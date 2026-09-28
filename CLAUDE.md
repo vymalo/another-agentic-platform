@@ -42,7 +42,57 @@ documentation; there is no code yet.
   `sequenceDiagram` for the interaction and a `stateDiagram-v2` for the
   lifecycle — then prose for what the diagrams can't say.
 
-Skill: `edit-architecture` (`.agents/skills/edit-architecture/SKILL.md`).
+Skill: `edit-architecture` (see *Skills*).
+
+## Skills
+
+Skills live in `.agents/skills/` (symlinked into `.claude/skills/`). Most are
+vendored from `addyosmani/agent-skills`, `actionbook/rust-skills` and
+`leonardomso/rust-skills` and pinned in `skills-lock.json` — update them with
+the skills CLI, never by hand-editing their files.
+
+**Precedence when they disagree:** this file's rules → the repo's own skill
+(`edit-architecture`) → vendored skills. For example, `documentation-and-adrs`
+suggests standalone ADR files; decisions here are `AD-NNN` entries in
+`docs/architecture/11-decisions.md`, and sections keep their `§N` numbers.
+
+Start with `using-agent-skills` if unsure which applies.
+
+| When you are… | Use |
+|---|---|
+| Editing the architecture, recording an AD, closing an open question | **`edit-architecture`** (repo skill) |
+| Explaining the reasoning behind a decision | `documentation-and-adrs` (style only — format per `edit-architecture`) |
+| Turning a vague idea into a design | `idea-refine`, `interview-me` (ask the owner one question at a time) |
+| Specifying a CRD, an extension or an MVP step | `spec-driven-development`, then `planning-and-task-breakdown` |
+| Making a decision that is hard to reverse (CRD shape, extension URI, provider boundary) | `doubt-driven-development` |
+| Checking a claim about Kubernetes, a protocol, a product or its licence | `source-driven-development` — and mark it *verified* with date + source |
+| Designing a CRD, provider interface (`RuntimeProvider`, `WorkflowProvider`, …) or public API | `api-and-interface-design`; Rust side: `m04-zero-cost`, `m05-type-driven` |
+| Security model: identity, credential broker, egress, tenancy | `security-and-hardening` |
+| Operator, runtimes, probes, scale-to-zero | `domain-cloud-native`, `m12-lifecycle`, `m07-concurrency` |
+| Observability (§48–50) | `observability-and-instrumentation` |
+| Implementing anything | `incremental-implementation` + `test-driven-development` |
+| Rust: first stop for any Rust question | `rust-router`, which dispatches to the `m01`…`m15` skills |
+| Rust: borrow-checker, ownership, smart pointers, mutability errors | `m01-ownership`, `m02-resource`, `m03-mutability` |
+| Rust: errors | `m06-error-handling`, `m13-domain-error` |
+| Rust: domain model (services, revisions, runs, leases) | `m09-domain`, `m05-type-driven` |
+| Rust: crates, workspace, features | `m11-ecosystem`, `rust-learner`, `rust-deps-visualizer` |
+| Rust: navigating or refactoring code | `rust-code-navigator`, `rust-symbol-analyzer`, `rust-trait-explorer`, `rust-call-graph`, `rust-refactor-helper` |
+| Rust: rules catalogue / anti-patterns | `rust-skills`, `coding-guidelines`, `m15-anti-pattern`; `unsafe-checker` if `unsafe` ever appears |
+| Control-plane API and UI (§60–61) | `domain-web`, `frontend-ui-engineering`, `browser-testing-with-devtools` |
+| Something broke | `debugging-and-error-recovery` |
+| Performance or cold starts (§80) | `performance-optimization`, `m10-performance` |
+| Before opening or merging a PR | `code-review-and-quality`, `code-simplification`, `git-workflow-and-versioning` |
+| CI workflows | `ci-cd-and-automation` |
+| Versioning an API/CRD or retiring one (§62) | `deprecation-and-migration` |
+| Releasing | `shipping-and-launch` |
+| Setting or raising the quality bar | `constraint-driven-development` |
+| Editing this file or other agent context | `context-engineering` |
+
+Not for direct use: `core-actionbook`, `core-agent-browser`, `core-dynamic-skills`,
+`core-fix-skill-docs` (internal helpers invoked by other rust-skills workflows),
+`meta-cognition-parallel` (experimental), `rust-skill-creator`, `rust-daily`,
+`m14-mental-model` (learning aids). Off-domain here: `domain-cli`,
+`domain-embedded`, `domain-fintech`, `domain-iot`, `domain-ml`.
 
 ## Commands
 
