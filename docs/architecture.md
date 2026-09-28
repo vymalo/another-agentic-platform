@@ -7,6 +7,13 @@
 **Audience:** Architects, platform engineers, application developers, security engineers, SREs, AI/agent engineers  
 **Document style:** Architecture overview inspired by arc42, with concrete API, CRD, runtime, security, and operational design
 
+**Revision history:**
+
+| Date | Change |
+|---|---|
+| 2026-09-28 | Imported from the `lightbridge-agents` draft (renames only). |
+| 2026-09-28 | Review edits: `AgentRun`/`AgentLease` become application records (§19–20, §56–59, AD-016); `WorkflowProvider` boundary with Restate as one implementation (§17a, AD-017); gateways are replaceable OpenAI-compatible endpoints (§41, AD-018); release channels projected onto A2A (§12a, AD-019); verified notes on ADK-Rust and `opencode acp` (§26) and on storage (§29). MVP cut in [mvp.md](mvp.md). |
+
 ---
 
 # 1. Executive Summary
@@ -108,6 +115,7 @@ The primary goals of `another-agentic-platform` are:
 - require Coder;
 - require a particular Gateway API implementation;
 - require a service mesh;
+- require a particular LLM/AI gateway (EAIG / Agent Router, AISIX, … are interchangeable OpenAI-compatible endpoints);
 - make `/v1/chat/completions` compatibility a platform requirement.
 
 In particular:
@@ -758,6 +766,19 @@ Discovery requests should not wake runtime compute.
 
 ---
 
+# 12a. Release-Channels A2A Extension
+
+When A2A is enabled, the service's agent card (`/.well-known/agent-card.json`, served by the control plane, so it never wakes compute) declares the platform's **release-channels extension** in `capabilities.extensions`.
+
+- URI: `https://agents.vymalo.com/a2a/extensions/release-channels/v1`
+- `required: false` — plain A2A clients keep working and get the default channel.
+- A client that understands it can let a user pick a channel or an exact revision (for example a dropdown in another-agentic-system) and pass the selection with the request.
+- Full contract: [extensions/release-channels-v1.md](extensions/release-channels-v1.md).
+
+This projects §10 (release channels) onto A2A without a platform-specific API: the client reads the card; the platform remains the only owner of channel state.
+
+---
+
 # 13. Metadata Plane vs Execution Plane
 
 ```mermaid
@@ -906,6 +927,8 @@ Multi-agent coordination should not depend on a coordinator process remaining al
 
 Restate handles durable progression.
 
+> **Review note (2026-09-28):** throughout this document, *Restate* stands for the **workflow provider** (§17a). Restate is one implementation; the first planned one is a Rust state machine on Postgres.
+
 ```mermaid
 flowchart TB
     Workflow[Restate Workflow]
@@ -1000,6 +1023,30 @@ Restate should own:
 
 ---
 
+# 17a. WorkflowProvider
+
+Durable workflow progression sits behind a provider boundary, like runtime (§22). Runs, steps, waits and budgets must not depend on one engine.
+
+```rust
+// Selected at build time (generic), not via `dyn`: async fn in traits is not dyn-compatible.
+trait WorkflowProvider {
+    async fn start(&self, run: &AgentRun, workflow: &WorkflowRef) -> Result<WorkflowId, WorkflowError>;
+    /// Human answer, CI result, A2A task update, timer…
+    async fn signal(&self, id: &WorkflowId, signal: Signal) -> Result<(), WorkflowError>;
+    async fn cancel(&self, id: &WorkflowId) -> Result<(), WorkflowError>;
+    async fn status(&self, id: &WorkflowId) -> Result<WorkflowStatus, WorkflowError>;
+}
+```
+
+| Implementation | Status | Notes |
+|---|---|---|
+| Rust state machine on Postgres | first | Transactional inbox/outbox, `FOR UPDATE SKIP LOCKED`, `LISTEN/NOTIFY`. Same design as another-agentic-system's orchestrator. No extra stateful system to operate. |
+| Restate | optional | Durable execution, timers, awakeables, Rust SDK. BSL-licensed server. |
+
+**Restate licence** (checked 2026-09-28 in `restatedev/restate` `LICENSE`): the Additional Use Grant allows use except for a *"Public Restate Platform Service"* — a managed service that lets third parties access Restate's APIs, register their own service deployments and invoke them. Change Date: 4 years after each release; Change License: Apache-2.0. The platform registers its own workflows and tenants invoke through the platform API, which reads as permitted — but a multi-tenant hosted offering should have that confirmed legally before Restate becomes load-bearing.
+
+---
+
 # 18. Runtime Controller Responsibilities
 
 The runtime controller/provider answers:
@@ -1033,10 +1080,12 @@ That belongs in Restate.
 
 `AgentRun` represents one logical execution.
 
-Example:
+> **Review decision (2026-09-28, AD-016):** `AgentRun` is an **application-database record, not a CRD**. Runs are created per request and updated constantly; in etcd that is write churn for data Kubernetes never reconciles. The shape below is the record, shown as YAML for readability.
+
+Example record:
 
 ```yaml
-apiVersion: agents.vymalo.com/v1alpha1
+# application record (Postgres), not a Kubernetes object
 kind: AgentRun
 
 metadata:
@@ -1121,10 +1170,12 @@ interactive session
 debug session
 ```
 
-Example:
+> **Review decision (2026-09-28, AD-016):** `AgentLease` is a **lease-service record in Postgres, not a CRD**. Every active holder renews its lease every few seconds; the operator reads the aggregate ("active leases per `AgentService`") instead of watching individual objects.
+
+Example record:
 
 ```yaml
-apiVersion: agents.vymalo.com/v1alpha1
+# lease-service record (Postgres), not a Kubernetes object
 kind: AgentLease
 
 metadata:
@@ -1388,6 +1439,11 @@ Therefore:
 
 > ACP/OpenCode are agent capabilities, not platform requirements.
 
+**Verified notes (2026-09-28):**
+
+- **ADK-Rust** is [zavora-ai/adk-rust](https://github.com/zavora-ai/adk-rust), a community Rust implementation of Google's ADK (not Google's own). It claims A2A v1.0 support via its `adk-server` crate. Not yet exercised — spike before it becomes load-bearing.
+- **`opencode acp`** runs OpenCode as an ACP agent over **stdio** (newline-delimited JSON-RPC). It opens no network port and starts a private OpenCode server per process ([docs](https://opencode.ai/docs/acp/)). The ADK process and OpenCode must therefore share a container/Pod — as drawn above.
+
 ---
 
 # 27. AgentEnvironment
@@ -1585,6 +1641,12 @@ Good candidates for sharing:
 | home directory | generally no |
 
 OpenCode itself should normally be installed in the runtime image rather than persisted on a shared volume.
+
+**Storage reality check (netcup, 2026-09-28):**
+
+- The only StorageClasses are `longhorn` (default) and `longhorn-static`. Sharing one project volume between concurrently running agents needs ReadWriteMany; Longhorn provides RWX through an NFS share-manager, whose performance for Git object databases and build `target/` directories is unverified here.
+- A realistic v1: one project volume per active runtime (RWO), plus caches that are already networked and shared (sccache backend, package-registry mirror).
+- A mount shadows whatever the image holds at that path, so toolchains belong under `/opt` in the image and only caches/state under mount points (learned running OpenHands Agent Canvas).
 
 ---
 
@@ -2022,6 +2084,10 @@ A ServiceAccount may simply be one identity provider implementation.
 # 41. EAIG
 
 EAIG remains the ingress and governance plane.
+
+EAIG is **Envoy AI Gateway**, since renamed **Agent Router** (an Agentic AI Foundation project; the `AIGatewayRoute` CRD and the `aigateway.envoyproxy.io` API group are unchanged). Like AISIX, it is consumed through OpenAI-compatible endpoints: the platform has **no hard dependency** on any one gateway (AD-018).
+
+The same class of gateway also governs **model egress**: agents call models through an OpenAI-compatible gateway endpoint (`AgentConfig.spec.model.providerRef`), never with raw provider keys. That is where model tokens and cost (§85) are measured.
 
 It may provide:
 
@@ -2585,9 +2651,9 @@ Recommended first-class CRDs:
 | `ToolProvider` | where tools come from |
 | `ToolUniverse` | reusable sets of effective tools |
 | `SecurityProfile` | reusable execution security |
-| `AgentRun` | one logical execution |
-| `AgentLease` | runtime compute requirement |
 | `AgentRoute` | optional routing/exposure |
+
+`AgentRun` and `AgentLease` are application records, not CRDs (§19–20, AD-016).
 
 Potential later CRDs:
 
@@ -2618,6 +2684,8 @@ Role
 Permission
 Conversation
 Response
+AgentRun
+AgentLease
 AuditEvent
 Artifact metadata
 billing records
@@ -2666,6 +2734,8 @@ flowchart TB
 
 Not every arrow is a Kubernetes `ownerReference`.
 
+`AgentRun` and `AgentLease` appear here as application records, not CRDs (AD-016).
+
 Many are normal object references.
 
 Shared resources such as:
@@ -2691,11 +2761,11 @@ It should not implement business workflows.
 For example:
 
 ```text
-AgentLease exists
+active leases > 0 (from the lease service)
     ↓
 ensure runtime active
 
-no AgentLease
+active leases = 0
     ↓
 wait idle timeout
     ↓
@@ -2850,6 +2920,7 @@ Possible interfaces:
 
 ```text
 RuntimeProvider
+WorkflowProvider
 RouteProvider
 IdentityProvider
 SecretProvider
@@ -3820,6 +3891,22 @@ Tenant and Project are core application concepts.
 
 Every run must be traceable end-to-end.
 
+### AD-016 — Runs and leases are application records
+
+`AgentRun` and `AgentLease` live in the application database, not etcd (§19–20).
+
+### AD-017 — Workflow engine behind a provider boundary
+
+`WorkflowProvider` (§17a): a Rust state machine on Postgres first; Restate optional.
+
+### AD-018 — Gateways are replaceable OpenAI-compatible endpoints
+
+EAIG / Agent Router, AISIX or others; no gateway-specific dependency (§41).
+
+### AD-019 — Release channels are projected onto A2A
+
+Through the release-channels agent-card extension (§12a).
+
 ---
 
 # 92. Proposed Decisions
@@ -3867,14 +3954,14 @@ The following should be explicitly decided during architecture review.
 ## CRDs
 
 - Which proposed resources truly need to be CRDs?
-- Should `AgentRun` be a CRD or application database record?
-- Should `AgentLease` be a CRD or lease-service concept?
+- ~~Should `AgentRun` be a CRD or application database record?~~ Decided: application record (AD-016).
+- ~~Should `AgentLease` be a CRD or lease-service concept?~~ Decided: lease-service record (AD-016).
 - Should `AgentRoute` be separate or embedded in `AgentService`?
 
 ## Storage
 
 - Which Kubernetes storage classes are required?
-- Is RWX available?
+- Is RWX available? (netcup: Longhorn only; RWX via NFS share-manager, performance unverified — §29.)
 - How are shared project Git objects implemented safely?
 - How are project caches cleaned?
 - Are snapshots required in v1?
@@ -3895,7 +3982,7 @@ The following should be explicitly decided during architecture review.
 
 ## Restate
 
-- Is Restate mandatory?
+- ~~Is Restate mandatory?~~ Decided: no — behind `WorkflowProvider` (AD-017).
 - Is it deployed in-cluster?
 - Is workflow execution provider-abstracted?
 
