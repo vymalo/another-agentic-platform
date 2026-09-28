@@ -37,5 +37,5 @@ flowchart TB
   surface + stateless orchestrator). It consumes agents over A2A, MCP and
   webhooks like any other system; when an agent comes from this platform, it
   offers release selection through the extension above.
-- **vymalo/openhand-images** — the toolchain image recipe (Rust, Flutter/Dart,
+- **vymalo/another-agentic-images** — the toolchain image recipe (Rust, Flutter/Dart,
   Node, agent CLIs under `/opt`) coding runtimes start from.
