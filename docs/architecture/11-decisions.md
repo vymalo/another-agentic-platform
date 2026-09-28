@@ -97,6 +97,20 @@ EAIG / Agent Router, AISIX or others; no gateway-specific dependency (§41).
 
 Through the release-channels agent-card extension (§12a).
 
+#### AD-020 — Swappable implementations, selected at build time
+
+Every provider boundary (§63) — and every other infrastructure seam: stores,
+lease service, credential broker, artifact store, model client — is a Rust
+trait in a dedicated crate, with a conformance testkit every implementation
+must pass. Implementations are separate crates; binaries (operator, control
+plane) are only compositions. Built-in implementations are Cargo features
+selected by configuration; a developer swaps in their own by writing a
+composition root against the same traits, without forking. No runtime plugins
+(Rust has no stable dylib ABI; out-of-process plugins would turn every
+boundary into a wire contract) — revisit only if third parties must ship
+implementations without compiling. Same decision as another-agentic-system
+ADR 0009. Accepts P-001 (§22, §63).
+
 ---
 
 ## 92. Proposed Decisions
@@ -106,6 +120,8 @@ These still deserve architecture review.
 ### P-001 — Runtime provider boundary
 
 Keep runtime implementation behind a small provider interface.
+
+*Accepted as part of AD-020 (2026-09-28).*
 
 ### P-002 — Coder as first runtime provider
 
@@ -137,7 +153,7 @@ The following should be explicitly decided during architecture review.
 
 - Is Coder mandatory for v1?
 - Is native Kubernetes runtime required for v1?
-- Is `RuntimeProvider` an internal Go/Rust interface or an API boundary?
+- ~~Is `RuntimeProvider` an internal Go/Rust interface or an API boundary?~~ Decided: an internal Rust trait, implementations chosen at build time (AD-020).
 - Do runtimes always map one-to-one with revisions?
 - Can multiple runs reuse one live runtime?
 

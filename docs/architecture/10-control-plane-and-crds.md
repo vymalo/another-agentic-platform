@@ -283,6 +283,11 @@ Where conversion becomes necessary, conversion webhooks can support multiple ser
 
 The architecture should prefer a small number of meaningful provider boundaries.
 
+Per AD-020, each is a Rust trait with a conformance testkit, implemented by
+separate crates and selected at build time (Cargo features + configuration, or
+a developer's own composition root). Nothing outside the trait's crate may
+depend on an implementation's types.
+
 Possible interfaces:
 
 ```text

@@ -189,6 +189,11 @@ The stable service continues to exist while runtime compute is absent.
 
 The platform should define a narrow runtime abstraction.
 
+> **Decision (2026-09-28, AD-020):** providers are Rust traits in their own
+> crate, with a conformance testkit; implementations (Kubernetes, Coder, …)
+> are separate crates selected at build time. The sketch below is kept
+> language-neutral.
+
 Conceptually:
 
 ```go
