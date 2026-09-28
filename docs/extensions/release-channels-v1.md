@@ -8,7 +8,7 @@
 ## Purpose
 
 Let an A2A client discover an agent's release channels and revisions
-([architecture §10](../architecture.md)) and invoke a specific one, **using
+([architecture §10](../architecture/02-domain-model.md)) and invoke a specific one, **using
 only the A2A agent card and message metadata** — no platform-specific API, no
 Kubernetes access, no client-side state.
 
@@ -18,7 +18,7 @@ default channel.
 ## Discovery: the agent card
 
 The control plane serves `/.well-known/agent-card.json` (discovery never wakes
-runtime compute — architecture §13) and declares the extension in
+runtime compute — [architecture §13](../architecture/03-interfaces.md)) and declares the extension in
 `capabilities.extensions`:
 
 ```json
@@ -52,7 +52,7 @@ runtime compute — architecture §13) and declares the extension in
 
 - `channels` maps channel name → revision name. Always contains `defaultChannel`.
 - `revisions` lists invocable revisions, newest first, bounded by the
-  retention policy (architecture §66). Each channel's target is always listed.
+  retention policy ([architecture §66](../architecture/09-operations.md)). Each channel's target is always listed.
 
 ## Invocation: selecting a release
 
@@ -107,7 +107,7 @@ Rules:
    `{ "requested": "staging", "revision": "coder-r51" }`, so the client can
    record which revision actually ran without keeping any platform state.
 4. **Authorization applies per revision.** Selecting a revision is subject to
-   the same policy as invoking the service (architecture §52, §68); a policy may
+   the same policy as invoking the service ([architecture §52, §68](../architecture/08-security.md)); a policy may
    restrict non-default channels to some callers.
 
 ## Client flow

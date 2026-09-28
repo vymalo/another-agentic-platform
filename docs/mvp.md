@@ -1,6 +1,6 @@
 # MVP cut
 
-The [architecture](architecture.md) is complete; this is the order to build it
+The [architecture](architecture/README.md) is complete; this is the order to build it
 in. The cut follows the success scenarios in §99: **A, B and C first**, with
 just enough of the revision model to make **D (rollback)** free.
 
