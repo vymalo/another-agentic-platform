@@ -14,7 +14,7 @@ just enough of the revision model to make **D (rollback)** free.
 | Runtime | Native Kubernetes `RuntimeProvider`, scale-to-zero via leases | Side services as same-Pod sidecars only |
 | Workflow | `WorkflowProvider` = Rust state machine on Postgres (AD-017) | Restate not deployed |
 | Harness | ADK-Rust agent; coding agents drive `opencode acp` over stdio in the same Pod | — |
-| Images | Prebuilt, digest-pinned images (toolchain recipe from vymalo/openhand-images) | No Environment Builder / DevContainer compiler yet |
+| Images | Prebuilt, digest-pinned images (toolchain recipe from vymalo/another-agentic-images) | No Environment Builder / DevContainer compiler yet |
 | Models | Any OpenAI-compatible gateway endpoint (AD-018) | — |
 | Credentials | Credential broker minting short-lived GitHub App installation tokens; git push mediated | No SPIFFE; Kubernetes ServiceAccount identity behind the `IdentityProvider` seam |
 | Tenancy | Tenant/Project in the data model and every record | One tenant in practice |
@@ -30,7 +30,7 @@ multi-tenant UI, snapshots, RWX project sharing.
 
 Start with the **native Kubernetes** runtime provider, not Coder:
 
-- The coding image already exists (vymalo/openhand-images: toolchains under `/opt`).
+- The coding image already exists (vymalo/another-agentic-images: toolchains under `/opt`).
 - Coder adds template → Terraform → Kubernetes translation for every agent, and
   non-coding agents (scenario A) are not naturally workspaces.
 - The `RuntimeProvider` seam keeps Coder available later without touching the
