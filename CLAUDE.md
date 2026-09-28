@@ -34,6 +34,10 @@ documentation; there is no code yet.
 - **CRD vs record:** slow-changing desired state is a CRD
   (`agents.vymalo.com/v1alpha1`); per-request or high-churn data (runs, leases,
   conversations, audit) is an application-database record (AD-016).
+- **Implementations are swappable at build time (AD-020).** Every provider or
+  infrastructure seam is a Rust trait with a conformance testkit;
+  implementations are separate crates; binaries only compose them. No
+  implementation types in trait signatures, no runtime plugins.
 - **Extensions are versioned by URI.** A breaking change to
   `release-channels/v1` means a `v2` URI and file, not an edit.
 - **Mark facts.** Third-party claims are *verified* (checked against source,
