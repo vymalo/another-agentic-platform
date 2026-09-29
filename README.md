@@ -39,3 +39,8 @@ flowchart TB
   offers release selection through the extension above.
 - **vymalo/another-agentic-images** — the toolchain image recipe (Rust, Flutter/Dart,
   Node, agent CLIs under `/opt`) coding runtimes start from.
+
+## License
+
+[MIT](LICENSE). Vendored agent skills keep their own licenses; see
+[third-party-notices.md](third-party-notices.md).
