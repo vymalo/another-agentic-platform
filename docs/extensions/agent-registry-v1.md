@@ -134,8 +134,9 @@ one value (*verified 2026-10-01*, RFC 9264 §4.2.4.1 and §4.2.4.3).
    is kept.
 6. **Unreadable documents fail closed.** The source is **unavailable** (not "empty") when the
    body is not valid JSON, is not an object with a `linkset` array, has no context object
-   carrying the v1 `profile` link or more than one, exceeds 1 MiB or 500 items, or was not
-   served as `application/linkset+json`. A client never truncates: silently dropping agents
+   carrying the v1 `profile` link or more than one context object carrying it (context objects
+   for other versions are ignored, see [Versioning](#versioning)), exceeds 1 MiB or 500 items, or
+   was not served as `application/linkset+json`. A client never truncates: silently dropping agents
    from a long list would hide them.
 
 Limits: at most 500 items and a 1 MiB body per document; at most 16 tags per item and 64
