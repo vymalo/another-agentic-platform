@@ -30,6 +30,7 @@ flowchart TB
 | [Architecture](docs/architecture/README.md) | The full design in 12 topic files: overview, domain model, interfaces, workflows, runtime, environments & storage, tools, security, operations, control plane & CRDs, decisions, summary |
 | [MVP](docs/mvp.md) | The v0 cut (scenarios A–C, plus D for free) and build order |
 | [Release-channels A2A extension](docs/extensions/release-channels-v1.md) | How any A2A client discovers and selects an agent's channels/revisions |
+| [Agent registry](docs/extensions/agent-registry-v1.md) | How any client lists the fleet's A2A agents: a linkset of agent cards |
 
 ## Related
 

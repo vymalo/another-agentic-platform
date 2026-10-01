@@ -14,6 +14,7 @@
 | 2026-09-28 | Imported from the `lightbridge-agents` draft (renames only). |
 | 2026-09-28 | Review edits: `AgentRun`/`AgentLease` become application records (§19–20, §56–59, AD-016); `WorkflowProvider` boundary with Restate as one implementation (§17a, AD-017); gateways are replaceable OpenAI-compatible endpoints (§41, AD-018); release channels projected onto A2A (§12a, AD-019); verified notes on ADK-Rust and `opencode acp` (§26) and on storage (§29). MVP cut in [mvp.md](../mvp.md). |
 | 2026-09-28 | AD-020: swappable implementations selected at build time — provider traits + conformance testkits, separate implementation crates, binaries as compositions (§22, §63, §91–93). |
+| 2026-10-01 | Agent registry: agent-registry/v1 contract (§12b, AD-021). |
 
 ## Contents
 
@@ -21,7 +22,7 @@
 |---|---|
 | [Overview](01-overview.md) | §1, §2, §3, §4, §5 |
 | [Domain model and release channels](02-domain-model.md) | §6, §7, §8, §9, §10 |
-| [Interfaces: APIs, discovery, routing and invocation](03-interfaces.md) | §11, §12, §12a, §13, §14, §43, §44, §45, §71, §72, §73, §74 |
+| [Interfaces: APIs, discovery, routing and invocation](03-interfaces.md) | §11, §12, §12a, §12b, §13, §14, §43, §44, §45, §71, §72, §73, §74 |
 | [Multi-agent work, workflows, verification and budgets](04-workflows.md) | §15, §16, §17, §17a, §69, §70, §84, §85 |
 | [Runtime, runs, leases and scale-to-zero](05-runtime.md) | §18, §19, §20, §21, §22, §23, §24, §25, §26, §42, §64, §65, §80 |
 | [Environments, storage, caches and worktrees](06-environments-and-storage.md) | §27, §28, §29, §30, §31, §54, §55, §81, §82 |
@@ -51,6 +52,7 @@ Cross-references in the text use the original section numbers (`§N`).
 | 11 | [Agent API Surfaces](03-interfaces.md) | `03-interfaces.md` |
 | 12 | [API Discovery](03-interfaces.md) | `03-interfaces.md` |
 | 12a | [Release-Channels A2A Extension](03-interfaces.md) | `03-interfaces.md` |
+| 12b | [Agent Registry](03-interfaces.md) | `03-interfaces.md` |
 | 13 | [Metadata Plane vs Execution Plane](03-interfaces.md) | `03-interfaces.md` |
 | 14 | [Responses API](03-interfaces.md) | `03-interfaces.md` |
 | 15 | [A2A and Multi-Agent Work](04-workflows.md) | `04-workflows.md` |

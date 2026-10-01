@@ -17,6 +17,7 @@ documentation; there is no code yet.
 | `docs/architecture/01-…12-*.md` | The architecture, split by topic; sections keep their original numbers |
 | `docs/mvp.md` | v0 cut (scenarios A–C, D for free) and build order |
 | `docs/extensions/release-channels-v1.md` | A2A extension contract consumed by other systems |
+| `docs/extensions/agent-registry-v1.md` | Registry contract: the linkset of agent cards the system reads (AD-021) |
 | `tools/docs-check/` | Diagram + link checker (also run in CI) |
 | `.agents/skills/` | Repo skills; `.claude/skills/*` are symlinks to them |
 
@@ -125,5 +126,5 @@ is validated too.
 
 ## Related repositories
 
-- `vymalo/another-agentic-system` — protocol-agnostic orchestration layer; consumes this platform over A2A (and the release-channels extension).
+- `vymalo/another-agentic-system` — protocol-agnostic orchestration layer; consumes this platform over A2A (the release-channels extension and the agent-registry contract).
 - `vymalo/another-agentic-images` — the toolchain images coding runtimes start from.
