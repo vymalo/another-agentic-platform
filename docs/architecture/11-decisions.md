@@ -111,6 +111,15 @@ boundary into a wire contract) — revisit only if third parties must ship
 implementations without compiling. Same decision as another-agentic-system
 ADR 0009. Accepts P-001 (§22, §63).
 
+#### AD-021 — The fleet's agents are listed as a linkset of agent cards
+
+The control plane lists the A2A agents it provisions in a versioned contract,
+`agent-registry/v1` (`https://agents.vymalo.com/registry/v1`): a JSON linkset in
+the RFC 9727 `api-catalog` shape with one agent-card URL per `AgentService`,
+its id and optional tags (§12b). Releases stay on each card (AD-019) and the
+registry carries no UI concept; the platform provisions agents and knows nothing
+about its clients. First consumer: another-agentic-system ADR 0022.
+
 ---
 
 ## 92. Proposed Decisions
