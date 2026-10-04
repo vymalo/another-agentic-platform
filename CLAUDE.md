@@ -17,6 +17,7 @@ documentation; there is no code yet.
 | `docs/architecture/01-…12-*.md` | The architecture, split by topic; sections keep their original numbers |
 | `docs/mvp.md` | v0 cut (scenarios A–C, D for free) and build order |
 | `docs/extensions/release-channels-v1.md` | A2A extension contract consumed by other systems |
+| `docs/extensions/agent-registry-v1.md` | Registry contract: the linkset of agent cards the system reads (AD-021) |
 | `tools/docs-check/` | Diagram + link checker (also run in CI) |
 | `.agents/skills/` | Repo skills; `.claude/skills/*` are symlinks to them |
 
@@ -51,12 +52,13 @@ Skill: `edit-architecture` (see *Skills*).
 ## Skills
 
 Skills live in `.agents/skills/` (symlinked into `.claude/skills/`). Most are
-vendored from `addyosmani/agent-skills`, `actionbook/rust-skills` and
-`leonardomso/rust-skills` and pinned in `skills-lock.json` — update them with
+vendored from `addyosmani/agent-skills`, `actionbook/rust-skills`,
+`leonardomso/rust-skills`, `docker/skills` and `vymalo/another-adam-rs` (the
+`adam-*` skills it provides) and pinned in `skills-lock.json` — update them with
 the skills CLI, never by hand-editing their files.
 
 **Precedence when they disagree:** this file's rules → the repo's own skill
-(`edit-architecture`) → vendored skills. For example, `documentation-and-adrs`
+(`edit-architecture`) → vendored skills (adam-rs's included). For example, `documentation-and-adrs`
 suggests standalone ADR files; decisions here are `AD-NNN` entries in
 `docs/architecture/11-decisions.md`, and sections keep their `§N` numbers.
 
@@ -73,6 +75,11 @@ Start with `using-agent-skills` if unsure which applies.
 | Designing a CRD, provider interface (`RuntimeProvider`, `WorkflowProvider`, …) or public API | `api-and-interface-design`; Rust side: `m04-zero-cost`, `m05-type-driven` |
 | Security model: identity, credential broker, egress, tenancy | `security-and-hardening` |
 | Operator, runtimes, probes, scale-to-zero | `domain-cloud-native`, `m12-lifecycle`, `m07-concurrency` |
+| Designing how the platform runs an adam agent: an agent folder, or the runtime embedded in a platform binary | `adam-agent-folder`, `adam-embed` |
+| The A2A extensions an adam agent supports (the release-channels and registry contracts it meets) | `adam-a2a-extensions` |
+| Storage behind an adam runtime, a new `Store` or `Notifier` backend (AD-020 seams) | `adam-store-adapter` |
+| Building, publishing or deploying the adam-coder image | `adam-coder-deploy` |
+| Moving to a newer adam-rs revision | `adam-upgrade` |
 | Observability (§48–50) | `observability-and-instrumentation` |
 | Implementing anything | `incremental-implementation` + `test-driven-development` |
 | Rust: first stop for any Rust question | `rust-router`, which dispatches to the `m01`…`m15` skills |
@@ -125,5 +132,5 @@ is validated too.
 
 ## Related repositories
 
-- `vymalo/another-agentic-system` — protocol-agnostic orchestration layer; consumes this platform over A2A (and the release-channels extension).
+- `vymalo/another-agentic-system` — protocol-agnostic orchestration layer; consumes this platform over A2A (the release-channels extension and the agent-registry contract).
 - `vymalo/another-agentic-images` — the toolchain images coding runtimes start from.

@@ -104,6 +104,21 @@ This projects §10 (release channels) onto A2A without a platform-specific API: 
 
 ---
 
+## 12b. Agent Registry
+
+A client that wants to offer "the platform's agents" needs a list to start from. A2A names curated registries as a discovery strategy but prescribes no registry API (*verified 2026-10-01*, <https://a2a-protocol.org/latest/topics/agent-discovery/>), so the platform defines one: a **linkset of agent cards**, one `item` per `AgentService` that has A2A enabled and that the caller may invoke (§52).
+
+- URI: `https://agents.vymalo.com/registry/v1` (a profile identifier carried in the document).
+- A JSON document, `application/linkset+json`, shaped like an RFC 9727 API catalog; each item is the absolute URL of the service's agent card, with the service id, an optional display title and optional tags.
+- Served by the control plane, so reading it never wakes runtime compute (§13). Recommended path `/registry/v1/agents` on the platform API host; authorised with the platform API's bearer token (§51, §52) and filtered per caller. It caches with `Cache-Control: private, max-age` (60 s or less) and `ETag`; a client that cannot read it lists no platform agents rather than a stale list.
+- It lists addresses and nothing more. It is not a gateway and does not expose agents behind one endpoint (§44): each agent keeps its own host, identity, authorization and card.
+- **Releases stay on each card** ([§12a](#12a-release-channels-a2a-extension)). The registry carries no channels or revisions, and nothing about any client's user interface; the platform just provisions A2A-capable agents.
+- Full contract: [extensions/agent-registry-v1.md](../extensions/agent-registry-v1.md). Decision: AD-021 (§91).
+
+The first consumer is another-agentic-system, which reads the registry live beside its own static agent list.
+
+---
+
 ## 13. Metadata Plane vs Execution Plane
 
 ```mermaid

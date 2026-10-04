@@ -10,7 +10,7 @@ just enough of the revision model to make **D (rollback)** free.
 |---|---|---|
 | Resources | `AgentService`, `AgentConfig`, `AgentRevision`, `AgentEnvironment`, `ToolProvider`, `ToolUniverse`, `SecurityProfile` as CRDs; `AgentRun`, `AgentLease` as Postgres records (AD-016) | `AgentRoute` embedded in `AgentService` until a second route kind exists |
 | Revisions | Publish config → immutable revision; channel map on the service | Promotion is a manual pointer move; no evaluation stage |
-| Interfaces | A2A + discovery (`/.well-known/api-catalog`, `/openapi.json`, `/docs`, agent card with the [release-channels extension](extensions/release-channels-v1.md)) | Responses API and MCP exposure later |
+| Interfaces | A2A + discovery (`/.well-known/api-catalog`, `/openapi.json`, `/docs`, agent card with the [release-channels extension](extensions/release-channels-v1.md), the fleet's [agent registry](extensions/agent-registry-v1.md)) | Responses API and MCP exposure later |
 | Runtime | Native Kubernetes `RuntimeProvider`, scale-to-zero via leases | Side services as same-Pod sidecars only |
 | Workflow | `WorkflowProvider` = Rust state machine on Postgres (AD-017) | Restate not deployed |
 | Harness | ADK-Rust agent; coding agents drive `opencode acp` over stdio in the same Pod | — |
