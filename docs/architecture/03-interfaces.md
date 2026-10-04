@@ -115,6 +115,8 @@ A client that wants to offer "the platform's agents" needs a list to start from.
 - **Releases stay on each card** ([§12a](#12a-release-channels-a2a-extension)). The registry carries no channels or revisions, and nothing about any client's user interface; the platform just provisions A2A-capable agents.
 - Full contract: [extensions/agent-registry-v1.md](../extensions/agent-registry-v1.md). Decision: AD-021 (§91).
 
+> **Decision (2026-10-04, AD-023):** until a control plane exists, the operator binary serves the registry from the cache of its own reflector, with **one static bearer** and **no per-caller filtering**, and it refuses rather than truncates a list past the limits. The deviations from this section and from the contract are listed in [§59a](10-control-plane-and-crds.md#registry-in-v0).
+
 The first consumer is another-agentic-system, which reads the registry live beside its own static agent list.
 
 ---

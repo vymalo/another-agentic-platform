@@ -170,6 +170,8 @@ This avoids leaked compute.
 
 Scale-to-zero is a semantic capability, not necessarily a Knative implementation.
 
+> **Decision (2026-10-04, AD-023):** the v0 operator does not scale to zero ([§59a](10-control-plane-and-crds.md#59a-operator-v0-adam-rs-agents)). It has `spec.suspend`, which takes the workload to zero replicas and reports the runtime phase `Suspended`, and nothing else: no leases, no idle timeout, no activator. A source of run leases is an open question (§93): the coder's workers keep stepping a run after the A2A call has returned, so the HTTP connection says nothing about idleness.
+
 Desired behavior:
 
 ```text
@@ -220,6 +222,26 @@ RuntimeProvider
 ```
 
 There is no requirement to implement both.
+
+> **Decision (2026-10-04, AD-023):** the Rust shape of the first provider boundary lives in the crate `aap-ports` and is sketched below (S3 settles the details). **`Activate` is folded into `ensure`**: ensuring a suspended runtime wakes it, so there is no second verb to keep in step with the first, and `suspend` stays. `Logs` is not in v0: logs are read through §50. `watch` feeds the controller with the ids of runtimes that changed, so the controller never watches workloads itself. Neutral types and the issue reasons of `RuntimeStatus` are in [§59a](10-control-plane-and-crds.md#59a-operator-v0-adam-rs-agents).
+
+```rust
+// crate aap-ports (AD-020): no Kubernetes type in any signature.
+pub trait RuntimeProvider: Send + Sync {
+    fn capabilities(&self) -> Capabilities;
+
+    /// Make the runtime match `spec`: create it, update it, or wake it.
+    async fn ensure(&self, id: &RuntimeId, spec: &RuntimeSpec) -> Result<RuntimeStatus, RuntimeError>;
+    async fn suspend(&self, id: &RuntimeId) -> Result<RuntimeStatus, RuntimeError>;
+    async fn delete(&self, id: &RuntimeId) -> Result<DeleteOutcome, RuntimeError>;
+
+    async fn status(&self, id: &RuntimeId) -> Result<RuntimeStatus, RuntimeError>;
+    async fn endpoint(&self, id: &RuntimeId, surface: Surface) -> Result<Endpoint, RuntimeError>;
+
+    /// Ids of runtimes whose state changed.
+    fn watch(&self) -> BoxStream<'static, RuntimeId>;
+}
+```
 
 ---
 
@@ -355,6 +377,8 @@ Other agents may not.
 ---
 
 ## 26. Agent Runtime
+
+> **Decision (2026-10-04, AD-022):** the harness is **adam-rs**, which replaces ADK-Rust in the drawings below: `adam-coder` (a coding task to a verified pull request) and `adam-agent` (serves any agent folder), both in the image `ghcr.io/vymalo/another-adam-rs/coder`, selected by `AgentConfig.spec.harness.type: adam-rs` ([§59a](10-control-plane-and-crds.md#59a-operator-v0-adam-rs-agents)). OpenCode stays a capability inside `adam-coder`: its ACP client is the adam-rs crate `adam-acp` (*verified 2026-10-04*, adam-rs at `0391809`: `docs/architecture.md`, `crates/adam-acp/README.md`). The ADK-Rust notes after the drawings are kept as the history of the choice.
 
 A coding runtime might contain:
 

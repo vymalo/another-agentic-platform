@@ -4,6 +4,8 @@ A Kubernetes-native platform for running **durable, versioned, independently
 addressable AI agent services on disposable compute**.
 
 > **Status: design only.** Formerly the `lightbridge-agents` draft.
+>
+> The first operator (v0: adam-rs agents from `AgentService` and `AgentConfig` on native Kubernetes) is specified in [§59a](docs/architecture/10-control-plane-and-crds.md#59a-operator-v0-adam-rs-agents). Status stays *design only* until its first code lands.
 
 An agent is a stable logical service — not a Pod, a model, a workspace or a
 process. It has a stable identity, immutable revisions selected through
@@ -38,6 +40,8 @@ flowchart TB
   surface + stateless orchestrator). It consumes agents over A2A, MCP and
   webhooks like any other system; when an agent comes from this platform, it
   offers release selection through the extension above.
+- **vymalo/another-adam-rs** — the agent harness (AD-022): `adam-coder` and
+  `adam-agent`, one image, which the v0 operator runs.
 - **vymalo/another-agentic-images** — the toolchain image recipe (Rust, Flutter/Dart,
   Node, agent CLIs under `/opt`) coding runtimes start from.
 
