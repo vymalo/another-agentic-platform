@@ -2,7 +2,7 @@
 
 - **URI:** `https://agents.vymalo.com/registry/v1`
 - **Status:** draft (2026-10-01)
-- **Implemented by:** the another-agentic-platform control plane (platform API)
+- **Implemented by:** the another-agentic-platform control plane (platform API); **v0: the operator binary** ([architecture §59a](../architecture/10-control-plane-and-crds.md#registry-in-v0)), serving the same document with one static bearer and no per-caller filtering until a control plane exists. A header note of 2026-10-04: the contract is unchanged, and the deviations are the server's, not the client's
 - **Consumed by:** any client that wants to list the fleet's A2A agents — first consumer: another-agentic-system ([ADR 0022](https://github.com/vymalo/another-agentic-system/blob/main/docs/decisions/0022-platform-provisions-agents-system-discovers-them.md))
 
 The URI is a **profile identifier** (it names this contract inside the document and in the

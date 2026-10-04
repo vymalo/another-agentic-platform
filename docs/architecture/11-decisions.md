@@ -120,6 +120,55 @@ its id and optional tags (§12b). Releases stay on each card (AD-019) and the
 registry carries no UI concept; the platform provisions agents and knows nothing
 about its clients. First consumer: another-agentic-system ADR 0022.
 
+#### AD-022 — The harness is adam-rs
+
+*(2026-10-04.)* The harness of the platform's agents is **adam-rs**
+([vymalo/another-adam-rs](https://github.com/vymalo/another-adam-rs)): two
+binaries in one image, `ghcr.io/vymalo/another-adam-rs/coder`: `adam-coder`
+(a coding task to a verified pull request) and `adam-agent` (serves any agent
+folder). It replaces ADK-Rust, which §26 recorded as *not yet exercised*, and
+which was never spiked: adam-rs exists and is what runs the netcup coder.
+OpenCode stays a capability inside `adam-coder` (the adam-rs crate `adam-acp`),
+so ACP and OpenCode remain agent capabilities, not platform requirements
+(§26). The harness is selected by `AgentConfig.spec.harness.type: adam-rs`,
+and `harness.adam.binary` names the binary. Amends §8 (`adk-rust` becomes
+`adam-rs`), §9 (the example revision's harness), §26 and the Harness row of
+[mvp.md](../mvp.md); the history text stays. Cost, accepted: adam's environment
+contract is copied into the operator's `aap-domain` and held equal by parity
+goldens (§59a, *Risks*).
+
+#### AD-023 — The first operator runs adam-rs agents from AgentService + AgentConfig
+
+*(2026-10-04.)* The first operator is **one Rust binary on kube-rs**, in this
+repository, specified in §59a. It reconciles two CRDs, `AgentService` and
+`AgentConfig`, into a workload, a Service, a NetworkPolicy and storage for an
+adam-rs agent (AD-022). The **native Kubernetes `RuntimeProvider` comes first**,
+which answers P-002: Coder is not first. Deferred, each with an inline
+equivalent that keeps the move additive: revisions and channels, leases,
+scale-to-zero, and the supporting CRDs (`AgentEnvironment`, `ToolUniverse`,
+`ToolProvider`, `SecurityProfile`, `AgentRoute`). `status.config.digest` is the
+seed of revisions. Until a control plane exists, **the operator binary serves
+the §12b registry**, with one static bearer and no per-caller filtering in v0.
+The Rust shape of `RuntimeProvider` lives in the crate `aap-ports`, and
+`Activate` is folded into `ensure` (§22). Amends §7, §8, §9, §10, §12b, §21,
+§22 and §56 as v0 subsets (blockquotes there); the target text stays.
+
+#### AD-024 — Secrets are references
+
+*(2026-10-04.)* A custom resource **names a Secret and a key and never holds a
+value**. The operator has **no RBAC on Secrets** and **creates no
+ExternalSecret**: how a Secret gets into the namespace is the deployment's
+business (§38). A pod receives only the variables the adam binaries know
+(`MODEL_API_KEY`, `A2A_BEARER_TOKENS`, `GITHUB_TOKEN`, `DATABASE_URL`,
+`MODEL_BASE_URL`) and the ones the extra MCP file names; the operator never
+invents a secret variable, and a conformance test checks that no secret value
+ever materialises. A run store is either a referenced Secret or an
+operator-owned CloudNativePG `Cluster`, behind the `StoreProvisioner` seam
+(AD-020). **Known gap, recorded and not hidden:** the coder still holds the
+GitHub App private key in its pod, as a file from a Secret, which contradicts
+§38 ("GitHub App private key … must never enter agent runtimes") until the
+credential broker (§39) exists.
+
 ---
 
 ## 92. Proposed Decisions
@@ -135,6 +184,8 @@ Keep runtime implementation behind a small provider interface.
 ### P-002 — Coder as first runtime provider
 
 Coder may provide the lowest-effort runtime implementation while preserving the platform's domain semantics.
+
+*Not taken for v0: native Kubernetes first (AD-023).*
 
 ### P-003 — SPIFFE/SPIRE
 
@@ -160,11 +211,13 @@ The following should be explicitly decided during architecture review.
 
 ### Runtime
 
-- Is Coder mandatory for v1?
-- Is native Kubernetes runtime required for v1?
+- ~~Is Coder mandatory for v1?~~ Decided: no. Native Kubernetes comes first and Coder stays possible behind `RuntimeProvider` (AD-023).
+- ~~Is native Kubernetes runtime required for v1?~~ Decided: yes, it is the first provider and the only one in v0 (AD-023).
 - ~~Is `RuntimeProvider` an internal Go/Rust interface or an API boundary?~~ Decided: an internal Rust trait, implementations chosen at build time (AD-020).
 - Do runtimes always map one-to-one with revisions?
 - Can multiple runs reuse one live runtime?
+- Revisions against adam's run ledger: adam keys a run by the agent's name, so two revisions running side by side would share or fork one ledger. Does a revision get its own agent name and ledger, a partition of one, or a drain before the switch? (§9, §59a)
+- What is the source of run leases for scale-to-zero? adam's store has run leases (`lease_until`), but the coder's workers keep stepping a run after the A2A call has returned, so the HTTP connection says nothing about idleness. Does the operator read adam's store, does adam export a signal, or does the agent call the lease service? (§20, §21, §59a)
 
 ### CRDs
 
@@ -194,6 +247,7 @@ The following should be explicitly decided during architecture review.
 - How does EAIG discover/update AgentServices?
 - Does EAIG directly implement scale-from-zero activation?
 - Are internal agent-to-agent calls routed through EAIG or directly over mTLS?
+- Per-caller registry filtering: which facts about a caller (§52) filter the list of §12b, and when does the registry move from the operator's one static bearer behind the platform API? (§12b, §59a)
 
 ### Restate
 
@@ -213,6 +267,21 @@ The following should be explicitly decided during architecture review.
 - Is Next.js only UI/BFF or also initial application API?
 - Does the UI directly stream Kubernetes logs through its backend?
 - What authorization engine implements RBAC/ABAC?
+
+### Operator v0 (asked of the owner, 2026-10-04)
+
+Open. Each carries the recommendation made with the plan of §59a.
+
+- Crate prefix `aap-` and the image `ghcr.io/vymalo/another-agentic-platform/operator`? *Recommended: yes.*
+- Where do the agent custom resources live? *Recommended: adam-rs `deploy/coder-agent` and the system chart, which keeps the CI tag bumps; not home-os.*
+- A namespaced operator that watches one namespace? *Recommended: yes for v0.*
+- The CRDs installed by a separate Argo app in the infrastructure project? *Recommended: yes.*
+- May github-actions push tag bumps to this repository's `main`? *Recommended: yes, as in the other repositories.*
+- Registry authentication with one dedicated token in v0? *Recommended: yes.*
+- A shadow `coder-next` with its own CloudNativePG cluster before the cutover? *Recommended: yes.*
+- A downtime window for the coder cutover (M3)? *Owner picks.*
+- `store` on `AgentService` rather than on `AgentConfig`? *Recommended: `AgentService`.*
+- The GitHub App key stays in the coder's pod until the credential broker exists? *Recommended: yes, recorded in AD-024.*
 
 ---
 
