@@ -6,13 +6,15 @@
 
 A Kubernetes-native platform for running **durable, versioned, independently
 addressable AI agent services on disposable compute**. Formerly the
-`lightbridge-agents` draft. **Status: design, plus slice S1 of the v0 operator** (§59a): the
-Cargo workspace, the CRD types, the CRDs and the examples. No controller yet; everything else is documentation.
+`lightbridge-agents` draft. **Status: design, plus slices S1 to S3 of the v0 operator** (§59a): the
+Cargo workspace, the CRD types, the CRDs and the examples (S1); the pure `validate`/`resolve` with parity
+goldens against the adam-rs chart (S2); the provider traits and their testkit (S3). No provider for a cluster
+(S4) and no controller (S5) yet; everything else is documentation.
 
 The first operator (v0: adam-rs agents from `AgentService` + `AgentConfig`, native
 Kubernetes; AD-022 to AD-024) is specified in §59a
-(`docs/architecture/10-control-plane-and-crds.md`). The status stays *design
-only* until slice S1 lands code; then this paragraph and the layout table change.
+(`docs/architecture/10-control-plane-and-crds.md`). Each slice that lands code updates this paragraph, the
+layout table and the root `README.md`.
 
 ## Layout
 
@@ -24,7 +26,8 @@ only* until slice S1 lands code; then this paragraph and the layout table change
 | `docs/extensions/release-channels-v1.md` | A2A extension contract consumed by other systems |
 | `docs/extensions/agent-registry-v1.md` | Registry contract: the linkset of agent cards the system reads (AD-021) |
 | `tools/docs-check/` | Diagram + link checker (also run in CI) |
-| `Cargo.toml`, `crates/`, `bin/` | The operator's Cargo workspace (§59a): `crates/api` (`aap-api`, the CRD types), `bin/operator` (`crdgen` now, `run` from S5). Each has a `README.md` to keep current |
+| `Cargo.toml`, `crates/`, `bin/` | The operator's Cargo workspace (§59a): `crates/api` (`aap-api`, the CRD types), `crates/ports` (`aap-ports`: `RuntimeProvider`, `StoreProvisioner`, `AgentDirectory`, their neutral types, and with the feature `testkit` the conformance macros and `Memory` implementations), `crates/domain` (`aap-domain`: pure `validate` and `resolve` into a `RuntimeSpec` with a sha256 digest; **adam's env contract lives only here**), `bin/operator` (`crdgen` now, `run` from S5). Each has a `README.md` to keep current |
+| `crates/domain/tests/golden/`, `tools/adam-parity/` | The parity goldens: what the adam-rs chart `deploy/coder` renders at the revision §59a cites, checked in, and the script that regenerates them (by hand: needs helm and a clone of adam-rs; `crates/domain/tests/golden/README.md` lists the differences that are intended). A change to the env contract is a change to those goldens |
 | `deploy/crds/`, `examples/` | The generated CRDs (checked in; regenerate with `cargo run -q -p aap-operator -- crdgen > deploy/crds/agents.vymalo.com.yaml`) and the example objects, `examples/invalid/` one per CEL rule |
 | `.agents/skills/` | Repo skills; `.claude/skills/*` are symlinks to them |
 
