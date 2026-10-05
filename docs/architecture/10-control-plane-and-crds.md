@@ -37,7 +37,7 @@ RouteProviderConfig
 
 They should only become CRDs if Kubernetes reconciliation is useful.
 
-> **Proposed (2026-10-05, P-010):** the dashboard of [§60a](#what-the-custom-resources-gain) adds `ModelEndpoint` (new) and a v0 subset of `ToolProvider` (one remote MCP server), referenced from `AgentConfig` by exclusive `endpointRef` and `providerRef` fields, so a model or a tool server is set once and named by every agent that uses it.
+> **Decided (2026-10-05, AD-029; was P-010):** the dashboard of [§60a](#what-the-custom-resources-gain) adds `ModelEndpoint` (new) and a v0 subset of `ToolProvider` (one remote MCP server), referenced from `AgentConfig` by exclusive `endpointRef` and `providerRef` fields, so a model or a tool server is set once and named by every agent that uses it.
 
 ---
 
@@ -670,6 +670,11 @@ Next to the existing charts, one step at a time. The coder stays on its Helm cha
 
 *Unverified:* that Argo CD leaves the claims of a StatefulSet's `volumeClaimTemplates` alone when it prunes (M3 depends on it), and that netcup's Kubernetes is 1.29 or newer.
 
+*Amended 2026-10-05 (the owner's decisions of that day, AD-031, AD-033; §60a):*
+
+- **The coder is renamed `coder-vymalo`** at M3, with the **same database** and the **same GitHub App installation**, and an alias `coder` for one release so old threads continue. The StatefulSet, the Service and the registry item are therefore named `coder-vymalo`, not `coder`: M3's "the StatefulSet `coder`" and "the Service name … unchanged" read as `coder-vymalo` for the first two, and the database is the one that stays. A StatefulSet's claim is named after it, so `work-coder-0` is **not** reattached under the new name by itself; whether the work volume is carried over or a fresh one is accepted is an open question (§93). How the alias is implemented is open there too. `coder-me`, for the GitHub owner `stephane-segning`, is a second coder with its own GitHub App, database and A2A token.
+- **`coder` and `chat` leave GitOps** after their cutovers (M3, M5): the Argo applications are removed without cascade and the dashboard adopts the objects (§60a, *GitOps and the dashboard*). Their configuration then lives only in the cluster, and a backup or export of it is an open question (§93).
+
 ### Slices
 
 | Slice | Repository | What |
@@ -768,19 +773,19 @@ revision digest
 runtime status
 ```
 
-> **Decision (2026-10-05, AD-025):** v0 of this UI is the admin dashboard of [§60a](#60a-admin-dashboard-v0): an `/admin` area of another-agentic-system's chat web over a Platform API that writes `AgentService` and `AgentConfig` (P-007, P-008). The beginner fields above that v0 has no CRD field for (Responses, MCP exposure, routes) are not shown.
+> **Decision (2026-10-05, AD-025):** v0 of this UI is the admin dashboard of [§60a](#60a-admin-dashboard-v0): an `/admin` area of another-agentic-system's chat web over a Platform API that writes `AgentService` and `AgentConfig` (AD-026, AD-027). The beginner fields above that v0 has no CRD field for (Responses, MCP exposure, routes) are not shown.
 
 ---
 
 ## 60a. Admin dashboard v0
 
-> **Status: design only (2026-10-05).** Nothing here is built; slice S0 of the dashboard is this text. The decision to build it is AD-025; the choices that wait for the owner are P-007 to P-012 (§92) and the questions of *Dashboard v0* in §93, each with its recommendation.
+> **Status: design only, decided (2026-10-05).** Nothing here is built; slice S0 of the dashboard is this text. The decision to build it is AD-025; the owner answered the questions of *Dashboard v0* in §93 the same day, and P-007 to P-012 (§92) became AD-026 to AD-031, with the permission model AD-032 and the coders per GitHub owner AD-033. Where the owner changed a recommendation (who may configure agents, who may use an agent, the takeover of `coder` and `chat`), the text below is the changed one. The names of the permissions are proposed, not final (§93).
 
 The owner, 2026-10-05: *"The MVP worked and now we need a dashboard for configuring all these. The same one actually."*
 
 "All these" is what is configured today in Helm values in the GitOps repository `WhyThatFunction/home-os`, in Keycloak and in AWS Secrets Manager:
 
-- the coders, which become **one coder per GitHub owner** (`coder-vymalo`, `coder-stephane`, …), each limited to its owners by `GITHUB_APP_OWNERS` (adam-rs ADR 0017);
+- the coders, which become **one coder per GitHub owner** (`coder-vymalo`, the renamed `coder`, and `coder-me` for `stephane-segning`, AD-033), each limited to its owners by `GITHUB_APP_OWNERS` (adam-rs ADR 0017) and each with **its own GitHub App**;
 - the folder agents (`chat`, `researcher`);
 - who may use which agent;
 - models, tool servers (web search, Context7), the size class of the per-run pod;
@@ -788,39 +793,40 @@ The owner, 2026-10-05: *"The MVP worked and now we need a dashboard for configur
 
 This section is the §60 UI made concrete for the v0 operator (§59a): a dashboard that writes `AgentService` and `AgentConfig` objects through a Platform API, so administrators do not touch CRDs, and humans get no Kubernetes RBAC (§52).
 
-### The reading of "the same one" (an assumption)
+### The reading of "the same one" (confirmed)
 
-**Assumed:** "the same one" means **one dashboard inside the existing chat web app** (another-agentic-system `web/`, Next.js and assistant-ui), with the same sign-in, look and roles: an `/admin` area of that app, not a second app. The first question of *Dashboard v0* in §93 asks the owner to confirm it, in case they meant a separate app or the platform's own UI.
+"The same one" means **one dashboard inside the existing chat web app** (another-agentic-system `web/`, Next.js and assistant-ui), with the same sign-in and look: an `/admin` area of that app, not a second app. **The owner confirmed it on 2026-10-05** (AD-026).
 
 ### What the dashboard covers in v0
 
 | Item | Set today in | v0 | How |
 |---|---|---|---|
-| Coders, one per GitHub owner | home-os (adam-rs chart `deploy/coder`) | **Edited** | `AgentService` + `AgentConfig` with `binary: adam-coder` |
-| Folder agents | the system chart (`chat`), `dev/` (`researcher`) | **Edited** | `AgentService` + `AgentConfig` with `binary: adam-agent` and inline `files` |
-| Who may use which agent | the orchestrator's `auth.roles.<role>.agents` and Keycloak client roles | **Edited**, per agent | `AgentService.spec.access.audience`, published in the registry (P-009) |
-| Models | each chart's `model` values | **Edited** | `ModelEndpoint` objects, referenced by name (P-010) |
-| Tool servers of an agent | the adam-rs chart's `mcp` values | **Edited** | `ToolProvider` objects, referenced by name (P-010) |
+| Coders, one per GitHub owner, each with its GitHub App | home-os (adam-rs chart `deploy/coder`) | **Edited**, including `coder-vymalo` (the renamed `coder`) after the cutover | `AgentService` + `AgentConfig` with `binary: adam-coder` (AD-033) |
+| Folder agents | the system chart (`chat`), `dev/` (`researcher`) | **Edited**, `chat` after the cutover | `AgentService` + `AgentConfig` with `binary: adam-agent` and inline `files` |
+| The image of an agent | the adam-rs chart's `image.tag` | **Optional**: empty is the operator's default coder image, which CI bumps in the operator chart; an agent may pin its own | `AgentConfig.spec.environment.image` (AD-029) |
+| Who may use which agent | the orchestrator's `auth.roles.<role>.agents` and Keycloak client roles | **Edited**, per agent: the audience names the agent's use permission (`agent.use:<agent-name>`); Keycloak composite roles grant it to people | `AgentService.spec.access.audience`, published in the registry (AD-028, AD-032) |
+| Models | each chart's `model` values | **Edited** | `ModelEndpoint` objects, referenced by name (AD-029) |
+| Tool servers of an agent | the adam-rs chart's `mcp` values | **Edited** | `ToolProvider` objects, referenced by name (AD-029) |
 | Run-pod size class | not yet (adam-rs run pods are in progress, ADR 0019 there) | **Edited** once adam-rs has it | `coder.runPods.sizeClass`, a name the operator's chart defines |
-| Secret values | AWS Secrets Manager, through ExternalSecrets | **Referenced only**, never shown or written | a picker over offered Secret keys (P-011) |
-| The coder and `chat` that GitOps deploys | home-os and the system chart | **Read-only**, with View YAML | one owner per object (P-012) |
+| Secret values | AWS Secrets Manager, through ExternalSecrets | **Referenced only**, never shown or written | a picker over offered Secret keys (AD-030) |
+| The `coder` and `chat` that GitOps deploys today | home-os and the system chart | **Taken over by the dashboard at the cutover** (M3, M5, §59a); read-only with View YAML until then, and any other GitOps object stays read-only | one owner per object (AD-031) |
 | Sharing, the tool servers a person attaches in chat, the orchestrator's roles, its title and description models | the system chart (the orchestrator reads its file at startup) | **Read-only** where the browser can already read them; otherwise not shown | `GET /api/me` (`sharing`), `GET /api/tool-servers`, `GET /api/registry`, `GET /api/config` |
-| People and their roles | Keycloak | **Out**: the dashboard never writes Keycloak | — |
+| People, their roles and the permissions' definitions | Keycloak | **Out**: the dashboard never writes Keycloak; the client roles and composites of AD-032 are made there | — |
 | The operator, the CRDs, the system chart, oauth2-proxy, the edge, databases of the system | home-os | **Out** | GitOps |
 
-### Where it lives (P-007)
+### Where it lives (AD-026)
 
 An `/admin` area of the system web, with three gates:
 
 1. **Capability-detected**, in the style of another-agentic-system's ADR 0008: the area exists only when the deployment gives the web's server a Platform API URL (`PLATFORM_API_URL`), and only while `GET /v1/info` on that URL answers, read live on each page load and never cached. Without the URL, `/admin` is a 404 and no link to it is drawn; the chat works as it does today. A Platform API that does not answer is "The platform API cannot be reached", with nothing editable (fail closed).
-2. **Shown to administrators**: the link and the area are drawn when `GET /api/me` lists the `admin` permission. This is a hint for the screen, never a check (the web's rule since ADR 0033 there).
+2. **Shown to people who hold the dashboard's permissions**: the link and the area are drawn when the Platform API's `GET /v1/me`, called with the person's bearer, lists at least `platform:agents.read` (below). This is a hint for the screen, never a check (the web's rule since ADR 0033 there). It is not the orchestrator's `admin`: the dashboard asks the permissions it needs, not a role.
 3. **Enforced by the Platform API**, which authorizes every request itself (below).
 
-`admin` fits: another-agentic-system ADR 0039 makes it "operational and content-free", reserved for endpoints that show no thread content and no personal data beyond counts. Agent configuration holds no thread, file, message or listing of anybody's, so the area reads nothing ADR 0039 protects. The dashboard does not read threads, and it never shows who used an agent.
+Agent configuration holds no thread, file, message or listing of anybody's, so the area reads nothing another-agentic-system's ADR 0039 protects. The dashboard does not read threads, and it never shows who used an agent. The orchestrator's `admin` permission stays operational and content-free there; the administrators' composite role (AD-032) holds it beside the dashboard's permissions, but the dashboard does not look at it.
 
-The dashboard has the chat's look (its tokens, shadcn components, the panda), its sign-in (oauth2-proxy at the edge) and its roles. The web side is the system's decision, another-agentic-system ADR 0045 (proposed).
+The dashboard has the chat's look (its tokens, shadcn components, the panda), its sign-in (oauth2-proxy at the edge) and its roles. The web side is the system's decision, another-agentic-system ADR 0045 (accepted 2026-10-05).
 
-### The Platform API (AD-025, P-008)
+### The Platform API (AD-025, AD-027)
 
 A Rust (axum) service in this repository, **its own binary `bin/api`**, beside `bin/operator` in the same workspace and the same chart (`deploy/operator`, component `api`, off by default). Why not inside the operator binary:
 
@@ -841,7 +847,7 @@ The cost is a second image and a second Deployment. The registry stays in the op
 | `crates/platform-api` | | The axum router, generic over the ports |
 | `bin/api` | | The composition root; one YAML configuration file, secrets by reference |
 
-**Authorization.** The request carries `Authorization: Bearer <JWT>`. The API checks it as another-agentic-system's orchestrator does (ADR 0033 there): signed by the configured issuer's keys (RS256, RS384, ES256 or EdDSA), `iss` equal to the issuer, one of the configured audiences in `aud`, `exp`, 60 seconds of leeway. The roles are the configured claim (`agentic_roles` on netcup). A role listed in `auth.configureRoles` grants **`agent.configure`** (§52), the only permission of v0, which covers every route below. No token is 401, a token without the role is 403, keys that cannot be fetched are 503. On netcup the same Keycloak client role `admin` that gives the orchestrator's `admin` is the configure role, so the web's hint and the API's check agree; when they do not, the API's 403 is what the person sees.
+**Authorization.** The request carries `Authorization: Bearer <JWT>`. The API checks it as another-agentic-system's orchestrator does (ADR 0033 there): signed by the configured issuer's keys (RS256, RS384, ES256 or EdDSA), `iss` equal to the issuer, one of the configured audiences in `aud`, `exp`, 60 seconds of leeway. The values of the configured claim (`agentic_roles` on netcup) are the person's **permissions**: Keycloak client roles of `another-agentic`, with the composites already expanded into the token (AD-032, *Permissions and roles* below). The API checks **individual permissions, never a role name**: each route needs the permission in the table below, a compile-time constant of `aap-api`, so no configuration lists roles. No token is 401, a token without the permission is 403 and says which one, keys that cannot be fetched are 503. The web's `GET /v1/me` hint and the API's check read the same token, so they agree; when a permission changed in Keycloak after the token was issued, the API's 403 is what the person sees until the next refresh.
 
 **How the web gets the token today** (*verified 2026-10-05*, another-agentic-system `deploy/chart/files/Caddyfile` and `dev/Caddyfile`): every request to the web passes the edge's `forward_auth` to oauth2-proxy, which answers 202 with `Authorization: Bearer <ID token>` (`--set-authorization-header=true`, `deploy/chart/templates/oauth2-proxy.yaml`), and `copy_headers Authorization` puts it on the request that goes to the web, replacing what the browser sent. The ID token carries `aud: another-agentic` (the client id) and the roles claim `agentic_roles` (`deploy/keycloak/README.md`). So the web's server already receives the person's token on every request, and today ignores it. The dashboard's route handler, `/admin/api/[...path]`, forwards that header, unchanged, to the Platform API, and nothing else: it stores no token and logs none. `/admin/api/*` is not under `/api/*`, so the edge routes it to the web, not to the orchestrator.
 
@@ -849,6 +855,7 @@ The cost is a second image and a second Deployment. The registry stays in the op
 
 | Route | What |
 |---|---|
+| `GET /v1/me` | The person's dashboard permissions, from the token: the values of the roles claim that start with `platform:` (an empty list is a 200). The web draws `/admin` from it |
 | `GET /v1/info` | The capability document: version, namespace, the deployment's defaults as the forms show them (read-only), the run-pod size classes, the offer label |
 | `GET /v1/agents` | Every `AgentService` of the namespace with its config's kind, its state and conditions, and `managedBy`: `dashboard` or `gitops` |
 | `GET /v1/agents/{name}` | The form, the status, and the `resourceVersion` of both objects as an `ETag` |
@@ -857,13 +864,26 @@ The cost is a second image and a second Deployment. The registry stays in the op
 | `GET /v1/agents/{name}/yaml` | Both objects as YAML, without `status`, `managedFields` and server-set metadata: View YAML and Export YAML |
 | `GET`, `PUT`, `DELETE /v1/models/{name}`, `GET /v1/models` | `ModelEndpoint` objects; a delete of one still referenced is 409 with the agents that use it |
 | `GET`, `PUT`, `DELETE /v1/tool-servers/{name}`, `GET /v1/tool-servers` | `ToolProvider` objects; the same 409 rule |
-| `GET /v1/secret-keys` | The Secret keys an agent may reference (P-011): Secret name, key, and the ExternalSecret that makes it. Never a value |
+| `GET /v1/secret-keys` | The Secret keys an agent may reference (AD-030): Secret name, key, and the ExternalSecret that makes it. Never a value |
+
+**The permission of each route** (AD-032; names proposed):
+
+| Permission | Routes |
+|---|---|
+| none beyond a valid token | `GET /v1/me` |
+| `platform:agents.read` | every `GET` of `/v1/info`, `/v1/agents`, `/v1/models` and `/v1/tool-servers`, and `GET /v1/agents/{name}/yaml` |
+| `platform:agents.write` | `PUT` and `DELETE` of `/v1/agents/{name}`, which includes `spec.suspend` and `spec.access.audience` |
+| `platform:models.write` | `PUT` and `DELETE` of `/v1/models/{name}` |
+| `platform:toolproviders.write` | `PUT` and `DELETE` of `/v1/tool-servers/{name}` |
+| `platform:secrets.pick` | `GET /v1/secret-keys`, **and any write whose body names a secret key** (a model's API key, a tool server's header, a coder's GitHub App key), in addition to the write's own permission |
+
+A write holds its own permission and, when it names a secret, `platform:secrets.pick`; a read of one object type needs only `platform:agents.read`, so a person who may edit tool servers reads agents too (the composites of AD-032 bundle them).
 
 Status codes: 400 a body that is not a form, 401, 403, 404, 409 (exists, still referenced, owned by GitOps, or a server-side-apply conflict), 412 (`If-Match` is stale: somebody saved first), 422 (validation, each error with its form field), 503 (the API server or the issuer's keys cannot be reached).
 
 **Applying.** The API validates the form with `aap-forms` and `aap-domain::validate` (the reconciler's rules of §59a, so the dashboard refuses what the operator would mark `ConfigInvalid`), then applies `AgentConfig` before `AgentService` by **server-side apply**, field manager `agents.vymalo.com/dashboard`, with `force: false`. The CRD's CEL rules run in the API server and come back as 422 on the field they name. Every object it writes carries the label `app.kubernetes.io/managed-by: dashboard.agents.vymalo.com`; the operator writes only `status`, so the two managers never share a field. Status and conditions are read back from the objects (§59a, *Status*); the dashboard asks again every 2 seconds while a page shows an agent that is not settled.
 
-**RBAC of the API** (a namespaced `Role`): `get`, `list`, `watch`, `create`, `patch`, `delete` on `agentservices`, `agentconfigs`, `modelendpoints`, `toolproviders`; `get`, `list` on `externalsecrets.external-secrets.io`. **No right on Secrets**, like the operator (AD-024): `list` on Secrets would return their values (*verified 2026-10-05*, <https://kubernetes.io/docs/concepts/security/rbac-good-practices/>, "Listing secrets").
+**RBAC of the API in Kubernetes** (a namespaced `Role`, not the permissions above): `get`, `list`, `watch`, `create`, `patch`, `delete` on `agentservices`, `agentconfigs`, `modelendpoints`, `toolproviders`; `get`, `list` on `externalsecrets.external-secrets.io`. **No right on Secrets**, like the operator (AD-024): `list` on Secrets would return their values (*verified 2026-10-05*, <https://kubernetes.io/docs/concepts/security/rbac-good-practices/>, "Listing secrets").
 
 ### Deployment defaults
 
@@ -871,9 +891,9 @@ The forms show what matters to an administrator; the rest comes from the API's c
 
 - the store: an operator-owned CloudNativePG cluster per agent (`store.postgres.cnpg`, instances and size), or a `secretRef` pattern;
 - the A2A bearer: `interfaces.a2a.bearerTokensSecretRef`, a Secret key that **must hold the orchestrator's `AGENT_REGISTRY_AGENT_TOKEN`** (the agent token rule of §59a; without it the orchestrator lists the agent and cannot call it);
-- `access.allowFrom` (the orchestrator's namespace), the GitHub App's id and private-key reference, `gitAuthor`, `allowedRepoHosts`, `githubApiUrl`, the coder's work volume, resources and `security`.
+- `access.allowFrom` (the orchestrator's namespace), `gitAuthor`, `allowedRepoHosts`, `githubApiUrl`, the coder's work volume, resources and `security`. **Not the GitHub App**: there is one App per coder (AD-033), so its id and its private-key reference are fields of each coder, the key picked from the offered Secret keys.
 
-The image is not copied into each agent. With P-010, `environment.image` becomes optional and the operator takes its own default (`--default-agent-image`, a value of its chart), so a GitOps bump of that value rolls every agent that has none, through the config digest.
+The image is not copied into each agent (AD-029). `environment.image` is optional and the operator takes its own default, **the coder image** (`--default-agent-image`, a value of its chart that CI bumps by GitOps), so a bump of that value rolls every agent that names none, through the config digest. The forms show the field *Image* under *Advanced*, empty by default, and **an agent may still pin its own image there** (a reference with a tag or a digest, an allow-list of registries being the deployment's default to set).
 
 ### What the custom resources gain
 
@@ -883,24 +903,24 @@ All additive to `v1alpha1` (§62), each a CEL rule or a reconciler rule as §59a
 apiVersion: agents.vymalo.com/v1alpha1
 kind: AgentService
 metadata:
-  name: coder-stephane
+  name: coder-me
   namespace: another-agentic-system
   labels: { app.kubernetes.io/managed-by: dashboard.agents.vymalo.com }
 spec:
-  description: Coding task to verified pull request, for stephane's repositories.
-  configRef: { name: coder-stephane }
+  description: Coding task to verified pull request, for stephane-segning's repositories.
+  configRef: { name: coder-me }
   access:
     allowFrom:                                   # §59a: the NetworkPolicy
       - namespaceSelector: { matchLabels: { kubernetes.io/metadata.name: another-agentic-system } }
-    audience: [team-stephane]                    # P-009: values of the consumer's roles claim; ["*"]: everyone; absent or []: administrators only
-  registry: { title: Coder (stephane), tags: [coding, git] }
+    audience: ["agent.use:coder-me"]             # AD-028: the agent's use permission, a Keycloak client role; ["*"]: everyone; absent or []: administrators only
+  registry: { title: Coder (me), tags: [coding, git] }
   # interfaces, scaling, store: the deployment defaults
 ```
 
 ```yaml
 apiVersion: agents.vymalo.com/v1alpha1
 kind: AgentConfig
-metadata: { name: coder-stephane, namespace: another-agentic-system }
+metadata: { name: coder-me, namespace: another-agentic-system }
 spec:
   harness:
     type: adam-rs
@@ -912,18 +932,18 @@ spec:
         prDraft: true
         github:
           app:
-            id: Iv23li4m1ZrQ8wdwjnQH
-            owners: [stephane]                   # GITHUB_APP_OWNERS
-            privateKeySecretRef: { name: coder-github-app, key: private-key.pem }
+            id: "<the id of coder-me's own GitHub App>"   # one App per coder (AD-033)
+            owners: [stephane-segning]           # GITHUB_APP_OWNERS
+            privateKeySecretRef: { name: coder-me-github-app, key: private-key.pem }   # an offered key, from the AWS property github_app_private_key_coder_me
         runPods: { sizeClass: standard }         # waits for adam-rs ADR 0019
   model:
-    endpointRef: { name: gateway }               # P-010: exclusive with baseUrl and apiKeySecretRef
+    endpointRef: { name: gateway }               # AD-029: exclusive with baseUrl and apiKeySecretRef
     model: coding-model
   tools:
     mcpServers:
-      websearch: { providerRef: { name: websearch } }   # P-010: exclusive with url and headers
+      websearch: { providerRef: { name: websearch } }   # AD-029: exclusive with url and headers
     allowInsecureHttp: true                      # never automatic (§59a); the form asks
-  # environment.image absent: the operator's default image (P-010)
+  # environment.image absent: the operator's default coder image (AD-029); an agent may pin its own
 ```
 
 ```yaml
@@ -950,11 +970,11 @@ spec:
 ```
 
 - **Resolution is the operator's.** `aap-domain::resolve` reads the referenced `ModelEndpoint` and `ToolProvider` into the same `RuntimeSpec` the inline form gives, so the pod is unchanged and the digest moves when the referenced object changes: an edit of an endpoint rolls out every agent that uses it. A missing referent is `ConfigResolved=False`, reason `ConfigInvalid`, with a message that names it. The controller maps a change of either kind to the services whose config references it, as it does for `AgentConfig`.
-- **`audience`** is a list of at most 32 strings of 1 to 64 visible characters; `"*"` only alone. It reaches no pod: it goes to the registry item (below) and nowhere else.
+- **`audience`** is a list of at most 32 strings of 1 to 64 visible characters; `"*"` only alone. By convention a value is a use permission, `agent.use:<agent-name>` (at most 50 characters, since a name is at most 40). It reaches no pod: it goes to the registry item (below) and nowhere else.
 - **`runPods.sizeClass`** names a class of the operator chart's `runPodClasses` (`standard: { requests: { cpu: 250m, memory: 512Mi }, limits: { memory: 2Gi } }`), the seed of §65's `ResourceClass`. The operator turns it into the resources of the run-pod template adam-rs reads (`RUN_POD_TEMPLATE_FILE` in the work in progress there, *unverified*: not on adam-rs `main` at `ea570d6`). This field is the last slice (D15) and waits for adam-rs.
 - A `ToolProvider`'s header variable is named by its Secret key (§59a, *What each field becomes*); two providers of one agent whose keys have the same name are `ConfigInvalid`.
 
-### Who may use an agent (P-009)
+### Who may use an agent (AD-028)
 
 Today, another-agentic-system decides per role: `auth.roles.<role>.agents` in the orchestrator's configuration file lists agent ids or `"*"`, and the roles come from Keycloak client roles in the token (*verified 2026-10-05*, `docs/api/config.md` "Roles and permissions", `orchestrator/crates/app/src/authz.rs`). Two ways to make it a dashboard setting:
 
@@ -965,36 +985,91 @@ Today, another-agentic-system decides per role: `auth.roles.<role>.agents` in th
 | Credentials the API needs | A Keycloak admin client, and write access to GitOps or the system's namespace | None more |
 | Two writers of one file | GitOps and the dashboard on the orchestrator's configuration | No |
 
-**Recommended: (b).** It keeps the dashboard out of Keycloak and out of the orchestrator's file. People still get roles in Keycloak: the administrator of the identity provider makes a client role such as `team-stephane` on the client `another-agentic` and gives it to people or groups; the client's role mapper puts every client role in `agentic_roles` (*verified 2026-10-05*, another-agentic-system `deploy/keycloak/README.md`). The orchestrator's own roles do not change per agent: a role with `agent.read` and `agent.invoke` over `"*"` (the netcup `user`) stays, and `audience` narrows it.
+**Decided: (b)** (the owner, 2026-10-05, adding that *"RBAC should normally answer this"*). It keeps the dashboard out of Keycloak and out of the orchestrator's file. **RBAC answers it through use permissions:** each agent has a Keycloak client role of `another-agentic` named `agent.use:<agent-name>`, its audience lists that name, and composite roles (*Permissions and roles*, below) grant it to people, so who may use `coder-me` is decided in Keycloak and not in git. The client's role mapper puts every client role, composites expanded, in `agentic_roles` (*verified 2026-10-05* for the mapper: another-agentic-system `deploy/keycloak/README.md`; the expansion is *unverified*, below). The orchestrator's check stays what it was, **"the audience intersects the person's roles"**: it needs no new code for composites. The orchestrator's own roles do not change per agent: a role with `agent.read` and `agent.invoke` over `"*"` (the netcup `user`) stays, and `audience` narrows it; the per-coder `auth.roles[].agents` entries of today's system chart become unnecessary for the agents the registry lists.
 
 **The registry attribute.** The item of `agent-registry/v1` gains an optional extension target attribute `audience`, an array of strings (as `tags`, RFC 9264 §4.2.4.3):
 
 ```json
-{ "href": "http://coder-stephane.another-agentic-system.svc:8080/.well-known/agent-card.json",
-  "type": "application/json", "title": "Coder (stephane)", "service": ["coder-stephane"],
-  "tags": ["coding", "git"], "audience": ["team-stephane"] }
+{ "href": "http://coder-me.another-agentic-system.svc:8080/.well-known/agent-card.json",
+  "type": "application/json", "title": "Coder (me)", "service": ["coder-me"],
+  "tags": ["coding", "git"], "audience": ["agent.use:coder-me"] }
 ```
 
 - **The consumer's rule** (to be added to the contract in D3): a client that offers listed agents to people shows an item to a person, and lets them invoke it, only when `audience` holds `"*"` or one of the values of the person's roles claim; an item with no `audience`, an empty one or a malformed one is for the client's administrators only. **Fail closed**: an agent the dashboard has just made, with no audience yet, is seen by administrators, who can try it, and by nobody else. A client that offers nothing to people (a script) may ignore it.
 - **Additive under the contract's Versioning**: an optional item attribute, which clients that do not know it ignore. The risk is that such a client shows a restricted agent to everybody; the only consumer is another-agentic-system, which ships the rule (ADR 0045 there, slice D8) before any agent with an `audience` exists.
 - **Listing is still not a grant** (the contract's *Serving*): the agent itself checks only the orchestrator's bearer, so for people the orchestrator is the enforcement point, as it is today for `auth.roles`. The platform's own per-caller filtering (§12b, rule 1 of the contract) remains the target for clients that read the registry with a person's token.
 
-### Secrets (P-011)
+### Permissions and roles (AD-032)
+
+The owner, 2026-10-05, asked *"can we break down into permissions and let roles provide mappings?"* and chose **Keycloak composite roles**. The names below are **proposed, not final** (§93); a name is in tokens and in every `audience`, so they are confirmed before anything is built.
+
+- **Permissions are client roles** of the client `another-agentic`: fine-grained, one thing each, named `<area>:<noun>.<verb>`, like the orchestrator's `noun.verb` names (`agent.read`, `thread.delete`; *verified 2026-10-05*, another-agentic-system `docs/api/config.md`, "Roles and permissions") with a prefix so that a dashboard permission never collides with an orchestrator role (`user`, `admin`).
+
+| Permission (proposed) | Grants |
+|---|---|
+| `platform:agents.read` | Read the dashboard: agents, models, tool servers, deployment defaults, View YAML. Draws `/admin` |
+| `platform:agents.write` | Create, edit, suspend, resume and delete agents, including their audience |
+| `platform:models.write` | Create, edit and delete `ModelEndpoint`s |
+| `platform:toolproviders.write` | Create, edit and delete `ToolProvider`s |
+| `platform:secrets.pick` | See the offered Secret keys and name one in a write (AD-030) |
+| `agent.use:<agent-name>` | Use one agent in chat. **Not a dashboard permission:** it is what that agent's `audience` lists (AD-028), and the orchestrator reads it. One per agent, made in Keycloak |
+
+`agent.use:<agent-name>` keeps the orchestrator's `agent.*` family and the colon separates the instance. It is a **role name in the token**; the orchestrator's `agent.read` and `agent.invoke` permissions over the agent's id stay what `auth.roles` gives, and the audience narrows them.
+
+- **Roles are composites** that bundle permissions, made in Keycloak by an administrator of the realm. Proposed: `platform-viewer` (`platform:agents.read`), `agent-editor` (`platform-viewer` plus `platform:agents.write` and `platform:secrets.pick`) and **`admin`, which becomes a composite that includes every dashboard permission** beside what it grants the orchestrator today. The use permissions are bundled the same way: `user` or a group's role is a composite that includes `agent.use:chat`, `agent.use:researcher`; a coder's group role includes `agent.use:coder-me`. The composites are the deployment's to define, and the platform names none of them in code.
+- **Keycloak expands composites into the token**: the roles claim (`agentic_roles` on netcup) holds the permissions a person has through any composite. *Unverified:* that the *User Client Role* mapper of the client's configuration (system `deploy/keycloak/README.md`) includes composite-expanded client roles on the realm's Keycloak version. The Keycloak administration guide's section on composite roles does not say it (checked 2026-10-05, <https://www.keycloak.org/docs/latest/server_admin/index.html>); the owner's decision rests on it, so it is tried on the realm before the API is built (D6, D14).
+- **Consequence for the system's repository**: its `deploy/keycloak/` exports (`roles-and-groups.json`, the client) gain these client roles and composites when the dashboard is built (D14). They are not edited by this decision.
+- **No role name in code**: `aap-api` knows the permission strings; it never compares a role name, and its configuration lists no role. A deployment that wants another bundle changes a composite in Keycloak and nothing else.
+
+```mermaid
+sequenceDiagram
+    actor A as Administrator
+    participant K as Keycloak
+    participant E as Edge, oauth2-proxy
+    participant W as Web server
+    participant P as Platform API
+    participant X as Orchestrator
+
+    A->>K: a composite role includes platform:agents.write and agent.use:coder-me
+    A->>K: a person joins the group of that composite
+    Note over K: composites are expanded when a token is issued
+    E->>K: sign-in, or refresh at most every 10 minutes
+    K-->>E: ID token, agentic_roles holds the person's permissions, composites expanded
+    E->>W: a request, Authorization Bearer ID token
+    W->>P: GET /v1/me, the same bearer
+    P->>P: verify issuer, audience, expiry, signature
+    P-->>W: the values of agentic_roles that start with platform:
+    W-->>E: /admin is drawn when platform:agents.read is among them
+    W->>P: PUT /v1/agents/coder-me, the same bearer
+    P->>P: the route needs platform:agents.write, never a role name
+    alt the permission is in the token
+        P-->>W: 201
+    else it is not
+        P-->>W: 403, naming platform:agents.write
+    end
+    W->>X: later, the person's own chat request, the same bearer
+    X->>X: the audience of coder-me intersects agentic_roles, agent.use:coder-me
+```
+
+A change in Keycloak (a person added to a group, a permission added to a composite) reaches the API and the orchestrator at the person's next token, within the 15 minutes of the access token's lifetime (system `deploy/keycloak/README.md`, *verified 2026-10-05*). The lifecycle of a permission is Keycloak's, not the platform's, so no state diagram is drawn.
+
+### Secrets (AD-030)
 
 The dashboard **never shows, reads or writes a secret value** (AD-024).
 
-- **v0, recommended: pick a reference.** A field that needs a secret (an API key, a header token, a base URL kept out of git) offers the keys of `GET /v1/secret-keys`: the `data[].secretKey` of every ExternalSecret in the namespace that carries the label `agents.vymalo.com/offer: "true"`, under its `target.name`. An ExternalSecret holds no value (*verified 2026-10-05*, <https://external-secrets.io/latest/api/externalsecret/>), so the API needs no right on Secrets. A key fetched with `dataFrom` is not listed and is typed by hand. The value is put in AWS Secrets Manager and the ExternalSecret in home-os, as today; the dashboard says where.
+- **v0, decided: pick a reference.** A field that needs a secret (an API key, a header token, a base URL kept out of git) offers the keys of `GET /v1/secret-keys`: the `data[].secretKey` of every ExternalSecret in the namespace that carries the label `agents.vymalo.com/offer: "true"`, under its `target.name`. An ExternalSecret holds no value (*verified 2026-10-05*, <https://external-secrets.io/latest/api/externalsecret/>), so the API needs no right on Secrets. A key fetched with `dataFrom` is not listed and is typed by hand. The value is put in AWS Secrets Manager and the ExternalSecret in home-os, as today; the dashboard says where.
 - **The offer label is the guard.** A form may reference only an offered key; the API refuses anything else (422). Without it, anyone who may configure agents could point an agent's `MODEL_API_KEY` at the orchestrator's database Secret and a model URL of their own, and read it from the requests: the operator and the kubelet would mount any Secret of the namespace that a custom resource names.
-- **v1, not recommended now:** a write-only form that writes a Kubernetes Secret (the API then needs `create` and `update` on Secrets, which in Kubernetes come with nothing that stops it reading them back, and the value then lives outside AWS, where GitOps does not know it), or a write to AWS Secrets Manager through an IAM role scoped to one prefix (`prod/another-agentic/agents/*`) and to `PutSecretValue`, with an ExternalSecret made per secret. Either is a credential with write power held by a process that takes browser traffic, and needs its own decision.
+- **v1, not now (the owner kept it out of v0):** a write-only form that writes a Kubernetes Secret (the API then needs `create` and `update` on Secrets, which in Kubernetes come with nothing that stops it reading them back, and the value then lives outside AWS, where GitOps does not know it), or a write to AWS Secrets Manager through an IAM role scoped to one prefix (`prod/another-agentic/agents/*`) and to `PutSecretValue`, with an ExternalSecret made per secret. Either is a credential with write power held by a process that takes browser traffic, and needs its own decision.
 
-### GitOps and the dashboard (P-012)
+### GitOps and the dashboard (AD-031)
 
-Argo CD in home-os owns the infrastructure: the CRDs, the operator, the system chart, and the custom resources that §59a's rollout puts in charts (`coder` from adam-rs `deploy/coder-agent`, `chat` from the system chart; decided in §93 on 2026-10-05). The dashboard owns the agents it makes. **One owner per object:**
+Argo CD in home-os owns the infrastructure: the CRDs, the operator and the system chart. §59a's rollout first puts `coder` (adam-rs `deploy/coder-agent`) and `chat` (the system chart) in charts, **and the owner decided on 2026-10-05 that the dashboard then takes them over**: their Argo applications are removed at the cutover (M3 and M5, §59a), and the dashboard owns them like the agents it makes. **One owner per object:**
 
 - **Argo prunes only what it tracks.** It tracks an object by its own annotation (`argocd.argoproj.io/tracking-id`, the default method; *verified 2026-10-05*, <https://argo-cd.readthedocs.io/en/stable/user-guide/resource_tracking/>), and an object of no Application is an orphan, which it can show and warn about but does not delete (<https://argo-cd.readthedocs.io/en/stable/user-guide/orphaned-resources/>). The `another-agentic` AppProject has `orphanedResources: { }`, so the dashboard's objects appear in Argo's orphan list; an ignore rule by kind can quiet that.
 - **The dashboard writes only its own objects.** It writes an object only when it carries its `managed-by` label and no Argo tracking annotation. Anything else is **read-only** in the dashboard, marked *Managed by GitOps*, with View YAML. A create whose name exists is 409.
 - **An agent defined in both places.** If a chart later renders an object with the name of a dashboard object, Argo applies over it and its tracking annotation appears: the dashboard sees the annotation, stops writing, and shows the object as GitOps's with a warning. The reverse, a dashboard save over a GitOps object, never happens (the rule above). With `selfHeal` on (home-os sets `automated: { prune: true, selfHeal: true }` for both another-agentic apps), a dashboard edit of a GitOps object would be undone within a sync, which is why it is refused.
-- **Moving an agent between owners.** Dashboard to GitOps: Export YAML, commit it, sync. GitOps to dashboard (not in v0): mark the objects `Prune=false`, remove them from git, then an "Adopt" action adds the label. The existing `coder` and `chat` stay GitOps's in v0.
+- **Moving an agent between owners.** Dashboard to GitOps: Export YAML, commit it, sync. GitOps to dashboard: mark the objects `Prune=false`, remove the Argo application without cascade, remove the tracking annotation, then an **Adopt** action adds the label. Adopt is in v0 for the takeover of `coder` and `chat`, and takes only an object that no Argo application tracks any more. *Unverified*: the exact sequence that keeps the objects, the volume and the database through it; it is rehearsed on the shadow (M2).
+- **What the takeover costs.** Once `coder` and `chat` leave git, **their configuration lives only in the cluster**: a lost cluster or a bad edit has no commit to go back to. v0 has Export YAML (manual) and the config digest; a backup or export of dashboard-owned objects is an open question (§93), not decided. Nothing of the fleet stays GitOps's afterwards, so *Managed by GitOps* appears only for an object somebody puts under Argo again.
 
 ### Revisions
 
@@ -1007,11 +1082,11 @@ Every screen lists what the API returns; a GitOps object is read-only everywhere
 | Screen | Fields and validation | Writes |
 |---|---|---|
 | **Agents** (`/admin`) | One row per `AgentService`: name, title, kind (coder or folder), state (the lifecycle below), the first false condition's reason and message, owners (coders), audience, *Managed by GitOps*, *In chat*. Actions: New coder, New folder agent, Edit, Suspend or Resume, Delete (confirm by typing the name; says what `deletionPolicy` keeps) | `spec.suspend`; delete |
-| **Coder** (new, edit) | Name: `^[a-z][a-z0-9-]{0,38}[a-z0-9]$`, at most 40 characters so every derived name fits 63, unique, fixed after create. Title (1 to 80), description (at most 500). Tags (at most 16, each 1 to 64, lower-case words and dashes). **GitHub owners**: at least one GitHub login (`^[A-Za-z0-9](?:[A-Za-z0-9-]{0,38})$`), no `*`. Owners who may get new repositories: a subset of the owners, default none. **Model**: an endpoint and one of its aliases (or a typed alias); OpenCode's model, default the same. **Run-pod size class**: one of `GET /v1/info`'s classes, hidden while there are none. Runs at once: 1 to 16. Pull requests as drafts. **Tool servers**: any `ToolProvider`s; an `http://` one to another host asks for *Allow plain http*, which covers every server of the agent. **Access**: the audience | `AgentService`: `metadata.name`, `description`, `registry.title`, `registry.tags`, `access.audience`. `AgentConfig`: `coder.github.app.owners`, `coder.createRepoOwners`, `model.endpointRef`, `model.model`, `coder.opencodeModel`, `coder.runPods.sizeClass`, `coder.workers`, `coder.prDraft`, `tools.mcpServers.<n>.providerRef`, `tools.allowInsecureHttp`; the rest from the deployment defaults |
+| **Coder** (new, edit) | Name: `^[a-z][a-z0-9-]{0,38}[a-z0-9]$`, at most 40 characters so every derived name fits 63, unique, fixed after create. Title (1 to 80), description (at most 500). Tags (at most 16, each 1 to 64, lower-case words and dashes). **GitHub App** (one per coder, AD-033): its id, and its private key as an offered secret key (`platform:secrets.pick`). **GitHub owners**: at least one GitHub login (`^[A-Za-z0-9](?:[A-Za-z0-9-]{0,38})$`), no `*`. Owners who may get new repositories: a subset of the owners, default none. **Model**: an endpoint and one of its aliases (or a typed alias); OpenCode's model, default the same. **Run-pod size class**: one of `GET /v1/info`'s classes, hidden while there are none. Runs at once: 1 to 16. Pull requests as drafts. **Tool servers**: any `ToolProvider`s; an `http://` one to another host asks for *Allow plain http*, which covers every server of the agent. **Image** under *Advanced*: empty is the operator's default coder image (AD-029). **Access**: the audience, defaulting to `agent.use:<name>` | `AgentService`: `metadata.name`, `description`, `registry.title`, `registry.tags`, `access.audience`. `AgentConfig`: `environment.image`, `coder.github.app.id`, `coder.github.app.privateKeySecretRef`, `coder.github.app.owners`, `coder.createRepoOwners`, `model.endpointRef`, `model.model`, `coder.opencodeModel`, `coder.runPods.sizeClass`, `coder.workers`, `coder.prDraft`, `tools.mcpServers.<n>.providerRef`, `tools.allowInsecureHttp`; the rest from the deployment defaults |
 | **Folder agent** (new, edit) | Name, title, description, tags, as above. **Instructions**: `instructions.md` in a text editor, with its front matter; more files by relative path (`skills/…`); the folder at most 1 MiB; no `mcp.json` (tools come from the Tool servers screen). Model, tool servers, access, as above | `AgentConfig`: `adam.binary: adam-agent`, `agent.folder.files`, `model`, `tools`; `AgentService` as above |
 | **Models** | Name (`^[a-z][a-z0-9-]{0,62}$`), title, base URL as a value (`http` or `https`, a host, no user, password, query or fragment) or an offered secret key, the API key (an offered secret key), the aliases (at most 32). *Used by*: the agents that reference it. Delete is refused while it is used | `ModelEndpoint` |
 | **Tool servers** | Name (`^[a-z][a-z0-9-]{0,30}$`, the prefix of its tools as `<name>__<tool>`), title, URL (the same URL rules), headers (an HTTP token as name, a plain-text prefix, an offered secret key), tools allow-list, optional (default on). *Used by*. A second, read-only list: the tool servers a person can attach in chat, from the orchestrator's `GET /api/tool-servers`, marked *set in the system chart* | `ToolProvider` |
-| **Access** | A table: agents by rows, the audience values in use by columns, and `*`. A cell toggles a value for one agent. A note says that people get roles in Keycloak, and that the orchestrator's own roles are in the system chart. GitOps agents are shown and not editable | `AgentService.spec.access.audience` |
+| **Access** | A table: agents by rows, the audience values in use by columns (the use permissions `agent.use:<name>`, and `*`). A cell toggles a value for one agent. A note says that **the use permission and the composite roles that grant it are made in Keycloak**, not here, and that the orchestrator's own roles are in the system chart. An object under GitOps is shown and not editable | `AgentService.spec.access.audience` |
 | **Deployment** | Read-only: the sharing cap (`GET /api/me`), the registry's state (`GET /api/registry`), the public `ui` settings (`GET /api/config`), the deployment defaults (`GET /v1/info`), and where each is changed | nothing |
 
 ### Create a coder
@@ -1032,11 +1107,12 @@ sequenceDiagram
     actor U as Person in chat
 
     A->>B: New coder: owners, model, size class, tools, audience, Save
-    B->>E: PUT /admin/api/agents/coder-stephane, session cookie
+    B->>E: PUT /admin/api/agents/coder-me, session cookie
     E->>E: forward_auth, 202 with Authorization Bearer ID token
     E->>W: the request, Authorization set by the edge
-    W->>P: PUT /v1/agents/coder-stephane, the same bearer, If-None-Match *
-    P->>P: verify the token, a role grants agent.configure
+    W->>P: PUT /v1/agents/coder-me, the same bearer, If-None-Match *
+    P->>P: verify the token, it holds platform:agents.write
+    P->>P: the body names a secret key, the token holds platform:secrets.pick
     P->>K: list ExternalSecrets, the offered keys
     P->>P: form to AgentConfig and AgentService, validate
     P->>K: server-side apply AgentConfig, then AgentService, manager dashboard
@@ -1047,18 +1123,18 @@ sequenceDiagram
     O->>K: get AgentConfig, ModelEndpoint, ToolProvider
     O->>K: StatefulSet, Service, NetworkPolicy, CNPG Cluster, status by server-side apply
     loop every 2 s until the state settles
-        B->>W: GET /admin/api/agents/coder-stephane
-        W->>P: GET /v1/agents/coder-stephane
+        B->>W: GET /admin/api/agents/coder-me
+        W->>P: GET /v1/agents/coder-me
         P->>K: get both objects
         P-->>W: state, conditions, digest
         W-->>B: state, conditions, digest
     end
-    O->>R: the reflector lists coder-stephane with its audience
+    O->>R: the reflector lists coder-me with its audience
     X->>R: GET /registry/v1/agents, If-None-Match, when its copy is stale
     R-->>X: 200, the new item
     U->>X: GET /api/agents
-    X->>X: a role grants agent.read, the audience holds one of the person's roles
-    X-->>U: Coder (stephane) in the agent picker
+    X->>X: a role grants agent.read, the audience holds one of the person's roles, agent.use:coder-me
+    X-->>U: Coder (me) in the agent picker
 ```
 
 The person sees the agent at most the registry's `max-age` plus the orchestrator's cap after it is listed (30 s and 60 s; *verified 2026-10-05* for the orchestrator: `orchestrator/crates/registry-platform/README.md` and `orchestrator/crates/app/src/app.rs`, `list_agents` reads the registry on every call). No restart: `dev/registry-e2e.sh` (b) asserts that an agent added to a mock registry is listed within 10 seconds (the script exists; it was not run for this text).
@@ -1099,7 +1175,7 @@ stateDiagram-v2
     Deleting: deletionTimestamp set
 ```
 
-`Saving` to `Blocked`, `Degraded`, `Ready` and `Suspended` are §59a's states once the operator has observed the generation; `InChat` is the page's own check, `GET /api/agents` read by the browser (an administrator sees every listed agent, P-009). A GitOps object goes through the same states and is read-only.
+`Saving` to `Blocked`, `Degraded`, `Ready` and `Suspended` are §59a's states once the operator has observed the generation; `InChat` is the page's own check, `GET /api/agents` read by the browser (an administrator sees every listed agent, AD-028). A GitOps object goes through the same states and is read-only.
 
 ### Slices
 
@@ -1115,23 +1191,26 @@ After the operator slices they need (§59a, *Slices*): S5 (the controller), S7 (
 | D6 | platform | `auth-oidc` | the conformance suite against an in-process issuer: algorithms, `aud`, expiry, unknown `kid`, roles claim | D4 |
 | D7 | platform | `platform-api` and `bin/api`; the chart's `api` component (Role without Secrets, NetworkPolicy from the web's pods only); `GET /v1/info` | router tests on the `Memory` ports; kind end-to-end: create a folder agent through the API, see it `Ready` and listed | S8, D2, D5, D6 |
 | D8 | system | The orchestrator enforces `audience` (ADR 0045): the reader parses it, every agent check applies it; the mock registry's items get one | unit and property tests of the predicate, conformance, `dev/registry-e2e.sh` extended (a person without the role does not see the agent; an administrator does) | D3 |
-| D9 | system | Web: the `/admin` area, `PLATFORM_API_URL`, the route handler, the gates, the Agents screen read-only; a mock Platform API in `web/mock` | Playwright with axe on the mock: hidden without the URL, hidden without `admin`, unreachable API, a 403 from the API, the header forwarded and never logged | D7 |
+| D9 | system | Web: the `/admin` area, `PLATFORM_API_URL`, the route handler, the gates, the Agents screen read-only; a mock Platform API in `web/mock` | Playwright with axe on the mock: hidden without the URL, hidden without `platform:agents.read`, unreachable API, a 403 from the API, the header forwarded and never logged | D7 |
 | D10 | system | Web: the coder and folder-agent forms, Suspend, Delete, View and Export YAML | Playwright: create, a 422 on its field, a 412 on a stale save, a GitOps agent read-only | D9 |
 | D11 | system | Web: Models, Tool servers, Access, Deployment | Playwright, as D10; `pnpm screens` | D10 |
 | D12 | system | The chart: `web.platformApiUrl`, the web's egress to the API | `deploy/chart/tests/render-check.sh` | D9 |
 | D13 | platform | kind end-to-end of the whole chain: the API creates a coder with an audience, the operator runs it, a pinned orchestrator image lists it for a person who holds the role and not for one who does not | CI job in `operator.yml` | D7, D8 |
-| D14 | home-os | The `api` component on, its configuration, the offer label on the agents' ExternalSecrets, the Keycloak client roles of the audiences, `web.platformApiUrl` | the first agent made on netcup | S10, S12, D12, D13 |
+| D14 | home-os and system | The `api` component on, its configuration, the offer label on the agents' ExternalSecrets, `web.platformApiUrl`; in the system's `deploy/keycloak/` exports, the client roles of AD-032 (the dashboard's permissions, one `agent.use:<name>` per agent) and the composite roles that bundle them, `admin` among them | the first agent made on netcup | S10, S12, D12, D13 |
+| D16 | home-os | The takeover (AD-031): the Argo applications of `coder` and `chat` removed without cascade, the objects adopted by the dashboard; `coder` renamed `coder-vymalo` with its alias, `coder-me` made (AD-033) | the dashboard edits `coder-vymalo` and `chat`; an old thread of `coder` continues | S14, S15, D14 |
 | D15 | platform and adam-rs | `runPods.sizeClass` and the chart's `runPodClasses`, once adam-rs's run pods (ADR 0019 there) are merged | goldens of the run-pod template | D2, adam-rs ADR 0019 |
 
 ### Risks
 
 | Risk | Handling |
 |---|---|
-| Whoever may configure agents can make a pod read any Secret its custom resource names | The offer label (P-011): only keys of labelled ExternalSecrets are accepted. A namespace of their own for agents is the stronger fence, later (owner question in §93) |
+| Whoever may configure agents can make a pod read any Secret its custom resource names | The offer label (AD-030) and the permission `platform:secrets.pick` that every secret reference needs: only keys of labelled ExternalSecrets are accepted. A namespace of their own for agents is the stronger fence, later (owner question in §93) |
 | The web gains its first server-side call and setting; another-agentic-system says the web has none | ADR 0045 there: one route handler, one URL, the header forwarded as received, nothing stored or logged |
 | The registry's `audience` is ignored by a client that does not know it, which then shows a restricted agent to everybody | The only consumer ships the rule (D8) before D14; the contract states the rule (D3) |
-| The web's `admin` and the API's configure role disagree | One Keycloak client role on netcup; the API's 403 is shown |
-| GitOps and the dashboard fight over an object | One owner per object, the label and the tracking annotation checked on every write (P-012) |
+| A permission or composite changed in Keycloak is not in a token yet | Tokens live 15 minutes and are refreshed by oauth2-proxy (system `deploy/keycloak/README.md`), so a change reaches the API and the orchestrator within that; the API's 403 names the permission it needed |
+| Many `agent.use:<name>` roles make the roles claim, and so the ID token, large | One role per agent is a handful at v0; *unverified* where a header limit bites (oauth2-proxy, Caddy, Next.js), to be tried with a realistic token in D9 |
+| After the takeover the configuration of `coder` and `chat` is only in the cluster | Export YAML by hand and the config digest in v0; a backup or export is an open question (§93) |
+| GitOps and the dashboard fight over an object | One owner per object, the label and the tracking annotation checked on every write (AD-031) |
 | A broken edit takes an agent down at once (no revisions) | `aap-domain::validate` before the apply; `Blocked` leaves what runs untouched (§59a); Export YAML before risky edits |
 | Two administrators edit the same agent | `If-Match` on every save, 412 for the second |
 | The ID token expires during a long edit | The web's session refresh (another-agentic-system ADR 0033 amendment of 2026-10-04) retries the call; the form keeps its fields |
