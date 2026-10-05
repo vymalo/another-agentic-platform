@@ -1,4 +1,4 @@
-//! The binary's contract: `crdgen` prints exactly the checked-in CRDs, `run` refuses until S5.
+//! The binary's contract: `crdgen` prints exactly the checked-in CRDs, and `run` says what it needs.
 
 #![allow(clippy::expect_used, clippy::unwrap_used)] // tests may
 
@@ -48,13 +48,54 @@ fn crdgen_prints_one_document_per_kind() {
     assert!(text.contains("name: agentservices.agents.vymalo.com"));
 }
 
+#[cfg(not(feature = "runtime-kubernetes"))]
 #[test]
-fn run_says_it_is_not_implemented_until_s5() {
+fn run_without_a_runtime_provider_says_what_to_rebuild_with() {
     let out = operator().arg("run").output().expect("runs the operator");
     assert!(!out.status.success());
     let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(stderr.contains("no runtime provider"), "{stderr}");
+}
+
+#[cfg(feature = "runtime-kubernetes")]
+#[test]
+fn run_without_a_cluster_fails_and_says_where_it_looked() {
+    // No in-cluster environment, and a kubeconfig that is not there: nothing to connect to.
+    let out = operator()
+        .arg("run")
+        .env_remove("KUBERNETES_SERVICE_HOST")
+        .env("KUBECONFIG", "/nonexistent/kubeconfig")
+        .env("HOME", "/nonexistent")
+        .env("HEALTH_ADDR", "127.0.0.1:0")
+        .env("METRICS_ADDR", "127.0.0.1:0")
+        .output()
+        .expect("runs the operator");
+    assert!(!out.status.success());
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(stderr.contains("connecting to the cluster"), "{stderr}");
+}
+
+#[test]
+fn run_lists_its_settings_and_the_environment_variables_that_set_them() {
+    let out = operator()
+        .args(["run", "--help"])
+        .output()
+        .expect("runs the operator");
+    assert!(out.status.success());
+    let help = String::from_utf8_lossy(&out.stdout);
+    for variable in [
+        "WATCH_NAMESPACE",
+        "HEALTH_ADDR",
+        "METRICS_ADDR",
+        "POD_NAME",
+        "AAP_CONCURRENCY",
+        "AAP_RESYNC_SECS",
+        "AAP_RESYNC_PENDING_SECS",
+    ] {
+        assert!(help.contains(variable), "{variable} is not in:\n{help}");
+    }
     assert!(
-        stderr.contains("not implemented until slice S5"),
-        "{stderr}"
+        help.contains("0.0.0.0:8081") && help.contains("0.0.0.0:9090"),
+        "{help}"
     );
 }

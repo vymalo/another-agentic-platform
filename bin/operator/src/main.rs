@@ -1,10 +1,15 @@
-//! The operator: the composition root (AD-020). Today it prints the CRDs (`crdgen`); the
-//! controller (`run`) arrives with slice S5.
+//! The operator: the composition root (AD-020). `crdgen` prints the CRDs; `run` composes the
+//! Kubernetes runtime provider, the Secret store and the controllers, and serves health (8081) and
+//! metrics (9090).
+
+mod run;
+#[cfg(feature = "runtime-kubernetes")]
+mod serve;
 
 use std::io::{self, Write};
 use std::process::ExitCode;
 
-use anyhow::{Context, Result, bail};
+use anyhow::{Context, Result};
 use clap::{Parser, Subcommand};
 
 /// The another-agentic-platform operator.
@@ -19,8 +24,8 @@ struct Cli {
 enum Command {
     /// Print the CustomResourceDefinitions as multi-document YAML.
     Crdgen,
-    /// Run the controller. Not implemented until slice S5.
-    Run,
+    /// Run the controllers: reconcile AgentService and AgentConfig objects.
+    Run(run::RunArgs),
 }
 
 fn main() -> ExitCode {
@@ -36,10 +41,20 @@ fn main() -> ExitCode {
 fn real_main(cli: Cli) -> Result<()> {
     match cli.command {
         Command::Crdgen => crdgen(&mut io::stdout().lock()),
-        Command::Run => bail!(
-            "`operator run` is not implemented until slice S5 (the controller); \
-             this build only has `operator crdgen`"
-        ),
+        Command::Run(args) => {
+            tracing_subscriber::fmt()
+                .with_env_filter(
+                    tracing_subscriber::EnvFilter::try_from_default_env()
+                        .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("info")),
+                )
+                .with_writer(io::stderr)
+                .init();
+            tokio::runtime::Builder::new_multi_thread()
+                .enable_all()
+                .build()
+                .context("starting the async runtime")?
+                .block_on(run::run(args))
+        }
     }
 }
 
