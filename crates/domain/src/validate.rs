@@ -8,8 +8,8 @@ use aap_api::{AgentConfig, AgentService, Binary, SecretKeyRef, Topology, VolumeS
 
 use crate::contract::{self, env};
 use crate::syntax::{
-    is_dns_label, is_env_name, is_http_token, is_mount_path, is_plain_http_remote, is_quantity,
-    is_relative_file_path, parse_http_url, paths_overlap,
+    is_dns_label, is_env_name, is_http_token, is_mount_path, is_plain_http_remote,
+    is_relative_file_path, is_size, parse_http_url, paths_overlap,
 };
 use crate::{convert, plan};
 
@@ -170,7 +170,7 @@ fn check_service(v: &mut Issues, svc: &AgentService, cfg: &AgentConfig) {
                     "at least one instance",
                 );
             }
-            if !is_quantity(&c.storage.size.0) {
+            if !is_size(&c.storage.size.0) {
                 v.add(
                     format!("{me} spec.store.postgres.cnpg.storage.size"),
                     format!("{:?} is not a size such as 5Gi", c.storage.size.0),
@@ -624,7 +624,7 @@ fn check_environment(v: &mut Issues, cfg: &AgentConfig) {
             }
             mounts.push(&vol.mount_path);
         }
-        if !is_quantity(&vol.source.persistent.size.0) {
+        if !is_size(&vol.source.persistent.size.0) {
             v.add(
                 format!("{at}.source.persistent.size"),
                 format!(

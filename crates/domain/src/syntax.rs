@@ -113,8 +113,18 @@ pub fn is_plain_http_remote(s: &str) -> bool {
     !loopback
 }
 
-/// A Kubernetes quantity that is a size: a positive number with an optional SI, binary or
-/// exponent suffix (`500m`, `20Gi`, `1e3`).
+/// A Kubernetes quantity that is a size: [`is_quantity`] and a positive number (`500m`, `20Gi`,
+/// `1e3`; not `0` or `0Gi`). Storage and volume sizes are sizes; resource requests and limits are
+/// quantities, where `0` is legal.
+pub fn is_size(s: &str) -> bool {
+    is_quantity(s)
+        && s.chars()
+            .take_while(|c| c.is_ascii_digit() || *c == '.')
+            .any(|c| ('1'..='9').contains(&c))
+}
+
+/// A Kubernetes quantity: a non-negative number with an optional SI, binary or exponent suffix
+/// (`0`, `500m`, `20Gi`, `1e3`).
 pub fn is_quantity(s: &str) -> bool {
     let digits_end = s
         .find(|c: char| !(c.is_ascii_digit() || c == '.'))
@@ -123,7 +133,6 @@ pub fn is_quantity(s: &str) -> bool {
     if number.is_empty()
         || number.matches('.').count() > 1
         || !number.chars().any(|c| c.is_ascii_digit())
-        || !number.chars().any(|c| ('1'..='9').contains(&c))
     {
         return false;
     }
@@ -260,14 +269,22 @@ mod tests {
     #[test]
     fn quantities() {
         for ok in [
-            "500m", "1Gi", "20Gi", "5", "0.5", "1e3", "2E-3", "100M", "1.5Gi",
+            "500m", "1Gi", "20Gi", "5", "0.5", "1e3", "2E-3", "100M", "1.5Gi", "0", "0m",
         ] {
             assert!(is_quantity(ok), "{ok}");
         }
-        for bad in [
-            "", "Gi", "-1", "0", "0Gi", "1.2.3", "1Xi", "1e", "5 Gi", "1gi", "abc",
-        ] {
+        for bad in ["", "Gi", "-1", "1.2.3", "1Xi", "1e", "5 Gi", "1gi", "abc"] {
             assert!(!is_quantity(bad), "{bad}");
+        }
+    }
+
+    #[test]
+    fn sizes() {
+        for ok in ["500m", "1Gi", "20Gi", "5", "0.5", "1e3", "1.5Gi"] {
+            assert!(is_size(ok), "{ok}");
+        }
+        for bad in ["", "0", "0Gi", "0.0", "-1", "1Xi", "abc"] {
+            assert!(!is_size(bad), "{bad}");
         }
     }
 

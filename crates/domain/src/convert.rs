@@ -134,3 +134,45 @@ pub fn resources(r: Option<&ResourceRequirements>) -> (Resources, Vec<(String, S
     let limits = take("limits", r.and_then(|r| r.limits.as_ref()));
     (Resources { requests, limits }, problems)
 }
+
+#[cfg(test)]
+mod tests {
+    #![allow(clippy::unwrap_used, clippy::expect_used)]
+    use super::resources;
+    use k8s_openapi::api::core::v1::ResourceRequirements;
+    use k8s_openapi::apimachinery::pkg::api::resource::Quantity;
+    use std::collections::BTreeMap;
+
+    fn reqs(pairs: &[(&str, &str)]) -> Option<BTreeMap<String, Quantity>> {
+        Some(
+            pairs
+                .iter()
+                .map(|(k, v)| ((*k).to_owned(), Quantity((*v).to_owned())))
+                .collect(),
+        )
+    }
+
+    #[test]
+    fn a_zero_request_is_a_quantity() {
+        // Kubernetes takes `cpu: "0"` (count on the limit alone): it is not refused.
+        let r = ResourceRequirements {
+            requests: reqs(&[("cpu", "0"), ("memory", "0m")]),
+            limits: reqs(&[("memory", "2Gi")]),
+            ..Default::default()
+        };
+        let (out, problems) = resources(Some(&r));
+        assert!(problems.is_empty(), "{problems:?}");
+        assert_eq!(out.requests.get("cpu").map(String::as_str), Some("0"));
+    }
+
+    #[test]
+    fn a_resource_that_is_not_a_quantity_is_a_problem() {
+        let r = ResourceRequirements {
+            limits: reqs(&[("memory", "2 Gi")]),
+            ..Default::default()
+        };
+        let (_, problems) = resources(Some(&r));
+        assert_eq!(problems.len(), 1, "{problems:?}");
+        assert_eq!(problems[0].0, "spec.environment.resources.limits.memory");
+    }
+}
