@@ -4,6 +4,9 @@ name: Operator
 # checked in under deploy/crds are what `operator crdgen` prints, and a kind cluster that
 # applies the CRDs, the examples (accepted) and examples/invalid (each refused).
 #
+# The `runtime-kubernetes` job runs the provider of S4 against a real API server: the conformance suite of
+# aap-ports and the cases of crates/runtime-kubernetes/tests/cluster.rs, with skipping forbidden.
+#
 # Later slices add the image, the chart and the end-to-end of the agents (S8, S9).
 
 on:
@@ -128,3 +131,38 @@ jobs:
             fi
           done
           exit "$failed"
+
+  runtime-kubernetes:
+    # RuntimeProvider on native Kubernetes against a real API server (S4): the conformance suite of
+    # aap-ports and the cases only a cluster shows. Nothing may skip: with the two REQUIRE variables an
+    # unset cluster is a failure, not a green run that proved nothing.
+    runs-on: ubuntu-latest
+    timeout-minutes: 40
+    steps:
+      - uses: actions/checkout@v7
+      - name: Create a kind cluster
+        uses: helm/kind-action@v1
+        with:
+          version: v0.33.0
+          # The same node image as the `kind` job: Kubernetes v1.35.8, the digest of the index of the tag.
+          node_image: kindest/node:v1.35.8@sha256:07b2536e30b803ed61d1677a79df6115f798ce64c80f9e22f6ed45afd09323c0
+          cluster_name: aap-runtime
+          wait: 120s
+      - name: Install Rust
+        run: rustup toolchain install "$RUST_TOOLCHAIN" --profile minimal --no-self-update && rustup default "$RUST_TOOLCHAIN"
+      - uses: Swatinem/rust-cache@v2
+      - name: The provider against the cluster
+        env:
+          AAP_TEST_REQUIRE_CLUSTER: "1"
+          AAP_TEST_REQUIRE_BACKEND: "1"
+        run: |
+          # The kubeconfig kind-action wrote; a file, so the tests never fall back to some default context.
+          export AAP_TEST_KUBECONFIG="$HOME/.kube/config"
+          kubectl --kubeconfig "$AAP_TEST_KUBECONFIG" get nodes
+          cargo test -p aap-runtime-kubernetes --test cluster --locked -- --test-threads=4
+      - name: What the cluster says, when a case failed
+        if: failure()
+        run: |
+          kubectl -n aap-test get statefulsets,deployments,services,networkpolicies,pdb,configmaps,pvc,pods -o wide || true
+          kubectl -n aap-test get events --sort-by=.lastTimestamp | tail -80 || true
+          kubectl -n aap-test describe pods | tail -200 || true
