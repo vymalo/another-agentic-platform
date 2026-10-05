@@ -8,13 +8,14 @@
 #     and `tini` drops the `--` and runs the rest;
 #   * the agent listens on 8080 and serves `/healthz` (the probes), and a card at the usual path.
 # It reads no environment variable, so a missing Secret is still the kubelet's to notice.
+# busybox has no /usr/local/bin: the RUN makes it.
 #
 # busybox 1.37.0 from the public ECR mirror of Docker Official Images, pinned by digest (the index of the
 # tag, the same on Docker Hub; verified 2026-10-05, the Docker-Content-Digest of
 # registry-1.docker.io/v2/library/busybox/manifests/1.37.0 and public.ecr.aws/v2/docker/library/busybox/manifests/1.37.0).
 FROM public.ecr.aws/docker/library/busybox:1.37.0@sha256:bdf57e528e45e4433820e045b29b4597825a1c9e38353532d90a01445013f82e
 
-RUN mkdir -p /www/.well-known \
+RUN mkdir -p /www/.well-known /usr/local/bin \
  && echo ok > /www/healthz \
  && echo '{"name":"stub","description":"a stand-in for the adam-rs image"}' > /www/.well-known/agent-card.json \
  && printf '#!/bin/sh\nexec httpd -f -p 8080 -h /www\n' > /usr/local/bin/stub-agent \
