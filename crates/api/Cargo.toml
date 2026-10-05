@@ -1,0 +1,26 @@
+[package]
+name = "aap-api"
+description = "The v0 CRD types of the another-agentic-platform operator: AgentService and AgentConfig"
+readme = "README.md"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+publish.workspace = true
+
+[dependencies]
+k8s-openapi.workspace = true
+kube.workspace = true
+schemars.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+
+[dev-dependencies]
+# `cel`: evaluates the CRD's x-kubernetes-validations locally, as a proxy for an API server.
+kube = { workspace = true, features = ["cel"] }
+serde_yaml.workspace = true
+
+[lints]
+workspace = true

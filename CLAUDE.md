@@ -6,8 +6,8 @@
 
 A Kubernetes-native platform for running **durable, versioned, independently
 addressable AI agent services on disposable compute**. Formerly the
-`lightbridge-agents` draft. **Status: design only** — the repository is
-documentation; there is no code yet.
+`lightbridge-agents` draft. **Status: design, plus slice S1 of the v0 operator** (§59a): the
+Cargo workspace, the CRD types, the CRDs and the examples. No controller yet; everything else is documentation.
 
 The first operator (v0: adam-rs agents from `AgentService` + `AgentConfig`, native
 Kubernetes; AD-022 to AD-024) is specified in §59a
@@ -24,6 +24,8 @@ only* until slice S1 lands code; then this paragraph and the layout table change
 | `docs/extensions/release-channels-v1.md` | A2A extension contract consumed by other systems |
 | `docs/extensions/agent-registry-v1.md` | Registry contract: the linkset of agent cards the system reads (AD-021) |
 | `tools/docs-check/` | Diagram + link checker (also run in CI) |
+| `Cargo.toml`, `crates/`, `bin/` | The operator's Cargo workspace (§59a): `crates/api` (`aap-api`, the CRD types), `bin/operator` (`crdgen` now, `run` from S5). Each has a `README.md` to keep current |
+| `deploy/crds/`, `examples/` | The generated CRDs (checked in; regenerate with `cargo run -q -p aap-operator -- crdgen > deploy/crds/agents.vymalo.com.yaml`) and the example objects, `examples/invalid/` one per CEL rule |
 | `.agents/skills/` | Repo skills; `.claude/skills/*` are symlinks to them |
 
 ## Rules for editing the architecture
@@ -113,6 +115,9 @@ Not for direct use: `core-actionbook`, `core-agent-browser`, `core-dynamic-skill
 ## Commands
 
 ```sh
+cargo fmt --all --check
+cargo clippy --workspace --all-targets --locked -- -D warnings
+cargo test --workspace --locked           # includes the CRD drift check
 npm --prefix tools/docs-check ci          # once per clone
 node tools/docs-check/check-docs.mjs      # every diagram parses, every relative link resolves
 git config core.hooksPath .githooks       # once per clone: local Conventional Commits hook

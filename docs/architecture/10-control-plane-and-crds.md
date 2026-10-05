@@ -162,6 +162,8 @@ The latter belongs in Restate.
 
 > **Status: design only (2026-10-04).** Nothing here is built; slice S0 is this text. The first code lands with S1 (§59a, *Slices*).
 
+> **S1 built (2026-10-05):** the workspace, `aap-api`, `crdgen` and the examples, in [`crates/api`](../../crates/api/README.md) and [`bin/operator`](../../bin/operator/README.md). The `kind` job in CI is what proves the CEL rules against a real API server (*unverified* until it has run).
+
 The first operator the platform ships. It is smaller than the design of §59 on purpose: it manages **adam-rs agents** (AD-022) from two CRDs, `AgentService` and `AgentConfig`, on native Kubernetes (AD-023), and it keeps secrets out of the custom resources (AD-024).
 
 It exists because of one request from the owner (2026-10-04): *"that coder, I wanted to have a k8s operator to manage it automatically using CRDs"*. The owner's defaults, which this section follows:
@@ -296,7 +298,7 @@ spec:
         optional: true
     allowInsecureHttp: true
   environment:
-    image: { ref: ghcr.io/vymalo/another-adam-rs/coder:sha-0391809 }
+    image: { ref: ghcr.io/vymalo/another-adam-rs/coder:sha-0391809@sha256:814d8ee329a5e4d8634e8a82532c035999c4be27aac086508b742a635449ea40 }
     resources: { requests: { cpu: 500m, memory: 1Gi }, limits: { memory: 6Gi } }
     volumes:
       - name: work
