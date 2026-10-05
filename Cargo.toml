@@ -1,0 +1,33 @@
+[workspace]
+resolver = "3"
+members = ["crates/api"]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.94"
+license = "MIT"
+repository = "https://github.com/vymalo/another-agentic-platform"
+authors = ["Stephane Segning Lambou / vymalo"]
+publish = false
+
+[workspace.dependencies]
+aap-api = { path = "crates/api" }
+anyhow = "1"
+clap = { version = "4", features = ["derive"] }
+k8s-openapi = { version = "0.28.0", default-features = false, features = ["v1_32", "schemars"] }
+kube = { version = "4.0.0", default-features = false, features = ["derive"] }
+schemars = "1"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+serde_yaml = { package = "serde_yaml_ng", version = "0.10" }
+thiserror = "2"
+
+[workspace.lints.clippy]
+unwrap_used = "warn"
+expect_used = "warn"
+
+[profile.release]
+lto = "thin"
+codegen-units = 1
+strip = true
