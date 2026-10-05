@@ -107,7 +107,7 @@ agent token rule of §59a).
 ## The image
 
 `ghcr.io/vymalo/another-agentic-platform/operator`, built from [`docker/operator/Dockerfile`](../../docker/operator/Dockerfile) by
-`operator-image.yml`: on a pull request it builds, smoke-tests and runs the kind
+[`operator-image.yml`](../../.github/workflows/operator-image.yml): on a pull request it builds, smoke-tests and runs the kind
 end-to-end of the coder; on `main`, after those pass, it pushes the image **that passed** as `sha-<7>` and `latest`, and a last job
 runs `bump-tag.sh` and pushes `chore(deploy): bump operator to sha-<7>` to `main` as `github-actions[bot]` (§93 allows it). A
 deployment pins `sha-<7>`, never `latest`.

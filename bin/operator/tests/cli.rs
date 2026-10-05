@@ -9,6 +9,22 @@ fn operator() -> Command {
     Command::new(env!("CARGO_BIN_EXE_operator"))
 }
 
+/// `deploy/operator-crds` reads its own copy (a Helm chart reads only its directory); it is the checked-in file, byte for byte
+/// (render-check.sh checks it too, with helm).
+#[test]
+fn the_crds_chart_holds_the_checked_in_crds() {
+    let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+    let checked_in =
+        std::fs::read_to_string(root.join("deploy/crds/agents.vymalo.com.yaml")).unwrap();
+    let copy =
+        std::fs::read_to_string(root.join("deploy/operator-crds/files/agents.vymalo.com.yaml"))
+            .unwrap_or_default();
+    assert!(
+        copy == checked_in,
+        "deploy/operator-crds/files/agents.vymalo.com.yaml differs from deploy/crds/agents.vymalo.com.yaml. Copy it:\n  cp deploy/crds/agents.vymalo.com.yaml deploy/operator-crds/files/"
+    );
+}
+
 #[test]
 fn crdgen_matches_the_checked_in_crds() {
     let out = operator()

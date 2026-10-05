@@ -18,7 +18,7 @@ name: Operator
 # operator serves, with the token and without, from this machine and from a pod of the cluster, and follows the card
 # it lists.
 #
-# Later slices add the image, the chart and the end-to-end of the agents (S8, S9).
+# The image, the charts and the end-to-end of the coder (S8, S9) are operator-image.yml's.
 
 on:
   pull_request:
@@ -27,6 +27,7 @@ on:
       - "bin/**"
       - "Cargo.*"
       - "deploy/crds/**"
+      - "deploy/operator-crds/**"
       - "examples/**"
       - ".github/workflows/operator.yml"
   push:
@@ -36,6 +37,7 @@ on:
       - "bin/**"
       - "Cargo.*"
       - "deploy/crds/**"
+      - "deploy/operator-crds/**"
       - "examples/**"
       - ".github/workflows/operator.yml"
 
@@ -92,6 +94,13 @@ jobs:
           cargo run --locked -q -p aap-operator -- crdgen > "$RUNNER_TEMP/crds.yaml"
           if ! diff -u deploy/crds/agents.vymalo.com.yaml "$RUNNER_TEMP/crds.yaml"; then
             echo "::error file=deploy/crds/agents.vymalo.com.yaml::stale. Run: cargo run -q -p aap-operator -- crdgen > deploy/crds/agents.vymalo.com.yaml"
+            exit 1
+          fi
+      - name: the CRDs chart holds the same file
+        run: |
+          # deploy/operator-crds reads its own copy (a Helm chart reads only its directory).
+          if ! diff -u deploy/crds/agents.vymalo.com.yaml deploy/operator-crds/files/agents.vymalo.com.yaml; then
+            echo "::error file=deploy/operator-crds/files/agents.vymalo.com.yaml::differs from deploy/crds. Run: cp deploy/crds/agents.vymalo.com.yaml deploy/operator-crds/files/"
             exit 1
           fi
 

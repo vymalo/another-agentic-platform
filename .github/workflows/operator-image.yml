@@ -1,0 +1,314 @@
+name: Operator image
+
+# The operator's image and chart (S8): checks on pull requests, the image on main, and a tag bump in the chart. The Rust checks
+# (fmt, clippy, tests, the CRD drift check, the kind jobs of the crates) are operator.yml's; this workflow covers what only the
+# image and the charts show. The pattern of vymalo/another-adam-rs coder.yml and vymalo/another-agentic-system orchestrator.yml.
+#
+# chart:       helm lint of both charts, the render checks of deploy/operator (goldens, RBAC, refusals, the CRDs chart against
+#              deploy/crds), and kubeconform in strict mode over the renders.
+# scripts:     shellcheck, and bump-tag.sh is idempotent and edits only image.tag.
+# dockerfile:  hadolint.
+# image:       builds the image on pull requests too (no push) and smoke-tests it: the user, the binary starts, `crdgen` prints the
+#              checked-in CRDs, `run` without a cluster says so, and there is no shell. The image is kept as an artifact: the jobs
+#              that follow use THE image that passed, never a rebuild of it.
+# push:        main only, after every job above: `sha-<7>` and `latest`.
+# bump:        main only, after the push: `deploy/operator/bump-tag.sh` sets `image.tag` in deploy/operator/values.yaml and
+#              `chore(deploy): bump operator to sha-<7>` is pushed to main as github-actions[bot] (decided in §93, 2026-10-05).
+#              It is made with GITHUB_TOKEN, which does not trigger workflows, so it cannot loop; Argo CD in home-os tracks this
+#              repository and rolls the new tag out (S10). It is a no-op when the tag is current, and it does not put an older
+#              tag back when a newer commit has moved main (jobs can finish out of order).
+#
+# The governance and commit-lint workflows run on pull requests only (governance.yml, commit-lint.yml: `on: pull_request`),
+# so a push to main, the bump included, is checked by neither; the subject of the bump passes tools/commit-lint.sh anyway.
+# Whether main accepts a push from github-actions is *unverified* for this repository (no branch protection could be read, and the
+# repository has no ruleset: `gh api repos/vymalo/another-agentic-platform/rulesets` answered []): the first bump says. Pull requests
+# get a dry run that shows the edit the bump would make.
+
+on:
+  pull_request:
+    paths:
+      - "crates/**"
+      - "bin/**"
+      - "Cargo.toml"
+      - "Cargo.lock"
+      - "docker/operator/**"
+      - "deploy/operator/**"
+      - "deploy/operator-crds/**"
+      - "deploy/crds/**"
+      - ".github/workflows/operator-image.yml"
+  push:
+    branches: [main]
+    paths:
+      - "crates/**"
+      - "bin/**"
+      - "Cargo.toml"
+      - "Cargo.lock"
+      - "docker/operator/**"
+      - "deploy/operator/**"
+      - "deploy/operator-crds/**"
+      - "deploy/crds/**"
+      - ".github/workflows/operator-image.yml"
+
+env:
+  IMAGE: ghcr.io/vymalo/another-agentic-platform/operator
+  HELM_VERSION: v3.19.0
+  KUBECONFORM_VERSION: v0.7.0
+  # The Kubernetes version the rendered manifests are validated against.
+  KUBERNETES_VERSION: 1.31.0
+
+concurrency:
+  group: operator-image-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+permissions:
+  contents: read
+
+jobs:
+  chart:
+    name: helm lint, render checks and kubeconform
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: azure/setup-helm@v4
+        with:
+          version: ${{ env.HELM_VERSION }}
+      - name: helm lint
+        run: |
+          helm lint deploy/operator
+          helm lint deploy/operator -f deploy/operator/examples/netcup.values.yaml
+          helm lint deploy/operator -f deploy/operator/tests/secret.values.yaml
+          helm lint deploy/operator-crds
+      - name: helm template (the values of the netcup Application)
+        run: |
+          helm template aap-operator deploy/operator --namespace another-agentic-system -f deploy/operator/examples/netcup.values.yaml > /dev/null
+          helm template aap-operator-crds deploy/operator-crds > /dev/null
+      - name: The rendered chart keeps its guarantees
+        run: sh deploy/operator/tests/render-check.sh
+      # Core kinds against the Kubernetes schemas, the ExternalSecret against the CRD schema vendored in
+      # deploy/operator/tests/schemas (a pinned copy of the datreeio catalog: a live catalog 500 once skipped the image job of
+      # adam-rs). A kind without a schema fails (no -ignore-missing-schemas). The core schemas are still downloaded; a
+      # download failure (not a validation failure) is retried. The CRDs themselves are skipped: no schema set has one for
+      # CustomResourceDefinition, and the `kind` job of operator.yml applies them to a real API server.
+      - name: kubeconform
+        env:
+          KUBECONFORM_SHA256: c31518ddd122663b3f3aa874cfe8178cb0988de944f29c74a0b9260920d115d3
+        run: |
+          set -eu
+          curl -sSfL -o "$RUNNER_TEMP/kubeconform.tgz" \
+            "https://github.com/yannh/kubeconform/releases/download/${KUBECONFORM_VERSION}/kubeconform-linux-amd64.tar.gz"
+          echo "$KUBECONFORM_SHA256  $RUNNER_TEMP/kubeconform.tgz" | sha256sum -c -
+          tar -xzf "$RUNNER_TEMP/kubeconform.tgz" -C "$RUNNER_TEMP" kubeconform
+          # The defaults (no registry), netcup (an ExternalSecret), tests/secret.values.yaml (an existing Secret, another watched
+          # namespace, no CloudNativePG), and the CRDs chart.
+          helm template aap-operator deploy/operator --namespace another-agentic-system > "$RUNNER_TEMP/rendered-default.yaml"
+          helm template aap-operator deploy/operator --namespace another-agentic-system \
+            -f deploy/operator/examples/netcup.values.yaml > "$RUNNER_TEMP/rendered-netcup.yaml"
+          helm template aap-operator deploy/operator --namespace another-agentic-system \
+            -f deploy/operator/tests/secret.values.yaml > "$RUNNER_TEMP/rendered-secret.yaml"
+          helm template aap-operator-crds deploy/operator-crds > "$RUNNER_TEMP/rendered-crds.yaml"
+          for attempt in 1 2 3; do
+            status=0
+            "$RUNNER_TEMP/kubeconform" -strict -summary -skip CustomResourceDefinition -kubernetes-version "$KUBERNETES_VERSION" \
+                -schema-location default \
+                -schema-location 'deploy/operator/tests/schemas/{{.Group}}/{{.ResourceKind}}_{{.ResourceAPIVersion}}.json' \
+                "$RUNNER_TEMP/rendered-default.yaml" "$RUNNER_TEMP/rendered-netcup.yaml" "$RUNNER_TEMP/rendered-secret.yaml" \
+                "$RUNNER_TEMP/rendered-crds.yaml" \
+                > "$RUNNER_TEMP/kubeconform.out" 2>&1 || status=$?
+            cat "$RUNNER_TEMP/kubeconform.out"
+            if [ "$status" -eq 0 ]; then exit 0; fi
+            if ! grep -q 'failed downloading schema' "$RUNNER_TEMP/kubeconform.out"; then exit "$status"; fi
+            echo "schema download failed (attempt $attempt of 3); retrying in 20 s"
+            sleep 20
+          done
+          exit 1
+
+  dockerfile:
+    name: lint Dockerfile
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: hadolint/hadolint-action@v3.1.0
+        with:
+          dockerfile: docker/operator/Dockerfile
+
+  scripts:
+    name: shell scripts and the bump
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - name: shellcheck
+        run: shellcheck deploy/operator/bump-tag.sh deploy/operator/tests/*.sh
+      - name: bump-tag.sh is idempotent and edits only image.tag
+        run: sh deploy/operator/tests/bump-tag-test.sh
+
+  bump-dry-run:
+    name: show the tag bump
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - name: What the bump would change on main
+        env:
+          SHA: ${{ github.event.pull_request.head.sha }}
+        run: |
+          tag="sha-$(printf '%s' "$SHA" | cut -c1-7)"
+          sh deploy/operator/bump-tag.sh deploy/operator/values.yaml "$tag"
+          {
+            echo "### Tag bump dry run"
+            echo
+            echo "On main this pull request would set \`image.tag\` to \`$tag\`:"
+            echo
+            echo '```diff'
+            git diff --unified=1 -- deploy/operator/values.yaml
+            echo '```'
+          } | tee -a "$GITHUB_STEP_SUMMARY"
+
+  image:
+    name: build and smoke-test the image
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v7
+      - uses: docker/setup-buildx-action@v4
+      # Built here, once, and loaded into the local daemon: the smoke test below and the jobs after this one run what is pushed.
+      # Fork pull requests cannot write the cache: ignore-error keeps them green.
+      - name: Build
+        uses: docker/build-push-action@v7
+        with:
+          context: .
+          file: docker/operator/Dockerfile
+          platforms: linux/amd64
+          push: false
+          load: true
+          provenance: false
+          tags: operator:smoke
+          labels: |
+            org.opencontainers.image.revision=${{ github.sha }}
+          cache-from: type=gha,scope=operator
+          cache-to: type=gha,mode=max,scope=operator,ignore-error=true
+      - name: Smoke test the image
+        run: |
+          set -euo pipefail
+          # Numeric, so Kubernetes can verify runAsNonRoot: the chart's runAsUser is the same number.
+          user=$(docker inspect -f '{{.Config.User}}' operator:smoke)
+          [ "$user" = 65532:65532 ] || { echo "::error::image user is '$user', expected 65532:65532"; exit 1; }
+          # The binary starts as that user, and says what it does.
+          # (Read whole first: `docker run | grep -q` under pipefail fails when grep exits on its match while docker still writes.)
+          help=$(docker run --rm operator:smoke --help)
+          grep -q crdgen <<<"$help"
+          run_help=$(docker run --rm operator:smoke run --help)
+          grep -q REGISTRY_TOKEN_FILE <<<"$run_help"
+          # `crdgen` prints the CRDs of the repository, byte for byte: the image's binary is this commit's.
+          docker run --rm operator:smoke crdgen > "$RUNNER_TEMP/crds.yaml"
+          cmp "$RUNNER_TEMP/crds.yaml" deploy/crds/agents.vymalo.com.yaml
+          cmp "$RUNNER_TEMP/crds.yaml" deploy/operator-crds/files/agents.vymalo.com.yaml
+          # `run` with no cluster to reach fails, and says so (never a panic, never a hang).
+          out=$(docker run --rm -e KUBECONFIG=/nonexistent operator:smoke run 2>&1) && { echo "::error::run succeeded with no cluster"; exit 1; } || true
+          grep -q 'connecting to the cluster' <<<"$out" || { echo "::error::run did not say it was connecting: $out"; exit 1; }
+          # Only the operator: no shell, no package manager in the image (a read of the whole file system).
+          cid=$(docker create operator:smoke)
+          files=$(docker export "$cid" | tar -t)
+          docker rm "$cid" > /dev/null
+          grep -qx 'operator' <<<"$files" || { echo "::error::no /operator in the image"; exit 1; }
+          if grep -Eq '(^|/)s?bin/(sh|bash|dash|busybox|apt|apt-get|dpkg)$' <<<"$files"; then
+            echo "::error::the image has a shell or a package manager"; grep -E '(^|/)s?bin/(sh|bash|dash|busybox|apt|apt-get|dpkg)$' <<<"$files"; exit 1
+          fi
+          size=$(docker image inspect -f '{{.Size}}' operator:smoke)
+          echo "image size: $size bytes" | tee -a "$GITHUB_STEP_SUMMARY"
+      # The image that passed travels to the jobs after this one as a file.
+      - name: Save the image
+        run: docker save operator:smoke -o "$RUNNER_TEMP/operator.tar"
+      - uses: actions/upload-artifact@v7
+        with:
+          name: operator-image
+          path: ${{ runner.temp }}/operator.tar
+          retention-days: 1
+          if-no-files-found: error
+
+  push:
+    name: push the image that passed
+    # Main only, and only after everything above: the chart, the Dockerfile, the scripts and the image's own smoke test.
+    needs: [chart, dockerfile, scripts, image]
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - uses: actions/download-artifact@v8
+        with:
+          name: operator-image
+          path: ${{ runner.temp }}
+      - name: Load the image that passed
+        run: docker load -i "$RUNNER_TEMP/operator.tar"
+      - uses: docker/login-action@v4
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      # The tags: `sha-<7>` is what the chart pins (never `latest`), `latest` is for people.
+      - name: Push
+        run: |
+          set -eu
+          tag="sha-$(printf '%s' "$GITHUB_SHA" | cut -c1-7)"
+          docker tag operator:smoke "$IMAGE:$tag"
+          docker tag operator:smoke "$IMAGE:latest"
+          docker push "$IMAGE:$tag"
+          docker push "$IMAGE:latest"
+          {
+            echo "### Pushed"
+            echo
+            echo "\`$IMAGE:$tag\` and \`$IMAGE:latest\`."
+            echo
+            echo "A new GHCR package is private until it is made public (deploy/operator/README.md, \"The image\")."
+          } >> "$GITHUB_STEP_SUMMARY"
+
+  # The image that was just pushed is the one the chart deploys: set `image.tag` in deploy/operator/values.yaml to
+  # `sha-<first 7 of the commit>` and push `chore(deploy): bump operator to sha-xxxxxxx` to main as github-actions.
+  bump:
+    name: bump the tag in the chart
+    needs: push
+    runs-on: ubuntu-latest
+    concurrency:
+      group: operator-bump
+      cancel-in-progress: false
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: main
+          fetch-depth: 0
+      - name: Set image.tag and push
+        env:
+          SHA: ${{ github.sha }}
+        run: |
+          set -eu
+          tag="sha-$(printf '%s' "$SHA" | cut -c1-7)"
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          for attempt in 1 2 3; do
+            git fetch origin main
+            git reset --hard origin/main
+            # A newer commit that changes what this workflow builds makes its own image and bumps for itself; do not put the tag
+            # back to this older one (image jobs can finish out of order). The bump commits themselves do not count.
+            newer="$(git log --format=%s "$SHA..origin/main" -- crates bin Cargo.toml Cargo.lock docker/operator deploy/operator deploy/operator-crds deploy/crds .github/workflows/operator-image.yml | grep -v '^chore(deploy): bump operator to ' || true)"
+            if [ -n "$newer" ]; then
+              echo "main has moved on since $SHA; the newer build will bump"
+              exit 0
+            fi
+            result="$(sh deploy/operator/bump-tag.sh deploy/operator/values.yaml "$tag")"
+            echo "$result"
+            case "$result" in
+              unchanged*) exit 0 ;;
+            esac
+            git add deploy/operator/values.yaml
+            git commit -m "chore(deploy): bump operator to $tag"
+            if git push origin HEAD:main; then
+              exit 0
+            fi
+            echo "push raced with another commit (attempt $attempt); retrying"
+            sleep $((attempt * 3))
+          done
+          echo "could not push the bump" >&2
+          exit 1
