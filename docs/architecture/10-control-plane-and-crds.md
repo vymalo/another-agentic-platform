@@ -298,7 +298,7 @@ spec:
         optional: true
     allowInsecureHttp: true
   environment:
-    image: { ref: ghcr.io/vymalo/another-adam-rs/coder:sha-0391809 }
+    image: { ref: ghcr.io/vymalo/another-adam-rs/coder:sha-0391809@sha256:814d8ee329a5e4d8634e8a82532c035999c4be27aac086508b742a635449ea40 }
     resources: { requests: { cpu: 500m, memory: 1Gi }, limits: { memory: 6Gi } }
     volumes:
       - name: work
