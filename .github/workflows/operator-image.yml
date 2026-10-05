@@ -11,6 +11,11 @@ name: Operator image
 # image:       builds the image on pull requests too (no push) and smoke-tests it: the user, the binary starts, `crdgen` prints the
 #              checked-in CRDs, `run` without a cluster says so, and there is no shell. The image is kept as an artifact: the jobs
 #              that follow use THE image that passed, never a rebuild of it.
+# operator-coder-e2e (S9): a kind cluster, the CRDs chart and the operator chart installed with THAT image, the real adam-rs coder
+#              image (ghcr.io/vymalo/another-adam-rs/coder, by tag and digest, 2.9 GB) run by the operator on a Postgres the job runs
+#              and dummy Secrets: the AgentService becomes Ready, the agent card answers through the Service, the registry lists the
+#              coder, and a deletion completes its finalizer and keeps the claim (Retain). deploy/operator/tests/e2e/README.md says
+#              what it proves and what it does not (no model, no GitHub).
 # push:        main only, after every job above: `sha-<7>` and `latest`.
 # bump:        main only, after the push: `deploy/operator/bump-tag.sh` sets `image.tag` in deploy/operator/values.yaml and
 #              `chore(deploy): bump operator to sha-<7>` is pushed to main as github-actions[bot] (decided in §93, 2026-10-05).
@@ -137,7 +142,7 @@ jobs:
     steps:
       - uses: actions/checkout@v7
       - name: shellcheck
-        run: shellcheck deploy/operator/bump-tag.sh deploy/operator/tests/*.sh
+        run: shellcheck deploy/operator/bump-tag.sh deploy/operator/tests/*.sh deploy/operator/tests/e2e/*.sh
       - name: bump-tag.sh is idempotent and edits only image.tag
         run: sh deploy/operator/tests/bump-tag-test.sh
 
@@ -225,10 +230,50 @@ jobs:
           retention-days: 1
           if-no-files-found: error
 
+  operator-coder-e2e:
+    name: operator-coder-e2e
+    needs: image
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v7
+      # The coder image is 2.9 GB compressed and a good 8 GB on disk once kind has it: make room first.
+      - name: Free disk space
+        run: |
+          df -h /
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /opt/hostedtoolcache/CodeQL /usr/local/share/boost
+          df -h /
+      - uses: azure/setup-helm@v4
+        with:
+          version: ${{ env.HELM_VERSION }}
+      - name: Create a kind cluster
+        uses: helm/kind-action@v1
+        with:
+          version: v0.33.0
+          # The same node image as the jobs of operator.yml: Kubernetes v1.35.8, the digest of the index of the tag.
+          node_image: kindest/node:v1.35.8@sha256:07b2536e30b803ed61d1677a79df6115f798ce64c80f9e22f6ed45afd09323c0
+          cluster_name: aap-coder
+          wait: 120s
+      # The image that passed the smoke test, loaded into the cluster: the chart runs it with pullPolicy Never.
+      - uses: actions/download-artifact@v8
+        with:
+          name: operator-image
+          path: ${{ runner.temp }}
+      - name: Load the image into kind
+        run: |
+          docker load -i "$RUNNER_TEMP/operator.tar"
+          kind load docker-image operator:smoke --name aap-coder
+      - name: The operator runs the coder
+        env:
+          OPERATOR_IMAGE_REPOSITORY: operator
+          OPERATOR_IMAGE_TAG: smoke
+          OPERATOR_PULL_POLICY: Never
+        run: sh deploy/operator/tests/e2e/coder-e2e.sh
+
   push:
     name: push the image that passed
-    # Main only, and only after everything above: the chart, the Dockerfile, the scripts and the image's own smoke test.
-    needs: [chart, dockerfile, scripts, image]
+    # Main only, and only after everything above: the chart, the Dockerfile, the scripts, the image's own smoke test, and the coder.
+    needs: [chart, dockerfile, scripts, image, operator-coder-e2e]
     if: github.event_name == 'push' && github.ref == 'refs/heads/main'
     runs-on: ubuntu-latest
     permissions:

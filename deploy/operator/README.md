@@ -138,7 +138,7 @@ sh deploy/operator/tests/bump-tag-test.sh
 | `tests/render-check.sh` | the three golden renders (`tests/golden/netcup.yaml` from `examples/netcup.values.yaml`, `secret.yaml` from `tests/secret.values.yaml`, `default.yaml`); no Secret object, no `ClusterRole`, no host access; one replica, `Recreate`, the probes, the security context; the `Role` equal to the table above, with and without `storeCnpg`; the registry only with a token, mounted as a file; the NetworkPolicy; the ExternalSecret; every refusal of `_validate.tpl`; and `deploy/operator-crds` equal to `deploy/crds` |
 | `tests/bump-tag-test.sh` | `bump-tag.sh` edits only `image.tag`, is idempotent, refuses a malformed tag (the test of adam-rs's `deploy/coder`, with this chart's values) |
 | `tests/schemas/` | the `ExternalSecret` schema for kubeconform ([its README](tests/schemas/README.md)) |
-| `tests/e2e/` | the kind end-to-end of the coder (S9): `tests/e2e/` |
+| `tests/e2e/` | the kind end-to-end of the coder (S9): [`tests/e2e/README.md`](tests/e2e/README.md) |
 
 CI also runs kubeconform in strict mode over four renders (the defaults, netcup, `secret.values.yaml`, and the CRDs chart with the
 `CustomResourceDefinition` kind skipped, because the schema set has none: the `kind` job of `operator.yml` applies them to a real API server).

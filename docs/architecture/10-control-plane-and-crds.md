@@ -162,7 +162,7 @@ The latter belongs in Restate.
 
 ## 59a. Operator v0: adam-rs agents
 
-> **Status: design only (2026-10-04); slices S1 to S8 are built (2026-10-05, the blockquotes below).** Slice S0 is this text.
+> **Status: design only (2026-10-04); slices S1 to S9 are built (2026-10-05, the blockquotes below).** Slice S0 is this text.
 
 > **S1 built (2026-10-05):** the workspace, `aap-api`, `crdgen` and the examples, in [`crates/api`](../../crates/api/README.md) and [`bin/operator`](../../bin/operator/README.md). The `kind` job in CI is what proves the CEL rules against a real API server (*unverified* until it has run).
 
@@ -177,6 +177,8 @@ The latter belongs in Restate.
 > **S7 built (2026-10-05):** [`aap-registry`](../../crates/registry/README.md): the `agent-registry/v1` document builder and an axum router, served by `operator run` on 8080 (feature `registry`, default on; `REGISTRY_TOKEN_FILE`). One static bearer compared in constant time (`401` with no body, and **no token, no registry**: fail closed, and every service is `Listed: False`, reason `RegistryDisabled`), a strong `ETag` with `304`, `Cache-Control: private, max-age=30`, `Vary: Authorization`, `HEAD`, and `503` rather than a truncated document past 500 items or 1 MiB, when every service that would be listed is `Listed: False`, reason `RegistryFull` (a flag shared with the controller). A listed service is `Listed: True`, reason `Listed`. The document is read by **the system's own reader, vendored with its test vectors** (`crates/registry/tests/vendored`, at another-agentic-system `e5da0a4`), with no item skipped, and by a property test over arbitrary entries. Proven against a fake directory and, host side, against a bare kube-apiserver v1.35.8; **a pod reading the registry and the card it lists, in kind (the `operator-e2e` job), is *unverified* until CI has run it**. Where it differs from this section: *Registry in v0* below, and the crate's README (*Deviations*).
 
 > **S8 built (2026-10-05, *unverified* until CI has run it):** [`docker/operator/Dockerfile`](../../docker/operator/Dockerfile) (cargo-chef 0.1.77 on Rust 1.94.1, Debian trixie, onto `gcr.io/distroless/cc-debian13:nonroot`; both pinned by tag and digest, *verified 2026-10-05*; user 65532; only the `operator` binary), the chart [`deploy/operator`](../../deploy/operator/README.md), the chart [`deploy/operator-crds`](../../deploy/operator-crds/README.md) and [`.github/workflows/operator-image.yml`](../../.github/workflows/operator-image.yml). The chart has been **rendered, linted and checked with kubeconform and its own render checks, and not installed on a cluster**; the image has been **built by nobody**: no docker daemon existed where S8 was written, so the Dockerfile is only hadolint-clean and its smoke commands were run on the binary built on the host. Both are *unverified* until the workflow has run. Where it differs from *The operator chart* below is in the *Amended* note there.
+
+> **S9 built (2026-10-05, *unverified* until CI has run it):** the kind end-to-end of the coder, the job `operator-coder-e2e` of [`operator-image.yml`](../../.github/workflows/operator-image.yml) and [`deploy/operator/tests/e2e/`](../../deploy/operator/tests/e2e/README.md). It installs the CRDs chart and the operator chart with the image built in the job (loaded into kind), applies `examples/coder.yaml` adapted (the real adam-rs coder image `sha-9a1fd4e` by tag and digest, *verified 2026-10-05*, anonymous pull; a Postgres the job runs behind `store.postgres.secretRef`; dummy Secrets), and asserts that the AgentService is `Ready`, that the coder's card answers through the Service from a pod, that the registry lists it, and that a deletion completes the finalizer and keeps the claim under `Retain`. **It proves the operator runs the real coder up to its startup checks; it proves no model call and no GitHub call, sends no task, and runs the token variant, not the GitHub App** (§59a's *Testing* asked for a throwaway App key: a key is a credential and the App is not what an operator-made pod differs in). The job has not run.
 
 The first operator the platform ships. It is smaller than the design of §59 on purpose: it manages **adam-rs agents** (AD-022) from two CRDs, `AgentService` and `AgentConfig`, on native Kubernetes (AD-023), and it keeps secrets out of the custom resources (AD-024).
 
@@ -627,6 +629,8 @@ Each item is additive later, and the third column says how it stays so.
 - An envtest-like harness: a real kube-apiserver and etcd, for the CRDs, the CEL rules and server-side apply.
 - The registry contract tests, and a **consumer test** that reads the document with another-agentic-system's `orch-registry-platform` parser.
 - A kind end-to-end in CI: a stub agent; `adam-agent` with a WireMock model; and the coder with a throwaway GitHub App key.
+
+*Amended 2026-10-05 (S9):* the stub agent is `bin/operator/tests/stub` (S5, in `operator.yml`); the coder's end-to-end runs the real image with a **dummy GitHub token** and a model address nothing answers, because the pod only needs to start (a dummy key would be refused when parsed, a real one is a credential); `adam-agent` with a WireMock model is not built (the stub stands for it).
 
 ### The operator chart
 
