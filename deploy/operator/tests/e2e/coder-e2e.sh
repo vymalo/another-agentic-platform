@@ -187,7 +187,7 @@ refused=$(req curl -X POST -H 'Content-Type: application/json' -d '{}' "$a2a_url
 [ "$(req curl -X POST -H 'Content-Type: application/json' -H 'Authorization: Bearer wrong' -d '{}' "$a2a_url")" = 401 ] \
   || die "a wrong token is not 401"
 accepted=$(req curl -X POST -H 'Content-Type: application/json' -H "Authorization: Bearer $a2a_token" -d '{}' "$a2a_url")
-[ "$accepted" != 401 ] && [ "$accepted" != 403 ] || die "the token of coder-secrets was refused ($accepted): the Secret did not reach the pod"
+case $accepted in 401 | 403) die "the token of coder-secrets was refused ($accepted): the Secret did not reach the pod" ;; esac
 ok "the A2A endpoint is closed without the token ($refused), and the token of the Secret opens it ($accepted)"
 
 step "   the registry"
@@ -202,7 +202,8 @@ ok "the registry lists the coder (service, title, tags) with its card URL, to th
 [ "$(jp agentservice/coder '{.status.conditions[?(@.type=="Listed")].reason}')" = Listed ] || die "Listed is not True / Listed"
 # The card the registry lists is the card the pod serves.
 href=$(body curl | jq -r '.linkset[0].item[0].href')
-[ "$(req curl "$href")" = 200 ] && [ "$(body curl | jq -r .name)" = Coder ] || die "the card the registry lists is not served"
+[ "$(req curl "$href")" = 200 ] || die "the card the registry lists is not served"
+[ "$(body curl | jq -r .name)" = Coder ] || die "the card the registry lists is not the coder's"
 ok "the card it lists is the card the pod serves"
 # NetworkPolicy: only the labelled pods may read the registry. kind's CNI enforces policies since kindnetd learned to; if it does
 # not, say so instead of failing (what this proves is the operator's, not the CNI's).
