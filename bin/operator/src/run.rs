@@ -65,6 +65,19 @@ impl RunArgs {
     }
 }
 
+/// The store provisioner of this build: with `store-cnpg`, the one that makes a CloudNativePG cluster and
+/// also serves a referenced Secret (it passes the whole suite of `aap-ports`, so the controller sees one
+/// type); without it, referenced Secrets alone, and a cluster is refused as not installed.
+#[cfg(all(feature = "runtime-kubernetes", feature = "store-cnpg"))]
+fn store(client: &kube::Client) -> aap_store_cnpg::CnpgStore {
+    aap_store_cnpg::CnpgStore::new(client.clone())
+}
+
+#[cfg(all(feature = "runtime-kubernetes", not(feature = "store-cnpg")))]
+fn store(_client: &kube::Client) -> aap_store_secret::SecretStore {
+    aap_store_secret::SecretStore::new()
+}
+
 /// Resolves on SIGTERM or SIGINT.
 #[cfg(feature = "runtime-kubernetes")]
 async fn termination() {
@@ -103,7 +116,7 @@ pub async fn run(args: RunArgs) -> Result<()> {
         env!("CARGO_PKG_VERSION")
     );
 
-    // Everything below is the composition: a Kubernetes runtime, referenced Secrets, the controllers.
+    // Everything below is the composition: a Kubernetes runtime, the store, the controllers.
     let client = kube::Client::try_default()
         .await
         .context("connecting to the cluster (in-cluster configuration, or KUBECONFIG)")?;
@@ -121,13 +134,8 @@ pub async fn run(args: RunArgs) -> Result<()> {
             svc.metadata.uid.clone().unwrap_or_default(),
         )
     });
-    let operator = Operator::new(
-        client,
-        runtime,
-        aap_store_secret::SecretStore::new(),
-        owner,
-        options,
-    );
+    let store = store(&client);
+    let operator = Operator::new(client, runtime, store, owner, options);
 
     let (stop, stopped) = watch::channel(false);
     let signalled = |mut rx: watch::Receiver<bool>| async move {

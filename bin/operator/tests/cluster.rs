@@ -1121,3 +1121,63 @@ async fn health_readiness_and_metrics_are_served() {
     );
     case.finish().await;
 }
+
+/// Whether the API server serves CloudNativePG's `Cluster`.
+async fn cnpg_installed(client: &Client) -> bool {
+    match client
+        .list_api_group_resources("postgresql.cnpg.io/v1")
+        .await
+    {
+        Ok(list) => list.resources.iter().any(|r| r.name == "clusters"),
+        Err(kube::Error::Api(status)) if status.code == 404 => false,
+        Err(e) => panic!("discovering postgresql.cnpg.io/v1: {e}"),
+    }
+}
+
+/// S6: a service that asks for an operator-owned cluster, on a cluster without CloudNativePG. (With it
+/// installed, `crates/store-cnpg/tests/cluster.rs` and the `store-cnpg` job of `operator.yml` are the proof.)
+#[tokio::test]
+async fn a_service_that_asks_for_a_cluster_is_cnpg_not_installed_without_cloudnativepg() {
+    let Some(cluster) = connect().await else {
+        return;
+    };
+    if cnpg_installed(&cluster.client).await {
+        assert!(
+            !required(),
+            "this case needs a cluster without CloudNativePG, and {REQUIRE_VAR}=1 forbids skipping"
+        );
+        eprintln!("skipped: CloudNativePG is installed in this cluster");
+        return;
+    }
+    let case = Case::begin(&cluster, "cnpg").await;
+    case.secrets("chat").await;
+    let (mut svc, cfg) = chat("chat", &cluster.image);
+    svc["spec"]["store"] =
+        json!({"postgres": {"cnpg": {"instances": 1, "storage": {"size": "1Gi"}}}});
+    case.apply::<aap_api::AgentConfig>(&cfg).await;
+    case.apply::<AgentService>(&svc).await;
+
+    let blocked = case
+        .until("chat", "StoreReady False, CNPGNotInstalled", 60, |s| {
+            is(s, "StoreReady", "False", "CNPGNotInstalled")
+        })
+        .await;
+    assert_eq!(state(&blocked["status"]), "Blocked");
+    assert!(is(&blocked["status"], "Ready", "False", "CNPGNotInstalled"));
+    assert!(
+        case.api::<Deployment>()
+            .get_opt("chat")
+            .await
+            .unwrap()
+            .is_none(),
+        "no agent is made against a database that cannot exist"
+    );
+
+    // Deleting a service that never got its cluster completes its finalizer: the release finds no API.
+    case.api::<AgentService>()
+        .delete("chat", &DeleteParams::default())
+        .await
+        .unwrap();
+    case.gone::<AgentService>("chat", 60).await;
+    case.finish().await;
+}

@@ -15,16 +15,19 @@ name = "operator"
 path = "src/main.rs"
 
 [features]
-# What `run` can compose (§59a lists `runtime-kubernetes`, `store-cnpg` and `registry`; the last two
-# arrive with S6 and S7). Without a runtime provider the binary still has `crdgen` and `run` says what
-# is missing.
-default = ["runtime-kubernetes"]
+# What `run` can compose (§59a lists `runtime-kubernetes`, `store-cnpg` and `registry`; the last arrives
+# with S7). Without a runtime provider the binary still has `crdgen` and `run` says what is missing.
+# Without `store-cnpg` the store is the referenced-Secret one alone, and a service that asks for a cluster
+# is `StoreReady: False`, reason `CNPGNotInstalled`.
+default = ["runtime-kubernetes", "store-cnpg"]
 runtime-kubernetes = ["dep:aap-runtime-kubernetes"]
+store-cnpg = ["dep:aap-store-cnpg"]
 
 [dependencies]
 aap-api.workspace = true
 aap-controller.workspace = true
 aap-runtime-kubernetes = { workspace = true, optional = true }
+aap-store-cnpg = { workspace = true, optional = true }
 aap-store-secret.workspace = true
 anyhow.workspace = true
 axum = { version = "0.8", default-features = false, features = ["http1", "tokio"] }

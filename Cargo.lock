@@ -61,6 +61,7 @@ dependencies = [
  "aap-domain",
  "aap-ports",
  "aap-runtime-kubernetes",
+ "aap-store-cnpg",
  "aap-store-secret",
  "anyhow",
  "axum",
@@ -104,6 +105,24 @@ dependencies = [
  "serde_json",
  "serde_yaml_ng",
  "thiserror 2.0.21",
+ "tokio",
+ "tower",
+]
+
+[[package]]
+name = "aap-store-cnpg"
+version = "0.1.0"
+dependencies = [
+ "aap-api",
+ "aap-domain",
+ "aap-ports",
+ "aap-store-cnpg",
+ "aap-store-secret",
+ "http",
+ "k8s-openapi",
+ "kube",
+ "serde_json",
+ "serde_yaml_ng",
  "tokio",
  "tower",
 ]

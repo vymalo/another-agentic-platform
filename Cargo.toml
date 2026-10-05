@@ -6,6 +6,7 @@ members = [
     "crates/domain",
     "crates/runtime-kubernetes",
     "crates/store-secret",
+    "crates/store-cnpg",
     "crates/controller",
     "bin/operator",
 ]
@@ -25,6 +26,7 @@ aap-domain = { path = "crates/domain" }
 aap-ports = { path = "crates/ports" }
 aap-runtime-kubernetes = { path = "crates/runtime-kubernetes" }
 aap-store-secret = { path = "crates/store-secret" }
+aap-store-cnpg = { path = "crates/store-cnpg" }
 aap-controller = { path = "crates/controller" }
 anyhow = "1"
 clap = { version = "4", features = ["derive", "env"] }
