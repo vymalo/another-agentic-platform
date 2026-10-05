@@ -21,6 +21,7 @@
 | 2026-10-05 | Operator v0, slice S4 (§59a): `aap-runtime-kubernetes` built; *Owned objects* amended: the field manager and the `managed-by` label are `aap-operator`, and every apply is forced. |
 | 2026-10-05 | Operator v0, slice S5 (§59a): `aap-controller`, `aap-store-secret` and `operator run` built; *Reconciliation* gains a note of what the controller does where §59a is silent (the reasons of a condition that is not yet known, a spec a provider refuses, the timers and back-off, the deletion policy at delete time) and where it differs (see the crate's *Deviations*). |
 | 2026-10-05 | Operator v0, slice S6 (§59a): `aap-store-cnpg` built, the `StoreProvisioner` for an operator-owned CloudNativePG `Cluster`; the status line of §59a says where it differs (no owner reference on the Cluster, a foreign Cluster of the name is `ConfigInvalid`, one provisioner type serves both store kinds). The cluster proof in CI is *unverified* until it has run. |
+| 2026-10-05 | Operator v0, slice S7 (§59a): `aap-registry` built, the `agent-registry/v1` document builder and its axum router, served by `operator run` on 8080 behind one static bearer from `REGISTRY_TOKEN_FILE` (no token, no registry). *Registry in v0* gains an *Amended* note of what the built registry does where the section was silent, and corrects the agent token rule: no test of the registry crate can cover it. `RegistryFull` is now set by a flag the registry shares with the controller. The kind proof (a pod reading the registry and the card) is *unverified* until CI has run it. |
 
 ## Contents
 
