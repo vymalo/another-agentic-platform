@@ -62,6 +62,20 @@ pub fn validate(service: &AgentService, config: &AgentConfig) -> Result<(), Vec<
     if v.0.is_empty() { Ok(()) } else { Err(v.0) }
 }
 
+/// Check an `AgentConfig` by itself: the rules of [`validate`] that need no `AgentService`. The
+/// `AgentConfig` controller reports them as its `Valid` condition (§59a, "Reconciliation"). A config
+/// that passes can still fail [`validate`] against a service: the rules that read both (a placement
+/// that fits the number of workers, a reference that names this config) are the service's.
+///
+/// # Errors
+///
+/// Every issue found, in the order [`validate`] reports the config's.
+pub fn validate_config(config: &AgentConfig) -> Result<(), Vec<ConfigIssue>> {
+    let mut v = Issues(Vec::new());
+    check_config(&mut v, config);
+    if v.0.is_empty() { Ok(()) } else { Err(v.0) }
+}
+
 fn secret_ref(v: &mut Issues, field: &str, r: &SecretKeyRef) {
     if r.name.trim().is_empty() || r.key.trim().is_empty() {
         v.add(field, "a Secret reference needs a name and a key");

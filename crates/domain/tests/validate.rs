@@ -738,3 +738,31 @@ fn the_shape_rules_of_the_crd_hold_without_an_api_server() {
         "the invalid examples are all there: {covered}"
     );
 }
+
+#[test]
+fn a_config_is_checked_by_itself() {
+    let (s, c) = example("coder");
+    let (_, config) = typed(&s, &c);
+    aap_domain::validate_config(&config).unwrap();
+
+    // A rule of the config alone is found without a service...
+    let (s, mut c) = example("coder");
+    set(
+        &mut c,
+        &format!("{CODER}/workspacePlacement"),
+        json!("sideways"),
+    );
+    let (_, config) = typed(&s, &c);
+    let found = aap_domain::validate_config(&config).unwrap_err();
+    assert!(
+        found.iter().any(|i| i.field.contains("workspacePlacement")),
+        "{found:?}"
+    );
+
+    // ... and one of the service's (the name of the config it references) is not its business.
+    let (mut s, c) = example("coder");
+    set(&mut s, "/spec/configRef/name", json!("another"));
+    let (service, config) = typed(&s, &c);
+    aap_domain::validate_config(&config).unwrap();
+    assert!(validate(&service, &config).is_err());
+}

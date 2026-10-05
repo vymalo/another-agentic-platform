@@ -2,7 +2,7 @@
 
 The pure core of the v0 operator ([§59a](../../docs/architecture/10-control-plane-and-crds.md#59a-operator-v0-adam-rs-agents)):
 
-* **`validate(&AgentService, &AgentConfig) -> Result<(), Vec<ConfigIssue>>`**: the rules §59a leaves to
+* **`validate(&AgentService, &AgentConfig) -> Result<(), Vec<ConfigIssue>>`** (and `validate_config(&AgentConfig)`, the config's rules alone): the rules §59a leaves to
   the reconciler (the ones `aap-api` could not put in CEL, and the cross-object ones).
 * **`resolve(&AgentService, &AgentConfig, OwnerHandle) -> Result<ResolvedAgent, Vec<ConfigIssue>>`**: the
   `RuntimeSpec` of the agent, the `StoreSpec` of its ledger and the sha256 **digest** the pods are
@@ -36,6 +36,7 @@ Dependency direction, as §59a's table has it: `aap-domain` depends on `aap-api`
 | Item | What |
 |---|---|
 | `validate(service, config)` | every issue found, in a fixed order (the service's, then the config's), or `Ok(())` |
+| `validate_config(config)` | the config's own rules alone (added in S5 for the `AgentConfig` controller's `Valid` condition). A config that passes can still fail `validate` against a service |
 | `ConfigIssue { field, message }` | one reason an object pair cannot be resolved; `field` is `AgentConfig spec.tools.mcpServers[search].url`. The controller joins them into the `ConfigInvalid` condition. (Named apart from `aap_ports::Issue`, which is a runtime's) |
 | `resolve(service, config, owner)` | `validate`, then the specs. The owner is the opaque handle the controller got from the object; it is copied into the specs unread and is not part of the digest |
 | `ResolvedAgent { id, store_id, runtime, store, digest, public_url }` | what the controller needs to reconcile. `runtime.digest == digest` |
