@@ -1,0 +1,10 @@
+apiVersion: v2
+name: aap-operator
+description: "The another-agentic-platform operator (§59a): one replica that reconciles AgentService and AgentConfig in one namespace, and serves the agent registry. The CRDs are the chart deploy/operator-crds; the agents are custom resources, not part of this chart."
+type: application
+version: 0.1.0
+appVersion: "0.1.0"
+# The agents' pod template uses a native sidecar (the GitHub MCP server of the coder), on by default from 1.29 (§59a, *Risks*).
+kubeVersion: ">=1.29.0-0"
+sources:
+  - https://github.com/vymalo/another-agentic-platform
