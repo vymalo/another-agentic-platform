@@ -169,6 +169,20 @@ GitHub App private key in its pod, as a file from a Secret, which contradicts
 §38 ("GitHub App private key … must never enter agent runtimes") until the
 credential broker (§39) exists.
 
+#### AD-025 — Agents are configured from a dashboard over a Platform API
+
+*(2026-10-05.)* On the owner's request of that day ("we need a dashboard for
+configuring all these"), administrators configure the fleet's agents from a
+**dashboard**, the UI of §60, specified in §60a. The dashboard calls a
+**Platform API** that authorizes the person (`agent.configure`, §52), validates
+with `aap-domain`, and writes the agents' custom resources by server-side apply;
+it reads their status and conditions back. **The custom resources stay the only
+store of agent configuration** (AD-016): the dashboard and the API keep no
+database of their own, and humans get no Kubernetes RBAC (§52). Secrets stay
+references (AD-024). Where the dashboard lives, how the API is packaged, how
+access per agent, secrets, models, tool servers and GitOps ownership work are
+proposed as P-007 to P-012 and asked of the owner in §93 (*Dashboard v0*).
+
 ---
 
 ## 92. Proposed Decisions
@@ -202,6 +216,57 @@ Use Kueue only if/when queued execution becomes necessary.
 ### P-006 — Shared project storage
 
 Formalize `run`, `agent`, and `project` volume scopes.
+
+### P-007 — The dashboard is an `/admin` area of the system's chat web
+
+"The same one" is read as one dashboard inside another-agentic-system's web,
+with its sign-in, look and roles. The area exists only when the web's server
+has a Platform API URL and the API answers (capability-detected, fail closed),
+is drawn for people whose `GET /api/me` lists `admin` (content-free,
+another-agentic-system ADR 0039), and is enforced by the API. The web's server
+forwards the person's bearer, which the edge already puts on every request to
+the web, and nothing else (§60a). The system's side: its ADR 0045 (proposed).
+
+### P-008 — The Platform API is its own binary
+
+`bin/api` beside `bin/operator`, in the same workspace and chart: least
+privilege per process (the API writes specs and reads ExternalSecrets, the
+operator writes workloads), a process that takes people's tokens apart from the
+one that reconciles, and a stateless API that can run two replicas while the
+operator stays one (§60a).
+
+### P-009 — Who may use an agent is on its `AgentService`, published in the registry
+
+`AgentService.spec.access.audience` lists values of the consumer's roles claim
+(`"*"` is everyone). The registry item carries it as the optional attribute
+`audience` (additive to `agent-registry/v1`). A consumer that offers agents to
+people enforces it and fails closed: an item without an audience is for its
+administrators only. The dashboard writes neither Keycloak nor the orchestrator's
+configuration (§60a). The system's side: its ADR 0045 (proposed).
+
+### P-010 — Shared settings are named objects or operator defaults, never copies
+
+A model endpoint is a `ModelEndpoint` and a remote MCP server a `ToolProvider`
+(a v0 subset of §32), referenced from `AgentConfig` by exclusive `endpointRef`
+and `providerRef` fields and resolved by the operator, so one edit rolls every
+agent that uses it. `environment.image` becomes optional, and the operator's
+default image applies. Additive to `v1alpha1` (§56, §60a).
+
+### P-011 — Secrets are picked, never written, in dashboard v0
+
+A secret field offers only the keys of ExternalSecrets labelled
+`agents.vymalo.com/offer: "true"`; the API refuses any other reference and has
+no right on Secrets. Values stay in AWS Secrets Manager. A write-only form
+(a Kubernetes Secret, or AWS through a narrowly scoped IAM role) needs its own
+decision (§60a).
+
+### P-012 — One owner per object: GitOps or the dashboard
+
+The dashboard writes only objects that carry its `managed-by` label and no
+Argo CD tracking annotation; every other object is read-only in it. Argo CD
+prunes only what it tracks, so it leaves the dashboard's objects alone. An
+object that gains Argo's annotation becomes GitOps's. The existing `coder` and
+`chat` stay GitOps's in v0 (§60a).
 
 ---
 
@@ -264,7 +329,7 @@ The following should be explicitly decided during architecture review.
 
 ### UI
 
-- Is Next.js only UI/BFF or also initial application API?
+- Is Next.js only UI/BFF or also initial application API? *Proposed (2026-10-05, P-007, P-008):* UI and a thin forwarder only; the application API is the Rust Platform API (§60a). Open until the owner answers *Dashboard v0* below.
 - Does the UI directly stream Kubernetes logs through its backend?
 - What authorization engine implements RBAC/ABAC?
 
@@ -282,6 +347,24 @@ The following should be explicitly decided during architecture review.
 - ~~A downtime window for the coder cutover (M3)? *Owner picks.*~~ **Decided (2026-10-05):** no fixed window. The cutover is made when no run is active (the coder's runs are drained first: no new task is sent to it, and M3 starts when every run has finished or parked); the expected gap is the restart of one pod. Chosen in the owner's "go with recommendations", which named none for this line; the owner can still name a window.
 - `store` on `AgentService` rather than on `AgentConfig`? *Recommended: `AgentService`.* **Decided (2026-10-05): as recommended.**
 - The GitHub App key stays in the coder's pod until the credential broker exists? *Recommended: yes, recorded in AD-024.* **Decided (2026-10-05): as recommended.**
+
+### Dashboard v0 (asked of the owner, 2026-10-05)
+
+Open. Each carries the recommendation made with the plan of §60a.
+
+- "The same one" read as one dashboard inside the existing chat web (`/admin` in another-agentic-system `web/`), with the same sign-in, look and roles, not a second app? *Recommended: yes.* If a separate app or the platform's own UI was meant, §60a's web part moves and the Platform API stays.
+- The `/admin` area shown only when the deployment gives the web a Platform API URL and the API answers, and drawn for people whose roles hold `admin`? *Recommended: yes* (capability-detected and fail closed, as another-agentic-system ADR 0008; `admin` is content-free, ADR 0039 there).
+- The web's server calls the Platform API with the person's token, which the edge already forwards to the web: the web's first server-side call and first setting (`PLATFORM_API_URL`), an exception to the letter of the system's invariant 2 (an HTTP API, not an A2A extension), kept optional, live and removable? *Recommended: yes*, rather than routing `/platform/*` at the edge, so the API is not on the public edge and only the web's pods reach it.
+- The Platform API as its own binary `bin/api` in this repository, in the operator's chart, rather than inside the operator binary? *Recommended: its own binary.*
+- Who may configure agents: the Keycloak client role `admin` of `another-agentic`, the one that gives the orchestrator's `admin`? *Recommended: yes for v0*; a role of its own when someone should configure agents without being an administrator of the chat.
+- Who may use an agent: (a) the dashboard edits Keycloak roles and the orchestrator's `auth.roles`, or (b) `AgentService.spec.access.audience`, published in the registry and enforced by the orchestrator, an agent with no audience seen and invoked by administrators only? *Recommended: (b).*
+- Models and the agents' tool servers as named objects (`ModelEndpoint`, and `ToolProvider` in a v0 subset), referenced by agents, with the operator's default image when an agent names none? *Recommended: yes.*
+- Secrets in v0: pick a key of an ExternalSecret labelled `agents.vymalo.com/offer: "true"`, never write a value? *Recommended: yes*; a write-only form (a Kubernetes Secret, or AWS Secrets Manager through an IAM role scoped to one prefix) only later and by its own decision.
+- One owner per object: the dashboard writes only what carries its label and no Argo CD annotation, and the GitOps `coder` and `chat` stay GitOps's (read-only in the dashboard) in v0? *Recommended: yes.*
+- Agents made by the dashboard in the system's namespace, `another-agentic-system`, the one the operator watches? *Recommended: yes for v0*, with the offer label as the fence on Secrets; a namespace of their own later.
+- Revisions and promotion (§61) out of dashboard v0, with the config digest, View YAML and Export YAML instead? *Recommended: yes.*
+- Run-pod size classes defined by the deployment (the operator chart's `runPodClasses`, such as `standard` with a 2Gi limit) and picked by name, once adam-rs's run pods are merged? *Recommended: yes.*
+- The orchestrator's own settings (sharing, the tool servers a person attaches in chat, its roles, its title and description models) stay in the system chart in v0, shown read-only where the web can already read them? *Recommended: yes*: the orchestrator reads its file at startup, and editing it live is its own decision in that repository.
 
 ---
 

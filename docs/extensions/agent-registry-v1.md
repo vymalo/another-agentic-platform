@@ -3,6 +3,7 @@
 - **URI:** `https://agents.vymalo.com/registry/v1`
 - **Status:** draft (2026-10-01)
 - **Implemented by:** the another-agentic-platform control plane (platform API); **v0: the operator binary** ([architecture §59a](../architecture/10-control-plane-and-crds.md#registry-in-v0)), serving the same document with one static bearer and no per-caller filtering until a control plane exists. A header note of 2026-10-04: the contract is unchanged, and the deviations are the server's, not the client's
+- **Proposed (2026-10-05):** an optional item attribute `audience` (who may use the agent, enforced by a consumer that offers agents to people, failing closed), specified in [architecture §60a](../architecture/10-control-plane-and-crds.md#who-may-use-an-agent-p-009) as P-009. Not part of this contract until the owner accepts it; slice D3 then edits the *Item* table and the rules here
 - **Consumed by:** any client that wants to list the fleet's A2A agents — first consumer: another-agentic-system ([ADR 0022](https://github.com/vymalo/another-agentic-system/blob/main/docs/decisions/0022-platform-provisions-agents-system-discovers-them.md))
 
 The URI is a **profile identifier** (it names this contract inside the document and in the
