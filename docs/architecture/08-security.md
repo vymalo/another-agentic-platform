@@ -259,6 +259,8 @@ action = agent.invoke
 resource.project = payments
 ```
 
+> **Decision (2026-10-05, AD-032):** for the admin dashboard (§60a), permissions are **Keycloak client roles** of the client `another-agentic`, and human-facing roles are **composite roles** that bundle them; the Platform API checks individual permissions, never a role name. v0 names, proposed and not final: `platform:agents.read`, `platform:agents.write`, `platform:models.write`, `platform:toolproviders.write`, `platform:secrets.pick` and `agent.use:<agent-name>`. `agent.configure` above stays an example of the target model; v0 replaces it with the finer set.
+
 Human authorization belongs to the application control plane.
 
 Humans should not need direct Kubernetes RBAC.
