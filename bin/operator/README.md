@@ -1,24 +1,58 @@
 # aap-operator
 
-The composition root of the operator (AD-020), binary `operator`. It is minimal until the
-controller exists: only the CRD generator works today.
+The composition root of the operator (AD-020), binary `operator`. It names the types the libraries leave generic: the
+Kubernetes runtime provider, the referenced-Secret store and the controllers. Nothing else is in it.
 
 ```sh
 cargo run -q -p aap-operator -- crdgen > deploy/crds/agents.vymalo.com.yaml   # regenerate the CRDs
-cargo run -q -p aap-operator -- run                                            # exits 1: not implemented until S5
+cargo run -q -p aap-operator -- run                                            # the controllers, against KUBECONFIG or the cluster
 ```
 
 | Subcommand | What |
 |---|---|
 | `crdgen` | Prints the CRDs of [`aap-api`](../../crates/api/README.md) as multi-document YAML on standard output, behind a two-line header that says it is generated |
-| `run` | Not implemented until slice S5 (the controller). Prints `operator: ... not implemented until slice S5 ...` on standard error and exits 1 |
+| `run` | Composes `KubernetesRuntime` ([`aap-runtime-kubernetes`](../../crates/runtime-kubernetes/README.md)), `SecretStore` ([`aap-store-secret`](../../crates/store-secret/README.md)) and the [`Operator`](../../crates/controller/README.md), serves health and metrics, and runs until SIGTERM or SIGINT, then lets the passes in flight finish |
 
-Libraries use `thiserror`; this binary uses `anyhow` (and has no error type of its own).
+Libraries use `thiserror`; this binary uses `anyhow` (and has no error type of its own). **No leader election, one
+replica** (§59a: "One replica, `Recreate`, no leader election"): a second reconciler would only race the first.
 
-## Environment
+## `run`: settings
 
-None yet. The ports of §59a (8080 registry, 8081 health, 9090 metrics) and their settings arrive
-with the slices that serve them.
+Each is a flag and an environment variable, which is how the chart sets them (S8).
+
+| Variable | Flag | Default | Meaning |
+|---|---|---|---|
+| `WATCH_NAMESPACE` | `--watch-namespace` | none: every namespace | Watch one namespace (the namespaced operator of §93). Empty is the same as unset |
+| `HEALTH_ADDR` | `--health-addr` | `0.0.0.0:8081` | `/healthz`, `/readyz` |
+| `METRICS_ADDR` | `--metrics-addr` | `0.0.0.0:9090` | `/metrics` |
+| `POD_NAME` | `--instance` | none | The `reportingInstance` of Events |
+| `AAP_CONCURRENCY` | `--concurrency` | 4 | Services reconciled at once (never the same one twice) |
+| `AAP_RESYNC_SECS` | `--resync-secs` | 300 | Timer for a service that is Ready or Suspended |
+| `AAP_RESYNC_PENDING_SECS` | `--resync-pending-secs` | 15 | Timer for one that is rolling out, unwell or held by a foreign object |
+| `RUST_LOG` | | `info` | `tracing` filter; logs go to standard error |
+| `KUBECONFIG` | | | Used when there is no in-cluster environment (`kube::Client::try_default`) |
+
+The registry's 8080 and its settings arrive with S7; `Listed` says `RegistryDisabled` until then.
+
+* `GET /healthz` on 8081: 200 while the process is up (liveness).
+* `GET /readyz` on 8081: 200 once both controllers' caches have listed the cluster, 503 before.
+* `GET /metrics` on 9090: Prometheus text, the counters listed in the [controller's README](../../crates/controller/README.md#metrics).
+
+### Features
+
+| Feature | Default | What |
+|---|---|---|
+| `runtime-kubernetes` | yes | Builds `run` with the Kubernetes provider. Without it `run` exits 1 and says to rebuild with it; `crdgen` still works |
+
+§59a lists `runtime-kubernetes`, `store-cnpg` and `registry`. The last two are S6 and S7: a feature that gated nothing
+would be a lie, so they are not declared yet. The referenced-Secret store is always built in (it is the baseline and has no
+dependency).
+
+## Cluster rights
+
+Everything `run` does to the API, for the chart of S8 (a namespaced `Role`, §59a): the
+[controller's](../../crates/controller/README.md#cluster-rights) plus the
+[provider's](../../crates/runtime-kubernetes/README.md#cluster-rights). **No right on Secrets.**
 
 ## The CRDs are a checked-in file
 
@@ -29,5 +63,60 @@ with the slices that serve them.
 
 ## Tests
 
-`cargo test -p aap-operator` runs the built binary: `crdgen` equals the checked-in file and prints
-one document per kind, and `run` refuses with the message above.
+```sh
+cargo test -p aap-operator                                  # the cluster cases skip
+AAP_TEST_KUBECONFIG=$HOME/.kube/config AAP_TEST_STUB_IMAGE=aap-stub:ci cargo test -p aap-operator --test cluster
+```
+
+| File | What |
+|---|---|
+| `src/serve.rs` unit tests | `/healthz` is up at once, `/readyz` answers 503 until the readiness handle is marked, `/metrics` is Prometheus text |
+| `tests/cli.rs` | runs the built binary: `crdgen` equals the checked-in file and prints one document per kind; `run` without a cluster fails and says it was connecting; `run --help` lists every variable above |
+| `tests/cluster.rs` | **the end-to-end**: the binary against a real cluster (below) |
+
+### The end-to-end, `tests/cluster.rs`
+
+Every case starts `operator run` (the binary Cargo built, `CARGO_BIN_EXE_operator`) against the cluster of
+`AAP_TEST_KUBECONFIG`, with `WATCH_NAMESPACE` set to a namespace of its own, free ports, and its log in
+`$TMPDIR/aap-e2e-*.log` (printed when a case fails). The CRDs are installed first by server-side apply (what `crdgen`
+prints, and the `operator-e2e` job also applies the checked-in file with `kubectl`). **Everything a case creates has a name
+of its own** (the namespace, the Secrets, the objects): the cases run in parallel in one cluster, the lesson of S4's
+first CI run.
+
+The pods run [`tests/stub/Dockerfile`](tests/stub/Dockerfile): busybox pinned by digest that answers `/healthz` on 8080, with
+`adam-coder` as its entrypoint and `tini` and `adam-agent` where the operator puts them (`tini -- adam-agent`). **No adam
+image is needed**; CI builds it and loads it into kind. The CRD has no command override, so the stub is the way a test
+image runs as the real binaries would.
+
+| Case | What it shows |
+|---|---|
+| `a_folder_agent_is_made_becomes_ready_and_its_deletion_completes` | an `adam-agent` service becomes `Ready` with every condition, `status.runtime`, endpoints and the digest; the Deployment carries our labels, an owner reference to the service and the digest on its pod template; the Service and the folder's ConfigMap exist; the config is `Valid`; an Event `Reconciled`; deleting completes the finalizer and the Deployment, Service and ConfigMap are gone, the config stays |
+| `a_coder_keeps_its_volume_under_retain_and_loses_it_under_delete` | an `adam-coder` with a per-replica volume is a StatefulSet with its claim template; deleted, `Retain` leaves the claim (without an owner) and `Delete` removes it |
+| `a_missing_secret_is_a_condition_until_the_secret_exists` | the Secrets do not exist: `RuntimeReady: False`, reason `MissingSecret`, `Degraded`, no value in the status; the Secrets appear and the service becomes `Ready` with no object of ours changed (the runtime's watch) |
+| `a_missing_or_invalid_config_blocks_and_a_fixed_one_unblocks` | `ConfigNotFound` and nothing made; an invalid config is `ConfigInvalid` and the config is not `Valid`; fixing it makes the service Ready; breaking it again leaves the running Deployment untouched |
+| `suspend_scales_to_zero_and_resume_wakes` | `Suspended` with zero replicas, then `Ready` again |
+| `an_object_that_is_not_ours_with_the_name_is_a_conflict_that_changes_nothing` | a Deployment named like the service, labelled `Helm`: `NameConflict`, `Blocked`, the foreign object not written; its removal lets the operator make its own |
+| `a_deletion_that_happens_while_the_operator_is_down_completes_when_it_returns` | the operator is killed (SIGKILL), the service deleted: the finalizer holds the object and the Deployment; a new operator completes it |
+| `health_readiness_and_metrics_are_served` | `/healthz`, `/readyz` 200 and the counters on `/metrics` |
+| `the_manifests_are_valid_and_resolve` | the cases' own objects pass `aap_domain::resolve`, with no cluster, so a broken fixture is not found minutes into CI |
+
+| Variable | Meaning |
+|---|---|
+| `AAP_TEST_KUBECONFIG` | the kubeconfig file of the cluster to test. **Unset: the cluster cases skip.** Never the default context |
+| `AAP_TEST_REQUIRE_CLUSTER` | `1` or `true`: unset `AAP_TEST_KUBECONFIG` is a failure (CI) |
+| `AAP_TEST_STUB_IMAGE` | the stub image, already on the cluster's nodes. Default `aap-stub:ci` |
+| `AAP_TEST_NO_WORKLOADS` | `1` or `true`: the cluster is only an API server and etcd (no controller manager, no kubelet). The test then patches the status of every Deployment and StatefulSet to "rolled out" itself and skips the cases that need a kubelet. See below |
+
+### What has and has not been run
+
+* **The `operator-e2e` job of `operator.yml` has not run.** No kind, docker daemon or kubelet existed where this slice was
+  written. Everything below that needs pods (the claims of a StatefulSet, the kubelet's `CreateContainerConfigError`, a real
+  rollout, the stub image) is *unverified* until CI has run it.
+* **What was run**: on 2026-10-05, the nine cases (the missing-Secret case returns early) against a bare **kube-apiserver
+  v1.35.8 and etcd v3.5.21** started by hand (the kind job's Kubernetes version; no controller manager, no kubelet), with
+  `AAP_TEST_NO_WORKLOADS=1`: all passed. That proves the operator binary, the controllers, the provider's server-side
+  apply, the finalizer, the status subresource, Events, list and watch, and the CRDs and their CEL rules against a real API
+  server. It does **not** prove that a pod starts, that the kubelet words a missing Secret as the provider expects, that
+  the StatefulSet controller makes the claims, or the stub image.
+  The run found one thing: a pass on a stale cache fails the finalizer's `test` with a 422, which the first version of the
+  controller classed as bad input (10 minutes of waiting); it is a lost race and is now a `Conflict`.

@@ -6,11 +6,12 @@
 
 A Kubernetes-native platform for running **durable, versioned, independently
 addressable AI agent services on disposable compute**. Formerly the
-`lightbridge-agents` draft. **Status: design, plus slices S1 to S4 of the v0 operator** (§59a): the
+`lightbridge-agents` draft. **Status: design, plus slices S1 to S5 of the v0 operator** (§59a): the
 Cargo workspace, the CRD types, the CRDs and the examples (S1); the pure `validate`/`resolve` with parity
 goldens against the adam-rs chart (S2); the provider traits and their testkit (S3); the `RuntimeProvider` on
-native Kubernetes (S4, its cluster proof unverified until CI has run it). No controller (S5) yet; everything
-else is documentation.
+native Kubernetes (S4, its cluster proof unverified until CI has run it); the controllers, the referenced-Secret store and
+`operator run` (S5: proven against a fake API server and a bare kube-apiserver, its kind proof unverified until the
+`operator-e2e` job has run). No CloudNativePG store (S6) or registry (S7) yet; everything else is documentation.
 
 The first operator (v0: adam-rs agents from `AgentService` + `AgentConfig`, native
 Kubernetes; AD-022 to AD-024) is specified in §59a
@@ -27,7 +28,7 @@ layout table and the root `README.md`.
 | `docs/extensions/release-channels-v1.md` | A2A extension contract consumed by other systems |
 | `docs/extensions/agent-registry-v1.md` | Registry contract: the linkset of agent cards the system reads (AD-021) |
 | `tools/docs-check/` | Diagram + link checker (also run in CI) |
-| `Cargo.toml`, `crates/`, `bin/` | The operator's Cargo workspace (§59a): `crates/api` (`aap-api`, the CRD types), `crates/ports` (`aap-ports`: `RuntimeProvider`, `StoreProvisioner`, `AgentDirectory`, their neutral types, and with the feature `testkit` the conformance macros and `Memory` implementations), `crates/domain` (`aap-domain`: pure `validate` and `resolve` into a `RuntimeSpec` with a sha256 digest; **adam's env contract lives only here**), `crates/runtime-kubernetes` (`aap-runtime-kubernetes`: `RuntimeProvider` on native Kubernetes by server-side apply, golden YAML of the examples in `tests/golden/`, a fake API server in `tests/support/`, and `tests/cluster.rs`, the conformance suite against a real cluster, which skips unless `AAP_TEST_KUBECONFIG` is set and fails under `AAP_TEST_REQUIRE_CLUSTER=1`), `bin/operator` (`crdgen` now, `run` from S5). Each has a `README.md` to keep current |
+| `Cargo.toml`, `crates/`, `bin/` | The operator's Cargo workspace (§59a): `crates/api` (`aap-api`, the CRD types), `crates/ports` (`aap-ports`: `RuntimeProvider`, `StoreProvisioner`, `AgentDirectory`, their neutral types, and with the feature `testkit` the conformance macros and `Memory` implementations), `crates/domain` (`aap-domain`: pure `validate` and `resolve` into a `RuntimeSpec` with a sha256 digest; **adam's env contract lives only here**), `crates/runtime-kubernetes` (`aap-runtime-kubernetes`: `RuntimeProvider` on native Kubernetes by server-side apply, golden YAML of the examples in `tests/golden/`, a fake API server in `tests/support/`, and `tests/cluster.rs`, the conformance suite against a real cluster, which skips unless `AAP_TEST_KUBECONFIG` is set and fails under `AAP_TEST_REQUIRE_CLUSTER=1`), `crates/store-secret` (`aap-store-secret`: `StoreProvisioner` for a referenced Secret; never reads a Secret, AD-024), `crates/controller` (`aap-controller`: the `AgentService` and `AgentConfig` reconcilers over the two provider seams, kube-rs; `tests/support` is a fake API server with list and watch, `tests/reconcile.rs` and `tests/operator.rs` drive it with the `Memory` providers), `bin/operator` (`crdgen`, and `run` composing provider, store and controllers with health on 8081 and metrics on 9090; `tests/cluster.rs`, the operator binary against a real cluster, skips unless `AAP_TEST_KUBECONFIG` is set and fails under `AAP_TEST_REQUIRE_CLUSTER=1`; `tests/stub/Dockerfile` is the adam image's stand-in). Each has a `README.md` to keep current |
 | `crates/domain/tests/golden/`, `tools/adam-parity/` | The parity goldens: what the adam-rs chart `deploy/coder` renders at the revision §59a cites, checked in, and the script that regenerates them (by hand: needs helm and a clone of adam-rs; `crates/domain/tests/golden/README.md` lists the differences that are intended). A change to the env contract is a change to those goldens |
 | `deploy/crds/`, `examples/` | The generated CRDs (checked in; regenerate with `cargo run -q -p aap-operator -- crdgen > deploy/crds/agents.vymalo.com.yaml`) and the example objects, `examples/invalid/` one per CEL rule |
 | `.agents/skills/` | Repo skills; `.claude/skills/*` are symlinks to them |
@@ -123,6 +124,8 @@ cargo fmt --all --check
 cargo clippy --workspace --all-targets --locked -- -D warnings
 cargo test --workspace --locked           # includes the CRD drift check; the cluster tests skip
 AAP_TEST_KUBECONFIG=$HOME/.kube/config cargo test -p aap-runtime-kubernetes --test cluster   # a throwaway cluster, e.g. kind
+docker build -t aap-stub:ci bin/operator/tests/stub && kind load docker-image aap-stub:ci --name aap   # the stand-in image
+AAP_TEST_KUBECONFIG=$HOME/.kube/config cargo test -p aap-operator --test cluster   # the operator binary against that cluster
 npm --prefix tools/docs-check ci          # once per clone
 node tools/docs-check/check-docs.mjs      # every diagram parses, every relative link resolves
 git config core.hooksPath .githooks       # once per clone: local Conventional Commits hook

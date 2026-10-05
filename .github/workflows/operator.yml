@@ -7,6 +7,11 @@ name: Operator
 # The `runtime-kubernetes` job runs the provider of S4 against a real API server: the conformance suite of
 # aap-ports and the cases of crates/runtime-kubernetes/tests/cluster.rs, with skipping forbidden.
 #
+# The `operator-e2e` job is S5's end-to-end: the CRDs of deploy/crds are installed in a kind cluster, the
+# `operator` binary built in the job runs against it (bin/operator/tests/cluster.rs starts it, one per case),
+# and each case applies an AgentConfig and an AgentService, waits for Ready, and deletes. The pods run a stand-in
+# image (bin/operator/tests/stub), so no adam image is needed.
+#
 # Later slices add the image, the chart and the end-to-end of the agents (S8, S9).
 
 on:
@@ -166,3 +171,53 @@ jobs:
           kubectl -n aap-test get statefulsets,deployments,services,networkpolicies,pdb,configmaps,pvc,pods -o wide || true
           kubectl -n aap-test get events --sort-by=.lastTimestamp | tail -80 || true
           kubectl -n aap-test describe pods | tail -200 || true
+
+  operator-e2e:
+    # The operator binary against a real cluster, with real pods (S5). Nothing may skip: with
+    # AAP_TEST_REQUIRE_CLUSTER an unset cluster is a failure, not a green run that proved nothing.
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v7
+      - name: Create a kind cluster
+        uses: helm/kind-action@v1
+        with:
+          version: v0.33.0
+          # The same node image as the other jobs: Kubernetes v1.35.8, the digest of the index of the tag.
+          node_image: kindest/node:v1.35.8@sha256:07b2536e30b803ed61d1677a79df6115f798ce64c80f9e22f6ed45afd09323c0
+          cluster_name: aap-operator
+          wait: 120s
+      - name: Install the CRDs
+        run: |
+          # The checked-in file, as a deployment installs it. Server-side: a client-side apply keeps the
+          # manifest in an annotation, which has a size limit.
+          kubectl apply --server-side -f deploy/crds/agents.vymalo.com.yaml
+          kubectl wait --for=condition=Established --timeout=60s \
+            crd/agentconfigs.agents.vymalo.com crd/agentservices.agents.vymalo.com
+      - name: Build the stand-in for the adam image and load it into kind
+        run: |
+          # busybox pinned by digest that answers /healthz on 8080 as adam-agent and adam-coder would.
+          docker build -t aap-stub:ci bin/operator/tests/stub
+          kind load docker-image aap-stub:ci --name aap-operator
+      - name: Install Rust
+        run: rustup toolchain install "$RUST_TOOLCHAIN" --profile minimal --no-self-update && rustup default "$RUST_TOOLCHAIN"
+      - uses: Swatinem/rust-cache@v2
+      - name: Build the operator
+        run: cargo build --locked -p aap-operator
+      - name: The operator against the cluster
+        env:
+          AAP_TEST_REQUIRE_CLUSTER: "1"
+          AAP_TEST_STUB_IMAGE: aap-stub:ci
+        run: |
+          # The kubeconfig kind-action wrote; a file, so the tests never fall back to some default context.
+          export AAP_TEST_KUBECONFIG="$HOME/.kube/config"
+          kubectl --kubeconfig "$AAP_TEST_KUBECONFIG" get nodes
+          # Every case has a namespace, Secrets and object names of its own, so they run side by side.
+          cargo test -p aap-operator --test cluster --locked -- --test-threads=4
+      - name: What the cluster says, when a case failed
+        if: failure()
+        run: |
+          kubectl get agentservices,agentconfigs -A -o yaml | tail -400 || true
+          kubectl get deployments,statefulsets,services,pvc,pods -A -o wide | grep aap-e2e || true
+          kubectl get events -A --sort-by=.lastTimestamp | tail -80 || true
+          for f in /tmp/aap-e2e-*.log; do echo "== $f"; tail -60 "$f"; done || true
