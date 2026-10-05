@@ -9,6 +9,11 @@ addressable AI agent services on disposable compute**. Formerly the
 `lightbridge-agents` draft. **Status: design only** — the repository is
 documentation; there is no code yet.
 
+The first operator (v0: adam-rs agents from `AgentService` + `AgentConfig`, native
+Kubernetes; AD-022 to AD-024) is specified in §59a
+(`docs/architecture/10-control-plane-and-crds.md`). The status stays *design
+only* until slice S1 lands code; then this paragraph and the layout table change.
+
 ## Layout
 
 | Path | What |
@@ -134,3 +139,4 @@ is validated too.
 
 - `vymalo/another-agentic-system` — protocol-agnostic orchestration layer; consumes this platform over A2A (the release-channels extension and the agent-registry contract).
 - `vymalo/another-agentic-images` — the toolchain images coding runtimes start from.
+- `vymalo/another-adam-rs` — the agent harness (AD-022): `adam-coder` and `adam-agent`, one image; the v0 operator (§59a) runs them.

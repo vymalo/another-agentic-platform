@@ -60,6 +60,8 @@ It answers:
 
 It does **not** describe the complete internal behavior of the agent.
 
+> **Decision (2026-10-04, AD-023):** the v0 operator implements a subset of this resource ([§59a](10-control-plane-and-crds.md#59a-operator-v0-adam-rs-agents)): `configRef`, `description` and `interfaces.a2a` (`responses` and `mcp` exist and must be `false`), plus the fields v0 adds: `scaling.topology`, `scaling.workers`, `scaling.front`, `suspend`, `store`, `access`, `registry` and `deletionPolicy`. `release`, `routes`, `authorization`, `minReplicas`, `maxReplicas` and `idleTimeout` wait until something consumes them. The example below stays the target.
+
 Example:
 
 ```yaml
@@ -134,6 +136,8 @@ Changing these does not necessarily produce a new agent revision.
 It answers:
 
 > What does this agent do, what does it use, and how should it execute?
+
+> **Decision (2026-10-04, AD-022, AD-023):** `harness.type` is `adam-rs`: `adk-rust` in the example below is history. The harness names a `binary` (`adam-coder` or `adam-agent`), and OpenCode stays a capability inside `adam-coder`. In v0, `instructions` are the agent's folder (or the agent embedded in `adam-coder`), `model` carries the alias, the endpoint and a reference to the key, and `environment`, `tools` and `security` are inline instead of `*Ref` fields; `verification` and `artifacts` are left out ([§59a](10-control-plane-and-crds.md#59a-operator-v0-adam-rs-agents)).
 
 Example:
 
@@ -211,6 +215,8 @@ AgentRevision coder-r43
 
 `AgentRevision` is an immutable, fully resolved execution definition.
 
+> **Decision (2026-10-04, AD-023):** not in v0. The operator computes the digest of the resolved agent and records it as `AgentService.status.config.digest`, which is what a revision's `configurationDigest` would be. Revisions wait for the open question about adam's run ledger (§93): the ledger is keyed by the agent's name, so two revisions running side by side would share or fork one.
+
 ```mermaid
 flowchart LR
     Config[AgentConfig]
@@ -267,6 +273,8 @@ A change creates another revision.
 ## 10. Release Channels
 
 `latest` and `production` are intentionally different.
+
+> **Decision (2026-10-04, AD-023):** not in v0. There are no channels and no `@channel` or `@revision` addressing, and the agent card carries no release-channels extension (§12a): adam serves its own card. A v0 service is one running configuration.
 
 Example:
 

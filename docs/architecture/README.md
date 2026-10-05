@@ -15,6 +15,8 @@
 | 2026-09-28 | Review edits: `AgentRun`/`AgentLease` become application records (§19–20, §56–59, AD-016); `WorkflowProvider` boundary with Restate as one implementation (§17a, AD-017); gateways are replaceable OpenAI-compatible endpoints (§41, AD-018); release channels projected onto A2A (§12a, AD-019); verified notes on ADK-Rust and `opencode acp` (§26) and on storage (§29). MVP cut in [mvp.md](../mvp.md). |
 | 2026-09-28 | AD-020: swappable implementations selected at build time — provider traits + conformance testkits, separate implementation crates, binaries as compositions (§22, §63, §91–93). |
 | 2026-10-01 | Agent registry: agent-registry/v1 contract (§12b, AD-021). |
+| 2026-10-04 | Operator v0: the harness is adam-rs (AD-022, §8, §9, §26); the first operator runs adam-rs agents from `AgentService` + `AgentConfig` on native Kubernetes (AD-023, new §59a, decision notes in §7–§10, §12b, §21, §22, §56, §59); secrets are references (AD-024); P-002 not taken for v0, two §93 runtime questions decided, new open questions and owner questions. mvp.md and the registry contract updated. Documentation only. |
+| 2026-10-05 | Operator v0 owner questions decided (§93): every recommendation taken; the coder cutover (M3) needs no fixed window and is made when no run is active; tag-bump pushes allowed (§59a risks). |
 
 ## Contents
 
@@ -29,7 +31,7 @@
 | [Tools](07-tools.md) | §32, §33, §34, §35, §36 |
 | [Security, identity, credentials and tenancy](08-security.md) | §37, §38, §39, §40, §41, §51, §52, §53, §68, §75, §76, §77, §83 |
 | [Artifacts, observability, lifecycle, reliability and quotas](09-operations.md) | §46, §47, §48, §49, §50, §66, §67, §78, §79, §86 |
-| [Control plane, CRDs, operator and UI](10-control-plane-and-crds.md) | §56, §57, §58, §59, §60, §61, §62, §63, §87, §88, §89, §90 |
+| [Control plane, CRDs, operator and UI](10-control-plane-and-crds.md) | §56, §57, §58, §59, §59a, §60, §61, §62, §63, §87, §88, §89, §90 |
 | [Decisions and open questions](11-decisions.md) | §91, §92, §93 |
 | [Deployment, summary and success criteria](12-summary.md) | §94, §95, §96, §97, §98, §99, §100 |
 
@@ -101,6 +103,7 @@ Cross-references in the text use the original section numbers (`§N`).
 | 57 | [Things That Should Probably Not Be CRDs](10-control-plane-and-crds.md) | `10-control-plane-and-crds.md` |
 | 58 | [CRD Reference Model](10-control-plane-and-crds.md) | `10-control-plane-and-crds.md` |
 | 59 | [Operator Design](10-control-plane-and-crds.md) | `10-control-plane-and-crds.md` |
+| 59a | [Operator v0: adam-rs agents](10-control-plane-and-crds.md) | `10-control-plane-and-crds.md` |
 | 60 | [UI Architecture](10-control-plane-and-crds.md) | `10-control-plane-and-crds.md` |
 | 61 | [Draft → Revision → Promotion UX](10-control-plane-and-crds.md) | `10-control-plane-and-crds.md` |
 | 62 | [API / CRD Versioning](10-control-plane-and-crds.md) | `10-control-plane-and-crds.md` |
