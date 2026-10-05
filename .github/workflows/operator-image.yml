@@ -276,10 +276,18 @@ jobs:
     needs: [chart, dockerfile, scripts, image, operator-coder-e2e]
     if: github.event_name == 'push' && github.ref == 'refs/heads/main'
     runs-on: ubuntu-latest
+    # One push at a time, so the check below and the push of `latest` are not interleaved with another run's.
+    concurrency:
+      group: operator-push
+      cancel-in-progress: false
     permissions:
       contents: read
       packages: write
     steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: main
+          fetch-depth: 0
       - uses: actions/download-artifact@v8
         with:
           name: operator-image
@@ -297,13 +305,21 @@ jobs:
           set -eu
           tag="sha-$(printf '%s' "$GITHUB_SHA" | cut -c1-7)"
           docker tag operator:smoke "$IMAGE:$tag"
-          docker tag operator:smoke "$IMAGE:latest"
           docker push "$IMAGE:$tag"
-          docker push "$IMAGE:latest"
+          # `latest` follows the newest build only: image jobs can finish out of order, and an older run must not move it back
+          # (the same rule as the bump below; the bump commits themselves do not count).
+          newer="$(git log --format=%s "$GITHUB_SHA..origin/main" -- crates bin Cargo.toml Cargo.lock docker/operator deploy/operator deploy/operator-crds deploy/crds .github/workflows/operator-image.yml | grep -v '^chore(deploy): bump operator to ' || true)"
+          if [ -n "$newer" ]; then
+            pushed="\`$IMAGE:$tag\` (not \`latest\`: main has moved on since this commit, the newer build pushes it)."
+          else
+            docker tag operator:smoke "$IMAGE:latest"
+            docker push "$IMAGE:latest"
+            pushed="\`$IMAGE:$tag\` and \`$IMAGE:latest\`."
+          fi
           {
             echo "### Pushed"
             echo
-            echo "\`$IMAGE:$tag\` and \`$IMAGE:latest\`."
+            echo "$pushed"
             echo
             echo "A new GHCR package is private until it is made public (deploy/operator/README.md, \"The image\")."
           } >> "$GITHUB_STEP_SUMMARY"
