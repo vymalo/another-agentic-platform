@@ -1,7 +1,7 @@
 # aap-operator
 
 The composition root of the operator (AD-020), binary `operator`. It names the types the libraries leave generic: the
-Kubernetes runtime provider, the referenced-Secret store and the controllers. Nothing else is in it.
+Kubernetes runtime provider, the store provisioner and the controllers. Nothing else is in it.
 
 ```sh
 cargo run -q -p aap-operator -- crdgen > deploy/crds/agents.vymalo.com.yaml   # regenerate the CRDs
@@ -11,7 +11,7 @@ cargo run -q -p aap-operator -- run                                            #
 | Subcommand | What |
 |---|---|
 | `crdgen` | Prints the CRDs of [`aap-api`](../../crates/api/README.md) as multi-document YAML on standard output, behind a two-line header that says it is generated |
-| `run` | Composes `KubernetesRuntime` ([`aap-runtime-kubernetes`](../../crates/runtime-kubernetes/README.md)), `SecretStore` ([`aap-store-secret`](../../crates/store-secret/README.md)) and the [`Operator`](../../crates/controller/README.md), serves health and metrics, and runs until SIGTERM or SIGINT, then lets the passes in flight finish |
+| `run` | Composes `KubernetesRuntime` ([`aap-runtime-kubernetes`](../../crates/runtime-kubernetes/README.md)), `CnpgStore` ([`aap-store-cnpg`](../../crates/store-cnpg/README.md), which also serves a referenced Secret; `SecretStore` ([`aap-store-secret`](../../crates/store-secret/README.md)) without the `store-cnpg` feature) and the [`Operator`](../../crates/controller/README.md), serves health and metrics, and runs until SIGTERM or SIGINT, then lets the passes in flight finish |
 
 Libraries use `thiserror`; this binary uses `anyhow` (and has no error type of its own). **No leader election, one
 replica** (§59a: "One replica, `Recreate`, no leader election"): a second reconciler would only race the first.
@@ -43,16 +43,18 @@ The registry's 8080 and its settings arrive with S7; `Listed` says `RegistryDisa
 | Feature | Default | What |
 |---|---|---|
 | `runtime-kubernetes` | yes | Builds `run` with the Kubernetes provider. Without it `run` exits 1 and says to rebuild with it; `crdgen` still works |
+| `store-cnpg` | yes | The store is `CnpgStore`: a service with `store.postgres.cnpg` gets a CloudNativePG `Cluster`. Without it the store is `SecretStore` and such a service is `StoreReady: False`, reason `CNPGNotInstalled` (the same words as a cluster without CloudNativePG) |
 
-§59a lists `runtime-kubernetes`, `store-cnpg` and `registry`. The last two are S6 and S7: a feature that gated nothing
-would be a lie, so they are not declared yet. The referenced-Secret store is always built in (it is the baseline and has no
-dependency).
+§59a lists `runtime-kubernetes`, `store-cnpg` and `registry`. `registry` is S7's: a feature that gated nothing would be
+a lie, so it is not declared yet. The controller never names the store type: `run` picks `CnpgStore` or `SecretStore` by
+the feature, and the controller is generic over `StoreProvisioner` (AD-020).
 
 ## Cluster rights
 
 Everything `run` does to the API, for the chart of S8 (a namespaced `Role`, §59a): the
 [controller's](../../crates/controller/README.md#cluster-rights) plus the
-[provider's](../../crates/runtime-kubernetes/README.md#cluster-rights). **No right on Secrets.**
+[provider's](../../crates/runtime-kubernetes/README.md#cluster-rights), and with `store-cnpg` the
+[store's](../../crates/store-cnpg/README.md#cluster-rights). **No right on Secrets.**
 
 ## The CRDs are a checked-in file
 
@@ -97,6 +99,7 @@ image runs as the real binaries would.
 | `suspend_scales_to_zero_and_resume_wakes` | `Suspended` with zero replicas, then `Ready` again |
 | `an_object_that_is_not_ours_with_the_name_is_a_conflict_that_changes_nothing` | a Deployment named like the service, labelled `Helm`: `NameConflict`, `Blocked`, the foreign object not written; its removal lets the operator make its own |
 | `a_deletion_that_happens_while_the_operator_is_down_completes_when_it_returns` | the operator is killed (SIGKILL), the service deleted: the finalizer holds the object and the Deployment; a new operator completes it |
+| `a_service_that_asks_for_a_cluster_is_cnpg_not_installed_without_cloudnativepg` | S6: `store.postgres.cnpg` on a cluster without CloudNativePG is `StoreReady: False`, `CNPGNotInstalled`, `Blocked`, no workload, and the deletion of that service completes (a skip when CloudNativePG is installed; a failure under `AAP_TEST_REQUIRE_CLUSTER=1`) |
 | `health_readiness_and_metrics_are_served` | `/healthz`, `/readyz` 200 and the counters on `/metrics` |
 | `the_manifests_are_valid_and_resolve` | the cases' own objects pass `aap_domain::resolve`, with no cluster, so a broken fixture is not found minutes into CI |
 
@@ -120,3 +123,8 @@ image runs as the real binaries would.
   the StatefulSet controller makes the claims, or the stub image.
   The run found one thing: a pass on a stale cache fails the finalizer's `test` with a 422, which the first version of the
   controller classed as bad input (10 minutes of waiting); it is a lost race and is now a `Conflict`.
+* **S6, 2026-10-05**, the same bare kube-apiserver v1.35.8 (etcd v3.6.4), all ten cases with `AAP_TEST_NO_WORKLOADS=1` and
+  `AAP_TEST_REQUIRE_CLUSTER=1`: they passed. The first run of the new case failed **all five cases that delete a service**:
+  with `store-cnpg` the finalizer's release asked for a Cluster, and an API server without CloudNativePG answers a plain-text
+  `404 page not found` that `Api::get_opt` does not take for "not found". That is fixed in `aap-store-cnpg` and held by
+  its fake API server and by this case.

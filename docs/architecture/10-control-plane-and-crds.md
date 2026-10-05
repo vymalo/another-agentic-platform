@@ -162,7 +162,7 @@ The latter belongs in Restate.
 
 ## 59a. Operator v0: adam-rs agents
 
-> **Status: design only (2026-10-04).** Nothing here is built; slice S0 is this text. The first code lands with S1 (§59a, *Slices*).
+> **Status: design only (2026-10-04); slices S1 to S6 are built (2026-10-05, the blockquotes below).** Slice S0 is this text.
 
 > **S1 built (2026-10-05):** the workspace, `aap-api`, `crdgen` and the examples, in [`crates/api`](../../crates/api/README.md) and [`bin/operator`](../../bin/operator/README.md). The `kind` job in CI is what proves the CEL rules against a real API server (*unverified* until it has run).
 
@@ -171,6 +171,8 @@ The latter belongs in Restate.
 > **S4 built (2026-10-05):** [`aap-runtime-kubernetes`](../../crates/runtime-kubernetes/README.md): `RuntimeProvider` on native Kubernetes. It renders a `RuntimeSpec` into its objects (golden YAML of `examples/coder.yaml`, combined and split, and `examples/chat.yaml`), applies them by server-side apply under `aap-operator`, guards adoption, maps pods to `RuntimeStatus`, honours `deletionPolicy` on delete and watches the owned kinds. Proven locally against a fake API server (`tests/api.rs`); **the proof against a real API server is *unverified* until the `runtime-kubernetes` job of `operator.yml` has run**: no cluster was available where it was written. Where it differs from this section, and why, is in the crate's README (*Applying*, *Status*) and below, at *Owned objects*.
 
 > **S5 built (2026-10-05):** [`aap-controller`](../../crates/controller/README.md) (the reconcilers over the two provider seams, kube-rs), [`aap-store-secret`](../../crates/store-secret/README.md) (the `StoreProvisioner` for a referenced Secret) and `operator run` in [`bin/operator`](../../bin/operator/README.md) (health 8081, metrics 9090, `WATCH_NAMESPACE`, no leader election). Proven against a fake API server that has list and watch (`crates/controller/tests`), and by `bin/operator/tests/cluster.rs` against **a bare kube-apiserver v1.35.8 and etcd, run by hand on 2026-10-05, with the test playing the controller manager**; **the proof with real pods, in kind (the `operator-e2e` job of `operator.yml`), is *unverified* until CI has run it** (no cluster, docker daemon or kubelet existed where S5 was written). The controller's README lists every place it differs from this section and why: the reasons of a condition that is `Unknown`, a spec a provider refuses (`ConfigResolved: False`), `Listed: RegistryDisabled` until S7, the timers and back-off, the owner handle passed in by the composition root, and **`aap-store-secret` not checking that a Secret exists**, because *Secrets and databases* below gives the operator no right on Secrets.
+
+> **S6 built (2026-10-05):** [`aap-store-cnpg`](../../crates/store-cnpg/README.md): the `StoreProvisioner` for `store.postgres.cnpg`. It server-side applies a `postgresql.cnpg.io/v1` `Cluster` `<svc>-db` through the dynamic API (no CloudNativePG crate), reports the Secret reference `<svc>-db-app` / `uri` (never reading it), reads readiness from the Cluster's status, honours `deletionPolicy` on release, and maps a missing CloudNativePG API to `CNPGNotInstalled`; feature `store-cnpg` (default on) of `operator run`. Proven against a fake API server (`crates/store-cnpg/tests/api.rs`) and, for the missing-API case and its deletion, against a bare kube-apiserver v1.35.8; **the proof against a real CloudNativePG 1.30.1 in kind (the `store-cnpg` job of `operator.yml`) is *unverified* until CI has run it**. Where it differs from this section: the Cluster has **no owner reference** (data, as *Owned objects* says), a Cluster of that name that is not ours is `ConfigInvalid` (the store seam has no `NameConflict`), and a referenced Secret is served by the same provisioner. The crate's README has the facts checked (*verified 2026-10-05*).
 
 The first operator the platform ships. It is smaller than the design of §59 on purpose: it manages **adam-rs agents** (AD-022) from two CRDs, `AgentService` and `AgentConfig`, on native Kubernetes (AD-023), and it keeps secrets out of the custom resources (AD-024).
 
@@ -195,7 +197,7 @@ One Cargo workspace in this repository. Crates are prefixed `aap-` (owner questi
 | `crates/ports` | `aap-ports` | The traits `RuntimeProvider`, `StoreProvisioner`, `AgentDirectory` and their neutral types. Feature `testkit`: the conformance macros and `Memory` implementations |
 | `crates/runtime-kubernetes` | `aap-runtime-kubernetes` | `RuntimeProvider` on native Kubernetes (§23) |
 | `crates/store-secret` | | `StoreProvisioner` for a referenced Secret |
-| `crates/store-cnpg` | | `StoreProvisioner` for an operator-owned CloudNativePG `Cluster` |
+| `crates/store-cnpg` | `aap-store-cnpg` | `StoreProvisioner` for an operator-owned CloudNativePG `Cluster` (also serves a referenced Secret, so one type is the store) |
 | `crates/registry` | | The `agent-registry/v1` document builder and an axum router: bearer, `ETag` / `304`, `Cache-Control: private, max-age<=60`, `Vary` |
 | `crates/controller` | | The reconcilers, generic over `<R: RuntimeProvider, S: StoreProvisioner>`: status, conditions, events, the finalizer, and an `AgentDirectory` backed by a reflector |
 | `crates/testsupport` | | Fixtures and the API-server harness |

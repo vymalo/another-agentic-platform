@@ -7,7 +7,7 @@ types that cross them.
 | Trait | Does | Implemented by (later slices) |
 |---|---|---|
 | `RuntimeProvider` | makes an agent's compute exist, says how it is doing, tells the controller what changed | `runtime-kubernetes` (S4); `MemoryRuntime` here |
-| `StoreProvisioner` | makes the agent's run ledger exist: a referenced Secret, or an operator-owned CloudNativePG cluster | `store-secret`, `store-cnpg` (S5, S6); `MemoryStore` here |
+| `StoreProvisioner` | makes the agent's run ledger exist: a referenced Secret, or an operator-owned CloudNativePG cluster | `store-secret`, `store-cnpg` (S5, S6: `CnpgStore` serves both kinds); `MemoryStore` here |
 | `AgentDirectory` | lists the agents the platform runs, for the registry | the controller's reflector (S5, S7); `MemoryDirectory` here |
 
 **No Kubernetes type, no driver type and no secret value appears in any signature.** A secret has no
