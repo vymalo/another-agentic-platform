@@ -1,6 +1,6 @@
 [workspace]
 resolver = "3"
-members = ["crates/api", "crates/ports", "crates/domain", "bin/operator"]
+members = ["crates/api", "crates/ports", "crates/domain", "crates/runtime-kubernetes", "bin/operator"]
 
 [workspace.package]
 version = "0.1.0"
@@ -15,6 +15,7 @@ publish = false
 aap-api = { path = "crates/api" }
 aap-domain = { path = "crates/domain" }
 aap-ports = { path = "crates/ports" }
+aap-runtime-kubernetes = { path = "crates/runtime-kubernetes" }
 anyhow = "1"
 clap = { version = "4", features = ["derive"] }
 futures = { version = "0.3", default-features = false, features = ["std", "async-await"] }
