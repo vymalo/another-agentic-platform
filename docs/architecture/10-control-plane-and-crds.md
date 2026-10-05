@@ -629,7 +629,7 @@ Next to the existing charts, one step at a time. The coder stays on its Helm cha
 | M0 | In home-os, an app for the CRDs (project `infrastructure`) and an app for the operator (project `another-agentic`, with this repository as a source repository) |
 | M1 | The system chart's registry wiring. **The coder stays a static agent**: only static agents carry the `agent-checks` gate in the system, and a registry agent does not |
 | M2 | A shadow, `coder-next`, an `AgentService` of its own with its own CloudNativePG cluster, beside the Helm coder |
-| M3 | The cutover. Snapshot the `work-coder-0` volume. Mark the objects that hold data `Prune=false` and keep them. The home-os source moves to adam-rs `deploy/coder-agent`. The operator reports `NameConflict` until Argo prunes the Helm objects, then creates the StatefulSet `coder` and **reattaches the claim `work-coder-0`**. The Service name and the database are unchanged. Needs a downtime window (open question in §93) |
+| M3 | The cutover. Snapshot the `work-coder-0` volume. Mark the objects that hold data `Prune=false` and keep them. The home-os source moves to adam-rs `deploy/coder-agent`. The operator reports `NameConflict` until Argo prunes the Helm objects, then creates the StatefulSet `coder` and **reattaches the claim `work-coder-0`**. The Service name and the database are unchanged. No fixed downtime window: made when no run is active (decided in §93, 2026-10-05) |
 | M4 | The rollback recipe, written with the cutover. Under `Retain`, deleting the `AgentService` keeps the volume and the database |
 | M5 | `chat`: `chat.runtime: agentservice` in the system chart |
 | M6 | Retire `deploy/coder` and the chat Deployment path |
@@ -672,7 +672,7 @@ Next to the existing charts, one step at a time. The coder stays on its Helm cha
 | A folder over 1 MiB does not fit a ConfigMap | A clear `ConfigInvalid`; an artifact source later |
 | netcup's Kubernetes version and Argo's pruning behaviour are unverified | Checked in M0 and on the shadow, before M3 |
 | kube-rs churn | Pinned versions; the controller sits behind the ports |
-| A bot pushing tag bumps to this repository's `main` against its governance check | Owner question in §93 |
+| A bot pushing tag bumps to this repository's `main` against its governance check | Allowed by the owner (§93, decided 2026-10-05); the bump commits follow the other repositories' |
 
 ### Facts checked
 

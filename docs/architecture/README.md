@@ -16,6 +16,7 @@
 | 2026-09-28 | AD-020: swappable implementations selected at build time — provider traits + conformance testkits, separate implementation crates, binaries as compositions (§22, §63, §91–93). |
 | 2026-10-01 | Agent registry: agent-registry/v1 contract (§12b, AD-021). |
 | 2026-10-04 | Operator v0: the harness is adam-rs (AD-022, §8, §9, §26); the first operator runs adam-rs agents from `AgentService` + `AgentConfig` on native Kubernetes (AD-023, new §59a, decision notes in §7–§10, §12b, §21, §22, §56, §59); secrets are references (AD-024); P-002 not taken for v0, two §93 runtime questions decided, new open questions and owner questions. mvp.md and the registry contract updated. Documentation only. |
+| 2026-10-05 | Operator v0 owner questions decided (§93): every recommendation taken; the coder cutover (M3) needs no fixed window and is made when no run is active; tag-bump pushes allowed (§59a risks). |
 
 ## Contents
 

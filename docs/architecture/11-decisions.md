@@ -270,18 +270,18 @@ The following should be explicitly decided during architecture review.
 
 ### Operator v0 (asked of the owner, 2026-10-04)
 
-Open. Each carries the recommendation made with the plan of §59a.
+~~Open. Each carries the recommendation made with the plan of §59a.~~ **Decided 2026-10-05:** the owner answered "go with recommendations". Every recommendation below stands. The question that carried none, the cutover window, is decided as noted on its line.
 
-- Crate prefix `aap-` and the image `ghcr.io/vymalo/another-agentic-platform/operator`? *Recommended: yes.*
-- Where do the agent custom resources live? *Recommended: adam-rs `deploy/coder-agent` and the system chart, which keeps the CI tag bumps; not home-os.*
-- A namespaced operator that watches one namespace? *Recommended: yes for v0.*
-- The CRDs installed by a separate Argo app in the infrastructure project? *Recommended: yes.*
-- May github-actions push tag bumps to this repository's `main`? *Recommended: yes, as in the other repositories.*
-- Registry authentication with one dedicated token in v0? *Recommended: yes.*
-- A shadow `coder-next` with its own CloudNativePG cluster before the cutover? *Recommended: yes.*
-- A downtime window for the coder cutover (M3)? *Owner picks.*
-- `store` on `AgentService` rather than on `AgentConfig`? *Recommended: `AgentService`.*
-- The GitHub App key stays in the coder's pod until the credential broker exists? *Recommended: yes, recorded in AD-024.*
+- Crate prefix `aap-` and the image `ghcr.io/vymalo/another-agentic-platform/operator`? *Recommended: yes.* **Decided (2026-10-05): as recommended.**
+- Where do the agent custom resources live? *Recommended: adam-rs `deploy/coder-agent` and the system chart, which keeps the CI tag bumps; not home-os.* **Decided (2026-10-05): as recommended.**
+- A namespaced operator that watches one namespace? *Recommended: yes for v0.* **Decided (2026-10-05): as recommended.**
+- The CRDs installed by a separate Argo app in the infrastructure project? *Recommended: yes.* **Decided (2026-10-05): as recommended.**
+- May github-actions push tag bumps to this repository's `main`? *Recommended: yes, as in the other repositories.* **Decided (2026-10-05): as recommended.**
+- Registry authentication with one dedicated token in v0? *Recommended: yes.* **Decided (2026-10-05): as recommended.**
+- A shadow `coder-next` with its own CloudNativePG cluster before the cutover? *Recommended: yes.* **Decided (2026-10-05): as recommended.**
+- ~~A downtime window for the coder cutover (M3)? *Owner picks.*~~ **Decided (2026-10-05):** no fixed window. The cutover is made when no run is active (the coder's runs are drained first: no new task is sent to it, and M3 starts when every run has finished or parked); the expected gap is the restart of one pod. Chosen in the owner's "go with recommendations", which named none for this line; the owner can still name a window.
+- `store` on `AgentService` rather than on `AgentConfig`? *Recommended: `AgentService`.* **Decided (2026-10-05): as recommended.**
+- The GitHub App key stays in the coder's pod until the credential broker exists? *Recommended: yes, recorded in AD-024.* **Decided (2026-10-05): as recommended.**
 
 ---
 
