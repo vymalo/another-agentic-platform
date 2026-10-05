@@ -12,7 +12,7 @@ image:
   repository: ghcr.io/vymalo/another-agentic-platform/operator
   # Bumped on every green build of main by .github/workflows/operator-image.yml (`sha-<7 hex>`), with
   # deploy/operator/bump-tag.sh: a plain key, written by that script only. `latest` is refused.
-  tag: sha-0000000
+  tag: sha-e3d164c
   # Optional `sha256:...`: when set the image is `repository:tag@digest`.
   digest: ""
   pullPolicy: IfNotPresent
