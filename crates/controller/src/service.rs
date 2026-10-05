@@ -142,6 +142,10 @@ where
         suspend: svc.spec.suspend,
         a2a_enabled: svc.spec.interfaces.a2a.enabled,
         registry: ctx.options.registry,
+        registry_full: ctx
+            .options
+            .registry_full
+            .load(std::sync::atomic::Ordering::Acquire),
         provider: ctx.runtime.name(),
         config: ConfigOutcome::Resolved,
         store: StoreOutcome::NotEvaluated,

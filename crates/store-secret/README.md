@@ -13,7 +13,7 @@ let status = store.ensure(&id, &spec).await?;   // StoreState::SecretReferenced,
 |---|---|
 | `capabilities()` | `{ cnpg: false }` |
 | `ensure(id, spec)` with `StoreKind::Secret(r)` | `StoreStatus { state: SecretReferenced, connection: r }`; remembers the id |
-| `ensure(id, spec)` with `StoreKind::Cnpg(_)` | `StoreError::Unsupported`: a cluster is [`store-cnpg`](../../docs/architecture/10-control-plane-and-crds.md#slices)'s (S6). The controller reports it as `StoreReady: False`, reason `CNPGNotInstalled` |
+| `ensure(id, spec)` with `StoreKind::Cnpg(_)` | `StoreError::Unsupported`: a cluster is [`store-cnpg`](../store-cnpg/README.md)'s (S6), and a build without that feature refuses it. The controller reports it as `StoreReady: False`, reason `CNPGNotInstalled` |
 | `ensure` of a spec that fails `check` (an empty name or key) | `StoreError::InvalidSpec` |
 | `release(id)` | `existed` is true when this provisioner ensured the id; `retained` is always false: a Secret someone else owns holds no data of ours, whatever the deletion policy says |
 

@@ -15,19 +15,24 @@ name = "operator"
 path = "src/main.rs"
 
 [features]
-# What `run` can compose (§59a lists `runtime-kubernetes`, `store-cnpg` and `registry`; the last two
-# arrive with S6 and S7). Without a runtime provider the binary still has `crdgen` and `run` says what
-# is missing.
-default = ["runtime-kubernetes"]
+# What `run` can compose (§59a lists `runtime-kubernetes`, `store-cnpg` and `registry`). Without a runtime
+# provider the binary still has `crdgen` and `run` says what is missing. Without `store-cnpg` the store is
+# the referenced-Secret one alone, and a service that asks for a cluster is `StoreReady: False`, reason
+# `CNPGNotInstalled`. Without `registry` nothing is served on 8080 and `Listed` says `RegistryDisabled`.
+default = ["runtime-kubernetes", "store-cnpg", "registry"]
 runtime-kubernetes = ["dep:aap-runtime-kubernetes"]
+store-cnpg = ["dep:aap-store-cnpg"]
+registry = ["dep:aap-registry"]
 
 [dependencies]
 aap-api.workspace = true
 aap-controller.workspace = true
+aap-registry = { workspace = true, optional = true }
 aap-runtime-kubernetes = { workspace = true, optional = true }
+aap-store-cnpg = { workspace = true, optional = true }
 aap-store-secret.workspace = true
 anyhow.workspace = true
-axum = { version = "0.8", default-features = false, features = ["http1", "tokio"] }
+axum.workspace = true
 clap.workspace = true
 kube = { workspace = true, features = ["client", "rustls-tls", "ring"] }
 serde_yaml.workspace = true

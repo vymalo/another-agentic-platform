@@ -26,6 +26,7 @@ fn observed() -> Observed {
         suspend: false,
         a2a_enabled: true,
         registry: RegistryMode::Disabled,
+        registry_full: false,
         provider: "memory",
         config: ConfigOutcome::Resolved,
         store: StoreOutcome::Answered(StoreState::SecretReferenced),
@@ -259,6 +260,26 @@ fn listed_is_decided_when_a_registry_is_served() {
     );
     assert_eq!(
         reason(|o| o.config = ConfigOutcome::NotFound { name: "c".into() }),
+        ("False".into(), "ServiceBlocked".into())
+    );
+    // A full registry lists nothing, and says so on the services it would have listed.
+    assert_eq!(
+        reason(|o| o.registry_full = true),
+        ("False".into(), "RegistryFull".into())
+    );
+    // A service that is not listable anyway keeps its own, more specific reason.
+    assert_eq!(
+        reason(|o| {
+            o.registry_full = true;
+            o.a2a_enabled = false;
+        }),
+        ("False".into(), "A2ADisabled".into())
+    );
+    assert_eq!(
+        reason(|o| {
+            o.registry_full = true;
+            o.config = ConfigOutcome::NotFound { name: "c".into() };
+        }),
         ("False".into(), "ServiceBlocked".into())
     );
     // `Listed` informs: it never makes a ready agent unready.

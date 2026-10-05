@@ -7,10 +7,16 @@ name: Operator
 # The `runtime-kubernetes` job runs the provider of S4 against a real API server: the conformance suite of
 # aap-ports and the cases of crates/runtime-kubernetes/tests/cluster.rs, with skipping forbidden.
 #
+# The `store-cnpg` job runs the provisioner of S6 against a real API server with CloudNativePG installed (the release
+# manifest, pinned by version and checked by sha256): the conformance suite of aap-ports and the cases of
+# crates/store-cnpg/tests/cluster.rs, which wait for a real Cluster to be ready and read its `<cluster>-app` Secret.
+#
 # The `operator-e2e` job is S5's end-to-end: the CRDs of deploy/crds are installed in a kind cluster, the
 # `operator` binary built in the job runs against it (bin/operator/tests/cluster.rs starts it, one per case),
 # and each case applies an AgentConfig and an AgentService, waits for Ready, and deletes. The pods run a stand-in
-# image (bin/operator/tests/stub), so no adam image is needed.
+# image (bin/operator/tests/stub), so no adam image is needed. S7's case also reads the agent registry the
+# operator serves, with the token and without, from this machine and from a pod of the cluster, and follows the card
+# it lists.
 #
 # Later slices add the image, the chart and the end-to-end of the agents (S8, S9).
 
@@ -172,6 +178,57 @@ jobs:
           kubectl -n aap-test get events --sort-by=.lastTimestamp | tail -80 || true
           kubectl -n aap-test describe pods | tail -200 || true
 
+  store-cnpg:
+    # StoreProvisioner for an operator-owned CloudNativePG Cluster against a real API server (S6): the conformance
+    # suite of aap-ports and the cases only CloudNativePG shows. Nothing may skip.
+    runs-on: ubuntu-latest
+    timeout-minutes: 40
+    steps:
+      - uses: actions/checkout@v7
+      - name: Create a kind cluster
+        uses: helm/kind-action@v1
+        with:
+          version: v0.33.0
+          # The same node image as the other jobs: Kubernetes v1.35.8, the digest of the index of the tag.
+          node_image: kindest/node:v1.35.8@sha256:07b2536e30b803ed61d1677a79df6115f798ce64c80f9e22f6ed45afd09323c0
+          cluster_name: aap-cnpg
+          wait: 120s
+      - name: Install CloudNativePG
+        env:
+          # The release manifest of CloudNativePG 1.30.1 (1.30.x supports Kubernetes 1.34 to 1.36: verified 2026-10-05,
+          # https://cloudnative-pg.io/docs/devel/supported_releases). The checksum is that of the file read on
+          # 2026-10-05, identical from the release asset and from the release-1.30 branch. The manifest names its
+          # operator image by tag (ghcr.io/cloudnative-pg/cloudnative-pg:1.30.1), not by digest.
+          CNPG_URL: https://github.com/cloudnative-pg/cloudnative-pg/releases/download/v1.30.1/cnpg-1.30.1.yaml
+          CNPG_SHA256: 37237f145d8138256ea25ae830f87759255665ff08f8d552fdd8224a5ec032fb
+        run: |
+          curl -fsSL -o "$RUNNER_TEMP/cnpg.yaml" "$CNPG_URL"
+          echo "$CNPG_SHA256  $RUNNER_TEMP/cnpg.yaml" | sha256sum -c -
+          # Server-side: the CRDs are too large for a client-side apply's annotation.
+          kubectl apply --server-side -f "$RUNNER_TEMP/cnpg.yaml"
+          kubectl -n cnpg-system rollout status deployment/cnpg-controller-manager --timeout=180s
+          kubectl wait --for=condition=Established --timeout=60s crd/clusters.postgresql.cnpg.io
+      - name: Install Rust
+        run: rustup toolchain install "$RUST_TOOLCHAIN" --profile minimal --no-self-update && rustup default "$RUST_TOOLCHAIN"
+      - uses: Swatinem/rust-cache@v2
+      - name: The provisioner against the cluster
+        env:
+          AAP_TEST_REQUIRE_CLUSTER: "1"
+          AAP_TEST_REQUIRE_BACKEND: "1"
+        run: |
+          # The kubeconfig kind-action wrote; a file, so the tests never fall back to some default context.
+          export AAP_TEST_KUBECONFIG="$HOME/.kube/config"
+          kubectl --kubeconfig "$AAP_TEST_KUBECONFIG" get nodes
+          # Every case names its Clusters itself; each makes a Postgres pod, so not too many at once.
+          cargo test -p aap-store-cnpg --test cluster --locked -- --test-threads=3
+      - name: What the cluster says, when a case failed
+        if: failure()
+        run: |
+          kubectl -n aap-test get clusters.postgresql.cnpg.io,pods,pvc,secrets -o wide || true
+          kubectl -n aap-test describe clusters.postgresql.cnpg.io | tail -200 || true
+          kubectl -n aap-test get events --sort-by=.lastTimestamp | tail -80 || true
+          kubectl -n cnpg-system logs deployment/cnpg-controller-manager --tail=100 || true
+
   operator-e2e:
     # The operator binary against a real cluster, with real pods (S5). Nothing may skip: with
     # AAP_TEST_REQUIRE_CLUSTER an unset cluster is a failure, not a green run that proved nothing.
@@ -212,6 +269,12 @@ jobs:
           # The kubeconfig kind-action wrote; a file, so the tests never fall back to some default context.
           export AAP_TEST_KUBECONFIG="$HOME/.kube/config"
           kubectl --kubeconfig "$AAP_TEST_KUBECONFIG" get nodes
+          # The registry case reads the registry, and the card it lists, from a pod. The operator runs on this
+          # machine, which the pods of kind reach at the IPv4 gateway of the docker network `kind`.
+          AAP_TEST_HOST_ADDR="$(docker network inspect kind --format '{{range .IPAM.Config}}{{println .Gateway}}{{end}}' | grep -E '^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$' | head -1)"
+          test -n "$AAP_TEST_HOST_ADDR" || { echo "::error::no IPv4 gateway found for the docker network kind"; exit 1; }
+          echo "pods reach this machine at $AAP_TEST_HOST_ADDR"
+          export AAP_TEST_HOST_ADDR
           # Every case has a namespace, Secrets and object names of its own, so they run side by side.
           cargo test -p aap-operator --test cluster --locked -- --test-threads=4
       - name: What the cluster says, when a case failed

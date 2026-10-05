@@ -1,5 +1,5 @@
 //! The two small HTTP servers of the operator: health on 8081 (`/healthz`, `/readyz`) and metrics on
-//! 9090 (`/metrics`, Prometheus text). The registry's 8080 is S7's.
+//! 9090 (`/metrics`, Prometheus text). `serve` also serves the registry's router on 8080 (`aap-registry`).
 
 use std::future::Future;
 use std::net::SocketAddr;

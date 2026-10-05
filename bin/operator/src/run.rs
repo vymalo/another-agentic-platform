@@ -2,6 +2,7 @@
 //! store provisioner (AD-020); this is the one place that names the types.
 
 use std::net::SocketAddr;
+use std::path::PathBuf;
 
 use anyhow::Result;
 use clap::Args;
@@ -29,6 +30,22 @@ pub struct RunArgs {
     #[arg(long, env = "AAP_CONCURRENCY", default_value_t = 4)]
     pub concurrency: u16,
 
+    /// Where the agent registry (`GET /registry/v1/agents`) is served. Only with the `registry` feature
+    /// and a token.
+    #[arg(long, env = "REGISTRY_ADDR", default_value = "0.0.0.0:8080")]
+    pub registry_addr: SocketAddr,
+
+    /// The file that holds the registry's bearer token (a mounted Secret). **No token, no registry**: with
+    /// this unset, or the file missing or empty, nothing is served on the registry's port and every service
+    /// is `Listed: False`, reason `RegistryDisabled` (fail closed). Read once at start.
+    #[arg(long, env = "REGISTRY_TOKEN_FILE")]
+    pub registry_token_file: Option<PathBuf>,
+
+    /// The URL of the registry document itself, sent as its `anchor` (the contract asks a server to; a
+    /// client ignores it). Unset: no `anchor`.
+    #[arg(long, env = "REGISTRY_PUBLIC_URL")]
+    pub registry_public_url: Option<String>,
+
     /// Seconds between looks at a service that is Ready or Suspended (the timer that makes a lost
     /// signal harmless).
     #[arg(long, env = "AAP_RESYNC_SECS", default_value_t = 300)]
@@ -49,11 +66,19 @@ impl RunArgs {
             .filter(|n| !n.trim().is_empty())
     }
 
-    fn options(&self) -> aap_controller::Options {
+    fn options(
+        &self,
+        registry: bool,
+        registry_full: std::sync::Arc<std::sync::atomic::AtomicBool>,
+    ) -> aap_controller::Options {
         aap_controller::Options {
             watch_namespace: self.namespace(),
-            // The registry is S7: until then `Listed` says `RegistryDisabled`.
-            registry: aap_controller::RegistryMode::Disabled,
+            registry: if registry {
+                aap_controller::RegistryMode::Enabled
+            } else {
+                aap_controller::RegistryMode::Disabled
+            },
+            registry_full,
             resync: aap_controller::Resync {
                 settled: std::time::Duration::from_secs(self.resync_secs),
                 pending: std::time::Duration::from_secs(self.resync_pending_secs),
@@ -64,6 +89,56 @@ impl RunArgs {
         }
     }
 }
+
+/// The store provisioner of this build: with `store-cnpg`, the one that makes a CloudNativePG cluster and
+/// also serves a referenced Secret (it passes the whole suite of `aap-ports`, so the controller sees one
+/// type); without it, referenced Secrets alone, and a cluster is refused as not installed.
+#[cfg(all(feature = "runtime-kubernetes", feature = "store-cnpg"))]
+fn store(client: &kube::Client) -> aap_store_cnpg::CnpgStore {
+    aap_store_cnpg::CnpgStore::new(client.clone())
+}
+
+#[cfg(all(feature = "runtime-kubernetes", not(feature = "store-cnpg")))]
+fn store(_client: &kube::Client) -> aap_store_secret::SecretStore {
+    aap_store_secret::SecretStore::new()
+}
+
+/// The registry's token, or why there is none. **No token, no registry** (fail closed): the operator
+/// keeps reconciling, says so loudly, and every service is `Listed: False`, reason `RegistryDisabled`.
+#[cfg(all(feature = "runtime-kubernetes", feature = "registry"))]
+fn registry_token(args: &RunArgs) -> Option<aap_registry::Token> {
+    let Some(path) = &args.registry_token_file else {
+        tracing::warn!(
+            "no REGISTRY_TOKEN_FILE: the agent registry is not served (it has no token to demand)"
+        );
+        return None;
+    };
+    match aap_registry::Token::from_file(path) {
+        Ok(token) => Some(token),
+        Err(e) => {
+            tracing::error!(
+                "{}: {e}: the agent registry is not served (it has no token to demand)",
+                path.display()
+            );
+            None
+        }
+    }
+}
+
+#[cfg(all(feature = "runtime-kubernetes", not(feature = "registry")))]
+fn registry_token(args: &RunArgs) -> Option<()> {
+    if args.registry_token_file.is_some() {
+        tracing::warn!(
+            "REGISTRY_TOKEN_FILE is set, but this build has no `registry` feature: nothing is served on the registry's port"
+        );
+    }
+    None
+}
+
+/// How often the registry's document is built when nobody asks, so that `RegistryFull` is true to the
+/// directory and not to the last request.
+#[cfg(all(feature = "runtime-kubernetes", feature = "registry"))]
+const REGISTRY_REFRESH: std::time::Duration = std::time::Duration::from_secs(15);
 
 /// Resolves on SIGTERM or SIGINT.
 #[cfg(feature = "runtime-kubernetes")]
@@ -96,14 +171,16 @@ pub async fn run(args: RunArgs) -> Result<()> {
     use kube::{Resource, ResourceExt};
     use tokio::sync::watch;
 
-    let options = args.options();
+    let registry_full = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let token = registry_token(&args);
+    let options = args.options(token.is_some(), registry_full.clone());
     tracing::info!(
         namespace = options.watch_namespace.as_deref().unwrap_or("(all)"),
         "starting the operator {}",
         env!("CARGO_PKG_VERSION")
     );
 
-    // Everything below is the composition: a Kubernetes runtime, referenced Secrets, the controllers.
+    // Everything below is the composition: a Kubernetes runtime, the store, the controllers.
     let client = kube::Client::try_default()
         .await
         .context("connecting to the cluster (in-cluster configuration, or KUBECONFIG)")?;
@@ -121,13 +198,18 @@ pub async fn run(args: RunArgs) -> Result<()> {
             svc.metadata.uid.clone().unwrap_or_default(),
         )
     });
-    let operator = Operator::new(
-        client,
-        runtime,
-        aap_store_secret::SecretStore::new(),
-        owner,
-        options,
-    );
+    let store = store(&client);
+    let operator = Operator::new(client, runtime, store, owner, options);
+
+    #[cfg(feature = "registry")]
+    let registry_server = token.map(|token| {
+        let mut registry = aap_registry::Registry::new(operator.directory(), token)
+            .with_full_flag(registry_full.clone());
+        if let Some(anchor) = args.registry_public_url.clone().filter(|u| !u.is_empty()) {
+            registry = registry.with_anchor(anchor);
+        }
+        Arc::new(registry)
+    });
 
     let (stop, stopped) = watch::channel(false);
     let signalled = |mut rx: watch::Receiver<bool>| async move {
@@ -144,6 +226,36 @@ pub async fn run(args: RunArgs) -> Result<()> {
         crate::serve::metrics(operator.metrics()),
         signalled(stopped.clone()),
     ));
+
+    // The registry: served on its port, and its document built on a timer besides, so that the flag the
+    // controller reads (`RegistryFull`) follows the directory when nobody asks.
+    #[cfg(feature = "registry")]
+    let registry = tokio::spawn({
+        let registry = registry_server.clone();
+        let addr = args.registry_addr;
+        let stopped = stopped.clone();
+        async move {
+            let Some(registry) = registry else {
+                // Not served: the select below must not end on this arm.
+                return std::future::pending::<Result<()>>().await;
+            };
+            let refresh = {
+                let registry = registry.clone();
+                tokio::spawn(async move {
+                    loop {
+                        // The result is the flag's and the log's: nobody is waiting for it.
+                        let _ = registry.document().await;
+                        tokio::time::sleep(REGISTRY_REFRESH).await;
+                    }
+                })
+            };
+            let served = crate::serve::serve(addr, registry.router(), signalled(stopped)).await;
+            refresh.abort();
+            served
+        }
+    });
+    #[cfg(not(feature = "registry"))]
+    let registry = tokio::spawn(std::future::pending::<Result<()>>());
 
     let asked = Arc::new(std::sync::atomic::AtomicBool::new(false));
     let asked_by_signal = asked.clone();
@@ -165,6 +277,7 @@ pub async fn run(args: RunArgs) -> Result<()> {
         }
         r = health => r.context("the health server task").and_then(|r| r).and(Err(anyhow::anyhow!("the health server stopped"))),
         r = metrics => r.context("the metrics server task").and_then(|r| r).and(Err(anyhow::anyhow!("the metrics server stopped"))),
+        r = registry => r.context("the registry task").and_then(|r| r).and(Err(anyhow::anyhow!("the registry stopped"))),
     };
     // Stop whatever still serves.
     let _ = stop.send(true);
