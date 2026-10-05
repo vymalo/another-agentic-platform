@@ -459,13 +459,16 @@ async fn a_missing_secret_is_named_by_the_reason_and_the_runtime_recovers_when_i
     let Some(h) = make().await else { return };
     let id = fresh();
     // One reference to a Secret that does not exist. The provider directly: the harness would make it.
+    // Its name is this runtime's own: the other tests run at the same time in the namespace and make
+    // `{SENTINEL}-secrets` for their pods, which would let this pod start.
+    let missing = format!("{SENTINEL}-{}-secrets", id.name());
     let mut spec = runnable(&bare(&id));
     spec.workloads[0]
         .container
         .env
         .push(aap_ports::EnvVar::secret(
             "MODEL_API_KEY",
-            aap_ports::SecretRef::new(format!("{SENTINEL}-secrets"), "MODEL_API_KEY"),
+            aap_ports::SecretRef::new(missing.clone(), "MODEL_API_KEY"),
         ));
     h.runtime.ensure(&id, &spec).await.unwrap();
 
@@ -473,7 +476,7 @@ async fn a_missing_secret_is_named_by_the_reason_and_the_runtime_recovers_when_i
         let s = h.status(&id).await.unwrap();
         s.issues
             .iter()
-            .any(|i| matches!(&i.reason, IssueReason::MissingSecret { name } if name == &format!("{SENTINEL}-secrets")))
+            .any(|i| matches!(&i.reason, IssueReason::MissingSecret { name } if name == &missing))
             .then_some(s)
     })
     .await;
