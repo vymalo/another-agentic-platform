@@ -14,7 +14,9 @@ name: Operator
 # The `operator-e2e` job is S5's end-to-end: the CRDs of deploy/crds are installed in a kind cluster, the
 # `operator` binary built in the job runs against it (bin/operator/tests/cluster.rs starts it, one per case),
 # and each case applies an AgentConfig and an AgentService, waits for Ready, and deletes. The pods run a stand-in
-# image (bin/operator/tests/stub), so no adam image is needed.
+# image (bin/operator/tests/stub), so no adam image is needed. S7's case also reads the agent registry the
+# operator serves, with the token and without, from this machine and from a pod of the cluster, and follows the card
+# it lists.
 #
 # Later slices add the image, the chart and the end-to-end of the agents (S8, S9).
 
@@ -267,6 +269,12 @@ jobs:
           # The kubeconfig kind-action wrote; a file, so the tests never fall back to some default context.
           export AAP_TEST_KUBECONFIG="$HOME/.kube/config"
           kubectl --kubeconfig "$AAP_TEST_KUBECONFIG" get nodes
+          # The registry case reads the registry, and the card it lists, from a pod. The operator runs on this
+          # machine, which the pods of kind reach at the IPv4 gateway of the docker network `kind`.
+          AAP_TEST_HOST_ADDR="$(docker network inspect kind --format '{{range .IPAM.Config}}{{println .Gateway}}{{end}}' | grep -E '^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$' | head -1)"
+          test -n "$AAP_TEST_HOST_ADDR" || { echo "::error::no IPv4 gateway found for the docker network kind"; exit 1; }
+          echo "pods reach this machine at $AAP_TEST_HOST_ADDR"
+          export AAP_TEST_HOST_ADDR
           # Every case has a namespace, Secrets and object names of its own, so they run side by side.
           cargo test -p aap-operator --test cluster --locked -- --test-threads=4
       - name: What the cluster says, when a case failed

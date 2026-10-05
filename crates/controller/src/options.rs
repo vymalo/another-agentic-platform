@@ -1,5 +1,7 @@
 //! What a composition root sets.
 
+use std::sync::Arc;
+use std::sync::atomic::AtomicBool;
 use std::time::Duration;
 
 /// Whether this operator serves an agent registry (S7). It decides the `Listed` condition.
@@ -43,6 +45,12 @@ pub struct Options {
     pub watch_namespace: Option<String>,
     /// Whether a registry is served.
     pub registry: RegistryMode,
+    /// Set by the registry while it refuses to list because its document would pass a limit of the
+    /// contract (500 items, 1 MiB): every service that would have been listed is then `Listed: False`,
+    /// reason `RegistryFull`. The composition root shares this one flag with the registry (the controller
+    /// depends on no registry crate); a pass reads it, so a change reaches a service at its next pass.
+    /// Meaningless with [`RegistryMode::Disabled`].
+    pub registry_full: Arc<AtomicBool>,
     /// The timers.
     pub resync: Resync,
     /// Services reconciled at the same time (never the same one twice).
@@ -56,6 +64,7 @@ impl Default for Options {
         Self {
             watch_namespace: None,
             registry: RegistryMode::Disabled,
+            registry_full: Arc::new(AtomicBool::new(false)),
             resync: Resync::default(),
             concurrency: 4,
             instance: None,

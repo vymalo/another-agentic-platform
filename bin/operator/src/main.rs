@@ -1,6 +1,6 @@
 //! The operator: the composition root (AD-020). `crdgen` prints the CRDs; `run` composes the
-//! Kubernetes runtime provider, the Secret store and the controllers, and serves health (8081) and
-//! metrics (9090).
+//! Kubernetes runtime provider, the store (CloudNativePG, or referenced Secrets) and the controllers, and
+//! serves health (8081), metrics (9090) and, with a token, the agent registry (8080).
 
 mod run;
 #[cfg(feature = "runtime-kubernetes")]
@@ -20,7 +20,9 @@ struct Cli {
     command: Command,
 }
 
+// `Run` carries every setting of `run`; the enum is parsed once at start, so its size costs nothing.
 #[derive(Debug, Subcommand)]
+#[allow(clippy::large_enum_variant)]
 enum Command {
     /// Print the CustomResourceDefinitions as multi-document YAML.
     Crdgen,

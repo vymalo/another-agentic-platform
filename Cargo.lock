@@ -60,6 +60,7 @@ dependencies = [
  "aap-controller",
  "aap-domain",
  "aap-ports",
+ "aap-registry",
  "aap-runtime-kubernetes",
  "aap-store-cnpg",
  "aap-store-secret",
@@ -88,6 +89,23 @@ dependencies = [
  "serde_json",
  "thiserror 2.0.21",
  "tokio",
+]
+
+[[package]]
+name = "aap-registry"
+version = "0.1.0"
+dependencies = [
+ "aap-ports",
+ "axum",
+ "proptest",
+ "serde_json",
+ "sha2",
+ "subtle",
+ "thiserror 2.0.21",
+ "tokio",
+ "tower",
+ "tracing",
+ "url",
 ]
 
 [[package]]

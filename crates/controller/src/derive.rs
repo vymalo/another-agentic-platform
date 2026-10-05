@@ -53,6 +53,8 @@ pub struct Observed {
     pub a2a_enabled: bool,
     /// Whether this operator serves a registry.
     pub registry: RegistryMode,
+    /// The registry refuses to list anything for now: its document would pass a limit (`RegistryFull`).
+    pub registry_full: bool,
     /// `RuntimeProvider::name`.
     pub provider: &'static str,
     /// The config.
@@ -314,6 +316,12 @@ fn listed_condition(obs: &Observed, state: ServiceState) -> Draft {
                     Truth::False,
                     reason::SERVICE_BLOCKED,
                     "the service is Blocked, so the registry does not list it",
+                )
+            } else if obs.registry_full {
+                Draft::new(
+                    Truth::False,
+                    reason::REGISTRY_FULL,
+                    "the registry would pass its limit of 500 items or 1 MiB and lists nothing rather than truncate",
                 )
             } else if obs
                 .endpoints

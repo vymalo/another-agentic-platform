@@ -88,6 +88,25 @@ impl World {
     }
 
     fn build(example_name: &str, scripted: Scripted, store: MemoryStore) -> Self {
+        Self::build_with(example_name, scripted, store, Options::default())
+    }
+
+    /// A world whose registry is served (or not), as the composition root says.
+    fn with_options(example_name: &str, options: Options) -> Self {
+        Self::build_with(
+            example_name,
+            Scripted::wrapping(MemoryRuntime::new()),
+            MemoryStore::new(),
+            options,
+        )
+    }
+
+    fn build_with(
+        example_name: &str,
+        scripted: Scripted,
+        store: MemoryStore,
+        options: Options,
+    ) -> Self {
         let runtime = scripted.inner.clone();
         let (service, config) = example(example_name);
         let fake = Fake::new();
@@ -96,15 +115,9 @@ impl World {
         fake.put(CONFIGS, config);
         let metrics = Arc::new(Metrics::new());
         let ctx = Arc::new(
-            Context::new(
-                fake.client(),
-                scripted,
-                store.clone(),
-                owner(),
-                Options::default(),
-            )
-            .with_clock(clock())
-            .with_metrics(metrics.clone()),
+            Context::new(fake.client(), scripted, store.clone(), owner(), options)
+                .with_clock(clock())
+                .with_metrics(metrics.clone()),
         );
         Self {
             fake,
@@ -206,6 +219,40 @@ async fn the_first_pass_only_adds_the_finalizer() {
     let patch = w.fake.writes().pop().unwrap();
     assert!(patch.content_type.contains("json-patch"));
     assert_eq!(patch.body.unwrap()[0]["op"], "test");
+}
+
+#[tokio::test]
+async fn a_served_registry_lists_a_ready_service_and_a_full_one_lists_nothing() {
+    use std::sync::atomic::Ordering;
+
+    let full = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let w = World::with_options(
+        "chat",
+        Options {
+            registry: aap_controller::RegistryMode::Enabled,
+            registry_full: full.clone(),
+            ..Options::default()
+        },
+    );
+    w.settle().await;
+    let status = w.status();
+    is(&status, "Listed", "True", "Listed");
+    is(&status, "Ready", "True", "Reconciled");
+
+    // The registry says it would pass a limit: the next pass says so, and the agent stays Ready.
+    full.store(true, Ordering::Release);
+    w.settle().await;
+    let status = w.status();
+    is(&status, "Listed", "False", "RegistryFull");
+    is(&status, "Ready", "True", "Reconciled");
+    assert_eq!(
+        status["state"], "Ready",
+        "Listed informs and never gates Ready"
+    );
+
+    full.store(false, Ordering::Release);
+    w.settle().await;
+    is(&w.status(), "Listed", "True", "Listed");
 }
 
 #[tokio::test]

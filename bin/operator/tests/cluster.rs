@@ -33,10 +33,12 @@ use std::time::{Duration, Instant};
 
 use aap_api::AgentService;
 use k8s_openapi::api::apps::v1::{Deployment, StatefulSet};
-use k8s_openapi::api::core::v1::{ConfigMap, Namespace, PersistentVolumeClaim, Secret, Service};
+use k8s_openapi::api::core::v1::{
+    ConfigMap, Namespace, PersistentVolumeClaim, Pod, Secret, Service,
+};
 use k8s_openapi::api::events::v1::Event;
 use k8s_openapi::apiextensions_apiserver::pkg::apis::apiextensions::v1::CustomResourceDefinition;
-use kube::api::{DeleteParams, ListParams, Patch, PatchParams, PostParams};
+use kube::api::{DeleteParams, ListParams, LogParams, Patch, PatchParams, PostParams};
 use kube::config::{KubeConfigOptions, Kubeconfig};
 use kube::{Api, Client, Config};
 use serde_json::{Value, json};
@@ -45,6 +47,9 @@ const KUBECONFIG_VAR: &str = "AAP_TEST_KUBECONFIG";
 const REQUIRE_VAR: &str = "AAP_TEST_REQUIRE_CLUSTER";
 const IMAGE_VAR: &str = "AAP_TEST_STUB_IMAGE";
 const NO_WORKLOADS_VAR: &str = "AAP_TEST_NO_WORKLOADS";
+/// The address of this machine as the pods of the cluster reach it (kind: the gateway of the `kind` docker
+/// network). Set, the registry case also reads the registry, and the card it lists, from a pod.
+const HOST_ADDR_VAR: &str = "AAP_TEST_HOST_ADDR";
 const FINALIZER: &str = "agents.vymalo.com/runtime";
 
 // ---------------------------------------------------------------- the manifests
@@ -261,6 +266,7 @@ struct OperatorProc {
     log: std::path::PathBuf,
     health: u16,
     metrics: u16,
+    registry: u16,
 }
 
 fn free_port() -> u16 {
@@ -272,15 +278,26 @@ fn free_port() -> u16 {
 }
 
 impl OperatorProc {
-    fn spawn(cluster: &Cluster, namespace: &str) -> Self {
+    /// `registry_token`: the token the registry demands, written to a file the operator reads. `None`: no
+    /// `REGISTRY_TOKEN_FILE`, so no registry (fail closed), which is what most cases run with.
+    fn spawn(cluster: &Cluster, namespace: &str, registry_token: Option<&str>) -> Self {
         let log = std::env::temp_dir().join(format!("aap-e2e-{namespace}-{}.log", free_port()));
-        let (health, metrics) = (free_port(), free_port());
-        let child = Command::new(env!("CARGO_BIN_EXE_operator"))
+        let (health, metrics, registry) = (free_port(), free_port(), free_port());
+        let mut command = Command::new(env!("CARGO_BIN_EXE_operator"));
+        if let Some(token) = registry_token {
+            let file = std::env::temp_dir().join(format!("aap-e2e-{namespace}.token"));
+            // A mounted Secret ends its value with a newline as often as not.
+            std::fs::write(&file, format!("{token}\n")).unwrap();
+            command.env("REGISTRY_TOKEN_FILE", file);
+        }
+        let child = command
             .arg("run")
             .env("KUBECONFIG", &cluster.kubeconfig)
             .env("WATCH_NAMESPACE", namespace)
             .env("HEALTH_ADDR", format!("127.0.0.1:{health}"))
             .env("METRICS_ADDR", format!("127.0.0.1:{metrics}"))
+            // Every interface, so that a pod can reach it (the registry case); the port is this case's own.
+            .env("REGISTRY_ADDR", format!("0.0.0.0:{registry}"))
             .env("POD_NAME", "operator-under-test")
             // The pending timer is short, so what a signal missed is found soon.
             .env("AAP_RESYNC_PENDING_SECS", "5")
@@ -294,6 +311,7 @@ impl OperatorProc {
             log,
             health,
             metrics,
+            registry,
         }
     }
 
@@ -341,6 +359,14 @@ struct Case<'a> {
 
 impl<'a> Case<'a> {
     async fn begin(cluster: &'a Cluster, prefix: &str) -> Case<'a> {
+        Self::begin_with(cluster, prefix, None).await
+    }
+
+    async fn begin_with(
+        cluster: &'a Cluster,
+        prefix: &str,
+        registry_token: Option<&str>,
+    ) -> Case<'a> {
         let nanos = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .unwrap()
@@ -363,7 +389,7 @@ impl<'a> Case<'a> {
         let emulator = cluster
             .no_workloads
             .then(|| tokio::spawn(emulate_workloads(cluster.client.clone(), ns.clone())));
-        let operator = Some(OperatorProc::spawn(cluster, &ns));
+        let operator = Some(OperatorProc::spawn(cluster, &ns, registry_token));
         Case {
             cluster,
             ns,
@@ -1070,7 +1096,7 @@ async fn a_deletion_that_happens_while_the_operator_is_down_completes_when_it_re
         "nothing has run the delete yet"
     );
 
-    case.operator = Some(OperatorProc::spawn(&cluster, &case.ns));
+    case.operator = Some(OperatorProc::spawn(&cluster, &case.ns, None));
     case.gone::<AgentService>("chat", 120).await;
     case.gone::<Deployment>("chat", 60).await;
     case.finish().await;
@@ -1179,5 +1205,271 @@ async fn a_service_that_asks_for_a_cluster_is_cnpg_not_installed_without_cloudna
         .await
         .unwrap();
     case.gone::<AgentService>("chat", 60).await;
+    case.finish().await;
+}
+
+// ---------------------------------------------------------------------- S7: the registry
+
+/// A bare HTTP/1.1 request: status code, headers (names lower-cased) and body.
+async fn http_request(
+    port: u16,
+    method: &str,
+    path: &str,
+    headers: &[(&str, &str)],
+) -> Option<(u16, Vec<(String, String)>, String)> {
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    let mut stream = tokio::net::TcpStream::connect(("127.0.0.1", port))
+        .await
+        .ok()?;
+    let mut request =
+        format!("{method} {path} HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n");
+    for (k, v) in headers {
+        request.push_str(&format!("{k}: {v}\r\n"));
+    }
+    request.push_str("\r\n");
+    stream.write_all(request.as_bytes()).await.ok()?;
+    let mut out = String::new();
+    stream.read_to_string(&mut out).await.ok()?;
+    let (head, body) = out.split_once("\r\n\r\n")?;
+    let mut lines = head.lines();
+    let code = lines.next()?.split_whitespace().nth(1)?.parse().ok()?;
+    let headers = lines
+        .filter_map(|l| l.split_once(':'))
+        .map(|(k, v)| (k.trim().to_ascii_lowercase(), v.trim().to_owned()))
+        .collect();
+    Some((code, headers, body.to_owned()))
+}
+
+fn header<'a>(headers: &'a [(String, String)], name: &str) -> &'a str {
+    headers
+        .iter()
+        .find(|(k, _)| k == name)
+        .map_or("", |(_, v)| v.as_str())
+}
+
+/// Run `script` in a pod of the stand-in image (busybox, so `wget`) and return what it printed.
+async fn run_in_pod(case: &Case<'_>, name: &str, script: &str) -> String {
+    use kube::api::PostParams;
+    let pod: Pod = serde_json::from_value(json!({
+        "apiVersion": "v1", "kind": "Pod", "metadata": {"name": name},
+        "spec": {
+            "restartPolicy": "Never",
+            "automountServiceAccountToken": false,
+            "securityContext": {"runAsUser": 10001, "runAsGroup": 10001, "runAsNonRoot": true,
+                                "seccompProfile": {"type": "RuntimeDefault"}},
+            "containers": [{
+                "name": "probe", "image": case.cluster.image,
+                "command": ["sh", "-c", script],
+                "securityContext": {"allowPrivilegeEscalation": false, "capabilities": {"drop": ["ALL"]}},
+            }],
+        },
+    }))
+    .unwrap();
+    let pods = case.api::<Pod>();
+    pods.create(&PostParams::default(), &pod)
+        .await
+        .unwrap_or_else(|e| panic!("pod {name}: {e}"));
+    let phase = poll(&format!("pod {name} to finish"), 180, || async {
+        let p = pods.get(name).await.ok()?;
+        let phase = p.status?.phase?;
+        matches!(phase.as_str(), "Succeeded" | "Failed").then_some(phase)
+    })
+    .await;
+    let logs = pods
+        .logs(name, &LogParams::default())
+        .await
+        .unwrap_or_else(|e| format!("(no logs: {e})"));
+    assert_eq!(
+        phase, "Succeeded",
+        "pod {name} ended {phase}; it printed:\n{logs}"
+    );
+    logs
+}
+
+#[tokio::test]
+async fn the_registry_lists_a_ready_agent_to_whoever_holds_the_token_and_nobody_else() {
+    let Some(cluster) = connect().await else {
+        return;
+    };
+    const TOKEN: &str = "e2e-registry-token-6f1d0c9a";
+    let case = Case::begin_with(&cluster, "registry", Some(TOKEN)).await;
+    let port = case.operator.as_ref().unwrap().registry;
+    let ns = case.ns.clone();
+
+    case.secrets("chat").await;
+    let (svc, cfg) = chat("chat", &cluster.image);
+    case.apply::<aap_api::AgentConfig>(&cfg).await;
+    case.apply::<AgentService>(&svc).await;
+    // A service whose config does not exist is Blocked, and a registry never lists what is not applied.
+    let (mut orphan, _) = chat("orphan", &cluster.image);
+    orphan["spec"]["configRef"] = json!({"name": "nobody-made-this"});
+    case.apply::<AgentService>(&orphan).await;
+
+    let listed = case
+        .until("chat", "Listed: True", 240, |s| {
+            state(s) == "Ready" && is(s, "Listed", "True", "Listed")
+        })
+        .await;
+    assert!(is(&listed["status"], "Ready", "True", "Reconciled"));
+    let blocked = case
+        .until("orphan", "Listed: False, ServiceBlocked", 60, |s| {
+            is(s, "Listed", "False", "ServiceBlocked")
+        })
+        .await;
+    assert_eq!(state(&blocked["status"]), "Blocked");
+
+    // No token, or a wrong one: 401, and nothing in the body.
+    for headers in [
+        vec![],
+        vec![("Authorization", "Bearer wrong")],
+        vec![("Authorization", "Basic ZTJlOnRva2Vu")],
+    ] {
+        let (code, _, body) = poll("the registry to answer", 60, || async {
+            http_request(port, "GET", "/registry/v1/agents", &headers).await
+        })
+        .await;
+        assert_eq!(code, 401, "{headers:?}");
+        assert!(body.is_empty(), "{body}");
+    }
+
+    // The token: the linkset, with the cache headers of the contract.
+    let auth = format!("Bearer {TOKEN}");
+    let (code, headers, body) = http_request(
+        port,
+        "GET",
+        "/registry/v1/agents",
+        &[
+            ("Authorization", &auth),
+            ("Accept", "application/linkset+json"),
+        ],
+    )
+    .await
+    .expect("the registry answers");
+    assert_eq!(code, 200, "{body}");
+    assert!(header(&headers, "content-type").starts_with("application/linkset+json"));
+    assert_eq!(header(&headers, "cache-control"), "private, max-age=30");
+    assert_eq!(header(&headers, "vary"), "Authorization");
+    let etag = header(&headers, "etag").to_owned();
+    assert!(etag.starts_with('"'), "{etag}");
+    let doc: Value = serde_json::from_str(&body).unwrap();
+    let context = &doc["linkset"][0];
+    assert_eq!(
+        context["profile"][0]["href"],
+        "https://agents.vymalo.com/registry/v1"
+    );
+    let card = format!("http://chat.{ns}.svc:8080/.well-known/agent-card.json");
+    assert_eq!(
+        context["item"],
+        json!([{"href": card, "type": "application/json", "service": ["chat"], "title": "chat", "tags": ["e2e"]}]),
+        "the agent that is Ready is listed, the blocked one is not: {body}"
+    );
+    assert!(!body.contains(TOKEN));
+
+    // The validator: 304 on a match, and HEAD has the headers and no body.
+    let (code, headers, body) = http_request(
+        port,
+        "GET",
+        "/registry/v1/agents",
+        &[("Authorization", &auth), ("If-None-Match", &etag)],
+    )
+    .await
+    .unwrap();
+    assert_eq!(code, 304);
+    assert!(body.is_empty());
+    assert_eq!(header(&headers, "etag"), etag);
+    let (code, _, body) = http_request(
+        port,
+        "HEAD",
+        "/registry/v1/agents",
+        &[("Authorization", &auth)],
+    )
+    .await
+    .unwrap();
+    assert_eq!(code, 200);
+    assert!(body.is_empty());
+
+    // From inside the cluster: the registry over the network a pod has, and the card it points at.
+    match std::env::var(HOST_ADDR_VAR).ok().filter(|h| !h.is_empty()) {
+        Some(host) => {
+            let script = format!(
+                "wget -q -O - --header 'Authorization: Bearer {TOKEN}' http://{host}:{port}/registry/v1/agents && echo && echo ---- && wget -q -O - {card}"
+            );
+            let logs = run_in_pod(&case, "registry-reader", &script).await;
+            assert!(logs.contains(r#""service":["chat"]"#), "{logs}");
+            assert!(!logs.contains("orphan"), "{logs}");
+            let (_, card_text) = logs.split_once("----").unwrap();
+            assert!(
+                card_text.contains("a stand-in for the adam-rs image"),
+                "the card the registry lists answers in the cluster: {logs}"
+            );
+            // And without the token the same pod is refused.
+            let refused = run_in_pod(
+                &case,
+                "registry-refused",
+                &format!(
+                    "wget -q -O - http://{host}:{port}/registry/v1/agents 2>&1; echo \"exit=$?\"; true"
+                ),
+            )
+            .await;
+            assert!(
+                refused.contains("401") || refused.contains("Unauthorized"),
+                "{refused}"
+            );
+            assert!(!refused.contains("linkset"), "{refused}");
+        }
+        None => {
+            eprintln!("skipped: the in-cluster read, {HOST_ADDR_VAR} is not set");
+        }
+    }
+
+    // Deleting the service takes it out of the list.
+    case.api::<AgentService>()
+        .delete("chat", &DeleteParams::default())
+        .await
+        .unwrap();
+    case.gone::<AgentService>("chat", 120).await;
+    let (code, _, body) = http_request(
+        port,
+        "GET",
+        "/registry/v1/agents",
+        &[("Authorization", &auth)],
+    )
+    .await
+    .unwrap();
+    assert_eq!(code, 200);
+    assert!(!body.contains(r#""service":["chat"]"#), "{body}");
+    case.finish().await;
+}
+
+#[tokio::test]
+async fn without_a_token_no_registry_is_served_and_nothing_is_listed() {
+    let Some(cluster) = connect().await else {
+        return;
+    };
+    let case = Case::begin(&cluster, "noregistry").await;
+    let port = case.operator.as_ref().unwrap().registry;
+    case.secrets("chat").await;
+    let (svc, cfg) = chat("chat", &cluster.image);
+    case.apply::<aap_api::AgentConfig>(&cfg).await;
+    case.apply::<AgentService>(&svc).await;
+    let ready = case
+        .until("chat", "Ready", 240, |s| state(s) == "Ready")
+        .await;
+    assert!(
+        is(&ready["status"], "Listed", "False", "RegistryDisabled"),
+        "{:#}",
+        ready["status"]
+    );
+    // Nothing listens on the registry's port: fail closed.
+    assert!(
+        http_request(
+            port,
+            "GET",
+            "/registry/v1/agents",
+            &[("Authorization", "Bearer x")]
+        )
+        .await
+        .is_none()
+    );
     case.finish().await;
 }
