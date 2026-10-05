@@ -1,0 +1,38 @@
+[package]
+name = "aap-runtime-kubernetes"
+description = "RuntimeProvider on native Kubernetes (§23): server-side apply of a StatefulSet or Deployment, a Service, a NetworkPolicy and ConfigMaps, and the status read back from pods"
+readme = "README.md"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+publish.workspace = true
+
+[features]
+# `impl RuntimeUnderTest for KubernetesRuntime`, so a composition root can run the conformance suite of
+# `aap-ports` against its own cluster. Off by default.
+testkit = ["aap-ports/testkit"]
+
+[dependencies]
+aap-ports.workspace = true
+futures.workspace = true
+k8s-openapi.workspace = true
+kube = { workspace = true, features = ["client", "rustls-tls", "ring", "runtime"] }
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+
+[dev-dependencies]
+aap-api.workspace = true
+aap-domain.workspace = true
+aap-ports = { workspace = true, features = ["testkit"] }
+# The fake API server of tests/api.rs: a tower service in place of the HTTP client.
+http = "1"
+serde_yaml.workspace = true
+tokio = { workspace = true, features = ["macros", "rt", "rt-multi-thread", "time"] }
+tower = { version = "0.5", default-features = false, features = ["util"] }
+
+[lints]
+workspace = true
