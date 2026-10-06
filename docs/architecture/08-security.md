@@ -536,6 +536,8 @@ resource.project = payments
 
 > **Decision (2026-10-05, AD-032):** for the admin dashboard (§60a), permissions are **Keycloak client roles** of the client `another-agentic`, and human-facing roles are **composite roles** that bundle them; the Platform API checks individual permissions, never a role name. v0 names, proposed and not final: `platform:agents.read`, `platform:agents.write`, `platform:models.write`, `platform:toolproviders.write`, `platform:secrets.pick` and `agent.use:<agent-name>`. `agent.configure` above stays an example of the target model; v0 replaces it with the finer set.
 
+> **Decision (2026-10-06, AD-044):** **every client is a public OAuth client with PKCE**, per RFC 8252 (OAuth 2.0 for Native Apps), with **one Keycloak public client per platform**. Web: redirect. Desktop (Tauri): the system browser and a loopback redirect `http://127.0.0.1:<port>` (for example tauri-plugin-oauth, <https://www.lib.rs/crates/tauri-plugin-oauth>, maintenance *unverified*). Mobile: an in-app browser tab (ASWebAuthenticationSession or Custom Tabs, never an embedded webview) with an app-claimed https link or a custom scheme. Tokens live in the OS keychain or keystore. The clients call the orchestrator and the Platform API directly with the bearer JWT (§60a, *Clients without a web server*). The details are another-agentic-system's ADR 0047, *to be added*, in <https://github.com/vymalo/another-agentic-system/blob/main/docs/decisions/>.
+
 Human authorization belongs to the application control plane.
 
 Humans should not need direct Kubernetes RBAC.

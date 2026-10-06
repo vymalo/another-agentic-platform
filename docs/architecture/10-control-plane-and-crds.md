@@ -723,7 +723,7 @@ Next to the existing charts, one step at a time. The coder stays on its Helm cha
 
 ## 59b. The run pool: pods where work runs
 
-> **Status: design only, decided by the owner (2026-10-06).** Nothing here is built. The owner's decisions are AD-034 to AD-039; where this section recommends something the owner did not decide, it is a proposal (P-013 to P-015, §92) and says so. It extends adam-rs [ADR 0019](https://github.com/vymalo/another-adam-rs/blob/main/docs/decisions/0019-a-runs-processes-in-a-pod-of-their-own.md) (*verified 2026-10-06*, read on adam-rs `origin/main`), which it does not replace: both modes coexist (*Migration*).
+> **Status: design only, decided by the owner (2026-10-06).** Nothing here is built. The owner's decisions are AD-034 to AD-039, and AD-043 (containers in a run, below, added 2026-10-06); where this section recommends something the owner did not decide, it is a proposal (P-013 to P-015 and P-018, §92) and says so. It extends adam-rs [ADR 0019](https://github.com/vymalo/another-adam-rs/blob/main/docs/decisions/0019-a-runs-processes-in-a-pod-of-their-own.md) (*verified 2026-10-06*, read on adam-rs `origin/main`), which it does not replace: both modes coexist (*Migration*).
 
 ### Why
 
@@ -741,6 +741,7 @@ The owner's decisions turn this around: **the operator makes and owns the pods, 
 | 5 | Reuse across repos only "if the agent can be modular enough and the files strictly separated; so that one agent cannot read repos it's not supposed to read… So even across the same owner, no" | Never across owners; within an owner only with strict per-lease file isolation | AD-037, P-013 |
 | 6 | A shared RWX volume plus a git clone on lease | Pod-private directories on one RWX claim; the coder clones into them | AD-038 |
 | 7, 8 | Seams (AD-020); both modes coexist, per-run stays the default | `PooledEnvironment` in adam-rs, the pool logic behind a trait in the platform | AD-039 |
+| 9 | *"Some of those environments need docker; e.g. for building… How do we do?"* (later the same day) | `containers: { mode: None \| Build \| Engine }` on the `RunEnvironment`: a BuildKit or a rootless Podman sidecar in a user-namespaced pod | AD-043, P-018 |
 
 *Amends AD-016 for one object:* `RunLease` is a CRD, not an application record. It is one object per run, renewed every `renewSeconds` (default 60), not per request, which is why etcd carries it; `AgentLease` (§20) stays a record.
 
@@ -769,6 +770,8 @@ spec:
   isolation:
     mode: PodPerLease                     # PodPerLease (default) | UidPerLease (strict, P-013)
     userNamespace: false                  # hostUsers: false; required by UidPerLease
+  containers:
+    mode: None                            # None (default) | Build | Engine (AD-043); not None requires isolation.userNamespace: true
   storage:
     claimName: coder-vymalo-work          # an existing ReadWriteMany claim, the one the coder mounts (placement shared)
     mountPath: /work
@@ -824,6 +827,7 @@ status:
 | CEL | `pool.minWarm <= pool.maxPods`; `pool.maxPods >= 1` |
 | CEL | `pool.maxLeasesPerPod == 1 \|\| isolation.mode == 'UidPerLease'`; `maxLeasesPerPod <= 8` |
 | CEL | `isolation.mode == 'UidPerLease'` requires `isolation.userNamespace == true`; `PodPerLease` requires `securityContext.runAsUser > 0` |
+| CEL | `containers.mode == 'None' \|\| isolation.userNamespace == true` (AD-043); `containers.mode == 'None' \|\| pool.maxLeasesPerPod == 1` (one daemon is never shared by two leases: it can mount any directory the pod mounts) |
 | CEL | `lease.ttlSeconds` in 30..3600; `lease.renewSeconds * 2 <= lease.ttlSeconds`; `lease.maxDurationSeconds >= lease.ttlSeconds`; `pool.idleTTLSeconds` in 60..86400 |
 | CEL | `storage.claimName` and `storage.mountPath` immutable (`self == oldSelf`); `mountPath` absolute |
 | CEL | `requesters` has at least one item (fail closed: nobody may lease an environment that names nobody) |
@@ -844,6 +848,8 @@ status:
 | PriorityClass | `<env>-run` | Value 0, `preemptionPolicy: Never`, so the namespace's priority-scoped quota (ADR 0019) still caps the pool |
 
 **The pod, fixed, not configurable:** `automountServiceAccountToken: false` on the pod too; `enableServiceLinks: false`; no host network, PID or IPC; not privileged; `allowPrivilegeEscalation: false`; every capability dropped (`UidPerLease` adds `SETUID`, `SETGID`, `CHOWN`, `FOWNER` and nothing more); `readOnlyRootFilesystem: true`; the only writable paths are the pod's private directory (below) and `emptyDir` tmpfs mounts for `/tmp` and `$HOME`. The init container of ADR 0019 (copies `adam-exec` and `opencode` into an `emptyDir` at `/opt/adam/bin`) is kept. Annotations: `agents.vymalo.com/env-digest` (a changed image or class replaces **free** pods only; a leased pod finishes first), `agents.vymalo.com/owner` (the binding, below), `agents.vymalo.com/dir`.
+
+*Amended 2026-10-06 (AD-043):* with `containers.mode` other than `None`, the pod is made with `hostUsers: false` and gains one sidecar whose security context the operator renders itself; the floor above stays for the run container. See *Containers in a run*.
 
 **The operator's own RBAC grows** (§59a *The operator chart*, "pods for status"): `pods` create, delete, patch; `serviceaccounts`, `networkpolicies` create and patch; `runenvironments` and `runleases` with `status` and `finalizers`. Still namespaced, still no right on Secrets, still no `pods/exec`.
 
@@ -950,6 +956,66 @@ The owner's rule, kept whole: **no pod is ever shared across owners.** Inside an
 - **No shared git mirror or package cache across leases in v0.** A mirror that holds repository X would be readable by a lease that was granted only repository Y; a per-owner cache is a later decision (open question).
 - **Wipe.** The holder wipes at release (above); the coder's janitor removes `pods/<dir>` of a pod that no longer exists, as it does for `held_runs` today. The operator never mounts the claim.
 
+### Containers in a run (AD-043, P-018)
+
+The owner, 2026-10-06: *"some of those environments need docker; e.g. for building… How do we do?"* A run pod holds no container engine, and giving it one is the most dangerous thing a pool can do, so the answer is one field, off by default: `containers.mode` on the `RunEnvironment`.
+
+| `mode` | What the pod gets | For |
+|---|---|---|
+| `None` (default) | Nothing: the pod of the tables above | Most runs |
+| `Build` | A **BuildKit** sidecar. The run reaches it with `docker buildx` through a socket on an `emptyDir` shared only inside the pod (a `remote` builder on that socket; the exact flags are *unverified*) | Building images: `docker build`, `buildx bake` |
+| `Engine` | A **rootless Podman** sidecar serving a Docker-compatible socket on the same kind of `emptyDir` | `docker run`, compose, Testcontainers, devcontainers |
+
+**The rules, all of them in code or CEL, none a field:**
+
+- **`mode != None` requires `isolation.userNamespace: true`** (`hostUsers: false`), and `pool.maxLeasesPerPod: 1` (CEL, above). A daemon can bind-mount anything the pod mounts, so it is never shared by two leases; **one daemon per pod, and never across owners** (AD-037 holds as it did).
+- **Never the host's Docker or containerd socket**, never a `hostPath`. **Never `privileged` unless the pod has `hostUsers: false`**: the operator renders the sidecar's security context itself (the floor of *What the operator makes* is for the run container; the sidecar gets the least its daemon needs, and which capabilities, seccomp and AppArmor profile that is, is *unverified* and decided by the kind job). The object cannot loosen it.
+- **`Build` runs BuildKit rootful inside the pod and mapped to an unprivileged host user by the user namespace.** Rootless BuildKit cannot run inside a user namespace, so rootful BuildKit mapped to a high uid is the pattern (*verified 2026-10-06*, <https://kubernetes.web.cern.ch/blog/2025/06/19/rootless-container-builds-on-kubernetes/>), and Kubernetes' own announcement names "builders like buildkit with `hostUsers: false`" (*verified 2026-10-06*, <https://kubernetes.io/blog/2026/04/23/kubernetes-v1-36-userns-ga/>, user namespaces stable in v1.36).
+- **`Engine` is rootless Podman**, the engine adam-rs and the system already chose for a repository's devcontainer: adam-rs [ADR 0010](https://github.com/vymalo/another-adam-rs/blob/main/docs/decisions/0010-a-run-works-in-its-repositorys-devcontainer.md) and the system's [ADR 0028](https://github.com/vymalo/another-agentic-system/blob/main/docs/decisions/0028-devcontainer-json-is-the-workspace-environment-contract.md). There it is one Podman service of the dev stack beside the coder (*verified 2026-10-06*, both records); here it is a sidecar of each run pod, inside the pod's user namespace, so the devcontainer path of ADR 0010 keeps its socket and changes only where the service runs.
+- **Kaniko is not chosen:** its original repository was archived in June 2025 and only forks remain (*verified 2026-10-06*, <https://ideas.harness.io/feature-request/p/kaniko-project-is-archived-how-do-we-build-images-in-un-privileged-mode>).
+- The sidecar images are values of the operator chart, pinned by tag and digest, like the workspace image. The sidecar's `ephemeral-storage` and memory come from the size class, and the object has no field for them.
+
+**Storage and cache.** The daemon's own snapshot store is an `emptyDir` of the sidecar: overlay snapshots on the NFS-backed RWX claim are *unverified* and probably unsupported. The **build cache lives on the RWX claim or in a registry**: `docker buildx build --cache-to type=local` writes it to the lease directory (so it survives a lost pod and a parked run, and is wiped with the lease), and `type=registry` is the way across runs. Across leases there is **no shared cache on the claim in v0**, for the reason of *Storage and clones* (a cache holds what another lease's repository held); a per-owner one is the existing open question (§93), and a registry cache is per owner and repository.
+
+**Credentials and pushes (reconciling P-015).** The run pod holds no credential (AD-038), and `Build` needs none to *build*: base images from public registries, and the result stays in the pod. To **push** an image the shape is P-015's: the build writes an OCI archive (`--output type=oci,dest=<lease dir>/image.tar`) into the lease directory, which the coder mounts, and **the coder pushes it** with a registry grant from the broker (§39a), short-lived and scoped to the repository path, never a long-lived key and never in the pod. Git writes and image pushes are therefore both the coder's. A push from inside the build (`buildx --push`) or a pull of a private base image needs a credential in the pod; that is a **short grant** (minutes, one repository path, passed as a `buildx --secret` from tmpfs and never as an environment variable, an image layer or a file of the claim), and it is the one place this design puts a credential in a run pod. It is proposed, not decided, and off until the owner says (P-018). The broker has no registry connection kind yet (§39a covers code hosts and MCP servers), and which registry and which credential is open (§93).
+
+**A pod with a daemon is not reused (P-018).** Containers, images, volumes and networks of a daemon are residue that the coder's wipe of a directory does not reach, so in v0 a pod with `mode != None` is **deleted at release**, never returned to the pool, and `minWarm` counts it as a new pod. Reuse, after the isolation suite covers the daemon, is a later decision.
+
+```mermaid
+sequenceDiagram
+    participant C as Coder
+    participant K as Operator
+    participant P as Run pod, user namespace
+    participant B as BuildKit sidecar
+    participant G as Broker, §39a
+    participant R as Registry
+
+    C->>K: RunLease for an environment with containers.mode Build
+    K-->>C: Bound, a pod of its own, directory on the RWX claim
+    C->>P: pods/exec: docker buildx build, cache to the lease directory, output an OCI archive
+    P->>B: the build, over the pod's socket
+    B-->>P: image written to the lease directory
+    P-->>C: exit status, the archive on the shared claim
+    C->>G: grant for the registry, one repository path
+    G-->>C: a short-lived token
+    C->>R: push the archive, the token
+    C->>K: delete the RunLease
+    K->>P: delete the pod, a pod with a daemon is not reused
+```
+
+```mermaid
+stateDiagram-v2
+    [*] --> Starting: pod created with a sidecar
+    Starting --> Ready: socket answers
+    Starting --> Failed: sidecar does not start
+    Ready --> Ready: builds and containers of the lease
+    Ready --> Released: RunLease deleted or expired
+    Failed --> Released: lease Failed
+    Released --> [*]: pod deleted
+```
+
+*Unverified, and decided in the kind job:* that rootful BuildKit and rootless Podman start in a pod with `hostUsers: false` on this cluster; the netcup cluster's Kubernetes version, kernel and containerd (user namespaces stable in v1.36 need Linux 6.3 or later and containerd 2.0 or later, *verified 2026-10-06*, §59b *Isolation*) and its container runtime class; Podman's Docker-compatible API for Testcontainers. §93 *Run pool* asks the owner for the cluster facts.
+
 ### Seams (AD-039, AD-020)
 
 | Seam | Where | What |
@@ -992,6 +1058,7 @@ Both modes work in one cluster: they use different pod names, labels, and RBAC, 
 | `pods/exec` on any pod of the namespace if `resourceNames` is not honoured | Proved in kind; otherwise a namespace for run pods (needs the operator to watch two namespaces) |
 | A lease CRD adds etcd writes | One renewal per `renewSeconds` per active run; open question on the default |
 | The operator now creates pods | Its Role is namespaced, no Secrets, no `exec`; pods are fixed-hardened and the object cannot loosen them |
+| A container daemon in a run pod widens the blast radius | Off by default; `userNamespace` required by CEL; never the host's socket; one daemon per pod and owner; the pod is deleted at release; no credential in the pod unless the short grant of P-018 is turned on; the kind job proves the daemon starts and that a build cannot reach another lease's files |
 
 ---
 
@@ -1100,6 +1167,20 @@ Agent configuration holds no thread, file, message or listing of anybody's, so t
 
 The dashboard has the chat's look (its tokens, shadcn components, the panda), its sign-in (oauth2-proxy at the edge) and its roles. The web side is the system's decision, another-agentic-system ADR 0045 (accepted 2026-10-05).
 
+*Amended 2026-10-06:* the three gates stay, but "the web's server" is "the client" and the sign-in is not only the edge's: *Clients without a web server*, below.
+
+### Clients without a web server (amends AD-026, AD-044, P-017)
+
+*Amended 2026-10-06.* The owner: *"we're packing the UI into tauri for building a desktop and a mobile application."* Tauri cannot run a Node server, so the web becomes a **static export** (`output: 'export'` in Next.js, with no request-time server code and no API routes; *verified 2026-10-06*, <https://nextjs.org/docs/app/guides/static-exports>), one build for the browser, the desktop app and the mobile app. The decision of AD-026 that *the web's server calls the Platform API with the person's token, not through the public edge* **cannot hold for desktop and mobile**, and for the browser it would be the odd one out. What replaces it, for every client, whether the web as a single-page app, desktop or mobile:
+
+- **The client calls the orchestrator and the Platform API directly with `Authorization: Bearer <JWT>`.** The API validates it exactly as the orchestrator does (another-agentic-system ADR 0033: an OAuth 2 resource server; its oauth2-proxy runs with `--skip-jwt-bearer-tokens`, so a token that verifies goes through and the service checks it again; *verified 2026-10-06*, that repository's `docs/decisions/0033-the-orchestrator-is-an-oauth2-resource-server.md` and `deploy/chart/templates/oauth2-proxy.yaml`). Nothing in *The Platform API* below changes: the same token, the same permissions, the same routes.
+- **The Platform API is on the edge**, behind that JWT validation, at a path or host the deployment names. It gains **CORS restricted to the deployment's origins** (the web's origin, and whatever origin each native shell's webview sends, for example `tauri://localhost`; *unverified*, and it may differ per platform), no wildcard and no credentials mode, and **rate limits** per token at the edge, since a bearer API is open to any script that holds a token. The NetworkPolicy of D7, which let only the web's pods in, is replaced by the edge's.
+- **`PLATFORM_API_URL` is a public base URL**, not a server-side setting. A client learns it from a config endpoint (the orchestrator's `GET /api/config` gains an additive public setting, the system's side) or, for desktop and mobile, at build time. The two gates of *Where it lives* keep their meaning with the client in the web server's place: no URL, no `/admin` and no link; an API that does not answer, "The platform API cannot be reached", read live.
+- **The sign-in is the client's own**, and differs per platform: AD-044 and §52.
+- **No token is stored by a server.** The edge no longer puts the ID token on the web's requests for this purpose; the client holds its tokens (AD-044) and refreshes them itself.
+
+**The framework of `/admin` (P-017).** *Proposed:* **Refine**, a headless React framework for CRUD and admin applications with an official shadcn/ui integration (the chat's components, so the look is kept), an access-control provider (which maps to our permissions, fed from `GET /v1/me`: a hint only, the API checks every request) and a Vite single-page-app preset, which suits a static export (*verified 2026-10-06*, <https://refine.dev/core/docs/ui-integrations/shadcn/introduction/>; that the access-control provider fits our permissions is a design intent, *unverified* until tried). The owner decides; the web is another-agentic-system's.
+
 ### The Platform API (AD-025, AD-027)
 
 A Rust (axum) service in this repository, **its own binary `bin/api`**, beside `bin/operator` in the same workspace and the same chart (`deploy/operator`, component `api`, off by default). Why not inside the operator binary:
@@ -1124,6 +1205,8 @@ The cost is a second image and a second Deployment. The registry stays in the op
 **Authorization.** The request carries `Authorization: Bearer <JWT>`. The API checks it as another-agentic-system's orchestrator does (ADR 0033 there): signed by the configured issuer's keys (RS256, RS384, ES256 or EdDSA), `iss` equal to the issuer, one of the configured audiences in `aud`, `exp`, 60 seconds of leeway. The values of the configured claim (`agentic_roles` on netcup) are the person's **permissions**: Keycloak client roles of `another-agentic`, with the composites already expanded into the token (AD-032, *Permissions and roles* below). The API checks **individual permissions, never a role name**: each route needs the permission in the table below, a compile-time constant of `aap-api`, so no configuration lists roles. No token is 401, a token without the permission is 403 and says which one, keys that cannot be fetched are 503. The web's `GET /v1/me` hint and the API's check read the same token, so they agree; when a permission changed in Keycloak after the token was issued, the API's 403 is what the person sees until the next refresh.
 
 **How the web gets the token today** (*verified 2026-10-05*, another-agentic-system `deploy/chart/files/Caddyfile` and `dev/Caddyfile`): every request to the web passes the edge's `forward_auth` to oauth2-proxy, which answers 202 with `Authorization: Bearer <ID token>` (`--set-authorization-header=true`, `deploy/chart/templates/oauth2-proxy.yaml`), and `copy_headers Authorization` puts it on the request that goes to the web, replacing what the browser sent. The ID token carries `aud: another-agentic` (the client id) and the roles claim `agentic_roles` (`deploy/keycloak/README.md`). So the web's server already receives the person's token on every request, and today ignores it. The dashboard's route handler, `/admin/api/[...path]`, forwards that header, unchanged, to the Platform API, and nothing else: it stores no token and logs none. `/admin/api/*` is not under `/api/*`, so the edge routes it to the web, not to the orchestrator.
+
+*Amended 2026-10-06:* that is the flow of the first web, which has a server. Static clients (*Clients without a web server*) get their bearer from their own sign-in, and the route handler `/admin/api/[...path]` does not exist: they call `/v1/...` on the Platform API's public base URL. The edge's `forward_auth` stays for the chat's pages and for a web that is still served by a Next.js server.
 
 **Routes** (problem details on error, RFC 9457):
 
@@ -1299,29 +1382,29 @@ The owner, 2026-10-05, asked *"can we break down into permissions and let roles 
 sequenceDiagram
     actor A as Administrator
     participant K as Keycloak
-    participant E as Edge, oauth2-proxy
-    participant W as Web server
+    participant C as Client, web SPA, desktop or mobile
+    participant E as Edge, JWT bearer checked
     participant P as Platform API
     participant X as Orchestrator
 
     A->>K: a composite role includes platform:agents.write and agent.use:coder-me
     A->>K: a person joins the group of that composite
     Note over K: composites are expanded when a token is issued
-    E->>K: sign-in, or refresh at most every 10 minutes
-    K-->>E: ID token, agentic_roles holds the person's permissions, composites expanded
-    E->>W: a request, Authorization Bearer ID token
-    W->>P: GET /v1/me, the same bearer
+    C->>K: sign-in with PKCE (AD-044), refresh with the refresh token
+    K-->>C: tokens, agentic_roles holds the person's permissions, composites expanded
+    C->>E: GET /v1/me, Authorization Bearer
+    E->>P: the same request, the token verified
     P->>P: verify issuer, audience, expiry, signature
-    P-->>W: the values of agentic_roles that start with platform:
-    W-->>E: /admin is drawn when platform:agents.read is among them
-    W->>P: PUT /v1/agents/coder-me, the same bearer
+    P-->>C: the values of agentic_roles that start with platform:
+    Note over C: /admin is drawn when platform:agents.read is among them
+    C->>P: PUT /v1/agents/coder-me, the same bearer, through the edge
     P->>P: the route needs platform:agents.write, never a role name
     alt the permission is in the token
-        P-->>W: 201
+        P-->>C: 201
     else it is not
-        P-->>W: 403, naming platform:agents.write
+        P-->>C: 403, naming platform:agents.write
     end
-    W->>X: later, the person's own chat request, the same bearer
+    C->>X: later, the person's own chat request, the same bearer
     X->>X: the audience of coder-me intersects agentic_roles, agent.use:coder-me
 ```
 
@@ -1365,14 +1448,13 @@ Every screen lists what the API returns; a GitOps object is read-only everywhere
 
 ### Create a coder
 
-From the form to the person's agent picker. The Platform API, the web's `/admin` route handler and the `audience` attribute are planned (D1 to D9); the operator, the registry, the orchestrator's registry reader and `GET /api/agents` are §59a's slices and another-agentic-system's built code.
+From the form to the person's agent picker. The Platform API, the client's `/admin` area (calling the API directly, *Clients without a web server*) and the `audience` attribute are planned (D1 to D9); the operator, the registry, the orchestrator's registry reader and `GET /api/agents` are §59a's slices and another-agentic-system's built code.
 
 ```mermaid
 sequenceDiagram
     actor A as Administrator
-    participant B as Browser, /admin
-    participant E as Edge, Caddy and oauth2-proxy
-    participant W as Web server, Next.js
+    participant B as Client, /admin
+    participant E as Edge, JWT bearer checked
     participant P as Platform API
     participant K as Kubernetes API server
     participant O as Operator
@@ -1381,27 +1463,23 @@ sequenceDiagram
     actor U as Person in chat
 
     A->>B: New coder: owners, model, size class, tools, audience, Save
-    B->>E: PUT /admin/api/agents/coder-me, session cookie
-    E->>E: forward_auth, 202 with Authorization Bearer ID token
-    E->>W: the request, Authorization set by the edge
-    W->>P: PUT /v1/agents/coder-me, the same bearer, If-None-Match *
+    B->>E: PUT /v1/agents/coder-me, Authorization Bearer, If-None-Match *
+    E->>E: the bearer verifies, the origin is allowed, within the rate limit
+    E->>P: the request
     P->>P: verify the token, it holds platform:agents.write
     P->>P: the body names a secret key, the token holds platform:secrets.pick
     P->>K: list ExternalSecrets, the offered keys
     P->>P: form to AgentConfig and AgentService, validate
     P->>K: server-side apply AgentConfig, then AgentService, manager dashboard
     K-->>P: applied, generation 1
-    P-->>W: 201, state Saving
-    W-->>B: 201
+    P-->>B: 201, state Saving
     K-->>O: AgentService changed
     O->>K: get AgentConfig, ModelEndpoint, ToolProvider
     O->>K: StatefulSet, Service, NetworkPolicy, CNPG Cluster, status by server-side apply
     loop every 2 s until the state settles
-        B->>W: GET /admin/api/agents/coder-me
-        W->>P: GET /v1/agents/coder-me
+        B->>P: GET /v1/agents/coder-me, through the edge
         P->>K: get both objects
-        P-->>W: state, conditions, digest
-        W-->>B: state, conditions, digest
+        P-->>B: state, conditions, digest
     end
     O->>R: the reflector lists coder-me with its audience
     X->>R: GET /registry/v1/agents, If-None-Match, when its copy is stale
@@ -1474,12 +1552,16 @@ After the operator slices they need (§59a, *Slices*): S5 (the controller), S7 (
 | D16 | home-os | The takeover (AD-031): the Argo applications of `coder` and `chat` removed without cascade, the objects adopted by the dashboard; `coder` renamed `coder-vymalo` with its alias, `coder-me` made (AD-033) | the dashboard edits `coder-vymalo` and `chat`; an old thread of `coder` continues | S14, S15, D14 |
 | D15 | platform and adam-rs | `runPods.sizeClass` and the chart's `runPodClasses`, once adam-rs's run pods (ADR 0019 there) are merged | goldens of the run-pod template | D2, adam-rs ADR 0019 |
 
+*Amended 2026-10-06 (clients without a web server):* D7 gains the edge route to the API, CORS for the deployment's origins and a rate limit, and its NetworkPolicy lets the edge in, not only the web's pods; D9 becomes the `/admin` area of the static export, with the API's public base URL (a config endpoint or build time) and **no route handler** (and, if P-017 is taken, Refine); D12 becomes the chart's edge route and the public setting, not `web.platformApiUrl` for a server. The desktop and mobile shells, and their sign-in, are the system's (its ADR 0047, *to be added*) and are not slices of this repository.
+
 ### Risks
 
 | Risk | Handling |
 |---|---|
 | Whoever may configure agents can make a pod read any Secret its custom resource names | The offer label (AD-030) and the permission `platform:secrets.pick` that every secret reference needs: only keys of labelled ExternalSecrets are accepted. A namespace of their own for agents is the stronger fence, later (owner question in §93) |
 | The web gains its first server-side call and setting; another-agentic-system says the web has none | ADR 0045 there: one route handler, one URL, the header forwarded as received, nothing stored or logged |
+| *Amended 2026-10-06:* the Platform API is now reachable by any holder of a token, from any client | JWT validated at the edge and again in the API; CORS limited to the deployment's origins; rate limits; the permission checks of AD-032 are unchanged, and they, not the network, were always the guard |
+| A native client's tokens leave the browser's cookie jar | OS keychain or keystore, public clients with PKCE, one Keycloak client per platform (AD-044) |
 | The registry's `audience` is ignored by a client that does not know it, which then shows a restricted agent to everybody | The only consumer ships the rule (D8) before D14; the contract states the rule (D3) |
 | A permission or composite changed in Keycloak is not in a token yet | Tokens live 15 minutes and are refreshed by oauth2-proxy (system `deploy/keycloak/README.md`), so a change reaches the API and the orchestrator within that; the API's 403 names the permission it needed |
 | Many `agent.use:<name>` roles make the roles claim, and so the ID token, large | One role per agent is a handful at v0; *unverified* where a header limit bites (oauth2-proxy, Caddy, Next.js), to be tried with a realistic token in D9 |
@@ -1497,7 +1579,8 @@ After the operator slices they need (§59a, *Slices*): S5 (the controller), S7 (
 - *Verified 2026-10-05*, home-os at `12bb11d`: both another-agentic Applications sync with `ServerSideApply=true` and `automated: { prune: true, selfHeal: true }` (`charts/apps/values.yaml`); the AppProject has `orphanedResources: { }` (`charts/cd/values.yaml`); no `application.resourceTrackingMethod` is set (`charts/argocd/values.yaml`).
 - *Verified 2026-10-05*, documentation: Argo CD's default tracking method is the annotation, and orphaned resources are reported, not deleted (the two Argo CD pages above); an ExternalSecret holds no value (external-secrets.io); `list` on Secrets returns their contents (kubernetes.io).
 - *Verified 2026-10-05*, adam-rs at `ea570d6`: `deploy/coder/values.yaml` has `github.app.owners` (`GITHUB_APP_OWNERS`) and the `mcp.websearch` and `mcp.context7` servers the forms replace; no run-pod setting is on `main`.
-- *Unverified*: adam-rs ADR 0019 and its settings (`RUN_POD_TEMPLATE_FILE`, a 2Gi limit), seen only as uncommitted work in a local working copy; the Argo CD version on netcup (installed by hand, unpinned) and so its tracking method; that `dev/registry-e2e.sh` passes today (not run); that a StatefulSet name over 52 characters fails (the reason for the 40-character cap).
+- *Verified 2026-10-06*: a Next.js static export has no request-time server code or API routes (<https://nextjs.org/docs/app/guides/static-exports>); another-agentic-system runs oauth2-proxy with `--skip-jwt-bearer-tokens=true` (`deploy/chart/templates/oauth2-proxy.yaml`, ADR 0033); Refine's shadcn/ui integration (<https://refine.dev/core/docs/ui-integrations/shadcn/introduction/>).
+- *Unverified*: adam-rs ADR 0019 and its settings (`RUN_POD_TEMPLATE_FILE`, a 2Gi limit), seen only as uncommitted work in a local working copy; the Argo CD version on netcup (installed by hand, unpinned) and so its tracking method; that `dev/registry-e2e.sh` passes today (not run); that a StatefulSet name over 52 characters fails (the reason for the 40-character cap). *Unverified, 2026-10-06*: the origins each Tauri platform's webview uses (CORS), and Refine's Vite preset and access-control provider beyond the page above.
 
 ---
 

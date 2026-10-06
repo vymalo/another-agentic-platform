@@ -207,6 +207,8 @@ Platform API (`GET /v1/me`), not from `admin` in the orchestrator's
 `GET /api/me`; it stays a hint, and the API checks every request itself (§60a).
 The system's side: its ADR 0045 (accepted 2026-10-05).
 
+*Amended 2026-10-06 (the owner: "we're packing the UI into tauri for building a desktop and a mobile application"):* Tauri cannot run a Node server, so the web is a **static export** (`output: 'export'`, no request-time server code, no API routes; *verified 2026-10-06*, <https://nextjs.org/docs/app/guides/static-exports>), and **"the web's server calls the Platform API with the person's bearer, not through the public edge" no longer holds**, for desktop and mobile and so for the web. The **client**, whether the web as a single-page app, desktop or mobile, calls the orchestrator and the **Platform API directly with a bearer JWT**, which the API validates like the orchestrator (the system's ADR 0033: an OAuth 2 resource server, oauth2-proxy skipping a JWT bearer that verifies). The Platform API is therefore **on the edge**, behind JWT validation, with **CORS restricted to the deployment's origins** (`tauri://localhost` or whatever each platform uses: *unverified*) and **rate limits**. `PLATFORM_API_URL` becomes a **public base URL** the client learns from a config endpoint or at build time. The gates, the permissions and the routes are unchanged. The original text above stands as decided on 2026-10-05. §60a, *Clients without a web server*; sign-in: AD-044. The system's side: its ADR 0047 (*to be added*).
+
 #### AD-027 — The Platform API is its own binary
 
 *(2026-10-05. Was P-008; owner's question 4: as recommended.)* `bin/api` beside
@@ -376,6 +378,14 @@ chosen** (§93). Ownership is per user and, later, per organisation, and pods ar
 never shared across owners (AD-037). **Closes, once built, the gap AD-024
 records.** §39a.
 
+#### AD-043 — Run environments may offer containers: `None`, `Build` or `Engine`
+
+*(2026-10-06; the owner: "some of those environments need docker; e.g. for building… How do we do?")* The `RunEnvironment` gains `containers: { mode: None | Build | Engine }`, **`None` by default**. `Build` is a **BuildKit** sidecar, rootful inside a pod with `hostUsers: false` (rootless BuildKit cannot run inside a user namespace), used through `docker buildx`; `Engine` is a **rootless Podman** sidecar with a Docker-compatible socket, for `docker run`, compose, Testcontainers and devcontainers (adam-rs ADR 0010, the system's ADR 0028). **Never** the host's Docker socket, **never `privileged` without `hostUsers: false`**, **one daemon per pod, never shared across owners**. CEL: `mode != None` requires `isolation.userNamespace == true`. The build cache lives on the RWX claim or in a registry cache. Push credentials come from the broker (§39a) and are used by the coder, or by a short grant (P-018), reconciled with P-015. Kaniko is not chosen (archived upstream in June 2025). §59b, *Containers in a run*.
+
+#### AD-044 — Every client is a public OAuth client with PKCE (RFC 8252)
+
+*(2026-10-06; owner-driven, with the Tauri clients of AD-026's amendment.)* Web, desktop and mobile are **public OAuth clients using PKCE**, following RFC 8252 (OAuth 2.0 for Native Apps), and each sign-in uses the **system browser or an in-app browser tab, never an embedded webview**: **web** by redirect; **desktop** by the system browser and a **loopback redirect** `http://127.0.0.1:<port>` (for example tauri-plugin-oauth, <https://www.lib.rs/crates/tauri-plugin-oauth>; its maintenance status is *unverified*); **mobile** by an in-app browser tab (ASWebAuthenticationSession on iOS, Custom Tabs on Android) with an app-claimed https link or a custom scheme. Tokens are kept in the **OS keychain or keystore**. **One Keycloak public client per platform**, so redirect URIs and token policy are separate. The details live in another-agentic-system's ADR 0047 (*to be added*; the decisions folder is <https://github.com/vymalo/another-agentic-system/blob/main/docs/decisions/>); this record keeps the platform's side: what the Platform API accepts (a JWT of that issuer with an audience it knows, §60a). §52.
+
 ---
 
 ## 92. Proposed Decisions
@@ -421,6 +431,8 @@ forwards the person's bearer, which the edge already puts on every request to
 the web, and nothing else (§60a). The system's side: its ADR 0045 (proposed).
 
 *Accepted 2026-10-05 as AD-026, amended: drawn for people who hold the dashboard's permissions, not for `admin` alone (AD-032).*
+
+*Amended 2026-10-06 (AD-026): the client calls the Platform API directly with its bearer; there is no web server in between.*
 
 ### P-008 — The Platform API is its own binary
 
@@ -492,14 +504,22 @@ move to a namespace of their own. §59b.
 ### P-015 — Git writes stay in the coder, and a trusted service may take them later
 
 Clones and pushes are made by the coder with a broker grant, never inside a run
-pod (§83 prefers a trusted platform component for pushes; that stays open). §59b,
-§39a.
+pod (§83 prefers a trusted platform component for pushes; that stays open). Image
+pushes follow the same shape (P-018). §59b, §39a.
 
 ### P-016 — The broker is a service of its own
 
 `aap-broker` (the traits and the testkit), one crate per vault backend, composed
 by a broker binary, so that key material is in no process that takes browser
 traffic or runs agents. §39a.
+
+### P-017 — Refine is the framework of `/admin`
+
+**Refine**, a headless React CRUD and admin framework with an official shadcn/ui integration, an access-control provider that maps to our permissions (AD-032) and a Vite single-page-app preset, for the dashboard's `/admin` area of the static-exported web (AD-026, amended). Not decided: the owner picks, and the web is another-agentic-system's. *Verified 2026-10-06*, <https://refine.dev/core/docs/ui-integrations/shadcn/introduction/>. §60a.
+
+### P-018 — A pod with a container daemon is deleted at release, and image pushes are the coder's
+
+With `containers.mode` other than `None` (AD-043): the pod is **deleted at release**, never reused, because a daemon's containers, images and volumes are residue the wipe of a directory does not reach. An **image is pushed by the coder** from an OCI archive in the lease directory, with a registry grant from the broker, the shape of P-015, so no registry credential is in a run pod. A push or a private-base-image pull from inside the build is a **short grant** (minutes, one repository path, a `buildx --secret` from tmpfs), proposed and off until the owner decides. §59b, *Containers in a run*.
 
 ---
 
@@ -594,6 +614,9 @@ The owner decided the pool (AD-034 to AD-039). Open, the first four named by the
 - **Work in a pod that is lost.** After an eviction the next lease re-clones. How much of the run does adam-rs recover from its last snapshot or push? That is adam-rs's ADR.
 - **What `minWarm` means.** Free pods, bound or not. A first lease of a new owner still waits for a pod of its own unless an unbound one is free.
 - **A per-owner package cache or git mirror.** None in v0 (a mirror of repository X is readable by a lease granted only Y).
+- **Containers in a run (AD-043).** *Cluster facts, pending the owner's script:* the netcup cluster's Kubernetes version (user namespaces are stable in v1.36, *verified 2026-10-06*), its kernel (Linux 6.3 or later for idmap mounts), containerd (2.0 or later) and runtime class are **unverified**. Until the script answers, whether `hostUsers: false` works there, and so whether `Build` and `Engine` can be offered at all, is open.
+- **Which registry, and which credential, for an image push or a private base image** (AD-043, P-018). The broker has code-host and MCP connections (§39a) and no registry kind; ghcr.io and a GitHub token are the obvious candidates and *unverified*. Is the short in-pod grant of P-018 ever acceptable, or are pushes the coder's only?
+- **Is a pod with a daemon never reused (P-018) the right cost?** It makes `Build` and `Engine` runs cold every time. A reuse after a daemon-aware wipe waits for the isolation suite.
 
 ### Connections and the broker (asked 2026-10-06)
 
@@ -615,7 +638,7 @@ The owner decided the shape (AD-040 to AD-042). Open:
 
 - ~~"The same one" read as one dashboard inside the existing chat web (`/admin` in another-agentic-system `web/`), with the same sign-in, look and roles, not a second app? *Recommended: yes.*~~ **Decided (2026-10-05): yes, as recommended** (AD-026).
 - ~~The `/admin` area shown only when the deployment gives the web a Platform API URL and the API answers, and drawn for people whose roles hold `admin`? *Recommended: yes.*~~ **Decided (2026-10-05): yes, with one change:** the area is shown only when the web has a Platform API URL and the API answers, and it is **drawn for people who hold the dashboard's permissions** (question 5), not for a single `admin` role (AD-026, AD-032).
-- ~~The web's server calls the Platform API with the person's token, which the edge already forwards to the web (`PLATFORM_API_URL`), kept optional, live and removable? *Recommended: yes*, rather than routing `/platform/*` at the edge.~~ **Decided (2026-10-05): yes, as recommended**: with the person's bearer, not through the public edge (AD-026).
+- ~~The web's server calls the Platform API with the person's token, which the edge already forwards to the web (`PLATFORM_API_URL`), kept optional, live and removable? *Recommended: yes*, rather than routing `/platform/*` at the edge.~~ **Decided (2026-10-05): yes, as recommended**: with the person's bearer, not through the public edge (AD-026). *Amended 2026-10-06:* the client calls the API directly with its bearer, through the edge, because the web is a static export packed into Tauri (AD-026, amended).
 - ~~The Platform API as its own binary `bin/api` in this repository, in the operator's chart? *Recommended: its own binary.*~~ **Decided (2026-10-05): yes, as recommended** (AD-027).
 - ~~Who may configure agents: the Keycloak client role `admin` of `another-agentic`? *Recommended: yes for v0.*~~ **Decided (2026-10-05): CHANGED.** The owner asked: *"can we break down into permissions and let roles provide mappings?"* and chose **Keycloak composite roles**. Permissions are client roles of `another-agentic`; human-facing roles are composites that bundle them; `admin` becomes a composite of all of them; Keycloak expands composites into the token; the Platform API checks permissions, never a role name (AD-032). The names are proposed: see the open questions below.
 - ~~Who may use an agent: (a) the dashboard edits Keycloak roles and the orchestrator's `auth.roles`, or (b) `AgentService.spec.access.audience`, published in the registry and enforced by the orchestrator? *Recommended: (b).*~~ **Decided (2026-10-05): (b), as recommended, and the owner added that *"RBAC should normally answer this"*.** Each agent gets a use permission, a client role `agent.use:<agent-name>`, and that is what its audience lists; composite roles grant it to people; the orchestrator's check stays "audience ∩ the person's roles". Who may use `coder-me` is decided in Keycloak, not in git (AD-028, AD-032).
@@ -636,6 +659,7 @@ Open, raised by these answers:
 - **Who makes the client role `agent.use:<name>` of a new agent.** The dashboard never writes Keycloak (§60a), so an agent made in it has no audience that anyone holds until an administrator makes the role in Keycloak and adds it to a composite. Is that manual step acceptable, or does a later version create the role through Keycloak's admin API with a narrowly scoped client?
 - **The coder's rename and its volume claim.** A StatefulSet's claim is named after it, so renaming the coder to `coder-vymalo` does not reattach `work-coder-0` the way M3 says (§59a, *Amended 2026-10-05*). Is the work volume carried over (a snapshot restored into `work-coder-vymalo-0`), or is a fresh one accepted? The database stays. Also open: how the alias `coder` is implemented (in the orchestrator, or as a second registry item).
 - **The property names of the GitHub Apps' keys** (AD-033): `github_app_private_key_coder_vymalo` and `github_app_private_key_coder_me` are proposed. The existing property `github_app_private_key` is the first one's today; renaming it is a step in the AWS secret and in home-os.
+- **Clients (AD-026, AD-044).** The origins each Tauri platform's webview sends for CORS (*unverified*); where `PLATFORM_API_URL` is learnt (a public setting of the orchestrator's `GET /api/config`, or build time only); the edge route and rate limits of the Platform API; whether the web as a single-page app keeps the oauth2-proxy session at all.
 
 ---
 
