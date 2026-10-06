@@ -203,7 +203,7 @@ OpenCode itself should normally be installed in the runtime image rather than pe
 
 **Storage reality check (netcup, 2026-09-28):**
 
-- The only StorageClasses are `longhorn` (default) and `longhorn-static`. Sharing one project volume between concurrently running agents needs ReadWriteMany; Longhorn provides RWX through an NFS share-manager, whose performance for Git object databases and build `target/` directories is unverified here.
+- The only StorageClasses are `longhorn` (default) and `longhorn-static`. Sharing one project volume between concurrently running agents needs ReadWriteMany; Longhorn provides RWX through an NFS share-manager, whose performance for Git object databases and build `target/` directories is unverified here. A pod with `hostUsers: false` cannot mount that RWX claim (`MOUNT_ATTR_IDMAP`, *verified 2026-10-06*), while a Longhorn RWO ext4 volume mounts idmapped, and the `longhorn` class keeps 2 replicas (*verified 2026-10-06*, the owner's probes); see AD-045 and §59b.
 - A realistic v1: one project volume per active runtime (RWO), plus caches that are already networked and shared (sccache backend, package-registry mirror).
 - A mount shadows whatever the image holds at that path, so toolchains belong under `/opt` in the image and only caches/state under mount points (learned running OpenHands Agent Canvas).
 

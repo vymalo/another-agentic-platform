@@ -723,7 +723,7 @@ Next to the existing charts, one step at a time. The coder stays on its Helm cha
 
 ## 59b. The run pool: pods where work runs
 
-> **Status: design only, decided by the owner (2026-10-06).** Nothing here is built. The owner's decisions are AD-034 to AD-039, and AD-043 (containers in a run, below, added 2026-10-06); where this section recommends something the owner did not decide, it is a proposal (P-013 to P-015 and P-018, §92) and says so. It extends adam-rs [ADR 0019](https://github.com/vymalo/another-adam-rs/blob/main/docs/decisions/0019-a-runs-processes-in-a-pod-of-their-own.md) (*verified 2026-10-06*, read on adam-rs `origin/main`), which it does not replace: both modes coexist (*Migration*).
+> **Status: design only, decided by the owner (2026-10-06).** Nothing here is built. The owner's decisions are AD-034 to AD-039, AD-043 (containers in a run, below, added 2026-10-06) and AD-045 (a replicated volume of a pod's own, added 2026-10-06 after the cluster probes); where this section recommends something the owner did not decide, it is a proposal (P-013 to P-015, P-018 and P-019, §92) and says so. It extends adam-rs [ADR 0019](https://github.com/vymalo/another-adam-rs/blob/main/docs/decisions/0019-a-runs-processes-in-a-pod-of-their-own.md) (*verified 2026-10-06*, read on adam-rs `origin/main`), which it does not replace: both modes coexist (*Migration*).
 
 ### Why
 
@@ -741,7 +741,8 @@ The owner's decisions turn this around: **the operator makes and owns the pods, 
 | 5 | Reuse across repos only "if the agent can be modular enough and the files strictly separated; so that one agent cannot read repos it's not supposed to read… So even across the same owner, no" | Never across owners; within an owner only with strict per-lease file isolation | AD-037, P-013 |
 | 6 | A shared RWX volume plus a git clone on lease | Pod-private directories on one RWX claim; the coder clones into them | AD-038 |
 | 7, 8 | Seams (AD-020); both modes coexist, per-run stays the default | `PooledEnvironment` in adam-rs, the pool logic behind a trait in the platform | AD-039 |
-| 9 | *"Some of those environments need docker; e.g. for building… How do we do?"* (later the same day) | `containers: { mode: None \| Build \| Engine }` on the `RunEnvironment`: a BuildKit or a rootless Podman sidecar in a user-namespaced pod | AD-043, P-018 |
+| 9 | *"Some of those environments need docker; e.g. for building… How do we do?"* (later the same day) | `containers: { mode: None \| Build \| Engine }` on the `RunEnvironment`: a BuildKit or a Podman sidecar in a user-namespaced pod | AD-043, P-018 |
+| 10 | *"Also I think we can go with normal RWO volumes too, replicated"* (after the cluster probes) | `storage.mode: SharedClaim \| PodVolume`: a run pod may have a replicated `ReadWriteOnce` volume of its own, **in addition to** the shared claim, which stays the default. Files and git then cross `pods/exec` | AD-045, P-019 |
 
 *Amends AD-016 for one object:* `RunLease` is a CRD, not an application record. It is one object per run, renewed every `renewSeconds` (default 60), not per request, which is why etcd carries it; `AgentLease` (§20) stays a record.
 
@@ -769,12 +770,16 @@ spec:
     maxRepos: 8
   isolation:
     mode: PodPerLease                     # PodPerLease (default) | UidPerLease (strict, P-013)
-    userNamespace: false                  # hostUsers: false; required by UidPerLease
+    userNamespace: false                  # hostUsers: false; required by UidPerLease; requires storage.mode: PodVolume (AD-045)
   containers:
-    mode: None                            # None (default) | Build | Engine (AD-043); not None requires isolation.userNamespace: true
+    mode: None                            # None (default) | Build | Engine (AD-043); not None requires isolation.userNamespace: true and storage.mode: PodVolume
   storage:
-    claimName: coder-vymalo-work          # an existing ReadWriteMany claim, the one the coder mounts (placement shared)
+    mode: SharedClaim                     # SharedClaim (default, AD-038) | PodVolume (AD-045)
+    claimName: coder-vymalo-work          # SharedClaim: an existing ReadWriteMany claim the coder mounts too (placement shared)
     mountPath: /work
+    podVolume:                            # PodVolume: one ReadWriteOnce claim per run pod, made by the operator
+      storageClassName: longhorn          # replication is the class's (Longhorn replicas)
+      size: 20Gi
   scheduling:
     nodeSelector: { kubernetes.io/arch: amd64 }
     tolerations: []
@@ -827,13 +832,15 @@ status:
 | CEL | `pool.minWarm <= pool.maxPods`; `pool.maxPods >= 1` |
 | CEL | `pool.maxLeasesPerPod == 1 \|\| isolation.mode == 'UidPerLease'`; `maxLeasesPerPod <= 8` |
 | CEL | `isolation.mode == 'UidPerLease'` requires `isolation.userNamespace == true`; `PodPerLease` requires `securityContext.runAsUser > 0` |
+| CEL | `isolation.userNamespace == true` requires `storage.mode == 'PodVolume'` (AD-045: a Longhorn RWX claim cannot be idmapped, *verified 2026-10-06* on netcup, *Cluster facts* below); `containers.mode == 'None' \|\| storage.mode == 'PodVolume'` (implied by the two rules around it, stated so that the refusal names the cause) |
 | CEL | `containers.mode == 'None' \|\| isolation.userNamespace == true` (AD-043); `containers.mode == 'None' \|\| pool.maxLeasesPerPod == 1` (one daemon is never shared by two leases: it can mount any directory the pod mounts) |
 | CEL | `lease.ttlSeconds` in 30..3600; `lease.renewSeconds * 2 <= lease.ttlSeconds`; `lease.maxDurationSeconds >= lease.ttlSeconds`; `pool.idleTTLSeconds` in 60..86400 |
-| CEL | `storage.claimName` and `storage.mountPath` immutable (`self == oldSelf`); `mountPath` absolute |
+| CEL | `storage.mode`, `storage.claimName` and `storage.mountPath` immutable (`self == oldSelf`); `mountPath` absolute |
+| CEL | `storage.podVolume` is required if and only if `storage.mode == 'PodVolume'`, and `storage.claimName` if and only if `SharedClaim`; `podVolume.size` is a quantity above zero. A change to `podVolume` applies to pods made afterwards: an existing volume is not resized |
 | CEL | `requesters` has at least one item (fail closed: nobody may lease an environment that names nobody) |
 | CEL | `securityContext.seccompProfile` is `RuntimeDefault` or `Localhost`; nothing here can add a capability, set `privileged`, or turn off `readOnlyRootFilesystem` |
 | CEL, `RunLease` | `spec.environmentRef`, `spec.runId` and `spec.owner` immutable; `spec.repos` has at most 16 items and may only grow (`oldSelf.all(r, self.exists(x, x == r))`); `spec.holder.uid` may change (adoption by another worker) |
-| Reconciler (`ConfigInvalid`) | `sizeClass` names a class of `runPodClasses`; `image.ref` passes the deployment's registry allow-list (AD-029); the claim exists and is `ReadWriteMany`; `maxPods` is at most the chart's `runPodMaxOrdinal`; a named ServiceAccount exists |
+| Reconciler (`ConfigInvalid`) | `sizeClass` names a class of `runPodClasses`; `image.ref` passes the deployment's registry allow-list (AD-029); for `SharedClaim`, the claim exists and is `ReadWriteMany`; for `PodVolume`, the StorageClass exists; `maxPods` is at most the chart's `runPodMaxOrdinal`; a named ServiceAccount exists |
 | Reconciler (`Denied`) | the lease's requester is not in `requesters`; `repos` exceeds `lease.maxRepos`; the environment is not `Ready` |
 
 *Unverified:* that CEL expresses the transition rule on `spec.repos` and `request.userInfo` in an admission policy for `requesters`. Both are proved against a real API server in the kind job (as the S1 note of §59a).
@@ -846,12 +853,15 @@ status:
 | ServiceAccount | `<env>-run` | Owned by the environment; `automountServiceAccountToken: false`; **no Role or RoleBinding is ever made for it** |
 | NetworkPolicy | `<env>-run` | No ingress; egress from `network` (the shape of ADR 0019's, OD-K6) |
 | PriorityClass | `<env>-run` | Value 0, `preemptionPolicy: Never`, so the namespace's priority-scoped quota (ADR 0019) still caps the pool |
+| PersistentVolumeClaim | `<pod name>-work-<suffix>`, only for `storage.mode: PodVolume` (AD-045) | **Not made by the operator:** the pod declares a **generic ephemeral volume** named `work-<suffix>` from `podVolume` (StorageClass, size, `ReadWriteOnce`), and Kubernetes' ephemeral volume controller makes the claim `<pod name>-<volume name>`, owned by the pod and deleted with it (stable since v1.23, *verified 2026-10-06*, the ephemeral-volumes page of kubernetes.io). The random suffix keeps a re-made ordinal from meeting its predecessor's claim while that one is still being deleted (the controller uses only a claim made for *this* pod). Mounted at `<mountPath>/pods/<pod name>-<suffix>`, the path of `SharedClaim`'s pod directory |
 
 **The pod, fixed, not configurable:** `automountServiceAccountToken: false` on the pod too; `enableServiceLinks: false`; no host network, PID or IPC; not privileged; `allowPrivilegeEscalation: false`; every capability dropped (`UidPerLease` adds `SETUID`, `SETGID`, `CHOWN`, `FOWNER` and nothing more); `readOnlyRootFilesystem: true`; the only writable paths are the pod's private directory (below) and `emptyDir` tmpfs mounts for `/tmp` and `$HOME`. The init container of ADR 0019 (copies `adam-exec` and `opencode` into an `emptyDir` at `/opt/adam/bin`) is kept. Annotations: `agents.vymalo.com/env-digest` (a changed image or class replaces **free** pods only; a leased pod finishes first), `agents.vymalo.com/owner` (the binding, below), `agents.vymalo.com/dir`.
 
 *Amended 2026-10-06 (AD-043):* with `containers.mode` other than `None`, the pod is made with `hostUsers: false` and gains one sidecar whose security context the operator renders itself; the floor above stays for the run container. See *Containers in a run*.
 
-**The operator's own RBAC grows** (§59a *The operator chart*, "pods for status"): `pods` create, delete, patch; `serviceaccounts`, `networkpolicies` create and patch; `runenvironments` and `runleases` with `status` and `finalizers`. Still namespaced, still no right on Secrets, still no `pods/exec`.
+*Amended 2026-10-06 (AD-045):* with `storage.mode: PodVolume` the pod's private writable path is its own volume (the claim above), not a directory of the shared claim, and the coder does not mount it. See *Pod volume: files and git over exec*.
+
+**The operator's own RBAC grows** (§59a *The operator chart*, "pods for status"): `pods` create, delete, patch; `serviceaccounts`, `networkpolicies` create and patch; `persistentvolumeclaims` get, list, watch only, to report a claim that does not bind (AD-045: the ephemeral volume controller makes and deletes them); `runenvironments` and `runleases` with `status` and `finalizers`. Still namespaced, still no right on Secrets, still no `pods/exec`.
 
 **The coder's RBAC shrinks:** `runleases` (create, get, list, watch, patch, delete) and `pods/exec` (create, get). **No `pods` create or delete**, so the admission policy of ADR 0019 stops being the thing that holds a compromised coder back. `pods/exec` is limited by `resourceNames` to the ordinal pod names the chart renders from `runPodMaxOrdinal` (P-014); *unverified* that RBAC honours `resourceNames` on a subresource (the RBAC page of kubernetes.io, read 2026-10-06, does not say, and the answer comes from the kind job). If it does not, the coder can exec into any pod of its namespace, as ADR 0019 already lets it, and that is stated as a risk, not hidden.
 
@@ -920,7 +930,8 @@ Prose for what they cannot say:
 - **Packing.** A lease goes to a pod bound to its owner that has room (most loaded first, so the others go idle and are reaped), then to an unbound Free pod, then to a new pod. With `maxLeasesPerPod: 1` this is "reuse after release".
 - **Expired and Failed leases stay visible** for ten minutes with their reason (the holder reads it), then the operator deletes them. A lease whose holder pod disappeared is `Expired` only after `ttlSeconds` unless a worker adopts it first (the run is durable and may move to another worker: it patches `spec.holder`).
 - **Cleaned is the holder's claim, and a bad claim costs only that owner.** Anything but a clean release deletes the pod, so a crashed coder never leaves residue for the next lease. Only a *wrong* "cleaned" can, and it can only reach the same owner's next lease (the binding above).
-- **Parking.** A run that waits hours for a person releases its lease; the coder first moves the directory to `/work/parked/<run-hash>`, a path no run pod mounts, and moves it back into the next lease's directory. This works for a **full clone** and not for a worktree of a shared mirror, whose `.git` file holds an absolute path (*unverified*, `git worktree repair` aside), so the pool uses full clones. v0 of the pool does not share a mirror (below).
+- **The diagram is `SharedClaim`'s.** Under `PodVolume` the clone, the work and the push cross `pods/exec` as bundles, the pod is made with its own volume and takes it with it when it goes (*Pod volume: files and git over exec*).
+- **Parking.** Under `PodVolume` parking is a bundle in the coder's storage (P-019). Under `SharedClaim`, a run that waits hours for a person releases its lease; the coder first moves the directory to `/work/parked/<run-hash>`, a path no run pod mounts, and moves it back into the next lease's directory. This works for a **full clone** and not for a worktree of a shared mirror, whose `.git` file holds an absolute path (*unverified*, `git worktree repair` aside), so the pool uses full clones. v0 of the pool does not share a mirror (below).
 
 ### Isolation (AD-037, P-013)
 
@@ -930,12 +941,12 @@ The owner's rule, kept whole: **no pod is ever shared across owners.** Inside an
 
 | | A. One lease per pod, pod-private mount (`PodPerLease`) | B. A user id per lease, `0700` directories (`UidPerLease`) | C. A mount namespace per lease, alone |
 |---|---|---|---|
-| How | The pod mounts only `subPath: pods/<name>-<suffix>` of the RWX claim, at `/work/pods/<name>-<suffix>`; the suffix is random per pod creation, so a re-made ordinal never sees an old directory. The coder mounts the whole claim | One pod, up to `maxLeasesPerPod` leases, each under its own uid in `…/<lease-id>` mode `0700`, own `TMPDIR` and `HOME` | `unshare -m` per lease and bind-mount its directory |
+| How | The pod mounts only `subPath: pods/<name>-<suffix>` of the RWX claim, at `/work/pods/<name>-<suffix>`; the suffix is random per pod creation, so a re-made ordinal never sees an old directory. The coder mounts the whole claim. Under `PodVolume` the private mount is the pod's own volume, at the same path, and the coder mounts nothing | One pod, up to `maxLeasesPerPod` leases, each under its own uid in `…/<lease-id>` mode `0700`, own `TMPDIR` and `HOME` | `unshare -m` per lease and bind-mount its directory |
 | Reads another lease's files | **Stopped** by the kubelet mount: the other directories are not in the pod | Stopped by file modes, **unless root or `CAP_DAC_OVERRIDE`** | Stopped by the path, **but not by `/proc/<pid>/root` or `/cwd` of a same-uid process** (*unverified*, from proc(5) and ptrace access rules) |
 | Sees or signals another lease's processes | Stopped (pod PID namespace) | Signals and `ptrace` stopped (other uid); `/proc` still lists their command lines, and `hidepid` needs a mount the pod cannot make | Not stopped |
 | Network | Stopped (pod network namespace) | **Not stopped**: one network namespace, so `127.0.0.1` services and abstract unix sockets are shared | Not stopped |
 | Memory, CPU, OOM | Per-pod limits per lease | **One lease's build can OOM-kill another's** | Same |
-| Needs | Nothing special | A root-capable helper (`SETUID`, `SETGID`) in the pod, so `hostUsers: false`: stable since Kubernetes v1.36 and needs Linux 6.3 or later, containerd 2.0 or later, and idmap mounts on every volume (*verified 2026-10-06*, the user-namespaces page of kubernetes.io; that **Longhorn's NFS share-manager RWX** supports idmap mounts is *unverified*) | `CAP_SYS_ADMIN` or a user namespace; the default seccomp profile blocks `mount` and `unshare` (*unverified*) |
+| Needs | Nothing special | A root-capable helper (`SETUID`, `SETGID`) in the pod, so `hostUsers: false`: stable since Kubernetes v1.36 and needs Linux 6.3 or later, containerd 2.0 or later, and idmap mounts on every volume (*verified 2026-10-06*, the user-namespaces page of kubernetes.io). **It therefore requires `storage.mode: PodVolume` (AD-045):** a pod with `hostUsers: false` cannot mount Longhorn's RWX claim (`failed to set MOUNT_ATTR_IDMAP … invalid argument`, *verified 2026-10-06* on netcup, the owner's probe, consistent with mount_setattr(2), which lists no NFS among the idmap-capable filesystems, <https://man7.org/linux/man-pages/man2/mount_setattr.2.html>); a Longhorn RWO ext4 volume mounts idmapped. The one `PodVolume` of a pod is shared by its leases, each in its own `0700` uid directory | `CAP_SYS_ADMIN` or a user namespace; the default seccomp profile blocks `mount` and `unshare` (*unverified*) |
 | Does not stop | Residue between sequential leases (so wipe or delete, above); a kernel escape (the node's kernel is shared by every container); the coder, which sees every directory by design | A compromise of the helper (it can become any uid); a kernel escape | Most of it alone |
 | Cost | A pod per concurrent lease | Packs many leases per pod: the cheapest | Cheap, and weakest alone |
 
@@ -952,9 +963,69 @@ The owner's rule, kept whole: **no pod is ever shared across owners.** Inside an
 
 - **Paths mean the same in the coder and the pod** (adam-rs ADR 0010's rule, kept): the pod's mount path is the claim's path, so the coder's file tools and its git stay where the credentials are, and **no credential is in a run pod**. The coder clones with a broker grant for that repo and lease (§39a): short-lived, scoped to the repository, never a long-lived key.
 - **The agent may clone another repo mid-run** into its own lease directory: the coder patches `spec.repos` (the operator checks only the count; **authority is the broker's**, which refuses a repo no connection grants, §39a), and clones it. The person's yes for a second repository (the system's `workspace-e2e.sh`) stays the coder's gate.
-- **The claim is Longhorn RWX** (a share-manager NFS; **unverified on this cluster**, and §29 says its speed for `target/` and `node_modules` is unverified): measuring it is the first open question below. A pod's private directory holds builds, so a slow RWX makes slow builds; the fallback is `emptyDir` for caches with the clone on RWX, not designed here.
+- **The claim is Longhorn RWX.** *Verified 2026-10-06, the owner's probe on netcup:* the class serves RWX through an NFS share-manager, and a pod with `hostUsers: false` cannot mount it (*Cluster facts*, below). *Unverified:* its speed for `target/` and `node_modules` (§29); measuring it is the first open question below. A pod's private directory holds builds, so a slow RWX makes slow builds. A `PodVolume` (AD-045) is one answer; `emptyDir` for caches with the clone on RWX is not designed here.
 - **No shared git mirror or package cache across leases in v0.** A mirror that holds repository X would be readable by a lease that was granted only repository Y; a per-owner cache is a later decision (open question).
 - **Wipe.** The holder wipes at release (above); the coder's janitor removes `pods/<dir>` of a pod that no longer exists, as it does for `held_runs` today. The operator never mounts the claim.
+
+*Amended 2026-10-06 (the owner: "Also I think we can go with normal RWO volumes too, replicated"; AD-045, P-019):* everything above is `storage.mode: SharedClaim`, which **stays the default**. An environment may instead choose `PodVolume`, a `ReadWriteOnce` volume of the pod's own. The coder cannot mount another pod's RWO volume, so under `PodVolume` the bullets above that say the coder mounts the claim, clones into it or janitors it do not apply; the next subsection says what replaces them.
+
+### Pod volume: files and git over exec (AD-045, P-019)
+
+The owner, 2026-10-06, after the cluster probes: *"Also I think we can go with normal RWO volumes too, replicated."* **Too:** an addition, not a replacement. The reason it is needed is a verified fact: a pod with `hostUsers: false` cannot mount Longhorn's RWX claim, and a Longhorn RWO ext4 volume mounts idmapped (*Cluster facts*, below).
+
+**What the pod gets.** One `ReadWriteOnce` claim per run pod, a generic ephemeral volume of the pod (*What the operator makes*): Kubernetes makes it with the pod and deletes it with the pod, and it is mounted where `SharedClaim`'s pod directory would be, so a lease directory has the same path in both modes. **Replication is the StorageClass's**: the `longhorn` class has `numberOfReplicas: "2"` (*verified 2026-10-06*, the owner's `kubectl get sc longhorn -o jsonpath='{.parameters.numberOfReplicas}'`), so a `PodVolume` from it has 2 replicas on netcup. **Sequential reuse after a wipe works as before** (the holder wipes the lease directory; the pod goes back to Free). A pod deleted for any other reason, an idle reap, a lost lease, a changed `env-digest`, **takes its volume with it**, so nothing outlives the pod to be found by another owner. The volume attaches wherever the pod schedules, so it does not pin a pod to a node; how long a Longhorn attach takes when a new pod starts is *unverified*.
+
+**What the coder can no longer do, and what replaces it (P-019).** The coder mounts nothing of a `PodVolume`. Its file tools and its git therefore cross `pods/exec`, and **no credential enters the pod**, so P-015 holds unchanged:
+
+- **Files.** The coder's file tools act through the environment session (`pods/exec`), not through the coder's own filesystem. This is an adam-rs change (*What adam-rs must change*).
+- **Clone.** The coder fetches the repository into **a bare mirror of its own**, with a broker grant for that repository and lease (§39a), makes a `git bundle` of it and streams the bundle into the pod on stdin of an exec, into a file of the lease directory; `git clone` (or `git fetch`) in the pod reads the bundle. The mirror is the coder's, per owner and repository; no run pod sees it, so the objection of *Storage and clones* to a shared mirror does not apply.
+- **Push.** The pod writes `git bundle create` of the branch to stdout, the coder fetches the bundle into its mirror and **pushes with a grant**. **Incremental bundles** (`^<basis>`, the last commit the other side has) keep later transfers small.
+- **Image.** An image built in the pod reaches the coder as the OCI archive streamed over exec, and the coder pushes it (P-018, amended).
+- **Parking.** A run that waits hours for a person releases its lease. Before that the coder has the pod commit the work in progress, **untracked files included and ignored ones left out**, to a private ref (`refs/adam/park/<run-hash>`), and keeps a bundle of that ref in its own storage. The next lease restores it into a pod, which may be another. **Ignored build outputs are rebuilt**: that is the price of not copying `target/` and `node_modules` through exec.
+- *Unverified:* the exact git invocations (`git bundle create` with `^<basis>` and `-` for stdout, `git clone` and `git fetch` from a bundle file, committing untracked files to a private ref through a temporary index), the throughput and the size limits of an exec stream, and what a bundle costs on a large monorepo.
+
+```mermaid
+sequenceDiagram
+    participant C as Coder
+    participant K as Operator
+    participant P as Run pod with its volume
+    participant G as Broker, §39a
+    participant H as Code host
+
+    C->>K: create RunLease
+    K->>P: create the pod with an ephemeral RWO volume, Kubernetes makes its claim
+    K-->>C: Bound, podName, directory on the pod volume
+    C->>G: grant for the repository
+    G-->>C: a short-lived token
+    C->>H: fetch into the coder's bare mirror
+    C->>P: pods/exec: stream a git bundle on stdin, clone from it
+    loop while the run works
+        C->>P: pods/exec: file reads and writes, commands
+    end
+    C->>P: pods/exec: git bundle of the branch to stdout, incremental
+    P-->>C: the bundle
+    C->>C: fetch the bundle into the mirror
+    C->>H: push with a grant
+    opt the run waits for a person
+        C->>P: pods/exec: commit the work in progress to the park ref, bundle to stdout
+        P-->>C: the bundle, kept in the coder's storage
+    end
+    C->>P: pods/exec: kill the lease's processes, wipe its directory
+    C->>K: delete the RunLease
+    K->>P: keep the pod Free, or delete it and with it the volume
+```
+
+```mermaid
+stateDiagram-v2
+    [*] --> Claimed: pod created, the ephemeral volume controller makes its claim
+    Claimed --> Attached: the claim binds and attaches where the pod schedules
+    Attached --> Leased: RunLease Bound, repositories cloned from bundles
+    Leased --> Attached: released clean, directory wiped, a parked run's bundle kept by the coder
+    Attached --> [*]: pod deleted, its volume deleted with it
+    Leased --> [*]: pod lost or released unclean, its volume deleted with it
+```
+
+Prose for what they cannot say: the coder's mirror and its parked bundles are the coder's own storage, so a coder that loses them loses only parked runs, never a pushed branch; and under `UidPerLease` the one volume of a pod holds each lease in its own `0700` uid directory (*Isolation*).
 
 ### Containers in a run (AD-043, P-018)
 
@@ -964,20 +1035,20 @@ The owner, 2026-10-06: *"some of those environments need docker; e.g. for buildi
 |---|---|---|
 | `None` (default) | Nothing: the pod of the tables above | Most runs |
 | `Build` | A **BuildKit** sidecar. The run reaches it with `docker buildx` through a socket on an `emptyDir` shared only inside the pod (a `remote` builder on that socket; the exact flags are *unverified*) | Building images: `docker build`, `buildx bake` |
-| `Engine` | A **rootless Podman** sidecar serving a Docker-compatible socket on the same kind of `emptyDir` | `docker run`, compose, Testcontainers, devcontainers |
+| `Engine` | A **Podman** sidecar serving a Docker-compatible socket on the same kind of `emptyDir`; privileged only inside the pod's user namespace (below) | `docker run`, compose, Testcontainers, devcontainers |
 
 **The rules, all of them in code or CEL, none a field:**
 
-- **`mode != None` requires `isolation.userNamespace: true`** (`hostUsers: false`), and `pool.maxLeasesPerPod: 1` (CEL, above). A daemon can bind-mount anything the pod mounts, so it is never shared by two leases; **one daemon per pod, and never across owners** (AD-037 holds as it did).
-- **Never the host's Docker or containerd socket**, never a `hostPath`. **Never `privileged` unless the pod has `hostUsers: false`**: the operator renders the sidecar's security context itself (the floor of *What the operator makes* is for the run container; the sidecar gets the least its daemon needs, and which capabilities, seccomp and AppArmor profile that is, is *unverified* and decided by the kind job). The object cannot loosen it.
-- **`Build` runs BuildKit rootful inside the pod and mapped to an unprivileged host user by the user namespace.** Rootless BuildKit cannot run inside a user namespace, so rootful BuildKit mapped to a high uid is the pattern (*verified 2026-10-06*, <https://kubernetes.web.cern.ch/blog/2025/06/19/rootless-container-builds-on-kubernetes/>), and Kubernetes' own announcement names "builders like buildkit with `hostUsers: false`" (*verified 2026-10-06*, <https://kubernetes.io/blog/2026/04/23/kubernetes-v1-36-userns-ga/>, user namespaces stable in v1.36).
-- **`Engine` is rootless Podman**, the engine adam-rs and the system already chose for a repository's devcontainer: adam-rs [ADR 0010](https://github.com/vymalo/another-adam-rs/blob/main/docs/decisions/0010-a-run-works-in-its-repositorys-devcontainer.md) and the system's [ADR 0028](https://github.com/vymalo/another-agentic-system/blob/main/docs/decisions/0028-devcontainer-json-is-the-workspace-environment-contract.md). There it is one Podman service of the dev stack beside the coder (*verified 2026-10-06*, both records); here it is a sidecar of each run pod, inside the pod's user namespace, so the devcontainer path of ADR 0010 keeps its socket and changes only where the service runs.
+- **`mode != None` requires `isolation.userNamespace: true`** (`hostUsers: false`), **`storage.mode: PodVolume`** (an RWX claim cannot be mounted in a pod with `hostUsers: false`, AD-045) and `pool.maxLeasesPerPod: 1` (CEL, above). A daemon can bind-mount anything the pod mounts, so it is never shared by two leases; **one daemon per pod, and never across owners** (AD-037 holds as it did).
+- **Never the host's Docker or containerd socket**, never a `hostPath`. **Never `privileged` unless the pod has `hostUsers: false`**: the operator renders the sidecar's security context itself (the floor of *What the operator makes* is for the run container, which keeps it; the sidecar gets the least its daemon needs). The object cannot loosen it. *Verified 2026-10-06 on netcup:* both daemons start with `privileged: true` **inside the user namespace**, in a namespace whose Pod Security level is `privileged`. The Pod Security Standards' `baseline` forbids `privileged: true` (that `hostUsers: false` does not relax it is *unverified*; the probes did not try `baseline`). So **pods with a daemon need a namespace at level `privileged`**, and that level is the namespace's: it applies to every pod there. *Proposed (P-018):* such run pods live in a **namespace of their own** (`<coder namespace>-run`), at level `privileged`, where nothing but the operator makes pods, and the chart renders a `ValidatingAdmissionPolicy` there that admits a pod only if its requester is the operator's ServiceAccount, it has `hostUsers: false`, and its only `privileged` container is the sidecar of the chart's pinned image. The coder's namespace keeps its level. The cost: the operator watches two namespaces and the coder execs across (the `pods/exec` risk row already names this namespace). Whether a smaller set of capabilities, seccomp and AppArmor than `privileged` is enough is *unverified* and decided by the kind job.
+- **`Build` runs BuildKit rootful inside the pod and mapped to an unprivileged host user by the user namespace.** Rootless BuildKit cannot run inside a user namespace, so rootful BuildKit mapped to a high uid is the pattern (*verified 2026-10-06*, <https://kubernetes.web.cern.ch/blog/2025/06/19/rootless-container-builds-on-kubernetes/>), and Kubernetes' own announcement names "builders like buildkit with `hostUsers: false`" (*verified 2026-10-06*, <https://kubernetes.io/blog/2026/04/23/kubernetes-v1-36-userns-ga/>, user namespaces stable in v1.36). *Verified 2026-10-06 on netcup, the owner's probe:* `moby/buildkit`, `privileged: true` inside the user namespace, `--root` on an `emptyDir`, built a two-line Dockerfile and exported an OCI archive.
+- **`Engine` is Podman**, the engine adam-rs and the system already chose for a repository's devcontainer: adam-rs [ADR 0010](https://github.com/vymalo/another-adam-rs/blob/main/docs/decisions/0010-a-run-works-in-its-repositorys-devcontainer.md) and the system's [ADR 0028](https://github.com/vymalo/another-agentic-system/blob/main/docs/decisions/0028-devcontainer-json-is-the-workspace-environment-contract.md). There it is one Podman service of the dev stack beside the coder (*verified 2026-10-06*, both records); here it is a sidecar of each run pod, inside the pod's user namespace, so the devcontainer path of ADR 0010 keeps its socket and changes only where the service runs. *Verified 2026-10-06 on netcup:* Podman 5.8.7 (`quay.io/podman/stable`) ran busybox with `privileged: true` inside the user namespace, storage on an `emptyDir`, `--cgroup-manager=cgroupfs --events-backend=file`. That is **rootful Podman inside the user namespace**, privileged only there and mapped to an unprivileged host uid range; **rootless Podman inside the user namespace is *unverified***, and so is Podman's Docker-compatible API for Testcontainers.
 - **Kaniko is not chosen:** its original repository was archived in June 2025 and only forks remain (*verified 2026-10-06*, <https://ideas.harness.io/feature-request/p/kaniko-project-is-archived-how-do-we-build-images-in-un-privileged-mode>).
 - The sidecar images are values of the operator chart, pinned by tag and digest, like the workspace image. The sidecar's `ephemeral-storage` and memory come from the size class, and the object has no field for them.
 
-**Storage and cache.** The daemon's own snapshot store is an `emptyDir` of the sidecar: overlay snapshots on the NFS-backed RWX claim are *unverified* and probably unsupported. The **build cache lives on the RWX claim or in a registry**: `docker buildx build --cache-to type=local` writes it to the lease directory (so it survives a lost pod and a parked run, and is wiped with the lease), and `type=registry` is the way across runs. Across leases there is **no shared cache on the claim in v0**, for the reason of *Storage and clones* (a cache holds what another lease's repository held); a per-owner one is the existing open question (§93), and a registry cache is per owner and repository.
+**Storage and cache.** The daemon's own snapshot store is an `emptyDir` of the sidecar (*verified 2026-10-06 on netcup* for both daemons; overlay snapshots on an NFS-backed claim are *unverified* and probably unsupported, and no such claim is mountable here anyway). The **build cache lives on the pod volume or in a registry**: `docker buildx build --cache-to type=local` writes it to the lease directory on the `PodVolume` (so it is wiped with the lease, and a lost pod or a parked run loses it, P-019), and `type=registry` is the way across runs. Across leases there is **no shared cache in v0**, for the reason of *Storage and clones* (a cache holds what another lease's repository held); a per-owner one is the existing open question (§93), and a registry cache is per owner and repository.
 
-**Credentials and pushes (reconciling P-015).** The run pod holds no credential (AD-038), and `Build` needs none to *build*: base images from public registries, and the result stays in the pod. To **push** an image the shape is P-015's: the build writes an OCI archive (`--output type=oci,dest=<lease dir>/image.tar`) into the lease directory, which the coder mounts, and **the coder pushes it** with a registry grant from the broker (§39a), short-lived and scoped to the repository path, never a long-lived key and never in the pod. Git writes and image pushes are therefore both the coder's. A push from inside the build (`buildx --push`) or a pull of a private base image needs a credential in the pod; that is a **short grant** (minutes, one repository path, passed as a `buildx --secret` from tmpfs and never as an environment variable, an image layer or a file of the claim), and it is the one place this design puts a credential in a run pod. It is proposed, not decided, and off until the owner says (P-018). The broker has no registry connection kind yet (§39a covers code hosts and MCP servers), and which registry and which credential is open (§93).
+**Credentials and pushes (reconciling P-015).** The run pod holds no credential (AD-038), and `Build` needs none to *build*: base images from public registries, and the result stays in the pod. To **push** an image the shape is P-015's: the build writes an OCI archive (`--output type=oci,dest=<lease dir>/image.tar`) into the lease directory on the pod volume, **the coder reads it over `pods/exec`** (the archive streamed on stdout, P-018 amended) and **the coder pushes it** with a registry grant from the broker (§39a), short-lived and scoped to the repository path, never a long-lived key and never in the pod. Git writes and image pushes are therefore both the coder's. A push from inside the build (`buildx --push`) or a pull of a private base image needs a credential in the pod; that is a **short grant** (minutes, one repository path, passed as a `buildx --secret` from tmpfs and never as an environment variable, an image layer or a file of the claim), and it is the one place this design puts a credential in a run pod. It is proposed, not decided, and off until the owner says (P-018). The broker has no registry connection kind yet (§39a covers code hosts and MCP servers), and which registry and which credential is open (§93).
 
 **A pod with a daemon is not reused (P-018).** Containers, images, volumes and networks of a daemon are residue that the coder's wipe of a directory does not reach, so in v0 a pod with `mode != None` is **deleted at release**, never returned to the pool, and `minWarm` counts it as a new pod. Reuse, after the isolation suite covers the daemon, is a later decision.
 
@@ -991,16 +1062,18 @@ sequenceDiagram
     participant R as Registry
 
     C->>K: RunLease for an environment with containers.mode Build
-    K-->>C: Bound, a pod of its own, directory on the RWX claim
+    K-->>C: Bound, a pod of its own with its own volume
     C->>P: pods/exec: docker buildx build, cache to the lease directory, output an OCI archive
     P->>B: the build, over the pod's socket
-    B-->>P: image written to the lease directory
-    P-->>C: exit status, the archive on the shared claim
+    B-->>P: image written to the lease directory on the pod volume
+    P-->>C: exit status
+    C->>P: pods/exec: stream the archive
+    P-->>C: the archive on stdout
     C->>G: grant for the registry, one repository path
     G-->>C: a short-lived token
     C->>R: push the archive, the token
     C->>K: delete the RunLease
-    K->>P: delete the pod, a pod with a daemon is not reused
+    K->>P: delete the pod and its volume, a pod with a daemon is not reused
 ```
 
 ```mermaid
@@ -1011,10 +1084,34 @@ stateDiagram-v2
     Ready --> Ready: builds and containers of the lease
     Ready --> Released: RunLease deleted or expired
     Failed --> Released: lease Failed
-    Released --> [*]: pod deleted
+    Released --> [*]: pod and its volume deleted
 ```
 
-*Unverified, and decided in the kind job:* that rootful BuildKit and rootless Podman start in a pod with `hostUsers: false` on this cluster; the netcup cluster's Kubernetes version, kernel and containerd (user namespaces stable in v1.36 need Linux 6.3 or later and containerd 2.0 or later, *verified 2026-10-06*, §59b *Isolation*) and its container runtime class; Podman's Docker-compatible API for Testcontainers. §93 *Run pool* asks the owner for the cluster facts.
+*Amended 2026-10-06 after the cluster probes (AD-043, AD-045):* the sidecar shapes are **proven on netcup** (*Cluster facts*, below): BuildKit rootful and Podman, each `privileged` inside the user namespace and on an `emptyDir`. What changed: `mode != None` now requires `storage.mode: PodVolume`; the run pods' namespace must allow Pod Security `privileged` for such pods (the operator renders the sidecar's context; the run container keeps its floor); the OCI archive is streamed to the coder over exec. *Still unverified, and decided in the kind job:* Podman's Docker-compatible API for Testcontainers and devcontainers; rootless Podman inside the user namespace; the exact `buildx` flags.
+
+### Cluster facts (verified 2026-10-06)
+
+*Verified 2026-10-06*, the owner's run of two probe scripts on the netcup cluster. The first five answer the question of §93 *Run pool*; the probes follow.
+
+| Fact | Value |
+|---|---|
+| Nodes | 5 Talos v1.13.6, Kubernetes v1.36.1, kernel 6.18.38-talos, containerd 2.2.5 |
+| User namespaces | `user.max_user_namespaces` is 15000: no Talos change is needed |
+| CNI | Cilium 1.19.6, which enforces NetworkPolicy |
+| Runtime classes | None: no gVisor, no Kata |
+| Addresses | Pod CIDR 10.244.0.0/16 (a /24 per node); the `kubernetes` service is 10.96.0.1 |
+| Allocatable | About 47.75 CPU and 107 GiB memory over the 5 nodes; the control-plane node has about 4 CPU and 7 GiB |
+| StorageClasses | Only `longhorn` (default, `numberOfReplicas: "2"`) and `longhorn-static`, both `driver.longhorn.io` |
+
+| Probe (a pod with `hostUsers: false`) | Result |
+|---|---|
+| 1. An `emptyDir` volume | **Works**: root in the pod maps to host uid 130154496, range 65536 |
+| 2. A Longhorn **RWX** claim (NFS share-manager) | **Fails to start**: `failed to set MOUNT_ATTR_IDMAP on …/volumes/kubernetes.io~csi/pvc-…/mount: invalid argument`. Consistent with mount_setattr(2), which does not list NFS among the idmap-capable filesystems (*verified 2026-10-06*, <https://man7.org/linux/man-pages/man2/mount_setattr.2.html>) |
+| 3. A Longhorn **RWO** claim (block device, ext4) | **Works**: mounted `ext4 (rw,seclabel,relatime,idmapped)` |
+| 4. Rootful BuildKit (`moby/buildkit`, `privileged: true` inside the user namespace, `--root` on an `emptyDir`) | **Works**: built a two-line Dockerfile and exported an OCI archive |
+| 5. Podman 5.8.7 (`quay.io/podman/stable`, `privileged: true` inside the user namespace, storage on an `emptyDir`, `--cgroup-manager=cgroupfs --events-backend=file`) | **Works**: ran busybox |
+
+Probes 4 and 5 ran in a namespace at Pod Security `privileged`; `baseline` was not tried (*Containers in a run*). Probes 2 and 3 are why AD-045 exists; probes 4 and 5 are why AD-043's sidecars are offered.
 
 ### Seams (AD-039, AD-020)
 
@@ -1024,7 +1121,7 @@ stateDiagram-v2
 | `PodProvider` | `aap-ports`, implemented by `aap-runpool-kubernetes` | `create(env, NewPod)`, `delete`, `list(env)`, `watch()` over neutral types: no Kubernetes type in a signature |
 | Testkit (`aap-ports/testkit`) | `planner_properties!`, `pod_provider_conformance!`, a `Memory` provider | See the list below |
 
-The testkit asserts: **never two owners on one pod**; never more than `maxPods`, nor `maxLeasesPerPod` per pod; reuse before create; a Free pod above `minWarm` is reaped after `idleTTLSeconds` and not before; an expired lease frees its slot and deletes the pod; a lease from a requester not listed is `Denied`; `repos` over the limit is `Denied`; no secret value ever materialises in a `Plan`, a pod spec or a status (as §59a's macro). The Kubernetes provider additionally proves, against a real API server, the owner reference, the ServiceAccount's `automount: false`, and that no Role is made. The planner is a pure function, so property tests cover it.
+The testkit asserts: **never two owners on one pod**; never more than `maxPods`, nor `maxLeasesPerPod` per pod; reuse before create; a Free pod above `minWarm` is reaped after `idleTTLSeconds` and not before; an expired lease frees its slot and deletes the pod; a lease from a requester not listed is `Denied`; `repos` over the limit is `Denied`; no secret value ever materialises in a `Plan`, a pod spec or a status (as §59a's macro). The Kubernetes provider additionally proves, against a real API server, the owner reference, the ServiceAccount's `automount: false`, that no Role is made, and (AD-045) that a `PodVolume` pod's claim is made by the ephemeral volume controller, binds, and goes with the pod. The planner is a pure function, so property tests cover it.
 
 **What adam-rs must change** (its own ADR, amending 0019; this repository decides nothing there):
 
@@ -1032,6 +1129,7 @@ The testkit asserts: **never two owners on one pod**; never more than `maxPods`,
 - a **`RUN_ENVIRONMENT` value**, `pool` (default stays `local`, and the per-run value `kubernetes` stays), with `RUN_POOL_ENVIRONMENT` (the `RunEnvironment` name) and the lease timings from the object, not variables;
 - **the run's workspace path comes from the lease** (`status.directory`), not from the coder: the coder must lease before it makes the workspace. That changes the order inside `ensure`. A defaulted method on `Environment` (say `workspace_root`) breaks no implementer; a *required* one would, and adam-rs's Rule 2 says to flag it;
 - **`pods/exec` only** in its chart's RBAC, no `pods` verbs, and `runleases`; the `runPods` block's template, quota and admission policy are not used in pool mode;
+- **file access through the environment session** (`pods/exec`), not the coder's filesystem, and **git by bundles over exec** with the coder's own bare mirror, for `storage.mode: PodVolume` (AD-045, P-019): `SharedClaim` keeps the coder's own filesystem and git. A defaulted method again, so that no implementer breaks, and the same flag under adam-rs's Rule 2;
 - the coder's **`owner`**: a stable id of the person the run is for, which today's thread-tools grant does not carry (§39a open question).
 
 ### Migration (AD-039)
@@ -1052,7 +1150,8 @@ Both modes work in one cluster: they use different pod names, labels, and RBAC, 
 
 | Risk | Handling |
 |---|---|
-| Longhorn RWX is slow for builds or does not give idmap mounts | Measured before R5; A needs neither idmap nor a user namespace |
+| Longhorn RWX is slow for builds (*unverified*) and **cannot be mounted with `hostUsers: false`** (*verified 2026-10-06*) | Speed is measured before R5; A needs no user namespace; a user namespace (`UidPerLease`, `containers.mode`) needs `PodVolume` (AD-045) |
+| `PodVolume`: git and files through exec are slower than a shared mount, and it is a new adam-rs seam; a Longhorn attach when a new pod starts adds latency (*unverified*) | Off by default (`SharedClaim` stays); incremental bundles; the file tools and bundles are adam-rs's change (P-019); the attach time is measured in the kind job and on netcup |
 | Sequential reuse leaves residue | Read-only root, writable paths only the private mount and tmpfs, wipe and kill at release, delete on anything but a clean release |
 | The coder, which mounts everything, is the weak point | As today; mediation of writes is P-015 (§39a) |
 | `pods/exec` on any pod of the namespace if `resourceNames` is not honoured | Proved in kind; otherwise a namespace for run pods (needs the operator to watch two namespaces) |
