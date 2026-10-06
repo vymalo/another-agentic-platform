@@ -85,6 +85,8 @@ Every run must be traceable end-to-end.
 
 `AgentRun` and `AgentLease` live in the application database, not etcd (§19–20).
 
+*Amended 2026-10-06 (AD-036):* `RunLease`, the slot a run asks of a run pool (§59b), is a CRD. `AgentRun` and `AgentLease` stay records.
+
 #### AD-017 — Workflow engine behind a provider boundary
 
 `WorkflowProvider` (§17a): a Rust state machine on Postgres first; Restate optional.
@@ -168,6 +170,8 @@ operator-owned CloudNativePG `Cluster`, behind the `StoreProvisioner` seam
 GitHub App private key in its pod, as a file from a Secret, which contradicts
 §38 ("GitHub App private key … must never enter agent runtimes") until the
 credential broker (§39) exists.
+
+*Amended 2026-10-06 (AD-042):* the broker that closes this gap is designed in §39a. It is not built, so the gap stands.
 
 #### AD-025 — Agents are configured from a dashboard over a Platform API
 
@@ -288,6 +292,90 @@ GitHub App per coder**, each with its own private key in AWS Secrets Manager
 coder, not deployment defaults (§60a). Property names are proposed (§93). The
 system's side and the details: its ADR 0045 and the amendment of 0041.
 
+#### AD-034 — The operator, not the coder, creates and owns the pods where work runs
+
+*(2026-10-06; owner's decision 1 of the run pool.)* Run pods are made by the
+operator, owned (controller `ownerReference`) by a configurable `RunEnvironment`,
+and run under a dedicated ServiceAccount: no API token, and no Role or RoleBinding
+made for it. The coder loses `pods/create` and keeps `pods/exec` on the pods the
+chart names, plus `runleases`. Extends adam-rs ADR 0019, whose coder-made pods
+stay the default until the pool is proven (AD-039). §59b.
+
+#### AD-035 — Everything about a run pool is configurable on the `RunEnvironment`
+
+*(2026-10-06; decision 2.)* Image (default: the operator's workspace image), size
+class (`runPodClasses`, AD-031), idle time-to-live, warm minimum, maximum pods,
+maximum leases per pod, node selector and tolerations, the ServiceAccount and the
+security context, with CEL rules where a rule needs no other object. The floor of
+the pod's hardening is fixed in code and cannot be loosened by the object. A
+dashboard form is a later slice (§60a). §59b.
+
+#### AD-036 — Pods are pooled per environment and a slot is a `RunLease`
+
+*(2026-10-06; decisions 3 and 4.)* Pods are reused across runs that use the same
+`RunEnvironment`: not one per run, not one per workspace. The operator bin-packs
+leases onto pods, keeps the warm minimum and reaps idle pods after their
+time-to-live. The coder asks for a slot with a `RunLease` CR naming the
+environment, the run, the owner and the repos; the operator assigns a pod and
+reclaims the slot when the lease ends, its holder disappears or its TTL expires.
+**Amends AD-016 for this object only:** `RunLease` is a CRD (one per run,
+renewed once a minute); `AgentLease` (§20) stays an application record. §59b.
+
+#### AD-037 — Never share a pod across owners; within an owner, only with strict file isolation
+
+*(2026-10-06; decision 5, the owner's words:)* reusing a pod across different
+repos is acceptable *"if the agent can be modular enough and the files strictly
+separated; so that one agent cannot read repos it's not supposed to read… So even
+across the same owner, no"* (no sharing unless isolation is strict). A pod is bound
+to one owner by its first lease and never re-bound. Within an owner, one lease per
+pod is the safe default until a strict mode is proven (P-013). §59b, *Isolation*.
+
+#### AD-038 — Storage is one shared RWX volume plus a git clone on lease
+
+*(2026-10-06; decision 6.)* The coder and the run pods share a `ReadWriteMany`
+claim (Longhorn RWX; *unverified* on this cluster). The coder clones the lease's
+repositories into the lease's directory, and may clone another repository
+mid-run into the same directory. Clones use short-lived grants from the credential
+broker (§39a), never a long-lived key, and **no credential is put in a run pod**.
+§59b, *Storage and clones*.
+
+#### AD-039 — The run pool is behind traits, and per-run pods stay the default
+
+*(2026-10-06; decisions 7 and 8; AD-020.)* In adam-rs, a new `Environment`
+implementation (`PooledEnvironment`, `RUN_ENVIRONMENT=pool`, its own crate)
+creates and watches a `RunLease`; adam-rs decides its side in an ADR of its own. In
+the platform, the pool policy is a pure `PoolPlanner` and the cluster is behind
+`PodProvider`, each with a testkit. The pool and ADR 0019's per-run pods coexist;
+**per-run stays the default** until the owner decides the pool is proven. §59b.
+
+#### AD-040 — An agent's MCP servers are fixed; users add their own, per user
+
+*(2026-10-06; decisions 1 and 2 of connections.)* An agent's MCP servers come from
+its folder or `AgentConfig` and users cannot change them. A user can add MCP
+servers from the UI on top of them, with auth `oauth2` (authorization code with
+PKCE, following the MCP authorization specification), `api_key` (header name
+configurable), `bearer` or `none`, stored per user and optionally shared to an
+organisation later. The owner asked to *"mimic how LibreChat is doing their
+stuff"*: §39a records what that means and where it differs. §39a.
+
+#### AD-041 — Code hosts are connections: GitHub App, GitLab and Bitbucket
+
+*(2026-10-06; decision 3.)* A user connects GitHub (an App the user installs),
+GitLab and Bitbucket (OAuth). The connections feed adam-rs's `CodeHost` and
+`GitCredentials`, which have only GitHub today. Whether one App per coder (AD-033)
+remains is open (§93). §39a.
+
+#### AD-042 — A credential broker holds the secrets and hands out short-lived scoped grants
+
+*(2026-10-06; decisions 4 and 5.)* Refresh tokens and keys are stored encrypted
+per user and per connection. A run gets a short-lived, scoped token **per request,
+per run, per connection**; revocation is one action; nothing secret goes into
+agent pods, files or logs. The port is `CredentialBroker` over a `SecretVault`,
+each with a testkit (AD-020); the candidate backends are listed and **none is
+chosen** (§93). Ownership is per user and, later, per organisation, and pods are
+never shared across owners (AD-037). **Closes, once built, the gap AD-024
+records.** §39a.
+
 ---
 
 ## 92. Proposed Decisions
@@ -385,6 +473,34 @@ object that gains Argo's annotation becomes GitOps's. The existing `coder` and
 
 *Accepted 2026-10-05 as AD-031, amended: the dashboard takes over `coder` and `chat` at the cutover, and nothing of the fleet stays read-only.*
 
+### P-013 — Pod per lease is the default isolation; a user id per lease is the strict mode, later
+
+Within one owner, make **one lease per pod** (`isolation.mode: PodPerLease`, the
+pod mounting only its own private directory of the RWX claim) the default and the
+only mode until the isolation suite passes in the cluster. Then offer
+**`UidPerLease`** (a user id per lease, `0700` directories, `hostUsers: false`) for
+density. A per-lease mount namespace is an addition to it, never alone. Never
+across owners in any mode (AD-037). §59b, *Isolation*.
+
+### P-014 — Run pods have ordinal names, so `pods/exec` can be listed
+
+`<env>-run-<n>` with `n` below the chart's `runPodMaxOrdinal`, so the coder's
+`pods/exec` right can name its pods (`resourceNames`). *Unverified* that RBAC
+honours `resourceNames` on a subresource; the kind job decides. If not, run pods
+move to a namespace of their own. §59b.
+
+### P-015 — Git writes stay in the coder, and a trusted service may take them later
+
+Clones and pushes are made by the coder with a broker grant, never inside a run
+pod (§83 prefers a trusted platform component for pushes; that stays open). §59b,
+§39a.
+
+### P-016 — The broker is a service of its own
+
+`aap-broker` (the traits and the testkit), one crate per vault backend, composed
+by a broker binary, so that key material is in no process that takes browser
+traffic or runs agents. §39a.
+
 ---
 
 ## 93. Open Architecture Questions
@@ -397,7 +513,7 @@ The following should be explicitly decided during architecture review.
 - ~~Is native Kubernetes runtime required for v1?~~ Decided: yes, it is the first provider and the only one in v0 (AD-023).
 - ~~Is `RuntimeProvider` an internal Go/Rust interface or an API boundary?~~ Decided: an internal Rust trait, implementations chosen at build time (AD-020).
 - Do runtimes always map one-to-one with revisions?
-- Can multiple runs reuse one live runtime?
+- Can multiple runs reuse one live runtime? *Run pods (§59b): yes, within one owner, one lease per pod by default (AD-036, AD-037). Agent runtimes: still open.*
 - Revisions against adam's run ledger: adam keys a run by the agent's name, so two revisions running side by side would share or fork one ledger. Does a revision get its own agent name and ledger, a partition of one, or a drain before the switch? (§9, §59a)
 - What is the source of run leases for scale-to-zero? adam's store has run leases (`lease_until`), but the coder's workers keep stepping a run after the A2A call has returned, so the HTTP connection says nothing about idleness. Does the operator read adam's store, does adam export a signal, or does the agent call the lease service? (§20, §21, §59a)
 
@@ -411,7 +527,7 @@ The following should be explicitly decided during architecture review.
 ### Storage
 
 - Which Kubernetes storage classes are required?
-- Is RWX available? (netcup: Longhorn only; RWX via NFS share-manager, performance unverified — §29.)
+- Is RWX available? (netcup: Longhorn only; RWX via NFS share-manager, performance unverified — §29.) *The run pool (§59b) depends on it: see Run pool below.*
 - How are shared project Git objects implemented safely?
 - How are project caches cleaned?
 - Are snapshots required in v1?
@@ -419,8 +535,8 @@ The following should be explicitly decided during architecture review.
 ### Security
 
 - Is SPIFFE/SPIRE required initially or roadmap?
-- Which credential broker is used?
-- Are Git writes mediated?
+- Which credential broker is used? *Designed in §39a (AD-042); the vault backend is open: see Connections and the broker below.*
+- Are Git writes mediated? *Proposed, P-015: they stay in the coder, never in a run pod; a trusted service may take them later.*
 - What is the default egress policy?
 - What runtime sandbox technology is required?
 
@@ -464,6 +580,34 @@ The following should be explicitly decided during architecture review.
 - ~~A downtime window for the coder cutover (M3)? *Owner picks.*~~ **Decided (2026-10-05):** no fixed window. The cutover is made when no run is active (the coder's runs are drained first: no new task is sent to it, and M3 starts when every run has finished or parked); the expected gap is the restart of one pod. Chosen in the owner's "go with recommendations", which named none for this line; the owner can still name a window.
 - `store` on `AgentService` rather than on `AgentConfig`? *Recommended: `AgentService`.* **Decided (2026-10-05): as recommended.**
 - The GitHub App key stays in the coder's pod until the credential broker exists? *Recommended: yes, recorded in AD-024.* **Decided (2026-10-05): as recommended.**
+
+### Run pool (asked 2026-10-06)
+
+The owner decided the pool (AD-034 to AD-039). Open, the first four named by the owner:
+
+- **Longhorn RWX performance for builds.** The run pods' private directories hold `target/` and `node_modules` on an NFS share-manager (§29, *unverified*). Measure a cold and a warm Rust and Node build on it before a coder is switched to the pool; also whether it supports idmap mounts (needed only by `UidPerLease`).
+- **Image pre-pull per node.** The workspace image is 2.85 GB compressed (adam-rs ADR 0019, *verified 2026-10-05* there). Does the pool keep it on every eligible node (a DaemonSet that pulls, or the nodes' own pre-pull), so that a new pod starts in seconds?
+- **The lease TTL defaults.** Proposed: expire after 180 s without renewal, renew every 60 s, at most 8 h, 8 repositories, a free pod idle 15 min. Each renewal is a write to etcd.
+- **How a lease's quota is accounted per owner.** `maxPods` caps an environment, not a person. Is there a per-owner cap, how are `Pending` leases ordered between owners (first come is the proposal), and may a person's idle pod be evicted to admit another's (the proposal: yes, the longest idle)?
+- **Sequential reuse after a wipe: is it "strictly separated"?** The default reuses a pod for the same owner's next lease after the coder kills its processes and wipes its directory, and deletes the pod on any unclean end. Or does the owner want a fresh pod per lease (`recycle: Delete`, not a field in v0)?
+- **Does RBAC honour `resourceNames` on `pods/exec`** (P-014)? If not, run pods need a namespace of their own and the operator a second watched namespace.
+- **Work in a pod that is lost.** After an eviction the next lease re-clones. How much of the run does adam-rs recover from its last snapshot or push? That is adam-rs's ADR.
+- **What `minWarm` means.** Free pods, bound or not. A first lease of a new owner still waits for a pod of its own unless an unbound one is free.
+- **A per-owner package cache or git mirror.** None in v0 (a mirror of repository X is readable by a lease granted only Y).
+
+### Connections and the broker (asked 2026-10-06)
+
+The owner decided the shape (AD-040 to AD-042). Open:
+
+- **The vault backend.** HashiCorp Vault, a KMS-envelope table in Postgres, or AWS Secrets Manager (§39a): none chosen.
+- **Token lifetimes.** The broker's maximum grant lifetime and whether it caches a minted token for the rest of a run. GitHub's installation token lasts one hour and cannot be shortened by the broker; GitLab's and Bitbucket's last two (*verified 2026-10-06*, §39a).
+- **Organisation sharing.** The sharing model, where an organisation's members come from (Keycloak groups, §52), and who may share a connection with it.
+- **How the orchestrator relays user MCP servers.** Recommended: through the existing `thread-tools/v1` relay, which already keeps tool-server credentials out of A2A messages, with a broker grant per call, so the agent never holds a credential. The alternative is the agent calling the server itself with a grant, which puts a token in the agent's pod. Either changes the system's relay, and how a person's list is attached to a chat (each chat, or on by default) is open with it.
+- **GitHub: one App per coder (AD-033) or one platform App users install (AD-041)?** The second may make the coder-per-owner split unnecessary.
+- **Who may add user servers**, under which permission name (§60a), and whether an administrator keeps an allow or deny list of hosts.
+- **How the coder and the orchestrator authenticate to the broker** (workload identity, §40, is not built) and how the run token gets an `owner` claim.
+- **The broker as its own service and database** (P-016), and its place in the operator's chart or a chart of its own.
+- **GitLab and Bitbucket scope.** The token cannot be cut to one repository (§39a), so the broker enforces the lease's repositories by policy only. Is that acceptable, or are those hosts limited to read?
 
 ### Dashboard v0 (asked of the owner, 2026-10-05)
 

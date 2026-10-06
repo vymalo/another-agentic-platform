@@ -25,6 +25,7 @@
 | 2026-10-05 | Operator v0, slice S8 (§59a): the operator's image (`docker/operator`), its Helm chart (`deploy/operator`) and the CRDs chart (`deploy/operator-crds`), and `operator-image.yml` (build, smoke test, push, tag bump). *The operator chart* gains an *Amended* note: the CRDs are their own chart (§93, so no `crds.install`), the workflow is its own file, and what the chart does where §59a is silent (the `Role` in the watched namespace, `storeCnpg`, the NetworkPolicy, the token as a file). *Rollout on netcup* M0 names the two charts. Rendered, linted and checked with kubeconform; the install on a cluster and the image build are *unverified* until CI has run them. |
 | 2026-10-05 | Operator v0, slice S9 (§59a): the kind end-to-end of the coder (`operator-coder-e2e`, `deploy/operator/tests/e2e`): the operator, from its chart, runs the real adam-rs coder image (`sha-9a1fd4e`, by tag and digest) on a Postgres the job runs and dummy Secrets, and the card, the registry and a deletion under `Retain` are asserted. *Testing* gains an *Amended* note: a dummy GitHub token instead of a throwaway App key, no model and no GitHub call. Unverified until the job has run. |
 | 2026-10-05 | Admin dashboard v0 decided by the owner (§93, *Dashboard v0*): P-007 to P-012 become AD-026 to AD-031, with AD-032 (permissions are Keycloak client roles, roles are composites, the API checks permissions, §60a *Permissions and roles*, §52 note) and AD-033 (one coder per GitHub owner, one GitHub App each; `coder` renamed `coder-vymalo`, `coder-me` added). Changed from the recommendations: who may configure agents (permissions, not one `admin` role), who may use an agent (use permissions `agent.use:<agent-name>` in the audience), and the dashboard takes over `coder` and `chat` at the cutover (§59a amended; §91 AD-031). New open questions: backup or export of dashboard-owned objects, the final permission names, who makes a new agent's use role, the coder's volume claim under the rename. The operator's default coder image applies when an agent names none. §60a, §52, §59a, the registry contract's header and mvp.md step 1e updated. Documentation only. |
+| 2026-10-06 | The run pool (new §59b) and the credential broker with connections and user MCP servers (new §39a), decided by the owner: AD-034 to AD-042 (the operator makes and owns run pods under a `RunEnvironment`; pods pooled and leased with a `RunLease`; never shared across owners; RWX plus a clone on lease; both modes coexist, per-run stays the default; agent MCP servers fixed, users add their own with OAuth 2, API key, bearer or none; GitHub App, GitLab and Bitbucket connections; a broker over a vault trait). Proposed: P-013 to P-016 (pod per lease as the isolation default, ordinal pod names, git writes stay in the coder, the broker as its own service). Notes on AD-016 (`RunLease` is a CRD) and AD-024 (the gap is designed, not closed), §59a and §60a pointers, open questions in §93 (*Run pool*, *Connections and the broker*). Documentation only. |
 
 ## Contents
 
@@ -37,9 +38,9 @@
 | [Runtime, runs, leases and scale-to-zero](05-runtime.md) | §18, §19, §20, §21, §22, §23, §24, §25, §26, §42, §64, §65, §80 |
 | [Environments, storage, caches and worktrees](06-environments-and-storage.md) | §27, §28, §29, §30, §31, §54, §55, §81, §82 |
 | [Tools](07-tools.md) | §32, §33, §34, §35, §36 |
-| [Security, identity, credentials and tenancy](08-security.md) | §37, §38, §39, §40, §41, §51, §52, §53, §68, §75, §76, §77, §83 |
+| [Security, identity, credentials and tenancy](08-security.md) | §37, §38, §39, §39a, §40, §41, §51, §52, §53, §68, §75, §76, §77, §83 |
 | [Artifacts, observability, lifecycle, reliability and quotas](09-operations.md) | §46, §47, §48, §49, §50, §66, §67, §78, §79, §86 |
-| [Control plane, CRDs, operator and UI](10-control-plane-and-crds.md) | §56, §57, §58, §59, §59a, §60, §60a, §61, §62, §63, §87, §88, §89, §90 |
+| [Control plane, CRDs, operator and UI](10-control-plane-and-crds.md) | §56, §57, §58, §59, §59a, §59b, §60, §60a, §61, §62, §63, §87, §88, §89, §90 |
 | [Decisions and open questions](11-decisions.md) | §91, §92, §93 |
 | [Deployment, summary and success criteria](12-summary.md) | §94, §95, §96, §97, §98, §99, §100 |
 
@@ -91,6 +92,7 @@ Cross-references in the text use the original section numbers (`§N`).
 | 37 | [SecurityProfile](08-security.md) | `08-security.md` |
 | 38 | [Secrets Model](08-security.md) | `08-security.md` |
 | 39 | [Credential Broker](08-security.md) | `08-security.md` |
+| 39a | [Connections, user MCP servers and the credential broker](08-security.md) | `08-security.md` |
 | 40 | [SPIFFE / SPIRE](08-security.md) | `08-security.md` |
 | 41 | [EAIG](08-security.md) | `08-security.md` |
 | 42 | [Scale-from-Zero Request](05-runtime.md) | `05-runtime.md` |
@@ -112,6 +114,7 @@ Cross-references in the text use the original section numbers (`§N`).
 | 58 | [CRD Reference Model](10-control-plane-and-crds.md) | `10-control-plane-and-crds.md` |
 | 59 | [Operator Design](10-control-plane-and-crds.md) | `10-control-plane-and-crds.md` |
 | 59a | [Operator v0: adam-rs agents](10-control-plane-and-crds.md) | `10-control-plane-and-crds.md` |
+| 59b | [The run pool: pods where work runs](10-control-plane-and-crds.md) | `10-control-plane-and-crds.md` |
 | 60 | [UI Architecture](10-control-plane-and-crds.md) | `10-control-plane-and-crds.md` |
 | 60a | [Admin dashboard v0](10-control-plane-and-crds.md) | `10-control-plane-and-crds.md` |
 | 61 | [Draft → Revision → Promotion UX](10-control-plane-and-crds.md) | `10-control-plane-and-crds.md` |

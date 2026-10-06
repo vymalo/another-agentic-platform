@@ -618,7 +618,7 @@ Each item is additive later, and the third column says how it stays so.
 | `AgentEnvironment`, `ToolUniverse`, `ToolProvider`, `SecurityProfile`, `AgentRoute`, `authorization.policyRef` | They are reuse mechanisms, and nothing is shared yet | The inline `environment`, `tools` and `security` have the shape of those CRDs' specs, so a later `*Ref`, exclusive with the inline form, is additive |
 | An admission webhook | It needs cert-manager | CEL on the CRD plus validation in the reconciler cover v0 |
 | Per-caller registry filtering | There is no platform API yet | The registry is behind `AgentDirectory`; the filter joins when the control plane serves it |
-| Credential broker, SPIFFE | §39 and §40 are not built | AD-024 records the gap |
+| Credential broker, SPIFFE | §39 and §40 are not built | AD-024 records the gap; the broker is designed in §39a (AD-042), still not built |
 
 ### Testing
 
@@ -718,6 +718,280 @@ Next to the existing charts, one step at a time. The coder stays on its Helm cha
 - *Verified 2026-10-04*, adam-rs at `0391809`: the variable names, defaults and rules of the table above (`bin/adam-coder/README.md`, `bin/adam-agent/README.md`), the chart's pod template, `_validate.tpl`, network policy and extra MCP file, and the image's two binaries and entrypoint (`docker/coder/Dockerfile`).
 - *Verified 2026-10-04*, kube-rs documentation: `kube` 4.0.0, `k8s-openapi` 0.28.0, `schemars` 1.
 - *Unverified*: CEL rules through `x_kube(validation = …)`; server-side-apply co-ownership of a CloudNativePG Cluster's `managed.roles`; Argo CD pruning of `volumeClaimTemplates` claims; netcup's Kubernetes version.
+
+---
+
+## 59b. The run pool: pods where work runs
+
+> **Status: design only, decided by the owner (2026-10-06).** Nothing here is built. The owner's decisions are AD-034 to AD-039; where this section recommends something the owner did not decide, it is a proposal (P-013 to P-015, §92) and says so. It extends adam-rs [ADR 0019](https://github.com/vymalo/another-adam-rs/blob/main/docs/decisions/0019-a-runs-processes-in-a-pod-of-their-own.md) (*verified 2026-10-06*, read on adam-rs `origin/main`), which it does not replace: both modes coexist (*Migration*).
+
+### Why
+
+Today the coder process makes one pod per run, itself (`adam-env-kubernetes`, `RUN_ENVIRONMENT=kubernetes`; ADR 0019). The pod has a 2Gi limit, no owner reference, and a PriorityClass-scoped `ResourceQuota` is the only cap. To do that the coder's ServiceAccount holds `pods` create and delete, and a `ValidatingAdmissionPolicy` is what stops a compromised coder from making a privileged pod. The pod sees the whole work volume, so it is no isolation between runs (ADR 0019, *Consequences*). The `Environment` and `EnvSession` traits it implements are `crates/adam-workspace/src/environment.rs` in adam-rs (*verified 2026-10-06*): `ensure`, `release`, `held_runs`, and `prepare`, `kill`, `secret_ref` on the session.
+
+The owner's decisions turn this around: **the operator makes and owns the pods, and the coder asks for a slot.**
+
+### Decisions in one table
+
+| # | The owner (2026-10-06) | Becomes | Record |
+|---|---|---|---|
+| 1 | The operator, not the coder, creates and owns the pods where work runs | Pods owned by a `RunEnvironment`, run under a dedicated ServiceAccount with no token and no RBAC. The coder loses `pods/create`, keeps `pods/exec` | AD-034 |
+| 2 | Everything is configurable on that object | The `RunEnvironment` spec, below | AD-035 |
+| 3, 4 | Pods are reused across runs of one environment; the coder asks for a slot with a `RunLease` | Pooling, bin-packing, reaping, the lease lifecycle | AD-036 |
+| 5 | Reuse across repos only "if the agent can be modular enough and the files strictly separated; so that one agent cannot read repos it's not supposed to read… So even across the same owner, no" | Never across owners; within an owner only with strict per-lease file isolation | AD-037, P-013 |
+| 6 | A shared RWX volume plus a git clone on lease | Pod-private directories on one RWX claim; the coder clones into them | AD-038 |
+| 7, 8 | Seams (AD-020); both modes coexist, per-run stays the default | `PooledEnvironment` in adam-rs, the pool logic behind a trait in the platform | AD-039 |
+
+*Amends AD-016 for one object:* `RunLease` is a CRD, not an application record. It is one object per run, renewed every `renewSeconds` (default 60), not per request, which is why etcd carries it; `AgentLease` (§20) stays a record.
+
+### The two kinds
+
+Group `agents.vymalo.com`, `v1alpha1`, namespaced, in the same namespace as the coder (the work claim must be in the pods' namespace). `RunEnvironment` is **not** `AgentEnvironment` (§27, deferred): that describes how an agent's own runtime is built, this is the compute where its *work* runs. It is not called `Environment` either, which is adam's trait.
+
+```yaml
+apiVersion: agents.vymalo.com/v1alpha1
+kind: RunEnvironment
+metadata: { name: coder-vymalo, namespace: another-agentic-system }
+spec:
+  image:                                  # optional: the operator's default workspace image (a value of its chart, bumped by CI)
+    ref: ghcr.io/vymalo/another-agentic-images/workspace:1.98.1-ee2273e@sha256:9b2670fc45f50b7b7b8f959fe5caa06e630cba86c0229b2a7d33bee7f26d752a
+  sizeClass: standard                     # a name of the operator chart's runPodClasses (AD-031)
+  pool:
+    maxPods: 4                            # hard cap; at most the chart's runPodMaxOrdinal
+    minWarm: 1                            # free pods kept ready (bound or not)
+    maxLeasesPerPod: 1                    # >1 needs isolation.mode UidPerLease
+    idleTTLSeconds: 900                   # a free pod above minWarm is deleted after this
+  lease:
+    ttlSeconds: 180                       # without renewal, a lease expires
+    renewSeconds: 60                      # how often the holder renews (a hint to the holder)
+    maxDurationSeconds: 28800             # hard cap, renewed or not
+    maxRepos: 8
+  isolation:
+    mode: PodPerLease                     # PodPerLease (default) | UidPerLease (strict, P-013)
+    userNamespace: false                  # hostUsers: false; required by UidPerLease
+  storage:
+    claimName: coder-vymalo-work          # an existing ReadWriteMany claim, the one the coder mounts (placement shared)
+    mountPath: /work
+  scheduling:
+    nodeSelector: { kubernetes.io/arch: amd64 }
+    tolerations: []
+  serviceAccountName: ""                  # empty: the operator makes <env>-run (no token, no Role)
+  securityContext: { runAsUser: 10001, runAsGroup: 10001, fsGroup: 10001, seccompProfile: RuntimeDefault }
+  network: { denyCIDRs: [], allowCIDRs: [] }   # egress: DNS and the internet minus private ranges, plus these
+  requesters:                             # who may lease; enforced by an admission policy the chart renders
+    - serviceAccount: coder-vymalo
+  deletionPolicy: Retain                  # as AgentService (§59a)
+status:
+  observedGeneration: 2
+  pods: { total: 3, free: 1, leased: 2, starting: 0 }
+  leases: { pending: 0, bound: 2 }
+  conditions:
+    - { type: Ready, status: "True", reason: Reconciled }
+    - { type: Saturated, status: "False", reason: CapacityAvailable }
+```
+
+```yaml
+apiVersion: agents.vymalo.com/v1alpha1
+kind: RunLease
+metadata:
+  name: run-3f9a1c0b27de                 # run-<12 hex of the sha256 of the run id>, as ADR 0019 names pods
+  namespace: another-agentic-system
+spec:
+  environmentRef: { name: coder-vymalo }
+  runId: 01J9ZK3QWXJ0V7R2N8S4T5A6BC
+  owner: { kind: User, id: 5c1b0e5e-0f3a-4e57-9d1e-2f7a5b7c9a11 }   # User | Org: the identity the work is for (§53), never a GitHub login
+  repos:
+    - { host: github.com, owner: vymalo, name: another-adam-rs, access: Write }
+  holder: { name: coder-vymalo-0, uid: 7c3f1e0a-9d2b-4a61-8e7d-6a1b2c3d4e5f }   # the coder pod now holding it; a worker taking the run over patches it
+  renewedAt: "2026-10-06T09:41:12Z"       # written by the holder
+status:
+  phase: Bound                            # Pending | Bound | Releasing | Expired | Failed | Denied
+  podName: coder-vymalo-run-2
+  directory: /work/pods/coder-vymalo-run-2-k3x9q/run-3f9a1c0b27de
+  uid: null                               # UidPerLease only
+  expiresAt: "2026-10-06T09:44:12Z"       # the operator's clock, from when it saw the last renewal
+  conditions:
+    - { type: Assigned, status: "True", reason: PodAssigned }
+    - { type: HolderAlive, status: "True", reason: Renewed }
+```
+
+**Who writes what.** The holder writes `spec` (it holds `runleases` and nothing else: no `status`), so it cannot forge the pod or the directory it is given. The operator writes `status`, and judges liveness by when *it* last saw `renewedAt` change, not by comparing the holder's clock to its own.
+
+#### CEL rules (CRD) and reconciler rules
+
+| Where | Rule |
+|---|---|
+| CEL | `pool.minWarm <= pool.maxPods`; `pool.maxPods >= 1` |
+| CEL | `pool.maxLeasesPerPod == 1 \|\| isolation.mode == 'UidPerLease'`; `maxLeasesPerPod <= 8` |
+| CEL | `isolation.mode == 'UidPerLease'` requires `isolation.userNamespace == true`; `PodPerLease` requires `securityContext.runAsUser > 0` |
+| CEL | `lease.ttlSeconds` in 30..3600; `lease.renewSeconds * 2 <= lease.ttlSeconds`; `lease.maxDurationSeconds >= lease.ttlSeconds`; `pool.idleTTLSeconds` in 60..86400 |
+| CEL | `storage.claimName` and `storage.mountPath` immutable (`self == oldSelf`); `mountPath` absolute |
+| CEL | `requesters` has at least one item (fail closed: nobody may lease an environment that names nobody) |
+| CEL | `securityContext.seccompProfile` is `RuntimeDefault` or `Localhost`; nothing here can add a capability, set `privileged`, or turn off `readOnlyRootFilesystem` |
+| CEL, `RunLease` | `spec.environmentRef`, `spec.runId` and `spec.owner` immutable; `spec.repos` has at most 16 items and may only grow (`oldSelf.all(r, self.exists(x, x == r))`); `spec.holder.uid` may change (adoption by another worker) |
+| Reconciler (`ConfigInvalid`) | `sizeClass` names a class of `runPodClasses`; `image.ref` passes the deployment's registry allow-list (AD-029); the claim exists and is `ReadWriteMany`; `maxPods` is at most the chart's `runPodMaxOrdinal`; a named ServiceAccount exists |
+| Reconciler (`Denied`) | the lease's requester is not in `requesters`; `repos` exceeds `lease.maxRepos`; the environment is not `Ready` |
+
+*Unverified:* that CEL expresses the transition rule on `spec.repos` and `request.userInfo` in an admission policy for `requesters`. Both are proved against a real API server in the kind job (as the S1 note of §59a).
+
+### What the operator makes
+
+| Object | Name | Notes |
+|---|---|---|
+| Pod | `<env>-run-<n>`, `n` below `maxPods` | A **bare pod** with a controller `ownerReference` to the `RunEnvironment` (`controller: true`, `blockOwnerDeletion: true`): deleting the environment collects the pods and fails their leases. Ordinal names are on purpose (P-014); a name still terminating is requeued, not an error |
+| ServiceAccount | `<env>-run` | Owned by the environment; `automountServiceAccountToken: false`; **no Role or RoleBinding is ever made for it** |
+| NetworkPolicy | `<env>-run` | No ingress; egress from `network` (the shape of ADR 0019's, OD-K6) |
+| PriorityClass | `<env>-run` | Value 0, `preemptionPolicy: Never`, so the namespace's priority-scoped quota (ADR 0019) still caps the pool |
+
+**The pod, fixed, not configurable:** `automountServiceAccountToken: false` on the pod too; `enableServiceLinks: false`; no host network, PID or IPC; not privileged; `allowPrivilegeEscalation: false`; every capability dropped (`UidPerLease` adds `SETUID`, `SETGID`, `CHOWN`, `FOWNER` and nothing more); `readOnlyRootFilesystem: true`; the only writable paths are the pod's private directory (below) and `emptyDir` tmpfs mounts for `/tmp` and `$HOME`. The init container of ADR 0019 (copies `adam-exec` and `opencode` into an `emptyDir` at `/opt/adam/bin`) is kept. Annotations: `agents.vymalo.com/env-digest` (a changed image or class replaces **free** pods only; a leased pod finishes first), `agents.vymalo.com/owner` (the binding, below), `agents.vymalo.com/dir`.
+
+**The operator's own RBAC grows** (§59a *The operator chart*, "pods for status"): `pods` create, delete, patch; `serviceaccounts`, `networkpolicies` create and patch; `runenvironments` and `runleases` with `status` and `finalizers`. Still namespaced, still no right on Secrets, still no `pods/exec`.
+
+**The coder's RBAC shrinks:** `runleases` (create, get, list, watch, patch, delete) and `pods/exec` (create, get). **No `pods` create or delete**, so the admission policy of ADR 0019 stops being the thing that holds a compromised coder back. `pods/exec` is limited by `resourceNames` to the ordinal pod names the chart renders from `runPodMaxOrdinal` (P-014); *unverified* that RBAC honours `resourceNames` on a subresource (the RBAC page of kubernetes.io, read 2026-10-06, does not say, and the answer comes from the kind job). If it does not, the coder can exec into any pod of its namespace, as ADR 0019 already lets it, and that is stated as a risk, not hidden.
+
+### The lease
+
+```mermaid
+sequenceDiagram
+    participant C as Coder (PooledEnvironment)
+    participant A as API server
+    participant O as Operator
+    participant P as Run pod (adam-exec)
+
+    C->>A: create RunLease (environmentRef, runId, owner, repos, holder)
+    A-->>O: watch: new lease
+    O->>O: plan: same-owner or unbound pod with room, else a new pod, else wait
+    alt no pod fits and pods < maxPods
+        O->>A: create Pod (ownerReference to the RunEnvironment, ServiceAccount run, no token)
+        A-->>O: pod Ready
+    else the pool is full
+        O->>A: lease status Pending, Assigned False WaitingForCapacity
+    end
+    O->>A: lease status Bound (podName, directory), label the pod with owner
+    A-->>C: watch: Bound
+    C->>C: git clone each repo into directory (a broker grant per repo, §39a)
+    loop while the run works
+        C->>A: pods/exec in podName, working directory under directory
+        A->>P: the command
+        C->>A: patch spec.renewedAt every renewSeconds
+    end
+    opt the agent needs another repo
+        C->>A: patch spec.repos (it may only grow)
+        C->>C: clone it into the same directory
+    end
+    C->>P: pods/exec: kill every process of the lease, wipe the directory
+    C->>A: annotate cleaned, delete RunLease
+    A-->>O: finalizer runs
+    alt cleaned and the pod is healthy
+        O->>A: slot freed, pod stays Free
+    else not cleaned (expired, holder gone, pod lost)
+        O->>A: delete the pod
+    end
+    opt a free pod idle for idleTTLSeconds and pods above minWarm
+        O->>A: delete the pod
+    end
+```
+
+```mermaid
+stateDiagram-v2
+    [*] --> Pending: created
+    Pending --> Denied: unknown environment, requester not allowed, too many repos
+    Pending --> Pending: waiting for capacity or for the pod to start
+    Pending --> Bound: a slot is assigned
+    Bound --> Bound: renewed
+    Bound --> Expired: no renewal for ttlSeconds, or maxDurationSeconds passed, or the holder pod is gone and nobody adopted
+    Bound --> Failed: the pod is lost (evicted, node gone, deleted)
+    Bound --> Releasing: the holder deletes the lease
+    Expired --> Releasing: the operator frees the slot
+    Failed --> Releasing: the operator frees the slot
+    Denied --> Releasing: the holder deletes the lease
+    Releasing --> [*]: finalizer removed; a cleaned pod is Free, any other is deleted
+```
+
+Prose for what they cannot say:
+
+- **Binding to an owner is the pod's, once.** A pod serves no lease until it is Free; its first lease sets `agents.vymalo.com/owner`, and from then on it is offered only to leases of that owner. It is never re-bound; it is reaped. Leases are served in order of creation. When the pool is full and only pods bound to other owners are Free, the operator deletes the longest-idle one to make room.
+- **Packing.** A lease goes to a pod bound to its owner that has room (most loaded first, so the others go idle and are reaped), then to an unbound Free pod, then to a new pod. With `maxLeasesPerPod: 1` this is "reuse after release".
+- **Expired and Failed leases stay visible** for ten minutes with their reason (the holder reads it), then the operator deletes them. A lease whose holder pod disappeared is `Expired` only after `ttlSeconds` unless a worker adopts it first (the run is durable and may move to another worker: it patches `spec.holder`).
+- **Cleaned is the holder's claim, and a bad claim costs only that owner.** Anything but a clean release deletes the pod, so a crashed coder never leaves residue for the next lease. Only a *wrong* "cleaned" can, and it can only reach the same owner's next lease (the binding above).
+- **Parking.** A run that waits hours for a person releases its lease; the coder first moves the directory to `/work/parked/<run-hash>`, a path no run pod mounts, and moves it back into the next lease's directory. This works for a **full clone** and not for a worktree of a shared mirror, whose `.git` file holds an absolute path (*unverified*, `git worktree repair` aside), so the pool uses full clones. v0 of the pool does not share a mirror (below).
+
+### Isolation (AD-037, P-013)
+
+The owner's rule, kept whole: **no pod is ever shared across owners.** Inside an owner, files of different leases are shared in one pod only if the separation is strict.
+
+**What the platform can and cannot do.** A pod's mounts are fixed when it is created, so *a kubelet mount cannot follow a lease*. Strict separation of a reused pod therefore comes from one of two places: the **pod's private mount** (one lease at a time), or a mechanism **inside** the pod (a user id or a mount namespace per lease).
+
+| | A. One lease per pod, pod-private mount (`PodPerLease`) | B. A user id per lease, `0700` directories (`UidPerLease`) | C. A mount namespace per lease, alone |
+|---|---|---|---|
+| How | The pod mounts only `subPath: pods/<name>-<suffix>` of the RWX claim, at `/work/pods/<name>-<suffix>`; the suffix is random per pod creation, so a re-made ordinal never sees an old directory. The coder mounts the whole claim | One pod, up to `maxLeasesPerPod` leases, each under its own uid in `…/<lease-id>` mode `0700`, own `TMPDIR` and `HOME` | `unshare -m` per lease and bind-mount its directory |
+| Reads another lease's files | **Stopped** by the kubelet mount: the other directories are not in the pod | Stopped by file modes, **unless root or `CAP_DAC_OVERRIDE`** | Stopped by the path, **but not by `/proc/<pid>/root` or `/cwd` of a same-uid process** (*unverified*, from proc(5) and ptrace access rules) |
+| Sees or signals another lease's processes | Stopped (pod PID namespace) | Signals and `ptrace` stopped (other uid); `/proc` still lists their command lines, and `hidepid` needs a mount the pod cannot make | Not stopped |
+| Network | Stopped (pod network namespace) | **Not stopped**: one network namespace, so `127.0.0.1` services and abstract unix sockets are shared | Not stopped |
+| Memory, CPU, OOM | Per-pod limits per lease | **One lease's build can OOM-kill another's** | Same |
+| Needs | Nothing special | A root-capable helper (`SETUID`, `SETGID`) in the pod, so `hostUsers: false`: stable since Kubernetes v1.36 and needs Linux 6.3 or later, containerd 2.0 or later, and idmap mounts on every volume (*verified 2026-10-06*, the user-namespaces page of kubernetes.io; that **Longhorn's NFS share-manager RWX** supports idmap mounts is *unverified*) | `CAP_SYS_ADMIN` or a user namespace; the default seccomp profile blocks `mount` and `unshare` (*unverified*) |
+| Does not stop | Residue between sequential leases (so wipe or delete, above); a kernel escape (the node's kernel is shared by every container); the coder, which sees every directory by design | A compromise of the helper (it can become any uid); a kernel escape | Most of it alone |
+| Cost | A pod per concurrent lease | Packs many leases per pod: the cheapest | Cheap, and weakest alone |
+
+**Recommendation (P-013):** make **A** the default and the only mode until B is proven. A needs no privilege in the pod, its guarantee is the kubelet's and the kernel's rather than ours, and reuse is **sequential reuse after a wipe** for the same owner. Ship B as `isolation.mode: UidPerLease` for density **only after the isolation suite passes in the cluster** (the testkit's isolation test: a lease tries to read another's files, `/proc/<pid>/environ`, `ptrace` it, signal it and reach its `127.0.0.1` port, and each must fail). Treat C as an addition *to* B (per-lease mount namespace plus uid), never alone. In every mode: never across owners. If the owner wants a fresh pod for every lease (no sequential reuse at all), `minWarm` spares plus delete-on-release give it; a field for that (`recycle: Wipe | Delete`) is not in v0 (open question, §93).
+
+### Storage and clones (AD-038)
+
+```text
+/work                          the whole RWX claim: the coder mounts it all
+├── pods/<name>-<suffix>/      what ONE run pod mounts (and only this), at the same path
+│   └── <lease-id>/<repo>/…    a full clone per repo, by the coder, on lease
+└── parked/<run-hash>/…        parked runs; no run pod mounts it
+```
+
+- **Paths mean the same in the coder and the pod** (adam-rs ADR 0010's rule, kept): the pod's mount path is the claim's path, so the coder's file tools and its git stay where the credentials are, and **no credential is in a run pod**. The coder clones with a broker grant for that repo and lease (§39a): short-lived, scoped to the repository, never a long-lived key.
+- **The agent may clone another repo mid-run** into its own lease directory: the coder patches `spec.repos` (the operator checks only the count; **authority is the broker's**, which refuses a repo no connection grants, §39a), and clones it. The person's yes for a second repository (the system's `workspace-e2e.sh`) stays the coder's gate.
+- **The claim is Longhorn RWX** (a share-manager NFS; **unverified on this cluster**, and §29 says its speed for `target/` and `node_modules` is unverified): measuring it is the first open question below. A pod's private directory holds builds, so a slow RWX makes slow builds; the fallback is `emptyDir` for caches with the clone on RWX, not designed here.
+- **No shared git mirror or package cache across leases in v0.** A mirror that holds repository X would be readable by a lease that was granted only repository Y; a per-owner cache is a later decision (open question).
+- **Wipe.** The holder wipes at release (above); the coder's janitor removes `pods/<dir>` of a pod that no longer exists, as it does for `held_runs` today. The operator never mounts the claim.
+
+### Seams (AD-039, AD-020)
+
+| Seam | Where | What |
+|---|---|---|
+| `PoolPlanner` | `aap-domain` (pure) | `plan(&EnvSpec, &Observed, now) -> Plan { assign, create, delete, expire, deny }`: the whole pool policy (owner binding, packing, reaping, expiry, denial) with no I/O and no clock of its own |
+| `PodProvider` | `aap-ports`, implemented by `aap-runpool-kubernetes` | `create(env, NewPod)`, `delete`, `list(env)`, `watch()` over neutral types: no Kubernetes type in a signature |
+| Testkit (`aap-ports/testkit`) | `planner_properties!`, `pod_provider_conformance!`, a `Memory` provider | See the list below |
+
+The testkit asserts: **never two owners on one pod**; never more than `maxPods`, nor `maxLeasesPerPod` per pod; reuse before create; a Free pod above `minWarm` is reaped after `idleTTLSeconds` and not before; an expired lease frees its slot and deletes the pod; a lease from a requester not listed is `Denied`; `repos` over the limit is `Denied`; no secret value ever materialises in a `Plan`, a pod spec or a status (as §59a's macro). The Kubernetes provider additionally proves, against a real API server, the owner reference, the ServiceAccount's `automount: false`, and that no Role is made. The planner is a pure function, so property tests cover it.
+
+**What adam-rs must change** (its own ADR, amending 0019; this repository decides nothing there):
+
+- a **new crate**, e.g. `adam-env-pool`, implementing `Environment`: `ensure` creates or finds the `RunLease` and waits for `Bound`; `release` cleans, then deletes it; `held_runs` lists leases by label; `prepare` and `kill` reuse the exec client of `adam-env-kubernetes` (`adam-kube-exec`);
+- a **`RUN_ENVIRONMENT` value**, `pool` (default stays `local`, and the per-run value `kubernetes` stays), with `RUN_POOL_ENVIRONMENT` (the `RunEnvironment` name) and the lease timings from the object, not variables;
+- **the run's workspace path comes from the lease** (`status.directory`), not from the coder: the coder must lease before it makes the workspace. That changes the order inside `ensure`. A defaulted method on `Environment` (say `workspace_root`) breaks no implementer; a *required* one would, and adam-rs's Rule 2 says to flag it;
+- **`pods/exec` only** in its chart's RBAC, no `pods` verbs, and `runleases`; the `runPods` block's template, quota and admission policy are not used in pool mode;
+- the coder's **`owner`**: a stable id of the person the run is for, which today's thread-tools grant does not carry (§39a open question).
+
+### Migration (AD-039)
+
+| Step | What | Mode in use |
+|---|---|---|
+| R0 | This text | per-run (ADR 0019) |
+| R1 | CRD types, planner and testkit in `aap-api`, `aap-domain`, `aap-ports` | per-run |
+| R2 | `aap-runpool-kubernetes`, the controller, the chart (`runPool.enabled: false`) | per-run |
+| R3 | adam-rs `adam-env-pool` and its ADR | per-run |
+| R4 | kind e2e with the isolation suite; a shadow coder on `pool` | per-run for every real coder |
+| R5 | A coder is switched to `pool` when the owner decides the proof is enough | `pool` per coder |
+| R6 | `kubernetes` per-run mode is retired only by a new decision | |
+
+Both modes work in one cluster: they use different pod names, labels, and RBAC, and the pool's PriorityClass is its own. Switching a coder is a value in its `AgentConfig` plus its RBAC, and rolls back the same way.
+
+### Risks
+
+| Risk | Handling |
+|---|---|
+| Longhorn RWX is slow for builds or does not give idmap mounts | Measured before R5; A needs neither idmap nor a user namespace |
+| Sequential reuse leaves residue | Read-only root, writable paths only the private mount and tmpfs, wipe and kill at release, delete on anything but a clean release |
+| The coder, which mounts everything, is the weak point | As today; mediation of writes is P-015 (§39a) |
+| `pods/exec` on any pod of the namespace if `resourceNames` is not honoured | Proved in kind; otherwise a namespace for run pods (needs the operator to watch two namespaces) |
+| A lease CRD adds etcd writes | One renewal per `renewSeconds` per active run; open question on the default |
+| The operator now creates pods | Its Role is namespaced, no Secrets, no `exec`; pods are fixed-hardened and the object cannot loosen them |
 
 ---
 
@@ -971,7 +1245,7 @@ spec:
 
 - **Resolution is the operator's.** `aap-domain::resolve` reads the referenced `ModelEndpoint` and `ToolProvider` into the same `RuntimeSpec` the inline form gives, so the pod is unchanged and the digest moves when the referenced object changes: an edit of an endpoint rolls out every agent that uses it. A missing referent is `ConfigResolved=False`, reason `ConfigInvalid`, with a message that names it. The controller maps a change of either kind to the services whose config references it, as it does for `AgentConfig`.
 - **`audience`** is a list of at most 32 strings of 1 to 64 visible characters; `"*"` only alone. By convention a value is a use permission, `agent.use:<agent-name>` (at most 50 characters, since a name is at most 40). It reaches no pod: it goes to the registry item (below) and nowhere else.
-- **`runPods.sizeClass`** names a class of the operator chart's `runPodClasses` (`standard: { requests: { cpu: 250m, memory: 512Mi }, limits: { memory: 2Gi } }`), the seed of §65's `ResourceClass`. The operator turns it into the resources of the run-pod template adam-rs reads (`RUN_POD_TEMPLATE_FILE` in the work in progress there, *unverified*: not on adam-rs `main` at `ea570d6`). This field is the last slice (D15) and waits for adam-rs.
+- **`runPods.sizeClass`** names a class of the operator chart's `runPodClasses` (`standard: { requests: { cpu: 250m, memory: 512Mi }, limits: { memory: 2Gi } }`), the seed of §65's `ResourceClass`. The operator turns it into the resources of the run-pod template adam-rs reads (`RUN_POD_TEMPLATE_FILE` in the work in progress there, *unverified*: not on adam-rs `main` at `ea570d6`). This field is the last slice (D15) and waits for adam-rs. With the run pool (§59b), the class is `RunEnvironment.spec.sizeClass` and the operator makes the pods, not a template adam-rs reads.
 - A `ToolProvider`'s header variable is named by its Secret key (§59a, *What each field becomes*); two providers of one agent whose keys have the same name are `ConfigInvalid`.
 
 ### Who may use an agent (AD-028)
