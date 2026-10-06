@@ -1400,9 +1400,9 @@ spec:
         prDraft: true
         github:
           app:
-            id: "<the id of coder-me's own GitHub App>"   # one App per coder (AD-033)
+            id: "<the id of the one GitHub App>"   # one App for every Adam (AD-033 amended 2026-10-06)
             owners: [stephane-segning]           # GITHUB_APP_OWNERS
-            privateKeySecretRef: { name: coder-me-github-app, key: private-key.pem }   # an offered key, from the AWS property github_app_private_key_coder_me
+            privateKeySecretRef: { name: github-app, key: private-key.pem }   # the one offered key, the AWS property github_app_private_key
         runPods: { sizeClass: standard }         # waits for adam-rs ADR 0019
   model:
     endpointRef: { name: gateway }               # AD-029: exclusive with baseUrl and apiKeySecretRef

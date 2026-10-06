@@ -224,7 +224,7 @@ The GitHub setup (the installation's Setup URL redirects to the broker with the 
 
 **What adam-rs gains:** implementations of `CodeHost` for GitLab (merge requests) and Bitbucket (pull requests) and a `GitCredentials` backed by the broker, each in its own crate and chosen by configuration (AD-020); how a merge request is named in `PullRequest` is adam's to decide.
 
-**Versus AD-033:** one GitHub App per coder, its key in AWS Secrets Manager and in the coder's pod, is today's rule. With connections the App is the platform's and users install it, and the coder-per-owner rule may become unnecessary. **Not decided**; AD-033 stands until the owner says (§93).
+**Versus AD-033:** one GitHub App for every coder (amended 2026-10-06; it was one per coder), its key in AWS Secrets Manager and in the coder's pod, is today's rule. With connections the App is the platform's and users install it, and the coder-per-owner rule may become unnecessary. **Not decided**; AD-033 stands until the owner says (§93).
 
 ### The port and its testkit (AD-042, AD-020)
 
