@@ -55,7 +55,7 @@ One Cargo workspace ([§59a](docs/architecture/10-control-plane-and-crds.md#59a-
 | [`deploy/operator-crds`](deploy/operator-crds/README.md) | A chart of the CRDs only (its own Argo CD app, §93): a copy of `deploy/crds`, held equal by a test |
 | [`deploy/operator/tests/e2e`](deploy/operator/tests/e2e/README.md) | The end-to-end of the coder in kind (S9): `coder-e2e.sh`, `examples/coder.yaml` adapted to the real image and a Postgres the job runs |
 | [`tools/adam-parity`](tools/adam-parity/regen.sh) | Regenerates the parity goldens from the adam-rs chart (by hand: needs helm and a clone of adam-rs) |
-| [`examples`](examples/coder.yaml) | `coder.yaml` and `chat.yaml` (a service and its config each), [`coder-me.yaml`](examples/coder-me.yaml) (the dashboard's `ModelEndpoint` and `ToolProvider` and a coder that references them), and [`invalid/`](examples/invalid), one object per CEL rule and schema bound, each refused by an API server |
+| [`examples`](examples/coder.yaml) | `coder.yaml` and `chat.yaml` (a service and its config each), [`coder-me.yaml`](examples/coder-me.yaml) (the dashboard's `ModelEndpoint` and `ToolProvider` and a coder that references them), and [`invalid/`](examples/invalid), one object per CEL rule and per bound of the dashboard's fields, each refused by an API server |
 
 ```sh
 cargo fmt --all --check
