@@ -124,7 +124,7 @@ fn not_an_object(kind: Kind) -> FieldError {
 ///
 /// It behaves as the contract says and as an API server behaves, up to the validation of the CRDs: the
 /// only body it refuses is one that is not an object (and a `configRef` that is not the agent's name).
-/// A write that changes nothing keeps the version, as a server-side apply does.
+/// A write that changes nothing keeps the version (a server-side apply of an unchanged object is believed to: *unverified*).
 #[derive(Clone)]
 pub struct MemoryObjects {
     namespace: String,

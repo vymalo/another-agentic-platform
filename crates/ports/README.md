@@ -157,8 +157,9 @@ depending on `aap-api` and so on `kube`, would give every provider that depends 
   not there yet); deleted in the other order. The config of an agent has the agent's name, and a draft whose `configRef` says otherwise is
   `Invalid`.
 * **The token is the `resourceVersion`s**, as §60a says, so any write to either object makes an old token stale, **the operator's
-  status writes included** (a server bumps the version of an object whose status changed). The router answers `412` and the client reads
-  again. Whether a save that changes nothing moves the token is the backend's, and callers must not depend on it.
+  status writes included** (a Kubernetes API server gives an object a new `resourceVersion` when its status changes: *unverified* here,
+  D5's cluster test shows it). The router answers `412` and the client reads again. Whether a save that changes nothing moves the token is the
+  backend's (`MemoryObjects` keeps it, as a server-side apply of an unchanged object is believed to: *unverified*), and callers must not depend on it.
 * **The status is the operator's.** A write never touches it.
 * **References are checked on a delete, not on a write.** An agent may name a model that is not there (the operator marks it
   `ConfigInvalid`, naming it, and the API validates with `aap-domain` before it writes). Deleting a shared object some agent names is
@@ -215,6 +216,7 @@ string (`aap_api::permission`), never a role name** (AD-032): no type here compa
 | `StoreSpec`, `StoreKind::{Secret, Cnpg}`, `CnpgSpec`, `StoreStatus`, `StoreState`, `StoreCapabilities`, `ReleaseOutcome` | the store |
 | `DirectoryEntry` | the directory entry type for the registry: scope, name, title, description, tags, **audience (D3)**, card URL, `a2a_enabled`, `blocked`. A public struct built with a literal: **the field `audience` broke every `DirectoryEntry { .. }` literal** (an implementer of `AgentDirectory` that builds its own entries; the literals in this repository are updated: the controller's `entry()`, the testkit's `entry()`, `tests/contract.rs` and the registry crate's test helpers; `MemoryDirectory` builds none, it keeps the entries it is given), and it is `#[serde(default)]`, so a stored entry from before reads as having none |
 | `DeletionPolicy::{Retain, Delete}` | the neutral form of `aap_api::DeletionPolicy` |
+| `Kind`, `SharedKind`, `Stored`, `Agent`, `AgentDraft`, `SharedDraft`, `Precondition`, `ResourceVersion`, `ETag`, `Owner`, `OfferedSecret`, `FieldError`, `ObjectsError`, `Principal`, `AuthError` | the vocabulary of `AgentObjects` and `Authenticator` (D4): [above](#what-crosses-agentobjects) |
 
 Choices worth knowing, because §59a does not say:
 
@@ -261,10 +263,13 @@ Off by default (the controller and the providers depend on the traits only). Wit
 * `sample_spec(id)`: a spec that uses every kind of thing a provider must handle (a sidecar, literal,
   secret and pod-name variables, a per-replica volume, a file set, a secret file, probes). Providers reuse
   it in their own tests.
-* **`memory::{MemoryRuntime, MemoryStore, MemoryDirectory}`**: in-memory implementations that pass their
-  own suites (`tests/memory.rs`, with and without `suspend`, with and without CloudNativePG) and serve the
+* **`memory::{MemoryRuntime, MemoryStore, MemoryDirectory, MemoryObjects, MemoryAuthenticator}`**: in-memory implementations that pass
+  their own suites (`tests/memory.rs`, with and without `suspend`, with and without CloudNativePG) and serve the
   controller's unit tests: `set_foreign` (the adoption guard), `force_status` (a crash loop),
-  `set_unavailable`, `set_cnpg_installed`, `set_cluster_ready`, `set_ready`.
+  `set_unavailable`, `set_cnpg_installed`, `set_cluster_ready`, `set_ready`. `MemoryObjects` refuses what is not an object and a
+  `configRef` that is not the agent's name, and nothing else (no CEL); a write that changes nothing keeps the version (as a server-side
+  apply of an unchanged object is believed to: *unverified*). `MemoryAuthenticator` is a table of tokens (`with_token`, `grant`,
+  `set_unavailable`): it checks no signature.
 
 ```rust
 async fn make() -> Option<MemoryRuntime> {
@@ -284,7 +289,6 @@ aap_ports::runtime_provider_conformance!(make);
   that materialises a secret, a `watch` that never speaks), the adoption guard, a forced status, an
   unreachable backend, a missing CloudNativePG API, `DirectoryEntry::listed`, a directory that has not
   synced.
-
 * `tests/objects.rs` (D4): every `ObjectsError` has one status and a class (an exhaustive `match`); the ownership rule as a table
   (the label's value is compared whole; Argo's annotation beats the label); the token is made of every version and no two pairs of versions
   spell one; the references of a config read from JSON; **the samples of the testkit are the shape of the real CRDs** (they are

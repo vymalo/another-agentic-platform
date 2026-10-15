@@ -188,7 +188,8 @@ Argo CD's annotation makes the dashboard stop writing it (AD-031). `tests/golden
 * `tests/secrets.rs`: the property tests above.
 * `tests/validation.rs`: every rule of every screen names its field; the operator resolves what the dashboard accepts; every error has a field; the offered key is the guard; the defaults are
   checked and a typo in them is refused.
-* `tests/export.rs`: the whitelist, with a sentinel in every place that must not be read; the golden.
+* `tests/export.rs`: the whitelist, with a sentinel in every place that must not be read; the golden (`AAP_UPDATE_GOLDEN=1 cargo test -p aap-forms --test export` rewrites
+  `tests/golden/coder-me.export.yaml`, and the diff is the change of the export).
 * `tests/domain_agrees.rs`: the references the store reads from JSON are the ones `aap_domain::references` reads from the types.
 
 ## Not here
