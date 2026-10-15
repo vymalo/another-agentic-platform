@@ -42,6 +42,16 @@ On netcup an Argo CD Application does this (`helm.valuesObject`, the contents of
 [`examples/netcup.values.yaml`](examples/netcup.values.yaml)), and CI bumps `image.tag` ([below](#the-image)). The image tag is
 `sha-0000000` until the first build of `main` bumps it: **a render of the chart before that deploys an image that does not exist**.
 
+### Upgrading
+
+**Install or upgrade the CRDs first, then the operator.** An operator from slice D2 onward expects all four CRDs (`agentservices`,
+`agentconfigs`, `modelendpoints`, `toolproviders`): without the last two it no longer stalls (it watches those kinds apart, so a
+list that fails holds no other agent back), but an agent whose config references a shared object stays `ConfigInvalid`, saying the
+kind is not installed, until they are there. Never run an operator older than D1 against CRDs that store a reference
+(`endpointRef`, `providerRef`): it types `baseUrl` as required and cannot decode such an `AgentConfig`. The same rule is in
+[`deploy/operator-crds`](../operator-crds/README.md#upgrading), with the reasons. The two Argo CD Applications sync apart:
+sequence them with the CRDs first (a sync wave, or their Application first).
+
 ## Values
 
 | Value | Default | What |
@@ -185,4 +195,6 @@ CI also runs kubeconform in strict mode over four renders (the defaults, netcup,
   binary, that the NetworkPolicy's egress is enough on a cluster that enforces it (kind's does), and that `list` without `watch` on
   `services`, `configmaps` and `persistentvolumeclaims`, as the runtime README lists them, is what the provider needs.
 * That Argo CD syncs the CRDs of `deploy/operator-crds` and this chart in that order (its sync waves, or two Applications) and leaves
-  an agent's objects alone while it does.
+  an agent's objects alone while it does. The order is the one rule of [Upgrading](#upgrading); what an operator does when it is not
+  kept (the watches of the shared kinds fail, and an agent that references them says so) is proven against the fake API server, and
+  by hand against a bare kube-apiserver (`bin/operator/tests/cluster.rs`), not on a cluster with Argo CD.

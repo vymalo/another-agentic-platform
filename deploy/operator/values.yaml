@@ -1,6 +1,6 @@
 # The operator of §59a, for one namespace. Nothing here is a secret: the registry's bearer token is an existing Secret
 # (registry.tokenSecret) or a property of an AWS Secrets Manager secret read by External Secrets (externalSecrets).
-# The CRDs are NOT in this chart (§93: a separate Argo CD app): install deploy/operator-crds first.
+# The CRDs are NOT in this chart (§93: a separate Argo CD app): install and upgrade deploy/operator-crds first (README "Upgrading").
 # templates/_validate.tpl refuses what would deploy something other than what it says.
 
 nameOverride: ""
