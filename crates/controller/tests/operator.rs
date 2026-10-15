@@ -3,7 +3,8 @@
 //! an object that appears is reconciled, that a changed `AgentConfig` reconciles the services that name
 //! it, that a changed or deleted `ModelEndpoint` or `ToolProvider` reconciles the services whose config
 //! references it (and only those), that an id from `RuntimeProvider::watch()` reconciles its service,
-//! that another namespace is left alone, and that the controllers stop when told to. A real API server is the kind job's.
+//! that another namespace is left alone, that a shared kind whose CRD is not installed stalls nothing, and that
+//! the controllers stop when told to. A real API server is the kind job's.
 
 #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 
@@ -95,7 +96,12 @@ struct Running {
 }
 
 async fn start(namespace: Option<&str>) -> Running {
-    let fake = Fake::new();
+    start_on(Fake::new(), namespace, true).await
+}
+
+/// The operator on `fake`. With `shared` false it does not wait for the watches of the two shared kinds,
+/// because those are not there to open (`Fake::absent`).
+async fn start_on(fake: Fake, namespace: Option<&str>, shared: bool) -> Running {
     let runtime = Scripted::new();
     let owner: OwnerOf = Arc::new(|_| OwnerHandle::none());
     let options = Options {
@@ -128,8 +134,7 @@ async fn start(namespace: Option<&str>) -> Running {
     eventually("the controllers' watches", || {
         fake.watchers(SERVICES) >= 1
             && fake.watchers(CONFIGS) >= 2
-            && fake.watchers(ENDPOINTS) >= 1
-            && fake.watchers(PROVIDERS) >= 1
+            && (!shared || (fake.watchers(ENDPOINTS) >= 1 && fake.watchers(PROVIDERS) >= 1))
     })
     .await;
     Running {
@@ -520,5 +525,74 @@ async fn deleting_a_running_service_runs_the_finalizer_through_the_controller() 
 #[tokio::test]
 async fn the_operator_stops_when_told_to_even_with_nothing_to_do() {
     let r = start(None).await;
+    r.stop().await;
+}
+
+// ------------------------------------------------ the shared kinds' CRDs are not installed
+
+/// Poll `check` until it holds, or fail after `limit` with `what`. In the tests below time is virtual
+/// (`start_paused`): it moves when every task waits, so a backoff of thirty seconds costs nothing to
+/// sit through, and a limit is how long the operator itself would have taken.
+async fn within(limit: Duration, what: &str, mut check: impl FnMut() -> bool) {
+    let started = tokio::time::Instant::now();
+    while !check() {
+        assert!(
+            started.elapsed() < limit,
+            "not within {limit:?}: {what} (virtual time)"
+        );
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+}
+
+/// An operator rolled out before the CRDs chart (or with an older one), or without the right to list the
+/// shared kinds, has two watches that fail their list for as long as that lasts. They must not hold the
+/// services back: kube's `Controller` runs one backoff around every trigger it has, so a failing one
+/// that is left among them slows them all. With the two watches as `Controller::watches` made them, the
+/// first assertion fails (the service that existed at start is Ready after 11 to 16 s of virtual time)
+/// and so would the next (27 to 42 s).
+#[tokio::test(start_paused = true)]
+async fn kinds_whose_crds_are_not_installed_stall_no_service() {
+    let fake = Fake::new();
+    fake.absent(&[ENDPOINTS, PROVIDERS]);
+    // One service exists before the operator starts.
+    let (service, config) = example("chat", "team");
+    fake.put(CONFIGS, config);
+    fake.put(SERVICES, service);
+    let r = start_on(fake, None, false).await;
+
+    let promptly = Duration::from_secs(2);
+    within(
+        promptly,
+        "the service that existed at start to be Ready",
+        || r.state("team", "chat").as_deref() == Some("Ready"),
+    )
+    .await;
+
+    // Let the failing watches back off as far as they go: this is the worst moment for a new object.
+    tokio::time::sleep(Duration::from_secs(300)).await;
+
+    // A service created now is reconciled at once.
+    let (mut service, mut config) = example("chat", "team");
+    service["metadata"]["name"] = json!("later");
+    service["spec"]["configRef"]["name"] = json!("later");
+    config["metadata"]["name"] = json!("later");
+    r.fake.put(CONFIGS, config);
+    r.fake.put(SERVICES, service);
+    within(promptly, "a service created later to be Ready", || {
+        r.state("team", "later").as_deref() == Some("Ready")
+    })
+    .await;
+
+    // A change of a config is followed at once.
+    let before = r.digest("team", "later");
+    let mut config = r.fake.get(CONFIGS, "team", "later").unwrap();
+    config["spec"]["harness"]["adam"]["agent"]["folder"]["files"]["instructions.md"] =
+        json!("---\nname: later\n---\nChanged while the CRDs were absent.");
+    r.fake.put(CONFIGS, config);
+    within(promptly, "the service to follow its config", || {
+        r.digest("team", "later") != before
+    })
+    .await;
+
     r.stop().await;
 }
