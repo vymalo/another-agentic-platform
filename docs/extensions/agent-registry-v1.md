@@ -110,7 +110,7 @@ even when there is only one. Relation members are arrays even when they hold one
 | `title` | no | string | Display name. A client defaults to the `service` id when absent. |
 | `service` | yes | array of one string | The service id: the `AgentService` name ([architecture §7](../architecture/02-domain-model.md)), lower-case letters, digits and dashes, starting with a letter or digit, at most 63 characters (`^[a-z0-9][a-z0-9-]{0,62}$`). Stable for the life of the service. |
 | `tags` | no | array of strings | Labels for grouping and filtering (see [Tags](#tags)). Omitted when the service has none. |
-| `audience` | no | array of strings | Who may use the agent, for a client that offers agents to people (see [Audience](#audience)): at most 32 values of 1 to 64 visible ASCII characters (`^[!-~]{1,64}$`), or the single value `"*"`. Omitted when the service has none. |
+| `audience` | no | array of strings | Who may use the agent, for a client that offers agents to people (see [Audience](#audience)), read as a set: at most 32 distinct values, each of 1 to 64 bytes in `0x21` to `0x7E`, or the single value `"*"`. Omitted when the service has none. |
 
 `title` and `type` are target attributes defined by Web Linking, so each is a single value;
 `service`, `tags` and `audience` are extension target attributes, so each is an array even when
@@ -146,10 +146,10 @@ it holds one value (*verified 2026-10-01*, RFC 9264 §4.2.4.1 and §4.2.4.3).
    from a long list would hide them.
 
 Limits: at most 500 items and a 1 MiB body per document; at most 16 tags per item and 64
-characters per tag; at most 32 audience values per item and 64 characters per value. The body
+characters per tag; at most 32 distinct audience values per item and 64 bytes per value. The body
 limit counts every member, so a fleet whose audiences make the document pass 1 MiB is refused
-whole, like any other (500 items of 32 values of 64 characters are already over it). A fleet that outgrows them needs grouping (nested catalogs, RFC 9727
-§4.3 and §5.3) or a v2.
+whole, like any other (500 items of 32 values of 64 bytes are already over it). A fleet that
+outgrows them needs grouping (nested catalogs, RFC 9727 §4.3 and §5.3) or a v2.
 
 ## Tags
 
@@ -180,12 +180,26 @@ agent: it is not in any pod's environment or configuration.
   "tags": ["coding", "git"], "audience": ["agent.use:coder-me"] }
 ```
 
-**Shape.** An array of at most 32 strings, each 1 to 64 visible ASCII characters (`!` to `~`: no
-space, control or non-ASCII character), compared exactly. The value `"*"` admits everybody and is
-only allowed alone. By convention a value is the agent's **use permission**,
-`agent.use:<agent-name>`, a role the deployment's identity provider grants to people (for example
-through composite roles), so who may use an agent is decided there and not in the platform. The
-contract fixes no other meaning: a value is a string that a person's roles claim may hold.
+**Shape.** An array of strings, read as a **set**: a repeat is the same value and counts once. At
+most 32 distinct values, each of 1 to 64 bytes, every byte in `0x21` to `0x7E` (`!` to `~`: no
+space, control or non-ASCII character). Values are compared **byte for byte**, case-sensitive, with
+no trimming, case folding or Unicode normalisation. The value `"*"` admits everybody and is only
+allowed alone: `"*"` beside another **distinct** value is malformed, and a repeat of `"*"` is a
+repeat (`["*","*"]` is `["*"]`).
+
+A regular expression for a value must be anchored to the whole string (`\A[!-~]{1,64}\z`, and
+Python spells the end `\Z`): in PCRE, Perl, Python and Java a plain `$` also matches before a final
+newline, so `^[!-~]{1,64}$` accepts `"a\n"` (*verified 2026-10-15* by running Python 3, Perl, PHP's
+PCRE and Java's `Pattern` on `"a\n"`: `$` matched in all four, `\A…\z` or `\Z` in none).
+
+By convention a value is the agent's **use permission**, `agent.use:<agent-name>`, a role the
+deployment's identity provider grants to people (for example through composite roles), so who may
+use an agent is decided there and not in the platform. The contract fixes no other meaning: a value
+is a string that a person's roles claim may hold. The prefix `agent.use:` is 10 bytes, so a name
+used with the convention is **at most 54 characters**, and a service id may be 63: a service with a
+longer name cannot have its own use permission as a value. The platform's dashboard makes names of
+at most 40 characters, so conventional values of at most 50
+([architecture §60a](../architecture/10-control-plane-and-crds.md#who-may-use-an-agent-ad-028)).
 
 **The three cases a server publishes.**
 
@@ -198,17 +212,32 @@ contract fixes no other meaning: a value is a string that a person's roles claim
 A server publishes an audience as a set because its order means nothing to a consumer, and a
 document that only reorders the values should not change its `ETag`. A server never publishes an
 audience that breaks the shape above: a client would read it as none, so the server leaves it out.
-(This registry does, and logs that it did.) Clients do not depend on the order or on there being
-no repeats.
+A client reads the array as a set, and does not depend on the order or on there being no repeats.
 
-**The consumer's rule.** A client that offers listed agents to people **shows an item to a
-person, and lets them invoke it, only when its `audience` holds `"*"` or one of the values of the
-person's roles claim** (the claim is the client's configuration, not this contract's). An item with
-**no `audience`, an empty one or a malformed one** (not an array of strings, a value outside the
-shape, more than 32 values, or `"*"` beside another value) **is for the client's administrators
-only**. **Fail closed**: an agent just made, with no audience yet, is seen by the administrators,
-who can try it, and by nobody else. A client that offers nothing to people (a script) may ignore
-the attribute.
+**The consumer's rule.** A client that offers listed agents to people reads an item's `audience`
+and the person's roles as follows, and **fails closed** wherever the text is silent.
+
+1. **The audience.** It is *none* when the member is absent, is `[]`, or is *malformed*. Otherwise
+   it is the set of its values. *Malformed* is exactly this: not an array; an element that is not a
+   string; a string outside the grammar of the *Shape* above; more than 32 distinct values; or
+   `"*"` together with another distinct value.
+2. **The person's roles.** They are the strings of the person's roles claim (the claim is the
+   client's configuration, not this contract's). A claim that is missing, is not an array, or has
+   an element that is not a string means the person has **no roles** there (the whole claim, not
+   only that element), and only `"*"` admits them.
+3. **The rule.** The client shows the item to the person, and lets them invoke it, **only when its
+   audience holds `"*"` or a value equal, byte for byte, to one of the person's roles.** An item
+   whose audience is *none* is **for the client's administrators only** (who they are is the
+   client's configuration too).
+4. **Administrators.** The rule has no other exception for them: an administrator is shown an
+   item with an audience that is not *none* only when their own roles hold `"*"` or one of its
+   values. "Administrators only" is what an item with *none* is, and nothing more. A deployment
+   that wants its administrators to use every agent gives them each agent's use permission in the
+   identity provider (a composite role), and the client's code need not know.
+
+**Fail closed**: an agent just made, with no audience yet, is seen by the administrators, who can
+try it, and by nobody else. A client that offers nothing to people (a script) may ignore the
+attribute.
 
 **Listing is still not a grant** ([Serving](#serving)). `audience` tells a client whom to offer an
 agent to; the agent itself checks only the bearer it is called with. For people, the client is the
@@ -317,10 +346,11 @@ that such a client ignores the attribute and so shows a restricted agent to ever
 a client that offers agents to people implements [the consumer's rule](#audience) before any
 service has an audience. A reader of the system's, from before the attribute, is tested to read
 such a document with no item skipped
-([`aap-registry`](../../crates/registry/README.md#the-consumers-reader)). A service may declare both versions during a transition: the document then
-carries both `profile` links, either in one context object whose items are valid under both
-versions or in one context object per version. A client reads the one context object that
-carries the profile it implements.
+([`aap-registry`](../../crates/registry/README.md#the-consumers-reader)).
+
+A service may declare both versions during a transition: the document then carries both `profile`
+links, either in one context object whose items are valid under both versions or in one context
+object per version. A client reads the one context object that carries the profile it implements.
 
 ## Facts checked
 
