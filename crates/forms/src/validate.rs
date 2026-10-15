@@ -303,8 +303,8 @@ fn index(rest: &str) -> &str {
 /// The field of `server` among the tool servers of an agent form: they are a set, so an element is
 /// named by its name (`toolServers[websearch]`), as a file is (`files[skills/x.md]`) and a header
 /// (`headers[Authorization]`), and not by a position the client may not share.
-fn server_field(form: Option<&AgentForm>, server: &str) -> String {
-    if form.is_some_and(|f| f.tool_servers.contains(server)) {
+fn server_field(form: &AgentForm, server: &str) -> String {
+    if form.tool_servers.contains(server) {
         format!("toolServers[{server}]")
     } else {
         "toolServers".to_owned()
@@ -317,7 +317,7 @@ fn server_of(path: &str) -> Option<&str> {
     rest.find(']').map(|end| &rest[..end])
 }
 
-fn agent_field(form: Option<&AgentForm>, issue: &Place<'_>, message: &str) -> (String, String) {
+fn agent_field(form: &AgentForm, issue: &Place<'_>, message: &str) -> (String, String) {
     let mut message = message.to_owned();
     let field = match issue {
         Place::Service(path) => service_field(path),
@@ -368,7 +368,7 @@ fn service_field(path: &str) -> String {
     String::new()
 }
 
-fn config_field(form: Option<&AgentForm>, path: &str) -> String {
+fn config_field(form: &AgentForm, path: &str) -> String {
     const MAP: &[(&str, &str)] = &[
         (
             "spec.harness.adam.coder.github.app.id",
@@ -494,12 +494,10 @@ fn tool_field(path: &str) -> String {
 fn name_error(target: FormTarget<'_>, object_field: &str, message: &str) -> FormError {
     let origin = place(object_field);
     let (field, message) = match target {
-        FormTarget::Agent(form) => agent_field(Some(form), &origin, message),
+        FormTarget::Agent(form) => agent_field(form, &origin, message),
         FormTarget::Model => match &origin {
             Place::Model { path, .. } => (model_field(path), message.to_owned()),
-            Place::Service(p) => (model_field(p), message.to_owned()),
-            Place::Config(p) => (model_field(p), message.to_owned()),
-            Place::Tool { .. } | Place::Other => (String::new(), message.to_owned()),
+            _ => (String::new(), message.to_owned()),
         },
         FormTarget::ToolServer => match &origin {
             Place::Tool { path, .. } => (tool_field(path), message.to_owned()),
