@@ -15,7 +15,9 @@ use serde_json::json;
 
 use crate::contract::{self, env, probes, sidecar};
 use crate::digest::{files_hash8, spec_digest};
-use crate::validate::{ConfigIssue, validate};
+use crate::externals::Externals;
+use crate::refs::{Origins, materialize};
+use crate::validate::{ConfigIssue, check_all};
 use crate::{convert, plan};
 
 /// What the controller needs to reconcile one service.
@@ -40,23 +42,33 @@ pub struct ResolvedAgent {
 
 /// Resolve a service and its config.
 ///
+/// The objects the config references and the operator's default image come in `externals`, and are read
+/// into the config before anything else (§60a, AD-029): the result is what the **inline** form of the
+/// same content gives, variable for variable and digest for digest, so a pod does not know where a
+/// model address or an MCP server was written. The digest moves with the content of a referent and
+/// with the default image of a config that names none.
+///
 /// `owner` is the opaque handle of the service the controller got from the object; it goes into the
 /// specs unread and is not part of the digest. The same input always gives the same specs and the
-/// same digest: nothing here reads a clock, a random number, the environment or the cluster.
+/// same digest: nothing here reads a clock, a random number, the environment or the cluster, and
+/// nothing is fetched.
 ///
 /// # Errors
 ///
-/// The issues of [`validate`], when there are any: nothing is resolved from objects that are not
-/// valid.
+/// The issues of `validate`, when there are any: nothing is resolved from objects
+/// that are not valid, a referent that is missing included.
 pub fn resolve(
     service: &AgentService,
     config: &AgentConfig,
+    externals: &Externals,
     owner: OwnerHandle,
 ) -> Result<ResolvedAgent, Vec<ConfigIssue>> {
-    validate(service, config)?;
+    let read = materialize(config, externals);
+    check_all(service, &read)?;
+    let config = &read.config;
     let name = service.metadata.name.clone().unwrap_or_default();
     let namespace = service.metadata.namespace.clone().unwrap_or_default();
-    let cx = Cx::new(service, config, &name, &namespace);
+    let cx = Cx::new(service, config, &read.origins, &name, &namespace);
 
     let (store_kind, database) = match (
         &service.spec.store.postgres.secret_ref,
@@ -143,7 +155,10 @@ fn refused(field: &str, message: &str) -> ConfigIssue {
 /// What every step of the resolution reads.
 struct Cx<'a> {
     service: &'a AgentService,
+    /// The config with its references read (see [`materialize`]).
     config: &'a AgentConfig,
+    /// Where the servers of `config` came from: a provider's `tools` is written to the MCP file.
+    origins: &'a Origins,
     name: &'a str,
     coder: Option<&'a Coder>,
     placement: String,
@@ -156,6 +171,7 @@ impl<'a> Cx<'a> {
     fn new(
         service: &'a AgentService,
         config: &'a AgentConfig,
+        origins: &'a Origins,
         name: &'a str,
         namespace: &str,
     ) -> Self {
@@ -169,6 +185,7 @@ impl<'a> Cx<'a> {
         Self {
             service,
             config,
+            origins,
             name,
             coder: config.spec.harness.adam.coder.as_ref(),
             placement: plan::placement(config),
@@ -291,7 +308,8 @@ impl<'a> Cx<'a> {
     ) -> Result<Workload, ConfigIssue> {
         let spec = &self.config.spec;
         let runs_workers = role.runs_workers();
-        // `validate` refused a config with no image: the operator's default image is slice D2.
+        // `validate` refused a config with no image and no default to take: `materialize` has put the
+        // operator's default where the config named none.
         let image = spec
             .environment
             .image
@@ -300,7 +318,7 @@ impl<'a> Cx<'a> {
             .ok_or_else(|| {
                 refused(
                     "AgentConfig spec.environment.image",
-                    "no image: the operator's default image is slice D2 of the admin dashboard",
+                    "no image, and no default was applied",
                 )
             })?;
 
@@ -549,11 +567,11 @@ impl<'a> Cx<'a> {
         }
 
         if runs_workers {
-            // `validate` refused a model with no address: an endpointRef is slice D2.
+            // `validate` refused a model with no address: an endpointRef that was not read.
             let Some(base) = &spec.model.base_url else {
                 return Err(refused(
                     "AgentConfig spec.model.baseUrl",
-                    "no address: an endpointRef is slice D2 of the admin dashboard",
+                    "no address: the ModelEndpoint it names was not read",
                 ));
             };
             match (&base.value, &base.secret_ref) {
@@ -653,11 +671,11 @@ impl<'a> Cx<'a> {
         }
         e.push(EnvVar::secret(env::DATABASE_URL, database.clone()));
         if runs_workers {
-            // `validate` refused a model with no key: an endpointRef is slice D2.
+            // `validate` refused a model with no key: an endpointRef that was not read.
             let Some(key) = &spec.model.api_key_secret_ref else {
                 return Err(refused(
                     "AgentConfig spec.model.apiKeySecretRef",
-                    "no key: an endpointRef is slice D2 of the admin dashboard",
+                    "no key: the ModelEndpoint it names was not read",
                 ));
             };
             e.push(EnvVar::secret(
@@ -692,11 +710,11 @@ impl<'a> Cx<'a> {
         for (id, s) in &self.config.spec.tools.mcp_servers {
             let mut server = serde_json::Map::new();
             server.insert("type".to_owned(), json!("http"));
-            // `validate` refused a server with no url: a providerRef is slice D2.
+            // `validate` refused a server with no url: a providerRef that was not read.
             let Some(url) = &s.url else {
                 return Err(refused(
                     &format!("AgentConfig spec.tools.mcpServers[{id}].url"),
-                    "no url: a providerRef is slice D2 of the admin dashboard",
+                    "no url: the ToolProvider it names was not read",
                 ));
             };
             server.insert("url".to_owned(), json!(url));
@@ -713,6 +731,16 @@ impl<'a> Cx<'a> {
                     })
                     .collect();
                 server.insert("headers".to_owned(), serde_json::Value::Object(headers));
+            }
+            // The allow-list of a provider: adam's `tools` of the server, the chart's `mcp.<n>.tools`
+            // (adam-rs `0391809`, *verified 2026-10-15*). A set, so it is written sorted and once each:
+            // the order a person typed it in must not roll the pods. Empty: no key, every tool.
+            if let Some(o) = self.origins.servers.get(id) {
+                let allowed: std::collections::BTreeSet<&str> =
+                    o.tools.iter().map(String::as_str).collect();
+                if !allowed.is_empty() {
+                    server.insert("tools".to_owned(), json!(allowed));
+                }
             }
             if s.optional {
                 server.insert("optional".to_owned(), json!(true));
@@ -742,7 +770,8 @@ mod tests {
         change(&mut config);
         let service: AgentService = serde_json::from_value(service).unwrap();
         let config: AgentConfig = serde_json::from_value(config).unwrap();
-        Cx::new(&service, &config, "chat", "ns")
+        let origins = Origins::default();
+        Cx::new(&service, &config, &origins, "chat", "ns")
             .workloads(&SecretRef::new("db", "uri"))
             .map(|_| ())
     }

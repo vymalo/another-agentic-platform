@@ -4,12 +4,15 @@
 use std::collections::BTreeSet;
 use std::fmt;
 
-use aap_api::{AgentConfig, AgentService, Binary, SecretKeyRef, Topology, VolumeScope};
+use aap_api::{AgentConfig, AgentService, Binary, SecretKeyRef, Tools, Topology, VolumeScope};
 
 use crate::contract::{self, env};
+use crate::externals::Externals;
+use crate::refs::{Materialized, Origins, materialize};
 use crate::syntax::{
-    is_dns_label, is_env_name, is_http_token, is_mount_path, is_plain_http_remote,
-    is_relative_file_path, is_size, parse_http_url, paths_overlap,
+    is_adam_server_name, is_adam_tool_name, is_dns_label, is_dns_subdomain, is_env_name,
+    is_http_token, is_mount_path, is_plain_http_remote, is_relative_file_path, is_size,
+    parse_http_url, paths_overlap, shown_url,
 };
 use crate::{convert, plan};
 
@@ -33,7 +36,7 @@ impl fmt::Display for ConfigIssue {
 /// eleven characters and a label value is at most 63 (*unverified* here: Kubernetes issue 64023).
 const MAX_NAME: usize = 52;
 
-struct Issues(Vec<ConfigIssue>);
+pub(crate) struct Issues(pub(crate) Vec<ConfigIssue>);
 
 impl Issues {
     fn add(&mut self, field: impl Into<String>, message: impl Into<String>) {
@@ -44,17 +47,14 @@ impl Issues {
     }
 }
 
-/// The refusal of a reference this operator version cannot resolve yet. `ModelEndpoint` and
-/// `ToolProvider` references, and the default image, are slice D2 of the admin dashboard (§60a,
-/// AD-029): until it lands the config is refused, never started with a guess.
-fn until_d2(what: &str) -> String {
-    format!(
-        "{what}: resolving it is slice D2 of the admin dashboard (§60a, AD-029) and this operator does not do it yet, so the config is refused instead of started with a default"
-    )
-}
-
 /// Check the rules the reconciler owns: the cross-object ones and the ones of the adam-rs chart's
 /// `_validate.tpl`, so the same mistakes fail the same way (§59a, "Validation").
+///
+/// The objects the config references are read out of `externals` first (§60a, AD-029), and **checked
+/// as the inline form is**: a `ToolProvider`'s URL, header names, prefixes and Secret references by the
+/// rules of an inline server, a `ModelEndpoint`'s address and key by the rules of an inline model,
+/// each issue naming the referent (`ToolProvider websearch spec.mcp.url`). A referent that is not in
+/// `externals`, and a config with no image when there is no default, are issues too.
 ///
 /// It also re-checks the shape rules the CRD's CEL states (one of two, a block that goes with a
 /// binary): `resolve` relies on them, and an object that reached the controller without an API
@@ -63,29 +63,68 @@ fn until_d2(what: &str) -> String {
 ///
 /// # Errors
 ///
-/// Every issue found, in a fixed order: the service, then the config.
-pub fn validate(service: &AgentService, config: &AgentConfig) -> Result<(), Vec<ConfigIssue>> {
+/// Every issue found, in a fixed order: the service, then the references and the image, then the
+/// config.
+pub fn validate(
+    service: &AgentService,
+    config: &AgentConfig,
+    externals: &Externals,
+) -> Result<(), Vec<ConfigIssue>> {
+    check_all(service, &materialize(config, externals))
+}
+
+/// The issues of a service and a config whose references have been read.
+pub(crate) fn check_all(
+    service: &AgentService,
+    read: &Materialized,
+) -> Result<(), Vec<ConfigIssue>> {
     let mut v = Issues(Vec::new());
-    check_service(&mut v, service, config);
-    check_config(&mut v, config);
+    check_service(&mut v, service, &read.config);
+    v.0.extend(read.issues.iter().cloned());
+    check_config(&mut v, &read.config, &read.origins);
     if v.0.is_empty() { Ok(()) } else { Err(v.0) }
 }
 
-/// Check an `AgentConfig` by itself: the rules of [`validate`] that need no `AgentService`. The
-/// `AgentConfig` controller reports them as its `Valid` condition (§59a, "Reconciliation"). A config
-/// that passes can still fail [`validate`] against a service: the rules that read both (a placement
-/// that fits the number of workers, a reference that names this config) are the service's.
+/// Check an `AgentConfig` by itself: the rules of [`validate`] that need no `AgentService` and no
+/// other object. The `AgentConfig` controller reports them as its `Valid` condition (§59a,
+/// "Reconciliation"). A config that passes can still fail [`validate`]: the rules that read both objects
+/// (a placement that fits the number of workers, a reference that names this config) are the
+/// service's, and the objects the config references, and the operator's default image, are
+/// `validate`'s `externals`. Here a reference is only checked to name something.
 ///
 /// # Errors
 ///
 /// Every issue found, in the order [`validate`] reports the config's.
 pub fn validate_config(config: &AgentConfig) -> Result<(), Vec<ConfigIssue>> {
     let mut v = Issues(Vec::new());
-    check_config(&mut v, config);
+    check_config(&mut v, config, &Origins::default());
     if v.0.is_empty() { Ok(()) } else { Err(v.0) }
 }
 
-fn secret_ref(v: &mut Issues, field: &str, r: &SecretKeyRef) {
+/// The issue for `name`, written in `field`, when it cannot be the name of an object: not a DNS-1123
+/// subdomain. A reference's name goes into the path of a request to the API server (`.../modelendpoints/<name>`),
+/// so a name with a space makes the request fail for good and one with a `?` adds a query to it: such a
+/// name is refused before anything is read. The CRD only requires a name to be non-empty, and says nothing
+/// more on purpose (a pattern would tighten `configRef` too, which is a schema change), so this is where
+/// it is held. An empty name is the caller's own issue.
+///
+/// `field` is the path the issue is about (`AgentConfig spec.model.endpointRef.name`).
+#[must_use]
+pub fn name_issue(field: impl Into<String>, name: &str) -> Option<ConfigIssue> {
+    if name.trim().is_empty() || is_dns_subdomain(name) {
+        return None;
+    }
+    let shown: String = name.chars().take(64).collect();
+    let cut = if name.chars().count() > 64 { "…" } else { "" };
+    Some(ConfigIssue {
+        field: field.into(),
+        message: format!(
+            "{shown:?}{cut} is not the name of an object: a name is lower case letters, digits, `-` and `.`, starts and ends with a letter or a digit, and has at most 253 characters (a DNS-1123 subdomain)"
+        ),
+    })
+}
+
+pub(crate) fn secret_ref(v: &mut Issues, field: &str, r: &SecretKeyRef) {
     if r.name.trim().is_empty() || r.key.trim().is_empty() {
         v.add(field, "a Secret reference needs a name and a key");
     }
@@ -145,7 +184,7 @@ fn check_service(v: &mut Issues, svc: &AgentService, cfg: &AgentConfig) {
     {
         v.add(
             format!("{me} spec.interfaces.a2a.publicUrl"),
-            format!("{url:?}: {why}"),
+            format!("{:?}: {why}", shown_url(url)),
         );
     }
     if svc.spec.interfaces.responses.enabled || svc.spec.interfaces.mcp.enabled {
@@ -212,7 +251,7 @@ fn check_service(v: &mut Issues, svc: &AgentService, cfg: &AgentConfig) {
     }
 }
 
-fn check_config(v: &mut Issues, cfg: &AgentConfig) {
+fn check_config(v: &mut Issues, cfg: &AgentConfig, origins: &Origins) {
     let me = "AgentConfig";
     let spec = &cfg.spec;
     let adam = &spec.harness.adam;
@@ -245,8 +284,19 @@ fn check_config(v: &mut Issues, cfg: &AgentConfig) {
         check_coder(v, cfg, coder);
     }
 
-    // Model.
+    // Model. With a ModelEndpoint the address and the key were read from it, and an issue about them is
+    // about it: `ModelEndpoint gateway spec.baseUrl`, not a field the config does not have.
     let model = &spec.model;
+    let (base_at, key_at) = match &origins.endpoint {
+        Some(endpoint) => (
+            format!("ModelEndpoint {endpoint} spec.baseUrl"),
+            format!("ModelEndpoint {endpoint} spec.apiKeySecretRef"),
+        ),
+        None => (
+            format!("{me} spec.model.baseUrl"),
+            format!("{me} spec.model.apiKeySecretRef"),
+        ),
+    };
     if model.model.trim().is_empty() {
         v.add(format!("{me} spec.model.model"), "the model alias is empty");
     }
@@ -255,20 +305,14 @@ fn check_config(v: &mut Issues, cfg: &AgentConfig) {
         &model.base_url,
         &model.api_key_secret_ref,
     ) {
+        // A reference `materialize` could not read: it said so. Here it only has to name something.
         (Some(r), None, None) => {
+            let at = format!("{me} spec.model.endpointRef.name");
             if r.name.trim().is_empty() {
-                v.add(
-                    format!("{me} spec.model.endpointRef.name"),
-                    "the name is empty",
-                );
+                v.add(&at, "the name is empty");
+            } else if let Some(issue) = name_issue(&at, &r.name) {
+                v.0.push(issue);
             }
-            v.add(
-                format!("{me} spec.model.endpointRef"),
-                until_d2(&format!(
-                    "a reference to the ModelEndpoint {:?}; set spec.model.baseUrl and spec.model.apiKeySecretRef inline until then",
-                    r.name
-                )),
-            );
         }
         (Some(_), _, _) => v.add(
             format!("{me} spec.model"),
@@ -279,18 +323,15 @@ fn check_config(v: &mut Issues, cfg: &AgentConfig) {
                 (Some(url), None) => {
                     if let Err(why) = parse_http_url(url, false) {
                         v.add(
-                            format!("{me} spec.model.baseUrl.value"),
-                            format!("{url:?}: {why}"),
+                            format!("{base_at}.value"),
+                            format!("{:?}: {why}", shown_url(url)),
                         );
                     }
                 }
-                (None, Some(r)) => secret_ref(v, &format!("{me} spec.model.baseUrl.secretRef"), r),
-                _ => v.add(
-                    format!("{me} spec.model.baseUrl"),
-                    "exactly one of value and secretRef",
-                ),
+                (None, Some(r)) => secret_ref(v, &format!("{base_at}.secretRef"), r),
+                _ => v.add(&base_at, "exactly one of value and secretRef"),
             }
-            secret_ref(v, &format!("{me} spec.model.apiKeySecretRef"), key);
+            secret_ref(v, &key_at, key);
         }
         (None, _, _) => v.add(
             format!("{me} spec.model"),
@@ -298,7 +339,7 @@ fn check_config(v: &mut Issues, cfg: &AgentConfig) {
         ),
     }
 
-    check_tools(v, cfg);
+    check_tools(v, cfg, origins);
     check_environment(v, cfg);
 
     // extraEnv: names the operator does not set.
@@ -442,7 +483,7 @@ fn check_coder(v: &mut Issues, cfg: &AgentConfig, coder: &aap_api::Coder) {
     {
         v.add(
             format!("{me} {base}.githubApiUrl"),
-            format!("{url:?}: {why}"),
+            format!("{:?}: {why}", shown_url(url)),
         );
     }
     if let Some(a) = &coder.git_author
@@ -525,7 +566,7 @@ fn check_coder(v: &mut Issues, cfg: &AgentConfig, coder: &aap_api::Coder) {
     }
 }
 
-fn check_tools(v: &mut Issues, cfg: &AgentConfig) {
+fn check_tools(v: &mut Issues, cfg: &AgentConfig, origins: &Origins) {
     let me = "AgentConfig";
     let tools = &cfg.spec.tools;
 
@@ -549,16 +590,23 @@ fn check_tools(v: &mut Issues, cfg: &AgentConfig) {
 
     for (id, server) in &tools.mcp_servers {
         let at = format!("{me} spec.tools.mcpServers[{id}]");
-        // The model sees the tools of a server as `<id>__<tool>`, and model APIs take tool names of
-        // letters, digits, `_` and `-` (*unverified* against every gateway; the operator's own rule).
-        if id.is_empty()
-            || !id
-                .chars()
-                .all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-')
-        {
-            v.add(&at, "the server's name is letters, digits, `_` and `-`: the model sees its tools as <name>__<tool>");
+        // The URL and the headers of a server that came from a ToolProvider are the provider's: an issue
+        // about them is about `ToolProvider websearch spec.mcp.url`, which is what a person has to edit.
+        let origin = origins.servers.get(id);
+        let content = origin.map_or_else(
+            || at.clone(),
+            |o| format!("ToolProvider {} spec.mcp", o.provider),
+        );
+        // The model sees the tools of a server as `<id>__<tool>`: adam-rs refuses a file with a server
+        // that has another kind of name (`is_adam_server_name`), at every start.
+        if !is_adam_server_name(id) {
+            v.add(
+                &at,
+                "the server's name is letters, digits, `-` and `_`, at most 64 characters, with no `__` and not ending in `_`: the model sees its tools as <name>__<tool>, and adam-rs refuses the file of a server named otherwise (the pod would restart for ever)",
+            );
         }
         match (&server.provider_ref, &server.url) {
+            // A reference `materialize` could not read: it said so. Here it only has to name something.
             (Some(r), None) => {
                 if !server.headers.is_empty() {
                     v.add(
@@ -566,54 +614,68 @@ fn check_tools(v: &mut Issues, cfg: &AgentConfig) {
                         "providerRef is exclusive with url and headers",
                     );
                 }
+                let name_at = format!("{at}.providerRef.name");
                 if r.name.trim().is_empty() {
-                    v.add(format!("{at}.providerRef.name"), "the name is empty");
+                    v.add(&name_at, "the name is empty");
+                } else if let Some(issue) = name_issue(&name_at, &r.name) {
+                    v.0.push(issue);
                 }
-                v.add(
-                    format!("{at}.providerRef"),
-                    until_d2(&format!(
-                        "a reference to the ToolProvider {:?}; set url (and headers) inline until then",
-                        r.name
-                    )),
-                );
             }
             (Some(_), Some(_)) => v.add(&at, "providerRef is exclusive with url and headers"),
             (None, None) => v.add(&at, "needs a url, or a providerRef"),
-            (None, Some(url)) => match parse_http_url(url, true) {
-                Err(why) => v.add(
-                    format!("{at}.url"),
-                    format!("{url:?}: {why}. A URL is http or https with no user name, password or ${{VAR}} in it (a secret in a URL reaches the logs)"),
-                ),
-                Ok(_) => {
-                    if is_plain_http_remote(url) && !tools.allow_insecure_http {
-                        v.add(
-                            format!("{at}.url"),
-                            "a plain http:// URL to another machine: adam refuses such a server at startup unless tools.allowInsecureHttp is true (knowing that it covers every MCP server of the agent and the endpoints a sender announces, and that the bearer crosses the network in the clear); or use https",
-                        );
+            (None, Some(url)) => {
+                let url_at = if origin.is_some() {
+                    format!("{content}.url")
+                } else {
+                    format!("{at}.url")
+                };
+                match parse_http_url(url, true) {
+                    Err(why) => v.add(
+                        &url_at,
+                        format!("{:?}: {why}. A URL is http or https with no user name, password or ${{VAR}} in it (a secret in a URL reaches the logs)", shown_url(url)),
+                    ),
+                    Ok(_) => {
+                        if is_plain_http_remote(url) && !tools.allow_insecure_http {
+                            v.add(
+                                &url_at,
+                                "a plain http:// URL to another machine: adam refuses such a server at startup unless tools.allowInsecureHttp of the AgentConfig is true (knowing that it covers every MCP server of the agent and the endpoints a sender announces, and that the bearer crosses the network in the clear); or use https",
+                            );
+                        }
                     }
                 }
-            },
+            }
         }
         for (name, header) in &server.headers {
+            let header_at = format!("{content}.headers[{name}]");
             if !is_http_token(name) {
-                v.add(format!("{at}.headers[{name}]"), "not an HTTP header name");
+                v.add(&header_at, "not an HTTP header name");
             }
             if header.prefix.as_deref().is_some_and(|p| p.contains("${")) {
                 v.add(
-                    format!("{at}.headers[{name}].prefix"),
+                    format!("{header_at}.prefix"),
                     "plain text such as \"Bearer \": the secret is added from the Secret, never written",
                 );
             }
-            secret_ref(
-                v,
-                &format!("{at}.headers[{name}].secretRef"),
-                &header.secret_ref,
-            );
+            secret_ref(v, &format!("{header_at}.secretRef"), &header.secret_ref);
+        }
+        // The allow-list of a provider (`mcp.tools`) becomes the server's `tools` in the file, and adam
+        // refuses a file with an entry it cannot name for the model (exit 78): so is the entry.
+        if let Some(o) = origin {
+            for (i, tool) in o.tools.iter().enumerate() {
+                if !is_adam_tool_name(id, tool) {
+                    v.add(
+                        format!("ToolProvider {} spec.mcp.tools[{i}]", o.provider),
+                        format!("{tool:?} cannot be named {id}__{tool} for the model: adam-rs takes letters, digits, `-` and `_`, not starting with `_`, and at most 64 characters with the server's name ({id:?} here, the name the config gives the server) and `__`"),
+                    );
+                }
+            }
         }
     }
 
     // A header variable is named by its Secret key, so the key must be a variable name, must not be
-    // one the operator sets, and must not want two different Secrets.
+    // one the operator sets, and must not want two different Secrets. This is the rule for the
+    // headers of every server of the agent, a provider's and an inline one's alike: the variable is
+    // one per agent.
     for (var, wanted) in plan::header_vars(tools) {
         let at = format!("{me} spec.tools.mcpServers (header Secret key {var:?})");
         if !is_env_name(var) {
@@ -628,22 +690,42 @@ fn check_tools(v: &mut Issues, cfg: &AgentConfig) {
             v.add(
                 &at,
                 format!(
-                    "two headers want the variable {var} from different Secrets ({}): one variable carries one value",
-                    wanted.iter().map(|r| r.name.as_str()).collect::<Vec<_>>().join(", ")
+                    "two headers want the variable {var} from different Secrets ({}): one variable carries one value. They are {}",
+                    wanted.iter().map(|r| r.name.as_str()).collect::<Vec<_>>().join(", "),
+                    header_users(tools, origins, var).join(", ")
                 ),
             );
         }
     }
 }
 
+/// Who wants the variable `var`: `ToolProvider websearch header Authorization (Secret s)`, or the same
+/// for a server of the config.
+fn header_users(tools: &Tools, origins: &Origins, var: &str) -> Vec<String> {
+    let mut users = Vec::new();
+    for (id, server) in &tools.mcp_servers {
+        for (header, h) in &server.headers {
+            if h.secret_ref.key == var {
+                let owner = origins.servers.get(id).map_or_else(
+                    || format!("mcpServers[{id}]"),
+                    |o| format!("ToolProvider {}", o.provider),
+                );
+                users.push(format!(
+                    "{owner} header {header} (Secret {})",
+                    h.secret_ref.name
+                ));
+            }
+        }
+    }
+    users
+}
+
 fn check_environment(v: &mut Issues, cfg: &AgentConfig) {
     let me = "AgentConfig";
     let e = &cfg.spec.environment;
     match &e.image {
-        None => v.add(
-            format!("{me} spec.environment.image"),
-            until_d2("no image, which means the operator's default coder image; name an image (a tag, or a tag and a digest) until then"),
-        ),
+        // The operator's default, or an issue `materialize` already raised: either way not this rule's.
+        None => {}
         Some(image) => {
             let image = image.reference.as_str();
             if image.is_empty() || image.contains(char::is_whitespace) {

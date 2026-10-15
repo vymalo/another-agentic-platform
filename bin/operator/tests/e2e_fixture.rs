@@ -41,8 +41,13 @@ fn coder() -> (AgentService, AgentConfig) {
 #[test]
 fn the_coder_fixture_resolves_to_the_real_image_with_its_sidecar() {
     let (service, config) = coder();
-    let resolved = aap_domain::resolve(&service, &config, aap_ports::OwnerHandle::none())
-        .unwrap_or_else(|issues| panic!("{issues:?}"));
+    let resolved = aap_domain::resolve(
+        &service,
+        &config,
+        &aap_domain::Externals::default(),
+        aap_ports::OwnerHandle::none(),
+    )
+    .unwrap_or_else(|issues| panic!("{issues:?}"));
 
     let workload = &resolved.runtime.workloads[0];
     let image = &workload.container.image;
@@ -114,4 +119,55 @@ fn the_fixture_names_the_secrets_the_script_makes_and_the_postgres_it_runs() {
         script.contains("@sha256:"),
         "the curl image is pinned by digest"
     );
+}
+
+/// The default agent image the chart ships (AD-029) is the image this end-to-end runs the coder in: the pin is proven to start
+/// under the operator, and an agent that names none runs exactly what the fixture runs. Moving one means moving, and proving, the
+/// other.
+#[test]
+fn the_chart_ships_the_image_the_end_to_end_runs_as_its_default_agent_image() {
+    let values = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../deploy/operator/values.yaml");
+    let values: serde_yaml::Value =
+        serde_yaml::from_str(&std::fs::read_to_string(&values).unwrap()).unwrap();
+    let default = values["defaultAgentImage"]
+        .as_str()
+        .expect("the chart has a defaultAgentImage");
+    assert!(
+        default.contains(":sha-") && default.contains("@sha256:"),
+        "tag and digest: {default}"
+    );
+
+    let (service, config) = coder();
+    let pinned = config
+        .spec
+        .environment
+        .image
+        .as_ref()
+        .expect("the fixture pins its image")
+        .reference
+        .clone();
+    assert_eq!(
+        pinned, default,
+        "the chart's defaultAgentImage and the image of tests/e2e/coder.yaml are one pin: move both, and run the end-to-end"
+    );
+
+    // The fixture with no image, on an operator given the chart's default: the same agent, digest included.
+    let owner = aap_ports::OwnerHandle::none;
+    let by_image = aap_domain::resolve(
+        &service,
+        &config,
+        &aap_domain::Externals::default(),
+        owner(),
+    )
+    .unwrap();
+    let mut imageless = config.clone();
+    imageless.spec.environment.image = None;
+    let by_default = aap_domain::resolve(
+        &service,
+        &imageless,
+        &aap_domain::Externals::default().with_default_image(default),
+        owner(),
+    )
+    .unwrap();
+    assert_eq!(by_default, by_image);
 }

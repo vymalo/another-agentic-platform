@@ -121,12 +121,14 @@ ok "the operator pod runs as 65532 on a read-only root filesystem"
 # the object y of x). CloudNativePG is not installed here, so its rule is read from the Role instead.
 can() { kubectl auth can-i "$@" --as="$sa" 2>/dev/null || true; }
 for v in "create statefulsets" "delete deployments" "patch agentservices" "patch agentservices --subresource=status" \
-         "watch pods" "create networkpolicies" "create persistentvolumeclaims"; do
+         "watch pods" "create networkpolicies" "create persistentvolumeclaims" \
+         "get modelendpoints" "list modelendpoints" "watch modelendpoints" "get toolproviders" "list toolproviders" "watch toolproviders"; do
   # shellcheck disable=SC2086
   [ "$(can $v -n "$ns")" = yes ] || die "the operator may not: $v"
 done
 for v in "get secrets" "list secrets" "create secrets" "update agentservices --subresource=finalizers" \
-         "patch agentservices --subresource=finalizers" "create clusterroles" "delete pods" "create pods"; do
+         "patch agentservices --subresource=finalizers" "create clusterroles" "delete pods" "create pods" \
+         "patch modelendpoints" "create modelendpoints" "delete modelendpoints" "patch toolproviders" "create toolproviders" "delete toolproviders"; do
   # shellcheck disable=SC2086
   [ "$(can $v -n "$ns")" = no ] || die "the operator may: $v"
 done

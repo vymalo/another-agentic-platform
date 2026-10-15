@@ -21,8 +21,9 @@ pub enum RegistryMode {
 pub struct Resync {
     /// The service is `Ready` or `Suspended`.
     pub settled: Duration,
-    /// A rollout is in progress, the runtime is not well, or the name is held by an object that is
-    /// not ours (that object is not watched, so the controller has to look).
+    /// A rollout is in progress, the runtime is not well, the name is held by an object that is
+    /// not ours (that object is not watched, so the controller has to look), or an object the config
+    /// references is not there (the person is probably applying it, and the watch can be lost).
     pub pending: Duration,
     /// The store's backend is not installed: someone has to install it, which is no event of ours.
     pub not_installed: Duration,
@@ -57,6 +58,10 @@ pub struct Options {
     pub concurrency: u16,
     /// The `reportingInstance` of the Events: the pod's name, so two operators can be told apart.
     pub instance: Option<String>,
+    /// The image of an agent whose `AgentConfig` names none (`--default-agent-image`; AD-029, §60a).
+    /// `None`: the operator has no default, and such a config is `ConfigInvalid`. A change of it is a
+    /// new digest, and so a rollout, for exactly the agents that name no image.
+    pub default_agent_image: Option<String>,
 }
 
 impl Default for Options {
@@ -68,6 +73,7 @@ impl Default for Options {
             resync: Resync::default(),
             concurrency: 4,
             instance: None,
+            default_agent_image: None,
         }
     }
 }

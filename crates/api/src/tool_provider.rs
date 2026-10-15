@@ -10,8 +10,8 @@ use crate::config::McpHeader;
 
 /// Where some tools come from: one remote MCP server. An `AgentConfig` names it with
 /// `spec.tools.mcpServers.<name>.providerRef`; the operator resolves the reference into the same
-/// extra-MCP entry the inline form gives (slice D2 of the admin dashboard). A secret is never a
-/// value here (AD-024): a header names a Secret key.
+/// extra-MCP entry the inline form gives (§60a). A secret is never a value here (AD-024): a header
+/// names a Secret key.
 // kube-derive's repeated `printcolumn(type_ = …)` trips this lint (a false positive).
 #[allow(clippy::duplicated_attributes)]
 #[derive(CustomResource, KubeSchema, Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -45,9 +45,8 @@ pub struct ToolProviderSpec {
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize, KubeSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct ProviderMcp {
-    /// Its `http` or `https` URL, 1 to 2048 characters. Nothing checks it in D1; slice D2 applies
-    /// to it what the reconciler applies to an inline server's (no user name, password or `${…}`
-    /// in it, which would put a secret in a log).
+    /// Its `http` or `https` URL, 1 to 2048 characters. The operator checks it as an inline
+    /// server's: no user name, password or `${…}` in it, which would put a secret in a log.
     #[schemars(length(min = 1, max = 2048))]
     pub url: String,
 
@@ -57,7 +56,9 @@ pub struct ProviderMcp {
     pub headers: BTreeMap<String, McpHeader>,
 
     /// The tools of the server the agent may call, at most 32. Empty: every tool of the server.
-    /// Nothing in the inline form says this, so slice D2 decides what the operator does with it.
+    /// The operator writes it as the server's `tools` in the MCP file, which adam-rs reads as an
+    /// allow-list; an entry adam cannot name for the model (letters, digits, `-` and `_`, not
+    /// starting with `_`, `<server>__<tool>` at most 64 characters) makes the agent `ConfigInvalid`.
     #[serde(default)]
     #[schemars(length(max = 32))]
     pub tools: Vec<String>,

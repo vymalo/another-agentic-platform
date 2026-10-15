@@ -3,16 +3,21 @@
 //! apply of the status, the Events, and the list and watch of kube's `Controller`) and what it does
 //! with the answers is the real code.
 //!
-//! It keeps the two custom resources by path, applies JSON patches to `metadata.finalizers` as the
+//! It keeps the custom resources (the two kinds of the operator and the two shared kinds of the
+//! dashboard, whose status it never touches) by path, applies JSON patches to `metadata.finalizers` as the
 //! API server does (a failed `test` is a 422; an object that is being deleted goes away when the last
 //! finalizer does), replaces `status` on an apply of the `/status` subresource, answers a list, streams
 //! a watch (every change of an object is an `ADDED`, `MODIFIED` or `DELETED` line to whoever watches
-//! its kind), and records every call and every Event. It is not an API server: no CRD schema, no CEL,
-//! no resource versions to resume from, no other kinds.
+//! its kind), and records every call and every Event. A kind can be made *absent* ([`Fake::absent`]):
+//! every request for it, list, watch and get, is the 404 a real API server answers when the CRD is not
+//! installed, and a missing object is the 404 that names it (both *verified 2026-10-15* against a bare
+//! kube-apiserver v1.35.8: the first is the plain text `404 page not found`, which kube turns into a
+//! `Status` with no `details`; the second is a `Status` whose `details.name` is the object's). It is
+//! not an API server: no CRD schema, no CEL, no resource versions to resume from, no other kinds.
 
 #![allow(dead_code)] // each test file uses part of it
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::convert::Infallible;
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 
@@ -60,6 +65,8 @@ struct State {
     version: u64,
     fail_with: Option<u16>,
     watchers: BTreeMap<String, usize>,
+    /// The kinds (by plural) whose CRD is not installed.
+    absent: BTreeSet<String>,
 }
 
 #[derive(Clone)]
@@ -83,10 +90,11 @@ fn path(plural: &str, ns: &str, name: &str) -> String {
 }
 
 fn kind_of(plural: &str) -> &'static str {
-    if plural == "agentservices" {
-        "AgentService"
-    } else {
-        "AgentConfig"
+    match plural {
+        "agentservices" => "AgentService",
+        "modelendpoints" => "ModelEndpoint",
+        "toolproviders" => "ToolProvider",
+        _ => "AgentConfig",
     }
 }
 
@@ -100,6 +108,7 @@ impl Fake {
                 version: 0,
                 fail_with: None,
                 watchers: BTreeMap::new(),
+                absent: BTreeSet::new(),
             })),
             changes: broadcast::channel(1024).0,
         }
@@ -224,6 +233,13 @@ impl Fake {
         lock(&self.state).fail_with = code;
     }
 
+    /// The kinds (by plural, `modelendpoints`) whose CRD is not installed: every request for them is the
+    /// 404 an API server answers for a resource it does not serve. Replaces the earlier set; an empty
+    /// one is the CRDs being installed.
+    pub fn absent(&self, plurals: &[&str]) {
+        lock(&self.state).absent = plurals.iter().map(|p| (*p).to_owned()).collect();
+    }
+
     /// How many watches of this kind are open.
     pub fn watchers(&self, plural: &str) -> usize {
         lock(&self.state).watchers.get(plural).copied().unwrap_or(0)
@@ -272,6 +288,9 @@ impl Fake {
             [] => return failure(404, "no resource"),
         };
 
+        if s.absent.contains(plural) {
+            return not_served();
+        }
         match (call.method.as_str(), tail) {
             ("GET", []) => {
                 let watching = call.query.split('&').any(|p| p == "watch=true");
@@ -308,7 +327,7 @@ impl Fake {
             }
             ("GET", [name]) => match ns.and_then(|ns| s.objects.get(&path(plural, ns, name))) {
                 Some(o) => respond(200, o),
-                None => failure(404, "not found"),
+                None => not_found(plural, name),
             },
             ("PATCH", [name, rest @ ..]) => {
                 let is_status = rest == ["status"];
@@ -322,7 +341,7 @@ impl Fake {
                 s.version += 1;
                 let version = s.version.to_string();
                 let Some(object) = s.objects.get_mut(&key) else {
-                    return failure(404, "not found");
+                    return not_found(plural, name);
                 };
                 if call.content_type.contains("json-patch") {
                     if let Err(why) = json_patch(object, &patch) {
@@ -444,6 +463,31 @@ fn respond(code: u16, body: &Value) -> Resp {
                     .boxed_unsync(),
             )
         })
+}
+
+/// What an API server answers for an object that is not there: a `Status` whose `details` name it.
+fn not_found(plural: &str, name: &str) -> Resp {
+    respond(
+        404,
+        &json!({"apiVersion": "v1", "kind": "Status", "status": "Failure", "metadata": {},
+                "message": format!("{plural}.agents.vymalo.com \"{name}\" not found"),
+                "reason": "NotFound", "code": 404,
+                "details": {"name": name, "group": "agents.vymalo.com", "kind": plural}}),
+    )
+}
+
+/// What an API server answers for a resource it does not serve, a CRD that is not installed: not a
+/// `Status` but the plain text `404 page not found`, which kube turns into a `Status` with no details.
+fn not_served() -> Resp {
+    Response::builder()
+        .status(404)
+        .header("content-type", "text/plain; charset=utf-8")
+        .body(
+            Full::new(Bytes::from_static(b"404 page not found\n"))
+                .map_err(|never| match never {})
+                .boxed_unsync(),
+        )
+        .unwrap_or_else(|_| failure(404, "not served"))
 }
 
 fn failure(code: u16, message: &str) -> Resp {

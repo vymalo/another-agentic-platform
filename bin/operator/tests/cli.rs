@@ -113,6 +113,8 @@ fn run_lists_its_settings_and_the_environment_variables_that_set_them() {
         "AAP_CONCURRENCY",
         "AAP_RESYNC_SECS",
         "AAP_RESYNC_PENDING_SECS",
+        "DEFAULT_AGENT_IMAGE",
+        "--default-agent-image",
     ] {
         assert!(help.contains(variable), "{variable} is not in:\n{help}");
     }
@@ -120,4 +122,61 @@ fn run_lists_its_settings_and_the_environment_variables_that_set_them() {
         help.contains("0.0.0.0:8081") && help.contains("0.0.0.0:9090"),
         "{help}"
     );
+}
+
+/// `run` with no cluster to reach: `KUBERNETES_SERVICE_HOST` unset and no kubeconfig, so it stops at
+/// `connecting to the cluster` unless something before that stopped it.
+#[cfg(feature = "runtime-kubernetes")]
+fn run_without_a_cluster(default_image: Option<&str>) -> (bool, String) {
+    let mut command = operator();
+    command
+        .arg("run")
+        .env_remove("KUBERNETES_SERVICE_HOST")
+        .env_remove("DEFAULT_AGENT_IMAGE")
+        .env("KUBECONFIG", "/nonexistent/kubeconfig")
+        .env("HOME", "/nonexistent")
+        .env("HEALTH_ADDR", "127.0.0.1:0")
+        .env("METRICS_ADDR", "127.0.0.1:0");
+    if let Some(image) = default_image {
+        command.env("DEFAULT_AGENT_IMAGE", image);
+    }
+    let out = command.output().expect("runs the operator");
+    (
+        out.status.success(),
+        String::from_utf8_lossy(&out.stderr).into_owned(),
+    )
+}
+
+#[cfg(feature = "runtime-kubernetes")]
+#[test]
+fn a_default_image_with_white_space_stops_the_operator_before_it_looks_for_a_cluster() {
+    let (ok, stderr) = run_without_a_cluster(Some("ghcr.io/x/y:tag with space"));
+    assert!(!ok);
+    assert!(
+        stderr.contains("DEFAULT_AGENT_IMAGE") && stderr.contains("white space"),
+        "{stderr}"
+    );
+    assert!(
+        !stderr.contains("connecting to the cluster"),
+        "it never got that far: {stderr}"
+    );
+}
+
+#[cfg(feature = "runtime-kubernetes")]
+#[test]
+fn a_default_image_that_is_empty_or_a_reference_goes_on_to_look_for_a_cluster() {
+    // An empty value is a chart value left blank: no default, not a mistake.
+    for value in [
+        None,
+        Some(""),
+        Some("  "),
+        Some("ghcr.io/x/y:sha-1@sha256:abc"),
+    ] {
+        let (ok, stderr) = run_without_a_cluster(value);
+        assert!(!ok);
+        assert!(
+            stderr.contains("connecting to the cluster"),
+            "{value:?}: {stderr}"
+        );
+    }
 }

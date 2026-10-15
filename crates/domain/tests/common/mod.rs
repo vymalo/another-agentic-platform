@@ -4,7 +4,7 @@
 use std::path::{Path, PathBuf};
 
 use aap_api::{AgentConfig, AgentService};
-use aap_domain::{ConfigIssue, ResolvedAgent};
+use aap_domain::{ConfigIssue, Externals, ResolvedAgent};
 use aap_ports::OwnerHandle;
 use serde::Deserialize;
 use serde_json::Value;
@@ -30,7 +30,7 @@ pub fn example(name: &str) -> (Value, Value) {
         match d["kind"].as_str() {
             Some("AgentService") => service = Some(d),
             Some("AgentConfig") => config = Some(d),
-            // The shared objects of the admin dashboard (§60a): not inputs of `resolve` until slice D2.
+            // The shared objects of the admin dashboard (§60a): `shared_objects` reads them.
             Some("ModelEndpoint" | "ToolProvider") => {}
             other => panic!("unexpected kind {other:?}"),
         }
@@ -93,10 +93,24 @@ pub fn resolved(
     name: &str,
     change: impl FnOnce(&mut Value, &mut Value),
 ) -> Result<ResolvedAgent, Vec<ConfigIssue>> {
+    resolved_with(name, &Externals::default(), change)
+}
+
+/// The same with the objects the config may reference, and the operator's default image.
+pub fn resolved_with(
+    name: &str,
+    externals: &Externals,
+    change: impl FnOnce(&mut Value, &mut Value),
+) -> Result<ResolvedAgent, Vec<ConfigIssue>> {
     let (mut service, mut config) = example(name);
     change(&mut service, &mut config);
     let (service, config) = typed(&service, &config);
-    aap_domain::resolve(&service, &config, OwnerHandle::new("owner-token"))
+    aap_domain::resolve(
+        &service,
+        &config,
+        externals,
+        OwnerHandle::new("owner-token"),
+    )
 }
 
 pub fn must_resolve(name: &str, change: impl FnOnce(&mut Value, &mut Value)) -> ResolvedAgent {
@@ -110,6 +124,35 @@ pub fn must_resolve(name: &str, change: impl FnOnce(&mut Value, &mut Value)) -> 
                 .join("\n")
         )
     })
+}
+
+pub fn must_resolve_with(
+    name: &str,
+    externals: &Externals,
+    change: impl FnOnce(&mut Value, &mut Value),
+) -> ResolvedAgent {
+    resolved_with(name, externals, change).unwrap_or_else(|issues| {
+        panic!(
+            "expected the example to resolve, got:\n{}",
+            issues
+                .iter()
+                .map(ToString::to_string)
+                .collect::<Vec<_>>()
+                .join("\n")
+        )
+    })
+}
+
+/// The issues of an example with changes and some externals, which must be refused.
+pub fn issues_with(
+    name: &str,
+    externals: &Externals,
+    change: impl FnOnce(&mut Value, &mut Value),
+) -> Vec<ConfigIssue> {
+    match resolved_with(name, externals, change) {
+        Ok(_) => panic!("expected the example to be refused"),
+        Err(issues) => issues,
+    }
 }
 
 /// The issues of an example with changes, which must be refused.
@@ -133,4 +176,22 @@ pub fn assert_issue(issues: &[ConfigIssue], field_part: &str, message_part: &str
             .collect::<Vec<_>>()
             .join("\n")
     );
+}
+
+/// The `ModelEndpoint`s and `ToolProvider`s of an example file, as the `Externals` a composition root
+/// would read for its config.
+pub fn shared_objects(name: &str) -> Externals {
+    let mut ext = Externals::default();
+    for d in documents(&repo_root().join("examples").join(format!("{name}.yaml"))) {
+        match d["kind"].as_str() {
+            Some("ModelEndpoint") => {
+                ext = ext.with_model_endpoint(serde_json::from_value(d).expect("a ModelEndpoint"));
+            }
+            Some("ToolProvider") => {
+                ext = ext.with_tool_provider(serde_json::from_value(d).expect("a ToolProvider"));
+            }
+            _ => {}
+        }
+    }
+    ext
 }

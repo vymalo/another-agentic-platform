@@ -4,6 +4,11 @@
 //!
 //! * its own object (kube-rs's `Controller`, which also owns the reflector the directory reads);
 //! * a change of an `AgentConfig`, mapped to every service in that namespace that names it;
+//! * a change or a deletion of a `ModelEndpoint` or a `ToolProvider` (AD-029), mapped through the configs
+//!   that reference it to the services that run them. These two watches are **isolated** ([`isolated`]):
+//!   kube's `Controller` puts one backoff around all its triggers, so a watch that cannot list its kind
+//!   (the CRD is not installed, or the `Role` has no `list` on it) would throttle every trigger, the
+//!   services' own included, and no agent would be reconciled while it lasts;
 //! * [`RuntimeProvider::watch`]: the ids of runtimes that changed, mapped to the service of the same
 //!   scope and name, so the controller never watches a workload itself;
 //! * a timer per pass ([`Resync`](crate::Resync)), because a signal is never the truth.
@@ -16,13 +21,13 @@ use std::future::Future;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 
-use aap_api::{AgentConfig, AgentService};
+use aap_api::{AgentConfig, AgentService, ModelEndpoint, ToolProvider};
 use aap_ports::{RuntimeProvider, StoreProvisioner};
-use futures::StreamExt;
+use futures::{Stream, StreamExt};
 use kube::runtime::controller::Config as ControllerConfig;
 use kube::runtime::reflector::{ObjectRef, Store};
-use kube::runtime::{Controller, watcher};
-use kube::{Api, Client, ResourceExt};
+use kube::runtime::{Controller, WatchStreamExt, watcher};
+use kube::{Api, Client, Resource, ResourceExt};
 use tokio::sync::watch;
 
 use crate::config::{config_error_policy, reconcile_config};
@@ -31,6 +36,7 @@ use crate::directory::ReflectorDirectory;
 use crate::metrics::{Metrics, name};
 use crate::options::Options;
 use crate::service::{reconcile_service, service_error_policy};
+use crate::watches::{services_of_endpoint, services_of_provider};
 
 /// A handle that says whether the controllers have listed the cluster. `/readyz` reads it.
 #[derive(Clone, Debug, Default)]
@@ -126,6 +132,15 @@ where
         let namespace = self.options.watch_namespace.clone();
         let cfg = ControllerConfig::default().concurrency(self.options.concurrency);
 
+        // The configs come first: the services' watches of the shared objects map through their cache.
+        let configs_controller = Controller::new(
+            api::<AgentConfig>(&self.client, &self.options),
+            watcher::Config::default(),
+        )
+        .with_config(cfg.clone())
+        .graceful_shutdown_on(signal(stopped.clone()));
+        let config_reader = configs_controller.store();
+
         // The services.
         let Some(services) = self.services.take() else {
             return;
@@ -153,6 +168,8 @@ where
                 .map(|id| ObjectRef::<AgentService>::new(id.name()).within(id.scope()))
         };
         let mapper_reader = reader.clone();
+        let (endpoint_services, endpoint_configs) = (reader.clone(), config_reader.clone());
+        let (provider_services, provider_configs) = (reader.clone(), config_reader.clone());
         let services = services
             .with_config(cfg.clone())
             .graceful_shutdown_on(signal(stopped.clone()))
@@ -161,19 +178,24 @@ where
                 watcher::Config::default(),
                 move |config| services_of(&mapper_reader, &config),
             )
+            .watches_stream(
+                isolated(api::<ModelEndpoint>(&self.client, &self.options)),
+                move |endpoint| {
+                    services_of_endpoint(&endpoint_services, &endpoint_configs, &endpoint)
+                },
+            )
+            .watches_stream(
+                isolated(api::<ToolProvider>(&self.client, &self.options)),
+                move |provider| {
+                    services_of_provider(&provider_services, &provider_configs, &provider)
+                },
+            )
             .reconcile_on(signals)
             .run(reconcile_service, service_error_policy, ctx)
             .for_each(|result| async move { log_plumbing("agentservice", result) });
 
         // The configs.
         let config_ctx = Arc::new(ConfigContext::new(self.client.clone(), metrics.clone()));
-        let configs_controller = Controller::new(
-            api::<AgentConfig>(&self.client, &self.options),
-            watcher::Config::default(),
-        )
-        .with_config(cfg)
-        .graceful_shutdown_on(signal(stopped));
-        let config_reader = configs_controller.store();
         let configs = configs_controller
             .run(reconcile_config, config_error_policy, config_ctx)
             .for_each(|result| async move { log_plumbing("agentconfig", result) });
@@ -211,6 +233,48 @@ fn log_plumbing<T>(
             );
         }
     }
+}
+
+/// The changes and deletions of a shared kind, as a trigger that **cannot fail**.
+///
+/// `Controller::run` puts a single `StreamBackoff` around the merge of all its triggers, so an error from
+/// one of them delays them all. A watch of a kind whose CRD is not installed (the operator is rolled out
+/// before `deploy/operator-crds`, or the CRDs chart is older) fails its list with a 404 for as long as
+/// that lasts, and so does one the `Role` does not allow (403): left in the merge, it held every service
+/// back, each for a backoff's length, thirty seconds and more once the backoff had grown (*measured
+/// 2026-10-15 with kube-runtime 4.0.0 on the tests' fake API server, in virtual time: a service that
+/// existed at start was Ready after 11 to 16 s, one created later after 27 to 42 s, and with this
+/// function at once; the fake answers instantly, so a real API server is no faster*). Here the watcher takes its own backoff,
+/// which paces both its retries and the warning, and an error is logged and dropped. The watch finds the
+/// kind when it appears: its next list answers.
+///
+/// Deletions stay in (`touched_objects`), which is what makes a deleted referent block its services at
+/// once.
+fn isolated<K>(api: Api<K>) -> impl Stream<Item = Result<K, watcher::Error>> + Send + 'static
+where
+    K: Resource<DynamicType = ()>
+        + Clone
+        + serde::de::DeserializeOwned
+        + std::fmt::Debug
+        + Send
+        + 'static,
+{
+    watcher(api, watcher::Config::default())
+        .default_backoff()
+        .touched_objects()
+        .filter_map(|item| async move {
+            match item {
+                Ok(object) => Some(Ok(object)),
+                Err(error) => {
+                    tracing::warn!(
+                        kind = %K::kind(&()),
+                        "cannot watch the kind, so a change of its objects will not reach the agents that use them until the next timer \
+                         (is the CRD of deploy/operator-crds installed, and may the operator's Role list and watch it?): {error}"
+                    );
+                    None
+                }
+            }
+        })
 }
 
 fn api<K>(client: &Client, options: &Options) -> Api<K>

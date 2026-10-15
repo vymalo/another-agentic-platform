@@ -54,11 +54,42 @@ pub struct RunArgs {
     /// Seconds between looks at a service that is rolling out, unwell, or held by a foreign object.
     #[arg(long, env = "AAP_RESYNC_PENDING_SECS", default_value_t = 15)]
     pub resync_pending_secs: u64,
+
+    /// The image of an agent whose AgentConfig names none (AD-029, §60a): the coder image, a reference
+    /// such as `repository:tag@sha256:…`. Unset or empty: the operator has no default, and an
+    /// AgentConfig that names no image is `ConfigInvalid`. Changing it rolls every agent that names none
+    /// (and no other), through the config digest.
+    #[arg(long, env = "DEFAULT_AGENT_IMAGE")]
+    pub default_agent_image: Option<String>,
 }
 
 // What `run` composes needs a runtime provider; without one the settings are parsed and unused.
 #[cfg(feature = "runtime-kubernetes")]
 impl RunArgs {
+    /// The default image, if there is one: an empty value (a chart value left blank) is none, and a
+    /// reference with white space in it is a deployment mistake that stops the operator at start, not a
+    /// `ConfigInvalid` on every agent that would have used it.
+    ///
+    /// # Errors
+    ///
+    /// The value has white space in it.
+    pub fn default_image(&self) -> Result<Option<String>> {
+        let Some(image) = self
+            .default_agent_image
+            .as_deref()
+            .map(str::trim)
+            .filter(|i| !i.is_empty())
+        else {
+            return Ok(None);
+        };
+        if image.contains(char::is_whitespace) {
+            anyhow::bail!(
+                "DEFAULT_AGENT_IMAGE (--default-agent-image) {image:?} has white space in it: an image reference such as repository:tag@sha256:… is expected"
+            );
+        }
+        Ok(Some(image.to_owned()))
+    }
+
     /// An empty `WATCH_NAMESPACE` (a chart value left blank) means no namespace.
     fn namespace(&self) -> Option<String> {
         self.watch_namespace
@@ -70,6 +101,7 @@ impl RunArgs {
         &self,
         registry: bool,
         registry_full: std::sync::Arc<std::sync::atomic::AtomicBool>,
+        default_agent_image: Option<String>,
     ) -> aap_controller::Options {
         aap_controller::Options {
             watch_namespace: self.namespace(),
@@ -86,6 +118,7 @@ impl RunArgs {
             },
             concurrency: self.concurrency.max(1),
             instance: self.instance.clone().filter(|i| !i.is_empty()),
+            default_agent_image,
         }
     }
 }
@@ -171,11 +204,13 @@ pub async fn run(args: RunArgs) -> Result<()> {
     use kube::{Resource, ResourceExt};
     use tokio::sync::watch;
 
+    let default_image = args.default_image()?;
     let registry_full = Arc::new(std::sync::atomic::AtomicBool::new(false));
     let token = registry_token(&args);
-    let options = args.options(token.is_some(), registry_full.clone());
+    let options = args.options(token.is_some(), registry_full.clone(), default_image);
     tracing::info!(
         namespace = options.watch_namespace.as_deref().unwrap_or("(all)"),
+        default_agent_image = options.default_agent_image.as_deref().unwrap_or("(none)"),
         "starting the operator {}",
         env!("CARGO_PKG_VERSION")
     );

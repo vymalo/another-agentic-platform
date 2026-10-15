@@ -28,17 +28,20 @@ cp deploy/crds/agents.vymalo.com.yaml deploy/operator-crds/files/agents.vymalo.c
 
 ## Upgrading
 
-Upgrade the operator image before the CRDs, or together with them, never after. Since slice D1 (§60a) the CRDs admit an
-`AgentConfig` that carries an `endpointRef` or a `providerRef` and no `baseUrl`; an operator from before D1 types
-`Model.baseUrl` as required, so it cannot decode such an object (what its watch then does with the error is *unverified*).
-The other order is safe: the D1 operator reads every object written before D1. Nobody writes a reference before the
-Platform API of slice D5 does, so until then the order costs nothing, and after it, it matters. The two Argo CD
-Applications sync apart: sequence them (a sync wave, or the operator's first).
+**Install or upgrade the CRDs first, then the operator.** An operator from slice D2 onward expects all four CRDs (`agentservices`,
+`agentconfigs`, `modelendpoints`, `toolproviders`): without the last two it no longer stalls (it watches those kinds apart, so a
+list that fails holds no other agent back), but an agent whose config references a shared object stays `ConfigInvalid`, saying the
+kind is not installed, until they are there. Never run an operator older than D1 against CRDs that store a reference
+(`endpointRef`, `providerRef`): it types `baseUrl` as required and cannot decode such an `AgentConfig`. The other order was the
+guidance of D1, when an operator read nothing new and the CRDs were the risk; for a D2 operator it is the one that leaves agents
+blocked, so it is withdrawn. The CRDs over an older operator are safe as long as nobody has stored a reference: an operator from
+before D1 reads every object written before it, and the Platform API of slice D5, which will write references, is not built. The
+two Argo CD Applications sync apart: sequence them with the CRDs first (a sync wave, or their Application first).
 
 The change is additive for what is stored: the `kind` job of
 [`operator.yml`](../../.github/workflows/operator.yml) installs the CRDs of the commit a change builds on, stores
 `examples/coder.yaml` and `examples/chat.yaml` under them, applies the new CRDs over the old and updates those objects.
-The one bound on a field that existed is `tools.mcpServers`, at most 32 servers.
+The one bound on a field that existed is `tools.mcpServers`, at most 32 servers (confirmed by the owner on 2026-10-15).
 
 ## Removing it
 

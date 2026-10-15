@@ -311,8 +311,8 @@ fn shape(v: &Value) -> Value {
 
 #[test]
 fn model_endpoint_and_tool_provider_have_the_shape_of_the_inline_forms() {
-    // The same shapes as the inline forms, so slice D2 resolves a reference into the entry the
-    // inline form gives.
+    // The same shapes as the inline forms, so a reference resolves into the entry the inline form
+    // gives.
     let config = schema_of(&AgentConfig::crd());
 
     let endpoint = schema_of(&ModelEndpoint::crd());

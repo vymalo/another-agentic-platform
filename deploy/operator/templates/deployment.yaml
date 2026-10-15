@@ -60,6 +60,11 @@ spec:
                   fieldPath: metadata.name
             - name: RUST_LOG
               value: {{ .Values.logLevel | quote }}
+            {{- with .Values.defaultAgentImage }}
+            # AD-029: the image of an agent whose AgentConfig names none. A new value rolls those agents, and no other.
+            - name: DEFAULT_AGENT_IMAGE
+              value: {{ . | quote }}
+            {{- end }}
             {{- with .Values.tuning.concurrency }}
             - name: AAP_CONCURRENCY
               value: {{ . | quote }}

@@ -32,7 +32,8 @@ http = "1"
 http-body = "1"
 http-body-util = "0.1"
 serde_yaml.workspace = true
-tokio = { workspace = true, features = ["macros", "rt", "rt-multi-thread", "sync", "time"] }
+# `test-util` is for `start_paused`: the tests of a backoff run in virtual time (tests/operator.rs).
+tokio = { workspace = true, features = ["macros", "rt", "rt-multi-thread", "sync", "time", "test-util"] }
 tower = { version = "0.5", default-features = false, features = ["util"] }
 
 [lints]

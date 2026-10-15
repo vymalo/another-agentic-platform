@@ -2,7 +2,8 @@
 //!
 //! 1. the finalizer `agents.vymalo.com/runtime`, before anything is created (kube's `finalizer`
 //!    helper: the first pass only adds it, and the patch brings the second);
-//! 2. the `AgentConfig` the service names, and `aap_domain::resolve` (which validates);
+//! 2. the `AgentConfig` the service names, the `ModelEndpoint` and `ToolProvider`s it references, and
+//!    `aap_domain::resolve` (which validates);
 //! 3. the store, through [`StoreProvisioner`];
 //! 4. [`RuntimeProvider::ensure`] with the resolved spec;
 //! 5. the status (conditions and state, [`derive`]), patched by server-side apply;
@@ -14,9 +15,10 @@
 use std::sync::Arc;
 
 use aap_api::{
-    AgentConfig, AgentService, AgentServiceStatus, ConfigStatus, Endpoints, ServiceState,
+    AgentConfig, AgentService, AgentServiceStatus, ConfigStatus, Endpoints, ModelEndpoint,
+    ServiceState, ToolProvider,
 };
-use aap_domain::{ResolvedAgent, resolve};
+use aap_domain::{Externals, ResolvedAgent, name_issue, references, resolve};
 use aap_ports::{
     Phase, RuntimeError, RuntimeId, RuntimeProvider, StoreError, StoreProvisioner, StoreState,
     Surface,
@@ -94,6 +96,102 @@ enum Resolution {
     Blocked(ConfigOutcome),
 }
 
+/// What the GET of a referent found.
+enum Referent<K> {
+    Found(K),
+    /// The kind is served and the object is not there.
+    Absent,
+    /// The kind is not served: the CRD is not installed.
+    KindNotInstalled,
+}
+
+/// Read the referent `name`. An API server tells two 404s apart (*verified 2026-10-15* on a bare
+/// kube-apiserver v1.35.8): an object that is missing is a `Status` whose `details.name` is the object's,
+/// and a resource it does not serve (the CRD is not installed) is the plain text `404 page not found`,
+/// which kube turns into a `Status` with code 404, the reason "Failed to parse error data" and no
+/// details. `Api::get_opt` would call the second an error (its `is_not_found` reads the reason), and
+/// the pass would fail and retry for as long as the CRD is missing, with nothing said in the status.
+async fn read_referent<K>(api: &Api<K>, name: &str) -> Result<Referent<K>, Error>
+where
+    K: Clone + serde::de::DeserializeOwned + std::fmt::Debug,
+{
+    match api.get(name).await {
+        Ok(found) => Ok(Referent::Found(found)),
+        Err(kube::Error::Api(status)) if status.code == 404 => {
+            if status.details.as_ref().is_some_and(|d| !d.name.is_empty()) {
+                Ok(Referent::Absent)
+            } else {
+                Ok(Referent::KindNotInstalled)
+            }
+        }
+        Err(e) => Err(e.into()),
+    }
+}
+
+/// The objects `config` references, read from the API server, and the operator's default image
+/// (§60a, AD-029). Read live, as the config is, with no cache between: a pass sees the cluster as it is.
+/// One that is not there is left out, and `resolve` says which, by name: that is `ConfigInvalid`, not a
+/// failed pass. So is a kind the cluster does not serve (its CRD is not installed), which `resolve` says
+/// in its own words.
+async fn read_externals<R, S>(
+    config: &AgentConfig,
+    ns: &str,
+    ctx: &Context<R, S>,
+) -> Result<Externals, Error> {
+    let wanted = references(config);
+    let mut externals = Externals {
+        default_image: ctx.options.default_agent_image.clone(),
+        ..Externals::default()
+    };
+    if let Some(name) = &wanted.model_endpoint {
+        let api: Api<ModelEndpoint> = Api::namespaced(ctx.client.clone(), ns);
+        match read_referent(&api, name).await? {
+            Referent::Found(found) => {
+                externals.model_endpoints.insert(name.clone(), found);
+            }
+            Referent::Absent => {}
+            Referent::KindNotInstalled => {
+                externals
+                    .kinds_not_installed
+                    .insert(ModelEndpoint::kind(&()).into_owned());
+            }
+        }
+    }
+    if !wanted.tool_providers.is_empty() {
+        let api: Api<ToolProvider> = Api::namespaced(ctx.client.clone(), ns);
+        for name in &wanted.tool_providers {
+            match read_referent(&api, name).await? {
+                Referent::Found(found) => {
+                    externals.tool_providers.insert(name.clone(), found);
+                }
+                Referent::Absent => {}
+                Referent::KindNotInstalled => {
+                    externals
+                        .kinds_not_installed
+                        .insert(ToolProvider::kind(&()).into_owned());
+                    // The kind is the same for every name: one answer is all there is.
+                    break;
+                }
+            }
+        }
+    }
+    Ok(externals)
+}
+
+/// Whether `config` names an object that `externals` does not have: a referent that is missing, or
+/// whose whole kind is not served.
+fn is_missing_a_referent(config: &AgentConfig, externals: &Externals) -> bool {
+    let wanted = references(config);
+    wanted
+        .model_endpoint
+        .as_ref()
+        .is_some_and(|n| !externals.model_endpoints.contains_key(n))
+        || wanted
+            .tool_providers
+            .iter()
+            .any(|n| !externals.tool_providers.contains_key(n))
+}
+
 async fn fetch_and_resolve<R, S>(
     svc: &AgentService,
     ctx: &Context<R, S>,
@@ -103,19 +201,40 @@ async fn fetch_and_resolve<R, S>(
         .ok_or(Error::Malformed("an AgentService has no namespace"))?;
     let configs: Api<AgentConfig> = Api::namespaced(ctx.client.clone(), &ns);
     let wanted = &svc.spec.config_ref.name;
+    // The name goes into the path of the request: one that is not an object's name (the CRD only asks for
+    // one character) must not be sent, and is not a config that does not exist but a service that is wrong.
+    let field = "AgentService spec.configRef.name";
+    if wanted.trim().is_empty() {
+        return Ok(Resolution::Blocked(ConfigOutcome::Invalid {
+            message: format!("{field}: the name is empty"),
+        }));
+    }
+    if let Some(issue) = name_issue(field, wanted) {
+        return Ok(Resolution::Blocked(ConfigOutcome::Invalid {
+            message: issue.to_string(),
+        }));
+    }
     let Some(config) = configs.get_opt(wanted).await? else {
         return Ok(Resolution::Blocked(ConfigOutcome::NotFound {
             name: wanted.clone(),
         }));
     };
-    match resolve(svc, &config, (ctx.owner)(svc)) {
-        Err(issues) => Ok(Resolution::Blocked(ConfigOutcome::Invalid {
-            message: issues
+    let externals = read_externals(&config, &ns, ctx).await?;
+    match resolve(svc, &config, &externals, (ctx.owner)(svc)) {
+        Err(issues) => {
+            let message = issues
                 .iter()
                 .map(ToString::to_string)
                 .collect::<Vec<_>>()
-                .join("; "),
-        })),
+                .join("; ");
+            Ok(Resolution::Blocked(
+                if is_missing_a_referent(&config, &externals) {
+                    ConfigOutcome::ReferentMissing { message }
+                } else {
+                    ConfigOutcome::Invalid { message }
+                },
+            ))
+        }
         Ok(agent) => Ok(Resolution::Resolved {
             config: ConfigStatus {
                 name: config.name_any(),
@@ -276,7 +395,7 @@ async fn finish<R, S>(
     }
 
     announce(svc, ctx, previous, &status).await;
-    Ok(Action::requeue(period(ctx, &status, &obs.store)))
+    Ok(Action::requeue(period(ctx, &status, &obs)))
 }
 
 /// An Event when the state, or the reason the service is or is not ready, changed.
@@ -319,14 +438,18 @@ async fn announce<R, S>(
 fn period<R, S>(
     ctx: &Context<R, S>,
     status: &AgentServiceStatus,
-    store: &StoreOutcome,
+    obs: &Observed,
 ) -> std::time::Duration {
     let r = &ctx.options.resync;
     match status.state {
         Some(ServiceState::Ready | ServiceState::Suspended) => r.settled,
         Some(ServiceState::Blocked) => {
-            if matches!(store, StoreOutcome::NotInstalled { .. }) {
+            if matches!(obs.store, StoreOutcome::NotInstalled { .. }) {
                 r.not_installed
+            } else if matches!(obs.config, ConfigOutcome::ReferentMissing { .. }) {
+                // The objects a config names are applied one request at a time, and the watch that brings
+                // the missing one can be lost or not open yet: look again soon, not in five minutes.
+                r.pending
             } else if config_is_the_problem(&status.conditions) {
                 // Only a change of the objects helps, and the watches bring it. The timer is the net.
                 r.settled

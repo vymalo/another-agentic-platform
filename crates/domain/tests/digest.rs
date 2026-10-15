@@ -76,7 +76,13 @@ fn the_order_of_the_input_is_not_the_input() {
         reverse(v)
     };
     let (s, c) = typed(&reorder(&service), &reorder(&config));
-    let r = aap_domain::resolve(&s, &c, OwnerHandle::new("owner-token")).unwrap();
+    let r = aap_domain::resolve(
+        &s,
+        &c,
+        &aap_domain::Externals::default(),
+        OwnerHandle::new("owner-token"),
+    )
+    .unwrap();
     assert_eq!(r.digest, CODER_DIGEST);
 }
 
@@ -184,8 +190,20 @@ fn the_audience_reaches_no_pod() {
 fn the_owner_is_not_part_of_the_digest() {
     let (s, c) = example("coder");
     let (s, c) = typed(&s, &c);
-    let a = aap_domain::resolve(&s, &c, OwnerHandle::new("uid-1")).unwrap();
-    let b = aap_domain::resolve(&s, &c, OwnerHandle::new("uid-2")).unwrap();
+    let a = aap_domain::resolve(
+        &s,
+        &c,
+        &aap_domain::Externals::default(),
+        OwnerHandle::new("uid-1"),
+    )
+    .unwrap();
+    let b = aap_domain::resolve(
+        &s,
+        &c,
+        &aap_domain::Externals::default(),
+        OwnerHandle::new("uid-2"),
+    )
+    .unwrap();
     assert_eq!(a.digest, b.digest);
     assert_ne!(a.runtime.owner, b.runtime.owner);
 }
@@ -379,7 +397,13 @@ fn resolve_with(
     }
     set(&mut s, "/spec/scaling/workers", json!(workers));
     let (s, c) = typed(&s, &c);
-    aap_domain::resolve(&s, &c, OwnerHandle::new(owner)).unwrap()
+    aap_domain::resolve(
+        &s,
+        &c,
+        &aap_domain::Externals::default(),
+        OwnerHandle::new(owner),
+    )
+    .unwrap()
 }
 
 proptest! {

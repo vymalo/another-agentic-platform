@@ -9,8 +9,8 @@ For the admin dashboard it also has the two kinds of
 [§60a](../../docs/architecture/10-control-plane-and-crds.md#what-the-custom-resources-gain), slice D1: `ModelEndpoint`
 and `ToolProvider` (a v0 subset: one remote MCP server), the fields that reference them, `access.audience`, and an
 optional `environment.image`. All additive to `v1alpha1`: an object written before D1 is valid and means what it meant,
-with one exception: `tools.mcpServers` now holds at most 32 servers (see *Bounds*), so an `AgentConfig` stored with more would
-be refused on its next change.
+with one exception: `tools.mcpServers` now holds at most 32 servers (see *Bounds*; **confirmed by the owner on 2026-10-15**, existing
+configs included), so an `AgentConfig` stored with more would be refused on its next change.
 
 No client, no controller, no I/O: the crate derives the types with `kube` (`CustomResource`,
 `KubeSchema`), `schemars` and `serde`, and returns the definitions.
@@ -44,7 +44,7 @@ Retain`, `interfaces` (nothing exposed), `githubMcp` (`sidecar: true`, `port: 80
 
 | Field | Shape |
 |---|---|
-| `AgentService.spec.access.audience` | Optional list of at most 32 strings of 1 to 64 visible characters; `*` only alone. Absent or `[]`: administrators only, a meaning that is the consumer's (AD-028): the CRD checks the shape and nothing else. **It reaches no pod**: a test holds the resolved agent and its digest equal with and without it. It will go to the registry item (slice D3) and nothing enforces it before slice D8: until then nothing reads it |
+| `AgentService.spec.access.audience` | Optional list of at most 32 strings of 1 to 64 visible ASCII characters (`^[!-~]+$`, **decided by the owner on 2026-10-15**); `*` only alone. Absent or `[]`: administrators only, a meaning that is the consumer's (AD-028): the CRD checks the shape and nothing else. **It reaches no pod**: a test holds the resolved agent and its digest equal with and without it. It will go to the registry item (slice D3) and nothing enforces it before slice D8: until then nothing reads it |
 | `AgentConfig.spec.model.endpointRef` | `{ name }`, exclusive with `baseUrl` and `apiKeySecretRef` |
 | `AgentConfig.spec.tools.mcpServers.<n>.providerRef` | `{ name }`, exclusive with `url` and `headers` |
 | `AgentConfig.spec.environment.image` | Now optional: absent is the operator's default coder image (AD-029) |
@@ -59,7 +59,7 @@ object stored before D1 stays as valid as it was. The one exception is the map o
 | Where | Bound | Why this value |
 |---|---|---|
 | `access.audience` | at most 32 values, each 1 to 64 characters | §60a (AD-028); an API server prices the rules that walk the list by these |
-| `tools.mcpServers` | at most 32 servers | an existing field: **D1 bounded it**, because the CEL rules of one server run once per entry and kube-apiserver v1.35.8 refused the CRD with the map unbounded (*verified 2026-10-15*) |
+| `tools.mcpServers` | at most 32 servers | an existing field: **D1 bounded it**, because the CEL rules of one server run once per entry and kube-apiserver v1.35.8 refused the CRD with the map unbounded (*verified 2026-10-15*). **Confirmed by the owner on 2026-10-15:** an agent has at most 32 extra MCP servers, on existing configs too |
 | `ModelEndpoint.spec.title`, `ToolProvider.spec.title` | 1 to 128 characters | none inline to match (`registry.title` has no bound); a title is a line of a list |
 | `ModelEndpoint.spec.models` | at most 32 aliases | §60a: the aliases (at most 32) |
 | `ToolProvider.spec.mcp.url` | 1 to 2048 characters | none inline to match; the usual practical limit of a URL |
@@ -72,16 +72,15 @@ Not bounded, on purpose: the strings inside `models` and `tools`, the header nam
 whole object is limited by the API server's own size limit. Every bound in this table has an invalid example (below).
 
 **This crate only says what is valid.** Resolving a reference into the entry the inline form gives, and the default
-image, are slice D2 (`aap-domain`). Until then `aap-domain` refuses a config that uses `endpointRef`, `providerRef` or no
-image, with a `ConfigInvalid` that names the field and says so.
+image, are `aap-domain`'s (slice D2, built: [its README](../domain/README.md#references-and-the-default-image-slice-d2-ad-029)).
 
-**What D2 must do with the referents.** An API server checks nothing of what `ModelEndpoint` and `ToolProvider` hold beyond
-the bounds above, and D1 checks nothing about the provider's URL. The inline form's checks are the reconciler's
-(`aap-domain::validate`): D2 applies the same ones to the referent it resolves, with the field named after the referent. For a
-provider that is `parse_http_url` on `mcp.url` (an `http` or `https` URL with no user name, password or `${…}`: a secret in a
-URL reaches the logs), `is_http_token` on each header name, and the clash of two headers that want one variable from
-different Secrets. For an endpoint, `parse_http_url` on `baseUrl.value` and the checks of the two `SecretKeyRef`s. This is why
-`ToolProvider` has no printer column for its URL: a URL with a password in it would be printed by `kubectl get` before any check had looked at it.
+**What the operator does with the referents.** An API server checks nothing of what `ModelEndpoint` and `ToolProvider` hold beyond
+the bounds above. The inline form's checks are the reconciler's (`aap-domain::validate`), and D2 applies the same ones to the
+referent it resolves, with the field named after the referent. For a provider that is `parse_http_url` on `mcp.url` (an `http`
+or `https` URL with no user name, password or `${…}`: a secret in a URL reaches the logs), `is_http_token` on each header name, and
+the clash of two headers that want one variable from different Secrets. For an endpoint, `parse_http_url` on `baseUrl.value` and
+the checks of the two `SecretKeyRef`s. This is why `ToolProvider` has no printer column for its URL: a URL with a password in it would
+be printed by `kubectl get` before any check had looked at it.
 
 ## CEL rules (`x-kubernetes-validations`)
 
@@ -106,7 +105,7 @@ object. Each has an invalid example in [`examples/invalid`](../../examples/inval
 | `providerRef` is exclusive with `url` and `headers` | `McpServer` (D1) |
 | `url`, or `providerRef` | `McpServer` (D1; **replaces** the schema's `required` on `url`) |
 | `*` only alone in `access.audience` | `Access.audience` (D1) |
-| an `access.audience` value is visible ASCII (`^[!-~]+$`) | `Access.audience` (D1) |
+| an `access.audience` value is visible ASCII (`^[!-~]+$`; **decided by the owner on 2026-10-15**) | `Access.audience` (D1) |
 
 The audience's other bounds, 32 values and 1 to 64 characters each, are **schema bounds**, not CEL rules, and an API
 server needs them: it prices a rule that walks a list by `maxItems` and `maxLength`. For the same reason `tools.mcpServers`
@@ -124,12 +123,15 @@ the `githubMcp` port beyond its 1 to 65535 range (the range is also in the schem
 ### Where D1 reads §60a differently
 
 * "Visible characters" is read as visible ASCII, `!` to `~`: no space, control character or non-ASCII letter. A role name is
-  ASCII today (`agent.use:<name>`, `*`), and a rule that is too strict can be relaxed later without breaking an object,
-  where the reverse cannot be.
+  ASCII today (`agent.use:<name>`, `*`). **The owner confirmed this reading on 2026-10-15**, and with it the bound of 32
+  extra MCP servers per agent, which also holds for configs stored before D1.
 * `ToolProvider.spec.mcp.optional` defaults to `false`, as the inline field does; the dashboard form's "default on" is the
-  form's. `tools` has no inline counterpart: what the operator does with it is for D2.
+  form's. `tools` has no inline counterpart; **D2 maps it** to the `tools` allow-list that adam-rs reads in the MCP file
+  (*verified 2026-10-15* at adam-rs `0391809`, in [`aap-domain`'s README](../domain/README.md#references-and-the-default-image-slice-d2-ad-029)),
+  and refuses an entry adam cannot name.
 * Beside a `providerRef`, the server's own `optional` is not forbidden (it has a default, so a rule could not tell it from
-  absent); D2 decides how it meets the provider's.
+  absent); **D2 decides that the server is optional when either the agent's entry or the provider says so**
+  (`agent.optional || provider.optional`). *A decision for the owner to confirm.*
 
 ## Tests
 

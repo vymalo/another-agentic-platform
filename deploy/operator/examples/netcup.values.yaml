@@ -4,9 +4,18 @@
 #
 # Prerequisites, in order: the CRDs (deploy/operator-crds, its own Application), the AWS property `agent_registry_token`
 # (random, at least 32 bytes: `openssl rand -hex 32`), and CloudNativePG when an agent asks for `store.postgres.cnpg`.
+#
+# Order, on every install and every upgrade: the CRDs first, then the operator. An operator from slice D2 onward expects all four
+# CRDs (agentservices, agentconfigs, modelendpoints, toolproviders): without the last two it no longer stalls (it watches those
+# kinds apart), but an agent whose config references a shared object stays ConfigInvalid until they are there. Never run an
+# operator older than D1 against CRDs that store a reference (endpointRef, providerRef). README "Upgrading".
 
 # Empty: the release's namespace, `another-agentic-system`.
 watchNamespace: ""
+
+# The image of an agent whose AgentConfig names none (AD-029). Not set here: the chart's pin, the coder image the kind end-to-end runs, is
+# used. The GitOps repository sets `defaultAgentImage` (repository:tag@sha256:…, tag AND digest) to roll every agent that names none onto a
+# newer coder: README "The default agent image".
 
 externalSecrets:
   enabled: true

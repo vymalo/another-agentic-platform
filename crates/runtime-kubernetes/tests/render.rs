@@ -541,7 +541,13 @@ fn no_secret_name_is_in_plain_text() {
     let r = {
         let s = serde_json::from_value(service).unwrap();
         let c = serde_json::from_value(config).unwrap();
-        aap_domain::resolve(&s, &c, OwnerHandle::none()).unwrap()
+        aap_domain::resolve(
+            &s,
+            &c,
+            &aap_domain::Externals::default(),
+            OwnerHandle::none(),
+        )
+        .unwrap()
     };
     let docs = render(&r.id, &r.runtime).unwrap().documents();
     let mut text = Vec::new();

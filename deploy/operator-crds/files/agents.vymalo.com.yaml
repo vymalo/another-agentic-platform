@@ -42,8 +42,8 @@ spec:
                   image:
                     description: |-
                       The image. adam-rs ships one image for both binaries. Absent: the operator's default coder
-                      image (AD-029; slice D2 of the admin dashboard implements the default, and until then a
-                      config with no image is `ConfigInvalid`). An agent may still pin its own.
+                      image (AD-029, the operator's `--default-agent-image`; with no default configured, a config
+                      with no image is `ConfigInvalid`). An agent may still pin its own.
                     nullable: true
                     properties:
                       ref:
@@ -422,8 +422,9 @@ spec:
                   endpointRef:
                     description: |-
                       A `ModelEndpoint` of the same namespace that holds the address and the key (AD-029).
-                      Exclusive with `baseUrl` and `apiKeySecretRef`. The operator resolves it in slice D2 of the
-                      admin dashboard (§60a); until then a config that uses it is `ConfigInvalid`.
+                      Exclusive with `baseUrl` and `apiKeySecretRef`. The operator reads the endpoint into the same
+                      variables the inline form gives (§60a), so an edit of the endpoint rolls every agent that uses
+                      it. An endpoint that is not there makes the agent `ConfigInvalid`, naming it.
                     nullable: true
                     properties:
                       name:
@@ -543,15 +544,15 @@ spec:
                         optional:
                           default: false
                           description: |-
-                            The agent starts without it when it is unreachable. Beside a `providerRef` the provider
-                            has an `optional` of its own and nothing combines the two yet: slice D2 decides how they
-                            meet.
+                            The agent starts without it when it is unreachable. Beside a `providerRef` the provider has an
+                            `optional` of its own, and the server is optional when either says so.
                           type: boolean
                         providerRef:
                           description: |-
                             A `ToolProvider` of the same namespace that holds the URL and the headers (AD-029).
-                            Exclusive with `url` and `headers`. The operator resolves it in slice D2 of the admin
-                            dashboard (§60a); until then a config that uses it is `ConfigInvalid`.
+                            Exclusive with `url` and `headers`. The operator reads the provider into the same entry of the
+                            extra MCP file the inline form gives (§60a), so an edit of the provider rolls every agent that
+                            uses it. A provider that is not there makes the agent `ConfigInvalid`, naming it.
                           nullable: true
                           properties:
                             name:
@@ -1142,8 +1143,7 @@ spec:
             description: |-
               An OpenAI-compatible model endpoint and the Secret key of its API key. An `AgentConfig` names
               it with `spec.model.endpointRef`; the operator resolves the reference into the same variables
-              the inline `baseUrl` and `apiKeySecretRef` give (slice D2 of the admin dashboard). A secret is
-              never a value here (AD-024).
+              the inline `baseUrl` and `apiKeySecretRef` give (§60a). A secret is never a value here (AD-024).
             properties:
               apiKeySecretRef:
                 description: The Secret key that holds the API key (`MODEL_API_KEY`).
@@ -1244,8 +1244,8 @@ spec:
             description: |-
               Where some tools come from: one remote MCP server. An `AgentConfig` names it with
               `spec.tools.mcpServers.<name>.providerRef`; the operator resolves the reference into the same
-              extra-MCP entry the inline form gives (slice D2 of the admin dashboard). A secret is never a
-              value here (AD-024): a header names a Secret key.
+              extra-MCP entry the inline form gives (§60a). A secret is never a value here (AD-024): a header
+              names a Secret key.
             properties:
               mcp:
                 description: The remote MCP server. The only kind of provider in v0 (§32 lists more).
@@ -1288,16 +1288,17 @@ spec:
                     default: []
                     description: |-
                       The tools of the server the agent may call, at most 32. Empty: every tool of the server.
-                      Nothing in the inline form says this, so slice D2 decides what the operator does with it.
+                      The operator writes it as the server's `tools` in the MCP file, which adam-rs reads as an
+                      allow-list; an entry adam cannot name for the model (letters, digits, `-` and `_`, not
+                      starting with `_`, `<server>__<tool>` at most 64 characters) makes the agent `ConfigInvalid`.
                     items:
                       type: string
                     maxItems: 32
                     type: array
                   url:
                     description: |-
-                      Its `http` or `https` URL, 1 to 2048 characters. Nothing checks it in D1; slice D2 applies
-                      to it what the reconciler applies to an inline server's (no user name, password or `${…}`
-                      in it, which would put a secret in a log).
+                      Its `http` or `https` URL, 1 to 2048 characters. The operator checks it as an inline
+                      server's: no user name, password or `${…}` in it, which would put a secret in a log.
                     maxLength: 2048
                     minLength: 1
                     type: string

@@ -27,6 +27,8 @@ image:
   repository: ghcr.io/vymalo/another-agentic-platform/operator
   tag: sha-0000000 # bumped by CI
   pullPolicy: IfNotPresent
+# The default agent image is a pin of its own, moved by hand: the bump never reads or writes it.
+defaultAgentImage: ghcr.io/vymalo/another-adam-rs/coder:sha-9a1fd4e@sha256:c3c178b7d73599f40d53f798616e510346abd3300a622b09b2bc233109f12b44
 sidecar:
   image:
     tag: keep-me
@@ -45,7 +47,7 @@ fi
 if grep -q '^  tag: sha-abc1234$' "$work/values.yaml"; then ok "image.tag holds the new tag"; else bad "image.tag was not set"; fi
 changed=$(diff "$work/before.yaml" "$work/values.yaml" | grep -c '^[<>]' || true)
 if [ "$changed" -eq 2 ]; then ok "exactly one line changed"; else bad "$changed diff lines, want 2 (one line out, one in)"; fi
-for keep in 'tag: keep-me' 'tag: also-keep-me' '^tag: top-level-keep-me'; do
+for keep in 'tag: keep-me' 'tag: also-keep-me' '^tag: top-level-keep-me' '^defaultAgentImage: ghcr.io/vymalo/another-adam-rs/coder:sha-9a1fd4e@sha256:c3c178b7d73599f40d53f798616e510346abd3300a622b09b2bc233109f12b44$'; do
   if grep -q -- "$keep" "$work/values.yaml"; then ok "untouched: $keep"; else bad "lost: $keep"; fi
 done
 

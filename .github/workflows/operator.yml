@@ -339,6 +339,16 @@ jobs:
           export AAP_TEST_HOST_ADDR
           # Every case has a namespace, Secrets and object names of its own, so they run side by side.
           cargo test -p aap-operator --test cluster --locked -- --test-threads=4
+      # An operator rolled out before the CRDs chart: the API server does not serve the shared kinds. The case deletes
+      # the CRDs of ModelEndpoint and ToolProvider (and installs them again), so it runs alone, after the others.
+      - name: The operator without the CRDs of the shared kinds
+        env:
+          AAP_TEST_REQUIRE_CLUSTER: "1"
+          AAP_TEST_STUB_IMAGE: aap-stub:ci
+          AAP_TEST_DROP_SHARED_CRDS: "1"
+        run: |
+          export AAP_TEST_KUBECONFIG="$HOME/.kube/config"
+          cargo test -p aap-operator --test cluster --locked -- --exact an_operator_without_the_shared_crds_still_runs_plain_services_and_says_what_is_missing
       - name: What the cluster says, when a case failed
         if: failure()
         run: |

@@ -32,6 +32,7 @@ Each is a flag and an environment variable, which is how the chart sets them (S8
 | `REGISTRY_ADDR` | `--registry-addr` | `0.0.0.0:8080` | Where the agent registry is served (feature `registry`, and only with a token) |
 | `REGISTRY_TOKEN_FILE` | `--registry-token-file` | none | The file that holds the registry's bearer token (a mounted Secret), read once at start. **No token, no registry**: unset, missing, unreadable or empty, nothing is served on the port, the operator logs why and keeps reconciling, and every service is `Listed: False`, reason `RegistryDisabled` |
 | `REGISTRY_PUBLIC_URL` | `--registry-public-url` | none | The URL of the registry document itself, sent as its `anchor` (optional in the contract) |
+| `DEFAULT_AGENT_IMAGE` | `--default-agent-image` | none | The image of an agent whose `AgentConfig` names none (slice D2, AD-029): the coder image, a reference such as `repository:tag@sha256:…`. Unset or empty (a chart value left blank): **no default**, and such a config is `ConfigInvalid`, naming this flag. White space in it stops the operator at start (a deployment mistake, not an error on every agent that would have used it). A new value rolls every agent that names no image, through the config digest, and no other |
 | `RUST_LOG` | | `info` | `tracing` filter; logs go to standard error |
 | `KUBECONFIG` | | | Used when there is no in-cluster environment (`kube::Client::try_default`) |
 
@@ -57,7 +58,7 @@ the feature, and the controller is generic over `StoreProvisioner` (AD-020).
 Everything `run` does to the API, for the chart of S8 (a namespaced `Role`, §59a): the
 [controller's](../../crates/controller/README.md#cluster-rights) plus the
 [provider's](../../crates/runtime-kubernetes/README.md#cluster-rights), and with `store-cnpg` the
-[store's](../../crates/store-cnpg/README.md#cluster-rights). **No right on Secrets.**
+[store's](../../crates/store-cnpg/README.md#cluster-rights). **No right on Secrets**, and the shared kinds of the dashboard (`modelendpoints`, `toolproviders`) are read and watched, never written.
 
 ## The CRDs are a checked-in file
 
@@ -76,7 +77,8 @@ AAP_TEST_KUBECONFIG=$HOME/.kube/config AAP_TEST_STUB_IMAGE=aap-stub:ci cargo tes
 | File | What |
 |---|---|
 | `src/serve.rs` unit tests | `/healthz` is up at once, `/readyz` answers 503 until the readiness handle is marked, `/metrics` is Prometheus text |
-| `tests/cli.rs` | runs the built binary: `crdgen` equals the checked-in file and prints one document per kind; `run` without a cluster fails and says it was connecting; `run --help` lists every variable above |
+| `tests/cli.rs` | runs the built binary: `crdgen` equals the checked-in file and prints one document per kind; `run` without a cluster fails and says it was connecting; `run --help` lists every variable above; a default image with white space stops `run` before it looks for a cluster, and an empty one or a reference does not |
+| `tests/e2e_fixture.rs` | the fixtures of the chart's kind end-to-end resolve; **the chart's `defaultAgentImage` is the image `tests/e2e/coder.yaml` runs**, and the fixture with its image removed, on an operator given that default, is the same agent, digest included |
 | `tests/cluster.rs` | **the end-to-end**: the binary against a real cluster (below) |
 
 ### The end-to-end, `tests/cluster.rs`
@@ -106,14 +108,17 @@ image runs as the real binaries would.
 | `without_a_token_no_registry_is_served_and_nothing_is_listed` | S7: no `REGISTRY_TOKEN_FILE`: nothing listens on the registry's port and the service is `Listed: False` / `RegistryDisabled` |
 | `a_service_that_asks_for_a_cluster_is_cnpg_not_installed_without_cloudnativepg` | S6: `store.postgres.cnpg` on a cluster without CloudNativePG is `StoreReady: False`, `CNPGNotInstalled`, `Blocked`, no workload, and the deletion of that service completes (a skip when CloudNativePG is installed; a failure under `AAP_TEST_REQUIRE_CLUSTER=1`) |
 | `health_readiness_and_metrics_are_served` | `/healthz`, `/readyz` 200 and the counters on `/metrics` |
-| `the_manifests_are_valid_and_resolve` | the cases' own objects pass `aap_domain::resolve`, with no cluster, so a broken fixture is not found minutes into CI |
+| `a_config_that_references_the_shared_objects_runs_what_they_say_and_follows_their_edits` | D2: a config naming a `ModelEndpoint`, a `ToolProvider` and no image is `ConfigInvalid` while they are missing (nothing made, both named); created, the service becomes `Ready` by itself (the operator watches both kinds) and the Deployment carries the endpoint's address and Secret key, the provider's header Secret as `SEARCH_MCP_TOKEN`, the MCP file the provider gives and the operator's default image; an edit of the endpoint moves the digest (status and pod template) and the variable; deleting the provider blocks the service naming it and leaves the Deployment's generation alone; creating it again is the same digest |
+| `an_operator_without_the_shared_crds_still_runs_plain_services_and_says_what_is_missing` | D2, review fixes: **off unless `AAP_TEST_DROP_SHARED_CRDS=1`, and then run alone** (it deletes the CRDs of `ModelEndpoint` and `ToolProvider` cluster-wide and installs them again). With the API server not serving the two kinds (the plain text `404 page not found`): a plain service becomes `Ready` and follows a change of its config; a service that references the kinds is `Blocked`, `ConfigInvalid`, and the message says the kinds are not installed and to install `deploy/operator-crds`, in a pass that did not fail; the CRDs installed and the objects made, that service becomes `Ready` (by the watches the failed lists restarted, or the 5 s pending timer these cases set) |
+| `the_manifests_are_valid_and_resolve` | the cases' own objects pass `aap_domain::resolve`, with no cluster, so a broken fixture is not found minutes into CI (D2: the shared objects with the default image, and refused without them) |
 
 | Variable | Meaning |
 |---|---|
 | `AAP_TEST_KUBECONFIG` | the kubeconfig file of the cluster to test. **Unset: the cluster cases skip.** Never the default context |
 | `AAP_TEST_REQUIRE_CLUSTER` | `1` or `true`: unset `AAP_TEST_KUBECONFIG` is a failure (CI) |
-| `AAP_TEST_STUB_IMAGE` | the stub image, already on the cluster's nodes. Default `aap-stub:ci` |
+| `AAP_TEST_STUB_IMAGE` | the stub image, already on the cluster's nodes. Default `aap-stub:ci`. Every operator the cases start is also given it as `DEFAULT_AGENT_IMAGE`, which only the case of the shared objects relies on |
 | `AAP_TEST_HOST_ADDR` | the address of this machine as the cluster's pods reach it (kind: the gateway of the docker network `kind`; the workflow computes it). Set, the registry case also reads the registry and the card from a pod. Unset, that part is skipped |
+| `AAP_TEST_DROP_SHARED_CRDS` | `1`: lets the case above delete the two shared CRDs. Never set it for a run of the whole file: the other cases use those kinds. CI sets it in a step of its own, after the whole-file run |
 | `AAP_TEST_NO_WORKLOADS` | `1` or `true`: the cluster is only an API server and etcd (no controller manager, no kubelet). The test then patches the status of every Deployment and StatefulSet to "rolled out" itself and skips the cases that need a kubelet. See below |
 
 ### What has and has not been run
@@ -138,3 +143,16 @@ image runs as the real binaries would.
   included (the token, the headers, the item, `304`, `HEAD`, a Blocked service not listed, a deleted one gone). **Its pod
   part has not run** (`AAP_TEST_HOST_ADDR` is unset there: no pod ever exists on a bare API server), and neither has
   the kind job: *unverified* until `operator-e2e` has run.
+* **D2, 2026-10-15**, a bare **kube-apiserver v1.35.8 and etcd** started by hand (a new data directory, a token, `AlwaysAllow`
+  authorization, no controller manager, no kubelet), `AAP_TEST_NO_WORKLOADS=1` and `AAP_TEST_REQUIRE_CLUSTER=1`, the proxy
+  variables unset: the thirteen cases passed, the new one included. The first run of the new case failed on the test's own
+  mistake (an argument in the wrong place), not on the operator. That proves the watches of the two new kinds, the reads, the
+  digest and the block against a real API server; `AlwaysAllow` proves **nothing** of the `Role`'s verbs on them, which only the
+  kind end-to-end's `kubectl auth can-i` checks (`deploy/operator/tests/e2e`): *unverified* until CI has run it.
+* **D2 review fixes, 2026-10-15**, a new bare kube-apiserver v1.35.8 and etcd v3.6.4 (same flags, proxy variables unset),
+  `AAP_TEST_NO_WORKLOADS=1`: the other thirteen cases passed, and the new case, with `AAP_TEST_DROP_SHARED_CRDS=1`
+  and run alone, passed in 4 s. With the pass reading a referent by `Api::get_opt`, as the first version did, it fails: the
+  service never says anything (its status is never written), because kube takes the plain-text 404 of a kind that is not served
+  for an error, not for "not found" (the same lesson as S6's, for another call). The same run showed the warning of the isolated
+  watch of each kind in the operator's log, once. The kind job has not run this case: *unverified* until CI has (the workflow
+  has a step for it, `The operator without the CRDs of the shared kinds`).

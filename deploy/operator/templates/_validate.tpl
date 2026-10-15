@@ -24,6 +24,16 @@ Included from deployment.yaml, which every render has, so they always run.
 {{- if and .Values.watchNamespace (not (regexMatch "^[a-z0-9]([-a-z0-9]*[a-z0-9])?$" (toString .Values.watchNamespace))) -}}
 {{- fail (printf "watchNamespace must be one namespace name (a DNS label), got %q: the operator is namespaced and has no value that watches every namespace" (toString .Values.watchNamespace)) -}}
 {{- end -}}
+{{- /* The default agent image (AD-029): empty is none; a value is pinned by tag and digest, as the operator's own image is. */ -}}
+{{- if .Values.defaultAgentImage -}}
+{{- $d := toString .Values.defaultAgentImage -}}
+{{- if not (regexMatch "^[^[:space:]]+:[A-Za-z0-9_][A-Za-z0-9._-]*@sha256:[0-9a-f]{64}$" $d) -}}
+{{- fail (printf "defaultAgentImage must be repository:tag@sha256:<64 hex> (a tag and a digest), got %q: the agents that name no image run it, and a moving reference would roll them without a commit" $d) -}}
+{{- end -}}
+{{- if regexMatch ":latest@" $d -}}
+{{- fail "defaultAgentImage must not be tagged latest: a moving tag would roll the agents without a commit" -}}
+{{- end -}}
+{{- end -}}
 {{- if not (kindIs "bool" .Values.storeCnpg) -}}
 {{- fail "storeCnpg must be true or false" -}}
 {{- end -}}
