@@ -123,7 +123,8 @@ jobs:
           # Server-side: a client-side apply keeps the manifest in an annotation, which has a size limit.
           kubectl apply --server-side -f deploy/crds/agents.vymalo.com.yaml
           kubectl wait --for=condition=Established --timeout=60s \
-            crd/agentconfigs.agents.vymalo.com crd/agentservices.agents.vymalo.com
+            crd/agentconfigs.agents.vymalo.com crd/agentservices.agents.vymalo.com \
+            crd/modelendpoints.agents.vymalo.com crd/toolproviders.agents.vymalo.com
           kubectl create namespace another-agentic-system
       - name: The examples are accepted
         run: |
@@ -132,10 +133,18 @@ jobs:
             kubectl apply -f "$f"
             echo "::endgroup::"
           done
-          kubectl -n another-agentic-system get agentservices,agentconfigs
+          kubectl -n another-agentic-system get agentservices,agentconfigs,modelendpoints,toolproviders
           # Defaulting works: `chat` leaves these out.
           test "$(kubectl -n another-agentic-system get agentservice chat -o jsonpath='{.spec.deletionPolicy}')" = Retain
           test "$(kubectl -n another-agentic-system get agentservice chat -o jsonpath='{.spec.interfaces.mcp.enabled}')" = false
+          # The dashboard's objects (examples/coder-me.yaml): the audience is kept, not pruned; a providerRef
+          # server is given `headers: {}` by the schema's default, which the exclusivity rule has to tolerate;
+          # and the references, with no inline model and no image, are what was stored.
+          test "$(kubectl -n another-agentic-system get agentservice coder-me -o jsonpath='{.spec.access.audience[0]}')" = agent.use:coder-me
+          kubectl -n another-agentic-system get agentconfig coder-me -o json | jq -e '.spec.tools.mcpServers.websearch.headers == {}'
+          test "$(kubectl -n another-agentic-system get agentconfig coder-me -o jsonpath='{.spec.model.endpointRef.name}')" = gateway
+          test -z "$(kubectl -n another-agentic-system get agentconfig coder-me -o jsonpath='{.spec.environment.image}')"
+          test "$(kubectl -n another-agentic-system get toolprovider websearch -o jsonpath='{.spec.mcp.optional}')" = true
       - name: Each invalid example is refused, for the reason it states
         run: |
           failed=0
@@ -259,7 +268,8 @@ jobs:
           # manifest in an annotation, which has a size limit.
           kubectl apply --server-side -f deploy/crds/agents.vymalo.com.yaml
           kubectl wait --for=condition=Established --timeout=60s \
-            crd/agentconfigs.agents.vymalo.com crd/agentservices.agents.vymalo.com
+            crd/agentconfigs.agents.vymalo.com crd/agentservices.agents.vymalo.com \
+            crd/modelendpoints.agents.vymalo.com crd/toolproviders.agents.vymalo.com
       - name: Build the stand-in for the adam image and load it into kind
         run: |
           # busybox pinned by digest that answers /healthz on 8080 as adam-agent and adam-coder would.
