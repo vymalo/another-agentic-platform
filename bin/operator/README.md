@@ -109,6 +109,7 @@ image runs as the real binaries would.
 | `a_service_that_asks_for_a_cluster_is_cnpg_not_installed_without_cloudnativepg` | S6: `store.postgres.cnpg` on a cluster without CloudNativePG is `StoreReady: False`, `CNPGNotInstalled`, `Blocked`, no workload, and the deletion of that service completes (a skip when CloudNativePG is installed; a failure under `AAP_TEST_REQUIRE_CLUSTER=1`) |
 | `health_readiness_and_metrics_are_served` | `/healthz`, `/readyz` 200 and the counters on `/metrics` |
 | `a_config_that_references_the_shared_objects_runs_what_they_say_and_follows_their_edits` | D2: a config naming a `ModelEndpoint`, a `ToolProvider` and no image is `ConfigInvalid` while they are missing (nothing made, both named); created, the service becomes `Ready` by itself (the operator watches both kinds) and the Deployment carries the endpoint's address and Secret key, the provider's header Secret as `SEARCH_MCP_TOKEN`, the MCP file the provider gives and the operator's default image; an edit of the endpoint moves the digest (status and pod template) and the variable; deleting the provider blocks the service naming it and leaves the Deployment's generation alone; creating it again is the same digest |
+| `an_operator_without_the_shared_crds_still_runs_plain_services_and_says_what_is_missing` | D2, review fixes: **off unless `AAP_TEST_DROP_SHARED_CRDS=1`, and then run alone** (it deletes the CRDs of `ModelEndpoint` and `ToolProvider` cluster-wide and installs them again). With the API server not serving the two kinds (the plain text `404 page not found`): a plain service becomes `Ready` and follows a change of its config; a service that references the kinds is `Blocked`, `ConfigInvalid`, and the message says the kinds are not installed and to install `deploy/operator-crds`, in a pass that did not fail; the CRDs installed and the objects made, that service becomes `Ready` (by the watches the failed lists restarted, or the 5 s pending timer these cases set) |
 | `the_manifests_are_valid_and_resolve` | the cases' own objects pass `aap_domain::resolve`, with no cluster, so a broken fixture is not found minutes into CI (D2: the shared objects with the default image, and refused without them) |
 
 | Variable | Meaning |
@@ -117,6 +118,7 @@ image runs as the real binaries would.
 | `AAP_TEST_REQUIRE_CLUSTER` | `1` or `true`: unset `AAP_TEST_KUBECONFIG` is a failure (CI) |
 | `AAP_TEST_STUB_IMAGE` | the stub image, already on the cluster's nodes. Default `aap-stub:ci`. Every operator the cases start is also given it as `DEFAULT_AGENT_IMAGE`, which only the case of the shared objects relies on |
 | `AAP_TEST_HOST_ADDR` | the address of this machine as the cluster's pods reach it (kind: the gateway of the docker network `kind`; the workflow computes it). Set, the registry case also reads the registry and the card from a pod. Unset, that part is skipped |
+| `AAP_TEST_DROP_SHARED_CRDS` | `1`: lets the case above delete the two shared CRDs. Never set it for a run of the whole file: the other cases use those kinds. CI sets it in a step of its own, after the whole-file run |
 | `AAP_TEST_NO_WORKLOADS` | `1` or `true`: the cluster is only an API server and etcd (no controller manager, no kubelet). The test then patches the status of every Deployment and StatefulSet to "rolled out" itself and skips the cases that need a kubelet. See below |
 
 ### What has and has not been run
@@ -147,3 +149,10 @@ image runs as the real binaries would.
   mistake (an argument in the wrong place), not on the operator. That proves the watches of the two new kinds, the reads, the
   digest and the block against a real API server; `AlwaysAllow` proves **nothing** of the `Role`'s verbs on them, which only the
   kind end-to-end's `kubectl auth can-i` checks (`deploy/operator/tests/e2e`): *unverified* until CI has run it.
+* **D2 review fixes, 2026-10-15**, a new bare kube-apiserver v1.35.8 and etcd v3.6.4 (same flags, proxy variables unset),
+  `AAP_TEST_NO_WORKLOADS=1`: the other thirteen cases passed, and the new case, with `AAP_TEST_DROP_SHARED_CRDS=1`
+  and run alone, passed in 4 s. With the pass reading a referent by `Api::get_opt`, as the first version did, it fails: the
+  service never says anything (its status is never written), because kube takes the plain-text 404 of a kind that is not served
+  for an error, not for "not found" (the same lesson as S6's, for another call). The same run showed the warning of the isolated
+  watch of each kind in the operator's log, once. The kind job has not run this case: *unverified* until CI has (the workflow
+  has a step for it, `The operator without the CRDs of the shared kinds`).

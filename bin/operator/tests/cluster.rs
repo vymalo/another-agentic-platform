@@ -22,6 +22,11 @@
 //! AAP_TEST_KUBECONFIG=$HOME/.kube/config cargo test -p aap-operator --test cluster
 //! ```
 //!
+//! **One case changes the cluster for everybody and is off unless asked for:** with `AAP_TEST_DROP_SHARED_CRDS=1` the
+//! case `an_operator_without_the_shared_crds_...` deletes the CRDs of `ModelEndpoint` and `ToolProvider` (and
+//! installs them again at the end), so run it **alone**:
+//! `AAP_TEST_DROP_SHARED_CRDS=1 cargo test -p aap-operator --test cluster -- --exact an_operator_without_the_shared_crds_still_runs_plain_services_and_says_what_is_missing`.
+//!
 //! `AAP_TEST_NO_WORKLOADS=1` is for a cluster that is only an API server and etcd (no controller manager, no
 //! kubelet): there nothing ever rolls out by itself, so the test plays the controller manager, patching the
 //! status of every Deployment and StatefulSet to "rolled out", and skips the cases that need a kubelet (a missing
@@ -1733,5 +1738,132 @@ async fn a_config_that_references_the_shared_objects_runs_what_they_say_and_foll
         .until("refs", "Ready again", 240, |s| state(s) == "Ready")
         .await;
     assert_eq!(again["status"]["config"]["digest"], second);
+    case.finish().await;
+}
+
+/// The variable that lets the case below delete CRDs of the cluster: it would break the cases that run beside it.
+const DROP_SHARED_CRDS_VAR: &str = "AAP_TEST_DROP_SHARED_CRDS";
+
+/// The operator was rolled out before `deploy/operator-crds` (or with an old one), so the API server does not
+/// serve the two shared kinds: it answers the plain text `404 page not found` to their list, their watch and a
+/// get. A plain service must still be made and become Ready, and a service whose config references an
+/// object of those kinds must say that the CRDs are not installed. Proven against the fake API server of
+/// `aap-controller`; this is the real one's, whose answer for a resource it does not serve is the only thing
+/// the fake had to imitate.
+#[tokio::test]
+async fn an_operator_without_the_shared_crds_still_runs_plain_services_and_says_what_is_missing() {
+    let Some(cluster) = connect().await else {
+        return;
+    };
+    if std::env::var(DROP_SHARED_CRDS_VAR).as_deref() != Ok("1") {
+        eprintln!(
+            "skipped: {DROP_SHARED_CRDS_VAR} is not 1 (this case deletes two CRDs, so it runs alone)"
+        );
+        return;
+    }
+    // The kinds go away. (A panic below leaves them away; the next `connect` installs them again.)
+    let crds: Api<CustomResourceDefinition> = Api::all(cluster.client.clone());
+    for name in [
+        "modelendpoints.agents.vymalo.com",
+        "toolproviders.agents.vymalo.com",
+    ] {
+        crds.delete(name, &DeleteParams::default()).await.unwrap();
+    }
+    poll(
+        "the API server to stop serving the shared kinds",
+        120,
+        || async {
+            let endpoints: Api<aap_api::ModelEndpoint> = Api::all(cluster.client.clone());
+            let providers: Api<aap_api::ToolProvider> = Api::all(cluster.client.clone());
+            let gone = |e: kube::Error| matches!(e, kube::Error::Api(s) if s.code == 404);
+            let a = endpoints
+                .list(&ListParams::default())
+                .await
+                .err()
+                .is_some_and(gone);
+            let b = providers
+                .list(&ListParams::default())
+                .await
+                .err()
+                .is_some_and(gone);
+            (a && b).then_some(())
+        },
+    )
+    .await;
+
+    let case = Case::begin(&cluster, "nocrd").await;
+    // A plain service: nothing in it names a shared object.
+    case.secrets("plain").await;
+    let (svc, cfg) = chat("plain", &cluster.image);
+    case.apply::<aap_api::AgentConfig>(&cfg).await;
+    case.apply::<AgentService>(&svc).await;
+    case.until(
+        "plain",
+        "a plain service to be Ready without the shared CRDs",
+        240,
+        |s| state(s) == "Ready",
+    )
+    .await;
+
+    // One that references them says what is missing, in a pass that did not fail.
+    case.secrets("refs").await;
+    let (_, _, svc, cfg) = shared_fixtures(&cluster.image);
+    case.apply::<aap_api::AgentConfig>(&cfg).await;
+    case.apply::<AgentService>(&svc).await;
+    let blocked = case
+        .until("refs", "the service to say the CRDs are missing", 60, |s| {
+            is(s, "ConfigResolved", "False", "ConfigInvalid")
+        })
+        .await;
+    let why = blocked["status"]["conditions"][0]["message"]
+        .as_str()
+        .unwrap();
+    assert!(
+        why.contains("ModelEndpoint \"gateway\"")
+            && why.contains("ToolProvider \"search\"")
+            && why.contains("is not installed")
+            && why.contains("deploy/operator-crds"),
+        "{why}"
+    );
+    assert_eq!(state(&blocked["status"]), "Blocked");
+
+    // The plain service is still served after all of that (the failing watches did not hold it back): a
+    // change of its config is followed.
+    let (_, mut plain_cfg) = chat("plain", &cluster.image);
+    plain_cfg["spec"]["harness"]["adam"]["agent"]["folder"]["files"]["instructions.md"] =
+        json!("---\nname: plain\ndescription: Changed.\ncard:\n  name: plain\n---\nChanged.\n");
+    let before = case.service("plain").await.unwrap()["status"]["config"]["digest"].clone();
+    case.apply::<aap_api::AgentConfig>(&plain_cfg).await;
+    case.until("plain", "the plain service to follow its config", 60, |s| {
+        s["config"]["digest"] != before
+    })
+    .await;
+
+    // The CRDs are installed, and the objects made: the operator's watches, which failed until now, find the
+    // kinds on their next try (their backoff ends within thirty seconds), and the blocked service goes on.
+    install_crds(&cluster.client).await;
+    let (endpoint, provider, _, _) = shared_fixtures(&cluster.image);
+    let tools: Secret = serde_json::from_value(json!({
+        "apiVersion": "v1", "kind": "Secret",
+        "metadata": {"name": "refs-tools"}, "stringData": {"SEARCH_MCP_TOKEN": "dummy"},
+    }))
+    .unwrap();
+    case.api::<Secret>()
+        .patch(
+            "refs-tools",
+            &PatchParams::apply("aap-e2e").force(),
+            &Patch::Apply(&tools),
+        )
+        .await
+        .unwrap();
+    case.apply::<aap_api::ModelEndpoint>(&endpoint).await;
+    case.apply::<aap_api::ToolProvider>(&provider).await;
+    case.until(
+        "refs",
+        "the blocked service to be Ready once the kinds exist",
+        240,
+        |s| state(s) == "Ready",
+    )
+    .await;
     case.finish().await;
 }
