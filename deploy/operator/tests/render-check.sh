@@ -72,6 +72,11 @@ role_rules() {
     /verbs:/ { v = $0; sub(/.*verbs: */, "", v); print g " " r " " v }'
 }
 rules_are() { [ "$(role_rules)" = "$1" ]; }
+# The operator reads the shared objects of the dashboard (AD-029) and never writes them.
+shared_kinds_are_read_only() {
+  shared=$(role_rules | grep -E 'modelendpoints|toolproviders') || return 1
+  ! printf '%s\n' "$shared" | grep -Eq 'patch|create|update|delete|\*'
+}
 
 # ---- The three golden renders ---------------------------------------------------------------------------------------------
 # The goldens are rendered with image.tag=sha-0000000, whatever values.yaml says: the bump job rewrites image.tag on main after
@@ -100,6 +105,22 @@ check "no token: the pod mounts no volume" dlacks Deployment aap-operator '^    
 check "no token: ingress is closed, not open (ingress: [])" dhas NetworkPolicy aap-operator '^  ingress: \[\]$'
 check "the metrics Service is there" dhas Service aap-operator-metrics 'port: 9090'
 
+# ---- The default agent image (AD-029) ----------------------------------------------------------------------------------
+check "the default agent image is DEFAULT_AGENT_IMAGE, pinned by tag and digest" \
+  dhas Deployment aap-operator 'name: DEFAULT_AGENT_IMAGE' 'value: "ghcr.io/vymalo/another-adam-rs/coder:[A-Za-z0-9._-]+@sha256:[0-9a-f]{64}"'
+default_matches_the_kind_end_to_end() {
+  # The pin the chart ships is the one the kind end-to-end of the coder runs: moving one means moving, and proving, the other.
+  pin=$(awk '/^defaultAgentImage:/ { print $2 }' "$chart/values.yaml")
+  [ -n "$pin" ] && grep -qF -- "ref: $pin" "$here/e2e/coder.yaml"
+}
+check "the chart's default agent image is the coder image of tests/e2e/coder.yaml, tag and digest" default_matches_the_kind_end_to_end
+render --set defaultAgentImage=
+check "an empty defaultAgentImage renders no DEFAULT_AGENT_IMAGE: the operator has no default" lacks 'DEFAULT_AGENT_IMAGE'
+other=ghcr.io/vymalo/another-adam-rs/coder:sha-aaaaaaa@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
+render --set "defaultAgentImage=$other"
+check "defaultAgentImage is the value of DEFAULT_AGENT_IMAGE" dhas Deployment aap-operator "value: \"$other\""
+render
+
 # ---- The Deployment -----------------------------------------------------------------------------------------------------
 check "one replica" dhas Deployment aap-operator '^  replicas: 1$'
 check "strategy Recreate (never two reconcilers at once)" dhas Deployment aap-operator '^    type: Recreate$'
@@ -124,6 +145,7 @@ check "the pod gets a service account token (its way in)" dhas Deployment aap-op
 
 # ---- RBAC: what the READMEs of the crates list, and nothing else ----------------------------------------------------------
 base_rules='[agents.vymalo.com] [agentservices, agentconfigs] [get, list, watch, patch]
+[agents.vymalo.com] [modelendpoints, toolproviders] [get, list, watch]
 [agents.vymalo.com] [agentservices/status, agentconfigs/status] [patch]
 [events.k8s.io] [events] [create, patch]
 [apps] [statefulsets, deployments] [get, list, watch, patch, create, delete]
@@ -137,6 +159,8 @@ check "the Role has exactly the rules of the controller's, the runtime's and the
 $cnpg_rule"
 check "the Role is in the release's namespace" dhas Role aap-operator "namespace: $ns"
 check "and so is its binding" dhas RoleBinding aap-operator "namespace: $ns"
+check "the shared kinds are read and never written: a rule for modelendpoints and toolproviders, with no patch, create, update or delete" \
+  shared_kinds_are_read_only
 check "no right on Secrets, none on a wildcard, none on a CustomResourceDefinition, a node or a namespace" \
   dlacks Role aap-operator 'secrets' '\*' 'customresourcedefinitions' 'nodes' 'namespaces'
 check "the binding is to the operator's own service account" dhas RoleBinding aap-operator 'kind: ServiceAccount' 'name: aap-operator$'
@@ -194,6 +218,16 @@ check "a replica count is refused (no leader election in v0)" refused 'no leader
 check "an empty image tag is refused" refused 'image.tag is required' --set image.tag=
 check "the latest tag is refused" refused 'must not be latest' --set image.tag=latest
 check "a malformed digest is refused" refused 'image.digest must be sha256' --set image.digest=abc
+check "a default agent image with no digest is refused" refused 'defaultAgentImage must be repository:tag@sha256' \
+  --set defaultAgentImage=ghcr.io/vymalo/another-adam-rs/coder:sha-9a1fd4e
+check "a default agent image with no tag is refused" refused 'defaultAgentImage must be repository:tag@sha256' \
+  --set "defaultAgentImage=ghcr.io/vymalo/another-adam-rs/coder@sha256:$(printf 'a%.0s' $(seq 64))"
+check "a default agent image with a short digest is refused" refused 'defaultAgentImage must be repository:tag@sha256' \
+  --set defaultAgentImage=ghcr.io/vymalo/another-adam-rs/coder:sha-9a1fd4e@sha256:abc
+check "a default agent image tagged latest is refused" refused 'must not be tagged latest' \
+  --set "defaultAgentImage=ghcr.io/vymalo/another-adam-rs/coder:latest@sha256:$(printf 'a%.0s' $(seq 64))"
+check "a default agent image with white space is refused" refused 'defaultAgentImage must be repository:tag@sha256' \
+  --set "defaultAgentImage=ghcr.io/x/y:t g@sha256:$(printf 'a%.0s' $(seq 64))"
 check "a watchNamespace that is not one namespace name is refused (watchNamespace is one name)" refused 'watchNamespace must be one namespace' --set-string 'watchNamespace=A b'
 check "a token Secret and an ExternalSecret together are refused" \
   refused 'the token comes from one place' --set registry.tokenSecret.name=t --set externalSecrets.enabled=true

@@ -6,6 +6,9 @@
 //! the cluster ends up with: the workload, the Service, the ConfigMap, the status the operator writes, the
 //! Events, and that deleting the service completes its finalizer.
 //!
+//! The operator is given the stub image as its default agent image (`DEFAULT_AGENT_IMAGE`, AD-029), which only the case of
+//! the shared objects (`ModelEndpoint`, `ToolProvider`) relies on: every other manifest names its image.
+//!
 //! **No real adam image is needed.** The pods run `stub/Dockerfile`: busybox that answers `/healthz` on 8080,
 //! with `adam-coder` as its entrypoint and `tini` and `adam-agent` where the operator expects them. CI builds
 //! it and loads it into kind (`AAP_TEST_STUB_IMAGE`, default `aap-stub:ci`).
@@ -179,6 +182,33 @@ fn the_manifests_are_valid_and_resolve() {
         )
         .unwrap_or_else(|issues| panic!("{issues:?}"));
     }
+
+    // The shared objects: resolved with the objects and the operator's default image, and refused without the
+    // objects, naming them.
+    let (endpoint, provider, mut svc, mut cfg) = shared_fixtures("aap-stub:ci");
+    svc["metadata"]["namespace"] = json!(namespace);
+    cfg["metadata"]["namespace"] = json!(namespace);
+    let svc: AgentService = serde_json::from_value(svc).unwrap();
+    let cfg: aap_api::AgentConfig = serde_json::from_value(cfg).unwrap();
+    let mut endpoint: aap_api::ModelEndpoint = serde_json::from_value(endpoint).unwrap();
+    let mut provider: aap_api::ToolProvider = serde_json::from_value(provider).unwrap();
+    endpoint.metadata.namespace = Some(namespace.to_owned());
+    provider.metadata.namespace = Some(namespace.to_owned());
+    let externals = aap_domain::Externals::default()
+        .with_default_image("aap-stub:ci")
+        .with_model_endpoint(endpoint)
+        .with_tool_provider(provider);
+    let resolved = aap_domain::resolve(&svc, &cfg, &externals, aap_ports::OwnerHandle::none())
+        .unwrap_or_else(|issues| panic!("{issues:?}"));
+    assert_eq!(resolved.runtime.workloads[0].container.image, "aap-stub:ci");
+    let issues = aap_domain::resolve(
+        &svc,
+        &cfg,
+        &aap_domain::Externals::default().with_default_image("aap-stub:ci"),
+        aap_ports::OwnerHandle::none(),
+    )
+    .unwrap_err();
+    assert_eq!(issues.len(), 2, "{issues:?}");
 }
 
 // -------------------------------------------------------------------- the cluster
@@ -304,6 +334,7 @@ impl OperatorProc {
             // Every interface, so that a pod can reach it (the registry case); the port is this case's own.
             .env("REGISTRY_ADDR", format!("0.0.0.0:{registry}"))
             .env("POD_NAME", "operator-under-test")
+            .env("DEFAULT_AGENT_IMAGE", &cluster.image)
             // The pending timer is short, so what a signal missed is found soon.
             .env("AAP_RESYNC_PENDING_SECS", "5")
             .env("RUST_LOG", "info,kube=warn")
@@ -1476,5 +1507,231 @@ async fn without_a_token_no_registry_is_served_and_nothing_is_listed() {
         .await
         .is_none()
     );
+    case.finish().await;
+}
+
+// ------------------------------------------------- the shared objects of the dashboard (D2)
+
+/// The manifests of the case below: a `ModelEndpoint`, a `ToolProvider`, and a folder agent that references both
+/// and names no image.
+fn shared_fixtures(image: &str) -> (Value, Value, Value, Value) {
+    let endpoint = json!({
+        "apiVersion": "agents.vymalo.com/v1alpha1", "kind": "ModelEndpoint",
+        "metadata": {"name": "gateway"},
+        "spec": {
+            "title": "Gateway",
+            "baseUrl": {"value": "http://gateway.invalid/v1"},
+            "apiKeySecretRef": {"name": "refs-secrets", "key": "MODEL_API_KEY"},
+        },
+    });
+    let provider = json!({
+        "apiVersion": "agents.vymalo.com/v1alpha1", "kind": "ToolProvider",
+        "metadata": {"name": "search"},
+        "spec": {
+            "title": "Search",
+            "mcp": {
+                "url": "http://search.invalid/mcp",
+                "headers": {"Authorization": {"prefix": "Bearer ", "secretRef": {"name": "refs-tools", "key": "SEARCH_MCP_TOKEN"}}},
+                "optional": true,
+            },
+        },
+    });
+    let (svc, mut cfg) = chat("refs", image);
+    cfg["spec"]["model"] = json!({"model": "stub-model", "endpointRef": {"name": "gateway"}});
+    cfg["spec"]["tools"] = json!({
+        "mcpServers": {"search": {"providerRef": {"name": "search"}}},
+        "allowInsecureHttp": true,
+    });
+    cfg["spec"]["environment"]
+        .as_object_mut()
+        .unwrap()
+        .remove("image");
+    (endpoint, provider, svc, cfg)
+}
+
+/// The environment of the first container of a Deployment, as JSON: `[{name, value | valueFrom}]`.
+fn container_env(deployment: &Deployment) -> Vec<Value> {
+    let d = serde_json::to_value(deployment).unwrap();
+    d["spec"]["template"]["spec"]["containers"][0]["env"]
+        .as_array()
+        .cloned()
+        .unwrap_or_default()
+}
+
+fn env_entry(env: &[Value], name: &str) -> Value {
+    env.iter()
+        .find(|e| e["name"] == name)
+        .cloned()
+        .unwrap_or_else(|| panic!("no {name} in {env:#?}"))
+}
+
+fn digest_annotation(deployment: &Deployment) -> String {
+    deployment
+        .spec
+        .as_ref()
+        .unwrap()
+        .template
+        .metadata
+        .as_ref()
+        .unwrap()
+        .annotations
+        .as_ref()
+        .unwrap()["agents.vymalo.com/config-digest"]
+        .clone()
+}
+
+/// A `ModelEndpoint` and a `ToolProvider` set once, and a config that names them and no image: the pods get
+/// what the objects say and the operator's default image; an edit of an object rolls them; the deletion of
+/// one blocks the service and leaves them alone. Proven against the fake API server of `aap-controller`; this
+/// is the real one's.
+#[tokio::test]
+async fn a_config_that_references_the_shared_objects_runs_what_they_say_and_follows_their_edits() {
+    let Some(cluster) = connect().await else {
+        return;
+    };
+    let case = Case::begin(&cluster, "refs").await;
+    case.secrets("refs").await;
+    // The provider's header Secret, which the pod reads as SEARCH_MCP_TOKEN.
+    let tools: Secret = serde_json::from_value(json!({
+        "apiVersion": "v1", "kind": "Secret",
+        "metadata": {"name": "refs-tools"}, "stringData": {"SEARCH_MCP_TOKEN": "dummy"},
+    }))
+    .unwrap();
+    case.api::<Secret>()
+        .patch(
+            "refs-tools",
+            &PatchParams::apply("aap-e2e").force(),
+            &Patch::Apply(&tools),
+        )
+        .await
+        .unwrap();
+
+    let (endpoint, provider, svc, cfg) = shared_fixtures(&cluster.image);
+
+    // The config and the service first: the objects they name are not there, and the service says so.
+    case.apply::<aap_api::AgentConfig>(&cfg).await;
+    case.apply::<AgentService>(&svc).await;
+    let blocked = case
+        .until("refs", "a missing referent to block the service", 60, |s| {
+            is(s, "ConfigResolved", "False", "ConfigInvalid")
+        })
+        .await;
+    let why = blocked["status"]["conditions"][0]["message"]
+        .as_str()
+        .unwrap();
+    assert!(
+        why.contains("ModelEndpoint \"gateway\"") && why.contains("ToolProvider \"search\""),
+        "{why}"
+    );
+    assert!(
+        case.api::<Deployment>()
+            .get_opt("refs")
+            .await
+            .unwrap()
+            .is_none(),
+        "nothing is made from half an agent"
+    );
+
+    // The objects appear: the service follows with nobody touching it (the operator watches both kinds).
+    case.apply::<aap_api::ModelEndpoint>(&endpoint).await;
+    case.apply::<aap_api::ToolProvider>(&provider).await;
+    let ready = case
+        .until("refs", "the service to be Ready", 240, |s| {
+            state(s) == "Ready"
+        })
+        .await;
+    let first = ready["status"]["config"]["digest"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+
+    // The pods run what the objects say, and the default image the operator was given.
+    let deployment = case.api::<Deployment>().get("refs").await.unwrap();
+    let env = container_env(&deployment);
+    assert_eq!(
+        serde_json::to_value(&deployment).unwrap()["spec"]["template"]["spec"]["containers"][0]["image"],
+        cluster.image,
+        "no image in the config: the operator's default"
+    );
+    assert_eq!(
+        env_entry(&env, "MODEL_BASE_URL")["value"],
+        "http://gateway.invalid/v1"
+    );
+    assert_eq!(
+        env_entry(&env, "MODEL_API_KEY")["valueFrom"]["secretKeyRef"],
+        json!({"name": "refs-secrets", "key": "MODEL_API_KEY"})
+    );
+    assert_eq!(
+        env_entry(&env, "SEARCH_MCP_TOKEN")["valueFrom"]["secretKeyRef"],
+        json!({"name": "refs-tools", "key": "SEARCH_MCP_TOKEN"})
+    );
+    assert_eq!(digest_annotation(&deployment), first);
+    let mcp = case.api::<ConfigMap>().get("refs-mcp").await.unwrap();
+    let file: Value = serde_json::from_str(&mcp.data.unwrap()["mcp.json"]).unwrap();
+    assert_eq!(
+        file["mcpServers"]["search"],
+        json!({
+            "type": "http", "url": "http://search.invalid/mcp", "optional": true,
+            "headers": {"Authorization": "Bearer ${SEARCH_MCP_TOKEN}"},
+        }),
+        "the provider's content, in the shape of an inline server"
+    );
+
+    // An edit of the endpoint rolls the agent: a new digest, on the status and on the pods.
+    let mut edited = endpoint.clone();
+    edited["spec"]["baseUrl"]["value"] = json!("http://gateway2.invalid/v1");
+    case.apply::<aap_api::ModelEndpoint>(&edited).await;
+    let rolled = case
+        .until("refs", "the digest to follow the endpoint", 120, |s| {
+            s["config"]["digest"].as_str().is_some_and(|d| d != first)
+        })
+        .await;
+    let second = rolled["status"]["config"]["digest"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    let deployment = case.api::<Deployment>().get("refs").await.unwrap();
+    assert_eq!(
+        env_entry(&container_env(&deployment), "MODEL_BASE_URL")["value"],
+        "http://gateway2.invalid/v1"
+    );
+    assert_eq!(digest_annotation(&deployment), second);
+    assert_eq!(
+        rolled["status"]["config"]["observedGeneration"],
+        ready["status"]["config"]["observedGeneration"],
+        "the config itself did not change"
+    );
+
+    // Deleting a referent blocks the service, naming it, and leaves the workload as it was.
+    case.until("refs", "Ready after the roll", 240, |s| state(s) == "Ready")
+        .await;
+    let before = case.api::<Deployment>().get("refs").await.unwrap();
+    case.api::<aap_api::ToolProvider>()
+        .delete("search", &DeleteParams::default())
+        .await
+        .unwrap();
+    let blocked = case
+        .until("refs", "the deletion to block the service", 60, |s| {
+            is(s, "ConfigResolved", "False", "ConfigInvalid")
+        })
+        .await;
+    assert_eq!(state(&blocked["status"]), "Blocked");
+    let why = blocked["status"]["conditions"][0]["message"]
+        .as_str()
+        .unwrap();
+    assert!(why.contains("ToolProvider \"search\""), "{why}");
+    let after = case.api::<Deployment>().get("refs").await.unwrap();
+    assert_eq!(
+        before.metadata.generation, after.metadata.generation,
+        "a blocked service leaves its workload untouched"
+    );
+    assert_eq!(digest_annotation(&after), second);
+
+    // And it comes back: the same objects, the same agent.
+    case.apply::<aap_api::ToolProvider>(&provider).await;
+    let again = case
+        .until("refs", "Ready again", 240, |s| state(s) == "Ready")
+        .await;
+    assert_eq!(again["status"]["config"]["digest"], second);
     case.finish().await;
 }

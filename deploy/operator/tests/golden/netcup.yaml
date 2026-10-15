@@ -69,6 +69,10 @@ rules:
   - apiGroups: [agents.vymalo.com]
     resources: [agentservices, agentconfigs]
     verbs: [get, list, watch, patch]
+  # aap-controller: the shared objects of the dashboard (AD-029) are read, to resolve a reference and to watch it, and never written.
+  - apiGroups: [agents.vymalo.com]
+    resources: [modelendpoints, toolproviders]
+    verbs: [get, list, watch]
   - apiGroups: [agents.vymalo.com]
     resources: [agentservices/status, agentconfigs/status]
     verbs: [patch]
@@ -220,6 +224,9 @@ spec:
                   fieldPath: metadata.name
             - name: RUST_LOG
               value: "info"
+            # AD-029: the image of an agent whose AgentConfig names none. A new value rolls those agents, and no other.
+            - name: DEFAULT_AGENT_IMAGE
+              value: "ghcr.io/vymalo/another-adam-rs/coder:sha-9a1fd4e@sha256:c3c178b7d73599f40d53f798616e510346abd3300a622b09b2bc233109f12b44"
             # No token, no registry: this variable is what turns it on.
             - name: REGISTRY_TOKEN_FILE
               value: /var/run/secrets/aap/registry/token

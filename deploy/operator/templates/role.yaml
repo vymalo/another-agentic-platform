@@ -15,6 +15,10 @@ rules:
   - apiGroups: [agents.vymalo.com]
     resources: [agentservices, agentconfigs]
     verbs: [get, list, watch, patch]
+  # aap-controller: the shared objects of the dashboard (AD-029) are read, to resolve a reference and to watch it, and never written.
+  - apiGroups: [agents.vymalo.com]
+    resources: [modelendpoints, toolproviders]
+    verbs: [get, list, watch]
   - apiGroups: [agents.vymalo.com]
     resources: [agentservices/status, agentconfigs/status]
     verbs: [patch]

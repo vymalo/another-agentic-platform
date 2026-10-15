@@ -22,6 +22,13 @@ imagePullSecrets: []
 # One namespace by design (§93, "a namespaced operator"): there is no value that gives it a ClusterRole.
 watchNamespace: ""
 
+# The image of an agent whose AgentConfig names none (AD-029, §60a): the coder image, by tag AND digest. Empty: the operator has no default,
+# and an agent that names no image is `ConfigInvalid`. A new value rolls every agent that names none, through the config digest, and
+# no agent that pins its own. It is NOT moved by bump-tag.sh (that is the operator's own `image.tag`): move it by hand, or from the
+# GitOps repository's values, after reading the digest from ghcr.io (README "The default agent image"). This pin is the one the kind
+# end-to-end of the coder runs (tests/e2e/coder.yaml), and `cargo test -p aap-operator` fails when the two differ.
+defaultAgentImage: ghcr.io/vymalo/another-adam-rs/coder:sha-9a1fd4e@sha256:c3c178b7d73599f40d53f798616e510346abd3300a622b09b2bc233109f12b44
+
 serviceAccount:
   create: true
   # Empty: the fullname. Required when `create` is false.
