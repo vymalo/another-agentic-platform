@@ -26,6 +26,20 @@ cargo run -q -p aap-operator -- crdgen > deploy/crds/agents.vymalo.com.yaml
 cp deploy/crds/agents.vymalo.com.yaml deploy/operator-crds/files/agents.vymalo.com.yaml
 ```
 
+## Upgrading
+
+Upgrade the operator image before the CRDs, or together with them, never after. Since slice D1 (§60a) the CRDs admit an
+`AgentConfig` that carries an `endpointRef` or a `providerRef` and no `baseUrl`; an operator from before D1 types
+`Model.baseUrl` as required, so it cannot decode such an object (what its watch then does with the error is *unverified*).
+The other order is safe: the D1 operator reads every object written before D1. Nobody writes a reference before the
+Platform API of slice D5 does, so until then the order costs nothing, and after it, it matters. The two Argo CD
+Applications sync apart: sequence them (a sync wave, or the operator's first).
+
+The change is additive for what is stored: the `kind` job of
+[`operator.yml`](../../.github/workflows/operator.yml) installs the CRDs of the commit a change builds on, stores
+`examples/coder.yaml` and `examples/chat.yaml` under them, applies the new CRDs over the old and updates those objects.
+The one bound on a field that existed is `tools.mcpServers`, at most 32 servers.
+
 ## Removing it
 
 Deleting the release deletes the CRDs, and with them every `AgentService`, `AgentConfig`, `ModelEndpoint` and `ToolProvider` (the operator's finalizers then no
