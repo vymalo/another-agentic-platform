@@ -9,8 +9,7 @@ use crate::config::BaseUrl;
 
 /// An OpenAI-compatible model endpoint and the Secret key of its API key. An `AgentConfig` names
 /// it with `spec.model.endpointRef`; the operator resolves the reference into the same variables
-/// the inline `baseUrl` and `apiKeySecretRef` give (slice D2 of the admin dashboard). A secret is
-/// never a value here (AD-024).
+/// the inline `baseUrl` and `apiKeySecretRef` give (§60a). A secret is never a value here (AD-024).
 // kube-derive's repeated `printcolumn(type_ = …)` trips this lint (a false positive).
 #[allow(clippy::duplicated_attributes)]
 #[derive(CustomResource, KubeSchema, Clone, Debug, PartialEq, Serialize, Deserialize)]

@@ -270,8 +270,9 @@ pub struct Model {
     pub model: String,
 
     /// A `ModelEndpoint` of the same namespace that holds the address and the key (AD-029).
-    /// Exclusive with `baseUrl` and `apiKeySecretRef`. The operator resolves it in slice D2 of the
-    /// admin dashboard (§60a); until then a config that uses it is `ConfigInvalid`.
+    /// Exclusive with `baseUrl` and `apiKeySecretRef`. The operator reads the endpoint into the same
+    /// variables the inline form gives (§60a), so an edit of the endpoint rolls every agent that uses
+    /// it. An endpoint that is not there makes the agent `ConfigInvalid`, naming it.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub endpoint_ref: Option<NameRef>,
 
@@ -366,8 +367,9 @@ impl Default for GithubMcp {
 #[x_kube(validation = Rule::new("has(self.providerRef) || has(self.url)").message("an MCP server needs a url, or a providerRef"))]
 pub struct McpServer {
     /// A `ToolProvider` of the same namespace that holds the URL and the headers (AD-029).
-    /// Exclusive with `url` and `headers`. The operator resolves it in slice D2 of the admin
-    /// dashboard (§60a); until then a config that uses it is `ConfigInvalid`.
+    /// Exclusive with `url` and `headers`. The operator reads the provider into the same entry of the
+    /// extra MCP file the inline form gives (§60a), so an edit of the provider rolls every agent that
+    /// uses it. A provider that is not there makes the agent `ConfigInvalid`, naming it.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub provider_ref: Option<NameRef>,
 
@@ -380,9 +382,8 @@ pub struct McpServer {
     #[serde(default)]
     pub headers: BTreeMap<String, McpHeader>,
 
-    /// The agent starts without it when it is unreachable. Beside a `providerRef` the provider
-    /// has an `optional` of its own and nothing combines the two yet: slice D2 decides how they
-    /// meet.
+    /// The agent starts without it when it is unreachable. Beside a `providerRef` the provider has an
+    /// `optional` of its own, and the server is optional when either says so.
     #[serde(default)]
     pub optional: bool,
 }
@@ -407,8 +408,8 @@ pub struct McpHeader {
 #[serde(rename_all = "camelCase")]
 pub struct Environment {
     /// The image. adam-rs ships one image for both binaries. Absent: the operator's default coder
-    /// image (AD-029; slice D2 of the admin dashboard implements the default, and until then a
-    /// config with no image is `ConfigInvalid`). An agent may still pin its own.
+    /// image (AD-029, the operator's `--default-agent-image`; with no default configured, a config
+    /// with no image is `ConfigInvalid`). An agent may still pin its own.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub image: Option<Image>,
 
