@@ -21,7 +21,7 @@ directory is whatever implements the trait, and in the operator that is the cont
 
 | Item | What |
 |---|---|
-| `document::build(entries, anchor)` | pure: entries in, a `Built { body, etag, listed, skipped }` out, or `Overflow` |
+| `document::build(entries, anchor)` | pure: entries in, a `Built { body, etag, listed, skipped, audience_withheld }` out, or `Overflow` |
 | `Registry::new(directory, token)`, `with_anchor`, `with_full_flag` | the server's state |
 | `Registry::router()` | `GET` (and so `HEAD`) of `PATH` = `/registry/v1/agents`; another path is `404`, another method `405` |
 | `Registry::document()` | read the directory and build, setting the full flag: a request is this plus headers |
