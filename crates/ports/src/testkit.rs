@@ -1,4 +1,4 @@
-//! Conformance suites for the three traits, in the style of adam-rs's `adam-store-testkit`: every
+//! Conformance suites for the traits, in the style of adam-rs's `adam-store-testkit`: every
 //! implementation runs the same cases, so "passes the testkit" means "behaves like every other
 //! one".
 //!
@@ -98,6 +98,101 @@ pub trait DirectoryUnderTest: crate::AgentDirectory + 'static {
     fn put(&self, entry: DirectoryEntry) -> impl Future<Output = ()> + Send;
     /// Remove an entry from the source.
     fn remove(&self, scope: &str, name: &str) -> impl Future<Output = ()> + Send;
+}
+
+/// How an object that is not the dashboard's came to be (AD-031): the two ways §60a names.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Foreign {
+    /// Applied by something else: it does not carry the dashboard's label (`kubectl`, Flux, Argo CD
+    /// before it tracks).
+    Unlabelled,
+    /// Tracked by Argo CD: it carries the Argo CD tracking annotation, and the dashboard's label as well
+    /// (an agent defined in both places, or adopted and not yet released by Argo).
+    ArgoTracked,
+}
+
+/// An [`AgentObjects`](crate::AgentObjects) the suite can set up and inspect: what the cases need of
+/// a backend that the port itself does not offer (the dashboard writes no foreign object, no status and
+/// no ExternalSecret, and reads no Secret).
+pub trait ObjectsUnderTest: crate::AgentObjects + 'static {
+    /// Put an object in the backend that the dashboard does not own, as `how` says. A Kubernetes backend
+    /// applies it with another field manager.
+    fn seed_foreign(
+        &self,
+        kind: crate::Kind,
+        name: &str,
+        spec: serde_json::Value,
+        how: Foreign,
+    ) -> impl Future<Output = ()> + Send;
+
+    /// Write `status` as the operator would.
+    fn set_status(
+        &self,
+        kind: crate::Kind,
+        name: &str,
+        status: serde_json::Value,
+    ) -> impl Future<Output = ()> + Send;
+
+    /// Make `key` of the Secret `secret` offered: an ExternalSecret `external_secret` with the offer
+    /// label and that key in its `data`.
+    fn offer(
+        &self,
+        secret: &str,
+        key: &str,
+        external_secret: &str,
+    ) -> impl Future<Output = ()> + Send;
+
+    /// An ExternalSecret that makes the key and does **not** carry the offer label.
+    fn decline(
+        &self,
+        secret: &str,
+        key: &str,
+        external_secret: &str,
+    ) -> impl Future<Output = ()> + Send;
+
+    /// A Secret that holds `value` under `key`. The port has no right to read it, and the case "no read
+    /// carries a secret value" fails when a value reaches an answer.
+    fn plant_secret_value(
+        &self,
+        secret: &str,
+        key: &str,
+        value: &str,
+    ) -> impl Future<Output = ()> + Send;
+
+    /// The same backend, made unreachable, or `None` when this one cannot be (the case is then
+    /// skipped).
+    fn unreachable(&self) -> impl Future<Output = Option<Self>> + Send
+    where
+        Self: Sized,
+    {
+        async { None }
+    }
+
+    /// A `spec` of `kind` that the backend refuses as invalid, and a text the refused field's path
+    /// contains. The default is a `spec` that is not an object, which every backend refuses; a backend with
+    /// rules of its own (the CEL of the CRDs) gives one that breaks one of them.
+    fn refused_spec(&self, kind: crate::Kind) -> Option<(serde_json::Value, String)> {
+        Some((
+            serde_json::Value::String("a spec is an object".to_owned()),
+            format!("{kind} spec"),
+        ))
+    }
+}
+
+/// An [`Authenticator`](crate::Authenticator) the suite can give people tokens to.
+pub trait AuthenticatorUnderTest: crate::Authenticator + 'static {
+    /// A token that the authenticator accepts and that belongs to `subject`, who holds `permissions`
+    /// (the values of the roles claim). A different token every time.
+    fn issue(&self, subject: &str, permissions: &[&str]) -> impl Future<Output = String> + Send;
+
+    /// An authenticator of the same kind that cannot fetch the keys it verifies with, and a token it
+    /// would have to verify with them. `None` when this one cannot be made so (the case is then skipped).
+    fn without_keys(&self) -> impl Future<Output = Option<(Self, String)>> + Send
+    where
+        Self: Sized,
+    {
+        async { None }
+    }
 }
 
 /// A resolved-looking spec that uses every kind of thing a provider must handle: a workload with a
@@ -244,6 +339,11 @@ pub fn sample_spec(id: &RuntimeId) -> RuntimeSpec {
         },
     }
 }
+
+pub mod auth;
+pub mod objects;
+
+pub use objects::{SECRET_VALUE, sample_agent, sample_agent_using, sample_shared};
 
 /// Cases of the runtime suite, as plain async functions for harnesses that do not use the macro.
 #[allow(missing_docs)] // each case is named for what it asserts

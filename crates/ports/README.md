@@ -2,21 +2,27 @@
 
 The provider seams of the v0 operator ([§59a](../../docs/architecture/10-control-plane-and-crds.md#59a-operator-v0-adam-rs-agents),
 [§22](../../docs/architecture/05-runtime.md#22-runtimeprovider), AD-020): three traits and the neutral
-types that cross them.
+types that cross them; and the two seams of the admin dashboard's Platform API
+([§60a](../../docs/architecture/10-control-plane-and-crds.md#the-platform-api-ad-025-ad-027), slice D4): `AgentObjects` and
+`Authenticator`.
 
 | Trait | Does | Implemented by (later slices) |
 |---|---|---|
 | `RuntimeProvider` | makes an agent's compute exist, says how it is doing, tells the controller what changed | `runtime-kubernetes` (S4); `MemoryRuntime` here |
 | `StoreProvisioner` | makes the agent's run ledger exist: a referenced Secret, or an operator-owned CloudNativePG cluster | `store-secret`, `store-cnpg` (S5, S6: `CnpgStore` serves both kinds); `MemoryStore` here |
 | `AgentDirectory` | lists the agents the platform runs, for the registry | the controller's reflector (S5), read by `aap-registry` (S7); `MemoryDirectory` here |
+| `AgentObjects` | the dashboard's custom resources: apply, get, list and delete an agent (`AgentService` + `AgentConfig`), a `ModelEndpoint`, a `ToolProvider`; list the offered secret references (D4) | `objects-kubernetes` (D5); `MemoryObjects` here |
+| `Authenticator` | a bearer token to a `Principal`: the subject and the values of the roles claim (D4) | `auth-oidc` (D6); `MemoryAuthenticator` here |
 
 **No Kubernetes type, no driver type and no secret value appears in any signature.** A secret has no
 field anywhere in this crate: it travels as a `SecretRef { name, key }` and a provider hands it to the
 process without reading it (AD-024).
 
-Where it sits: `aap-ports` depends on nothing of the workspace. `aap-domain` depends on it for the
+Where it sits: `aap-ports` depends on nothing of the workspace (its tests read `aap-api`, as a dev-dependency, to hold
+the testkit's samples to the real CRD types). `aap-domain` depends on it for the
 output of `resolve` (§59a: "the mapping of `adam-coder` / `adam-agent` onto `aap_ports::RuntimeSpec`"), and
-`aap-api` knows nothing of it; the controller (S5) is generic over `<R: RuntimeProvider, S: StoreProvisioner>`.
+`aap-api` knows nothing of it; the controller (S5) is generic over `<R: RuntimeProvider, S: StoreProvisioner>`. `aap-forms` (D4)
+builds the bodies `AgentObjects` takes and reads the bodies it gives; the Platform API (D7) is generic over the two traits of D4.
 
 ## The traits
 
@@ -41,6 +47,23 @@ trait StoreProvisioner: Send + Sync {
 trait AgentDirectory: Send + Sync {
     async fn list(&self) -> Result<Vec<DirectoryEntry>, DirectoryError>;
     async fn get(&self, scope: &str, name: &str) -> Result<Option<DirectoryEntry>, DirectoryError>;
+}
+```
+
+```rust
+trait AgentObjects: Send + Sync {                       // D4: the Platform API's store
+    async fn list_agents(&self) -> Result<Vec<Agent>, ObjectsError>;
+    async fn get_agent(&self, name: &str) -> Result<Option<Agent>, ObjectsError>;
+    async fn put_agent(&self, draft: &AgentDraft, when: &Precondition) -> Result<Agent, ObjectsError>;
+    async fn delete_agent(&self, name: &str, when: Option<&ETag>) -> Result<(), ObjectsError>;
+    async fn list_shared(&self, kind: SharedKind) -> Result<Vec<Stored>, ObjectsError>;   // Model | ToolServer
+    async fn get_shared(&self, kind: SharedKind, name: &str) -> Result<Option<Stored>, ObjectsError>;
+    async fn put_shared(&self, kind: SharedKind, draft: &SharedDraft, when: &Precondition) -> Result<Stored, ObjectsError>;
+    async fn delete_shared(&self, kind: SharedKind, name: &str, when: Option<&ETag>) -> Result<(), ObjectsError>;
+    async fn offered_secrets(&self) -> Result<Vec<OfferedSecret>, ObjectsError>;
+}
+trait Authenticator: Send + Sync {                      // D4: a bearer token to a person
+    async fn authenticate(&self, token: Option<&str>) -> Result<Principal, AuthError>;
 }
 ```
 
@@ -88,11 +111,89 @@ implementation.
 
 ### Errors
 
-`thiserror` enums (`RuntimeError`, `StoreError`, `DirectoryError`), each with a class
+`thiserror` enums (`RuntimeError`, `StoreError`, `DirectoryError`, `ObjectsError`, `AuthError`), each with a class
 (`Classify::class() -> ErrorClass`: `Transient`, `Conflict`, `Invalid`, `NotFound`, `Unsupported`,
 `Internal`). A caller decides from the class, never from the variant, the way the sibling repository
 `another-adam-rs` does with `adam_error::Classify`; the trait is small enough that it is defined here
 instead of depending on that repository.
+
+## `AgentObjects` and `Authenticator` (D4)
+
+[§60a](../../docs/architecture/10-control-plane-and-crds.md#the-platform-api-ad-025-ad-027): the Platform API is generic over these two
+traits and a router; the Kubernetes implementation (`objects-kubernetes`, D5) and the OIDC one (`auth-oidc`, D6) are other
+crates. **The contract below is what `agent_objects_conformance!` and `authenticator_conformance!` hold them to.**
+
+### What crosses `AgentObjects`
+
+**No Kubernetes type crosses it, and no type of `aap-api`** (the same rule as the other traits: the neutral vocabulary is
+defined here). A body is the JSON an API server holds as `spec`, a name is a string, and what the API server adds is a field of
+`Stored`. `aap-forms` is the typed side: it builds an `AgentDraft` from a form and reads a form back from an `Agent`.
+(`serde_json::Value` in a port is the wire format of Kubernetes objects, not an implementation type; the alternative, `aap-ports`
+depending on `aap-api` and so on `kube`, would give every provider that depends on this crate the CRD types.)
+
+| Type | What |
+|---|---|
+| `Kind::{AgentService, AgentConfig, ModelEndpoint, ToolProvider}`, `SharedKind::{Model, ToolServer}` | The four kinds. Closed. `SharedKind` is the pair of routes `/v1/models` and `/v1/tool-servers` |
+| `Stored { kind, namespace, name, version, generation, labels, annotations, spec, status }` | One object as the server holds it, reduced to what the dashboard needs. `status` is the operator's: the dashboard never writes it |
+| `Agent { service, config: Option<Stored> }` | An agent is its `AgentService` and the `AgentConfig` that service names (`spec.configRef.name`); the config is `None` when it is not there. One unit: read, saved and deleted together, with one `ETag` |
+| `AgentDraft { name, service, config }`, `SharedDraft { name, spec }` | What the dashboard writes: the two `spec`s of an agent (both objects are named `name`; `service.configRef.name` must say so), or one. Labels are the implementation's |
+| `Precondition::{DoesNotExist, Matches(ETag)}` | `If-None-Match: *` and `If-Match`. **There is no unconditional write** |
+| `ResourceVersion`, `ETag` | The `resourceVersion` of one object (opaque), and the token of **every** object of a unit, derived by `Stored::etag` and `Agent::etag` (length-prefixed: no two pairs of versions spell one token). An object that is not there is part of the token too |
+| `Owner::{Dashboard, GitOps}` | AD-031, in `Owner::of(labels, annotations)`: the dashboard owns an object with `app.kubernetes.io/managed-by: dashboard.agents.vymalo.com` and **no** `argocd.argoproj.io/tracking-id`. Anything else is GitOps's to the dashboard: read-only. On the wire `dashboard` and `gitops`, the `managedBy` of `GET /v1/agents` |
+| `OfferedSecret { secret, key, external_secret }` | A Secret key an agent may name (AD-030). **No field for a value**, so nothing that holds one can leak a secret |
+| `FieldError { field, message }` | A mistake with its field, as `<Kind> <path>` (`AgentService spec.access.audience`): the style of `aap-domain`'s issues, so the forms map both the same way |
+| `References`, `config_references(spec)`, `config_name(service_spec)` | What an `AgentConfig` names (`model.endpointRef`, `tools.mcpServers.<n>.providerRef`) and the config a service names, read from JSON. A test holds the rule equal to `aap_domain::references` (in `aap-forms`) |
+| `MANAGED_BY_LABEL`, `MANAGED_BY_DASHBOARD`, `ARGO_TRACKING_ANNOTATION`, `OFFER_LABEL` | The strings of the ownership rule and of the offer (`agents.vymalo.com/offer`) |
+
+### The contract of `AgentObjects`
+
+* **Ownership (AD-031).** A write or a delete of an object that is not `Owner::Dashboard` is `NotOwned`, before anything changes. A
+  write adds the label to what it writes (and keeps the labels the object has). Reads return every object, the dashboard's or not.
+* **No lost update.** A create needs the `AgentService` to be absent (`AlreadyExists`; a dashboard-owned `AgentConfig` of the
+  name, left by a create that failed halfway, is taken over; a GitOps one is `NotOwned`). A replace of what is not there is `NotFound`
+  (a 404 rather than a 412: the agent was deleted, which is more to say). A replace or a delete with a stale token is
+  `PreconditionFailed` and changes nothing.
+* **An agent is two objects.** Written `AgentConfig` first, then `AgentService` (the operator never sees a service whose config is
+  not there yet); deleted in the other order. The config of an agent has the agent's name, and a draft whose `configRef` says otherwise is
+  `Invalid`.
+* **The token is the `resourceVersion`s**, as §60a says, so any write to either object makes an old token stale, **the operator's
+  status writes included** (a server bumps the version of an object whose status changed). The router answers `412` and the client reads
+  again. Whether a save that changes nothing moves the token is the backend's, and callers must not depend on it.
+* **The status is the operator's.** A write never touches it.
+* **References are checked on a delete, not on a write.** An agent may name a model that is not there (the operator marks it
+  `ConfigInvalid`, naming it, and the API validates with `aap-domain` before it writes). Deleting a shared object some agent names is
+  `Referenced { by }`: the agents (their `AgentService`s) that name it, once each, in byte order, **GitOps's included**.
+* **Secrets.** `offered_secrets` lists the `data[].secretKey` of every ExternalSecret that carries the offer label, under its
+  `target.name`, ordered. It reads no Secret and has no right to; the cases plant values in the backend and fail when one reaches an answer.
+
+### Errors and the status of the Platform API
+
+Each variant has one status; `tests/objects.rs` holds this table with an exhaustive `match`, so a new variant does not compile until it has one.
+
+| `ObjectsError` | Status | Class | When |
+|---|---|---|---|
+| `AlreadyExists` | 409 | `Invalid` | a create found the name |
+| `NotOwned` | 409 | `Invalid` | the object is GitOps's |
+| `Referenced { by }` | 409 | `Invalid` | agents still name the shared object; the body names them |
+| `Conflict` | 409 | `Conflict` | another manager owns a field (a server-side apply conflict) |
+| `NotFound` | 404 | `NotFound` | a replace or a delete found nothing |
+| `PreconditionFailed` | 412 | `Conflict` | the token is stale: somebody saved first |
+| `Invalid(fields)` | 422 | `Invalid` | the backend refused the body, field by field (a CEL rule); the fields are mapped to the form by `aap-forms` |
+| `Unavailable` | 503 | `Transient` | the API server cannot be reached |
+| `Internal` | 500 | `Internal` | a bug |
+
+### `Authenticator`
+
+`authenticate(token: Option<&str>)` takes the credential after the scheme (the router reads the header). `Principal { subject, permissions }`
+keeps the **whole** roles claim (it also holds `agent.use:<name>` and the orchestrator's roles, which the dashboard ignores) as a set;
+`holds(permission)` is a byte-for-byte comparison, and `with_prefix("platform:")` is `GET /v1/me`. **The API checks a permission
+string (`aap_api::permission`), never a role name** (AD-032): no type here compares a value to a role.
+
+| `AuthError` | Status | Class | When |
+|---|---|---|---|
+| `Missing` | 401 | `Invalid` | no token, or an empty one, whatever the state of the keys |
+| `Invalid(reason)` | 401 | `Invalid` | the token does not verify. The reason is a word for a log (`expired`), never the token or a claim |
+| `Unavailable` | 503 | `Transient` | the issuer's keys cannot be fetched. Never a 401: a good token is not told it is bad |
 
 ## The neutral types
 
@@ -136,8 +237,9 @@ Choices worth knowing, because §59a does not say:
 Off by default (the controller and the providers depend on the traits only). With it:
 
 * **Conformance macros**, in the style of `adam-store-testkit`:
-  `runtime_provider_conformance!(make)` (14 cases), `store_provisioner_conformance!(make)` (7) and
-  `agent_directory_conformance!(make)` (6). `make` is a path to `async fn() -> Option<T>`; `None` skips
+  `runtime_provider_conformance!(make)` (14 cases), `store_provisioner_conformance!(make)` (7),
+  `agent_directory_conformance!(make)` (6), `agent_objects_conformance!(make)` (22, D4) and
+  `authenticator_conformance!(make)` (8, D4). `make` is a path to `async fn() -> Option<T>`; `None` skips
   the suite, and `AAP_TEST_REQUIRE_BACKEND=1` turns the skip into a failure (CI sets it for the suites that
   need a cluster). The macros expand to `#[tokio::test]`, so the crate that uses them needs `tokio` with
   `macros` and `rt`.
@@ -147,6 +249,15 @@ Off by default (the controller and the providers depend on the traits only). Wit
   The case **"no secret value materialises"** puts a sentinel in the names of the Secrets of a spec and
   fails if it is anywhere in that text or in an issue message. It is as honest as `materialised`: a
   Kubernetes provider feeds it the real objects it applied, minus `secretKeyRef`.
+* `ObjectsUnderTest` (D4) is what the objects cases need of a backend beyond the port: `seed_foreign` (an object the dashboard does
+  not own, `Foreign::Unlabelled` or `Foreign::ArgoTracked`), `set_status` (as the operator), `offer`, `decline` (an ExternalSecret
+  without the label) and `plant_secret_value` (a Secret that holds a value the port must never read), and, with defaults, `unreachable` (the
+  same backend made unreachable) and `refused_spec` (a `spec` the backend refuses; a backend with rules of its own, the CEL of the
+  CRDs, gives one that breaks one, and the case checks that the 422 names its field). `AuthenticatorUnderTest` is `issue(subject,
+  permissions)` (a token the authenticator accepts) and, with a default, `without_keys` (the same kind of authenticator that cannot fetch its keys, and a
+  token it would have to verify with them).
+* `sample_agent`, `sample_agent_using` and `sample_shared`: bodies of the real shape (a test reads them through the CRD types), with
+  Secret names that carry the sentinel. `SECRET_VALUE` is what the cases plant as a Secret's content.
 * `sample_spec(id)`: a spec that uses every kind of thing a provider must handle (a sidecar, literal,
   secret and pod-name variables, a per-replica volume, a file set, a secret file, probes). Providers reuse
   it in their own tests.
@@ -166,12 +277,21 @@ aap_ports::runtime_provider_conformance!(make);
 
 `cargo test -p aap-ports`:
 
-* `tests/memory.rs`: the five suites against the in-memory implementations (47 cases).
+* `tests/memory.rs`: the seven suites against the in-memory implementations (48 cases, then 22 for `MemoryObjects` and 8 for
+  `MemoryAuthenticator`).
 * `tests/contract.rs`: `RuntimeSpec::check` names each broken invariant, a spec round-trips through
   JSON, every error has the class that decides retrying, the suites **fail** what they must (a provider
   that materialises a secret, a `watch` that never speaks), the adoption guard, a forced status, an
   unreachable backend, a missing CloudNativePG API, `DirectoryEntry::listed`, a directory that has not
   synced.
+
+* `tests/objects.rs` (D4): every `ObjectsError` has one status and a class (an exhaustive `match`); the ownership rule as a table
+  (the label's value is compared whole; Argo's annotation beats the label); the token is made of every version and no two pairs of versions
+  spell one; the references of a config read from JSON; **the samples of the testkit are the shape of the real CRDs** (they are
+  decoded as `AgentServiceSpec`, `AgentConfigSpec`, `ModelEndpointSpec` and `ToolProviderSpec`, with nothing lost); a principal is a set;
+  and **the suites fail what they must**: a store that accepts a stale token, writes a GitOps agent or shared object, deletes what agents
+  name, does not label what it writes, or offers a value; an authenticator that calls unavailable keys invalid, echoes the token,
+  calls an empty token invalid or matches permissions loosely.
 
 The in-memory implementations are instant: they cannot show that a real provider's `watch` is timely
 or that its `status` reflects pod conditions. Those belong to S4's envtest harness, which runs the same

@@ -1,4 +1,4 @@
-//! In-memory implementations of the three traits. They pass their own conformance suites
+//! In-memory implementations of the traits. They pass their own conformance suites
 //! (`tests/memory.rs`), serve the controller's unit tests, and are the reference a real provider is
 //! read against. Cheap to clone: every clone is a handle on the same state.
 
@@ -15,6 +15,12 @@ use crate::{
     RuntimeSpec, RuntimeStatus, StoreCapabilities, StoreError, StoreId, StoreKind,
     StoreProvisioner, StoreSpec, StoreState, StoreStatus, Surface, VolumeSource, cnpg_connection,
 };
+
+mod auth;
+mod objects;
+
+pub use auth::MemoryAuthenticator;
+pub use objects::MemoryObjects;
 
 fn lock<T>(m: &Mutex<T>) -> MutexGuard<'_, T> {
     m.lock().unwrap_or_else(PoisonError::into_inner)
