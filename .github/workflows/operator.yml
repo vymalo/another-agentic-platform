@@ -19,6 +19,9 @@ name: Operator
 # operator serves, with the token and without, from this machine and from a pod of the cluster, and follows the card
 # it lists.
 #
+# The registry contract (docs/extensions/agent-registry-v1.md) is a path too: a test of aap-registry reads its first
+# JSON block, so an edit of the contract alone must run the tests.
+#
 # The image, the charts and the end-to-end of the coder (S8, S9) are operator-image.yml's.
 
 on:
@@ -30,6 +33,7 @@ on:
       - "deploy/crds/**"
       - "deploy/operator-crds/**"
       - "examples/**"
+      - "docs/extensions/agent-registry-v1.md"
       - ".github/workflows/operator.yml"
   push:
     branches: [main]
@@ -40,6 +44,7 @@ on:
       - "deploy/crds/**"
       - "deploy/operator-crds/**"
       - "examples/**"
+      - "docs/extensions/agent-registry-v1.md"
       - ".github/workflows/operator.yml"
 
 permissions:
