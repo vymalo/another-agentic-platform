@@ -57,6 +57,10 @@ pub struct Options {
     pub concurrency: u16,
     /// The `reportingInstance` of the Events: the pod's name, so two operators can be told apart.
     pub instance: Option<String>,
+    /// The image of an agent whose `AgentConfig` names none (`--default-agent-image`; AD-029, §60a).
+    /// `None`: the operator has no default, and such a config is `ConfigInvalid`. A change of it is a
+    /// new digest, and so a rollout, for exactly the agents that name no image.
+    pub default_agent_image: Option<String>,
 }
 
 impl Default for Options {
@@ -68,6 +72,7 @@ impl Default for Options {
             resync: Resync::default(),
             concurrency: 4,
             instance: None,
+            default_agent_image: None,
         }
     }
 }

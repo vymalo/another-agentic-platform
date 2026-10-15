@@ -1,8 +1,9 @@
 //! The whole controller, running: `Operator::run` against the fake API server's list and watch, the
 //! `Memory` store and a scripted runtime. What these show is the wiring that no single pass can: that
 //! an object that appears is reconciled, that a changed `AgentConfig` reconciles the services that name
-//! it, that an id from `RuntimeProvider::watch()` reconciles its service, that another namespace is
-//! left alone, and that the controllers stop when told to. A real API server is the kind job's.
+//! it, that a changed or deleted `ModelEndpoint` or `ToolProvider` reconciles the services whose config
+//! references it (and only those), that an id from `RuntimeProvider::watch()` reconciles its service,
+//! that another namespace is left alone, and that the controllers stop when told to. A real API server is the kind job's.
 
 #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 
@@ -23,6 +24,30 @@ use tokio::sync::oneshot;
 
 const SERVICES: &str = "agentservices";
 const CONFIGS: &str = "agentconfigs";
+const ENDPOINTS: &str = "modelendpoints";
+const PROVIDERS: &str = "toolproviders";
+
+const DEFAULT_IMAGE: &str = "ghcr.io/vymalo/another-adam-rs/coder:sha-9a1fd4e@sha256:c3c178b7d73599f40d53f798616e510346abd3300a622b09b2bc233109f12b44";
+
+/// The §60a example (`coder-me`) in `ns`: its service, its config and the two objects the config names.
+fn dashboard(ns: &str) -> (Value, Value, Value, Value) {
+    let path =
+        std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../examples/coder-me.yaml");
+    let text = std::fs::read_to_string(path).unwrap();
+    let mut docs: Vec<Value> = serde_yaml::Deserializer::from_str(&text)
+        .map(|d| serde::Deserialize::deserialize(d).unwrap())
+        .collect();
+    for d in &mut docs {
+        d["metadata"]["namespace"] = json!(ns);
+    }
+    let of = |kind: &str| docs.iter().find(|d| d["kind"] == kind).cloned().unwrap();
+    (
+        of("AgentService"),
+        of("AgentConfig"),
+        of("ModelEndpoint"),
+        of("ToolProvider"),
+    )
+}
 
 fn example(name: &str, ns: &str) -> (Value, Value) {
     let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
@@ -82,6 +107,7 @@ async fn start(namespace: Option<&str>) -> Running {
             pending: Duration::from_secs(3600),
             not_installed: Duration::from_secs(3600),
         },
+        default_agent_image: Some(DEFAULT_IMAGE.to_owned()),
         ..Options::default()
     };
     let operator = Operator::new(
@@ -100,7 +126,10 @@ async fn start(namespace: Option<&str>) -> Running {
     }));
     // The watches are open: nothing below races the list that precedes them.
     eventually("the controllers' watches", || {
-        fake.watchers(SERVICES) >= 1 && fake.watchers(CONFIGS) >= 2
+        fake.watchers(SERVICES) >= 1
+            && fake.watchers(CONFIGS) >= 2
+            && fake.watchers(ENDPOINTS) >= 1
+            && fake.watchers(PROVIDERS) >= 1
     })
     .await;
     Running {
@@ -210,6 +239,183 @@ async fn a_changed_config_reconciles_the_services_that_name_it() {
         r.state("team", "chat").as_deref() == Some("Blocked")
     })
     .await;
+    r.stop().await;
+}
+
+impl Running {
+    fn digest(&self, ns: &str, name: &str) -> Value {
+        self.fake.get(SERVICES, ns, name).unwrap()["status"]["config"]["digest"].clone()
+    }
+
+    fn message(&self, ns: &str, name: &str) -> String {
+        self.fake.get(SERVICES, ns, name).unwrap()["status"]["conditions"][0]["message"]
+            .as_str()
+            .unwrap_or_default()
+            .to_owned()
+    }
+
+    fn reconciles(&self) -> u64 {
+        self.metrics.get(
+            aap_controller::metric::RECONCILES,
+            &[("controller", "agentservice"), ("result", "ok")],
+        )
+    }
+}
+
+/// The §60a example with its objects, running: the service is `Ready`.
+async fn running_dashboard(r: &Running, ns: &str) {
+    let (service, config, endpoint, provider) = dashboard(ns);
+    r.fake.put(ENDPOINTS, endpoint);
+    r.fake.put(PROVIDERS, provider);
+    r.fake.put(CONFIGS, config);
+    r.fake.put(SERVICES, service);
+    eventually("Ready", || {
+        r.state(ns, "coder-me").as_deref() == Some("Ready")
+    })
+    .await;
+}
+
+#[tokio::test]
+async fn a_changed_model_endpoint_reconciles_the_services_that_use_it() {
+    let r = start(None).await;
+    running_dashboard(&r, "team").await;
+    let before = r.digest("team", "coder-me");
+
+    // The service and its config do not change: only the endpoint they reference does.
+    let mut endpoint = r.fake.get(ENDPOINTS, "team", "gateway").unwrap();
+    endpoint["spec"]["apiKeySecretRef"]["name"] = json!("rotated-models");
+    r.fake.put(ENDPOINTS, endpoint);
+    eventually("the service to follow its endpoint", || {
+        r.digest("team", "coder-me") != before
+    })
+    .await;
+    let spec = r
+        .runtime
+        .inner
+        .spec(&RuntimeId::new("team", "coder-me"))
+        .unwrap();
+    assert!(
+        spec.workloads[0]
+            .container
+            .env
+            .iter()
+            .any(|e| e.name == "MODEL_API_KEY"
+                && e.value
+                    == aap_ports::EnvValue::Secret(aap_ports::SecretRef::new(
+                        "rotated-models",
+                        "GATEWAY_API_KEY"
+                    ))),
+        "the pods read the new Secret"
+    );
+    r.stop().await;
+}
+
+#[tokio::test]
+async fn a_changed_tool_provider_reconciles_the_services_that_use_it() {
+    let r = start(None).await;
+    running_dashboard(&r, "team").await;
+    let before = r.digest("team", "coder-me");
+
+    let mut provider = r.fake.get(PROVIDERS, "team", "websearch").unwrap();
+    provider["spec"]["mcp"]["optional"] = json!(false);
+    r.fake.put(PROVIDERS, provider);
+    eventually("the service to follow its provider", || {
+        r.digest("team", "coder-me") != before
+    })
+    .await;
+    r.stop().await;
+}
+
+#[tokio::test]
+async fn a_deleted_referent_blocks_the_services_that_use_it_and_a_new_one_unblocks_them() {
+    let r = start(None).await;
+    running_dashboard(&r, "team").await;
+    let running = r.digest("team", "coder-me");
+
+    r.fake.delete(ENDPOINTS, "team", "gateway");
+    eventually("Blocked by the deletion", || {
+        r.state("team", "coder-me").as_deref() == Some("Blocked")
+    })
+    .await;
+    let message = r.message("team", "coder-me");
+    assert!(message.contains("ModelEndpoint \"gateway\""), "{message}");
+    assert_eq!(
+        r.digest("team", "coder-me"),
+        running,
+        "what runs is what ran"
+    );
+
+    // It comes back (created again, as a person would): the service follows, with no help.
+    let (_, _, endpoint, _) = dashboard("team");
+    r.fake.put(ENDPOINTS, endpoint);
+    eventually("Ready again", || {
+        r.state("team", "coder-me").as_deref() == Some("Ready")
+    })
+    .await;
+    assert_eq!(r.digest("team", "coder-me"), running);
+    r.stop().await;
+}
+
+#[tokio::test]
+async fn a_referent_created_after_the_service_unblocks_it() {
+    let r = start(None).await;
+    let (service, config, endpoint, provider) = dashboard("team");
+    r.fake.put(CONFIGS, config);
+    r.fake.put(SERVICES, service);
+    eventually("Blocked: the objects are not there", || {
+        r.state("team", "coder-me").as_deref() == Some("Blocked")
+    })
+    .await;
+    r.fake.put(ENDPOINTS, endpoint);
+    eventually("the provider alone", || {
+        let m = r.message("team", "coder-me");
+        !m.contains("ModelEndpoint") && m.contains("ToolProvider")
+    })
+    .await;
+    r.fake.put(PROVIDERS, provider);
+    eventually("Ready", || {
+        r.state("team", "coder-me").as_deref() == Some("Ready")
+    })
+    .await;
+    r.stop().await;
+}
+
+#[tokio::test]
+async fn a_referent_nobody_references_leaves_every_service_alone() {
+    let r = start(None).await;
+    running_dashboard(&r, "team").await;
+    let (service, config) = example("chat", "team");
+    r.fake.put(CONFIGS, config);
+    r.fake.put(SERVICES, service);
+    eventually("chat Ready", || {
+        r.state("team", "chat").as_deref() == Some("Ready")
+    })
+    .await;
+    // The timers are an hour: only a trigger can make another pass. Let the passes settle first.
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    let passes = r.reconciles();
+
+    // An object nothing references, a same-named one in another namespace, and one of each kind.
+    let (_, _, mut endpoint, mut provider) = dashboard("team");
+    endpoint["metadata"]["name"] = json!("unused");
+    provider["metadata"]["name"] = json!("unused");
+    r.fake.put(ENDPOINTS, endpoint);
+    r.fake.put(PROVIDERS, provider);
+    let (_, _, elsewhere, other_provider) = dashboard("elsewhere");
+    r.fake.put(ENDPOINTS, elsewhere);
+    r.fake.put(PROVIDERS, other_provider);
+    tokio::time::sleep(Duration::from_millis(400)).await;
+    assert_eq!(
+        r.reconciles(),
+        passes,
+        "no service was reconciled for an object nobody references"
+    );
+
+    // And the control: the object that is referenced does make a pass.
+    let mut endpoint = r.fake.get(ENDPOINTS, "team", "gateway").unwrap();
+    endpoint["spec"]["baseUrl"] = json!({"value": "https://other.example.invalid/v1"});
+    r.fake.put(ENDPOINTS, endpoint);
+    eventually("a pass for the referenced one", || r.reconciles() > passes).await;
     r.stop().await;
 }
 

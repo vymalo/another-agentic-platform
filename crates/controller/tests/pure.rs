@@ -5,9 +5,13 @@
 
 use std::time::Duration;
 
-use aap_api::{AgentService, ConfigStatus, Endpoints, ServiceState};
+use aap_api::{
+    AgentConfig, AgentService, ConfigStatus, Endpoints, ModelEndpoint, ServiceState, ToolProvider,
+};
 use aap_controller::derive::{ConfigOutcome, Observed, StoreOutcome, derive};
-use aap_controller::{Metrics, ReflectorDirectory, RegistryMode, backoff};
+use aap_controller::{
+    Metrics, ReflectorDirectory, RegistryMode, backoff, services_of_endpoint, services_of_provider,
+};
 use aap_ports::{
     AgentDirectory, DirectoryError, ErrorClass, Issue, IssueReason, Phase, Role, RuntimeStatus,
     StoreState,
@@ -521,4 +525,150 @@ fn a_finalizer_patch_that_loses_its_race_is_a_conflict_not_bad_input() {
     assert_eq!(add(403).class(), ErrorClass::Internal);
     // A 422 of the status patch is the operator's own bug: it is not a race.
     assert_eq!(Error::Kube(status(422)).class(), ErrorClass::Invalid);
+}
+
+// ------------------------------------------------------- which services a referent concerns
+
+fn linked_service(ns: &str, name: &str, config: &str) -> AgentService {
+    let mut s = service(ns, name, json!({}));
+    s.spec.config_ref.name = config.to_owned();
+    s
+}
+
+/// A config in `ns` with the references given; nothing else is needed to map a referent.
+fn config_with(ns: &str, name: &str, endpoint: Option<&str>, providers: &[&str]) -> AgentConfig {
+    let model = match endpoint {
+        Some(e) => json!({"model": "m", "endpointRef": {"name": e}}),
+        None => json!({"model": "m", "baseUrl": {"value": "https://x.example.invalid/v1"},
+                       "apiKeySecretRef": {"name": "s", "key": "K"}}),
+    };
+    let servers: serde_json::Map<String, serde_json::Value> = providers
+        .iter()
+        .map(|p| ((*p).to_owned(), json!({"providerRef": {"name": p}})))
+        .collect();
+    serde_json::from_value(json!({
+        "apiVersion": "agents.vymalo.com/v1alpha1", "kind": "AgentConfig",
+        "metadata": {"name": name, "namespace": ns},
+        "spec": {
+            "harness": {"type": "adam-rs", "adam": {"binary": "adam-agent", "agent": {"folder": {"files": {}}}}},
+            "model": model,
+            "tools": {"mcpServers": servers},
+            "environment": {},
+        },
+    }))
+    .unwrap()
+}
+
+fn endpoint(ns: Option<&str>, name: &str) -> ModelEndpoint {
+    let mut meta = json!({"name": name});
+    if let Some(ns) = ns {
+        meta["namespace"] = json!(ns);
+    }
+    serde_json::from_value(json!({
+        "apiVersion": "agents.vymalo.com/v1alpha1", "kind": "ModelEndpoint", "metadata": meta,
+        "spec": {"title": "t", "baseUrl": {"value": "https://x.example.invalid/v1"},
+                 "apiKeySecretRef": {"name": "s", "key": "K"}},
+    }))
+    .unwrap()
+}
+
+fn provider(ns: Option<&str>, name: &str) -> ToolProvider {
+    let mut meta = json!({"name": name});
+    if let Some(ns) = ns {
+        meta["namespace"] = json!(ns);
+    }
+    serde_json::from_value(json!({
+        "apiVersion": "agents.vymalo.com/v1alpha1", "kind": "ToolProvider", "metadata": meta,
+        "spec": {"title": "t", "mcp": {"url": "https://x.example.invalid/mcp"}},
+    }))
+    .unwrap()
+}
+
+#[test]
+fn a_referent_maps_to_the_services_whose_config_references_it_and_to_no_other() {
+    let (services, mut sw) = reflector::store::<AgentService>();
+    let (configs, mut cw) = reflector::store::<AgentConfig>();
+    sw.apply_watcher_event(&watcher::Event::Init);
+    cw.apply_watcher_event(&watcher::Event::Init);
+    // Namespace `a`: c1 references the endpoint e1 and the provider p1, c2 only the endpoint e1, c3 and c4
+    // nothing (c4 has a provider of another name). Namespace `b` has a c1 of its own that references e1.
+    for c in [
+        config_with("a", "c1", Some("e1"), &["p1"]),
+        config_with("a", "c2", Some("e1"), &[]),
+        config_with("a", "c3", None, &[]),
+        config_with("a", "c4", None, &["p9"]),
+        config_with("b", "c1", Some("e1"), &["p1"]),
+    ] {
+        cw.apply_watcher_event(&watcher::Event::InitApply(c));
+    }
+    for s in [
+        linked_service("a", "s1", "c1"),
+        linked_service("a", "s2", "c1"),
+        linked_service("a", "s3", "c2"),
+        linked_service("a", "s4", "c3"),
+        linked_service("a", "s5", "c4"),
+        linked_service("a", "s6", "no-such-config"),
+        linked_service("b", "sb", "c1"),
+    ] {
+        sw.apply_watcher_event(&watcher::Event::InitApply(s));
+    }
+    sw.apply_watcher_event(&watcher::Event::InitDone);
+    cw.apply_watcher_event(&watcher::Event::InitDone);
+
+    let names = |found: Vec<kube::runtime::reflector::ObjectRef<AgentService>>| {
+        let mut v: Vec<String> = found
+            .iter()
+            .map(|r| format!("{}/{}", r.namespace.clone().unwrap_or_default(), r.name))
+            .collect();
+        v.sort();
+        v
+    };
+
+    // e1 of `a`: the services of c1 and c2 in `a`, not `b`'s, whatever else their config holds.
+    assert_eq!(
+        names(services_of_endpoint(
+            &services,
+            &configs,
+            &endpoint(Some("a"), "e1")
+        )),
+        ["a/s1", "a/s2", "a/s3"]
+    );
+    assert_eq!(
+        names(services_of_endpoint(
+            &services,
+            &configs,
+            &endpoint(Some("b"), "e1")
+        )),
+        ["b/sb"]
+    );
+    // p1 of `a`: c1's services only. It is not an endpoint, and an endpoint of that name is not a provider.
+    assert_eq!(
+        names(services_of_provider(
+            &services,
+            &configs,
+            &provider(Some("a"), "p1")
+        )),
+        ["a/s1", "a/s2"]
+    );
+    assert_eq!(
+        names(services_of_provider(
+            &services,
+            &configs,
+            &provider(Some("a"), "e1")
+        )),
+        Vec::<String>::new()
+    );
+    assert_eq!(
+        names(services_of_endpoint(
+            &services,
+            &configs,
+            &endpoint(Some("a"), "p1")
+        )),
+        Vec::<String>::new()
+    );
+    // Nobody references these, and an object with no namespace belongs to nobody.
+    assert!(services_of_endpoint(&services, &configs, &endpoint(Some("a"), "unused")).is_empty());
+    assert!(services_of_provider(&services, &configs, &provider(Some("a"), "unused")).is_empty());
+    assert!(services_of_endpoint(&services, &configs, &endpoint(None, "e1")).is_empty());
+    assert!(services_of_provider(&services, &configs, &provider(None, "p1")).is_empty());
 }

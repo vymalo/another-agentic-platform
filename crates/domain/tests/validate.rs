@@ -5,7 +5,7 @@
 
 mod common;
 
-use aap_domain::{ConfigIssue, validate};
+use aap_domain::{ConfigIssue, Externals, validate};
 use common::{
     assert_issue, documents, example, issues, must_resolve, remove, repo_root, set, typed,
 };
@@ -20,7 +20,7 @@ fn the_examples_are_valid() {
     for name in ["coder", "chat"] {
         let (s, c) = example(name);
         let (s, c) = typed(&s, &c);
-        validate(&s, &c).unwrap_or_else(|i| panic!("{name}: {i:?}"));
+        validate(&s, &c, &Externals::default()).unwrap_or_else(|i| panic!("{name}: {i:?}"));
     }
 }
 
@@ -689,23 +689,35 @@ fn a_folder_agent_with_many_workers_needs_no_placement() {
 }
 
 /// The invalid examples `validate` has nothing to say about, and why. The audience reaches no pod and
-/// the registry lists an item with a malformed one for administrators only (§60a, AD-028); a
-/// `ModelEndpoint` and a `ToolProvider` are not inputs of `validate` until slice D2; and the number
-/// of extra MCP servers is a bound of the schema that costs the operator nothing to resolve.
-fn outside_validate(file_name: &str, kind: &str) -> bool {
+/// the registry lists an item with a malformed one for administrators only (§60a, AD-028); and what is a
+/// bound of the schema alone costs the operator nothing to resolve and it does not enforce: the number
+/// of extra MCP servers, the length of a title or of a provider's URL, and how many aliases, tools or
+/// headers a shared object lists. What the operator *does* check of a `ModelEndpoint` and a
+/// `ToolProvider` (an address, the Secret references, the exclusive forms, the URL) is asked of it.
+fn outside_validate(file_name: &str) -> bool {
     file_name.starts_with("audience-")
         || file_name == "mcp-servers-too-many.yaml"
-        || ["ModelEndpoint", "ToolProvider"].contains(&kind)
+        || [
+            "model-endpoint-models-too-many.yaml",
+            "model-endpoint-title-empty.yaml",
+            "model-endpoint-title-too-long.yaml",
+            "tool-provider-headers-too-many.yaml",
+            "tool-provider-title-empty.yaml",
+            "tool-provider-title-too-long.yaml",
+            "tool-provider-tools-too-many.yaml",
+            "tool-provider-url-too-long.yaml",
+        ]
+        .contains(&file_name)
 }
 
 #[test]
 fn the_shape_rules_of_the_crd_hold_without_an_api_server() {
     // The invalid examples are refused by the CEL rules of the CRD; `validate` repeats the shape
     // rules `resolve` relies on, so an object that never met an API server is refused too. The
-    // example is paired with the valid object of the other kind.
+    // example is paired with the valid object of the other kind; a shared object is paired with a
+    // coder that names it.
     let (coder_service, coder_config) = example("coder");
     let mut covered = 0;
-    // The skipped files that are an `AgentService` or an `AgentConfig`, the kinds `validate` reads.
     let mut skipped = Vec::new();
     let mut dir: Vec<_> = std::fs::read_dir(repo_root().join("examples/invalid"))
         .unwrap()
@@ -716,14 +728,13 @@ fn the_shape_rules_of_the_crd_hold_without_an_api_server() {
         let doc = documents(&path).remove(0);
         let file_name = path.file_name().unwrap().to_string_lossy().into_owned();
         let kind = doc["kind"].as_str().unwrap();
-        if outside_validate(&file_name, kind) {
-            if ["AgentService", "AgentConfig"].contains(&kind) {
-                skipped.push(file_name);
-            }
+        if outside_validate(&file_name) {
+            skipped.push(file_name);
             continue;
         }
         let (mut s, mut c) = (coder_service.clone(), coder_config.clone());
-        match doc["kind"].as_str().unwrap() {
+        let mut externals = Externals::default();
+        match kind {
             "AgentService" => {
                 s = doc.clone();
                 set(&mut s, "/metadata/name", json!("coder"));
@@ -734,7 +745,7 @@ fn the_shape_rules_of_the_crd_hold_without_an_api_server() {
                 );
                 set(&mut s, "/spec/configRef/name", json!("coder"));
             }
-            _ => {
+            "AgentConfig" => {
                 c = doc.clone();
                 set(&mut c, "/metadata/name", json!("coder"));
                 set(
@@ -743,18 +754,42 @@ fn the_shape_rules_of_the_crd_hold_without_an_api_server() {
                     json!("another-agentic-system"),
                 );
             }
+            "ModelEndpoint" => {
+                let mut endpoint = doc.clone();
+                set(&mut endpoint, "/metadata/name", json!("invalid"));
+                externals =
+                    externals.with_model_endpoint(serde_json::from_value(endpoint).unwrap());
+                remove(&mut c, "/spec/model/baseUrl");
+                remove(&mut c, "/spec/model/apiKeySecretRef");
+                set(
+                    &mut c,
+                    "/spec/model/endpointRef",
+                    json!({"name": "invalid"}),
+                );
+            }
+            "ToolProvider" => {
+                let mut provider = doc.clone();
+                set(&mut provider, "/metadata/name", json!("invalid"));
+                externals = externals.with_tool_provider(serde_json::from_value(provider).unwrap());
+                set(
+                    &mut c,
+                    "/spec/tools/mcpServers",
+                    json!({"search": {"providerRef": {"name": "invalid"}}}),
+                );
+            }
+            other => panic!("{}: a kind the test does not know: {other}", path.display()),
         }
         let (s, c) = typed(&s, &c);
         let expect = std::fs::read_to_string(&path).unwrap();
         assert!(
-            validate(&s, &c).is_err(),
+            validate(&s, &c, &externals).is_err(),
             "{} was accepted by validate:\n{expect}",
             path.display()
         );
         covered += 1;
     }
     assert!(
-        covered >= 26,
+        covered >= 34,
         "the invalid examples are all there: {covered}"
     );
     assert_eq!(
@@ -766,77 +801,20 @@ fn the_shape_rules_of_the_crd_hold_without_an_api_server() {
             "audience-value-too-long.yaml",
             "audience-value-with-space.yaml",
             "mcp-servers-too-many.yaml",
+            "model-endpoint-models-too-many.yaml",
+            "model-endpoint-title-empty.yaml",
+            "model-endpoint-title-too-long.yaml",
+            "tool-provider-headers-too-many.yaml",
+            "tool-provider-title-empty.yaml",
+            "tool-provider-title-too-long.yaml",
+            "tool-provider-tools-too-many.yaml",
+            "tool-provider-url-too-long.yaml",
         ],
         "an invalid example `validate` is not asked about must be named, with its reason"
     );
 }
 
 // ------------------------------------------- the references of the admin dashboard (§60a, AD-029)
-
-/// The one issue about `field_part`, with the others of the same kind of refusal allowed.
-fn about<'a>(issues: &'a [ConfigIssue], field_part: &str) -> &'a ConfigIssue {
-    issues
-        .iter()
-        .find(|i| i.field.contains(field_part))
-        .unwrap_or_else(|| panic!("no issue about {field_part:?} in {issues:#?}"))
-}
-
-/// A refusal because resolving a reference, or the default image, is slice D2: it names the field,
-/// says so, and says what to do instead.
-fn assert_until_d2(issues: &[ConfigIssue], field_part: &str, what: &str) {
-    let issue = about(issues, field_part);
-    assert!(issue.field.starts_with("AgentConfig spec."), "{issue}");
-    assert!(
-        issue.message.contains("slice D2") && issue.message.contains(what),
-        "{issue}"
-    );
-    assert!(
-        issue.message.contains("refused"),
-        "never a silent default: {issue}"
-    );
-}
-
-#[test]
-fn a_model_endpoint_reference_is_refused_until_slice_d2() {
-    let refused = |c: &mut Value| {
-        remove(c, "/spec/model/baseUrl");
-        remove(c, "/spec/model/apiKeySecretRef");
-        set(c, "/spec/model/endpointRef", json!({"name": "gateway"}));
-    };
-    for name in ["coder", "chat"] {
-        let found = issues(name, |_, c| refused(c));
-        assert_eq!(found.len(), 1, "{name}: only the reference: {found:#?}");
-        assert_until_d2(&found, "spec.model.endpointRef", "\"gateway\"");
-        // the same through `validate_config`, which the AgentConfig controller reports as `Valid`
-        let (s, mut c) = example(name);
-        refused(&mut c);
-        let (_, config) = typed(&s, &c);
-        let found = aap_domain::validate_config(&config).unwrap_err();
-        assert_until_d2(&found, "spec.model.endpointRef", "ModelEndpoint");
-    }
-}
-
-#[test]
-fn a_tool_provider_reference_is_refused_until_slice_d2() {
-    let found = issues("chat", |_, c| {
-        set(
-            c,
-            "/spec/tools/mcpServers",
-            json!({"websearch": {"providerRef": {"name": "websearch"}}}),
-        );
-    });
-    assert_eq!(found.len(), 1, "only the reference: {found:#?}");
-    assert_until_d2(&found, "mcpServers[websearch].providerRef", "ToolProvider");
-}
-
-#[test]
-fn no_image_is_refused_until_slice_d2() {
-    for name in ["coder", "chat"] {
-        let found = issues(name, |_, c| remove(c, "/spec/environment/image"));
-        assert_eq!(found.len(), 1, "{name}: only the image: {found:#?}");
-        assert_until_d2(&found, "spec.environment.image", "default coder image");
-    }
-}
 
 #[test]
 fn the_exclusive_forms_are_checked_again_without_an_api_server() {
@@ -912,26 +890,6 @@ fn the_exclusive_forms_are_checked_again_without_an_api_server() {
 }
 
 #[test]
-fn the_dashboard_example_is_refused_for_exactly_the_three_things_slice_d2_will_resolve() {
-    // `examples/coder-me.yaml` is the §60a example: an endpoint reference, a tool provider reference
-    // and no image. Nothing else is wrong with it, so the day D2 resolves them it resolves.
-    let found = issues("coder-me", |_, _| {});
-    let mut fields: Vec<_> = found.iter().map(|i| i.field.as_str()).collect();
-    fields.sort_unstable();
-    assert_eq!(
-        fields,
-        [
-            "AgentConfig spec.environment.image",
-            "AgentConfig spec.model.endpointRef",
-            "AgentConfig spec.tools.mcpServers[websearch].providerRef",
-        ]
-    );
-    for issue in &found {
-        assert!(issue.message.contains("slice D2"), "{issue}");
-    }
-}
-
-#[test]
 fn an_inline_object_is_not_touched_by_the_references() {
     // The parity goldens hold the same thing for the env contract; this holds it for validation: the
     // two examples and a server with a url are as valid as they were.
@@ -972,5 +930,5 @@ fn a_config_is_checked_by_itself() {
     set(&mut s, "/spec/configRef/name", json!("another"));
     let (service, config) = typed(&s, &c);
     aap_domain::validate_config(&config).unwrap();
-    assert!(validate(&service, &config).is_err());
+    assert!(validate(&service, &config, &Externals::default()).is_err());
 }

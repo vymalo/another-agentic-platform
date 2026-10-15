@@ -3,6 +3,8 @@
 //! [`aap_ports::StoreProvisioner`] (AD-020).
 //!
 //! * [`Operator`] wires the two controllers to their triggers and runs them.
+//! * [`services_of_endpoint`] and [`services_of_provider`] say which services a changed `ModelEndpoint` or
+//!   `ToolProvider` concerns, for the watches the operator runs.
 //! * [`reconcile_service`] and [`reconcile_config`] are one pass each, public so that a test can drive
 //!   them against the `Memory` providers and a fake API server.
 //! * [`derive`](mod@derive) is the pure part: what a pass saw, as conditions and a state.
@@ -24,6 +26,7 @@ mod metrics;
 mod operator;
 mod options;
 mod service;
+mod watches;
 
 pub use config::{config_error_policy, reconcile_config};
 pub use context::{
@@ -35,3 +38,4 @@ pub use metrics::{Metrics, name as metric};
 pub use operator::{Operator, Readiness};
 pub use options::{Options, RegistryMode, Resync};
 pub use service::{reconcile_service, service_error_policy};
+pub use watches::{services_of_endpoint, services_of_provider};

@@ -28,6 +28,8 @@ use support::scripted::Scripted;
 const NS: &str = "another-agentic-system";
 const SERVICES: &str = "agentservices";
 const CONFIGS: &str = "agentconfigs";
+const ENDPOINTS: &str = "modelendpoints";
+const PROVIDERS: &str = "toolproviders";
 
 // ------------------------------------------------------------------ fixtures
 
@@ -393,65 +395,330 @@ async fn an_invalid_config_blocks_the_service_and_leaves_what_runs_untouched() {
     assert_ne!(w.runtime.spec(&w.id()).unwrap().digest, running.digest);
 }
 
+// ------------------------------------------------ the shared objects of the dashboard (D2)
+
+/// The `ModelEndpoint` and the `ToolProvider` of an example file.
+fn shared(name: &str) -> (Value, Value) {
+    let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../../examples")
+        .join(format!("{name}.yaml"));
+    let text = std::fs::read_to_string(path).unwrap();
+    let docs: Vec<Value> = serde_yaml::Deserializer::from_str(&text)
+        .map(|d| serde::Deserialize::deserialize(d).unwrap())
+        .collect();
+    let of = |kind: &str| docs.iter().find(|d| d["kind"] == kind).cloned().unwrap();
+    (of("ModelEndpoint"), of("ToolProvider"))
+}
+
+/// The image the operator is given as its default, in these tests.
+const DEFAULT_IMAGE: &str = "ghcr.io/vymalo/another-adam-rs/coder:sha-9a1fd4e@sha256:c3c178b7d73599f40d53f798616e510346abd3300a622b09b2bc233109f12b44";
+
+/// The §60a example (`coder-me`): a config that references an endpoint and a provider and names no
+/// image, on an operator that has a default one. Its two objects are **not** applied: each test says when.
+fn dashboard_world() -> World {
+    World::with_options(
+        "coder-me",
+        Options {
+            default_agent_image: Some(DEFAULT_IMAGE.to_owned()),
+            ..Options::default()
+        },
+    )
+}
+
+impl World {
+    fn put_shared(&self) {
+        let (endpoint, provider) = shared("coder-me");
+        self.fake.put(ENDPOINTS, endpoint);
+        self.fake.put(PROVIDERS, provider);
+    }
+
+    fn edit_shared(&self, plural: &str, name: &str, change: impl FnOnce(&mut Value)) {
+        let mut o = self.fake.get(plural, NS, name).unwrap();
+        change(&mut o);
+        self.fake.put(plural, o);
+    }
+
+    fn message(&self) -> String {
+        self.status()["conditions"][0]["message"]
+            .as_str()
+            .unwrap()
+            .to_owned()
+    }
+
+    fn digest(&self) -> String {
+        self.runtime.spec(&self.id()).unwrap().digest
+    }
+}
+
+fn env_of(spec: &aap_ports::RuntimeSpec, name: &str) -> Option<aap_ports::EnvValue> {
+    spec.workloads[0]
+        .container
+        .env
+        .iter()
+        .find(|e| e.name == name)
+        .map(|e| e.value.clone())
+}
+
 #[tokio::test]
-async fn a_reference_the_operator_cannot_resolve_yet_blocks_the_service_and_names_the_field() {
-    // `endpointRef`, `providerRef` and a missing image are slice D2 of the admin dashboard (§60a): the CRD
-    // admits them, the operator refuses them, and nothing is started with a default instead.
-    let w = World::new("chat");
+async fn a_reference_to_an_object_that_is_not_there_blocks_the_service_and_names_it() {
+    let w = dashboard_world();
     w.settle().await;
+
+    let status = w.status();
+    assert_eq!(status["state"], "Blocked");
+    is(&status, "ConfigResolved", "False", "ConfigInvalid");
+    is(&status, "Ready", "False", "ConfigInvalid");
+    let message = w.message();
+    assert!(
+        message.contains("ModelEndpoint \"gateway\"") && message.contains(NS),
+        "{message}"
+    );
+    assert!(message.contains("ToolProvider \"websearch\""), "{message}");
+    // Nothing is made out of half an agent: no runtime, no store.
+    assert!(
+        w.runtime.ids().is_empty(),
+        "nothing in the pod spec: {:?}",
+        w.runtime.ids()
+    );
+    assert!(
+        w.store
+            .spec(&aap_ports::StoreId::new(NS, &w.name))
+            .is_none()
+    );
+    let last = w.fake.events().pop().unwrap();
+    assert_eq!(
+        (last["type"].as_str(), last["reason"].as_str()),
+        (Some("Warning"), Some("ConfigInvalid"))
+    );
+    assert!(last["note"].as_str().unwrap().contains("gateway"));
+}
+
+#[tokio::test]
+async fn a_referent_created_after_the_config_unblocks_it() {
+    let w = dashboard_world();
+    w.settle().await;
+    assert_eq!(w.status()["state"], "Blocked");
+
+    // The endpoint appears first: the provider is still named, alone.
+    let (endpoint, provider) = shared("coder-me");
+    w.fake.put(ENDPOINTS, endpoint);
+    w.pass().await.unwrap();
+    assert_eq!(w.status()["state"], "Blocked");
+    let message = w.message();
+    assert!(
+        !message.contains("ModelEndpoint") && message.contains("ToolProvider \"websearch\""),
+        "{message}"
+    );
+    assert!(w.runtime.ids().is_empty());
+
+    // The provider appears: the agent is made, from both.
+    w.fake.put(PROVIDERS, provider);
+    w.pass().await.unwrap();
+    let status = w.status();
+    assert_eq!(status["state"], "Ready", "{status}");
+    is(&status, "ConfigResolved", "True", "Resolved");
+    let spec = w.runtime.spec(&w.id()).expect("the runtime was ensured");
+    assert_eq!(status["config"]["digest"], json!(spec.digest));
+    // What the pod gets is what the objects say: the endpoint's Secret keys, the operator's image.
+    assert_eq!(
+        env_of(&spec, "MODEL_BASE_URL"),
+        Some(aap_ports::EnvValue::Secret(aap_ports::SecretRef::new(
+            "agent-models",
+            "GATEWAY_BASE_URL"
+        )))
+    );
+    assert_eq!(spec.workloads[0].container.image, DEFAULT_IMAGE);
+    assert!(
+        spec.file_sets
+            .iter()
+            .any(|f| f.name.ends_with("-mcp") && f.files["mcp.json"].contains("websearch")),
+        "{:?}",
+        spec.file_sets
+    );
+}
+
+#[tokio::test]
+async fn an_edit_of_a_referent_rolls_the_digest() {
+    let w = dashboard_world();
+    w.put_shared();
+    w.settle().await;
+    assert_eq!(w.status()["state"], "Ready");
+    let before = w.digest();
+
+    // An endpoint's key moves to another Secret: the pods must read the new one, so they roll.
+    w.edit_shared(ENDPOINTS, "gateway", |e| {
+        e["spec"]["apiKeySecretRef"]["name"] = json!("rotated-models");
+    });
+    w.pass().await.unwrap();
+    let after_endpoint = w.digest();
+    assert_ne!(
+        before, after_endpoint,
+        "an endpoint's edit rolls its agents"
+    );
+    assert_eq!(w.status()["config"]["digest"], json!(after_endpoint));
+    assert_eq!(
+        env_of(&w.runtime.spec(&w.id()).unwrap(), "MODEL_API_KEY"),
+        Some(aap_ports::EnvValue::Secret(aap_ports::SecretRef::new(
+            "rotated-models",
+            "GATEWAY_API_KEY"
+        )))
+    );
+    // The config itself did not change.
+    assert_eq!(w.status()["config"]["observedGeneration"], 1);
+
+    // A provider's URL, the same.
+    w.edit_shared(PROVIDERS, "websearch", |p| {
+        p["spec"]["mcp"]["url"] =
+            json!("http://another-search.another-agentic-system.svc:8080/mcp");
+    });
+    w.pass().await.unwrap();
+    let after_provider = w.digest();
+    assert_ne!(
+        after_endpoint, after_provider,
+        "a provider's edit rolls its agents"
+    );
+
+    // What only a person reads reaches no pod: the digest stays and nothing is written.
+    w.fake.clear_calls();
+    w.edit_shared(ENDPOINTS, "gateway", |e| {
+        e["spec"]["title"] = json!("A new title");
+        e["spec"]["models"] = json!(["another-alias"]);
+    });
+    w.edit_shared(PROVIDERS, "websearch", |p| {
+        p["spec"]["title"] = json!("A new title");
+    });
+    w.fake.clear_calls();
+    w.pass().await.unwrap();
+    assert_eq!(w.digest(), after_provider);
+    assert!(w.fake.writes().is_empty(), "{:?}", w.fake.writes());
+}
+
+#[tokio::test]
+async fn deleting_a_referent_blocks_the_service_and_leaves_what_runs_untouched() {
+    let w = dashboard_world();
+    w.put_shared();
+    w.settle().await;
+    assert_eq!(w.status()["state"], "Ready");
     let running = w.runtime.spec(&w.id()).unwrap();
 
-    type Edit = fn(&mut Value);
-    let cases: [(&str, Edit, &str); 3] = [
-        (
-            "spec.model.endpointRef",
-            |c| {
-                c["spec"]["model"] =
-                    json!({"model": "chat-model", "endpointRef": {"name": "gateway"}});
-            },
-            "ModelEndpoint",
-        ),
-        (
-            "spec.tools.mcpServers[websearch].providerRef",
-            |c| {
-                c["spec"]["tools"]["mcpServers"] =
-                    json!({"websearch": {"providerRef": {"name": "websearch"}}});
-            },
-            "ToolProvider",
-        ),
-        (
-            "spec.environment.image",
-            |c| {
-                c["spec"]["environment"]
-                    .as_object_mut()
-                    .unwrap()
-                    .remove("image");
-            },
-            "default coder image",
-        ),
-    ];
-    for (field, change, what) in cases {
-        w.edit_config(change);
-        w.pass().await.unwrap();
-        assert_eq!(
-            w.runtime.spec(&w.id()).unwrap(),
-            running,
-            "{field}: what runs is left as it is"
-        );
-        let status = w.status();
-        assert_eq!(status["state"], "Blocked", "{field}");
-        is(&status, "ConfigResolved", "False", "ConfigInvalid");
-        let message = status["conditions"][0]["message"].as_str().unwrap();
-        assert!(
-            message.contains(field) && message.contains("slice D2") && message.contains(what),
-            "{field}: {message}"
-        );
-        // back to the inline object it was: unblocked, and the same digest
-        w.edit_config(|c| *c = example("chat").1);
-        w.pass().await.unwrap();
-        assert_eq!(w.status()["state"], "Ready", "{field}");
-        assert_eq!(w.runtime.spec(&w.id()).unwrap(), running, "{field}");
-    }
+    w.fake.delete(ENDPOINTS, NS, "gateway");
+    w.pass().await.unwrap();
+
+    let status = w.status();
+    assert_eq!(status["state"], "Blocked");
+    is(&status, "ConfigResolved", "False", "ConfigInvalid");
+    let message = w.message();
+    assert!(message.contains("ModelEndpoint \"gateway\""), "{message}");
+    assert!(
+        !message.contains("ToolProvider"),
+        "only what is missing: {message}"
+    );
+    // Nothing of the half-resolved agent reached the pods: what runs is what ran.
+    assert_eq!(w.runtime.spec(&w.id()).unwrap(), running);
+    assert_eq!(status["config"]["digest"], json!(running.digest));
+    let last = w.fake.events().pop().unwrap();
+    assert_eq!(last["reason"], "ConfigInvalid");
+
+    // The same for a provider.
+    let (endpoint, _) = shared("coder-me");
+    w.fake.put(ENDPOINTS, endpoint);
+    w.pass().await.unwrap();
+    assert_eq!(w.status()["state"], "Ready");
+    assert_eq!(
+        w.digest(),
+        running.digest,
+        "the same objects, the same agent"
+    );
+    w.fake.delete(PROVIDERS, NS, "websearch");
+    w.pass().await.unwrap();
+    assert_eq!(w.status()["state"], "Blocked");
+    assert!(w.message().contains("ToolProvider \"websearch\""));
+    assert_eq!(w.runtime.spec(&w.id()).unwrap(), running);
+}
+
+#[tokio::test]
+async fn a_config_with_no_image_is_blocked_without_a_default_and_runs_the_default_with_one() {
+    // No default: the message says which flag.
+    let w = World::with_options("coder-me", Options::default());
+    w.put_shared();
+    w.settle().await;
+    assert_eq!(w.status()["state"], "Blocked");
+    let message = w.message();
+    assert!(
+        message.contains("spec.environment.image") && message.contains("--default-agent-image"),
+        "{message}"
+    );
+    assert!(w.runtime.ids().is_empty());
+
+    // The same objects on an operator with a default run it, and a bump of the default rolls an agent
+    // that names none and none that pins its own.
+    let other = "ghcr.io/vymalo/another-adam-rs/coder:sha-aaaaaaa@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+    let digest_with = |default: &str, pinned: bool| {
+        let default = default.to_owned();
+        async move {
+            let w = World::with_options(
+                "coder-me",
+                Options {
+                    default_agent_image: Some(default),
+                    ..Options::default()
+                },
+            );
+            w.put_shared();
+            if pinned {
+                w.edit_config(|c| {
+                    c["spec"]["environment"]["image"] = json!({"ref": "ghcr.io/x/y:own"});
+                });
+            }
+            w.settle().await;
+            assert_eq!(w.status()["state"], "Ready");
+            w.runtime.spec(&w.id()).unwrap()
+        }
+    };
+    let (a, b) = (
+        digest_with(DEFAULT_IMAGE, false).await,
+        digest_with(other, false).await,
+    );
+    assert_eq!(a.workloads[0].container.image, DEFAULT_IMAGE);
+    assert_eq!(b.workloads[0].container.image, other);
+    assert_ne!(
+        a.digest, b.digest,
+        "a new default rolls the agents that name none"
+    );
+    let (pa, pb) = (
+        digest_with(DEFAULT_IMAGE, true).await,
+        digest_with(other, true).await,
+    );
+    assert_eq!(pa.workloads[0].container.image, "ghcr.io/x/y:own");
+    assert_eq!(
+        pa.digest, pb.digest,
+        "an agent that pins its own image is not rolled"
+    );
+}
+
+#[tokio::test]
+async fn an_inline_object_is_unaffected_by_the_operators_default_and_the_shared_kinds() {
+    // The same `chat` under an operator with a default image and with none: the same agent.
+    let plain = World::new("chat");
+    plain.settle().await;
+    let with_default = World::with_options(
+        "chat",
+        Options {
+            default_agent_image: Some(DEFAULT_IMAGE.to_owned()),
+            ..Options::default()
+        },
+    );
+    with_default.settle().await;
+    assert_eq!(plain.digest(), with_default.digest());
+    // and it reads no ModelEndpoint or ToolProvider: it names none.
+    assert!(
+        with_default
+            .fake
+            .calls()
+            .iter()
+            .all(|c| !c.path.contains("modelendpoints") && !c.path.contains("toolproviders")),
+        "{:?}",
+        with_default.fake.calls()
+    );
 }
 
 #[tokio::test]

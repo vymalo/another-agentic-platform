@@ -11,11 +11,14 @@
 pub mod contract;
 mod convert;
 mod digest;
+mod externals;
 mod plan;
+mod refs;
 mod resolve;
 mod syntax;
 mod validate;
 
 pub use digest::{canonical_json, digest_json, spec_digest};
+pub use externals::{Externals, References, references};
 pub use resolve::{ResolvedAgent, resolve};
 pub use validate::{ConfigIssue, validate, validate_config};

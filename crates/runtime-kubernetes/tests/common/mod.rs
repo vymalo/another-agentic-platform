@@ -72,14 +72,16 @@ pub fn resolved(name: &str, change: impl FnOnce(&mut Value, &mut Value)) -> Reso
         service.metadata.name.clone().unwrap(),
         "0b1f3c5e-1111-4222-8333-444455556666",
     );
-    aap_domain::resolve(&service, &config, owner).unwrap_or_else(|issues| {
-        panic!(
-            "the example does not resolve: {}",
-            issues
-                .iter()
-                .map(ToString::to_string)
-                .collect::<Vec<_>>()
-                .join("; ")
-        )
-    })
+    aap_domain::resolve(&service, &config, &aap_domain::Externals::default(), owner).unwrap_or_else(
+        |issues| {
+            panic!(
+                "the example does not resolve: {}",
+                issues
+                    .iter()
+                    .map(ToString::to_string)
+                    .collect::<Vec<_>>()
+                    .join("; ")
+            )
+        },
+    )
 }

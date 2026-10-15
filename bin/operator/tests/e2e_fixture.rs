@@ -41,8 +41,13 @@ fn coder() -> (AgentService, AgentConfig) {
 #[test]
 fn the_coder_fixture_resolves_to_the_real_image_with_its_sidecar() {
     let (service, config) = coder();
-    let resolved = aap_domain::resolve(&service, &config, aap_ports::OwnerHandle::none())
-        .unwrap_or_else(|issues| panic!("{issues:?}"));
+    let resolved = aap_domain::resolve(
+        &service,
+        &config,
+        &aap_domain::Externals::default(),
+        aap_ports::OwnerHandle::none(),
+    )
+    .unwrap_or_else(|issues| panic!("{issues:?}"));
 
     let workload = &resolved.runtime.workloads[0];
     let image = &workload.container.image;

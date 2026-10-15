@@ -2,7 +2,8 @@
 //!
 //! 1. the finalizer `agents.vymalo.com/runtime`, before anything is created (kube's `finalizer`
 //!    helper: the first pass only adds it, and the patch brings the second);
-//! 2. the `AgentConfig` the service names, and `aap_domain::resolve` (which validates);
+//! 2. the `AgentConfig` the service names, the `ModelEndpoint` and `ToolProvider`s it references, and
+//!    `aap_domain::resolve` (which validates);
 //! 3. the store, through [`StoreProvisioner`];
 //! 4. [`RuntimeProvider::ensure`] with the resolved spec;
 //! 5. the status (conditions and state, [`derive`]), patched by server-side apply;
@@ -14,9 +15,10 @@
 use std::sync::Arc;
 
 use aap_api::{
-    AgentConfig, AgentService, AgentServiceStatus, ConfigStatus, Endpoints, ServiceState,
+    AgentConfig, AgentService, AgentServiceStatus, ConfigStatus, Endpoints, ModelEndpoint,
+    ServiceState, ToolProvider,
 };
-use aap_domain::{ResolvedAgent, resolve};
+use aap_domain::{Externals, ResolvedAgent, references, resolve};
 use aap_ports::{
     Phase, RuntimeError, RuntimeId, RuntimeProvider, StoreError, StoreProvisioner, StoreState,
     Surface,
@@ -94,6 +96,37 @@ enum Resolution {
     Blocked(ConfigOutcome),
 }
 
+/// The objects `config` references, read from the API server, and the operator's default image
+/// (§60a, AD-029). Read live, as the config is, with no cache between: a pass sees the cluster as it is.
+/// One that is not there is left out, and `resolve` says which, by name: that is `ConfigInvalid`, not a
+/// failed pass.
+async fn read_externals<R, S>(
+    config: &AgentConfig,
+    ns: &str,
+    ctx: &Context<R, S>,
+) -> Result<Externals, Error> {
+    let wanted = references(config);
+    let mut externals = Externals {
+        default_image: ctx.options.default_agent_image.clone(),
+        ..Externals::default()
+    };
+    if let Some(name) = &wanted.model_endpoint {
+        let api: Api<ModelEndpoint> = Api::namespaced(ctx.client.clone(), ns);
+        if let Some(found) = api.get_opt(name).await? {
+            externals.model_endpoints.insert(name.clone(), found);
+        }
+    }
+    if !wanted.tool_providers.is_empty() {
+        let api: Api<ToolProvider> = Api::namespaced(ctx.client.clone(), ns);
+        for name in &wanted.tool_providers {
+            if let Some(found) = api.get_opt(name).await? {
+                externals.tool_providers.insert(name.clone(), found);
+            }
+        }
+    }
+    Ok(externals)
+}
+
 async fn fetch_and_resolve<R, S>(
     svc: &AgentService,
     ctx: &Context<R, S>,
@@ -108,7 +141,8 @@ async fn fetch_and_resolve<R, S>(
             name: wanted.clone(),
         }));
     };
-    match resolve(svc, &config, (ctx.owner)(svc)) {
+    let externals = read_externals(&config, &ns, ctx).await?;
+    match resolve(svc, &config, &externals, (ctx.owner)(svc)) {
         Err(issues) => Ok(Resolution::Blocked(ConfigOutcome::Invalid {
             message: issues
                 .iter()

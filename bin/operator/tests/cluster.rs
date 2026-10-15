@@ -171,8 +171,13 @@ fn the_manifests_are_valid_and_resolve() {
         cfg["metadata"]["namespace"] = json!(namespace);
         let svc: AgentService = serde_json::from_value(svc).unwrap();
         let cfg: aap_api::AgentConfig = serde_json::from_value(cfg).unwrap();
-        aap_domain::resolve(&svc, &cfg, aap_ports::OwnerHandle::none())
-            .unwrap_or_else(|issues| panic!("{issues:?}"));
+        aap_domain::resolve(
+            &svc,
+            &cfg,
+            &aap_domain::Externals::default(),
+            aap_ports::OwnerHandle::none(),
+        )
+        .unwrap_or_else(|issues| panic!("{issues:?}"));
     }
 }
 

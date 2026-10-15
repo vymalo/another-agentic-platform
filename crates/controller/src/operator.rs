@@ -4,6 +4,8 @@
 //!
 //! * its own object (kube-rs's `Controller`, which also owns the reflector the directory reads);
 //! * a change of an `AgentConfig`, mapped to every service in that namespace that names it;
+//! * a change or a deletion of a `ModelEndpoint` or a `ToolProvider` (AD-029), mapped through the configs
+//!   that reference it to the services that run them;
 //! * [`RuntimeProvider::watch`]: the ids of runtimes that changed, mapped to the service of the same
 //!   scope and name, so the controller never watches a workload itself;
 //! * a timer per pass ([`Resync`](crate::Resync)), because a signal is never the truth.
@@ -16,7 +18,7 @@ use std::future::Future;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 
-use aap_api::{AgentConfig, AgentService};
+use aap_api::{AgentConfig, AgentService, ModelEndpoint, ToolProvider};
 use aap_ports::{RuntimeProvider, StoreProvisioner};
 use futures::StreamExt;
 use kube::runtime::controller::Config as ControllerConfig;
@@ -31,6 +33,7 @@ use crate::directory::ReflectorDirectory;
 use crate::metrics::{Metrics, name};
 use crate::options::Options;
 use crate::service::{reconcile_service, service_error_policy};
+use crate::watches::{services_of_endpoint, services_of_provider};
 
 /// A handle that says whether the controllers have listed the cluster. `/readyz` reads it.
 #[derive(Clone, Debug, Default)]
@@ -126,6 +129,15 @@ where
         let namespace = self.options.watch_namespace.clone();
         let cfg = ControllerConfig::default().concurrency(self.options.concurrency);
 
+        // The configs come first: the services' watches of the shared objects map through their cache.
+        let configs_controller = Controller::new(
+            api::<AgentConfig>(&self.client, &self.options),
+            watcher::Config::default(),
+        )
+        .with_config(cfg.clone())
+        .graceful_shutdown_on(signal(stopped.clone()));
+        let config_reader = configs_controller.store();
+
         // The services.
         let Some(services) = self.services.take() else {
             return;
@@ -153,6 +165,8 @@ where
                 .map(|id| ObjectRef::<AgentService>::new(id.name()).within(id.scope()))
         };
         let mapper_reader = reader.clone();
+        let (endpoint_services, endpoint_configs) = (reader.clone(), config_reader.clone());
+        let (provider_services, provider_configs) = (reader.clone(), config_reader.clone());
         let services = services
             .with_config(cfg.clone())
             .graceful_shutdown_on(signal(stopped.clone()))
@@ -161,19 +175,26 @@ where
                 watcher::Config::default(),
                 move |config| services_of(&mapper_reader, &config),
             )
+            .watches(
+                api::<ModelEndpoint>(&self.client, &self.options),
+                watcher::Config::default(),
+                move |endpoint| {
+                    services_of_endpoint(&endpoint_services, &endpoint_configs, &endpoint)
+                },
+            )
+            .watches(
+                api::<ToolProvider>(&self.client, &self.options),
+                watcher::Config::default(),
+                move |provider| {
+                    services_of_provider(&provider_services, &provider_configs, &provider)
+                },
+            )
             .reconcile_on(signals)
             .run(reconcile_service, service_error_policy, ctx)
             .for_each(|result| async move { log_plumbing("agentservice", result) });
 
         // The configs.
         let config_ctx = Arc::new(ConfigContext::new(self.client.clone(), metrics.clone()));
-        let configs_controller = Controller::new(
-            api::<AgentConfig>(&self.client, &self.options),
-            watcher::Config::default(),
-        )
-        .with_config(cfg)
-        .graceful_shutdown_on(signal(stopped));
-        let config_reader = configs_controller.store();
         let configs = configs_controller
             .run(reconcile_config, config_error_policy, config_ctx)
             .for_each(|result| async move { log_plumbing("agentconfig", result) });

@@ -116,7 +116,13 @@ fn resolved_with_sentinels(name: &str) -> (aap_domain::ResolvedAgent, usize) {
     let (mut s, mut c) = example(name);
     let changed = with_sentinels(&mut s, &mut c);
     let (s, c) = typed(&s, &c);
-    let r = aap_domain::resolve(&s, &c, aap_ports::OwnerHandle::none()).unwrap_or_else(|i| {
+    let r = aap_domain::resolve(
+        &s,
+        &c,
+        &aap_domain::Externals::default(),
+        aap_ports::OwnerHandle::none(),
+    )
+    .unwrap_or_else(|i| {
         panic!("{i:?}");
     });
     (r, changed)

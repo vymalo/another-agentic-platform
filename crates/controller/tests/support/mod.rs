@@ -3,7 +3,8 @@
 //! apply of the status, the Events, and the list and watch of kube's `Controller`) and what it does
 //! with the answers is the real code.
 //!
-//! It keeps the two custom resources by path, applies JSON patches to `metadata.finalizers` as the
+//! It keeps the custom resources (the two kinds of the operator and the two shared kinds of the
+//! dashboard, whose status it never touches) by path, applies JSON patches to `metadata.finalizers` as the
 //! API server does (a failed `test` is a 422; an object that is being deleted goes away when the last
 //! finalizer does), replaces `status` on an apply of the `/status` subresource, answers a list, streams
 //! a watch (every change of an object is an `ADDED`, `MODIFIED` or `DELETED` line to whoever watches
@@ -83,10 +84,11 @@ fn path(plural: &str, ns: &str, name: &str) -> String {
 }
 
 fn kind_of(plural: &str) -> &'static str {
-    if plural == "agentservices" {
-        "AgentService"
-    } else {
-        "AgentConfig"
+    match plural {
+        "agentservices" => "AgentService",
+        "modelendpoints" => "ModelEndpoint",
+        "toolproviders" => "ToolProvider",
+        _ => "AgentConfig",
     }
 }
 

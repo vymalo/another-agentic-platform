@@ -150,6 +150,22 @@ pub fn is_quantity(s: &str) -> bool {
     !exp.is_empty() && exp.chars().all(|c| c.is_ascii_digit())
 }
 
+/// The longest `<server>__<tool>` name adam shows a model (`MODEL_NAME_MAX`).
+pub const MODEL_NAME_MAX: usize = 64;
+
+/// Whether `tool` can be an entry of the `tools` allow-list of the MCP server `server`, by the rule of
+/// adam-rs `crates/adam-agent-fs/src/load/mcp.rs` at `0391809` (*verified 2026-10-15*, read there): not
+/// empty, not starting with `_`, ASCII letters, digits, `-` and `_` only, and `<server>__<tool>` at
+/// most 64 characters. A file with an entry that fails it is refused at startup (exit 78).
+pub fn is_adam_tool_name(server: &str, tool: &str) -> bool {
+    !tool.is_empty()
+        && !tool.starts_with('_')
+        && tool
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-')
+        && server.len() + 2 + tool.len() <= MODEL_NAME_MAX
+}
+
 /// A relative path inside a folder: not empty, not absolute, no empty, `.` or `..` segment, no
 /// backslash and no NUL.
 pub fn is_relative_file_path(s: &str) -> bool {
@@ -264,6 +280,22 @@ mod tests {
         ] {
             assert!(!is_plain_http_remote(fine), "{fine}");
         }
+    }
+
+    #[test]
+    fn adam_tool_names() {
+        for ok in ["web_search", "a", "list-issues", "T1", "x_"] {
+            assert!(is_adam_tool_name("search", ok), "{ok}");
+        }
+        // 64 characters exactly: `search` + `__` + 56.
+        assert!(is_adam_tool_name("search", &"t".repeat(56)));
+        for bad in ["", "_hidden", "web.search", "web search", "écho", "a/b"] {
+            assert!(!is_adam_tool_name("search", bad), "{bad}");
+        }
+        assert!(!is_adam_tool_name("search", &"t".repeat(57)));
+        // The server's name counts: the same tool does not fit behind a longer server name.
+        assert!(!is_adam_tool_name(&"s".repeat(40), &"t".repeat(23)));
+        assert!(is_adam_tool_name(&"s".repeat(40), &"t".repeat(22)));
     }
 
     #[test]
