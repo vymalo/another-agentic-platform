@@ -781,11 +781,19 @@ fn the_shape_rules_of_the_crd_hold_without_an_api_server() {
         }
         let (s, c) = typed(&s, &c);
         let expect = std::fs::read_to_string(&path).unwrap();
-        assert!(
-            validate(&s, &c, &externals).is_err(),
-            "{} was accepted by validate:\n{expect}",
-            path.display()
-        );
+        let Err(found) = validate(&s, &c, &externals) else {
+            panic!("{} was accepted by validate:\n{expect}", path.display());
+        };
+        // An object of a shared kind is refused *naming it*, not as an issue of the config that
+        // references it: what a person has to edit is `ToolProvider invalid spec.mcp.…`.
+        if matches!(kind, "ModelEndpoint" | "ToolProvider") {
+            let who = format!("{kind} invalid ");
+            assert!(
+                found.iter().any(|i| i.field.starts_with(&who)),
+                "{}: no issue names the referent ({who:?}) in:\n{found:#?}\n{expect}",
+                path.display()
+            );
+        }
         covered += 1;
     }
     assert!(
