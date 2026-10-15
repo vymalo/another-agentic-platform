@@ -112,7 +112,7 @@ instead of depending on that repository.
 | `RuntimeStatus { phase, replicas, issues }`, `Phase`, `Issue { role, reason, message }`, `IssueReason` | the §59a table: `ConfigRejected`, `DependencyUnavailable`, `MissingSecret { name }`, `ImagePull`, `CrashLoop`, `NameConflict`. Closed |
 | `Capabilities`, `Surface`, `Endpoint`, `DeleteOutcome` | |
 | `StoreSpec`, `StoreKind::{Secret, Cnpg}`, `CnpgSpec`, `StoreStatus`, `StoreState`, `StoreCapabilities`, `ReleaseOutcome` | the store |
-| `DirectoryEntry` | the directory entry type for the registry: scope, name, title, description, tags, **audience (D3)**, card URL, `a2a_enabled`, `blocked`. A public struct built with a literal: **the field `audience` broke every `DirectoryEntry { .. }` literal** (an implementer of `AgentDirectory` that builds its own entries; the two in this repository, the controller's and `MemoryDirectory`'s source, are updated), and it is `#[serde(default)]`, so a stored entry from before reads as having none |
+| `DirectoryEntry` | the directory entry type for the registry: scope, name, title, description, tags, **audience (D3)**, card URL, `a2a_enabled`, `blocked`. A public struct built with a literal: **the field `audience` broke every `DirectoryEntry { .. }` literal** (an implementer of `AgentDirectory` that builds its own entries; the literals in this repository are updated: the controller's `entry()`, the testkit's `entry()`, `tests/contract.rs` and the registry crate's test helpers; `MemoryDirectory` builds none, it keeps the entries it is given), and it is `#[serde(default)]`, so a stored entry from before reads as having none |
 | `DeletionPolicy::{Retain, Delete}` | the neutral form of `aap_api::DeletionPolicy` |
 
 Choices worth knowing, because §59a does not say:
