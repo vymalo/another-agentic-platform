@@ -134,6 +134,12 @@ fn the_state_follows_the_rule_of_the_reconciliation_section() {
         Blocked
     );
     assert_eq!(
+        case(|o| o.config = ConfigOutcome::ReferentMissing {
+            message: "m".into()
+        }),
+        Blocked
+    );
+    assert_eq!(
         case(|o| o.store = StoreOutcome::Answered(StoreState::ClusterNotReady)),
         Blocked
     );
@@ -677,4 +683,23 @@ fn a_referent_maps_to_the_services_whose_config_references_it_and_to_no_other() 
     assert!(services_of_provider(&services, &configs, &provider(Some("a"), "unused")).is_empty());
     assert!(services_of_endpoint(&services, &configs, &endpoint(None, "e1")).is_empty());
     assert!(services_of_provider(&services, &configs, &provider(None, "p1")).is_empty());
+}
+
+#[test]
+fn a_missing_referent_is_the_condition_of_an_invalid_config_with_its_words() {
+    // The difference between the two outcomes is the timer; for a person the condition is the same.
+    let status = |config| {
+        let mut o = observed();
+        o.config = config;
+        derive(&o, &[], &at("2026-10-05T10:00:00Z"))
+    };
+    let invalid = status(ConfigOutcome::Invalid {
+        message: "ModelEndpoint \"gateway\" was not found".into(),
+    });
+    let missing = status(ConfigOutcome::ReferentMissing {
+        message: "ModelEndpoint \"gateway\" was not found".into(),
+    });
+    assert_eq!(missing, invalid);
+    assert_eq!(missing.conditions[0].reason, "ConfigInvalid");
+    assert_eq!(missing.conditions[0].status, "False");
 }

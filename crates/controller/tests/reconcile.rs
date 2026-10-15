@@ -362,7 +362,12 @@ async fn an_invalid_config_blocks_the_service_and_leaves_what_runs_untouched() {
         c["spec"]["harness"]["adam"]["agent"]["folder"]["files"] =
             json!({"README.md": "no instructions"});
     });
-    w.pass().await.unwrap();
+    let next = w.pass().await.unwrap();
+    assert_eq!(
+        requeue_after(&next),
+        Duration::from_secs(300),
+        "only a change of the config helps, and its watch brings it"
+    );
 
     assert_eq!(
         w.runtime.spec(&w.id()).unwrap(),
@@ -462,7 +467,14 @@ fn env_of(spec: &aap_ports::RuntimeSpec, name: &str) -> Option<aap_ports::EnvVal
 #[tokio::test]
 async fn a_reference_to_an_object_that_is_not_there_blocks_the_service_and_names_it() {
     let w = dashboard_world();
-    w.settle().await;
+    let next = w.settle().await;
+    // The objects of a config are applied one request at a time, and the watch that would bring the
+    // second can be lost: the service is looked at again in the `pending` period, not the settled one.
+    assert_eq!(
+        requeue_after(&next),
+        Duration::from_secs(15),
+        "a missing referent is read again soon"
+    );
 
     let status = w.status();
     assert_eq!(status["state"], "Blocked");
@@ -518,8 +530,9 @@ async fn a_reference_to_a_kind_whose_crd_is_not_installed_blocks_the_service_and
         w.runtime.ids().is_empty(),
         "nothing is made from half an agent"
     );
-    // The pass found something to say, so it is not a failed pass: no error backoff, a timer.
-    assert!(requeue_after(&next) >= Duration::from_secs(1));
+    // The pass found something to say, so it is not a failed pass: no error backoff, and the timer of a
+    // missing referent (the CRDs are installed by hand, which no watch of ours sees until its backoff ends).
+    assert_eq!(requeue_after(&next), Duration::from_secs(15));
 
     // The CRDs are installed, but the objects are not created yet: now they are only missing.
     w.fake.absent(&[]);
@@ -572,8 +585,9 @@ async fn a_name_that_is_not_an_objects_is_blocked_before_any_request_is_made_wit
         "nothing was requested under those names"
     );
     assert!(w.runtime.ids().is_empty());
-    // It is a failure of the objects, not of the pass: a result, not an error to retry.
-    assert!(requeue_after(&next) >= Duration::from_secs(1));
+    // It is a failure of the objects, not of the pass: a result, not an error to retry. Nothing but a
+    // change of the config helps, and its watch brings that: the settled period.
+    assert_eq!(requeue_after(&next), Duration::from_secs(300));
 
     // The name is fixed: the pass reads the object and the agent is made.
     w.edit_config(|c| {

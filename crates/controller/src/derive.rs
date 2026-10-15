@@ -25,6 +25,16 @@ pub enum ConfigOutcome {
         /// What is wrong, for a person. Never a secret's value: none is in the objects.
         message: String,
     },
+    /// The config references an object that was not there when the pass read it (a `ModelEndpoint` or a
+    /// `ToolProvider`, or the whole kind: its CRD is not installed). The condition is `Invalid`'s, word for
+    /// word; the difference is the timer. The objects the config names are applied by a person or a tool,
+    /// each by its own request, so the service can be read between two of them, and the watch that would
+    /// bring the second is the one thing a lost signal or a kind that was not served yet leaves out:
+    /// such a service is looked at again soon, not at the settled period.
+    ReferentMissing {
+        /// What is missing, for a person (the same words as `Invalid`'s).
+        message: String,
+    },
 }
 
 /// `StoreReady`.
@@ -176,7 +186,7 @@ fn config_condition(config: &ConfigOutcome) -> Draft {
             reason::CONFIG_NOT_FOUND,
             format!("the AgentConfig {name:?} does not exist in this namespace"),
         ),
-        ConfigOutcome::Invalid { message } => {
+        ConfigOutcome::Invalid { message } | ConfigOutcome::ReferentMissing { message } => {
             Draft::new(Truth::False, reason::CONFIG_INVALID, message.clone())
         }
     }

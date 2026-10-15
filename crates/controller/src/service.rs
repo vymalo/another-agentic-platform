@@ -178,6 +178,20 @@ async fn read_externals<R, S>(
     Ok(externals)
 }
 
+/// Whether `config` names an object that `externals` does not have: a referent that is missing, or
+/// whose whole kind is not served.
+fn is_missing_a_referent(config: &AgentConfig, externals: &Externals) -> bool {
+    let wanted = references(config);
+    wanted
+        .model_endpoint
+        .as_ref()
+        .is_some_and(|n| !externals.model_endpoints.contains_key(n))
+        || wanted
+            .tool_providers
+            .iter()
+            .any(|n| !externals.tool_providers.contains_key(n))
+}
+
 async fn fetch_and_resolve<R, S>(
     svc: &AgentService,
     ctx: &Context<R, S>,
@@ -207,13 +221,20 @@ async fn fetch_and_resolve<R, S>(
     };
     let externals = read_externals(&config, &ns, ctx).await?;
     match resolve(svc, &config, &externals, (ctx.owner)(svc)) {
-        Err(issues) => Ok(Resolution::Blocked(ConfigOutcome::Invalid {
-            message: issues
+        Err(issues) => {
+            let message = issues
                 .iter()
                 .map(ToString::to_string)
                 .collect::<Vec<_>>()
-                .join("; "),
-        })),
+                .join("; ");
+            Ok(Resolution::Blocked(
+                if is_missing_a_referent(&config, &externals) {
+                    ConfigOutcome::ReferentMissing { message }
+                } else {
+                    ConfigOutcome::Invalid { message }
+                },
+            ))
+        }
         Ok(agent) => Ok(Resolution::Resolved {
             config: ConfigStatus {
                 name: config.name_any(),
@@ -374,7 +395,7 @@ async fn finish<R, S>(
     }
 
     announce(svc, ctx, previous, &status).await;
-    Ok(Action::requeue(period(ctx, &status, &obs.store)))
+    Ok(Action::requeue(period(ctx, &status, &obs)))
 }
 
 /// An Event when the state, or the reason the service is or is not ready, changed.
@@ -417,14 +438,18 @@ async fn announce<R, S>(
 fn period<R, S>(
     ctx: &Context<R, S>,
     status: &AgentServiceStatus,
-    store: &StoreOutcome,
+    obs: &Observed,
 ) -> std::time::Duration {
     let r = &ctx.options.resync;
     match status.state {
         Some(ServiceState::Ready | ServiceState::Suspended) => r.settled,
         Some(ServiceState::Blocked) => {
-            if matches!(store, StoreOutcome::NotInstalled { .. }) {
+            if matches!(obs.store, StoreOutcome::NotInstalled { .. }) {
                 r.not_installed
+            } else if matches!(obs.config, ConfigOutcome::ReferentMissing { .. }) {
+                // The objects a config names are applied one request at a time, and the watch that brings
+                // the missing one can be lost or not open yet: look again soon, not in five minutes.
+                r.pending
             } else if config_is_the_problem(&status.conditions) {
                 // Only a change of the objects helps, and the watches bring it. The timer is the net.
                 r.settled

@@ -21,8 +21,9 @@ pub enum RegistryMode {
 pub struct Resync {
     /// The service is `Ready` or `Suspended`.
     pub settled: Duration,
-    /// A rollout is in progress, the runtime is not well, or the name is held by an object that is
-    /// not ours (that object is not watched, so the controller has to look).
+    /// A rollout is in progress, the runtime is not well, the name is held by an object that is
+    /// not ours (that object is not watched, so the controller has to look), or an object the config
+    /// references is not there (the person is probably applying it, and the watch can be lost).
     pub pending: Duration,
     /// The store's backend is not installed: someone has to install it, which is no event of ours.
     pub not_installed: Duration,
