@@ -368,6 +368,7 @@ fn an_entry_is_listed_when_a2a_is_on_it_is_not_blocked_and_has_a_card() {
         title: None,
         description: None,
         tags: Vec::new(),
+        audience: Vec::new(),
         agent_card: Some("http://coder.ns.svc:8080/.well-known/agent-card.json".into()),
         a2a_enabled: true,
         blocked: false,

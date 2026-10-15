@@ -13,6 +13,12 @@
 //! * `title` is the service's title, trimmed and cut at 200 characters, and absent when there is none (a
 //!   reader defaults it to the service id); `tags` keep the valid tags (non-empty, at most 64 characters,
 //!   at most 16, no repeats) and are absent when none is left;
+//! * `audience` (AD-028) is the service's, **as a set**: without repeats and in byte order, so that the
+//!   same values in another order are the same bytes and the same `ETag`. It is absent when the service
+//!   has none (absent and `[]` are the same to a consumer: administrators only), and **absent too, and
+//!   named in [`Built::audience_withheld`], when it breaks the contract's shape** (a value that is not
+//!   1 to 64 visible ASCII characters, more than 32 values, `*` beside another value): a consumer would
+//!   take it for none, so the builder says none, and never publishes what the contract calls malformed;
 //! * the document is **refused, never truncated**, past 500 items or 1 MiB ([`Overflow`]): a client
 //!   never truncates either, and silently dropping agents from a long list would hide them.
 //!
@@ -39,6 +45,12 @@ pub const MAX_BODY_BYTES: usize = 1024 * 1024;
 pub const MAX_TAGS: usize = 16;
 /// The most characters of a tag.
 pub const MAX_TAG_CHARS: usize = 64;
+/// The most values of an item's `audience`.
+pub const MAX_AUDIENCE: usize = 32;
+/// The most characters of an `audience` value.
+pub const MAX_AUDIENCE_CHARS: usize = 64;
+/// The audience value that admits everybody.
+pub const AUDIENCE_EVERYBODY: &str = "*";
 /// The most characters of a title that are kept.
 pub const MAX_TITLE_CHARS: usize = 200;
 /// The longest agent id.
@@ -75,6 +87,11 @@ pub struct Built {
     /// The entries that are listable by the directory's rule and were left out, and why. An entry the
     /// directory does not list (A2A disabled, blocked) is not here: it is not an omission.
     pub skipped: Vec<Skipped>,
+    /// The listed items whose `audience` is **not** in the document because it breaks the contract's
+    /// shape, and why: for the operator's log. The item is listed, and a consumer takes it for one with
+    /// no audience, which is "administrators only". The CRD refuses every one of these, so this is a
+    /// guard for a directory that is not the controller's.
+    pub audience_withheld: Vec<Skipped>,
 }
 
 /// Whether `id` is an agent id: `^[a-z0-9][a-z0-9-]{0,62}$`, the contract's `service`.
@@ -115,6 +132,36 @@ fn tags_of(tags: &[String]) -> Vec<&str> {
         .collect()
 }
 
+/// Whether `value` is an audience value: 1 to 64 visible ASCII characters (`^[!-~]{1,64}$`).
+fn is_audience_value(value: &str) -> bool {
+    (1..=MAX_AUDIENCE_CHARS).contains(&value.len())
+        && value.bytes().all(|b| (b'!'..=b'~').contains(&b))
+}
+
+/// The audience as the document states it: the distinct values in byte order, `None` when there are
+/// none to state, or why the audience is not published.
+///
+/// A set, because that is what a consumer does with it (does one of the person's roles appear in it?):
+/// its order carries nothing, and a list that is only reordered must not change the `ETag` (an edit in
+/// the dashboard and one with `kubectl` may order the same values differently). Tags, whose order is a
+/// display order, are the other way.
+fn audience_of(audience: &[String]) -> Result<Option<Vec<&str>>, &'static str> {
+    let values: BTreeSet<&str> = audience.iter().map(String::as_str).collect();
+    if values.is_empty() {
+        return Ok(None);
+    }
+    if values.len() > MAX_AUDIENCE {
+        return Err("more than 32 distinct audience values");
+    }
+    if !values.iter().all(|v| is_audience_value(v)) {
+        return Err("an audience value is not 1 to 64 visible ASCII characters");
+    }
+    if values.len() > 1 && values.contains(AUDIENCE_EVERYBODY) {
+        return Err("the audience value * is only allowed alone");
+    }
+    Ok(Some(values.into_iter().collect()))
+}
+
 /// Build the document of `entries`. `anchor` is the URL of the document itself, which the contract asks a
 /// server to send and a reader ignores: `None` leaves it out.
 ///
@@ -128,6 +175,7 @@ pub fn build(entries: &[DirectoryEntry], anchor: Option<&str>) -> Result<Built, 
     let mut items: Vec<Value> = Vec::new();
     let mut listed: Vec<String> = Vec::new();
     let mut skipped = Vec::new();
+    let mut audience_withheld = Vec::new();
     let mut seen = BTreeSet::new();
     for e in ordered {
         let who = format!("{}/{}", e.scope, e.name);
@@ -161,6 +209,14 @@ pub fn build(entries: &[DirectoryEntry], anchor: Option<&str>) -> Result<Built, 
         let tags = tags_of(&e.tags);
         if !tags.is_empty() {
             item["tags"] = json!(tags);
+        }
+        match audience_of(&e.audience) {
+            Ok(Some(audience)) => item["audience"] = json!(audience),
+            Ok(None) => {}
+            Err(reason) => audience_withheld.push(Skipped {
+                entry: who.clone(),
+                reason,
+            }),
         }
         items.push(item);
         listed.push(e.name.clone());
@@ -201,6 +257,7 @@ pub fn build(entries: &[DirectoryEntry], anchor: Option<&str>) -> Result<Built, 
         etag,
         listed,
         skipped,
+        audience_withheld,
     })
 }
 

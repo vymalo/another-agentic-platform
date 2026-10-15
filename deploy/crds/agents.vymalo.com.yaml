@@ -776,8 +776,8 @@ spec:
                       Who may use the agent in a client (AD-028): the values of the person's roles claim that
                       admit them. By convention a value is the agent's use permission, `agent.use:<agent-name>`;
                       `*` admits everyone. Absent or empty: administrators only. The CRD checks only the shape;
-                      what the values mean is the consumer's rule. It reaches no pod. It will go to the registry
-                      item (slice D3) and nothing enforces it before slice D8: until then nothing reads it.
+                      what the values mean is the consumer's rule. It reaches no pod: it goes to the registry item as
+                      `audience` (slice D3: each value once, in byte order), and nothing enforces it before slice D8.
                     items:
                       maxLength: 64
                       minLength: 1

@@ -489,6 +489,53 @@ async fn the_directory_is_not_ready_before_the_first_sync_and_lists_in_order_aft
 }
 
 #[tokio::test]
+async fn the_audience_travels_from_the_service_to_its_entry_as_the_service_states_it() {
+    // `spec.access.audience` (AD-028) is copied, not interpreted: absent and `[]` are both empty, and the
+    // order and the repeats are the service's own (the registry normalises what it publishes).
+    let (reader, mut writer) = reflector::store::<AgentService>();
+    let directory = ReflectorDirectory::new(reader);
+    writer.apply_watcher_event(&watcher::Event::Init);
+    let cases: [(&str, Option<serde_json::Value>, &[&str]); 5] = [
+        ("absent", None, &[]),
+        ("empty", Some(json!([])), &[]),
+        ("star", Some(json!(["*"])), &["*"]),
+        (
+            "one",
+            Some(json!(["agent.use:coder-me"])),
+            &["agent.use:coder-me"],
+        ),
+        (
+            "unordered",
+            Some(json!(["agent.use:ops", "agent.use:admin", "agent.use:ops"])),
+            &["agent.use:ops", "agent.use:admin", "agent.use:ops"],
+        ),
+    ];
+    for (name, audience, _) in &cases {
+        let mut svc = serde_json::to_value(service("a", name, ready("http://x/card"))).unwrap();
+        if let Some(audience) = audience {
+            svc["spec"]["access"] = json!({ "audience": audience });
+        }
+        let svc: AgentService = serde_json::from_value(svc).unwrap();
+        writer.apply_watcher_event(&watcher::Event::InitApply(svc));
+    }
+    writer.apply_watcher_event(&watcher::Event::InitDone);
+    for (name, _, expected) in cases {
+        let entry = directory.get("a", name).await.unwrap().unwrap();
+        assert_eq!(entry.audience, expected, "{name}");
+        assert!(entry.listed(), "{name}: an audience does not gate listing");
+    }
+
+    // An edit of the service reaches the entry through the cache.
+    let mut edited = serde_json::to_value(service("a", "absent", ready("http://x/card"))).unwrap();
+    edited["spec"]["access"] = json!({ "audience": ["agent.use:absent"] });
+    writer.apply_watcher_event(&watcher::Event::Apply(
+        serde_json::from_value(edited).unwrap(),
+    ));
+    let entry = directory.get("a", "absent").await.unwrap().unwrap();
+    assert_eq!(entry.audience, ["agent.use:absent"]);
+}
+
+#[tokio::test]
 async fn the_directory_follows_the_cache() {
     let (reader, mut writer) = reflector::store::<AgentService>();
     let directory = ReflectorDirectory::new(reader);

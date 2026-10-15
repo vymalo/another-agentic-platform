@@ -1338,7 +1338,9 @@ async fn the_registry_lists_a_ready_agent_to_whoever_holds_the_token_and_nobody_
     let ns = case.ns.clone();
 
     case.secrets("chat").await;
-    let (svc, cfg) = chat("chat", &cluster.image);
+    let (mut svc, cfg) = chat("chat", &cluster.image);
+    // An audience (AD-028, slice D3), stated in an order that is not the published one.
+    svc["spec"]["access"]["audience"] = json!(["agent.use:chat", "agent.use:admin"]);
     case.apply::<aap_api::AgentConfig>(&cfg).await;
     case.apply::<AgentService>(&svc).await;
     // A service whose config does not exist is Blocked, and a registry never lists what is not applied.
@@ -1401,8 +1403,9 @@ async fn the_registry_lists_a_ready_agent_to_whoever_holds_the_token_and_nobody_
     let card = format!("http://chat.{ns}.svc:8080/.well-known/agent-card.json");
     assert_eq!(
         context["item"],
-        json!([{"href": card, "type": "application/json", "service": ["chat"], "title": "chat", "tags": ["e2e"]}]),
-        "the agent that is Ready is listed, the blocked one is not: {body}"
+        json!([{"href": card, "type": "application/json", "service": ["chat"], "title": "chat", "tags": ["e2e"],
+                "audience": ["agent.use:admin", "agent.use:chat"]}]),
+        "the agent that is Ready is listed with its audience as a set, the blocked one is not: {body}"
     );
     assert!(!body.contains(TOKEN));
 

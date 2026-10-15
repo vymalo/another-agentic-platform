@@ -19,6 +19,12 @@ pub struct DirectoryEntry {
     pub description: Option<String>,
     /// Free-form tags (`spec.registry.tags`).
     pub tags: Vec<String>,
+    /// Who may use the agent (`spec.access.audience`, AD-028): the values of a person's roles claim
+    /// that admit them, or `*` for everyone, **as the service states them**: in its order, with its
+    /// repeats. Empty is "no audience" (absent and `[]` are the same to a consumer): administrators
+    /// only. The registry normalises what it publishes, so a directory does not have to.
+    #[serde(default)]
+    pub audience: Vec<String>,
     /// The agent card's URL (`status.endpoints.agentCard`). `None` until the runtime has one.
     pub agent_card: Option<String>,
     /// The service serves A2A (`spec.interfaces.a2a.enabled`).

@@ -172,7 +172,9 @@ async fn a_service_that_appears_is_reconciled_and_listed_in_the_directory() {
     eventually("the caches to sync", || r.readiness.is_ready()).await;
     assert!(r.directory.list().await.unwrap().is_empty());
 
-    let (service, config) = example("chat", "team");
+    let (mut service, config) = example("chat", "team");
+    // An audience (AD-028) set on the object reaches the directory entry: the registry publishes from it.
+    service["spec"]["access"]["audience"] = json!(["agent.use:chat", "agent.use:admin"]);
     r.fake.put(CONFIGS, config);
     r.fake.put(SERVICES, service);
     eventually("the service to be Ready", || {
@@ -206,6 +208,11 @@ async fn a_service_that_appears_is_reconciled_and_listed_in_the_directory() {
     }
     let entry = r.directory.get("team", "chat").await.unwrap().unwrap();
     assert!(entry.listed(), "{entry:?}");
+    assert_eq!(
+        entry.audience,
+        ["agent.use:chat", "agent.use:admin"],
+        "from the object, through the list and the watch, as stated"
+    );
     assert!(
         r.metrics.get(
             aap_controller::metric::RECONCILES,

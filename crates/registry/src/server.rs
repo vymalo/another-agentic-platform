@@ -78,6 +78,13 @@ impl<D: AgentDirectory + 'static> Registry<D> {
                 for s in &built.skipped {
                     tracing::warn!("{} is not in the registry: {}", s.entry, s.reason);
                 }
+                for s in &built.audience_withheld {
+                    tracing::warn!(
+                        "{} is listed with no audience, so for administrators only: {}",
+                        s.entry,
+                        s.reason
+                    );
+                }
                 Ok(built)
             }
             Err(overflow) => {
