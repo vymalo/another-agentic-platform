@@ -932,3 +932,168 @@ fn a_config_is_checked_by_itself() {
     aap_domain::validate_config(&config).unwrap();
     assert!(validate(&service, &config, &Externals::default()).is_err());
 }
+
+// ------------------------------------------------------------------ a refused URL is not echoed whole
+
+const PASSWORD: &str = "s3cr3t-password";
+
+fn endpoint_with(url: &str) -> aap_api::ModelEndpoint {
+    serde_json::from_value(json!({
+        "apiVersion": "agents.vymalo.com/v1alpha1", "kind": "ModelEndpoint",
+        "metadata": {"name": "gateway", "namespace": "another-agentic-system"},
+        "spec": {"title": "Gateway", "baseUrl": {"value": url},
+                 "apiKeySecretRef": {"name": "agent-models", "key": "GATEWAY_API_KEY"}},
+    }))
+    .unwrap()
+}
+
+fn provider_with(url: &str) -> aap_api::ToolProvider {
+    serde_json::from_value(json!({
+        "apiVersion": "agents.vymalo.com/v1alpha1", "kind": "ToolProvider",
+        "metadata": {"name": "search", "namespace": "another-agentic-system"},
+        "spec": {"title": "Search", "mcp": {"url": url, "headers": {}, "tools": [], "optional": false}},
+    }))
+    .unwrap()
+}
+
+/// The issues of `name` with a change and some externals; none when the example is accepted.
+fn found_with(
+    name: &str,
+    externals: &Externals,
+    change: impl FnOnce(&mut Value, &mut Value),
+) -> Vec<ConfigIssue> {
+    common::resolved_with(name, externals, change)
+        .err()
+        .unwrap_or_default()
+}
+
+/// Every place that takes a URL and echoes it when it refuses it, with `url` in it: the issues of each
+/// (none when that field accepts the URL).
+fn url_in_every_field(url: &str) -> Vec<(&'static str, Vec<ConfigIssue>)> {
+    let none = Externals::default();
+    vec![
+        (
+            "inline model address",
+            found_with("chat", &none, |_, c| {
+                set(c, "/spec/model/baseUrl", json!({ "value": url }));
+            }),
+        ),
+        (
+            "inline MCP server",
+            found_with("chat", &none, |_, c| {
+                set(c, "/spec/tools/mcpServers", json!({"search": {"url": url}}));
+            }),
+        ),
+        (
+            "the service's public URL",
+            found_with("chat", &none, |s, _| {
+                set(s, "/spec/interfaces/a2a/publicUrl", json!(url));
+            }),
+        ),
+        (
+            "the coder's GitHub API URL",
+            found_with("coder", &none, |_, c| {
+                set(c, &format!("{CODER}/githubApiUrl"), json!(url));
+            }),
+        ),
+        (
+            "a ModelEndpoint",
+            found_with(
+                "chat",
+                &Externals::default().with_model_endpoint(endpoint_with(url)),
+                |_, c| {
+                    remove(c, "/spec/model/baseUrl");
+                    remove(c, "/spec/model/apiKeySecretRef");
+                    set(c, "/spec/model/endpointRef", json!({"name": "gateway"}));
+                },
+            ),
+        ),
+        (
+            "a ToolProvider",
+            found_with(
+                "chat",
+                &Externals::default().with_tool_provider(provider_with(url)),
+                |_, c| {
+                    set(
+                        c,
+                        "/spec/tools/mcpServers",
+                        json!({"search": {"providerRef": {"name": "search"}}}),
+                    );
+                },
+            ),
+        ),
+    ]
+}
+
+/// A URL that is refused can carry a secret (a user name and password, a token in the query or the
+/// path), and the issue goes to the `ConfigResolved` condition and the Events of every service that uses
+/// the object. No issue says it, in any field that takes a URL, inline or by reference, and each still
+/// says what is wrong.
+#[test]
+fn a_secret_in_a_refused_url_is_in_no_issue() {
+    // (the URL, a word of the reason every field that refuses it must say, whether every field refuses it)
+    let cases = [
+        (
+            format!("https://bot:{PASSWORD}@search.example.com/mcp"),
+            "user name or password",
+            true,
+        ),
+        (
+            format!("https://bot:{PASSWORD}@search.example.com"),
+            "user name or password",
+            true,
+        ),
+        // `$` is refused in an MCP URL only (strict), a missing scheme everywhere.
+        (
+            format!("https://search.example.com/mcp?api_key={PASSWORD}$"),
+            "`$`",
+            false,
+        ),
+        (
+            format!("https://search.example.com/{PASSWORD}/${{TOKEN}}"),
+            "`$`",
+            false,
+        ),
+        (
+            format!("{PASSWORD}@search.example.com/mcp"),
+            "not an http or https URL",
+            true,
+        ),
+        (
+            format!("search.example.com/mcp?api_key={PASSWORD}"),
+            "not an http or https URL",
+            true,
+        ),
+        (
+            format!("https://search.example.com/mcp?api_key={PASSWORD} x"),
+            "whitespace",
+            true,
+        ),
+    ];
+    for (url, reason, everywhere) in cases {
+        let found = url_in_every_field(&url);
+        assert!(
+            found.iter().any(|(_, issues)| !issues.is_empty()),
+            "{url} was accepted everywhere"
+        );
+        for (field, issues) in found {
+            if everywhere {
+                assert!(!issues.is_empty(), "{field}: {url} was accepted");
+            }
+            for issue in &issues {
+                // Rendered as the controller does (`field: message`), which is what reaches the status.
+                let shown = issue.to_string();
+                assert!(
+                    !shown.contains(PASSWORD),
+                    "{field}: the issue echoes the secret of {url:?}: {shown}"
+                );
+            }
+            if !issues.is_empty() {
+                assert!(
+                    issues.iter().any(|i| i.message.contains(reason)),
+                    "{field}: no issue says {reason:?} for {url:?} in {issues:#?}"
+                );
+            }
+        }
+    }
+}

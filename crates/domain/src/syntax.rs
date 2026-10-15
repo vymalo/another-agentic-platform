@@ -95,6 +95,40 @@ pub fn parse_http_url(s: &str, strict: bool) -> Result<HttpUrl<'_>, &'static str
     })
 }
 
+/// A URL as an issue may show it: the scheme and the host, with the user name and password replaced by
+/// `***` and everything after the host (path, query, fragment) replaced by `/…`. An issue reaches the
+/// status and the Events of every service that uses the object, and a URL that is refused is the one most
+/// likely to carry a secret: `https://user:password@host/`, `https://host/mcp?api_key=…`, a token in a
+/// path. The field the issue names says which one, and the host says whether it is the right one.
+///
+/// A user name or password is recognised by an `@` before the first `?` or `#`, the last one counting,
+/// so a password with a `/` in it is hidden too. A string with no scheme before its first `://` is shown
+/// the same way, without one.
+pub fn shown_url(s: &str) -> String {
+    let (scheme, rest) = match s.find("://") {
+        Some(i)
+            if s[..i]
+                .chars()
+                .all(|c| c.is_ascii_alphanumeric() || "+-.".contains(c)) =>
+        {
+            (&s[..i + 3], &s[i + 3..])
+        }
+        _ => ("", s),
+    };
+    let head_end = rest.find(['?', '#']).unwrap_or(rest.len());
+    let head = &rest[..head_end];
+    let hostpath = match head.rfind('@') {
+        Some(i) => format!("***@{}", &head[i + 1..]),
+        None => head.to_owned(),
+    };
+    let (origin, path) = match hostpath.split_once('/') {
+        Some((origin, _)) => (origin.to_owned(), true),
+        None => (hostpath, false),
+    };
+    let more = path || head_end < rest.len();
+    format!("{scheme}{origin}{}", if more { "/…" } else { "" })
+}
+
 /// Whether a URL is plain `http` to another machine, which adam refuses at startup unless
 /// `MCP_ALLOW_INSECURE` is set: the rule of adam-rs `crates/adam-mcp/src/url.rs` as the chart
 /// restates it (https, or http to `localhost`, `*.localhost`, `127.*` and `[::1]`, need nothing).
@@ -258,6 +292,38 @@ mod tests {
         }
         // Not strict: a fragment and a `$` are the caller's business.
         assert!(parse_http_url("https://x/a$b#f", false).is_ok());
+    }
+
+    #[test]
+    fn a_shown_url_has_no_user_no_password_and_no_path() {
+        for (url, shown) in [
+            (
+                "https://u:p@gw.example.com/v1",
+                "https://***@gw.example.com/…",
+            ),
+            ("https://bot:s3cr3t@host:8443", "https://***@host:8443"),
+            ("https://x/${TOKEN}", "https://x/…"),
+            ("https://host/mcp?api_key=s3cr3t", "https://host/…"),
+            ("https://host?api_key=s3cr3t", "https://host/…"),
+            ("https://host#s3cr3t", "https://host/…"),
+            ("https://host/mcp/s3cr3t-in-the-path", "https://host/…"),
+            // A password with a `/` in it, and one with an `@`: the last `@` before the query counts.
+            ("https://user:pa/ss@host/mcp", "https://***@host/…"),
+            ("https://user:p@ss@host/mcp", "https://***@host/…"),
+            ("https://x /y", "https://x /…"),
+            ("ftp://x/", "ftp://x/…"),
+            ("gateway.example.invalid/v1", "gateway.example.invalid/…"),
+            (
+                "u:s3cr3t@gateway.example.invalid/v1",
+                "***@gateway.example.invalid/…",
+            ),
+            ("u:s3cr3t@https://x", "***@https:/…"),
+            ("https://host", "https://host"),
+            ("", ""),
+        ] {
+            assert_eq!(shown_url(url), shown, "{url}");
+            assert!(!shown_url(url).contains("s3cr3t"), "{url}");
+        }
     }
 
     #[test]

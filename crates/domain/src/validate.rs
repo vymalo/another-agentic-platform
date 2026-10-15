@@ -11,7 +11,7 @@ use crate::externals::Externals;
 use crate::refs::{Materialized, Origins, materialize};
 use crate::syntax::{
     is_adam_tool_name, is_dns_label, is_env_name, is_http_token, is_mount_path,
-    is_plain_http_remote, is_relative_file_path, is_size, parse_http_url, paths_overlap,
+    is_plain_http_remote, is_relative_file_path, is_size, parse_http_url, paths_overlap, shown_url,
 };
 use crate::{convert, plan};
 
@@ -160,7 +160,7 @@ fn check_service(v: &mut Issues, svc: &AgentService, cfg: &AgentConfig) {
     {
         v.add(
             format!("{me} spec.interfaces.a2a.publicUrl"),
-            format!("{url:?}: {why}"),
+            format!("{:?}: {why}", shown_url(url)),
         );
     }
     if svc.spec.interfaces.responses.enabled || svc.spec.interfaces.mcp.enabled {
@@ -298,7 +298,10 @@ fn check_config(v: &mut Issues, cfg: &AgentConfig, origins: &Origins) {
             match (&base.value, &base.secret_ref) {
                 (Some(url), None) => {
                     if let Err(why) = parse_http_url(url, false) {
-                        v.add(format!("{base_at}.value"), format!("{url:?}: {why}"));
+                        v.add(
+                            format!("{base_at}.value"),
+                            format!("{:?}: {why}", shown_url(url)),
+                        );
                     }
                 }
                 (None, Some(r)) => secret_ref(v, &format!("{base_at}.secretRef"), r),
@@ -456,7 +459,7 @@ fn check_coder(v: &mut Issues, cfg: &AgentConfig, coder: &aap_api::Coder) {
     {
         v.add(
             format!("{me} {base}.githubApiUrl"),
-            format!("{url:?}: {why}"),
+            format!("{:?}: {why}", shown_url(url)),
         );
     }
     if let Some(a) = &coder.git_author
@@ -603,7 +606,7 @@ fn check_tools(v: &mut Issues, cfg: &AgentConfig, origins: &Origins) {
                 match parse_http_url(url, true) {
                     Err(why) => v.add(
                         &url_at,
-                        format!("{url:?}: {why}. A URL is http or https with no user name, password or ${{VAR}} in it (a secret in a URL reaches the logs)"),
+                        format!("{:?}: {why}. A URL is http or https with no user name, password or ${{VAR}} in it (a secret in a URL reaches the logs)", shown_url(url)),
                     ),
                     Ok(_) => {
                         if is_plain_http_remote(url) && !tools.allow_insecure_http {

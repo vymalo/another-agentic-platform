@@ -72,6 +72,15 @@ replicas); a `split` one has the workers (`<svc>`, role `Worker`) and the front 
   (§59a: "named by the Secret key"). `tests/secrets.rs` puts sentinels in every Secret name and key of both
   examples, walks the specs, and fails if either is anywhere but a reference, a header variable's name or a
   `${…}` of the MCP file.
+* **An issue never carries a URL whole.** A URL that is refused is the one most likely to hold a secret (a user
+  name and password, a token in the query or the path), and an issue reaches the `ConfigResolved` condition and the
+  Events of every service that uses the object. The four fields that take a URL (a model's address, an MCP server's
+  URL, `interfaces.a2a.publicUrl`, the coder's `githubApiUrl`, inline or in a referent) show it through `shown_url`:
+  the scheme and the host, `***` for a user name and password, `/…` for what follows the host
+  (`https://***@gw.example.com/…`). `tests/validate.rs` refuses a URL with a password, a token in the query and in
+  the path, in every one of those fields, and fails if the secret is anywhere in an issue. A password with a `/` in
+  it is not a valid URL, `parse_http_url` does not see a user name in it and accepts it as a host (not echoed, since
+  not refused).
 * **Files.** An inline folder is an immutable file set `<svc>-agent-<hash8>` (the first eight hex digits of
   the sha256 of its content) mounted read-only at `/etc/adam/agent`; a `configMapRef` is mounted as it is
   (`ExternalFiles`). The extra MCP servers are the file set `<svc>-mcp` (`mcp.json`, `${VAR}` references
@@ -230,13 +239,13 @@ runs the tests against the checked-in goldens only.
 | File | What |
 |---|---|
 | `tests/examples.rs` | every row of §59a's table on `coder` and `chat`, and the variations: split, each placement, a token, a pinned installation, a cluster store, a folder from a ConfigMap, no sidecar |
-| `tests/validate.rs` | each rule refused with the field it is about; the examples accepted; every `examples/invalid` file refused (but the ones it names: the audience's and the bounds the operator does not enforce), a shared object's paired with a coder that names it; the exclusive forms checked again |
+| `tests/validate.rs` | each rule refused with the field it is about; no secret of a refused URL in any issue; the examples accepted; every `examples/invalid` file refused (but the ones it names: the audience's and the bounds the operator does not enforce), a shared object's paired with a coder that names it; the exclusive forms checked again |
 | `tests/references.rs` | slice D2: a reference gives what the inline form gives (model, servers, a whole config, digest included); `optional` over its four cases; the allow-list written sorted, once each, absent when empty, refused when adam cannot name it; the digest follows a referent's content and not its title; a missing referent named, one of another namespace not read; a referent checked as the inline form is (sentence for sentence); the header-variable clash across providers and with an inline server; the default image everywhere the image goes, the digest rule, the refusals; `references()` |
 | `tests/digest.rs` | the digest rules above, the pinned digest and the properties; the audience reaches no pod (the resolved agent and the digest are the same with any audience) |
 | `tests/secrets.rs` | the sentinel walk: no secret value in a spec |
 | `tests/parity.rs` | the goldens |
 | `tests/conformance.rs` | every resolved spec passes `RuntimeSpec::check` and is made by `MemoryRuntime`/`MemoryStore`; `DATABASE_URL` and the provisioner's connection agree |
-| `src/*` unit tests | the syntax checks (DNS label, URL, quantity, paths) and the canonical JSON |
+| `src/*` unit tests | the syntax checks (DNS label, URL and how a URL is shown, quantity, paths) and the canonical JSON |
 
 Not tested here: anything that needs a cluster (the CEL rules against a real API server are the `kind` job's;
 the pods a provider makes from a spec are S4's).
