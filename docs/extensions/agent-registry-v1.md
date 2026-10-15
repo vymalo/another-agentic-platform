@@ -3,7 +3,7 @@
 - **URI:** `https://agents.vymalo.com/registry/v1`
 - **Status:** draft (2026-10-01)
 - **Implemented by:** the another-agentic-platform control plane (platform API); **v0: the operator binary** ([architecture §59a](../architecture/10-control-plane-and-crds.md#registry-in-v0)), serving the same document with one static bearer and no per-caller filtering until a control plane exists. A header note of 2026-10-04: the contract is unchanged, and the deviations are the server's, not the client's. Built 2026-10-05 as [`aap-registry`](../../crates/registry/README.md) (S7), which holds the contract's document rules in code and reads its own output with the consumer's reader
-- **Accepted by the owner, not yet in this contract (2026-10-05):** an optional item attribute `audience` (who may use the agent, enforced by a consumer that offers agents to people, failing closed; by convention the values are use permissions, `agent.use:<agent-name>`), specified in [architecture §60a](../architecture/10-control-plane-and-crds.md#who-may-use-an-agent-ad-028) as AD-028 (was P-009). Slice D3 edits the *Item* table and the rules here
+- **Amended 2026-10-15 (D3):** an optional item attribute `audience` (who may use the agent, enforced by a consumer that offers agents to people, failing closed; by convention the values are use permissions, `agent.use:<agent-name>`), accepted by the owner on 2026-10-05 and specified in [architecture §60a](../architecture/10-control-plane-and-crds.md#who-may-use-an-agent-ad-028) as AD-028 (was P-009). It is added to the *Item* table and to the rules below, with [its own section](#audience). The contract is **additive, so it stays `v1`**: see [Versioning](#versioning). Built as slice D3 in [`aap-registry`](../../crates/registry/README.md), which publishes it from `AgentService.spec.access.audience`
 - **Consumed by:** any client that wants to list the fleet's A2A agents — first consumer: another-agentic-system ([ADR 0022](https://github.com/vymalo/another-agentic-system/blob/main/docs/decisions/0022-platform-provisions-agents-system-discovers-them.md))
 
 The URI is a **profile identifier** (it names this contract inside the document and in the
@@ -66,13 +66,15 @@ ETag: "r-2026-10-01T09:00:00Z"
           "type": "application/json",
           "title": "Coder",
           "service": ["coder"],
-          "tags": ["coding", "git"]
+          "tags": ["coding", "git"],
+          "audience": ["agent.use:coder"]
         },
         {
           "href": "https://researcher.agents.example.com/.well-known/agent-card.json",
           "type": "application/json",
           "title": "Researcher",
-          "service": ["researcher"]
+          "service": ["researcher"],
+          "audience": ["*"]
         }
       ]
     }
@@ -108,10 +110,11 @@ even when there is only one. Relation members are arrays even when they hold one
 | `title` | no | string | Display name. A client defaults to the `service` id when absent. |
 | `service` | yes | array of one string | The service id: the `AgentService` name ([architecture §7](../architecture/02-domain-model.md)), lower-case letters, digits and dashes, starting with a letter or digit, at most 63 characters (`^[a-z0-9][a-z0-9-]{0,62}$`). Stable for the life of the service. |
 | `tags` | no | array of strings | Labels for grouping and filtering (see [Tags](#tags)). Omitted when the service has none. |
+| `audience` | no | array of strings | Who may use the agent, for a client that offers agents to people (see [Audience](#audience)): at most 32 values of 1 to 64 visible ASCII characters (`^[!-~]{1,64}$`), or the single value `"*"`. Omitted when the service has none. |
 
 `title` and `type` are target attributes defined by Web Linking, so each is a single value;
-`service` and `tags` are extension target attributes, so each is an array even when it holds
-one value (*verified 2026-10-01*, RFC 9264 §4.2.4.1 and §4.2.4.3).
+`service`, `tags` and `audience` are extension target attributes, so each is an array even when
+it holds one value (*verified 2026-10-01*, RFC 9264 §4.2.4.1 and §4.2.4.3).
 
 ## Rules
 
@@ -132,7 +135,9 @@ one value (*verified 2026-10-01*, RFC 9264 §4.2.4.1 and §4.2.4.3).
    string. The remaining items are kept, and the client says it skipped some (a warning in its
    logs, not in the user's way). Tags are advisory: a malformed `tags` value (not an array of
    strings, an empty or over-long tag, more than 16 tags) is dropped as a whole and the item
-   is kept.
+   is kept. A malformed `audience` is not a reason to skip an item either, and it is not
+   advisory: the item is kept and **its audience is read as none**, which is "administrators
+   only" ([Audience](#audience)).
 6. **Unreadable documents fail closed.** The source is **unavailable** (not "empty") when the
    body is not valid JSON, is not an object with a `linkset` array, has no context object
    carrying the v1 `profile` link or more than one context object carrying it (context objects
@@ -141,7 +146,9 @@ one value (*verified 2026-10-01*, RFC 9264 §4.2.4.1 and §4.2.4.3).
    from a long list would hide them.
 
 Limits: at most 500 items and a 1 MiB body per document; at most 16 tags per item and 64
-characters per tag. A fleet that outgrows them needs grouping (nested catalogs, RFC 9727
+characters per tag; at most 32 audience values per item and 64 characters per value. The body
+limit counts every member, so a fleet whose audiences make the document pass 1 MiB is refused
+whole, like any other (500 items of 32 values of 64 characters are already over it). A fleet that outgrows them needs grouping (nested catalogs, RFC 9727
 §4.3 and §5.3) or a v2.
 
 ## Tags
@@ -159,6 +166,55 @@ optional `tags` attribute of an item.
   never listed here. A client that wants a release picker reads the agent card's
   release-channels extension, live, as it does without a registry.
 
+## Audience
+
+The optional `audience` attribute says **who may use the agent**, to a client that offers listed
+agents to people. The platform keeps it on the `AgentService` (`spec.access.audience`, [architecture
+§60a](../architecture/10-control-plane-and-crds.md#who-may-use-an-agent-ad-028), AD-028), set and
+changed in the control plane; it appears **only** as this attribute of an item, and reaches no
+agent: it is not in any pod's environment or configuration.
+
+```json
+{ "href": "http://coder-me.another-agentic-system.svc:8080/.well-known/agent-card.json",
+  "type": "application/json", "title": "Coder (me)", "service": ["coder-me"],
+  "tags": ["coding", "git"], "audience": ["agent.use:coder-me"] }
+```
+
+**Shape.** An array of at most 32 strings, each 1 to 64 visible ASCII characters (`!` to `~`: no
+space, control or non-ASCII character), compared exactly. The value `"*"` admits everybody and is
+only allowed alone. By convention a value is the agent's **use permission**,
+`agent.use:<agent-name>`, a role the deployment's identity provider grants to people (for example
+through composite roles), so who may use an agent is decided there and not in the platform. The
+contract fixes no other meaning: a value is a string that a person's roles claim may hold.
+
+**The three cases a server publishes.**
+
+| The service has | The item |
+|---|---|
+| no audience, or an empty one | no `audience` attribute (the two are the same: administrators only) |
+| `["*"]` | `"audience": ["*"]` |
+| values | `"audience"` with the values **as a set**: each once, in byte order |
+
+A server publishes an audience as a set because its order means nothing to a consumer, and a
+document that only reorders the values should not change its `ETag`. A server never publishes an
+audience that breaks the shape above: a client would read it as none, so the server leaves it out.
+(This registry does, and logs that it did.) Clients do not depend on the order or on there being
+no repeats.
+
+**The consumer's rule.** A client that offers listed agents to people **shows an item to a
+person, and lets them invoke it, only when its `audience` holds `"*"` or one of the values of the
+person's roles claim** (the claim is the client's configuration, not this contract's). An item with
+**no `audience`, an empty one or a malformed one** (not an array of strings, a value outside the
+shape, more than 32 values, or `"*"` beside another value) **is for the client's administrators
+only**. **Fail closed**: an agent just made, with no audience yet, is seen by the administrators,
+who can try it, and by nobody else. A client that offers nothing to people (a script) may ignore
+the attribute.
+
+**Listing is still not a grant** ([Serving](#serving)). `audience` tells a client whom to offer an
+agent to; the agent itself checks only the bearer it is called with. For people, the client is the
+enforcement point, as it is for any role it already checks. [Rule 1](#rules) is a different filter:
+it is about the caller of the registry, and `audience` is about the people behind that caller.
+
 ## Serving
 
 - **Path.** `GET /registry/v1/agents` on the platform API host is recommended. Clients take the
@@ -175,6 +231,8 @@ optional `tags` attribute of an item.
 - **Listing is not a grant.** The registry hands out no credentials. Each agent card and A2A
   endpoint applies its own service's authorization
   ([architecture §44](../architecture/03-interfaces.md), [§68](../architecture/08-security.md)).
+  An `audience` ([Audience](#audience)) is no grant either: it is what a client reads to decide
+  whom to offer an agent to.
 - **Transport.** HTTPS outside a trusted cluster network, and the endpoint is rate-limited like
   other control-plane endpoints (RFC 9727 §8 recommends both for an API catalog; *verified
   2026-10-01*).
@@ -220,7 +278,8 @@ sequenceDiagram
   U->>S: open the agent picker
   S->>R: GET /registry/v1/agents, Accept linkset+json, Bearer token
   R-->>S: 200 linkset, Cache-Control max-age 30, ETag
-  S-->>U: agents in display order, with tags
+  S->>S: keep the items whose audience admits the user's roles
+  S-->>U: those agents in display order, with tags
   Note over S,R: later, the copy has expired
   S->>R: GET again with If-None-Match
   R-->>S: 304 Not Modified, freshness renewed
@@ -252,7 +311,13 @@ It holds no copy and no validator, so the next read is an unconditional `GET`.
 
 Breaking changes get a new URI (`…/registry/v2`) and a new file, `agent-registry-v2.md`; this
 file stays. Adding an optional item attribute is not breaking, because clients ignore unknown
-attributes (rule 4). A service may declare both versions during a transition: the document then
+attributes (rule 4). That is how `audience` was added on 2026-10-15 (D3): the URI is unchanged
+and a document with audiences is a valid `v1` document for a reader that predates it. The risk is
+that such a client ignores the attribute and so shows a restricted agent to everybody, which is why
+a client that offers agents to people implements [the consumer's rule](#audience) before any
+service has an audience. A reader of the system's, from before the attribute, is tested to read
+such a document with no item skipped
+([`aap-registry`](../../crates/registry/README.md#the-consumers-reader)). A service may declare both versions during a transition: the document then
 carries both `profile` links, either in one context object whose items are valid under both
 versions or in one context object per version. A client reads the one context object that
 carries the profile it implements.
@@ -269,7 +334,7 @@ carries the profile it implements.
   §3.1 (the `item` relation identifies a member of the catalog), §4.2 (the catalog MUST be
   `application/linkset+json` and SHOULD carry `profile="https://www.rfc-editor.org/info/rfc9727"`),
   §4.3 and §5.3 (nested catalogs, caching and compression), §8 (TLS, rate limiting).
-- Not from the RFCs: the attributes `service` and `tags`, the version `profile` link and the
+- Not from the RFCs: the attributes `service`, `tags` and `audience`, the version `profile` link and the
   limits are this contract's own definitions. The RFCs supply only the shape (a linkset of
   `item` links with extension target attributes).
 - *Verified 2026-10-01* against <https://a2a-protocol.org/latest/topics/agent-discovery/>: A2A
