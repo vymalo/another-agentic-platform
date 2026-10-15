@@ -21,6 +21,10 @@ pub struct Externals {
     /// The operator's default agent image (`--default-agent-image`), used by a config that names none.
     /// `None` (or only white space): the operator has no default, and such a config is invalid.
     pub default_image: Option<String>,
+    /// The shared kinds the cluster does not serve, by kind (`ModelEndpoint`, `ToolProvider`): their
+    /// CustomResourceDefinition is not installed. A reference to one is missing for a reason other than a
+    /// forgotten object, and the issue says so: nobody can create the referent until the CRDs are there.
+    pub kinds_not_installed: BTreeSet<String>,
 }
 
 impl Externals {
@@ -28,6 +32,13 @@ impl Externals {
     #[must_use]
     pub fn with_default_image(mut self, image: impl Into<String>) -> Self {
         self.default_image = Some(image.into());
+        self
+    }
+
+    /// A shared kind (`ModelEndpoint` or `ToolProvider`) whose CRD the cluster does not have.
+    #[must_use]
+    pub fn with_kind_not_installed(mut self, kind: impl Into<String>) -> Self {
+        self.kinds_not_installed.insert(kind.into());
         self
     }
 

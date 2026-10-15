@@ -494,6 +494,46 @@ async fn a_reference_to_an_object_that_is_not_there_blocks_the_service_and_names
 }
 
 #[tokio::test]
+async fn a_reference_to_a_kind_whose_crd_is_not_installed_blocks_the_service_and_says_so() {
+    // The API server answers a kind it does not serve with the plain text `404 page not found`, not with
+    // a Status that names an object, and kube's `get_opt` calls that an error: the pass would fail, back
+    // off and retry, and the status would never say anything. The pass reads it as what it is.
+    let w = dashboard_world();
+    w.fake.absent(&[ENDPOINTS, PROVIDERS]);
+    let next = w.settle().await;
+
+    let status = w.status();
+    assert_eq!(status["state"], "Blocked");
+    is(&status, "ConfigResolved", "False", "ConfigInvalid");
+    let message = w.message();
+    for who in ["ModelEndpoint \"gateway\"", "ToolProvider \"websearch\""] {
+        assert!(
+            message.contains(who)
+                && message.contains("is not installed")
+                && message.contains("deploy/operator-crds"),
+            "{who} in {message}"
+        );
+    }
+    assert!(
+        w.runtime.ids().is_empty(),
+        "nothing is made from half an agent"
+    );
+    // The pass found something to say, so it is not a failed pass: no error backoff, a timer.
+    assert!(requeue_after(&next) >= Duration::from_secs(1));
+
+    // The CRDs are installed, but the objects are not created yet: now they are only missing.
+    w.fake.absent(&[]);
+    w.pass().await.unwrap();
+    assert!(w.message().contains("was not found"), "{}", w.message());
+    assert!(!w.message().contains("is not installed"), "{}", w.message());
+
+    // And created: the agent is made.
+    w.put_shared();
+    w.pass().await.unwrap();
+    assert_eq!(w.status()["state"], "Ready", "{}", w.status());
+}
+
+#[tokio::test]
 async fn a_referent_created_after_the_config_unblocks_it() {
     let w = dashboard_world();
     w.settle().await;

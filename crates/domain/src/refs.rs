@@ -12,7 +12,7 @@
 //! so an issue about a provider's URL names the provider and not the server of the config, and a
 //! provider's allow-list of tools.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
 use aap_api::{AgentConfig, Image};
 use k8s_openapi::apimachinery::pkg::apis::meta::v1::ObjectMeta;
@@ -50,16 +50,23 @@ pub(crate) struct Materialized {
     pub issues: Vec<ConfigIssue>,
 }
 
-/// The object `name` of `map`, or the sentence that says why there is none.
+/// The object `name` of `map`, or the sentence that says why there is none. When the cluster does not
+/// serve the kind (`not_installed`) nobody can create the object: the sentence says what to install.
 fn find<'a, T>(
     map: &'a BTreeMap<String, T>,
     kind: &str,
+    not_installed: &BTreeSet<String>,
     name: &str,
     namespace: Option<&str>,
     meta: impl Fn(&T) -> &ObjectMeta,
     instead: &str,
 ) -> Result<&'a T, String> {
     let at = namespace.unwrap_or("(none)");
+    if not_installed.contains(kind) {
+        return Err(format!(
+            "{kind} {name:?} cannot be read: this cluster does not serve the kind {kind}, because its CustomResourceDefinition is not installed (install the CRDs chart, deploy/operator-crds, which holds all four of agents.vymalo.com), or {instead}"
+        ));
+    }
     let Some(found) = map.get(name) else {
         return Err(format!(
             "{kind} {name:?} was not found in namespace {at:?}: create it, or {instead}"
@@ -93,6 +100,7 @@ pub(crate) fn materialize(config: &AgentConfig, externals: &Externals) -> Materi
         match find(
             &externals.model_endpoints,
             "ModelEndpoint",
+            &externals.kinds_not_installed,
             &r.name,
             namespace,
             |e| &e.metadata,
@@ -122,6 +130,7 @@ pub(crate) fn materialize(config: &AgentConfig, externals: &Externals) -> Materi
         match find(
             &externals.tool_providers,
             "ToolProvider",
+            &externals.kinds_not_installed,
             &r.name,
             namespace,
             |p| &p.metadata,

@@ -524,6 +524,58 @@ fn a_missing_referent_is_an_issue_that_names_it() {
 }
 
 #[test]
+fn a_referent_of_a_kind_the_cluster_does_not_serve_says_to_install_the_crds() {
+    // The same example, with the composition root having found that neither kind is served: the issue
+    // does not say "create it", which nobody can do, but what to install.
+    let externals = Externals::default()
+        .with_default_image(DEFAULT_IMAGE)
+        .with_kind_not_installed("ModelEndpoint")
+        .with_kind_not_installed("ToolProvider");
+    let found = issues_with("coder-me", &externals, no_change);
+    assert_eq!(found.len(), 2, "{found:#?}");
+    for (field, who) in [
+        ("spec.model.endpointRef", "ModelEndpoint \"gateway\""),
+        (
+            "mcpServers[websearch].providerRef",
+            "ToolProvider \"websearch\"",
+        ),
+    ] {
+        let said = said(&found, field);
+        assert!(
+            said.contains(who)
+                && said.contains("is not installed")
+                && said.contains("deploy/operator-crds")
+                && !said.contains("create it"),
+            "{said}"
+        );
+        // And the way out that needs no CRD stays in the sentence.
+        assert!(said.contains("inline"), "{said}");
+    }
+
+    // One kind served, the other not: only the missing kind says so, and the other is an ordinary
+    // missing object.
+    let found = issues_with(
+        "coder-me",
+        &Externals::default()
+            .with_default_image(DEFAULT_IMAGE)
+            .with_kind_not_installed("ToolProvider"),
+        no_change,
+    );
+    assert!(said(&found, "spec.model.endpointRef").contains("was not found"));
+    assert!(said(&found, "mcpServers[websearch].providerRef").contains("is not installed"));
+
+    // A kind that is not installed whose objects are not asked for changes nothing: an inline config.
+    let (service, config) = typed_pair("chat");
+    let inline = Externals::default().with_kind_not_installed("ModelEndpoint");
+    assert!(aap_domain::validate(&service, &config, &inline).is_ok());
+}
+
+fn typed_pair(name: &str) -> (aap_api::AgentService, aap_api::AgentConfig) {
+    let (service, config) = example(name);
+    typed(&service, &config)
+}
+
+#[test]
 fn a_referent_of_another_namespace_is_not_read() {
     let mut externals = shared_objects("coder-me").with_default_image(DEFAULT_IMAGE);
     externals

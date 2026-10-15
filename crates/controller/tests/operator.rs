@@ -594,5 +594,76 @@ async fn kinds_whose_crds_are_not_installed_stall_no_service() {
     })
     .await;
 
+    // A service whose config references a ModelEndpoint and a ToolProvider is blocked at once. The
+    // message names both, and says why nobody can create them yet: the kinds are not installed. (A GET
+    // of such a kind is not a 404 that names an object, and `Api::get_opt` would have called it an error:
+    // the pass would have failed and retried, and the status would have said nothing.)
+    let (service, config, _, _) = dashboard("team");
+    r.fake.put(CONFIGS, config);
+    r.fake.put(SERVICES, service);
+    within(promptly, "the dashboard service to be Blocked", || {
+        r.state("team", "coder-me").as_deref() == Some("Blocked")
+    })
+    .await;
+    let message = r.message("team", "coder-me");
+    for kind in ["ModelEndpoint \"gateway\"", "ToolProvider \"websearch\""] {
+        assert!(message.contains(kind), "{kind} in {message}");
+    }
+    assert!(
+        message.contains("is not installed") && message.contains("deploy/operator-crds"),
+        "{message}"
+    );
+    assert!(
+        r.runtime
+            .inner
+            .spec(&RuntimeId::new("team", "coder-me"))
+            .is_none(),
+        "nothing is made out of half an agent"
+    );
+    r.stop().await;
+}
+
+/// The same operator, when the CRDs are installed afterwards: the watches that failed find the kinds on
+/// their next try, and the service that was blocked follows without anyone touching it. (The timers are
+/// an hour here, so only a trigger can do it.)
+#[tokio::test(start_paused = true)]
+async fn a_watch_that_failed_finds_its_kind_when_the_crds_are_installed() {
+    let fake = Fake::new();
+    fake.absent(&[ENDPOINTS, PROVIDERS]);
+    let (service, config, endpoint, provider) = dashboard("team");
+    fake.put(CONFIGS, config);
+    fake.put(SERVICES, service);
+    let r = start_on(fake, None, false).await;
+    within(Duration::from_secs(2), "Blocked", || {
+        r.state("team", "coder-me").as_deref() == Some("Blocked")
+    })
+    .await;
+    tokio::time::sleep(Duration::from_secs(300)).await;
+
+    // The CRDs are installed and the objects created. The watchers' next list answers, at most one
+    // ceiling of their backoff later (thirty seconds, with jitter).
+    r.fake.absent(&[]);
+    r.fake.put(ENDPOINTS, endpoint);
+    r.fake.put(PROVIDERS, provider);
+    within(Duration::from_secs(90), "the watches to open", || {
+        r.fake.watchers(ENDPOINTS) >= 1 && r.fake.watchers(PROVIDERS) >= 1
+    })
+    .await;
+    within(Duration::from_secs(90), "the service to be Ready", || {
+        r.state("team", "coder-me").as_deref() == Some("Ready")
+    })
+    .await;
+
+    // And they are watches: a change of the endpoint now reaches the service.
+    let before = r.digest("team", "coder-me");
+    let mut endpoint = r.fake.get(ENDPOINTS, "team", "gateway").unwrap();
+    endpoint["spec"]["apiKeySecretRef"]["name"] = json!("rotated-models");
+    r.fake.put(ENDPOINTS, endpoint);
+    within(
+        Duration::from_secs(2),
+        "the service to follow its endpoint",
+        || r.digest("team", "coder-me") != before,
+    )
+    .await;
     r.stop().await;
 }
