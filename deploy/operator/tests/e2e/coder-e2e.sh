@@ -91,8 +91,9 @@ kubectl get namespace "$ns" >/dev/null 2>&1 || kubectl create namespace "$ns"
 
 step "1. the CRDs (server-side apply, as Argo CD syncs them), a Postgres, and the coder's Secrets (dummy)"
 helm template aap-operator-crds "$repo/deploy/operator-crds" | kubectl apply --server-side -f -
-kubectl wait --for=condition=Established --timeout=60s crd/agentconfigs.agents.vymalo.com crd/agentservices.agents.vymalo.com
-ok "the CRDs are installed and Established"
+kubectl wait --for=condition=Established --timeout=60s crd/agentconfigs.agents.vymalo.com crd/agentservices.agents.vymalo.com \
+  crd/modelendpoints.agents.vymalo.com crd/toolproviders.agents.vymalo.com
+ok "the four CRDs are installed and Established"
 kubectl apply -f "$here/postgres.yaml"
 a2a_token=$(openssl rand -hex 24)
 registry_token=$(openssl rand -hex 24)
