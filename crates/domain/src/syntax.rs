@@ -204,6 +204,24 @@ pub fn is_quantity(s: &str) -> bool {
 /// The longest `<server>__<tool>` name adam shows a model (`MODEL_NAME_MAX`).
 pub const MODEL_NAME_MAX: usize = 64;
 
+/// Whether `name` can be the name of an MCP server in the extra MCP file, by the rule of adam-rs
+/// `server_name_ok` in `crates/adam-agent-fs/src/load/mcp.rs` (*verified 2026-10-15*, read with `git show` at
+/// `0391809`, the revision of the parity goldens, and the file is identical at `9a1fd4e`, the coder image the
+/// chart ships; **not run**): not empty, at most 64 characters, ASCII letters, digits, `-` and `_`, no `__`
+/// and not ending in `_`, because the model sees the tools as `<server>__<tool>` and `a` with a tool `_x`
+/// would be `a_` with a tool `x`. The loader applies it to every server of the file, with or without a `tools`
+/// list, and a file with a server that fails it is refused at start (`AgentError::ExtraMcp`), so the pod would
+/// restart for ever.
+pub fn is_adam_server_name(name: &str) -> bool {
+    !name.is_empty()
+        && name.len() <= MODEL_NAME_MAX
+        && !name.contains("__")
+        && !name.ends_with('_')
+        && name
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-')
+}
+
 /// Whether `tool` can be an entry of the `tools` allow-list of the MCP server `server`, by the rule of
 /// adam-rs `crates/adam-agent-fs/src/load/mcp.rs` at `0391809` (*verified 2026-10-15*, read there): not
 /// empty, not starting with `_`, ASCII letters, digits, `-` and `_` only, and `<server>__<tool>` at
@@ -419,6 +437,40 @@ mod tests {
         // The server's name counts: the same tool does not fit behind a longer server name.
         assert!(!is_adam_tool_name(&"s".repeat(40), &"t".repeat(23)));
         assert!(is_adam_tool_name(&"s".repeat(40), &"t".repeat(22)));
+    }
+
+    #[test]
+    fn adam_server_names() {
+        for ok in [
+            "search",
+            "websearch",
+            "a",
+            "a_b",
+            "a-b",
+            "_a",
+            "-a",
+            "A1",
+            "s01",
+            "a_-_b",
+            &"s".repeat(64),
+        ] {
+            assert!(is_adam_server_name(ok), "{ok}");
+        }
+        for bad in [
+            "",
+            "a__b",
+            "__a",
+            "a__",
+            "a_",
+            "_",
+            "bad name",
+            "a.b",
+            "a/b",
+            "caf\u{e9}",
+            &"s".repeat(65),
+        ] {
+            assert!(!is_adam_server_name(bad), "{bad:?}");
+        }
     }
 
     #[test]

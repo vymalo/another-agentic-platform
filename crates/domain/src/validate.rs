@@ -10,8 +10,9 @@ use crate::contract::{self, env};
 use crate::externals::Externals;
 use crate::refs::{Materialized, Origins, materialize};
 use crate::syntax::{
-    is_adam_tool_name, is_dns_label, is_dns_subdomain, is_env_name, is_http_token, is_mount_path,
-    is_plain_http_remote, is_relative_file_path, is_size, parse_http_url, paths_overlap, shown_url,
+    is_adam_server_name, is_adam_tool_name, is_dns_label, is_dns_subdomain, is_env_name,
+    is_http_token, is_mount_path, is_plain_http_remote, is_relative_file_path, is_size,
+    parse_http_url, paths_overlap, shown_url,
 };
 use crate::{convert, plan};
 
@@ -596,14 +597,13 @@ fn check_tools(v: &mut Issues, cfg: &AgentConfig, origins: &Origins) {
             || at.clone(),
             |o| format!("ToolProvider {} spec.mcp", o.provider),
         );
-        // The model sees the tools of a server as `<id>__<tool>`, and model APIs take tool names of
-        // letters, digits, `_` and `-` (*unverified* against every gateway; the operator's own rule).
-        if id.is_empty()
-            || !id
-                .chars()
-                .all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-')
-        {
-            v.add(&at, "the server's name is letters, digits, `_` and `-`: the model sees its tools as <name>__<tool>");
+        // The model sees the tools of a server as `<id>__<tool>`: adam-rs refuses a file with a server
+        // that has another kind of name (`is_adam_server_name`), at every start.
+        if !is_adam_server_name(id) {
+            v.add(
+                &at,
+                "the server's name is letters, digits, `-` and `_`, at most 64 characters, with no `__` and not ending in `_`: the model sees its tools as <name>__<tool>, and adam-rs refuses the file of a server named otherwise (the pod would restart for ever)",
+            );
         }
         match (&server.provider_ref, &server.url) {
             // A reference `materialize` could not read: it said so. Here it only has to name something.

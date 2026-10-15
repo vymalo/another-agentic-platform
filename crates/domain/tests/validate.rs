@@ -1097,3 +1097,66 @@ fn a_secret_in_a_refused_url_is_in_no_issue() {
         }
     }
 }
+
+// ------------------------------------------------------------------ the names of MCP servers
+
+/// adam-rs refuses, at every start, an extra MCP file with a server whose name fails `server_name_ok`
+/// (`crates/adam-agent-fs/src/load/mcp.rs`, *verified 2026-10-15* at `0391809`, read with `git show`):
+/// the pod would restart for ever. The operator refuses the name before it makes the pod.
+#[test]
+fn a_server_name_adam_would_refuse_is_refused_here() {
+    let long = "s".repeat(65);
+    for bad in [
+        "a__b",
+        "__a",
+        "a__",
+        "a_",
+        "_",
+        long.as_str(),
+        "bad name",
+        "a.b",
+    ] {
+        let found = issues("chat", |_, c| {
+            set(
+                c,
+                "/spec/tools/mcpServers",
+                json!({ bad: {"url": "https://search.example.com/mcp"} }),
+            );
+        });
+        assert!(
+            found
+                .iter()
+                .any(|i| i.field.contains("mcpServers[") && i.message.contains("`__`")),
+            "{bad:?}: {found:#?}"
+        );
+        // The same name from a ToolProvider is refused in the same words, since it is the config's own
+        // name for the server.
+        assert_eq!(
+            found
+                .iter()
+                .filter(|i| i.message.contains("the server's name"))
+                .count(),
+            1,
+            "{bad:?}: {found:#?}"
+        );
+    }
+    // And the ones adam takes are accepted, up to 64 characters.
+    let longest = "s".repeat(64);
+    for ok in ["search", "a_b", "a-b", "_a", "S1", longest.as_str()] {
+        let resolved = must_resolve("chat", |_, c| {
+            set(
+                c,
+                "/spec/tools/mcpServers",
+                json!({ ok: {"url": "https://search.example.com/mcp"} }),
+            );
+        });
+        assert!(
+            resolved
+                .runtime
+                .file_sets
+                .iter()
+                .any(|f| f.name.ends_with("-mcp")),
+            "{ok}"
+        );
+    }
+}

@@ -122,8 +122,12 @@ checks what the reconciler needs and the schema cannot say:
   would crash-loop; v0 has no other surface. This makes the `Listed: A2ADisabled` reason unreachable in v0
   (see *Deviations*).
 * A header's Secret key must be a variable name, not one the operator sets, and not shared with a different
-  Secret; `extraEnv` names must be variable names the operator does not set; an MCP server's name is letters,
-  digits, `_` and `-` (the model sees `<name>__<tool>`; *unverified* against every gateway).
+  Secret; `extraEnv` names must be variable names the operator does not set; an MCP server's name is the one
+  adam-rs takes (`is_adam_server_name`): letters, digits, `_` and `-`, at most 64 characters, no `__` and not ending
+  in `_` (the model sees `<name>__<tool>`; adam-rs `server_name_ok`, `crates/adam-agent-fs/src/load/mcp.rs`,
+  *verified 2026-10-15* with `git show` at `0391809`, identical at `9a1fd4e`, **not run**). The loader applies it to
+  every server of the extra file, and refuses a file with a server that fails it at every start, so a name such as
+  `a__b` would have made the pod restart for ever.
 * Quantities (volumes, resources, a cluster) parse; mount paths are absolute, not nested in one another or in a
   path the operator mounts; volume names are DNS labels, unique, not the operator's; `scope: agent` only.
 * Folder `files` paths are relative with no `..`, the folder is at most 1 MiB, and holds an
@@ -241,7 +245,7 @@ runs the tests against the checked-in goldens only.
 | File | What |
 |---|---|
 | `tests/examples.rs` | every row of §59a's table on `coder` and `chat`, and the variations: split, each placement, a token, a pinned installation, a cluster store, a folder from a ConfigMap, no sidecar |
-| `tests/validate.rs` | each rule refused with the field it is about; no secret of a refused URL in any issue; the examples accepted; every `examples/invalid` file refused (but the ones it names: the audience's and the bounds the operator does not enforce), a shared object's paired with a coder that names it; the exclusive forms checked again |
+| `tests/validate.rs` | each rule refused with the field it is about; no secret of a refused URL in any issue; the MCP server names adam refuses; the examples accepted; every `examples/invalid` file refused (but the ones it names: the audience's and the bounds the operator does not enforce), a shared object's paired with a coder that names it; the exclusive forms checked again |
 | `tests/references.rs` | slice D2: a reference gives what the inline form gives (model, servers, a whole config, digest included); `optional` over its four cases; the allow-list written sorted, once each, absent when empty, refused when adam cannot name it; the digest follows a referent's content and not its title; a missing referent named, one of another namespace not read; a referent checked as the inline form is (sentence for sentence); the header-variable clash across providers and with an inline server; the default image everywhere the image goes, the digest rule, the refusals; `references()` |
 | `tests/digest.rs` | the digest rules above, the pinned digest and the properties; the audience reaches no pod (the resolved agent and the digest are the same with any audience) |
 | `tests/secrets.rs` | the sentinel walk: no secret value in a spec |
