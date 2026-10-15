@@ -31,8 +31,8 @@ use crate::config::BaseUrl;
 )]
 #[serde(rename_all = "camelCase")]
 pub struct ModelEndpointSpec {
-    /// What the dashboard shows.
-    #[schemars(length(min = 1))]
+    /// What the dashboard shows. 1 to 128 characters.
+    #[schemars(length(min = 1, max = 128))]
     pub title: String,
 
     /// The endpoint (`MODEL_BASE_URL`): a value or a Secret key.
@@ -41,7 +41,9 @@ pub struct ModelEndpointSpec {
     /// The Secret key that holds the API key (`MODEL_API_KEY`).
     pub api_key_secret_ref: SecretKeyRef,
 
-    /// The model aliases the forms offer. Informative: nothing checks that the endpoint serves them.
+    /// The model aliases the forms offer, at most 32. Informative: nothing checks that the
+    /// endpoint serves them.
     #[serde(default)]
+    #[schemars(length(max = 32))]
     pub models: Vec<String>,
 }

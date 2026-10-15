@@ -690,9 +690,12 @@ fn a_folder_agent_with_many_workers_needs_no_placement() {
 
 /// The invalid examples `validate` has nothing to say about, and why. The audience reaches no pod and
 /// the registry lists an item with a malformed one for administrators only (§60a, AD-028); a
-/// `ModelEndpoint` and a `ToolProvider` are not inputs of `validate` until slice D2.
+/// `ModelEndpoint` and a `ToolProvider` are not inputs of `validate` until slice D2; and the number
+/// of extra MCP servers is a bound of the schema that costs the operator nothing to resolve.
 fn outside_validate(file_name: &str, kind: &str) -> bool {
-    file_name.starts_with("audience-") || ["ModelEndpoint", "ToolProvider"].contains(&kind)
+    file_name.starts_with("audience-")
+        || file_name == "mcp-servers-too-many.yaml"
+        || ["ModelEndpoint", "ToolProvider"].contains(&kind)
 }
 
 #[test]
@@ -702,6 +705,7 @@ fn the_shape_rules_of_the_crd_hold_without_an_api_server() {
     // example is paired with the valid object of the other kind.
     let (coder_service, coder_config) = example("coder");
     let mut covered = 0;
+    // The skipped files that are an `AgentService` or an `AgentConfig`, the kinds `validate` reads.
     let mut skipped = Vec::new();
     let mut dir: Vec<_> = std::fs::read_dir(repo_root().join("examples/invalid"))
         .unwrap()
@@ -711,8 +715,11 @@ fn the_shape_rules_of_the_crd_hold_without_an_api_server() {
     for path in dir {
         let doc = documents(&path).remove(0);
         let file_name = path.file_name().unwrap().to_string_lossy().into_owned();
-        if outside_validate(&file_name, doc["kind"].as_str().unwrap()) {
-            skipped.push(file_name);
+        let kind = doc["kind"].as_str().unwrap();
+        if outside_validate(&file_name, kind) {
+            if ["AgentService", "AgentConfig"].contains(&kind) {
+                skipped.push(file_name);
+            }
             continue;
         }
         let (mut s, mut c) = (coder_service.clone(), coder_config.clone());
@@ -747,7 +754,7 @@ fn the_shape_rules_of_the_crd_hold_without_an_api_server() {
         covered += 1;
     }
     assert!(
-        covered >= 24,
+        covered >= 26,
         "the invalid examples are all there: {covered}"
     );
     assert_eq!(
@@ -758,7 +765,7 @@ fn the_shape_rules_of_the_crd_hold_without_an_api_server() {
             "audience-value-empty.yaml",
             "audience-value-too-long.yaml",
             "audience-value-with-space.yaml",
-            "model-endpoint-base-url-both.yaml",
+            "mcp-servers-too-many.yaml",
         ],
         "an invalid example `validate` is not asked about must be named, with its reason"
     );

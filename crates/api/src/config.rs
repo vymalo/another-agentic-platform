@@ -380,8 +380,9 @@ pub struct McpServer {
     #[serde(default)]
     pub headers: BTreeMap<String, McpHeader>,
 
-    /// The agent starts without it when it is unreachable. Beside a `providerRef` the provider's
-    /// own `optional` is the one that counts (slice D2 decides how the two meet).
+    /// The agent starts without it when it is unreachable. Beside a `providerRef` the provider
+    /// has an `optional` of its own and nothing combines the two yet: slice D2 decides how they
+    /// meet.
     #[serde(default)]
     pub optional: bool,
 }

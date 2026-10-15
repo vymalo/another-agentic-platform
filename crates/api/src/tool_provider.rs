@@ -25,12 +25,6 @@ use crate::config::McpHeader;
     doc = "Where tools come from, set once and named by the AgentConfigs that use it (spec.tools.mcpServers.<name>.providerRef). v0: one remote MCP server.",
     printcolumn(name = "Title", type_ = "string", json_path = ".spec.title"),
     printcolumn(
-        name = "URL",
-        type_ = "string",
-        json_path = ".spec.mcp.url",
-        priority = 1
-    ),
-    printcolumn(
         name = "Age",
         type_ = "date",
         json_path = ".metadata.creationTimestamp"
@@ -38,8 +32,8 @@ use crate::config::McpHeader;
 )]
 #[serde(rename_all = "camelCase")]
 pub struct ToolProviderSpec {
-    /// What the dashboard shows.
-    #[schemars(length(min = 1))]
+    /// What the dashboard shows. 1 to 128 characters.
+    #[schemars(length(min = 1, max = 128))]
     pub title: String,
 
     /// The remote MCP server. The only kind of provider in v0 (§32 lists more).
@@ -51,18 +45,21 @@ pub struct ToolProviderSpec {
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize, KubeSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct ProviderMcp {
-    /// Its `http` or `https` URL, with no user name, password or `${…}` in it (checked by the
-    /// reconciler, as for an inline server).
-    #[schemars(length(min = 1))]
+    /// Its `http` or `https` URL, 1 to 2048 characters. Nothing checks it in D1; slice D2 applies
+    /// to it what the reconciler applies to an inline server's (no user name, password or `${…}`
+    /// in it, which would put a secret in a log).
+    #[schemars(length(min = 1, max = 2048))]
     pub url: String,
 
-    /// Request headers, by header name. Each value is a Secret key.
+    /// Request headers, by header name, at most 32. Each value is a Secret key.
     #[serde(default)]
+    #[schemars(extend("maxProperties" = 32))]
     pub headers: BTreeMap<String, McpHeader>,
 
-    /// The tools of the server the agent may call. Empty: every tool of the server. Nothing in the
-    /// inline form says this, so slice D2 decides what the operator does with it.
+    /// The tools of the server the agent may call, at most 32. Empty: every tool of the server.
+    /// Nothing in the inline form says this, so slice D2 decides what the operator does with it.
     #[serde(default)]
+    #[schemars(length(max = 32))]
     pub tools: Vec<String>,
 
     /// The agent starts without it when it is unreachable.

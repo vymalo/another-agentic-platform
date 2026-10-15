@@ -1,9 +1,10 @@
 //! The examples: the valid ones are accepted, each invalid one is refused for the reason it
-//! states, and every CEL rule has an invalid example.
+//! states, every CEL rule has an invalid example, and so has every bound of the fields the admin
+//! dashboard's first slice (D1) added.
 //!
 //! The rules are evaluated with `kube-cel`, a client-side CEL implementation. It is a proxy for an
 //! API server, not one: the `kind` job of `.github/workflows/operator.yml` is the real check. It
-//! does not check the OpenAPI schema either; `bounds` below does the three keywords the examples use.
+//! does not check the OpenAPI schema either; `bounds` below does the four keywords the examples use.
 
 #![allow(clippy::expect_used, clippy::unwrap_used)] // tests may
 
@@ -99,8 +100,9 @@ fn subset(a: &Value, b: &Value, path: &str) -> Result<(), String> {
 }
 
 /// The bounds of the OpenAPI schema `kube-cel` does not check, worded as kube-apiserver words them
-/// (*verified 2026-10-15*, v1.35.8): `maxItems`, `maxLength` and `minLength`, the three keywords
-/// the audience uses. Not a schema validator: a keyword the examples do not use is not read.
+/// (*verified 2026-10-15*, v1.35.8): `maxItems`, `maxProperties` (the same words, for a map),
+/// `maxLength` and `minLength`. Lengths count characters, as the server does. Not a schema
+/// validator: a keyword the examples do not use is not read.
 fn bounds(schema: &Value, value: &Value, path: &str, out: &mut Vec<String>) {
     match value {
         Value::Array(items) => {
@@ -120,7 +122,7 @@ fn bounds(schema: &Value, value: &Value, path: &str, out: &mut Vec<String>) {
         Value::String(text) => {
             if let Some(max) = schema["maxLength"]
                 .as_u64()
-                .filter(|m| text.len() as u64 > *m)
+                .filter(|m| (text.chars().count() as u64) > *m)
             {
                 out.push(format!("Too long: may not be more than {max} bytes"));
             }
@@ -134,6 +136,15 @@ fn bounds(schema: &Value, value: &Value, path: &str, out: &mut Vec<String>) {
             }
         }
         Value::Object(map) => {
+            if let Some(max) = schema["maxProperties"]
+                .as_u64()
+                .filter(|m| map.len() as u64 > *m)
+            {
+                out.push(format!(
+                    "Too many: {}: must have at most {max} items",
+                    map.len()
+                ));
+            }
             for (key, child) in map {
                 let at = if path.is_empty() {
                     key.clone()
@@ -153,16 +164,20 @@ fn bounds(schema: &Value, value: &Value, path: &str, out: &mut Vec<String>) {
     }
 }
 
-fn validate(doc: &Value) -> Result<(), Vec<String>> {
+/// The object against a schema: its bounds, then its CEL rules.
+fn validate_with(schema: &Value, doc: &Value) -> Result<(), Vec<String>> {
     let typed = through_the_types(doc);
-    let kind = doc["kind"].as_str().expect("kind");
-    let schema = schema_for(kind);
     let mut found = Vec::new();
-    bounds(&schema, &typed, "", &mut found);
-    if let Err(errors) = Validator::new().validate(&schema, &typed, None) {
+    bounds(schema, &typed, "", &mut found);
+    if let Err(errors) = Validator::new().validate(schema, &typed, None) {
         found.extend(errors.iter().map(|e| e.message.clone()));
     }
     if found.is_empty() { Ok(()) } else { Err(found) }
+}
+
+fn validate(doc: &Value) -> Result<(), Vec<String>> {
+    let kind = doc["kind"].as_str().expect("kind");
+    validate_with(&schema_for(kind), doc)
 }
 
 #[test]
@@ -409,5 +424,252 @@ fn collect_messages(v: &Value, out: &mut Vec<String>) {
         }
         Value::Array(items) => items.iter().for_each(|c| collect_messages(c, out)),
         _ => {}
+    }
+}
+
+// ---------------------------------------------------------------------------------------------
+// The bounds of the schema. A CEL rule has a message the test above looks up; a bound has none, so
+// each bound is named here with the example that exercises it, and the test below proves the example
+// states the message of that bound: with the keyword taken out of the schema the message is gone.
+
+/// `(kind, path, keyword, example)`. The path starts at the object: `[]` is an item of a list and
+/// `{}` the value of a map. The example is a file of `examples/invalid`, without `.yaml`.
+const BOUND_EXAMPLES: &[(&str, &str, &str, &str)] = &[
+    // access.audience (AD-028)
+    (
+        "AgentService",
+        "spec.access.audience",
+        "maxItems",
+        "audience-too-many",
+    ),
+    (
+        "AgentService",
+        "spec.access.audience[]",
+        "maxLength",
+        "audience-value-too-long",
+    ),
+    (
+        "AgentService",
+        "spec.access.audience[]",
+        "minLength",
+        "audience-value-empty",
+    ),
+    // the references (AD-029) and the map of servers their rules are priced by
+    (
+        "AgentConfig",
+        "spec.model.endpointRef.name",
+        "minLength",
+        "model-ref-name-empty",
+    ),
+    (
+        "AgentConfig",
+        "spec.tools.mcpServers",
+        "maxProperties",
+        "mcp-servers-too-many",
+    ),
+    (
+        "AgentConfig",
+        "spec.tools.mcpServers{}.providerRef.name",
+        "minLength",
+        "mcp-server-provider-ref-name-empty",
+    ),
+    // ModelEndpoint
+    (
+        "ModelEndpoint",
+        "spec.title",
+        "minLength",
+        "model-endpoint-title-empty",
+    ),
+    (
+        "ModelEndpoint",
+        "spec.title",
+        "maxLength",
+        "model-endpoint-title-too-long",
+    ),
+    (
+        "ModelEndpoint",
+        "spec.baseUrl.secretRef.name",
+        "minLength",
+        "model-endpoint-base-url-secret-name-empty",
+    ),
+    (
+        "ModelEndpoint",
+        "spec.baseUrl.secretRef.key",
+        "minLength",
+        "model-endpoint-base-url-secret-key-empty",
+    ),
+    (
+        "ModelEndpoint",
+        "spec.apiKeySecretRef.name",
+        "minLength",
+        "model-endpoint-api-key-name-empty",
+    ),
+    (
+        "ModelEndpoint",
+        "spec.apiKeySecretRef.key",
+        "minLength",
+        "model-endpoint-api-key-key-empty",
+    ),
+    (
+        "ModelEndpoint",
+        "spec.models",
+        "maxItems",
+        "model-endpoint-models-too-many",
+    ),
+    // ToolProvider
+    (
+        "ToolProvider",
+        "spec.title",
+        "minLength",
+        "tool-provider-title-empty",
+    ),
+    (
+        "ToolProvider",
+        "spec.title",
+        "maxLength",
+        "tool-provider-title-too-long",
+    ),
+    (
+        "ToolProvider",
+        "spec.mcp.url",
+        "minLength",
+        "tool-provider-url-empty",
+    ),
+    (
+        "ToolProvider",
+        "spec.mcp.url",
+        "maxLength",
+        "tool-provider-url-too-long",
+    ),
+    (
+        "ToolProvider",
+        "spec.mcp.headers",
+        "maxProperties",
+        "tool-provider-headers-too-many",
+    ),
+    (
+        "ToolProvider",
+        "spec.mcp.headers{}.secretRef.name",
+        "minLength",
+        "tool-provider-header-secret-name-empty",
+    ),
+    (
+        "ToolProvider",
+        "spec.mcp.headers{}.secretRef.key",
+        "minLength",
+        "tool-provider-header-secret-key-empty",
+    ),
+    (
+        "ToolProvider",
+        "spec.mcp.tools",
+        "maxItems",
+        "tool-provider-tools-too-many",
+    ),
+];
+
+const BOUND_KEYWORDS: [&str; 4] = ["minLength", "maxLength", "maxItems", "maxProperties"];
+
+type Site = (String, String, &'static str);
+
+/// Every bound of a schema, with the path it is at.
+fn sites(schema: &Value, kind: &str, path: &str, out: &mut Vec<Site>) {
+    for keyword in BOUND_KEYWORDS {
+        if schema.get(keyword).is_some() {
+            out.push((kind.to_owned(), path.to_owned(), keyword));
+        }
+    }
+    if let Some(properties) = schema["properties"].as_object() {
+        for (name, child) in properties {
+            let at = if path.is_empty() {
+                name.clone()
+            } else {
+                format!("{path}.{name}")
+            };
+            sites(child, kind, &at, out);
+        }
+    }
+    if schema["items"].is_object() {
+        sites(&schema["items"], kind, &format!("{path}[]"), out);
+    }
+    if schema["additionalProperties"].is_object() {
+        sites(
+            &schema["additionalProperties"],
+            kind,
+            &format!("{path}{{}}"),
+            out,
+        );
+    }
+}
+
+/// The JSON pointer into a schema of a path as `sites` writes it.
+fn pointer_of(path: &str) -> String {
+    let mut pointer = String::new();
+    for segment in path.split('.') {
+        let name = segment.trim_end_matches(['[', ']', '{', '}']);
+        pointer.push_str(&format!("/properties/{name}"));
+        match &segment[name.len()..] {
+            "" => {}
+            "[]" => pointer.push_str("/items"),
+            "{}" => pointer.push_str("/additionalProperties"),
+            other => panic!("{segment}: unexpected {other:?}"),
+        }
+    }
+    pointer
+}
+
+/// Every size bound of the four CRDs, and every bound of the two kinds of the dashboard, must be
+/// in the table: a new one fails here until it has an example.
+fn needs_an_example(site: &Site) -> bool {
+    site.2 != "minLength" || ["ModelEndpoint", "ToolProvider"].contains(&site.0.as_str())
+}
+
+#[test]
+fn every_bound_of_the_fields_d1_added_has_an_invalid_example_that_exercises_it() {
+    let mut found = Vec::new();
+    for crd in crds() {
+        let kind = crd.spec.names.kind.clone();
+        sites(&schema_for(&kind), &kind, "", &mut found);
+    }
+    let table: Vec<Site> = BOUND_EXAMPLES
+        .iter()
+        .map(|(kind, path, keyword, _)| ((*kind).to_owned(), (*path).to_owned(), *keyword))
+        .collect();
+    for site in found.iter().filter(|s| needs_an_example(s)) {
+        assert!(
+            table.contains(site),
+            "the bound {site:?} has no invalid example: add the file to examples/invalid and a row to BOUND_EXAMPLES"
+        );
+    }
+    for (site, (_, _, _, file)) in table.iter().zip(BOUND_EXAMPLES) {
+        assert!(
+            found.contains(site),
+            "{site:?} is not a bound of the schema any more: a stale row of BOUND_EXAMPLES"
+        );
+        let path = examples_dir().join("invalid").join(format!("{file}.yaml"));
+        let doc = documents(&path).remove(0);
+        assert_eq!(doc["kind"], site.0.as_str(), "{}", path.display());
+        let expected = expectation(&path);
+        let errors = validate(&doc).expect_err(&format!("{} was accepted", path.display()));
+        assert!(
+            errors.contains(&expected),
+            "{}: expected {expected:?}, got {errors:#?}",
+            path.display()
+        );
+        // and the message is this bound's: without the keyword the object is no longer refused with
+        // it (it may still be refused by a rule: an empty audience value is not visible ASCII either)
+        let mut schema = schema_for(&site.0);
+        let at = pointer_of(&site.1);
+        let removed = schema
+            .pointer_mut(&at)
+            .and_then(Value::as_object_mut)
+            .and_then(|bound| bound.remove(site.2));
+        assert!(removed.is_some(), "{site:?}: nothing at {at}");
+        if let Err(errors) = validate_with(&schema, &doc) {
+            assert!(
+                !errors.contains(&expected),
+                "{}: still refused with {expected:?} without {site:?}: {errors:#?}",
+                path.display()
+            );
+        }
     }
 }

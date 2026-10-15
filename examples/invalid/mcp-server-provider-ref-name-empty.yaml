@@ -1,0 +1,32 @@
+# Refused: an MCP server's providerRef.name is empty; at least 1 character (a bound of the schema, not a CEL rule).
+# expect: spec.tools.mcpServers.search.providerRef.name in body should be at least 1 chars long
+apiVersion: agents.vymalo.com/v1alpha1
+kind: AgentConfig
+metadata:
+  name: invalid-mcp-provider-ref-name-empty
+  namespace: another-agentic-system
+spec:
+  harness:
+    type: adam-rs
+    adam:
+      binary: adam-agent
+      agent:
+        folder:
+          files:
+            instructions.md: |
+              Hello.
+  model:
+    model: m
+    baseUrl:
+      value: https://gateway.example.invalid/v1
+    apiKeySecretRef:
+      name: s
+      key: MODEL_API_KEY
+  tools:
+    mcpServers:
+      search:
+        providerRef:
+          name: ""
+  environment:
+    image:
+      ref: ghcr.io/vymalo/another-adam-rs/coder:sha-0391809

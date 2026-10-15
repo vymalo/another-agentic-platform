@@ -339,11 +339,52 @@ fn model_endpoint_and_tool_provider_have_the_shape_of_the_inline_forms() {
     assert_eq!(mcp["required"], serde_json::json!(["url"]));
     let servers = property(&config, &["spec", "tools", "mcpServers"]);
     let inline = &servers["additionalProperties"]["properties"];
-    for field in ["headers", "optional"] {
-        assert_eq!(
-            shape(&mcp["properties"][field]),
-            shape(&inline[field]),
-            "ToolProvider.spec.mcp.{field}"
+    // The provider's map of headers has a bound the inline one does not (an inline server keeps
+    // the schema it had, so an object stored before D1 stays as valid as it was).
+    let mut headers = mcp["properties"]["headers"].clone();
+    assert_eq!(headers["maxProperties"], 32);
+    headers.as_object_mut().unwrap().remove("maxProperties");
+    assert_eq!(shape(&headers), shape(&inline["headers"]), "headers");
+    assert_eq!(
+        shape(&mcp["properties"]["optional"]),
+        shape(&inline["optional"]),
+        "optional"
+    );
+}
+
+#[test]
+fn the_new_kinds_are_bounded_and_the_inline_forms_are_not_tightened() {
+    // Sizes the dashboard's forms and the API server's cost estimate can rely on (the values are
+    // in the README of this crate). Only the new kinds carry them.
+    let endpoint = schema_of(&ModelEndpoint::crd());
+    let spec = property(&endpoint, &["spec"]);
+    assert_eq!(spec["properties"]["title"]["minLength"], 1);
+    assert_eq!(spec["properties"]["title"]["maxLength"], 128);
+    assert_eq!(spec["properties"]["models"]["maxItems"], 32);
+
+    let provider = schema_of(&ToolProvider::crd());
+    let spec = property(&provider, &["spec"]);
+    assert_eq!(spec["properties"]["title"]["minLength"], 1);
+    assert_eq!(spec["properties"]["title"]["maxLength"], 128);
+    let mcp = &spec["properties"]["mcp"]["properties"];
+    assert_eq!(mcp["url"]["minLength"], 1);
+    assert_eq!(mcp["url"]["maxLength"], 2048);
+    assert_eq!(mcp["headers"]["maxProperties"], 32);
+    assert_eq!(mcp["tools"]["maxItems"], 32);
+
+    // An object written before D1 is as valid as it was: no inline field got a bound.
+    let config = schema_of(&AgentConfig::crd());
+    let server = &property(&config, &["spec", "tools", "mcpServers"])["additionalProperties"];
+    for bound in ["maxLength", "maxProperties", "maxItems"] {
+        assert!(
+            server["properties"]["url"].get(bound).is_none(),
+            "url {bound}"
         );
+        assert!(
+            server["properties"]["headers"].get(bound).is_none(),
+            "headers {bound}"
+        );
+        let base_url = property(&config, &["spec", "model", "baseUrl", "value"]);
+        assert!(base_url.get(bound).is_none(), "baseUrl.value {bound}");
     }
 }

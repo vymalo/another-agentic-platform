@@ -1,4 +1,4 @@
-//! Types shared by both kinds.
+//! Types shared by the kinds.
 
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};

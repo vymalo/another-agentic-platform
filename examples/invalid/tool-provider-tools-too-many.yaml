@@ -1,0 +1,45 @@
+# Refused: a ToolProvider's mcp.tools allow-list has 33 names; at most 32 (a bound of the schema, not a CEL rule).
+# expect: Too many: 33: must have at most 32 items
+apiVersion: agents.vymalo.com/v1alpha1
+kind: ToolProvider
+metadata:
+  name: invalid-provider-tools-too-many
+  namespace: another-agentic-system
+spec:
+  title: Web search
+  mcp:
+    url: http://another-agentic-websearch.another-agentic-system.svc:8080/mcp
+    tools:
+      - tool-01
+      - tool-02
+      - tool-03
+      - tool-04
+      - tool-05
+      - tool-06
+      - tool-07
+      - tool-08
+      - tool-09
+      - tool-10
+      - tool-11
+      - tool-12
+      - tool-13
+      - tool-14
+      - tool-15
+      - tool-16
+      - tool-17
+      - tool-18
+      - tool-19
+      - tool-20
+      - tool-21
+      - tool-22
+      - tool-23
+      - tool-24
+      - tool-25
+      - tool-26
+      - tool-27
+      - tool-28
+      - tool-29
+      - tool-30
+      - tool-31
+      - tool-32
+      - tool-33

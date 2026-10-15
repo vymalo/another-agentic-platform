@@ -543,8 +543,9 @@ spec:
                         optional:
                           default: false
                           description: |-
-                            The agent starts without it when it is unreachable. Beside a `providerRef` the provider's
-                            own `optional` is the one that counts (slice D2 decides how the two meet).
+                            The agent starts without it when it is unreachable. Beside a `providerRef` the provider
+                            has an `optional` of its own and nothing combines the two yet: slice D2 decides how they
+                            meet.
                           type: boolean
                         providerRef:
                           description: |-
@@ -774,8 +775,8 @@ spec:
                       Who may use the agent in a client (AD-028): the values of the person's roles claim that
                       admit them. By convention a value is the agent's use permission, `agent.use:<agent-name>`;
                       `*` admits everyone. Absent or empty: administrators only. The CRD checks only the shape;
-                      what the values mean is the consumer's rule. It reaches no pod: it goes to the registry
-                      item and nowhere else.
+                      what the values mean is the consumer's rule. It reaches no pod. It will go to the registry
+                      item (slice D3) and nothing enforces it before slice D8: until then nothing reads it.
                     items:
                       maxLength: 64
                       minLength: 1
@@ -1188,12 +1189,16 @@ spec:
                   rule: has(self.value) != has(self.secretRef)
               models:
                 default: []
-                description: 'The model aliases the forms offer. Informative: nothing checks that the endpoint serves them.'
+                description: |-
+                  The model aliases the forms offer, at most 32. Informative: nothing checks that the
+                  endpoint serves them.
                 items:
                   type: string
+                maxItems: 32
                 type: array
               title:
-                description: What the dashboard shows.
+                description: What the dashboard shows. 1 to 128 characters.
+                maxLength: 128
                 minLength: 1
                 type: string
             required:
@@ -1226,10 +1231,6 @@ spec:
   - additionalPrinterColumns:
     - jsonPath: .spec.title
       name: Title
-      type: string
-    - jsonPath: .spec.mcp.url
-      name: URL
-      priority: 1
       type: string
     - jsonPath: .metadata.creationTimestamp
       name: Age
@@ -1276,7 +1277,8 @@ spec:
                       - secretRef
                       type: object
                     default: {}
-                    description: Request headers, by header name. Each value is a Secret key.
+                    description: Request headers, by header name, at most 32. Each value is a Secret key.
+                    maxProperties: 32
                     type: object
                   optional:
                     default: false
@@ -1285,22 +1287,26 @@ spec:
                   tools:
                     default: []
                     description: |-
-                      The tools of the server the agent may call. Empty: every tool of the server. Nothing in the
-                      inline form says this, so slice D2 decides what the operator does with it.
+                      The tools of the server the agent may call, at most 32. Empty: every tool of the server.
+                      Nothing in the inline form says this, so slice D2 decides what the operator does with it.
                     items:
                       type: string
+                    maxItems: 32
                     type: array
                   url:
                     description: |-
-                      Its `http` or `https` URL, with no user name, password or `${…}` in it (checked by the
-                      reconciler, as for an inline server).
+                      Its `http` or `https` URL, 1 to 2048 characters. Nothing checks it in D1; slice D2 applies
+                      to it what the reconciler applies to an inline server's (no user name, password or `${…}`
+                      in it, which would put a secret in a log).
+                    maxLength: 2048
                     minLength: 1
                     type: string
                 required:
                 - url
                 type: object
               title:
-                description: What the dashboard shows.
+                description: What the dashboard shows. 1 to 128 characters.
+                maxLength: 128
                 minLength: 1
                 type: string
             required:

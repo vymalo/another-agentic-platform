@@ -235,8 +235,8 @@ pub struct Access {
     /// Who may use the agent in a client (AD-028): the values of the person's roles claim that
     /// admit them. By convention a value is the agent's use permission, `agent.use:<agent-name>`;
     /// `*` admits everyone. Absent or empty: administrators only. The CRD checks only the shape;
-    /// what the values mean is the consumer's rule. It reaches no pod: it goes to the registry
-    /// item and nowhere else.
+    /// what the values mean is the consumer's rule. It reaches no pod. It will go to the registry
+    /// item (slice D3) and nothing enforces it before slice D8: until then nothing reads it.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[schemars(length(max = 32), inner(length(min = 1, max = 64)))]
     #[x_kube(validation = Rule::new("!self.exists(a, a == '*') || self.size() == 1").message("access.audience: the value * is only allowed alone"))]
