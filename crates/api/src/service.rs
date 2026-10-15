@@ -233,10 +233,12 @@ pub struct Access {
     pub allow_from: Vec<NetworkPolicyPeer>,
 
     /// Who may use the agent in a client (AD-028): the values of the person's roles claim that
-    /// admit them. By convention a value is the agent's use permission, `agent.use:<agent-name>`;
-    /// `*` admits everyone. Absent or empty: administrators only. The CRD checks only the shape;
-    /// what the values mean is the consumer's rule. It reaches no pod: it goes to the registry item as
-    /// `audience` (slice D3: each value once, in byte order), and nothing enforces it before slice D8.
+    /// admit them. By convention a value is the agent's use permission, `agent.use:<agent-name>`
+    /// (10 characters and the name, so a name of at most 54 fits the 64 of a value; the dashboard
+    /// makes names of at most 40); `*` admits everyone. Absent or empty: administrators only. The
+    /// CRD checks only the shape; what the values mean is the consumer's rule. It reaches no pod: it
+    /// goes to the registry item as `audience` (slice D3: each value once, in byte order), and
+    /// nothing enforces it before slice D8.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[schemars(length(max = 32), inner(length(min = 1, max = 64)))]
     #[x_kube(validation = Rule::new("!self.exists(a, a == '*') || self.size() == 1").message("access.audience: the value * is only allowed alone"))]
