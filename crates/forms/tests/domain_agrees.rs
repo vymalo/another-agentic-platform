@@ -11,7 +11,7 @@ use proptest::prelude::*;
 use support::*;
 
 proptest! {
-    #![proptest_config(ProptestConfig::with_cases(256))]
+    #![proptest_config(config(256))]
 
     /// `AgentObjects` refuses to delete what an agent names, reading names from JSON; the operator reads them
     /// from the types. They must name the same objects, or a delete would break an agent the operator can see.

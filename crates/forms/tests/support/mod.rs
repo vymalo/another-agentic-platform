@@ -23,6 +23,15 @@ use k8s_openapi::apimachinery::pkg::apis::meta::v1::LabelSelector;
 use proptest::prelude::*;
 use serde_json::{Value, json};
 
+/// The configuration of every property test: a failure is shown, not written to a file of the repository.
+pub fn config(cases: u32) -> ProptestConfig {
+    ProptestConfig {
+        cases,
+        failure_persistence: None,
+        ..ProptestConfig::default()
+    }
+}
+
 pub const NS: &str = "another-agentic-system";
 
 /// A string no form, default or default may let reach an object as a value.

@@ -515,7 +515,7 @@ fn a_gitops_object_a_form_can_say_is_a_form_for_a_gitops_owner() {
 }
 
 proptest! {
-    #![proptest_config(ProptestConfig::with_cases(256))]
+    #![proptest_config(config(256))]
 
     /// The second law: an object is a form only if the form writes it back unchanged. For any form and any one
     /// change of a field a form does not say, the object is YAML only and names the field.

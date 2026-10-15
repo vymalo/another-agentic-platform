@@ -89,7 +89,7 @@ fn the_example_forms_are_valid_and_the_operator_resolves_them() {
 }
 
 proptest! {
-    #![proptest_config(ProptestConfig::with_cases(128))]
+    #![proptest_config(config(128))]
 
     /// The dashboard and the operator agree: an agent the dashboard accepts resolves.
     #[test]

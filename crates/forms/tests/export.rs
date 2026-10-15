@@ -202,7 +202,7 @@ impl TapNoise for Agent {
 }
 
 proptest! {
-    #![proptest_config(ProptestConfig::with_cases(256))]
+    #![proptest_config(config(256))]
 
     /// For any agent and any noise, the export is the four members, a few of `metadata`, and nothing of the noise.
     #[test]

@@ -285,7 +285,7 @@ fn agent_values(agent: &Agent) -> Vec<Value> {
 }
 
 proptest! {
-    #![proptest_config(ProptestConfig::with_cases(256))]
+    #![proptest_config(config(256))]
 
     /// Under arbitrary forms and deployments: every string in the objects, and in their YAML, was given by the form, the
     /// deployment or the namespace, or is a constant of the schema. The converters have no secret to add, and add none.

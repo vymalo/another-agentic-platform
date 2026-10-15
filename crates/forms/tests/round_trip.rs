@@ -5,7 +5,7 @@
 mod support;
 
 use aap_forms::{
-    AgentForm, AgentKind, AgentView, BaseUrlForm, ModelEndpointForm, Representation,
+    AgentForm, AgentKind, AgentKindForm, AgentView, BaseUrlForm, ModelEndpointForm, Representation,
     ToolServerForm, load_agent, to_resources,
 };
 use aap_ports::{Kind, MANAGED_BY_DASHBOARD, MANAGED_BY_LABEL, Owner};
@@ -34,6 +34,43 @@ fn the_form_of_a_coder_round_trips_with_the_defaults_filled_in() {
         "the defaults are the deployment's part, not the form's"
     );
     assert_eq!(view.kind(), AgentKind::Coder);
+}
+
+#[test]
+fn a_form_with_every_optional_field_set_round_trips() {
+    // Every `Option` is `Some`, every list has an element: no field can be dropped unseen.
+    let mut form = coder_form("coder-max");
+    form.description = Some("A description.".to_owned());
+    form.tags = vec!["one".to_owned(), "two-words".to_owned()];
+    form.suspend = true;
+    form.tool_servers = ["context7".to_owned(), "websearch".to_owned()].into();
+    form.image = Some("registry.invalid/coder:sha-1234567".to_owned());
+    form.audience = Some(vec![
+        "agent.use:coder-max".to_owned(),
+        "agent.use:other".to_owned(),
+    ]);
+    if let AgentKindForm::Coder(c) = &mut form.agent {
+        c.github.owners = vec!["vymalo".to_owned(), "stephane-segning".to_owned()];
+        c.create_repo_owners = vec!["stephane-segning".to_owned()];
+        c.workers = Some(16);
+        c.pr_draft = Some(false);
+        c.opencode_model = Some("another-model".to_owned());
+    }
+    let deployment = defaults().deployment_for(AgentKind::Coder, "coder-max");
+    let view = view_of(&form, &deployment).unwrap();
+    assert_eq!(view.form, form);
+    assert_eq!(view.deployment, deployment);
+    // And a folder agent with the same.
+    let mut folder = folder_form("chat-max");
+    folder.description = Some("d".to_owned());
+    folder.suspend = true;
+    folder.tool_servers = ["websearch".to_owned()].into();
+    folder.allow_insecure_http = true;
+    folder.image = Some("registry.invalid/agent:tag".to_owned());
+    folder.audience = Some(Vec::new());
+    let deployment = defaults().deployment_for(AgentKind::Folder, "chat-max");
+    let view = view_of(&folder, &deployment).unwrap();
+    assert_eq!(view.form, folder);
 }
 
 #[test]
@@ -166,7 +203,7 @@ fn the_draft_is_the_two_specs_and_the_name() {
 }
 
 proptest! {
-    #![proptest_config(ProptestConfig::with_cases(256))]
+    #![proptest_config(config(256))]
 
     /// The first law: a form, with any deployment part, gives objects that read back as that form and that part.
     #[test]
