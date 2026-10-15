@@ -658,6 +658,7 @@ pub mod directory {
             title: Some(name.to_uppercase()),
             description: Some(format!("{name} does things")),
             tags: vec!["a".to_owned(), "b".to_owned()],
+            audience: vec![format!("agent.use:{name}")],
             agent_card: Some(format!(
                 "http://{name}.{scope}.svc:8080/.well-known/agent-card.json"
             )),
@@ -702,6 +703,32 @@ pub mod directory {
         assert_eq!(d.get(&scope, "coder").await.unwrap(), Some(e));
         assert_eq!(d.get(&scope, "nobody").await.unwrap(), None);
         assert_eq!(d.get("no-such-scope", "coder").await.unwrap(), None);
+    }
+
+    pub async fn the_audience_is_kept_as_the_service_states_it<D: DirectoryUnderTest>(d: D) {
+        // The registry normalises what it publishes (order, repeats); a directory hands over what the
+        // service says, and an absent audience and an empty one are both `[]`.
+        let scope = unique("ns");
+        let audiences: [(&str, &[&str]); 4] = [
+            ("none", &[]),
+            ("star", &["*"]),
+            ("unordered", &["b", "agent.use:a", "b", "*x"]),
+            ("one", &["agent.use:coder-me"]),
+        ];
+        for (name, audience) in audiences {
+            let mut e = entry(&scope, name);
+            e.audience = audience.iter().map(|a| (*a).to_owned()).collect();
+            d.put(e.clone()).await;
+            let got = d.get(&scope, name).await.unwrap().unwrap();
+            assert_eq!(got.audience, e.audience, "{name}: audience as put");
+            assert_eq!(got, e, "{name}");
+        }
+        let listed = in_scope(&d, &scope).await;
+        assert_eq!(listed.len(), audiences.len());
+        for e in listed {
+            let expected = audiences.iter().find(|(n, _)| *n == e.name).unwrap().1;
+            assert_eq!(e.audience, expected, "{}: audience in the list", e.name);
+        }
     }
 
     pub async fn a_changed_entry_replaces_the_old_one<D: DirectoryUnderTest>(d: D) {
@@ -804,7 +831,8 @@ macro_rules! agent_directory_conformance {
     ($make:path) => {
         $crate::agent_directory_conformance!(@cases $make;
             put_entries_are_listed_in_name_order, get_returns_what_was_put,
-            a_changed_entry_replaces_the_old_one, a_removed_entry_is_gone, scopes_do_not_mix,
+            the_audience_is_kept_as_the_service_states_it, a_changed_entry_replaces_the_old_one,
+            a_removed_entry_is_gone, scopes_do_not_mix,
         );
     };
     (@cases $make:path; $($case:ident),* $(,)?) => {

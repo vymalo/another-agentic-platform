@@ -104,7 +104,7 @@ image runs as the real binaries would.
 | `suspend_scales_to_zero_and_resume_wakes` | `Suspended` with zero replicas, then `Ready` again |
 | `an_object_that_is_not_ours_with_the_name_is_a_conflict_that_changes_nothing` | a Deployment named like the service, labelled `Helm`: `NameConflict`, `Blocked`, the foreign object not written; its removal lets the operator make its own |
 | `a_deletion_that_happens_while_the_operator_is_down_completes_when_it_returns` | the operator is killed (SIGKILL), the service deleted: the finalizer holds the object and the Deployment; a new operator completes it |
-| `the_registry_lists_a_ready_agent_to_whoever_holds_the_token_and_nobody_else` | S7: with a token file the operator serves the registry: `401` with no body for no token, a wrong one and the wrong scheme; `200` with the contract's headers, the `Ready` agent as an item with its card URL, title and tags, and the `Blocked` one not listed (`Listed: False` / `ServiceBlocked`); `304` on a match; `HEAD`; and, when `AAP_TEST_HOST_ADDR` is set, the registry and the card it lists read **from a pod** (and refused there without the token); a deleted service leaves the list |
+| `the_registry_lists_a_ready_agent_to_whoever_holds_the_token_and_nobody_else` | S7: with a token file the operator serves the registry: `401` with no body for no token, a wrong one and the wrong scheme; `200` with the contract's headers, the `Ready` agent as an item with its card URL, title, tags and (D3) the audience of its `AgentService` as a set, in byte order, and the `Blocked` one not listed (`Listed: False` / `ServiceBlocked`); `304` on a match; `HEAD`; and, when `AAP_TEST_HOST_ADDR` is set, the registry and the card it lists read **from a pod** (and refused there without the token); a deleted service leaves the list |
 | `without_a_token_no_registry_is_served_and_nothing_is_listed` | S7: no `REGISTRY_TOKEN_FILE`: nothing listens on the registry's port and the service is `Listed: False` / `RegistryDisabled` |
 | `a_service_that_asks_for_a_cluster_is_cnpg_not_installed_without_cloudnativepg` | S6: `store.postgres.cnpg` on a cluster without CloudNativePG is `StoreReady: False`, `CNPGNotInstalled`, `Blocked`, no workload, and the deletion of that service completes (a skip when CloudNativePG is installed; a failure under `AAP_TEST_REQUIRE_CLUSTER=1`) |
 | `health_readiness_and_metrics_are_served` | `/healthz`, `/readyz` 200 and the counters on `/metrics` |
@@ -156,3 +156,10 @@ image runs as the real binaries would.
   for an error, not for "not found" (the same lesson as S6's, for another call). The same run showed the warning of the isolated
   watch of each kind in the operator's log, once. The kind job has not run this case: *unverified* until CI has (the workflow
   has a step for it, `The operator without the CRDs of the shared kinds`).
+* **D3, 2026-10-15**, a new bare kube-apiserver v1.35.8 and etcd v3.6.4 (same flags, proxy variables unset),
+  `AAP_TEST_NO_WORKLOADS=1` and `AAP_TEST_REQUIRE_CLUSTER=1`: the registry case, with an audience stated as
+  `["agent.use:chat", "agent.use:admin"]` on the service, read the item with `["agent.use:admin", "agent.use:chat"]`.
+  The first full run of the file on that fresh API server passed 13 of 14, and the one that failed, `a_missing_or_invalid_config_blocks_and_a_fixed_one_unblocks`
+  (a case that does not touch the registry), timed out waiting for a status; it passed alone and in a second full run
+  (14 of 14, 9 s). It was not investigated further: *a flake of a cold API server, unproven*. The pod part of the registry case
+  did not run (no pods), as before.

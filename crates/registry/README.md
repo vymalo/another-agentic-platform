@@ -21,7 +21,7 @@ directory is whatever implements the trait, and in the operator that is the cont
 
 | Item | What |
 |---|---|
-| `document::build(entries, anchor)` | pure: entries in, a `Built { body, etag, listed, skipped }` out, or `Overflow` |
+| `document::build(entries, anchor)` | pure: entries in, a `Built { body, etag, listed, skipped, audience_withheld }` out, or `Overflow`. `Built` is `#[non_exhaustive]`: it is read, never built, outside the crate (D3 added `audience_withheld`, which broke a `Built { .. }` literal, and nothing in this repository made one) |
 | `Registry::new(directory, token)`, `with_anchor`, `with_full_flag` | the server's state |
 | `Registry::router()` | `GET` (and so `HEAD`) of `PATH` = `/registry/v1/agents`; another path is `404`, another method `405` |
 | `Registry::document()` | read the directory and build, setting the full flag: a request is this plus headers |
@@ -93,12 +93,28 @@ stateDiagram-v2
 | rule 3: never the same `service` twice | the first by (namespace, name) wins and a later namespace's service of that name is not listed (`skipped`). v0 deployments watch one namespace, so this is a guard and not a design |
 | `title` (optional) | `spec.registry.title`, trimmed, at most 200 characters; absent when there is none, and a reader defaults it to the id |
 | `tags` (optional, at most 16, 64 characters each) | `spec.registry.tags`: the empty and the over-long are dropped, repeats are dropped, the first 16 kept; absent when none is left |
+| `audience` (optional, [the contract's Audience](../../docs/extensions/agent-registry-v1.md#audience); slice D3, AD-028) | `spec.access.audience` **as a set**: each value once, in byte order (a capital before a small letter), so the same values in another order are the same bytes and the same `ETag`. **Absent** when the service has none *and when it has an empty list* (a consumer reads the two alike: administrators only, so the document says neither); `["*"]` is published as it is. **Withheld, and logged**, when the list breaks the contract's shape (a value that is not 1 to 64 bytes in `0x21` to `0x7E`, more than 32 distinct values, `*` beside another distinct value: `["*", "*"]` is the set `["*"]` and is published as it): a consumer reads a malformed audience as none, so the builder says none, and the item stays listed (`Built::audience_withheld`; the CRD refuses all of these, so this guards a directory that is not the controller's) |
 | `type` | `application/json` |
 | the context object | `profile: [{href: "https://agents.vymalo.com/registry/v1"}]`; `anchor` when configured; `item` absent when the list is empty |
 | rule 6 / limits: 500 items and 1 MiB, **never truncated** | past either, `Overflow` and a `503` |
 
 No releases, channels, descriptions or configuration are in the document: the contract has no such member (the system's
 reader ignores what it does not know, and rule 4 says "nothing else").
+
+**Why a sorted set and not the stored order.** An audience is read as "does one of the person's roles appear in it?",
+so its order means nothing, and a dashboard that saves the same values in another order, or `kubectl apply` of the same
+object written by hand, must not look like a change to every reader (a new `ETag` is a refetch, and the `ETag` of a
+document nobody changed is what makes `304` work). Tags keep their order because their order is a display order.
+Sorting lives in the builder and not in the controller's mapping, because the builder is what writes the bytes and the
+directory is a port that any implementation may back: `DirectoryEntry::audience` is what the service states, repeats
+and order included.
+
+**Size.** The audience counts against the contract's limits like any member, because the limit is measured on the
+document: 500 items of 32 values of 64 characters are 1,132,365 bytes, over 1 MiB, and the registry then refuses the
+whole document (`503`, `RegistryFull`) as for any other overflow; it never cuts a value. With 29 values of 64 characters
+on each of 500 services the body is 1,031,865 bytes, and with 30 it is over (measured on the test's fleet, services
+named `a0` to `a499` with no other member). A realistic fleet is far from it: one use permission per agent is a few dozen
+bytes.
 
 The body is compact JSON with members in key order, so the same entries give the same bytes. The **`ETag` is strong**: the
 first 128 bits of the SHA-256 of the body, quoted. A change of the `anchor` is a change of the document.
@@ -136,6 +152,7 @@ first 128 bits of the SHA-256 of the body, quoted. A change of the `anchor` is a
 | `Last-Modified` (the contract allows it) | not sent | the `ETag` is enough |
 | `anchor` (the contract: a server SHOULD) | sent when `REGISTRY_PUBLIC_URL` is set | the operator does not know the URL it is reached at |
 | a service name used in two namespaces (§59a does not say) | listed once, the first namespace in order | the contract forbids a duplicate `service` |
+| §60a: the item's `audience` is the service's list of values | the values as a **sorted set**, an empty list as no attribute, and a list that breaks the contract's shape not at all | the `ETag` must not move when only an order moves; absent, empty and malformed are the same to a consumer; the contract defines what is malformed |
 
 ## The consumer's reader
 
@@ -147,12 +164,26 @@ file), so this repository does not depend on that one. [`tests/vendored/UPSTREAM
 refresh it. Two fixtures come from there too: the contract's own example and the document its compose stack's mock
 registry serves.
 
+**The reader is from before `audience`** (the commit above is of 2026-10-05) and is *not* re-vendored by slice D3: the
+claim to test is that a reader that does not know the attribute ignores it, which the contract's *Versioning* rests on,
+and the pinned reader is exactly that. It reads only the members it knows and rejects nothing it does not (*verified
+2026-10-15*, `read_item` in the vendored file and its own test `members_and_attributes_this_reader_does_not_know_are_ignored`).
+The system enforces `audience` in its slice D8, which will re-vendor the reader (its parser then reads the attribute) and
+refresh the two fixtures at the commit that has it.
+
 What the tests hold with it: the fleet's document parses with **nothing skipped**; an empty fleet is an empty list and not
 an unreadable one; a document at 500 items is readable; and a property test over arbitrary entries (names that are and are
 not ids, odd titles, up to 24 tags, cards that are and are not URLs, listed or not) shows that whatever the directory
 holds, the builder either refuses the document or writes one the consumer reads **with no item skipped** and with exactly
 the ids the builder says it listed. The HTTP half of the consumer (its cache headers and its fail-closed reading) is
 tested in that repository, against its own mock; this crate's `tests/router.rs` is the server's half.
+
+For `audience` (D3) the consumer tests say three more things: the old reader makes **exactly the same list** of a document
+whose items carry audiences as of the same fleet without them (`Document` equal, nothing skipped), it keeps an item
+whatever its `audience` member holds (a string, a number, `null`, a list of numbers, an object), and the property test's
+arbitrary entries now carry arbitrary audiences (good, odd, too many, with a star) with the same "nothing skipped" outcome.
+The contract's own example, its first JSON block, is read from `docs/extensions/agent-registry-v1.md` by a test: it equals
+`tests/fixtures/contract-example.json` and what the builder writes for the two services it shows.
 
 ## Tests
 
@@ -164,9 +195,9 @@ AAP_UPDATE_GOLDENS=1 cargo test -p aap-registry --test document   # rewrite test
 | File | What |
 |---|---|
 | `src/token.rs` unit tests | the token matches only itself, is trimmed, `Debug` hides it, a file is read, a missing or empty one is an error |
-| `tests/document.rs` | what is listed and in what order; the same bytes for the same entries in any order; the strong `ETag` follows the body; **the golden document and its `ETag`**; the version marker and the anchor; cards and names a reader would skip are not listed; titles and tags made to fit; the limits are refusals (501 items, and a body past 1 MiB); the ids; the consumer reads the fleet, the empty fleet, the vendored documents and a document of 500 items; the property test |
-| `tests/router.rs` | `401` for ten kinds of missing or wrong credential on `GET` and `HEAD`, with no body; the scheme is case-insensitive and the token not; no `304` for the unauthenticated; the headers of the contract; `HEAD`; `304` for the five forms of a match and `200` for the four of a mismatch; a change of the fleet is a new `ETag`; a blocked or A2A-less service leaves the list; an empty fleet; `503` before the directory has synced; past a limit `503`, the flag raised and, when it fits again, cleared; `document()` sets the flag without a request; other paths and methods |
-| `bin/operator/tests/cluster.rs` | against a real cluster: the operator serves the registry with a token, lists the Ready agent and not a Blocked one, refuses without the token, answers `304` and `HEAD`, reads the registry and the card it lists **from a pod**, and drops a deleted service; without a token nothing listens |
+| `tests/document.rs` | what is listed and in what order; the same bytes for the same entries in any order; the strong `ETag` follows the body; **the golden document and its `ETag`** (a fleet with no audience: byte for byte what it was before D3); **the golden with audiences** (`tests/fixtures/golden-document-audience.json`); the version marker and the anchor; cards and names a reader would skip are not listed; titles and tags made to fit; the limits are refusals (501 items, and a body past 1 MiB); the ids; the consumer reads the fleet, the empty fleet, the vendored documents and a document of 500 items; the property test. **Audience (D3):** the §60a item, exactly; none and `[]` publish nothing and the same bytes; `["*"]`; the values as a set in byte order; all 24 orders of four values, each said twice, give the same body and `ETag` (and any change of the values does not); the bounds (32 values of 64 characters) published whole, 33 said with a repeat being 32; eight malformed audiences withheld with the item kept and named in `audience_withheld`; **the size**: 500 items with 32 values are refused whole, the largest number that fits is found and read by the consumer, and a body of **exactly 1 MiB** is accepted and one byte more is refused; the consumer tests above; the contract's example; two property tests (the published audience equals the contract's rule over arbitrary lists, and in any order and said twice it is the same bytes) |
+| `tests/router.rs` | `401` for ten kinds of missing or wrong credential on `GET` and `HEAD`, with no body; the scheme is case-insensitive and the token not; no `304` for the unauthenticated; the headers of the contract; `HEAD`; `304` for the five forms of a match and `200` for the four of a mismatch; a change of the fleet is a new `ETag`; a blocked or A2A-less service leaves the list; an empty fleet; `503` before the directory has synced; past a limit `503`, the flag raised and, when it fits again, cleared; `document()` sets the flag without a request; other paths and methods. **Audience (D3):** served in byte order and absent for a service with none; the same values reordered or repeated are still `304` for the old `ETag`, another value is `200` and a new one, and no audience takes the attribute away; 500 services whose audiences pass 1 MiB are `503` with the flag raised and `200` with it cleared once they are open to everybody |
+| `bin/operator/tests/cluster.rs` | against a real cluster: the operator serves the registry with a token, lists the Ready agent **with the audience of its `AgentService`, as a set** (D3) and not a Blocked one, refuses without the token, answers `304` and `HEAD`, reads the registry and the card it lists **from a pod**, and drops a deleted service; without a token nothing listens |
 
 ### What is not tested
 

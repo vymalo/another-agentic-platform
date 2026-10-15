@@ -39,6 +39,8 @@ fn entry(svc: &AgentService) -> DirectoryEntry {
         title: svc.spec.registry.title.clone(),
         description: svc.spec.description.clone(),
         tags: svc.spec.registry.tags.clone(),
+        // As the service states it (absent and `[]` are both empty): the registry normalises.
+        audience: svc.spec.access.audience.clone().unwrap_or_default(),
         agent_card: status
             .and_then(|s| s.endpoints.as_ref())
             .and_then(|e| e.agent_card.clone()),

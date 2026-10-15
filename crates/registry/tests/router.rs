@@ -9,12 +9,12 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 
 use aap_ports::memory::MemoryDirectory;
-use aap_registry::document::{MAX_ITEMS, PROFILE};
+use aap_registry::document::{MAX_AUDIENCE, MAX_ITEMS, PROFILE};
 use aap_registry::{MAX_AGE_SECS, PATH, Registry, Token, build};
 use axum::Router;
 use axum::body::Body;
 use axum::http::{Method, Request, Response, StatusCode, header};
-use support::{consumer, entry, titled};
+use support::{audienced, consumer, entry, longest_values, titled};
 use tower::ServiceExt;
 
 const TOKEN: &str = "registry-token-0123456789";
@@ -247,6 +247,64 @@ async fn a_change_of_the_fleet_is_a_new_etag_and_the_old_one_is_no_longer_curren
 }
 
 #[tokio::test]
+async fn an_audience_is_served_and_a_change_of_it_is_a_new_etag_but_a_reordering_is_not() {
+    let f = fixture();
+    let service = |audience: &[&str]| {
+        let mut e = titled("ns", "coder", "Coder", &["coding", "git"]);
+        e.audience = audience.iter().map(|a| (*a).to_owned()).collect();
+        e
+    };
+    f.directory
+        .put(service(&["agent.use:ops", "agent.use:coder"]));
+    let first = get(&f.router, &[]).await;
+    assert_eq!(first.status(), StatusCode::OK);
+    let etag = header_of(&first, header::ETAG);
+    let bytes = body(first).await;
+    let doc: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+    let items = doc["linkset"][0]["item"].as_array().unwrap();
+    let coder = items.iter().find(|i| i["service"][0] == "coder").unwrap();
+    assert_eq!(
+        coder["audience"],
+        serde_json::json!(["agent.use:coder", "agent.use:ops"]),
+        "published as a set, in byte order"
+    );
+    let researcher = items
+        .iter()
+        .find(|i| i["service"][0] == "researcher")
+        .unwrap();
+    assert!(
+        researcher.get("audience").is_none(),
+        "none: nothing is said"
+    );
+    let read = consumer::parse(&bytes).unwrap();
+    assert_eq!(read.items.len(), 2);
+    assert!(read.skipped.is_empty());
+
+    // The same values in another order, and one said twice: the same document, so a reader's copy is
+    // still current.
+    f.directory.put(service(&[
+        "agent.use:coder",
+        "agent.use:ops",
+        "agent.use:coder",
+    ]));
+    let response = get(&f.router, &[("if-none-match", &etag)]).await;
+    assert_eq!(response.status(), StatusCode::NOT_MODIFIED);
+    assert_eq!(header_of(&response, header::ETAG), etag);
+
+    // Another value: another document.
+    f.directory
+        .put(service(&["agent.use:coder", "agent.use:qa"]));
+    let response = get(&f.router, &[("if-none-match", &etag)]).await;
+    assert_eq!(response.status(), StatusCode::OK);
+    assert_ne!(header_of(&response, header::ETAG), etag);
+
+    // And taking the audience away takes the attribute away.
+    f.directory.put(service(&[]));
+    let text = String::from_utf8(body(get(&f.router, &[]).await).await).unwrap();
+    assert!(!text.contains("audience"), "{text}");
+}
+
+#[tokio::test]
 async fn an_empty_fleet_is_an_empty_list_that_a_reader_accepts() {
     let f = fixture();
     f.directory.remove("ns", "coder");
@@ -299,6 +357,34 @@ async fn past_a_limit_it_refuses_with_503_and_raises_the_flag_until_it_fits_agai
     }
     assert_eq!(get(&f.router, &[]).await.status(), StatusCode::OK);
     assert!(!f.full.load(Ordering::Acquire));
+}
+
+#[tokio::test]
+async fn audiences_that_pass_the_size_limit_are_a_503_and_raise_the_flag_until_they_fit() {
+    // 500 services, each with 32 values of 64 characters: no item is over a bound and there are not too
+    // many, but the body is over 1 MiB, and the registry refuses it whole rather than cut a value.
+    let f = fixture();
+    for i in 0..MAX_ITEMS {
+        let mut e = entry("big", &format!("a{i}"));
+        e.audience = longest_values(MAX_AUDIENCE);
+        f.directory.put(e);
+    }
+    f.directory.remove("ns", "coder");
+    f.directory.remove("ns", "researcher");
+    let response = get(&f.router, &[]).await;
+    assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+    assert!(body(response).await.is_empty());
+    assert!(f.full.load(Ordering::Acquire));
+
+    // The same fleet open to everybody is small, and the flag follows.
+    for i in 0..MAX_ITEMS {
+        f.directory.put(audienced("big", &format!("a{i}"), &["*"]));
+    }
+    let response = get(&f.router, &[]).await;
+    assert_eq!(response.status(), StatusCode::OK);
+    assert!(!f.full.load(Ordering::Acquire));
+    let read = consumer::parse(&body(response).await).unwrap();
+    assert_eq!(read.items.len(), MAX_ITEMS);
 }
 
 #[tokio::test]

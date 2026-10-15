@@ -79,7 +79,10 @@ implementation.
   `CNPGNotInstalled` condition), not a status. `cnpg_connection("coder")` is `coder-db-app` key `uri`:
   the one definition of that name, used by `aap-domain` for `DATABASE_URL` and by every provisioner.
 * **`AgentDirectory::list`** returns every service, listed or not, ordered by scope and name, with the
-  flags the registry needs (`a2a_enabled`, `blocked`, the card URL); `DirectoryEntry::listed()` is the
+  flags the registry needs (`a2a_enabled`, `blocked`, the card URL) and the `audience` (D3, AD-028: who may use the
+  agent, **as the service states it**, in its order and with its repeats; empty means none, because absent and `[]` are
+  the same to a consumer, so the type is a `Vec` like `tags` and not an `Option`; the registry sorts and de-duplicates what
+  it publishes, so a directory does not have to); `DirectoryEntry::listed()` is the
   rule of §59a ("A2A enabled, not `Blocked`") in one place. Before its first sync a directory answers
   `NotReady`, never an empty list that looks true.
 
@@ -109,7 +112,7 @@ instead of depending on that repository.
 | `RuntimeStatus { phase, replicas, issues }`, `Phase`, `Issue { role, reason, message }`, `IssueReason` | the §59a table: `ConfigRejected`, `DependencyUnavailable`, `MissingSecret { name }`, `ImagePull`, `CrashLoop`, `NameConflict`. Closed |
 | `Capabilities`, `Surface`, `Endpoint`, `DeleteOutcome` | |
 | `StoreSpec`, `StoreKind::{Secret, Cnpg}`, `CnpgSpec`, `StoreStatus`, `StoreState`, `StoreCapabilities`, `ReleaseOutcome` | the store |
-| `DirectoryEntry` | the directory entry type for the registry |
+| `DirectoryEntry` | the directory entry type for the registry: scope, name, title, description, tags, **audience (D3)**, card URL, `a2a_enabled`, `blocked`. A public struct built with a literal: **the field `audience` broke every `DirectoryEntry { .. }` literal** (an implementer of `AgentDirectory` that builds its own entries; the literals in this repository are updated: the controller's `entry()`, the testkit's `entry()`, `tests/contract.rs` and the registry crate's test helpers; `MemoryDirectory` builds none, it keeps the entries it is given), and it is `#[serde(default)]`, so a stored entry from before reads as having none |
 | `DeletionPolicy::{Retain, Delete}` | the neutral form of `aap_api::DeletionPolicy` |
 
 Choices worth knowing, because §59a does not say:
@@ -134,7 +137,7 @@ Off by default (the controller and the providers depend on the traits only). Wit
 
 * **Conformance macros**, in the style of `adam-store-testkit`:
   `runtime_provider_conformance!(make)` (14 cases), `store_provisioner_conformance!(make)` (7) and
-  `agent_directory_conformance!(make)` (5). `make` is a path to `async fn() -> Option<T>`; `None` skips
+  `agent_directory_conformance!(make)` (6). `make` is a path to `async fn() -> Option<T>`; `None` skips
   the suite, and `AAP_TEST_REQUIRE_BACKEND=1` turns the skip into a failure (CI sets it for the suites that
   need a cluster). The macros expand to `#[tokio::test]`, so the crate that uses them needs `tokio` with
   `macros` and `rt`.
