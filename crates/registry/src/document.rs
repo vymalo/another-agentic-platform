@@ -17,8 +17,9 @@
 //!   same values in another order are the same bytes and the same `ETag`. It is absent when the service
 //!   has none (absent and `[]` are the same to a consumer: administrators only), and **absent too, and
 //!   named in [`Built::audience_withheld`], when it breaks the contract's shape** (a value that is not
-//!   1 to 64 visible ASCII characters, more than 32 values, `*` beside another value): a consumer would
-//!   take it for none, so the builder says none, and never publishes what the contract calls malformed;
+//!   1 to 64 bytes in `0x21` to `0x7E`, more than 32 distinct values, `*` beside another distinct
+//!   value): a consumer would take it for none, so the builder says none, and never publishes what
+//!   the contract calls malformed;
 //! * the document is **refused, never truncated**, past 500 items or 1 MiB ([`Overflow`]): a client
 //!   never truncates either, and silently dropping agents from a long list would hide them.
 //!
@@ -66,7 +67,9 @@ pub struct Overflow {
     pub bytes: Option<usize>,
 }
 
-/// Why an entry is not in the document: for the operator's log, never for a client.
+/// A note about one entry and why: for the operator's log, never for a client. [`Built::skipped`]
+/// holds the entries that are not in the document, [`Built::audience_withheld`] the entries that
+/// are, without their audience.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Skipped {
     /// `scope/name` of the entry.
@@ -75,8 +78,9 @@ pub struct Skipped {
     pub reason: &'static str,
 }
 
-/// A document, ready to serve.
+/// A document, ready to serve. Read it, never build it: it grows a field when the document does.
 #[derive(Clone, Debug, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct Built {
     /// The body: UTF-8 JSON, compact.
     pub body: Vec<u8>,
@@ -132,7 +136,8 @@ fn tags_of(tags: &[String]) -> Vec<&str> {
         .collect()
 }
 
-/// Whether `value` is an audience value: 1 to 64 visible ASCII characters (`^[!-~]{1,64}$`).
+/// Whether `value` is an audience value: 1 to 64 bytes, each in `0x21` to `0x7E` (no regular
+/// expression: a `$` would also accept a final newline).
 fn is_audience_value(value: &str) -> bool {
     (1..=MAX_AUDIENCE_CHARS).contains(&value.len())
         && value.bytes().all(|b| (b'!'..=b'~').contains(&b))
