@@ -34,6 +34,7 @@ let crds: Vec<CustomResourceDefinition> = aap_api::crds(); // AgentConfig, Agent
 | `condition_type`, `reason` | The condition types and reasons of §59a, "Status", as constants, so the controller and its tests do not spell them twice |
 | `crds()` | The four `CustomResourceDefinition`s, in a fixed order: `AgentConfig`, `AgentService`, `ModelEndpoint`, `ToolProvider` |
 | `GROUP`, `VERSION` | `agents.vymalo.com`, `v1alpha1` |
+| `permission::{AGENTS_READ, AGENTS_WRITE, MODELS_WRITE, TOOLPROVIDERS_WRITE, SECRETS_PICK, ALL, PREFIX}` | The permissions of the Platform API as compile-time constants (slice D4, AD-032): what a route asks of the roles claim of a token. See *Permissions* below |
 
 Optional settings of `adam-coder` are `Option`s: a field left out is not set, and the binary's own
 default applies (the operator does not copy adam's defaults). The defaults the schema does apply
@@ -133,9 +134,33 @@ the `githubMcp` port beyond its 1 to 65535 range (the range is also in the schem
   absent); **D2 decides that the server is optional when either the agent's entry or the provider says so**
   (`agent.optional || provider.optional`). *A decision for the owner to confirm.*
 
+## Permissions (slice D4)
+
+[§60a](../../docs/architecture/10-control-plane-and-crds.md#the-platform-api-ad-025-ad-027) says that the permission of each route is
+"a compile-time constant of `aap-api`, so no configuration lists roles". `aap_api::permission` holds them. A permission is a
+Keycloak client role of the client `another-agentic`; the roles claim of a token holds the permissions a person has, composites
+expanded (AD-032). **The Platform API checks one of these strings and never a role name.**
+
+| Constant | Value | Guards |
+|---|---|---|
+| `AGENTS_READ` | `platform:agents.read` | every `GET` of `/v1/info`, `/v1/agents`, `/v1/models`, `/v1/tool-servers`, and `GET /v1/agents/{name}/yaml`; draws `/admin` |
+| `AGENTS_WRITE` | `platform:agents.write` | `PUT` and `DELETE` of `/v1/agents/{name}` (suspend and the audience included) |
+| `MODELS_WRITE` | `platform:models.write` | `PUT` and `DELETE` of `/v1/models/{name}` |
+| `TOOLPROVIDERS_WRITE` | `platform:toolproviders.write` | `PUT` and `DELETE` of `/v1/tool-servers/{name}` |
+| `SECRETS_PICK` | `platform:secrets.pick` | `GET /v1/secret-keys`, and any write whose body names a secret key, beside the write's own permission |
+
+`agent.use:<agent-name>` is **not** one of them: it is what an agent's `audience` lists (AD-028), the orchestrator reads it,
+and the dashboard only writes it (`permission::use_permission`). `GET /v1/me` is the values of the claim that start with
+`PREFIX`.
+
+The table of routes to permissions is the router's (slice D7), where each route's test holds it; this crate holds the names,
+and `tests/permission.rs` holds them equal to the sets §60a prints. The names are *proposed, not final* (§93).
+
 ## Tests
 
 `cargo test -p aap-api`:
+
+- `tests/permission.rs`: the constants are the permissions of §60a's two tables, each starts with `platform:` and appears once.
 
 - `tests/crds.rs`: the identity of the four CRDs, every rule above is in the generated schema, the
   schema has no rule the tests do not know, the schema bounds the rules need, the optional fields, the shapes the
