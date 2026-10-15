@@ -215,8 +215,9 @@ AAP_TEST_KUBECONFIG=$HOME/.kube/config cargo test -p aap-runtime-kubernetes --te
 
 The cluster tests create the namespace `aap-test` (the ids of `aap_ports::testkit` live there) and leave what a case does
 not delete (the claims of `Retain`): use a cluster you can throw away. The suite's spec names an image that does not exist,
-so the **harness** makes the containers runnable: the image becomes `busybox:1.37.0` from the public ECR mirror, pinned
-by digest (`sha256:bdf57e52…`, *verified 2026-10-05*: the same index on Docker Hub and on `public.ecr.aws`), the agent
+so the **harness** makes the containers runnable: the image becomes `busybox:1.37.0` from `mirror.gcr.io` (public ECR
+answered `429` to kind on GitHub's runners, 2026-10-15), pinned by digest (`sha256:bdf57e52…`, *verified 2026-10-05*: the
+same index on Docker Hub and on `public.ecr.aws`; *verified 2026-10-15* on `mirror.gcr.io`), the agent
 serves `/healthz` with `httpd`, sidecars sleep, and the grace period is 1 s; it also creates the Secrets the spec
 references, with a dummy value. Everything else (every object, label and field) is the provider's own.
 
