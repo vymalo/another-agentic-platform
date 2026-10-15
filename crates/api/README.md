@@ -72,16 +72,15 @@ Not bounded, on purpose: the strings inside `models` and `tools`, the header nam
 whole object is limited by the API server's own size limit. Every bound in this table has an invalid example (below).
 
 **This crate only says what is valid.** Resolving a reference into the entry the inline form gives, and the default
-image, are slice D2 (`aap-domain`). Until then `aap-domain` refuses a config that uses `endpointRef`, `providerRef` or no
-image, with a `ConfigInvalid` that names the field and says so.
+image, are `aap-domain`'s (slice D2, built: [its README](../domain/README.md#references-and-the-default-image-slice-d2-ad-029)).
 
-**What D2 must do with the referents.** An API server checks nothing of what `ModelEndpoint` and `ToolProvider` hold beyond
-the bounds above, and D1 checks nothing about the provider's URL. The inline form's checks are the reconciler's
-(`aap-domain::validate`): D2 applies the same ones to the referent it resolves, with the field named after the referent. For a
-provider that is `parse_http_url` on `mcp.url` (an `http` or `https` URL with no user name, password or `${…}`: a secret in a
-URL reaches the logs), `is_http_token` on each header name, and the clash of two headers that want one variable from
-different Secrets. For an endpoint, `parse_http_url` on `baseUrl.value` and the checks of the two `SecretKeyRef`s. This is why
-`ToolProvider` has no printer column for its URL: a URL with a password in it would be printed by `kubectl get` before any check had looked at it.
+**What the operator does with the referents.** An API server checks nothing of what `ModelEndpoint` and `ToolProvider` hold beyond
+the bounds above. The inline form's checks are the reconciler's (`aap-domain::validate`), and D2 applies the same ones to the
+referent it resolves, with the field named after the referent. For a provider that is `parse_http_url` on `mcp.url` (an `http`
+or `https` URL with no user name, password or `${…}`: a secret in a URL reaches the logs), `is_http_token` on each header name, and
+the clash of two headers that want one variable from different Secrets. For an endpoint, `parse_http_url` on `baseUrl.value` and
+the checks of the two `SecretKeyRef`s. This is why `ToolProvider` has no printer column for its URL: a URL with a password in it would
+be printed by `kubectl get` before any check had looked at it.
 
 ## CEL rules (`x-kubernetes-validations`)
 
@@ -127,9 +126,12 @@ the `githubMcp` port beyond its 1 to 65535 range (the range is also in the schem
   ASCII today (`agent.use:<name>`, `*`). **The owner confirmed this reading on 2026-10-15**, and with it the bound of 32
   extra MCP servers per agent, which also holds for configs stored before D1.
 * `ToolProvider.spec.mcp.optional` defaults to `false`, as the inline field does; the dashboard form's "default on" is the
-  form's. `tools` has no inline counterpart: what the operator does with it is for D2.
+  form's. `tools` has no inline counterpart; **D2 maps it** to the `tools` allow-list that adam-rs reads in the MCP file
+  (*verified 2026-10-15* at adam-rs `0391809`, in [`aap-domain`'s README](../domain/README.md#references-and-the-default-image-slice-d2-ad-029)),
+  and refuses an entry adam cannot name.
 * Beside a `providerRef`, the server's own `optional` is not forbidden (it has a default, so a rule could not tell it from
-  absent); D2 decides how it meets the provider's.
+  absent); **D2 decides that the server is optional when either the agent's entry or the provider says so**
+  (`agent.optional || provider.optional`). *A decision for the owner to confirm.*
 
 ## Tests
 

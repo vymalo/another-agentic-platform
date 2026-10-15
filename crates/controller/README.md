@@ -23,8 +23,9 @@ travels as the opaque `OwnerHandle` that the composition root's `OwnerOf` functi
 | `Operator::directory()` | a `ReflectorDirectory`: the `AgentDirectory` over the services controller's cache |
 | `Operator::readiness()`, `metrics()` | a `Readiness` handle (both caches have listed the cluster) and the `Metrics` counters, for `/readyz` and `/metrics` |
 | `reconcile_service`, `service_error_policy`, `reconcile_config`, `config_error_policy` | one pass of each reconciler, public so a test can drive it |
+| `services_of_endpoint(services, configs, &ModelEndpoint)`, `services_of_provider(services, configs, &ToolProvider)` | the services a changed or deleted `ModelEndpoint` or `ToolProvider` concerns (slice D2): through the caches of the configs and the services, the configs of the namespace that reference it, then the services that run them. What the two extra watches of `Operator::run` map with |
 | `derive::{derive, Observed, ConfigOutcome, StoreOutcome}` | the pure part: what a pass saw, as conditions and a state |
-| `Options { watch_namespace, registry, registry_full, resync, concurrency, instance }` | the settings; `RegistryMode::{Disabled, Enabled}`, `registry_full` an `Arc<AtomicBool>` the composition root shares with the registry (the controller depends on no registry crate), `Resync { settled, pending, not_installed }` |
+| `Options { watch_namespace, registry, registry_full, resync, concurrency, instance, default_agent_image }` | the settings; `RegistryMode::{Disabled, Enabled}`, `registry_full` an `Arc<AtomicBool>` the composition root shares with the registry (the controller depends on no registry crate), `Resync { settled, pending, not_installed }`, `default_agent_image` the image of a config that names none (`--default-agent-image`; `None`: no default, and such a config is `ConfigInvalid`) |
 | `Context`, `ConfigContext` | what a reconciler is given; `with_clock`, `with_metrics` |
 | `FINALIZER`, `FIELD_MANAGER` | `agents.vymalo.com/runtime` and `aap-operator` |
 | `Error` | each variant has a class (`aap_ports::Classify`); the error policy decides from the class |
@@ -44,8 +45,9 @@ sequenceDiagram
     C->>A: finalizer helper: add agents.vymalo.com/runtime (JSON patch that tests what it saw)
     Note over C,A: the first pass ends here, the patch brings the second
     C->>A: get the AgentConfig named by spec.configRef
-    C->>C: aap_domain::resolve, which validates
-    alt config missing or invalid
+    C->>A: get the ModelEndpoint and the ToolProviders it references, if any
+    C->>C: aap_domain::resolve with those objects and the default image, which validates
+    alt config missing, invalid, or a referent missing
         C->>R: status(id): what runs, left untouched
     else config resolved
         C->>S: ensure(store_id, store spec)
@@ -136,6 +138,7 @@ from them) and `status.runtime` is what the provider reports now.
 |---|---|
 | the service itself | `Controller::new` over the services (all namespaces, or `Options::watch_namespace`) |
 | an `AgentConfig` | `Controller::watches`, mapped through the services' reflector to every service of that namespace whose `spec.configRef.name` is the config |
+| a `ModelEndpoint` or a `ToolProvider` (slice D2) | `Controller::watches` over each kind, mapped by `services_of_endpoint` / `services_of_provider` through the configs' reflector (the configs of the namespace that reference it) and the services' (the services that run them). **A change and a deletion both**: an edit rolls the agents that use the object, a deletion makes them `ConfigInvalid` at once, and an object created later unblocks the services that were waiting for it. An object nobody references reconciles nothing |
 | a runtime changed | `Controller::reconcile_on` over `RuntimeProvider::watch()`: the id's scope and name are the service's. Ids of other namespaces (when namespaced) and of unknown services are ignored. **A hint, never the truth** |
 | the timer | each pass returns `Action::requeue(Resync)`: 5 minutes when `Ready` or `Suspended` or when only a change of the objects can help (a missing or invalid config), 15 s when rolling out, unwell or held by a foreign object, 60 s when a store backend is not installed |
 | not a trigger: a Secret | §59a gives the operator no right on Secrets (AD-024), so it cannot watch them. A Secret that appears reaches the controller through the pod, and the runtime's watch |
@@ -205,6 +208,8 @@ operator has not applied.
 | (not in §59a) delete-time policy sync | Described under *Deletion* | A change of `deletionPolicy` followed at once by a delete must not lose data |
 | `status` of `AgentConfig` | `observedGeneration` and the condition `Valid` (True/`Valid`, False/`ConfigInvalid`), from `aap_domain::validate_config`, a function this slice added to `aap-domain` for the config's own rules | `validate` takes both objects |
 | (the brief) leader election "only if §59a asks" | None | §59a: "One replica, `Recreate`, no leader election" |
+| §60a: "The reconciler reads the referents through the store it already uses" | The referents are read with `get` on the API server in each pass, as the config is, **not** from a reflector. Only the mapping from a referent to services uses the caches (those of the services and the configs) | A pass sees the cluster as it is, with no cache to be stale; the mapping is a hint and the timer is the net. Two more reflectors would only be read once per pass |
+| §60a: a missing referent is `ConfigInvalid` | A referent that is missing is `ConfigResolved: False`, reason `ConfigInvalid` (not `ConfigNotFound`, which is the config's own), the message naming it; the `AgentConfig`'s `Valid` condition does not read referents | As §60a says. The config is well formed; the agent cannot be made |
 
 ## Cluster rights
 
@@ -214,6 +219,7 @@ For the chart of S8, in the namespaces watched (the runtime provider's own are i
 | Resources | Verbs |
 |---|---|
 | `agentservices`, `agentconfigs` (`agents.vymalo.com`) | `get list watch patch` (`patch` also writes `metadata.finalizers`) |
+| `modelendpoints`, `toolproviders` | `get list watch` (read in a pass, watched; **never written**) |
 | `agentservices/status`, `agentconfigs/status` | `patch` (server-side apply under `aap-operator`) |
 | `events` (`events.k8s.io`) | `create patch` |
 
@@ -225,9 +231,9 @@ For the chart of S8, in the namespaces watched (the runtime provider's own are i
 
 | File | What |
 |---|---|
-| `tests/reconcile.rs` | one pass at a time, the **real `kube::Client`** against a fake API server (`tests/support`: JSON patches of the finalizer with their `test`, server-side apply of `/status`, Events, 404s as the server words them) and the `Memory` providers of `aap-ports`: the first pass only adds the finalizer; create → Ready with every condition, endpoints, digest, owner, one Event; a second pass writes nothing; a changed config is a new digest; an invalid config blocks and leaves what runs untouched, and fixing it unblocks; a reference the operator cannot resolve yet (an `endpointRef`, a `providerRef`, no image: slice D2 of the admin dashboard) blocks the same way and the message names the field; a missing config; a missing Secret, each runtime issue, a rollout in progress; a `NameConflict` that clears; suspend and resume; a provider without `suspend`; a spec a provider refuses; a store without CloudNativePG, a cluster not ready; a served registry lists a ready service, and a full one makes it `Listed: False` / `RegistryFull` without making it unready; delete under `Retain` and under `Delete`, a policy changed just before the delete, a service that never got a runtime, a delete that fails and keeps the finalizer; back-off by class and its reset; API failures by class; the `AgentConfig` `Valid` condition |
-| `tests/operator.rs` | `Operator::run` against the fake's **list and watch**: a service that appears is reconciled and listed in the directory, a changed config reconciles the services that name it, an id from `RuntimeProvider::watch()` reconciles its service (no object changed), another namespace is left alone, a deletion runs the finalizer, the controllers stop when told to |
-| `tests/pure.rs` | `derive`: the five conditions in order, the transition time kept, the state rule row by row, the first false reason on `Ready`, the issue that speaks, `Listed` with a registry (and `RegistryFull`); `backoff`; the counters' text; the directory over a reflector's cache |
+| `tests/reconcile.rs` | one pass at a time, the **real `kube::Client`** against a fake API server (`tests/support`: JSON patches of the finalizer with their `test`, server-side apply of `/status`, Events, 404s as the server words them) and the `Memory` providers of `aap-ports`: the first pass only adds the finalizer; create → Ready with every condition, endpoints, digest, owner, one Event; a second pass writes nothing; a changed config is a new digest; an invalid config blocks and leaves what runs untouched, and fixing it unblocks; the shared objects of the dashboard (slice D2): a referent that is not there blocks the service, the message names it, and nothing is made (no runtime, no store); one that is created later unblocks it; an edit of an endpoint or a provider is a new digest and a rollout, and a title or a list of aliases is not; a deleted referent blocks the service with `ConfigInvalid` naming it and leaves what runs untouched, and the same object created again is the same agent; a config with no image is blocked naming `--default-agent-image` without a default, runs the default with one, and a new default rolls the agents that name none and not the ones that pin their own; an inline object is unaffected by the default and reads no shared kind; a missing config; a missing Secret, each runtime issue, a rollout in progress; a `NameConflict` that clears; suspend and resume; a provider without `suspend`; a spec a provider refuses; a store without CloudNativePG, a cluster not ready; a served registry lists a ready service, and a full one makes it `Listed: False` / `RegistryFull` without making it unready; delete under `Retain` and under `Delete`, a policy changed just before the delete, a service that never got a runtime, a delete that fails and keeps the finalizer; back-off by class and its reset; API failures by class; the `AgentConfig` `Valid` condition |
+| `tests/operator.rs` | `Operator::run` against the fake's **list and watch**: a service that appears is reconciled and listed in the directory, a changed config reconciles the services that name it, a changed, deleted or created `ModelEndpoint` or `ToolProvider` reconciles the services whose config references it and no object nobody references does (the timers are an hour, so only a trigger makes a pass), an id from `RuntimeProvider::watch()` reconciles its service (no object changed), another namespace is left alone, a deletion runs the finalizer, the controllers stop when told to |
+| `tests/pure.rs` | `derive`: the five conditions in order, the transition time kept, the state rule row by row, the first false reason on `Ready`, the issue that speaks, `Listed` with a registry (and `RegistryFull`); `backoff`; the counters' text; the directory over a reflector's cache; which services a referent concerns (the namespace of each hop, the kind, the name) |
 
 `tests/support/scripted.rs` wraps `MemoryRuntime`: the in-memory one resets a forced status on every `ensure` and speaks on
 every `ensure` (which, in a running controller, is a reason to run another pass forever), so a test scripts what

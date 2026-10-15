@@ -49,6 +49,7 @@ On netcup an Argo CD Application does this (`helm.valuesObject`, the contents of
 | `image.repository`, `image.tag`, `image.digest`, `image.pullPolicy` | `ghcr.io/vymalo/another-agentic-platform/operator`, `sha-0000000`, none, `IfNotPresent` | The tag is **written by CI only** (`bump-tag.sh`), never by hand. `latest` and a malformed digest are refused |
 | `imagePullSecrets` | `[]` | For a private package ([below](#the-image)) |
 | `watchNamespace` | the release's namespace | The one namespace watched; the `Role` and `RoleBinding` are made there. A name, never a list or a wildcard: **there is no value that gives the operator a `ClusterRole`** |
+| `defaultAgentImage` | `ghcr.io/vymalo/another-adam-rs/coder:sha-9a1fd4e@sha256:c3c178b7d73599f40d53f798616e510346abd3300a622b09b2bc233109f12b44` | The image of an agent whose `AgentConfig` names none (`DEFAULT_AGENT_IMAGE`, `operator run --default-agent-image`; AD-029): the coder image, **by tag and digest** (the chart refuses a value without both, and `latest`). Empty: no variable, no default, and such an agent is `ConfigInvalid`. **Not** moved by `bump-tag.sh`: [below](#the-default-agent-image) |
 | `storeCnpg` | `true` | The right on CloudNativePG `Cluster`s (`get patch create delete`). The image is built with the `store-cnpg` feature; `false` is for a cluster that has no CloudNativePG |
 | `registry.tokenSecret.name`, `.key` | none, `token` | An existing Secret that holds the registry's bearer token. The operator reads the file **once**, at start: after a rotation, restart the pod |
 | `registry.publicUrl` | none | `REGISTRY_PUBLIC_URL`: the registry document's own URL, its `anchor` |
@@ -81,6 +82,7 @@ The `Role` is the sum of the three crates' tables, no more
 | Resources | Verbs |
 |---|---|
 | `agentservices`, `agentconfigs` (`agents.vymalo.com`) | `get list watch patch` |
+| `modelendpoints`, `toolproviders` (`agents.vymalo.com`) | `get list watch` (the shared objects of the dashboard, AD-029: read to resolve a reference and watched, **never written**) |
 | `agentservices/status`, `agentconfigs/status` | `patch` |
 | `events` (`events.k8s.io`) | `create patch` |
 | `statefulsets`, `deployments` (`apps`) | `get list watch patch create delete` |
@@ -125,6 +127,37 @@ curl -s -o /dev/null -w '%{http_code}\n' -H "Authorization: Bearer $TOKEN" \
 
 Until it answers 200, a cluster that pulls it anonymously gets `ImagePullBackOff` (or set `imagePullSecrets`).
 
+## The default agent image
+
+An `AgentConfig` that names no `environment.image` runs the operator's default, the coder image (AD-029, [§60a](../../docs/architecture/10-control-plane-and-crds.md#deployment-defaults),
+*Deployment defaults*). The chart sets it with `defaultAgentImage`, which becomes `DEFAULT_AGENT_IMAGE`. It is **a pin of its own**:
+`bump-tag.sh` moves the operator's `image.tag` and nothing else (`tests/bump-tag-test.sh` holds that, with a `defaultAgentImage` line next to
+it), because the operator's image and the coder's are two images with two release trains (this repository's and adam-rs's). §60a says "a
+value of its chart that CI bumps by GitOps": the value is the GitOps repository's to set (`helm.valuesObject` in the Application, see
+[`examples/netcup.values.yaml`](examples/netcup.values.yaml)) and to move, and this chart ships a pin that works.
+
+* **What a change does.** A new value is a new digest for exactly the agents that name no image, and so a rollout of them; an agent that
+  pins its own image is not touched. Changing it is how a new coder is rolled out to every agent made from the dashboard.
+* **The pin the chart ships** is `sha-9a1fd4e` of `ghcr.io/vymalo/another-adam-rs/coder`, the image `tests/e2e/coder.yaml` runs under the
+  operator in kind (the real coder, up to its startup checks: [`tests/e2e/README.md`](tests/e2e/README.md)). Its digest was read from
+  ghcr.io on 2026-10-15, anonymously: HTTP 200, `sha256:c3c178b7…12b44`. **Two tests hold the two together**: `render-check.sh` and
+  `cargo test -p aap-operator --test e2e_fixture` fail when the chart's value and the image of `coder.yaml` differ. A pin that has not been
+  through the end-to-end is a pin nobody has seen start.
+* **To move it** (by hand or from the GitOps repository's values; there is no automation):
+
+  ```sh
+  TAG=sha-<7>                    # a tag of ghcr.io/vymalo/another-adam-rs/coder that CI of adam-rs pushed
+  TOKEN=$(curl -s "https://ghcr.io/token?scope=repository:vymalo/another-adam-rs/coder:pull" | python3 -c 'import sys,json;print(json.load(sys.stdin)["token"])')
+  curl -s -D - -o /dev/null -H "Authorization: Bearer $TOKEN" \
+    -H 'Accept: application/vnd.oci.image.index.v1+json, application/vnd.oci.image.manifest.v1+json, application/vnd.docker.distribution.manifest.v2+json' \
+    https://ghcr.io/v2/vymalo/another-adam-rs/coder/manifests/$TAG | grep -i -E '^HTTP|docker-content-digest'    # 200, and the digest
+  ```
+
+  Put `repository:TAG@sha256:<digest>` in `defaultAgentImage` here and in the `ref:` of `tests/e2e/coder.yaml`, and let the end-to-end run
+  In the GitOps repository only the value is set.
+* **The chart refuses** a value without a tag and a digest, a short digest, white space, and a tag `latest`. The binary refuses white space
+  at start. Neither checks that the image exists.
+
 ## Tests
 
 ```sh
@@ -136,8 +169,8 @@ sh deploy/operator/tests/bump-tag-test.sh
 
 | File | What |
 |---|---|
-| `tests/render-check.sh` | the three golden renders (`tests/golden/netcup.yaml` from `examples/netcup.values.yaml`, `secret.yaml` from `tests/secret.values.yaml`, `default.yaml`); no Secret object, no `ClusterRole`, no host access; one replica, `Recreate`, the probes, the security context; the `Role` equal to the table above, with and without `storeCnpg`; the registry only with a token, mounted as a file; the NetworkPolicy; the ExternalSecret; every refusal of `_validate.tpl`; and `deploy/operator-crds` equal to `deploy/crds` |
-| `tests/bump-tag-test.sh` | `bump-tag.sh` edits only `image.tag`, is idempotent, refuses a malformed tag (the test of adam-rs's `deploy/coder`, with this chart's values) |
+| `tests/render-check.sh` | the three golden renders (`tests/golden/netcup.yaml` from `examples/netcup.values.yaml`, `secret.yaml` from `tests/secret.values.yaml`, `default.yaml`); no Secret object, no `ClusterRole`, no host access; one replica, `Recreate`, the probes, the security context; the `Role` equal to the table above, with and without `storeCnpg`; the registry only with a token, mounted as a file; the NetworkPolicy; the ExternalSecret; every refusal of `_validate.tpl` (the default agent image's included); the shared kinds read and never written; `DEFAULT_AGENT_IMAGE` pinned by tag and digest, empty rendering none, and the chart's pin equal to the end-to-end's; and `deploy/operator-crds` equal to `deploy/crds` |
+| `tests/bump-tag-test.sh` | `bump-tag.sh` edits only `image.tag` (a `defaultAgentImage` line beside it is left alone), is idempotent, refuses a malformed tag (the test of adam-rs's `deploy/coder`, with this chart's values) |
 | `tests/schemas/` | the `ExternalSecret` schema for kubeconform ([its README](tests/schemas/README.md)) |
 | `tests/e2e/` | the kind end-to-end of the coder (S9): [`tests/e2e/README.md`](tests/e2e/README.md) |
 
