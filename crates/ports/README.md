@@ -167,6 +167,24 @@ depending on `aap-api` and so on `kube`, would give every provider that depends 
 * **Secrets.** `offered_secrets` lists the `data[].secretKey` of every ExternalSecret that carries the offer label, under its
   `target.name`, ordered. It reads no Secret and has no right to; the cases plant values in the backend and fail when one reaches an answer.
 
+The ownership of an object is the one thing a write changes and a person does not see, so here is its lifecycle (AD-031; the **Adopt** action is slice D16's,
+the takeover of `coder` and `chat`, and is not built):
+
+```mermaid
+stateDiagram-v2
+    [*] --> Dashboard: put_agent or put_shared with DoesNotExist, the label written
+    [*] --> GitOps: applied by something else, without the label
+    Dashboard --> Dashboard: put with Matches, the label kept
+    Dashboard --> GitOps: Argo CD tracks it, its annotation appears
+    GitOps --> Dashboard: Adopt (D16), the annotation removed and the label added
+    GitOps --> GitOps: any put or delete is NotOwned
+    Dashboard --> [*]: delete_agent or delete_shared
+    GitOps --> [*]: deleted by its own owner
+
+    Dashboard: the dashboard owns it and may write and delete it
+    GitOps: read-only in the dashboard
+```
+
 ### Errors and the status of the Platform API
 
 Each variant has one status; `tests/objects.rs` holds this table with an exhaustive `match`, so a new variant does not compile until it has one.

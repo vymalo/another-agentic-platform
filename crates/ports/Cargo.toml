@@ -1,6 +1,6 @@
 [package]
 name = "aap-ports"
-description = "The provider seams of the v0 operator: RuntimeProvider, StoreProvisioner, AgentDirectory, their neutral types, and a conformance testkit"
+description = "The seams of the v0 operator and of the admin dashboard's Platform API: RuntimeProvider, StoreProvisioner, AgentDirectory, AgentObjects, Authenticator, their neutral types, and conformance testkits"
 readme = "README.md"
 version.workspace = true
 edition.workspace = true
