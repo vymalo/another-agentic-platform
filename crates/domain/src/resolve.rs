@@ -87,7 +87,7 @@ pub fn resolve(
         aap_api::DeletionPolicy::Delete => DeletionPolicy::Delete,
     };
 
-    let (file_sets, workloads) = cx.workloads(&database);
+    let (file_sets, workloads) = cx.workloads(&database).map_err(|issue| vec![issue])?;
     let (allow_from, _) = convert::peers(&service.spec.access.allow_from);
     let selects = workloads
         .iter()
@@ -130,6 +130,16 @@ fn lit(name: &str, value: impl Into<String>) -> EnvVar {
     EnvVar::literal(name, value)
 }
 
+/// What `resolve` answers where `validate` has already refused the input. It is not reached from an
+/// object `validate` let through; if it ever is, the answer is a refusal that names the field, never
+/// a default that starts an agent half-made.
+fn refused(field: &str, message: &str) -> ConfigIssue {
+    ConfigIssue {
+        field: field.to_owned(),
+        message: message.to_owned(),
+    }
+}
+
 /// What every step of the resolution reads.
 struct Cx<'a> {
     service: &'a AgentService,
@@ -170,7 +180,10 @@ impl<'a> Cx<'a> {
 
     /// The file sets and the workloads: the workers (or the one process that is everything) first,
     /// then the front of `split`.
-    fn workloads(&self, database: &SecretRef) -> (Vec<FileSet>, Vec<Workload>) {
+    fn workloads(
+        &self,
+        database: &SecretRef,
+    ) -> Result<(Vec<FileSet>, Vec<Workload>), ConfigIssue> {
         let adam = &self.config.spec.harness.adam;
         let mut file_sets = Vec::new();
 
@@ -194,23 +207,27 @@ impl<'a> Cx<'a> {
                     name: r.name.clone(),
                     mode: contract::FILES_MODE,
                 },
-                (None, None) => VolumeSource::ExternalFiles {
-                    name: String::new(),
-                    mode: contract::FILES_MODE,
-                },
+                // `validate` refused a folder with neither.
+                (None, None) => {
+                    return Err(refused(
+                        "AgentConfig spec.harness.adam.agent.folder",
+                        "exactly one of files and configMapRef",
+                    ));
+                }
             };
-            VolumeSpec {
+            Ok(VolumeSpec {
                 name: contract::AGENT_FOLDER_VOLUME.to_owned(),
                 source,
-            }
+            })
         });
+        let folder_volume = folder_volume.transpose()?;
 
         // The extra MCP servers: one file of `${VAR}` references, never a value.
         let mcp_volume = if self.config.spec.tools.mcp_servers.is_empty() {
             None
         } else {
             let set = format!("{}-mcp", self.name);
-            let mut text = serde_json::to_string_pretty(&self.mcp_json()).unwrap_or_default();
+            let mut text = serde_json::to_string_pretty(&self.mcp_json()?).unwrap_or_default();
             text.push('\n');
             file_sets.push(FileSet {
                 name: set.clone(),
@@ -237,7 +254,7 @@ impl<'a> Cx<'a> {
                 database,
                 folder_volume.as_ref(),
                 mcp_volume.as_ref(),
-            )),
+            )?),
             Topology::Split => {
                 workloads.push(self.workload(
                     Role::Worker,
@@ -246,7 +263,7 @@ impl<'a> Cx<'a> {
                     database,
                     folder_volume.as_ref(),
                     mcp_volume.as_ref(),
-                ));
+                )?);
                 let replicas =
                     u32::try_from(scaling.front.as_ref().map_or(1, |f| f.replicas)).unwrap_or(1);
                 workloads.push(self.workload(
@@ -256,10 +273,10 @@ impl<'a> Cx<'a> {
                     database,
                     folder_volume.as_ref(),
                     None,
-                ));
+                )?);
             }
         }
-        (file_sets, workloads)
+        Ok((file_sets, workloads))
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -271,7 +288,7 @@ impl<'a> Cx<'a> {
         database: &SecretRef,
         folder: Option<&VolumeSpec>,
         mcp: Option<&VolumeSpec>,
-    ) -> Workload {
+    ) -> Result<Workload, ConfigIssue> {
         let spec = &self.config.spec;
         let runs_workers = role.runs_workers();
         // `validate` refused a config with no image: the operator's default image is slice D2.
@@ -280,7 +297,12 @@ impl<'a> Cx<'a> {
             .image
             .as_ref()
             .map(|i| i.reference.clone())
-            .unwrap_or_default();
+            .ok_or_else(|| {
+                refused(
+                    "AgentConfig spec.environment.image",
+                    "no image: the operator's default image is slice D2 of the admin dashboard",
+                )
+            })?;
 
         // Volumes and mounts. A control plane serves the card and starts runs: it has the folder
         // (every role reads it) and nothing else.
@@ -344,7 +366,7 @@ impl<'a> Cx<'a> {
             }
         }
 
-        let env = self.env(role, database);
+        let env = self.env(role, database)?;
         let stable_identity = volumes.iter().any(|v| {
             matches!(&v.source, VolumeSource::Persistent(p) if p.sharing == Sharing::PerReplica)
         }) || env.iter().any(|e| e.value == EnvValue::PodName);
@@ -454,7 +476,7 @@ impl<'a> Cx<'a> {
 
         let sec = &spec.security;
         let front_replicas = role == Role::ControlPlane && replicas > 1;
-        Workload {
+        Ok(Workload {
             name,
             role,
             replicas,
@@ -481,7 +503,7 @@ impl<'a> Cx<'a> {
                 Some(contract::front::TERMINATION_GRACE_SECS)
             },
             min_available: front_replicas.then_some(contract::front::MIN_AVAILABLE),
-        }
+        })
     }
 
     fn github_app(&self) -> Option<&'a aap_api::GithubApp> {
@@ -493,7 +515,7 @@ impl<'a> Cx<'a> {
 
     /// The environment of one process, by role. Order is fixed: the contract's variables, then
     /// `extraEnv`, then the Secret-backed ones.
-    fn env(&self, role: Role, database: &SecretRef) -> Vec<EnvVar> {
+    fn env(&self, role: Role, database: &SecretRef) -> Result<Vec<EnvVar>, ConfigIssue> {
         let spec = &self.config.spec;
         let runs_workers = role.runs_workers();
         let serves_a2a = role != Role::Worker;
@@ -528,16 +550,25 @@ impl<'a> Cx<'a> {
 
         if runs_workers {
             // `validate` refused a model with no address: an endpointRef is slice D2.
-            if let Some(base) = &spec.model.base_url {
-                match (&base.value, &base.secret_ref) {
-                    (Some(url), _) => e.push(lit(env::MODEL_BASE_URL, url)),
-                    (None, Some(r)) => {
-                        e.push(EnvVar::secret(
-                            env::MODEL_BASE_URL,
-                            SecretRef::new(&r.name, &r.key),
-                        ));
-                    }
-                    (None, None) => {}
+            let Some(base) = &spec.model.base_url else {
+                return Err(refused(
+                    "AgentConfig spec.model.baseUrl",
+                    "no address: an endpointRef is slice D2 of the admin dashboard",
+                ));
+            };
+            match (&base.value, &base.secret_ref) {
+                (Some(url), None) => e.push(lit(env::MODEL_BASE_URL, url)),
+                (None, Some(r)) => {
+                    e.push(EnvVar::secret(
+                        env::MODEL_BASE_URL,
+                        SecretRef::new(&r.name, &r.key),
+                    ));
+                }
+                _ => {
+                    return Err(refused(
+                        "AgentConfig spec.model.baseUrl",
+                        "exactly one of value and secretRef",
+                    ));
                 }
             }
             e.push(lit(env::MODEL, &spec.model.model));
@@ -622,12 +653,17 @@ impl<'a> Cx<'a> {
         }
         e.push(EnvVar::secret(env::DATABASE_URL, database.clone()));
         if runs_workers {
-            if let Some(key) = &spec.model.api_key_secret_ref {
-                e.push(EnvVar::secret(
-                    env::MODEL_API_KEY,
-                    SecretRef::new(&key.name, &key.key),
+            // `validate` refused a model with no key: an endpointRef is slice D2.
+            let Some(key) = &spec.model.api_key_secret_ref else {
+                return Err(refused(
+                    "AgentConfig spec.model.apiKeySecretRef",
+                    "no key: an endpointRef is slice D2 of the admin dashboard",
                 ));
-            }
+            };
+            e.push(EnvVar::secret(
+                env::MODEL_API_KEY,
+                SecretRef::new(&key.name, &key.key),
+            ));
             if let Some(t) = self.coder.and_then(|c| c.github.token.as_ref()) {
                 e.push(EnvVar::secret(
                     env::GITHUB_TOKEN,
@@ -647,19 +683,23 @@ impl<'a> Cx<'a> {
                 SecretRef::new(&r.name, &r.key),
             ));
         }
-        e
+        Ok(e)
     }
 
     /// The extra MCP file, in the shape of `mcp.json`: `${VAR}` references only.
-    fn mcp_json(&self) -> serde_json::Value {
+    fn mcp_json(&self) -> Result<serde_json::Value, ConfigIssue> {
         let mut servers = serde_json::Map::new();
         for (id, s) in &self.config.spec.tools.mcp_servers {
             let mut server = serde_json::Map::new();
             server.insert("type".to_owned(), json!("http"));
             // `validate` refused a server with no url: a providerRef is slice D2.
-            if let Some(url) = &s.url {
-                server.insert("url".to_owned(), json!(url));
-            }
+            let Some(url) = &s.url else {
+                return Err(refused(
+                    &format!("AgentConfig spec.tools.mcpServers[{id}].url"),
+                    "no url: a providerRef is slice D2 of the admin dashboard",
+                ));
+            };
+            server.insert("url".to_owned(), json!(url));
             if !s.headers.is_empty() {
                 let headers: serde_json::Map<String, serde_json::Value> = s
                     .headers
@@ -679,6 +719,78 @@ impl<'a> Cx<'a> {
             }
             servers.insert(id.clone(), serde_json::Value::Object(server));
         }
-        json!({ "mcpServers": servers })
+        Ok(json!({ "mcpServers": servers }))
+    }
+}
+
+#[cfg(test)]
+#[allow(clippy::expect_used, clippy::unwrap_used)] // tests may
+mod tests {
+    use super::*;
+    use serde::Deserialize;
+    use serde_json::Value;
+
+    /// `workloads` of the `chat` example with one change, without `validate` in front of it: the
+    /// inputs `resolve` never sees.
+    fn workloads_after(change: impl FnOnce(&mut Value)) -> Result<(), ConfigIssue> {
+        let text = include_str!("../../../examples/chat.yaml");
+        let mut docs: Vec<Value> = serde_yaml::Deserializer::from_str(text)
+            .map(|d| Value::deserialize(d).unwrap())
+            .collect();
+        let mut config = docs.pop().unwrap();
+        let service = docs.pop().unwrap();
+        change(&mut config);
+        let service: AgentService = serde_json::from_value(service).unwrap();
+        let config: AgentConfig = serde_json::from_value(config).unwrap();
+        Cx::new(&service, &config, "chat", "ns")
+            .workloads(&SecretRef::new("db", "uri"))
+            .map(|_| ())
+    }
+
+    #[test]
+    fn the_unchanged_example_resolves() {
+        assert_eq!(workloads_after(|_| {}), Ok(()));
+    }
+
+    #[test]
+    fn what_validate_refuses_is_a_refusal_here_too_never_a_default() {
+        let field = |change: fn(&mut Value)| workloads_after(change).unwrap_err().field;
+        assert_eq!(
+            field(|c| {
+                c["spec"]["environment"]["image"] = Value::Null;
+            }),
+            "AgentConfig spec.environment.image"
+        );
+        assert_eq!(
+            field(|c| {
+                c["spec"]["model"]["baseUrl"] = Value::Null;
+            }),
+            "AgentConfig spec.model.baseUrl"
+        );
+        assert_eq!(
+            field(|c| {
+                c["spec"]["model"]["baseUrl"] = serde_json::json!({});
+            }),
+            "AgentConfig spec.model.baseUrl"
+        );
+        assert_eq!(
+            field(|c| {
+                c["spec"]["model"]["apiKeySecretRef"] = Value::Null;
+            }),
+            "AgentConfig spec.model.apiKeySecretRef"
+        );
+        assert_eq!(
+            field(|c| {
+                c["spec"]["tools"]["mcpServers"] =
+                    serde_json::json!({ "search": { "providerRef": { "name": "websearch" } } });
+            }),
+            "AgentConfig spec.tools.mcpServers[search].url"
+        );
+        assert_eq!(
+            field(|c| {
+                c["spec"]["harness"]["adam"]["agent"]["folder"] = serde_json::json!({});
+            }),
+            "AgentConfig spec.harness.adam.agent.folder"
+        );
     }
 }

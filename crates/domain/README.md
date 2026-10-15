@@ -120,14 +120,17 @@ checks what the reconciler needs and the schema cannot say:
   serve, `front` only with `split`) are checked again, because `resolve` relies on them and an object that never
   met an API server's CEL (a test, a CRD installed without the rules) must not be resolved into something
   half-made. `tests/validate.rs` runs every file of `examples/invalid` through `validate`, except the ones it is not
-  asked about: the audience's (it reaches no pod) and the two shared kinds' (not inputs until D2), which the test names.
+  asked about: the audience's (it reaches no pod), the number of extra MCP servers (a bound of the schema) and the two
+  shared kinds' (not inputs until D2), which the test names.
 * **References and the default image are refused until slice D2 of the admin dashboard** (§60a, AD-029). A config
   with `model.endpointRef`, an `mcpServers.<n>.providerRef` or no `environment.image` is not resolvable here: `resolve`
   has no `ModelEndpoint` or `ToolProvider` to read, and the operator's default image is a setting of D2. `validate`
   reports each as a `ConfigIssue` on the field (`AgentConfig spec.model.endpointRef`), saying that resolving it is slice D2
   and that the config is refused rather than started with a default, so the AgentConfig is `Valid: False` and the
   service `ConfigResolved: False`, reason `ConfigInvalid`, and what runs is left untouched. `resolve` returns those
-  issues and never reaches a missing field. Inline objects are untouched: the parity goldens and the pinned digest did not
+  issues and never reaches a missing field. Should it ever reach one (an image, a model address or key, an MCP server's
+  `url`, a folder's source that `validate` would have refused), it answers with a `ConfigIssue` on that field and never
+  with a default: a unit test in `src/resolve.rs` calls it on such objects without `validate` in front. Inline objects are untouched: the parity goldens and the pinned digest did not
   move. `access.audience` is **not** read here at all: it reaches no pod, a test holds the resolved agent and its digest
   equal with and without it, and the registry (D3) lists an item with a malformed one for administrators only.
 
