@@ -2,14 +2,15 @@
 //! states, and every CEL rule has an invalid example.
 //!
 //! The rules are evaluated with `kube-cel`, a client-side CEL implementation. It is a proxy for an
-//! API server, not one: the `kind` job of `.github/workflows/operator.yml` is the real check.
+//! API server, not one: the `kind` job of `.github/workflows/operator.yml` is the real check. It
+//! does not check the OpenAPI schema either; `bounds` below does the three keywords the examples use.
 
 #![allow(clippy::expect_used, clippy::unwrap_used)] // tests may
 
 use std::fs;
 use std::path::{Path, PathBuf};
 
-use aap_api::{AgentConfig, AgentService, crds};
+use aap_api::{AgentConfig, AgentService, ModelEndpoint, ToolProvider, crds};
 use kube::core::cel::Validator;
 use serde::Deserialize;
 use serde_json::Value;
@@ -50,6 +51,15 @@ fn through_the_types(doc: &Value) -> Value {
             let typed: AgentConfig = serde_json::from_value(doc.clone()).expect("an AgentConfig");
             serde_json::to_value(&typed).expect("serialises")
         }
+        Some("ModelEndpoint") => {
+            let typed: ModelEndpoint =
+                serde_json::from_value(doc.clone()).expect("a ModelEndpoint");
+            serde_json::to_value(&typed).expect("serialises")
+        }
+        Some("ToolProvider") => {
+            let typed: ToolProvider = serde_json::from_value(doc.clone()).expect("a ToolProvider");
+            serde_json::to_value(&typed).expect("serialises")
+        }
         other => panic!("unexpected kind {other:?}"),
     }
 }
@@ -88,12 +98,71 @@ fn subset(a: &Value, b: &Value, path: &str) -> Result<(), String> {
     }
 }
 
+/// The bounds of the OpenAPI schema `kube-cel` does not check, worded as kube-apiserver words them
+/// (*verified 2026-10-15*, v1.35.8): `maxItems`, `maxLength` and `minLength`, the three keywords
+/// the audience uses. Not a schema validator: a keyword the examples do not use is not read.
+fn bounds(schema: &Value, value: &Value, path: &str, out: &mut Vec<String>) {
+    match value {
+        Value::Array(items) => {
+            if let Some(max) = schema["maxItems"]
+                .as_u64()
+                .filter(|m| items.len() as u64 > *m)
+            {
+                out.push(format!(
+                    "Too many: {}: must have at most {max} items",
+                    items.len()
+                ));
+            }
+            for (i, item) in items.iter().enumerate() {
+                bounds(&schema["items"], item, &format!("{path}[{i}]"), out);
+            }
+        }
+        Value::String(text) => {
+            if let Some(max) = schema["maxLength"]
+                .as_u64()
+                .filter(|m| text.len() as u64 > *m)
+            {
+                out.push(format!("Too long: may not be more than {max} bytes"));
+            }
+            if let Some(min) = schema["minLength"]
+                .as_u64()
+                .filter(|m| (text.chars().count() as u64) < *m)
+            {
+                out.push(format!(
+                    "{path} in body should be at least {min} chars long"
+                ));
+            }
+        }
+        Value::Object(map) => {
+            for (key, child) in map {
+                let at = if path.is_empty() {
+                    key.clone()
+                } else {
+                    format!("{path}.{key}")
+                };
+                let declared = &schema["properties"][key.as_str()];
+                let of = if declared.is_null() {
+                    &schema["additionalProperties"]
+                } else {
+                    declared
+                };
+                bounds(of, child, &at, out);
+            }
+        }
+        _ => {}
+    }
+}
+
 fn validate(doc: &Value) -> Result<(), Vec<String>> {
     let typed = through_the_types(doc);
     let kind = doc["kind"].as_str().expect("kind");
-    Validator::new()
-        .validate(&schema_for(kind), &typed, None)
-        .map_err(|errors| errors.iter().map(|e| e.message.clone()).collect())
+    let schema = schema_for(kind);
+    let mut found = Vec::new();
+    bounds(&schema, &typed, "", &mut found);
+    if let Err(errors) = Validator::new().validate(&schema, &typed, None) {
+        found.extend(errors.iter().map(|e| e.message.clone()));
+    }
+    if found.is_empty() { Ok(()) } else { Err(found) }
 }
 
 #[test]
@@ -129,6 +198,136 @@ fn each_example_is_an_agent_service_and_its_agent_config() {
             docs[0]["spec"]["configRef"]["name"], docs[1]["metadata"]["name"],
             "{name}"
         );
+    }
+}
+
+#[test]
+fn the_dashboard_example_names_what_it_references() {
+    let docs = documents(&examples_dir().join("coder-me.yaml"));
+    let kinds: Vec<_> = docs
+        .iter()
+        .map(|d| d["kind"].as_str().unwrap_or_default())
+        .collect();
+    // the referents first, then the config, then the service that names it
+    assert_eq!(
+        kinds,
+        [
+            "ModelEndpoint",
+            "ToolProvider",
+            "AgentConfig",
+            "AgentService"
+        ]
+    );
+    let (endpoint, provider, config, service) = (&docs[0], &docs[1], &docs[2], &docs[3]);
+    assert_eq!(
+        config["spec"]["model"]["endpointRef"]["name"],
+        endpoint["metadata"]["name"]
+    );
+    assert_eq!(
+        config["spec"]["tools"]["mcpServers"]["websearch"]["providerRef"]["name"],
+        provider["metadata"]["name"]
+    );
+    assert_eq!(
+        service["spec"]["configRef"]["name"],
+        config["metadata"]["name"]
+    );
+    // the reference replaces what the inline form says, and so does the default image
+    assert!(config["spec"]["model"].get("baseUrl").is_none());
+    assert!(config["spec"]["model"].get("apiKeySecretRef").is_none());
+    assert!(config["spec"]["environment"].get("image").is_none());
+    assert_eq!(
+        service["spec"]["access"]["audience"],
+        serde_json::json!(["agent.use:coder-me"])
+    );
+}
+
+/// The `chat` example with another `access.audience`, validated like any example.
+fn audience_validates(audience: Option<Value>) -> Result<(), Vec<String>> {
+    let mut service = documents(&examples_dir().join("chat.yaml")).remove(0);
+    match audience {
+        Some(a) => service["spec"]["access"] = serde_json::json!({ "audience": a }),
+        None => service["spec"]["access"] = serde_json::json!({}),
+    }
+    validate(&service)
+}
+
+#[test]
+fn an_audience_is_absent_empty_a_star_alone_or_up_to_32_visible_values() {
+    let many = |n: usize, len: usize| -> Value {
+        Value::Array(
+            (0..n)
+                .map(|i| Value::String(format!("{i:0>len$}")))
+                .collect(),
+        )
+    };
+    for (what, audience) in [
+        ("absent", None),
+        ("empty", Some(serde_json::json!([]))),
+        ("a star alone", Some(serde_json::json!(["*"]))),
+        (
+            "a use permission",
+            Some(serde_json::json!(["agent.use:coder-me"])),
+        ),
+        (
+            "two values",
+            Some(serde_json::json!([
+                "agent.use:chat",
+                "agent.use:researcher"
+            ])),
+        ),
+        ("32 values", Some(many(32, 3))),
+        ("a value of 64 characters", Some(many(1, 64))),
+        (
+            "a star in a longer value",
+            Some(serde_json::json!(["agent.*", "*.use"])),
+        ),
+    ] {
+        if let Err(errors) = audience_validates(audience) {
+            panic!("{what} was refused: {errors:#?}");
+        }
+    }
+    // The refusals the examples pin one by one, and the ones they share a rule with.
+    for (what, audience, reason) in [
+        (
+            "a star beside a value",
+            serde_json::json!(["*", "agent.use:chat"]),
+            "access.audience: the value * is only allowed alone",
+        ),
+        (
+            "a star twice",
+            serde_json::json!(["*", "*"]),
+            "access.audience: the value * is only allowed alone",
+        ),
+        (
+            "a space",
+            serde_json::json!(["agent use"]),
+            "access.audience: a value is visible ASCII characters, with no space or control character",
+        ),
+        (
+            "a tab",
+            serde_json::json!(["agent\tuse"]),
+            "access.audience: a value is visible ASCII characters, with no space or control character",
+        ),
+        (
+            "a non-ASCII character",
+            serde_json::json!(["agent.use:é"]),
+            "access.audience: a value is visible ASCII characters, with no space or control character",
+        ),
+        (
+            "33 values",
+            many(33, 3),
+            "Too many: 33: must have at most 32 items",
+        ),
+        (
+            "65 characters",
+            many(1, 65),
+            "Too long: may not be more than 64 bytes",
+        ),
+    ] {
+        match audience_validates(Some(audience)) {
+            Ok(()) => panic!("{what} was accepted"),
+            Err(errors) => assert!(errors.contains(&reason.to_owned()), "{what}: {errors:#?}"),
+        }
     }
 }
 

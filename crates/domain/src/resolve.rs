@@ -274,7 +274,13 @@ impl<'a> Cx<'a> {
     ) -> Workload {
         let spec = &self.config.spec;
         let runs_workers = role.runs_workers();
-        let image = spec.environment.image.reference.clone();
+        // `validate` refused a config with no image: the operator's default image is slice D2.
+        let image = spec
+            .environment
+            .image
+            .as_ref()
+            .map(|i| i.reference.clone())
+            .unwrap_or_default();
 
         // Volumes and mounts. A control plane serves the card and starts runs: it has the folder
         // (every role reads it) and nothing else.
@@ -521,15 +527,18 @@ impl<'a> Cx<'a> {
         }
 
         if runs_workers {
-            match (&spec.model.base_url.value, &spec.model.base_url.secret_ref) {
-                (Some(url), _) => e.push(lit(env::MODEL_BASE_URL, url)),
-                (None, Some(r)) => {
-                    e.push(EnvVar::secret(
-                        env::MODEL_BASE_URL,
-                        SecretRef::new(&r.name, &r.key),
-                    ));
+            // `validate` refused a model with no address: an endpointRef is slice D2.
+            if let Some(base) = &spec.model.base_url {
+                match (&base.value, &base.secret_ref) {
+                    (Some(url), _) => e.push(lit(env::MODEL_BASE_URL, url)),
+                    (None, Some(r)) => {
+                        e.push(EnvVar::secret(
+                            env::MODEL_BASE_URL,
+                            SecretRef::new(&r.name, &r.key),
+                        ));
+                    }
+                    (None, None) => {}
                 }
-                (None, None) => {}
             }
             e.push(lit(env::MODEL, &spec.model.model));
             if let Some(c) = self.coder {
@@ -613,11 +622,12 @@ impl<'a> Cx<'a> {
         }
         e.push(EnvVar::secret(env::DATABASE_URL, database.clone()));
         if runs_workers {
-            let key = &spec.model.api_key_secret_ref;
-            e.push(EnvVar::secret(
-                env::MODEL_API_KEY,
-                SecretRef::new(&key.name, &key.key),
-            ));
+            if let Some(key) = &spec.model.api_key_secret_ref {
+                e.push(EnvVar::secret(
+                    env::MODEL_API_KEY,
+                    SecretRef::new(&key.name, &key.key),
+                ));
+            }
             if let Some(t) = self.coder.and_then(|c| c.github.token.as_ref()) {
                 e.push(EnvVar::secret(
                     env::GITHUB_TOKEN,
@@ -646,7 +656,10 @@ impl<'a> Cx<'a> {
         for (id, s) in &self.config.spec.tools.mcp_servers {
             let mut server = serde_json::Map::new();
             server.insert("type".to_owned(), json!("http"));
-            server.insert("url".to_owned(), json!(s.url));
+            // `validate` refused a server with no url: a providerRef is slice D2.
+            if let Some(url) = &s.url {
+                server.insert("url".to_owned(), json!(url));
+            }
             if !s.headers.is_empty() {
                 let headers: serde_json::Map<String, serde_json::Value> = s
                     .headers

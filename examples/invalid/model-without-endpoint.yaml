@@ -1,0 +1,25 @@
+# Refused: model has no endpointRef and no inline address; the inline form needs a baseUrl and an apiKeySecretRef.
+# expect: model needs an endpointRef, or both a baseUrl and an apiKeySecretRef
+apiVersion: agents.vymalo.com/v1alpha1
+kind: AgentConfig
+metadata:
+  name: invalid-model-without-endpoint
+  namespace: another-agentic-system
+spec:
+  harness:
+    type: adam-rs
+    adam:
+      binary: adam-agent
+      agent:
+        folder:
+          files:
+            instructions.md: |
+              Hello.
+  model:
+    model: m
+    apiKeySecretRef:
+      name: s
+      key: MODEL_API_KEY
+  environment:
+    image:
+      ref: ghcr.io/vymalo/another-adam-rs/coder:sha-0391809

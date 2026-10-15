@@ -1,5 +1,5 @@
 # Refused: model.baseUrl has both value and secretRef (a rule beyond the list of §59a, same shape).
-# expect: exactly one of model.baseUrl.value and model.baseUrl.secretRef
+# expect: exactly one of baseUrl.value and baseUrl.secretRef
 apiVersion: agents.vymalo.com/v1alpha1
 kind: AgentConfig
 metadata:

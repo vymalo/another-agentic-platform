@@ -1,0 +1,59 @@
+# Refused: access.audience has 33 values; at most 32 (a bound of the schema, not a CEL rule).
+# expect: Too many: 33: must have at most 32 items
+apiVersion: agents.vymalo.com/v1alpha1
+kind: AgentService
+metadata:
+  name: invalid-audience-too-many
+  namespace: another-agentic-system
+spec:
+  configRef:
+    name: chat
+  interfaces:
+    a2a:
+      enabled: true
+      bearerTokensSecretRef:
+        name: tokens
+        key: A2A_BEARER_TOKENS
+  scaling:
+    topology: combined
+    workers: 1
+  store:
+    postgres:
+      secretRef:
+        name: db
+        key: uri
+  access:
+    audience:
+      - v00
+      - v01
+      - v02
+      - v03
+      - v04
+      - v05
+      - v06
+      - v07
+      - v08
+      - v09
+      - v10
+      - v11
+      - v12
+      - v13
+      - v14
+      - v15
+      - v16
+      - v17
+      - v18
+      - v19
+      - v20
+      - v21
+      - v22
+      - v23
+      - v24
+      - v25
+      - v26
+      - v27
+      - v28
+      - v29
+      - v30
+      - v31
+      - v32

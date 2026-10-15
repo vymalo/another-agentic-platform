@@ -1,0 +1,26 @@
+# Refused: an access.audience value has a space; a value is 1 to 64 visible characters.
+# expect: access.audience: a value is visible ASCII characters, with no space or control character
+apiVersion: agents.vymalo.com/v1alpha1
+kind: AgentService
+metadata:
+  name: invalid-audience-value-with-space
+  namespace: another-agentic-system
+spec:
+  configRef:
+    name: chat
+  interfaces:
+    a2a:
+      enabled: true
+      bearerTokensSecretRef:
+        name: tokens
+        key: A2A_BEARER_TOKENS
+  scaling:
+    topology: combined
+    workers: 1
+  store:
+    postgres:
+      secretRef:
+        name: db
+        key: uri
+  access:
+    audience: ["agent use chat"]

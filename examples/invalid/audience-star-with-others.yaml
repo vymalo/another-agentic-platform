@@ -1,0 +1,26 @@
+# Refused: access.audience has * beside another value; * admits everyone and is only allowed alone.
+# expect: access.audience: the value * is only allowed alone
+apiVersion: agents.vymalo.com/v1alpha1
+kind: AgentService
+metadata:
+  name: invalid-audience-star-with-others
+  namespace: another-agentic-system
+spec:
+  configRef:
+    name: chat
+  interfaces:
+    a2a:
+      enabled: true
+      bearerTokensSecretRef:
+        name: tokens
+        key: A2A_BEARER_TOKENS
+  scaling:
+    topology: combined
+    workers: 1
+  store:
+    postgres:
+      secretRef:
+        name: db
+        key: uri
+  access:
+    audience: ["*", "agent.use:chat"]

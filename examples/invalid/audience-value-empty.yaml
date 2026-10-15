@@ -1,0 +1,27 @@
+# Refused: an access.audience value is empty; at least 1 character (a bound of the schema, not a CEL rule).
+# expect: spec.access.audience[0] in body should be at least 1 chars long
+apiVersion: agents.vymalo.com/v1alpha1
+kind: AgentService
+metadata:
+  name: invalid-audience-value-empty
+  namespace: another-agentic-system
+spec:
+  configRef:
+    name: chat
+  interfaces:
+    a2a:
+      enabled: true
+      bearerTokensSecretRef:
+        name: tokens
+        key: A2A_BEARER_TOKENS
+  scaling:
+    topology: combined
+    workers: 1
+  store:
+    postgres:
+      secretRef:
+        name: db
+        key: uri
+  access:
+    audience:
+      - ""

@@ -8,7 +8,7 @@ use kube::{CustomResource, KubeSchema};
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
-use crate::common::{Empty, SecretKeyRef};
+use crate::common::{Empty, NameRef, SecretKeyRef};
 use crate::status::AgentConfigStatus;
 
 /// The configuration of an agent: its harness, model, tools, environment and security. A
@@ -142,7 +142,7 @@ pub struct Folder {
 
     /// A ConfigMap of the same namespace that holds the folder.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub config_map_ref: Option<crate::common::NameRef>,
+    pub config_map_ref: Option<NameRef>,
 }
 
 /// The settings of `adam-coder`. A field left out is not set, so the binary's own default applies.
@@ -258,25 +258,39 @@ pub struct GithubToken {
 
 // ------------------------------------------------------------------ model
 
-/// The model the agent talks to, over an OpenAI-compatible endpoint.
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize, JsonSchema)]
+/// The model the agent talks to, over an OpenAI-compatible endpoint: a `ModelEndpoint` by name
+/// (`endpointRef`), or the address and key inline (`baseUrl` and `apiKeySecretRef`), never both.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize, KubeSchema)]
 #[serde(rename_all = "camelCase")]
+#[x_kube(validation = Rule::new("!has(self.endpointRef) || (!has(self.baseUrl) && !has(self.apiKeySecretRef))").message("model.endpointRef is exclusive with model.baseUrl and model.apiKeySecretRef"))]
+#[x_kube(validation = Rule::new("has(self.endpointRef) || (has(self.baseUrl) && has(self.apiKeySecretRef))").message("model needs an endpointRef, or both a baseUrl and an apiKeySecretRef"))]
 pub struct Model {
     /// The model alias (`MODEL`).
     #[schemars(length(min = 1))]
     pub model: String,
 
-    /// The endpoint (`MODEL_BASE_URL`): a value or a Secret key.
-    pub base_url: BaseUrl,
+    /// A `ModelEndpoint` of the same namespace that holds the address and the key (AD-029).
+    /// Exclusive with `baseUrl` and `apiKeySecretRef`. The operator resolves it in slice D2 of the
+    /// admin dashboard (§60a); until then a config that uses it is `ConfigInvalid`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub endpoint_ref: Option<NameRef>,
 
-    /// The Secret key that holds the API key (`MODEL_API_KEY`).
-    pub api_key_secret_ref: SecretKeyRef,
+    /// The endpoint (`MODEL_BASE_URL`): a value or a Secret key. With `apiKeySecretRef`, unless
+    /// `endpointRef` is set.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub base_url: Option<BaseUrl>,
+
+    /// The Secret key that holds the API key (`MODEL_API_KEY`). With `baseUrl`, unless
+    /// `endpointRef` is set.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub api_key_secret_ref: Option<SecretKeyRef>,
 }
 
 /// The model endpoint: a plain value, or a Secret key when the deployment keeps it out of git.
+/// Used by `AgentConfig.spec.model.baseUrl` and `ModelEndpoint.spec.baseUrl`.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize, KubeSchema)]
 #[serde(rename_all = "camelCase")]
-#[x_kube(validation = Rule::new("has(self.value) != has(self.secretRef)").message("exactly one of model.baseUrl.value and model.baseUrl.secretRef"))]
+#[x_kube(validation = Rule::new("has(self.value) != has(self.secretRef)").message("exactly one of baseUrl.value and baseUrl.secretRef"))]
 pub struct BaseUrl {
     /// The URL.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -297,8 +311,10 @@ pub struct Tools {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub github_mcp: Option<GithubMcp>,
 
-    /// Extra MCP servers, by name. Written to a ConfigMap that holds `${VAR}` references only.
+    /// Extra MCP servers, by name, at most 32 (the bound lets an API server price the CEL rules of
+    /// a server). Written to a ConfigMap that holds `${VAR}` references only.
     #[serde(default)]
+    #[schemars(extend("maxProperties" = 32))]
     pub mcp_servers: BTreeMap<String, McpServer>,
 
     /// Allow a plain `http://` MCP server on another machine (`MCP_ALLOW_INSECURE`). Never automatic.
@@ -342,18 +358,30 @@ impl Default for GithubMcp {
     }
 }
 
-/// One extra MCP server.
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize, JsonSchema)]
+/// One extra MCP server: a `ToolProvider` by name (`providerRef`), or the URL and headers inline,
+/// never both.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize, KubeSchema)]
 #[serde(rename_all = "camelCase")]
+#[x_kube(validation = Rule::new("!has(self.providerRef) || (!has(self.url) && (!has(self.headers) || self.headers.size() == 0))").message("mcpServers.providerRef is exclusive with url and headers"))]
+#[x_kube(validation = Rule::new("has(self.providerRef) || has(self.url)").message("an MCP server needs a url, or a providerRef"))]
 pub struct McpServer {
-    /// Its `http` or `https` URL, with no user name, password or `${…}` in it (checked by the reconciler).
-    pub url: String,
+    /// A `ToolProvider` of the same namespace that holds the URL and the headers (AD-029).
+    /// Exclusive with `url` and `headers`. The operator resolves it in slice D2 of the admin
+    /// dashboard (§60a); until then a config that uses it is `ConfigInvalid`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub provider_ref: Option<NameRef>,
 
-    /// Request headers, by header name. Each value is a Secret key.
+    /// Its `http` or `https` URL, with no user name, password or `${…}` in it (checked by the
+    /// reconciler). Required unless `providerRef` is set.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub url: Option<String>,
+
+    /// Request headers, by header name. Each value is a Secret key. Not with `providerRef`.
     #[serde(default)]
     pub headers: BTreeMap<String, McpHeader>,
 
-    /// The agent starts without it when it is unreachable.
+    /// The agent starts without it when it is unreachable. Beside a `providerRef` the provider's
+    /// own `optional` is the one that counts (slice D2 decides how the two meet).
     #[serde(default)]
     pub optional: bool,
 }
@@ -377,8 +405,11 @@ pub struct McpHeader {
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct Environment {
-    /// The image. adam-rs ships one image for both binaries.
-    pub image: Image,
+    /// The image. adam-rs ships one image for both binaries. Absent: the operator's default coder
+    /// image (AD-029; slice D2 of the admin dashboard implements the default, and until then a
+    /// config with no image is `ConfigInvalid`). An agent may still pin its own.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub image: Option<Image>,
 
     /// CPU and memory of the agent container.
     #[serde(default, skip_serializing_if = "Option::is_none")]

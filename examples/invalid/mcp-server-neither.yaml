@@ -1,0 +1,31 @@
+# Refused: an MCP server has neither a url nor a providerRef.
+# expect: an MCP server needs a url, or a providerRef
+apiVersion: agents.vymalo.com/v1alpha1
+kind: AgentConfig
+metadata:
+  name: invalid-mcp-neither
+  namespace: another-agentic-system
+spec:
+  harness:
+    type: adam-rs
+    adam:
+      binary: adam-agent
+      agent:
+        folder:
+          files:
+            instructions.md: |
+              Hello.
+  model:
+    model: m
+    baseUrl:
+      value: https://gateway.example.invalid/v1
+    apiKeySecretRef:
+      name: s
+      key: MODEL_API_KEY
+  tools:
+    mcpServers:
+      search:
+        optional: true
+  environment:
+    image:
+      ref: ghcr.io/vymalo/another-adam-rs/coder:sha-0391809

@@ -40,7 +40,11 @@ spec:
                 description: The image, resources and volumes of the agent's pods.
                 properties:
                   image:
-                    description: The image. adam-rs ships one image for both binaries.
+                    description: |-
+                      The image. adam-rs ships one image for both binaries. Absent: the operator's default coder
+                      image (AD-029; slice D2 of the admin dashboard implements the default, and until then a
+                      config with no image is `ConfigInvalid`). An agent may still pin its own.
+                    nullable: true
                     properties:
                       ref:
                         description: 'The reference: a tag, or a tag and a digest.'
@@ -143,8 +147,6 @@ spec:
                       - source
                       type: object
                     type: array
-                required:
-                - image
                 type: object
               extraEnv:
                 additionalProperties:
@@ -370,7 +372,10 @@ spec:
                 description: The model the agent talks to.
                 properties:
                   apiKeySecretRef:
-                    description: The Secret key that holds the API key (`MODEL_API_KEY`).
+                    description: |-
+                      The Secret key that holds the API key (`MODEL_API_KEY`). With `baseUrl`, unless
+                      `endpointRef` is set.
+                    nullable: true
                     properties:
                       key:
                         description: Key inside the Secret.
@@ -385,7 +390,10 @@ spec:
                     - name
                     type: object
                   baseUrl:
-                    description: 'The endpoint (`MODEL_BASE_URL`): a value or a Secret key.'
+                    description: |-
+                      The endpoint (`MODEL_BASE_URL`): a value or a Secret key. With `apiKeySecretRef`, unless
+                      `endpointRef` is set.
+                    nullable: true
                     properties:
                       secretRef:
                         description: The Secret key that holds the URL.
@@ -409,17 +417,34 @@ spec:
                         type: string
                     type: object
                     x-kubernetes-validations:
-                    - message: exactly one of model.baseUrl.value and model.baseUrl.secretRef
+                    - message: exactly one of baseUrl.value and baseUrl.secretRef
                       rule: has(self.value) != has(self.secretRef)
+                  endpointRef:
+                    description: |-
+                      A `ModelEndpoint` of the same namespace that holds the address and the key (AD-029).
+                      Exclusive with `baseUrl` and `apiKeySecretRef`. The operator resolves it in slice D2 of the
+                      admin dashboard (§60a); until then a config that uses it is `ConfigInvalid`.
+                    nullable: true
+                    properties:
+                      name:
+                        description: Name of the referenced object.
+                        minLength: 1
+                        type: string
+                    required:
+                    - name
+                    type: object
                   model:
                     description: The model alias (`MODEL`).
                     minLength: 1
                     type: string
                 required:
-                - apiKeySecretRef
-                - baseUrl
                 - model
                 type: object
+                x-kubernetes-validations:
+                - message: model.endpointRef is exclusive with model.baseUrl and model.apiKeySecretRef
+                  rule: '!has(self.endpointRef) || (!has(self.baseUrl) && !has(self.apiKeySecretRef))'
+                - message: model needs an endpointRef, or both a baseUrl and an apiKeySecretRef
+                  rule: has(self.endpointRef) || (has(self.baseUrl) && has(self.apiKeySecretRef))
               security:
                 default: {}
                 description: The pod's security context. Everything else of it is fixed by the operator.
@@ -482,7 +507,9 @@ spec:
                     type: object
                   mcpServers:
                     additionalProperties:
-                      description: One extra MCP server.
+                      description: |-
+                        One extra MCP server: a `ToolProvider` by name (`providerRef`), or the URL and headers inline,
+                        never both.
                       properties:
                         headers:
                           additionalProperties:
@@ -511,20 +538,45 @@ spec:
                             - secretRef
                             type: object
                           default: {}
-                          description: Request headers, by header name. Each value is a Secret key.
+                          description: Request headers, by header name. Each value is a Secret key. Not with `providerRef`.
                           type: object
                         optional:
                           default: false
-                          description: The agent starts without it when it is unreachable.
+                          description: |-
+                            The agent starts without it when it is unreachable. Beside a `providerRef` the provider's
+                            own `optional` is the one that counts (slice D2 decides how the two meet).
                           type: boolean
+                        providerRef:
+                          description: |-
+                            A `ToolProvider` of the same namespace that holds the URL and the headers (AD-029).
+                            Exclusive with `url` and `headers`. The operator resolves it in slice D2 of the admin
+                            dashboard (§60a); until then a config that uses it is `ConfigInvalid`.
+                          nullable: true
+                          properties:
+                            name:
+                              description: Name of the referenced object.
+                              minLength: 1
+                              type: string
+                          required:
+                          - name
+                          type: object
                         url:
-                          description: Its `http` or `https` URL, with no user name, password or `${…}` in it (checked by the reconciler).
+                          description: |-
+                            Its `http` or `https` URL, with no user name, password or `${…}` in it (checked by the
+                            reconciler). Required unless `providerRef` is set.
+                          nullable: true
                           type: string
-                      required:
-                      - url
                       type: object
+                      x-kubernetes-validations:
+                      - message: mcpServers.providerRef is exclusive with url and headers
+                        rule: '!has(self.providerRef) || (!has(self.url) && (!has(self.headers) || self.headers.size() == 0))'
+                      - message: an MCP server needs a url, or a providerRef
+                        rule: has(self.providerRef) || has(self.url)
                     default: {}
-                    description: Extra MCP servers, by name. Written to a ConfigMap that holds `${VAR}` references only.
+                    description: |-
+                      Extra MCP servers, by name, at most 32 (the bound lets an API server price the CEL rules of
+                      a server). Written to a ConfigMap that holds `${VAR}` references only.
+                    maxProperties: 32
                     type: object
                 type: object
             required:
@@ -717,6 +769,25 @@ spec:
                           type: object
                       type: object
                     type: array
+                  audience:
+                    description: |-
+                      Who may use the agent in a client (AD-028): the values of the person's roles claim that
+                      admit them. By convention a value is the agent's use permission, `agent.use:<agent-name>`;
+                      `*` admits everyone. Absent or empty: administrators only. The CRD checks only the shape;
+                      what the values mean is the consumer's rule. It reaches no pod: it goes to the registry
+                      item and nowhere else.
+                    items:
+                      maxLength: 64
+                      minLength: 1
+                      type: string
+                    maxItems: 32
+                    nullable: true
+                    type: array
+                    x-kubernetes-validations:
+                    - message: 'access.audience: the value * is only allowed alone'
+                      rule: '!self.exists(a, a == ''*'') || self.size() == 1'
+                    - message: 'access.audience: a value is visible ASCII characters, with no space or control character'
+                      rule: self.all(a, a.matches('^[!-~]+$'))
                 type: object
               configRef:
                 description: The AgentConfig, in the same namespace, this service runs.
@@ -1039,3 +1110,207 @@ spec:
     storage: true
     subresources:
       status: {}
+---
+apiVersion: apiextensions.k8s.io/v1
+kind: CustomResourceDefinition
+metadata:
+  name: modelendpoints.agents.vymalo.com
+spec:
+  group: agents.vymalo.com
+  names:
+    categories: []
+    kind: ModelEndpoint
+    plural: modelendpoints
+    shortNames: []
+    singular: modelendpoint
+  scope: Namespaced
+  versions:
+  - additionalPrinterColumns:
+    - jsonPath: .spec.title
+      name: Title
+      type: string
+    - jsonPath: .metadata.creationTimestamp
+      name: Age
+      type: date
+    name: v1alpha1
+    schema:
+      openAPIV3Schema:
+        description: An OpenAI-compatible model endpoint, set once and named by the AgentConfigs that use it (spec.model.endpointRef).
+        properties:
+          spec:
+            description: |-
+              An OpenAI-compatible model endpoint and the Secret key of its API key. An `AgentConfig` names
+              it with `spec.model.endpointRef`; the operator resolves the reference into the same variables
+              the inline `baseUrl` and `apiKeySecretRef` give (slice D2 of the admin dashboard). A secret is
+              never a value here (AD-024).
+            properties:
+              apiKeySecretRef:
+                description: The Secret key that holds the API key (`MODEL_API_KEY`).
+                properties:
+                  key:
+                    description: Key inside the Secret.
+                    minLength: 1
+                    type: string
+                  name:
+                    description: Name of the Secret.
+                    minLength: 1
+                    type: string
+                required:
+                - key
+                - name
+                type: object
+              baseUrl:
+                description: 'The endpoint (`MODEL_BASE_URL`): a value or a Secret key.'
+                properties:
+                  secretRef:
+                    description: The Secret key that holds the URL.
+                    nullable: true
+                    properties:
+                      key:
+                        description: Key inside the Secret.
+                        minLength: 1
+                        type: string
+                      name:
+                        description: Name of the Secret.
+                        minLength: 1
+                        type: string
+                    required:
+                    - key
+                    - name
+                    type: object
+                  value:
+                    description: The URL.
+                    nullable: true
+                    type: string
+                type: object
+                x-kubernetes-validations:
+                - message: exactly one of baseUrl.value and baseUrl.secretRef
+                  rule: has(self.value) != has(self.secretRef)
+              models:
+                default: []
+                description: 'The model aliases the forms offer. Informative: nothing checks that the endpoint serves them.'
+                items:
+                  type: string
+                type: array
+              title:
+                description: What the dashboard shows.
+                minLength: 1
+                type: string
+            required:
+            - apiKeySecretRef
+            - baseUrl
+            - title
+            type: object
+        required:
+        - spec
+        title: ModelEndpoint
+        type: object
+    served: true
+    storage: true
+    subresources: {}
+---
+apiVersion: apiextensions.k8s.io/v1
+kind: CustomResourceDefinition
+metadata:
+  name: toolproviders.agents.vymalo.com
+spec:
+  group: agents.vymalo.com
+  names:
+    categories: []
+    kind: ToolProvider
+    plural: toolproviders
+    shortNames: []
+    singular: toolprovider
+  scope: Namespaced
+  versions:
+  - additionalPrinterColumns:
+    - jsonPath: .spec.title
+      name: Title
+      type: string
+    - jsonPath: .spec.mcp.url
+      name: URL
+      priority: 1
+      type: string
+    - jsonPath: .metadata.creationTimestamp
+      name: Age
+      type: date
+    name: v1alpha1
+    schema:
+      openAPIV3Schema:
+        description: 'Where tools come from, set once and named by the AgentConfigs that use it (spec.tools.mcpServers.<name>.providerRef). v0: one remote MCP server.'
+        properties:
+          spec:
+            description: |-
+              Where some tools come from: one remote MCP server. An `AgentConfig` names it with
+              `spec.tools.mcpServers.<name>.providerRef`; the operator resolves the reference into the same
+              extra-MCP entry the inline form gives (slice D2 of the admin dashboard). A secret is never a
+              value here (AD-024): a header names a Secret key.
+            properties:
+              mcp:
+                description: The remote MCP server. The only kind of provider in v0 (§32 lists more).
+                properties:
+                  headers:
+                    additionalProperties:
+                      description: A header whose value is a Secret key.
+                      properties:
+                        prefix:
+                          description: Plain text put in front of the secret, e.g. `Bearer `.
+                          nullable: true
+                          type: string
+                        secretRef:
+                          description: The Secret key that holds the value. It is named by the variable that carries it.
+                          properties:
+                            key:
+                              description: Key inside the Secret.
+                              minLength: 1
+                              type: string
+                            name:
+                              description: Name of the Secret.
+                              minLength: 1
+                              type: string
+                          required:
+                          - key
+                          - name
+                          type: object
+                      required:
+                      - secretRef
+                      type: object
+                    default: {}
+                    description: Request headers, by header name. Each value is a Secret key.
+                    type: object
+                  optional:
+                    default: false
+                    description: The agent starts without it when it is unreachable.
+                    type: boolean
+                  tools:
+                    default: []
+                    description: |-
+                      The tools of the server the agent may call. Empty: every tool of the server. Nothing in the
+                      inline form says this, so slice D2 decides what the operator does with it.
+                    items:
+                      type: string
+                    type: array
+                  url:
+                    description: |-
+                      Its `http` or `https` URL, with no user name, password or `${…}` in it (checked by the
+                      reconciler, as for an inline server).
+                    minLength: 1
+                    type: string
+                required:
+                - url
+                type: object
+              title:
+                description: What the dashboard shows.
+                minLength: 1
+                type: string
+            required:
+            - mcp
+            - title
+            type: object
+        required:
+        - spec
+        title: ToolProvider
+        type: object
+    served: true
+    storage: true
+    subresources: {}

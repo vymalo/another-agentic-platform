@@ -44,6 +44,15 @@ impl Issues {
     }
 }
 
+/// The refusal of a reference this operator version cannot resolve yet. `ModelEndpoint` and
+/// `ToolProvider` references, and the default image, are slice D2 of the admin dashboard (§60a,
+/// AD-029): until it lands the config is refused, never started with a guess.
+fn until_d2(what: &str) -> String {
+    format!(
+        "{what}: resolving it is slice D2 of the admin dashboard (§60a, AD-029) and this operator does not do it yet, so the config is refused instead of started with a default"
+    )
+}
+
 /// Check the rules the reconciler owns: the cross-object ones and the ones of the adam-rs chart's
 /// `_validate.tpl`, so the same mistakes fail the same way (§59a, "Validation").
 ///
@@ -241,26 +250,53 @@ fn check_config(v: &mut Issues, cfg: &AgentConfig) {
     if model.model.trim().is_empty() {
         v.add(format!("{me} spec.model.model"), "the model alias is empty");
     }
-    match (&model.base_url.value, &model.base_url.secret_ref) {
-        (Some(url), None) => {
-            if let Err(why) = parse_http_url(url, false) {
+    match (
+        &model.endpoint_ref,
+        &model.base_url,
+        &model.api_key_secret_ref,
+    ) {
+        (Some(r), None, None) => {
+            if r.name.trim().is_empty() {
                 v.add(
-                    format!("{me} spec.model.baseUrl.value"),
-                    format!("{url:?}: {why}"),
+                    format!("{me} spec.model.endpointRef.name"),
+                    "the name is empty",
                 );
             }
+            v.add(
+                format!("{me} spec.model.endpointRef"),
+                until_d2(&format!(
+                    "a reference to the ModelEndpoint {:?}; set spec.model.baseUrl and spec.model.apiKeySecretRef inline until then",
+                    r.name
+                )),
+            );
         }
-        (None, Some(r)) => secret_ref(v, &format!("{me} spec.model.baseUrl.secretRef"), r),
-        _ => v.add(
-            format!("{me} spec.model.baseUrl"),
-            "exactly one of value and secretRef",
+        (Some(_), _, _) => v.add(
+            format!("{me} spec.model"),
+            "endpointRef is exclusive with baseUrl and apiKeySecretRef",
+        ),
+        (None, Some(base), Some(key)) => {
+            match (&base.value, &base.secret_ref) {
+                (Some(url), None) => {
+                    if let Err(why) = parse_http_url(url, false) {
+                        v.add(
+                            format!("{me} spec.model.baseUrl.value"),
+                            format!("{url:?}: {why}"),
+                        );
+                    }
+                }
+                (None, Some(r)) => secret_ref(v, &format!("{me} spec.model.baseUrl.secretRef"), r),
+                _ => v.add(
+                    format!("{me} spec.model.baseUrl"),
+                    "exactly one of value and secretRef",
+                ),
+            }
+            secret_ref(v, &format!("{me} spec.model.apiKeySecretRef"), key);
+        }
+        (None, _, _) => v.add(
+            format!("{me} spec.model"),
+            "needs an endpointRef, or both a baseUrl and an apiKeySecretRef",
         ),
     }
-    secret_ref(
-        v,
-        &format!("{me} spec.model.apiKeySecretRef"),
-        &model.api_key_secret_ref,
-    );
 
     check_tools(v, cfg);
     check_environment(v, cfg);
@@ -522,19 +558,41 @@ fn check_tools(v: &mut Issues, cfg: &AgentConfig) {
         {
             v.add(&at, "the server's name is letters, digits, `_` and `-`: the model sees its tools as <name>__<tool>");
         }
-        match parse_http_url(&server.url, true) {
-            Err(why) => v.add(
-                format!("{at}.url"),
-                format!("{:?}: {why}. A URL is http or https with no user name, password or ${{VAR}} in it (a secret in a URL reaches the logs)", server.url),
-            ),
-            Ok(_) => {
-                if is_plain_http_remote(&server.url) && !tools.allow_insecure_http {
+        match (&server.provider_ref, &server.url) {
+            (Some(r), None) => {
+                if !server.headers.is_empty() {
                     v.add(
-                        format!("{at}.url"),
-                        "a plain http:// URL to another machine: adam refuses such a server at startup unless tools.allowInsecureHttp is true (knowing that it covers every MCP server of the agent and the endpoints a sender announces, and that the bearer crosses the network in the clear); or use https",
+                        format!("{at}.headers"),
+                        "providerRef is exclusive with url and headers",
                     );
                 }
+                if r.name.trim().is_empty() {
+                    v.add(format!("{at}.providerRef.name"), "the name is empty");
+                }
+                v.add(
+                    format!("{at}.providerRef"),
+                    until_d2(&format!(
+                        "a reference to the ToolProvider {:?}; set url (and headers) inline until then",
+                        r.name
+                    )),
+                );
             }
+            (Some(_), Some(_)) => v.add(&at, "providerRef is exclusive with url and headers"),
+            (None, None) => v.add(&at, "needs a url, or a providerRef"),
+            (None, Some(url)) => match parse_http_url(url, true) {
+                Err(why) => v.add(
+                    format!("{at}.url"),
+                    format!("{url:?}: {why}. A URL is http or https with no user name, password or ${{VAR}} in it (a secret in a URL reaches the logs)"),
+                ),
+                Ok(_) => {
+                    if is_plain_http_remote(url) && !tools.allow_insecure_http {
+                        v.add(
+                            format!("{at}.url"),
+                            "a plain http:// URL to another machine: adam refuses such a server at startup unless tools.allowInsecureHttp is true (knowing that it covers every MCP server of the agent and the endpoints a sender announces, and that the bearer crosses the network in the clear); or use https",
+                        );
+                    }
+                }
+            },
         }
         for (name, header) in &server.headers {
             if !is_http_token(name) {
@@ -581,12 +639,20 @@ fn check_tools(v: &mut Issues, cfg: &AgentConfig) {
 fn check_environment(v: &mut Issues, cfg: &AgentConfig) {
     let me = "AgentConfig";
     let e = &cfg.spec.environment;
-    let image = e.image.reference.as_str();
-    if image.is_empty() || image.contains(char::is_whitespace) {
-        v.add(
-            format!("{me} spec.environment.image.ref"),
-            "an image reference with no space",
-        );
+    match &e.image {
+        None => v.add(
+            format!("{me} spec.environment.image"),
+            until_d2("no image, which means the operator's default coder image; name an image (a tag, or a tag and a digest) until then"),
+        ),
+        Some(image) => {
+            let image = image.reference.as_str();
+            if image.is_empty() || image.contains(char::is_whitespace) {
+                v.add(
+                    format!("{me} spec.environment.image.ref"),
+                    "an image reference with no space",
+                );
+            }
+        }
     }
     let (_, problems) = convert::resources(e.resources.as_ref());
     for (field, message) in problems {

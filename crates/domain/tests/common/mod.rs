@@ -30,6 +30,8 @@ pub fn example(name: &str) -> (Value, Value) {
         match d["kind"].as_str() {
             Some("AgentService") => service = Some(d),
             Some("AgentConfig") => config = Some(d),
+            // The shared objects of the admin dashboard (§60a): not inputs of `resolve` until slice D2.
+            Some("ModelEndpoint" | "ToolProvider") => {}
             other => panic!("unexpected kind {other:?}"),
         }
     }

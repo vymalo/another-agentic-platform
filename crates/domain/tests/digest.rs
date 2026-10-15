@@ -147,6 +147,40 @@ fn what_is_only_applied_does_not_roll_the_pods() {
 }
 
 #[test]
+fn the_audience_reaches_no_pod() {
+    // `access.audience` goes to the registry item and nowhere else (AD-028): whatever it says, absent,
+    // empty, a star or 32 values, the resolved agent, its runtime spec and so its digest are the same.
+    let many: Vec<String> = (0..32).map(|i| format!("agent.use:agent-{i:02}")).collect();
+    for name in ["coder", "chat"] {
+        let base = must_resolve(name, |_, _| {});
+        for audience in [
+            json!([]),
+            json!(["*"]),
+            json!([format!("agent.use:{name}")]),
+            json!(many),
+        ] {
+            let r = must_resolve(name, |s, _| {
+                set(s, "/spec/access/audience", audience.clone())
+            });
+            assert_eq!(
+                r, base,
+                "{name}: an audience of {audience} changed the resolved agent"
+            );
+            assert_eq!(r.runtime.digest, base.digest, "{name}");
+            assert!(
+                !format!("{:?}", r.runtime).contains("agent.use:"),
+                "{name}: the audience is in the runtime spec"
+            );
+        }
+    }
+    assert_eq!(
+        digest_of("coder", |_, _| {}),
+        CODER_DIGEST,
+        "the pin is untouched"
+    );
+}
+
+#[test]
 fn the_owner_is_not_part_of_the_digest() {
     let (s, c) = example("coder");
     let (s, c) = typed(&s, &c);
