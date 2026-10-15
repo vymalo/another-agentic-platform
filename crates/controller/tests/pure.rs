@@ -591,13 +591,16 @@ fn a_referent_maps_to_the_services_whose_config_references_it_and_to_no_other() 
     sw.apply_watcher_event(&watcher::Event::Init);
     cw.apply_watcher_event(&watcher::Event::Init);
     // Namespace `a`: c1 references the endpoint e1 and the provider p1, c2 only the endpoint e1, c3 and c4
-    // nothing (c4 has a provider of another name). Namespace `b` has a c1 of its own that references e1.
+    // nothing (c4 has a provider of another name). Namespace `b` has a c1 of its own that references e1,
+    // and a c9 that exists nowhere else: a service of `a` that names c9 has no config, and must not be
+    // mapped through the one of `b`.
     for c in [
         config_with("a", "c1", Some("e1"), &["p1"]),
         config_with("a", "c2", Some("e1"), &[]),
         config_with("a", "c3", None, &[]),
         config_with("a", "c4", None, &["p9"]),
         config_with("b", "c1", Some("e1"), &["p1"]),
+        config_with("b", "c9", Some("e1"), &["p1"]),
     ] {
         cw.apply_watcher_event(&watcher::Event::InitApply(c));
     }
@@ -608,7 +611,10 @@ fn a_referent_maps_to_the_services_whose_config_references_it_and_to_no_other() 
         linked_service("a", "s4", "c3"),
         linked_service("a", "s5", "c4"),
         linked_service("a", "s6", "no-such-config"),
+        linked_service("a", "s7", "c9"),
         linked_service("b", "sb", "c1"),
+        // A service of `b` that names c2, which is `a`'s config: `b` has none of that name.
+        linked_service("b", "sb2", "c2"),
     ] {
         sw.apply_watcher_event(&watcher::Event::InitApply(s));
     }
