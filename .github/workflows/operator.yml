@@ -2,7 +2,8 @@ name: Operator
 
 # The Rust workspace of the v0 operator (§59a): fmt, clippy, tests, the check that the CRDs
 # checked in under deploy/crds are what `operator crdgen` prints, and a kind cluster that
-# applies the CRDs, the examples (accepted) and examples/invalid (each refused).
+# first installs the previous commit's CRDs and examples, then applies the CRDs over them (the objects stored
+# before stay valid), the examples (accepted) and examples/invalid (each refused).
 #
 # The `runtime-kubernetes` job runs the provider of S4 against a real API server: the conformance suite of
 # aap-ports and the cases of crates/runtime-kubernetes/tests/cluster.rs, with skipping forbidden.
@@ -118,14 +119,56 @@ jobs:
           node_image: kindest/node:v1.35.8@sha256:07b2536e30b803ed61d1677a79df6115f798ce64c80f9e22f6ed45afd09323c0
           cluster_name: aap
           wait: 120s
+      # The CRDs change in place (Argo CD syncs them over the ones installed), and the objects stored under the old ones
+      # stay. So the cluster starts as the last deployment left it: the CRDs of the commit this one builds on, and the
+      # two examples of that commit stored under them. The next steps put the new CRDs over them.
+      - name: Install the previous CRDs and their objects
+        env:
+          # The commit this one builds on: a pull request's base, or what a push replaced (its full SHA: git fetches
+          # nothing by an abbreviation). `main` when the event has none.
+          BASE_SHA: ${{ github.event.pull_request.base.sha || github.event.before }}
+        run: |
+          set -eu
+          base="$BASE_SHA"
+          case "$base" in ''|0000000000000000000000000000000000000000) base=main ;; esac
+          git fetch --depth=1 origin "$base"
+          mkdir -p "$RUNNER_TEMP/base"
+          for f in deploy/crds/agents.vymalo.com.yaml examples/coder.yaml examples/chat.yaml; do
+            git show "FETCH_HEAD:$f" > "$RUNNER_TEMP/base/$(basename "$f")"
+          done
+          crds=$(kubectl apply --server-side -f "$RUNNER_TEMP/base/agents.vymalo.com.yaml" -o name)
+          printf '%s\n' "$crds" | xargs kubectl wait --for=condition=Established --timeout=60s
+          kubectl create namespace another-agentic-system
+          kubectl apply -f "$RUNNER_TEMP/base/coder.yaml" -f "$RUNNER_TEMP/base/chat.yaml"
+          # Two services and two configs, stored under the previous CRDs.
+          test "$(kubectl -n another-agentic-system get agentservices,agentconfigs -o name | wc -l)" -eq 4
       - name: Apply the CRDs
         run: |
-          # Server-side: a client-side apply keeps the manifest in an annotation, which has a size limit.
+          # Server-side: a client-side apply keeps the manifest in an annotation, which has a size limit. Over the previous
+          # CRDs of the step above, as Argo CD does it.
           kubectl apply --server-side -f deploy/crds/agents.vymalo.com.yaml
           kubectl wait --for=condition=Established --timeout=60s \
             crd/agentconfigs.agents.vymalo.com crd/agentservices.agents.vymalo.com \
             crd/modelendpoints.agents.vymalo.com crd/toolproviders.agents.vymalo.com
-          kubectl create namespace another-agentic-system
+      # The change is additive for what is stored: the old objects are still accepted under the new CRDs. Two checks,
+      # because an update that leaves the spec alone is forgiven by the API server's ratcheting of invalid values (a label
+      # on an object the new schema would refuse still goes through): the update shows that a stored object can be read,
+      # pruned and written back, and the dry-run create of the same objects in another namespace, which has nothing stored
+      # to be forgiven against, shows that the new schema accepts them.
+      - name: Objects stored under the previous CRDs are still accepted
+        run: |
+          set -eu
+          for f in coder chat; do
+            out=$(kubectl label --overwrite -f "$RUNNER_TEMP/base/$f.yaml" upgrade-check=ok)
+            printf '%s\n' "$out"
+            test "$(printf '%s\n' "$out" | grep -c ' labeled$')" -eq 2 || { echo "::error::the stored objects of examples/$f.yaml were not updated"; exit 1; }
+          done
+          test "$(kubectl -n another-agentic-system get agentservices,agentconfigs -l upgrade-check=ok -o name | wc -l)" -eq 4
+          kubectl create namespace upgrade-check
+          for f in coder chat; do
+            sed 's/^  namespace: another-agentic-system$/  namespace: upgrade-check/' "$RUNNER_TEMP/base/$f.yaml" |
+              kubectl create --dry-run=server -f -
+          done
       - name: The examples are accepted
         run: |
           for f in examples/*.yaml; do
