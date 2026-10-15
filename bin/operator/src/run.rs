@@ -63,6 +63,8 @@ pub struct RunArgs {
     pub default_agent_image: Option<String>,
 }
 
+// What `run` composes needs a runtime provider; without one the settings are parsed and unused.
+#[cfg(feature = "runtime-kubernetes")]
 impl RunArgs {
     /// The default image, if there is one: an empty value (a chart value left blank) is none, and a
     /// reference with white space in it is a deployment mistake that stops the operator at start, not a
@@ -87,11 +89,7 @@ impl RunArgs {
         }
         Ok(Some(image.to_owned()))
     }
-}
 
-// What `run` composes needs a runtime provider; without one the settings are parsed and unused.
-#[cfg(feature = "runtime-kubernetes")]
-impl RunArgs {
     /// An empty `WATCH_NAMESPACE` (a chart value left blank) means no namespace.
     fn namespace(&self) -> Option<String> {
         self.watch_namespace
