@@ -1,4 +1,4 @@
-//! The status of both kinds, and the condition types and reasons the controller writes.
+//! The status of `AgentService` and `AgentConfig`, and the condition types and reasons the controller writes.
 
 use k8s_openapi::apimachinery::pkg::apis::meta::v1::Condition;
 use schemars::JsonSchema;

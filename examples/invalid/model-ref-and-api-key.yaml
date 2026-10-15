@@ -1,0 +1,27 @@
+# Refused: model has an endpointRef and an apiKeySecretRef; the reference is exclusive with the inline key.
+# expect: model.endpointRef is exclusive with model.baseUrl and model.apiKeySecretRef
+apiVersion: agents.vymalo.com/v1alpha1
+kind: AgentConfig
+metadata:
+  name: invalid-model-ref-and-api-key
+  namespace: another-agentic-system
+spec:
+  harness:
+    type: adam-rs
+    adam:
+      binary: adam-agent
+      agent:
+        folder:
+          files:
+            instructions.md: |
+              Hello.
+  model:
+    model: m
+    endpointRef:
+      name: gateway
+    apiKeySecretRef:
+      name: s
+      key: MODEL_API_KEY
+  environment:
+    image:
+      ref: ghcr.io/vymalo/another-adam-rs/coder:sha-0391809

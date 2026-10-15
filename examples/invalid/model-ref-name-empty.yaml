@@ -1,0 +1,26 @@
+# Refused: model.endpointRef.name is empty; at least 1 character (a bound of the schema, not a CEL rule).
+# expect: spec.model.endpointRef.name in body should be at least 1 chars long
+apiVersion: agents.vymalo.com/v1alpha1
+kind: AgentConfig
+metadata:
+  name: invalid-model-ref-name-empty
+  namespace: another-agentic-system
+spec:
+  harness:
+    type: adam-rs
+    adam:
+      binary: adam-agent
+      agent:
+        folder:
+          files:
+            instructions.md: |
+              Hello.
+  model:
+    model: m
+    endpointRef:
+      name: ""
+  tools:
+    mcpServers: {}
+  environment:
+    image:
+      ref: ghcr.io/vymalo/another-adam-rs/coder:sha-0391809

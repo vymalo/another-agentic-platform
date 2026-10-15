@@ -1,0 +1,95 @@
+# Refused: tools.mcpServers has 33 servers; at most 32 (a bound of the schema, not a CEL rule).
+# expect: Too many: 33: must have at most 32 items
+apiVersion: agents.vymalo.com/v1alpha1
+kind: AgentConfig
+metadata:
+  name: invalid-mcp-servers-too-many
+  namespace: another-agentic-system
+spec:
+  harness:
+    type: adam-rs
+    adam:
+      binary: adam-agent
+      agent:
+        folder:
+          files:
+            instructions.md: |
+              Hello.
+  model:
+    model: m
+    baseUrl:
+      value: https://gateway.example.invalid/v1
+    apiKeySecretRef:
+      name: s
+      key: MODEL_API_KEY
+  tools:
+    mcpServers:
+      s01:
+        url: https://mcp-01.example.invalid/mcp
+      s02:
+        url: https://mcp-02.example.invalid/mcp
+      s03:
+        url: https://mcp-03.example.invalid/mcp
+      s04:
+        url: https://mcp-04.example.invalid/mcp
+      s05:
+        url: https://mcp-05.example.invalid/mcp
+      s06:
+        url: https://mcp-06.example.invalid/mcp
+      s07:
+        url: https://mcp-07.example.invalid/mcp
+      s08:
+        url: https://mcp-08.example.invalid/mcp
+      s09:
+        url: https://mcp-09.example.invalid/mcp
+      s10:
+        url: https://mcp-10.example.invalid/mcp
+      s11:
+        url: https://mcp-11.example.invalid/mcp
+      s12:
+        url: https://mcp-12.example.invalid/mcp
+      s13:
+        url: https://mcp-13.example.invalid/mcp
+      s14:
+        url: https://mcp-14.example.invalid/mcp
+      s15:
+        url: https://mcp-15.example.invalid/mcp
+      s16:
+        url: https://mcp-16.example.invalid/mcp
+      s17:
+        url: https://mcp-17.example.invalid/mcp
+      s18:
+        url: https://mcp-18.example.invalid/mcp
+      s19:
+        url: https://mcp-19.example.invalid/mcp
+      s20:
+        url: https://mcp-20.example.invalid/mcp
+      s21:
+        url: https://mcp-21.example.invalid/mcp
+      s22:
+        url: https://mcp-22.example.invalid/mcp
+      s23:
+        url: https://mcp-23.example.invalid/mcp
+      s24:
+        url: https://mcp-24.example.invalid/mcp
+      s25:
+        url: https://mcp-25.example.invalid/mcp
+      s26:
+        url: https://mcp-26.example.invalid/mcp
+      s27:
+        url: https://mcp-27.example.invalid/mcp
+      s28:
+        url: https://mcp-28.example.invalid/mcp
+      s29:
+        url: https://mcp-29.example.invalid/mcp
+      s30:
+        url: https://mcp-30.example.invalid/mcp
+      s31:
+        url: https://mcp-31.example.invalid/mcp
+      s32:
+        url: https://mcp-32.example.invalid/mcp
+      s33:
+        url: https://mcp-33.example.invalid/mcp
+  environment:
+    image:
+      ref: ghcr.io/vymalo/another-adam-rs/coder:sha-0391809

@@ -1,0 +1,11 @@
+# Refused: a ToolProvider's title is empty; at least 1 character (a bound of the schema, not a CEL rule).
+# expect: spec.title in body should be at least 1 chars long
+apiVersion: agents.vymalo.com/v1alpha1
+kind: ToolProvider
+metadata:
+  name: invalid-provider-title-empty
+  namespace: another-agentic-system
+spec:
+  title: ""
+  mcp:
+    url: http://another-agentic-websearch.another-agentic-system.svc:8080/mcp

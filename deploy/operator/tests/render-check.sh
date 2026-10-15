@@ -74,9 +74,13 @@ role_rules() {
 rules_are() { [ "$(role_rules)" = "$1" ]; }
 
 # ---- The three golden renders ---------------------------------------------------------------------------------------------
+# The goldens are rendered with image.tag=sha-0000000, whatever values.yaml says: the bump job rewrites image.tag on main after
+# every operator image and no workflow checks the bump commit, so a golden that held the real tag would be stale (and this
+# script red) after every bump. That the real tag is a sha-<7 hex> tag of the operator package is checked on the default
+# render below, which does not set it.
 golden() { # golden <name> <helm args>: the render equals tests/golden/<name>.yaml (or rewrites it)
   name=$1; shift
-  render "$@"
+  render "$@" --set image.tag=sha-0000000
   if [ "${UPDATE_GOLDEN:-}" = 1 ]; then cp "$out" "$here/golden/$name.yaml"; echo "wrote tests/golden/$name.yaml" >&2; return 0; fi
   cmp -s "$out" "$here/golden/$name.yaml"
 }
@@ -220,9 +224,9 @@ crds_equal() {
 check "the CRDs chart renders exactly deploy/crds/agents.vymalo.com.yaml" crds_equal
 crds_kinds() {
   helm template aap-operator-crds "$crds_chart" --namespace "$ns" > "$err" || return 1
-  [ "$(grep -c '^kind: CustomResourceDefinition$' "$err")" -eq 2 ] && [ "$(grep -c '^  name: .*\.agents\.vymalo\.com$' "$err")" -eq 2 ] \
+  [ "$(grep -c '^kind: CustomResourceDefinition$' "$err")" -eq 4 ] && [ "$(grep -c '^  name: .*\.agents\.vymalo\.com$' "$err")" -eq 4 ] \
     && ! grep -Eq '^kind: (Deployment|Role|Secret)$' "$err"
 }
-check "it holds the two CRDs and nothing else" crds_kinds
+check "it holds the four CRDs and nothing else" crds_kinds
 
 if [ "$fail" -eq 0 ]; then echo "operator chart checks passed"; else echo "operator chart checks FAILED"; exit 1; fi

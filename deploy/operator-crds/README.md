@@ -1,14 +1,15 @@
 # aap-operator-crds
 
-The CustomResourceDefinitions of the operator, `agentservices.agents.vymalo.com` and `agentconfigs.agents.vymalo.com`
-(`v1alpha1`), as a chart of their own. A separate chart because the CRDs are installed by their own Argo CD Application in the
+The CustomResourceDefinitions of the operator, `agentservices.agents.vymalo.com` and `agentconfigs.agents.vymalo.com` and, for
+the admin dashboard (§60a), `modelendpoints.agents.vymalo.com` and `toolproviders.agents.vymalo.com` (`v1alpha1`), as a chart of
+their own. A separate chart because the CRDs are installed by their own Argo CD Application in the
 infrastructure project, and upgraded apart from the operator ([§59a](../../docs/architecture/10-control-plane-and-crds.md#the-operator-chart), §93).
 
 ```sh
 helm template aap-operator-crds deploy/operator-crds | kubectl apply --server-side -f -
 ```
 
-Server-side apply, as Argo CD's `ServerSideApply=true` sync option does: the CRDs are 55 KB, and a client-side apply keeps a copy
+Server-side apply, as Argo CD's `ServerSideApply=true` sync option does: the CRDs are 67 KB, and a client-side apply keeps a copy
 of the manifest in an annotation.
 
 ## One source
@@ -25,8 +26,22 @@ cargo run -q -p aap-operator -- crdgen > deploy/crds/agents.vymalo.com.yaml
 cp deploy/crds/agents.vymalo.com.yaml deploy/operator-crds/files/agents.vymalo.com.yaml
 ```
 
+## Upgrading
+
+Upgrade the operator image before the CRDs, or together with them, never after. Since slice D1 (§60a) the CRDs admit an
+`AgentConfig` that carries an `endpointRef` or a `providerRef` and no `baseUrl`; an operator from before D1 types
+`Model.baseUrl` as required, so it cannot decode such an object (what its watch then does with the error is *unverified*).
+The other order is safe: the D1 operator reads every object written before D1. Nobody writes a reference before the
+Platform API of slice D5 does, so until then the order costs nothing, and after it, it matters. The two Argo CD
+Applications sync apart: sequence them (a sync wave, or the operator's first).
+
+The change is additive for what is stored: the `kind` job of
+[`operator.yml`](../../.github/workflows/operator.yml) installs the CRDs of the commit a change builds on, stores
+`examples/coder.yaml` and `examples/chat.yaml` under them, applies the new CRDs over the old and updates those objects.
+The one bound on a field that existed is `tools.mcpServers`, at most 32 servers.
+
 ## Removing it
 
-Deleting the release deletes the CRDs, and with them every `AgentService` and `AgentConfig` (the operator's finalizers then no
+Deleting the release deletes the CRDs, and with them every `AgentService`, `AgentConfig`, `ModelEndpoint` and `ToolProvider` (the operator's finalizers then no
 longer run, so the agents' objects are left to their owner references). Nothing here keeps them (`helm.sh/resource-policy`):
 protect them in the Argo CD Application (`Prune=false`, as home-os does for objects that hold data), not in the chart.

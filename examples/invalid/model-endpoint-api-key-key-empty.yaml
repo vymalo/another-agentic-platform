@@ -1,0 +1,14 @@
+# Refused: a ModelEndpoint's apiKeySecretRef.key is empty; at least 1 character (a bound of the schema, not a CEL rule).
+# expect: spec.apiKeySecretRef.key in body should be at least 1 chars long
+apiVersion: agents.vymalo.com/v1alpha1
+kind: ModelEndpoint
+metadata:
+  name: invalid-endpoint-api-key-key-empty
+  namespace: another-agentic-system
+spec:
+  title: Gateway
+  baseUrl:
+    value: https://gateway.example.invalid/v1
+  apiKeySecretRef:
+    name: s
+    key: ""

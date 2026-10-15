@@ -1,0 +1,106 @@
+# A coder that uses the shared objects of the admin dashboard (§60a, "What the custom resources gain"):
+# a ModelEndpoint and a ToolProvider set once and named by the AgentConfig (AD-029), no image (the
+# operator's default coder image), and an audience on the AgentService (AD-028). Every secret is a
+# reference to a Secret key; no value is in this file.
+#
+# The referents come first and the AgentConfig before the AgentService, the order the Platform API
+# applies them in. An API server checks none of the references; the operator resolves them (slice D2,
+# not built: until then it marks this config `ConfigInvalid`, naming the field).
+apiVersion: agents.vymalo.com/v1alpha1
+kind: ModelEndpoint
+metadata:
+  name: gateway
+  namespace: another-agentic-system
+spec:
+  title: Gateway
+  baseUrl:
+    secretRef: # or { value: https://…/v1 }
+      name: agent-models
+      key: GATEWAY_BASE_URL
+  apiKeySecretRef:
+    name: agent-models
+    key: GATEWAY_API_KEY
+  models: [coding-model, chat-model] # the aliases the forms offer; informative
+---
+apiVersion: agents.vymalo.com/v1alpha1
+kind: ToolProvider
+metadata:
+  name: websearch
+  namespace: another-agentic-system
+spec:
+  title: Web search
+  mcp: # v0 subset of §32: one remote MCP server
+    url: http://another-agentic-websearch.another-agentic-system.svc:8080/mcp
+    headers:
+      Authorization:
+        prefix: "Bearer "
+        secretRef:
+          name: agent-tools
+          key: SEARCH_MCP_TOKEN
+    tools: [] # empty: every tool of the server
+    optional: true
+---
+apiVersion: agents.vymalo.com/v1alpha1
+kind: AgentConfig
+metadata:
+  name: coder-me
+  namespace: another-agentic-system
+spec:
+  harness:
+    type: adam-rs
+    adam:
+      binary: adam-coder
+      agent:
+        embedded: {}
+      coder:
+        workers: 2
+        prDraft: true
+        github:
+          app:
+            id: Iv1.example # the App's client ID: public, not a secret
+            owners: [stephane-segning] # GITHUB_APP_OWNERS
+            privateKeySecretRef:
+              name: github-app
+              key: private-key.pem
+  model:
+    endpointRef: # exclusive with baseUrl and apiKeySecretRef
+      name: gateway
+    model: coding-model
+  tools:
+    mcpServers:
+      websearch:
+        providerRef: # exclusive with url and headers
+          name: websearch
+    allowInsecureHttp: true # the provider's URL is plain http inside the cluster; never automatic
+  environment: {} # no image: the operator's default coder image; an agent may pin its own
+---
+apiVersion: agents.vymalo.com/v1alpha1
+kind: AgentService
+metadata:
+  name: coder-me
+  namespace: another-agentic-system
+spec:
+  description: Coding task to verified pull request, for stephane-segning's repositories.
+  configRef:
+    name: coder-me
+  interfaces:
+    a2a:
+      enabled: true
+      bearerTokensSecretRef:
+        name: coder-me-secrets
+        key: A2A_BEARER_TOKENS
+  store:
+    postgres:
+      cnpg:
+        instances: 1
+        storage:
+          size: 5Gi
+  access:
+    allowFrom:
+      - namespaceSelector:
+          matchLabels:
+            kubernetes.io/metadata.name: another-agentic-system
+    audience: ["agent.use:coder-me"] # the agent's use permission; ["*"]: everyone; absent or []: administrators only
+  registry:
+    title: Coder (me)
+    tags: [coding, git]

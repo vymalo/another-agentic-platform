@@ -39,10 +39,10 @@ COPY crates crates
 COPY bin bin
 RUN cargo build --release --locked --package aap-operator --bin operator
 # Smoke test of what was built, in the build stage because the final image has no shell: the binary starts,
-# prints its usage, and `crdgen` prints both CRDs. (CI runs the same two commands on the final image.)
+# prints its usage, and `crdgen` prints the four CRDs. (CI runs the same two commands on the final image.)
 RUN /src/target/release/operator --help > /dev/null \
  && /src/target/release/operator crdgen > /tmp/crds.yaml \
- && test "$(grep -c '^kind: CustomResourceDefinition$' /tmp/crds.yaml)" = 2
+ && test "$(grep -c '^kind: CustomResourceDefinition$' /tmp/crds.yaml)" = 4
 
 FROM gcr.io/distroless/cc-debian13:nonroot@sha256:e792ab3d241a468a4fd7519ddbbebe66b49b5f365771716ea688ad40b6c6f1c2
 LABEL org.opencontainers.image.source="https://github.com/vymalo/another-agentic-platform" \

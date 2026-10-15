@@ -1,0 +1,11 @@
+# Refused: a ToolProvider's title has 129 characters; at most 128 (a bound of the schema, not a CEL rule).
+# expect: Too long: may not be more than 128 bytes
+apiVersion: agents.vymalo.com/v1alpha1
+kind: ToolProvider
+metadata:
+  name: invalid-provider-title-too-long
+  namespace: another-agentic-system
+spec:
+  title: TTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTT
+  mcp:
+    url: http://another-agentic-websearch.another-agentic-system.svc:8080/mcp

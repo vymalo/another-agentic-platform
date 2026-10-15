@@ -1,0 +1,17 @@
+# Refused: a ModelEndpoint's baseUrl has both value and secretRef.
+# expect: exactly one of baseUrl.value and baseUrl.secretRef
+apiVersion: agents.vymalo.com/v1alpha1
+kind: ModelEndpoint
+metadata:
+  name: invalid-endpoint-base-url-both
+  namespace: another-agentic-system
+spec:
+  title: Gateway
+  baseUrl:
+    value: https://gateway.example.invalid/v1
+    secretRef:
+      name: s
+      key: GATEWAY_BASE_URL
+  apiKeySecretRef:
+    name: s
+    key: GATEWAY_API_KEY

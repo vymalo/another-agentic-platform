@@ -57,11 +57,17 @@ fn crdgen_prints_one_document_per_kind() {
     let text = String::from_utf8(out.stdout).expect("utf-8");
     assert_eq!(
         text.matches("\n---\n").count(),
-        2,
-        "one `---` before each of the two CRDs"
+        4,
+        "one `---` before each of the four CRDs"
     );
-    assert!(text.contains("name: agentconfigs.agents.vymalo.com"));
-    assert!(text.contains("name: agentservices.agents.vymalo.com"));
+    for name in [
+        "agentconfigs",
+        "agentservices",
+        "modelendpoints",
+        "toolproviders",
+    ] {
+        assert!(text.contains(&format!("name: {name}.agents.vymalo.com")));
+    }
 }
 
 #[cfg(not(feature = "runtime-kubernetes"))]

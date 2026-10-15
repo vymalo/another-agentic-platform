@@ -394,6 +394,67 @@ async fn an_invalid_config_blocks_the_service_and_leaves_what_runs_untouched() {
 }
 
 #[tokio::test]
+async fn a_reference_the_operator_cannot_resolve_yet_blocks_the_service_and_names_the_field() {
+    // `endpointRef`, `providerRef` and a missing image are slice D2 of the admin dashboard (§60a): the CRD
+    // admits them, the operator refuses them, and nothing is started with a default instead.
+    let w = World::new("chat");
+    w.settle().await;
+    let running = w.runtime.spec(&w.id()).unwrap();
+
+    type Edit = fn(&mut Value);
+    let cases: [(&str, Edit, &str); 3] = [
+        (
+            "spec.model.endpointRef",
+            |c| {
+                c["spec"]["model"] =
+                    json!({"model": "chat-model", "endpointRef": {"name": "gateway"}});
+            },
+            "ModelEndpoint",
+        ),
+        (
+            "spec.tools.mcpServers[websearch].providerRef",
+            |c| {
+                c["spec"]["tools"]["mcpServers"] =
+                    json!({"websearch": {"providerRef": {"name": "websearch"}}});
+            },
+            "ToolProvider",
+        ),
+        (
+            "spec.environment.image",
+            |c| {
+                c["spec"]["environment"]
+                    .as_object_mut()
+                    .unwrap()
+                    .remove("image");
+            },
+            "default coder image",
+        ),
+    ];
+    for (field, change, what) in cases {
+        w.edit_config(change);
+        w.pass().await.unwrap();
+        assert_eq!(
+            w.runtime.spec(&w.id()).unwrap(),
+            running,
+            "{field}: what runs is left as it is"
+        );
+        let status = w.status();
+        assert_eq!(status["state"], "Blocked", "{field}");
+        is(&status, "ConfigResolved", "False", "ConfigInvalid");
+        let message = status["conditions"][0]["message"].as_str().unwrap();
+        assert!(
+            message.contains(field) && message.contains("slice D2") && message.contains(what),
+            "{field}: {message}"
+        );
+        // back to the inline object it was: unblocked, and the same digest
+        w.edit_config(|c| *c = example("chat").1);
+        w.pass().await.unwrap();
+        assert_eq!(w.status()["state"], "Ready", "{field}");
+        assert_eq!(w.runtime.spec(&w.id()).unwrap(), running, "{field}");
+    }
+}
+
+#[tokio::test]
 async fn a_missing_config_is_a_condition_and_creates_nothing() {
     let w = World::new("chat");
     w.fake.delete(CONFIGS, NS, "chat");

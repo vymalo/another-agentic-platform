@@ -1,0 +1,144 @@
+# Refused: a ToolProvider's mcp.headers has 33 headers; at most 32 (a bound of the schema, not a CEL rule).
+# expect: Too many: 33: must have at most 32 items
+apiVersion: agents.vymalo.com/v1alpha1
+kind: ToolProvider
+metadata:
+  name: invalid-provider-headers-too-many
+  namespace: another-agentic-system
+spec:
+  title: Web search
+  mcp:
+    url: http://another-agentic-websearch.another-agentic-system.svc:8080/mcp
+    headers:
+      X-Header-01:
+        secretRef:
+          name: s
+          key: HEADER_01
+      X-Header-02:
+        secretRef:
+          name: s
+          key: HEADER_02
+      X-Header-03:
+        secretRef:
+          name: s
+          key: HEADER_03
+      X-Header-04:
+        secretRef:
+          name: s
+          key: HEADER_04
+      X-Header-05:
+        secretRef:
+          name: s
+          key: HEADER_05
+      X-Header-06:
+        secretRef:
+          name: s
+          key: HEADER_06
+      X-Header-07:
+        secretRef:
+          name: s
+          key: HEADER_07
+      X-Header-08:
+        secretRef:
+          name: s
+          key: HEADER_08
+      X-Header-09:
+        secretRef:
+          name: s
+          key: HEADER_09
+      X-Header-10:
+        secretRef:
+          name: s
+          key: HEADER_10
+      X-Header-11:
+        secretRef:
+          name: s
+          key: HEADER_11
+      X-Header-12:
+        secretRef:
+          name: s
+          key: HEADER_12
+      X-Header-13:
+        secretRef:
+          name: s
+          key: HEADER_13
+      X-Header-14:
+        secretRef:
+          name: s
+          key: HEADER_14
+      X-Header-15:
+        secretRef:
+          name: s
+          key: HEADER_15
+      X-Header-16:
+        secretRef:
+          name: s
+          key: HEADER_16
+      X-Header-17:
+        secretRef:
+          name: s
+          key: HEADER_17
+      X-Header-18:
+        secretRef:
+          name: s
+          key: HEADER_18
+      X-Header-19:
+        secretRef:
+          name: s
+          key: HEADER_19
+      X-Header-20:
+        secretRef:
+          name: s
+          key: HEADER_20
+      X-Header-21:
+        secretRef:
+          name: s
+          key: HEADER_21
+      X-Header-22:
+        secretRef:
+          name: s
+          key: HEADER_22
+      X-Header-23:
+        secretRef:
+          name: s
+          key: HEADER_23
+      X-Header-24:
+        secretRef:
+          name: s
+          key: HEADER_24
+      X-Header-25:
+        secretRef:
+          name: s
+          key: HEADER_25
+      X-Header-26:
+        secretRef:
+          name: s
+          key: HEADER_26
+      X-Header-27:
+        secretRef:
+          name: s
+          key: HEADER_27
+      X-Header-28:
+        secretRef:
+          name: s
+          key: HEADER_28
+      X-Header-29:
+        secretRef:
+          name: s
+          key: HEADER_29
+      X-Header-30:
+        secretRef:
+          name: s
+          key: HEADER_30
+      X-Header-31:
+        secretRef:
+          name: s
+          key: HEADER_31
+      X-Header-32:
+        secretRef:
+          name: s
+          key: HEADER_32
+      X-Header-33:
+        secretRef:
+          name: s
+          key: HEADER_33
