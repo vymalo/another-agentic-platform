@@ -763,7 +763,7 @@ apiVersion: agents.vymalo.com/v1alpha1
 kind: RunEnvironment
 metadata: { name: coder-vymalo, namespace: another-agentic-system }
 spec:
-  image:                                  # optional: the operator's default workspace image (a value of its chart, bumped by CI)
+  image:                                  # optional: the operator's default workspace image (a value of its chart, which GitOps sets: AD-029, amended 2026-10-15)
     ref: ghcr.io/vymalo/another-agentic-images/workspace:1.98.1-ee2273e@sha256:9b2670fc45f50b7b7b8f959fe5caa06e630cba86c0229b2a7d33bee7f26d752a
   sizeClass: standard                     # a name of the operator chart's runPodClasses (AD-031)
   pool:
@@ -1273,7 +1273,7 @@ This section is the §60 UI made concrete for the v0 operator (§59a): a dashboa
 |---|---|---|---|
 | Coders, one per GitHub owner, each with its GitHub App | home-os (adam-rs chart `deploy/coder`) | **Edited**, including `coder-vymalo` (the renamed `coder`) after the cutover | `AgentService` + `AgentConfig` with `binary: adam-coder` (AD-033) |
 | Folder agents | the system chart (`chat`), `dev/` (`researcher`) | **Edited**, `chat` after the cutover | `AgentService` + `AgentConfig` with `binary: adam-agent` and inline `files` |
-| The image of an agent | the adam-rs chart's `image.tag` | **Optional**: empty is the operator's default coder image, which CI bumps in the operator chart; an agent may pin its own | `AgentConfig.spec.environment.image` (AD-029) |
+| The image of an agent | the adam-rs chart's `image.tag` | **Optional**: empty is the operator's default coder image, a value of the operator chart (*amended 2026-10-15, D2:* the GitOps repository sets it, CI does not bump it: AD-029); an agent may pin its own | `AgentConfig.spec.environment.image` (AD-029) |
 | Who may use which agent | the orchestrator's `auth.roles.<role>.agents` and Keycloak client roles | **Edited**, per agent: the audience names the agent's use permission (`agent.use:<agent-name>`); Keycloak composite roles grant it to people | `AgentService.spec.access.audience`, published in the registry (AD-028, AD-032) |
 | Models | each chart's `model` values | **Edited** | `ModelEndpoint` objects, referenced by name (AD-029) |
 | Tool servers of an agent | the adam-rs chart's `mcp` values | **Edited** | `ToolProvider` objects, referenced by name (AD-029) |
