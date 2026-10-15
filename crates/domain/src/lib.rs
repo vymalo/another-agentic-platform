@@ -21,4 +21,4 @@ mod validate;
 pub use digest::{canonical_json, digest_json, spec_digest};
 pub use externals::{Externals, References, references};
 pub use resolve::{ResolvedAgent, resolve};
-pub use validate::{ConfigIssue, validate, validate_config};
+pub use validate::{ConfigIssue, name_issue, validate, validate_config};

@@ -18,6 +18,7 @@ use aap_api::{AgentConfig, Image};
 use k8s_openapi::apimachinery::pkg::apis::meta::v1::ObjectMeta;
 
 use crate::externals::Externals;
+use crate::syntax::is_dns_subdomain;
 use crate::validate::ConfigIssue;
 
 /// Where the fields of the materialized config came from, when not from the config itself.
@@ -95,7 +96,7 @@ pub(crate) fn materialize(config: &AgentConfig, externals: &Externals) -> Materi
         &model.endpoint_ref,
         &model.base_url,
         &model.api_key_secret_ref,
-    ) && !r.name.trim().is_empty()
+    ) && is_dns_subdomain(&r.name)
     {
         match find(
             &externals.model_endpoints,
@@ -124,7 +125,7 @@ pub(crate) fn materialize(config: &AgentConfig, externals: &Externals) -> Materi
         let Some(r) = &server.provider_ref else {
             continue;
         };
-        if server.url.is_some() || !server.headers.is_empty() || r.name.trim().is_empty() {
+        if server.url.is_some() || !server.headers.is_empty() || !is_dns_subdomain(&r.name) {
             continue;
         }
         match find(

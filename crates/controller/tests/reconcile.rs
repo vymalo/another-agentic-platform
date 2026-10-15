@@ -533,6 +533,83 @@ async fn a_reference_to_a_kind_whose_crd_is_not_installed_blocks_the_service_and
     assert_eq!(w.status()["state"], "Ready", "{}", w.status());
 }
 
+/// The requests a pass made for objects of these kinds.
+fn asked_for(w: &World, plurals: &[&str]) -> Vec<String> {
+    w.fake
+        .calls()
+        .into_iter()
+        .filter(|c| plurals.iter().any(|p| c.path.contains(&format!("/{p}"))))
+        .map(|c| format!("{} {}?{}", c.method, c.path, c.query))
+        .collect()
+}
+
+#[tokio::test]
+async fn a_name_that_is_not_an_objects_is_blocked_before_any_request_is_made_with_it() {
+    // A name goes into the path of the GET: `bad name` would make the pass fail for good, and
+    // `x?watch=true` would add a query to it. The CRD asks for one character and no more.
+    let w = dashboard_world();
+    w.put_shared();
+    w.edit_config(|c| {
+        c["spec"]["model"]["endpointRef"]["name"] = json!("x?watch=true");
+        c["spec"]["tools"]["mcpServers"]["websearch"]["providerRef"]["name"] = json!("bad name");
+    });
+    w.fake.clear_calls();
+    let next = w.settle().await;
+
+    let status = w.status();
+    assert_eq!(status["state"], "Blocked", "{status}");
+    is(&status, "ConfigResolved", "False", "ConfigInvalid");
+    let message = w.message();
+    assert!(
+        message.contains("spec.model.endpointRef.name")
+            && message.contains("mcpServers[websearch].providerRef.name")
+            && message.contains("not the name of an object"),
+        "{message}"
+    );
+    assert_eq!(
+        asked_for(&w, &["modelendpoints", "toolproviders"]),
+        Vec::<String>::new(),
+        "nothing was requested under those names"
+    );
+    assert!(w.runtime.ids().is_empty());
+    // It is a failure of the objects, not of the pass: a result, not an error to retry.
+    assert!(requeue_after(&next) >= Duration::from_secs(1));
+
+    // The name is fixed: the pass reads the object and the agent is made.
+    w.edit_config(|c| {
+        c["spec"]["model"]["endpointRef"]["name"] = json!("gateway");
+        c["spec"]["tools"]["mcpServers"]["websearch"]["providerRef"]["name"] = json!("websearch");
+    });
+    w.pass().await.unwrap();
+    assert_eq!(w.status()["state"], "Ready", "{}", w.status());
+}
+
+#[tokio::test]
+async fn a_config_name_that_is_not_an_objects_is_blocked_before_any_request_is_made_with_it() {
+    for name in ["bad name", "x?watch=true", "../agentservices/x", "UPPER"] {
+        let w = World::new("chat");
+        w.edit_service(|s| s["spec"]["configRef"]["name"] = json!(name));
+        w.fake.clear_calls();
+        w.settle().await;
+
+        let status = w.status();
+        assert_eq!(status["state"], "Blocked", "{name}: {status}");
+        is(&status, "ConfigResolved", "False", "ConfigInvalid");
+        let message = w.message();
+        assert!(
+            message.contains("AgentService spec.configRef.name")
+                && message.contains("not the name of an object"),
+            "{name}: {message}"
+        );
+        assert_eq!(
+            asked_for(&w, &["agentconfigs"]),
+            Vec::<String>::new(),
+            "{name}: no request for a config"
+        );
+        assert!(w.runtime.ids().is_empty());
+    }
+}
+
 #[tokio::test]
 async fn a_referent_created_after_the_config_unblocks_it() {
     let w = dashboard_world();

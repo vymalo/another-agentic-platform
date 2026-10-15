@@ -9,6 +9,8 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use aap_api::{AgentConfig, ModelEndpoint, ToolProvider};
 
+use crate::syntax::is_dns_subdomain;
+
 /// The objects an `AgentConfig` may name, and the settings of the operator that fill what it leaves
 /// out. [`Externals::default`] is the empty one: no object and no default image, which is all an
 /// inline config needs.
@@ -76,8 +78,9 @@ impl References {
 }
 
 /// What `config` references. A composition root reads these, and a controller that watches the kinds
-/// uses it to find the configs a changed object concerns. A reference with an empty name is not one:
-/// `validate` reports it.
+/// uses it to find the configs a changed object concerns. A reference whose name is empty, or is not the
+/// name of an object (a DNS-1123 subdomain), is not one: `validate` reports it, and nothing is ever
+/// requested of the API server under such a name.
 pub fn references(config: &AgentConfig) -> References {
     let spec = &config.spec;
     References {
@@ -86,14 +89,14 @@ pub fn references(config: &AgentConfig) -> References {
             .endpoint_ref
             .as_ref()
             .map(|r| r.name.clone())
-            .filter(|n| !n.trim().is_empty()),
+            .filter(|n| is_dns_subdomain(n)),
         tool_providers: spec
             .tools
             .mcp_servers
             .values()
             .filter_map(|s| s.provider_ref.as_ref())
             .map(|r| r.name.clone())
-            .filter(|n| !n.trim().is_empty())
+            .filter(|n| is_dns_subdomain(n))
             .collect(),
     }
 }

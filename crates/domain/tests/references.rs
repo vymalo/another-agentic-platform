@@ -593,6 +593,120 @@ fn a_referent_of_another_namespace_is_not_read() {
     );
 }
 
+// ------------------------------------------------------------------ names
+
+/// What a person can type in `name`: none of these is the name of an object, and each goes into the path of
+/// a request to the API server (`.../modelendpoints/<name>`): a space breaks the request for good, `?` adds
+/// a query to it, `/` and `..` leave the path, `%` is decoded by the server.
+const NOT_NAMES: [&str; 10] = [
+    "bad name",
+    "x?watch=true",
+    "x#y",
+    "a/b",
+    "../x",
+    "UPPER",
+    "a_b",
+    "x%20y",
+    "-a",
+    "a..b",
+];
+
+#[test]
+fn a_reference_whose_name_is_not_an_objects_is_refused_and_never_asked_for() {
+    let too_long = "x".repeat(254);
+    for name in NOT_NAMES.iter().copied().chain([too_long.as_str()]) {
+        // The model's endpoint.
+        let (s, mut c) = example("chat");
+        use_endpoint(&mut c, name);
+        let (_, config) = typed(&s, &c);
+        assert!(
+            references(&config).is_empty(),
+            "{name:?} would be requested: {:?}",
+            references(&config)
+        );
+        let found = issues_with("chat", &Externals::default(), |_, c| {
+            use_endpoint(c, name);
+        });
+        let sentence = said(&found, "spec.model.endpointRef.name");
+        assert!(sentence.contains("not the name of an object"), "{sentence}");
+        // One issue about it: the name is not also reported as missing.
+        assert_eq!(found.len(), 1, "{name:?}: {found:#?}");
+        assert!(
+            aap_domain::validate_config(&config)
+                .unwrap_err()
+                .iter()
+                .any(|i| i.field == "AgentConfig spec.model.endpointRef.name"),
+            "the config's own Valid condition says so too"
+        );
+
+        // A server's provider.
+        let (s, mut c) = example("chat");
+        set(
+            &mut c,
+            "/spec/tools/mcpServers",
+            json!({"search": {"providerRef": {"name": name}}, "fine": {"providerRef": {"name": "fine"}}}),
+        );
+        let (_, config) = typed(&s, &c);
+        assert_eq!(
+            references(&config)
+                .tool_providers
+                .iter()
+                .map(String::as_str)
+                .collect::<Vec<_>>(),
+            ["fine"],
+            "{name:?}: only the name that is one is asked for"
+        );
+        let found = issues_with(
+            "chat",
+            &Externals::default().with_tool_provider(provider(
+                "fine",
+                json!({"url": "https://search.example.invalid/mcp"}),
+            )),
+            |_, c| {
+                set(
+                    c,
+                    "/spec/tools/mcpServers",
+                    json!({"search": {"providerRef": {"name": name}}, "fine": {"providerRef": {"name": "fine"}}}),
+                );
+            },
+        );
+        let sentence = said(&found, "mcpServers[search].providerRef.name");
+        assert!(sentence.contains("not the name of an object"), "{sentence}");
+        assert_eq!(found.len(), 1, "{name:?}: {found:#?}");
+    }
+}
+
+#[test]
+fn the_name_in_a_name_issue_is_cut_so_that_a_huge_one_cannot_fill_a_condition() {
+    let huge = "A".repeat(20_000);
+    let found = issues_with("chat", &Externals::default(), |_, c| {
+        use_endpoint(c, &huge);
+    });
+    let said = said(&found, "spec.model.endpointRef.name");
+    assert!(said.len() < 400, "{} characters", said.len());
+    assert!(said.contains('…'), "{said}");
+}
+
+#[test]
+fn a_name_with_dots_is_a_name() {
+    // A DNS-1123 subdomain: dots are allowed, and the object is found under the name as typed.
+    let mut externals = Externals::default().with_default_image(DEFAULT_IMAGE);
+    let (_, chat) = example("chat");
+    let mut gateway = endpoint_like(&chat);
+    gateway.metadata.name = Some("models.gateway-v1".to_owned());
+    externals = externals.with_model_endpoint(gateway);
+    let found = issues_with("coder-me", &externals, |_, c| {
+        set(
+            c,
+            "/spec/model/endpointRef",
+            json!({"name": "models.gateway-v1"}),
+        );
+    });
+    // Only the provider is still missing.
+    assert_eq!(found.len(), 1, "{found:#?}");
+    assert!(found[0].message.contains("ToolProvider"), "{}", found[0]);
+}
+
 // ------------------------------------------------------------------ checked as inline
 
 /// Resolve `chat` with an endpoint of this content, which must be refused: the issues.

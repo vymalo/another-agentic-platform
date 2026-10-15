@@ -13,6 +13,23 @@ pub fn is_dns_label(s: &str) -> bool {
         && b.last().is_some_and(|c| *c != b'-')
 }
 
+/// A DNS-1123 subdomain, which is what the name of a Kubernetes object is (`IsDNS1123Subdomain`): at most
+/// 253 characters of lower case letters, digits, `-` and `.`, and every `.`-separated part non-empty and
+/// starting and ending with a letter or a digit. Used for the names an object has in a reference: they go
+/// into the path of a request, so what is not a name must never be sent as one.
+pub fn is_dns_subdomain(s: &str) -> bool {
+    !s.is_empty()
+        && s.len() <= 253
+        && s.split('.').all(|part| {
+            let b = part.as_bytes();
+            !b.is_empty()
+                && b.iter()
+                    .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || *c == b'-')
+                && b.first().is_some_and(|c| *c != b'-')
+                && b.last().is_some_and(|c| *c != b'-')
+        })
+}
+
 /// A shell-safe environment variable name: `[A-Za-z_][A-Za-z0-9_]*`. Kubernetes allows more; an
 /// adam `${VAR}` reference and a person reading a manifest are served by this.
 pub fn is_env_name(s: &str) -> bool {
@@ -242,6 +259,46 @@ mod tests {
         }
         for bad in ["", "-a", "a-", "A", "a_b", "a.b", "x".repeat(64).as_str()] {
             assert!(!is_dns_label(bad), "{bad}");
+        }
+    }
+
+    #[test]
+    fn dns_subdomains() {
+        for ok in [
+            "gateway",
+            "a",
+            "web-search",
+            "a.b",
+            "ns.model-endpoint.v1",
+            "0",
+            &"x".repeat(253),
+            &format!("{}.{}", "a".repeat(63), "b".repeat(63)),
+        ] {
+            assert!(is_dns_subdomain(ok), "{ok}");
+        }
+        for bad in [
+            "",
+            "bad name",
+            "x?watch=true",
+            "x#y",
+            "a/b",
+            "../x",
+            "..",
+            ".a",
+            "a.",
+            "a..b",
+            "-a",
+            "a-",
+            "a.-b",
+            "UPPER",
+            "a_b",
+            "x%20y",
+            "caf\u{e9}",
+            " a",
+            "a\n",
+            &"x".repeat(254),
+        ] {
+            assert!(!is_dns_subdomain(bad), "{bad:?}");
         }
     }
 

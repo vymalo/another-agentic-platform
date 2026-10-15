@@ -10,7 +10,7 @@ use crate::contract::{self, env};
 use crate::externals::Externals;
 use crate::refs::{Materialized, Origins, materialize};
 use crate::syntax::{
-    is_adam_tool_name, is_dns_label, is_env_name, is_http_token, is_mount_path,
+    is_adam_tool_name, is_dns_label, is_dns_subdomain, is_env_name, is_http_token, is_mount_path,
     is_plain_http_remote, is_relative_file_path, is_size, parse_http_url, paths_overlap, shown_url,
 };
 use crate::{convert, plan};
@@ -98,6 +98,29 @@ pub fn validate_config(config: &AgentConfig) -> Result<(), Vec<ConfigIssue>> {
     let mut v = Issues(Vec::new());
     check_config(&mut v, config, &Origins::default());
     if v.0.is_empty() { Ok(()) } else { Err(v.0) }
+}
+
+/// The issue for `name`, written in `field`, when it cannot be the name of an object: not a DNS-1123
+/// subdomain. A reference's name goes into the path of a request to the API server (`.../modelendpoints/<name>`),
+/// so a name with a space makes the request fail for good and one with a `?` adds a query to it: such a
+/// name is refused before anything is read. The CRD only requires a name to be non-empty, and says nothing
+/// more on purpose (a pattern would tighten `configRef` too, which is a schema change), so this is where
+/// it is held. An empty name is the caller's own issue.
+///
+/// `field` is the path the issue is about (`AgentConfig spec.model.endpointRef.name`).
+#[must_use]
+pub fn name_issue(field: impl Into<String>, name: &str) -> Option<ConfigIssue> {
+    if name.trim().is_empty() || is_dns_subdomain(name) {
+        return None;
+    }
+    let shown: String = name.chars().take(64).collect();
+    let cut = if name.chars().count() > 64 { "…" } else { "" };
+    Some(ConfigIssue {
+        field: field.into(),
+        message: format!(
+            "{shown:?}{cut} is not the name of an object: a name is lower case letters, digits, `-` and `.`, starts and ends with a letter or a digit, and has at most 253 characters (a DNS-1123 subdomain)"
+        ),
+    })
 }
 
 pub(crate) fn secret_ref(v: &mut Issues, field: &str, r: &SecretKeyRef) {
@@ -283,11 +306,11 @@ fn check_config(v: &mut Issues, cfg: &AgentConfig, origins: &Origins) {
     ) {
         // A reference `materialize` could not read: it said so. Here it only has to name something.
         (Some(r), None, None) => {
+            let at = format!("{me} spec.model.endpointRef.name");
             if r.name.trim().is_empty() {
-                v.add(
-                    format!("{me} spec.model.endpointRef.name"),
-                    "the name is empty",
-                );
+                v.add(&at, "the name is empty");
+            } else if let Some(issue) = name_issue(&at, &r.name) {
+                v.0.push(issue);
             }
         }
         (Some(_), _, _) => v.add(
@@ -591,8 +614,11 @@ fn check_tools(v: &mut Issues, cfg: &AgentConfig, origins: &Origins) {
                         "providerRef is exclusive with url and headers",
                     );
                 }
+                let name_at = format!("{at}.providerRef.name");
                 if r.name.trim().is_empty() {
-                    v.add(format!("{at}.providerRef.name"), "the name is empty");
+                    v.add(&name_at, "the name is empty");
+                } else if let Some(issue) = name_issue(&name_at, &r.name) {
+                    v.0.push(issue);
                 }
             }
             (Some(_), Some(_)) => v.add(&at, "providerRef is exclusive with url and headers"),

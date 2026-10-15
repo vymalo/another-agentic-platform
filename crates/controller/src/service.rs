@@ -18,7 +18,7 @@ use aap_api::{
     AgentConfig, AgentService, AgentServiceStatus, ConfigStatus, Endpoints, ModelEndpoint,
     ServiceState, ToolProvider,
 };
-use aap_domain::{Externals, ResolvedAgent, references, resolve};
+use aap_domain::{Externals, ResolvedAgent, name_issue, references, resolve};
 use aap_ports::{
     Phase, RuntimeError, RuntimeId, RuntimeProvider, StoreError, StoreProvisioner, StoreState,
     Surface,
@@ -187,6 +187,19 @@ async fn fetch_and_resolve<R, S>(
         .ok_or(Error::Malformed("an AgentService has no namespace"))?;
     let configs: Api<AgentConfig> = Api::namespaced(ctx.client.clone(), &ns);
     let wanted = &svc.spec.config_ref.name;
+    // The name goes into the path of the request: one that is not an object's name (the CRD only asks for
+    // one character) must not be sent, and is not a config that does not exist but a service that is wrong.
+    let field = "AgentService spec.configRef.name";
+    if wanted.trim().is_empty() {
+        return Ok(Resolution::Blocked(ConfigOutcome::Invalid {
+            message: format!("{field}: the name is empty"),
+        }));
+    }
+    if let Some(issue) = name_issue(field, wanted) {
+        return Ok(Resolution::Blocked(ConfigOutcome::Invalid {
+            message: issue.to_string(),
+        }));
+    }
     let Some(config) = configs.get_opt(wanted).await? else {
         return Ok(Resolution::Blocked(ConfigOutcome::NotFound {
             name: wanted.clone(),
