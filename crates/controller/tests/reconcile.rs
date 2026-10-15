@@ -401,11 +401,13 @@ async fn a_reference_the_operator_cannot_resolve_yet_blocks_the_service_and_name
     w.settle().await;
     let running = w.runtime.spec(&w.id()).unwrap();
 
-    let cases: [(&str, fn(&mut Value), &str); 3] = [
+    type Edit = fn(&mut Value);
+    let cases: [(&str, Edit, &str); 3] = [
         (
             "spec.model.endpointRef",
             |c| {
-                c["spec"]["model"] = json!({"model": "chat-model", "endpointRef": {"name": "gateway"}});
+                c["spec"]["model"] =
+                    json!({"model": "chat-model", "endpointRef": {"name": "gateway"}});
             },
             "ModelEndpoint",
         ),
@@ -420,7 +422,10 @@ async fn a_reference_the_operator_cannot_resolve_yet_blocks_the_service_and_name
         (
             "spec.environment.image",
             |c| {
-                c["spec"]["environment"].as_object_mut().unwrap().remove("image");
+                c["spec"]["environment"]
+                    .as_object_mut()
+                    .unwrap()
+                    .remove("image");
             },
             "default coder image",
         ),
