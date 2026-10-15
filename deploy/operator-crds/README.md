@@ -38,7 +38,7 @@ Applications sync apart: sequence them (a sync wave, or the operator's first).
 The change is additive for what is stored: the `kind` job of
 [`operator.yml`](../../.github/workflows/operator.yml) installs the CRDs of the commit a change builds on, stores
 `examples/coder.yaml` and `examples/chat.yaml` under them, applies the new CRDs over the old and updates those objects.
-The one bound on a field that existed is `tools.mcpServers`, at most 32 servers.
+The one bound on a field that existed is `tools.mcpServers`, at most 32 servers (confirmed by the owner on 2026-10-15).
 
 ## Removing it
 
