@@ -74,9 +74,13 @@ role_rules() {
 rules_are() { [ "$(role_rules)" = "$1" ]; }
 
 # ---- The three golden renders ---------------------------------------------------------------------------------------------
+# The goldens are rendered with image.tag=sha-0000000, whatever values.yaml says: the bump job rewrites image.tag on main after
+# every operator image and no workflow checks the bump commit, so a golden that held the real tag would be stale (and this
+# script red) after every bump. That the real tag is a sha-<7 hex> tag of the operator package is checked on the default
+# render below, which does not set it.
 golden() { # golden <name> <helm args>: the render equals tests/golden/<name>.yaml (or rewrites it)
   name=$1; shift
-  render "$@"
+  render "$@" --set image.tag=sha-0000000
   if [ "${UPDATE_GOLDEN:-}" = 1 ]; then cp "$out" "$here/golden/$name.yaml"; echo "wrote tests/golden/$name.yaml" >&2; return 0; fi
   cmp -s "$out" "$here/golden/$name.yaml"
 }
