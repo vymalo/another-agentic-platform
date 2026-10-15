@@ -244,7 +244,7 @@ fn log_plumbing<T>(
 /// back, each for a backoff's length, thirty seconds and more once the backoff had grown (*measured
 /// 2026-10-15 with kube-runtime 4.0.0 on the tests' fake API server, in virtual time: a service that
 /// existed at start was Ready after 11 to 16 s, one created later after 27 to 42 s, and with this
-/// function at once; the reviewer saw minutes in real time*). Here the watcher takes its own backoff,
+/// function at once; the fake answers instantly, so a real API server is no faster*). Here the watcher takes its own backoff,
 /// which paces both its retries and the warning, and an error is logged and dropped. The watch finds the
 /// kind when it appears: its next list answers.
 ///
