@@ -15,7 +15,7 @@ use axum::Router;
 use axum::http::{StatusCode, header};
 use axum::response::IntoResponse;
 use axum::routing::get;
-use common::{Rig, assert_accepted, assert_invalid, tuning, unavailable};
+use common::{Rig, assert_accepted, assert_invalid, eventually, tuning, unavailable};
 use serde_json::{Value, json};
 
 const SUBJECT: &str = "alice";
@@ -103,7 +103,14 @@ async fn the_keys_are_fetched_again_when_they_are_old() {
     let token = rig.idp.token(TEST_AUDIENCE, SUBJECT);
     check(&rig.auth, &token).await.unwrap();
     tokio::time::sleep(Duration::from_millis(300)).await;
+    // The copy is old: it answers this request, and a refresh is started in the background.
     check(&rig.auth, &token).await.unwrap();
+    eventually("the refresh", || rig.idp.jwks_fetches() == 2).await;
+    // The new copy is fresh: no more requests.
+    tokio::time::sleep(Duration::from_millis(50)).await;
+    for _ in 0..3 {
+        check(&rig.auth, &token).await.unwrap();
+    }
     assert_eq!(rig.idp.jwks_fetches(), 2);
 }
 
@@ -218,11 +225,23 @@ async fn a_key_the_issuer_withdraws_stops_verifying_at_the_next_refresh() {
     rig.idp.withdraw_unpublished_keys();
     assert_accepted(rig.check(&token).await, "withdrawn, but the copy is fresh");
     tokio::time::sleep(Duration::from_millis(400)).await;
-    assert_invalid(
+    // The copy is old: it answers the first request after that, withdrawn key and all, while the refresh runs
+    // (a request does not wait for a refresh while a copy can verify).
+    assert_accepted(
         rig.check(&token).await,
-        InvalidToken::UnknownKey,
-        "withdrawn, and the copy refreshed",
+        "withdrawn, the copy old: served while the refresh runs",
     );
+    // Once the refresh is over the key is gone.
+    let give_up = std::time::Instant::now() + Duration::from_secs(5);
+    loop {
+        match rig.check(&token).await {
+            Err(AuthError::Invalid(InvalidToken::UnknownKey)) => break,
+            Ok(_) if std::time::Instant::now() < give_up => {
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+            other => panic!("withdrawn, and the copy refreshed: {other:?}"),
+        }
+    }
 }
 
 #[tokio::test]
@@ -319,7 +338,7 @@ async fn keys_that_cannot_be_refreshed_go_on_verifying_for_the_grace_and_no_long
     tokio::time::sleep(Duration::from_millis(400)).await;
     // Older than the refresh interval, the refresh fails, the copy is still inside the grace.
     assert_accepted(check(&rig.auth, &token).await, "the stale copy verifies");
-    assert!(rig.idp.jwks_fetches() >= 2, "a refresh was tried");
+    eventually("a refresh to be tried", || rig.idp.jwks_fetches() >= 2).await;
     rig.auth
         .ready()
         .await

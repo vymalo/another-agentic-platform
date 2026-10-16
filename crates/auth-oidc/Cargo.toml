@@ -30,7 +30,9 @@ base64.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 thiserror.workspace = true
-tokio = { workspace = true, features = ["sync", "time"] }
+# `rt` for `tokio::spawn`: a fetch of the keys runs on a task of its own, so that no request holds a lock or loses
+# the fetch by being dropped.
+tokio = { workspace = true, features = ["rt", "sync", "time"] }
 tracing.workspace = true
 url.workspace = true
 aws-lc-rs = { workspace = true, optional = true }

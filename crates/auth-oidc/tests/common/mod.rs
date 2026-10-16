@@ -1,7 +1,7 @@
 //! What the test files share: an issuer, an authenticator for it, and the claims of a good token.
 #![allow(dead_code, clippy::unwrap_used, clippy::expect_used, missing_docs)]
 
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use aap_auth_oidc::testkit::{
     Signing, TEST_AUDIENCE, TEST_INTERVAL, TEST_ROLES_CLAIM, TestIdp, now,
@@ -120,4 +120,13 @@ pub fn secrets_of(token: &str) -> Vec<String> {
     let mut secrets = vec![token.to_owned(), SENTINEL.to_owned()];
     secrets.extend(token.split('.').map(str::to_owned));
     secrets
+}
+
+/// Polls `condition` every 10 ms until it holds, and fails after ten seconds.
+pub async fn eventually(what: &str, mut condition: impl FnMut() -> bool) {
+    let give_up = Instant::now() + Duration::from_secs(10);
+    while !condition() {
+        assert!(Instant::now() < give_up, "gave up waiting for: {what}");
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
 }

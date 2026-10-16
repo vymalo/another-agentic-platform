@@ -33,23 +33,31 @@ signature has are this crate's own (below).
 sequenceDiagram
   participant C as Client (the web, a CLI, the desktop app)
   participant A as OidcAuthenticator
+  participant F as Fetch task (one at a time)
   participant I as Issuer (discovery, JWKS)
   C->>A: authenticate(token)
   A->>A: none, or empty: Missing
   A->>A: over 16 KiB, not three base64url parts, alg not allowed: Invalid(Malformed)
-  alt a copy of the keys, fresh
+  alt a fresh copy of the keys
     A->>A: use the copy
-  else no copy, or 10 minutes old
-    A->>I: GET discovery, GET jwks
-    I-->>A: keys (or a failure: Unavailable, unless an old copy may still verify)
+  else a copy older than 10 minutes, within the hour of grace
+    A->>A: use the copy at once
+    A--)F: start a refresh, unless one is running or one failed under 5 s ago
+  else no copy, or past the grace
+    A->>F: start a fetch or join the one running, unless one failed under 5 s ago
+    F->>I: GET discovery, GET jwks
+    I-->>F: keys, or a failure
+    F-->>A: the copy is recorded, or Unavailable if there is still none
   end
   alt the kid is in the copy
-    A->>A: pick its key
-  else the kid is unknown, and no fetch within 30 s
-    A->>I: GET jwks again
-    I-->>A: keys (or a failure: Unavailable)
+    A->>A: pick the keys of that kid and of the algorithm's kind
+  else the kid is unknown
+    A->>F: join the fetch that is running, or start one unless a fetch started within 30 s or one failed under 5 s ago
+    F->>I: GET discovery again (not with a jwksUrl), GET jwks again
+    I-->>F: keys, or a failure
+    F-->>A: the new copy, or Unavailable if the fetch failed
   end
-  A->>A: signature, then iss, aud, exp, nbf, sub
+  A->>A: signature, then exp, nbf, iss, aud, sub
   A->>A: the values of the roles claim are the permissions
   A-->>C: Principal, or Invalid(reason), or Unavailable(source)
 ```
@@ -59,12 +67,13 @@ stateDiagram-v2
   [*] --> NoCopy: the process starts, nothing is persisted
   NoCopy --> Fresh: a fetch gives at least one usable key
   NoCopy --> NoCopy: the fetch fails; not again for 5 s, Unavailable meanwhile
-  Fresh --> Fresh: an unknown kid; one fetch, then none for 30 s
+  Fresh --> Fresh: an unknown kid; one fetch, joined by the rest, then none for 30 s
   Fresh --> Old: 10 minutes old
-  Old --> Fresh: a fetch succeeds
-  Old --> Old: the fetch fails; still verifies, an unknown kid is Unavailable
+  Old --> Old: used at once; a refresh runs in the background
+  Old --> Fresh: the refresh succeeds
+  Old --> Old: the refresh fails, not again for 5 s; an unknown kid is Unavailable
   Old --> TooOld: older than 10 minutes plus an hour
-  TooOld --> Fresh: a fetch succeeds
+  TooOld --> Fresh: a fetch succeeds, which every request waits for
   TooOld --> TooOld: the fetch fails; every token is Unavailable
 ```
 
@@ -90,12 +99,22 @@ stateDiagram-v2
 - **The key cache** is a copy this process may lose at any time. Fetched on first use and by `ready()`, refreshed once 10 minutes
   old ([`REFRESH_INTERVAL`](src/config.rs)), fetched again when a token names a `kid` the copy lacks **at most once in 30 s**
   ([`KID_REFETCH_INTERVAL`](src/config.rs): any fetch counts, so a flood of invented ids is one request to the issuer), and not
-  again for 5 s after a failure ([`RETRY_INTERVAL`](src/config.rs)). One request at a time: concurrent first requests make one
-  fetch. While there is no copy, or it is older than the refresh interval plus an hour ([`STALE_GRACE`](src/config.rs)), every token
-  is `Unavailable` (fail closed); in between, the copy goes on verifying while the issuer is down. **A key the issuer withdraws
-  stops verifying at the next refresh**, not before: the revocation delay of a key is at most 10 minutes when the issuer is up and at
-  most 70 when it is down. **A refresh holds the lock** (single flight): a request that arrives while the keys are being fetched waits for the fetch, at most two
-  timeouts (10 s, the discovery document and then the JWKS), even when a stale copy could answer it; after a failure the next 5 s do not wait.
+  again for 5 s after a failure ([`RETRY_INTERVAL`](src/config.rs)). **A fetch runs on a task of its own** (`tokio::spawn`, so
+  `tokio` has its `rt` feature in the normal dependencies and the authenticator needs a Tokio runtime), **one at a time**, and
+  **the lock on the cache is held to read or to change it and never across a request to the issuer**. Who waits for a fetch:
+  a request with **no copy**, or one past its grace, waits for the fetch that is running or starts one (the concurrent first
+  requests make one), and is `Unavailable` if there is still nothing to verify with (fail closed); a request whose token names an
+  **unknown `kid`** waits for the fetch that is running or starts the one its budget allows, **and no other request waits**; a
+  request that finds a **fresh copy** waits for nothing; a request that finds a copy **older than the refresh interval and within
+  an hour of it** ([`STALE_GRACE`](src/config.rs)) **is served by that copy at once** and starts a refresh in the background if none
+  is running and none failed just now. `ready()` does the same: it returns at once while a copy can verify, and waits only when
+  there is none. A request that is dropped (a client that hung up, a timeout above) **leaves the fetch running**, and the keys it
+  brings are recorded: the fetch is the cache's, not the request's. Each request to the issuer (discovery, then the JWKS) is
+  bounded by the 5 s timeout ([`FETCH_TIMEOUT`](src/config.rs)), so a fetch lasts at most two of them. Past the grace every token is
+  `Unavailable`; in between, the copy goes on verifying while the issuer is down. **A key the issuer withdraws stops verifying when
+  the refresh that follows its 10 minutes is over**, not before: when the issuer is up and requests keep coming, the delay is
+  10 minutes and one fetch; **a request that comes after a quiet period is verified against the copy it finds, however old it is
+  within the grace (70 minutes), while the refresh runs** (decision 8 below).
 
 ### What an error is
 
@@ -157,6 +176,14 @@ Over real HTTP, against issuers on local ports; the cache's intervals are shorte
   stale copy and its grace (`TooOld`); a discovery document for another issuer, without a usable `jwks_uri`; a redirect never followed; an
   answer over 1 MiB; an answer that is not a key set, not JSON, or has no usable key; an unreachable issuer; unusable keys beside good
   ones; a trailing slash on the issuer.
+- `tests/slow.rs` (10): an issuer that is slow or never answers. A good token is answered while a fetch for an unknown `kid` to a
+  slow issuer is running (and only the request that named the unknown key waits); unknown kids that arrive while a fetch runs join
+  it; a stale copy is served at once and refreshed in the background once, with the issuer hanging; `ready()` returns at once with a
+  copy that can verify and waits when there is none; the first requests wait for the one fetch and fail closed at the timeout; **a
+  request cancelled during a slow fetch does not lose the keys it asked for** (the next request with the rotated key is accepted); an
+  unknown `kid` joins the refresh of a stale copy that is running; and every request to the issuer is bounded by the timeout: a
+  discovery request that is never answered, a JWKS request that is never answered after a good discovery, and a body that drips in
+  are each `FetchFailure::Timeout` after the configured time.
 - `tests/secrets.rs` (2): the sentinel in every place a token has something to leak, in the message, the debug form and the whole chain of
   sources of an `Unavailable`; a refusal is a word.
 - `tests/logs.rs` (1, a binary of its own: a callsite that another test hit first, with no subscriber, is cached as uninteresting): nothing logged holds a
@@ -183,6 +210,7 @@ the permissions), and the user claim's lower-casing (a subject is opaque, kept a
 | 5 | **An unknown `kid` while the issuer cannot be reached is `Unavailable`**, not `UnknownKey` (the orchestrator refuses it) | `UnknownKey`: a client holding a good token signed by a key published a minute ago signs in again for nothing |
 | 6 | A missing `iss` is `WrongIssuer` and a missing `aud` is `WrongAudience` (the token does not name this API); `MissingClaim` is for `sub` and `exp`, the port's own words | `MissingClaim` for all four |
 | 7 | JWS is checked by **aws-lc-rs** (through `jsonwebtoken`), TLS is **rustls with ring** (through `reqwest` 0.12): see below | `jsonwebtoken`'s `rust_crypto` backend (pure Rust, no second native library, and RSA key generation for the testkit would be slow in debug builds) |
+| 8 | **A copy older than the refresh interval is served at once** while a refresh runs in the background (no request waits for a refresh while a copy can verify); a request after a long quiet is verified against a copy up to 70 minutes old | wait for the refresh (a slow issuer holds up everyone, and a hanging one for the timeout) |
 
 ### Dependencies
 

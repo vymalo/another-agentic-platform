@@ -197,6 +197,11 @@ impl KeySet {
         self.keys.is_empty()
     }
 
+    /// How many keys the set has.
+    pub(crate) fn len(&self) -> usize {
+        self.keys.len()
+    }
+
     /// The key that may verify a token with this `alg` and `kid`: a key of the algorithm's kind,
     /// whose declared algorithm (if any) is `alg`, and whose `kid` is the token's. A token with
     /// no `kid` takes the one key of that kind, when there is exactly one.
