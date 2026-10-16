@@ -192,6 +192,8 @@ Over real HTTP, against issuers on local ports; the cache's intervals are shorte
   unknown `kid` joins the refresh of a stale copy that is running; and every request to the issuer is bounded by the timeout: a
   discovery request that is never answered, a JWKS request that is never answered after a good discovery, and a body that drips in
   are each `FetchFailure::Timeout` after the configured time.
+- `tests/provider.rs` (1, a binary of its own: the choice is made once per process): with a second crypto backend linked, two authenticators
+  verify a token of each algorithm without the library's panic.
 - `tests/secrets.rs` (2): the sentinel in every place a token has something to leak, in the message, the debug form and the whole chain of
   sources of an `Unavailable`; a refusal is a word.
 - `tests/logs.rs` (1, a binary of its own: a callsite that another test hit first, with no subscriber, is cached as uninteresting): nothing logged holds a
@@ -227,6 +229,14 @@ the permissions), and the user claim's lower-casing (a subject is opaque, kept a
 is 0.12 with `rustls-tls-native-roots`, which is rustls with ring (0.13's `rustls` feature is aws-lc-rs, which would put two providers in
 `rustls` and leave a process with no default). So a binary that links this crate has `ring` for TLS and `aws-lc-rs` for signatures; `rustls`
 itself has only `ring` in its features (`cargo tree -p aap-auth-oidc -e normal -i rustls`). No `openssl`.
+
+**The constructor installs aws-lc-rs as `jsonwebtoken`'s process-level provider** (`jsonwebtoken::crypto::aws_lc::DEFAULT_PROVIDER.install_default()`,
+*verified 2026-10-16* in `jsonwebtoken` 11.1.0, `src/crypto/mod.rs` and `src/crypto/aws_lc/mod.rs`), and ignores "already installed". The library
+picks a backend from its features only when exactly one is enabled; with two (a binary that links another crate with `rust_crypto`, as D7
+may) it **panics on the first verification** ("Could not automatically determine the process-level CryptoProvider"). The dev-dependencies of
+this crate enable `rust_crypto` beside `aws_lc_rs`, so every test of the crate runs in that situation (this is why `Cargo.lock` holds the
+RustCrypto crates, for tests only), and `tests/provider.rs` is the case on its own. A binary that wants another provider installs it before
+the first authenticator is built.
 
 ## Facts
 

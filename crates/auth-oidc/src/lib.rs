@@ -195,6 +195,7 @@ impl OidcAuthenticator {
     ///
     /// As [`new`](Self::new).
     pub fn with_tuning(config: OidcConfig, tuning: Tuning) -> Result<Self, ConfigError> {
+        install_crypto_provider();
         let (issuer_url, jwks_url) = config.parts()?;
         let source = match jwks_url {
             Some(url) => Source::Url(url),
@@ -454,6 +455,14 @@ impl Inner {
             .map_err(|e| invalid(reason(e.kind())))?;
         Ok(data.claims)
     }
+}
+
+/// Makes the process-level crypto provider of `jsonwebtoken` this crate's, aws-lc-rs. The library chooses it from
+/// its features when exactly one backend is enabled, and **panics on the first verification when two are**, as
+/// they are in a binary that links another crate with the `rust_crypto` backend. Idempotent: the provider can be
+/// installed once per process, and one that is already there (ours, or one the binary chose) is left alone.
+fn install_crypto_provider() {
+    let _ = jsonwebtoken::crypto::aws_lc::DEFAULT_PROVIDER.install_default();
 }
 
 /// Waits for a fetch to be over: its sender is dropped, and nothing is ever sent.

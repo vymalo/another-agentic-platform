@@ -46,6 +46,10 @@ aap-ports = { workspace = true, features = ["testkit"] }
 # The keys of tests/keys.rs, made with the library the testkit signs with.
 aws-lc-rs.workspace = true
 axum = { workspace = true, features = ["json"] }
+# A second crypto backend beside aws-lc-rs, as a binary that links another crate with `jsonwebtoken` may have
+# (D7 does): the library cannot choose between two, and panics on first use unless one is installed. The tests of
+# this crate run with both linked, which is what tests/provider.rs is about.
+jsonwebtoken = { workspace = true, features = ["rust_crypto"] }
 serde_yaml.workspace = true
 tokio = { workspace = true, features = ["macros", "rt", "rt-multi-thread", "net", "time", "sync"] }
 tracing-subscriber.workspace = true
