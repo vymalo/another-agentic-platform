@@ -113,6 +113,12 @@ for each tested shape (tests/api-shapes.sh) to find such a value before it is de
 */}}
 {{- define "aap.api.validate" -}}
 {{- $api := .Values.api -}}
+{{- /* The blocks the templates read a field of: a null (or a text) in their place is a named refusal and not a nil pointer in a template. */ -}}
+{{- range $k := list "image" "serviceAccount" "ingress" "networkPolicy" -}}
+{{- if not (kindIs "map" (get $api $k)) -}}
+{{- fail (printf "api.%s must be a map (the defaults of values.yaml are its keys; a null removes them all)" $k) -}}
+{{- end -}}
+{{- end -}}
 {{- /* The image: a tag nothing moves under it. */ -}}
 {{- if not $api.image.repository -}}
 {{- fail "api.image.repository is required" -}}
@@ -267,6 +273,9 @@ for each tested shape (tests/api-shapes.sh) to find such a value before it is de
 {{- /* The edge's route. */ -}}
 {{- $ing := $api.ingress -}}
 {{- if $ing.enabled -}}
+{{- if not (kindIs "map" $ing.tls) -}}
+{{- fail "api.ingress.tls must be a map (enabled, secretName)" -}}
+{{- end -}}
 {{- if not $ing.host -}}
 {{- fail "api.ingress.host is required with api.ingress.enabled: the API takes people's tokens and is routed by name" -}}
 {{- end -}}
@@ -280,6 +289,11 @@ for each tested shape (tests/api-shapes.sh) to find such a value before it is de
 {{- /* The network policy: who reaches the API is said, never implied, and a peer says who. */ -}}
 {{- $np := $api.networkPolicy -}}
 {{- if $np.enabled -}}
+{{- range $k := list "apiServer" "dns" "issuer" -}}
+{{- if not (kindIs "map" (get $np $k)) -}}
+{{- fail (printf "api.networkPolicy.%s must be a map (ports, and to or cidrs)" $k) -}}
+{{- end -}}
+{{- end -}}
 {{- if not $np.from -}}
 {{- fail "api.networkPolicy.from is required while api.networkPolicy.enabled: with none, nothing could reach the API (list the pods of the Ingress controller, or set api.networkPolicy.enabled=false)" -}}
 {{- end -}}

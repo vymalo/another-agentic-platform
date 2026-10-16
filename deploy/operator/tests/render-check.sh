@@ -602,6 +602,17 @@ check "a service account to use but no name is refused" refused_api 'api.service
 check "an Ingress with no host is refused" refused_api 'api.ingress.host is required' --set api.ingress.host=
 check "an Ingress path that does not start with / is refused" refused_api 'api.ingress.path must start with /' --set api.ingress.path=v1
 check "an Ingress pathType that is not one is refused" refused_api 'api.ingress.pathType must be' --set api.ingress.pathType=Regex
+# A null (or a text) where a template reads a field is a named refusal, not a nil pointer from a template.
+check "api.networkPolicy: null is refused by name" refused_api 'api.networkPolicy must be a map' --set api.networkPolicy=null
+check "api.ingress: null is refused by name" refused_api 'api.ingress must be a map' --set api.ingress=null
+check "api.image: null is refused by name" refused_api 'api.image must be a map' --set api.image=null
+check "api.serviceAccount: null is refused by name" refused_api 'api.serviceAccount must be a map' --set api.serviceAccount=null
+check "api.ingress.tls: null is refused by name while the Ingress is on" refused_api 'api.ingress.tls must be a map' --set api.ingress.tls=null
+check "api.networkPolicy.apiServer: null is refused by name while the policy is on" refused_api 'api.networkPolicy.apiServer must be a map' --set api.networkPolicy.apiServer=null
+check "api.networkPolicy.dns: null is refused by name while the policy is on" refused_api 'api.networkPolicy.dns must be a map' --set api.networkPolicy.dns=null
+check "api.networkPolicy.issuer: null is refused by name while the policy is on" refused_api 'api.networkPolicy.issuer must be a map' --set api.networkPolicy.issuer=null
+check "with the Ingress off, api.ingress.tls: null is not read" renders_ok -f "$here/api.values.yaml" --set api.ingress.enabled=false --set api.ingress.tls=null
+check "api.resources: null still renders (a way to ask for no requests and no limits)" renders_ok -f "$here/api.values.yaml" --set api.resources=null
 check "no peer that may reach the API is refused while the policy is on" refused_api 'api.networkPolicy.from is required' --set api.networkPolicy.from=null
 check "a peer that names nothing is refused" refused_api 'a peer needs a namespaceSelector' --set-json 'api.networkPolicy.from=[{"foo":"bar"}]'
 check "a DNS peer that names nothing is refused" refused_api 'api.networkPolicy.dns.to: a peer needs' --set-json 'api.networkPolicy.dns.to=[{"foo":"bar"}]'
