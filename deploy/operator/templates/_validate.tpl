@@ -103,9 +103,13 @@ Included from deployment.yaml, which every render has, so they always run.
 {{- end -}}
 
 {{/*
-The Platform API's values (api.*, only with api.enabled). Whatever the binary would refuse at start and can be seen at render time is
-refused here with the value's name: the issuer, the audiences, the roles claim, the CORS origins (a wildcard among them), the
-registries an agent may pin an image from, the one store, the image's tag. CI also runs `api --check` on the file this renders.
+The Platform API's values (api.*, only with api.enabled). What the chart can check at render time, and the binary would refuse at
+start, is refused here with the value's name: the issuer, the audiences, the roles claim, the CORS origins (a wildcard among them),
+the registries an agent may pin an image from, the keys of `defaults`, the one store, the image's tag. This is NOT a promise that the
+binary accepts what is rendered: the types below `defaults` (coder, folder, security) are the CRDs' own and are checked by the binary
+alone, and a URL or a size has more rules than the regular expressions here. What is left, the binary refuses at start (a pod that
+exits and never becomes ready; with maxUnavailable 0 the old pods go on serving), and CI runs `api --check` on the file this renders
+for each tested shape (tests/api-shapes.sh) to find such a value before it is deployed.
 */}}
 {{- define "aap.api.validate" -}}
 {{- $api := .Values.api -}}

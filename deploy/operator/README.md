@@ -169,10 +169,17 @@ flowchart LR
 | `api.networkPolicy.enabled`, `.from`, `.apiServer`, `.dns`, `.issuer` | `true`, `[]`, `443, 6443`, `kube-dns:53`, `443` | [Below](#the-networkpolicy) |
 | `api.logLevel`, `api.resources`, `api.podAnnotations`, `api.podLabels`, `api.priorityClassName`, `api.nodeSelector`, `api.tolerations`, `api.affinity`, `api.topologySpreadConstraints` | `info`, 50m / 64Mi requested and 256Mi limit, empty | |
 
-`templates/_validate.tpl` refuses, with the value's name, what the binary would refuse at start and can be seen at render time (the issuer, the
-audiences, the roles claim, a wildcard or default-port origin, no registries, both or neither store, a tag `latest`, a grace period shorter than
-the sleep plus 30 s) and a few things only the chart can know (a `defaults.namespace` that is not the watched one, a policy with no `from`, an
-Ingress with no host). The real guard is the binary: CI runs **`api --check` on the file the chart renders** ([Tests](#tests)).
+`templates/_validate.tpl` refuses, with the value's name, what the chart can check at render time and the binary would refuse at start (the issuer
+as a URL with no query, fragment or credentials and a port from 1 to 65535, the audiences, the roles claim, an origin as a browser writes it, a
+registry as a host, the keys of `defaults`, a size, both or neither store, a tag `latest`, a grace period shorter than the sleep plus 30 s) and a few
+things only the chart can know (a `defaults.namespace` that is not the watched one, a policy with no `from`, an Ingress with no host).
+
+**That is not a promise that the binary accepts what is rendered.** The chart cannot check the types below `defaults` (`coder`, `folder`, `security`:
+the CRDs' own, whose unknown keys only the binary finds) and a URL or a size has more rules than a template can hold. What is left the binary refuses
+**at start**, naming the key, and fails closed: the new pod exits and never becomes ready (`CrashLoopBackOff`), and with `maxUnavailable: 0` the old
+pods go on serving the old file. CI runs **`api --check` on the file the chart renders for each shape it is tested in** ([Tests](#tests)): that finds a
+value the chart renders and the binary refuses, for those shapes; it does not prove there is none. Run `api --check` on your own values before you deploy
+them (`tests/api-config.sh` writes the file).
 
 ### The pod
 

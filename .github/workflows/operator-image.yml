@@ -18,8 +18,11 @@ name: Operator and API images
 #              that follow use THE image that passed, never a rebuild of it.
 # api-image:   (D7b1) builds docker/api/Dockerfile and smoke-tests the image like the operator's (the user, the version, the usage, the
 #              example configuration accepted, a misspelt key refused, no cluster to reach said so, no shell), and runs `api --check`
-#              in the image on the configuration the chart renders (deploy/operator/tests/api-config.sh) for three shapes of values, so
-#              the chart can never render a file the binary refuses. It is kept as an artifact for the push, as the operator's is.
+#              in the image on the configuration the chart renders for each shape of values it is tested in (deploy/operator/tests/
+#              api-shapes.sh: the golden one, a Secret per agent, the least a deployment must say, and one that sets every value). That
+#              finds a shape the chart renders and the binary refuses; it does not prove there is none: the chart refuses what it can check
+#              at render time, and anything else the binary refuses at start, failing closed. It is kept as an artifact for the push, as
+#              the operator's is.
 # operator-coder-e2e (S9): a kind cluster, the CRDs chart and the operator chart installed with THAT image, the real adam-rs coder
 #              image (ghcr.io/vymalo/another-adam-rs/coder, by tag and digest, 2.9 GB) run by the operator on a Postgres the job runs
 #              and dummy Secrets: the AgentService becomes Ready, the agent card answers through the Service, the registry lists the

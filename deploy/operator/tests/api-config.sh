@@ -1,7 +1,9 @@
 #!/bin/sh
 # Render the chart (`helm template`, with the Platform API forced on) and write the configuration file the API pod would read, the
-# `config.yaml` of the ConfigMap `aap-operator-api`, to a file. CI feeds it to the built image's `api --check`, so the chart can never
-# render a file the binary refuses; `render-check.sh` cannot, it needs no binary.
+# `config.yaml` of the ConfigMap `aap-operator-api`, to a file. CI feeds the file of each tested shape (api-shapes.sh) to the built
+# image's `api --check`, which finds a shape the chart renders and the binary refuses; `render-check.sh` cannot, it needs no binary. It
+# does not prove there is no such value: the chart refuses what it can check at render time (_validate.tpl), and the binary refuses
+# the rest at start.
 #
 #   sh deploy/operator/tests/api-config.sh <out-file> [helm template arguments...]
 #   sh deploy/operator/tests/api-config.sh /tmp/config.yaml -f deploy/operator/tests/api.values.yaml

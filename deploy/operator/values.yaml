@@ -109,8 +109,9 @@ affinity: {}
 # its own ServiceAccount and Role (it may write the specs people edit and list the ExternalSecrets that offer keys; the operator may
 # not, and the operator writes workloads, which the API may not) and takes people's tokens, which the operator does not. Stateless:
 # two replicas are fine. Nothing here is a secret: the API checks a token against the issuer's public keys and reaches the cluster with
-# its ServiceAccount (bin/api/README.md, "The configuration file"). templates/_validate.tpl refuses an `api` that the binary would
-# refuse at start (the `--check` of CI on the rendered file is the real guard). What a deployment must provide, and the edge's part
+# its ServiceAccount (bin/api/README.md, "The configuration file"). templates/_validate.tpl refuses what it can check at render time and
+# the binary would refuse at start; the rest the binary refuses at start (a pod that never becomes ready, the old ones still serving), and
+# the `--check` of CI on the file rendered for each tested shape is what looks for such a value. What a deployment must provide, and the edge's part
 # (TLS, a JWT check, a rate limit per token): README "The Platform API".
 api:
   enabled: false
