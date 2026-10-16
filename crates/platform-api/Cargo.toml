@@ -28,7 +28,6 @@ tracing.workspace = true
 [dev-dependencies]
 aap-auth-oidc = { workspace = true, features = ["testkit"] }
 aap-ports = { workspace = true, features = ["testkit"] }
-http = "1"
 tokio = { workspace = true, features = ["macros", "rt", "rt-multi-thread", "net", "time"] }
 tower = { version = "0.5", default-features = false, features = ["util"] }
 tracing-subscriber.workspace = true
