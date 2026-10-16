@@ -482,6 +482,20 @@ defaults:
     }
 
     #[test]
+    fn an_origin_with_the_default_port_is_refused_and_says_to_drop_it() {
+        // A browser never sends it, so the entry would match nothing and the page would fail with no word in the log.
+        for origin in ["https://agents.example.com:443", "http://localhost:80"] {
+            let mut v = example();
+            v["cors"]["allowedOrigins"] = serde_yaml::from_str(&format!("['{origin}']")).unwrap();
+            let error = refused(&v);
+            assert!(
+                error.contains("cors") && error.contains("default port") && error.contains("drop"),
+                "{origin}: {error}"
+            );
+        }
+    }
+
+    #[test]
     fn defaults_that_the_operator_would_refuse_are_refused_at_load() {
         let mut v = example();
         v["defaults"]["a2aBearer"]["key"] = "".into();

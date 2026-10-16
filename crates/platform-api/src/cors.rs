@@ -4,7 +4,9 @@
 //! **No wildcard, no credentials**: the token travels in `Authorization`, which a script on any page cannot read, and a
 //! credentialed mode would need `Access-Control-Allow-Credentials`, which is never sent. An origin is matched
 //! **exactly** (tower-http compares the `Origin` header with each entry byte for byte), so a list is the whole policy.
-//! An empty list is no CORS at all: no header is added, and a browser from another origin cannot read an answer.
+//! An empty list is no CORS at all: no header is added, and a browser from another origin cannot read an answer. An origin
+//! is written as a browser writes it, so the default port of a scheme (`https://host:443`) is refused: a browser leaves it
+//! out, and the entry would match nothing.
 //!
 //! Rate limits are the edge's, not this crate's.
 
@@ -35,6 +37,14 @@ pub enum CorsError {
         /// Which entry, from 0.
         index: usize,
     },
+    /// The default port of the scheme, which a browser leaves out of the `Origin` it sends: the entry would match nothing.
+    #[error(
+        "cors.allowedOrigins: entry {index} names the default port of its scheme: drop it (a browser sends https://host and not https://host:443)"
+    )]
+    DefaultPort {
+        /// Which entry, from 0.
+        index: usize,
+    },
 }
 
 /// The origins allowed to call the API from a browser, each validated and written the way a browser writes it.
@@ -51,7 +61,8 @@ impl CorsOrigins {
     ///
     /// # Errors
     ///
-    /// [`CorsError`] for a wildcard, `null`, and anything that is not `scheme://host[:port]`.
+    /// [`CorsError`] for a wildcard, `null`, anything that is not `scheme://host[:port]`, and the default port of the
+    /// scheme.
     pub fn new<I, S>(origins: I) -> Result<Self, CorsError>
     where
         I: IntoIterator<Item = S>,
@@ -66,8 +77,11 @@ impl CorsOrigins {
             if origin.eq_ignore_ascii_case("null") {
                 return Err(CorsError::Null);
             }
-            if !is_origin(origin) {
+            let Some((scheme, port)) = parse_origin(origin) else {
                 return Err(CorsError::NotAnOrigin { index });
+            };
+            if port.is_some_and(|port| is_default_port(scheme, port)) {
+                return Err(CorsError::DefaultPort { index });
             }
             if !out.iter().any(|o| o == origin) {
                 out.push(origin.to_owned());
@@ -108,12 +122,11 @@ impl CorsOrigins {
     }
 }
 
-/// `scheme "://" host [ ":" port ]` as a browser serialises an origin (RFC 6454 §6.2): the scheme and the host in lower
-/// case, no user information, no path (not even `/`), no query, no fragment.
-fn is_origin(text: &str) -> bool {
-    let Some((scheme, authority)) = text.split_once("://") else {
-        return false;
-    };
+/// The scheme and the port (if the text has one) of an origin as a browser serialises it (RFC 6454 §6.2): `scheme "://" host
+/// [ ":" port ]`, the scheme and the host in lower case, no user information, no path (not even `/`), no query, no fragment,
+/// and a port without a leading zero. `None` for anything else.
+fn parse_origin(text: &str) -> Option<(&str, Option<&str>)> {
+    let (scheme, authority) = text.split_once("://")?;
     let scheme_ok = scheme
         .bytes()
         .next()
@@ -122,7 +135,7 @@ fn is_origin(text: &str) -> bool {
             b.is_ascii_lowercase() || b.is_ascii_digit() || matches!(b, b'+' | b'-' | b'.')
         });
     if !scheme_ok {
-        return false;
+        return None;
     }
     let (host, port) = match authority.strip_prefix('[') {
         // An IPv6 literal: `[::1]` or `[::1]:8080`.
@@ -145,10 +158,19 @@ fn is_origin(text: &str) -> bool {
     let port_ok = port.is_none_or(|p| {
         !p.is_empty()
             && p.len() <= 5
+            && !p.starts_with('0')
             && p.bytes().all(|b| b.is_ascii_digit())
             && p.parse::<u32>().is_ok_and(|n| (1..=65535).contains(&n))
     });
-    host_ok && port_ok
+    (host_ok && port_ok).then_some((scheme, port))
+}
+
+/// Whether `port` is the one a browser leaves out of the `Origin` of a page with this `scheme`.
+fn is_default_port(scheme: &str, port: &str) -> bool {
+    matches!(
+        (scheme, port),
+        ("http" | "ws", "80") | ("https" | "wss", "443")
+    )
 }
 
 #[cfg(test)]
@@ -168,6 +190,43 @@ mod tests {
         .unwrap();
         assert_eq!(ok.as_slice().len(), 5, "a repeated origin is one");
         assert!(CorsOrigins::new(Vec::<String>::new()).unwrap().is_empty());
+    }
+
+    #[test]
+    fn an_origin_with_the_default_port_of_its_scheme_is_refused_because_a_browser_never_sends_it() {
+        // A browser leaves the port out of the `Origin` of a page on the default one, so `https://x:443` would sit in the list
+        // and match nothing: the preflight would fail with no word in any log.
+        for (bad, index) in [
+            ("https://agents.example.com:443", 1),
+            ("http://agents.example.com:80", 1),
+            ("wss://agents.example.com:443", 1),
+            ("ws://agents.example.com:80", 1),
+            ("https://[::1]:443", 1),
+        ] {
+            assert_eq!(
+                CorsOrigins::new(["https://ok.example.com", bad]),
+                Err(CorsError::DefaultPort { index }),
+                "{bad}"
+            );
+        }
+        let message = CorsError::DefaultPort { index: 1 }.to_string();
+        assert!(
+            message.contains("default port") && message.contains("drop"),
+            "{message}"
+        );
+        // The other port of the scheme is a port, and the default of another scheme is one too.
+        CorsOrigins::new([
+            "https://agents.example.com:80",
+            "http://agents.example.com:443",
+            "https://agents.example.com:8443",
+            "tauri://localhost:443",
+        ])
+        .unwrap();
+        // A port as a browser writes it has no leading zero.
+        assert_eq!(
+            CorsOrigins::new(["https://agents.example.com:08443"]),
+            Err(CorsError::NotAnOrigin { index: 0 })
+        );
     }
 
     #[test]
