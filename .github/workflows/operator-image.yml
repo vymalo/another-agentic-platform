@@ -1,6 +1,6 @@
 name: Operator and API images
 
-# The images and the chart of the platform (S8, D7b1): checks on pull requests, the images on main, and a tag bump in the chart. Two
+# The images and the chart of the platform (S8, S9, D7b1, D7b2): checks on pull requests, the images on main, and a tag bump in the chart. Two
 # images are built from one commit, `operator` (S8) and `api` (the Platform API, D7b1), and ONE job bumps both tags in one commit: two
 # workflows would each push a bump to main and race (and each one's "has main moved on?" test would count the other's bump commit as a
 # newer build). The cost is that the api image waits for the operator's end-to-end and that both tags always move together; the images

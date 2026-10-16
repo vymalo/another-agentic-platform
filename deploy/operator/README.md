@@ -305,7 +305,9 @@ different in two ways, and says so: **ingress** is the peers of `api.networkPoli
 from the node, which a NetworkPolicy never blocks, as in the operator's policy; §60a's "NetworkPolicy of D7, which let only the web's pods in, is replaced by the
 edge's"), and **egress** is three rules, not one: the API server (`apiServer.ports`, `.cidrs`), the cluster's DNS (`dns.to` and `.ports`, UDP and TCP), and the
 issuer's keys (`issuer.to`, `.ports`), because the API resolves the issuer's name and fetches its keys. Enforcement is the cluster's
-CNI's: *unverified* that the rules are enough on a cluster that enforces them (D7b2, in kind, whose CNI does).
+CNI's: *unverified* that the rules are enough on a cluster that enforces them. The kind end-to-end of D7b2 installs the policy and says whether kind's CNI enforced it
+(kindnet is given the right to list and watch NetworkPolicies by the manifest of kind v0.33.0, *verified 2026-10-16*, which suggests it does; *unverified*): a pod the
+policy names reaches the API through its Service, and one it does not name is refused only if the CNI enforces, otherwise the job warns and does not fail.
 
 **The defaults are wider than they look, and you should narrow them.** A rule with `ports` and no `to` allows **any address** on those ports, so with the
 defaults (`apiServer.cidrs: []`, `issuer.to: []`) the pod may reach **every address of the cluster and of the internet on 443 and 6443** (the API server's
@@ -340,7 +342,8 @@ and run its conformance suite under: `render-check.sh` reads that file and compa
 Two images, one workflow, one commit. [`operator-image.yml`](../../.github/workflows/operator-image.yml) builds both from the same commit:
 `ghcr.io/vymalo/another-agentic-platform/operator` from [`docker/operator/Dockerfile`](../../docker/operator/Dockerfile) and
 `ghcr.io/vymalo/another-agentic-platform/api` (the Platform API) from [`docker/api/Dockerfile`](../../docker/api/Dockerfile). On a pull request it builds
-and smoke-tests each (the API's also runs `api --check` on the configuration this chart renders) and runs the kind end-to-end of the coder; on `main`,
+and smoke-tests each (the API's also runs `api --check` on the configuration this chart renders) and runs the kind end-to-ends of the coder and of the API
+(`api-e2e`, D7b2: this chart with the API on, a folder agent made through it); on `main`,
 after all of those pass, it pushes the images **that passed** as `sha-<7>` (the same tag for both), and as `latest` unless main has moved on to a newer
 build (image jobs can finish out of order), and a last job runs `bump-tag.sh` for each (`image.tag`, then `api.image.tag`) and pushes **one** commit,
 `chore(deploy): bump operator and api to sha-<7>`, to `main` as `github-actions[bot]` (§93 allows it). There is one bump job so that two pushes to `main`
@@ -348,9 +351,9 @@ cannot race: the cost is that the API's image waits for the operator's end-to-en
 (the workspace is one build, so a change in a shared crate touches both anyway). A deployment pins `sha-<7>`, never `latest`.
 
 **An API failure blocks the operator's release too, and the other way round.** `push` needs every job (`dockerfile-api` and `api-image` as well as
-`image` and `operator-coder-e2e`), so a red Dockerfile lint, smoke test or `--check` of the API's image on `main` means *no* image is pushed and *no*
+`image` and `operator-coder-e2e`, and `api-e2e`), so a red Dockerfile lint, smoke test, `--check` or end-to-end of the API's image on `main` means *no* image is pushed and *no*
 tag is bumped, the operator's included, until the next green build; and the API's image is not pushed while the coder end-to-end (2.9 GB, the
-flakiest job) is red. This is a decision for the owner (one workflow and one commit was chosen, §60a D7b1). The alternative is two pushes, each
+flakiest job) is red. `api-e2e` is in this workflow, and not in `operator.yml`, because both images are artifacts of this one already and `push` has to wait for it. This is a decision for the owner (one workflow and one commit was chosen, §60a D7b1). The alternative is two pushes, each
 after its own jobs, and a bump that moves each tag only when its own image passed (`bump-tag.sh <file> <tag> operator|api` already moves one key
 alone): an API change would then never hold back the operator, at the price of a bump that has to decide, for each tag, whether its image
 passed, and of the race that one commit avoids (two bumps pushed to `main` by one run each, and the "has main moved on?" test counting the other's).
@@ -416,7 +419,7 @@ sh deploy/operator/tests/api-shapes.sh /tmp/api-config && for f in /tmp/api-conf
 | `tests/bump-tag-test.sh` | `bump-tag.sh` edits only `image.tag` (a `defaultAgentImage` line beside it is left alone) or, with `api`, only `api.image.tag` (each leaves the other, and keys that only look like it, alone), is idempotent, refuses a malformed tag and an unknown component (the test of adam-rs's `deploy/coder`, with this chart's values) |
 | `tests/api.values.yaml`, `tests/api-secretref.values.yaml`, `tests/api-full.values.yaml`, `tests/api-shapes.sh`, `tests/api-config.sh` | the shapes of the API component: the golden one, a Secret per agent, and **one that sets every value the chart exposes** (ports, `apiServer.cidrs`, `issuer.to`, every key of `defaults`, the Ingress, the scheduling), and the scripts that render a shape and write the ConfigMap's `config.yaml` to a file (`api-shapes.sh` writes `golden`, `secretref`, `minimal` and `full`), which CI hands to the image's `api --check` |
 | `tests/schemas/` | the `ExternalSecret` schema for kubeconform ([its README](tests/schemas/README.md)) |
-| `tests/e2e/` | the kind end-to-end of the coder (S9): [`tests/e2e/README.md`](tests/e2e/README.md) |
+| `tests/e2e/` | the kind end-to-ends: of the coder (S9, `coder-e2e.sh`) and of the Platform API (D7b2, `api-e2e.sh` with `api.values.yaml` and `api-offer.yaml`; `render-check.sh` renders the values it installs and asserts what the script depends on): [`tests/e2e/README.md`](tests/e2e/README.md) |
 
 CI also runs kubeconform in strict mode over seven renders (the defaults, netcup, `secret.values.yaml`, the three API shapes, and the CRDs chart with the
 `CustomResourceDefinition` kind skipped, because the schema set has none: the `kind` job of `operator.yml` applies them to a real API server).
@@ -435,11 +438,13 @@ CI also runs kubeconform in strict mode over seven renders (the defaults, netcup
 
 ## What is not proven
 
-* **The Platform API component has not run on a cluster.** It is rendered, linted, checked with kubeconform, and its file is read by the binary (`api --check`,
-  here and in CI); the image is built by CI (not here: this slice was written where no container daemon runs). *Unverified* until D7b2, the kind
-  end-to-end through the API: that the pod starts with a read-only root file system, that the `Role` is enough under real RBAC (`/readyz` says so
-  when it is not), that the NetworkPolicy's egress reaches a real issuer, that `preStop.sleep` and the grace period behave as described on a real
-  cluster (the sleep action, and what 1.29 does without its gate), and the whole chain: create a folder agent through the API, see it `Ready` and listed.
+* **The Platform API component has not run on a cluster where it was written.** It is rendered, linted, checked with kubeconform, and its file is read by the binary (`api --check`,
+  here and in CI); the image is built by CI (not here: no container daemon runs where this was written). **D7b2 is the job that runs it**, `api-e2e`
+  ([`tests/e2e/README.md`](tests/e2e/README.md#the-kind-end-to-end-of-the-platform-api-d7b2)), and it is *unverified* until CI has run it: that the pod starts with a read-only root file system,
+  that the `Role` is enough under real RBAC (`/readyz` says so when it is not), that the NetworkPolicy's egress reaches an issuer, and the whole chain: a folder agent created through the
+  API, `Ready` and listed, replaced and deleted. **Still not proven when it has**: a real Keycloak (the issuer is the testkit's), the edge (TLS, a JWT check, rate limits), the policy's
+  enforcement if kind's plugin has none, that `preStop.sleep` and the grace period do what is described under a rolling update (the pod has the hook; nothing measures it, and what 1.29 does without its
+  gate is not tried), two replicas, and a coder or a tool server made through the API.
 
 * The chart has been rendered, linted and checked with kubeconform; **it has not been installed on a cluster by hand**. The first
   install is the `operator-coder-e2e` job of `operator-image.yml` (*unverified* until CI has run it), which installs this chart
