@@ -116,8 +116,27 @@ sh deploy/operator/tests/e2e/api-e2e.sh      # kubectl on that cluster; needs he
 
 The script finds the host's address on the docker network `kind` itself (`AAP_TEST_HOST_ADDR` says it when docker is not the runtime, or when the cluster is
 not kind: the pods must reach the machine the script runs on). `TEST_ISSUER_BIN` names a test issuer that is already built. On a failure it prints what the
-cluster says, the API's and the operator's logs and the last answer of the API, and it removes what it made (the agent first, while the operator is there to run
-its finalizer; then the chart). The CRDs stay: they are the cluster's.
+cluster says, the API's and the operator's logs and the last answer of the API, and it removes what it made (below).
+
+**It runs only on a throwaway cluster and touches only what it made** (after the review of 2026-10-16: the first version armed its cleanup before any check and, on a
+missing tool, would have run `helm uninstall aap-operator` and deleted `agent-a2a-bearer`, the chart's own default name for the real orchestrator's token, in
+`another-agentic-system`):
+
+* `kubectl`'s current context must be `kind-*`; anything else is refused **before anything is made and before the cleanup exists**. `AAP_E2E_ALLOW_ANY_CONTEXT=1` says that another
+  cluster is a throwaway one (it then also applies the CRDs and the ExternalSecret CRD of the pinned copy there, which Argo CD would also leave).
+* It works in a namespace of its own, `AAP_E2E_NAMESPACE` (default **`aap-e2e-api`**, not the namespace of a deployment), that **it makes with the label `aap-e2e/made-by=api-e2e`**. A namespace that exists
+  without the label is never used; one that has it is a leftover of an earlier run and is used again (a terminating one is waited for, three minutes at most).
+* Its Secrets and its ExternalSecret have names of their own, set in the chart's values it writes and in [`api-offer.yaml`](api-offer.yaml): `e2e-agent-models` (the model's key, the sentinel), `e2e-a2a-bearer`,
+  `e2e-chat-db-app` and `e2e-agent-models-es`. Each carries the label, and **one that exists without it is never overwritten**. The two curl pods are named for the run.
+* The cleanup undoes what each step recorded when it happened, in the order that lets the operator, which is still there, run the finalizer of the agent: the agent and the model if step 4 began,
+  the Helm release if the install began, the namespace (and with it the Secrets, the offer and the pods) if the script made it, then the issuer. **A run that stops before any of that** (a missing tool, a failed
+  build, a refused context or namespace) **uninstalls and deletes nothing**. `INT`, `TERM` and `HUP` run it too (dash does not run an `EXIT` trap for a signal by itself). The CRDs stay.
+
+| Variable | Default | Says |
+|---|---|---|
+| `AAP_E2E_NAMESPACE` | `aap-e2e-api` | the namespace of the run; made by the script, or one it made before |
+| `AAP_E2E_ALLOW_ANY_CONTEXT` | unset | `1`: the current context may be a cluster that is not a kind cluster's, and is a throwaway one |
+| `AAP_E2E_CNI_MAY_IGNORE_POLICIES` | unset | `1`: the cluster's network plugin has no NetworkPolicy support; a pod the API's policy does not name that reaches the API is then a warning and not a failure |
 
 **The token issuer is a program on the runner.** The API checks a bearer JWT against the keys of an OIDC issuer, so the pod has to fetch an issuer's
 discovery document and keys, and the script has to get tokens for people who hold chosen permissions. [`test-issuer`](../../../../crates/auth-oidc/README.md#test-tooling-the-issuer-as-a-program)
@@ -134,6 +153,7 @@ sequenceDiagram
     participant O as the operator
     participant S as the agent pod (the stand-in)
 
+    J->>K: refuse a context that is not kind-*, make the namespace aap-e2e-api (labelled)
     J->>K: the CRDs (and the ExternalSecret's), curl pods
     J->>I: start on 0.0.0.0:0, named http://HOST:PORT, tokens on 127.0.0.1 only
     J->>K: from a pod: the issuer answers, the control port does not
@@ -150,10 +170,11 @@ sequenceDiagram
     K->>S: the kubelet starts the stand-in
     J->>A: GET /v1/agents (ready), /v1/agents/e2e-chat, /yaml, DELETE of the model (409 referenced)
     J->>A: PUT with the current ETag (200) and the old one (412), DELETE with none (428), the old one (412), the current one (202 or 204)
-    O->>K: deletes the workload, removes the finalizer, the API deletes the config last
+    O->>K: deletes the workload, removes the finalizer, the API deletes the config last (204) or leaves it as an orphan (202), which J removes
     J->>A: GET (404), the list is empty, DELETE of the model (204)
-    J->>K: from a pod the policy names, GET /v1/me through the Service, from one it does not
+    J->>K: from a pod the policy names, GET /v1/me through the Service, from one it does not (dropped)
     J->>K: the logs hold no secret value and no token
+    J->>K: undo what was made: the objects, the release, the namespace
 ```
 
 ```mermaid
@@ -162,13 +183,13 @@ stateDiagram-v2
     Installed --> Asked: tokens, 401, 403, the offered keys
     Asked --> Created: the model (201), then the agent (201, ETag, label of the dashboard)
     Created --> Ready: the operator makes it Ready (the API's state ready, at most 4 minutes)
-    Created --> Failed: blocked for 30 s, or the time is up
+    Created --> Failed: blocked for three looks in a row (about 10 s), or the time is up
     Ready --> Replaced: PUT If-Match, 200; the old ETag, 412
     Replaced --> Deleted: DELETE If-Match (412 for the old one, 428 for none), 202 or 204
-    Deleted --> Gone: the finalizer completed, both objects and the workload gone
+    Deleted --> Gone: the finalizer completed, both objects and the workload gone (on a 202 the config is an orphan and J removes it)
     Gone --> Checked: the model's delete, the NetworkPolicy, no secret and no token in any answer or log
     Checked --> [*]
-    Failed --> [*]: the script prints what the cluster, the API and the operator say
+    Failed --> [*]: the script prints what the cluster, the API and the operator say, and undoes only what it made
 ```
 
 ### Files
@@ -176,8 +197,8 @@ stateDiagram-v2
 | File | What |
 |---|---|
 | [`api-e2e.sh`](api-e2e.sh) | the script: every step bounded, every assertion named, the cluster's state printed on a failure |
-| [`api.values.yaml`](api.values.yaml) | the chart's values for it: the API on, a Secret per agent for the ledger, `docker.io` the one registry an agent may pin its image from, the pods labelled `aap-e2e/client` the only ones the policy lets reach the API. The script adds in a second file what it knows when it runs: the images, the issuer and the egress rule that reaches it, the namespace. `render-check.sh` renders both and asserts what the script depends on, so a change that breaks them fails the chart job and not this one |
-| [`api-offer.yaml`](api-offer.yaml) | the labelled `ExternalSecret` that offers the model's API key to the forms (no External Secrets Operator in the cluster: nothing reads it but the API, which lists it) |
+| [`api.values.yaml`](api.values.yaml) | the chart's values for it: the API on, a Secret per agent for the ledger, `docker.io` the one registry an agent may pin its image from, the pods labelled `aap-e2e/client` the only ones the policy lets reach the API. The script adds in a second file what it knows when it runs: the images, the issuer and the egress rule that reaches it, the namespace, the Secret of the A2A bearer. `render-check.sh` renders both (in the namespace `aap-e2e-api`, with the bearer `e2e-a2a-bearer`) and asserts what the script depends on, so a change that breaks them fails the chart job and not this one |
+| [`api-offer.yaml`](api-offer.yaml) | the labelled `ExternalSecret` `e2e-agent-models-es` that offers the model's API key (`e2e-agent-models`) to the forms (no External Secrets Operator in the cluster: nothing reads it but the API, which lists it) |
 | `../../../../crates/auth-oidc/examples/test-issuer.rs` | the issuer and its tokens, [documented with the crate](../../../../crates/auth-oidc/README.md#test-tooling-the-issuer-as-a-program) |
 | `../../../../crates/objects-kubernetes/tests/crds/external-secrets.io_externalsecrets.yaml` | the pinned copy of the ExternalSecret CRD, applied here as the crate's own cluster test applies it |
 | `../../../../bin/operator/tests/stub/Dockerfile` | the agent's image: the stand-in for the adam image that `operator-e2e` runs |
@@ -203,17 +224,20 @@ stateDiagram-v2
   (the agent's name only to a reader of agents).
 * **The conditional writes**: a replace with the current `ETag` is `200` and renames both objects; with the ETag of before it is `412` and changes nothing; a delete with
   no `If-Match` is `428`, with the old tag `412`, with the current one `202` or `204`; the operator's finalizer completes and the objects, the Deployment, the Service
-  and the pod are gone, the API deleting the config last; the agent is then `404` and the list is empty, and the model can go (`204`). The operator writes its status all
+  and the pod are gone; the agent is then `404` and the list is empty, and the model can go (`204`). **A `204` means both objects go** (the API deletes the config after the service). **A `202`**
+  (the finalizer outlasted the API's 5 s wait) **leaves the `AgentConfig` behind as an orphan, as D5 says**: the body must say the agent is `deleting`, the `AgentService` must go, and the script reports
+  the config in a `::warning::` and removes it with `kubectl`, so that the run ends clean; it does not claim an order the end state cannot show. The operator writes its status all
   the time, so a replace or a delete right after a read may be `412`: the script reads again, up to five times.
-* **The NetworkPolicy**: a pod the policy names reaches the API through its Service with a token; a pod it does not name is refused **if the cluster enforces
-  NetworkPolicies** (kind's does, per the coder end-to-end), and otherwise the script says so in a warning and does not fail. Either way the pod was Ready with the policy installed.
+* **The NetworkPolicy**: a pod the policy names reaches the API through its Service with a token; a pod it does not name, **which reaches the issuer** (so its network works and the refusal is the policy's),
+  is refused: its connection is dropped (status `000`). Anything else, a `200`, a `401` or a `5xx`, fails the job: the request got through. Kind's network plugin enforces NetworkPolicies (below), so there is no
+  tolerance by default; `AAP_E2E_CNI_MAY_IGNORE_POLICIES=1` is for a cluster whose plugin does not, and then a pod that got through is a warning. Either way the API's pod was Ready with the policy installed.
 
 ### What it does not prove
 
 * **A real Keycloak.** The issuer is the testkit's (RS256, a flat roles claim, `http`, keys that never rotate). That a real Keycloak's keys and its roles claim (the
   composite-expanded roles, a nested claim) work is D14, when the realm is tried.
 * **The edge**: TLS, a check of the JWT, rate limits and the Ingress. The script reaches the API with `kubectl port-forward` and, once, through the Service from a pod.
-* **NetworkPolicy enforcement is kind's, not proven by this script alone.** kind's default network plugin, kindnet, **enforced** a NetworkPolicy in the coder end-to-end (*verified 2026-10-16*, `operator-coder-e2e` of run 38892472909 on `main` (kind v0.33.0, node v1.35.8): `ok   a pod the registry's NetworkPolicy does not name cannot read it (status 000)`; its ClusterRole may list and watch NetworkPolicies, pods and namespaces: `pkg/build/nodeimage/const_cni.go` of kind v0.33.0), so this job most likely runs under enforcement, and the API's pod being Ready then shows that its ingress rule (the health port is not in it: the kubelet's probes come from the node) and its three egress rules were enough. The script accepts either outcome and says which it saw (`::warning::` when a pod the policy does not name got through). `apiServer.cidrs` is empty in these values (any address on 443 and 6443), so the rule that is narrow is the issuer's, a /32.
+* **NetworkPolicy enforcement is kind's, not proven by this script alone.** kind's default network plugin, kindnet, **enforced** a NetworkPolicy in the coder end-to-end (*verified 2026-10-16*, `operator-coder-e2e` of run 38892472909 on `main` (kind v0.33.0, node v1.35.8): `ok   a pod the registry's NetworkPolicy does not name cannot read it (status 000)`; its ClusterRole may list and watch NetworkPolicies, pods and namespaces: `pkg/build/nodeimage/const_cni.go` of kind v0.33.0), so this job runs under enforcement, and the API's pod being Ready then shows that its ingress rule (the health port is not in it: the kubelet's probes come from the node) and its three egress rules were enough. **The script requires the refusal** (it accepted either outcome before the review of 2026-10-16, which let the check pass without proving anything); what only a run of the job can show is that kindnet does refuse this pod on this policy. `apiServer.cidrs` is empty in these values (any address on 443 and 6443), so the rule that is narrow is the issuer's, a /32.
 * **`preStop.sleep` and a rolling update.** The pod has the hook (the script checks the pod spec) and Kubernetes 1.35 has the feature on; that a request in flight survives a
   rollout, and what the sleep does for a client, is not measured.
 * **A real agent image, CloudNativePG, a coder, a tool server, a suspend.** The agent is a folder agent on the stand-in (it answers `/healthz` and a card), its ledger is a
@@ -222,10 +246,7 @@ stateDiagram-v2
 * **The log's colour.** The binary's `tracing-subscriber` writes ANSI colour codes into the pod's log (`fmt()` with no `with_ansi`: `bin/api/src/main.rs`; *observed 2026-10-16* with stderr redirected to a file in the walk described below); the script strips them before it
   looks for a request line. The operator's log is set up the same way (`bin/operator/src/main.rs`). *Not changed here* (a decision for the owner, §60a).
 
-*Unverified* until the job has run: it was written where **no container daemon and no kind exist**, so no step of it ran against a cluster. What was run: `shellcheck`, `actionlint`,
-`helm template` of the values (and the file the chart renders read by the built `api --check`), and **the whole script, end to end, against the real router of
-`aap-platform-api` over the `Memory` ports, the real `OidcAuthenticator` and the real `test-issuer`, with a fake `kubectl` (a scratch program: not committed) that answers
+**The job passed on its first run** (run 38896792093, head `ef0b86f`, *verified 2026-10-16* in its log: every step, a `204` on the delete, the agent `ready` after 5 s, the other pod refused with status `000`). It was written where **no container daemon and no kind exist**, and the changes the review of 2026-10-16 made to it (the guards, the namespace and the Secrets of its own, the cleanup that records what it made, the signals, the `202` branch, the strict policy step, the scan of the headers and of the pieces of a token) are *unverified* until CI has run them. What was run where they were written: `shellcheck`, `dash -n`, `actionlint`, `render-check.sh`, and **the whole script, end to end, under `dash`, against the real router of
+`aap-platform-api` over the `Memory` ports, the real `OidcAuthenticator` and the real `test-issuer`, with a fake `kubectl` and a fake `helm` (scratch programs: not committed) that answer
 from the objects the router wrote**: every `curl` step and `jq` filter of the API half is the real thing; every `kubectl` assertion is the fake's, and the fake says what the script
-wants to hear. Where it may need a fix: the time the kubelet takes to start the stand-in (4 minutes allowed), the deletion of the agent pod (the stand-in does not handle `SIGTERM`: up to
-the 30 s grace period), whether the kubelet's probes and `kubectl port-forward` pass kindnet's policy enforcement, and `kubectl auth can-i` as a service account on the chart's
-`Role` (the same call as `coder-e2e.sh`'s).
+wants to hear, except where a scenario makes it say otherwise (a context that is not kind's, a namespace or a Secret that is not the script's, a missing tool, a failed build, a `202` with and without an orphan, a service that lingers, a pod the policy does not refuse, a leaked token, each of the three signals). Where the changes may need a fix in kind: `kubectl create -f -` of the labelled namespace and its deletion, the agents in a namespace other than `another-agentic-system`, and the control that the other pod reaches the issuer.

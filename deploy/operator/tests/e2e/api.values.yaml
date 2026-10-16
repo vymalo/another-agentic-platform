@@ -39,7 +39,8 @@ api:
     # Who may reach the API: the pods the script labels `aap-e2e/client: "true"`, and nothing else. kind's network plugin, kindnet, enforces
     # NetworkPolicies (coder-e2e.sh sees a pod the registry's policy does not name refused); `kubectl port-forward`, which the script uses for most
     # calls, does not go through the pod network at all. So the script asks the API from a pod with the label (allowed) and from one without
-    # (refused if the plugin enforces policies, and a warning if it does not), and says which it saw.
+    # (which must be refused: a dropped connection, after a check that it reaches the issuer; AAP_E2E_CNI_MAY_IGNORE_POLICIES=1 turns a
+    # pod that got through into a warning, for a cluster whose plugin has no policy support).
     from:
       - podSelector:
           matchLabels:
