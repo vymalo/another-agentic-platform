@@ -123,6 +123,7 @@ pub fn defaults() -> Defaults {
         folder: FolderDefaults {
             resources: Some(requests("100m", "256Mi")),
         },
+        allowed_image_registries: None,
     }
 }
 

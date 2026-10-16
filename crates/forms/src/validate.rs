@@ -21,6 +21,7 @@ use url::Url;
 use crate::agent::{AgentForm, AgentKindForm, ModelChoice};
 use crate::defaults::{Defaults, Deployment, StoreDefault};
 use crate::error::{Errors, FormError};
+use crate::image::{ImagePolicy, is_host};
 use crate::resources::{Resources, to_resources};
 use crate::secret::{OfferedKeys, SecretPick};
 use crate::shared::{BaseUrlForm, ModelEndpointForm, ToolServerForm};
@@ -118,8 +119,8 @@ fn check_url(e: &mut Errors, field: &str, text: &str) {
     }
 }
 
-/// The rules of the *Coder* and *Folder agent* screens, and the offered keys. Every error with its field.
-fn check_agent(form: &AgentForm, offered: &OfferedKeys) -> Errors {
+/// The rules of the *Coder* and *Folder agent* screens, the offered keys and the image. Every error with its field.
+fn check_agent(form: &AgentForm, offered: &OfferedKeys, images: &ImagePolicy) -> Errors {
     let mut e = Errors::default();
     if !is_agent_name(&form.name) {
         e.add(
@@ -164,6 +165,11 @@ fn check_agent(form: &AgentForm, offered: &OfferedKeys) -> Errors {
         } else if let Some(issue) = name_issue(&field, name) {
             e.add(field, issue.message);
         }
+    }
+    if let Some(image) = &form.image
+        && let Err(why) = images.check(image)
+    {
+        e.add("image", why);
     }
     if let Some(audience) = &form.audience {
         if audience.len() > 32 {
@@ -563,7 +569,8 @@ pub fn check_replace(current: &AgentForm, new: &AgentForm) -> Vec<FormError> {
 
 /// Validate an agent form, and give the objects to write.
 ///
-/// The screens' rules, the offered keys, and then `aap_domain::validate` on the rendered objects with
+/// The screens' rules, the offered keys, the agent's own image against `images` (a tag or a digest, no
+/// credentials, an allowed registry: [`ImagePolicy`]), and then `aap_domain::validate` on the rendered objects with
 /// `externals` ([`externals`] builds them from the store's lists): the agent is refused here for what the
 /// operator would mark `ConfigInvalid`. Every error names its form field; an error in the deployment's part is
 /// `deployment.…` (the person cannot edit it: the API's configuration is wrong, and [`Defaults::check`] would have said so).
@@ -577,8 +584,9 @@ pub fn validate_agent(
     namespace: &str,
     externals: &Externals,
     offered: &OfferedKeys,
+    images: &ImagePolicy,
 ) -> Result<Resources, Vec<FormError>> {
-    let errors = check_agent(form, offered);
+    let errors = check_agent(form, offered, images);
     let resources = to_resources(form, deployment, namespace);
     let issues = aap_domain::validate(&resources.service, &resources.config, externals)
         .err()
@@ -822,6 +830,13 @@ impl Defaults {
         }
         if !has_text(&self.offer_label) || self.offer_label.contains(char::is_whitespace) {
             problems.push("offerLabel is a label key with no space".to_owned());
+        }
+        for registry in self.allowed_image_registries.iter().flatten() {
+            if !is_host(registry) {
+                problems.push(format!(
+                    "allowedImageRegistries: {registry:?} is a registry host (`ghcr.io`, `registry.example:5000`), with no scheme and no path"
+                ));
+            }
         }
         if let StoreDefault::SecretRef(p) = &self.store
             && !p.name.contains("{name}")

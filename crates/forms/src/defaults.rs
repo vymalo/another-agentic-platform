@@ -21,6 +21,7 @@ use k8s_openapi::api::networking::v1::NetworkPolicyPeer;
 use serde::{Deserialize, Serialize};
 
 use crate::agent::AgentKind;
+use crate::image::ImagePolicy;
 
 /// What the Platform API's configuration file says every agent gets, apart from what its form sets.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -57,6 +58,13 @@ pub struct Defaults {
     /// What a folder agent gets.
     #[serde(default)]
     pub folder: FolderDefaults,
+
+    /// The registries an agent may pin its own image from (*Advanced*, §60a), as hosts (`ghcr.io`,
+    /// `registry.example:5000`; an image with no registry is `docker.io`'s). **Absent: any registry**, the
+    /// tag or digest still required. **A list: only those. An empty list: none**, so no agent may pin its
+    /// own image (it fails closed: somebody wrote it). See [`ImagePolicy`].
+    #[serde(default)]
+    pub allowed_image_registries: Option<Vec<String>>,
 }
 
 fn default_offer_label() -> String {
@@ -157,6 +165,14 @@ pub struct FolderDefaults {
 }
 
 impl Defaults {
+    /// The rule about the image an agent pins for itself.
+    pub fn image_policy(&self) -> ImagePolicy {
+        match &self.allowed_image_registries {
+            None => ImagePolicy::any_registry(),
+            Some(registries) => ImagePolicy::only(registries),
+        }
+    }
+
     /// What a **new** agent of `kind` named `name` gets: the defaults, filled in for it.
     pub fn deployment_for(&self, kind: AgentKind, name: &str) -> Deployment {
         let store = match &self.store {

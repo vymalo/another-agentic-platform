@@ -7,8 +7,8 @@ mod support;
 use aap_domain::Externals;
 use aap_forms::{
     AgentForm, AgentKind, AgentKindForm, BaseUrlForm, Deployment, FormError, FormTarget,
-    HeaderForm, ModelEndpointForm, OfferedKeys, SecretPick, ToolServerForm, from_object_errors,
-    validate_agent, validate_model, validate_tool_server,
+    HeaderForm, ImagePolicy, ModelEndpointForm, OfferedKeys, SecretPick, ToolServerForm,
+    from_object_errors, validate_agent, validate_model, validate_tool_server,
 };
 use aap_ports::{FieldError, Kind, OfferedSecret};
 use proptest::prelude::*;
@@ -43,6 +43,7 @@ fn check(form: &AgentForm) -> Result<aap_forms::Resources, Vec<FormError>> {
         NS,
         &externals(),
         &offered(),
+        &ImagePolicy::any_registry(),
     )
 }
 
@@ -108,7 +109,7 @@ proptest! {
         form.allow_insecure_http = true;
         let deployment = defaults().deployment_for(form.kind(), &form.name);
         // The generated names are valid by construction except where a rule has a bound; keep to the ones that pass.
-        if let Ok(resources) = validate_agent(&form, &deployment, NS, &externals, &offered) {
+        if let Ok(resources) = validate_agent(&form, &deployment, NS, &externals, &offered, &ImagePolicy::any_registry()) {
             let resolved = aap_domain::resolve(&resources.service, &resources.config, &externals, aap_ports::OwnerHandle::none());
             prop_assert!(resolved.is_ok(), "{:?}", resolved.err());
         }
@@ -129,7 +130,7 @@ proptest! {
             6 => form.tags = vec!["Bad".to_owned()],
             _ => form.allow_insecure_http = false,
         }
-        let result = validate_agent(&form, &d, NS, &Externals::default(), &OfferedKeys::default());
+        let result = validate_agent(&form, &d, NS, &Externals::default(), &OfferedKeys::default(), &ImagePolicy::any_registry());
         let errors = result.err().unwrap_or_default();
         prop_assert!(!errors.is_empty());
         for e in &errors {
@@ -435,6 +436,7 @@ fn an_error_of_a_referent_is_on_the_field_that_names_it_and_says_which_object() 
         NS,
         &externals,
         &offered(),
+        &ImagePolicy::any_registry(),
     )
     .unwrap_err();
     let e = errors.iter().find(|e| e.field == "model.endpoint").unwrap();
@@ -456,7 +458,14 @@ fn an_error_in_the_deployments_part_is_on_a_deployment_field() {
         port: 0,
         host: None,
     });
-    let got = fields(validate_agent(&form, &d, NS, &externals(), &offered()));
+    let got = fields(validate_agent(
+        &form,
+        &d,
+        NS,
+        &externals(),
+        &offered(),
+        &ImagePolicy::any_registry(),
+    ));
     for expected in [
         "deployment.store",
         "deployment.a2aBearer",
@@ -478,6 +487,7 @@ fn the_offered_key_is_the_guard() {
         NS,
         &externals(),
         &nothing,
+        &ImagePolicy::any_registry(),
     )
     .unwrap_err();
     let e = errors
@@ -502,7 +512,8 @@ fn the_offered_key_is_the_guard() {
             &deployment(AgentKind::Folder, "chat"),
             NS,
             &externals(),
-            &nothing
+            &nothing,
+            &ImagePolicy::any_registry()
         )
         .is_ok()
     );
@@ -726,6 +737,151 @@ fn an_error_never_quotes_the_address_it_refuses() {
             assert!(!format!("{e} {e:?}").contains(SENTINEL), "{e}");
         }
     }
+}
+
+// ----------------------------------------------------------------- the image
+
+fn with_image(
+    policy: &ImagePolicy,
+    image: Option<&str>,
+) -> Result<aap_forms::Resources, Vec<FormError>> {
+    let mut form = coder_form("coder-me");
+    form.image = image.map(str::to_owned);
+    validate_agent(
+        &form,
+        &deployment(AgentKind::Coder, "coder-me"),
+        NS,
+        &externals(),
+        &offered(),
+        policy,
+    )
+}
+
+const PINNED: &str = "ghcr.io/vymalo/another-adam-rs/coder:sha-9a1fd4e@sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
+
+#[test]
+fn an_agents_own_image_is_pinned_has_no_credentials_and_comes_from_an_allowed_registry() {
+    let any = ImagePolicy::any_registry();
+    let only = ImagePolicy::only(["ghcr.io"]);
+    // A pinned image from an allowed registry, with a tag, a digest or both.
+    for image in [
+        PINNED,
+        "ghcr.io/vymalo/another-adam-rs/coder:sha-9a1fd4e",
+        "ghcr.io/vymalo/coder@sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+    ] {
+        assert!(with_image(&only, Some(image)).is_ok(), "{image}");
+        assert!(with_image(&any, Some(image)).is_ok(), "{image}");
+    }
+    // The three references a review found accepted.
+    for (image, policy, says) in [
+        (
+            "user:pw@registry.invalid/a:1",
+            &any,
+            "no user name or password",
+        ),
+        ("registry.invalid/a", &any, "tag or a digest"),
+        (
+            "evil.example/x:1",
+            &only,
+            "evil.example is not an allowed registry",
+        ),
+    ] {
+        let errors = with_image(policy, Some(image)).unwrap_err();
+        assert_eq!(errors.len(), 1, "{image}: {errors:?}");
+        assert_eq!(errors[0].field, "image", "{image}");
+        assert!(
+            errors[0].message.contains(says),
+            "{image}: {}",
+            errors[0].message
+        );
+    }
+    // No image is the operator's default, whatever the allow-list says.
+    for policy in [&any, &only, &ImagePolicy::only(Vec::<String>::new())] {
+        assert!(with_image(policy, None).is_ok());
+    }
+}
+
+#[test]
+fn an_empty_allow_list_lets_no_agent_pin_an_image_and_an_absent_one_lets_any_registry() {
+    let none = ImagePolicy::only(Vec::<String>::new());
+    let errors = with_image(&none, Some(PINNED)).unwrap_err();
+    assert_eq!(fields_of(&errors), ["image"]);
+    assert!(
+        errors[0].message.contains("no agent pin its own image"),
+        "{errors:?}"
+    );
+    assert!(with_image(&ImagePolicy::any_registry(), Some("evil.example/x:1")).is_ok());
+
+    let mut d = defaults();
+    assert_eq!(
+        d.image_policy(),
+        ImagePolicy::any_registry(),
+        "absent: any registry"
+    );
+    d.allowed_image_registries = Some(Vec::new());
+    assert_eq!(d.image_policy(), none, "present and empty: none");
+    d.allowed_image_registries = Some(vec!["ghcr.io".to_owned()]);
+    assert_eq!(d.image_policy(), ImagePolicy::only(["ghcr.io"]));
+}
+
+fn fields_of(errors: &[FormError]) -> Vec<&str> {
+    errors.iter().map(|e| e.field.as_str()).collect()
+}
+
+#[test]
+fn an_error_about_an_image_never_quotes_it() {
+    for image in [
+        format!("user:{SENTINEL}@registry.invalid/a:1"),
+        format!("{SENTINEL}@registry.invalid/a:1"),
+        format!("registry.invalid/{SENTINEL}"),
+        format!("registry.invalid/a:1@{SENTINEL}"),
+    ] {
+        for policy in [ImagePolicy::any_registry(), ImagePolicy::only(["ghcr.io"])] {
+            for e in with_image(&policy, Some(&image)).unwrap_err() {
+                assert!(!format!("{e} {e:?}").contains(SENTINEL), "{e}");
+            }
+        }
+    }
+}
+
+#[test]
+fn the_allowed_registries_are_read_from_the_apis_configuration_and_checked_when_it_starts() {
+    let mut d = defaults();
+    assert!(d.allowed_image_registries.is_none() && d.check().is_empty());
+    d.allowed_image_registries = Some(vec!["ghcr.io".into(), "registry.example:5000".into()]);
+    assert!(d.check().is_empty(), "{:?}", d.check());
+    d.allowed_image_registries = Some(Vec::new());
+    assert!(
+        d.check().is_empty(),
+        "an empty list is allowed: it is how to forbid images"
+    );
+    for bad in [
+        "https://ghcr.io",
+        "ghcr.io/vymalo",
+        "",
+        "ghcr.io:",
+        "a b",
+        "ghcr.io@x",
+    ] {
+        d.allowed_image_registries = Some(vec![bad.to_owned()]);
+        let problems = d.check();
+        assert!(
+            problems
+                .iter()
+                .any(|p| p.contains("allowedImageRegistries")),
+            "{bad:?}: {problems:?}"
+        );
+    }
+
+    let yaml = "namespace: ns\nstore: { cnpg: { instances: 1, storage: { size: 5Gi } } }\na2aBearer: { name: a, key: K }\n";
+    let absent: aap_forms::Defaults = serde_yaml::from_str(yaml).unwrap();
+    assert_eq!(absent.allowed_image_registries, None);
+    let empty: aap_forms::Defaults =
+        serde_yaml::from_str(&format!("{yaml}allowedImageRegistries: []\n")).unwrap();
+    assert_eq!(empty.allowed_image_registries, Some(Vec::new()));
+    let some: aap_forms::Defaults =
+        serde_yaml::from_str(&format!("{yaml}allowedImageRegistries: [ghcr.io]\n")).unwrap();
+    assert_eq!(some.image_policy(), ImagePolicy::only(["ghcr.io"]));
 }
 
 // ------------------------------------------------------------------ tool servers

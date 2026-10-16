@@ -19,7 +19,7 @@ sequenceDiagram
     C->>A: PUT /v1/agents/coder-me, the form, If-None-Match *
     A->>A: serde: a body that is not a form is a 400
     A->>S: offered_secrets, list_shared (Model, ToolServer)
-    A->>F: validate_agent(form, defaults.deployment_for(..), namespace, externals, offered)
+    A->>F: validate_agent(form, defaults.deployment_for(..), namespace, externals, offered, defaults.image_policy())
     F->>F: the screens' rules (check_agent)
     F->>D: validate(service, config, externals) on the rendered objects
     D-->>F: issues
@@ -37,7 +37,8 @@ sequenceDiagram
 | `AgentForm { name, title, description, tags, suspend, model, tool_servers, allow_insecure_http, image, audience, agent }` | The agent form. `agent` is `AgentKindForm::Coder(CoderSettings)` or `Folder(FolderSettings)`: a coder has a GitHub App and no files, a folder agent has files and no GitHub App, and a body that mixes them is not a form |
 | `ModelEndpointForm`, `BaseUrlForm::{Value, Secret}`, `ToolServerForm`, `HeaderForm` | The forms of the Models and Tool servers screens |
 | `SecretPick { secret, key }`, `OfferedKeys` | How a form names a secret: **by reference only**. `OfferedKeys::from_offered(label, &[OfferedSecret])` is what a write may name |
-| `Defaults`, `Deployment`, `Defaults::deployment_for(kind, name)`, `Defaults::check()` | The deployment's defaults (the API's configuration file), and the part of an agent they fill |
+| `Defaults`, `Deployment`, `Defaults::deployment_for(kind, name)`, `Defaults::check()`, `Defaults::image_policy()` | The deployment's defaults (the API's configuration file), and the part of an agent they fill |
+| `ImagePolicy::{any_registry, only}`, `check(reference)` | The rule about the image an agent pins for itself: [below](#the-image-of-an-agent) |
 | `to_resources(form, deployment, namespace) -> Resources` | The two objects, with the label of the dashboard. Total: every form gives objects. `Resources::draft()` is the `AgentDraft` a store takes |
 | `load_agent(&Agent) -> Loaded<AgentView>`, `ModelEndpointForm::load`, `ToolServerForm::load` | An object read as a form, or the reasons it is YAML only. `Loaded { managed_by, representation }` |
 | `validate_agent`, `validate_model`, `validate_tool_server` | The screens' rules and the operator's, each error a `FormError { field, message }` |
@@ -143,8 +144,8 @@ if the form writes it back unchanged** (any one change of a field no form says m
 
 ## Validation, and the form field of every error
 
-`validate_agent(form, deployment, namespace, externals, offered)`: the screens' rules of §60a (names, lengths, counts, ranges, the GitHub owners, the audience's shape, no
-`mcp.json` in a folder, the offered keys), then `aap_domain::validate` on the rendered objects with `externals` (so the dashboard refuses what the operator would mark
+`validate_agent(form, deployment, namespace, externals, offered, images)`: the screens' rules of §60a (names, lengths, counts, ranges, the GitHub owners, the audience's shape, no
+`mcp.json` in a folder, the offered keys, the image), then `aap_domain::validate` on the rendered objects with `externals` (so the dashboard refuses what the operator would mark
 `ConfigInvalid`), then every `aap-domain` issue named by the **form field** it is about; a field with an error of its own is not reported twice. `validate_model` and
 `validate_tool_server` do the same for the shared kinds: the operator's rules for a `ModelEndpoint` or a `ToolProvider` are asked through a probe agent that names it, as the operator
 reads it, and only the issues about that object are kept.
@@ -169,6 +170,23 @@ For the shared kinds: `ModelEndpoint spec.baseUrl.value` is `baseUrl.value`, `.s
 
 The operator's default image is its own flag, which the API does not know: `externals(.., None)` tells `aap-domain` a stand-in image, so a form with no image is not refused for it
 (the operator marks such an agent `ConfigInvalid` if it has none). **A URL is never quoted** in an error (it may carry a password).
+
+## The image of an agent
+
+§60a: *Image* under *Advanced* is "a reference with a tag or a digest, an allow-list of registries being the deployment's default to set". `ImagePolicy::check` (called by
+`validate_agent` for `form.image`, error on the field `image`) refuses a reference that:
+
+* is not a reference (`[registry/]name[:tag][@sha256:digest]`, lower-case path components, a registry host with an optional port, a tag of at most 128 characters), has a space or
+  a control character, or is over 512 characters;
+* **has no tag and no digest** (`registry.invalid/a`): an image that can move is not pinned;
+* has **userinfo** (`user:pw@registry.invalid/a:1`): `@` is only allowed in front of a digest, which is `sha256:` and 64 lower-case hexadecimal digits;
+* comes from a registry that is not on the deployment's list, when there is one.
+
+**What the list means** (`Defaults.allowedImageRegistries`, an optional list of hosts, `ghcr.io` or `registry.example:5000`; an image with no registry is `docker.io`'s): **absent**, any registry
+is accepted (the deployment did not restrict them; §60a says the list is the deployment's default *to set*) and the tag or digest is still required; **a list**, only those registries;
+**an empty list**, none, so no agent may pin its own image: somebody wrote it, so it fails closed. `Defaults::check()` refuses an entry that is not a host. No message **quotes the
+reference** (it may carry a password); the registry of a reference that was accepted as to its shape is named. An existing agent whose image the list no longer allows is refused at its next
+save, for the field `image`: a save validates the whole form.
 
 ## The YAML export
 

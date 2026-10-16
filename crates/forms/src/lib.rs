@@ -19,6 +19,7 @@ mod agent;
 mod defaults;
 mod error;
 mod export;
+mod image;
 mod represent;
 mod resources;
 mod secret;
@@ -35,6 +36,7 @@ pub use defaults::{
 };
 pub use error::FormError;
 pub use export::{ExportError, export_agent, export_object};
+pub use image::ImagePolicy;
 pub use represent::{Loaded, Representation, Unrepresentable};
 pub use resources::{AgentView, Resources, load_agent, to_resources};
 pub use secret::{OfferedKeys, SecretPick};
