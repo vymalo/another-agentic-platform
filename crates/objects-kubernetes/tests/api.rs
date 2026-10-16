@@ -15,6 +15,7 @@ use aap_ports::{
     Precondition, SharedKind,
 };
 use serde_json::{Value, json};
+use support::facts;
 use support::harness::Harness;
 use support::{Call, Fake};
 
@@ -65,6 +66,28 @@ async fn made(h: &Harness) -> (String, AgentDraft, aap_ports::Agent) {
         .await
         .unwrap();
     (name, draft, agent)
+}
+
+// ------------------------------------------------------------------ the fake is what it claims to be
+
+// The same assertions run against a real API server in `tests/cluster.rs`.
+
+#[tokio::test]
+async fn the_fake_leaves_a_deleted_object_with_a_finalizer_terminating_as_a_real_server_does() {
+    let (_fake, h) = setup();
+    facts::a_delete_of_an_object_with_a_finalizer_leaves_it_terminating(&h).await;
+}
+
+#[tokio::test]
+async fn the_fake_checks_the_version_before_the_rules_of_the_crd_as_a_real_server_does() {
+    let (_fake, h) = setup();
+    facts::a_stale_version_is_a_conflict_before_the_rules_of_the_crd(&h).await;
+}
+
+#[tokio::test]
+async fn the_fake_stores_the_defaults_of_a_post_as_a_real_server_does() {
+    let (_fake, h) = setup();
+    facts::a_create_stores_the_defaults_of_the_schema(&h).await;
 }
 
 // ------------------------------------------------------------------ atomicity

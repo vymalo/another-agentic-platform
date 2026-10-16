@@ -39,6 +39,7 @@ use kube::api::{
 use kube::config::{KubeConfigOptions, Kubeconfig};
 use kube::{Client, Config};
 use serde_json::{Value, json};
+use support::facts;
 use support::harness::{GITOPS, Harness, resource};
 use support::intercept::interpose;
 
@@ -191,6 +192,26 @@ macro_rules! cluster {
             None => return,
         }
     };
+}
+
+// What the fake API server of `tests/api.rs` copies, asserted here against the real one by the same code.
+
+#[tokio::test]
+async fn a_delete_of_an_object_with_a_finalizer_leaves_it_terminating() {
+    let h = cluster!();
+    facts::a_delete_of_an_object_with_a_finalizer_leaves_it_terminating(&h).await;
+}
+
+#[tokio::test]
+async fn a_stale_version_is_a_conflict_before_the_rules_of_the_crd() {
+    let h = cluster!();
+    facts::a_stale_version_is_a_conflict_before_the_rules_of_the_crd(&h).await;
+}
+
+#[tokio::test]
+async fn a_create_stores_the_defaults_of_the_schema() {
+    let h = cluster!();
+    facts::a_create_stores_the_defaults_of_the_schema(&h).await;
 }
 
 #[tokio::test]

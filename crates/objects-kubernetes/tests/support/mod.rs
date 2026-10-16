@@ -11,18 +11,25 @@
 //!   the defaults of the schema (`suspend`, `scaling`, `conditions: []`, ...) written into what is stored, the
 //!   `status` of the main resource ignored, and `metadata.managedFields` in the answer;
 //! * the `status` subresource, JSON merge patches (an *update*: it takes the fields it changes from the others),
-//!   `POST`, `GET` and `LIST` with a label selector, and `DELETE` with the options in its body (`dryRun`,
-//!   `preconditions`), the query parameter ignored;
+//!   `POST` (the defaults are written, as for an apply), `GET` and `LIST` with a label selector, and `DELETE` with the options
+//!   in its body (`dryRun`, `preconditions`), the query parameter ignored;
+//! * **finalizers**: a `DELETE` of an object that has some sets `metadata.deletionTimestamp` (and moves the version and the
+//!   generation) and answers the object, not a `Status`, as the real server does; the object stays until the last finalizer is
+//!   removed (`State::run_finalizer`, or a merge patch that empties the list), and an apply of a terminating object is accepted;
+//! * the order of the refusals of an apply: a body the schema refuses (`500`), the fields another manager owns (`409`), the
+//!   `resourceVersion` (`409`), and only then the `uid` and the rules of the CRD (`422`): a stale version and a CEL violation
+//!   are a `409`;
 //! * the answers of the rules a body can break, as the `Status` bodies captured from the real thing
 //!   (`tests/fixtures/status`);
 //! * a kind that is not served (ExternalSecrets, until they are) answers the plain text `404 page not found`.
 //!
-//! It is not an API server: there is no authorization (`calls()` is how a test shows what was asked), no
-//! finalizers, no watches, no paging, no validation but the few rules above, and the defaults are the few the
+//! It is not an API server: there is no authorization (`calls()` is how a test shows what was asked), no garbage
+//! collection, no watches, no paging, no validation but the few rules above, and the defaults are the few the
 //! tests need. What a cluster does is `tests/cluster.rs`'s.
 
 #![allow(dead_code, clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 
+pub mod facts;
 pub mod harness;
 pub mod intercept;
 
@@ -281,6 +288,16 @@ impl Fake {
     }
 }
 
+/// When the fake says an object began to be deleted.
+const DELETION_TIMESTAMP: &str = "2026-10-16T00:00:00Z";
+
+/// Whether the object has finalizers.
+fn has_finalizers(value: &Value) -> bool {
+    value["metadata"]["finalizers"]
+        .as_array()
+        .is_some_and(|f| !f.is_empty())
+}
+
 fn key(plural: &str, name: &str) -> String {
     format!("{plural}/{name}")
 }
@@ -350,8 +367,9 @@ fn fixture(text: &str, name: &str) -> (u16, Value) {
 
 // ------------------------------------------------------------------ the rules a body can break
 
-/// The rules the fake knows. The first that matches answers; the bodies are the captured ones.
-fn refuse(plural: &str, name: &str, patch: &Value) -> Option<(u16, Value)> {
+/// A body the schema of the CRD refuses: the `500` of a typed patch that cannot be made (captured). It comes
+/// before everything else, even before a stale `resourceVersion`: the real server builds the typed patch first.
+fn schema_refusal(plural: &str, name: &str, patch: &Value) -> Option<(u16, Value)> {
     let spec = patch.get("spec");
     if let Some(spec) = spec
         && !spec.is_object()
@@ -362,17 +380,24 @@ fn refuse(plural: &str, name: &str, patch: &Value) -> Option<(u16, Value)> {
             name,
         ));
     }
+    if plural == "agentservices"
+        && patch
+            .pointer("/spec/suspend")
+            .is_some_and(|v| !v.is_boolean())
+    {
+        return Some(fixture(
+            include_str!("../fixtures/status/apply-type-mismatch.500.json"),
+            name,
+        ));
+    }
+    None
+}
+
+/// The rules of the CRD (CEL): a `422` with the field, as captured. They are checked **after** the
+/// `resourceVersion` (a stale version and a CEL violation are a `409`, observed on a v1.35.8).
+fn rule_refusal(plural: &str, name: &str, patch: &Value) -> Option<(u16, Value)> {
     match plural {
         "agentservices" => {
-            if patch
-                .pointer("/spec/suspend")
-                .is_some_and(|v| !v.is_boolean())
-            {
-                return Some(fixture(
-                    include_str!("../fixtures/status/apply-type-mismatch.500.json"),
-                    name,
-                ));
-            }
             let audience = patch
                 .pointer("/spec/access/audience")
                 .and_then(Value::as_array);
@@ -674,6 +699,8 @@ impl State {
             .get("fieldManager")
             .cloned()
             .unwrap_or_else(|| "unknown".to_owned());
+        // The defaults of the schema are written into what is stored, and an update owns what it caused.
+        defaults(plural, &mut object);
         let mut paths = BTreeSet::new();
         leaves(
             &object["metadata"]["labels"].clone(),
@@ -761,7 +788,7 @@ impl State {
             let hook = self.delete_hooks.remove(i);
             (hook.run)(self);
         }
-        let Some(obj) = self.objects.get(&key(plural, name)) else {
+        let Some(obj) = self.objects.get(&key(plural, name)).cloned() else {
             return not_found(plural, name);
         };
         let pre = call.body.as_ref().map(|b| &b["preconditions"]);
@@ -772,7 +799,10 @@ impl State {
                 plural,
                 name,
                 &format!(
-                    "the ResourceVersion in the precondition ({rv}) does not match the ResourceVersion in record. The object might have been modified"
+                    "the ResourceVersion in the precondition ({rv}) does not match the ResourceVersion in record ({}). The object might have been modified",
+                    obj.value["metadata"]["resourceVersion"]
+                        .as_str()
+                        .unwrap_or_default()
                 ),
             );
         }
@@ -786,6 +816,22 @@ impl State {
                     "the UID in the precondition ({uid}) does not match the UID in record. The object might have been deleted and then recreated"
                 ),
             );
+        }
+        if has_finalizers(&obj.value) {
+            // The object stays, terminating, until its finalizers have run; the answer is the object (observed on a
+            // v1.35.8: a `200` with `deletionTimestamp`, the version and the generation moved on the first delete, and
+            // nothing moved on the next ones). A dry run answers what it would have done.
+            let mut obj = obj;
+            if obj.value["metadata"].get("deletionTimestamp").is_none() {
+                obj.value["metadata"]["deletionTimestamp"] = json!(DELETION_TIMESTAMP);
+                let generation = obj.value["metadata"]["generation"].as_i64().unwrap_or(1);
+                obj.value["metadata"]["generation"] = json!(generation + 1);
+                if !call.dry_run() {
+                    obj.value["metadata"]["resourceVersion"] = json!(self.bump());
+                    self.objects.insert(key(plural, name), obj.clone());
+                }
+            }
+            return (200, self.answer(plural, &obj));
         }
         if !call.dry_run() {
             self.objects.remove(&key(plural, name));
@@ -822,7 +868,14 @@ impl State {
         }
         let answer = self.answer(plural, &obj);
         if !dry_run {
-            self.objects.insert(key(plural, name), obj);
+            if obj.value["metadata"].get("deletionTimestamp").is_some()
+                && !has_finalizers(&obj.value)
+            {
+                // The last finalizer of an object that is being deleted went: the object goes with it.
+                self.objects.remove(&key(plural, name));
+            } else {
+                self.objects.insert(key(plural, name), obj);
+            }
         }
         (if created { 201 } else { 200 }, answer)
     }
@@ -849,7 +902,8 @@ impl State {
             );
         };
         let force = call.query.get("force").is_some_and(|f| f == "true");
-        if let Some(refusal) = refuse(plural, name, &patch) {
+        // The typed patch is made first: a body the schema refuses is refused whatever else is wrong.
+        if let Some(refusal) = schema_refusal(plural, name, &patch) {
             return refusal;
         }
         let existing = self.objects.get(&key(plural, name)).cloned();
@@ -857,26 +911,15 @@ impl State {
             return not_found(plural, name);
         }
 
-        // The uid names an object: another one is immutable, and none at all is a conflict.
-        if let Some(uid) = patch["metadata"]["uid"].as_str() {
-            match &existing {
-                None => {
-                    return conflict(
-                        plural,
-                        name,
-                        &format!(
-                            "uid mismatch: the provided object specified uid {uid}, and no existing object was found"
-                        ),
-                    );
-                }
-                Some(o) if o.value["metadata"]["uid"] != json!(uid) => {
-                    return fixture(
-                        include_str!("../fixtures/status/apply-uid-immutable.422.json"),
-                        name,
-                    );
-                }
-                Some(_) => {}
-            }
+        // A uid for an object that is not there is a conflict.
+        if let (Some(uid), None) = (patch["metadata"]["uid"].as_str(), &existing) {
+            return conflict(
+                plural,
+                name,
+                &format!(
+                    "uid mismatch: the provided object specified uid {uid}, and no existing object was found"
+                ),
+            );
         }
 
         let applied = owned_leaves(&patch, sub);
@@ -925,6 +968,19 @@ impl State {
                 name,
                 "the object has been modified; please apply your changes to the latest version and try again",
             );
+        }
+        // What the object's own validation says comes after the version: a `uid` that is another object's is
+        // immutable, and the rules of the CRD.
+        if let (Some(uid), Some(o)) = (patch["metadata"]["uid"].as_str(), &existing)
+            && o.value["metadata"]["uid"] != json!(uid)
+        {
+            return fixture(
+                include_str!("../fixtures/status/apply-uid-immutable.422.json"),
+                name,
+            );
+        }
+        if let Some(refusal) = rule_refusal(plural, name, &patch) {
+            return refusal;
         }
 
         if force {
@@ -1024,6 +1080,28 @@ impl State {
     /// Delete an object as somebody else (for a hook).
     pub fn remove(&mut self, plural: &str, name: &str) {
         self.objects.remove(&key(plural, name));
+    }
+
+    /// Put a finalizer on an object, as the operator does before it makes anything (for a hook): a merge patch by
+    /// `aap-operator`. A `DELETE` of the object then leaves it terminating.
+    pub fn add_finalizer(&mut self, plural: &str, name: &str, finalizer: &str) {
+        self.merge_as(
+            "aap-operator",
+            plural,
+            name,
+            json!({ "metadata": { "finalizers": [finalizer] } }),
+        );
+    }
+
+    /// The finalizers have run, as the operator's do once the compute is gone (for a hook): the list is emptied, and an
+    /// object that is being deleted goes.
+    pub fn run_finalizer(&mut self, plural: &str, name: &str) {
+        self.merge_as(
+            "aap-operator",
+            plural,
+            name,
+            json!({ "metadata": { "finalizers": null } }),
+        );
     }
 }
 
