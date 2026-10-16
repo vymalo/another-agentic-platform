@@ -172,7 +172,30 @@ verifies), and `Tuning` (a test shortens them) is not `Deserialize`.
 
 | Feature | Default | Effect |
 |---|---|---|
-| `testkit` | no | `testkit::TestIdp`: an issuer on `127.0.0.1:<port>` serving its discovery document and its JWKS, with RSA 2048, P-256 and Ed25519 keys made at run time, once per process (twice: one set it publishes, one it does not until `publish_unpublished_keys()`; `withdraw_unpublished_keys()` takes it back), `mint(claims, Signing)` for the tokens the cases need (the right ones, and `alg: none`, HS256 with a public key as the secret, a key that is not published, one that signs under a published `kid`, one with no `kid`), `forge(header, claims, signature)` for the headers that must be refused unread, `set_jwks_down`, `set_discovery_down` and fetch counters; and `TestAuthenticator`, a `TestIdp` and an `OidcAuthenticator` for it, which is an `Authenticator` and an `AuthenticatorUnderTest` (`issue` gives a token with the permissions asked, `without_keys` an authenticator whose issuer answers 503). For this crate's tests and the Platform API's router tests (D7). **No private key is in the repository.** |
+| `testkit` | no | `testkit::TestIdp`: an issuer on `127.0.0.1:<port>` (`start_at(bind, public_host)`: on the address you say and named `http://<public_host>:<port>`, which is what a client in a cluster is configured with) serving its discovery document and its JWKS, with RSA 2048, P-256 and Ed25519 keys made at run time, once per process (twice: one set it publishes, one it does not until `publish_unpublished_keys()`; `withdraw_unpublished_keys()` takes it back), `token_with_roles(audience, subject, roles_claim, roles)` for a good token that holds roles (at a dotted path, nested), `mint(claims, Signing)` for the tokens the cases need (the right ones, and `alg: none`, HS256 with a public key as the secret, a key that is not published, one that signs under a published `kid`, one with no `kid`), `forge(header, claims, signature)` for the headers that must be refused unread, `set_jwks_down`, `set_discovery_down` and fetch counters; and `TestAuthenticator`, a `TestIdp` and an `OidcAuthenticator` for it, which is an `Authenticator` and an `AuthenticatorUnderTest` (`issue` gives a token with the permissions asked, `without_keys` an authenticator whose issuer answers 503). For this crate's tests and the Platform API's router tests (D7). **No private key is in the repository.** |
+
+## Test tooling: the issuer as a program
+
+`examples/test-issuer.rs` (`required-features = ["testkit"]`; an example, so **nothing ships it**: no image, no chart) is the testkit's issuer as a
+process, for the kind end-to-end of the Platform API ([`deploy/operator/tests/e2e/api-e2e.sh`](../../deploy/operator/tests/e2e/README.md), D7b2): the API
+pod in a cluster has to fetch an issuer's discovery document and keys, and the script has to get tokens for people who hold chosen permissions.
+
+```sh
+cargo build -p aap-auth-oidc --example test-issuer --features testkit --locked
+target/debug/examples/test-issuer --bind 0.0.0.0:0 --public-host 172.18.0.1     # the host's address on the docker network of kind
+```
+
+| Flag | Default | |
+|---|---|---|
+| `--bind` | `127.0.0.1:0` | Where the issuer listens (`0.0.0.0:0`: a free port on every interface, which a cluster reaches at the host's address) |
+| `--public-host` | `127.0.0.1` | The host of its name, `http://<host>:<port>`: the `iss` of its tokens and the `issuer` of its discovery document |
+| `--control` | `127.0.0.1:0` | Where `GET /token?sub=<subject>&roles=<a,b,c>` answers a signed token. **A loopback address only; any other is refused at start**: minting must not be reachable from the cluster |
+| `--audience` | `aap-test-api` | The `aud` of its tokens |
+| `--roles-claim` | `agentic_roles` | The claim that holds the roles; a dotted path is nested |
+
+It prints `issuer=`, `audience=`, `roles-claim=` and `control=` lines and `ready`, then serves until it is killed. The keys are the testkit's, made when it starts; a token is good for
+five minutes. It serves the discovery document and `/jwks` and nothing else on the issuer's port. *Run 2026-10-16* by hand: the discovery document names the issuer, the
+token's claims are the ones asked for, a missing `sub` is `400`, `/token` on the issuer's port is `404`, and `--control 0.0.0.0:0` exits `1`.
 
 ## Tests
 
@@ -188,12 +211,12 @@ Over real HTTP, against issuers on local ports; the cache's intervals are shorte
   sub); the leeway pinned at 55 s (accepted) and 65 s (refused) for `exp` and `nbf`; `iat` not required; `cnf` accepted;
   the time checks come after the signature; a token of exactly the cap and one step more; garbage; the roles claim (nested, named
   with dots, a text, every bad shape, only the configured claim is read).
-- `tests/jwks.rs` (21): discovery and `jwksUrl`; fetched on first use and by `ready()`; refreshed when old; one fetch for concurrent first
+- `tests/jwks.rs` (23): discovery and `jwksUrl`; fetched on first use and by `ready()`; refreshed when old; one fetch for concurrent first
   requests; **an unknown `kid` is one fetch for a flood and none within 30 s**; a rotated key is found and a withdrawn one is lost at the
   refresh; an unknown `kid` with the issuer down is `Unavailable`; the issuer down at the start and recovering; the retry interval; the
   stale copy and its grace (`TooOld`); a discovery document for another issuer, without a usable `jwks_uri`; a redirect never followed; an
   answer over 1 MiB; an answer that is not a key set, not JSON, or has no usable key; an unreachable issuer; unusable keys beside good
-  ones; a trailing slash on the issuer, and exactly one of several removed to find the discovery document.
+  ones; a trailing slash on the issuer, and exactly one of several removed to find the discovery document; **the testkit's issuer started at an address and named by another host** (its `iss` and its discovery document say the name, and a token of it is accepted), and `token_with_roles` (two tokens of the same second differ, the roles are nested at a dotted path, no roles is a token that holds nothing).
 - `tests/keys.rs` (7): real keys, as issuers write them: an Ed25519 key whose public key starts with a zero octet verifies; Ed25519 keys of
   31, 33 and no octets are not keys; a P-256 key whose `x` (and one whose `y`) starts with a zero verifies written in full, cut and with a
   sign byte; coordinates of 33 significant octets or none are not keys; an RSA key verifies with a sign byte before `n` and `e` written

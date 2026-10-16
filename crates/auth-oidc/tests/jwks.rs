@@ -650,3 +650,80 @@ async fn only_one_terminating_slash_of_the_issuer_is_removed_to_find_the_discove
         );
     }
 }
+
+// ---- the testkit's issuer at an address of the caller's choosing (the kind end-to-end of the Platform API) ----------
+
+#[tokio::test]
+async fn an_issuer_started_at_an_address_names_itself_by_the_host_it_is_told() {
+    // Bound on one address and named by another host, as an issuer on the runner is for a pod that reaches the runner at the
+    // docker network's gateway: `iss` and the discovery document say the name the client was configured with.
+    let idp = TestIdp::start_at("127.0.0.1:0", "localhost").await;
+    assert!(
+        idp.issuer().starts_with("http://localhost:"),
+        "{}",
+        idp.issuer()
+    );
+    let port = idp.issuer().rsplit(':').next().unwrap().to_owned();
+    assert!(port.parse::<u16>().unwrap() > 0, "{port}");
+
+    let client = reqwest::Client::builder().no_proxy().build().unwrap();
+    let discovery: Value = serde_json::from_str(
+        &client
+            .get(format!("{}/.well-known/openid-configuration", idp.issuer()))
+            .send()
+            .await
+            .unwrap()
+            .text()
+            .await
+            .unwrap(),
+    )
+    .unwrap();
+    assert_eq!(discovery["issuer"], json!(idp.issuer()));
+    assert_eq!(discovery["jwks_uri"], json!(idp.jwks_url()));
+
+    let auth = OidcAuthenticator::with_tuning(idp.config(), tuning()).unwrap();
+    let roles = ["platform:agents.read", "platform:agents.write"];
+    let token = idp.token_with_roles(TEST_AUDIENCE, SUBJECT, "agentic_roles", &roles);
+    let principal = assert_accepted(check(&auth, &token).await, "a token of an issuer at a name");
+    assert_eq!(principal.subject(), SUBJECT);
+    assert_eq!(principal.permissions().collect::<Vec<_>>(), roles);
+}
+
+#[tokio::test]
+async fn tokens_with_roles_differ_and_nest_the_claim_at_a_dotted_path() {
+    let idp = TestIdp::start().await;
+    let config = OidcConfig::new(
+        idp.issuer(),
+        [TEST_AUDIENCE],
+        "resource_access.another-agentic.roles",
+    );
+    let auth = OidcAuthenticator::with_tuning(config, tuning()).unwrap();
+    let roles = ["platform:agents.read".to_owned()];
+    let first = idp.token_with_roles(
+        TEST_AUDIENCE,
+        SUBJECT,
+        "resource_access.another-agentic.roles",
+        &roles,
+    );
+    let second = idp.token_with_roles(
+        TEST_AUDIENCE,
+        SUBJECT,
+        "resource_access.another-agentic.roles",
+        &roles,
+    );
+    assert_ne!(first, second, "the same second, two tokens");
+    for token in [first, second] {
+        let principal = assert_accepted(check(&auth, &token).await, "a nested roles claim");
+        assert!(principal.holds("platform:agents.read"));
+    }
+    // No roles is a good token that holds nothing.
+    let none: [&str; 0] = [];
+    let token = idp.token_with_roles(
+        TEST_AUDIENCE,
+        SUBJECT,
+        "resource_access.another-agentic.roles",
+        &none,
+    );
+    let principal = assert_accepted(check(&auth, &token).await, "no roles");
+    assert_eq!(principal.permissions().count(), 0);
+}
