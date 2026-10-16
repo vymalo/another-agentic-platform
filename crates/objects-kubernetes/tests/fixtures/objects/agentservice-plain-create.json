@@ -1,0 +1,131 @@
+{
+  "apiVersion": "agents.vymalo.com/v1alpha1",
+  "kind": "AgentService",
+  "metadata": {
+    "creationTimestamp": "2026-10-16T01:26:51Z",
+    "generation": 1,
+    "managedFields": [
+      {
+        "apiVersion": "agents.vymalo.com/v1alpha1",
+        "fieldsType": "FieldsV1",
+        "fieldsV1": {
+          "f:spec": {
+            ".": {},
+            "f:access": {
+              ".": {},
+              "f:allowFrom": {},
+              "f:audience": {}
+            },
+            "f:configRef": {
+              ".": {},
+              "f:name": {}
+            },
+            "f:deletionPolicy": {},
+            "f:description": {},
+            "f:interfaces": {
+              ".": {},
+              "f:a2a": {
+                ".": {},
+                "f:bearerTokensSecretRef": {
+                  ".": {},
+                  "f:key": {},
+                  "f:name": {}
+                },
+                "f:enabled": {}
+              },
+              "f:mcp": {
+                ".": {},
+                "f:enabled": {}
+              },
+              "f:responses": {
+                ".": {},
+                "f:enabled": {}
+              }
+            },
+            "f:registry": {
+              ".": {},
+              "f:tags": {},
+              "f:title": {}
+            },
+            "f:scaling": {
+              ".": {},
+              "f:topology": {},
+              "f:workers": {}
+            },
+            "f:store": {
+              ".": {},
+              "f:postgres": {
+                ".": {},
+                "f:cnpg": {
+                  ".": {},
+                  "f:instances": {},
+                  "f:storage": {
+                    ".": {},
+                    "f:size": {}
+                  }
+                }
+              }
+            },
+            "f:suspend": {}
+          }
+        },
+        "manager": "kubectl-create",
+        "operation": "Update",
+        "time": "2026-10-16T01:26:51Z"
+      }
+    ],
+    "name": "o2",
+    "namespace": "aap-test",
+    "resourceVersion": "427",
+    "uid": "99316b1d-82d3-43f3-840e-ed054b4afd63"
+  },
+  "spec": {
+    "access": {
+      "allowFrom": [],
+      "audience": [
+        "agent.use:o1"
+      ]
+    },
+    "configRef": {
+      "name": "o1"
+    },
+    "deletionPolicy": "Retain",
+    "description": "A sample agent.",
+    "interfaces": {
+      "a2a": {
+        "bearerTokensSecretRef": {
+          "key": "A2A_BEARER_TOKENS",
+          "name": "aap-sentinel-a2a"
+        },
+        "enabled": true
+      },
+      "mcp": {
+        "enabled": false
+      },
+      "responses": {
+        "enabled": false
+      }
+    },
+    "registry": {
+      "tags": [
+        "sample"
+      ],
+      "title": "Sample"
+    },
+    "scaling": {
+      "topology": "combined",
+      "workers": 1
+    },
+    "store": {
+      "postgres": {
+        "cnpg": {
+          "instances": 1,
+          "storage": {
+            "size": "5Gi"
+          }
+        }
+      }
+    },
+    "suspend": false
+  }
+}

@@ -1,0 +1,18 @@
+{
+  "kind": "Status",
+  "apiVersion": "v1",
+  "metadata": {},
+  "status": "Failure",
+  "message": "Apply failed with 1 conflict: conflict with \"kubectl-edit\" using agents.vymalo.com/v1alpha1: .spec.registry.title",
+  "reason": "Conflict",
+  "details": {
+    "causes": [
+      {
+        "reason": "FieldManagerConflict",
+        "message": "conflict with \"kubectl-edit\" using agents.vymalo.com/v1alpha1",
+        "field": ".spec.registry.title"
+      }
+    ]
+  },
+  "code": 409
+}

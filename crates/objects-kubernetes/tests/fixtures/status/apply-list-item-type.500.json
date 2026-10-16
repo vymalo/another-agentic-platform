@@ -1,0 +1,8 @@
+{
+  "kind": "Status",
+  "apiVersion": "v1",
+  "metadata": {},
+  "status": "Failure",
+  "message": "failed to create typed patch object (/x; agents.vymalo.com/v1alpha1, Kind=AgentService): .spec.access.audience[1]: expected string, got &value.valueUnstructured{Value:3}",
+  "code": 500
+}

@@ -1,0 +1,14 @@
+{
+  "kind": "Status",
+  "apiVersion": "v1",
+  "metadata": {},
+  "status": "Failure",
+  "message": "Operation cannot be fulfilled on AgentService.agents.vymalo.com \"x\": the UID in the precondition (22222222-2222-2222-2222-222222222222) does not match the UID in record (008eed78-1436-46db-9581-4e34528bb3da). The object might have been deleted and then recreated",
+  "reason": "Conflict",
+  "details": {
+    "name": "x",
+    "group": "agents.vymalo.com",
+    "kind": "AgentService"
+  },
+  "code": 409
+}

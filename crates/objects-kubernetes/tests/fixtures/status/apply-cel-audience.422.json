@@ -1,0 +1,21 @@
+{
+  "kind": "Status",
+  "apiVersion": "v1",
+  "metadata": {},
+  "status": "Failure",
+  "message": "AgentService.agents.vymalo.com \"x\" is invalid: spec.access.audience: Invalid value: access.audience: the value * is only allowed alone",
+  "reason": "Invalid",
+  "details": {
+    "name": "x",
+    "group": "agents.vymalo.com",
+    "kind": "AgentService",
+    "causes": [
+      {
+        "reason": "FieldValueInvalid",
+        "message": "Invalid value: access.audience: the value * is only allowed alone",
+        "field": "spec.access.audience"
+      }
+    ]
+  },
+  "code": 422
+}

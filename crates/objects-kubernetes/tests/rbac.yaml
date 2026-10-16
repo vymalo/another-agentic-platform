@@ -1,0 +1,16 @@
+# The Role of the crate under test: exactly what `aap-objects-kubernetes` asks of the API server in its namespace,
+# and no right on Secrets. `tests/rbac.rs` holds it equal to the calls the crate makes (and to the README's table),
+# `tests/cluster.rs` runs the conformance suite as an identity that has this Role and nothing else, and checks the
+# identity's rights one by one.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: aap-objects-kubernetes
+  namespace: aap-test
+rules:
+  - apiGroups: [agents.vymalo.com]
+    resources: [agentservices, agentconfigs, modelendpoints, toolproviders]
+    verbs: [create, delete, get, list, patch]
+  - apiGroups: [external-secrets.io]
+    resources: [externalsecrets]
+    verbs: [list]

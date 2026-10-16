@@ -1,0 +1,8 @@
+{
+  "kind": "Status",
+  "apiVersion": "v1",
+  "metadata": {},
+  "status": "Failure",
+  "message": "failed to create typed patch object (/x; agents.vymalo.com/v1alpha1, Kind=AgentService): .spec.bogus: field not declared in schema",
+  "code": 500
+}

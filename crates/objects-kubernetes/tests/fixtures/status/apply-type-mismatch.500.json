@@ -1,0 +1,8 @@
+{
+  "kind": "Status",
+  "apiVersion": "v1",
+  "metadata": {},
+  "status": "Failure",
+  "message": "failed to create typed patch object (/x; agents.vymalo.com/v1alpha1, Kind=AgentService): .spec.suspend: expected boolean, got &{yes}",
+  "code": 500
+}

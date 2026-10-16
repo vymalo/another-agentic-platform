@@ -1,0 +1,14 @@
+{
+  "kind": "Status",
+  "apiVersion": "v1",
+  "metadata": {},
+  "status": "Failure",
+  "message": "Operation cannot be fulfilled on AgentService.agents.vymalo.com \"x\": the ResourceVersion in the precondition (1) does not match the ResourceVersion in record (247). The object might have been modified",
+  "reason": "Conflict",
+  "details": {
+    "name": "x",
+    "group": "agents.vymalo.com",
+    "kind": "AgentService"
+  },
+  "code": 409
+}

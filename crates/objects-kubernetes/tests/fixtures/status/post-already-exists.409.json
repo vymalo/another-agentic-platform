@@ -1,0 +1,14 @@
+{
+  "kind": "Status",
+  "apiVersion": "v1",
+  "metadata": {},
+  "status": "Failure",
+  "message": "agentservices.agents.vymalo.com \"x\" already exists",
+  "reason": "AlreadyExists",
+  "details": {
+    "name": "x",
+    "group": "agents.vymalo.com",
+    "kind": "agentservices"
+  },
+  "code": 409
+}

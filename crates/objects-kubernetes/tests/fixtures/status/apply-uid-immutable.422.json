@@ -1,0 +1,26 @@
+{
+  "kind": "Status",
+  "apiVersion": "v1",
+  "metadata": {},
+  "status": "Failure",
+  "message": "AgentService.agents.vymalo.com \"x\" is invalid: metadata.uid: Invalid value: \"22222222-2222-2222-2222-222222222222\": field is immutable",
+  "reason": "Invalid",
+  "details": {
+    "name": "x",
+    "group": "agents.vymalo.com",
+    "kind": "AgentService",
+    "causes": [
+      {
+        "reason": "FieldValueInvalid",
+        "message": "Invalid value: \"22222222-2222-2222-2222-222222222222\": field is immutable",
+        "field": "metadata.uid"
+      },
+      {
+        "reason": "FieldValueInvalid",
+        "message": "Invalid value: \"22222222-2222-2222-2222-222222222222\": field is immutable",
+        "field": "metadata.uid"
+      }
+    ]
+  },
+  "code": 422
+}
