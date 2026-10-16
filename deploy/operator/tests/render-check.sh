@@ -80,6 +80,13 @@ rules_are() { [ "$(role_rules)" = "$1" ]; }
 # The same for the Platform API's Role, and for the file that Role must equal.
 api_role_rules() { doc Role aap-operator-api | rules_from; }
 api_rules_are() { [ "$(api_role_rules)" = "$1" ]; }
+# The n-th egress rule (from 1) of the API's NetworkPolicy, and the securityContext of the pod (six spaces: spec.template.spec) and of the
+# container (ten spaces) of its Deployment, each alone: a pattern that must hold for the pod is not satisfied by the container's block.
+api_egress_rule() { doc NetworkPolicy aap-operator-api | awk -v n="$1" '/^  egress:$/ { e = 1; next } e && /^    - / { i++ } e && i == n { print }'; }
+api_pod_security() { doc Deployment aap-operator-api | awk '/^      securityContext:$/ { s = 1; print; next } s && /^        / { print; next } s { exit }'; }
+api_container_security() { doc Deployment aap-operator-api | awk '/^          securityContext:$/ { s = 1; print; next } s && /^            / { print; next } s { exit }'; }
+all_of() { b=$1; shift; for p in "$@"; do printf '%s\n' "$b" | grep -Eq -- "$p" || return 1; done; }
+none_of() { b=$1; shift; for p in "$@"; do ! printf '%s\n' "$b" | grep -Eq -- "$p" || return 1; done; }
 # The operator reads the shared objects of the dashboard (AD-029) and never writes them.
 shared_kinds_are_read_only() {
   shared=$(role_rules | grep -E 'modelendpoints|toolproviders') || return 1
@@ -376,6 +383,62 @@ secretref_pod() {
 }
 check "api (secretref shape): the image is tag and digest, the log level and the grace period are the values, and there is no preStop hook" secretref_pod
 
+# The shape that sets every value: what each one does to the render. (It renders from the defaults of values.yaml, so each of these differs from them.)
+render -f "$here/api-full.values.yaml"
+api_ports_in_the_file_and_the_pod() {
+  dhas ConfigMap aap-operator-api '^    listen: 0.0.0.0:8443$' '^    healthListen: 0.0.0.0:9091$' \
+    && dlacks ConfigMap aap-operator-api 'listen: 0.0.0.0:(8080|8081)$' \
+    && dhas Deployment aap-operator-api 'containerPort: 8443' 'containerPort: 9091' && dlacks Deployment aap-operator-api 'containerPort: (8080|8081)'
+}
+check "api (full shape): api.port and api.healthPort (8443, 9091) are the file's listen and healthListen and the container's ports, the defaults nowhere" \
+  api_ports_in_the_file_and_the_pod
+api_ports_in_the_service_and_the_policy() {
+  dhas Service aap-operator-api 'port: 8443' 'targetPort: http' && dlacks Service aap-operator-api 'port: (8080|8081|9091)' \
+    && dhas NetworkPolicy aap-operator-api 'port: 8443' && dlacks NetworkPolicy aap-operator-api 'port: (8080|8081|9091)$'
+}
+check "api (full shape): the Service and the policy's ingress are on api.port (8443) and the health port (9091) is in neither" api_ports_in_the_service_and_the_policy
+api_probes_follow_the_health_port() {
+  # The probes name the port `health`, which is the container's second port: the number is only in the ports list.
+  dcount Deployment aap-operator-api 'port: health' 3 && dhas Deployment aap-operator-api 'name: health' 'containerPort: 9091'
+}
+check "api (full shape): the three probes go to the named port health, which is 9091" api_probes_follow_the_health_port
+api_apiserver_rule() {
+  r=$(api_egress_rule 1)
+  all_of "$r" '^      - protocol: TCP$|^        - protocol: TCP$' 'port: 443$' 'port: 6443$' 'port: 16443$' '^      to:$' 'cidr: 10\.96\.0\.1/32$' 'cidr: 192\.168\.49\.2/32$' \
+    && [ "$(printf '%s\n' "$r" | grep -c 'ipBlock:')" -eq 2 ] && none_of "$r" '203\.113|169\.254'
+}
+check "api (full shape): egress rule 1 is the API server on its ports, to the addresses of apiServer.cidrs and no others" api_apiserver_rule
+api_dns_rule() {
+  r=$(api_egress_rule 2)
+  all_of "$r" 'cidr: 169\.254\.20\.10/32$' && [ "$(printf '%s\n' "$r" | grep -c 'port: 53$')" -eq 2 ] && [ "$(printf '%s\n' "$r" | grep -c 'port: 5353$')" -eq 2 ] \
+    && none_of "$r" 'kube-dns|10\.96|203\.0'
+}
+check "api (full shape): egress rule 2 is DNS on 53 and 5353 over UDP and TCP, to dns.to" api_dns_rule
+api_issuer_rule() {
+  r=$(api_egress_rule 3)
+  all_of "$r" '^      to:$' 'cidr: 203\.0\.113\.0/24$' 'kubernetes.io/metadata.name: identity$' 'app: keycloak$' 'port: 443$' 'port: 8443$' \
+    && none_of "$r" 'port: (53|6443|16443)$' '10\.96\.0\.1|169\.254'
+}
+check "api (full shape): egress rule 3 is the issuer on issuer.ports (443, 8443), to the peers of issuer.to" api_issuer_rule
+api_policy_ingress_peers() {
+  dhas NetworkPolicy aap-operator-api 'kubernetes.io/metadata.name: ingress-nginx$' 'cidr: 10\.0\.0\.0/8$' && dlacks NetworkPolicy aap-operator-api 'app.kubernetes.io/name: traefik'
+}
+check "api (full shape): the policy's ingress peers are api.networkPolicy.from" api_policy_ingress_peers
+render -f "$here/api.values.yaml"
+api_default_rules_are_open_on_their_ports() {
+  all_of "$(api_egress_rule 1)" 'port: 443$' 'port: 6443$' && none_of "$(api_egress_rule 1)" 'ipBlock' '^      to:$' \
+    && all_of "$(api_egress_rule 3)" 'port: 443$' && none_of "$(api_egress_rule 3)" 'ipBlock' 'namespaceSelector' '^      to:$'
+}
+check "api: with no apiServer.cidrs and no issuer.to the two rules have no 'to': any address on those ports (as the README says)" api_default_rules_are_open_on_their_ports
+# The pod's security context and the container's, each by itself.
+render -f "$here/api.values.yaml"
+check "api: the POD's securityContext (spec.template.spec) has runAsNonRoot, uid and gid 65532 and the RuntimeDefault seccomp profile" \
+  all_of "$(api_pod_security)" 'runAsNonRoot: true$' 'runAsUser: 65532$' 'runAsGroup: 65532$' 'type: RuntimeDefault$'
+check "api: the POD's securityContext holds nothing of the container's (no escalation, no read-only root file system, no capabilities)" \
+  none_of "$(api_pod_security)" 'allowPrivilegeEscalation' 'readOnlyRootFilesystem' 'capabilities'
+check "api: the CONTAINER's securityContext has no privilege escalation, a read-only root file system, runAsNonRoot and no capability" \
+  all_of "$(api_container_security)" 'allowPrivilegeEscalation: false$' 'readOnlyRootFilesystem: true$' 'runAsNonRoot: true$' 'drop: \[ALL\]$'
+
 # ---- What is refused -------------------------------------------------------------------------------------------------------
 check "a replica count is refused (no leader election in v0)" refused 'no leader election' --set replicaCount=2
 check "an empty image tag is refused" refused 'image.tag is required' --set image.tag=
@@ -481,6 +544,7 @@ check "no peer that may reach the API is refused while the policy is on" refused
 check "a peer that names nothing is refused" refused_api 'a peer needs a namespaceSelector' --set-json 'api.networkPolicy.from=[{"foo":"bar"}]'
 check "a DNS peer that names nothing is refused" refused_api 'api.networkPolicy.dns.to: a peer needs' --set-json 'api.networkPolicy.dns.to=[{"foo":"bar"}]'
 check "no API server port is refused" refused_api 'api.networkPolicy.apiServer.ports must name at least one port' --set api.networkPolicy.apiServer.ports=null
+check "an issuer peer that names nothing is refused" refused_api 'api.networkPolicy.issuer.to: a peer needs' --set-json 'api.networkPolicy.issuer.to=[{"foo":"bar"}]'
 check "an issuer port that is not a port is refused" refused_api 'api.networkPolicy.issuer.ports: 99999 is not a port number' --set-json 'api.networkPolicy.issuer.ports=[99999]'
 # The URL, the origins and the registries are read as the binary reads them (aap-auth-oidc's http_url, aap-platform-api's CorsOrigins,
 # aap-forms' is_host): a value the binary refuses at start is refused here, by name, and the edge of what it accepts renders.
