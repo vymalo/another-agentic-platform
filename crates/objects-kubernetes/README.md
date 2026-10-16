@@ -74,13 +74,18 @@ stateDiagram-v2
 **The one window.** The API server writes one object at a time, so when somebody else saves the service between the dry runs and the
 apply of the service, the config is already written and the answer is `PreconditionFailed` (`412`). The next read shows both objects
 as they are, and a retry succeeds; a create that stopped halfway leaves a dashboard-owned config that the next create takes over.
-`tests/api.rs` shows the window (`when_the_service_changes_between_the_two_applies...`) and its two cousins: a create never merges
-into a service made in the meantime, and a replace never brings back one that was deleted.
+`tests/api.rs` (the fake) and `tests/cluster.rs` (a real API server, through a client that lets an administrator get in first,
+`tests/support/intercept.rs`) show the window (`when_the_service_changes_between_the_two_applies...`) and its two cousins: a create never
+merges into a service made in the meantime, and a replace never brings back one that was deleted.
 
 **A create is an apply of an object that must not be there.** The API server has no "only if absent" for an apply, so the create names
 a `resourceVersion` that no object has ([`NEVER`](src/lib.rs), `1`): the server ignores the version of an object that is not there and
 refuses it, with a `409`, for one that is. **A replace names the `uid` it read**, so a service that was deleted and made again, or
 deleted, is a `409` and never a create.
+
+The client is the caller's, and so are its timeouts (the composition root of the API builds it). Lists are not paged: a namespace holds
+tens of agents. An object the operator is deleting (a service whose finalizer has not run) is read as it is until the operator releases it;
+`Stored` carries no deletion timestamp (§60a, D5's questions).
 
 ## Applying
 
@@ -186,7 +191,7 @@ test skips unless `AAP_TEST_KUBECONFIG` is set.
 | `tests/api.rs` | `agent_objects_conformance!` (28) on the fake, and what the suite cannot see: the dry runs come first and the config before the service, the version and uid of every apply, the label and the spec and nothing else, no `force`, no `status`, no annotation, no Secret read, every refusal makes **no write at all** (CEL on either body, a type, a stale token on either object, a field another manager owns), the window, a create over a service made meanwhile, a replace over one deleted meanwhile, the deletes (what they are bound to), outages and a kind that is not served, every mistake in one `Invalid`, names that are not names |
 | `tests/rbac.rs` | the verbs of the crate against `tests/rbac.yaml` and the table above |
 | `tests/crd_assumptions.rs` | no keyed list or atomic map in the CRDs; the checked-in CRDs are what `crdgen` prints; the ExternalSecret CRD is the pinned copy and serves the version read |
-| `tests/cluster.rs` | the same suite on a **real API server**, as the identity of `AAP_TEST_API_KUBECONFIG`, and the facts above |
+| `tests/cluster.rs` | the same suite (28) on a **real API server**, as the identity of `AAP_TEST_API_KUBECONFIG`, and 16 cases of what only a server shows: the facts above, the window and its cousins decided by the real server, the CEL rules mapped to their field, the rights of the identity |
 
 `tests/support` is the fake API server (header: what it implements and that it copies a real one) and the harness (`Harness`) that
 implements `ObjectsUnderTest` with plain calls of the API, so that **one harness drives the fake and a real server**: GitOps's objects
@@ -212,9 +217,10 @@ AAP_TEST_KUBECONFIG=$HOME/.kube/config AAP_TEST_API_KUBECONFIG=/path/to/dashboar
   cargo test -p aap-objects-kubernetes --test cluster
 ```
 
-**What has and has not been run.** On 2026-10-16 the 40 cases of `tests/cluster.rs` passed against a bare kube-apiserver v1.35.8 and etcd
+**What has and has not been run.** On 2026-10-16 the 44 cases of `tests/cluster.rs` passed against a bare kube-apiserver v1.35.8 and etcd
 3.6.4 started by hand with `--authorization-mode=RBAC` (no controller manager, no kubelet), twice: as the administrator, and as a user that
-holds only the `Role` of `tests/rbac.yaml`, with `AAP_TEST_REQUIRE_CLUSTER=1` (the cases about rights included). That proves the crate and the
+holds only the `Role` of `tests/rbac.yaml` (a ServiceAccount, as the CI job makes it), with `AAP_TEST_REQUIRE_CLUSTER=1` (the cases about rights
+included) and four test threads, as CI. That proves the crate and the
 suite against a real API server and a real RBAC, and the facts above. It does **not** prove the `kind` job (the pipeline's own run is
 *unverified* until CI has run it), an operator that writes the status concurrently, an External Secrets Operator that reconciles the
 ExternalSecrets (only the CRD is installed: the offer reads the objects, not the Secrets they would make), or Argo CD (a second field manager

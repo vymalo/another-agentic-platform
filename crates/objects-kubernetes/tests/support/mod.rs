@@ -24,6 +24,7 @@
 #![allow(dead_code, clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 
 pub mod harness;
+pub mod intercept;
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::convert::Infallible;

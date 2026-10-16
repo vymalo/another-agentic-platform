@@ -33,11 +33,14 @@ use k8s_openapi::api::authorization::v1::SelfSubjectAccessReview;
 use k8s_openapi::api::core::v1::{Namespace, Secret};
 use k8s_openapi::apiextensions_apiserver::pkg::apis::apiextensions::v1::CustomResourceDefinition;
 use k8s_openapi::serde::Deserialize;
-use kube::api::{Api, DeleteParams, ListParams, Patch, PatchParams, PostParams, Preconditions};
+use kube::api::{
+    Api, DeleteParams, DynamicObject, ListParams, Patch, PatchParams, PostParams, Preconditions,
+};
 use kube::config::{KubeConfigOptions, Kubeconfig};
 use kube::{Client, Config};
 use serde_json::{Value, json};
-use support::harness::{GITOPS, Harness};
+use support::harness::{GITOPS, Harness, resource};
+use support::intercept::interpose;
 
 const KUBECONFIG_VAR: &str = "AAP_TEST_KUBECONFIG";
 const API_KUBECONFIG_VAR: &str = "AAP_TEST_API_KUBECONFIG";
@@ -142,8 +145,8 @@ fn closed_port() -> Client {
     Client::try_from(config).unwrap()
 }
 
-/// The harness on the cluster of `AAP_TEST_KUBECONFIG`, or `None` to skip.
-async fn make() -> Option<Harness> {
+/// The administrator's client and the crate's, on the cluster of `AAP_TEST_KUBECONFIG`, or `None` to skip.
+async fn identities() -> Option<(Client, Client)> {
     let Some(admin) = client_of(KUBECONFIG_VAR).await else {
         assert!(
             !required(),
@@ -168,6 +171,12 @@ async fn make() -> Option<Harness> {
             admin.clone()
         }
     };
+    Some((admin, dashboard))
+}
+
+/// The harness on the cluster, or `None` to skip.
+async fn make() -> Option<Harness> {
+    let (admin, dashboard) = identities().await?;
     Some(Harness::new(dashboard, admin, NAMESPACE, closed_port()))
 }
 
@@ -674,5 +683,250 @@ async fn the_identity_of_the_crate_has_the_role_and_no_right_on_secrets() {
     assert!(
         matches!(&err, kube::Error::Api(s) if s.code == 403),
         "{err}"
+    );
+}
+
+// ------------------------------------------------------------------ somebody gets in first
+
+/// The service of the dashboard's agent `name`, as another administrator saves it through the dashboard.
+fn service_body(name: &str, spec: &Value) -> Value {
+    json!({
+        "apiVersion": "agents.vymalo.com/v1alpha1", "kind": "AgentService",
+        "metadata": { "name": name, "labels": { "app.kubernetes.io/managed-by": "dashboard.agents.vymalo.com" } },
+        "spec": spec,
+    })
+}
+
+#[tokio::test]
+async fn when_the_service_changes_between_the_two_applies_the_config_stays_written_and_a_retry_succeeds()
+ {
+    let Some((admin, dashboard)) = identities().await else {
+        return;
+    };
+    let (client, hooks) = interpose(&dashboard, NAMESPACE);
+    let objects = KubernetesObjects::new(client, NAMESPACE);
+    let name = unique("ag");
+    let draft = sample_agent(&name);
+    let made = objects
+        .put_agent(&draft, &Precondition::DoesNotExist)
+        .await
+        .unwrap();
+
+    // Another administrator saves the service, through the dashboard, after the dry runs and before the apply.
+    let mut theirs = draft.service.clone();
+    theirs["description"] = json!("theirs");
+    let api = Api::<DynamicObject>::namespaced_with(
+        admin.clone(),
+        NAMESPACE,
+        &resource(Kind::AgentService),
+    );
+    let service = name.clone();
+    hooks.before_the_next_apply("agentservices", &name, move || async move {
+        api.patch(
+            &service,
+            &PatchParams::apply(FIELD_MANAGER),
+            &Patch::Apply(&service_body(&service, &theirs)),
+        )
+        .await
+        .unwrap();
+    });
+    let mut changed = draft.clone();
+    changed.service["registry"]["title"] = json!("Changed");
+    changed.config["model"]["model"] = json!("another-model");
+    let err = objects
+        .put_agent(&changed, &Precondition::Matches(made.etag()))
+        .await
+        .unwrap_err();
+    assert!(matches!(err, ObjectsError::PreconditionFailed), "{err:?}");
+
+    // The one place a refusal changes something: the config was written first, and the service is theirs.
+    let config = Api::<DynamicObject>::namespaced_with(
+        admin.clone(),
+        NAMESPACE,
+        &resource(Kind::AgentConfig),
+    )
+    .get(&name)
+    .await
+    .unwrap();
+    assert_eq!(
+        config.data["spec"]["model"]["model"],
+        json!("another-model")
+    );
+    let service =
+        Api::<DynamicObject>::namespaced_with(admin, NAMESPACE, &resource(Kind::AgentService))
+            .get(&name)
+            .await
+            .unwrap();
+    assert_eq!(service.data["spec"]["description"], json!("theirs"));
+    assert_eq!(service.data["spec"]["registry"]["title"], json!("Sample"));
+
+    // A retry reads again and succeeds.
+    let seen = objects.get_agent(&name).await.unwrap().unwrap();
+    let saved = objects
+        .put_agent(&changed, &Precondition::Matches(seen.etag()))
+        .await
+        .unwrap();
+    assert_eq!(saved.service.spec["registry"]["title"], json!("Changed"));
+}
+
+#[tokio::test]
+async fn a_create_never_merges_into_a_service_made_between_the_read_and_the_apply() {
+    let Some((admin, dashboard)) = identities().await else {
+        return;
+    };
+    for (their_description, outcome) in [
+        (None, "AlreadyExists"),
+        (Some("made by somebody else"), "Conflict"),
+    ] {
+        let (client, hooks) = interpose(&dashboard, NAMESPACE);
+        let objects = KubernetesObjects::new(client, NAMESPACE);
+        let name = unique("ag");
+        let draft = sample_agent(&name);
+        let mut theirs = draft.service.clone();
+        if let Some(d) = their_description {
+            theirs["description"] = json!(d);
+        }
+        let api = Api::<DynamicObject>::namespaced_with(
+            admin.clone(),
+            NAMESPACE,
+            &resource(Kind::AgentService),
+        );
+        let service = name.clone();
+        hooks.before_the_next_apply("agentservices", &name, move || async move {
+            // A GitOps tool: no label of the dashboard.
+            let mut body = service_body(&service, &theirs);
+            body["metadata"].as_object_mut().unwrap().remove("labels");
+            api.patch(&service, &PatchParams::apply(GITOPS), &Patch::Apply(&body))
+                .await
+                .unwrap();
+        });
+        let err = objects
+            .put_agent(&draft, &Precondition::DoesNotExist)
+            .await
+            .unwrap_err();
+        match (outcome, &err) {
+            // The same fields: only the version the create names stops it.
+            (
+                "AlreadyExists",
+                ObjectsError::AlreadyExists {
+                    kind: Kind::AgentService,
+                    name: n,
+                },
+            ) => {
+                assert_eq!(*n, name);
+            }
+            // A field they own with another value: the server's conflict, and still nothing merged.
+            ("Conflict", ObjectsError::Conflict(m)) => assert!(m.contains(GITOPS), "{m}"),
+            _ => panic!("{outcome}: {err:?}"),
+        }
+        let theirs = Api::<DynamicObject>::namespaced_with(
+            admin.clone(),
+            NAMESPACE,
+            &resource(Kind::AgentService),
+        )
+        .get(&name)
+        .await
+        .unwrap();
+        assert!(
+            theirs.metadata.labels.is_none(),
+            "{outcome}: the label of the dashboard was merged into it"
+        );
+        assert_eq!(
+            theirs.data["spec"]["description"],
+            json!(their_description.unwrap_or("A sample agent.")),
+            "{outcome}"
+        );
+    }
+}
+
+#[tokio::test]
+async fn a_replace_never_brings_back_a_service_deleted_between_the_read_and_the_apply() {
+    let Some((admin, dashboard)) = identities().await else {
+        return;
+    };
+    let (client, hooks) = interpose(&dashboard, NAMESPACE);
+    let objects = KubernetesObjects::new(client, NAMESPACE);
+    let name = unique("ag");
+    let draft = sample_agent(&name);
+    let made = objects
+        .put_agent(&draft, &Precondition::DoesNotExist)
+        .await
+        .unwrap();
+    let api = Api::<DynamicObject>::namespaced_with(
+        admin.clone(),
+        NAMESPACE,
+        &resource(Kind::AgentService),
+    );
+    let (gone, service) = (api.clone(), name.clone());
+    hooks.before_the_next_apply("agentservices", &name, move || async move {
+        gone.delete(&service, &DeleteParams::default())
+            .await
+            .unwrap();
+    });
+    let mut changed = draft.clone();
+    changed.service["registry"]["title"] = json!("Late");
+    let err = objects
+        .put_agent(&changed, &Precondition::Matches(made.etag()))
+        .await
+        .unwrap_err();
+    assert!(
+        matches!(
+            &err,
+            ObjectsError::NotFound {
+                kind: Kind::AgentService,
+                ..
+            }
+        ),
+        "{err:?}"
+    );
+    assert!(
+        api.get_opt(&name).await.unwrap().is_none(),
+        "it stays deleted"
+    );
+}
+
+#[tokio::test]
+async fn a_config_the_operator_wrote_to_after_the_dry_run_goes_with_its_service() {
+    let Some((admin, dashboard)) = identities().await else {
+        return;
+    };
+    let (client, hooks) = interpose(&dashboard, NAMESPACE);
+    let objects = KubernetesObjects::new(client, NAMESPACE);
+    let name = unique("ag");
+    let made = objects
+        .put_agent(&sample_agent(&name), &Precondition::DoesNotExist)
+        .await
+        .unwrap();
+    // The operator writes the status of the config after the dry runs, before the config is deleted.
+    let configs = Api::<DynamicObject>::namespaced_with(
+        admin.clone(),
+        NAMESPACE,
+        &resource(Kind::AgentConfig),
+    );
+    let (api, config) = (configs.clone(), name.clone());
+    hooks.before_the_next_delete("agentconfigs", &name, move || async move {
+        let body = json!({
+            "apiVersion": "agents.vymalo.com/v1alpha1", "kind": "AgentConfig",
+            "metadata": { "name": config }, "status": { "observedGeneration": 2 },
+        });
+        api.patch_status(
+            &config,
+            &PatchParams::apply("aap-operator").force(),
+            &Patch::Apply(&body),
+        )
+        .await
+        .unwrap();
+    });
+    objects.delete_agent(&name, &made.etag()).await.unwrap();
+    assert!(
+        configs.get_opt(&name).await.unwrap().is_none(),
+        "bound to its uid and not to its version"
+    );
+    assert!(
+        Api::<DynamicObject>::namespaced_with(admin, NAMESPACE, &resource(Kind::AgentService))
+            .get_opt(&name)
+            .await
+            .unwrap()
+            .is_none()
     );
 }
