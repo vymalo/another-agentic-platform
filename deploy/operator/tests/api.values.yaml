@@ -25,7 +25,7 @@ api:
     className: traefik
     host: api.agents.example.com
     annotations:
-      # Where the edge's per-token rate limit is attached (a Traefik Middleware of the CRD kind: README "The Platform API").
+      # Where the edge's rate limit is attached (a Traefik Middleware of the CRD kind; per token only behind a JWT check: README "The edge").
       traefik.ingress.kubernetes.io/router.middlewares: another-agentic-system-api-ratelimit@kubernetescrd
     tls:
       secretName: api-agents-tls

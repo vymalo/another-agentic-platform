@@ -131,7 +131,7 @@ the API never stops reconciliation).
 
 ```mermaid
 flowchart LR
-  C[a client<br/>web, desktop, mobile] -->|HTTPS, Bearer JWT| E[the edge<br/>TLS, JWT check, rate limit per token]
+  C[a client<br/>web, desktop, mobile] -->|HTTPS, Bearer JWT| E[the edge<br/>TLS, JWT check, rate limits]
   E -->|Ingress api.ingress| S[Service aap-operator-api :8080]
   S --> P[Deployment aap-operator-api<br/>N replicas, RollingUpdate]
   CM[ConfigMap aap-operator-api<br/>config.yaml] -->|mounted read-only| P
@@ -151,7 +151,7 @@ flowchart LR
 | **Where the API server is** | `api.networkPolicy.apiServer.cidrs`, from `kubectl get endpoints kubernetes` (default: **any address on 443 and 6443**, see [the NetworkPolicy](#the-networkpolicy): set it) |
 | **Who may call a new agent** | `api.config.defaults.allowFrom` (the peers of `access.allowFrom`, usually the orchestrator's namespace). **Empty by default: a new agent made from the dashboard can be called by nobody** |
 | **The A2A bearer's Secret** | `api.config.defaults.a2aBearer` (default `agent-a2a-bearer`, key `AGENT_REGISTRY_AGENT_TOKEN`): the Secret key that must hold the orchestrator's `AGENT_REGISTRY_AGENT_TOKEN`, or the orchestrator lists an agent and cannot call it |
-| **The edge** (below) | TLS, a check of the JWT, CORS passes through, and **a rate limit per token**: the API implements none of them |
+| **The edge** (below) | TLS, a check of the JWT, CORS passes through, and **a rate limit: per address, and per token only behind a check of the JWT** (a limit keyed by the raw `Authorization` header is dodged by forging a new value each time): the API implements none of them |
 
 ### Values
 
@@ -250,8 +250,8 @@ sent to a pod that has closed its listener). What 1.29 does with a `sleep` handl
 ### The edge
 
 §60a puts the API **on the edge, at a path or host the deployment names**: it is called with a bearer token by the web (a single-page app), the desktop
-app and the mobile shells, with no web server of ours in between. **Rate limits per token, TLS and, if wanted, a first check of the JWT are the edge's**; the
-API does not implement a limiter (a bearer API is open to any script that holds a token). What the chart does for it:
+app and the mobile shells, with no web server of ours in between. **Rate limits, TLS and, if wanted, a first check of the JWT are the edge's**; the
+API does not implement a limiter (a bearer API is open to any script that holds a token, and to any script that merely sends one). What the chart does for it:
 
 * `api.ingress` makes an `Ingress` for `host` and `path` (`/v1` by default: every route of the API is under it) to the Service's port `http`. `className` and
   `annotations` are passed through, and **`annotations` is where the edge's policy is attached**. The API answers its own CORS preflights (`OPTIONS`,
@@ -285,9 +285,16 @@ API does not implement a limiter (a bearer API is open to any script that holds 
       tls: { secretName: api-agents-tls }
   ```
 
+  **This example limits nothing per attacker by itself.** The `Authorization` header the Middleware groups by is not a checked token: whoever sends the request
+  chooses it, so a script that sends a different forged `Bearer` value with each request gets a fresh bucket each time and is never limited (the API refuses
+  every one of those requests, but only after the edge let it through and the API spent a token check on it). The Middleware limits a client that reuses one token,
+  a leaked or abusive real one included, and no more. **A per-address limit is needed as well** (a second Middleware whose `sourceCriterion` is the client's
+  address, `ipStrategy`, which needs the edge to see the real address behind a load balancer; its fields were not re-read here, *unverified*), **or the edge must verify the JWT**
+  before it counts (a forward authentication, as below), so that the bucket is a person's and not a string an attacker invents.
   NGINX's `limit-rps` annotations limit per client address, not per token; per token on NGINX needs configuration this chart does not make.
-* A check of the JWT at the edge (the system's oauth2-proxy runs with `--skip-jwt-bearer-tokens`) is optional: the API checks every token itself, so the edge
-  can only add a first line. Whatever the edge does must pass `Authorization` through unchanged.
+* A check of the JWT at the edge (the system's oauth2-proxy runs with `--skip-jwt-bearer-tokens`) is optional for correctness: the API checks every token itself, so
+  the edge can only add a first line. It is what makes a limit **per token or per person** mean something, and then the limit should be keyed by a claim of the
+  verified token and not by the raw header. Whatever the edge does must pass `Authorization` through unchanged.
 * The origins that may call from a browser are `api.config.cors.allowedOrigins`, **in the API's file**, not the edge's.
 
 ### The NetworkPolicy

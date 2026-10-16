@@ -112,7 +112,8 @@ affinity: {}
 # its ServiceAccount (bin/api/README.md, "The configuration file"). templates/_validate.tpl refuses what it can check at render time and
 # the binary would refuse at start; the rest the binary refuses at start (a pod that never becomes ready, the old ones still serving), and
 # the `--check` of CI on the file rendered for each tested shape is what looks for such a value. What a deployment must provide, and the edge's part
-# (TLS, a JWT check, a rate limit per token): README "The Platform API".
+# (TLS, a JWT check, rate limits: a limit per address, and per token only behind a JWT check, because the edge cannot tell a forged
+# `Authorization` value from a real one without it): README "The Platform API", "The edge".
 api:
   enabled: false
   image:
