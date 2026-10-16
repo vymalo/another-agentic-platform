@@ -29,6 +29,7 @@ Each is a flag and an environment variable, which is how the chart sets them (S8
 | `AAP_CONCURRENCY` | `--concurrency` | 4 | Services reconciled at once (never the same one twice) |
 | `AAP_RESYNC_SECS` | `--resync-secs` | 300 | Timer for a service that is Ready or Suspended |
 | `AAP_RESYNC_PENDING_SECS` | `--resync-pending-secs` | 15 | Timer for one that is rolling out, unwell or held by a foreign object |
+| `AAP_RECONCILE_TIMEOUT_SECS` | `--reconcile-timeout-secs` | 60 | The longest one pass over one object may take. A pass that is not done by then is dropped, fails as `Transient` (`reconcile failed: the pass did not finish within …`, counter `aap_reconcile_timeouts_total`) and is tried again after the error policy's wait. Without it a request that is never answered keeps the object out of the controller for as long as it lives |
 | `REGISTRY_ADDR` | `--registry-addr` | `0.0.0.0:8080` | Where the agent registry is served (feature `registry`, and only with a token) |
 | `REGISTRY_TOKEN_FILE` | `--registry-token-file` | none | The file that holds the registry's bearer token (a mounted Secret), read once at start. **No token, no registry**: unset, missing, unreadable or empty, nothing is served on the port, the operator logs why and keeps reconciling, and every service is `Listed: False`, reason `RegistryDisabled` |
 | `REGISTRY_PUBLIC_URL` | `--registry-public-url` | none | The URL of the registry document itself, sent as its `anchor` (optional in the contract) |

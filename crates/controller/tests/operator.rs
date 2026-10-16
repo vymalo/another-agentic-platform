@@ -114,6 +114,8 @@ async fn start_on(fake: Fake, namespace: Option<&str>, shared: bool) -> Running 
             not_installed: Duration::from_secs(3600),
         },
         default_agent_image: Some(DEFAULT_IMAGE.to_owned()),
+        // Only a test that stalls a request meets it; the others finish in milliseconds.
+        pass_timeout: Duration::from_secs(30),
         ..Options::default()
     };
     let operator = Operator::new(
@@ -672,5 +674,43 @@ async fn a_watch_that_failed_finds_its_kind_when_the_crds_are_installed() {
         || r.digest("team", "coder-me") != before,
     )
     .await;
+    r.stop().await;
+}
+
+// ------------------------------------------------ a request that is never answered
+
+/// A request that is received and never answered holds the service's slot in kube's `Controller` for as
+/// long as the request lives, and nothing else reaches the service meanwhile: not a watch event, not the
+/// timer. It happens when a call is queued behind a watch on a pooled connection that hyper 1.11.1 let go
+/// of too early (*seen 2026-10-16* on kind v1.35.8: a new service with no status for the 60 s or 240 s a
+/// case waited, nothing in the log; the call went out when the watch ended, 290 s later). The first pass
+/// of a service is one request, the finalizer's patch, so a service whose patch is never answered is the
+/// shape of it. Without a limit on a pass this service has no status after any amount of time.
+#[tokio::test(start_paused = true)]
+async fn a_request_that_is_never_answered_does_not_leave_a_new_service_without_a_status() {
+    let fake = Fake::new();
+    fake.stall_next("PATCH", "/agentservices/chat", 1);
+    let r = start_on(fake, Some("team"), true).await;
+
+    let (service, config) = example("chat", "team");
+    r.fake.put(CONFIGS, config);
+    r.fake.put(SERVICES, service);
+
+    // The limit cuts the first pass at 30 s, the error policy waits 5 s, the second pass adds the finalizer
+    // and its patch brings the third.
+    within(
+        Duration::from_secs(90),
+        "the service to be Ready although the request of its first pass was never answered",
+        || r.state("team", "chat").as_deref() == Some("Ready"),
+    )
+    .await;
+    assert_eq!(
+        r.metrics.get(
+            aap_controller::metric::PASS_TIMEOUTS,
+            &[("controller", "agentservice")]
+        ),
+        1,
+        "one pass was cut short, and it is counted"
+    );
     r.stop().await;
 }

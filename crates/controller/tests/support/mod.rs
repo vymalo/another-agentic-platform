@@ -12,7 +12,9 @@
 //! every request for it, list, watch and get, is the 404 a real API server answers when the CRD is not
 //! installed, and a missing object is the 404 that names it (both *verified 2026-10-15* against a bare
 //! kube-apiserver v1.35.8: the first is the plain text `404 page not found`, which kube turns into a
-//! `Status` with no `details`; the second is a `Status` whose `details.name` is the object's). It is
+//! `Status` with no `details`; the second is a `Status` whose `details.name` is the object's). A request can
+//! be made to **never be answered** ([`Fake::stall_next`]): the shape of a call queued behind a watch on a
+//! pooled connection (*seen 2026-10-16* on a real cluster: hyper 1.11.1, see the controller's README). It is
 //! not an API server: no CRD schema, no CEL, no resource versions to resume from, no other kinds.
 
 #![allow(dead_code)] // each test file uses part of it
@@ -67,6 +69,15 @@ struct State {
     watchers: BTreeMap<String, usize>,
     /// The kinds (by plural) whose CRD is not installed.
     absent: BTreeSet<String>,
+    /// Requests that are received and never answered, while `remaining` lasts.
+    stalls: Vec<Stall>,
+}
+
+/// A request the fake takes and never answers.
+struct Stall {
+    method: String,
+    path_contains: String,
+    remaining: usize,
 }
 
 #[derive(Clone)]
@@ -109,6 +120,7 @@ impl Fake {
                 fail_with: None,
                 watchers: BTreeMap::new(),
                 absent: BTreeSet::new(),
+                stalls: Vec::new(),
             })),
             changes: broadcast::channel(1024).0,
         }
@@ -240,9 +252,33 @@ impl Fake {
         lock(&self.state).absent = plurals.iter().map(|p| (*p).to_owned()).collect();
     }
 
+    /// The next `times` requests with this method whose path contains `path_contains` are received (and
+    /// recorded in [`calls`](Self::calls)) and **never answered**: the client waits for ever, as it does for
+    /// a request queued behind a watch on a connection that is still streaming it.
+    pub fn stall_next(&self, method: &str, path_contains: &str, times: usize) {
+        lock(&self.state).stalls.push(Stall {
+            method: method.to_owned(),
+            path_contains: path_contains.to_owned(),
+            remaining: times,
+        });
+    }
+
     /// How many watches of this kind are open.
     pub fn watchers(&self, plural: &str) -> usize {
         lock(&self.state).watchers.get(plural).copied().unwrap_or(0)
+    }
+
+    /// Whether `call` is one to leave unanswered (and, then, record it and use one of the stall's turns).
+    fn stalls(&self, call: &Call) -> bool {
+        let mut s = lock(&self.state);
+        let Some(stall) = s.stalls.iter_mut().find(|st| {
+            st.remaining > 0 && st.method == call.method && call.path.contains(&st.path_contains)
+        }) else {
+            return false;
+        };
+        stall.remaining -= 1;
+        s.calls.push(call.clone());
+        true
     }
 
     async fn handle(&self, req: Request<Body>) -> Resp {
@@ -260,6 +296,9 @@ impl Fake {
                 .to_owned(),
             body: serde_json::from_slice(&bytes).ok(),
         };
+        if self.stalls(&call) {
+            return std::future::pending().await;
+        }
         let mut s = lock(&self.state);
         s.calls.push(call.clone());
         if let Some(code) = s.fail_with {

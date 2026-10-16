@@ -342,7 +342,13 @@ impl OperatorProc {
             .env("DEFAULT_AGENT_IMAGE", &cluster.image)
             // The pending timer is short, so what a signal missed is found soon.
             .env("AAP_RESYNC_PENDING_SECS", "5")
-            .env("RUST_LOG", "info,kube=warn")
+            // A pass that waits for a request nobody answers is cut short well inside the shortest wait of a
+            // case (60 s), so that the case still gets its status, and `Case::finish` fails on it: a hang is
+            // something to see, not something to be healed behind the test's back.
+            .env("AAP_RECONCILE_TIMEOUT_SECS", "30")
+            // `aap_controller=debug` is a line when a pass starts and one when it ends, with its duration. The log is
+            // printed when a case fails, and a pass that never ended is then the one with a start and no end.
+            .env("RUST_LOG", "info,kube=warn,aap_controller=debug")
             .stdout(Stdio::null())
             .stderr(std::fs::File::create(&log).unwrap())
             .spawn()
@@ -538,6 +544,14 @@ impl<'a> Case<'a> {
                 op.exited().is_none(),
                 "the operator died during the case:\n{}",
                 op.log()
+            );
+            // The case passed because the operator cut a pass short and the next one went through: the request
+            // of the first was never answered (2026-10-16: hyper 1.11.1 queued a call behind a watch, see the
+            // controller's README, "A pass that hangs"). That is a defect to fix, not to wait out.
+            let log = op.log();
+            assert!(
+                !log.contains("did not finish within"),
+                "a pass of the operator was cut short, a request was never answered:\n{log}"
             );
         }
         // Best effort: the cluster is a throwaway one, and some have no controller to finish a namespace.

@@ -223,6 +223,61 @@ async fn the_first_pass_only_adds_the_finalizer() {
     assert_eq!(patch.body.unwrap()[0]["op"], "test");
 }
 
+/// kube's `finalizer` helper ends the pass that adds the finalizer with `Action::await_change()`: the patch
+/// "will cause a new reconciliation". A watch event that never comes then leaves a new service without a
+/// status for ever, because no timer was set. It gets the timer of a service that is being set up.
+#[tokio::test]
+async fn the_pass_that_adds_the_finalizer_still_asks_to_be_looked_at_again() {
+    let w = World::new("chat");
+    let action = w.pass().await.unwrap();
+    assert_eq!(
+        requeue_after(&action),
+        Options::default().resync.pending,
+        "{action:?}"
+    );
+    // A pass that has more to do than adding the finalizer keeps its own timer.
+    let action = w.pass().await.unwrap();
+    assert_eq!(requeue_after(&action), Options::default().resync.settled);
+}
+
+/// A request that is received and never answered must not hold a pass for ever (kube-client sets no timeout
+/// for a response, because a watch is one). The pass is cut at the limit and fails as a transient error, which
+/// the error policy retries; the next pass starts afresh.
+#[tokio::test(start_paused = true)]
+async fn a_request_that_is_never_answered_ends_the_pass() {
+    let w = World::with_options(
+        "chat",
+        Options {
+            pass_timeout: Duration::from_secs(30),
+            ..Options::default()
+        },
+    );
+    // The finalizer's patch is received and never answered.
+    w.fake.stall_next("PATCH", "/agentservices/chat", 1);
+    let outcome = tokio::time::timeout(Duration::from_secs(300), w.pass())
+        .await
+        .expect("the pass ended: it was cut short, not left waiting for an answer for ever");
+    let err = outcome.unwrap_err();
+    assert!(
+        matches!(err, aap_controller::Error::TimedOut(limit) if limit == Duration::from_secs(30)),
+        "{err}"
+    );
+    assert_eq!(err.class(), ErrorClass::Transient);
+    assert_eq!(
+        w.metrics
+            .get(metric::PASS_TIMEOUTS, &[("controller", "agentservice")]),
+        1
+    );
+    // The error policy asks for another pass soon.
+    let svc: AgentService = serde_json::from_value(w.service()).unwrap();
+    let action = service_error_policy(Arc::new(svc), &err, w.ctx.clone());
+    assert_eq!(requeue_after(&action), Duration::from_secs(5));
+    // The stalled request never reached the object. The next pass is a new one, and gets through.
+    assert!(w.service()["metadata"].get("finalizers").is_none());
+    w.settle().await;
+    is(&w.status(), "Ready", "True", "Reconciled");
+}
+
 #[tokio::test]
 async fn a_served_registry_lists_a_ready_service_and_a_full_one_lists_nothing() {
     use std::sync::atomic::Ordering;

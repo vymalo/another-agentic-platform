@@ -195,7 +195,10 @@ where
             .for_each(|result| async move { log_plumbing("agentservice", result) });
 
         // The configs.
-        let config_ctx = Arc::new(ConfigContext::new(self.client.clone(), metrics.clone()));
+        let config_ctx = Arc::new(
+            ConfigContext::new(self.client.clone(), metrics.clone())
+                .with_pass_timeout(self.options.pass_timeout),
+        );
         let configs = configs_controller
             .run(reconcile_config, config_error_policy, config_ctx)
             .for_each(|result| async move { log_plumbing("agentconfig", result) });

@@ -39,6 +39,10 @@ impl Default for Resync {
     }
 }
 
+/// How long one pass over one object may take before it is cut short (`Options::pass_timeout`). A pass is
+/// a handful of requests that an API server answers in milliseconds; a minute is long for any of them.
+pub(crate) const PASS_TIMEOUT: Duration = Duration::from_secs(60);
+
 /// The settings of [`Operator`](crate::Operator).
 #[derive(Clone, Debug)]
 pub struct Options {
@@ -58,6 +62,12 @@ pub struct Options {
     pub concurrency: u16,
     /// The `reportingInstance` of the Events: the pod's name, so two operators can be told apart.
     pub instance: Option<String>,
+    /// The longest one pass over one object may take. A pass that is not done by then is dropped (what it had
+    /// asked of the API server is cancelled), fails with [`Error::TimedOut`](crate::Error::TimedOut), a
+    /// transient error, and is tried again after the error policy's wait. Without a limit a request that is
+    /// never answered holds the object's slot, so that no signal and no timer reaches it, for as long as the
+    /// request lives (*seen 2026-10-16*: up to the 290 s of a watch; see the README, "A pass that hangs").
+    pub pass_timeout: Duration,
     /// The image of an agent whose `AgentConfig` names none (`--default-agent-image`; AD-029, §60a).
     /// `None`: the operator has no default, and such a config is `ConfigInvalid`. A change of it is a
     /// new digest, and so a rollout, for exactly the agents that name no image.
@@ -72,6 +82,7 @@ impl Default for Options {
             registry_full: Arc::new(AtomicBool::new(false)),
             resync: Resync::default(),
             concurrency: 4,
+            pass_timeout: PASS_TIMEOUT,
             instance: None,
             default_agent_image: None,
         }

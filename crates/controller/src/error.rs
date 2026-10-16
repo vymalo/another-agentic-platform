@@ -1,6 +1,8 @@
 //! The controller's errors. Each has a class (`aap_ports::Classify`): the error policy decides from
 //! the class, never from the variant.
 
+use std::time::Duration;
+
 use aap_ports::{Classify, ErrorClass, RuntimeError, StoreError};
 use kube::runtime::finalizer;
 
@@ -23,6 +25,12 @@ pub enum Error {
     /// Adding or removing the finalizer failed, or the work it wraps did.
     #[error("finalizer: {0}")]
     Finalizer(#[source] Box<finalizer::Error<Error>>),
+    /// The pass did not finish in [`Options::pass_timeout`](crate::Options::pass_timeout): a request to the
+    /// API server or to a provider was never answered. The pass was dropped; the next one starts afresh.
+    #[error(
+        "the pass did not finish within {0:?}: a request to the Kubernetes API or to a provider was never answered"
+    )]
+    TimedOut(Duration),
 }
 
 impl From<kube::Error> for Error {
@@ -56,6 +64,8 @@ impl Classify for Error {
             Self::Runtime(e) => e.class(),
             Self::Store(e) => e.class(),
             Self::Malformed(_) => ErrorClass::Internal,
+            // Whatever was asked may well be answered next time, from another connection.
+            Self::TimedOut(_) => ErrorClass::Transient,
             Self::Finalizer(f) => match &**f {
                 finalizer::Error::ApplyFailed(e) | finalizer::Error::CleanupFailed(e) => e.class(),
                 // The finalizer is a JSON patch that first `test`s what it saw, so that it never overwrites

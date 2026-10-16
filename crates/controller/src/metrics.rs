@@ -16,6 +16,8 @@ pub mod name {
     pub const RECONCILES: &str = "aap_reconcile_total";
     /// Failed passes, by `controller` and the `class` of the error.
     pub const ERRORS: &str = "aap_reconcile_errors_total";
+    /// Passes cut short for taking longer than `Options::pass_timeout`, by `controller`.
+    pub const PASS_TIMEOUTS: &str = "aap_reconcile_timeouts_total";
     /// Status patches written, by `controller`.
     pub const STATUS_PATCHES: &str = "aap_status_patches_total";
     /// Services whose state changed, by the new `state`.
@@ -30,6 +32,7 @@ fn help(series: &str) -> &'static str {
     match series {
         name::RECONCILES => "Reconcile passes.",
         name::ERRORS => "Reconcile passes that failed, by error class.",
+        name::PASS_TIMEOUTS => "Reconcile passes cut short for taking too long.",
         name::STATUS_PATCHES => "Status patches written.",
         name::STATE_CHANGES => "AgentService state changes, by the new state.",
         name::RUNTIME_SIGNALS => "Runtime ids reported by the provider's watch.",
