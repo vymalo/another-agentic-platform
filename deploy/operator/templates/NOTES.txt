@@ -6,6 +6,15 @@ The agent registry is served at http://{{ include "aap.fullname" . }}-registry.{
 {{- else }}
 No registry token is set, so no registry is served and every service says Listed: False, reason RegistryDisabled.
 {{- end }}
+{{- if .Values.api.enabled }}
+The Platform API is the Service {{ include "aap.api.fullname" . }}.{{ .Release.Namespace }}.svc:{{ .Values.api.port }} (ClusterIP).
+{{- if .Values.api.ingress.enabled }}
+The Ingress routes https://{{ .Values.api.ingress.host }}{{ .Values.api.ingress.path }} to it.
+{{- else }}
+There is no Ingress (api.ingress.enabled is false): route /v1 from your edge to the Service.
+{{- end }}
+TLS, a check of the JWT and the rate limits are the edge's, and the edge must let OPTIONS requests (the CORS preflights) through to the API (README "The edge").
+{{- end }}
 {{- if and .Values.api.enabled .Values.api.networkPolicy.enabled }}
 {{- $np := .Values.api.networkPolicy }}
 {{- if not $np.apiServer.cidrs }}

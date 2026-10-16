@@ -490,6 +490,14 @@ check "NOTES (api off): the operator's notes, and nothing about the Platform API
 render_notes -f "$here/api.values.yaml"
 check "NOTES (api on, no apiServer.cidrs and no issuer.to): it says the NetworkPolicy lets the API reach ANY address on both lists of ports, and what to set" \
   has_all 'ANY address on 443, 6443 \(the API server.s ports\): set api.networkPolicy.apiServer.cidrs' 'ANY address on 443 \(the issuer.s ports\): set api.networkPolicy.issuer.to'
+notes_name_the_service_and_the_route() {
+  has_all 'The Platform API is the Service aap-operator-api\.another-agentic-system\.svc:8080 \(ClusterIP\)' \
+    'The Ingress routes https://api\.agents\.example\.com/v1 to it' 'TLS, a check of the JWT and the rate limits are the edge.s' 'OPTIONS'
+}
+check "NOTES (api on, with an Ingress): the Service, its port, the Ingress's URL and what the edge must do" notes_name_the_service_and_the_route
+render_notes -f "$here/api-secretref.values.yaml"
+notes_without_an_ingress() { has_all 'svc:8080 \(ClusterIP\)' 'There is no Ingress .*route /v1 from your edge to the Service' && lacks 'The Ingress routes'; }
+check "NOTES (api on, no Ingress): it says to route /v1 from the edge to the Service" notes_without_an_ingress
 render_notes -f "$here/api-full.values.yaml"
 check "NOTES (api on, both set): no warning about ANY address" lacks 'NetworkPolicy lets it reach ANY address'
 render_notes -f "$here/api.values.yaml" --set 'api.networkPolicy.apiServer.cidrs[0]=10.96.0.1/32'
