@@ -284,6 +284,14 @@ build (image jobs can finish out of order), and a last job runs `bump-tag.sh` fo
 cannot race: the cost is that the API's image waits for the operator's end-to-end, and that both move together even when a change touches one
 (the workspace is one build, so a change in a shared crate touches both anyway). A deployment pins `sha-<7>`, never `latest`.
 
+**An API failure blocks the operator's release too, and the other way round.** `push` needs every job (`dockerfile-api` and `api-image` as well as
+`image` and `operator-coder-e2e`), so a red Dockerfile lint, smoke test or `--check` of the API's image on `main` means *no* image is pushed and *no*
+tag is bumped, the operator's included, until the next green build; and the API's image is not pushed while the coder end-to-end (2.9 GB, the
+flakiest job) is red. This is a decision for the owner (one workflow and one commit was chosen, §60a D7b1). The alternative is two pushes, each
+after its own jobs, and a bump that moves each tag only when its own image passed (`bump-tag.sh <file> <tag> operator|api` already moves one key
+alone): an API change would then never hold back the operator, at the price of a bump that has to decide, for each tag, whether its image
+passed, and of the race that one commit avoids (two bumps pushed to `main` by one run each, and the "has main moved on?" test counting the other's).
+
 **A new GHCR package is private until it is made public.** After the first push (owner step), for **each** of `operator` and `api`: *Packages → the
 package → Package settings → Change visibility → Public*, then check the anonymous pull, from the images repository's `CLAUDE.md` (for the API, say
 `api` in both places):

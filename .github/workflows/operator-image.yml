@@ -28,7 +28,9 @@ name: Operator and API images
 #              and dummy Secrets: the AgentService becomes Ready, the agent card answers through the Service, the registry lists the
 #              coder, and a deletion completes its finalizer and keeps the claim (Retain). deploy/operator/tests/e2e/README.md says
 #              what it proves and what it does not (no model, no GitHub).
-# push:        main only, after every job above: `sha-<7>` and `latest` of both images (the same tag).
+# push:        main only, after every job above: `sha-<7>` and `latest` of both images (the same tag). One red job of either image
+#              (the API's included) means no image is pushed and no tag bumped: a decision for the owner (deploy/operator/README.md,
+#              "The image").
 # bump:        main only, after the push: `deploy/operator/bump-tag.sh` sets `image.tag` and, with `api`, `api.image.tag` in
 #              deploy/operator/values.yaml and `chore(deploy): bump operator and api to sha-<7>` is pushed to main as
 #              github-actions[bot] (decided in §93, 2026-10-05).
