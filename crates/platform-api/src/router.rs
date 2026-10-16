@@ -80,14 +80,17 @@ where
 {
     let cors = state.cors.layer();
     let state: S<O, A> = Arc::new(state);
-    let router = routes
-        .layer(from_fn_with_state(state.clone(), guard::<O, A>))
-        .layer(from_fn(trace::harden));
+    // From the inside out: the guard; CORS (which answers a preflight itself, before the guard asks for a token); the log;
+    // and the headers of every answer, outside all of them, so that a preflight, a 404 and a 405 carry them too.
+    let router = routes.layer(from_fn_with_state(state.clone(), guard::<O, A>));
     let router = match cors {
         Some(cors) => router.layer(cors),
         None => router,
     };
-    router.layer(from_fn(trace::request)).with_state(state)
+    router
+        .layer(from_fn(trace::request))
+        .layer(from_fn(trace::harden))
+        .with_state(state)
 }
 
 /// The Platform API, ready to serve (`axum::serve(listener, router)`).

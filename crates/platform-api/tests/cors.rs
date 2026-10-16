@@ -72,6 +72,46 @@ async fn a_preflight_from_a_listed_origin_gets_the_headers_and_needs_no_token() 
 }
 
 #[tokio::test]
+async fn every_answer_carries_the_hardening_headers_a_preflight_and_a_refusal_included() {
+    // The CORS layer answers a preflight itself; the headers that make an answer not cached and not sniffed must be
+    // outside it, or the preflight, which is an answer, would go without.
+    let api = api();
+    let preflight_ok = preflight(&api, WEB, "/v1/agents/chat", "PUT", "authorization").await;
+    assert!(preflight_ok.status.is_success(), "{}", preflight_ok.text());
+    let preflight_stranger =
+        preflight(&api, STRANGER, "/v1/agents/chat", "PUT", "authorization").await;
+    let preflight_nowhere = preflight(&api, WEB, "/v1/nowhere", "GET", "authorization").await;
+    let not_found = api.get("/v1/nowhere").header("origin", WEB).send().await;
+    let not_allowed = api
+        .request(Method::POST, "/v1/agents")
+        .header("origin", WEB)
+        .send()
+        .await;
+    let unauthorized = api.get("/v1/me").header("origin", WEB).send().await;
+    for (what, r) in [
+        ("a preflight", &preflight_ok),
+        ("a preflight from a stranger", &preflight_stranger),
+        ("a preflight of a path that is no route", &preflight_nowhere),
+        ("a 404", &not_found),
+        ("a 405", &not_allowed),
+        ("a 401", &unauthorized),
+    ] {
+        assert_eq!(r.header("cache-control"), Some("no-store"), "{what}");
+        assert_eq!(
+            r.header("x-content-type-options"),
+            Some("nosniff"),
+            "{what}"
+        );
+    }
+    // And they still carry the CORS headers: reordering the layers must not cost the page its error bodies.
+    assert_eq!(not_found.header("access-control-allow-origin"), Some(WEB));
+    assert_eq!(
+        unauthorized.header("access-control-allow-origin"),
+        Some(WEB)
+    );
+}
+
+#[tokio::test]
 async fn a_preflight_from_another_origin_gets_no_allow_origin() {
     let api = api();
     for origin in [
