@@ -3,8 +3,8 @@
 
 use aap_api::{ModelEndpoint, ToolProvider};
 use aap_forms::{
-    FormError, FormTarget, Loaded, ModelEndpointForm, OfferedKeys, SharedChange, ToolServerForm,
-    dependents_after, validate_model, validate_tool_server,
+    FormError, FormTarget, Loaded, ModelEndpointForm, OfferedKeys, Representation, SharedChange,
+    ToolServerForm, dependents_after, validate_model, validate_tool_server,
 };
 use aap_ports::{AgentObjects, Authenticator, SharedDraft, SharedKind, Stored};
 use axum::Extension;
@@ -218,6 +218,10 @@ where
         }
         if &current.etag() != tag {
             return Err(from_port(&aap_ports::ObjectsError::PreconditionFailed));
+        }
+        // An object with a member no form says would lose it in a save from a form: it is edited as YAML.
+        if let Representation::YamlOnly(reasons) = F::load(&current).representation {
+            return Err(Problem::yaml_only(&reasons));
         }
     }
 

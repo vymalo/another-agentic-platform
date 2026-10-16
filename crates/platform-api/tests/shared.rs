@@ -476,3 +476,46 @@ async fn the_offered_keys_are_listed_and_a_value_is_never_among_them() {
     assert!(keys.contains(&json!({ "secret": "agent-models", "key": "GATEWAY_API_KEY", "externalSecret": "agent-models-es" })));
     assert!(!r.text().contains("secret-value-9c3b") && !r.text().contains("hidden"));
 }
+
+#[tokio::test]
+async fn an_object_with_a_member_no_form_says_is_yaml_only_and_a_form_may_not_replace_it() {
+    let (api, token) = Api::seeded().await;
+    let docs = api
+        .objects
+        .get_shared(SharedKind::ToolServer, "docs")
+        .await
+        .unwrap()
+        .unwrap();
+    let mut spec = docs.spec.clone();
+    spec["mcp"]["futureField"] = json!("a newer version's");
+    let draft = aap_ports::SharedDraft {
+        name: "docs".to_owned(),
+        spec,
+    };
+    api.objects
+        .put_shared(
+            SharedKind::ToolServer,
+            &draft,
+            &aap_ports::Precondition::Matches(docs.etag()),
+        )
+        .await
+        .unwrap();
+
+    let got = api.get("/v1/tool-servers/docs").token(&token).send().await;
+    assert!(
+        got.json()["representation"]["yamlOnly"]
+            .to_string()
+            .contains("futureField"),
+        "{}",
+        got.text()
+    );
+    let r = api
+        .put("/v1/tool-servers/docs")
+        .token(&token)
+        .replace(&got.etag())
+        .json(&open_tool_body("docs"))
+        .send()
+        .await;
+    assert_eq!(r.code(), 409, "{}", r.text());
+    assert!(r.is_problem("yaml-only"));
+}
