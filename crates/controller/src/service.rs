@@ -35,6 +35,7 @@ use crate::context::{Context, FIELD_MANAGER, FINALIZER, failed};
 use crate::derive::{ConfigOutcome, Observed, StoreOutcome, derive, ready_summary};
 use crate::error::Error;
 use crate::metrics::name;
+use crate::pass::bounded;
 
 const CONTROLLER: &str = "agentservice";
 
@@ -59,14 +60,36 @@ where
         .ok_or(Error::Malformed("an AgentService has no namespace"))?;
     let key = format!("{ns}/{}", svc.name_any());
     let api: Api<AgentService> = Api::namespaced(ctx.client.clone(), &ns);
-    let result = finalizer(&api, FINALIZER, svc, |event| async {
-        match event {
-            Event::Apply(svc) => apply(&svc, &ctx).await,
-            Event::Cleanup(svc) => cleanup(&svc, &ctx).await,
-        }
-    })
+    // kube's `finalizer` helper adds the finalizer and stops, with `Action::await_change()`: "the patch will
+    // cause a new reconciliation". That is the one pass of a new service that ends with no timer, so a watch
+    // event that never comes would leave it without a status for ever. It gets the timer of a service that is
+    // still being set up.
+    let adding =
+        svc.meta().deletion_timestamp.is_none() && !svc.finalizers().iter().any(|f| f == FINALIZER);
+    let result = bounded(
+        CONTROLLER,
+        &key,
+        ctx.options.pass_timeout,
+        &ctx.metrics,
+        async {
+            finalizer(&api, FINALIZER, svc, |event| async {
+                match event {
+                    Event::Apply(svc) => apply(&svc, &ctx).await,
+                    Event::Cleanup(svc) => cleanup(&svc, &ctx).await,
+                }
+            })
+            .await
+            .map_err(|e| Error::Finalizer(Box::new(e)))
+        },
+    )
     .await
-    .map_err(|e| Error::Finalizer(Box::new(e)));
+    .map(|action| {
+        if adding && action == Action::await_change() {
+            Action::requeue(ctx.options.resync.pending)
+        } else {
+            action
+        }
+    });
     if result.is_ok() {
         ctx.retries.succeeded(&key);
         ctx.metrics.inc(

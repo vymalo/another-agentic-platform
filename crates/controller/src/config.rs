@@ -16,6 +16,7 @@ use serde_json::json;
 use crate::context::{ConfigContext, FIELD_MANAGER, failed};
 use crate::error::Error;
 use crate::metrics::name;
+use crate::pass::bounded;
 
 const CONTROLLER: &str = "agentconfig";
 
@@ -71,11 +72,29 @@ pub async fn reconcile_config(
         .namespace()
         .ok_or(Error::Malformed("an AgentConfig has no namespace"))?;
     let name_of = config.name_any();
+    let key = format!("{ns}/{name_of}");
+    bounded(
+        CONTROLLER,
+        &key,
+        ctx.pass_timeout,
+        &ctx.metrics,
+        write_status(&config, &ns, &name_of, &ctx),
+    )
+    .await
+}
+
+/// The pass itself: compare the status the object has with the one its spec gives, and write it when they differ.
+async fn write_status(
+    config: &AgentConfig,
+    ns: &str,
+    name_of: &str,
+    ctx: &ConfigContext,
+) -> Result<Action, Error> {
     let previous = config.status.clone().unwrap_or_default();
-    let status = config_status(&config, &previous.conditions, &(ctx.clock)());
+    let status = config_status(config, &previous.conditions, &(ctx.clock)());
 
     if config.status.as_ref() != Some(&status) {
-        let api: Api<AgentConfig> = Api::namespaced(ctx.client.clone(), &ns);
+        let api: Api<AgentConfig> = Api::namespaced(ctx.client.clone(), ns);
         let body = json!({
             "apiVersion": AgentConfig::api_version(&()),
             "kind": AgentConfig::kind(&()),
@@ -83,7 +102,7 @@ pub async fn reconcile_config(
             "status": status,
         });
         api.patch_status(
-            &name_of,
+            name_of,
             &PatchParams::apply(FIELD_MANAGER).force(),
             &Patch::Apply(&body),
         )

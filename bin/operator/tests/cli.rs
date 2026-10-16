@@ -113,6 +113,7 @@ fn run_lists_its_settings_and_the_environment_variables_that_set_them() {
         "AAP_CONCURRENCY",
         "AAP_RESYNC_SECS",
         "AAP_RESYNC_PENDING_SECS",
+        "AAP_RECONCILE_TIMEOUT_SECS",
         "DEFAULT_AGENT_IMAGE",
         "--default-agent-image",
     ] {

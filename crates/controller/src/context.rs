@@ -146,17 +146,27 @@ pub struct ConfigContext {
     pub(crate) metrics: Arc<Metrics>,
     pub(crate) clock: Clock,
     pub(crate) retries: Retries,
+    pub(crate) pass_timeout: Duration,
 }
 
 impl ConfigContext {
-    /// A context with the real clock.
+    /// A context with the real clock and the default limit on a pass.
     pub fn new(client: Client, metrics: Arc<Metrics>) -> Self {
         Self {
             client,
             metrics,
             clock: system_clock(),
             retries: Retries::default(),
+            pass_timeout: crate::options::PASS_TIMEOUT,
         }
+    }
+
+    /// Cut a pass short after `limit` ([`Options::pass_timeout`](crate::Options::pass_timeout) for the
+    /// services).
+    #[must_use]
+    pub fn with_pass_timeout(mut self, limit: Duration) -> Self {
+        self.pass_timeout = limit;
+        self
     }
 
     /// Take the time from `clock`.

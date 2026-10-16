@@ -25,6 +25,7 @@ mod error;
 mod metrics;
 mod operator;
 mod options;
+mod pass;
 mod service;
 mod watches;
 

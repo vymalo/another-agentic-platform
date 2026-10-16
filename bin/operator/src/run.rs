@@ -30,6 +30,12 @@ pub struct RunArgs {
     #[arg(long, env = "AAP_CONCURRENCY", default_value_t = 4)]
     pub concurrency: u16,
 
+    /// Seconds one pass over one object may take. A pass that is not done by then is dropped and tried
+    /// again after the error policy's wait: a request that is never answered would otherwise keep the
+    /// object out of the controller for as long as it lives.
+    #[arg(long, env = "AAP_RECONCILE_TIMEOUT_SECS", default_value_t = 60)]
+    pub reconcile_timeout_secs: u64,
+
     /// Where the agent registry (`GET /registry/v1/agents`) is served. Only with the `registry` feature
     /// and a token.
     #[arg(long, env = "REGISTRY_ADDR", default_value = "0.0.0.0:8080")]
@@ -117,6 +123,7 @@ impl RunArgs {
                 ..aap_controller::Resync::default()
             },
             concurrency: self.concurrency.max(1),
+            pass_timeout: std::time::Duration::from_secs(self.reconcile_timeout_secs.max(1)),
             instance: self.instance.clone().filter(|i| !i.is_empty()),
             default_agent_image,
         }
