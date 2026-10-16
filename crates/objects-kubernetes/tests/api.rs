@@ -8,8 +8,6 @@
 
 mod support;
 
-use std::sync::{Arc, Mutex};
-
 use aap_objects_kubernetes::{FIELD_MANAGER, KubernetesObjects, NEVER};
 use aap_ports::testkit::{ObjectsUnderTest, sample_agent, sample_shared, unique};
 use aap_ports::{
@@ -516,36 +514,46 @@ fn written(fake: &Fake, plural: &str) -> Vec<Call> {
         .collect()
 }
 
-/// The warnings the crate logs while it runs, as text.
-#[derive(Clone, Default)]
-struct Logs(Arc<Mutex<Vec<u8>>>);
-
-impl Logs {
-    /// Log into this, at `WARN` and above, until the guard is dropped. The runtime of `#[tokio::test]` has one thread,
-    /// so the default subscriber of the thread is the one every await runs under.
-    fn capture() -> (Self, tracing::subscriber::DefaultGuard) {
-        let logs = Self::default();
-        let sink = logs.clone();
-        let subscriber = tracing_subscriber::fmt()
-            .with_writer(move || sink.clone())
-            .with_ansi(false)
-            .with_max_level(tracing::Level::WARN)
-            .finish();
-        (logs, tracing::subscriber::set_default(subscriber))
-    }
-
-    fn text(&self) -> String {
-        String::from_utf8_lossy(&self.0.lock().unwrap()).into_owned()
-    }
+thread_local! {
+    /// What the crate logged on this thread: a test runs on one thread (`#[tokio::test]` has a single-threaded runtime).
+    static LOGGED: std::cell::RefCell<Vec<u8>> = const { std::cell::RefCell::new(Vec::new()) };
 }
 
-impl std::io::Write for Logs {
+/// The writer of the one subscriber of this process: it writes into the buffer of the thread that logs.
+struct ThreadLog;
+
+impl std::io::Write for ThreadLog {
     fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
-        self.0.lock().unwrap().extend_from_slice(bytes);
+        LOGGED.with(|l| l.borrow_mut().extend_from_slice(bytes));
         Ok(bytes.len())
     }
     fn flush(&mut self) -> std::io::Result<()> {
         Ok(())
+    }
+}
+
+/// The warnings the crate logs while it runs, as text, for the current test.
+///
+/// The subscriber is global and installed once, and writes into the buffer of the thread that logs, so that the tests
+/// that run in parallel do not read each other's lines.
+struct Logs;
+
+impl Logs {
+    fn capture() -> Self {
+        static INSTALLED: std::sync::Once = std::sync::Once::new();
+        INSTALLED.call_once(|| {
+            tracing_subscriber::fmt()
+                .with_writer(|| ThreadLog)
+                .with_ansi(false)
+                .with_max_level(tracing::Level::WARN)
+                .init();
+        });
+        LOGGED.with(|l| l.borrow_mut().clear());
+        Self
+    }
+
+    fn text(&self) -> String {
+        LOGGED.with(|l| String::from_utf8_lossy(&l.borrow()).into_owned())
     }
 }
 
@@ -712,12 +720,11 @@ async fn a_service_apply_that_fails_leaves_the_config_written_and_says_why_and_a
                 s.apply_as("kubectl-edit", true, "agentservices", &service, body);
             });
         }
-        let (logs, guard) = Logs::capture();
+        let logs = Logs::capture();
         let err = h
             .put_agent(&changed, &Precondition::Matches(agent.etag()))
             .await
             .unwrap_err();
-        drop(guard);
         match (what, &err) {
             ("unavailable", ObjectsError::Unavailable(_)) => {}
             ("field conflict", ObjectsError::Conflict(m)) => {
@@ -747,7 +754,15 @@ async fn a_service_apply_that_fails_leaves_the_config_written_and_says_why_and_a
             log.contains("AgentConfig") && log.contains("AgentService"),
             "{what}: {log}"
         );
-        for value in ["another-model", "Changed", "Theirs", "kubectl-edit", "503"] {
+        // (The name of the agent is random and can hold any digits: the server's words are what is looked for.)
+        for value in [
+            "another-model",
+            "Changed",
+            "Theirs",
+            "kubectl-edit",
+            "failing once on purpose",
+            "ServiceUnavailable",
+        ] {
             assert!(
                 !log.contains(value),
                 "{what}: the log holds {value:?}: {log}"
