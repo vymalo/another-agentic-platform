@@ -19,7 +19,7 @@ use std::error::Error as StdError;
 
 use aap_forms::{FormError, FormTarget, Unrepresentable, from_object_errors};
 use aap_ports::{AuthError, InvalidToken, Kind, ObjectsError};
-use axum::http::header::{ALLOW, CONTENT_TYPE, WWW_AUTHENTICATE};
+use axum::http::header::{ALLOW, CONTENT_TYPE, RETRY_AFTER, WWW_AUTHENTICATE};
 use axum::http::{HeaderName, HeaderValue, StatusCode};
 use axum::response::{IntoResponse, Response};
 use serde_json::{Map, Value, json};
@@ -28,6 +28,9 @@ use serde_json::{Map, Value, json};
 pub const PROBLEM_JSON: &str = "application/problem+json";
 
 const TYPE_PREFIX: &str = "urn:vymalo:agents:problem:";
+
+/// What a `503` tells a client to wait, in seconds: the keys and the cluster come back in seconds or not at all.
+const RETRY_AFTER_SECONDS: &str = "5";
 
 /// An error of the API, as a response.
 #[derive(Debug)]
@@ -164,7 +167,8 @@ impl Problem {
                 "keys-unavailable",
                 "The token cannot be checked now",
                 "the issuer's keys cannot be fetched, so the token could not be checked: it is not known to be bad, try again",
-            ),
+            )
+            .header(RETRY_AFTER, RETRY_AFTER_SECONDS),
         }
     }
 
@@ -385,6 +389,7 @@ impl Problem {
                     "Unavailable",
                     "the cluster's API server cannot be reached or refused the call: try again",
                 )
+                .header(RETRY_AFTER, RETRY_AFTER_SECONDS)
             }
             ObjectsError::Internal(source) => {
                 tracing::error!(error = %chain(source.as_ref()), "the object store failed");

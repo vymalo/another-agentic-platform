@@ -959,6 +959,11 @@ async fn an_object_store_that_is_down_is_503_and_not_a_mistake_of_the_request() 
     ] {
         assert_eq!(r.code(), 503, "{}", r.text());
         assert!(r.is_problem("unavailable"));
+        assert_eq!(
+            r.header("retry-after"),
+            Some("5"),
+            "a client is told when to come back"
+        );
     }
 }
 
@@ -974,6 +979,7 @@ async fn keys_that_cannot_be_fetched_are_503_never_401() {
             r.header("www-authenticate").is_none(),
             "a good token is not told it is bad"
         );
+        assert_eq!(r.header("retry-after"), Some("5"), "{path}");
     }
     // A request with no token needs no keys.
     assert_eq!(api.get("/v1/me").send().await.code(), 401);

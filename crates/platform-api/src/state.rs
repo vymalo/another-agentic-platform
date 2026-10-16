@@ -1,5 +1,7 @@
 //! What the handlers share: the two ports, and the deployment's configuration. No global.
 
+use std::sync::atomic::AtomicBool;
+
 use aap_forms::{Defaults, ImagePolicy};
 use aap_ports::{AgentObjects, Authenticator};
 
@@ -23,6 +25,9 @@ pub struct ApiState<O, A> {
     pub(crate) images: ImagePolicy,
     pub(crate) cors: CorsOrigins,
     pub(crate) version: String,
+    /// Whether the last request that needed the issuer's keys found them unavailable: the log says so when this changes,
+    /// and not once per request while it lasts.
+    pub(crate) keys_down: AtomicBool,
 }
 
 impl<O, A> ApiState<O, A>
@@ -51,6 +56,7 @@ where
             images,
             cors: CorsOrigins::none(),
             version: env!("CARGO_PKG_VERSION").to_owned(),
+            keys_down: AtomicBool::new(false),
         })
     }
 

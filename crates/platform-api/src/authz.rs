@@ -19,6 +19,7 @@
 //! * The token is never logged, echoed or kept: it is passed to the authenticator and dropped.
 
 use std::sync::Arc;
+use std::sync::atomic::Ordering;
 
 use aap_api::permission;
 use aap_ports::{AgentObjects, AuthError, Authenticator, Principal};
@@ -114,10 +115,18 @@ where
         Err(problem) => return problem.into_response(),
     };
     let principal = match state.auth.authenticate(token).await {
-        Ok(principal) => principal,
+        Ok(principal) => {
+            if state.keys_down.swap(false, Ordering::Relaxed) {
+                tracing::info!("the issuer's keys are available again");
+            }
+            principal
+        }
         Err(error) => {
-            if let AuthError::Unavailable(source) = &error {
-                tracing::warn!(error = %chain(source.as_ref()), "the issuer's keys are unavailable: a token could not be checked");
+            // Said when it starts, not once per request while it lasts: every request of every person is a line otherwise.
+            if let AuthError::Unavailable(source) = &error
+                && !state.keys_down.swap(true, Ordering::Relaxed)
+            {
+                tracing::warn!(error = %chain(source.as_ref()), "the issuer's keys are unavailable: tokens cannot be checked until they are");
             }
             return Problem::from_auth(&error).into_response();
         }
