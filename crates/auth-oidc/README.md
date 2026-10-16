@@ -81,11 +81,12 @@ stateDiagram-v2
 
 - **Algorithms**: RS256, RS384, ES256 and EdDSA, and nothing else. `none` and the HMAC family are refused whatever key they name
   (the algorithm confusion attack), and a key only verifies tokens of its own family (an RSA key never verifies ES256). A JWKS key
-  that cannot verify (symmetric, an RSA modulus under 2048 bits, `use: enc`, `key_ops` without `verify`, another curve, an `alg`
-  this does not allow) is skipped, never an error for the rest of the set, and the fetch logs how many were skipped and how many are
+  that cannot verify (symmetric, an RSA modulus under 2048 bits counted from its highest set bit, `use: enc`, `key_ops` without `verify`,
+  another curve, an `alg` this does not allow) is skipped, never an error for the rest of the set, and the fetch logs how many were skipped and how many are
   usable at debug, counts only. **The octets of a key are read as they are, leading zeros included**: an Ed25519 key is exactly 32
   octets, a zero in front a part of it (about one key in 256 has one); an RSA `n` and `e` are read without their leading zeros (a
-  sign byte, or `AAEAAQ` for 65537), the modulus then at least 256 octets; a P-256 coordinate is read without its leading zeros,
+  sign byte, or `AAEAAQ` for 65537), the modulus then at least 2048 bits counted on that
+  magnitude (256 octets whose first is `0x01` are 2041 bits and are refused, as is `0x7F`, 2047; `0x80` is 2048 and kept); a P-256 coordinate is read without its leading zeros,
   refused over 32 octets or empty, and given to the library in the full 32 (an issuer may cut the zeros, write them or cover them
   with a sign byte, and each verifies). **Every key that shares the token's `kid`** (and its kind) is tried, in the order of the set,
   and the token is good if one of them signed it; only a bad signature moves on to the next key, any other word is of a token that a
@@ -248,7 +249,7 @@ Over real HTTP, against issuers on local ports; the cache's intervals are shorte
   argument; a blank audience and an empty part of the roles claim; and `try_start_at` on a port in use and on an address that is not the machine's (an error, not a panic). Each refusal was broken on purpose (no loopback check, duplicates
   allowed, no read-back of the host through a URL, no label check, no IPv6 parse) and a named test failed.
 - `tests/config.rs` (4): the YAML, what it lacks or says more, what is refused at construction, and that a refusal never shows a value.
-- Unit tests in `src/` (15): the choice of key and of its candidates (`keys.rs`, 8), the claims (`claims.rs`, 5), the `jwks_uri` rule (`fetch.rs`, 2).
+- Unit tests in `src/` (16): the choice of key and of its candidates and the RSA minimum of 2048 bits against 256 octets (`keys.rs`, 9), the claims (`claims.rs`, 5), the `jwks_uri` rule (`fetch.rs`, 2).
 
 Every client the tests build for themselves (`reqwest`, in `tests/jwks.rs`, `tests/logs.rs`, `tests/slow.rs`) takes no proxy, and so does the
 authenticator the tests build (`Tuning::use_system_proxy: false`, in `tests/common` and the `testkit`), so the suite passes with

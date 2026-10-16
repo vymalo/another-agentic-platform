@@ -22,8 +22,9 @@ pub(crate) const ALLOWED: [Algorithm; 4] = [
     Algorithm::EdDSA,
 ];
 
-/// The smallest RSA modulus, in bytes (2048 bits).
-const MIN_RSA_MODULUS_BYTES: usize = 256;
+/// The smallest RSA modulus, in bits, counted on its magnitude (the bits from its highest set bit): a sign byte
+/// makes it no bigger, and 256 octets whose first is `0x01` are 2041 bits, which aws-lc refuses at verification.
+const MIN_RSA_MODULUS_BITS: usize = 2048;
 
 /// The size of a P-256 coordinate, in bytes.
 const P256_COORDINATE_BYTES: usize = 32;
@@ -121,6 +122,15 @@ fn magnitude(bytes: &[u8]) -> &[u8] {
     &bytes[zeros..]
 }
 
+/// The bits of an unsigned big-endian integer from its highest set bit: 0 for no octets (`magnitude` has taken
+/// the zeros off, so the first octet, when there is one, is not zero).
+fn bit_length(magnitude: &[u8]) -> usize {
+    match magnitude.first() {
+        None => 0,
+        Some(top) => magnitude.len() * 8 - top.leading_zeros() as usize,
+    }
+}
+
 fn base64url(bytes: &[u8]) -> String {
     URL_SAFE_NO_PAD.encode(bytes)
 }
@@ -162,7 +172,7 @@ fn read_key(jwk: &Jwk) -> Option<Key> {
             // The library takes the integers as they are written: a sign byte in front would make a key that
             // is admitted and never verifies.
             let (n, e) = (magnitude(&n), magnitude(&e));
-            if n.len() < MIN_RSA_MODULUS_BYTES || e.is_empty() {
+            if e.is_empty() || bit_length(n) < MIN_RSA_MODULUS_BITS {
                 return None;
             }
             (
@@ -370,6 +380,31 @@ mod tests {
         );
         assert!(parse(vec![ec(&[], &y)]).set.is_empty());
         assert!(parse(vec![ec(&x, &[])]).set.is_empty());
+    }
+
+    #[test]
+    fn the_rsa_minimum_is_2048_bits_not_256_octets() {
+        let key = |octets: usize, top: u8, sign_byte: bool| {
+            let mut n = vec![0xC3u8; octets];
+            n[0] = top;
+            if sign_byte {
+                n.insert(0, 0);
+            }
+            json!({"kty": "RSA", "kid": "k", "n": URL_SAFE_NO_PAD.encode(n), "e": "AQAB"})
+        };
+        for sign_byte in [false, true] {
+            // 256 octets whose first is 0x01 are 2041 bits: admitted by a count of octets, and refused by aws-lc
+            // when a token is verified. The same for 0x7F (2047 bits).
+            assert!(parse(vec![key(256, 0x01, sign_byte)]).set.is_empty());
+            assert!(parse(vec![key(256, 0x7F, sign_byte)]).set.is_empty());
+            // Exactly 2048 bits, and more.
+            assert_eq!(parse(vec![key(256, 0x80, sign_byte)]).set.len(), 1);
+            assert_eq!(parse(vec![key(256, 0xFF, sign_byte)]).set.len(), 1);
+            assert_eq!(parse(vec![key(257, 0x01, sign_byte)]).set.len(), 1); // 2049 bits
+        }
+        assert_eq!(bit_length(&[]), 0);
+        assert_eq!(bit_length(&[0x01]), 1);
+        assert_eq!(bit_length(&[0x80, 0]), 16);
     }
 
     #[test]
