@@ -153,6 +153,17 @@ for each tested shape (tests/api-shapes.sh) to find such a value before it is de
 {{- fail (printf "api.terminationGracePeriodSeconds must be a whole number of at least api.preStopSleepSeconds + 32 (the sleep counts against it, the API drains for up to 25 s and then takes up to 2 s to stop its health port, and 5 s of margin), got %v with a sleep of %v" $api.terminationGracePeriodSeconds $api.preStopSleepSeconds) -}}
 {{- end -}}
 {{- $_ := include "aap.api.serviceAccountName" . -}}
+{{- /* The pod's labels and annotations are the chart's first: a key of the same name would be written twice, and a selector label of another value would leave the Deployment with pods its selector does not match. */ -}}
+{{- range $k, $v := (default (dict) $api.podLabels) -}}
+{{- if has $k (list "app.kubernetes.io/name" "app.kubernetes.io/instance" "app.kubernetes.io/component") -}}
+{{- fail (printf "api.podLabels: %s is a selector label of the API's pods, which the chart sets" $k) -}}
+{{- end -}}
+{{- end -}}
+{{- range $k, $v := (default (dict) $api.podAnnotations) -}}
+{{- if eq $k "checksum/config" -}}
+{{- fail "api.podAnnotations: checksum/config is the chart's (the hash of the configuration file that rolls the pods)" -}}
+{{- end -}}
+{{- end -}}
 {{- /* The configuration file: the keys the chart owns, and the ones the binary requires. */ -}}
 {{- $c := $api.config -}}
 {{- range $k, $v := $c -}}

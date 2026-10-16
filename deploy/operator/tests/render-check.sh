@@ -447,6 +447,12 @@ api_policy_ingress_peers() {
 }
 check "api (full shape): the policy's ingress peers are api.networkPolicy.from" api_policy_ingress_peers
 render -f "$here/api.values.yaml"
+render -f "$here/api-full.values.yaml"
+check "api (full shape): podLabels and podAnnotations are on the pod template, once each" \
+  dcount Deployment aap-operator-api 'team: platform' 1
+check "api (full shape): the pod annotation of the values is on the pod template once" \
+  dcount Deployment aap-operator-api 'example.com/scrape: "false"' 1
+render -f "$here/api.values.yaml"
 api_nothing_extra_by_default() {
   test "$(api_env_names)" = "API_CONFIG_FILE RUST_LOG " && test "$(api_volume_names)" = "config " && test "$(api_mounts)" = "config /etc/aap-api "
 }
@@ -603,6 +609,16 @@ check "an Ingress with no host is refused" refused_api 'api.ingress.host is requ
 check "an Ingress path that does not start with / is refused" refused_api 'api.ingress.path must start with /' --set api.ingress.path=v1
 check "an Ingress pathType that is not one is refused" refused_api 'api.ingress.pathType must be' --set api.ingress.pathType=Regex
 # A null (or a text) where a template reads a field is a named refusal, not a nil pointer from a template.
+check "podLabels: app.kubernetes.io/name (a selector label of the API's pods) is refused" refused_api 'api.podLabels: app.kubernetes.io/name is a selector label' \
+  --set-json 'api.podLabels={"app.kubernetes.io/name":"other"}'
+check "podLabels: app.kubernetes.io/instance is refused" refused_api 'api.podLabels: app.kubernetes.io/instance is a selector label' \
+  --set-json 'api.podLabels={"app.kubernetes.io/instance":"other"}'
+check "podLabels: app.kubernetes.io/component is refused" refused_api 'api.podLabels: app.kubernetes.io/component is a selector label' \
+  --set-json 'api.podLabels={"app.kubernetes.io/component":"other"}'
+check "podAnnotations: checksum/config (the chart's hash of the file) is refused" refused_api 'api.podAnnotations: checksum/config is the chart' \
+  --set-json 'api.podAnnotations={"checksum/config":"x"}'
+check "podLabels and podAnnotations of other names render" \
+  renders_ok -f "$here/api.values.yaml" --set-json 'api.podLabels={"team":"platform"}' --set-json 'api.podAnnotations={"example.com/x":"y"}'
 check "api.networkPolicy: null is refused by name" refused_api 'api.networkPolicy must be a map' --set api.networkPolicy=null
 check "api.ingress: null is refused by name" refused_api 'api.ingress must be a map' --set api.ingress=null
 check "api.image: null is refused by name" refused_api 'api.image must be a map' --set api.image=null
