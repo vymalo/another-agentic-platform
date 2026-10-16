@@ -2,9 +2,11 @@
 {{- if and .Values.api.enabled .Values.api.networkPolicy.enabled }}
 {{- $np := .Values.api.networkPolicy -}}
 # Ingress is closed except the peers of api.networkPolicy.from (the edge) on the API port; the health port has no rule, because the
-# kubelet's probes come from the node, which a NetworkPolicy never blocks (as in the operator's policy). Egress goes to the API server, to
-# the cluster's DNS and to the issuer's keys, and nowhere else. Unlike the operator's, which reaches the API server by its address
-# and nothing else, the API resolves the issuer's name and fetches its keys, so it has the two rules more.
+# kubelet's probes come from the node, which a NetworkPolicy never blocks (as in the operator's policy). Egress is three rules: the API server,
+# the cluster's DNS and the issuer's keys. A rule with ports and no `to` allows ANY address on those ports, which is what the API server's
+# and the issuer's rules are until apiServer.cidrs and issuer.to are set (README "The NetworkPolicy"); the DNS rule is narrow by default.
+# Unlike the operator's, which reaches the API server and nothing else, the API resolves the issuer's name and fetches its keys, so it has
+# the two rules more.
 apiVersion: networking.k8s.io/v1
 kind: NetworkPolicy
 metadata:

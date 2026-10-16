@@ -460,11 +460,11 @@ render_notes -f "$here/api.values.yaml"
 check "NOTES (api on, no apiServer.cidrs and no issuer.to): it says the NetworkPolicy lets the API reach ANY address on both lists of ports, and what to set" \
   has_all 'ANY address on 443, 6443 \(the API server.s ports\): set api.networkPolicy.apiServer.cidrs' 'ANY address on 443 \(the issuer.s ports\): set api.networkPolicy.issuer.to'
 render_notes -f "$here/api-full.values.yaml"
-check "NOTES (api on, both set): no warning about ANY address" lacks 'ANY address'
+check "NOTES (api on, both set): no warning about ANY address" lacks 'NetworkPolicy lets it reach ANY address'
 render_notes -f "$here/api.values.yaml" --set 'api.networkPolicy.apiServer.cidrs[0]=10.96.0.1/32'
 check "NOTES (only the API server's addresses set): the warning is about the issuer alone" has 'ANY address on 443 \(the issuer.s ports\)' && lacks 'API server.s ports'
 render_notes -f "$here/api.values.yaml" --set api.networkPolicy.enabled=false --set api.networkPolicy.from=null
-check "NOTES (api on, the policy off): no warning about a policy that is not there" lacks 'ANY address'
+check "NOTES (api on, the policy off): no warning about a policy that is not there" lacks 'NetworkPolicy lets it reach ANY address'
 render
 
 # ---- What is refused -------------------------------------------------------------------------------------------------------
