@@ -1,13 +1,14 @@
 apiVersion: agents.vymalo.com/v1alpha1
 kind: AgentConfig
 metadata:
-  name: coder-me
-  namespace: another-agentic-system
+  annotations:
+    agents.vymalo.com/note: kept
   labels:
+    agents.vymalo.com/team: kept
     app.kubernetes.io/managed-by: dashboard.agents.vymalo.com
     team: agents
-  annotations:
-    note.example.invalid/owner: platform team
+  name: coder-me
+  namespace: another-agentic-system
 spec:
   environment:
     resources:
@@ -72,13 +73,14 @@ spec:
 apiVersion: agents.vymalo.com/v1alpha1
 kind: AgentService
 metadata:
-  name: coder-me
-  namespace: another-agentic-system
+  annotations:
+    agents.vymalo.com/note: kept
   labels:
+    agents.vymalo.com/team: kept
     app.kubernetes.io/managed-by: dashboard.agents.vymalo.com
     team: agents
-  annotations:
-    note.example.invalid/owner: platform team
+  name: coder-me
+  namespace: another-agentic-system
 spec:
   access:
     allowFrom:

@@ -35,6 +35,35 @@ fn noisy(mut object: Stored) -> Stored {
     object
         .annotations
         .insert("note.example.invalid/owner".into(), "platform team".into());
+    // What a tool writes: no prefix of ours, so none of it is exported (an allow-list, not a list of tools).
+    for tool_label in [
+        "app.kubernetes.io/instance",
+        "argocd.argoproj.io/instance",
+        "kustomize.toolkit.fluxcd.io/name",
+        "helm.sh/chart",
+        "tool.example.invalid/anything-next-year",
+    ] {
+        object
+            .labels
+            .insert(tool_label.into(), format!("{SENTINEL}-label"));
+    }
+    for tool_annotation in [
+        "meta.helm.sh/release-name",
+        "reloader.example.invalid/auto",
+        "kubernetes.io/change-cause",
+        "unprefixed-note",
+    ] {
+        object
+            .annotations
+            .insert(tool_annotation.into(), format!("{SENTINEL}-annotation"));
+    }
+    // What the platform puts on its own objects, and what a person keeps: a label with no prefix.
+    object
+        .annotations
+        .insert("agents.vymalo.com/note".into(), "kept".into());
+    object
+        .labels
+        .insert("agents.vymalo.com/team".into(), "kept".into());
     object.labels.insert("team".into(), "agents".into());
     object.status = Some(
         json!({ "state": "Ready", "conditions": [{ "message": SENTINEL }], "secret": SENTINEL }),
@@ -119,24 +148,156 @@ fn what_a_server_sets_and_what_a_tool_writes_is_not_exported() {
     ] {
         assert!(!yaml.contains(word), "{word} in\n{yaml}");
     }
-    // What a person put stays: their annotation, their label and the dashboard's.
+    // What stays: the person's label (no prefix), the platform's label and annotation, and the dashboard's mark.
     let docs = parsed(&yaml);
-    assert_eq!(
-        docs[1]["metadata"]["annotations"]["note.example.invalid/owner"],
-        "platform team"
-    );
-    assert_eq!(docs[1]["metadata"]["labels"]["team"], "agents");
-    assert_eq!(
-        docs[1]["metadata"]["labels"][aap_ports::MANAGED_BY_LABEL],
-        aap_ports::MANAGED_BY_DASHBOARD
-    );
-    assert_eq!(
-        docs[1]["metadata"]["annotations"]
+    for doc in &docs[1..] {
+        assert_eq!(doc["metadata"]["labels"]["team"], "agents");
+        assert_eq!(doc["metadata"]["labels"]["agents.vymalo.com/team"], "kept");
+        assert_eq!(
+            doc["metadata"]["labels"][aap_ports::MANAGED_BY_LABEL],
+            aap_ports::MANAGED_BY_DASHBOARD
+        );
+        assert_eq!(
+            doc["metadata"]["annotations"]["agents.vymalo.com/note"],
+            "kept"
+        );
+        let labels: BTreeSet<&str> = doc["metadata"]["labels"]
             .as_object()
             .unwrap()
-            .len(),
-        1,
-        "only the person's"
+            .keys()
+            .map(String::as_str)
+            .collect();
+        assert_eq!(
+            labels,
+            BTreeSet::from([
+                "agents.vymalo.com/team",
+                "app.kubernetes.io/managed-by",
+                "team"
+            ]),
+            "the allow-list: no tool's label"
+        );
+        // The annotations: the platform's, and nothing else, a person's note included.
+        assert_eq!(
+            doc["metadata"]["annotations"]
+                .as_object()
+                .unwrap()
+                .keys()
+                .collect::<Vec<_>>(),
+            ["agents.vymalo.com/note"]
+        );
+    }
+    for gone in [
+        "note.example.invalid/owner",
+        "app.kubernetes.io/instance",
+        "helm.sh",
+        "fluxcd",
+        "unprefixed-note",
+        "reloader",
+    ] {
+        assert!(!yaml.contains(gone), "{gone} in\n{yaml}");
+    }
+}
+
+#[test]
+fn the_managed_by_label_is_kept_when_it_says_the_dashboard_and_dropped_when_it_says_another_tool() {
+    let mut agent = coder_agent();
+    agent
+        .service
+        .labels
+        .insert(aap_ports::MANAGED_BY_LABEL.into(), "Helm".into());
+    let docs = parsed(&export_agent(&agent).unwrap());
+    assert!(
+        docs[1]["metadata"]["labels"]
+            .get(aap_ports::MANAGED_BY_LABEL)
+            .is_none(),
+        "an object Helm manages is not exported as the dashboard's"
+    );
+    assert_eq!(
+        docs[0]["metadata"]["labels"][aap_ports::MANAGED_BY_LABEL],
+        aap_ports::MANAGED_BY_DASHBOARD
+    );
+}
+
+#[test]
+fn a_string_that_yaml_1_1_reads_as_something_else_is_quoted_and_comes_back_a_string() {
+    let strings = [
+        "yes",
+        "no",
+        "on",
+        "off",
+        "y",
+        "n",
+        "Y",
+        "N",
+        "12:30",
+        "1_000",
+        "2026-10-16",
+    ];
+    let mut object = stored(
+        Kind::ToolProvider,
+        "websearch",
+        json!({
+            "title": "Web search",
+            // As values, as members of a list and as keys of a map.
+            "values": strings,
+            "keys": strings.iter().map(|s| ((*s).to_owned(), json!(*s))).collect::<serde_json::Map<_, _>>(),
+        }),
+        true,
+    );
+    object.labels.insert("answer".into(), "yes".into());
+    object
+        .annotations
+        .insert("agents.vymalo.com/since".into(), "2026-10-16".into());
+    let yaml = export_object(&object).unwrap();
+
+    // Quoted, line by line: what a YAML 1.1 reader would otherwise read as a boolean, an integer or a date.
+    for s in strings {
+        assert!(
+            yaml.contains(&format!("- \"{s}\"\n")),
+            "the value {s}:\n{yaml}"
+        );
+        assert!(
+            yaml.contains(&format!("\"{s}\": \"{s}\"\n")),
+            "the key {s}:\n{yaml}"
+        );
+    }
+    assert!(yaml.contains("    answer: \"yes\"\n"), "{yaml}");
+    assert!(
+        yaml.contains("    agents.vymalo.com/since: \"2026-10-16\"\n"),
+        "{yaml}"
+    );
+    // And nothing of the value is a bare word that a YAML 1.1 reader would not read as a string.
+    for line in yaml.lines() {
+        let bare = line
+            .rsplit(": ")
+            .next()
+            .unwrap_or(line)
+            .trim_start_matches("- ");
+        assert!(
+            ![
+                "yes",
+                "no",
+                "on",
+                "off",
+                "y",
+                "n",
+                "Y",
+                "N",
+                "12:30",
+                "1_000",
+                "2026-10-16"
+            ]
+            .contains(&bare),
+            "a bare {bare:?} in\n{yaml}"
+        );
+    }
+    // It reads back as the strings it was.
+    let doc = &parsed(&yaml)[0];
+    assert_eq!(doc["spec"], object.spec);
+    assert_eq!(doc["metadata"]["labels"]["answer"], "yes");
+    assert_eq!(
+        doc["metadata"]["annotations"]["agents.vymalo.com/since"],
+        "2026-10-16"
     );
 }
 
@@ -210,7 +371,9 @@ proptest! {
         let mut agent = agent_of(&to_resources(&form, &deployment, NS), true).tap_noise();
         for stored in std::iter::once(&mut agent.service).chain(agent.config.as_mut()) {
             for (k, v) in &extra {
+                // A person's or a tool's (no prefix of ours): not exported. The platform's: exported.
                 stored.annotations.insert(format!("example.invalid/{k}"), v.clone());
+                stored.annotations.insert(format!("agents.vymalo.com/{k}"), v.clone());
             }
             // Members of `metadata` a future Kubernetes adds are not on the whitelist: they are not in `Stored` at
             // all, and the export builds the object from named members.
@@ -224,7 +387,7 @@ proptest! {
             let meta: BTreeSet<&str> = doc["metadata"].as_object().unwrap().keys().map(String::as_str).collect();
             prop_assert!(meta.is_subset(&BTreeSet::from(["name", "namespace", "labels", "annotations"])));
             let annotations = doc["metadata"]["annotations"].as_object().map(|m| m.len()).unwrap_or(0);
-            prop_assert_eq!(annotations, extra.len() + 1, "the person's annotations, and no tool's");
+            prop_assert_eq!(annotations, extra.len() + 1, "the platform's annotations, and nobody else's");
         }
     }
 

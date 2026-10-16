@@ -18,12 +18,13 @@ aap-ports.workspace = true
 k8s-openapi.workspace = true
 serde.workspace = true
 serde_json.workspace = true
-serde_yaml.workspace = true
 thiserror.workspace = true
 url.workspace = true
 
 [dev-dependencies]
 proptest.workspace = true
+# Reads the export back in the tests; the export itself is written by `src/yaml.rs`.
+serde_yaml.workspace = true
 
 [lints]
 workspace = true

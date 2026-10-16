@@ -26,6 +26,7 @@ mod secret;
 mod shared;
 mod syntax;
 mod validate;
+mod yaml;
 
 pub use agent::{
     AgentForm, AgentKind, AgentKindForm, CoderSettings, FolderSettings, GithubAppForm, ModelChoice,
