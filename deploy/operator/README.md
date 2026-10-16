@@ -328,19 +328,19 @@ helm lint deploy/operator && helm lint deploy/operator-crds
 sh deploy/operator/tests/render-check.sh                    # needs helm
 UPDATE_GOLDEN=1 sh deploy/operator/tests/render-check.sh    # after a deliberate change: rewrites tests/golden
 sh deploy/operator/tests/bump-tag-test.sh
-# the configuration the chart renders for the API, read by the binary (cargo build -p aap-api-server first)
-sh deploy/operator/tests/api-config.sh /tmp/config.yaml -f deploy/operator/tests/api.values.yaml && target/debug/api --config /tmp/config.yaml --check
+# the configuration the chart renders for the API in each of its four shapes, read by the binary (cargo build -p aap-api-server first)
+sh deploy/operator/tests/api-shapes.sh /tmp/api-config && for f in /tmp/api-config/*.yaml; do target/debug/api --config "$f" --check; done
 ```
 
 | File | What |
 |---|---|
 | `tests/render-check.sh` | the four golden renders (`tests/golden/netcup.yaml` from `examples/netcup.values.yaml`, `secret.yaml` from `tests/secret.values.yaml`, `default.yaml`, and `api.yaml` from `tests/api.values.yaml`, the Platform API on; the first three have it off and equal what they were before it existed); no Secret object, no `ClusterRole`, no host access; one replica, `Recreate`, the probes, the security context; the `Role` equal to the table above, with and without `storeCnpg`; the registry only with a token, mounted as a file; the NetworkPolicy; the ExternalSecret; every refusal of `_validate.tpl` (the default agent image's included); the shared kinds read and never written; `DEFAULT_AGENT_IMAGE` pinned by tag and digest, empty rendering none, and the chart's pin equal to the end-to-end's; and `deploy/operator-crds` equal to `deploy/crds`. For the API: its objects, pod and labels, the `Role` **equal to `crates/objects-kubernetes/tests/rbac.yaml`** (read from the file) with no right on Secrets, the Service without the health port, the policy, the Ingress and its annotations, no Secret in the render or the file, the second shape (`tests/api-secretref.values.yaml`), nothing rendered or checked while it is off, and every refusal of `_validate.tpl` for it |
 | `tests/bump-tag-test.sh` | `bump-tag.sh` edits only `image.tag` (a `defaultAgentImage` line beside it is left alone) or, with `api`, only `api.image.tag` (each leaves the other, and keys that only look like it, alone), is idempotent, refuses a malformed tag and an unknown component (the test of adam-rs's `deploy/coder`, with this chart's values) |
-| `tests/api.values.yaml`, `tests/api-secretref.values.yaml`, `tests/api-config.sh` | the two shapes of the API component, and the script that renders one and writes the ConfigMap's `config.yaml` to a file, which CI hands to the image's `api --check` |
+| `tests/api.values.yaml`, `tests/api-secretref.values.yaml`, `tests/api-full.values.yaml`, `tests/api-shapes.sh`, `tests/api-config.sh` | the shapes of the API component: the golden one, a Secret per agent, and **one that sets every value the chart exposes** (ports, `apiServer.cidrs`, `issuer.to`, every key of `defaults`, the Ingress, the scheduling), and the scripts that render a shape and write the ConfigMap's `config.yaml` to a file (`api-shapes.sh` writes `golden`, `secretref`, `minimal` and `full`), which CI hands to the image's `api --check` |
 | `tests/schemas/` | the `ExternalSecret` schema for kubeconform ([its README](tests/schemas/README.md)) |
 | `tests/e2e/` | the kind end-to-end of the coder (S9): [`tests/e2e/README.md`](tests/e2e/README.md) |
 
-CI also runs kubeconform in strict mode over six renders (the defaults, netcup, `secret.values.yaml`, the two API shapes, and the CRDs chart with the
+CI also runs kubeconform in strict mode over seven renders (the defaults, netcup, `secret.values.yaml`, the three API shapes, and the CRDs chart with the
 `CustomResourceDefinition` kind skipped, because the schema set has none: the `kind` job of `operator.yml` applies them to a real API server).
 
 ## What is not proven

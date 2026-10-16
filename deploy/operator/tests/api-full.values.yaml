@@ -1,0 +1,170 @@
+# The third shape of the Platform API: EVERY value of `api` the chart exposes, none of them left to its default, so that what the
+# chart renders for each one is read by `api --check` (tests/api-shapes.sh, CI) and asserted by render-check.sh. Not a golden, and not a
+# deployment to copy: the addresses, the names and the sizes are made up to differ from the defaults. The other shapes are
+# tests/api.values.yaml (the golden) and tests/api-secretref.values.yaml (a Secret per agent).
+watchNamespace: agents
+imagePullSecrets:
+  - name: ghcr-pull
+api:
+  enabled: true
+  image:
+    repository: registry.example.com/mirror/aap-api
+    tag: sha-1234abc
+    digest: sha256:1111111111111111111111111111111111111111111111111111111111111111
+    pullPolicy: Always
+  replicas: 3
+  # Neither is the default: the chart writes both into the file (listen, healthListen), the probes and the Service.
+  port: 8443
+  healthPort: 9091
+  logLevel: aap_platform_api=debug,info
+  config:
+    oidc:
+      issuer: https://keycloak.example.com:8443/realms/another-agentic
+      audiences: [another-agentic, another-agentic-desktop, another-agentic-mobile]
+      rolesClaim: resource_access.another-agentic.roles
+      jwksUrl: https://keycloak.example.com:8443/realms/another-agentic/protocol/openid-connect/certs
+    cors:
+      allowedOrigins:
+        - https://agents.example.com
+        - https://admin.agents.example.com:8443
+        - http://localhost:3000
+        - http://[::1]:3000
+        - tauri://localhost
+        - http://tauri.localhost
+    # Every key of aap_forms::Defaults (bin/api/config.example.yaml), with other values than the example's.
+    defaults:
+      namespace: agents
+      offerLabel: agents.vymalo.com/offer
+      store:
+        cnpg:
+          instances: 3
+          storage:
+            size: 50Gi
+            storageClass: longhorn
+      a2aBearer:
+        name: orchestrator-agent-token
+        key: token
+      allowFrom:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: another-agentic-system
+          podSelector:
+            matchLabels:
+              app.kubernetes.io/component: orchestrator
+        - ipBlock:
+            cidr: 10.20.0.0/16
+            except: [10.20.5.0/24]
+      security:
+        runAsUser: 10002
+        runAsGroup: 10002
+        fsGroup: 10002
+      coder:
+        gitAuthor:
+          name: example-bot[bot]
+          email: 1+example-bot[bot]@users.noreply.github.com
+        allowedRepoHosts: [github.com, git.example.com]
+        githubApiUrl: https://api.github.com
+        githubMcp:
+          sidecar: true
+          port: 8082
+        workVolume:
+          name: work
+          scope: agent
+          mountPath: /work
+          source:
+            persistent:
+              size: 40Gi
+              storageClass: fast
+              perReplica: true
+        resources:
+          requests:
+            cpu: 750m
+            memory: 2Gi
+      folder:
+        resources:
+          requests:
+            cpu: 200m
+            memory: 512Mi
+      allowedImageRegistries: [ghcr.io, registry.example.com:5000, localhost:5000]
+  serviceAccount:
+    create: true
+    name: dashboard-api
+    annotations:
+      example.com/owner: platform
+  # The sleep counts against the grace period: 15 + 30 is the least the chart accepts.
+  terminationGracePeriodSeconds: 60
+  preStopSleepSeconds: 15
+  ingress:
+    enabled: true
+    className: nginx
+    host: api.agents.example.com
+    path: /v1
+    pathType: ImplementationSpecific
+    annotations:
+      nginx.ingress.kubernetes.io/limit-rps: "20"
+      example.com/edge: "yes"
+    tls:
+      enabled: true
+      secretName: api-agents-tls
+  networkPolicy:
+    enabled: true
+    from:
+      - namespaceSelector:
+          matchLabels:
+            kubernetes.io/metadata.name: ingress-nginx
+      - ipBlock:
+          cidr: 10.0.0.0/8
+    apiServer:
+      ports: [443, 6443, 16443]
+      cidrs: [10.96.0.1/32, 192.168.49.2/32]
+    dns:
+      to:
+        - ipBlock:
+            cidr: 169.254.20.10/32
+      ports: [53, 5353]
+    issuer:
+      to:
+        - ipBlock:
+            cidr: 203.0.113.0/24
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: identity
+          podSelector:
+            matchLabels:
+              app: keycloak
+      ports: [443, 8443]
+  resources:
+    requests:
+      cpu: 100m
+      memory: 128Mi
+    limits:
+      cpu: "1"
+      memory: 512Mi
+  podAnnotations:
+    example.com/scrape: "false"
+  podLabels:
+    team: platform
+  priorityClassName: platform-high
+  nodeSelector:
+    kubernetes.io/os: linux
+  tolerations:
+    - key: dedicated
+      operator: Equal
+      value: platform
+      effect: NoSchedule
+  affinity:
+    podAntiAffinity:
+      preferredDuringSchedulingIgnoredDuringExecution:
+        - weight: 100
+          podAffinityTerm:
+            topologyKey: kubernetes.io/hostname
+            labelSelector:
+              matchLabels:
+                app.kubernetes.io/component: api
+  topologySpreadConstraints:
+    - maxSkew: 1
+      topologyKey: topology.kubernetes.io/zone
+      whenUnsatisfiable: ScheduleAnyway
+      labelSelector:
+        matchLabels:
+          app.kubernetes.io/component: api

@@ -532,6 +532,20 @@ check "a secretRef name without {name} is refused (every agent would share one l
 check "with the policy off, no peer is needed" renders_ok -f "$here/api.values.yaml" --set api.networkPolicy.enabled=false --set api.networkPolicy.from=null
 check "the secretref shape renders (a Secret per agent, no policy, no Ingress)" renders_ok -f "$here/api-secretref.values.yaml"
 
+# The shapes CI hands to the binary's `--check` (api-shapes.sh): four files, and the one that sets every value holds the ports it set.
+api_shapes_are_written() {
+  d=$(mktemp -d) || return 1
+  sh "$here/api-shapes.sh" "$d" > /dev/null 2>&1 \
+    && [ "$(find "$d" -type f | wc -l)" -eq 4 ] && [ -s "$d/golden.yaml" ] && [ -s "$d/secretref.yaml" ] && [ -s "$d/minimal.yaml" ] \
+    && grep -q '^listen: 0.0.0.0:8443$' "$d/full.yaml" && grep -q '^healthListen: 0.0.0.0:9091$' "$d/full.yaml" \
+    && grep -q '^listen: 0.0.0.0:8080$' "$d/minimal.yaml"
+  r=$?
+  rm -rf "$d"
+  return "$r"
+}
+check "api: api-shapes.sh writes the file of four shapes (golden, secretref, minimal, full), the full one with the ports it sets" api_shapes_are_written
+check "api: the shape that sets every value (tests/api-full.values.yaml) renders" renders_ok -f "$here/api-full.values.yaml"
+
 # ---- The CRDs chart: one source ------------------------------------------------------------------------------------------
 check "deploy/operator-crds/files is a copy of deploy/crds (cp deploy/crds/agents.vymalo.com.yaml deploy/operator-crds/files/)" \
   cmp -s "$crds_file" "$crds_chart/files/agents.vymalo.com.yaml"

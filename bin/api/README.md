@@ -111,7 +111,7 @@ ConfigMap at `/etc/aap-api/config.yaml` (`API_CONFIG_FILE`) and **nothing else m
 above, a NetworkPolicy and an optional Ingress. The chart owns `listen`, `healthListen` and `defaults.namespace`; the rest is `api.config`. To read what it renders with this binary:
 
 ```sh
-sh deploy/operator/tests/api-config.sh /tmp/config.yaml -f deploy/operator/tests/api.values.yaml
+sh deploy/operator/tests/api-config.sh /tmp/config.yaml -f deploy/operator/tests/api.values.yaml   # or tests/api-shapes.sh for all four shapes
 cargo run -q -p aap-api-server -- --config /tmp/config.yaml --check
 ```
 

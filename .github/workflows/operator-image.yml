@@ -97,6 +97,7 @@ jobs:
           helm lint deploy/operator -f deploy/operator/tests/secret.values.yaml
           helm lint deploy/operator -f deploy/operator/tests/api.values.yaml
           helm lint deploy/operator -f deploy/operator/tests/api-secretref.values.yaml
+          helm lint deploy/operator -f deploy/operator/tests/api-full.values.yaml
           helm lint deploy/operator-crds
       - name: helm template (the values of the netcup Application)
         run: |
@@ -121,8 +122,9 @@ jobs:
           echo "$KUBECONFORM_SHA256  $RUNNER_TEMP/kubeconform.tgz" | sha256sum -c -
           tar -xzf "$RUNNER_TEMP/kubeconform.tgz" -C "$RUNNER_TEMP" kubeconform
           # The defaults (no registry), netcup (an ExternalSecret), tests/secret.values.yaml (an existing Secret, another watched
-          # namespace, no CloudNativePG), the Platform API in its two shapes (tests/api.values.yaml: an Ingress and a policy;
-          # tests/api-secretref.values.yaml: neither, an existing service account), and the CRDs chart.
+          # namespace, no CloudNativePG), the Platform API in its three shapes (tests/api.values.yaml: an Ingress and a policy;
+          # tests/api-secretref.values.yaml: neither, an existing service account; tests/api-full.values.yaml: every value set), and the
+          # CRDs chart.
           helm template aap-operator deploy/operator --namespace another-agentic-system > "$RUNNER_TEMP/rendered-default.yaml"
           helm template aap-operator deploy/operator --namespace another-agentic-system \
             -f deploy/operator/examples/netcup.values.yaml > "$RUNNER_TEMP/rendered-netcup.yaml"
@@ -132,6 +134,8 @@ jobs:
             -f deploy/operator/tests/api.values.yaml > "$RUNNER_TEMP/rendered-api.yaml"
           helm template aap-operator deploy/operator --namespace another-agentic-system \
             -f deploy/operator/tests/api-secretref.values.yaml > "$RUNNER_TEMP/rendered-api-secretref.yaml"
+          helm template aap-operator deploy/operator --namespace another-agentic-system \
+            -f deploy/operator/tests/api-full.values.yaml > "$RUNNER_TEMP/rendered-api-full.yaml"
           helm template aap-operator-crds deploy/operator-crds > "$RUNNER_TEMP/rendered-crds.yaml"
           for attempt in 1 2 3; do
             status=0
@@ -139,7 +143,8 @@ jobs:
                 -schema-location default \
                 -schema-location 'deploy/operator/tests/schemas/{{.Group}}/{{.ResourceKind}}_{{.ResourceAPIVersion}}.json' \
                 "$RUNNER_TEMP/rendered-default.yaml" "$RUNNER_TEMP/rendered-netcup.yaml" "$RUNNER_TEMP/rendered-secret.yaml" \
-                "$RUNNER_TEMP/rendered-api.yaml" "$RUNNER_TEMP/rendered-api-secretref.yaml" "$RUNNER_TEMP/rendered-crds.yaml" \
+                "$RUNNER_TEMP/rendered-api.yaml" "$RUNNER_TEMP/rendered-api-secretref.yaml" "$RUNNER_TEMP/rendered-api-full.yaml" \
+                "$RUNNER_TEMP/rendered-crds.yaml" \
                 > "$RUNNER_TEMP/kubeconform.out" 2>&1 || status=$?
             cat "$RUNNER_TEMP/kubeconform.out"
             if [ "$status" -eq 0 ]; then exit 0; fi
@@ -323,25 +328,22 @@ jobs:
           fi
           size=$(docker image inspect -f '{{.Size}}' api:smoke)
           echo "api image size: $size bytes" | tee -a "$GITHUB_STEP_SUMMARY"
-      # The chart can never render a file the binary refuses: the image's own `--check`, on what `helm template` renders for the
-      # shapes the render checks assert (the golden one, the Secret-per-agent one) and for the least a deployment must say.
+      # The image's own `--check` on what `helm template` renders for each shape the chart is tested in (tests/api-shapes.sh: the golden one,
+      # the Secret-per-agent one, the least a deployment must say, and one that sets every value the chart exposes). The chart refuses what
+      # it can check at render time; what it cannot, the binary refuses at start (a pod that never becomes ready), and this is where a shape
+      # the chart renders and the binary refuses is found, before it is deployed.
       - name: The configuration the chart renders is one the image accepts
         run: |
           set -euo pipefail
-          dir="$RUNNER_TEMP/api-config"; mkdir -p "$dir"
-          sh deploy/operator/tests/api-config.sh "$dir/full.yaml" -f deploy/operator/tests/api.values.yaml
-          sh deploy/operator/tests/api-config.sh "$dir/secretref.yaml" -f deploy/operator/tests/api-secretref.values.yaml
-          sh deploy/operator/tests/api-config.sh "$dir/minimal.yaml" \
-            --set api.config.oidc.issuer=https://keycloak.example.com/realms/another-agentic \
-            --set 'api.config.oidc.audiences[0]=another-agentic' --set api.config.oidc.rolesClaim=agentic_roles \
-            --set 'api.config.defaults.allowedImageRegistries[0]=ghcr.io' \
-            --set 'api.networkPolicy.from[0].podSelector.matchLabels.app=edge'
-          for f in full secretref minimal; do
-            echo "--- $f.yaml"
-            cat "$dir/$f.yaml"
-            out=$(docker run --rm -v "$dir:/cfg:ro" api:smoke --config "/cfg/$f.yaml" --check)
+          dir="$RUNNER_TEMP/api-config"
+          sh deploy/operator/tests/api-shapes.sh "$dir"
+          for f in "$dir"/*.yaml; do
+            name=$(basename "$f" .yaml)
+            echo "--- $name.yaml"
+            cat "$f"
+            out=$(docker run --rm -v "$dir:/cfg:ro" api:smoke --config "/cfg/$name.yaml" --check)
             echo "$out"
-            grep -q ': ok$' <<<"$out" || { echo "::error::the image refuses the configuration the chart renders ($f): $out"; exit 1; }
+            grep -q ': ok$' <<<"$out" || { echo "::error::the image refuses the configuration the chart renders ($name): $out"; exit 1; }
           done
       # The image that passed travels to the push as a file.
       - name: Save the image
