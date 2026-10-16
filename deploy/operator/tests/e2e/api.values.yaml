@@ -1,0 +1,50 @@
+# The values the kind end-to-end of the Platform API (D7b2, api-e2e.sh) installs the operator chart with, the Platform API on. What the
+# script adds in a second values file, because it knows them only when it runs: the images (the ones built in the job and loaded into
+# kind, never pulled), the issuer (a program on the runner, at the host's address on the docker network of kind, on a port it was given)
+# and the one egress rule that reaches it, and the namespace the agents live in.
+#
+# Nothing here is a secret. The cluster is a throwaway one; no value below is advice for a deployment (deploy/operator/README.md, "The
+# Platform API", is).
+
+tuning:
+  # A pending service is looked at again every 5 s instead of 15: the job waits for a pod, not for a timer.
+  resyncPendingSecs: 5
+
+api:
+  enabled: true
+  replicas: 1
+  config:
+    # The issuer, the audience and the roles claim are the script's (api-e2e.sh writes them).
+    cors:
+      # No browser: CORS is not part of this proof (crates/platform-api/tests/cors.rs).
+      allowedOrigins: []
+    defaults:
+      # A Secret per agent for the ledger, named from the agent's: no CloudNativePG in the cluster (store-cnpg's job is that proof). The
+      # script makes `e2e-chat-db-app` (key `uri`, a value that is never used: the stand-in opens no connection).
+      store:
+        cnpg: null
+        secretRef:
+          name: "{name}-db-app"
+          key: uri
+      # The Secret key every new agent reads its A2A bearer tokens from. The script makes it.
+      a2aBearer:
+        name: agent-a2a-bearer
+        key: AGENT_REGISTRY_AGENT_TOKEN
+      # `access.allowFrom` of a new agent is the script's too (the namespace it lives in).
+      #
+      # The agent in this proof pins its own image, the stand-in `aap-stub:ci`, which is Docker Hub's by its name (`docker.io`): the one
+      # registry this list admits. A reference from any other registry is `422` (the script asks for one).
+      allowedImageRegistries: [docker.io]
+  networkPolicy:
+    enabled: true
+    # Who may reach the API: the pods the script labels `aap-e2e/client: "true"`, and nothing else. Whether kind's network plugin ENFORCES
+    # the policy is not known here (`kubectl port-forward`, which the script uses for most calls, does not go through the pod network at
+    # all): the script asks the API from a pod with the label (allowed under either) and from one without (refused only if the plugin
+    # enforces policies), and says which it saw.
+    from:
+      - podSelector:
+          matchLabels:
+            aap-e2e/client: "true"
+    # `apiServer.cidrs` is left empty (any address on 443 and 6443): the API server's address is the control-plane node container's, which
+    # the script does not look up. A deployment sets it (deploy/operator/README.md, "The NetworkPolicy").
+    # `issuer.to` and `issuer.ports` are the script's: one /32 (the host) and the port the issuer was given.
