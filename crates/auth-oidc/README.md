@@ -50,14 +50,16 @@ sequenceDiagram
     F-->>A: the copy is recorded, or Unavailable if there is still none
   end
   alt the kid is in the copy
-    A->>A: pick the keys of that kid and of the algorithm's kind
+    A->>A: pick the keys of that kid and of the algorithm's kind (all of them, or with no kid the one key of the kind)
   else the kid is unknown
+    A->>A: use the new copy at once if another request has brought one since
     A->>F: join the fetch that is running, or start one unless a fetch started within 30 s or one failed under 5 s ago
     F->>I: GET discovery again (not with a jwksUrl), GET jwks again
     I-->>F: keys, or a failure
     F-->>A: the new copy, or Unavailable if the fetch failed
+    A->>A: no key of that kid and kind even then: Invalid(UnknownKey)
   end
-  A->>A: signature, then exp, nbf, iss, aud, sub
+  A->>A: signature (the first of those keys that verifies it), then exp, nbf, iss, aud, sub
   A->>A: the values of the roles claim are the permissions
   A-->>C: Principal, or Invalid(reason), or Unavailable(source)
 ```
@@ -85,22 +87,28 @@ stateDiagram-v2
   octets, a zero in front a part of it (about one key in 256 has one); an RSA `n` and `e` are read without their leading zeros (a
   sign byte, or `AAEAAQ` for 65537), the modulus then at least 256 octets; a P-256 coordinate is read without its leading zeros,
   refused over 32 octets or empty, and given to the library in the full 32 (an issuer may cut the zeros, write them or cover them
-  with a sign byte, and each verifies). A token with no `kid` takes the one key of its kind, when there is exactly one.
+  with a sign byte, and each verifies). **Every key that shares the token's `kid`** (and its kind) is tried, in the order of the set,
+  and the token is good if one of them signed it; only a bad signature moves on to the next key, any other word is of a token that a
+  key did verify. A token with no `kid` takes the one key of its kind, when there is exactly one (two are none).
 - **Claims**: the signature first, then in this order: `exp` required, a time, and not past; `nbf`, when there, not in the future
   (**60 seconds of leeway** for both, pinned at 55 and 65 s); `iss` **one text**, equal to the configured issuer, exactly (a list
   that holds it is refused, which `jsonwebtoken` alone would accept); one of the configured audiences among `aud` (a text, or a list
   of texts); `sub` required, text, not blank and without a control character (otherwise kept byte for byte). With several wrong, the
   word is that of the first in this order, the same every time. **`iat` is not required** (decision 2 below).
 - **Permissions**: the values at the dotted path `rolesClaim` (`agentic_roles`; `realm_access.roles` for Keycloak's own). A claim whose
-  own name has dots is found by that name first; a list gives its texts (anything else in it is skipped), a text is one role,
+  own name has dots is found by that name first, and that is the only escape there is (as in the system): when no claim has the whole
+  path as its name, the path is split at every dot and each part is the name of a key of an object, so a key that itself contains a
+  dot **below the top level** (`resource_access` -> `my.client` -> `roles`) cannot be named; a list gives its texts (anything else in it is skipped), a text is one role,
   anything else is none, and **a bad roles claim never refuses a token**: a person with no permission is a person, and the API
   answers `403` and names the permission it needed. The whole claim is kept, whatever it holds: `GET /v1/me` filters by a prefix.
 - **Size**: a token over 16 KiB ([`MAX_TOKEN_BYTES`](src/config.rs)) is refused unread. A token that is not three base64url parts of
   JSON, or whose `alg` is not ours, ends before any key is looked at: **no fetch, no key**.
-- **Where the keys are**: `jwksUrl`, or the `jwks_uri` of `{issuer}/.well-known/openid-configuration`, whose `issuer` must be the
-  configured one (OpenID Connect Discovery 1.0, 4.3). `jwks_uri` must be `http(s)` without credentials and not plain HTTP under an
-  HTTPS issuer. **No redirect is followed**, a body over 1 MiB is refused, a request times out (5 s), `HTTP(S)_PROXY` is honoured, and
-  the TLS roots are the system's. There is no filter on the issuer's *address*: it is the operator's own configuration, and an
+- **Where the keys are**: `jwksUrl`, or the `jwks_uri` of `{issuer}/.well-known/openid-configuration` (**one** terminating `/` of the
+  issuer is removed before the path is appended, never all of them: OpenID Connect Discovery 1.0, 4), whose `issuer` must be the
+  configured one (4.3). `jwks_uri` must be `http(s)` without credentials and not plain HTTP under an
+  HTTPS issuer. **No redirect is followed**, a body over 1 MiB is refused, a request times out (5 s), `HTTP_PROXY`, `HTTPS_PROXY` and `NO_PROXY`
+  are honoured (an issuer on a private address is reached through the proxy unless `NO_PROXY` names it; `Tuning::use_system_proxy` is
+  off in every test, so the tests need no variable), and the TLS roots are the system's. There is no filter on the issuer's *address*: it is the operator's own configuration, and an
   identity provider in the cluster is a private address.
 - **The key cache** is a copy this process may lose at any time. Fetched on first use and by `ready()`, refreshed once 10 minutes
   old ([`REFRESH_INTERVAL`](src/config.rs)), fetched again when a token names a `kid` the copy lacks **at most once in 30 s**
@@ -128,7 +136,7 @@ stateDiagram-v2
 |---|---|---|
 | `Missing` | no token, or an empty one, whatever the state of the keys | |
 | `Invalid(Malformed)` | over 16 KiB; not three base64url parts of JSON; an `alg` that is not allowed (`none`, HMAC, RS512, PS*, ES384, unknown); a signature that is not base64url; a claim of the wrong shape the library cannot read past (`exp`, `nbf` or `sub` as a list or an object) | |
-| `Invalid(BadSignature)` | the key the token names does not verify it (another key's signature, a payload edited after signing) | |
+| `Invalid(BadSignature)` | none of the keys the token names verifies it (another key's signature, a payload edited after signing) | |
 | `Invalid(UnknownKey)` | the `kid` is not in the issuer's keys, even after the one fetch it earns; or no key of the algorithm's kind fits (a `kid` of an RSA key on an ES256 token; no `kid` and two keys of the kind) | |
 | `Invalid(Expired)` | `exp` more than 60 s past, **or `nbf` more than 60 s ahead**: the closed set has no word for "not yet valid" (decision 4) | |
 | `Invalid(WrongIssuer)` | `iss` is not the configured issuer, exactly, is not a text (a list is not), or is not there | |
@@ -138,8 +146,9 @@ stateDiagram-v2
 
 **None of it holds a part of a token**: the reason of an `Invalid` is one word of a closed enum, and the source of an `Unavailable` is
 made of this crate's own words, because no request to the issuer carries anything of a token (the URLs are the configured ones). The
-error of the transport (an address, a resolver's message) goes to the **debug** log and nowhere else; nothing logged holds a token, a
-`kid` or a claim, which `tests/logs.rs` reads in the output of a subscriber.
+error of the transport (an address, a resolver's message) goes to the **debug** log and nowhere else, **without the URL** (reqwest
+writes it whole, and the query of a `jwksUrl` may hold a secret: `.without_url()`); every other line the crate logs is a closed word or
+a count. Nothing logged holds a token, a `kid`, a claim or a URL, which `tests/logs.rs` reads in the output of a subscriber.
 
 ## Configuration
 
@@ -154,8 +163,9 @@ rolesClaim: agentic_roles                                     # no default: with
 
 `OidcAuthenticator::new(config)` validates it and refuses, with a `ConfigError` that names the setting and never shows its value: an
 issuer that is not an absolute `http(s)` URL with a host and no credentials, query, fragment or white space around it; no audience, or
-a blank one; a blank `rolesClaim`; a `jwksUrl` that is not an `http(s)` URL without credentials. An `http` issuer is allowed (a
-Keycloak in the cluster). The intervals above are not in the file: they are security settings (how long a withdrawn key still
+a blank one; a blank `rolesClaim`; a `jwksUrl` that is not an `http(s)` URL without credentials. An `http` issuer (or `jwksUrl`) is allowed (a
+Keycloak in the cluster) and **warned about once, at construction**, in a line that names no URL: the keys every token is checked against
+would travel in the clear. The intervals above are not in the file: they are security settings (how long a withdrawn key still
 verifies), and `Tuning` (a test shortens them) is not `Deserialize`.
 
 ## Features
@@ -170,22 +180,25 @@ verifies), and `Tuning` (a test shortens them) is not `Deserialize`.
 Over real HTTP, against issuers on local ports; the cache's intervals are shortened.
 
 - `tests/conformance.rs`: `aap_ports::authenticator_conformance!` (8 cases) through `TestAuthenticator`.
-- `tests/checks.rs` (30): every word of `InvalidToken` produced by the token that deserves it; each allowed algorithm accepted; `none`, HS256 with the
+- `tests/checks.rs` (32): every word of `InvalidToken` produced by the token that deserves it; each allowed algorithm accepted; `none`, HS256 with the
   RSA public key, RS512, PS256, ES384 and the rest refused unread with no fetch; a key of another kind; another key's signature under
   a published `kid`; a payload edited after signing; an unknown `kid`; no `kid`; `exp` past (beyond and within the leeway), `nbf`;
-  `iss` exactly; `aud` as text and list, one of several configured; `sub`; `exp` required; `iat` not required; `cnf` accepted;
+  `iss` exactly and as one text (a list that holds it is refused); `aud` as text and list, one of several configured; `sub`, and not
+  blank or with a control character; `exp` required; the word when several claims are missing is always the same (exp, iss, aud,
+  sub); the leeway pinned at 55 s (accepted) and 65 s (refused) for `exp` and `nbf`; `iat` not required; `cnf` accepted;
   the time checks come after the signature; a token of exactly the cap and one step more; garbage; the roles claim (nested, named
   with dots, a text, every bad shape, only the configured claim is read).
-- `tests/jwks.rs` (20): discovery and `jwksUrl`; fetched on first use and by `ready()`; refreshed when old; one fetch for concurrent first
+- `tests/jwks.rs` (21): discovery and `jwksUrl`; fetched on first use and by `ready()`; refreshed when old; one fetch for concurrent first
   requests; **an unknown `kid` is one fetch for a flood and none within 30 s**; a rotated key is found and a withdrawn one is lost at the
   refresh; an unknown `kid` with the issuer down is `Unavailable`; the issuer down at the start and recovering; the retry interval; the
   stale copy and its grace (`TooOld`); a discovery document for another issuer, without a usable `jwks_uri`; a redirect never followed; an
   answer over 1 MiB; an answer that is not a key set, not JSON, or has no usable key; an unreachable issuer; unusable keys beside good
-  ones; a trailing slash on the issuer.
-- `tests/keys.rs` (6): real keys, as issuers write them: an Ed25519 key whose public key starts with a zero octet verifies; Ed25519 keys of
+  ones; a trailing slash on the issuer, and exactly one of several removed to find the discovery document.
+- `tests/keys.rs` (7): real keys, as issuers write them: an Ed25519 key whose public key starts with a zero octet verifies; Ed25519 keys of
   31, 33 and no octets are not keys; a P-256 key whose `x` (and one whose `y`) starts with a zero verifies written in full, cut and with a
   sign byte; coordinates of 33 significant octets or none are not keys; an RSA key verifies with a sign byte before `n` and `e` written
-  `AAEAAQ`; a 2040-bit modulus is no bigger for a sign byte.
+  `AAEAAQ`; a 2040-bit modulus is no bigger for a sign byte; two keys under one `kid` are both tried (a token signed by either is
+  accepted, a stranger's is `BadSignature`, and no `kid` with two keys of the kind is `UnknownKey`).
 - `tests/slow.rs` (10): an issuer that is slow or never answers. A good token is answered while a fetch for an unknown `kid` to a
   slow issuer is running (and only the request that named the unknown key waits); unknown kids that arrive while a fetch runs join
   it; a stale copy is served at once and refreshed in the background once, with the issuer hanging; `ready()` returns at once with a
@@ -199,9 +212,14 @@ Over real HTTP, against issuers on local ports; the cache's intervals are shorte
 - `tests/secrets.rs` (2): the sentinel in every place a token has something to leak, in the message, the debug form and the whole chain of
   sources of an `Unavailable`; a refusal is a word.
 - `tests/logs.rs` (1, a binary of its own: a callsite that another test hit first, with no subscriber, is cached as uninteresting): nothing logged holds a
-  token, a `kid` or a claim, read in the output of a subscriber.
+  token, a `kid`, a claim, or a secret in the query of a `jwksUrl` (the connection fails and the log is read), read in the output of a
+  subscriber; an `http` issuer is warned about once at construction, an `https` one not.
 - `tests/config.rs` (4): the YAML, what it lacks or says more, what is refused at construction, and that a refusal never shows a value.
-- Unit tests in `src/`: the choice of key (`keys.rs`), the claims (`claims.rs`), the `jwks_uri` rule (`fetch.rs`).
+- Unit tests in `src/` (15): the choice of key and of its candidates (`keys.rs`, 8), the claims (`claims.rs`, 5), the `jwks_uri` rule (`fetch.rs`, 2).
+
+Every client the tests build for themselves (`reqwest`, in `tests/jwks.rs`, `tests/logs.rs`, `tests/slow.rs`) takes no proxy, and so does the
+authenticator the tests build (`Tuning::use_system_proxy: false`, in `tests/common` and the `testkit`), so the suite passes with
+`HTTP_PROXY` and `HTTPS_PROXY` set and no `NO_PROXY` (*run 2026-10-16* with both on a closed port).
 
 ## What is left out, and what was decided
 
@@ -251,7 +269,7 @@ the first authenticator is built.
   `use_pem`.
 - *Verified 2026-10-16*, the crates.io index entry of `reqwest` 0.12.28: `rustls-tls-native-roots` is `rustls-tls-native-roots-no-provider` and `__rustls-ring`.
 - *Verified 2026-10-16*, OpenID Connect Discovery 1.0, 4.3 and 4.1 (<https://openid.net/specs/openid-connect-discovery-1_0.html>): the `issuer` of the document must be
-  identical to the issuer URL used as the prefix of `/.well-known/openid-configuration`, and a terminating `/` of the issuer is removed before the path is appended.
+  identical to the issuer URL used as the prefix of `/.well-known/openid-configuration`, and one terminating `/` of the issuer is removed before the path is appended.
 - *Verified 2026-10-16*, run once by hand and not a test (it needs the network): `OidcAuthenticator::new(OidcConfig::new("https://accounts.google.com", ..))` fetched
   Google's discovery document and JWKS over TLS (rustls with ring, native roots from `SSL_CERT_FILE`) through the sandbox's `HTTPS_PROXY`, `ready()` was `Ok`, and a
   token naming an unknown `kid` was `Invalid(UnknownKey)`. So the TLS path, the proxy variable and a real issuer's RS256 JWKS work.
