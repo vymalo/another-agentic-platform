@@ -219,6 +219,11 @@ pub struct Stored {
     /// Its `status`, as JSON: what the operator observed. `None` for a kind that has none, and before
     /// the operator has written any. The dashboard never writes it.
     pub status: Option<Value>,
+    /// Whether the object is **being deleted**: it has a `deletionTimestamp` and stays until its finalizers have run.
+    /// For an `AgentService` that is the operator releasing the compute and the store, which can take a while and
+    /// reads the `AgentConfig` while it does. Nothing is written to such an object ([`ObjectsError::Deleting`]).
+    #[serde(default)]
+    pub deleting: bool,
 }
 
 impl Stored {
@@ -258,6 +263,12 @@ impl Agent {
         } else {
             Owner::GitOps
         }
+    }
+
+    /// Whether the agent is being deleted: its service is (the operator has not finished with it), or its config is.
+    /// It is still listed and read, with the operator's status, until it goes.
+    pub fn deleting(&self) -> bool {
+        self.service.deleting || self.config.as_ref().is_some_and(|c| c.deleting)
     }
 
     /// The token of the two objects: stale when either changed, and the token of no other agent.
@@ -440,6 +451,15 @@ pub enum ObjectsError {
         /// The agents that name it.
         by: Vec<String>,
     },
+    /// The object is being deleted ([`Stored::deleting`]): a finalizer has not run, so nothing is written to it, and a
+    /// create of its name waits for it to go. `409`. Read again later: the agent is gone when the operator is done.
+    #[error("{kind} {name} is being deleted")]
+    Deleting {
+        /// The kind that is being deleted.
+        kind: Kind,
+        /// Its name.
+        name: String,
+    },
     /// Another manager owns a field of the object (a server-side apply conflict). `409`. Read again.
     #[error("conflict: {0}")]
     Conflict(String),
@@ -463,8 +483,10 @@ impl Classify for ObjectsError {
             | Self::Referenced { .. }
             | Self::Invalid(_) => ErrorClass::Invalid,
             Self::NotFound { .. } => ErrorClass::NotFound,
-            // Lost a race: read again, retry.
-            Self::PreconditionFailed | Self::Conflict(_) => ErrorClass::Conflict,
+            // Lost a race, or the object is on its way out: read again, retry.
+            Self::PreconditionFailed | Self::Conflict(_) | Self::Deleting { .. } => {
+                ErrorClass::Conflict
+            }
             Self::Unavailable(_) => ErrorClass::Transient,
             Self::Internal(_) => ErrorClass::Internal,
         }
@@ -504,15 +526,33 @@ impl Classify for ObjectsError {
 /// * **An agent is two objects, written in order**: the `AgentConfig`, then the `AgentService` (the
 ///   operator never sees a service whose config is not there yet); deleted in the other order. A write
 ///   that fails between the two does not leave a config that a retry of the create cannot take over.
+/// * **A delete returns once the service is gone or is being deleted; the config goes when the service is
+///   gone.** The operator's finalizer on the `AgentService` releases the compute and the store, and it **reads
+///   the `AgentConfig` while it does** (a `deletionPolicy` changed just before the delete must be honoured:
+///   `Delete` to `Retain` must not lose data, and the operator can only honour what it can still read). So a
+///   delete that leaves the service [`Stored::deleting`] leaves the config too, and the agent is still listed,
+///   read ([`Agent::deleting`]) and refused every write ([`ObjectsError::Deleting`]) until the operator is
+///   done. An implementation may wait a short, bounded time for the service to go before it returns.
+/// * **An orphan config is deleted by a delete of its name.** What the delete above leaves when the operator
+///   was slower than the wait (and what a create that failed halfway leaves) is a config the dashboard owns
+///   and no service names. [`list_orphans`](AgentObjects::list_orphans) lists them with their tokens, and
+///   `delete_agent(name, &config.etag())` of a name whose service is absent deletes the config. A config that is
+///   GitOps's ([`ObjectsError::NotOwned`]) or that any service names ([`ObjectsError::Referenced`]) is never
+///   deleted that way.
 ///
 /// **What an implementation over an API server must do (`aap-objects-kubernetes` does)**, since two objects cannot be written
 /// atomically there: before the first write, read both objects and compare the token and the owners;
 /// run both server-side applies with `dryRun=All` and each object's `resourceVersion` in the apply, so
 /// that a stale token on either object and a rule of the CRDs (a `422`) are refused while nothing has
-/// changed; then apply the config and the service, each with the `resourceVersion` it was read at. The
-/// window that remains (the service changed by somebody else between the two applies) leaves the config
-/// written and answers [`ObjectsError::PreconditionFailed`]; a retry reads again and succeeds, and the
-/// README of this crate says so.
+/// changed; then apply the config and the service, each with the `resourceVersion` it was read at.
+///
+/// **The one window.** Between the two real applies the service can change: the operator writes its `status`
+/// whenever the config changes, and somebody else may save it. When the service's `spec`, labels and annotations are
+/// what was read, the apply is repeated once with the new version; otherwise the write stops with the config
+/// written and answers [`ObjectsError::PreconditionFailed`]. A failure of the service's apply for another reason
+/// (the API server is unavailable, a field conflict) leaves the config written too, and answers
+/// [`ObjectsError::Unavailable`] or [`ObjectsError::Conflict`]. A retry reads again and succeeds, and the create is
+/// retried over the config it left (taken over). The README of this crate says so.
 pub trait AgentObjects: Send + Sync {
     /// Every agent of the namespace, ordered by name.
     ///
@@ -541,10 +581,12 @@ pub trait AgentObjects: Send + Sync {
     /// # Errors
     ///
     /// [`ObjectsError::AlreadyExists`] (create), [`ObjectsError::NotFound`] (replace),
-    /// [`ObjectsError::PreconditionFailed`], [`ObjectsError::NotOwned`], [`ObjectsError::Referenced`] (another
-    /// service names the config), [`ObjectsError::Invalid`] (a body that is not an object, a `configRef` that
-    /// is not the agent's name, a rule the backend states), [`ObjectsError::Conflict`],
-    /// [`ObjectsError::Unavailable`]. None of them changes either object.
+    /// [`ObjectsError::PreconditionFailed`], [`ObjectsError::NotOwned`], [`ObjectsError::Deleting`] (the service or
+    /// the config is being deleted: a replace, and a create of its name, wait for it to go),
+    /// [`ObjectsError::Referenced`] (another service names the config), [`ObjectsError::Invalid`] (a body that is
+    /// not an object, a `configRef` that is not the agent's name, a rule the backend states),
+    /// [`ObjectsError::Conflict`], [`ObjectsError::Unavailable`]. **A refusal changes neither object**, but for
+    /// the window above, where `PreconditionFailed`, `Conflict` and `Unavailable` can leave the config written.
     fn put_agent(
         &self,
         draft: &AgentDraft,
@@ -558,16 +600,33 @@ pub trait AgentObjects: Send + Sync {
     /// `DELETE` without `If-Match` itself, as it answers a `PUT` without a precondition. A client that holds
     /// no token reads the agent first.
     ///
+    /// **It returns once the service is gone or is being deleted** ([`Stored::deleting`]); the config goes when
+    /// the service is gone (above). Deleting a service that is already being deleted is accepted. For a name
+    /// whose service is absent, it deletes the **orphan** config of that name, on the config's own token
+    /// ([`list_orphans`](Self::list_orphans)).
+    ///
     /// # Errors
     ///
-    /// [`ObjectsError::NotFound`], [`ObjectsError::PreconditionFailed`], [`ObjectsError::NotOwned`],
-    /// [`ObjectsError::Referenced`] (another service names the config: nothing is deleted),
-    /// [`ObjectsError::Unavailable`].
+    /// [`ObjectsError::NotFound`] (no service, and no config of that name that is an orphan),
+    /// [`ObjectsError::PreconditionFailed`], [`ObjectsError::NotOwned`], [`ObjectsError::Referenced`] (another
+    /// service names the config: nothing is deleted), [`ObjectsError::Unavailable`].
     fn delete_agent(
         &self,
         name: &str,
         when: &ETag,
     ) -> impl Future<Output = Result<(), ObjectsError>> + Send;
+
+    /// The `AgentConfig`s that the dashboard owns and that no `AgentService` of the namespace names, ordered by name,
+    /// with the tokens a [`delete_agent`](Self::delete_agent) of their names takes ([`Stored::etag`]): what a delete
+    /// leaves behind when the operator was still finalizing the service, and what a create that failed halfway
+    /// leaves. Not an agent (`get_agent` and `list_agents` do not have it) and harmless (nothing runs), but garbage.
+    /// A config is not an orphan while a service names it, whoever owns the service, and not while it is GitOps's.
+    /// One whose create is in its first half (the config is written, the service not yet) is listed for that moment.
+    ///
+    /// # Errors
+    ///
+    /// [`ObjectsError::Unavailable`].
+    fn list_orphans(&self) -> impl Future<Output = Result<Vec<Stored>, ObjectsError>> + Send;
 
     /// Every shared object of the kind, ordered by name.
     ///
@@ -594,7 +653,8 @@ pub trait AgentObjects: Send + Sync {
     ///
     /// # Errors
     ///
-    /// As [`put_agent`](Self::put_agent), without the `configRef`.
+    /// As [`put_agent`](Self::put_agent), without the `configRef` ([`ObjectsError::Deleting`] if the object is being
+    /// deleted).
     fn put_shared(
         &self,
         kind: SharedKind,

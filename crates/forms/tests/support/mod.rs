@@ -260,6 +260,7 @@ pub fn stored(kind: Kind, name: &str, spec: Value, dashboard: bool) -> Stored {
         annotations: BTreeMap::new(),
         spec,
         status: None,
+        deleting: false,
     }
 }
 

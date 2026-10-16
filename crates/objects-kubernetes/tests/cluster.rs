@@ -42,6 +42,7 @@ use serde_json::{Value, json};
 use support::facts;
 use support::harness::{GITOPS, Harness, resource};
 use support::intercept::interpose;
+use support::scenarios;
 
 const KUBECONFIG_VAR: &str = "AAP_TEST_KUBECONFIG";
 const API_KUBECONFIG_VAR: &str = "AAP_TEST_API_KUBECONFIG";
@@ -706,6 +707,28 @@ async fn the_identity_of_the_crate_has_the_role_and_no_right_on_secrets() {
         matches!(&err, kube::Error::Api(s) if s.code == 403),
         "{err}"
     );
+}
+
+// ------------------------------------------------------------------ a service the operator is finalizing
+
+// The same scenarios run against the fake API server in `tests/api.rs`.
+
+#[tokio::test]
+async fn the_config_stays_until_the_service_is_gone() {
+    let h = cluster!();
+    scenarios::the_config_stays_until_the_service_is_gone(&h).await;
+}
+
+#[tokio::test]
+async fn a_delete_the_operator_finishes_in_time_removes_the_config() {
+    let h = cluster!();
+    scenarios::a_delete_the_operator_finishes_in_time_removes_the_config(&h).await;
+}
+
+#[tokio::test]
+async fn a_service_made_meanwhile_keeps_the_config() {
+    let h = cluster!();
+    scenarios::a_service_made_meanwhile_keeps_the_config(&h).await;
 }
 
 // ------------------------------------------------------------------ somebody gets in first

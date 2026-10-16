@@ -49,6 +49,7 @@ mod failure;
 mod stored;
 
 use std::collections::BTreeSet;
+use std::time::{Duration, Instant};
 
 use aap_api::{AgentConfig, AgentService, ModelEndpoint, ToolProvider};
 use aap_ports::{
@@ -70,6 +71,15 @@ use stored::Live;
 /// manager's: the operator writes `status` and a finalizer, and GitOps tools write their own objects.
 pub const FIELD_MANAGER: &str = "agents.vymalo.com/dashboard";
 
+/// How long a delete waits, at most, for the operator to finish with the service ([`KubernetesObjects::with_delete_wait`]).
+///
+/// The operator's finalizer releases the compute and the store in one pass of its reconciler, which the watch starts at
+/// once: under `deletionPolicy: Retain` that is usually a second or two. A delete is an HTTP request that a person
+/// waits for, behind proxies that cut a request off after some tens of seconds, and the page asks again every 2 seconds
+/// (§60a): a few seconds let the common delete answer with the agent gone, and hold a worker for no longer when it is
+/// not. The figure is a choice, not a measurement.
+pub const DELETE_WAIT: Duration = Duration::from_secs(5);
+
 /// The `resourceVersion` a create names: the API server ignores the version of an object that is not there, and
 /// refuses it with a `409` for one that is, so that a create never merges into an object made in the meantime.
 /// *Verified 2026-10-16* (see the crate documentation). An object never has version `1`: the API server writes
@@ -85,6 +95,7 @@ pub struct KubernetesObjects {
     client: Client,
     namespace: String,
     offer_label: String,
+    delete_wait: Duration,
 }
 
 impl KubernetesObjects {
@@ -95,6 +106,7 @@ impl KubernetesObjects {
             client,
             namespace: namespace.into(),
             offer_label: OFFER_LABEL.to_owned(),
+            delete_wait: DELETE_WAIT,
         }
     }
 
@@ -103,6 +115,15 @@ impl KubernetesObjects {
     #[must_use]
     pub fn with_offer_label(mut self, label: impl Into<String>) -> Self {
         self.offer_label = label.into();
+        self
+    }
+
+    /// Wait this long, at most, for the service of a deleted agent to go before a delete answers ([`DELETE_WAIT`] by
+    /// default). When the operator is done in time the config is deleted too and the agent is gone; when it is not, the
+    /// delete is accepted all the same and the config stays until the service has gone (see `delete_agent`).
+    #[must_use]
+    pub fn with_delete_wait(mut self, wait: Duration) -> Self {
+        self.delete_wait = wait;
         self
     }
 
@@ -254,13 +275,14 @@ impl KubernetesObjects {
         }
     }
 
-    /// Delete `live`, bound to the object that was read.
+    /// Delete `live`, bound to the object that was read. An object that has finalizers is not gone when the API server
+    /// has answered: it is [`Deleted::Terminating`] until they have run.
     async fn delete_one(
         &self,
         live: &Live,
         strict: bool,
         dry_run: bool,
-    ) -> Result<(), ObjectsError> {
+    ) -> Result<Deleted, ObjectsError> {
         let params = DeleteParams {
             dry_run,
             propagation_policy: Some(PropagationPolicy::Background),
@@ -275,7 +297,10 @@ impl KubernetesObjects {
         let kind = live.stored.kind;
         let name = live.stored.name.as_str();
         match self.api(kind).delete(name, &params).await {
-            Ok(_) => Ok(()),
+            // The API server answers the object, with a `deletionTimestamp`, while finalizers are to run, and a
+            // `Status` once it is gone (*observed* on a v1.35.8).
+            Ok(answer) if answer.is_left() => Ok(Deleted::Terminating),
+            Ok(_) => Ok(Deleted::Gone),
             Err(error) => Err(match classify(error) {
                 Failure::NotFound(_) => ObjectsError::NotFound {
                     kind,
@@ -284,6 +309,86 @@ impl KubernetesObjects {
                 Failure::Version => self.lost_race(kind, name, &Guard::of(Some(live))).await,
                 other => failed(&resource(kind), other),
             }),
+        }
+    }
+
+    /// Whether the service has gone, asked again every few milliseconds for at most the delete wait. A service of
+    /// the name that is another object (made again) is the old one gone. An API server that cannot be asked ends the
+    /// wait: the delete was accepted, and the operator finishes it.
+    async fn wait_until_gone(&self, service: &Live) -> bool {
+        let name = service.stored.name.as_str();
+        let poll =
+            (self.delete_wait / 20).clamp(Duration::from_millis(10), Duration::from_millis(250));
+        let deadline = Instant::now() + self.delete_wait;
+        loop {
+            match self.get(Kind::AgentService, name).await {
+                Ok(None) => return true,
+                Ok(Some(now)) if now.uid != service.uid => return true,
+                Ok(Some(_)) => {}
+                Err(error) => {
+                    tracing::warn!(
+                        service = name,
+                        outcome = outcome(&error),
+                        "could not ask whether a deleted service has gone; the config stays"
+                    );
+                    return false;
+                }
+            }
+            let left = deadline.saturating_duration_since(Instant::now());
+            if left.is_zero() {
+                return false;
+            }
+            tokio::time::sleep(poll.min(left)).await;
+        }
+    }
+
+    /// The service of an agent has gone: its config goes with it, unless a service has been made meanwhile that names it
+    /// (the services are listed again right before the delete, so that one keeps its config; **a window of one request
+    /// remains**). Bound to the config's `uid` and not to its version: the operator writes the status of a config, and
+    /// a version read earlier would strand a config whose service is gone. A config that is gone, or made again, is left.
+    async fn delete_the_config_of_a_gone_service(&self, config: &Live) -> Result<(), ObjectsError> {
+        let services = self.list(Kind::AgentService).await?;
+        if !Self::naming(&services, &config.stored.name, "").is_empty() {
+            return Ok(());
+        }
+        match self.delete_one(config, false, false).await {
+            Ok(_) | Err(ObjectsError::NotFound { .. } | ObjectsError::PreconditionFailed) => Ok(()),
+            Err(error) => Err(error),
+        }
+    }
+
+    /// A delete of a name whose service is not there: the orphan config of that name, on its own token, or nothing.
+    async fn delete_orphan(
+        &self,
+        services: &[Live],
+        name: &str,
+        when: &ETag,
+    ) -> Result<(), ObjectsError> {
+        let not_found = || ObjectsError::NotFound {
+            kind: Kind::AgentService,
+            name: name.to_owned(),
+        };
+        let Some(config) = self.get(Kind::AgentConfig, name).await? else {
+            return Err(not_found());
+        };
+        if !config.stored.owner().writable() {
+            return Err(not_owned(&config));
+        }
+        let by = Self::naming(services, name, "");
+        if !by.is_empty() {
+            return Err(ObjectsError::Referenced {
+                kind: Kind::AgentConfig,
+                name: name.to_owned(),
+                by,
+            });
+        }
+        if *when != config.stored.etag() {
+            return Err(ObjectsError::PreconditionFailed);
+        }
+        match self.delete_one(&config, true, false).await {
+            Ok(_) => Ok(()),
+            Err(ObjectsError::NotFound { .. }) => Err(not_found()),
+            Err(error) => Err(error),
         }
     }
 
@@ -330,6 +435,30 @@ impl KubernetesObjects {
             }
         }
         out
+    }
+}
+
+/// What a delete did to an object.
+enum Deleted {
+    /// It is gone.
+    Gone,
+    /// It has finalizers that have not run: it stays, with a `deletionTimestamp`, until they have.
+    Terminating,
+}
+
+/// A fixed word for what an error was, for a log: never the error's own words, which can carry a server's.
+fn outcome(error: &ObjectsError) -> &'static str {
+    match error {
+        ObjectsError::AlreadyExists { .. } => "already exists",
+        ObjectsError::NotFound { .. } => "not found",
+        ObjectsError::PreconditionFailed => "the object changed",
+        ObjectsError::NotOwned { .. } => "not owned",
+        ObjectsError::Referenced { .. } => "referenced",
+        ObjectsError::Deleting { .. } => "being deleted",
+        ObjectsError::Conflict(_) => "a field conflict",
+        ObjectsError::Invalid(_) => "invalid",
+        ObjectsError::Unavailable(_) => "unavailable",
+        ObjectsError::Internal(_) => "internal",
     }
 }
 
@@ -508,6 +637,13 @@ fn check(draft: &AgentDraft) -> Vec<FieldError> {
     out
 }
 
+fn deleting(live: &Live) -> ObjectsError {
+    ObjectsError::Deleting {
+        kind: live.stored.kind,
+        name: live.stored.name.clone(),
+    }
+}
+
 fn not_owned(live: &Live) -> ObjectsError {
     ObjectsError::NotOwned {
         kind: live.stored.kind,
@@ -561,7 +697,8 @@ impl AgentObjects for KubernetesObjects {
         let service = services.iter().find(|s| s.stored.name == name);
         let config = self.get(Kind::AgentConfig, name).await?;
         match (when, service) {
-            (Precondition::DoesNotExist, Some(_)) => {
+            // A service that is being deleted is refused below, as such.
+            (Precondition::DoesNotExist, Some(s)) if !s.stored.deleting => {
                 return Err(ObjectsError::AlreadyExists {
                     kind: Kind::AgentService,
                     name: name.to_owned(),
@@ -581,6 +718,15 @@ impl AgentObjects for KubernetesObjects {
             .find(|o| !o.stored.owner().writable())
         {
             return Err(not_owned(gitops));
+        }
+        // Nothing is written to an object whose finalizers are running: the operator reads the config while it
+        // releases the service, and a name that is going is free once it has gone.
+        if let Some(dying) = service
+            .into_iter()
+            .chain(config.iter())
+            .find(|o| o.stored.deleting)
+        {
+            return Err(deleting(dying));
         }
         let by = Self::naming(&services, name, name);
         if !by.is_empty() {
@@ -637,10 +783,7 @@ impl AgentObjects for KubernetesObjects {
         }
         let services = self.list(Kind::AgentService).await?;
         let Some(service) = services.iter().find(|s| s.stored.name == name) else {
-            return Err(ObjectsError::NotFound {
-                kind: Kind::AgentService,
-                name: name.to_owned(),
-            });
+            return self.delete_orphan(&services, name, when).await;
         };
         let config = match config_name(&service.stored.spec) {
             Some(config) => self.get(Kind::AgentConfig, config).await?,
@@ -671,20 +814,35 @@ impl AgentObjects for KubernetesObjects {
         }
 
         // Both deletes as a dry run first, each bound to the version it was read at: a refusal of either leaves
-        // both objects. Then the service, then the config.
+        // both objects.
         for live in config.iter().chain(std::iter::once(service)) {
             self.delete_one(live, true, true).await?;
         }
-        self.delete_one(service, true, false).await?;
-        if let Some(config) = &config {
-            // The service is gone: whatever the config has become since the dry run (the operator writes its
-            // status), it goes with it. Bound to its `uid` only, so that a config made again is not deleted.
-            match self.delete_one(config, false, false).await {
-                Ok(()) | Err(ObjectsError::NotFound { .. } | ObjectsError::PreconditionFailed) => {}
-                Err(error) => return Err(error),
-            }
+        // Then the service. **The config stays until the service is gone.** The operator's finalizer on the service
+        // reads the config to honour `deletionPolicy`, and a config it cannot find is a policy it cannot honour:
+        // a person who saved `Retain` and deleted at once would lose the data the old `Delete` takes.
+        let gone = match self.delete_one(service, true, false).await? {
+            Deleted::Gone => true,
+            Deleted::Terminating => self.wait_until_gone(service).await,
+        };
+        match (&config, gone) {
+            (Some(config), true) => self.delete_the_config_of_a_gone_service(config).await,
+            // The operator is not done. The delete is accepted: the service goes when it is, and its config stays
+            // as an orphan that a later delete of the name removes.
+            _ => Ok(()),
         }
-        Ok(())
+    }
+
+    async fn list_orphans(&self) -> Result<Vec<Stored>, ObjectsError> {
+        let services = self.list(Kind::AgentService).await?;
+        Ok(self
+            .list(Kind::AgentConfig)
+            .await?
+            .into_iter()
+            .filter(|c| c.stored.owner().writable())
+            .filter(|c| Self::naming(&services, &c.stored.name, "").is_empty())
+            .map(|c| c.stored)
+            .collect())
     }
 
     async fn list_shared(&self, kind: SharedKind) -> Result<Vec<Stored>, ObjectsError> {
@@ -724,7 +882,7 @@ impl AgentObjects for KubernetesObjects {
         }
         let found = self.get(kind, name).await?;
         match (when, &found) {
-            (Precondition::DoesNotExist, Some(_)) => {
+            (Precondition::DoesNotExist, Some(live)) if !live.stored.deleting => {
                 return Err(ObjectsError::AlreadyExists {
                     kind,
                     name: name.to_owned(),
@@ -741,6 +899,9 @@ impl AgentObjects for KubernetesObjects {
         if let Some(live) = &found {
             if !live.stored.owner().writable() {
                 return Err(not_owned(live));
+            }
+            if live.stored.deleting {
+                return Err(deleting(live));
             }
             if let Precondition::Matches(etag) = when
                 && *etag != live.stored.etag()
@@ -787,7 +948,7 @@ impl AgentObjects for KubernetesObjects {
                 by,
             });
         }
-        self.delete_one(&live, true, false).await
+        self.delete_one(&live, true, false).await.map(|_| ())
     }
 
     async fn offered_secrets(&self) -> Result<Vec<OfferedSecret>, ObjectsError> {

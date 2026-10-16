@@ -17,6 +17,7 @@ use aap_ports::{
 use serde_json::{Value, json};
 use support::facts;
 use support::harness::Harness;
+use support::scenarios;
 use support::{Call, Fake};
 
 async fn make() -> Option<Harness> {
@@ -569,6 +570,28 @@ async fn a_config_the_operator_wrote_to_after_the_dry_run_goes_with_its_service(
         fake.stored("agentconfigs", &name).is_none(),
         "the config is bound to its uid and not to its version"
     );
+}
+
+// ------------------------------------------------------------------ a service the operator is finalizing
+
+// The same scenarios run against a real API server in `tests/cluster.rs`.
+
+#[tokio::test]
+async fn the_config_stays_until_the_service_is_gone() {
+    let (_fake, h) = setup();
+    scenarios::the_config_stays_until_the_service_is_gone(&h).await;
+}
+
+#[tokio::test]
+async fn a_delete_the_operator_finishes_in_time_removes_the_config() {
+    let (_fake, h) = setup();
+    scenarios::a_delete_the_operator_finishes_in_time_removes_the_config(&h).await;
+}
+
+#[tokio::test]
+async fn a_service_made_meanwhile_keeps_the_config() {
+    let (_fake, h) = setup();
+    scenarios::a_service_made_meanwhile_keeps_the_config(&h).await;
 }
 
 // ------------------------------------------------------------------ answers of the server

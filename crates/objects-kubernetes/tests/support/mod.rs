@@ -32,6 +32,7 @@
 pub mod facts;
 pub mod harness;
 pub mod intercept;
+pub mod scenarios;
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::convert::Infallible;

@@ -641,6 +641,299 @@ pub mod cases {
         assert_eq!(p.get_agent(&name).await.unwrap(), None);
     }
 
+    pub async fn a_terminating_agent_is_listed_as_deleting<O: ObjectsUnderTest>(p: O) {
+        // The operator's finalizer is releasing the compute and the store: the agent is still there, and says so.
+        let (name, other) = (unique("ag"), unique("ag"));
+        let draft = sample_agent(&name);
+        let made = p
+            .put_agent(&draft, &Precondition::DoesNotExist)
+            .await
+            .unwrap();
+        p.put_agent(&sample_agent(&other), &Precondition::DoesNotExist)
+            .await
+            .unwrap();
+        assert!(!made.deleting(), "an agent is not being deleted");
+        assert!(!made.service.deleting);
+
+        p.seed_terminating(&name).await;
+        let seen = agent(&p, &name).await;
+        assert!(seen.service.deleting, "the service is being deleted");
+        assert!(seen.deleting());
+        assert!(
+            !config_of(&seen).deleting,
+            "the config is not: the operator reads it"
+        );
+        assert_eq!(seen.service.spec, draft.service, "it is read as it was");
+        assert_eq!(config_of(&seen).spec, draft.config);
+        let listed = p
+            .list_agents()
+            .await
+            .unwrap()
+            .into_iter()
+            .find(|a| a.name() == name)
+            .expect("an agent that is being deleted is listed");
+        assert_eq!(listed, seen);
+        assert!(listed.deleting());
+        assert!(
+            !agent(&p, &other).await.deleting(),
+            "the other agents are not"
+        );
+    }
+
+    pub async fn a_deleting_agent_refuses_a_write<O: ObjectsUnderTest>(p: O) {
+        let name = unique("ag");
+        let draft = sample_agent(&name);
+        p.put_agent(&draft, &Precondition::DoesNotExist)
+            .await
+            .unwrap();
+        p.seed_terminating(&name).await;
+        let before = agent(&p, &name).await;
+        assert!(before.deleting());
+
+        let is_deleting = |error: &ObjectsError| {
+            matches!(
+                error,
+                ObjectsError::Deleting { kind: Kind::AgentService, name: n } if *n == name
+            ) && error.class() == ErrorClass::Conflict
+        };
+        let changed = reconfigured(&retitled(&draft, "Written while it goes"), "another-model");
+        let err = refused(
+            "a replace of an agent that is being deleted",
+            p.put_agent(&changed, &Precondition::Matches(before.etag()))
+                .await,
+        );
+        assert!(is_deleting(&err), "{err:?}");
+        let err = refused(
+            "a create over an agent that is being deleted",
+            p.put_agent(&changed, &Precondition::DoesNotExist).await,
+        );
+        assert!(is_deleting(&err), "{err:?}");
+        assert_eq!(agent(&p, &name).await, before, "nothing was written");
+
+        // Once it is gone, the name is free.
+        p.run_finalizer(&name).await;
+        assert_eq!(p.get_agent(&name).await.unwrap(), None);
+        // (The config the operator read is left: a create over it takes it over.)
+        p.put_agent(&draft, &Precondition::DoesNotExist)
+            .await
+            .expect("a create of the name of an agent that is gone");
+    }
+
+    pub async fn a_delete_leaves_the_config_while_the_operator_finalizes<O: ObjectsUnderTest>(
+        p: O,
+    ) {
+        // The operator's finalizer reads the config to honour the deletion policy: a policy changed just before the
+        // delete has to be honoured, and the operator can only honour what it can still read.
+        let name = unique("ag");
+        let draft = sample_agent(&name);
+        p.put_agent(&draft, &Precondition::DoesNotExist)
+            .await
+            .unwrap();
+        p.seed_finalizer(&name).await;
+        let made = agent(&p, &name).await;
+
+        p.delete_agent(&name, &made.etag())
+            .await
+            .expect("a delete of a service the operator is finalizing is accepted");
+        let seen = agent(&p, &name).await;
+        assert!(seen.service.deleting, "the service is being deleted");
+        assert_eq!(
+            seen.config.as_ref().map(|c| &c.spec),
+            Some(&draft.config),
+            "the config stays while the operator finalizes: it is what the operator reads"
+        );
+        assert!(
+            !p.list_orphans()
+                .await
+                .unwrap()
+                .iter()
+                .any(|o| o.name == name),
+            "a config that a service names is not an orphan"
+        );
+
+        // A second delete is accepted and changes nothing more.
+        p.delete_agent(&name, &seen.etag())
+            .await
+            .expect("a delete of an agent that is being deleted is accepted");
+        assert_eq!(config_of(&agent(&p, &name).await).spec, draft.config);
+
+        // The operator is done: the agent is gone, and its config is not.
+        p.run_finalizer(&name).await;
+        assert_eq!(p.get_agent(&name).await.unwrap(), None, "the agent is gone");
+        assert!(!listed(&p, &name).await.contains(&name));
+        let orphan = p
+            .list_orphans()
+            .await
+            .unwrap()
+            .into_iter()
+            .find(|o| o.name == name)
+            .expect("the config the delete left is an orphan");
+        assert_eq!(orphan.kind, Kind::AgentConfig);
+        assert_eq!(orphan.spec, draft.config);
+        labelled_as_the_dashboards(&orphan);
+    }
+
+    pub async fn an_orphan_config_is_deleted_by_a_delete_of_its_name<O: ObjectsUnderTest>(p: O) {
+        let (name, other) = (unique("ag"), unique("half"));
+        let draft = sample_agent(&name);
+        p.put_agent(&draft, &Precondition::DoesNotExist)
+            .await
+            .unwrap();
+        p.seed_finalizer(&name).await;
+        let made = agent(&p, &name).await;
+        p.delete_agent(&name, &made.etag()).await.unwrap();
+        p.run_finalizer(&name).await;
+        // What a create that failed halfway leaves is one too.
+        p.seed_orphan_config(&other, sample_agent(&other).config)
+            .await;
+
+        let orphans = |all: Vec<Stored>| -> Vec<String> {
+            all.into_iter()
+                .map(|o| o.name)
+                .filter(|n| *n == name || *n == other)
+                .collect()
+        };
+        let mut both = vec![name.clone(), other.clone()];
+        both.sort();
+        assert_eq!(
+            orphans(p.list_orphans().await.unwrap()),
+            both,
+            "the orphans, ordered by name"
+        );
+        assert_eq!(
+            p.get_agent(&name).await.unwrap(),
+            None,
+            "a config alone is not an agent"
+        );
+
+        // The token is the config's own: the operator's status moved it.
+        let orphan = p
+            .list_orphans()
+            .await
+            .unwrap()
+            .into_iter()
+            .find(|o| o.name == name)
+            .unwrap();
+        p.set_status(Kind::AgentConfig, &name, json!({ "observedGeneration": 1 }))
+            .await;
+        let err = refused(
+            "a delete of an orphan config with a stale token",
+            p.delete_agent(&name, &orphan.etag()).await,
+        );
+        assert!(matches!(err, ObjectsError::PreconditionFailed), "{err:?}");
+        let err = refused(
+            "a delete of an orphan config with the token of the agent it was",
+            p.delete_agent(&name, &made.etag()).await,
+        );
+        assert!(matches!(err, ObjectsError::PreconditionFailed), "{err:?}");
+        assert!(
+            orphans(p.list_orphans().await.unwrap()).contains(&name),
+            "the stale delete changed nothing"
+        );
+
+        let orphan = p
+            .list_orphans()
+            .await
+            .unwrap()
+            .into_iter()
+            .find(|o| o.name == name)
+            .unwrap();
+        p.delete_agent(&name, &orphan.etag())
+            .await
+            .expect("a delete of an orphan config on its own token");
+        assert_eq!(
+            orphans(p.list_orphans().await.unwrap()),
+            vec![other.clone()],
+            "the config is gone, the other orphan is not"
+        );
+        let err = refused(
+            "a delete of an agent that is not there",
+            p.delete_agent(&name, &orphan.etag()).await,
+        );
+        assert!(
+            matches!(
+                &err,
+                ObjectsError::NotFound {
+                    kind: Kind::AgentService,
+                    ..
+                }
+            ),
+            "{err:?}"
+        );
+        // And the name is free.
+        p.put_agent(&draft, &Precondition::DoesNotExist)
+            .await
+            .unwrap();
+    }
+
+    pub async fn a_config_that_is_not_an_orphan_is_never_deleted_as_one<O: ObjectsUnderTest>(p: O) {
+        let token = ETag::new("1");
+        // A config that is GitOps's, with no service.
+        for how in [Foreign::Unlabelled, Foreign::ArgoTracked] {
+            let name = unique("gitops-config");
+            let config = sample_agent(&name).config;
+            p.seed_foreign(Kind::AgentConfig, &name, config.clone(), how)
+                .await;
+            assert!(
+                !p.list_orphans()
+                    .await
+                    .unwrap()
+                    .iter()
+                    .any(|o| o.name == name),
+                "{how:?}: a GitOps config is not an orphan"
+            );
+            let err = refused(
+                format!("{how:?}: a delete of a GitOps config that no service names"),
+                p.delete_agent(&name, &token).await,
+            );
+            assert!(is_not_owned(&err, Kind::AgentConfig), "{how:?}: {err:?}");
+            // It is still there: a service that names it has it.
+            let reader = unique("reader");
+            p.seed_foreign(
+                Kind::AgentService,
+                &reader,
+                service_naming(&reader, &name),
+                Foreign::Unlabelled,
+            )
+            .await;
+            assert_eq!(
+                agent(&p, &reader).await.config.map(|c| c.spec),
+                Some(config),
+                "{how:?}: the config was not deleted"
+            );
+        }
+
+        // A config of the dashboard that a service names, whoever owns that service.
+        let (orphan, namer) = (unique("named"), unique("namer"));
+        let config = sample_agent(&orphan).config;
+        p.seed_orphan_config(&orphan, config.clone()).await;
+        p.seed_foreign(
+            Kind::AgentService,
+            &namer,
+            service_naming(&namer, &orphan),
+            Foreign::Unlabelled,
+        )
+        .await;
+        assert!(
+            !p.list_orphans()
+                .await
+                .unwrap()
+                .iter()
+                .any(|o| o.name == orphan),
+            "a config that a service names is not an orphan"
+        );
+        let err = refused(
+            "a delete of a config that another service names",
+            p.delete_agent(&orphan, &token).await,
+        );
+        assert!(is_referenced_config(&err, &orphan, &[&namer]), "{err:?}");
+        assert_eq!(
+            agent(&p, &namer).await.config.map(|c| c.spec),
+            Some(config),
+            "the config was not deleted"
+        );
+    }
+
     pub async fn a_gitops_agent_is_read_and_never_written<O: ObjectsUnderTest>(p: O) {
         for how in [Foreign::Unlabelled, Foreign::ArgoTracked] {
             let name = unique("gitops");
@@ -1497,6 +1790,11 @@ macro_rules! agent_objects_conformance {
             a_body_that_is_not_acceptable_is_invalid_with_fields,
             an_agent_is_deleted_with_its_config,
             a_delete_holds_the_token_it_is_given,
+            a_terminating_agent_is_listed_as_deleting,
+            a_deleting_agent_refuses_a_write,
+            a_delete_leaves_the_config_while_the_operator_finalizes,
+            an_orphan_config_is_deleted_by_a_delete_of_its_name,
+            a_config_that_is_not_an_orphan_is_never_deleted_as_one,
             a_gitops_agent_is_read_and_never_written,
             a_gitops_config_blocks_the_create_of_its_name,
             a_pair_with_one_gitops_object_is_gitops,

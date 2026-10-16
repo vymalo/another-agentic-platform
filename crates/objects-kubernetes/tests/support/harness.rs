@@ -9,6 +9,7 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
+use std::time::Duration;
 
 use aap_api::{AgentConfig, AgentService, ModelEndpoint, ToolProvider};
 use aap_objects_kubernetes::{FIELD_MANAGER, KubernetesObjects};
@@ -20,7 +21,7 @@ use aap_ports::{
 };
 use k8s_openapi::api::core::v1::Secret;
 use kube::Client;
-use kube::api::{Api, ApiResource, DynamicObject, Patch, PatchParams};
+use kube::api::{Api, ApiResource, DeleteParams, DynamicObject, Patch, PatchParams};
 use serde_json::{Value, json};
 
 use super::Fake;
@@ -33,6 +34,10 @@ pub const GITOPS: &str = "gitops-author";
 pub const OPERATOR: &str = "aap-operator";
 /// The manager of this harness: ExternalSecrets and Secrets.
 pub const HARNESS: &str = "aap-test-harness";
+/// The finalizer the operator puts on a service before it makes anything (`aap_controller`).
+pub const FINALIZER: &str = "agents.vymalo.com/runtime";
+/// How long a delete of the crate under test waits for a service to go: the cases that leave one terminating wait it out.
+pub const DELETE_WAIT: Duration = Duration::from_millis(300);
 
 pub fn resource(kind: Kind) -> ApiResource {
     match kind {
@@ -80,7 +85,7 @@ impl Harness {
     /// transport fails.
     pub fn new(dashboard: Client, admin: Client, namespace: &str, unreachable: Client) -> Self {
         Self {
-            objects: KubernetesObjects::new(dashboard, namespace),
+            objects: KubernetesObjects::new(dashboard, namespace).with_delete_wait(DELETE_WAIT),
             admin,
             namespace: namespace.to_owned(),
             off: Some(KubernetesObjects::new(unreachable, namespace)),
@@ -126,6 +131,24 @@ impl Harness {
             .await
             .unwrap_or_else(|e| {
                 panic!("the harness could not apply {} {name}: {e}", resource.kind)
+            });
+    }
+
+    /// The finalizers of the service `name`, as the operator sets them (a merge patch by its manager); `null` takes them
+    /// off, and a service that is being deleted goes.
+    pub async fn set_finalizers(&self, name: &str, finalizers: Value) {
+        self.dynamic(&resource(Kind::AgentService))
+            .patch(
+                name,
+                &PatchParams {
+                    field_manager: Some(OPERATOR.to_owned()),
+                    ..PatchParams::default()
+                },
+                &Patch::Merge(json!({ "metadata": { "finalizers": finalizers } })),
+            )
+            .await
+            .unwrap_or_else(|e| {
+                panic!("the harness could not set the finalizers of the service {name}: {e}")
             });
     }
 
@@ -194,6 +217,10 @@ impl AgentObjects for Harness {
 
     async fn delete_agent(&self, name: &str, when: &ETag) -> Result<(), ObjectsError> {
         self.objects.delete_agent(name, when).await
+    }
+
+    async fn list_orphans(&self) -> Result<Vec<Stored>, ObjectsError> {
+        self.objects.list_orphans().await
     }
 
     async fn list_shared(&self, kind: SharedKind) -> Result<Vec<Stored>, ObjectsError> {
@@ -278,6 +305,22 @@ impl ObjectsUnderTest for Harness {
         });
         self.apply_as(FIELD_MANAGER, false, &resource, name, body)
             .await;
+    }
+
+    async fn seed_finalizer(&self, name: &str) {
+        self.set_finalizers(name, json!([FINALIZER])).await;
+    }
+
+    async fn seed_terminating(&self, name: &str) {
+        self.seed_finalizer(name).await;
+        self.dynamic(&resource(Kind::AgentService))
+            .delete(name, &DeleteParams::default())
+            .await
+            .unwrap_or_else(|e| panic!("the harness could not delete the service {name}: {e}"));
+    }
+
+    async fn run_finalizer(&self, name: &str) {
+        self.set_finalizers(name, Value::Null).await;
     }
 
     async fn set_status(&self, kind: Kind, name: &str, status: Value) {

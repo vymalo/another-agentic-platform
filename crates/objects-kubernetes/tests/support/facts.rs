@@ -10,10 +10,7 @@ use aap_ports::{AgentObjects, Kind, MANAGED_BY_DASHBOARD, MANAGED_BY_LABEL, Prec
 use kube::api::{DeleteParams, Patch, PatchParams};
 use serde_json::{Value, json};
 
-use super::harness::{Harness, OPERATOR};
-
-/// The finalizer the operator puts on a service before it makes anything (`aap_controller`).
-pub const FINALIZER: &str = "agents.vymalo.com/runtime";
+use super::harness::{FINALIZER, Harness, OPERATOR};
 
 fn version(object: &kube::api::DynamicObject) -> String {
     object.metadata.resource_version.clone().unwrap()

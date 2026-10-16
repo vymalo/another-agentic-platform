@@ -17,6 +17,9 @@ k8s-openapi.workspace = true
 kube = { workspace = true, features = ["client", "rustls-tls", "ring"] }
 serde_json.workspace = true
 thiserror.workspace = true
+# The bounded wait of a delete, and the log of a write that stopped halfway.
+tokio = { workspace = true, features = ["time"] }
+tracing.workspace = true
 
 [dev-dependencies]
 aap-ports = { workspace = true, features = ["testkit"] }

@@ -47,6 +47,7 @@ impl Live {
     pub(crate) fn from_object(kind: Kind, namespace: &str, object: DynamicObject) -> Self {
         let meta = object.metadata;
         let owned = owned_by_someone(&meta);
+        let deleting = meta.deletion_timestamp.is_some();
         let spec = object.data.get("spec").cloned().unwrap_or(Value::Null);
         let status = object.data.get("status").cloned();
         Self {
@@ -62,6 +63,7 @@ impl Live {
                 spec: written(&spec, owned.as_ref().and_then(|o| o.fields.get("spec"))),
                 status: status
                     .map(|s| written(&s, owned.as_ref().and_then(|o| o.fields.get("status")))),
+                deleting,
             },
         }
     }

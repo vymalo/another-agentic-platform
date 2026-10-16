@@ -135,6 +135,19 @@ pub trait ObjectsUnderTest: crate::AgentObjects + 'static {
         spec: serde_json::Value,
     ) -> impl Future<Output = ()> + Send;
 
+    /// The operator's finalizer is on the `AgentService` `name`: a delete of it leaves it terminating
+    /// ([`Stored::deleting`](crate::Stored::deleting)) until [`run_finalizer`](Self::run_finalizer). A Kubernetes backend
+    /// adds `agents.vymalo.com/runtime` to `metadata.finalizers` with another field manager.
+    fn seed_finalizer(&self, name: &str) -> impl Future<Output = ()> + Send;
+
+    /// The service `name` is being deleted by somebody other than the port, `kubectl delete` for one: it has the
+    /// operator's finalizer (put on if it has none) and is terminating.
+    fn seed_terminating(&self, name: &str) -> impl Future<Output = ()> + Send;
+
+    /// The operator's finalizer on the service `name` has run: the finalizer is gone, and a service that was being
+    /// deleted goes with it. Nothing else is touched, **the config is left**.
+    fn run_finalizer(&self, name: &str) -> impl Future<Output = ()> + Send;
+
     /// Write `status` as the operator would.
     fn set_status(
         &self,
