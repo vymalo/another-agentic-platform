@@ -570,12 +570,16 @@ fn an_edit_cannot_change_the_name_or_the_kind() {
 fn what_an_api_server_refuses_is_named_by_the_field_of_the_form() {
     let form = coder_form("coder-me");
     let at = |field: &str, message: &str| {
+        let (kind, path) = field.split_once(' ').unwrap();
+        let kind = match kind {
+            "AgentService" => Kind::AgentService,
+            "AgentConfig" => Kind::AgentConfig,
+            "ModelEndpoint" => Kind::ModelEndpoint,
+            _ => Kind::ToolProvider,
+        };
         from_object_errors(
             FormTarget::Agent(&form),
-            &[FieldError {
-                field: field.into(),
-                message: message.into(),
-            }],
+            &[FieldError::new(kind, path, message)],
         )
         .remove(0)
     };
@@ -618,18 +622,16 @@ fn what_an_api_server_refuses_is_named_by_the_field_of_the_form() {
     // The shared kinds.
     let m = from_object_errors(
         FormTarget::Model,
-        &[FieldError {
-            field: "ModelEndpoint spec.baseUrl".into(),
-            message: "x".into(),
-        }],
+        &[FieldError::new(Kind::ModelEndpoint, "spec.baseUrl", "x")],
     );
     assert_eq!(m[0].field, "baseUrl");
     let t = from_object_errors(
         FormTarget::ToolServer,
-        &[FieldError {
-            field: "ToolProvider spec.mcp.headers[Authorization].secretRef".into(),
-            message: "x".into(),
-        }],
+        &[FieldError::new(
+            Kind::ToolProvider,
+            "spec.mcp.headers[Authorization].secretRef",
+            "x",
+        )],
     );
     assert_eq!(t[0].field, "headers[Authorization].secret");
 }

@@ -297,19 +297,35 @@ pub struct OfferedSecret {
     pub external_secret: String,
 }
 
-/// A mistake in a body, with the field it is about, as an API server's validation reports it. The field
-/// is a path from the object in the style of `aap-domain`'s issues: `AgentService spec.access.audience`.
+/// A mistake in a body, with the field it is about, as an API server's validation reports it: the **kind** of
+/// the object and the **path** from it (`spec.access.audience[2]`). Typed, because an implementation produces
+/// it from the answer of a server and the forms map it to a form field by the kind and the path, not by
+/// parsing a sentence.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct FieldError {
-    /// The field, `<Kind> <path>`.
-    pub field: String,
+    /// The object the field is in.
+    pub kind: Kind,
+    /// The field, from the object: `spec.access.audience`, `spec.model`, `spec` for the body as a whole.
+    pub path: String,
     /// What is wrong.
     pub message: String,
 }
 
+impl FieldError {
+    /// An error at `path` of an object of `kind`.
+    pub fn new(kind: Kind, path: impl Into<String>, message: impl Into<String>) -> Self {
+        Self {
+            kind,
+            path: path.into(),
+            message: message.into(),
+        }
+    }
+}
+
 impl fmt::Display for FieldError {
+    /// `<Kind> <path>: <message>`, the words of `aap-domain`'s issues.
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "{}: {}", self.field, self.message)
+        write!(f, "{} {}: {}", self.kind, self.path, self.message)
     }
 }
 

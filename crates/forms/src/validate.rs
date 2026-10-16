@@ -13,7 +13,7 @@ use std::collections::BTreeSet;
 
 use aap_api::{AgentConfig, AgentService, ModelEndpoint, ToolProvider};
 use aap_domain::{ConfigIssue, Externals, name_issue};
-use aap_ports::{FieldError, Stored};
+use aap_ports::{FieldError, Kind, Stored};
 use k8s_openapi::apimachinery::pkg::apis::meta::v1::ObjectMeta;
 use serde::de::DeserializeOwned;
 use url::Url;
@@ -268,14 +268,11 @@ enum Place<'a> {
     Other,
 }
 
-fn place(field: &str) -> Place<'_> {
-    /// `<name> <path>` (the issues of `aap-domain` name the referent) or `<path>` (a server's own errors do not).
+/// Where an issue of `aap-domain` is: `<Kind> <path>`, and, for a referent, `<Kind> <name> <path>` (its issues name
+/// the referent, because an agent has several).
+fn place_of_issue(field: &str) -> Place<'_> {
     fn named(rest: &str) -> (&str, &str) {
-        if rest.starts_with("spec.") || rest.starts_with("metadata.") {
-            ("", rest)
-        } else {
-            rest.split_once(' ').unwrap_or(("", rest))
-        }
+        rest.split_once(' ').unwrap_or(("", rest))
     }
     if let Some(rest) = field.strip_prefix("AgentService ") {
         Place::Service(rest)
@@ -289,6 +286,17 @@ fn place(field: &str) -> Place<'_> {
         Place::Tool { name, path }
     } else {
         Place::Other
+    }
+}
+
+/// Where an error of a store is: its kind and the path from the object. A store's error names no referent.
+fn place_of_error(error: &FieldError) -> Place<'_> {
+    let path = error.path.as_str();
+    match error.kind {
+        Kind::AgentService => Place::Service(path),
+        Kind::AgentConfig => Place::Config(path),
+        Kind::ModelEndpoint => Place::Model { name: "", path },
+        Kind::ToolProvider => Place::Tool { name: "", path },
     }
 }
 
@@ -496,16 +504,21 @@ fn tool_field(path: &str) -> String {
     String::new()
 }
 
-/// Name the form field an error of the objects is about.
-fn name_error(target: FormTarget<'_>, object_field: &str, message: &str) -> FormError {
-    let origin = place(object_field);
+/// Name the form field an error of the objects is about. `object_field` is where it was, in the words of
+/// the objects, for the error that has no form field to go to.
+fn name_error(
+    target: FormTarget<'_>,
+    origin: &Place<'_>,
+    object_field: &str,
+    message: &str,
+) -> FormError {
     let (field, message) = match target {
-        FormTarget::Agent(form) => agent_field(form, &origin, message),
-        FormTarget::Model => match &origin {
+        FormTarget::Agent(form) => agent_field(form, origin, message),
+        FormTarget::Model => match origin {
             Place::Model { path, .. } => (model_field(path), message.to_owned()),
             _ => (String::new(), message.to_owned()),
         },
-        FormTarget::ToolServer => match &origin {
+        FormTarget::ToolServer => match origin {
             Place::Tool { path, .. } => (tool_field(path), message.to_owned()),
             // A header variable that two of this server's headers want: the probe agent's rule.
             Place::Config(p) if p.starts_with("spec.tools.mcpServers (header Secret key") => {
@@ -525,16 +538,23 @@ fn name_error(target: FormTarget<'_>, object_field: &str, message: &str) -> Form
 fn from_issues(target: FormTarget<'_>, issues: &[ConfigIssue]) -> Vec<FormError> {
     issues
         .iter()
-        .map(|i| name_error(target, &i.field, &i.message))
+        .map(|i| name_error(target, &place_of_issue(&i.field), &i.field, &i.message))
         .collect()
 }
 
 /// The form errors for what the store answered `Invalid` (an API server's validation, `422`): the same
-/// mapping as for `aap-domain`'s issues, since both name `<Kind> <path>`.
+/// mapping as for `aap-domain`'s issues, from the kind and the path that the store gave.
 pub fn from_object_errors(target: FormTarget<'_>, errors: &[FieldError]) -> Vec<FormError> {
     errors
         .iter()
-        .map(|e| name_error(target, &e.field, &e.message))
+        .map(|e| {
+            name_error(
+                target,
+                &place_of_error(e),
+                &format!("{} {}", e.kind, e.path),
+                &e.message,
+            )
+        })
         .collect()
 }
 
@@ -888,7 +908,12 @@ impl Defaults {
                 aap_domain::validate(&resources.service, &resources.config, &externals)
             {
                 for issue in issues {
-                    let e = name_error(FormTarget::Agent(form), &issue.field, &issue.message);
+                    let e = name_error(
+                        FormTarget::Agent(form),
+                        &place_of_issue(&issue.field),
+                        &issue.field,
+                        &issue.message,
+                    );
                     problems.push(format!("{:?} agent: {e}", form.kind()));
                 }
             }

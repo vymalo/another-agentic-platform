@@ -169,12 +169,12 @@ pub trait ObjectsUnderTest: crate::AgentObjects + 'static {
     }
 
     /// A `spec` of `kind` that the backend refuses as invalid, and a text the refused field's path
-    /// contains. The default is a `spec` that is not an object, which every backend refuses; a backend with
-    /// rules of its own (the CEL of the CRDs) gives one that breaks one of them.
-    fn refused_spec(&self, kind: crate::Kind) -> Option<(serde_json::Value, String)> {
+    /// contains. The default is a `spec` that is not an object, which every backend refuses, at the path
+    /// `spec`; a backend with rules of its own (the CEL of the CRDs) gives one that breaks one of them.
+    fn refused_spec(&self, _kind: crate::Kind) -> Option<(serde_json::Value, String)> {
         Some((
             serde_json::Value::String("a spec is an object".to_owned()),
-            format!("{kind} spec"),
+            "spec".to_owned(),
         ))
     }
 }

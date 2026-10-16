@@ -80,10 +80,7 @@ fn every_error_has_one_status_and_a_class() {
             ErrorClass::Conflict,
         ),
         (
-            ObjectsError::Invalid(vec![FieldError {
-                field: "f".into(),
-                message: "m".into(),
-            }]),
+            ObjectsError::Invalid(vec![FieldError::new(Kind::AgentConfig, "spec.f", "m")]),
             422,
             ErrorClass::Invalid,
         ),
@@ -115,10 +112,11 @@ fn a_referenced_error_names_the_agents_that_use_the_object() {
         e.to_string(),
         "ModelEndpoint gateway is still used by chat, coder-me"
     );
-    let e = ObjectsError::Invalid(vec![FieldError {
-        field: "AgentService spec.access.audience".into(),
-        message: "no".into(),
-    }]);
+    let e = ObjectsError::Invalid(vec![FieldError::new(
+        Kind::AgentService,
+        "spec.access.audience",
+        "no",
+    )]);
     assert!(
         e.to_string()
             .contains("AgentService spec.access.audience: no"),

@@ -329,14 +329,14 @@ pub mod cases {
         assert!(
             fields
                 .iter()
-                .any(|f| f.field == "AgentService spec.configRef.name"),
+                .any(|f| f.kind == Kind::AgentService && f.path == "spec.configRef.name"),
             "{fields:?}"
         );
         assert_eq!(p.get_agent(&name).await.unwrap(), None, "nothing was made");
 
         // What the backend itself refuses.
         for kind in [Kind::AgentService, Kind::AgentConfig] {
-            let Some((spec, field)) = p.refused_spec(kind) else {
+            let Some((spec, path)) = p.refused_spec(kind) else {
                 continue;
             };
             let mut draft = sample_agent(&name);
@@ -352,8 +352,10 @@ pub mod cases {
                 panic!("{kind}: {err:?}")
             };
             assert!(
-                fields.iter().any(|f| f.field.contains(&field)),
-                "{kind}: a field names {field}: {fields:?}"
+                fields
+                    .iter()
+                    .any(|f| f.kind == kind && f.path.contains(&path)),
+                "{kind}: a field of {kind} has {path} in its path: {fields:?}"
             );
             assert_eq!(p.get_agent(&name).await.unwrap(), None, "nothing was made");
         }

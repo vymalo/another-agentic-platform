@@ -114,10 +114,7 @@ impl State {
 }
 
 fn not_an_object(kind: Kind) -> FieldError {
-    FieldError {
-        field: format!("{kind} spec"),
-        message: "a spec is an object".to_owned(),
-    }
+    FieldError::new(kind, "spec", "a spec is an object")
 }
 
 /// [`AgentObjects`] over a map. Cheap to clone: every clone is a handle on the same state.
@@ -261,10 +258,11 @@ impl AgentObjects for MemoryObjects {
             invalid.push(not_an_object(Kind::AgentConfig));
         }
         if draft.service.is_object() && config_name(&draft.service) != Some(name) {
-            invalid.push(FieldError {
-                field: "AgentService spec.configRef.name".to_owned(),
-                message: format!("must be {name:?}: the config of an agent has the agent's name"),
-            });
+            invalid.push(FieldError::new(
+                Kind::AgentService,
+                "spec.configRef.name",
+                format!("must be {name:?}: the config of an agent has the agent's name"),
+            ));
         }
         if !invalid.is_empty() {
             return Err(ObjectsError::Invalid(invalid));
