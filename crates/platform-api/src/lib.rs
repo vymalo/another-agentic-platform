@@ -29,7 +29,7 @@ mod view;
 
 pub use body::MAX_BODY_BYTES;
 pub use cors::{CorsError, CorsOrigins, PREFLIGHT_MAX_AGE};
-pub use problem::{PROBLEM_JSON, Problem};
+pub use problem::PROBLEM_JSON;
 pub use router::router;
 pub use routes::{Needs, ROUTES, Route, RouteId, Verb};
 pub use state::{ApiState, StateError};

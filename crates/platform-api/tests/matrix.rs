@@ -90,7 +90,9 @@ fn the_router_registers_routes_from_the_table_and_nowhere_else() {
                 dirs.push(path);
             } else if path.extension().is_some_and(|e| e == "rs") {
                 let source = std::fs::read_to_string(&path).unwrap();
-                for line in source.lines() {
+                // The unit tests of a module may build routers of their own (the one that proves a stray route is refused).
+                let code_only = source.split("#[cfg(test)]").next().unwrap_or_default();
+                for line in code_only.lines() {
                     let code = line.split("//").next().unwrap_or_default();
                     if code.contains(".route(") {
                         found.push(path.file_name().unwrap().to_string_lossy().into_owned());

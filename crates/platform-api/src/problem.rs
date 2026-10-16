@@ -70,13 +70,9 @@ impl Problem {
     }
 
     /// The HTTP status.
-    pub fn status(&self) -> StatusCode {
+    #[cfg(test)]
+    pub(crate) fn status(&self) -> StatusCode {
         self.status
-    }
-
-    /// The slug of `type`.
-    pub fn slug(&self) -> &'static str {
-        self.slug
     }
 
     // ------------------------------------------------------------------ the request itself

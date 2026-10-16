@@ -61,6 +61,15 @@ impl Api {
         )
     }
 
+    /// A router built elsewhere (over another authenticator); `auth` is then a table nobody consults.
+    pub fn from_router(router: Router, objects: MemoryObjects) -> Self {
+        Self {
+            router,
+            objects,
+            auth: MemoryAuthenticator::new(),
+        }
+    }
+
     pub fn build(objects: MemoryObjects, auth: MemoryAuthenticator, cors: CorsOrigins) -> Self {
         let state = ApiState::new(objects.clone(), auth.clone(), defaults())
             .unwrap()

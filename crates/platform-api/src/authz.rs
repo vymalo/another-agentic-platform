@@ -115,7 +115,59 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
-    use axum::http::HeaderValue;
+    use aap_ports::memory::{MemoryAuthenticator, MemoryObjects};
+    use axum::Router;
+    use axum::body::Body;
+    use axum::http::{HeaderValue, StatusCode};
+    use axum::middleware::from_fn_with_state;
+    use axum::routing::{get, post};
+    use tower::ServiceExt;
+
+    fn state() -> Arc<ApiState<MemoryObjects, MemoryAuthenticator>> {
+        let defaults = serde_json::from_value(serde_json::json!({
+            "namespace": "ns",
+            "store": { "cnpg": { "instances": 1, "storage": { "size": "1Gi" } } },
+            "a2aBearer": { "name": "a2a", "key": "TOKEN" },
+        }))
+        .unwrap();
+        let auth = MemoryAuthenticator::new().with_token("t", "alice", permission::ALL);
+        Arc::new(ApiState::new(MemoryObjects::new(), auth, defaults).unwrap())
+    }
+
+    async fn status(app: Router, method: &str, path: &str) -> StatusCode {
+        let request = Request::builder()
+            .method(method)
+            .uri(path)
+            .header("authorization", "Bearer t")
+            .body(Body::empty())
+            .unwrap();
+        app.oneshot(request).await.unwrap().status()
+    }
+
+    #[tokio::test]
+    async fn a_route_that_is_not_in_the_table_is_refused_and_never_served() {
+        let state = state();
+        let app = Router::new()
+            .route("/v1/me", get(|| async { "served" }))
+            // Not in the table: a path nobody gave a permission, and a method the table does not have for a path it has.
+            .route("/v1/stray", get(|| async { "served" }))
+            .route("/v1/me", post(|| async { "served" }))
+            .route_layer(from_fn_with_state(
+                state.clone(),
+                authorize::<MemoryObjects, MemoryAuthenticator>,
+            ))
+            .with_state(state);
+        assert_eq!(status(app.clone(), "GET", "/v1/me").await, StatusCode::OK);
+        assert_eq!(
+            status(app.clone(), "GET", "/v1/stray").await,
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "a route without a permission is not served, even to a person who holds every permission"
+        );
+        assert_eq!(
+            status(app, "POST", "/v1/me").await,
+            StatusCode::INTERNAL_SERVER_ERROR
+        );
+    }
 
     fn headers(values: &[&str]) -> HeaderMap {
         let mut h = HeaderMap::new();
