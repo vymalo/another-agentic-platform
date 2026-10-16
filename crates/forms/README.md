@@ -19,7 +19,7 @@ sequenceDiagram
     C->>A: PUT /v1/agents/coder-me, the form, If-None-Match *
     A->>A: serde: a body that is not a form is a 400
     A->>S: offered_secrets, list_shared (Model, ToolServer)
-    A->>F: validate_agent(form, defaults.deployment_for(..), namespace, externals, offered, defaults.image_policy())
+    A->>F: validate_agent(form, defaults.deployment_for(..), namespace, referents, offered, defaults.image_policy())
     F->>F: the screens' rules (check_agent)
     F->>D: validate(service, config, externals) on the rendered objects
     D-->>F: issues
@@ -36,7 +36,7 @@ sequenceDiagram
 |---|---|
 | `AgentForm { name, title, description, tags, suspend, model, tool_servers, allow_insecure_http, image, audience, agent }` | The agent form. `agent` is `AgentKindForm::Coder(CoderSettings)` or `Folder(FolderSettings)`: a coder has a GitHub App and no files, a folder agent has files and no GitHub App, and a body that mixes them is not a form |
 | `ModelEndpointForm`, `BaseUrlForm::{Value, Secret}`, `ToolServerForm`, `HeaderForm` | The forms of the Models and Tool servers screens |
-| `SecretPick { secret, key }`, `OfferedKeys` | How a form names a secret: **by reference only**. `OfferedKeys::from_offered(label, &[OfferedSecret])` is what a write may name |
+| `SecretPick { secret, key }`, `OfferedKeys` | How a form names a secret: **by reference only**. `OfferedKeys::from_offered(label, &[OfferedSecret])` is what a write may name; a Secret made with `dataFrom` takes any key of valid syntax (below) |
 | `Defaults`, `Deployment`, `Defaults::deployment_for(kind, name)`, `Defaults::check()`, `Defaults::image_policy()` | The deployment's defaults (the API's configuration file), and the part of an agent they fill |
 | `ImagePolicy::{any_registry, only}`, `check(reference)` | The rule about the image an agent pins for itself: [below](#the-image-of-an-agent) |
 | `to_resources(form, deployment, namespace) -> Resources` | The two objects, with the label of the dashboard. Total: every form gives objects. `Resources::draft()` is the `AgentDraft` a store takes |
@@ -44,8 +44,9 @@ sequenceDiagram
 | `validate_agent`, `validate_model`, `validate_tool_server` | The screens' rules and the operator's, each error a `FormError { field, message }` |
 | `from_object_errors(FormTarget, &[FieldError])` | What a store answered `Invalid` (an API server's validation), named by form field |
 | `check_replace(current, new)` | What an edit may not change: the name, and the kind |
-| `externals(models, tool_servers, default_image)` | The `aap-domain::Externals` for a list of the store's shared objects |
-| `export_agent(&Agent)`, `export_object(&Stored)` | The YAML of the objects, without `status`, `managedFields` and server-set metadata |
+| `externals(models, tool_servers, default_image) -> Referents` | The `aap-domain::Externals` for a list of the store's shared objects, and the objects that **exist and cannot be read** (an agent that names one is told so, not that it is missing) |
+| `dependents_after(SharedChange, agents, &Referents)` | What editing a shared object breaks in the agents that name it: [below](#what-editing-a-shared-object-does-to-its-agents) |
+| `export_agent(&Agent)`, `export_object(&Stored)` | The YAML of the objects, without `status`, `managedFields`, server-set metadata and any label or annotation a tool wrote: [below](#the-yaml-export) |
 | `AgentForm::secret_picks()`, `names_a_secret()` | The secret keys a body names: a write that names one needs `platform:secrets.pick` besides its own permission |
 
 ## The forms on the wire
@@ -90,6 +91,10 @@ of it, that the person chose among `GET /v1/secret-keys`. The objects made of a 
 names the offer label so that the person knows what to add to an ExternalSecret. A form that names a key needs `platform:secrets.pick`
 (`names_a_secret()`).
 
+**A Secret made with `dataFrom`** (an ExternalSecret that fetches everything a remote secret holds) has no key to list: `OfferedSecret.key` is `None` for it, and a form may name **any key
+of valid syntax** in that Secret, typed by hand (§60a: "a key fetched with `dataFrom` is not listed and is typed by hand"): 1 to 253 letters, digits, `-`, `_` and `.`, not `.`, `..` or
+a name that starts with `..`. A Secret that lists its keys takes only those. The message of a refusal says which of the two it is.
+
 `tests/secrets.rs` holds it, under arbitrary input:
 
 * at every object of every form, a member that could carry a value (`value`, `password`, `token`, …) is refused, and so is anything but
@@ -104,7 +109,7 @@ names the offer label so that the person knows what to add to an ExternalSecret.
 [§60a](../../docs/architecture/10-control-plane-and-crds.md#deployment-defaults): the forms show what matters to an administrator; the rest comes
 from the API's configuration file. `Defaults` is that file's section (`deny_unknown_fields`: a typo stops the API at start, and
 `Defaults::check()` makes a sample agent of each kind from the defaults and asks `aap-domain::validate`, so a store with no instances or a
-bearer without a key is found at start and not at the first save). It holds the namespace, the offer label, the store (`cnpg` or a
+bearer without a key is found at start and not at the first save). It holds the namespace, the offer label, the registries an agent may pin its own image from (`allowedImageRegistries`, [below](#the-image-of-an-agent)), the store (`cnpg` or a
 `secretRef` named by a pattern with `{name}`), the A2A bearer reference, `allowFrom`, `security`, and per kind: for a coder `gitAuthor`,
 `allowedRepoHosts`, `githubApiUrl`, the GitHub MCP sidecar, the work volume and the resources; for a folder agent the resources.
 
@@ -144,8 +149,8 @@ if the form writes it back unchanged** (any one change of a field no form says m
 
 ## Validation, and the form field of every error
 
-`validate_agent(form, deployment, namespace, externals, offered, images)`: the screens' rules of §60a (names, lengths, counts, ranges, the GitHub owners, the audience's shape, no
-`mcp.json` in a folder, the offered keys, the image), then `aap_domain::validate` on the rendered objects with `externals` (so the dashboard refuses what the operator would mark
+`validate_agent(form, deployment, namespace, referents, offered, images)`: the screens' rules of §60a (names, lengths, counts, ranges, the GitHub owners, the audience's shape, no
+`mcp.json` in a folder, the offered keys, the image), then `aap_domain::validate` on the rendered objects with `referents.externals` (so the dashboard refuses what the operator would mark
 `ConfigInvalid`), then every `aap-domain` issue named by the **form field** it is about; a field with an error of its own is not reported twice. `validate_model` and
 `validate_tool_server` do the same for the shared kinds: the operator's rules for a `ModelEndpoint` or a `ToolProvider` are asked through a probe agent that names it, as the operator
 reads it, and only the issues about that object are kept.
@@ -171,6 +176,26 @@ For the shared kinds: `ModelEndpoint spec.baseUrl.value` is `baseUrl.value`, `.s
 The operator's default image is its own flag, which the API does not know: `externals(.., None)` tells `aap-domain` a stand-in image, so a form with no image is not refused for it
 (the operator marks such an agent `ConfigInvalid` if it has none). **A URL is never quoted** in an error (it may carry a password).
 
+## Free text that reaches the objects and the logs
+
+A field that takes any text can carry a secret by mistake, and the forms cannot tell. What is restricted, and what is not:
+
+* **A header's prefix** (`headers[H].prefix`) is an authentication scheme and **one space** (`Bearer `, `Basic `, `Token `: 1 to 32 letters, digits and `-`), or nothing. A person pastes a token where they are
+  asked for a prefix, and the prefix is written to the object, shown in the export and logged; the secret is picked from the Secret keys. The inline form of an `AgentConfig` (and `aap-domain`) takes any
+  prefix but one with `${`; the dashboard is stricter on purpose, and what it accepts the operator accepts. No message quotes a prefix.
+* **An address** (`baseUrl.value`, the tool server's `url`) is refused with a user name, a password, a query or a fragment, and never quoted. **The path is not checked**: an address with a token in its path
+  (`https://search.example/mcp/<token>`) is accepted, because the dashboard cannot tell a path from a secret. It reaches the object, the export and the logs. A server that wants a credential takes it in a header.
+* The title, the description, the tags, the aliases and the files of a folder are free text by design, and are not checked for secrets.
+* **`Debug`** of `BaseUrlForm` and of `ToolServerForm` hides the user name, password, query and fragment of the address (`https://***@host/path?***`), since a form is logged before it is validated.
+
+## What editing a shared object does to its agents
+
+`validate_model` and `validate_tool_server` ask the operator's rules through a **probe agent** that names the object, with `tools.allowInsecureHttp` on because that rule is the agent's. So a tool server
+changed to a plain `http://` address on another host passes, and every agent that names it and does not allow plain http becomes `ConfigInvalid` the moment the write is made, unseen. `dependents_after(change,
+agents, referents)` is the check: for each of `agents` (the `Agent`s of `list_agents`) that names the changed object it asks `aap_domain::validate` **twice**, with the object as it is in `referents` and as
+`change` (what `validate_model` and `validate_tool_server` give) makes it, and returns the issues the change **adds**, one `FormError` each (on no field), naming the agent. An agent that was invalid already is not
+blamed on the change; one that cannot be read by this version is reported as unknown. The Platform API (D7) calls it before a shared write and decides between a `422` and a warning the person confirms.
+
 ## The image of an agent
 
 §60a: *Image* under *Advanced* is "a reference with a tag or a digest, an allow-list of registries being the deployment's default to set". `ImagePolicy::check` (called by
@@ -190,10 +215,21 @@ save, for the field `image`: a save validates the whole form.
 
 ## The YAML export
 
-`export_agent` gives the `AgentConfig` and then the `AgentService` (the order the API applies them), `export_object` one. It is a **whitelist**: `apiVersion`, `kind`, `metadata`
-(`name`, `namespace`, `labels`, the annotations a person put) and `spec`, so `status`, `managedFields` and whatever a future Kubernetes adds to `metadata` cannot reach it. The annotations
-a tool writes (`kubectl.kubernetes.io/…`, which holds a copy of the last apply, and Argo CD's tracking id) are left out. The `managed-by` label stays: an exported object is shown as it is, and
-Argo CD's annotation makes the dashboard stop writing it (AD-031). `tests/golden/coder-me.export.yaml` is the golden.
+`export_agent` gives the `AgentConfig` and then the `AgentService` (the order the API applies them), `export_object` one. It is a **whitelist**: `apiVersion`, `kind`, `metadata` and `spec`, so `status`, `managedFields` and whatever a
+future Kubernetes adds to `metadata` cannot reach it. Within `metadata`, **labels and annotations are filtered by an allow-list, and there is no blacklist anywhere in the crate**:
+
+* **labels** kept: those with **no prefix** (the person's own: by the convention of Kubernetes an unprefixed key is private to the user, and "automated system components … which add labels to end-user objects must specify a prefix"),
+  those with the platform's prefix `agents.vymalo.com/`, and `app.kubernetes.io/managed-by` **when it says `dashboard.agents.vymalo.com`** (an object Helm manages is not exported as the dashboard's; Argo CD's annotation makes the dashboard
+  stop writing an exported object, AD-031). Every other prefixed label (Argo CD's and Flux's tracking, Helm's, `app.kubernetes.io/instance`, whatever the next tool adds) is out;
+* **annotations** kept: only those with the platform's prefix `agents.vymalo.com/`. An annotation is where tools keep copies of the object (`kubectl.kubernetes.io/last-applied-configuration`), their tracking ids and their state, and a
+  person's note has no prefix a tool could not also use. A GitOps export needs the spec, the name and the labels; a note is added in the repository where the object goes. *(If the owner wants a deployment's own prefixes kept, it is a
+  value of `Defaults` and one argument here.)*
+
+**The YAML is written by `src/yaml.rs`, not by a library**, because `serde_yaml_ng` writes the strings `yes`, `no`, `on`, `off`, `y`, `n`, `Y`, `N`, `12:30`, `1_000` and `2026-10-16` unquoted, which `kubectl`, Argo CD and Flux (YAML 1.1 in effect,
+through go-yaml) read as a boolean, an integer or a timestamp: a string of the object would be another type in the file exported from it. The writer quotes (double quotes, JSON-like escapes) every string that is not made of a short list of safe
+characters, that YAML 1.1 reads as a boolean, null, number, float or timestamp, or that **starts like a number** (it over-quotes: a version `1.2.3`), and every map key the same way; a string with lines is a literal block (`|`, `|-`, `|+`) when a block can hold
+it and quoted when not. It keeps the library's layout (a sequence under a key is not indented; keys sorted, so `metadata` reads `annotations`, `labels`, `name`, `namespace` as `kubectl get -o yaml` prints it). The tests read it back with
+`serde_yaml_ng` for any value (a property), and check every plain scalar it writes against a separate implementation of the YAML 1.1 resolver written from the specification's regular expressions. `tests/golden/coder-me.export.yaml` is the golden.
 
 ## Tests
 
@@ -202,12 +238,15 @@ Argo CD's annotation makes the dashboard stop writing it (AD-031). `tests/golden
 * `tests/round_trip.rs`: the objects of a coder are the ones of §60a; every form round-trips (also through JSON); the label; the wire forms; a new agent gets the defaults and an old one
   keeps what it holds.
 * `tests/representability.rs`: `coder-me.yaml` is a form, `coder.yaml` and `chat.yaml` are YAML only and say what; every field no form and no deployment says makes the object YAML only
-  and is named (the second law, as a property test); a member the version does not know is never dropped; no reason quotes a value.
+  and is named (the second law, as a property test); **a field the form always writes (`registry.title`, `github.app.owners`) cannot be missing from the object**; a member the version does not know is never dropped, also inside the
+  elements of `allowFrom` and `volumes`; no reason quotes a value.
 * `tests/secrets.rs`: the property tests above.
-* `tests/validation.rs`: every rule of every screen names its field; the operator resolves what the dashboard accepts; every error has a field; the offered key is the guard; the defaults are
-  checked and a typo in them is refused.
-* `tests/export.rs`: the whitelist, with a sentinel in every place that must not be read; the golden (`AAP_UPDATE_GOLDEN=1 cargo test -p aap-forms --test export` rewrites
-  `tests/golden/coder-me.export.yaml`, and the diff is the change of the export).
+* `tests/validation.rs`: every rule of every screen names its field; the operator resolves what the dashboard accepts (**and at least 200 of the 256 generated forms are accepted**, so that the property cannot pass because everything was
+  refused; the generators produce unicode, line breaks and the strings YAML 1.1 reads as another type where a field allows them); every error has a field; the offered key is the guard, and a `dataFrom` Secret takes any key of valid syntax; the image, the header prefix and the
+  `Debug` of an address; the defaults are checked and a typo in them is refused.
+* `tests/export.rs`: the whitelist, with a sentinel in every place that must not be read, in labels and annotations of tools that do not exist yet; the allow-list of labels and annotations; the listed strings quoted line by line and
+  read back as strings; the golden (`AAP_UPDATE_GOLDEN=1 cargo test -p aap-forms --test export` rewrites `tests/golden/coder-me.export.yaml`, and the diff is the change of the export). `src/yaml.rs` has the unit and property tests of the writer.
+* `tests/dependents.rs`: `dependents_after` (a tool server made plain http breaks the agents that do not allow it, an agent already refused is not blamed, one that cannot be read is reported), and an object that exists and cannot be read is not said to be missing.
 * `tests/domain_agrees.rs`: the references the store reads from JSON are the ones `aap_domain::references` reads from the types.
 
 ## Not here
