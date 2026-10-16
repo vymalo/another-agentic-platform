@@ -27,7 +27,7 @@ name: Operator
 # The registry contract (docs/extensions/agent-registry-v1.md) is a path too: a test of aap-registry reads its first
 # JSON block, so an edit of the contract alone must run the tests.
 #
-# The images (the operator's and the Platform API's), the charts and the end-to-end of the coder (S8, S9, D7b1) are operator-image.yml's.
+# The images (the operator's and the Platform API's), the charts and the end-to-ends of the coder and of the Platform API (S8, S9, D7b1, D7b2) are operator-image.yml's.
 
 on:
   pull_request:
