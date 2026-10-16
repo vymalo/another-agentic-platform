@@ -1,0 +1,8 @@
+{
+  "kind": "Status",
+  "apiVersion": "v1",
+  "metadata": {},
+  "status": "Failure",
+  "message": "admission webhook \"deny.example.com\" denied the request without explanation",
+  "code": 400
+}

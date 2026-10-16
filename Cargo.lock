@@ -69,6 +69,27 @@ dependencies = [
 ]
 
 [[package]]
+name = "aap-objects-kubernetes"
+version = "0.1.0"
+dependencies = [
+ "aap-api",
+ "aap-ports",
+ "http",
+ "k8s-openapi",
+ "kube",
+ "serde",
+ "serde_json",
+ "serde_yaml_ng",
+ "sha2",
+ "thiserror 2.0.21",
+ "tokio",
+ "tower",
+ "tracing",
+ "tracing-subscriber",
+ "url",
+]
+
+[[package]]
 name = "aap-operator"
 version = "0.1.0"
 dependencies = [

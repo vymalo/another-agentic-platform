@@ -1,0 +1,94 @@
+{
+  "apiVersion": "agents.vymalo.com/v1alpha1",
+  "kind": "AgentConfig",
+  "metadata": {
+    "creationTimestamp": "2026-10-16T01:26:51Z",
+    "generation": 1,
+    "labels": {
+      "app.kubernetes.io/managed-by": "dashboard.agents.vymalo.com"
+    },
+    "managedFields": [
+      {
+        "apiVersion": "agents.vymalo.com/v1alpha1",
+        "fieldsType": "FieldsV1",
+        "fieldsV1": {
+          "f:metadata": {
+            "f:labels": {
+              "f:app.kubernetes.io/managed-by": {}
+            }
+          },
+          "f:spec": {
+            "f:environment": {},
+            "f:harness": {
+              "f:adam": {
+                "f:agent": {
+                  "f:folder": {
+                    "f:files": {
+                      "f:instructions.md": {}
+                    }
+                  }
+                },
+                "f:binary": {}
+              },
+              "f:type": {}
+            },
+            "f:model": {
+              "f:apiKeySecretRef": {
+                "f:key": {},
+                "f:name": {}
+              },
+              "f:baseUrl": {
+                "f:value": {}
+              },
+              "f:model": {}
+            },
+            "f:tools": {
+              "f:mcpServers": {}
+            }
+          }
+        },
+        "manager": "agents.vymalo.com/dashboard",
+        "operation": "Apply",
+        "time": "2026-10-16T01:26:51Z"
+      }
+    ],
+    "name": "o1",
+    "namespace": "aap-test",
+    "resourceVersion": "422",
+    "uid": "ed0c5bc6-7c0d-4380-8f38-98aeae9fa8d1"
+  },
+  "spec": {
+    "environment": {
+      "volumes": []
+    },
+    "extraEnv": {},
+    "harness": {
+      "adam": {
+        "agent": {
+          "folder": {
+            "files": {
+              "instructions.md": "---\nname: sample\n---\nHello.\n"
+            }
+          }
+        },
+        "binary": "adam-agent"
+      },
+      "type": "adam-rs"
+    },
+    "model": {
+      "apiKeySecretRef": {
+        "key": "MODEL_API_KEY",
+        "name": "aap-sentinel-models"
+      },
+      "baseUrl": {
+        "value": "https://gateway.example.invalid/v1"
+      },
+      "model": "chat-model"
+    },
+    "security": {},
+    "tools": {
+      "allowInsecureHttp": false,
+      "mcpServers": {}
+    }
+  }
+}

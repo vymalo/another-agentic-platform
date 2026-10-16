@@ -12,6 +12,11 @@ name: Operator
 # manifest, pinned by version and checked by sha256): the conformance suite of aap-ports and the cases of
 # crates/store-cnpg/tests/cluster.rs, which wait for a real Cluster to be ready and read its `<cluster>-app` Secret.
 #
+# The `objects-kubernetes` job runs the dashboard's store of D5 against a real API server, as an identity that holds
+# the Role of crates/objects-kubernetes/tests/rbac.yaml and nothing else (no right on Secrets): the conformance suite
+# of aap-ports and the cases of crates/objects-kubernetes/tests/cluster.rs. The CRD of the ExternalSecret is a pinned
+# copy in the crate, so no operator and no network are needed. (`crates/**` is why a change of the crate runs it.)
+#
 # The `operator-e2e` job is S5's end-to-end: the CRDs of deploy/crds are installed in a kind cluster, the
 # `operator` binary built in the job runs against it (bin/operator/tests/cluster.rs starts it, one per case),
 # and each case applies an AgentConfig and an AgentService, waits for Ready, and deletes. The pods run a stand-in
@@ -294,6 +299,74 @@ jobs:
           kubectl -n aap-test describe clusters.postgresql.cnpg.io | tail -200 || true
           kubectl -n aap-test get events --sort-by=.lastTimestamp | tail -80 || true
           kubectl -n cnpg-system logs deployment/cnpg-controller-manager --tail=100 || true
+
+  objects-kubernetes:
+    # AgentObjects on the Kubernetes API server against a real one (D5): server-side apply, the preconditions, the
+    # ownership rules, the offered keys. The crate runs as a ServiceAccount that has the Role of
+    # crates/objects-kubernetes/tests/rbac.yaml and nothing else, so a verb the crate uses and the Role lacks is a
+    # failure here, and so is a right on Secrets. Nothing may skip.
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v7
+      - name: Create a kind cluster
+        uses: helm/kind-action@v1
+        with:
+          version: v0.33.0
+          # The same node image as the other jobs: Kubernetes v1.35.8, the digest of the index of the tag.
+          node_image: kindest/node:v1.35.8@sha256:07b2536e30b803ed61d1677a79df6115f798ce64c80f9e22f6ed45afd09323c0
+          cluster_name: aap-objects
+          wait: 120s
+      # The kinds the Role names, so `auth can-i` below can resolve them (kubectl answers "no" for a resource the
+      # server does not serve). The test applies the same files again, forced, under its own field manager.
+      - name: Install the CRDs
+        run: |
+          set -eu
+          kubectl apply --server-side -f deploy/crds/agents.vymalo.com.yaml
+          kubectl apply --server-side -f crates/objects-kubernetes/tests/crds/external-secrets.io_externalsecrets.yaml
+          kubectl wait --for=condition=Established --timeout=60s \
+            crd/agentservices.agents.vymalo.com crd/agentconfigs.agents.vymalo.com \
+            crd/modelendpoints.agents.vymalo.com crd/toolproviders.agents.vymalo.com \
+            crd/externalsecrets.external-secrets.io
+      - name: "The identity of the crate, a ServiceAccount with its Role"
+        run: |
+          set -eu
+          kubectl create namespace aap-test
+          kubectl apply -f crates/objects-kubernetes/tests/rbac.yaml
+          kubectl -n aap-test create serviceaccount dashboard
+          kubectl -n aap-test create rolebinding aap-objects-kubernetes --role=aap-objects-kubernetes --serviceaccount=aap-test:dashboard
+          # A kubeconfig for it: the cluster of the administrator's, and the token of the ServiceAccount.
+          server="$(kubectl config view --raw --minify -o jsonpath='{.clusters[0].cluster.server}')"
+          kubectl config view --raw --minify -o jsonpath='{.clusters[0].cluster.certificate-authority-data}' | base64 -d > "$RUNNER_TEMP/ca.crt"
+          token="$(kubectl -n aap-test create token dashboard --duration=1h)"
+          cfg="$RUNNER_TEMP/dashboard.kubeconfig"
+          kubectl config set-cluster aap --kubeconfig="$cfg" --server="$server" --certificate-authority="$RUNNER_TEMP/ca.crt" --embed-certs=true
+          kubectl config set-credentials dashboard --kubeconfig="$cfg" --token="$token"
+          kubectl config set-context aap --kubeconfig="$cfg" --cluster=aap --user=dashboard
+          kubectl config use-context aap --kubeconfig="$cfg"
+          # It cannot read a Secret, and it holds the Role (the test checks every verb of it).
+          test "$(kubectl --kubeconfig="$cfg" -n aap-test auth can-i list secrets)" = no
+          test "$(kubectl --kubeconfig="$cfg" -n aap-test auth can-i patch agentservices.agents.vymalo.com)" = yes
+      - name: Install Rust
+        run: rustup toolchain install "$RUST_TOOLCHAIN" --profile minimal --no-self-update && rustup default "$RUST_TOOLCHAIN"
+      - uses: Swatinem/rust-cache@v2
+      - name: The crate against the cluster
+        env:
+          AAP_TEST_REQUIRE_CLUSTER: "1"
+          AAP_TEST_REQUIRE_BACKEND: "1"
+        run: |
+          # Files, so the tests never fall back to some default context. The administrator's makes the CRDs, the
+          # objects of GitOps, the operator's status and the Secrets; the other is the crate's.
+          export AAP_TEST_KUBECONFIG="$HOME/.kube/config"
+          export AAP_TEST_API_KUBECONFIG="$RUNNER_TEMP/dashboard.kubeconfig"
+          kubectl --kubeconfig "$AAP_TEST_KUBECONFIG" get nodes
+          # Every case names its objects itself.
+          cargo test -p aap-objects-kubernetes --test cluster --locked -- --test-threads=4
+      - name: What the cluster says, when a case failed
+        if: failure()
+        run: |
+          kubectl -n aap-test get agentservices,agentconfigs,modelendpoints,toolproviders,externalsecrets -o wide || true
+          kubectl -n aap-test get events --sort-by=.lastTimestamp | tail -40 || true
 
   operator-e2e:
     # The operator binary against a real cluster, with real pods (S5). Nothing may skip: with

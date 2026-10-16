@@ -1,0 +1,14 @@
+{
+  "kind": "Status",
+  "apiVersion": "v1",
+  "metadata": {},
+  "status": "Failure",
+  "message": "Operation cannot be fulfilled on agentservices.agents.vymalo.com \"y\": uid mismatch: the provided object specified uid 11111111-1111-1111-1111-111111111111, and no existing object was found",
+  "reason": "Conflict",
+  "details": {
+    "name": "y",
+    "group": "agents.vymalo.com",
+    "kind": "agentservices"
+  },
+  "code": 409
+}

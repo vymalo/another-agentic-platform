@@ -24,6 +24,8 @@ struct State {
     /// Values a Secret of the backend holds. Nothing reads them: they are there so that a case can show
     /// that no answer of the port carries one.
     values: BTreeMap<(String, String), String>,
+    /// The services that have the operator's finalizer: a delete of one leaves it deleting.
+    finalized: BTreeSet<String>,
     unavailable: bool,
 }
 
@@ -94,6 +96,7 @@ impl State {
                     annotations: BTreeMap::new(),
                     spec: spec.clone(),
                     status: None,
+                    deleting: false,
                 };
                 self.objects.insert(key, stored.clone());
                 stored
@@ -130,6 +133,38 @@ impl State {
     }
 }
 
+impl State {
+    /// The configs the dashboard owns that no service names.
+    fn orphans(&self) -> Vec<Stored> {
+        let named: BTreeSet<&str> = self
+            .objects
+            .iter()
+            .filter(|((kind, _), _)| *kind == Kind::AgentService)
+            .filter_map(|(_, service)| config_name(&service.spec))
+            .collect();
+        self.objects
+            .iter()
+            .filter(|((kind, _), _)| *kind == Kind::AgentConfig)
+            .filter(|((_, name), config)| {
+                config.owner().writable() && !named.contains(name.as_str())
+            })
+            .map(|(_, config)| config.clone())
+            .collect()
+    }
+
+    /// The service `name` begins to be deleted: it stays, with a new version and generation, until its finalizer runs.
+    fn begin_deleting(&mut self, name: &str) {
+        let version = self.fresh_version(Kind::AgentService, name);
+        if let Some(service) = self.objects.get_mut(&(Kind::AgentService, name.to_owned()))
+            && !service.deleting
+        {
+            service.deleting = true;
+            service.generation += 1;
+            service.version = version;
+        }
+    }
+}
+
 fn not_an_object(kind: Kind) -> FieldError {
     FieldError::new(kind, "spec", "a spec is an object")
 }
@@ -138,7 +173,7 @@ fn not_an_object(kind: Kind) -> FieldError {
 ///
 /// It behaves as the contract says and as an API server behaves, up to the validation of the CRDs: the
 /// only body it refuses is one that is not an object (and a `configRef` that is not the agent's name).
-/// A write that changes nothing keeps the version (a server-side apply of an unchanged object is believed to: *unverified*).
+/// A write that changes nothing keeps the version (a server-side apply of an unchanged object does: *verified 2026-10-16*, `aap-objects-kubernetes`).
 #[derive(Clone)]
 pub struct MemoryObjects {
     namespace: String,
@@ -200,6 +235,7 @@ impl MemoryObjects {
                 annotations,
                 spec,
                 status: None,
+                deleting: false,
             },
         );
     }
@@ -209,6 +245,51 @@ impl MemoryObjects {
     pub fn seed_orphan_config(&self, name: &str, spec: &Value) {
         let mut s = lock(&self.state);
         s.write(&self.namespace, Kind::AgentConfig, name, spec);
+    }
+
+    /// An object removed as an administrator would, with no precondition and whatever its finalizers.
+    pub fn remove(&self, kind: Kind, name: &str) {
+        let mut s = lock(&self.state);
+        s.objects.remove(&(kind, name.to_owned()));
+        if kind == Kind::AgentService {
+            s.finalized.remove(name);
+        }
+    }
+
+    /// The operator's finalizer is on the service `name`: a delete of it leaves it deleting until
+    /// [`run_finalizer`](Self::run_finalizer).
+    pub fn seed_finalizer(&self, name: &str) {
+        let mut s = lock(&self.state);
+        if s.finalized.insert(name.to_owned()) {
+            let version = s.fresh_version(Kind::AgentService, name);
+            if let Some(service) = s.objects.get_mut(&(Kind::AgentService, name.to_owned())) {
+                service.version = version;
+            }
+        }
+    }
+
+    /// The service `name` is being deleted by somebody else (`kubectl delete`): it has the finalizer and is deleting.
+    pub fn seed_terminating(&self, name: &str) {
+        self.seed_finalizer(name);
+        lock(&self.state).begin_deleting(name);
+    }
+
+    /// The finalizer on the service `name` ran: a service that was being deleted goes, the config stays.
+    pub fn run_finalizer(&self, name: &str) {
+        let mut s = lock(&self.state);
+        if s.finalized.remove(name) {
+            let deleting = s
+                .get(Kind::AgentService, name)
+                .is_some_and(|service| service.deleting);
+            if deleting {
+                s.objects.remove(&(Kind::AgentService, name.to_owned()));
+            } else {
+                let version = s.fresh_version(Kind::AgentService, name);
+                if let Some(service) = s.objects.get_mut(&(Kind::AgentService, name.to_owned())) {
+                    service.version = version;
+                }
+            }
+        }
     }
 
     /// The status the operator would have written.
@@ -308,7 +389,8 @@ impl AgentObjects for MemoryObjects {
         let config_in_place = s.get(Kind::AgentConfig, name).cloned();
         match when {
             Precondition::DoesNotExist => {
-                if service_in_place.is_some() {
+                // A service that is being deleted is refused below, as `Deleting`.
+                if service_in_place.as_ref().is_some_and(|s| !s.deleting) {
                     return Err(ObjectsError::AlreadyExists {
                         kind: Kind::AgentService,
                         name: name.to_owned(),
@@ -326,6 +408,14 @@ impl AgentObjects for MemoryObjects {
         for object in service_in_place.iter().chain(&config_in_place) {
             if !object.owner().writable() {
                 return Err(ObjectsError::NotOwned {
+                    kind: object.kind,
+                    name: object.name.clone(),
+                });
+            }
+        }
+        for object in service_in_place.iter().chain(&config_in_place) {
+            if object.deleting {
+                return Err(ObjectsError::Deleting {
                     kind: object.kind,
                     name: object.name.clone(),
                 });
@@ -354,10 +444,9 @@ impl AgentObjects for MemoryObjects {
     async fn delete_agent(&self, name: &str, when: &ETag) -> Result<(), ObjectsError> {
         let mut s = lock(&self.state);
         s.up()?;
-        let agent = s.agent(name).ok_or_else(|| ObjectsError::NotFound {
-            kind: Kind::AgentService,
-            name: name.to_owned(),
-        })?;
+        let Some(agent) = s.agent(name) else {
+            return delete_orphan(&mut s, name, when);
+        };
         for object in std::iter::once(&agent.service).chain(&agent.config) {
             if !object.owner().writable() {
                 return Err(ObjectsError::NotOwned {
@@ -379,11 +468,23 @@ impl AgentObjects for MemoryObjects {
         if *when != agent.etag() {
             return Err(ObjectsError::PreconditionFailed);
         }
+        if s.finalized.contains(name) {
+            // The operator's finalizer is on the service: it stays, deleting, and so does the config, which the
+            // operator reads while it releases the compute and the store.
+            s.begin_deleting(name);
+            return Ok(());
+        }
         s.objects.remove(&(Kind::AgentService, name.to_owned()));
         if let Some(config) = &agent.config {
             s.objects.remove(&(Kind::AgentConfig, config.name.clone()));
         }
         Ok(())
+    }
+
+    async fn list_orphans(&self) -> Result<Vec<Stored>, ObjectsError> {
+        let s = lock(&self.state);
+        s.up()?;
+        Ok(s.orphans())
     }
 
     async fn list_shared(&self, kind: SharedKind) -> Result<Vec<Stored>, ObjectsError> {
@@ -493,6 +594,37 @@ impl AgentObjects for MemoryObjects {
     }
 }
 
+/// A delete of a name whose service is absent: the orphan config of that name, or nothing.
+fn delete_orphan(s: &mut State, name: &str, when: &ETag) -> Result<(), ObjectsError> {
+    let not_found = || ObjectsError::NotFound {
+        kind: Kind::AgentService,
+        name: name.to_owned(),
+    };
+    let config = s
+        .get(Kind::AgentConfig, name)
+        .cloned()
+        .ok_or_else(not_found)?;
+    if !config.owner().writable() {
+        return Err(ObjectsError::NotOwned {
+            kind: Kind::AgentConfig,
+            name: name.to_owned(),
+        });
+    }
+    let by = s.other_services_naming(name, "");
+    if !by.is_empty() {
+        return Err(ObjectsError::Referenced {
+            kind: Kind::AgentConfig,
+            name: name.to_owned(),
+            by,
+        });
+    }
+    if *when != config.etag() {
+        return Err(ObjectsError::PreconditionFailed);
+    }
+    s.objects.remove(&(Kind::AgentConfig, name.to_owned()));
+    Ok(())
+}
+
 impl ObjectsUnderTest for MemoryObjects {
     async fn seed_foreign(&self, kind: Kind, name: &str, spec: Value, how: Foreign) {
         Self::seed_foreign(self, kind, name, spec, how);
@@ -500,6 +632,18 @@ impl ObjectsUnderTest for MemoryObjects {
 
     async fn seed_orphan_config(&self, name: &str, spec: Value) {
         Self::seed_orphan_config(self, name, &spec);
+    }
+
+    async fn seed_finalizer(&self, name: &str) {
+        Self::seed_finalizer(self, name);
+    }
+
+    async fn seed_terminating(&self, name: &str) {
+        Self::seed_terminating(self, name);
+    }
+
+    async fn run_finalizer(&self, name: &str) {
+        Self::run_finalizer(self, name);
     }
 
     async fn set_status(&self, kind: Kind, name: &str, status: Value) {

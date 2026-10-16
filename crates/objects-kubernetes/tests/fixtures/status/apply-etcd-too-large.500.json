@@ -1,0 +1,8 @@
+{
+  "kind": "Status",
+  "apiVersion": "v1",
+  "metadata": {},
+  "status": "Failure",
+  "message": "etcdserver: request is too large",
+  "code": 500
+}

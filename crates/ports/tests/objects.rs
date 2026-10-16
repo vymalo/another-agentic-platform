@@ -28,6 +28,7 @@ fn status(e: &ObjectsError) -> u16 {
         ObjectsError::AlreadyExists { .. }
         | ObjectsError::NotOwned { .. }
         | ObjectsError::Referenced { .. }
+        | ObjectsError::Deleting { .. }
         | ObjectsError::Conflict(_) => 409,
         ObjectsError::NotFound { .. } => 404,
         ObjectsError::PreconditionFailed => 412,
@@ -74,6 +75,14 @@ fn every_error_has_one_status_and_a_class() {
             },
             409,
             ErrorClass::Invalid,
+        ),
+        (
+            ObjectsError::Deleting {
+                kind: Kind::AgentService,
+                name: name(),
+            },
+            409,
+            ErrorClass::Conflict,
         ),
         (
             ObjectsError::Conflict("a field".into()),
@@ -187,6 +196,7 @@ fn stored(kind: Kind, version: &str, labels: &[(&str, &str)]) -> Stored {
         annotations: BTreeMap::new(),
         spec: json!({}),
         status: None,
+        deleting: false,
     }
 }
 
@@ -635,6 +645,8 @@ enum Refusal {
     NotOwned(Option<Kind>),
     /// An object that others name (of this kind, or of any).
     Referenced(Option<Kind>),
+    /// An object that is being deleted.
+    Deleting,
 }
 
 /// The part of the token a faulty store looks at.
@@ -669,6 +681,14 @@ enum Fault {
     ListDropsAgentsWithoutConfig,
     /// `get_agent` does not find an agent whose config is missing.
     GetDropsAgentsWithoutConfig,
+    /// A read says that no agent is being deleted.
+    HidesDeleting,
+    /// A delete of an agent that is being deleted deletes its config at once.
+    DeletesTheConfigAtOnce,
+    /// `list_orphans` lists none.
+    DropsOrphans,
+    /// `list_orphans` lists the configs of GitOps as well.
+    ListsGitOpsConfigsAsOrphans,
 }
 
 struct Faulty {
@@ -680,6 +700,8 @@ struct Faulty {
     tokens: Mutex<BTreeSet<String>>,
     /// The configs seeded with no service.
     orphans: Mutex<BTreeSet<String>>,
+    /// The configs seeded as GitOps's.
+    foreign_configs: Mutex<BTreeSet<String>>,
 }
 
 fn faulty(fault: Fault) -> Faulty {
@@ -689,6 +711,7 @@ fn faulty(fault: Fault) -> Faulty {
         given: Mutex::default(),
         tokens: Mutex::default(),
         orphans: Mutex::default(),
+        foreign_configs: Mutex::default(),
     }
 }
 
@@ -704,6 +727,7 @@ fn pretend(name: &str, draft: &AgentDraft) -> Agent {
         annotations: BTreeMap::new(),
         spec: spec.clone(),
         status: None,
+        deleting: false,
     };
     Agent {
         service: object(Kind::AgentService, &draft.service),
@@ -772,6 +796,7 @@ impl Faulty {
                 | (Refusal::Referenced(want), ObjectsError::Referenced { kind, .. }) => {
                     want.is_none_or(|w| w == *kind)
                 }
+                (Refusal::Deleting, ObjectsError::Deleting { .. }) => true,
                 _ => false,
             }
     }
@@ -783,6 +808,9 @@ impl AgentObjects for Faulty {
         if matches!(self.fault, Fault::ListDropsAgentsWithoutConfig) {
             agents.retain(|a| a.config.is_some());
         }
+        if matches!(self.fault, Fault::HidesDeleting) {
+            agents.iter_mut().for_each(|a| a.service.deleting = false);
+        }
         agents.iter().for_each(|a| self.remember(a));
         Ok(agents)
     }
@@ -791,6 +819,10 @@ impl AgentObjects for Faulty {
         let agent = self.inner.get_agent(name).await?;
         let agent = match (self.fault, agent) {
             (Fault::GetDropsAgentsWithoutConfig, Some(a)) if a.config.is_none() => None,
+            (Fault::HidesDeleting, Some(mut a)) => {
+                a.service.deleting = false;
+                Some(a)
+            }
             (_, agent) => agent,
         };
         agent.iter().for_each(|a| self.remember(a));
@@ -862,15 +894,54 @@ impl AgentObjects for Faulty {
 
     async fn delete_agent(&self, name: &str, when: &ETag) -> Result<(), ObjectsError> {
         let mut when = when.clone();
-        if let Some(current) = self.inner.get_agent(name).await?
-            && self.passes_agent(Call::DeleteAgent, &when, &current)
-        {
-            when = current.etag();
+        match self.inner.get_agent(name).await? {
+            Some(current) => {
+                if self.passes_agent(Call::DeleteAgent, &when, &current) {
+                    when = current.etag();
+                }
+            }
+            // An orphan config has a token of its own, and a store can forget to compare it.
+            None if matches!(
+                self.fault,
+                Fault::Forgets(Refusal::StaleToken, Call::DeleteAgent)
+            ) =>
+            {
+                if let Some(orphan) = self
+                    .inner
+                    .list_orphans()
+                    .await?
+                    .into_iter()
+                    .find(|o| o.name == name)
+                {
+                    when = orphan.etag();
+                }
+            }
+            None => {}
         }
-        match self.inner.delete_agent(name, &when).await {
+        let result = self.inner.delete_agent(name, &when).await;
+        if matches!(self.fault, Fault::DeletesTheConfigAtOnce) && result.is_ok() {
+            self.inner.remove(Kind::AgentConfig, name);
+        }
+        match result {
             Err(e) if self.forgets(Call::DeleteAgent, &e) => Ok(()),
             result => result,
         }
+    }
+
+    async fn list_orphans(&self) -> Result<Vec<Stored>, ObjectsError> {
+        let mut orphans = match self.fault {
+            Fault::DropsOrphans => return Ok(Vec::new()),
+            _ => self.inner.list_orphans().await?,
+        };
+        if matches!(self.fault, Fault::ListsGitOpsConfigsAsOrphans) {
+            for name in self.foreign_configs.lock().unwrap().iter() {
+                orphans.push(Stored {
+                    name: name.clone(),
+                    ..stored(Kind::AgentConfig, "pretended", &[])
+                });
+            }
+        }
+        Ok(orphans)
     }
 
     async fn list_shared(&self, kind: SharedKind) -> Result<Vec<Stored>, ObjectsError> {
@@ -947,7 +1018,19 @@ impl AgentObjects for Faulty {
 
 impl ObjectsUnderTest for Faulty {
     async fn seed_foreign(&self, kind: Kind, name: &str, spec: Value, how: Foreign) {
+        if kind == Kind::AgentConfig {
+            self.foreign_configs.lock().unwrap().insert(name.to_owned());
+        }
         ObjectsUnderTest::seed_foreign(&self.inner, kind, name, spec, how).await;
+    }
+    async fn seed_finalizer(&self, name: &str) {
+        ObjectsUnderTest::seed_finalizer(&self.inner, name).await;
+    }
+    async fn seed_terminating(&self, name: &str) {
+        ObjectsUnderTest::seed_terminating(&self.inner, name).await;
+    }
+    async fn run_finalizer(&self, name: &str) {
+        ObjectsUnderTest::run_finalizer(&self.inner, name).await;
     }
     async fn seed_orphan_config(&self, name: &str, spec: Value) {
         self.orphans.lock().unwrap().insert(name.to_owned());
@@ -1100,6 +1183,37 @@ the_suite_fails! {
     the_suite_fails_a_get_that_drops_agents_without_a_config:
         Fault::GetDropsAgentsWithoutConfig => an_agent_whose_config_is_missing_is_listed_and_read,
         "a service whose config is missing is an agent";
+}
+
+// An agent that is being deleted, and the config a delete leaves.
+the_suite_fails! {
+    the_suite_fails_a_store_that_writes_an_agent_that_is_being_deleted:
+        Forgets(Refusal::Deleting, ReplaceAgent) => a_deleting_agent_refuses_a_write,
+        "a replace of an agent that is being deleted: was accepted";
+    the_suite_fails_a_store_that_creates_over_an_agent_that_is_being_deleted:
+        Forgets(Refusal::Deleting, CreateAgent) => a_deleting_agent_refuses_a_write,
+        "a create over an agent that is being deleted: was accepted";
+    the_suite_fails_a_read_that_does_not_say_an_agent_is_being_deleted:
+        Fault::HidesDeleting => a_terminating_agent_is_listed_as_deleting,
+        "the service is being deleted";
+    the_suite_fails_a_delete_that_takes_the_config_from_the_operator:
+        Fault::DeletesTheConfigAtOnce => a_delete_leaves_the_config_while_the_operator_finalizes,
+        "the config stays while the operator finalizes";
+    the_suite_fails_a_store_that_does_not_list_the_config_a_delete_left:
+        Fault::DropsOrphans => a_delete_leaves_the_config_while_the_operator_finalizes,
+        "the config the delete left is an orphan";
+    the_suite_fails_a_delete_of_an_orphan_config_with_a_stale_token:
+        Forgets(StaleToken, DeleteAgent) => an_orphan_config_is_deleted_by_a_delete_of_its_name,
+        "a delete of an orphan config with a stale token: was accepted";
+    the_suite_fails_a_store_that_lists_a_gitops_config_as_an_orphan:
+        Fault::ListsGitOpsConfigsAsOrphans => a_config_that_is_not_an_orphan_is_never_deleted_as_one,
+        "a GitOps config is not an orphan";
+    the_suite_fails_a_delete_of_a_gitops_config_that_no_service_names:
+        Forgets(NotOwned(Some(Kind::AgentConfig)), DeleteAgent) => a_config_that_is_not_an_orphan_is_never_deleted_as_one,
+        "a delete of a GitOps config that no service names: was accepted";
+    the_suite_fails_a_delete_of_an_orphan_config_that_a_service_names:
+        Forgets(Referenced(Some(Kind::AgentConfig)), DeleteAgent) => a_config_that_is_not_an_orphan_is_never_deleted_as_one,
+        "a delete of a config that another service names: was accepted";
 }
 
 // What the store writes, and what it answers.

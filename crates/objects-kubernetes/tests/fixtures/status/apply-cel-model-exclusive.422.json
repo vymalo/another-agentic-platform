@@ -1,0 +1,21 @@
+{
+  "kind": "Status",
+  "apiVersion": "v1",
+  "metadata": {},
+  "status": "Failure",
+  "message": "AgentConfig.agents.vymalo.com \"x\" is invalid: spec.model: Invalid value: model.endpointRef is exclusive with model.baseUrl and model.apiKeySecretRef",
+  "reason": "Invalid",
+  "details": {
+    "name": "x",
+    "group": "agents.vymalo.com",
+    "kind": "AgentConfig",
+    "causes": [
+      {
+        "reason": "FieldValueInvalid",
+        "message": "Invalid value: model.endpointRef is exclusive with model.baseUrl and model.apiKeySecretRef",
+        "field": "spec.model"
+      }
+    ]
+  },
+  "code": 422
+}

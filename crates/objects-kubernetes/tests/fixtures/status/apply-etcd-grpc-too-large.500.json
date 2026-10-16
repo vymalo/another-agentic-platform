@@ -1,0 +1,8 @@
+{
+  "kind": "Status",
+  "apiVersion": "v1",
+  "metadata": {},
+  "status": "Failure",
+  "message": "rpc error: code = ResourceExhausted desc = trying to send message larger than max (2098603 vs. 2097152)",
+  "code": 500
+}

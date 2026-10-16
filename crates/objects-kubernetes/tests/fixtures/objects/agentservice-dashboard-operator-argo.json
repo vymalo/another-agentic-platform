@@ -1,0 +1,211 @@
+{
+  "apiVersion": "agents.vymalo.com/v1alpha1",
+  "kind": "AgentService",
+  "metadata": {
+    "annotations": {
+      "argocd.argoproj.io/tracking-id": "agentic:agents.vymalo.com/AgentService:aap-test/o1"
+    },
+    "creationTimestamp": "2026-10-16T01:26:51Z",
+    "finalizers": [
+      "agents.vymalo.com/runtime"
+    ],
+    "generation": 1,
+    "labels": {
+      "app.kubernetes.io/managed-by": "dashboard.agents.vymalo.com"
+    },
+    "managedFields": [
+      {
+        "apiVersion": "agents.vymalo.com/v1alpha1",
+        "fieldsType": "FieldsV1",
+        "fieldsV1": {
+          "f:status": {
+            "f:conditions": {},
+            "f:observedGeneration": {},
+            "f:state": {}
+          }
+        },
+        "manager": "aap-operator",
+        "operation": "Apply",
+        "subresource": "status",
+        "time": "2026-10-16T01:26:51Z"
+      },
+      {
+        "apiVersion": "agents.vymalo.com/v1alpha1",
+        "fieldsType": "FieldsV1",
+        "fieldsV1": {
+          "f:metadata": {
+            "f:labels": {
+              "f:app.kubernetes.io/managed-by": {}
+            }
+          },
+          "f:spec": {
+            "f:access": {
+              "f:audience": {}
+            },
+            "f:configRef": {
+              "f:name": {}
+            },
+            "f:description": {},
+            "f:interfaces": {
+              "f:a2a": {
+                "f:bearerTokensSecretRef": {
+                  "f:key": {},
+                  "f:name": {}
+                },
+                "f:enabled": {}
+              }
+            },
+            "f:registry": {
+              "f:tags": {},
+              "f:title": {}
+            },
+            "f:store": {
+              "f:postgres": {
+                "f:cnpg": {
+                  "f:instances": {},
+                  "f:storage": {
+                    "f:size": {}
+                  }
+                }
+              }
+            }
+          }
+        },
+        "manager": "agents.vymalo.com/dashboard",
+        "operation": "Apply",
+        "time": "2026-10-16T01:26:51Z"
+      },
+      {
+        "apiVersion": "agents.vymalo.com/v1alpha1",
+        "fieldsType": "FieldsV1",
+        "fieldsV1": {
+          "f:metadata": {
+            "f:annotations": {
+              "f:argocd.argoproj.io/tracking-id": {}
+            },
+            "f:labels": {
+              "f:app.kubernetes.io/managed-by": {}
+            }
+          },
+          "f:spec": {
+            "f:access": {
+              "f:audience": {}
+            },
+            "f:configRef": {
+              "f:name": {}
+            },
+            "f:description": {},
+            "f:interfaces": {
+              "f:a2a": {
+                "f:bearerTokensSecretRef": {
+                  "f:key": {},
+                  "f:name": {}
+                },
+                "f:enabled": {}
+              }
+            },
+            "f:registry": {
+              "f:tags": {},
+              "f:title": {}
+            },
+            "f:store": {
+              "f:postgres": {
+                "f:cnpg": {
+                  "f:instances": {},
+                  "f:storage": {
+                    "f:size": {}
+                  }
+                }
+              }
+            }
+          }
+        },
+        "manager": "argocd-controller",
+        "operation": "Apply",
+        "time": "2026-10-16T01:26:51Z"
+      },
+      {
+        "apiVersion": "agents.vymalo.com/v1alpha1",
+        "fieldsType": "FieldsV1",
+        "fieldsV1": {
+          "f:metadata": {
+            "f:finalizers": {
+              ".": {},
+              "v:\"agents.vymalo.com/runtime\"": {}
+            }
+          }
+        },
+        "manager": "aap-operator",
+        "operation": "Update",
+        "time": "2026-10-16T01:26:51Z"
+      }
+    ],
+    "name": "o1",
+    "namespace": "aap-test",
+    "resourceVersion": "426",
+    "uid": "502275ca-c782-4fff-bce3-44361cf1801c"
+  },
+  "spec": {
+    "access": {
+      "allowFrom": [],
+      "audience": [
+        "agent.use:o1"
+      ]
+    },
+    "configRef": {
+      "name": "o1"
+    },
+    "deletionPolicy": "Retain",
+    "description": "A sample agent.",
+    "interfaces": {
+      "a2a": {
+        "bearerTokensSecretRef": {
+          "key": "A2A_BEARER_TOKENS",
+          "name": "aap-sentinel-a2a"
+        },
+        "enabled": true
+      },
+      "mcp": {
+        "enabled": false
+      },
+      "responses": {
+        "enabled": false
+      }
+    },
+    "registry": {
+      "tags": [
+        "sample"
+      ],
+      "title": "Sample"
+    },
+    "scaling": {
+      "topology": "combined",
+      "workers": 1
+    },
+    "store": {
+      "postgres": {
+        "cnpg": {
+          "instances": 1,
+          "storage": {
+            "size": "5Gi"
+          }
+        }
+      }
+    },
+    "suspend": false
+  },
+  "status": {
+    "conditions": [
+      {
+        "lastTransitionTime": "2026-10-16T01:00:00Z",
+        "message": "ok",
+        "observedGeneration": 1,
+        "reason": "Ready",
+        "status": "True",
+        "type": "Ready"
+      }
+    ],
+    "observedGeneration": 1,
+    "state": "Ready"
+  }
+}

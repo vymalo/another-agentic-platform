@@ -1,0 +1,26 @@
+{
+  "kind": "Status",
+  "apiVersion": "v1",
+  "metadata": {},
+  "status": "Failure",
+  "message": "AgentService.agents.vymalo.com \"x\" is invalid: [spec: Invalid value: \"null\": spec in body must be of type object: \"null\", <nil>: Invalid value: null: some validation rules were not checked because the object was invalid; correct the existing errors to complete validation]",
+  "reason": "Invalid",
+  "details": {
+    "name": "x",
+    "group": "agents.vymalo.com",
+    "kind": "AgentService",
+    "causes": [
+      {
+        "reason": "FieldValueTypeInvalid",
+        "message": "Invalid value: \"null\": spec in body must be of type object: \"null\"",
+        "field": "spec"
+      },
+      {
+        "reason": "FieldValueInvalid",
+        "message": "Invalid value: null: some validation rules were not checked because the object was invalid; correct the existing errors to complete validation",
+        "field": "<nil>"
+      }
+    ]
+  },
+  "code": 422
+}

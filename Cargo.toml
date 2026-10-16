@@ -8,6 +8,7 @@ members = [
     "crates/runtime-kubernetes",
     "crates/store-secret",
     "crates/store-cnpg",
+    "crates/objects-kubernetes",
     "crates/registry",
     "crates/controller",
     "bin/operator",
@@ -30,6 +31,7 @@ aap-ports = { path = "crates/ports" }
 aap-runtime-kubernetes = { path = "crates/runtime-kubernetes" }
 aap-store-secret = { path = "crates/store-secret" }
 aap-store-cnpg = { path = "crates/store-cnpg" }
+aap-objects-kubernetes = { path = "crates/objects-kubernetes" }
 aap-registry = { path = "crates/registry" }
 aap-controller = { path = "crates/controller" }
 anyhow = "1"

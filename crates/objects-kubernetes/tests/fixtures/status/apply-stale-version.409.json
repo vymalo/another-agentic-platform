@@ -1,0 +1,14 @@
+{
+  "kind": "Status",
+  "apiVersion": "v1",
+  "metadata": {},
+  "status": "Failure",
+  "message": "Operation cannot be fulfilled on agentservices.agents.vymalo.com \"x\": the object has been modified; please apply your changes to the latest version and try again",
+  "reason": "Conflict",
+  "details": {
+    "name": "x",
+    "group": "agents.vymalo.com",
+    "kind": "agentservices"
+  },
+  "code": 409
+}
