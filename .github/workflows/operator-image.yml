@@ -101,7 +101,11 @@ jobs:
           helm lint deploy/operator -f deploy/operator/examples/netcup.values.yaml
           helm lint deploy/operator -f deploy/operator/tests/secret.values.yaml
           helm lint deploy/operator -f deploy/operator/tests/api.values.yaml
-          helm lint deploy/operator -f deploy/operator/tests/api-secretref.values.yaml
+          # tests/api-secretref.values.yaml is NOT linted: it says `cnpg: null` (to switch the store to a Secret per agent), and `helm lint`
+          # coalesces the values twice, so the second pass puts the chart's default `cnpg` back and logs ten "[INFO] Fail: ... exactly
+          # one of cnpg and secretRef" that fail nothing (reproduced with a four-line chart, helm v3.19.0: a key set to null in the values
+          # file comes back from the chart's defaults under `lint` and not under `template`). `helm template`, which is what Argo CD and
+          # install run, deletes the key; render-check.sh, `api --check` and kubeconform read this shape, and that is its guard.
           helm lint deploy/operator -f deploy/operator/tests/api-full.values.yaml
           helm lint deploy/operator-crds
       - name: helm template (the values of the netcup Application)
