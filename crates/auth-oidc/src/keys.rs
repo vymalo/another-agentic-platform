@@ -25,6 +25,12 @@ pub(crate) const ALLOWED: [Algorithm; 4] = [
 /// The smallest RSA modulus, in bytes (2048 bits).
 const MIN_RSA_MODULUS_BYTES: usize = 256;
 
+/// The size of a P-256 coordinate, in bytes.
+const P256_COORDINATE_BYTES: usize = 32;
+
+/// The size of an Ed25519 public key, in bytes.
+const ED25519_KEY_BYTES: usize = 32;
+
 /// The kind of a key.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum Kind {
@@ -101,11 +107,35 @@ fn algorithm(name: &str) -> Option<Algorithm> {
     })
 }
 
-fn b64_len(text: &str) -> Option<usize> {
-    URL_SAFE_NO_PAD
-        .decode(text.trim_end_matches('='))
-        .ok()
-        .map(|bytes| bytes.iter().skip_while(|b| **b == 0).count())
+/// The octets a JWK member writes in base64url (padding, which RFC 7515 forbids and some issuers write, is
+/// accepted).
+fn octets(text: &str) -> Option<Vec<u8>> {
+    URL_SAFE_NO_PAD.decode(text.trim_end_matches('=')).ok()
+}
+
+/// The octets of an unsigned big-endian integer without its leading zeros, which are a sign byte or padding
+/// (RFC 7518 §6.3.1 writes `n` and `e` without them; RFC 7518 §6.2.1.2 writes a coordinate in the full length of
+/// its curve; issuers do both, and some add a sign byte).
+fn magnitude(bytes: &[u8]) -> &[u8] {
+    let zeros = bytes.iter().take_while(|b| **b == 0).count();
+    &bytes[zeros..]
+}
+
+fn base64url(bytes: &[u8]) -> String {
+    URL_SAFE_NO_PAD.encode(bytes)
+}
+
+/// A P-256 coordinate written by an issuer in any of its ways (cut, full, with a sign byte), as the 32 octets
+/// the key is made of, in base64url. `None` for what cannot be one: nothing, or more than 32 significant octets.
+fn p256_coordinate(text: &str) -> Option<String> {
+    let bytes = octets(text)?;
+    let value = magnitude(&bytes);
+    if bytes.is_empty() || value.len() > P256_COORDINATE_BYTES {
+        return None;
+    }
+    let mut padded = [0u8; P256_COORDINATE_BYTES];
+    padded[P256_COORDINATE_BYTES - value.len()..].copy_from_slice(value);
+    Some(base64url(&padded))
 }
 
 /// One JWK as a key, or `None` when this authenticator cannot use it.
@@ -128,32 +158,43 @@ fn read_key(jwk: &Jwk) -> Option<Key> {
     };
     let (kind, decoding) = match jwk.kty.as_str() {
         "RSA" => {
-            let (n, e) = (jwk.n.as_deref()?, jwk.e.as_deref()?);
-            if b64_len(n)? < MIN_RSA_MODULUS_BYTES || b64_len(e)? == 0 {
+            let (n, e) = (octets(jwk.n.as_deref()?)?, octets(jwk.e.as_deref()?)?);
+            // The library takes the integers as they are written: a sign byte in front would make a key that
+            // is admitted and never verifies.
+            let (n, e) = (magnitude(&n), magnitude(&e));
+            if n.len() < MIN_RSA_MODULUS_BYTES || e.is_empty() {
                 return None;
             }
-            (Kind::Rsa, DecodingKey::from_rsa_components(n, e).ok()?)
+            (
+                Kind::Rsa,
+                DecodingKey::from_rsa_components(&base64url(n), &base64url(e)).ok()?,
+            )
         }
         "EC" => {
             if jwk.crv.as_deref() != Some("P-256") {
                 return None;
             }
-            let (x, y) = (jwk.x.as_deref()?, jwk.y.as_deref()?);
-            // A P-256 coordinate is 32 bytes; its leading zeros may have been cut or kept.
-            if b64_len(x)? > 32 || b64_len(y)? > 32 {
-                return None;
-            }
-            (Kind::EcP256, DecodingKey::from_ec_components(x, y).ok()?)
+            // The library wants each coordinate in the 32 octets of the curve; an issuer may have cut its leading
+            // zeros or covered them with a sign byte.
+            let (x, y) = (
+                p256_coordinate(jwk.x.as_deref()?)?,
+                p256_coordinate(jwk.y.as_deref()?)?,
+            );
+            (Kind::EcP256, DecodingKey::from_ec_components(&x, &y).ok()?)
         }
         "OKP" => {
             if jwk.crv.as_deref() != Some("Ed25519") {
                 return None;
             }
-            let x = jwk.x.as_deref()?;
-            if b64_len(x)? != 32 {
+            // The key is its 32 octets, a zero in front included: nothing is cut and nothing is added.
+            let x = octets(jwk.x.as_deref()?)?;
+            if x.len() != ED25519_KEY_BYTES {
                 return None;
             }
-            (Kind::Ed25519, DecodingKey::from_ed_components(x).ok()?)
+            (
+                Kind::Ed25519,
+                DecodingKey::from_ed_components(&base64url(&x)).ok()?,
+            )
         }
         _ => return None,
     };
@@ -268,6 +309,64 @@ mod tests {
         ]);
         assert_eq!(parsed.set.keys.len(), 3);
         assert_eq!(parsed.skipped, 10);
+    }
+
+    #[test]
+    fn an_ed25519_key_is_its_32_octets_and_a_leading_zero_is_a_part_of_it() {
+        let x = |bytes: Vec<u8>| json!({"kty": "OKP", "crv": "Ed25519", "kid": "k", "x": URL_SAFE_NO_PAD.encode(bytes)});
+        let mut zero_led = vec![9u8; 32];
+        zero_led[0] = 0;
+        assert_eq!(parse(vec![x(zero_led.clone())]).set.len(), 1);
+        assert_eq!(parse(vec![x(vec![9u8; 32])]).set.len(), 1);
+        // 31 octets: one too few. 33 with a zero in front: one too many, which is not a sign byte here.
+        assert!(parse(vec![x(zero_led[1..].to_vec())]).set.is_empty());
+        assert!(
+            parse(vec![x([&[0u8][..], &[9u8; 32]].concat())])
+                .set
+                .is_empty()
+        );
+        assert!(parse(vec![x(Vec::new())]).set.is_empty());
+    }
+
+    #[test]
+    fn rsa_integers_and_ec_coordinates_are_read_without_their_sign_bytes_and_zeros() {
+        let enc = |bytes: &[u8]| URL_SAFE_NO_PAD.encode(bytes);
+        let modulus = [0xC3u8; 256];
+        let signed = [&[0u8][..], &modulus].concat();
+        let rsa = |n: &[u8], e: &[u8]| json!({"kty": "RSA", "kid": "k", "n": enc(n), "e": enc(e)});
+        for (n, e) in [
+            (&modulus[..], &[1u8, 0, 1][..]),
+            (&signed[..], &[1u8, 0, 1][..]),
+            (&signed[..], &[0u8, 1, 0, 1][..]),
+        ] {
+            assert_eq!(parse(vec![rsa(n, e)]).set.len(), 1);
+        }
+        // 255 significant octets are 2040 bits, however many zeros are in front; an exponent of zeros is none.
+        let small = [&[0u8, 0][..], &[0xC3u8; 255]].concat();
+        assert!(parse(vec![rsa(&small, &[1, 0, 1])]).set.is_empty());
+        assert!(parse(vec![rsa(&modulus, &[0, 0])]).set.is_empty());
+        assert!(parse(vec![rsa(&modulus, &[])]).set.is_empty());
+
+        let mut x = [7u8; 32];
+        x[0] = 0;
+        let y = [7u8; 32];
+        let ec = |x: &[u8], y: &[u8]| json!({"kty": "EC", "crv": "P-256", "kid": "k", "x": enc(x), "y": enc(y)});
+        for written in [
+            x.to_vec(),                        // in full
+            x[1..].to_vec(),                   // the zero cut
+            [&[0u8][..], &x].concat(),         // a sign byte in front
+            [&[0u8, 0][..], &x[1..]].concat(), // padded with more zeros
+        ] {
+            assert_eq!(parse(vec![ec(&written, &y)]).set.len(), 1);
+        }
+        // More than 32 significant octets, and none, cannot be a coordinate.
+        assert!(
+            parse(vec![ec(&[&[1u8][..], &y].concat(), &y)])
+                .set
+                .is_empty()
+        );
+        assert!(parse(vec![ec(&[], &y)]).set.is_empty());
+        assert!(parse(vec![ec(&x, &[])]).set.is_empty());
     }
 
     #[test]

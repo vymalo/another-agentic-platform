@@ -80,8 +80,12 @@ stateDiagram-v2
 - **Algorithms**: RS256, RS384, ES256 and EdDSA, and nothing else. `none` and the HMAC family are refused whatever key they name
   (the algorithm confusion attack), and a key only verifies tokens of its own family (an RSA key never verifies ES256). A JWKS key
   that cannot verify (symmetric, an RSA modulus under 2048 bits, `use: enc`, `key_ops` without `verify`, another curve, an `alg`
-  this does not allow) is skipped, never an error for the rest of the set. A token with no `kid` takes the one key of its kind,
-  when there is exactly one.
+  this does not allow) is skipped, never an error for the rest of the set, and the fetch logs how many were skipped and how many are
+  usable at debug, counts only. **The octets of a key are read as they are, leading zeros included**: an Ed25519 key is exactly 32
+  octets, a zero in front a part of it (about one key in 256 has one); an RSA `n` and `e` are read without their leading zeros (a
+  sign byte, or `AAEAAQ` for 65537), the modulus then at least 256 octets; a P-256 coordinate is read without its leading zeros,
+  refused over 32 octets or empty, and given to the library in the full 32 (an issuer may cut the zeros, write them or cover them
+  with a sign byte, and each verifies). A token with no `kid` takes the one key of its kind, when there is exactly one.
 - **Claims**: the signature first, then `iss` equal to the configured issuer, exactly; one of the configured audiences among `aud`
   (a text or a list); `exp` required and not past; `nbf`, when there, not in the future; **60 seconds of leeway** for both; `sub`
   required, non-empty text. **`iat` is not required** (decision 2 below).
@@ -176,6 +180,10 @@ Over real HTTP, against issuers on local ports; the cache's intervals are shorte
   stale copy and its grace (`TooOld`); a discovery document for another issuer, without a usable `jwks_uri`; a redirect never followed; an
   answer over 1 MiB; an answer that is not a key set, not JSON, or has no usable key; an unreachable issuer; unusable keys beside good
   ones; a trailing slash on the issuer.
+- `tests/keys.rs` (6): real keys, as issuers write them: an Ed25519 key whose public key starts with a zero octet verifies; Ed25519 keys of
+  31, 33 and no octets are not keys; a P-256 key whose `x` (and one whose `y`) starts with a zero verifies written in full, cut and with a
+  sign byte; coordinates of 33 significant octets or none are not keys; an RSA key verifies with a sign byte before `n` and `e` written
+  `AAEAAQ`; a 2040-bit modulus is no bigger for a sign byte.
 - `tests/slow.rs` (10): an issuer that is slow or never answers. A good token is answered while a fetch for an unknown `kid` to a
   slow issuer is running (and only the request that named the unknown key waits); unknown kids that arrive while a fetch runs join
   it; a stale copy is served at once and refreshed in the background once, with the issuer hanging; `ready()` returns at once with a
