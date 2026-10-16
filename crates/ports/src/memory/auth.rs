@@ -6,7 +6,7 @@ use std::sync::{Arc, Mutex};
 
 use super::lock;
 use crate::testkit::AuthenticatorUnderTest;
-use crate::{AuthError, Authenticator, Principal};
+use crate::{AuthError, Authenticator, InvalidToken, Principal};
 
 #[derive(Default)]
 struct State {
@@ -69,7 +69,7 @@ impl Authenticator for MemoryAuthenticator {
         s.tokens
             .get(token)
             .cloned()
-            .ok_or_else(|| AuthError::Invalid("unknown token".to_owned()))
+            .ok_or(AuthError::Invalid(InvalidToken::BadSignature))
     }
 }
 

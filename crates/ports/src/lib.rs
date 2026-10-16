@@ -23,7 +23,7 @@ pub mod memory;
 #[cfg(feature = "testkit")]
 pub mod testkit;
 
-pub use auth::{AuthError, Authenticator, Principal};
+pub use auth::{AuthError, Authenticator, InvalidToken, Principal};
 pub use directory::{AgentDirectory, DirectoryEntry};
 pub use error::{BoxError, Classify, DirectoryError, ErrorClass, RuntimeError, StoreError};
 pub use ids::{OwnerHandle, RuntimeId, SecretRef, StoreId};

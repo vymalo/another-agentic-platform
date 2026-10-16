@@ -4,6 +4,63 @@
 use super::*;
 use crate::AuthError;
 
+/// base64url, without padding: what a JWT's parts are.
+fn base64url(bytes: &[u8]) -> String {
+    const ALPHABET: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_";
+    let mut out = String::new();
+    for chunk in bytes.chunks(3) {
+        let n = chunk
+            .iter()
+            .enumerate()
+            .fold(0u32, |n, (i, b)| n | (u32::from(*b) << (16 - 8 * i)));
+        for i in 0..=chunk.len() {
+            out.push(char::from(ALPHABET[((n >> (18 - 6 * i)) & 63) as usize]));
+        }
+    }
+    out
+}
+
+/// A token of the shape an OIDC issuer signs (`header.payload.signature`, three base64url parts) that nobody
+/// issued, with [`SENTINEL`] where a real one has something to leak: the `kid` of its header, the `iss`, `aud`
+/// and `sub` of its claims, and its signature. A credential that no error may show, whole or in part (a
+/// decoded claim included): an implementation that parses it reaches the code that formats `unknown kid …`.
+pub fn sentinel_token() -> String {
+    let header = format!(r#"{{"alg":"RS256","typ":"JWT","kid":"{SENTINEL}"}}"#);
+    let claims = format!(r#"{{"iss":"{SENTINEL}","aud":"{SENTINEL}","sub":"{SENTINEL}","exp":1}}"#);
+    format!(
+        "{}.{}.{}",
+        base64url(header.as_bytes()),
+        base64url(claims.as_bytes()),
+        base64url(SENTINEL.as_bytes())
+    )
+}
+
+/// What an error shows: its message, its debug form and those of its whole chain of sources.
+fn shown(error: &AuthError) -> String {
+    let mut text = format!("{error} {error:?}");
+    let mut source = std::error::Error::source(error);
+    while let Some(cause) = source {
+        text.push_str(&format!(" {cause} {cause:?}"));
+        source = cause.source();
+    }
+    text
+}
+
+/// Panics when `error` shows `token`, a part of it (if it has the three of a JWT) or the sentinel.
+fn assert_hides(when: &str, error: &AuthError, token: &str) {
+    let text = shown(error);
+    let mut secrets = vec![token, SENTINEL];
+    if token.split('.').count() == 3 {
+        secrets.extend(token.split('.'));
+    }
+    for secret in secrets {
+        assert!(
+            !text.contains(secret),
+            "{when}: the error holds the token ({secret}): {text}"
+        );
+    }
+}
+
 /// Cases of the authenticator suite, as plain async functions for harnesses that do not use the macro.
 #[allow(missing_docs)] // each case is named for what it asserts
 pub mod cases {
@@ -44,7 +101,8 @@ pub mod cases {
     }
 
     pub async fn a_token_nobody_issued_is_invalid<A: AuthenticatorUnderTest>(a: A) {
-        for token in ["not-a-token", "a.b.c", "Bearer x", "0"] {
+        let jwt_shaped = sentinel_token();
+        for token in ["not-a-token", "a.b.c", "Bearer x", "0", jwt_shaped.as_str()] {
             let err = a.authenticate(Some(token)).await.unwrap_err();
             assert!(matches!(err, AuthError::Invalid(_)), "{token:?}: {err:?}");
             assert_eq!(err.class(), ErrorClass::Invalid);
@@ -116,20 +174,20 @@ pub mod cases {
     }
 
     pub async fn an_error_does_not_carry_the_token<A: AuthenticatorUnderTest>(a: A) {
-        let sentinel = format!("{SENTINEL}.credential");
-        let err = a.authenticate(Some(&sentinel)).await.unwrap_err();
-        let shown = format!("{err} {err:?}");
-        assert!(
-            !shown.contains(&sentinel),
-            "the error holds the token: {shown}"
-        );
-        if let Some((without_keys, token)) = a.without_keys().await {
-            let err = without_keys.authenticate(Some(&token)).await.unwrap_err();
-            let shown = format!("{err} {err:?}");
-            assert!(
-                !shown.contains(&token),
-                "the error holds the token: {shown}"
-            );
+        // A token of the shape of a JWT, with the sentinel in its header, its claims and its signature: an
+        // implementation that decodes it must not repeat any of it, whole or in part, in an error, its debug
+        // form or the chain of its sources.
+        let token = sentinel_token();
+        let err = a.authenticate(Some(&token)).await.unwrap_err();
+        assert_hides("a token nobody issued", &err, &token);
+        if let Some((without_keys, issued)) = a.without_keys().await {
+            for credential in [issued, token] {
+                let err = without_keys
+                    .authenticate(Some(&credential))
+                    .await
+                    .unwrap_err();
+                assert_hides("keys that cannot be fetched", &err, &credential);
+            }
         }
     }
 }

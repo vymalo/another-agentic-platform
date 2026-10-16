@@ -229,13 +229,14 @@ Each variant has one status; `tests/objects.rs` holds this table with an exhaust
 `authenticate(token: Option<&str>)` takes the credential after the scheme (the router reads the header). `Principal { subject, permissions }`
 keeps the **whole** roles claim (it also holds `agent.use:<name>` and the orchestrator's roles, which the dashboard ignores) as a set;
 `holds(permission)` is a byte-for-byte comparison, and `with_prefix("platform:")` is `GET /v1/me`. **The API checks a permission
-string (`aap_api::permission`), never a role name** (AD-032): no type here compares a value to a role.
+string (`aap_api::permission`), never a role name** (AD-032): no type here compares a value to a role. A `Principal` has **no `Default`**: it is somebody a token proved,
+and an empty one would be an authenticated nobody.
 
 | `AuthError` | Status | Class | When |
 |---|---|---|---|
 | `Missing` | 401 | `Invalid` | no token, or an empty one, whatever the state of the keys |
-| `Invalid(reason)` | 401 | `Invalid` | the token does not verify. The reason is a word for a log (`expired`), never the token or a claim |
-| `Unavailable` | 503 | `Transient` | the issuer's keys cannot be fetched. Never a 401: a good token is not told it is bad |
+| `Invalid(InvalidToken)` | 401 | `Invalid` | the token does not verify. The reason is **a closed enum** (`Malformed`, `BadSignature`, `UnknownKey`, `Expired`, `WrongIssuer`, `WrongAudience`, `MissingClaim`), each a fixed word for a log (`expired`): it cannot hold the token or a claim, whatever an implementer forgets |
+| `Unavailable(source)` | 503 | `Transient` | the issuer's keys cannot be fetched. Never a 401: a good token is not told it is bad. The source is the failure to fetch the keys: **an implementation must not put the token, a claim or a header of it in it** (a fetch for `kid` X that fails must not say X). The suite reads the message, the debug form and the whole chain of sources |
 
 ## The neutral types
 
@@ -282,7 +283,7 @@ Off by default (the controller and the providers depend on the traits only). Wit
 * **Conformance macros**, in the style of `adam-store-testkit`:
   `runtime_provider_conformance!(make)` (14 cases), `store_provisioner_conformance!(make)` (7),
   `agent_directory_conformance!(make)` (6), `agent_objects_conformance!(make)` (28, D4) and
-  `authenticator_conformance!(make)` (8, D4). `make` is a path to `async fn() -> Option<T>`; `None` skips
+  `authenticator_conformance!(make)` (8, D4; its sentinel token is JWT-shaped, three base64url parts with the sentinel as `kid`, `iss`, `aud`, `sub` and signature). `make` is a path to `async fn() -> Option<T>`; `None` skips
   the suite, and `AAP_TEST_REQUIRE_BACKEND=1` turns the skip into a failure (CI sets it for the suites that
   need a cluster). The macros expand to `#[tokio::test]`, so the crate that uses them needs `tokio` with
   `macros` and `rt`.

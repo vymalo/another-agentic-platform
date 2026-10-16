@@ -13,9 +13,9 @@ use aap_ports::testkit::{
 };
 use aap_ports::{
     ARGO_TRACKING_ANNOTATION, Agent, AgentDraft, AgentObjects, AuthError, Authenticator, Classify,
-    ETag, ErrorClass, FieldError, Kind, MANAGED_BY_DASHBOARD, MANAGED_BY_LABEL, ObjectsError,
-    OfferedSecret, Owner, Precondition, Principal, ResourceVersion, SharedDraft, SharedKind,
-    Stored, config_name, config_references,
+    ETag, ErrorClass, FieldError, InvalidToken, Kind, MANAGED_BY_DASHBOARD, MANAGED_BY_LABEL,
+    ObjectsError, OfferedSecret, Owner, Precondition, Principal, ResourceVersion, SharedDraft,
+    SharedKind, Stored, config_name, config_references,
 };
 use serde_json::{Value, json};
 
@@ -513,24 +513,105 @@ fn a_principal_is_a_subject_and_a_set_of_values() {
         ["platform:agents.read", "platform:agents.write"]
     );
     assert!(p.holds("b") && !p.holds("c") && !p.holds("platform:"));
-    assert_eq!(Principal::default().permissions().count(), 0);
+    assert_eq!(
+        Principal::new("nobody", [] as [&str; 0])
+            .permissions()
+            .count(),
+        0
+    );
 }
 
 #[test]
 fn every_auth_error_has_a_class_and_none_holds_a_token() {
     assert_eq!(AuthError::Missing.class(), ErrorClass::Invalid);
-    assert_eq!(
-        AuthError::Invalid("expired".into()).class(),
-        ErrorClass::Invalid
-    );
+    for reason in InvalidToken::ALL {
+        assert_eq!(AuthError::Invalid(reason).class(), ErrorClass::Invalid);
+    }
     assert_eq!(
         AuthError::Unavailable("down".into()).class(),
         ErrorClass::Transient
     );
     assert_eq!(
-        AuthError::Invalid("expired".into()).to_string(),
+        AuthError::Invalid(InvalidToken::Expired).to_string(),
         "the bearer token is not valid: expired"
     );
+}
+
+#[test]
+fn the_reason_a_token_is_invalid_is_one_of_a_fixed_set_of_words() {
+    // Exhaustive: a new reason does not compile until it is in `ALL` and has a word.
+    let word = |r: InvalidToken| match r {
+        InvalidToken::Malformed => "malformed",
+        InvalidToken::BadSignature => "bad signature",
+        InvalidToken::UnknownKey => "unknown key",
+        InvalidToken::Expired => "expired",
+        InvalidToken::WrongIssuer => "wrong issuer",
+        InvalidToken::WrongAudience => "wrong audience",
+        InvalidToken::MissingClaim => "missing claim",
+    };
+    let words: BTreeSet<&str> = InvalidToken::ALL.iter().map(|r| r.as_str()).collect();
+    assert_eq!(words.len(), InvalidToken::ALL.len(), "one word each");
+    for reason in InvalidToken::ALL {
+        assert_eq!(reason.as_str(), word(reason));
+        assert_eq!(reason.to_string(), word(reason));
+        assert!(
+            reason
+                .as_str()
+                .bytes()
+                .all(|c| c.is_ascii_lowercase() || c == b' '),
+            "{reason}"
+        );
+    }
+}
+
+/// base64url without padding, decoded.
+fn unbase64url(text: &str) -> Vec<u8> {
+    let value = |c: u8| match c {
+        b'A'..=b'Z' => c - b'A',
+        b'a'..=b'z' => c - b'a' + 26,
+        b'0'..=b'9' => c - b'0' + 52,
+        b'-' => 62,
+        b'_' => 63,
+        other => panic!("{} is not base64url", char::from(other)),
+    };
+    let mut out = Vec::new();
+    for chunk in text.as_bytes().chunks(4) {
+        let n = chunk
+            .iter()
+            .enumerate()
+            .fold(0u32, |n, (i, c)| n | (u32::from(value(*c)) << (18 - 6 * i)));
+        out.extend((0..chunk.len() - 1).map(|i| u8::try_from((n >> (16 - 8 * i)) & 255).unwrap()));
+    }
+    out
+}
+
+#[test]
+fn the_sentinel_token_has_the_shape_of_a_jwt_and_the_sentinel_in_every_place_a_claim_could_leak_from()
+ {
+    let token = testkit::auth::sentinel_token();
+    let parts: Vec<&str> = token.split('.').collect();
+    assert_eq!(parts.len(), 3, "header.payload.signature");
+    for part in &parts {
+        assert!(
+            !part.is_empty()
+                && part
+                    .bytes()
+                    .all(|c| c.is_ascii_alphanumeric() || c == b'-' || c == b'_'),
+            "{part}"
+        );
+    }
+    assert!(
+        !token.contains(testkit::SENTINEL),
+        "encoded: the sentinel is not literal in it"
+    );
+    let header: Value = serde_json::from_slice(&unbase64url(parts[0])).unwrap();
+    assert_eq!(header["alg"], "RS256");
+    assert_eq!(header["kid"], testkit::SENTINEL);
+    let claims: Value = serde_json::from_slice(&unbase64url(parts[1])).unwrap();
+    for claim in ["iss", "aud", "sub"] {
+        assert_eq!(claims[claim], testkit::SENTINEL, "{claim}");
+    }
+    assert_eq!(unbase64url(parts[2]), testkit::SENTINEL.as_bytes());
 }
 
 // -------------------------------------------- the suites fail what they must
@@ -1047,12 +1128,37 @@ async fn the_faults_are_the_only_difference_from_the_memory_store() {
 enum AuthFault {
     /// A token that cannot be checked is invalid.
     KeysDownIsInvalid,
-    /// An error holds the token.
+    /// The error of keys that cannot be fetched holds the token.
     EchoesTheToken,
+    /// The error of keys that cannot be fetched says only in the chain of its sources what token it was.
+    EchoesTheTokenInASource,
+    /// The error of keys that cannot be fetched holds the `kid` of the token's header.
+    EchoesTheKeyId,
     /// An empty token is invalid, not missing.
     EmptyIsInvalid,
     /// Permissions are matched by prefix.
     PrefixMatches,
+}
+
+/// An error that says nothing, and whose cause says the token: `Display` and `Debug` of it show no token.
+struct Chained(Box<dyn std::error::Error + Send + Sync>);
+
+impl std::fmt::Debug for Chained {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("Chained")
+    }
+}
+
+impl std::fmt::Display for Chained {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("the keys cannot be fetched")
+    }
+}
+
+impl std::error::Error for Chained {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        Some(&*self.0)
+    }
 }
 
 struct Sloppy {
@@ -1062,20 +1168,28 @@ struct Sloppy {
 
 impl Authenticator for Sloppy {
     async fn authenticate(&self, token: Option<&str>) -> Result<Principal, AuthError> {
+        let token_text = token.unwrap_or_default();
         match (self.fault, self.inner.authenticate(token).await) {
             (AuthFault::KeysDownIsInvalid, Err(AuthError::Unavailable(_))) => {
-                Err(AuthError::Invalid("unverifiable".into()))
+                Err(AuthError::Invalid(InvalidToken::UnknownKey))
             }
-            (AuthFault::EchoesTheToken, Err(AuthError::Invalid(_))) => Err(AuthError::Invalid(
-                format!("bad token {}", token.unwrap_or_default()),
-            )),
-            (AuthFault::EchoesTheToken, Err(AuthError::Unavailable(_))) => {
+            (AuthFault::EchoesTheToken, Err(AuthError::Unavailable(_))) => Err(
+                AuthError::Unavailable(format!("cannot check {token_text}").into()),
+            ),
+            (AuthFault::EchoesTheTokenInASource, Err(AuthError::Unavailable(_))) => {
+                Err(AuthError::Unavailable(Box::new(Chained(
+                    format!("cannot check {token_text}").into(),
+                ))))
+            }
+            (AuthFault::EchoesTheKeyId, Err(e)) if token_text.split('.').count() == 3 => {
+                // An implementation that decodes the header and names the key it could not fetch.
+                let _ = e;
                 Err(AuthError::Unavailable(
-                    format!("cannot check {}", token.unwrap_or_default()).into(),
+                    format!("no key {} at the issuer", testkit::SENTINEL).into(),
                 ))
             }
             (AuthFault::EmptyIsInvalid, Err(AuthError::Missing)) if token == Some("") => {
-                Err(AuthError::Invalid("empty".into()))
+                Err(AuthError::Invalid(InvalidToken::Malformed))
             }
             (AuthFault::PrefixMatches, Ok(p)) => {
                 // Every value is widened to the one that starts the same way.
@@ -1116,7 +1230,7 @@ fn sloppy(fault: AuthFault) -> Sloppy {
 use testkit::auth::cases as auth_cases;
 
 #[tokio::test]
-#[should_panic(expected = "Invalid(\"unverifiable\")")]
+#[should_panic(expected = "Invalid(UnknownKey)")]
 async fn the_suite_fails_an_authenticator_that_calls_unavailable_keys_invalid() {
     auth_cases::keys_that_cannot_be_fetched_are_unavailable_not_invalid(sloppy(
         AuthFault::KeysDownIsInvalid,
@@ -1125,13 +1239,25 @@ async fn the_suite_fails_an_authenticator_that_calls_unavailable_keys_invalid() 
 }
 
 #[tokio::test]
-#[should_panic(expected = "the error holds the token")]
+#[should_panic(expected = "keys that cannot be fetched: the error holds the token")]
 async fn the_suite_fails_an_authenticator_whose_error_holds_the_token() {
     auth_cases::an_error_does_not_carry_the_token(sloppy(AuthFault::EchoesTheToken)).await;
 }
 
 #[tokio::test]
-#[should_panic(expected = "Invalid(\"empty\")")]
+#[should_panic(expected = "keys that cannot be fetched: the error holds the token")]
+async fn the_suite_fails_an_authenticator_whose_source_holds_the_token() {
+    auth_cases::an_error_does_not_carry_the_token(sloppy(AuthFault::EchoesTheTokenInASource)).await;
+}
+
+#[tokio::test]
+#[should_panic(expected = "a token nobody issued: the error holds the token")]
+async fn the_suite_fails_an_authenticator_whose_error_holds_the_key_id_of_the_token() {
+    auth_cases::an_error_does_not_carry_the_token(sloppy(AuthFault::EchoesTheKeyId)).await;
+}
+
+#[tokio::test]
+#[should_panic(expected = "Invalid(Malformed)")]
 async fn the_suite_fails_an_authenticator_that_calls_an_empty_token_invalid() {
     auth_cases::no_token_is_missing_whatever_the_state_of_the_keys(sloppy(
         AuthFault::EmptyIsInvalid,
