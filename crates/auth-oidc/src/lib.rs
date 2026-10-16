@@ -200,6 +200,15 @@ impl OidcAuthenticator {
     pub fn with_tuning(config: OidcConfig, tuning: Tuning) -> Result<Self, ConfigError> {
         install_crypto_provider();
         let (issuer_url, jwks_url) = config.parts()?;
+        // The keys every token is checked against travel in the clear: anyone on the path can swap them. Said once,
+        // here, and not as a refusal: a Keycloak in the cluster is often reached over plain http, on purpose. The
+        // URL is not repeated (it is the operator's own, and the log has no need of it).
+        if issuer_url.scheme() == "http" || jwks_url.as_ref().is_some_and(|u| u.scheme() == "http")
+        {
+            tracing::warn!(
+                "plain http is configured for the token issuer or its keys; anyone on the network path could swap the keys every token is checked against (use https unless the network is trusted)"
+            );
+        }
         let source = match jwks_url {
             Some(url) => Source::Url(url),
             None => {

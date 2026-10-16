@@ -10,8 +10,8 @@ mod common;
 use std::io::Write;
 use std::sync::{Arc, Mutex};
 
-use aap_auth_oidc::OidcAuthenticator;
 use aap_auth_oidc::testkit::{Alg, Signing, TEST_AUDIENCE};
+use aap_auth_oidc::{OidcAuthenticator, OidcConfig};
 use aap_ports::Authenticator;
 use axum::Router;
 use axum::routing::get;
@@ -125,7 +125,47 @@ async fn nothing_the_authenticator_logs_holds_a_token_or_a_claim() {
         "the skipped keys of a set with no good key are counted: {counted}"
     );
 
+    // A secret in the query of a configured URL is in no log line, whatever fails: here the connection.
+    const QUERY_SECRET: &str = "query-secret-3f9a1c";
+    let closed = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = closed.local_addr().unwrap();
+    drop(closed);
+    let config = rig
+        .idp
+        .config()
+        .with_jwks_url(format!("http://{address}/jwks?token={QUERY_SECRET}"));
+    let auth = OidcAuthenticator::with_tuning(config, tuning()).unwrap();
+    assert!(auth.ready().await.is_err());
+
+    // An issuer over plain http is warned about once, when the authenticator is built, and an https one is not.
+    let before = capture.0.lock().unwrap().len();
+    let https = OidcConfig::new("https://idp.example/realms/x", ["api"], "roles");
+    OidcAuthenticator::new(https).unwrap();
+    let https_log = String::from_utf8(capture.0.lock().unwrap()[before..].to_vec()).unwrap();
+    assert!(!https_log.contains("plain http"), "{https_log}");
+    let plain = OidcConfig::new(
+        "http://keycloak.keycloak.svc:8080/realms/x",
+        ["api"],
+        "roles",
+    );
+    OidcAuthenticator::new(plain).unwrap();
+    let plain_log = String::from_utf8(capture.0.lock().unwrap()[before..].to_vec()).unwrap();
+    assert_eq!(
+        plain_log.matches("plain http").count(),
+        1,
+        "one warning for an http issuer: {plain_log}"
+    );
+    assert!(plain_log.contains("WARN"), "{plain_log}");
+    assert!(
+        !plain_log.contains("keycloak"),
+        "the warning names the issuer: {plain_log}"
+    );
+
     let log = String::from_utf8(capture.0.lock().unwrap().clone()).unwrap();
+    assert!(
+        !log.contains(QUERY_SECRET),
+        "the log shows a secret of a URL: {log}"
+    );
     assert!(!log.contains(SKIPPED_KID), "the log names a key: {log}");
     assert!(
         log.contains("cannot be fetched") && log.contains("can be fetched again"),

@@ -128,13 +128,13 @@ impl Fetcher {
             .header(ACCEPT, HeaderValue::from_static("application/json"))
             .send()
             .await
-            .map_err(|e| failure(&e))?;
+            .map_err(failure)?;
         let status = response.status();
         if !status.is_success() {
             return Err(FetchFailure::Status(status.as_u16()));
         }
         let mut body = Vec::new();
-        while let Some(chunk) = response.chunk().await.map_err(|e| failure(&e))? {
+        while let Some(chunk) = response.chunk().await.map_err(failure)? {
             if body.len() + chunk.len() > MAX_BODY_BYTES {
                 return Err(FetchFailure::TooLarge);
             }
@@ -145,9 +145,11 @@ impl Fetcher {
 }
 
 /// The closed word for a transport error. The error's own text (an address, a resolver's or a handshake's
-/// message, the configured URL: nothing of a token, which no request carries) goes to the debug log and
-/// nowhere else.
-fn failure(error: &reqwest::Error) -> FetchFailure {
+/// message: nothing of a token, which no request carries) goes to the debug log and nowhere else, **without the
+/// URL**, which reqwest otherwise writes whole and which may hold a secret in its query (a `jwksUrl` is the
+/// operator's to write: `?key=...`).
+fn failure(error: reqwest::Error) -> FetchFailure {
+    let error = error.without_url();
     tracing::debug!(%error, "the request to the issuer failed");
     if error.is_timeout() {
         FetchFailure::Timeout
