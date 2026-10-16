@@ -390,8 +390,9 @@ secret() {
 secret "$models_secret" "--from-literal=GATEWAY_API_KEY=$sentinel"
 secret "$bearer_secret" "--from-literal=AGENT_REGISTRY_AGENT_TOKEN=$(openssl rand -hex 24)"
 secret "$agent-db-app" "--from-literal=uri=postgres://postgres:e2e-throwaway@unused.$ns.svc:5432/$agent"
+# The CRD was Established a moment ago; the API server's discovery may need one more to know the kind (to be asked about it, and to accept one).
+until_ok 60 "the API server to know the kind ExternalSecret" kubectl -n "$ns" get externalsecrets.external-secrets.io
 not_foreign "externalsecret/$offer"
-# The CRD was Established a moment ago; the API server's discovery may need one more to know the kind.
 until_ok 60 "the API server to accept an ExternalSecret" kubectl -n "$ns" apply -f "$here/api-offer.yaml"
 [ "$(jp "externalsecret/$offer" '{.spec.target.name}')" = "$models_secret" ] \
   || die "api-offer.yaml does not offer the Secret $models_secret as $offer (its target is '$(jp "externalsecret/$offer" '{.spec.target.name}')')"
