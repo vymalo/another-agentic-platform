@@ -23,7 +23,7 @@
 //! - **Roles**: the values at the configured claim. A claim that is absent or of another shape is no
 //!   permission, and does not refuse the token.
 //!
-//! Every refusal is one word of [`InvalidToken`](aap_ports::InvalidToken); none holds a part of the token.
+//! Every refusal is one word of [`InvalidToken`]; none holds a part of the token.
 //!
 //! # The key cache
 //!
