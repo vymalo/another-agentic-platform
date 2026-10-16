@@ -64,7 +64,11 @@ fn unescape(inner: &str) -> Option<ETag> {
     let mut i = 0;
     while i < bytes.len() {
         if bytes[i] == b'%' {
+            // Two hexadecimal digits: `from_str_radix` alone would take a sign (`%+f`).
             let hex = inner.get(i + 1..i + 3)?;
+            if !hex.bytes().all(|b| b.is_ascii_hexdigit()) {
+                return None;
+            }
             out.push(u8::from_str_radix(hex, 16).ok()?);
             i += 3;
         } else {
@@ -187,6 +191,24 @@ mod tests {
             assert!(!text[1..text.len() - 1].contains('"'));
             assert_eq!(matching(text).unwrap(), tag, "{raw:?}");
         }
+    }
+
+    #[test]
+    fn an_escape_is_a_percent_and_two_hexadecimal_digits_and_nothing_else() {
+        // `u8::from_str_radix` takes a sign: `%+f` is not an escape, and must not be read as the byte 0x0f.
+        for bad in [
+            "%+f", "%+0", "%-1", "%1", "%", "%1g", "%g1", "% 1", "%\u{e9}1", "abc%2",
+        ] {
+            assert!(unescape(bad).is_none(), "{bad:?} was read as an escape");
+        }
+        assert_eq!(unescape("%0f%0F%41").unwrap(), ETag::new("\u{f}\u{f}A"));
+        assert_eq!(unescape("a%22b").unwrap(), ETag::new("a\"b"));
+        // And through the header, the way a client sends it back.
+        assert_eq!(
+            matching("\"%+f\"").unwrap_err().status().as_u16(),
+            400,
+            "an If-Match that is not an ETag of this API"
+        );
     }
 
     #[test]
