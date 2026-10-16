@@ -1,0 +1,39 @@
+# The Platform API component on (api.enabled), with the values a deployment must give and the ones it usually sets: the render
+# tests/golden/api.yaml, which `api --check` (CI, operator-image.yml) also reads. The issuer, the origins and the registry are examples.
+watchNamespace: agents
+api:
+  enabled: true
+  replicas: 2
+  config:
+    oidc:
+      issuer: https://keycloak.example.com/realms/another-agentic
+      audiences: [another-agentic]
+      rolesClaim: agentic_roles
+      jwksUrl: https://keycloak.example.com/realms/another-agentic/protocol/openid-connect/certs
+    cors:
+      allowedOrigins:
+        - https://agents.example.com
+        - tauri://localhost
+    defaults:
+      allowFrom:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: another-agentic-system
+      allowedImageRegistries: [ghcr.io]
+  ingress:
+    enabled: true
+    className: traefik
+    host: api.agents.example.com
+    annotations:
+      # Where the edge's rate limit is attached (a Traefik Middleware of the CRD kind; per token only behind a JWT check: README "The edge").
+      traefik.ingress.kubernetes.io/router.middlewares: another-agentic-system-api-ratelimit@kubernetescrd
+    tls:
+      secretName: api-agents-tls
+  networkPolicy:
+    from:
+      - namespaceSelector:
+          matchLabels:
+            kubernetes.io/metadata.name: kube-system
+        podSelector:
+          matchLabels:
+            app.kubernetes.io/name: traefik

@@ -65,7 +65,7 @@ kept too, so a hung issuer is asked once and not once per probe. A pod that is d
 sentence, never the cluster's or the issuer's own words. The API server's `401` and `403` are `Unavailable` in the port, so a `Role` that is missing a verb shows as `503` on the API and as not ready here.
 
 The `Role` it needs is [`crates/objects-kubernetes/tests/rbac.yaml`](../../crates/objects-kubernetes/tests/rbac.yaml): `create`, `delete`, `get`, `list`, `patch` on
-the four kinds and `list` on `externalsecrets`, **and no right on Secrets**. D7b's chart grants exactly it.
+the four kinds and `list` on `externalsecrets`, **and no right on Secrets**. The chart's `api` component grants exactly it ([below](#the-image-and-the-chart)).
 
 ```mermaid
 stateDiagram-v2
@@ -84,9 +84,10 @@ stateDiagram-v2
     Draining: /readyz 503, /healthz 200, the API's port closed
 ```
 
-A stop closes the API's listener, lets the requests in flight finish for at most 25 s (under Kubernetes' 30), and only then closes the health port, so that a pod
-that is going is *not ready* for as long as it takes. A Service takes a moment to drop an endpoint, so the chart should hold the pod a few seconds before the signal
-(`preStop`): that is D7b's.
+A stop closes the API's listener, lets the requests in flight finish for at most 25 s, and only then closes the health port, so that a pod
+that is going is *not ready* for as long as it takes. A Service takes a moment to drop an endpoint, so the chart holds the pod for 5 s before the signal
+(`lifecycle.preStop.sleep`) and gives it 40 s in all: the sleep counts against the grace period, which must also hold the drain, the 2 s the health port is
+given to stop after it, and 5 s of margin, so the chart refuses less than the sleep plus 32.
 
 ## Tests
 
@@ -98,9 +99,26 @@ that is going is *not ready* for as long as it takes. A Service takes a moment t
 | `serve` (6) | `/healthz` and `/readyz` follow the check; **a burst of 50 probes asks the check once, and the answer is kept 5 s**; a failure and a timeout are kept; a draining pod is not ready at once and is alive; a check that never answers is not ready |
 | `run` (7) | **the router comes up on a real socket with the `Memory` ports and over a real issuer**, answers, and stops when told (the port is closed); a server that ends by itself ends the API with its reason; readiness needs the keys and the cluster; **the cluster probe asks for one `ModelEndpoint` of the namespace (a client that records the request) and fails when the server refuses**; the flags win over the file |
 
+## The image and the chart
+
+**The image** is [`docker/api/Dockerfile`](../../docker/api/Dockerfile): `ghcr.io/vymalo/another-agentic-platform/api`, built from the repository root, the operator's
+Dockerfile with the package and the binary changed (cargo-chef on Rust 1.94.1 onto `distroless/cc-debian13:nonroot`, both pinned by tag and digest, user 65532, `ENTRYPOINT ["/api"]`,
+no shell and no `CMD`: the file is required). The build stage runs `--version`, `--help`, `--check` on `config.example.yaml`, and a refusal of that file with a misspelt key. CI
+([`operator-image.yml`](../../.github/workflows/operator-image.yml), job `api-image`) builds it, runs the same on the final image, and runs `api --check` in it on the
+configuration the chart renders. *Unverified* until CI has run it: no image was built where this was written (the binary was, in release mode).
+
+**The chart** is the component `api` of [`deploy/operator`](../../deploy/operator/README.md#the-platform-api), off by default: a Deployment with its configuration mounted from a
+ConfigMap at `/etc/aap-api/config.yaml` (`API_CONFIG_FILE`) and **nothing else mounted**, a Service on the API port (the health port is the pod's, for the kubelet), the `Role`
+above, a NetworkPolicy and an optional Ingress. The chart owns `listen`, `healthListen` and `defaults.namespace`; the rest is `api.config`. To read what it renders with this binary:
+
+```sh
+sh deploy/operator/tests/api-config.sh /tmp/config.yaml -f deploy/operator/tests/api.values.yaml   # or tests/api-shapes.sh for all four shapes
+cargo run -q -p aap-api-server -- --config /tmp/config.yaml --check
+```
+
 ## Not here
 
-* The image, its CI build and push, the chart's `api` component (the `Role`, the `Service`, the edge route, the configuration as a ConfigMap) and the kind
-  end-to-end (create a folder agent through the API, see it `Ready` and listed) are slice **D7b**. **Until then the binary has not run against a real API
-  server or a real issuer**: `--check` and the tests are all that was run.
-* TLS, rate limits and request timeouts are the edge's (§60a, *Clients without a web server*).
+* The kind end-to-end (create a folder agent through the API, see it `Ready` and listed) is slice **D7b2**. **Until then the binary has not run against a real API
+  server or a real issuer**: `--check` and the tests are all that was run, and the pod has never been started in a cluster.
+* TLS, rate limits and request timeouts are the edge's (§60a, *Clients without a web server*): the chart makes the Ingress and passes its annotations through, where a
+  per-token rate limit is attached ([the chart's README](../../deploy/operator/README.md#the-edge)).

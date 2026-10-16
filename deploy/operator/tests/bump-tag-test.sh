@@ -1,6 +1,6 @@
 #!/bin/sh
-# Tests of deploy/operator/bump-tag.sh: it edits only image.tag, is idempotent, and
-# refuses input it does not understand. Needs only sh, awk, cmp and diff.
+# Tests of deploy/operator/bump-tag.sh: it edits only the one tag it was asked for (image.tag, or with `api`
+# api.image.tag), is idempotent, and refuses input it does not understand. Needs only sh, awk, cmp and diff.
 #
 #   sh deploy/operator/tests/bump-tag-test.sh        (from the repository root)
 set -eu
@@ -14,7 +14,7 @@ fail=0
 ok() { echo "ok   $1"; }
 bad() { echo "FAIL $1"; fail=1; }
 
-# run <file> <tag>: sets $out and $rc without aborting the script.
+# run <file> <tag> [component]: sets $out and $rc without aborting the script.
 run() {
   rc=0
   out=$(sh "$bump" "$@" 2>&1) || rc=$?
@@ -34,6 +34,17 @@ sidecar:
     tag: keep-me
   tag: also-keep-me
 tag: top-level-keep-me
+# The Platform API has an image block of its own, bumped apart (`api`): the operator's bump never reads or writes it.
+api:
+  enabled: false
+  image:
+    repository: ghcr.io/vymalo/another-agentic-platform/api
+    tag: sha-1111111 # bumped by CI
+    digest: ""
+  config:
+    image:
+      tag: api-config-keep-me
+  tag: api-level-keep-me
 YAML
 
 # 1. A new tag replaces image.tag and nothing else.
@@ -47,7 +58,7 @@ fi
 if grep -q '^  tag: sha-abc1234$' "$work/values.yaml"; then ok "image.tag holds the new tag"; else bad "image.tag was not set"; fi
 changed=$(diff "$work/before.yaml" "$work/values.yaml" | grep -c '^[<>]' || true)
 if [ "$changed" -eq 2 ]; then ok "exactly one line changed"; else bad "$changed diff lines, want 2 (one line out, one in)"; fi
-for keep in 'tag: keep-me' 'tag: also-keep-me' '^tag: top-level-keep-me' '^defaultAgentImage: ghcr.io/vymalo/another-adam-rs/coder:sha-9a1fd4e@sha256:c3c178b7d73599f40d53f798616e510346abd3300a622b09b2bc233109f12b44$'; do
+for keep in 'tag: keep-me' 'tag: also-keep-me' '^tag: top-level-keep-me' '^    tag: sha-1111111 # bumped by CI$' '^defaultAgentImage: ghcr.io/vymalo/another-adam-rs/coder:sha-9a1fd4e@sha256:c3c178b7d73599f40d53f798616e510346abd3300a622b09b2bc233109f12b44$'; do
   if grep -q -- "$keep" "$work/values.yaml"; then ok "untouched: $keep"; else bad "lost: $keep"; fi
 done
 
@@ -95,5 +106,75 @@ case "$out" in unchanged*) ok "and bumping it again is a no-op" ;; *) bad "real 
 lines_before=$(wc -l < "$here/../values.yaml")
 lines_after=$(wc -l < "$work/real.yaml")
 if [ "$lines_before" -eq "$lines_after" ]; then ok "the real file keeps its line count"; else bad "line count $lines_before -> $lines_after"; fi
+
+# 8. The `api` component: api.image.tag, and nothing else.
+cp "$work/before.yaml" "$work/api-before.yaml"
+cp "$work/before.yaml" "$work/api.yaml"
+run "$work/api.yaml" sha-abc1234 api
+if [ "$rc" -eq 0 ] && [ "$out" = "changed: api.image.tag sha-1111111 -> sha-abc1234" ]; then
+  ok "api: a new tag is applied and reported"
+else
+  bad "api: a new tag: rc=$rc out='$out'"
+fi
+if grep -q '^    tag: sha-abc1234$' "$work/api.yaml"; then ok "api.image.tag holds the new tag"; else bad "api.image.tag was not set"; fi
+changed=$(diff "$work/api-before.yaml" "$work/api.yaml" | grep -c '^[<>]' || true)
+if [ "$changed" -eq 2 ]; then ok "api: exactly one line changed"; else bad "api: $changed diff lines, want 2"; fi
+if grep -q '^  tag: sha-0000000 # bumped by CI$' "$work/api.yaml"; then ok "api: the operator's image.tag is untouched"; else bad "api: image.tag changed"; fi
+for keep in 'tag: keep-me' 'tag: also-keep-me' '^tag: top-level-keep-me' 'tag: api-config-keep-me' '^  tag: api-level-keep-me' '^defaultAgentImage: '; do
+  if grep -q -- "$keep" "$work/api.yaml"; then ok "api: untouched: $keep"; else bad "api: lost: $keep"; fi
+done
+# ... and the operator's bump leaves the api's tag alone.
+cp "$work/before.yaml" "$work/op.yaml"
+run "$work/op.yaml" sha-abc1234
+if grep -q '^    tag: sha-1111111 # bumped by CI$' "$work/op.yaml"; then ok "operator: api.image.tag is untouched"; else bad "operator: api.image.tag changed"; fi
+run "$work/op.yaml" sha-abc1234 operator
+case "$out" in unchanged*) ok "operator named explicitly is the default" ;; *) bad "operator named: rc=$rc out='$out'" ;; esac
+# Idempotent, and a re-run leaves the file byte for byte alone.
+cp "$work/api.yaml" "$work/api-after-first.yaml"
+run "$work/api.yaml" sha-abc1234 api
+case "$out" in unchanged*) unchanged=1 ;; *) unchanged=0 ;; esac
+if [ "$rc" -eq 0 ] && [ "$unchanged" -eq 1 ] && cmp -s "$work/api-after-first.yaml" "$work/api.yaml"; then ok "api: the second run is a no-op"; else bad "api: second run: rc=$rc out='$out'"; fi
+# Both, one after the other, as the bump job does: two lines changed in all.
+cp "$work/before.yaml" "$work/both.yaml"
+run "$work/both.yaml" sha-2222222
+run "$work/both.yaml" sha-2222222 api
+changed=$(diff "$work/before.yaml" "$work/both.yaml" | grep -c '^[<>]' || true)
+if [ "$changed" -eq 4 ] && grep -q '^  tag: sha-2222222$' "$work/both.yaml" && grep -q '^    tag: sha-2222222$' "$work/both.yaml"; then
+  ok "both components, one after the other: two lines changed"
+else
+  bad "both: $changed diff lines, want 4"
+fi
+# A quoted current api tag is read correctly.
+sed 's/^    tag: sha-1111111.*/    tag: "sha-3333333"/' "$work/before.yaml" > "$work/api-quoted.yaml"
+run "$work/api-quoted.yaml" sha-3333333 api
+case "$out" in unchanged*) ok "api: a quoted current tag counts as current" ;; *) bad "api: quoted tag: rc=$rc out='$out'" ;; esac
+# A component it does not know, and a malformed tag for the api, are refused before the file is touched.
+cp "$work/before.yaml" "$work/api-refuse.yaml"
+run "$work/api-refuse.yaml" sha-abc1234 web
+if [ "$rc" -eq 2 ]; then ok "an unknown component is refused (exit 2)"; else bad "unknown component: rc=$rc"; fi
+run "$work/api-refuse.yaml" latest api
+if [ "$rc" -eq 2 ]; then ok "api: refuses tag latest (exit 2)"; else bad "api: latest: rc=$rc"; fi
+run "$work/api-refuse.yaml" sha-abc1234 api extra
+if [ "$rc" -eq 2 ]; then ok "a fourth argument is a usage error"; else bad "fourth argument: rc=$rc"; fi
+if cmp -s "$work/before.yaml" "$work/api-refuse.yaml"; then ok "refusals leave the file alone"; else bad "a refusal changed the file"; fi
+# A values file with no api.image.tag fails without writing anything (the operator's block is not the api's).
+run "$work/notag.yaml" sha-abc1234 api
+if [ "$rc" -eq 1 ]; then ok "api: no api.image.tag is an error (exit 1)"; else bad "api: no api.image.tag: rc=$rc, want 1"; fi
+if cmp -s "$work/notag.before" "$work/notag.yaml"; then ok "api: the file without api.image.tag is untouched"; else bad "api: it modified a file without api.image.tag"; fi
+printf 'image:\n  repository: x\n  tag: sha-0000000\n' > "$work/op-only.yaml"
+run "$work/op-only.yaml" sha-abc1234 api
+if [ "$rc" -eq 1 ]; then ok "api: a file with only image.tag has no api.image.tag"; else bad "api: op-only: rc=$rc, want 1"; fi
+
+# 9. The chart's real values.yaml (on a copy): the api tag bumps, and the operator's stays.
+cp "$here/../values.yaml" "$work/real-api.yaml"
+run "$work/real-api.yaml" sha-1234567 api
+if [ "$rc" -eq 0 ] && grep -q '^    tag: sha-1234567' "$work/real-api.yaml"; then ok "the chart's values.yaml api tag can be bumped"; else bad "real values.yaml api: rc=$rc out='$out'"; fi
+operator_before=$(awk '/^image:/ { f = 1; next } f && /^  tag:/ { print; exit }' "$here/../values.yaml")
+operator_after=$(awk '/^image:/ { f = 1; next } f && /^  tag:/ { print; exit }' "$work/real-api.yaml")
+if [ "$operator_before" = "$operator_after" ]; then ok "and the operator's image.tag did not move"; else bad "the api bump moved image.tag"; fi
+changed=$(diff "$here/../values.yaml" "$work/real-api.yaml" | grep -c '^[<>]' || true)
+if [ "$changed" -le 2 ]; then ok "the real file: at most one line changed"; else bad "the real file: $changed diff lines"; fi
+run "$work/real-api.yaml" sha-1234567 api
+case "$out" in unchanged*) ok "and bumping it again is a no-op" ;; *) bad "real values.yaml api, second run: '$out'" ;; esac
 
 if [ "$fail" -eq 0 ]; then echo "bump-tag tests passed"; else echo "bump-tag tests FAILED"; exit 1; fi

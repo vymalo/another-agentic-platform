@@ -1,0 +1,22 @@
+{{- include "aap.validate" . -}}
+{{- if .Values.api.enabled }}
+{{- /*
+The rights of `api`, namespaced: exactly crates/objects-kubernetes/tests/rbac.yaml, the Role that crate is tested under (tests/render-check.sh
+holds the two equal). No right on Secrets (a `list` on Secrets would return their values), no `watch` (nothing watches), no ClusterRole, no
+wildcard, nothing on workloads: the API writes the specs people edit and the operator makes the pods.
+*/ -}}
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: {{ include "aap.api.fullname" . }}
+  namespace: {{ include "aap.api.namespace" . }}
+  labels:
+    {{- include "aap.api.labels" . | nindent 4 }}
+rules:
+  - apiGroups: [agents.vymalo.com]
+    resources: [agentservices, agentconfigs, modelendpoints, toolproviders]
+    verbs: [create, delete, get, list, patch]
+  - apiGroups: [external-secrets.io]
+    resources: [externalsecrets]
+    verbs: [list]
+{{- end }}

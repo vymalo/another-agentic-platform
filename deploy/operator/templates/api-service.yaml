@@ -1,0 +1,19 @@
+{{- include "aap.validate" . -}}
+{{- if .Values.api.enabled }}
+# The API, cluster-internal: the route from outside is the edge's (api.ingress, or the deployment's own). The health port is not exposed.
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ include "aap.api.fullname" . }}
+  labels:
+    {{- include "aap.api.labels" . | nindent 4 }}
+spec:
+  type: ClusterIP
+  selector:
+    {{- include "aap.api.selectorLabels" . | nindent 4 }}
+  ports:
+    - name: http
+      port: {{ .Values.api.port }}
+      targetPort: http
+      protocol: TCP
+{{- end }}

@@ -5,19 +5,23 @@
 #   sh deploy/operator/tests/render-check.sh                    (from the repository root)
 #   UPDATE_GOLDEN=1 sh deploy/operator/tests/render-check.sh    rewrites tests/golden/*.yaml, for a deliberate change
 #
-# Three renders are golden: the values of the Application on netcup (examples/netcup.values.yaml), the other shape those
-# values do not make (tests/secret.values.yaml), and the defaults. Also checked: deploy/operator-crds against deploy/crds.
+# Four renders are golden: the values of the Application on netcup (examples/netcup.values.yaml), the other shape those
+# values do not make (tests/secret.values.yaml), the defaults, and the Platform API component on (tests/api.values.yaml; the first
+# three have it off, and equal to what they were before it existed). Also checked: deploy/operator-crds against deploy/crds, and the
+# API's Role against crates/objects-kubernetes/tests/rbac.yaml, the Role that crate is tested under.
 set -eu
 
 here=$(cd "$(dirname "$0")" && pwd)
 chart="$here/.."
 crds_chart="$chart/../operator-crds"
 crds_file="$chart/../crds/agents.vymalo.com.yaml"
+api_rbac_file="$chart/../../crates/objects-kubernetes/tests/rbac.yaml"
 ns=another-agentic-system
 out=$(mktemp)
 err=$(mktemp)
 fail=0
-trap 'rm -f "$out" "$err"' EXIT
+notes_chart=$(mktemp -d)
+trap 'rm -rf "$out" "$err" "$notes_chart"' EXIT
 
 check() { # check <description> <command...>
   desc=$1; shift
@@ -29,6 +33,7 @@ check() { # check <description> <command...>
   fi
 }
 has() { grep -Eq -- "$1" "$out"; }
+has_all() { for p in "$@"; do has "$p" || return 1; done; }
 lacks() { ! grep -Eq -- "$1" "$out"; }
 fails() { ! "$@"; }
 # render [helm args]: the chart into $out. The defaults render with no values at all.
@@ -64,14 +69,26 @@ dlacks() {
   for p in "$@"; do ! printf '%s\n' "$d" | grep -Eq -- "$p" || return 1; done
 }
 dcount() { [ "$(doc "$1" "$2" | grep -Ec -- "$3")" -eq "$4" ]; }
-# The rules of the Role, one line each: `<groups> <resources> <verbs>`, as the READMEs of the crates list them.
-role_rules() {
-  doc Role aap-operator | awk '
+# The rules of a Role (on the standard input), one line each: `<groups> <resources> <verbs>`, as the READMEs of the crates list them.
+rules_from() {
+  awk '
+    /^[ ]*#/ { next }
     /apiGroups:/ { g = $0; sub(/.*apiGroups: */, "", g) }
     /resources:/ { r = $0; sub(/.*resources: */, "", r) }
     /verbs:/ { v = $0; sub(/.*verbs: */, "", v); print g " " r " " v }'
 }
+role_rules() { doc Role aap-operator | rules_from; }
 rules_are() { [ "$(role_rules)" = "$1" ]; }
+# The same for the Platform API's Role, and for the file that Role must equal.
+api_role_rules() { doc Role aap-operator-api | rules_from; }
+api_rules_are() { [ "$(api_role_rules)" = "$1" ]; }
+# The n-th egress rule (from 1) of the API's NetworkPolicy, and the securityContext of the pod (six spaces: spec.template.spec) and of the
+# container (ten spaces) of its Deployment, each alone: a pattern that must hold for the pod is not satisfied by the container's block.
+api_egress_rule() { doc NetworkPolicy aap-operator-api | awk -v n="$1" '/^  egress:$/ { e = 1; next } e && /^    - / { i++ } e && i == n { print }'; }
+api_pod_security() { doc Deployment aap-operator-api | awk '/^      securityContext:$/ { s = 1; print; next } s && /^        / { print; next } s { exit }'; }
+api_container_security() { doc Deployment aap-operator-api | awk '/^          securityContext:$/ { s = 1; print; next } s && /^            / { print; next } s { exit }'; }
+all_of() { b=$1; shift; for p in "$@"; do printf '%s\n' "$b" | grep -Eq -- "$p" || return 1; done; }
+none_of() { b=$1; shift; for p in "$@"; do ! printf '%s\n' "$b" | grep -Eq -- "$p" || return 1; done; }
 # The operator reads the shared objects of the dashboard (AD-029) and never writes them.
 shared_kinds_are_read_only() {
   shared=$(role_rules | grep -E 'modelendpoints|toolproviders') || return 1
@@ -79,26 +96,27 @@ shared_kinds_are_read_only() {
 }
 
 # ---- The three golden renders ---------------------------------------------------------------------------------------------
-# The goldens are rendered with image.tag=sha-0000000, whatever values.yaml says: the bump job rewrites image.tag on main after
-# every operator image and no workflow checks the bump commit, so a golden that held the real tag would be stale (and this
-# script red) after every bump. That the real tag is a sha-<7 hex> tag of the operator package is checked on the default
-# render below, which does not set it.
+# The goldens are rendered with image.tag and api.image.tag = sha-0000000, whatever values.yaml says: the bump job rewrites both on
+# main after every build and no workflow checks the bump commit, so a golden that held the real tags would be stale (and this
+# script red) after every bump. That the real tags are sha-<7 hex> tags of the operator and api packages is checked on the
+# renders below, which do not set them.
 golden() { # golden <name> <helm args>: the render equals tests/golden/<name>.yaml (or rewrites it)
   name=$1; shift
-  render "$@" --set image.tag=sha-0000000
+  render "$@" --set image.tag=sha-0000000 --set api.image.tag=sha-0000000
   if [ "${UPDATE_GOLDEN:-}" = 1 ]; then cp "$out" "$here/golden/$name.yaml"; echo "wrote tests/golden/$name.yaml" >&2; return 0; fi
   cmp -s "$out" "$here/golden/$name.yaml"
 }
 check "the netcup render equals tests/golden/netcup.yaml" golden netcup -f "$chart/examples/netcup.values.yaml"
 check "the render of tests/secret.values.yaml equals tests/golden/secret.yaml" golden secret -f "$here/secret.values.yaml"
 check "the default render equals tests/golden/default.yaml" golden default
+check "the Platform API render (tests/api.values.yaml) equals tests/golden/api.yaml" golden api -f "$here/api.values.yaml"
 
 # ---- The default render: no registry, nothing a secret could be in --------------------------------------------------------
 render
 check "no Secret object is rendered (the token is an existing Secret or an ExternalSecret)" lacks '^kind: Secret$'
 check "no token-looking value in the render" lacks '(ghp_|github_pat_|gho_|sk-[A-Za-z0-9]{8}|-----BEGIN|AKIA[0-9A-Z]{16}|xox[bp]-|eyJ[A-Za-z0-9_-]{20})'
 check "no ClusterRole and no ClusterRoleBinding: the operator is namespaced" lacks '^kind: Cluster(Role|RoleBinding)$'
-check "no Ingress, ServiceMonitor or CRD: this chart is the operator only" lacks '^kind: (Ingress|ServiceMonitor|CustomResourceDefinition)$'
+check "no Ingress, ServiceMonitor or CRD: nothing is routed from outside by default" lacks '^kind: (Ingress|ServiceMonitor|CustomResourceDefinition)$'
 check "no token, no registry: no REGISTRY_TOKEN_FILE, no registry port, no registry Service" \
   lacks 'REGISTRY_TOKEN_FILE|name: registry|aap-operator-registry'
 check "no token: the pod mounts no volume" dlacks Deployment aap-operator '^      volumes:'
@@ -213,6 +231,282 @@ check "netcup: only the orchestrator's pods may read the registry" \
   dhas NetworkPolicy aap-operator 'app.kubernetes.io/component: orchestrator'
 check "netcup: no Secret object, still" lacks '^kind: Secret$'
 
+# ---- The Platform API component (D7b1): off by default, its own objects when on -----------------------------------------------
+# A check with more than one condition is a function: `check` runs one command.
+api_objects='aap-operator-api|component: api|/etc/aap-api'
+render
+check "api off (the default): nothing of the Platform API is rendered" lacks "$api_objects"
+check "api off: the operator's Role has no right on ExternalSecrets (those are the API's alone)" dlacks Role aap-operator 'externalsecrets'
+render -f "$chart/examples/netcup.values.yaml"
+check "api off (netcup): nothing of the Platform API is rendered" lacks "$api_objects"
+render -f "$here/secret.values.yaml"
+check "api off (secret.values.yaml): nothing of the Platform API is rendered" lacks "$api_objects"
+render --set api.enabled=false --set api.config.oidc.issuer=not-a-url --set api.config.defaults.allowedImageRegistries=null
+check "api off: its values are not checked and not rendered, whatever they say" lacks "$api_objects"
+
+render -f "$here/api.values.yaml"
+all_api_objects() {
+  dhas Deployment aap-operator-api 'kind: Deployment' && dhas Service aap-operator-api 'kind: Service' \
+    && dhas ServiceAccount aap-operator-api 'kind: ServiceAccount' && dhas Role aap-operator-api 'kind: Role' \
+    && dhas RoleBinding aap-operator-api 'kind: RoleBinding' && dhas ConfigMap aap-operator-api 'kind: ConfigMap' \
+    && dhas NetworkPolicy aap-operator-api 'kind: NetworkPolicy' && dhas Ingress aap-operator-api 'kind: Ingress'
+}
+check "api on: a Deployment, Service, ServiceAccount, Role, RoleBinding, ConfigMap, NetworkPolicy and Ingress of the API" all_api_objects
+check "api on: the operator's Deployment is the operator's (one replica, Recreate, the namespace of tests/api.values.yaml)" \
+  dhas Deployment aap-operator '^  replicas: 1$' '^    type: Recreate$' 'value: "agents"'
+
+# The pods of the two components never select each other: the operator's selectors (name, instance) match no API pod.
+check "api: the API's pods have a name label of their own (aap-operator-api) and the component label" \
+  dhas Deployment aap-operator-api 'app.kubernetes.io/name: aap-operator-api' 'app.kubernetes.io/component: api'
+check "api: the operator's name label (aap-operator) is not on the API's pods, so the operator's Deployment, Services and policy never select them" \
+  dlacks Deployment aap-operator-api 'app.kubernetes.io/name: aap-operator$'
+check "api: the operator's pods have no component label, so the API's Service and policy never select them" \
+  dlacks Deployment aap-operator 'app.kubernetes.io/component'
+check "api: the API's Service selects the API's pods only" \
+  dhas Service aap-operator-api 'app.kubernetes.io/name: aap-operator-api' 'app.kubernetes.io/component: api'
+operator_policy_is_the_operators() {
+  dhas NetworkPolicy aap-operator 'app.kubernetes.io/name: aap-operator$' && dlacks NetworkPolicy aap-operator 'component'
+}
+check "api: the operator's NetworkPolicy still selects the operator's pods only" operator_policy_is_the_operators
+
+# The Deployment.
+check "api: the replicas are the value (2), the strategy a rolling update that surges and loses no pod" \
+  dhas Deployment aap-operator-api '^  replicas: 2$' '^    type: RollingUpdate$' 'maxSurge: 1' 'maxUnavailable: 0'
+check "api: the image is a sha-<7 hex> tag of the api package (the placeholder until CI bumps it, then the bumped tag)" \
+  dhas Deployment aap-operator-api 'image: "ghcr.io/vymalo/another-agentic-platform/api:sha-[0-9a-f]{7}"'
+api_reads_its_file() {
+  dhas Deployment aap-operator-api 'name: API_CONFIG_FILE' 'value: /etc/aap-api/config.yaml' 'mountPath: /etc/aap-api' 'readOnly: true' \
+    'configMap:' 'name: aap-operator-api' && dlacks Deployment aap-operator-api '^          args:'
+}
+check "api: the binary reads its file from API_CONFIG_FILE, mounted read-only from the ConfigMap of the API, and takes no argument" api_reads_its_file
+check "api: the pods roll with the file (a checksum of the ConfigMap)" dhas Deployment aap-operator-api 'checksum/config: [0-9a-f]{64}'
+api_probes() {
+  dcount Deployment aap-operator-api 'path: /healthz' 2 && dhas Deployment aap-operator-api 'path: /readyz' 'containerPort: 8081' \
+    && dcount Deployment aap-operator-api 'port: health' 3
+}
+check "api: probes are /healthz twice (startup, liveness) and /readyz once, on the named port health (8081)" api_probes
+check "api: the API's port is named http (8080)" dhas Deployment aap-operator-api 'name: http' 'containerPort: 8080'
+check "api: the pod is non-root 65532 with the RuntimeDefault seccomp profile" \
+  dhas Deployment aap-operator-api 'runAsUser: 65532' 'runAsNonRoot: true' 'type: RuntimeDefault'
+check "api: no privilege escalation, a read-only root filesystem, every capability dropped" \
+  dhas Deployment aap-operator-api 'allowPrivilegeEscalation: false' 'readOnlyRootFilesystem: true' 'drop: \[ALL\]'
+check "api: the pod gets a service account token (its way to the cluster), of the API's own service account" \
+  dhas Deployment aap-operator-api 'automountServiceAccountToken: true' 'serviceAccountName: aap-operator-api'
+check "api: the pod is held in the Service for 5 s before the signal (the kubelet's sleep action: the image has no shell) and has 40 s to stop" \
+  dhas Deployment aap-operator-api 'preStop:' 'sleep:' 'seconds: 5$' 'terminationGracePeriodSeconds: 40'
+check "api: the Deployment reads no Secret: no secretKeyRef, no secret volume, no envFrom" \
+  dlacks Deployment aap-operator-api 'secretKeyRef|secretName|secret:|envFrom'
+check "api: resources have defaults: a CPU request and a memory limit" dhas Deployment aap-operator-api 'cpu: 50m' 'memory: 256Mi'
+
+# The Service.
+api_service() {
+  dhas Service aap-operator-api 'type: ClusterIP' 'port: 8080' 'targetPort: http' && dlacks Service aap-operator-api '8081|name: health|targetPort: health'
+}
+check "api: the Service is ClusterIP on 8080, target port http, and does not expose the health port" api_service
+
+# The configuration file: rendered from the values, owned where the chart owns it, and no secret in it.
+check "api: the file is the ConfigMap's config.yaml, with the chart's listen and healthListen and the watched namespace" \
+  dhas ConfigMap aap-operator-api '^  config.yaml: \|$' '^    listen: 0.0.0.0:8080$' '^    healthListen: 0.0.0.0:8081$' '^      namespace: agents$'
+check "api: the file holds the issuer, the audience, the roles claim, the origins and the registries the values say" \
+  dhas ConfigMap aap-operator-api 'issuer: https://keycloak.example.com/realms/another-agentic' '^      - another-agentic$' 'rolesClaim: agentic_roles' \
+    '^      - https://agents.example.com$' '^      - tauri://localhost$' '^      - ghcr.io$'
+check "api: there is no secret in the file (the binary has no place for one)" \
+  dlacks ConfigMap aap-operator-api '(password|clientsecret|client_secret|privatekey|apikey|bearer ey|ghp_|github_pat_|-----BEGIN|AKIA[0-9A-Z]{16}|eyJ[A-Za-z0-9_-]{20})'
+no_secret_anywhere() {
+  lacks '^kind: Secret$' && lacks '(ghp_|github_pat_|gho_|sk-[A-Za-z0-9]{8}|-----BEGIN|AKIA[0-9A-Z]{16}|xox[bp]-|eyJ[A-Za-z0-9_-]{20})' \
+    && lacks '^kind: Cluster(Role|RoleBinding)$' && lacks '(hostNetwork|hostPID|hostIPC|hostPath|privileged: true)'
+}
+check "api: no Secret object, no token-looking value, no ClusterRole, no host access anywhere in the render" no_secret_anywhere
+
+# RBAC: exactly the Role the objects crate is tested under, and nothing else.
+the_api_role_is_the_crates_role() {
+  from_file=$(rules_from < "$api_rbac_file")
+  [ "$(printf '%s\n' "$from_file" | grep -c .)" -eq 2 ] && [ "$(api_role_rules)" = "$from_file" ]
+}
+check "api: the Role's rules are exactly those of crates/objects-kubernetes/tests/rbac.yaml (two rules, read from that file)" the_api_role_is_the_crates_role
+check "api: ... the four kinds with create delete get list patch, and list on externalsecrets (§60a, D5)" \
+  api_rules_are '[agents.vymalo.com] [agentservices, agentconfigs, modelendpoints, toolproviders] [create, delete, get, list, patch]
+[external-secrets.io] [externalsecrets] [list]'
+check "api: no right on Secrets, none on a wildcard, none on watch, none on a workload, a pod, a ConfigMap or a CRD" \
+  dlacks Role aap-operator-api '\*' 'watch' \
+    '[[ ,](secrets|deployments|statefulsets|pods|configmaps|services|persistentvolumeclaims|networkpolicies|customresourcedefinitions|nodes|namespaces)[],]'
+api_role_in_watched_namespace() {
+  dhas Role aap-operator-api 'namespace: agents' && dhas RoleBinding aap-operator-api 'namespace: agents'
+}
+check "api: the Role and its binding are in the watched namespace (agents)" api_role_in_watched_namespace
+api_binding() {
+  dhas RoleBinding aap-operator-api 'name: aap-operator-api$' "namespace: $ns" 'kind: Role$' && dlacks RoleBinding aap-operator-api 'name: aap-operator$'
+}
+check "api: the binding is to the API's own service account in the release's namespace, never the operator's" api_binding
+check "api: the operator's Role is untouched by the API: still the operator's rules, with storeCnpg" rules_are "$base_rules
+$cnpg_rule"
+
+# The NetworkPolicy: the edge in, the API server, DNS and the issuer out.
+api_policy_ingress() {
+  dhas NetworkPolicy aap-operator-api '^    - Ingress$' '^    - Egress$' 'app.kubernetes.io/name: traefik' 'port: 8080' \
+    && dcount NetworkPolicy aap-operator-api '^    - from:$' 1 && dlacks NetworkPolicy aap-operator-api 'port: 8081'
+}
+check "api: ingress is the peers of api.networkPolicy.from, on the API port 8080 only (no rule for the health port)" api_policy_ingress
+api_policy_egress() {
+  dcount NetworkPolicy aap-operator-api '^    - ports:$' 3 && dhas NetworkPolicy aap-operator-api 'port: 6443' 'port: 53' 'protocol: UDP' 'k8s-app: kube-dns' \
+    && dlacks NetworkPolicy aap-operator-api 'port: 80$' 'port: 8080$.*port: 8080' '^    - \{\}' 'egress: \[\{\}\]'
+}
+check "api: egress is three rules: the API server (443, 6443), DNS (53 over UDP and TCP, to kube-dns) and the issuer (443), and no other" api_policy_egress
+
+# The Ingress: the edge's route, with the annotations of the values (where the rate limit is attached).
+check "api: the Ingress routes the host and path to the API's Service port http, with the class, the TLS secret and the annotation" \
+  dhas Ingress aap-operator-api 'ingressClassName: traefik' 'host: "api.agents.example.com"' 'path: /v1' 'pathType: Prefix' 'name: aap-operator-api$' 'name: http$' \
+    'secretName: api-agents-tls' 'traefik.ingress.kubernetes.io/router.middlewares: another-agentic-system-api-ratelimit@kubernetescrd'
+render -f "$here/api.values.yaml" --set api.ingress.enabled=false
+check "api: api.ingress.enabled=false: no Ingress" lacks '^kind: Ingress$'
+render -f "$here/api.values.yaml" --set api.ingress.tls.enabled=false --set api.ingress.className=
+check "api: api.ingress.tls.enabled=false and no class: no tls block and no ingressClassName" dlacks Ingress aap-operator-api '^  tls:' 'ingressClassName'
+render -f "$here/api.values.yaml" --set api.ingress.tls.secretName=
+api_default_certificate() { dhas Ingress aap-operator-api '^  tls:' 'hosts:' && dlacks Ingress aap-operator-api 'secretName'; }
+check "api: no TLS secret name: a tls block with the host and no secretName (the edge's default certificate)" api_default_certificate
+render -f "$here/api.values.yaml" --set api.networkPolicy.enabled=false
+no_api_policy() { [ -z "$(doc NetworkPolicy aap-operator-api)" ] && dhas NetworkPolicy aap-operator 'kind: NetworkPolicy'; }
+check "api: api.networkPolicy.enabled=false: no policy for the API, and the operator's stays" no_api_policy
+
+# The other shape: a Secret per agent for the ledger, no policy, no Ingress, an existing service account, the image by digest, no hook.
+render -f "$here/api-secretref.values.yaml"
+check "api (secretref shape): the file has the Secret pattern and no CloudNativePG store, and the plain-http issuer in the cluster" \
+  dhas ConfigMap aap-operator-api 'secretRef:' "name: '\\{name\\}-db-app'" 'issuer: http://keycloak.identity.svc:8080/realms/another-agentic' \
+    'rolesClaim: resource_access.another-agentic.roles' '^      namespace: another-agentic-system$' '^      - another-agentic-desktop$'
+check "api (secretref shape): ... and no cnpg key in the API's file" dlacks ConfigMap aap-operator-api 'cnpg'
+secretref_objects() {
+  lacks '^kind: Ingress$' && [ -z "$(doc NetworkPolicy aap-operator-api)" ] && [ -z "$(doc ServiceAccount dashboard-api)" ] \
+    && dhas Deployment aap-operator-api 'serviceAccountName: dashboard-api' && dhas RoleBinding aap-operator-api 'name: dashboard-api$'
+}
+check "api (secretref shape): no Ingress, no policy for the API, no ServiceAccount made, and the existing one is the pod's and the binding's" secretref_objects
+secretref_pod() {
+  dhas Deployment aap-operator-api 'api:sha-[0-9a-f]{7}@sha256:0{64}"' 'value: "debug"' 'terminationGracePeriodSeconds: 32' \
+    && dlacks Deployment aap-operator-api '^          lifecycle:' 'sleep:'
+}
+check "api (secretref shape): the image is tag and digest, the log level and the grace period are the values, and there is no preStop hook" secretref_pod
+
+# The shape that sets every value: what each one does to the render. (It renders from the defaults of values.yaml, so each of these differs from them.)
+render -f "$here/api-full.values.yaml"
+# The block of "<indent spaces><key>:" in the API's Deployment (the lines under it, until one that is indented no more), and from it the names of
+# the container's variables, the pod's volumes and the container's mounts, in the order of the lines (the chart's own first). toYaml writes the
+# keys of an extra entry in alphabetical order, so a mount is `- mountPath:` then `name:` and a volume `- configMap:` ... then `name:`.
+api_block() {
+  doc Deployment aap-operator-api | awk -v ind="$1" -v key="$2" '
+    BEGIN { pre = ""; for (i = 0; i < ind; i++) pre = pre " " }
+    $0 == pre key ":" { s = 1; next }
+    s { match($0, /^ */); if ($0 != "" && RLENGTH <= ind) exit; print }'
+}
+api_env_names() { api_block 10 env | sed -n 's/^            - name: //p' | tr '\n' ' '; }
+api_volume_names() { api_block 6 volumes | sed -n 's/^        - name: //p;s/^          name: //p' | tr '\n' ' '; }
+api_mounts() { api_block 10 volumeMounts | sed -n 's/^            - name: //p;s/^            - mountPath: //p;s/^              mountPath: //p;s/^              name: //p' | tr '\n' ' '; }
+api_ports_in_the_file_and_the_pod() {
+  dhas ConfigMap aap-operator-api '^    listen: 0.0.0.0:8443$' '^    healthListen: 0.0.0.0:9091$' \
+    && dlacks ConfigMap aap-operator-api 'listen: 0.0.0.0:(8080|8081)$' \
+    && dhas Deployment aap-operator-api 'containerPort: 8443' 'containerPort: 9091' && dlacks Deployment aap-operator-api 'containerPort: (8080|8081)'
+}
+check "api (full shape): api.port and api.healthPort (8443, 9091) are the file's listen and healthListen and the container's ports, the defaults nowhere" \
+  api_ports_in_the_file_and_the_pod
+api_ports_in_the_service_and_the_policy() {
+  dhas Service aap-operator-api 'port: 8443' 'targetPort: http' && dlacks Service aap-operator-api 'port: (8080|8081|9091)' \
+    && dhas NetworkPolicy aap-operator-api 'port: 8443' && dlacks NetworkPolicy aap-operator-api 'port: (8080|8081|9091)$'
+}
+check "api (full shape): the Service and the policy's ingress are on api.port (8443) and the health port (9091) is in neither" api_ports_in_the_service_and_the_policy
+api_probes_follow_the_health_port() {
+  # The probes name the port `health`, which is the container's second port: the number is only in the ports list.
+  dcount Deployment aap-operator-api 'port: health' 3 && dhas Deployment aap-operator-api 'name: health' 'containerPort: 9091'
+}
+check "api (full shape): the three probes go to the named port health, which is 9091" api_probes_follow_the_health_port
+check "api (full shape): the container's environment is the chart's two variables, then api.extraEnv in order" \
+  test "$(api_env_names)" = "API_CONFIG_FILE RUST_LOG SSL_CERT_FILE HTTPS_PROXY NO_PROXY "
+check "api (full shape): api.extraEnv values are rendered as they are" \
+  dhas Deployment aap-operator-api 'value: /etc/aap-api-ca/ca-bundle.crt' 'value: http://proxy.example.com:3128' 'value: .svc,.cluster.local,10.0.0.0/8'
+api_extra_volumes() { test "$(api_volume_names)" = "config ca " && dhas Deployment aap-operator-api 'name: aap-api-ca$'; }
+check "api (full shape): the volumes are the chart's config and then api.extraVolumes (a ConfigMap of the CA bundle)" api_extra_volumes
+api_extra_mounts() { test "$(api_mounts)" = "config /etc/aap-api /etc/aap-api-ca ca " && dhas Deployment aap-operator-api 'mountPath: /etc/aap-api-ca$' 'readOnly: true'; }
+check "api (full shape): the mounts are the configuration directory and then api.extraVolumeMounts, read-only" api_extra_mounts
+api_apiserver_rule() {
+  r=$(api_egress_rule 1)
+  all_of "$r" '^      - protocol: TCP$|^        - protocol: TCP$' 'port: 443$' 'port: 6443$' 'port: 16443$' '^      to:$' 'cidr: 10\.96\.0\.1/32$' 'cidr: 192\.168\.49\.2/32$' \
+    && [ "$(printf '%s\n' "$r" | grep -c 'ipBlock:')" -eq 2 ] && none_of "$r" '203\.113|169\.254'
+}
+check "api (full shape): egress rule 1 is the API server on its ports, to the addresses of apiServer.cidrs and no others" api_apiserver_rule
+api_dns_rule() {
+  r=$(api_egress_rule 2)
+  all_of "$r" 'cidr: 169\.254\.20\.10/32$' && [ "$(printf '%s\n' "$r" | grep -c 'port: 53$')" -eq 2 ] && [ "$(printf '%s\n' "$r" | grep -c 'port: 5353$')" -eq 2 ] \
+    && none_of "$r" 'kube-dns|10\.96|203\.0'
+}
+check "api (full shape): egress rule 2 is DNS on 53 and 5353 over UDP and TCP, to dns.to" api_dns_rule
+api_issuer_rule() {
+  r=$(api_egress_rule 3)
+  all_of "$r" '^      to:$' 'cidr: 203\.0\.113\.0/24$' 'kubernetes.io/metadata.name: identity$' 'app: keycloak$' 'port: 443$' 'port: 8443$' \
+    && none_of "$r" 'port: (53|6443|16443)$' '10\.96\.0\.1|169\.254'
+}
+check "api (full shape): egress rule 3 is the issuer on issuer.ports (443, 8443), to the peers of issuer.to" api_issuer_rule
+api_policy_ingress_peers() {
+  dhas NetworkPolicy aap-operator-api 'kubernetes.io/metadata.name: ingress-nginx$' 'cidr: 10\.0\.0\.0/8$' && dlacks NetworkPolicy aap-operator-api 'app.kubernetes.io/name: traefik'
+}
+check "api (full shape): the policy's ingress peers are api.networkPolicy.from" api_policy_ingress_peers
+render -f "$here/api.values.yaml"
+render -f "$here/api-full.values.yaml"
+check "api (full shape): podLabels and podAnnotations are on the pod template, once each" \
+  dcount Deployment aap-operator-api 'team: platform' 1
+check "api (full shape): the pod annotation of the values is on the pod template once" \
+  dcount Deployment aap-operator-api 'example.com/scrape: "false"' 1
+render -f "$here/api.values.yaml"
+api_nothing_extra_by_default() {
+  test "$(api_env_names)" = "API_CONFIG_FILE RUST_LOG " && test "$(api_volume_names)" = "config " && test "$(api_mounts)" = "config /etc/aap-api "
+}
+check "api: with no extraEnv, extraVolumes or extraVolumeMounts the container has the chart's two variables, its config volume and its one mount, nothing more" \
+  api_nothing_extra_by_default
+api_default_rules_are_open_on_their_ports() {
+  all_of "$(api_egress_rule 1)" 'port: 443$' 'port: 6443$' && none_of "$(api_egress_rule 1)" 'ipBlock' '^      to:$' \
+    && all_of "$(api_egress_rule 3)" 'port: 443$' && none_of "$(api_egress_rule 3)" 'ipBlock' 'namespaceSelector' '^      to:$'
+}
+check "api: with no apiServer.cidrs and no issuer.to the two rules have no 'to': any address on those ports (as the README says)" api_default_rules_are_open_on_their_ports
+# The pod's security context and the container's, each by itself.
+render -f "$here/api.values.yaml"
+check "api: the POD's securityContext (spec.template.spec) has runAsNonRoot, uid and gid 65532 and the RuntimeDefault seccomp profile" \
+  all_of "$(api_pod_security)" 'runAsNonRoot: true$' 'runAsUser: 65532$' 'runAsGroup: 65532$' 'type: RuntimeDefault$'
+check "api: the POD's securityContext holds nothing of the container's (no escalation, no read-only root file system, no capabilities)" \
+  none_of "$(api_pod_security)" 'allowPrivilegeEscalation' 'readOnlyRootFilesystem' 'capabilities'
+check "api: the CONTAINER's securityContext has no privilege escalation, a read-only root file system, runAsNonRoot and no capability" \
+  all_of "$(api_container_security)" 'allowPrivilegeEscalation: false$' 'readOnlyRootFilesystem: true$' 'runAsNonRoot: true$' 'drop: \[ALL\]$'
+
+# templates/NOTES.txt is not in `helm template`'s output. A copy of the chart with one more template that includes it as the data of a
+# ConfigMap shows it (the copy is made once; the chart itself is not touched).
+cp -r "$chart/." "$notes_chart/"
+cat > "$notes_chart/templates/zz-notes-check.yaml" <<'NOTES'
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: notes-check
+data:
+  notes: |
+    {{- include (print $.Template.BasePath "/NOTES.txt") . | nindent 4 }}
+NOTES
+render_notes() { helm template aap-operator "$notes_chart" --namespace "$ns" "$@" > "$out"; }
+render_notes
+check "NOTES (api off): the operator's notes, and nothing about the Platform API" lacks 'Platform API'
+render_notes -f "$here/api.values.yaml"
+check "NOTES (api on, no apiServer.cidrs and no issuer.to): it says the NetworkPolicy lets the API reach ANY address on both lists of ports, and what to set" \
+  has_all 'ANY address on 443, 6443 \(the API server.s ports\): set api.networkPolicy.apiServer.cidrs' 'ANY address on 443 \(the issuer.s ports\): set api.networkPolicy.issuer.to'
+notes_name_the_service_and_the_route() {
+  has_all 'The Platform API is the Service aap-operator-api\.another-agentic-system\.svc:8080 \(ClusterIP\)' \
+    'The Ingress routes https://api\.agents\.example\.com/v1 to it' 'TLS, a check of the JWT and the rate limits are the edge.s' 'OPTIONS'
+}
+check "NOTES (api on, with an Ingress): the Service, its port, the Ingress's URL and what the edge must do" notes_name_the_service_and_the_route
+render_notes -f "$here/api-secretref.values.yaml"
+notes_without_an_ingress() { has_all 'svc:8080 \(ClusterIP\)' 'There is no Ingress .*route /v1 from your edge to the Service' && lacks 'The Ingress routes'; }
+check "NOTES (api on, no Ingress): it says to route /v1 from the edge to the Service" notes_without_an_ingress
+render_notes -f "$here/api-full.values.yaml"
+check "NOTES (api on, both set): no warning about ANY address" lacks 'NetworkPolicy lets it reach ANY address'
+render_notes -f "$here/api.values.yaml" --set 'api.networkPolicy.apiServer.cidrs[0]=10.96.0.1/32'
+notes_about_the_issuer_alone() { has 'ANY address on 443 \(the issuer.s ports\)' && lacks 'API server.s ports'; }
+check "NOTES (only the API server's addresses set): the warning is about the issuer alone" notes_about_the_issuer_alone
+render_notes -f "$here/api.values.yaml" --set api.networkPolicy.enabled=false --set api.networkPolicy.from=null
+check "NOTES (api on, the policy off): no warning about a policy that is not there" lacks 'NetworkPolicy lets it reach ANY address'
+render
+
 # ---- What is refused -------------------------------------------------------------------------------------------------------
 check "a replica count is refused (no leader election in v0)" refused 'no leader election' --set replicaCount=2
 check "an empty image tag is refused" refused 'image.tag is required' --set image.tag=
@@ -245,6 +539,204 @@ check "a tuning key that is not a setting is refused" refused 'is not a setting'
 check "a tuning value below 1 is refused" refused 'at least 1' --set tuning.concurrency=0
 check "storeCnpg must be a boolean" refused 'storeCnpg must be true or false' --set storeCnpg=yes
 check "a missing service account name is refused when none is created" refused 'serviceAccount.name is required' --set serviceAccount.create=false
+
+# ---- What the Platform API's values refuse ---------------------------------------------------------------------------------
+# Each is refused by name, on a render that is otherwise valid (tests/api.values.yaml); json values by --set-json.
+refused_api() { frag=$1; shift; refused "$frag" -f "$here/api.values.yaml" "$@"; }
+check "api.enabled must be a boolean" refused 'api.enabled must be true or false' --set-string api.enabled=yes
+check "api must be a map" refused 'api must be a map' --set api=null
+# The least a deployment must say, minus one thing at a time: the chart ships a default for none of these five, so each is refused by name,
+# and with all five the chart renders.
+refused_without() {
+  skip=$1; frag=$2
+  set -- --set api.enabled=true
+  [ "$skip" = issuer ] || set -- "$@" --set api.config.oidc.issuer=https://keycloak.example.com/realms/x
+  [ "$skip" = audiences ] || set -- "$@" --set 'api.config.oidc.audiences[0]=x'
+  [ "$skip" = rolesClaim ] || set -- "$@" --set api.config.oidc.rolesClaim=roles
+  [ "$skip" = registries ] || set -- "$@" --set 'api.config.defaults.allowedImageRegistries[0]=ghcr.io'
+  [ "$skip" = from ] || set -- "$@" --set 'api.networkPolicy.from[0].podSelector.matchLabels.a=b'
+  refused "$frag" "$@"
+}
+renders_ok() { helm template aap-operator "$chart" --namespace "$ns" "$@" > /dev/null 2>&1; }
+check "api on with no issuer is refused (nothing to default it to)" refused_without issuer 'api.config.oidc.issuer is required'
+check "api on with no audience is refused (nothing to default it to)" refused_without audiences 'api.config.oidc.audiences is required'
+check "api on with no roles claim is refused (nothing to default it to)" refused_without rolesClaim 'api.config.oidc.rolesClaim is required'
+check "api on with no image registry is refused (nothing to default it to: the chart does not choose where agents' images may come from)" \
+  refused_without registries 'allowedImageRegistries is required'
+check "api on with no peer that may reach it is refused (nothing to default it to)" refused_without from 'api.networkPolicy.from is required'
+check "the least a deployment must say (an issuer, an audience, a roles claim, a registry, who reaches the API) is enough to render" \
+  renders_ok --set api.enabled=true --set api.config.oidc.issuer=https://keycloak.example.com/realms/x --set 'api.config.oidc.audiences[0]=x' \
+    --set api.config.oidc.rolesClaim=roles --set 'api.config.defaults.allowedImageRegistries[0]=ghcr.io' --set 'api.networkPolicy.from[0].podSelector.matchLabels.a=b'
+check "an issuer that is not an http(s) URL is refused" refused_api 'api.config.oidc.issuer is required' --set api.config.oidc.issuer=keycloak.example.com
+check "an issuer with credentials is refused" refused_api 'api.config.oidc.issuer is required' --set api.config.oidc.issuer=https://u:p@keycloak.example.com/realms/x
+check "no audience is refused" refused_api 'api.config.oidc.audiences is required' --set api.config.oidc.audiences=null
+check "an empty audience list is refused" refused_api 'api.config.oidc.audiences is required' --set-json 'api.config.oidc.audiences=[]'
+check "a blank audience is refused" refused_api 'every audience must be a text that is not blank' --set-json 'api.config.oidc.audiences=["x","  "]'
+check "no roles claim is refused" refused_api 'api.config.oidc.rolesClaim is required' --set api.config.oidc.rolesClaim=null
+check "a blank roles claim is refused" refused_api 'api.config.oidc.rolesClaim is required' --set-string 'api.config.oidc.rolesClaim= '
+check "a jwksUrl that is not a URL is refused" refused_api 'api.config.oidc.jwksUrl must be an http(s) URL' --set api.config.oidc.jwksUrl=keys
+check "an oidc key that is not a setting is refused (a typo would leave a default in its place)" refused_api 'api.config.oidc.rolesClam is not a setting' --set api.config.oidc.rolesClam=x
+check "a key of api.config that is not oidc, cors or defaults is refused (listen is api.port)" refused_api 'api.config.listen is not a setting of the chart' --set api.config.listen=0.0.0.0:9
+check "a cors wildcard is refused" refused_api 'a wildcard is refused' --set-json 'api.config.cors.allowedOrigins=["*"]'
+check "a cors wildcard inside an origin is refused" refused_api 'a wildcard is refused' --set-json 'api.config.cors.allowedOrigins=["https://*.example.com"]'
+check "a cors origin null is refused" refused_api 'is refused: it is the origin of any sandboxed page' --set-json 'api.config.cors.allowedOrigins=["null"]'
+check "a cors origin with a trailing slash is refused" refused_api 'is not an origin' --set-json 'api.config.cors.allowedOrigins=["https://a.example.com/"]'
+check "a cors origin with a path is refused" refused_api 'is not an origin' --set-json 'api.config.cors.allowedOrigins=["https://a.example.com/app"]'
+check "a cors origin in upper case is refused" refused_api 'is not an origin' --set-json 'api.config.cors.allowedOrigins=["HTTPS://a.example.com"]'
+check "a cors origin that is not a string is refused" refused_api 'is not an origin' --set-json 'api.config.cors.allowedOrigins=[1]'
+check "a cors origin with the default port of its scheme is refused" refused_api 'names the default port of its scheme' --set-json 'api.config.cors.allowedOrigins=["https://a.example.com:443"]'
+check "a cors key that is not allowedOrigins is refused" refused_api 'api.config.cors.origins is not a setting' --set-json 'api.config.cors.origins=["https://a.example.com"]'
+check "no allowedImageRegistries is refused (the binary does not start without it)" refused_api 'allowedImageRegistries is required' --set api.config.defaults.allowedImageRegistries=null
+check "an empty allowedImageRegistries is refused" refused_api 'allowedImageRegistries is required' --set-json 'api.config.defaults.allowedImageRegistries=[]'
+check "an allowedImageRegistries entry that is not a registry host is refused" refused_api 'is not a registry host' --set-json 'api.config.defaults.allowedImageRegistries=["ghcr.io/vymalo"]'
+check "a store with both cnpg and secretRef is refused" refused_api 'exactly one of cnpg and secretRef' --set api.config.defaults.store.secretRef.name=x --set api.config.defaults.store.secretRef.key=k
+check "a store with neither is refused" refused_api 'exactly one of cnpg and secretRef' --set api.config.defaults.store.cnpg=null
+check "no a2aBearer is refused" refused_api 'api.config.defaults.a2aBearer.name and .key are required' --set api.config.defaults.a2aBearer=null
+check "a defaults.namespace that is not the operator's is refused (watchNamespace sets both)" refused_api 'but the operator watches' --set api.config.defaults.namespace=elsewhere
+check "an image tag that is empty is refused" refused_api 'api.image.tag is required' --set api.image.tag=
+check "an image tag latest is refused" refused_api 'api.image.tag must not be latest' --set api.image.tag=latest
+check "a malformed image digest is refused" refused_api 'api.image.digest must be sha256' --set api.image.digest=abc
+check "an empty image repository is refused" refused_api 'api.image.repository is required' --set api.image.repository=
+check "zero replicas is refused" refused_api 'api.replicas must be a whole number of at least 1' --set api.replicas=0
+check "a port that is not a port is refused" refused_api 'api.port: 70000 is not a port number' --set api.port=70000
+check "a health port that is not a port is refused" refused_api 'api.healthPort: 0 is not a port number' --set api.healthPort=0
+check "the same port for the API and its health is refused" refused_api 'api.port and api.healthPort must differ' --set api.healthPort=8080
+check "a negative preStop sleep is refused" refused_api 'api.preStopSleepSeconds must be a whole number' --set api.preStopSleepSeconds=-1
+check "a grace period that cannot hold the sleep and the drain is refused" refused_api 'api.terminationGracePeriodSeconds must be a whole number of at least' --set api.terminationGracePeriodSeconds=34
+check "a grace period of sleep + 31 is refused (25 s of drain, 2 s for the health port and 5 s of margin make 32)" \
+  refused_api 'api.terminationGracePeriodSeconds must be a whole number of at least api.preStopSleepSeconds + 32' --set api.terminationGracePeriodSeconds=36
+check "a grace period of sleep + 32 renders" renders_ok -f "$here/api.values.yaml" --set api.terminationGracePeriodSeconds=37
+grace_with_no_sleep() {
+  renders_ok -f "$here/api.values.yaml" --set api.preStopSleepSeconds=0 --set api.terminationGracePeriodSeconds=32 \
+    && refused_api 'api.terminationGracePeriodSeconds must be a whole number' --set api.preStopSleepSeconds=0 --set api.terminationGracePeriodSeconds=31
+}
+check "with no sleep the grace period of 32 renders and 31 is refused" grace_with_no_sleep
+check "the grace period must grow with the sleep" refused_api 'api.terminationGracePeriodSeconds must be a whole number of at least' --set api.preStopSleepSeconds=20
+check "a service account to use but no name is refused" refused_api 'api.serviceAccount.name is required' --set api.serviceAccount.create=false
+check "an Ingress with no host is refused" refused_api 'api.ingress.host is required' --set api.ingress.host=
+check "an Ingress path that does not start with / is refused" refused_api 'api.ingress.path must start with /' --set api.ingress.path=v1
+check "an Ingress pathType that is not one is refused" refused_api 'api.ingress.pathType must be' --set api.ingress.pathType=Regex
+# A null (or a text) where a template reads a field is a named refusal, not a nil pointer from a template.
+check "podLabels: app.kubernetes.io/name (a selector label of the API's pods) is refused" refused_api 'api.podLabels: app.kubernetes.io/name is a selector label' \
+  --set-json 'api.podLabels={"app.kubernetes.io/name":"other"}'
+check "podLabels: app.kubernetes.io/instance is refused" refused_api 'api.podLabels: app.kubernetes.io/instance is a selector label' \
+  --set-json 'api.podLabels={"app.kubernetes.io/instance":"other"}'
+check "podLabels: app.kubernetes.io/component is refused" refused_api 'api.podLabels: app.kubernetes.io/component is a selector label' \
+  --set-json 'api.podLabels={"app.kubernetes.io/component":"other"}'
+check "podAnnotations: checksum/config (the chart's hash of the file) is refused" refused_api 'api.podAnnotations: checksum/config is the chart' \
+  --set-json 'api.podAnnotations={"checksum/config":"x"}'
+check "podLabels and podAnnotations of other names render" \
+  renders_ok -f "$here/api.values.yaml" --set-json 'api.podLabels={"team":"platform"}' --set-json 'api.podAnnotations={"example.com/x":"y"}'
+check "api.networkPolicy: null is refused by name" refused_api 'api.networkPolicy must be a map' --set api.networkPolicy=null
+check "api.ingress: null is refused by name" refused_api 'api.ingress must be a map' --set api.ingress=null
+check "api.image: null is refused by name" refused_api 'api.image must be a map' --set api.image=null
+check "api.serviceAccount: null is refused by name" refused_api 'api.serviceAccount must be a map' --set api.serviceAccount=null
+check "api.ingress.tls: null is refused by name while the Ingress is on" refused_api 'api.ingress.tls must be a map' --set api.ingress.tls=null
+check "api.networkPolicy.apiServer: null is refused by name while the policy is on" refused_api 'api.networkPolicy.apiServer must be a map' --set api.networkPolicy.apiServer=null
+check "api.networkPolicy.dns: null is refused by name while the policy is on" refused_api 'api.networkPolicy.dns must be a map' --set api.networkPolicy.dns=null
+check "api.networkPolicy.issuer: null is refused by name while the policy is on" refused_api 'api.networkPolicy.issuer must be a map' --set api.networkPolicy.issuer=null
+check "with the Ingress off, api.ingress.tls: null is not read" renders_ok -f "$here/api.values.yaml" --set api.ingress.enabled=false --set api.ingress.tls=null
+check "api.resources: null still renders (a way to ask for no requests and no limits)" renders_ok -f "$here/api.values.yaml" --set api.resources=null
+check "no peer that may reach the API is refused while the policy is on" refused_api 'api.networkPolicy.from is required' --set api.networkPolicy.from=null
+check "a peer that names nothing is refused" refused_api 'a peer needs a namespaceSelector' --set-json 'api.networkPolicy.from=[{"foo":"bar"}]'
+check "a DNS peer that names nothing is refused" refused_api 'api.networkPolicy.dns.to: a peer needs' --set-json 'api.networkPolicy.dns.to=[{"foo":"bar"}]'
+check "no API server port is refused" refused_api 'api.networkPolicy.apiServer.ports must name at least one port' --set api.networkPolicy.apiServer.ports=null
+check "an issuer peer that names nothing is refused" refused_api 'api.networkPolicy.issuer.to: a peer needs' --set-json 'api.networkPolicy.issuer.to=[{"foo":"bar"}]'
+# api.extraEnv, api.extraVolumes and api.extraVolumeMounts: the chart's own names and paths are not for sale.
+ca_volume='api.extraVolumes=[{"name":"ca","configMap":{"name":"aap-api-ca"}}]'
+check "extraEnv: RUST_LOG is refused (it is api.logLevel)" refused_api 'api.extraEnv: RUST_LOG is the chart' --set-json 'api.extraEnv=[{"name":"RUST_LOG","value":"debug"}]'
+check "extraEnv: API_CONFIG_FILE is refused (it is the mounted file)" refused_api 'api.extraEnv: API_CONFIG_FILE is the chart' --set-json 'api.extraEnv=[{"name":"API_CONFIG_FILE","value":"/x"}]'
+check "extraEnv: API_LISTEN_ADDR is refused (it would win over api.port, which the probes and the Service follow)" \
+  refused_api 'api.extraEnv: API_LISTEN_ADDR is the chart' --set-json 'api.extraEnv=[{"name":"API_LISTEN_ADDR","value":"0.0.0.0:1"}]'
+check "extraEnv: HEALTH_ADDR is refused" refused_api 'api.extraEnv: HEALTH_ADDR is the chart' --set-json 'api.extraEnv=[{"name":"HEALTH_ADDR","value":"0.0.0.0:1"}]'
+check "extraEnv: a name set twice is refused" refused_api 'api.extraEnv: A is set twice' --set-json 'api.extraEnv=[{"name":"A","value":"1"},{"name":"A","value":"2"}]'
+check "extraEnv: an entry with no name is refused" refused_api 'api.extraEnv: every entry is a map with a name' --set-json 'api.extraEnv=[{"value":"1"}]'
+check "extraEnv: an entry that is not a map is refused" refused_api 'api.extraEnv: every entry is a map with a name' --set-json 'api.extraEnv=["A=1"]'
+check "extraEnv: a name that is not a variable name is refused" refused_api 'is not an environment variable name' --set-json 'api.extraEnv=[{"name":"A B","value":"1"}]'
+check "extraEnv: a value that is not a list is refused" refused_api 'api.extraEnv must be a list' --set api.extraEnv=x
+check "extraVolumes: a volume named config (the chart's) is refused" refused_api "api.extraVolumes: \`config\` is the chart" --set-json 'api.extraVolumes=[{"name":"config","emptyDir":{}}]'
+check "extraVolumes: a name used twice is refused" refused_api 'api.extraVolumes: ca is named twice' \
+  --set-json 'api.extraVolumes=[{"name":"ca","emptyDir":{}},{"name":"ca","emptyDir":{}}]'
+check "extraVolumeMounts: a mount of a volume that is not in extraVolumes is refused" refused_api 'api.extraVolumeMounts: nothing is not a volume of api.extraVolumes' \
+  --set-json 'api.extraVolumeMounts=[{"name":"nothing","mountPath":"/x"}]'
+check "extraVolumeMounts: a mount at the configuration directory is refused" refused_api 'which is the configuration file' \
+  --set-json "$ca_volume" --set-json 'api.extraVolumeMounts=[{"name":"ca","mountPath":"/etc/aap-api"}]'
+check "extraVolumeMounts: a mount under the configuration directory is refused" refused_api 'which is the configuration file' \
+  --set-json "$ca_volume" --set-json 'api.extraVolumeMounts=[{"name":"ca","mountPath":"/etc/aap-api/ca"}]'
+check "extraVolumeMounts: a mount at the configuration file is refused" refused_api 'which is the configuration file' \
+  --set-json "$ca_volume" --set-json 'api.extraVolumeMounts=[{"name":"ca","mountPath":"/etc/aap-api/config.yaml"}]'
+check "extraVolumeMounts: a mount at the configuration directory with a trailing slash is refused" refused_api 'which is the configuration file' \
+  --set-json "$ca_volume" --set-json 'api.extraVolumeMounts=[{"name":"ca","mountPath":"/etc/aap-api/"}]'
+check "extraVolumeMounts: a relative mount path is refused" refused_api 'must be an absolute path' \
+  --set-json "$ca_volume" --set-json 'api.extraVolumeMounts=[{"name":"ca","mountPath":"etc/ca"}]'
+check "extraVolumeMounts: /etc/aap-api-ca, which only starts like the configuration directory, renders" \
+  renders_ok -f "$here/api.values.yaml" --set-json "$ca_volume" --set-json 'api.extraVolumeMounts=[{"name":"ca","mountPath":"/etc/aap-api-ca"}]'
+check "extraEnv with a secretKeyRef (a proxy URL with credentials) renders: the pod reads that Secret, the API's Role does not" \
+  renders_ok -f "$here/api.values.yaml" --set-json 'api.extraEnv=[{"name":"HTTPS_PROXY","valueFrom":{"secretKeyRef":{"name":"proxy","key":"url"}}}]'
+check "an issuer port that is not a port is refused" refused_api 'api.networkPolicy.issuer.ports: 99999 is not a port number' --set-json 'api.networkPolicy.issuer.ports=[99999]'
+# The URL, the origins and the registries are read as the binary reads them (aap-auth-oidc's http_url, aap-platform-api's CorsOrigins,
+# aap-forms' is_host): a value the binary refuses at start is refused here, by name, and the edge of what it accepts renders.
+check "an issuer with a query is refused (the binary compares it with the iss of a token)" \
+  refused_api 'api.config.oidc.issuer is required' --set 'api.config.oidc.issuer=https://keycloak.example.com/realms/x?a=1'
+check "an issuer with a fragment is refused" refused_api 'api.config.oidc.issuer is required' --set 'api.config.oidc.issuer=https://keycloak.example.com/realms/x#f'
+check "an issuer with a query and no path is refused" refused_api 'api.config.oidc.issuer is required' --set 'api.config.oidc.issuer=https://keycloak.example.com?a=1'
+check "an issuer with a port above 65535 is refused" refused_api 'api.config.oidc.issuer is required' --set api.config.oidc.issuer=https://keycloak.example.com:70000/realms/x
+check "an issuer with port 0 is refused" refused_api 'api.config.oidc.issuer is required' --set api.config.oidc.issuer=https://keycloak.example.com:0/realms/x
+check "an issuer with a port that is not a number is refused" refused_api 'api.config.oidc.issuer is required' --set api.config.oidc.issuer=https://keycloak.example.com:https/realms/x
+check "an issuer with a port renders" renders_ok -f "$here/api.values.yaml" --set api.config.oidc.issuer=https://keycloak.example.com:8443/realms/x
+check "an issuer that is an IPv6 literal with a port renders" renders_ok -f "$here/api.values.yaml" --set 'api.config.oidc.issuer=http://[::1]:8080/realms/x'
+check "a jwksUrl with a port above 65535 is refused" refused_api 'api.config.oidc.jwksUrl must be an http(s) URL' --set api.config.oidc.jwksUrl=https://keycloak.example.com:99999/certs
+check "a jwksUrl with credentials is refused" refused_api 'api.config.oidc.jwksUrl must be an http(s) URL' --set api.config.oidc.jwksUrl=https://u:p@keycloak.example.com/certs
+check "a jwksUrl may have a query (the binary only asks for a host and no credentials)" renders_ok -f "$here/api.values.yaml" --set 'api.config.oidc.jwksUrl=https://keycloak.example.com/certs?a=1'
+check "a registry with a trailing dot is refused (aap-forms' is_host: an empty label)" refused_api 'is not a registry host' --set-json 'api.config.defaults.allowedImageRegistries=["ghcr.io."]'
+check "a registry with an empty label is refused" refused_api 'is not a registry host' --set-json 'api.config.defaults.allowedImageRegistries=["a..b"]'
+check "a registry whose label starts with - is refused" refused_api 'is not a registry host' --set-json 'api.config.defaults.allowedImageRegistries=["-a.io"]'
+check "a registry whose label ends with - is refused" refused_api 'is not a registry host' --set-json 'api.config.defaults.allowedImageRegistries=["a-.io"]'
+check "a registry with an empty port is refused" refused_api 'is not a registry host' --set-json 'api.config.defaults.allowedImageRegistries=["a.io:"]'
+check "a registry with an underscore is refused" refused_api 'is not a registry host' --set-json 'api.config.defaults.allowedImageRegistries=["a_b.io"]'
+check "registries as the binary reads them (a port, one label, upper case, a hyphen inside a label) render" \
+  renders_ok -f "$here/api.values.yaml" --set-json 'api.config.defaults.allowedImageRegistries=["registry.example:5000","localhost:5000","x","GHCR.io","a-b.c-d.io"]'
+check "an origin with a port above 65535 is refused" refused_api 'is not an origin' --set-json 'api.config.cors.allowedOrigins=["https://a.example.com:99999"]'
+check "an origin with port 0 is refused" refused_api 'is not an origin' --set-json 'api.config.cors.allowedOrigins=["https://a.example.com:0"]'
+check "an origin with a leading zero in the port is refused" refused_api 'is not an origin' --set-json 'api.config.cors.allowedOrigins=["https://a.example.com:08080"]'
+check "an origin with an empty port is refused" refused_api 'is not an origin' --set-json 'api.config.cors.allowedOrigins=["https://a.example.com:"]'
+check "an origin whose host has an underscore is refused" refused_api 'is not an origin' --set-json 'api.config.cors.allowedOrigins=["https://a_b.example.com"]'
+check "an origin whose host has a tilde is refused" refused_api 'is not an origin' --set-json 'api.config.cors.allowedOrigins=["https://a~b.example.com"]'
+check "an origin with user information is refused" refused_api 'is not an origin' --set-json 'api.config.cors.allowedOrigins=["https://u@a.example.com"]'
+check "an origin with port 80 on http is refused (the default port of its scheme)" refused_api 'names the default port of its scheme' --set-json 'api.config.cors.allowedOrigins=["http://a.example.com:80"]'
+check "an origin with port 80 on ws is refused" refused_api 'names the default port of its scheme' --set-json 'api.config.cors.allowedOrigins=["ws://a.example.com:80"]'
+check "an origin with port 443 on wss is refused" refused_api 'names the default port of its scheme' --set-json 'api.config.cors.allowedOrigins=["wss://a.example.com:443"]'
+check "an IPv6 origin with the default port of its scheme is refused" refused_api 'names the default port of its scheme' --set-json 'api.config.cors.allowedOrigins=["https://[::1]:443"]'
+check "origins as a browser writes them (a port, an IPv6 literal, another scheme, 443 on http and 80 on https) render" \
+  renders_ok -f "$here/api.values.yaml" --set-json 'api.config.cors.allowedOrigins=["http://localhost:3000","http://[::1]:8080","tauri://localhost","https://a.example.com:8443","http://a.example.com:443","https://a.example.com:80"]'
+# The keys of defaults and the store, which the binary refuses at start and the chart can see.
+check "a key of api.config.defaults that is not a setting is refused (a typo would leave a default in its place)" \
+  refused_api 'api.config.defaults.bogus is not a setting of the API' --set api.config.defaults.bogus=1
+check "an offerLabel with a space is refused" refused_api 'api.config.defaults.offerLabel must be a label key with no space' --set-string 'api.config.defaults.offerLabel=not a label'
+check "a defaults.allowFrom peer that names nothing is refused" refused_api 'api.config.defaults.allowFrom: a peer needs' --set-json 'api.config.defaults.allowFrom=[{"foo":"bar"}]'
+check "store.cnpg.instances 0 is refused" refused_api 'store.cnpg.instances must be a whole number of at least 1' --set api.config.defaults.store.cnpg.instances=0
+check "store.cnpg.instances 1.5 is refused" refused_api 'store.cnpg.instances must be a whole number of at least 1' --set api.config.defaults.store.cnpg.instances=1.5
+check "store.cnpg.storage.size that is not a size is refused" refused_api 'store.cnpg.storage.size must be a size' --set api.config.defaults.store.cnpg.storage.size=lots
+check "store.cnpg.storage.size 0Gi is refused (a size has something in it)" refused_api 'store.cnpg.storage.size must be a size' --set api.config.defaults.store.cnpg.storage.size=0Gi
+check "a size as the binary reads it (20Gi, 0.5Ti, 1e3) renders" renders_ok -f "$here/api.values.yaml" --set api.config.defaults.store.cnpg.storage.size=0.5Ti
+check "a secretRef name without {name} is refused (every agent would share one ledger)" \
+  refused_api 'store.secretRef.name must hold {name}' --set api.config.defaults.store.cnpg=null --set api.config.defaults.store.secretRef.name=db --set api.config.defaults.store.secretRef.key=k
+check "with the policy off, no peer is needed" renders_ok -f "$here/api.values.yaml" --set api.networkPolicy.enabled=false --set api.networkPolicy.from=null
+check "the secretref shape renders (a Secret per agent, no policy, no Ingress)" renders_ok -f "$here/api-secretref.values.yaml"
+
+# The shapes CI hands to the binary's `--check` (api-shapes.sh): four files, and the one that sets every value holds the ports it set.
+api_shapes_are_written() {
+  d=$(mktemp -d) || return 1
+  sh "$here/api-shapes.sh" "$d" > /dev/null 2>&1 \
+    && [ "$(find "$d" -type f | wc -l)" -eq 4 ] && [ -s "$d/golden.yaml" ] && [ -s "$d/secretref.yaml" ] && [ -s "$d/minimal.yaml" ] \
+    && grep -q '^listen: 0.0.0.0:8443$' "$d/full.yaml" && grep -q '^healthListen: 0.0.0.0:9091$' "$d/full.yaml" \
+    && grep -q '^listen: 0.0.0.0:8080$' "$d/minimal.yaml"
+  r=$?
+  rm -rf "$d"
+  return "$r"
+}
+check "api: api-shapes.sh writes the file of four shapes (golden, secretref, minimal, full), the full one with the ports it sets" api_shapes_are_written
+check "api: the shape that sets every value (tests/api-full.values.yaml) renders" renders_ok -f "$here/api-full.values.yaml"
 
 # ---- The CRDs chart: one source ------------------------------------------------------------------------------------------
 check "deploy/operator-crds/files is a copy of deploy/crds (cp deploy/crds/agents.vymalo.com.yaml deploy/operator-crds/files/)" \
