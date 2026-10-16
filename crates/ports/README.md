@@ -11,7 +11,7 @@ types that cross them; and the two seams of the admin dashboard's Platform API
 | `RuntimeProvider` | makes an agent's compute exist, says how it is doing, tells the controller what changed | `runtime-kubernetes` (S4); `MemoryRuntime` here |
 | `StoreProvisioner` | makes the agent's run ledger exist: a referenced Secret, or an operator-owned CloudNativePG cluster | `store-secret`, `store-cnpg` (S5, S6: `CnpgStore` serves both kinds); `MemoryStore` here |
 | `AgentDirectory` | lists the agents the platform runs, for the registry | the controller's reflector (S5), read by `aap-registry` (S7); `MemoryDirectory` here |
-| `AgentObjects` | the dashboard's custom resources: apply, get, list and delete an agent (`AgentService` + `AgentConfig`), a `ModelEndpoint`, a `ToolProvider`; list the offered secret references (D4) | `objects-kubernetes` (D5); `MemoryObjects` here |
+| `AgentObjects` | the dashboard's custom resources: apply, get, list and delete an agent (`AgentService` + `AgentConfig`), a `ModelEndpoint`, a `ToolProvider`; list the offered secret references (D4) | [`objects-kubernetes`](../objects-kubernetes/README.md) (D5); `MemoryObjects` here |
 | `Authenticator` | a bearer token to a `Principal`: the subject and the values of the roles claim (D4) | `auth-oidc` (D6); `MemoryAuthenticator` here |
 
 **No Kubernetes type, no driver type and no secret value appears in any signature.** A secret has no
@@ -134,7 +134,7 @@ depending on `aap-api` and so on `kube`, would give every provider that depends 
 | Type | What |
 |---|---|
 | `Kind::{AgentService, AgentConfig, ModelEndpoint, ToolProvider}`, `SharedKind::{Model, ToolServer}` | The four kinds. Closed. `SharedKind` is the pair of routes `/v1/models` and `/v1/tool-servers` |
-| `Stored { kind, namespace, name, version, generation, labels, annotations, spec, status }` | One object as the server holds it, reduced to what the dashboard needs. `status` is the operator's: the dashboard never writes it |
+| `Stored { kind, namespace, name, version, generation, labels, annotations, spec, status }` | One object as the server holds it, reduced to what the dashboard needs. `status` is the operator's: the dashboard never writes it. `spec` and `status` are **as written**, without the defaults that an API server adds to every object (`aap-objects-kubernetes` reads them through `managedFields`) |
 | `Agent { service, config: Option<Stored> }` | An agent is its `AgentService` and the `AgentConfig` that service names (`spec.configRef.name`); the config is `None` when it is not there. One unit: read, saved and deleted together, with one `ETag` |
 | `AgentDraft { name, service, config }`, `SharedDraft { name, spec }` | What the dashboard writes: the two `spec`s of an agent (both objects are named `name`; `service.configRef.name` must say so), or one. Labels are the implementation's |
 | `Precondition::{DoesNotExist, Matches(ETag)}` | `If-None-Match: *` and `If-Match`. **There is no unconditional write, and no unconditional delete**: `delete_agent` and `delete_shared` take the `ETag` the caller read, so that a delete never removes what somebody changed since the list was drawn (the router answers a `DELETE` without `If-Match` itself) |
@@ -169,9 +169,9 @@ depending on `aap-api` and so on `kube`, would give every provider that depends 
   those services in byte order. **A delete refuses whole**: neither the service nor the config is deleted. (The other choice, deleting the service and keeping the
   config, leaves a dashboard-labelled config that no screen shows.) `NotOwned` would be wrong: the config may be the dashboard's.
 * **The token is the kinds, names and `resourceVersion`s of the objects**, as §60a says (the `resourceVersion`s), so any write to either object makes an old token stale, **the operator's
-  status writes included** (a Kubernetes API server gives an object a new `resourceVersion` when its status changes: *unverified* here,
-  D5's cluster test shows it). The router answers `412` and the client reads again. Whether a save that changes nothing moves the token is the
-  backend's (`MemoryObjects` keeps it, as a server-side apply of an unchanged object is believed to: *unverified*), and callers must not depend on it. `MemoryObjects` numbers the
+  status writes included** (a Kubernetes API server gives an object a new `resourceVersion` when its status changes: *verified 2026-10-16*
+  by D5's cluster test, `the_status_of_the_operator_makes_a_token_stale_and_a_save_that_changes_nothing_keeps_it`). The router answers `412` and the client reads again. Whether a save that changes nothing moves the token is the
+  backend's (`MemoryObjects` keeps it, as a server-side apply of an unchanged object does: *verified 2026-10-16* by the same test), and callers must not depend on it. `MemoryObjects` numbers the
   versions **per object** (kept after a delete), so that two objects often share one, which is what makes the token's kind and name testable.
 * **The status is the operator's.** A write never touches it.
 * **References are checked on a delete, not on a write.** An agent may name a model that is not there (the operator marks it
@@ -185,11 +185,11 @@ depending on `aap-api` and so on `kube`, would give every provider that depends 
   (`app.kubernetes.io/instance`): an object that has the dashboard's label and that one of those now syncs is still read as the dashboard's, and a save would fight it. An object
   **without** the label is GitOps's whoever applied it. Whoever hands a dashboard object to such a tool removes the label first (AD-031, *Adopt*, D16).
 
-**What `objects-kubernetes` (D5) must do** about the atomicity above, since a Kubernetes API server writes one object at a time: before the first write, **read both objects and compare the token,
+**What `objects-kubernetes` (D5) does** about the atomicity above, since a Kubernetes API server writes one object at a time: before the first write, **read both objects and compare the token,
 the owners and the services that name the config**; run both server-side applies with `dryRun=All`, each with the `resourceVersion` it was read at, so that a stale
 token on either object and a rule of the CRDs (a `422` on the service, which would come *after* the config was applied) are refused while nothing has changed; then apply the
 config and the service for real, each with its `resourceVersion`. The window that is left (somebody changes the service between the two real applies) leaves the config written and
-answers `PreconditionFailed`; a retry reads again and succeeds, and the create is retried over the config it left (taken over). That is the one place a refusal changes something, and D5's tests show it.
+answers `PreconditionFailed`; a retry reads again and succeeds, and the create is retried over the config it left (taken over). That is the one place a refusal changes something, and `aap-objects-kubernetes` shows it, on a fake API server and on a real one.
 
 The ownership of an object is the one thing a write changes and a person does not see, so here is its lifecycle (AD-031; the **Adopt** action is slice D16's,
 the takeover of `coder` and `chat`, and is not built):
@@ -312,7 +312,7 @@ Off by default (the controller and the providers depend on the traits only). Wit
   controller's unit tests: `set_foreign` (the adoption guard), `force_status` (a crash loop),
   `set_unavailable`, `set_cnpg_installed`, `set_cluster_ready`, `set_ready`. `MemoryObjects` refuses what is not an object and a
   `configRef` that is not the agent's name, and nothing else (no CEL); a write that changes nothing keeps the version (as a server-side
-  apply of an unchanged object is believed to: *unverified*). `MemoryAuthenticator` is a table of tokens (`with_token`, `grant`,
+  apply of an unchanged object does: *verified 2026-10-16*). `MemoryAuthenticator` is a table of tokens (`with_token`, `grant`,
   `set_unavailable`): it checks no signature.
 
 ```rust

@@ -212,7 +212,9 @@ pub struct Stored {
     pub labels: BTreeMap<String, String>,
     /// Its annotations, all of them.
     pub annotations: BTreeMap<String, String>,
-    /// Its `spec`, as JSON.
+    /// Its `spec`, as JSON, **as it was written**: the fields somebody set, not the defaults that an API server
+    /// adds to every object (`aap-objects-kubernetes` reads it through `metadata.managedFields`). What a
+    /// draft held is what the object holds.
     pub spec: Value,
     /// Its `status`, as JSON: what the operator observed. `None` for a kind that has none, and before
     /// the operator has written any. The dashboard never writes it.
@@ -469,7 +471,7 @@ impl Classify for ObjectsError {
     }
 }
 
-/// The dashboard's custom resources. Implemented on the API server by `objects-kubernetes` (D5, server-side
+/// The dashboard's custom resources. Implemented on the API server by `aap-objects-kubernetes` (D5, server-side
 /// apply with the field manager `agents.vymalo.com/dashboard`); `MemoryObjects` (feature `testkit`) is the
 /// reference. An implementation is bound to one namespace.
 ///
@@ -503,7 +505,7 @@ impl Classify for ObjectsError {
 ///   operator never sees a service whose config is not there yet); deleted in the other order. A write
 ///   that fails between the two does not leave a config that a retry of the create cannot take over.
 ///
-/// **What an implementation over an API server (D5) must do**, since two objects cannot be written
+/// **What an implementation over an API server must do (`aap-objects-kubernetes` does)**, since two objects cannot be written
 /// atomically there: before the first write, read both objects and compare the token and the owners;
 /// run both server-side applies with `dryRun=All` and each object's `resourceVersion` in the apply, so
 /// that a stale token on either object and a rule of the CRDs (a `422`) are refused while nothing has
