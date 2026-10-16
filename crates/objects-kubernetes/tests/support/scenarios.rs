@@ -38,6 +38,24 @@ async fn service_is_there(h: &Harness, name: &str) -> bool {
         .is_some()
 }
 
+/// Wait until the service `name` is being deleted (it has a `deletionTimestamp`): the moment the operator would start.
+/// What the operator does next is done after this, never at a time chosen in advance: the requests of a delete take as
+/// long as the API server takes, which grows with the objects an earlier run left.
+async fn wait_until_terminating(h: &Harness, name: &str) {
+    let deadline = Instant::now() + Duration::from_secs(60);
+    loop {
+        let found = h.raw(Kind::AgentService).get_opt(name).await.unwrap();
+        if found.is_some_and(|s| s.metadata.deletion_timestamp.is_some()) {
+            return;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "the service {name} never began to be deleted"
+        );
+        tokio::time::sleep(Duration::from_millis(5)).await;
+    }
+}
+
 /// **The data-loss case.** A person saves `deletionPolicy: Retain` over `Delete` and deletes the agent in one
 /// breath, the operator not having reconciled in between. The operator's finalizer honours the policy it can read:
 /// it needs the config (a config it cannot find leaves the remembered `Delete` standing, and the volumes and the
@@ -129,9 +147,11 @@ pub async fn a_delete_the_operator_finishes_in_time_removes_the_config(h: &Harne
     let agent = h.get_agent(&name).await.unwrap().unwrap();
 
     let objects = h.objects.clone().with_delete_wait(Duration::from_secs(20));
+    // The operator reacts to the deletion: it finalizes once the service is being deleted, a moment later.
     let operator = {
         let (h, name) = (h.clone(), name.clone());
         tokio::spawn(async move {
+            wait_until_terminating(&h, &name).await;
             tokio::time::sleep(Duration::from_millis(200)).await;
             h.run_finalizer(&name).await;
         })
@@ -174,7 +194,7 @@ pub async fn a_service_made_meanwhile_keeps_the_config(h: &Harness) {
     let meanwhile = {
         let (h, name, other) = (h.clone(), name.clone(), other.clone());
         tokio::spawn(async move {
-            tokio::time::sleep(Duration::from_millis(150)).await;
+            wait_until_terminating(&h, &name).await;
             h.seed_foreign(
                 Kind::AgentService,
                 &other,
