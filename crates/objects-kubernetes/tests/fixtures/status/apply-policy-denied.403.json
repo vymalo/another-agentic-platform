@@ -1,0 +1,19 @@
+{
+  "kind": "Status",
+  "apiVersion": "v1",
+  "metadata": {},
+  "status": "Failure",
+  "message": "agentservices.agents.vymalo.com \"v1x\" is forbidden: ValidatingAdmissionPolicy 'frozen' with binding 'frozen' denied request: agents of this team are frozen",
+  "reason": "Forbidden",
+  "details": {
+    "name": "v1x",
+    "group": "agents.vymalo.com",
+    "kind": "agentservices",
+    "causes": [
+      {
+        "message": "ValidatingAdmissionPolicy 'frozen' with binding 'frozen' denied request: agents of this team are frozen"
+      }
+    ]
+  },
+  "code": 403
+}

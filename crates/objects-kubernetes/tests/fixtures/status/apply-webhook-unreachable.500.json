@@ -1,0 +1,16 @@
+{
+  "kind": "Status",
+  "apiVersion": "v1",
+  "metadata": {},
+  "status": "Failure",
+  "message": "Internal error occurred: failed calling webhook \"deny.example.com\": failed to call webhook: Post \"https://127.0.0.1:18443/validate?timeout=3s\": dial tcp 127.0.0.1:18443: connect: connection refused",
+  "reason": "InternalError",
+  "details": {
+    "causes": [
+      {
+        "message": "failed calling webhook \"deny.example.com\": failed to call webhook: Post \"https://127.0.0.1:18443/validate?timeout=3s\": dial tcp 127.0.0.1:18443: connect: connection refused"
+      }
+    ]
+  },
+  "code": 500
+}

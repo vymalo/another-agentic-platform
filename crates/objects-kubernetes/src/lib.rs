@@ -227,14 +227,61 @@ impl KubernetesObjects {
         if !mistakes.is_empty() {
             return Err(ObjectsError::Invalid(mistakes));
         }
-        let mut written = Vec::with_capacity(writes.len());
+        let mut written: Vec<Live> = Vec::with_capacity(writes.len());
         for write in writes {
-            match self.apply(write, false).await {
+            match self.apply_for_real(write).await {
                 Ok(live) => written.push(live),
-                Err(failure) => return Err(self.refused(write, failure).await),
+                Err(error) => {
+                    if let Some(first) = written.first() {
+                        // The one window: the first object is written and the second is not. Names and kinds, and a
+                        // fixed word for what went wrong; never a value, never the server's own words.
+                        tracing::warn!(
+                            namespace = %self.namespace,
+                            name = write.name,
+                            written = %first.stored.kind,
+                            failed = %write.kind,
+                            outcome = outcome(&error),
+                            "an agent was written halfway: its config is written and its service is not; a retry reads both again"
+                        );
+                    }
+                    return Err(error);
+                }
             }
         }
         Ok(written)
+    }
+
+    /// One real apply of `write`.
+    ///
+    /// A `409` about the version of an object that was read is looked into **once**: the operator writes the `status`
+    /// of a service when its config changes (and the status of the config when it has resolved it), which gives the
+    /// object a new `resourceVersion` between the dry run and this apply without changing anything the person's save is
+    /// about. When the object is the one that was read, with the same `spec`, labels and annotations, and is not being
+    /// deleted, the apply is repeated once with the version it has now. Anything else is a lost race.
+    async fn apply_for_real(&self, write: &Write<'_>) -> Result<Live, ObjectsError> {
+        let failure = match self.apply(write, false).await {
+            Ok(live) => return Ok(live),
+            Err(failure) => failure,
+        };
+        let (Failure::Version, Guard::Exactly(read)) = (&failure, &write.guard) else {
+            return Err(self.refused(write, failure).await);
+        };
+        let now = self.get(write.kind, write.name).await?;
+        match now {
+            Some(now) if now.only_moved_since(read) => {
+                let again = Write::new(write.kind, write.name, write.spec, Guard::of(Some(&now)));
+                match self.apply(&again, false).await {
+                    Ok(live) => Ok(live),
+                    Err(failure) => Err(self.refused(&again, failure).await),
+                }
+            }
+            now => Err(write_race_outcome(
+                write.kind,
+                write.name,
+                &write.guard,
+                now.as_ref(),
+            )),
+        }
     }
 
     /// What a refused apply of `write` is, for the person.
@@ -254,24 +301,11 @@ impl KubernetesObjects {
         }
     }
 
-    /// The object changed, or was made or deleted, between the read and the write: what that is.
+    /// A write found the object changed, or made or deleted, since it was read: what that is.
     async fn lost_race(&self, kind: Kind, name: &str, guard: &Guard) -> ObjectsError {
-        let now = match self.get(kind, name).await {
-            Ok(now) => now,
-            Err(error) => return error,
-        };
-        // The agent is its service, and a shared object is itself: the config is one half of a token.
-        let primary = kind != Kind::AgentConfig;
-        match (guard, now) {
-            (Guard::Absent, Some(_)) if primary => ObjectsError::AlreadyExists {
-                kind,
-                name: name.to_owned(),
-            },
-            (Guard::Exactly { .. }, None) if primary => ObjectsError::NotFound {
-                kind,
-                name: name.to_owned(),
-            },
-            _ => ObjectsError::PreconditionFailed,
+        match self.get(kind, name).await {
+            Ok(now) => write_race_outcome(kind, name, guard, now.as_ref()),
+            Err(error) => error,
         }
     }
 
@@ -306,7 +340,10 @@ impl KubernetesObjects {
                     kind,
                     name: name.to_owned(),
                 },
-                Failure::Version => self.lost_race(kind, name, &Guard::of(Some(live))).await,
+                Failure::Version => match self.get(kind, name).await {
+                    Ok(now) => race_outcome(kind, name, &Guard::of(Some(live)), now.as_ref()),
+                    Err(error) => error,
+                },
                 other => failed(&resource(kind), other),
             }),
         }
@@ -462,25 +499,47 @@ fn outcome(error: &ObjectsError) -> &'static str {
     }
 }
 
+/// What a write that lost a race is, from the object as it is now (`None`: it is not there).
+///
+/// **Only the primary kind of a write is told as `AlreadyExists` and `NotFound`**: the agent is its service, and a shared
+/// object is itself, while the config is one half of the agent's token, so that a config made or deleted between the read
+/// and the apply is a token that went stale (`PreconditionFailed`) and not a missing agent.
+fn race_outcome(kind: Kind, name: &str, guard: &Guard, now: Option<&Live>) -> ObjectsError {
+    let primary = kind != Kind::AgentConfig;
+    match (guard, now) {
+        (Guard::Absent, Some(_)) if primary => ObjectsError::AlreadyExists {
+            kind,
+            name: name.to_owned(),
+        },
+        (Guard::Exactly(_), None) if primary => ObjectsError::NotFound {
+            kind,
+            name: name.to_owned(),
+        },
+        _ => ObjectsError::PreconditionFailed,
+    }
+}
+
+/// [`race_outcome`] of a write: an object that began to be deleted in the meantime is told as such.
+fn write_race_outcome(kind: Kind, name: &str, guard: &Guard, now: Option<&Live>) -> ObjectsError {
+    match now {
+        Some(live) if live.stored.deleting => deleting(live),
+        now => race_outcome(kind, name, guard, now),
+    }
+}
+
 /// What a write needs of the object it finds.
 enum Guard {
     /// Nothing: the dry run that only collects mistakes.
     Unbound,
     /// The object must not be there: the create.
     Absent,
-    /// The object must be the one that was read.
-    Exactly { uid: String, version: String },
+    /// The object must be the one that was read, at the version it was read at.
+    Exactly(Box<Live>),
 }
 
 impl Guard {
     fn of(found: Option<&Live>) -> Self {
-        match found {
-            Some(live) => Self::Exactly {
-                uid: live.uid.clone(),
-                version: live.version().to_owned(),
-            },
-            None => Self::Absent,
-        }
+        found.map_or(Self::Absent, |live| Self::Exactly(Box::new(live.clone())))
     }
 }
 
@@ -513,10 +572,10 @@ impl<'a> Write<'a> {
         match &self.guard {
             Guard::Unbound => {}
             Guard::Absent => metadata["resourceVersion"] = json!(NEVER),
-            Guard::Exactly { uid, version } => {
-                metadata["resourceVersion"] = json!(version);
-                if !uid.is_empty() {
-                    metadata["uid"] = json!(uid);
+            Guard::Exactly(read) => {
+                metadata["resourceVersion"] = json!(read.version());
+                if !read.uid.is_empty() {
+                    metadata["uid"] = json!(read.uid);
                 }
             }
         }

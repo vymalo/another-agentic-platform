@@ -8,6 +8,8 @@
 
 mod support;
 
+use std::sync::{Arc, Mutex};
+
 use aap_objects_kubernetes::{FIELD_MANAGER, KubernetesObjects, NEVER};
 use aap_ports::testkit::{ObjectsUnderTest, sample_agent, sample_shared, unique};
 use aap_ports::{
@@ -506,6 +508,362 @@ async fn a_replace_never_brings_back_a_service_deleted_between_the_read_and_the_
     );
 }
 
+/// The calls that wrote something for real and were accepted, of one kind.
+fn written(fake: &Fake, plural: &str) -> Vec<Call> {
+    changes(fake)
+        .into_iter()
+        .filter(|c| c.succeeded() && c.plural() == plural && c.is_apply())
+        .collect()
+}
+
+/// The warnings the crate logs while it runs, as text.
+#[derive(Clone, Default)]
+struct Logs(Arc<Mutex<Vec<u8>>>);
+
+impl Logs {
+    /// Log into this, at `WARN` and above, until the guard is dropped. The runtime of `#[tokio::test]` has one thread,
+    /// so the default subscriber of the thread is the one every await runs under.
+    fn capture() -> (Self, tracing::subscriber::DefaultGuard) {
+        let logs = Self::default();
+        let sink = logs.clone();
+        let subscriber = tracing_subscriber::fmt()
+            .with_writer(move || sink.clone())
+            .with_ansi(false)
+            .with_max_level(tracing::Level::WARN)
+            .finish();
+        (logs, tracing::subscriber::set_default(subscriber))
+    }
+
+    fn text(&self) -> String {
+        String::from_utf8_lossy(&self.0.lock().unwrap()).into_owned()
+    }
+}
+
+impl std::io::Write for Logs {
+    fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+        self.0.lock().unwrap().extend_from_slice(bytes);
+        Ok(bytes.len())
+    }
+    fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
+    }
+}
+
+#[tokio::test]
+async fn what_the_operator_writes_between_the_two_applies_does_not_stop_the_save() {
+    // The operator writes the `status` of a service when its config changes, and puts its finalizer on a service it has
+    // just seen: the `resourceVersion` moves, and what the save is about does not.
+    for what in ["a status", "a finalizer"] {
+        let (fake, h) = setup();
+        let (name, draft, agent) = made(&h).await;
+        fake.clear_calls();
+        let changed = reconfigured(&retitled(&draft, "Changed"), "another-model");
+        let service = name.clone();
+        fake.before_the_next_real_apply("agentservices", &name, move |s| {
+            if what == "a status" {
+                s.apply_status_as(
+                    "aap-operator",
+                    "agentservices",
+                    &service,
+                    json!({ "observedGeneration": 2 }),
+                );
+            } else {
+                s.add_finalizer("agentservices", &service, "agents.vymalo.com/runtime");
+            }
+        });
+        let before =
+            fake.stored("agentservices", &name).unwrap()["metadata"]["resourceVersion"].clone();
+        let saved = h
+            .put_agent(&changed, &Precondition::Matches(agent.etag()))
+            .await
+            .unwrap_or_else(|e| panic!("{what}: {e:?}"));
+        assert_eq!(
+            saved.service.spec["registry"]["title"],
+            json!("Changed"),
+            "{what}"
+        );
+        assert_eq!(
+            saved.config.as_ref().unwrap().spec["model"]["model"],
+            json!("another-model"),
+            "{what}"
+        );
+
+        // The service was applied twice: the version it was read at was refused, and the one it had then was not.
+        let applies = written(&fake, "agentservices");
+        assert_eq!(applies.len(), 1, "{what}: one accepted apply");
+        let tries: Vec<Value> = asked(&fake)
+            .into_iter()
+            .filter(|c| c.plural() == "agentservices" && c.is_apply() && !c.dry_run())
+            .map(|c| c.body.unwrap()["metadata"]["resourceVersion"].clone())
+            .collect();
+        assert_eq!(tries.len(), 2, "{what}: {tries:?}");
+        assert_eq!(
+            tries[0], before,
+            "{what}: the first names the version that was read"
+        );
+        assert_ne!(
+            tries[1], before,
+            "{what}: the second names the version it has now"
+        );
+        let service = fake.stored("agentservices", &name).unwrap();
+        assert_eq!(
+            service["spec"]["registry"]["title"],
+            json!("Changed"),
+            "{what}"
+        );
+    }
+}
+
+#[tokio::test]
+async fn what_the_save_is_about_changing_between_the_two_applies_stops_it_with_the_config_written()
+{
+    // Not a status: a label, an annotation (a field of the spec is `when_the_service_changes_between_the_two_applies...`).
+    // Whatever it is, the person saved over a service that is no longer the one they read, and is told so (`412`); the
+    // config was written first and stays so.
+    for what in ["a label", "an annotation"] {
+        let (fake, h) = setup();
+        let (name, draft, agent) = made(&h).await;
+        fake.clear_calls();
+        let changed = reconfigured(&retitled(&draft, "Changed"), "another-model");
+        let service = name.clone();
+        fake.before_the_next_real_apply("agentservices", &name, move |s| {
+            let patch = if what == "a label" {
+                json!({ "metadata": { "labels": { "team": "x" } } })
+            } else {
+                json!({ "metadata": { "annotations": { "note": "x" } } })
+            };
+            s.merge_as("kubectl-edit", "agentservices", &service, patch);
+        });
+        let err = h
+            .put_agent(&changed, &Precondition::Matches(agent.etag()))
+            .await
+            .unwrap_err();
+        assert!(
+            matches!(err, ObjectsError::PreconditionFailed),
+            "{what}: {err:?}"
+        );
+        let config = fake.stored("agentconfigs", &name).unwrap();
+        assert_eq!(
+            config["spec"]["model"]["model"],
+            json!("another-model"),
+            "{what}"
+        );
+        let service = fake.stored("agentservices", &name).unwrap();
+        assert_ne!(
+            service["spec"]["registry"]["title"],
+            json!("Changed"),
+            "{what}"
+        );
+        assert!(
+            written(&fake, "agentservices").is_empty(),
+            "{what}: the service was not applied"
+        );
+        assert_eq!(
+            asked(&fake)
+                .iter()
+                .filter(|c| c.plural() == "agentservices" && c.is_apply() && !c.dry_run())
+                .count(),
+            1,
+            "{what}: and it was not tried a second time"
+        );
+    }
+}
+
+#[tokio::test]
+async fn a_service_that_began_to_be_deleted_between_the_two_applies_is_told_so() {
+    let (fake, h) = setup();
+    let (name, draft, agent) = made(&h).await;
+    let service = name.clone();
+    fake.before_the_next_real_apply("agentservices", &name, move |s| {
+        s.add_finalizer("agentservices", &service, "agents.vymalo.com/runtime");
+        s.begin_delete("agentservices", &service);
+    });
+    let err = h
+        .put_agent(
+            &retitled(&draft, "Late"),
+            &Precondition::Matches(agent.etag()),
+        )
+        .await
+        .unwrap_err();
+    assert!(
+        matches!(&err, ObjectsError::Deleting { kind: Kind::AgentService, name: n } if *n == name),
+        "{err:?}"
+    );
+}
+
+#[tokio::test]
+async fn a_service_apply_that_fails_leaves_the_config_written_and_says_why_and_a_retry_succeeds() {
+    // The window, from the other side: the service is not changed by anybody, the API server fails the apply.
+    for what in ["unavailable", "field conflict"] {
+        let (fake, h) = setup();
+        let (name, draft, agent) = made(&h).await;
+        fake.clear_calls();
+        let changed = reconfigured(&retitled(&draft, "Changed"), "another-model");
+        let service = name.clone();
+        if what == "unavailable" {
+            fake.fail_the_next_real_apply_of("agentservices", &name, 503);
+        } else {
+            // Somebody takes the title with `force`: the dashboard's apply of another title is theirs to refuse.
+            fake.before_the_next_real_apply("agentservices", &name, move |s| {
+                let body = json!({
+                    "apiVersion": "agents.vymalo.com/v1alpha1", "kind": "AgentService",
+                    "metadata": { "name": service }, "spec": { "registry": { "title": "Theirs" } },
+                });
+                s.apply_as("kubectl-edit", true, "agentservices", &service, body);
+            });
+        }
+        let (logs, guard) = Logs::capture();
+        let err = h
+            .put_agent(&changed, &Precondition::Matches(agent.etag()))
+            .await
+            .unwrap_err();
+        drop(guard);
+        match (what, &err) {
+            ("unavailable", ObjectsError::Unavailable(_)) => {}
+            ("field conflict", ObjectsError::Conflict(m)) => {
+                assert!(m.contains("kubectl-edit"), "{m}")
+            }
+            _ => panic!("{what}: {err:?}"),
+        }
+        // The config is written, the service is not.
+        let config = fake.stored("agentconfigs", &name).unwrap();
+        assert_eq!(
+            config["spec"]["model"]["model"],
+            json!("another-model"),
+            "{what}"
+        );
+        let service = fake.stored("agentservices", &name).unwrap();
+        assert_ne!(
+            service["spec"]["registry"]["title"],
+            json!("Changed"),
+            "{what}"
+        );
+
+        // And it is logged: which agent, which half, and a fixed word; no value of the draft, none of the server's.
+        let log = logs.text();
+        assert!(log.contains("WARN"), "{what}: {log}");
+        assert!(log.contains(&name), "{what}: {log}");
+        assert!(
+            log.contains("AgentConfig") && log.contains("AgentService"),
+            "{what}: {log}"
+        );
+        for value in ["another-model", "Changed", "Theirs", "kubectl-edit", "503"] {
+            assert!(
+                !log.contains(value),
+                "{what}: the log holds {value:?}: {log}"
+            );
+        }
+
+        // A retry reads both again. An outage is over and it succeeds; a field that somebody else owns is theirs still,
+        // and the retry is refused by the dry run, before anything is written.
+        let seen = h.get_agent(&name).await.unwrap().unwrap();
+        let retry = h
+            .put_agent(&changed, &Precondition::Matches(seen.etag()))
+            .await;
+        if what == "unavailable" {
+            let saved = retry.unwrap_or_else(|e| panic!("{what}: {e:?}"));
+            assert_eq!(
+                saved.service.spec["registry"]["title"],
+                json!("Changed"),
+                "{what}"
+            );
+        } else {
+            assert!(
+                matches!(retry, Err(ObjectsError::Conflict(_))),
+                "{what}: {retry:?}"
+            );
+        }
+    }
+}
+
+#[tokio::test]
+async fn a_create_whose_service_apply_fails_leaves_a_config_that_the_next_create_takes_over() {
+    let (fake, h) = setup();
+    let name = unique("ag");
+    let draft = sample_agent(&name);
+    fake.fail_the_next_real_apply_of("agentservices", &name, 503);
+    let err = h
+        .put_agent(&draft, &Precondition::DoesNotExist)
+        .await
+        .unwrap_err();
+    assert!(matches!(err, ObjectsError::Unavailable(_)), "{err:?}");
+    assert!(
+        fake.stored("agentconfigs", &name).is_some(),
+        "the config is written"
+    );
+    assert!(fake.stored("agentservices", &name).is_none());
+    assert_eq!(
+        h.get_agent(&name).await.unwrap(),
+        None,
+        "a config alone is not an agent"
+    );
+    assert!(
+        h.list_orphans()
+            .await
+            .unwrap()
+            .iter()
+            .any(|o| o.name == name),
+        "it is an orphan, and can be deleted by name"
+    );
+    h.put_agent(&draft, &Precondition::DoesNotExist)
+        .await
+        .expect("the next create takes the config over");
+}
+
+#[tokio::test]
+async fn a_config_deleted_between_the_read_and_the_apply_is_a_stale_token_and_not_a_missing_agent()
+{
+    let (fake, h) = setup();
+    let (name, draft, agent) = made(&h).await;
+    fake.clear_calls();
+    let config = name.clone();
+    fake.before_the_next_real_apply("agentconfigs", &name, move |s| {
+        s.remove("agentconfigs", &config)
+    });
+    let err = h
+        .put_agent(
+            &retitled(&draft, "Late"),
+            &Precondition::Matches(agent.etag()),
+        )
+        .await
+        .unwrap_err();
+    // The agent is its service, and the service is there: only the token (the config is half of it) is stale.
+    assert!(matches!(err, ObjectsError::PreconditionFailed), "{err:?}");
+    assert!(
+        fake.stored("agentconfigs", &name).is_none(),
+        "it stays deleted"
+    );
+    assert!(
+        written(&fake, "agentservices").is_empty(),
+        "the service was not touched"
+    );
+}
+
+#[tokio::test]
+async fn a_config_made_between_the_read_and_the_apply_is_a_stale_token_and_not_an_existing_agent() {
+    let (fake, h) = setup();
+    let name = unique("ag");
+    let draft = sample_agent(&name);
+    let (config, theirs) = (name.clone(), draft.config.clone());
+    fake.before_the_next_real_apply("agentconfigs", &name, move |s| {
+        let body = json!({
+            "apiVersion": "agents.vymalo.com/v1alpha1", "kind": "AgentConfig",
+            "metadata": { "name": config }, "spec": theirs,
+        });
+        // Another administrator, through the dashboard, creating the same agent at the same time.
+        s.apply_as(FIELD_MANAGER, false, "agentconfigs", &config, body);
+    });
+    let err = h
+        .put_agent(&draft, &Precondition::DoesNotExist)
+        .await
+        .unwrap_err();
+    assert!(matches!(err, ObjectsError::PreconditionFailed), "{err:?}");
+    // The create stopped before the service: theirs is the config, and no service was made.
+    assert!(fake.stored("agentconfigs", &name).is_some());
+    assert!(fake.stored("agentservices", &name).is_none());
+    assert!(written(&fake, "agentservices").is_empty());
+}
+
 // ------------------------------------------------------------------ deletes
 
 #[tokio::test]
@@ -569,6 +927,75 @@ async fn a_config_the_operator_wrote_to_after_the_dry_run_goes_with_its_service(
     assert!(
         fake.stored("agentconfigs", &name).is_none(),
         "the config is bound to its uid and not to its version"
+    );
+}
+
+#[tokio::test]
+async fn a_config_that_goes_before_its_delete_is_not_an_error() {
+    // The agent is gone, which is what was asked: whoever took the config took it.
+    let (fake, h) = setup();
+    let (name, _, agent) = made(&h).await;
+    let config = name.clone();
+    fake.before_the_next_delete_of("agentconfigs", &name, move |s| {
+        s.remove("agentconfigs", &config)
+    });
+    h.delete_agent(&name, &agent.etag()).await.unwrap();
+    assert!(fake.stored("agentservices", &name).is_none());
+    assert!(fake.stored("agentconfigs", &name).is_none());
+}
+
+#[tokio::test]
+async fn a_config_made_again_before_its_delete_is_left_to_whoever_made_it() {
+    let (fake, h) = setup();
+    let (name, draft, agent) = made(&h).await;
+    let old = fake.stored("agentconfigs", &name).unwrap()["metadata"]["uid"].clone();
+    let (config, theirs) = (name.clone(), draft.config.clone());
+    fake.before_the_next_delete_of("agentconfigs", &name, move |s| {
+        s.remove("agentconfigs", &config);
+        let body = json!({
+            "apiVersion": "agents.vymalo.com/v1alpha1", "kind": "AgentConfig",
+            "metadata": { "name": config }, "spec": theirs,
+        });
+        s.apply_as("gitops-author", false, "agentconfigs", &config, body);
+    });
+    h.delete_agent(&name, &agent.etag()).await.unwrap();
+    assert!(fake.stored("agentservices", &name).is_none());
+    let config = fake
+        .stored("agentconfigs", &name)
+        .expect("the new config is left");
+    assert_ne!(
+        config["metadata"]["uid"], old,
+        "it is another object than the one that was read"
+    );
+}
+
+#[tokio::test]
+async fn an_orphan_config_that_goes_before_its_delete_is_not_found() {
+    let (fake, h) = setup();
+    let name = unique("half");
+    h.seed_orphan_config(&name, sample_agent(&name).config)
+        .await;
+    let orphan = h
+        .list_orphans()
+        .await
+        .unwrap()
+        .into_iter()
+        .find(|o| o.name == name)
+        .unwrap();
+    let config = name.clone();
+    fake.before_the_next_delete_of("agentconfigs", &name, move |s| {
+        s.remove("agentconfigs", &config)
+    });
+    let err = h.delete_agent(&name, &orphan.etag()).await.unwrap_err();
+    assert!(
+        matches!(
+            &err,
+            ObjectsError::NotFound {
+                kind: Kind::AgentService,
+                ..
+            }
+        ),
+        "{err:?}"
     );
 }
 

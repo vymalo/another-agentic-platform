@@ -1,0 +1,9 @@
+{
+  "kind": "Status",
+  "apiVersion": "v1",
+  "metadata": {},
+  "status": "Failure",
+  "message": "Request entity too large: limit is 3145728",
+  "reason": "RequestEntityTooLarge",
+  "code": 413
+}

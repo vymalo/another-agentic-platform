@@ -1,0 +1,14 @@
+{
+  "kind": "Status",
+  "apiVersion": "v1",
+  "metadata": {},
+  "status": "Failure",
+  "message": "agentservices.agents.vymalo.com \"x\" is forbidden: User \"dashboard\" cannot patch resource \"agentservices\" in API group \"agents.vymalo.com\" in the namespace \"default\"",
+  "reason": "Forbidden",
+  "details": {
+    "name": "x",
+    "group": "agents.vymalo.com",
+    "kind": "agentservices"
+  },
+  "code": 403
+}

@@ -44,6 +44,17 @@ impl Live {
         self.stored.version.as_str()
     }
 
+    /// Whether this is the object `earlier` was, and what moved since is not what a save is about: the same `uid`, not
+    /// being deleted, with the same `spec`, labels and annotations. The `resourceVersion` moves with a write of the
+    /// `status` (the operator's) and with a finalizer, and the `status` is in no apply of the dashboard.
+    pub(crate) fn only_moved_since(&self, earlier: &Self) -> bool {
+        self.uid == earlier.uid
+            && !self.stored.deleting
+            && self.stored.spec == earlier.stored.spec
+            && self.stored.labels == earlier.stored.labels
+            && self.stored.annotations == earlier.stored.annotations
+    }
+
     pub(crate) fn from_object(kind: Kind, namespace: &str, object: DynamicObject) -> Self {
         let meta = object.metadata;
         let owned = owned_by_someone(&meta);

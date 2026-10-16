@@ -1,6 +1,6 @@
 //! What an answer of the API server means for a write or a read.
 //!
-//! The mapping is held by `tests/status.rs` against `Status` bodies **captured from a kube-apiserver
+//! The mapping is held by this file's own tests against `Status` bodies **captured from a kube-apiserver
 //! v1.35.8** (`tests/fixtures/status`), not against bodies written from memory: three of the answers are
 //! not what the API conventions suggest, and each is in a fixture.
 //!
@@ -13,6 +13,20 @@
 //!   manager owns is a `409 Conflict` **with a `FieldManagerConflict` cause**. Both have the reason `Conflict`.
 //! * A `uid` that is not the object's is a `422` ("field is immutable") for an object that exists, and a `409`
 //!   for one that does not.
+//! * **An admission controller can refuse a write that is correct**, and a person must be told so, not that the
+//!   dashboard is down: a validating webhook that denies is `admission webhook "<name>" denied the request[: <why>]`
+//!   with the code the webhook chose (a `400` if it chose none, a `403`, ...), and a `ValidatingAdmissionPolicy` that
+//!   denies is a `403` (or a `422`) `... is forbidden: ValidatingAdmissionPolicy '<name>' with binding '<binding>' denied
+//!   request: <why>`. Both are [`Failure::Invalid`] on the body as a whole (`spec`), in the server's words, which a
+//!   person who administers the cluster wrote. **A webhook that cannot be asked** is not that: one that does not
+//!   support a dry run (`sideEffects` other than `None` or `NoneOnDryRun`) is a `400` `admission webhook "<name>" does
+//!   not support dry run` and is [`Failure::Internal`] (the dashboard cannot write atomically through it, a retry will not
+//!   help, and the person cannot fix it: the deployment must), and one that cannot be reached with `failurePolicy: Fail`
+//!   is a `500` `failed calling webhook` and is [`Failure::Unavailable`].
+//! * **A body too large** is a `413` `Request entity too large: limit is 3145728` (the API server's limit), or a `500`
+//!   `etcdserver: request is too large` (etcd's, about 1.5 MiB) or `rpc error: code = ResourceExhausted desc = trying
+//!   to send message larger than max (...)` (the API server's client of etcd, 2 MiB): all three are the person's body and
+//!   are [`Failure::Invalid`], not an outage that a retry would cure.
 
 use aap_ports::{FieldError, Kind};
 use kube::core::Status;
@@ -60,6 +74,23 @@ const FIELD_MANAGER_CONFLICT: &str = "FieldManagerConflict";
 /// The beginning of the message of a body the schema refuses (`structuredmerge.go` of the API server).
 const TYPED_PATCH: &str = "failed to create typed patch object (";
 
+/// The beginning of the message of an admission webhook (`k8s.io/apiserver/pkg/admission/plugin/webhook/errors`:
+/// `admission webhook "<name>" denied the request[: <why>]`, `... does not support dry run`).
+const WEBHOOK: &str = "admission webhook \"";
+
+/// What a webhook that refuses says after its name.
+const WEBHOOK_DENIED: &str = "\" denied the request";
+
+/// What a `ValidatingAdmissionPolicy` that refuses says (`... is forbidden: ValidatingAdmissionPolicy 'p' with binding 'b'
+/// denied request: <why>`).
+const POLICY_DENIED: &str = ": ValidatingAdmissionPolicy '";
+
+/// The words of a body that does not fit: etcd's limit on a request, and the limit of the API server's own client of etcd.
+const ETCD_TOO_LARGE: &[&str] = &[
+    "etcdserver: request is too large",
+    "trying to send message larger than max",
+];
+
 /// The cause the API server adds when it has stopped checking the CEL rules because a schema error came first.
 const NOT_CHECKED: &str = "some validation rules were not checked because the object was invalid";
 
@@ -94,14 +125,37 @@ fn verdict(status: &Status) -> Verdict {
         404 => Verdict::Is(Failure::NotServed),
         409 if status.reason == "AlreadyExists" => Verdict::Is(Failure::AlreadyExists),
         409 => Verdict::Is(conflict(status)),
+        // An admission controller said no to a body that was correct: the person's to know, as a mistake of the form.
+        400 | 403 if is_admission_denial(&status.message) => {
+            Verdict::Is(Failure::Invalid(whole_body(status)))
+        }
         422 => Verdict::Is(unprocessable(status)),
+        413 => Verdict::Is(Failure::Invalid(whole_body(status))),
         500 if status.message.starts_with(TYPED_PATCH) => {
             Verdict::Is(Failure::Invalid(typed_patch(&status.message)))
+        }
+        500 if ETCD_TOO_LARGE.iter().any(|w| status.message.contains(w)) => {
+            Verdict::Is(Failure::Invalid(whole_body(status)))
         }
         // `401` and `403` are an RBAC rule that is missing or has not propagated, as in the other providers.
         401 | 403 | 408 | 425 | 429 | 500..=599 => Verdict::Unavailable,
         _ => Verdict::Internal,
     }
+}
+
+/// Whether an admission controller refused the write: a webhook that denied (and not one that cannot dry-run, which says
+/// `does not support dry run`), or a policy.
+fn is_admission_denial(message: &str) -> bool {
+    (message.starts_with(WEBHOOK) && message.contains(WEBHOOK_DENIED))
+        || message.contains(POLICY_DENIED)
+}
+
+/// The body as a whole is what is wrong, in the words of the server: an error of the form, not of a field.
+fn whole_body(status: &Status) -> Vec<Problem> {
+    vec![Problem {
+        path: "spec".to_owned(),
+        message: status.message.clone(),
+    }]
 }
 
 fn causes(status: &Status) -> &[StatusCause] {
@@ -381,8 +435,9 @@ mod tests {
             Failure::AlreadyExists
         ));
         // The plain text `404 page not found` of a kind the server does not have, as the client reconstructs it.
-        let status =
-            Status::failure("404 page not found\n", "Failed to parse error data").with_code(404);
+        let text = include_str!("../tests/fixtures/status/unserved-kind.404.txt");
+        assert_eq!(text, "404 page not found\n");
+        let status = Status::failure(text, "Failed to parse error data").with_code(404);
         assert!(matches!(
             classify(kube::Error::Api(Box::new(status))),
             Failure::NotServed
@@ -422,6 +477,106 @@ mod tests {
             classify(kube::Error::Service("connection refused".into())),
             Failure::Unavailable(_)
         ));
+    }
+
+    // ------------------------------------------------------------------ an admission controller says no
+
+    #[test]
+    fn an_admission_webhook_that_denies_is_invalid_with_its_words_whatever_code_it_chose() {
+        // A `400` when the webhook chose no code, and the code it chose (a `403`) when it did.
+        let got = problems(classify(fixture!("apply-webhook-denied.400.json")));
+        assert_eq!(
+            got,
+            vec![(
+                "spec".to_owned(),
+                "admission webhook \"deny.example.com\" denied the request without explanation"
+                    .to_owned()
+            )]
+        );
+        let got = problems(classify(fixture!("apply-webhook-denied.403.json")));
+        assert_eq!(
+            got,
+            vec![(
+                "spec".to_owned(),
+                "admission webhook \"deny.example.com\" denied the request: agents of this team are frozen"
+                    .to_owned()
+            )]
+        );
+    }
+
+    #[test]
+    fn a_policy_that_denies_is_invalid_with_its_words_whatever_code_it_chose() {
+        for file in [
+            fixture!("apply-policy-denied.403.json"),
+            fixture!("apply-policy-denied.422.json"),
+        ] {
+            let got = problems(classify(file));
+            assert_eq!(got.len(), 1, "{got:?}");
+            assert_eq!(got[0].0, "spec");
+            assert!(
+                got[0]
+                    .1
+                    .contains("denied request: agents of this team are frozen"),
+                "{got:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_webhook_that_cannot_be_asked_is_not_a_denial() {
+        // `failurePolicy: Fail` and nobody answering: an outage, which a retry may cure.
+        assert!(matches!(
+            classify(fixture!("apply-webhook-unreachable.500.json")),
+            Failure::Unavailable(_)
+        ));
+        // A webhook that has no dry run to give (*verified 2026-10-16* in the source of k8s.io/apiserver v0.35.8,
+        // `NewDryRunUnsupportedErr`: `apierrors.NewBadRequest`; not captured, because `admissionregistration.k8s.io/v1`
+        // refuses the `sideEffects` that would make a webhook say it): the dashboard cannot write atomically through it,
+        // a retry will not help and the person cannot fix it. It is the deployment's, so `Internal`, not `Invalid`.
+        let status = Status::failure(
+            "admission webhook \"old.example.com\" does not support dry run",
+            "BadRequest",
+        )
+        .with_code(400);
+        assert!(matches!(
+            classify(kube::Error::Api(Box::new(status))),
+            Failure::Internal(_)
+        ));
+    }
+
+    #[test]
+    fn a_missing_right_stays_an_outage_and_is_not_taken_for_a_policy() {
+        // `401` and `403` are an RBAC rule that is missing or has not propagated, as in the other providers.
+        assert!(matches!(
+            classify(fixture!("apply-forbidden-rbac.403.json")),
+            Failure::Unavailable(_)
+        ));
+    }
+
+    #[test]
+    fn a_body_that_is_too_large_is_invalid_and_not_an_outage() {
+        // The API server's own limit: a `413` with a reason.
+        let got = problems(classify(fixture!("apply-too-large.413.json")));
+        assert_eq!(
+            got,
+            vec![(
+                "spec".to_owned(),
+                "Request entity too large: limit is 3145728".to_owned()
+            )]
+        );
+        // etcd's, and the limit of the API server's client of etcd: a `500` with no reason.
+        let got = problems(classify(fixture!("apply-etcd-too-large.500.json")));
+        assert_eq!(
+            got,
+            vec![(
+                "spec".to_owned(),
+                "etcdserver: request is too large".to_owned()
+            )]
+        );
+        let got = problems(classify(fixture!("apply-etcd-grpc-too-large.500.json")));
+        assert_eq!(got.len(), 1, "{got:?}");
+        assert_eq!(got[0].0, "spec");
+        assert!(got[0].1.contains("larger than max"), "{got:?}");
     }
 
     #[test]

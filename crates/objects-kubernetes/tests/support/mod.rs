@@ -152,6 +152,8 @@ pub struct State {
     unserved: BTreeSet<String>,
     hooks: Vec<Hook>,
     delete_hooks: Vec<Hook>,
+    /// An apply of an object that fails once with this code, before anything is changed: `(plural, name, code)`.
+    failing_applies: Vec<(String, String, u16)>,
 }
 
 /// The fake server. Clones share one state.
@@ -245,6 +247,14 @@ impl Fake {
             name: name.to_owned(),
             run: Box::new(edit),
         });
+    }
+
+    /// The next apply that is not a dry run of the object fails with this HTTP status, and changes nothing: the API
+    /// server is unavailable for one request, between the dry runs and the real writes.
+    pub fn fail_the_next_real_apply_of(&self, plural: &str, name: &str, code: u16) {
+        lock(&self.state)
+            .failing_applies
+            .push((plural.to_owned(), name.to_owned(), code));
     }
 
     /// Run `edit` once, just before the next apply that is not a dry run of the object: somebody else got there
@@ -596,7 +606,11 @@ impl State {
             return status(404, "NotFound", "not a path of the fake", json!({}));
         };
         if self.unserved.contains(t.plural) {
-            return (404, Value::String("404 page not found\n".to_owned()));
+            // The body captured from the real thing: plain text, no `Status`.
+            return (
+                404,
+                Value::String(include_str!("../fixtures/status/unserved-kind.404.txt").to_owned()),
+            );
         }
         match (call.method.as_str(), t.name) {
             ("GET", None) => self.list(t.plural, call),
@@ -891,6 +905,20 @@ impl State {
             let hook = self.hooks.remove(i);
             (hook.run)(self);
         }
+        if !call.dry_run()
+            && let Some(i) = self
+                .failing_applies
+                .iter()
+                .position(|(p, n, _)| p == plural && n == name)
+        {
+            let (_, _, code) = self.failing_applies.remove(i);
+            return status(
+                code,
+                "ServiceUnavailable",
+                "the fake is failing once on purpose",
+                json!({}),
+            );
+        }
         let Some(patch) = call.body.clone() else {
             return status(400, "BadRequest", "no body", json!({}));
         };
@@ -1081,6 +1109,22 @@ impl State {
     /// Delete an object as somebody else (for a hook).
     pub fn remove(&mut self, plural: &str, name: &str) {
         self.objects.remove(&key(plural, name));
+    }
+
+    /// Begin to delete an object as somebody else (for a hook): `kubectl delete`. An object with finalizers stays,
+    /// terminating.
+    pub fn begin_delete(&mut self, plural: &str, name: &str) {
+        let call = Call {
+            who: "somebody else",
+            method: "DELETE".to_owned(),
+            path: format!("/apis/agents.vymalo.com/v1alpha1/namespaces/aap-test/{plural}/{name}"),
+            query: BTreeMap::new(),
+            content_type: String::new(),
+            body: None,
+            code: 0,
+        };
+        let (code, body) = self.delete(plural, name, &call);
+        assert!(code < 300, "{code} {body}");
     }
 
     /// Put a finalizer on an object, as the operator does before it makes anything (for a hook): a merge patch by
