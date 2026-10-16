@@ -1772,13 +1772,14 @@ pub mod cases {
     }
 }
 
-/// Generate one `#[tokio::test]` per case of the objects suite. `$make` is a path to an
-/// `async fn() -> Option<O>` where `O: ObjectsUnderTest`; `None` skips the suite, unless
-/// `AAP_TEST_REQUIRE_BACKEND=1`, which fails it instead.
+/// Hand the names of **every case of the objects suite** to a macro: `agent_objects_cases!(my_macro!(arguments))` expands
+/// to `my_macro!(arguments; case, case, ...)`. The list is here once, so that what runs the whole suite in another
+/// way than [`agent_objects_conformance!`] (the rights a backend needs are derived from every request of every case)
+/// cannot run fewer cases than it.
 #[macro_export]
-macro_rules! agent_objects_conformance {
-    ($make:path) => {
-        $crate::agent_objects_conformance!(@cases $make;
+macro_rules! agent_objects_cases {
+    ($callback:path { $($args:tt)* }) => {
+        $callback!($($args)*;
             an_agent_is_created_and_read_back,
             a_second_create_is_refused_and_changes_nothing,
             a_replace_with_the_current_token_changes_the_agent,
@@ -1813,6 +1814,16 @@ macro_rules! agent_objects_conformance {
             no_read_carries_a_secret_value,
             an_unreachable_store_is_unavailable,
         );
+    };
+}
+
+/// Generate one `#[tokio::test]` per case of the objects suite. `$make` is a path to an
+/// `async fn() -> Option<O>` where `O: ObjectsUnderTest`; `None` skips the suite, unless
+/// `AAP_TEST_REQUIRE_BACKEND=1`, which fails it instead.
+#[macro_export]
+macro_rules! agent_objects_conformance {
+    ($make:path) => {
+        $crate::agent_objects_cases!($crate::agent_objects_conformance { @cases $make });
     };
     (@cases $make:path; $($case:ident),* $(,)?) => {
         $(

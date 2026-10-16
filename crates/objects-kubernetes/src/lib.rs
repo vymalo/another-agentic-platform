@@ -11,14 +11,44 @@
 //! (`dryRun=All`, each with the `resourceVersion` and the `uid` it read) and only then applies the `AgentConfig`
 //! and the `AgentService` for real. So a stale token on either object, a rule of the CRDs on either body, and a
 //! field another manager owns are all refused while nothing has changed. What remains is the window between the two
-//! real applies: when somebody changes the service in it, the config stays written and the answer is
-//! `PreconditionFailed`; a retry reads again and succeeds (a create takes the config it left over).
+//! real applies, and **every way out of it leaves the config written**, says why, and is logged at `warn` with the
+//! names and the kinds and no value:
+//!
+//! | The service, when its apply comes | The answer | A retry |
+//! |---|---|---|
+//! | only its `resourceVersion` moved (the operator wrote its `status`, or put its finalizer on) | none: the apply is repeated **once** with the version it has now, and the save succeeds | not needed |
+//! | its `spec`, labels or annotations changed, or it was made again (another `uid`), or it is gone | `PreconditionFailed` (`NotFound` for a replace of a service that is gone, `AlreadyExists` for a create over one) | reads both again, succeeds |
+//! | it began to be deleted | `Deleting` | after it is gone, as a create |
+//! | a field the apply sets is owned by another manager | `Conflict`, with the server's words | refused by the dry run, with nothing written, until they let go of the field |
+//! | the API server fails the apply (`5xx`, `429`, a timeout) | `Unavailable` | reads both again, succeeds when it is back |
+//!
+//! The config that a create leaves is a dashboard-owned config that no service names, which the next create takes over
+//! and which [`list_orphans`](aap_ports::AgentObjects::list_orphans) lists. The same repeat-once applies to the config
+//! apply and to a shared object's apply (nothing is half-written there: only the version moved).
+//!
+//! # A delete waits for the operator, and the config goes last
+//!
+//! The operator puts a finalizer on every service it sees. Its cleanup, when the finalizer runs, **reads the
+//! `AgentConfig` to honour `deletionPolicy`** (a person who saved `Retain` over `Delete` and deleted at once has had no
+//! reconcile in between), and a config it cannot read leaves the policy it remembers standing: the volumes and the
+//! database go. So a delete of an agent never deletes the config while the service is there. It deletes both as a dry run,
+//! then the service, then **waits for the service to go, for at most [`DELETE_WAIT`]** (5 s: long enough for the operator's
+//! reconcile, which the watch starts at once, short enough for an HTTP request that a person waits for), and only then
+//! lists the services once more and deletes the config, unless a service made meanwhile names it (a window of one request
+//! remains: a service made between that list and the config's delete loses its config, and the operator reports it
+//! `ConfigNotFound`). When the operator is not done in time the delete **returns anyway**: a delete returns once the service
+//! is gone or is being deleted, and the config goes when the service is gone. What is left is a dashboard-owned config that no
+//! service names, an *orphan*: `list_orphans` lists it with its token and a delete of its name removes it. A config that
+//! is GitOps's, or that a service names, is never deleted that way.
 //!
 //! # What a `resourceVersion` does in an apply (*verified 2026-10-16*, kube-apiserver v1.35.8)
 //!
-//! Kubernetes documents that a request may be made conditional on `resourceVersion`, for `PUT` and `PATCH`
-//! (<https://kubernetes.io/docs/reference/using-api/api-concepts/>, "Updates to existing resources"); it does not
-//! say what an *apply* does with one. Observed, by `tests/cluster.rs` and by hand:
+//! Kubernetes documents that a client that needs to detect lost updates should make its request conditional on the
+//! `resourceVersion`, "either HTTP PUT or HTTP PATCH"
+//! (<https://kubernetes.io/docs/reference/using-api/api-concepts/>, "Updates to existing resources", *verified
+//! 2026-10-16*: the page was fetched and read). It does not say what an *apply* does with one (the server-side apply page
+//! only says that a controller "doesn't have to" specify it, *verified* the same day), so it was observed, on the
+//! v1.35.8 only, by `tests/cluster.rs` and by hand:
 //!
 //! * an apply whose `metadata.resourceVersion` is not the object's is a `409 Conflict` (`the object has been
 //!   modified; please apply your changes to the latest version and try again`), **also when the apply would
@@ -28,16 +58,22 @@
 //!   read can never create the object again after somebody deleted it**;
 //! * an apply that names a `resourceVersion` for an object that is **not there** creates it (the version is
 //!   ignored). A create therefore names a version that no object has, [`NEVER`], so that an object made in the
-//!   meantime is a `409` and is never merged into;
+//!   meantime is a `409` and is never merged into. **That `"1"` is pinned on v1.35.8 only**: the API server writes
+//!   its own objects first, so an object never has version `1` there, and `tests/cluster.rs`
+//!   (`a_create_names_a_version_no_object_has_and_never_merges_into_one`) fails the day a server gives one;
 //! * a delete takes `preconditions.resourceVersion` and `preconditions.uid` in its body (`409` when they differ),
-//!   also with `dryRun: ["All"]` in the body; **the query parameter `dryRun` is ignored when the delete has a body**.
+//!   also with `dryRun: ["All"]` in the body; **the query parameter `dryRun` is ignored when the delete has a body**;
+//! * a delete of an object that has finalizers answers the object, with a `deletionTimestamp`, and keeps it until the
+//!   last one is removed; an apply of such an object is accepted.
 //!
 //! # What the roles must be
 //!
 //! A server-side apply needs `patch`, and `create` as well to make an object (*verified 2026-10-16*: with `patch`
-//! alone the answer is `403` for the create, dry-run or not; the Kubernetes documentation says the same,
-//! <https://kubernetes.io/docs/reference/using-api/server-side-apply/>, "Access control and permissions"). The
-//! verbs this crate uses are in its README and in `tests/rbac.rs`, which holds them equal to the calls it makes.
+//! alone the answer is `403` for the create, dry-run or not; and the Kubernetes documentation says the same, "a principal
+//! ... requires the patch permission to edit existing resources, and also needs the create verb permission in order to
+//! create new resources with Server-Side Apply", <https://kubernetes.io/docs/reference/using-api/server-side-apply/>,
+//! "Access control and permissions", *verified 2026-10-16*: the page was fetched and read). The verbs this crate uses are
+//! in its README and in `tests/rbac.rs`, which holds them equal to the calls it makes.
 //!
 //! No Kubernetes type is in a signature the port defines.
 

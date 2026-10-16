@@ -1162,6 +1162,30 @@ async fn a_policy_changed_just_before_the_delete_is_the_one_honoured() {
 }
 
 #[tokio::test]
+async fn a_config_that_is_gone_when_the_finalizer_runs_leaves_the_remembered_policy_standing() {
+    // The premise of the dashboard's delete (`aap-objects-kubernetes`, §60a D5): the operator can only honour the policy
+    // it can read. A person who saves `Retain` over `Delete` and deletes at once has had no pass in between; if the
+    // config has gone by the time the finalizer runs, the provider's remembered `Delete` stands and the data goes. So the
+    // dashboard deletes the config only once the service is gone, and this test fails when the operator stops needing it.
+    let w = World::new("coder");
+    w.edit_service(|s| s["spec"]["deletionPolicy"] = json!("Delete"));
+    w.settle().await;
+    w.edit_service(|s| s["spec"]["deletionPolicy"] = json!("Retain"));
+    w.fake.delete(SERVICES, NS, "coder"); // terminating on the finalizer
+    w.fake.delete(CONFIGS, NS, "coder"); // what a dashboard that deletes both at once does
+    w.pass().await.unwrap();
+    assert!(w.fake.get(SERVICES, NS, "coder").is_none());
+    let note = w.fake.events().pop().unwrap()["note"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    assert!(
+        !note.contains("kept the volumes"),
+        "with no config to read, the policy the provider remembers is the one honoured: {note}"
+    );
+}
+
+#[tokio::test]
 async fn deleting_a_service_that_never_got_a_runtime_still_completes() {
     let w = World::new("chat");
     w.fake.delete(CONFIGS, NS, "chat");

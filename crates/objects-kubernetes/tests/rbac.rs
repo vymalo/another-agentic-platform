@@ -1,8 +1,9 @@
 //! The rights the crate needs, derived from the calls it makes, held equal to `tests/rbac.yaml` (the `Role` that
 //! `tests/cluster.rs` runs the conformance suite under) and to the table of the README.
 //!
-//! The whole conformance suite runs against the fake with the crate and the harness as two clients, and every
-//! request of the crate is turned into the verb an API server authorizes it as. The Role must be **exactly** that:
+//! **Every case** of the conformance suite (`aap_ports::agent_objects_cases!`, the list the suite itself is made from)
+//! runs against the fake with the crate and the harness as two clients, and every request of the crate is turned into
+//! the verb an API server authorizes it as. The Role must be **exactly** that:
 //! a verb the crate never uses is a right it should not have, and a verb missing is a `403` in production. No
 //! Secret appears anywhere, and neither does `watch`.
 
@@ -80,20 +81,13 @@ fn verbs(call: &Call) -> Vec<&'static str> {
 async fn used() -> BTreeSet<Right> {
     let fake = Fake::new();
     let h = Harness::on_fake(&fake);
-    cases::an_agent_is_created_and_read_back(h.clone()).await;
-    cases::a_second_create_is_refused_and_changes_nothing(h.clone()).await;
-    cases::a_replace_with_the_current_token_changes_the_agent(h.clone()).await;
-    cases::a_body_that_is_not_acceptable_is_invalid_with_fields(h.clone()).await;
-    cases::an_agent_is_deleted_with_its_config(h.clone()).await;
-    cases::a_gitops_agent_is_read_and_never_written(h.clone()).await;
-    cases::a_create_after_a_half_failed_create_takes_the_config_over(h.clone()).await;
-    cases::agents_are_listed_by_name_and_are_independent(h.clone()).await;
-    cases::an_agent_whose_config_another_service_names_is_left_alone(h.clone()).await;
-    cases::shared_objects_have_the_same_life(h.clone()).await;
-    cases::a_shared_object_that_agents_name_is_not_deleted(h.clone()).await;
-    cases::the_status_is_the_operators_and_is_read_back(h.clone()).await;
-    cases::offered_secrets_are_references_and_never_values(h.clone()).await;
-    cases::no_read_carries_a_secret_value(h.clone()).await;
+    // Every case of the suite, in the order the port lists them: a case added to the port is run here too.
+    macro_rules! run_all {
+        ($h:expr; $($case:ident),* $(,)?) => {
+            $( cases::$case($h.clone()).await; )*
+        };
+    }
+    aap_ports::agent_objects_cases!(run_all { h });
     fake.calls()
         .iter()
         .filter(|c| c.who == "dashboard")

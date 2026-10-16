@@ -40,7 +40,7 @@ use kube::config::{KubeConfigOptions, Kubeconfig};
 use kube::{Client, Config};
 use serde_json::{Value, json};
 use support::facts;
-use support::harness::{GITOPS, Harness, resource};
+use support::harness::{FINALIZER, GITOPS, Harness, OPERATOR, resource};
 use support::intercept::interpose;
 use support::scenarios;
 
@@ -328,6 +328,16 @@ async fn a_create_names_a_version_no_object_has_and_never_merges_into_one() {
     );
     let seen = api.get(&name).await.unwrap();
     assert_eq!(seen.data["spec"]["title"], json!("first"));
+    // The premise of `NEVER`: no object has that version. They are revisions of the store, and the API server has
+    // written its own objects first. Pinned on this server version only (the crate documentation says so).
+    let version = seen.metadata.resource_version.clone().unwrap();
+    assert_ne!(version, NEVER, "an object has the version a create names");
+    assert!(
+        version
+            .parse::<u64>()
+            .is_ok_and(|v| v > NEVER.parse::<u64>().unwrap()),
+        "{version}"
+    );
     // And through the crate: AlreadyExists, and the object of the other is as it was.
     let err = h
         .put_shared(
@@ -812,6 +822,97 @@ async fn when_the_service_changes_between_the_two_applies_the_config_stays_writt
         .await
         .unwrap();
     assert_eq!(saved.service.spec["registry"]["title"], json!("Changed"));
+}
+
+#[tokio::test]
+async fn what_the_operator_writes_between_the_two_applies_does_not_stop_the_save() {
+    let Some((admin, dashboard)) = identities().await else {
+        return;
+    };
+    // The operator writes the status of a service when its config changes, and puts its finalizer on a service it
+    // has just seen: on a real server both give the service a new `resourceVersion` (the apply of the dashboard that
+    // names the old one is a `409`), and neither is what the save is about.
+    for what in ["a status", "a finalizer"] {
+        let (client, hooks) = interpose(&dashboard, NAMESPACE);
+        let objects = KubernetesObjects::new(client, NAMESPACE);
+        let name = unique("ag");
+        let draft = sample_agent(&name);
+        let made = objects
+            .put_agent(&draft, &Precondition::DoesNotExist)
+            .await
+            .unwrap();
+        let api = Api::<DynamicObject>::namespaced_with(
+            admin.clone(),
+            NAMESPACE,
+            &resource(Kind::AgentService),
+        );
+        let before = api.get(&name).await.unwrap().metadata.resource_version;
+        let (service, theirs) = (name.clone(), api.clone());
+        hooks.before_the_next_apply("agentservices", &name, move || async move {
+            if what == "a status" {
+                let body = json!({
+                    "apiVersion": "agents.vymalo.com/v1alpha1", "kind": "AgentService",
+                    "metadata": { "name": service }, "status": { "observedGeneration": 7 },
+                });
+                theirs
+                    .patch_status(
+                        &service,
+                        &PatchParams::apply(OPERATOR).force(),
+                        &Patch::Apply(&body),
+                    )
+                    .await
+                    .unwrap();
+            } else {
+                theirs
+                    .patch(
+                        &service,
+                        &PatchParams::default(),
+                        &Patch::Merge(json!({ "metadata": { "finalizers": [FINALIZER] } })),
+                    )
+                    .await
+                    .unwrap();
+            }
+        });
+        let mut changed = draft.clone();
+        changed.service["registry"]["title"] = json!("Changed");
+        changed.config["model"]["model"] = json!("another-model");
+        let saved = objects
+            .put_agent(&changed, &Precondition::Matches(made.etag()))
+            .await
+            .unwrap_or_else(|e| panic!("{what}: {e:?}"));
+        assert_eq!(
+            saved.service.spec["registry"]["title"],
+            json!("Changed"),
+            "{what}"
+        );
+        assert_eq!(
+            saved.config.as_ref().unwrap().spec["model"]["model"],
+            json!("another-model"),
+            "{what}"
+        );
+        let after = api.get(&name).await.unwrap();
+        assert_ne!(after.metadata.resource_version, before, "{what}");
+        assert_eq!(
+            after.data["spec"]["registry"]["title"],
+            json!("Changed"),
+            "{what}"
+        );
+        if what == "a status" {
+            assert_eq!(
+                after.data["status"]["observedGeneration"],
+                json!(7),
+                "the status is theirs, and kept"
+            );
+        } else {
+            api.patch(
+                &name,
+                &PatchParams::default(),
+                &Patch::Merge(json!({ "metadata": { "finalizers": null } })),
+            )
+            .await
+            .unwrap();
+        }
+    }
 }
 
 #[tokio::test]

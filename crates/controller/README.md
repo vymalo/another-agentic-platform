@@ -175,7 +175,10 @@ and the pass is retried. The policy a provider honours is the one **of its last 
 objects it made. A person who sets `deletionPolicy: Retain` and deletes in one breath has had no pass in between, and the
 provider would still hold `Delete`, which loses data. So when something exists and the objects still resolve, the
 controller applies them once more before it deletes; whatever does not resolve, or is refused by a provider, leaves the
-remembered policy standing. `a_policy_changed_just_before_the_delete_is_the_one_honoured` holds it.
+remembered policy standing. `a_policy_changed_just_before_the_delete_is_the_one_honoured` holds it, and
+`a_config_that_is_gone_when_the_finalizer_runs_leaves_the_remembered_policy_standing` holds the other half: **a client that
+deletes the `AgentConfig` while the service is still terminating can lose the data** (the dashboard's delete waits for the
+service to go before it deletes the config, [`aap-objects-kubernetes`](../objects-kubernetes/README.md)).
 
 ## `ReflectorDirectory`
 
