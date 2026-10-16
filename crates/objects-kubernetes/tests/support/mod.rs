@@ -575,7 +575,7 @@ impl State {
         match (call.method.as_str(), t.name) {
             ("GET", None) => self.list(t.plural, call),
             ("GET", Some(name)) => match self.objects.get(&key(t.plural, name)) {
-                Some(o) => (200, self.answer(t.plural, name, o)),
+                Some(o) => (200, self.answer(t.plural, o)),
                 None => not_found(t.plural, name),
             },
             ("POST", None) => self.create(t.plural, call),
@@ -592,8 +592,7 @@ impl State {
     }
 
     /// The object as the server answers: the stored value and the bookkeeping.
-    fn answer(&self, plural: &str, name: &str, o: &Obj) -> Value {
-        let _ = name;
+    fn answer(&self, plural: &str, o: &Obj) -> Value {
         let (api_version, kind) = kind_of(plural);
         let mut v = o.value.clone();
         v["apiVersion"] = json!(api_version);
@@ -640,7 +639,7 @@ impl State {
                     .iter()
                     .all(|(k, v)| o.value["metadata"]["labels"][k] == json!(v))
             })
-            .map(|(name, o)| self.answer(plural, name, o))
+            .map(|(_, o)| self.answer(plural, o))
             .collect();
         let (api_version, kind) = kind_of(plural);
         (
@@ -821,7 +820,7 @@ impl State {
                 obj.value["metadata"]["resourceVersion"] = json!(self.bump());
             }
         }
-        let answer = self.answer(plural, name, &obj);
+        let answer = self.answer(plural, &obj);
         if !dry_run {
             self.objects.insert(key(plural, name), obj);
         }

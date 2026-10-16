@@ -69,10 +69,9 @@ async fn client_of(var: &str) -> Option<Client> {
 
 /// The CRDs and the namespace, once per process. It runs on a thread and a runtime of its own: every test has a
 /// runtime of its own, and a connection made in one cannot be used from another.
-fn install_once(client: &Client) {
+fn install_once() {
     static DONE: OnceLock<()> = OnceLock::new();
     DONE.get_or_init(|| {
-        let _ = client;
         let path = std::env::var(KUBECONFIG_VAR).unwrap_or_default();
         std::thread::spawn(move || {
             tokio::runtime::Builder::new_current_thread()
@@ -160,7 +159,7 @@ async fn identities() -> Option<(Client, Client)> {
         .apiserver_version()
         .await
         .unwrap_or_else(|e| panic!("the cluster of {KUBECONFIG_VAR} does not answer: {e}"));
-    install_once(&admin);
+    install_once();
     let dashboard = match client_of(API_KUBECONFIG_VAR).await {
         Some(client) => client,
         None => {
@@ -625,7 +624,9 @@ async fn the_identity_of_the_crate_has_the_role_and_no_right_on_secrets() {
         eprintln!("skipped: {API_KUBECONFIG_VAR} is not set");
         return;
     };
-    let _ = cluster!();
+    if identities().await.is_none() {
+        return;
+    }
     // The four kinds: what the crate does, and nothing more.
     for resource in [
         "agentservices",
