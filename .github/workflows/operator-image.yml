@@ -1,24 +1,34 @@
-name: Operator image
+name: Operator and API images
 
-# The operator's image and chart (S8): checks on pull requests, the image on main, and a tag bump in the chart. The Rust checks
-# (fmt, clippy, tests, the CRD drift check, the kind jobs of the crates) are operator.yml's; this workflow covers what only the
-# image and the charts show. The pattern of vymalo/another-adam-rs coder.yml and vymalo/another-agentic-system orchestrator.yml.
+# The images and the chart of the platform (S8, D7b1): checks on pull requests, the images on main, and a tag bump in the chart. Two
+# images are built from one commit, `operator` (S8) and `api` (the Platform API, D7b1), and ONE job bumps both tags in one commit: two
+# workflows would each push a bump to main and race (and each one's "has main moved on?" test would count the other's bump commit as a
+# newer build). The cost is that the api image waits for the operator's end-to-end and that both tags always move together; the images
+# are built from one Cargo workspace, so a change to a shared crate moves both anyway. The Rust checks (fmt, clippy, tests, the CRD drift
+# check, the kind jobs of the crates) are operator.yml's; this workflow covers what only the images and the charts show. The pattern of
+# vymalo/another-adam-rs coder.yml and vymalo/another-agentic-system orchestrator.yml.
 #
 # chart:       helm lint of both charts, the render checks of deploy/operator (goldens, RBAC, refusals, the CRDs chart against
-#              deploy/crds), and kubeconform in strict mode over the renders.
-# scripts:     shellcheck, and bump-tag.sh is idempotent and edits only image.tag.
-# dockerfile:  hadolint.
+#              deploy/crds, the API's Role against the objects crate's rbac.yaml), and kubeconform in strict mode over the renders,
+#              the Platform API's included.
+# scripts:     shellcheck, and bump-tag.sh is idempotent and edits only the tag it was asked for (image.tag, or api.image.tag).
+# dockerfile:  hadolint (the operator's Dockerfile, and in dockerfile-api the API's).
 # image:       builds the image on pull requests too (no push) and smoke-tests it: the user, the binary starts, `crdgen` prints the
 #              checked-in CRDs, `run` without a cluster says so, and there is no shell. The image is kept as an artifact: the jobs
 #              that follow use THE image that passed, never a rebuild of it.
+# api-image:   (D7b1) builds docker/api/Dockerfile and smoke-tests the image like the operator's (the user, the version, the usage, the
+#              example configuration accepted, a misspelt key refused, no cluster to reach said so, no shell), and runs `api --check`
+#              in the image on the configuration the chart renders (deploy/operator/tests/api-config.sh) for three shapes of values, so
+#              the chart can never render a file the binary refuses. It is kept as an artifact for the push, as the operator's is.
 # operator-coder-e2e (S9): a kind cluster, the CRDs chart and the operator chart installed with THAT image, the real adam-rs coder
 #              image (ghcr.io/vymalo/another-adam-rs/coder, by tag and digest, 2.9 GB) run by the operator on a Postgres the job runs
 #              and dummy Secrets: the AgentService becomes Ready, the agent card answers through the Service, the registry lists the
 #              coder, and a deletion completes its finalizer and keeps the claim (Retain). deploy/operator/tests/e2e/README.md says
 #              what it proves and what it does not (no model, no GitHub).
-# push:        main only, after every job above: `sha-<7>` and `latest`.
-# bump:        main only, after the push: `deploy/operator/bump-tag.sh` sets `image.tag` in deploy/operator/values.yaml and
-#              `chore(deploy): bump operator to sha-<7>` is pushed to main as github-actions[bot] (decided in §93, 2026-10-05).
+# push:        main only, after every job above: `sha-<7>` and `latest` of both images (the same tag).
+# bump:        main only, after the push: `deploy/operator/bump-tag.sh` sets `image.tag` and, with `api`, `api.image.tag` in
+#              deploy/operator/values.yaml and `chore(deploy): bump operator and api to sha-<7>` is pushed to main as
+#              github-actions[bot] (decided in §93, 2026-10-05).
 #              It is made with GITHUB_TOKEN, which does not trigger workflows, so it cannot loop; Argo CD in home-os tracks this
 #              repository and rolls the new tag out (S10). It is a no-op when the tag is current, and it does not put an older
 #              tag back when a newer commit has moved main (jobs can finish out of order).
@@ -37,6 +47,7 @@ on:
       - "Cargo.toml"
       - "Cargo.lock"
       - "docker/operator/**"
+      - "docker/api/**"
       - "deploy/operator/**"
       - "deploy/operator-crds/**"
       - "deploy/crds/**"
@@ -49,6 +60,7 @@ on:
       - "Cargo.toml"
       - "Cargo.lock"
       - "docker/operator/**"
+      - "docker/api/**"
       - "deploy/operator/**"
       - "deploy/operator-crds/**"
       - "deploy/crds/**"
@@ -56,6 +68,7 @@ on:
 
 env:
   IMAGE: ghcr.io/vymalo/another-agentic-platform/operator
+  API_IMAGE: ghcr.io/vymalo/another-agentic-platform/api
   HELM_VERSION: v3.19.0
   KUBECONFORM_VERSION: v0.7.0
   # The Kubernetes version the rendered manifests are validated against.
@@ -82,10 +95,14 @@ jobs:
           helm lint deploy/operator
           helm lint deploy/operator -f deploy/operator/examples/netcup.values.yaml
           helm lint deploy/operator -f deploy/operator/tests/secret.values.yaml
+          helm lint deploy/operator -f deploy/operator/tests/api.values.yaml
+          helm lint deploy/operator -f deploy/operator/tests/api-secretref.values.yaml
           helm lint deploy/operator-crds
       - name: helm template (the values of the netcup Application)
         run: |
           helm template aap-operator deploy/operator --namespace another-agentic-system -f deploy/operator/examples/netcup.values.yaml > /dev/null
+          helm template aap-operator deploy/operator --namespace another-agentic-system -f deploy/operator/examples/netcup.values.yaml \
+            -f deploy/operator/tests/api.values.yaml > /dev/null
           helm template aap-operator-crds deploy/operator-crds > /dev/null
       - name: The rendered chart keeps its guarantees
         run: sh deploy/operator/tests/render-check.sh
@@ -104,12 +121,17 @@ jobs:
           echo "$KUBECONFORM_SHA256  $RUNNER_TEMP/kubeconform.tgz" | sha256sum -c -
           tar -xzf "$RUNNER_TEMP/kubeconform.tgz" -C "$RUNNER_TEMP" kubeconform
           # The defaults (no registry), netcup (an ExternalSecret), tests/secret.values.yaml (an existing Secret, another watched
-          # namespace, no CloudNativePG), and the CRDs chart.
+          # namespace, no CloudNativePG), the Platform API in its two shapes (tests/api.values.yaml: an Ingress and a policy;
+          # tests/api-secretref.values.yaml: neither, an existing service account), and the CRDs chart.
           helm template aap-operator deploy/operator --namespace another-agentic-system > "$RUNNER_TEMP/rendered-default.yaml"
           helm template aap-operator deploy/operator --namespace another-agentic-system \
             -f deploy/operator/examples/netcup.values.yaml > "$RUNNER_TEMP/rendered-netcup.yaml"
           helm template aap-operator deploy/operator --namespace another-agentic-system \
             -f deploy/operator/tests/secret.values.yaml > "$RUNNER_TEMP/rendered-secret.yaml"
+          helm template aap-operator deploy/operator --namespace another-agentic-system \
+            -f deploy/operator/tests/api.values.yaml > "$RUNNER_TEMP/rendered-api.yaml"
+          helm template aap-operator deploy/operator --namespace another-agentic-system \
+            -f deploy/operator/tests/api-secretref.values.yaml > "$RUNNER_TEMP/rendered-api-secretref.yaml"
           helm template aap-operator-crds deploy/operator-crds > "$RUNNER_TEMP/rendered-crds.yaml"
           for attempt in 1 2 3; do
             status=0
@@ -117,7 +139,7 @@ jobs:
                 -schema-location default \
                 -schema-location 'deploy/operator/tests/schemas/{{.Group}}/{{.ResourceKind}}_{{.ResourceAPIVersion}}.json' \
                 "$RUNNER_TEMP/rendered-default.yaml" "$RUNNER_TEMP/rendered-netcup.yaml" "$RUNNER_TEMP/rendered-secret.yaml" \
-                "$RUNNER_TEMP/rendered-crds.yaml" \
+                "$RUNNER_TEMP/rendered-api.yaml" "$RUNNER_TEMP/rendered-api-secretref.yaml" "$RUNNER_TEMP/rendered-crds.yaml" \
                 > "$RUNNER_TEMP/kubeconform.out" 2>&1 || status=$?
             cat "$RUNNER_TEMP/kubeconform.out"
             if [ "$status" -eq 0 ]; then exit 0; fi
@@ -136,6 +158,15 @@ jobs:
         with:
           dockerfile: docker/operator/Dockerfile
 
+  dockerfile-api:
+    name: lint the API's Dockerfile
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: hadolint/hadolint-action@v3.1.0
+        with:
+          dockerfile: docker/api/Dockerfile
+
   scripts:
     name: shell scripts and the bump
     runs-on: ubuntu-latest
@@ -143,7 +174,7 @@ jobs:
       - uses: actions/checkout@v7
       - name: shellcheck
         run: shellcheck deploy/operator/bump-tag.sh deploy/operator/tests/*.sh deploy/operator/tests/e2e/*.sh
-      - name: bump-tag.sh is idempotent and edits only image.tag
+      - name: bump-tag.sh is idempotent and edits only the tag it was asked for (image.tag, or api.image.tag)
         run: sh deploy/operator/tests/bump-tag-test.sh
 
   bump-dry-run:
@@ -157,11 +188,12 @@ jobs:
           SHA: ${{ github.event.pull_request.head.sha }}
         run: |
           tag="sha-$(printf '%s' "$SHA" | cut -c1-7)"
-          sh deploy/operator/bump-tag.sh deploy/operator/values.yaml "$tag"
+          sh deploy/operator/bump-tag.sh deploy/operator/values.yaml "$tag" operator
+          sh deploy/operator/bump-tag.sh deploy/operator/values.yaml "$tag" api
           {
             echo "### Tag bump dry run"
             echo
-            echo "On main this pull request would set \`image.tag\` to \`$tag\`:"
+            echo "On main this pull request would set \`image.tag\` and \`api.image.tag\` to \`$tag\`:"
             echo
             echo '```diff'
             git diff --unified=1 -- deploy/operator/values.yaml
@@ -230,6 +262,97 @@ jobs:
           retention-days: 1
           if-no-files-found: error
 
+  api-image:
+    name: build and smoke-test the API image
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v7
+      - uses: docker/setup-buildx-action@v4
+      - uses: azure/setup-helm@v4
+        with:
+          version: ${{ env.HELM_VERSION }}
+      # Built here, once, and loaded into the local daemon: the smoke test below and the push after it run what was tested.
+      - name: Build
+        uses: docker/build-push-action@v7
+        with:
+          context: .
+          file: docker/api/Dockerfile
+          platforms: linux/amd64
+          push: false
+          load: true
+          provenance: false
+          tags: api:smoke
+          labels: |
+            org.opencontainers.image.revision=${{ github.sha }}
+          cache-from: type=gha,scope=api
+          cache-to: type=gha,mode=max,scope=api,ignore-error=true
+      - name: Smoke test the image
+        run: |
+          set -euo pipefail
+          # Numeric, so Kubernetes can verify runAsNonRoot: the chart's runAsUser is the same number.
+          user=$(docker inspect -f '{{.Config.User}}' api:smoke)
+          [ "$user" = 65532:65532 ] || { echo "::error::image user is '$user', expected 65532:65532"; exit 1; }
+          # The binary starts as that user, says its version and its usage. (Read whole first: `docker run | grep -q` under pipefail
+          # fails when grep exits on its match while docker still writes.)
+          version=$(docker run --rm api:smoke --version)
+          grep -q '^api ' <<<"$version" || { echo "::error::--version said: $version"; exit 1; }
+          help=$(docker run --rm api:smoke --help)
+          grep -q -e '--check' <<<"$help"
+          grep -q API_CONFIG_FILE <<<"$help"
+          # No configuration, no API: the file is required.
+          if docker run --rm api:smoke > /dev/null 2>&1; then echo "::error::the API started with no configuration file"; exit 1; fi
+          # The example configuration is one the API can work with, and `--check` needs no cluster and no issuer.
+          out=$(docker run --rm -v "$PWD/bin/api:/cfg:ro" api:smoke --config /cfg/config.example.yaml --check)
+          grep -q ': ok$' <<<"$out" || { echo "::error::--check said: $out"; exit 1; }
+          # A misspelt key is refused, by name (the types deny unknown fields at every level).
+          bad="$RUNNER_TEMP/api-bad"; mkdir -p "$bad"
+          { cat bin/api/config.example.yaml; printf '\nlistn: 0.0.0.0:8080\n'; } > "$bad/config.yaml"
+          out=$(docker run --rm -v "$bad:/cfg:ro" api:smoke --config /cfg/config.yaml --check 2>&1) && { echo "::error::a misspelt key was accepted"; exit 1; } || true
+          grep -q listn <<<"$out" || { echo "::error::the refusal did not name the key: $out"; exit 1; }
+          # With a good file and no cluster to reach, serving fails, and says so (never a panic, never a hang).
+          out=$(docker run --rm -e KUBECONFIG=/nonexistent -v "$PWD/bin/api:/cfg:ro" api:smoke --config /cfg/config.example.yaml 2>&1) && { echo "::error::the API served with no cluster"; exit 1; } || true
+          grep -q 'connecting to the cluster' <<<"$out" || { echo "::error::the API did not say it was connecting: $out"; exit 1; }
+          # Only the API: no shell, no package manager in the image (a read of the whole file system).
+          cid=$(docker create api:smoke)
+          files=$(docker export "$cid" | tar -t)
+          docker rm "$cid" > /dev/null
+          grep -qx 'api' <<<"$files" || { echo "::error::no /api in the image"; exit 1; }
+          if grep -Eq '(^|/)s?bin/(sh|bash|dash|busybox|apt|apt-get|dpkg)$' <<<"$files"; then
+            echo "::error::the image has a shell or a package manager"; grep -E '(^|/)s?bin/(sh|bash|dash|busybox|apt|apt-get|dpkg)$' <<<"$files"; exit 1
+          fi
+          size=$(docker image inspect -f '{{.Size}}' api:smoke)
+          echo "api image size: $size bytes" | tee -a "$GITHUB_STEP_SUMMARY"
+      # The chart can never render a file the binary refuses: the image's own `--check`, on what `helm template` renders for the
+      # shapes the render checks assert (the golden one, the Secret-per-agent one) and for the least a deployment must say.
+      - name: The configuration the chart renders is one the image accepts
+        run: |
+          set -euo pipefail
+          dir="$RUNNER_TEMP/api-config"; mkdir -p "$dir"
+          sh deploy/operator/tests/api-config.sh "$dir/full.yaml" -f deploy/operator/tests/api.values.yaml
+          sh deploy/operator/tests/api-config.sh "$dir/secretref.yaml" -f deploy/operator/tests/api-secretref.values.yaml
+          sh deploy/operator/tests/api-config.sh "$dir/minimal.yaml" \
+            --set api.config.oidc.issuer=https://keycloak.example.com/realms/another-agentic \
+            --set 'api.config.oidc.audiences[0]=another-agentic' --set api.config.oidc.rolesClaim=agentic_roles \
+            --set 'api.config.defaults.allowedImageRegistries[0]=ghcr.io' \
+            --set 'api.networkPolicy.from[0].podSelector.matchLabels.app=edge'
+          for f in full secretref minimal; do
+            echo "--- $f.yaml"
+            cat "$dir/$f.yaml"
+            out=$(docker run --rm -v "$dir:/cfg:ro" api:smoke --config "/cfg/$f.yaml" --check)
+            echo "$out"
+            grep -q ': ok$' <<<"$out" || { echo "::error::the image refuses the configuration the chart renders ($f): $out"; exit 1; }
+          done
+      # The image that passed travels to the push as a file.
+      - name: Save the image
+        run: docker save api:smoke -o "$RUNNER_TEMP/api.tar"
+      - uses: actions/upload-artifact@v7
+        with:
+          name: api-image
+          path: ${{ runner.temp }}/api.tar
+          retention-days: 1
+          if-no-files-found: error
+
   operator-coder-e2e:
     name: operator-coder-e2e
     needs: image
@@ -271,9 +394,9 @@ jobs:
         run: sh deploy/operator/tests/e2e/coder-e2e.sh
 
   push:
-    name: push the image that passed
-    # Main only, and only after everything above: the chart, the Dockerfile, the scripts, the image's own smoke test, and the coder.
-    needs: [chart, dockerfile, scripts, image, operator-coder-e2e]
+    name: push the images that passed
+    # Main only, and only after everything above: the chart, the Dockerfiles, the scripts, both images' own smoke tests, and the coder.
+    needs: [chart, dockerfile, dockerfile-api, scripts, image, api-image, operator-coder-e2e]
     if: github.event_name == 'push' && github.ref == 'refs/heads/main'
     runs-on: ubuntu-latest
     # One push at a time, so the check below and the push of `latest` are not interleaved with another run's.
@@ -292,8 +415,14 @@ jobs:
         with:
           name: operator-image
           path: ${{ runner.temp }}
-      - name: Load the image that passed
-        run: docker load -i "$RUNNER_TEMP/operator.tar"
+      - uses: actions/download-artifact@v8
+        with:
+          name: api-image
+          path: ${{ runner.temp }}
+      - name: Load the images that passed
+        run: |
+          docker load -i "$RUNNER_TEMP/operator.tar"
+          docker load -i "$RUNNER_TEMP/api.tar"
       - uses: docker/login-action@v4
         with:
           registry: ghcr.io
@@ -306,28 +435,34 @@ jobs:
           tag="sha-$(printf '%s' "$GITHUB_SHA" | cut -c1-7)"
           docker tag operator:smoke "$IMAGE:$tag"
           docker push "$IMAGE:$tag"
+          docker tag api:smoke "$API_IMAGE:$tag"
+          docker push "$API_IMAGE:$tag"
           # `latest` follows the newest build only: image jobs can finish out of order, and an older run must not move it back
-          # (the same rule as the bump below; the bump commits themselves do not count).
-          newer="$(git log --format=%s "$GITHUB_SHA..origin/main" -- crates bin Cargo.toml Cargo.lock docker/operator deploy/operator deploy/operator-crds deploy/crds .github/workflows/operator-image.yml | grep -v '^chore(deploy): bump operator to ' || true)"
+          # (the same rule as the bump below; the bump commits themselves, old subject and new, do not count).
+          newer="$(git log --format=%s "$GITHUB_SHA..origin/main" -- crates bin Cargo.toml Cargo.lock docker/operator docker/api deploy/operator deploy/operator-crds deploy/crds .github/workflows/operator-image.yml | grep -Ev '^chore\(deploy\): bump (operator|operator and api) to ' || true)"
           if [ -n "$newer" ]; then
-            pushed="\`$IMAGE:$tag\` (not \`latest\`: main has moved on since this commit, the newer build pushes it)."
+            pushed="\`$IMAGE:$tag\` and \`$API_IMAGE:$tag\` (not \`latest\`: main has moved on since this commit, the newer build pushes it)."
           else
             docker tag operator:smoke "$IMAGE:latest"
             docker push "$IMAGE:latest"
-            pushed="\`$IMAGE:$tag\` and \`$IMAGE:latest\`."
+            docker tag api:smoke "$API_IMAGE:latest"
+            docker push "$API_IMAGE:latest"
+            pushed="\`$IMAGE:$tag\`, \`$IMAGE:latest\`, \`$API_IMAGE:$tag\` and \`$API_IMAGE:latest\`."
           fi
           {
             echo "### Pushed"
             echo
             echo "$pushed"
             echo
-            echo "A new GHCR package is private until it is made public (deploy/operator/README.md, \"The image\")."
+            echo "A new GHCR package is private until it is made public (deploy/operator/README.md, \"The image\"): the api package, the first time."
           } >> "$GITHUB_STEP_SUMMARY"
 
-  # The image that was just pushed is the one the chart deploys: set `image.tag` in deploy/operator/values.yaml to
-  # `sha-<first 7 of the commit>` and push `chore(deploy): bump operator to sha-xxxxxxx` to main as github-actions.
+  # The images that were just pushed are the ones the chart deploys: set `image.tag` and `api.image.tag` in deploy/operator/values.yaml to
+  # `sha-<first 7 of the commit>` and push `chore(deploy): bump operator and api to sha-xxxxxxx` to main as github-actions. One job, one
+  # commit, one retry loop for both tags: a second workflow with a bump of its own would race this one on `git push` and, because the
+  # "has main moved on?" test below reads the subjects of the commits that follow, take the other's bump for a newer build.
   bump:
-    name: bump the tag in the chart
+    name: bump the tags in the chart
     needs: push
     runs-on: ubuntu-latest
     concurrency:
@@ -353,18 +488,19 @@ jobs:
             git reset --hard origin/main
             # A newer commit that changes what this workflow builds makes its own image and bumps for itself; do not put the tag
             # back to this older one (image jobs can finish out of order). The bump commits themselves do not count.
-            newer="$(git log --format=%s "$SHA..origin/main" -- crates bin Cargo.toml Cargo.lock docker/operator deploy/operator deploy/operator-crds deploy/crds .github/workflows/operator-image.yml | grep -v '^chore(deploy): bump operator to ' || true)"
+            newer="$(git log --format=%s "$SHA..origin/main" -- crates bin Cargo.toml Cargo.lock docker/operator docker/api deploy/operator deploy/operator-crds deploy/crds .github/workflows/operator-image.yml | grep -Ev '^chore\(deploy\): bump (operator|operator and api) to ' || true)"
             if [ -n "$newer" ]; then
               echo "main has moved on since $SHA; the newer build will bump"
               exit 0
             fi
-            result="$(sh deploy/operator/bump-tag.sh deploy/operator/values.yaml "$tag")"
-            echo "$result"
-            case "$result" in
-              unchanged*) exit 0 ;;
-            esac
+            sh deploy/operator/bump-tag.sh deploy/operator/values.yaml "$tag" operator
+            sh deploy/operator/bump-tag.sh deploy/operator/values.yaml "$tag" api
+            if git diff --quiet -- deploy/operator/values.yaml; then
+              echo "both tags are current"
+              exit 0
+            fi
             git add deploy/operator/values.yaml
-            git commit -m "chore(deploy): bump operator to $tag"
+            git commit -m "chore(deploy): bump operator and api to $tag"
             if git push origin HEAD:main; then
               exit 0
             fi
