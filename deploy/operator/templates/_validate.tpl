@@ -262,6 +262,8 @@ for each tested shape (tests/api-shapes.sh) to find such a value before it is de
 {{- fail (printf "api.config.defaults.allowedImageRegistries: %v is not a registry host (and port): labels of letters, digits and `-` joined by `.`, with no scheme and no path" $r) -}}
 {{- end -}}
 {{- end -}}
+{{- /* The container's extra environment, volumes and mounts. */ -}}
+{{- include "aap.api.checkExtras" . -}}
 {{- /* The edge's route. */ -}}
 {{- $ing := $api.ingress -}}
 {{- if $ing.enabled -}}
@@ -321,5 +323,61 @@ compares it with the `iss` of a token; the JWKS URL (.query true) may have them.
 {{- if regexMatch $re $u -}}
 {{- $port := trimPrefix ":" (regexReplaceAll $re $u "${2}") -}}
 {{- if or (not $port) (and (ge (atoi $port) 1) (le (atoi $port) 65535)) -}}true{{- end -}}
+{{- end -}}
+{{- end -}}
+
+{{/*
+api.extraEnv, api.extraVolumes and api.extraVolumeMounts: each a list of maps; the chart's own names are refused (the variables the
+binary reads from the environment before its file, the volume `config`, everything under /etc/aap-api), a mount must name a volume of
+extraVolumes, and a name is used once.
+*/}}
+{{- define "aap.api.checkExtras" -}}
+{{- $api := .Values.api -}}
+{{- range $what := list "extraEnv" "extraVolumes" "extraVolumeMounts" -}}
+{{- $list := get $api $what -}}
+{{- if and (hasKey $api $what) (not (or (kindIs "slice" $list) (kindIs "invalid" $list))) -}}
+{{- fail (printf "api.%s must be a list" $what) -}}
+{{- end -}}
+{{- range $item := (default (list) $list) -}}
+{{- if not (and (kindIs "map" $item) (kindIs "string" $item.name) $item.name) -}}
+{{- fail (printf "api.%s: every entry is a map with a name, got %s" $what (toJson $item)) -}}
+{{- end -}}
+{{- end -}}
+{{- end -}}
+{{- $seen := dict -}}
+{{- range $e := (default (list) $api.extraEnv) -}}
+{{- if not (regexMatch `^[-._a-zA-Z][-._a-zA-Z0-9]*$` $e.name) -}}
+{{- fail (printf "api.extraEnv: %q is not an environment variable name" $e.name) -}}
+{{- end -}}
+{{- if has $e.name (list "API_CONFIG_FILE" "RUST_LOG" "API_LISTEN_ADDR" "HEALTH_ADDR") -}}
+{{- fail (printf "api.extraEnv: %s is the chart's: API_CONFIG_FILE is the mounted file, RUST_LOG is api.logLevel, and API_LISTEN_ADDR and HEALTH_ADDR would win over api.port and api.healthPort in the file, which the probes and the Service follow" $e.name) -}}
+{{- end -}}
+{{- if hasKey $seen $e.name -}}
+{{- fail (printf "api.extraEnv: %s is set twice" $e.name) -}}
+{{- end -}}
+{{- $_ := set $seen $e.name true -}}
+{{- end -}}
+{{- $volumes := dict -}}
+{{- range $v := (default (list) $api.extraVolumes) -}}
+{{- if eq $v.name "config" -}}
+{{- fail "api.extraVolumes: `config` is the chart's volume (the configuration file): name yours otherwise" -}}
+{{- end -}}
+{{- if hasKey $volumes $v.name -}}
+{{- fail (printf "api.extraVolumes: %s is named twice" $v.name) -}}
+{{- end -}}
+{{- $_ := set $volumes $v.name true -}}
+{{- end -}}
+{{- range $m := (default (list) $api.extraVolumeMounts) -}}
+{{- if not (hasKey $volumes $m.name) -}}
+{{- fail (printf "api.extraVolumeMounts: %s is not a volume of api.extraVolumes (the volume `config` is the chart's and is not mounted again)" $m.name) -}}
+{{- end -}}
+{{- if not (and (kindIs "string" $m.mountPath) (regexMatch `^/[^[:space:]]*$` $m.mountPath)) -}}
+{{- fail (printf "api.extraVolumeMounts: the mountPath of %s must be an absolute path, got %q" $m.name (toString $m.mountPath)) -}}
+{{- end -}}
+{{- /* The configuration file is /etc/aap-api/config.yaml: a mount there, over it or under it, would hide it or change it. */ -}}
+{{- $path := trimSuffix "/" $m.mountPath -}}
+{{- if or (eq $path "/etc/aap-api") (hasPrefix "/etc/aap-api/" $path) -}}
+{{- fail (printf "api.extraVolumeMounts: %s is mounted at %s, which is the configuration file's directory (/etc/aap-api): mount it elsewhere, for example /etc/aap-api-ca" $m.name $m.mountPath) -}}
+{{- end -}}
 {{- end -}}
 {{- end -}}

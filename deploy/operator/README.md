@@ -168,6 +168,7 @@ flowchart LR
 | `api.terminationGracePeriodSeconds`, `api.preStopSleepSeconds` | `40`, `5` | [Below](#a-pod-that-leaves) |
 | `api.ingress.enabled`, `.className`, `.host`, `.path`, `.pathType`, `.annotations`, `.tls.enabled`, `.tls.secretName` | off, none, none, `/v1`, `Prefix`, none, `true`, none | The edge's route (below). `host` is required when it is on |
 | `api.networkPolicy.enabled`, `.from`, `.apiServer`, `.dns`, `.issuer` | `true`, `[]`, `443, 6443`, `kube-dns:53`, `443` | [Below](#the-networkpolicy) |
+| `api.extraEnv`, `api.extraVolumes`, `api.extraVolumeMounts` | `[]` | The container's extra environment (a list of `EnvVar`), volumes (`Volume`) and mounts (`VolumeMount` of them): for an issuer behind a private CA or a proxy, [below](#an-issuer-behind-a-private-ca-or-a-proxy). Refused: the chart's own variables (`API_CONFIG_FILE`, `RUST_LOG`, `API_LISTEN_ADDR`, `HEALTH_ADDR`), a volume named `config`, a mount of a volume that is not in `extraVolumes`, and any mount at or under `/etc/aap-api`, where the configuration file is |
 | `api.logLevel`, `api.resources`, `api.podAnnotations`, `api.podLabels`, `api.priorityClassName`, `api.nodeSelector`, `api.tolerations`, `api.affinity`, `api.topologySpreadConstraints` | `info`, 50m / 64Mi requested and 256Mi limit, empty | |
 
 `templates/_validate.tpl` refuses, with the value's name, what the chart can check at render time and the binary would refuse at start (the issuer
@@ -186,13 +187,52 @@ them (`tests/api-config.sh` writes the file).
 
 `runAsNonRoot` (65532, the image's user), `RuntimeDefault` seccomp, no privilege escalation, every capability dropped, a read-only root file
 system; the file is a ConfigMap mounted read-only at `/etc/aap-api/config.yaml` and named by `API_CONFIG_FILE` (a checksum of it is a pod
-annotation, so a change rolls the pods). **It mounts no Secret and reads none**: there is none to give it. It mounts the service account token,
+annotation, so a change rolls the pods). **It mounts no Secret and reads none**: there is none to give it (`api.extraEnv` and `api.extraVolumes` can add one, as a
+proxy URL with credentials, and then the kubelet reads it; the API's `Role` still has no right on Secrets). It mounts the service account token,
 which is how it reaches the cluster. `RollingUpdate` with `maxSurge: 1, maxUnavailable: 0`. Probes are the operator's: `/healthz` (startup,
 liveness) and `/readyz` (readiness) on the health port; `/readyz` needs the issuer's keys **and** a call that needs the API's own rights, so a
 `Role` that lacks a verb shows as *not ready*.
 
 Its pods carry `app.kubernetes.io/name: aap-operator-api` (and `component: api`), **not** the operator's `name`, so the operator's Deployment
 selector, Services and NetworkPolicy, which select on `name` and `instance`, never match them (a test holds it).
+
+#### An issuer behind a private CA or a proxy
+
+The API fetches the issuer's keys with `reqwest`, and the file has no key for the certificates it trusts or for a proxy: both come from the environment, so
+the chart passes one through (`api.extraEnv`, `api.extraVolumes`, `api.extraVolumeMounts`). **What the binary reads** (*verified 2026-10-16* by reading the
+sources at the versions in `Cargo.lock`, **not by running it**):
+
+| | |
+|---|---|
+| **Roots** | `reqwest` 0.12.28, built with `rustls-tls-native-roots` only (no `webpki-roots` in the build), fills its root store from `rustls_native_certs::load_native_certs()` (`src/async_impl/client.rs`). `rustls-native-certs` 0.8.4 (`src/lib.rs`): **if `SSL_CERT_FILE` or `SSL_CERT_DIR` is set, certificates are loaded only from there, not from the platform store**; otherwise from the platform store (on Linux, where `openssl-probe` finds `ca-certificates.crt`). So the bundle must hold every CA the issuer's certificate chain needs |
+| **A wrong path** | loads no certificate and is no error: `reqwest` fails only when it found certificates and none was valid. Every fetch then fails with a certificate error, and `/readyz` stays *not ready* |
+| **Proxy** | `Tuning::default()` has `use_system_proxy: true`, so `reqwest` reads `ALL_PROXY`, `HTTP_PROXY`, `HTTPS_PROXY` and `NO_PROXY`, and their lower-case names (`hyper-util` 0.1.21, `client/proxy/matcher.rs`) |
+| **What they do not reach** | The cluster client of the API (`kube` 4.0.0, `Client::try_default`) trusts the service account's CA, and its in-cluster configuration has no proxy (`proxy_url: None`; `HTTPS_PROXY` is read only when a kubeconfig file is loaded, which the pod has none of). So `SSL_CERT_FILE` and a proxy affect the issuer's keys and nothing else |
+
+Whether the image's base (`gcr.io/distroless/cc-debian13`) has a platform bundle for `openssl-probe` to find, which an issuer with a public certificate needs when
+`SSL_CERT_FILE` is not set, is *unverified* (no image could be pulled where this was written). The recipe for a private CA (not tried on a cluster,
+*unverified*; `render-check.sh` holds only that these values render):
+
+```yaml
+# kubectl create configmap aap-api-ca --from-file=ca-bundle.crt=./bundle.pem -n <release namespace>
+#   bundle.pem: the private CA, and the public CAs the issuer's chain also needs; the API makes no other TLS call with reqwest
+api:
+  extraVolumes:
+    - name: ca
+      configMap:
+        name: aap-api-ca
+  extraVolumeMounts:
+    - name: ca
+      mountPath: /etc/aap-api-ca          # not under /etc/aap-api: the chart refuses that
+      readOnly: true
+  extraEnv:
+    - name: SSL_CERT_FILE
+      value: /etc/aap-api-ca/ca-bundle.crt
+```
+
+Behind a proxy, add `HTTPS_PROXY` and `NO_PROXY` (for an issuer in the cluster, `.svc,.cluster.local`) to `extraEnv`, take a proxy URL with credentials from a
+Secret (`valueFrom.secretKeyRef`), and **point the NetworkPolicy at the proxy, not at the issuer**: `api.networkPolicy.issuer.to` and `.ports` are the proxy's
+address and port, because that is what the pod connects to.
 
 #### A pod that leaves
 

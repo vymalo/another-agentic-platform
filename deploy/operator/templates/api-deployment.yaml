@@ -59,6 +59,9 @@ spec:
               value: /etc/aap-api/config.yaml
             - name: RUST_LOG
               value: {{ $api.logLevel | quote }}
+            {{- with $api.extraEnv }}
+            {{- toYaml . | nindent 12 }}
+            {{- end }}
           ports:
             - name: http
               containerPort: {{ $api.port }}
@@ -107,10 +110,16 @@ spec:
             - name: config
               mountPath: /etc/aap-api
               readOnly: true
+            {{- with $api.extraVolumeMounts }}
+            {{- toYaml . | nindent 12 }}
+            {{- end }}
       volumes:
         - name: config
           configMap:
             name: {{ include "aap.api.fullname" . }}
+        {{- with $api.extraVolumes }}
+        {{- toYaml . | nindent 8 }}
+        {{- end }}
       {{- with $api.nodeSelector }}
       nodeSelector:
         {{- toYaml . | nindent 8 }}

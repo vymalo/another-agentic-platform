@@ -362,8 +362,8 @@ check "api: api.ingress.enabled=false: no Ingress" lacks '^kind: Ingress$'
 render -f "$here/api.values.yaml" --set api.ingress.tls.enabled=false --set api.ingress.className=
 check "api: api.ingress.tls.enabled=false and no class: no tls block and no ingressClassName" dlacks Ingress aap-operator-api '^  tls:' 'ingressClassName'
 render -f "$here/api.values.yaml" --set api.ingress.tls.secretName=
-check "api: no TLS secret name: a tls block with the host and no secretName (the edge's default certificate)" \
-  dhas Ingress aap-operator-api '^  tls:' 'hosts:' && dlacks Ingress aap-operator-api 'secretName'
+api_default_certificate() { dhas Ingress aap-operator-api '^  tls:' 'hosts:' && dlacks Ingress aap-operator-api 'secretName'; }
+check "api: no TLS secret name: a tls block with the host and no secretName (the edge's default certificate)" api_default_certificate
 render -f "$here/api.values.yaml" --set api.networkPolicy.enabled=false
 no_api_policy() { [ -z "$(doc NetworkPolicy aap-operator-api)" ] && dhas NetworkPolicy aap-operator 'kind: NetworkPolicy'; }
 check "api: api.networkPolicy.enabled=false: no policy for the API, and the operator's stays" no_api_policy
@@ -387,6 +387,18 @@ check "api (secretref shape): the image is tag and digest, the log level and the
 
 # The shape that sets every value: what each one does to the render. (It renders from the defaults of values.yaml, so each of these differs from them.)
 render -f "$here/api-full.values.yaml"
+# The block of "<indent spaces><key>:" in the API's Deployment (the lines under it, until one that is indented no more), and from it the names of
+# the container's variables, the pod's volumes and the container's mounts, in the order of the lines (the chart's own first). toYaml writes the
+# keys of an extra entry in alphabetical order, so a mount is `- mountPath:` then `name:` and a volume `- configMap:` ... then `name:`.
+api_block() {
+  doc Deployment aap-operator-api | awk -v ind="$1" -v key="$2" '
+    BEGIN { pre = ""; for (i = 0; i < ind; i++) pre = pre " " }
+    $0 == pre key ":" { s = 1; next }
+    s { match($0, /^ */); if ($0 != "" && RLENGTH <= ind) exit; print }'
+}
+api_env_names() { api_block 10 env | sed -n 's/^            - name: //p' | tr '\n' ' '; }
+api_volume_names() { api_block 6 volumes | sed -n 's/^        - name: //p;s/^          name: //p' | tr '\n' ' '; }
+api_mounts() { api_block 10 volumeMounts | sed -n 's/^            - name: //p;s/^            - mountPath: //p;s/^              mountPath: //p;s/^              name: //p' | tr '\n' ' '; }
 api_ports_in_the_file_and_the_pod() {
   dhas ConfigMap aap-operator-api '^    listen: 0.0.0.0:8443$' '^    healthListen: 0.0.0.0:9091$' \
     && dlacks ConfigMap aap-operator-api 'listen: 0.0.0.0:(8080|8081)$' \
@@ -404,6 +416,14 @@ api_probes_follow_the_health_port() {
   dcount Deployment aap-operator-api 'port: health' 3 && dhas Deployment aap-operator-api 'name: health' 'containerPort: 9091'
 }
 check "api (full shape): the three probes go to the named port health, which is 9091" api_probes_follow_the_health_port
+check "api (full shape): the container's environment is the chart's two variables, then api.extraEnv in order" \
+  test "$(api_env_names)" = "API_CONFIG_FILE RUST_LOG SSL_CERT_FILE HTTPS_PROXY NO_PROXY "
+check "api (full shape): api.extraEnv values are rendered as they are" \
+  dhas Deployment aap-operator-api 'value: /etc/aap-api-ca/ca-bundle.crt' 'value: http://proxy.example.com:3128' 'value: .svc,.cluster.local,10.0.0.0/8'
+api_extra_volumes() { test "$(api_volume_names)" = "config ca " && dhas Deployment aap-operator-api 'name: aap-api-ca$'; }
+check "api (full shape): the volumes are the chart's config and then api.extraVolumes (a ConfigMap of the CA bundle)" api_extra_volumes
+api_extra_mounts() { test "$(api_mounts)" = "config /etc/aap-api /etc/aap-api-ca ca " && dhas Deployment aap-operator-api 'mountPath: /etc/aap-api-ca$' 'readOnly: true'; }
+check "api (full shape): the mounts are the configuration directory and then api.extraVolumeMounts, read-only" api_extra_mounts
 api_apiserver_rule() {
   r=$(api_egress_rule 1)
   all_of "$r" '^      - protocol: TCP$|^        - protocol: TCP$' 'port: 443$' 'port: 6443$' 'port: 16443$' '^      to:$' 'cidr: 10\.96\.0\.1/32$' 'cidr: 192\.168\.49\.2/32$' \
@@ -427,6 +447,11 @@ api_policy_ingress_peers() {
 }
 check "api (full shape): the policy's ingress peers are api.networkPolicy.from" api_policy_ingress_peers
 render -f "$here/api.values.yaml"
+api_nothing_extra_by_default() {
+  test "$(api_env_names)" = "API_CONFIG_FILE RUST_LOG " && test "$(api_volume_names)" = "config " && test "$(api_mounts)" = "config /etc/aap-api "
+}
+check "api: with no extraEnv, extraVolumes or extraVolumeMounts the container has the chart's two variables, its config volume and its one mount, nothing more" \
+  api_nothing_extra_by_default
 api_default_rules_are_open_on_their_ports() {
   all_of "$(api_egress_rule 1)" 'port: 443$' 'port: 6443$' && none_of "$(api_egress_rule 1)" 'ipBlock' '^      to:$' \
     && all_of "$(api_egress_rule 3)" 'port: 443$' && none_of "$(api_egress_rule 3)" 'ipBlock' 'namespaceSelector' '^      to:$'
@@ -462,7 +487,8 @@ check "NOTES (api on, no apiServer.cidrs and no issuer.to): it says the NetworkP
 render_notes -f "$here/api-full.values.yaml"
 check "NOTES (api on, both set): no warning about ANY address" lacks 'NetworkPolicy lets it reach ANY address'
 render_notes -f "$here/api.values.yaml" --set 'api.networkPolicy.apiServer.cidrs[0]=10.96.0.1/32'
-check "NOTES (only the API server's addresses set): the warning is about the issuer alone" has 'ANY address on 443 \(the issuer.s ports\)' && lacks 'API server.s ports'
+notes_about_the_issuer_alone() { has 'ANY address on 443 \(the issuer.s ports\)' && lacks 'API server.s ports'; }
+check "NOTES (only the API server's addresses set): the warning is about the issuer alone" notes_about_the_issuer_alone
 render_notes -f "$here/api.values.yaml" --set api.networkPolicy.enabled=false --set api.networkPolicy.from=null
 check "NOTES (api on, the policy off): no warning about a policy that is not there" lacks 'NetworkPolicy lets it reach ANY address'
 render
@@ -573,6 +599,37 @@ check "a peer that names nothing is refused" refused_api 'a peer needs a namespa
 check "a DNS peer that names nothing is refused" refused_api 'api.networkPolicy.dns.to: a peer needs' --set-json 'api.networkPolicy.dns.to=[{"foo":"bar"}]'
 check "no API server port is refused" refused_api 'api.networkPolicy.apiServer.ports must name at least one port' --set api.networkPolicy.apiServer.ports=null
 check "an issuer peer that names nothing is refused" refused_api 'api.networkPolicy.issuer.to: a peer needs' --set-json 'api.networkPolicy.issuer.to=[{"foo":"bar"}]'
+# api.extraEnv, api.extraVolumes and api.extraVolumeMounts: the chart's own names and paths are not for sale.
+ca_volume='api.extraVolumes=[{"name":"ca","configMap":{"name":"aap-api-ca"}}]'
+check "extraEnv: RUST_LOG is refused (it is api.logLevel)" refused_api 'api.extraEnv: RUST_LOG is the chart' --set-json 'api.extraEnv=[{"name":"RUST_LOG","value":"debug"}]'
+check "extraEnv: API_CONFIG_FILE is refused (it is the mounted file)" refused_api 'api.extraEnv: API_CONFIG_FILE is the chart' --set-json 'api.extraEnv=[{"name":"API_CONFIG_FILE","value":"/x"}]'
+check "extraEnv: API_LISTEN_ADDR is refused (it would win over api.port, which the probes and the Service follow)" \
+  refused_api 'api.extraEnv: API_LISTEN_ADDR is the chart' --set-json 'api.extraEnv=[{"name":"API_LISTEN_ADDR","value":"0.0.0.0:1"}]'
+check "extraEnv: HEALTH_ADDR is refused" refused_api 'api.extraEnv: HEALTH_ADDR is the chart' --set-json 'api.extraEnv=[{"name":"HEALTH_ADDR","value":"0.0.0.0:1"}]'
+check "extraEnv: a name set twice is refused" refused_api 'api.extraEnv: A is set twice' --set-json 'api.extraEnv=[{"name":"A","value":"1"},{"name":"A","value":"2"}]'
+check "extraEnv: an entry with no name is refused" refused_api 'api.extraEnv: every entry is a map with a name' --set-json 'api.extraEnv=[{"value":"1"}]'
+check "extraEnv: an entry that is not a map is refused" refused_api 'api.extraEnv: every entry is a map with a name' --set-json 'api.extraEnv=["A=1"]'
+check "extraEnv: a name that is not a variable name is refused" refused_api 'is not an environment variable name' --set-json 'api.extraEnv=[{"name":"A B","value":"1"}]'
+check "extraEnv: a value that is not a list is refused" refused_api 'api.extraEnv must be a list' --set api.extraEnv=x
+check "extraVolumes: a volume named config (the chart's) is refused" refused_api "api.extraVolumes: \`config\` is the chart" --set-json 'api.extraVolumes=[{"name":"config","emptyDir":{}}]'
+check "extraVolumes: a name used twice is refused" refused_api 'api.extraVolumes: ca is named twice' \
+  --set-json 'api.extraVolumes=[{"name":"ca","emptyDir":{}},{"name":"ca","emptyDir":{}}]'
+check "extraVolumeMounts: a mount of a volume that is not in extraVolumes is refused" refused_api 'api.extraVolumeMounts: nothing is not a volume of api.extraVolumes' \
+  --set-json 'api.extraVolumeMounts=[{"name":"nothing","mountPath":"/x"}]'
+check "extraVolumeMounts: a mount at the configuration directory is refused" refused_api 'which is the configuration file' \
+  --set-json "$ca_volume" --set-json 'api.extraVolumeMounts=[{"name":"ca","mountPath":"/etc/aap-api"}]'
+check "extraVolumeMounts: a mount under the configuration directory is refused" refused_api 'which is the configuration file' \
+  --set-json "$ca_volume" --set-json 'api.extraVolumeMounts=[{"name":"ca","mountPath":"/etc/aap-api/ca"}]'
+check "extraVolumeMounts: a mount at the configuration file is refused" refused_api 'which is the configuration file' \
+  --set-json "$ca_volume" --set-json 'api.extraVolumeMounts=[{"name":"ca","mountPath":"/etc/aap-api/config.yaml"}]'
+check "extraVolumeMounts: a mount at the configuration directory with a trailing slash is refused" refused_api 'which is the configuration file' \
+  --set-json "$ca_volume" --set-json 'api.extraVolumeMounts=[{"name":"ca","mountPath":"/etc/aap-api/"}]'
+check "extraVolumeMounts: a relative mount path is refused" refused_api 'must be an absolute path' \
+  --set-json "$ca_volume" --set-json 'api.extraVolumeMounts=[{"name":"ca","mountPath":"etc/ca"}]'
+check "extraVolumeMounts: /etc/aap-api-ca, which only starts like the configuration directory, renders" \
+  renders_ok -f "$here/api.values.yaml" --set-json "$ca_volume" --set-json 'api.extraVolumeMounts=[{"name":"ca","mountPath":"/etc/aap-api-ca"}]'
+check "extraEnv with a secretKeyRef (a proxy URL with credentials) renders: the pod reads that Secret, the API's Role does not" \
+  renders_ok -f "$here/api.values.yaml" --set-json 'api.extraEnv=[{"name":"HTTPS_PROXY","valueFrom":{"secretKeyRef":{"name":"proxy","key":"url"}}}]'
 check "an issuer port that is not a port is refused" refused_api 'api.networkPolicy.issuer.ports: 99999 is not a port number' --set-json 'api.networkPolicy.issuer.ports=[99999]'
 # The URL, the origins and the registries are read as the binary reads them (aap-auth-oidc's http_url, aap-platform-api's CorsOrigins,
 # aap-forms' is_host): a value the binary refuses at start is refused here, by name, and the edge of what it accepts renders.

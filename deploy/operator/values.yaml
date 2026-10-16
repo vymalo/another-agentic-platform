@@ -234,6 +234,23 @@ api:
       memory: 64Mi
     limits:
       memory: 256Mi
+
+  # Environment, volumes and mounts of the API's container beyond the chart's own, for an issuer behind a private CA or a proxy: `extraEnv`
+  # is a list of EnvVar (`HTTPS_PROXY`, `NO_PROXY`, `SSL_CERT_FILE`), `extraVolumes` a list of Volume (a ConfigMap that holds a CA bundle) and
+  # `extraVolumeMounts` a list of VolumeMount of them. The chart owns API_CONFIG_FILE, RUST_LOG (api.logLevel), API_LISTEN_ADDR and HEALTH_ADDR
+  # (api.port, api.healthPort), the volume `config` and everything under /etc/aap-api: it refuses a variable of those names and a mount there.
+  # The recipe, and what the binary reads (verified 2026-10-16, in the source): README "An issuer behind a private CA or a proxy".
+  extraEnv: []
+  #  - name: SSL_CERT_FILE
+  #    value: /etc/aap-api-ca/ca-bundle.crt
+  extraVolumes: []
+  #  - name: ca
+  #    configMap:
+  #      name: aap-api-ca
+  extraVolumeMounts: []
+  #  - name: ca
+  #    mountPath: /etc/aap-api-ca
+  #    readOnly: true
   podAnnotations: {}
   podLabels: {}
   priorityClassName: ""

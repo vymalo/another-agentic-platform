@@ -140,6 +140,23 @@ api:
     limits:
       cpu: "1"
       memory: 512Mi
+  # An issuer behind a private CA and a proxy (README "An issuer behind a private CA or a proxy"): in a real deployment issuer.to would
+  # name the proxy and issuer.ports its port.
+  extraEnv:
+    - name: SSL_CERT_FILE
+      value: /etc/aap-api-ca/ca-bundle.crt
+    - name: HTTPS_PROXY
+      value: http://proxy.example.com:3128
+    - name: NO_PROXY
+      value: .svc,.cluster.local,10.0.0.0/8
+  extraVolumes:
+    - name: ca
+      configMap:
+        name: aap-api-ca
+  extraVolumeMounts:
+    - name: ca
+      mountPath: /etc/aap-api-ca
+      readOnly: true
   podAnnotations:
     example.com/scrape: "false"
   podLabels:
