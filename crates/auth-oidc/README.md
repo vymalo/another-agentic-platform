@@ -86,9 +86,11 @@ stateDiagram-v2
   sign byte, or `AAEAAQ` for 65537), the modulus then at least 256 octets; a P-256 coordinate is read without its leading zeros,
   refused over 32 octets or empty, and given to the library in the full 32 (an issuer may cut the zeros, write them or cover them
   with a sign byte, and each verifies). A token with no `kid` takes the one key of its kind, when there is exactly one.
-- **Claims**: the signature first, then `iss` equal to the configured issuer, exactly; one of the configured audiences among `aud`
-  (a text or a list); `exp` required and not past; `nbf`, when there, not in the future; **60 seconds of leeway** for both; `sub`
-  required, non-empty text. **`iat` is not required** (decision 2 below).
+- **Claims**: the signature first, then in this order: `exp` required, a time, and not past; `nbf`, when there, not in the future
+  (**60 seconds of leeway** for both, pinned at 55 and 65 s); `iss` **one text**, equal to the configured issuer, exactly (a list
+  that holds it is refused, which `jsonwebtoken` alone would accept); one of the configured audiences among `aud` (a text, or a list
+  of texts); `sub` required, text, not blank and without a control character (otherwise kept byte for byte). With several wrong, the
+  word is that of the first in this order, the same every time. **`iat` is not required** (decision 2 below).
 - **Permissions**: the values at the dotted path `rolesClaim` (`agentic_roles`; `realm_access.roles` for Keycloak's own). A claim whose
   own name has dots is found by that name first; a list gives its texts (anything else in it is skipped), a text is one role,
   anything else is none, and **a bad roles claim never refuses a token**: a person with no permission is a person, and the API
@@ -129,9 +131,9 @@ stateDiagram-v2
 | `Invalid(BadSignature)` | the key the token names does not verify it (another key's signature, a payload edited after signing) | |
 | `Invalid(UnknownKey)` | the `kid` is not in the issuer's keys, even after the one fetch it earns; or no key of the algorithm's kind fits (a `kid` of an RSA key on an ES256 token; no `kid` and two keys of the kind) | |
 | `Invalid(Expired)` | `exp` more than 60 s past, **or `nbf` more than 60 s ahead**: the closed set has no word for "not yet valid" (decision 4) | |
-| `Invalid(WrongIssuer)` | `iss` is not the configured issuer, exactly, or is not there | |
-| `Invalid(WrongAudience)` | none of the configured audiences is in `aud`, or `aud` is not there or not readable | |
-| `Invalid(MissingClaim)` | no `exp` (or one that is not a time), no `sub` (or one that is not text, or is empty) | |
+| `Invalid(WrongIssuer)` | `iss` is not the configured issuer, exactly, is not a text (a list is not), or is not there | |
+| `Invalid(WrongAudience)` | none of the configured audiences is in `aud`, or `aud` is not there, not readable, or a list with something but texts in it | |
+| `Invalid(MissingClaim)` | no `exp` (or one that is not a time), no `sub` (or one that is not text, is empty or only white space, or has a control character) | |
 | `Unavailable(KeysUnavailable)` | the keys cannot be had: `NoCopy` (never fetched, the fetch fails), `TooOld` (the copy is past the grace, the fetch fails), `Unrefreshed` (the copy lacks the key the token names and cannot be refreshed: **a good token is not told it is bad**, decision 5) | `KeysUnavailable`, then the `FetchFailure`: a closed set of words and one status code (`the issuer answered 503`) |
 
 **None of it holds a part of a token**: the reason of an `Invalid` is one word of a closed enum, and the source of an `Unavailable` is
@@ -209,7 +211,7 @@ token is as good as its issuer's signature, and a thief who has it can use it. W
 possession like the orchestrator is a question for the owner (§60a, D6 note); nothing in this crate decides it by accident.
 
 Also left out: the user and e-mail claims, `email_verified`, the name and `expires_at` (the platform's `Principal` is the subject and
-the permissions), and the user claim's lower-casing (a subject is opaque, kept as it is).
+the permissions), and the user claim's lower-casing (a subject is opaque, kept as it is, byte for byte).
 
 | # | Decision | Alternative |
 |---|---|---|
@@ -221,6 +223,8 @@ the permissions), and the user claim's lower-casing (a subject is opaque, kept a
 | 6 | A missing `iss` is `WrongIssuer` and a missing `aud` is `WrongAudience` (the token does not name this API); `MissingClaim` is for `sub` and `exp`, the port's own words | `MissingClaim` for all four |
 | 7 | JWS is checked by **aws-lc-rs** (through `jsonwebtoken`), TLS is **rustls with ring** (through `reqwest` 0.12): see below | `jsonwebtoken`'s `rust_crypto` backend (pure Rust, no second native library, and RSA key generation for the testkit would be slow in debug builds) |
 | 8 | **A copy older than the refresh interval is served at once** while a refresh runs in the background (no request waits for a refresh while a copy can verify); a request after a long quiet is verified against a copy up to 70 minutes old | wait for the refresh (a slow issuer holds up everyone, and a hanging one for the timeout) |
+| 9 | **`iss` must be one text equal to the issuer**: a list that holds it is `WrongIssuer` | the library's check, which accepts any match |
+| 10 | **A `sub` that is blank or has a control character is `MissingClaim`**; any other text is kept byte for byte | any non-empty text |
 
 ### Dependencies
 

@@ -37,12 +37,14 @@ pub(crate) fn roles(claims: &Map<String, Value>, path: &str) -> Vec<String> {
     }
 }
 
-/// The principal a token with `claims` names: its `sub`, which must be text and not empty, and the values at
-/// the roles claim.
+/// The principal a token with `claims` names: its `sub`, which must be text, and the values at the roles claim.
+/// The subject is opaque and kept byte for byte, but it must be somebody: not blank, and without a control
+/// character (a newline or a NUL would have to be escaped everywhere the subject is written).
 ///
 /// # Errors
 ///
-/// [`InvalidToken::MissingClaim`] when `sub` is absent, is not text, or is empty.
+/// [`InvalidToken::MissingClaim`] when `sub` is absent, is not text, is empty or only white space, or has a
+/// control character.
 pub(crate) fn principal(
     claims: &Map<String, Value>,
     roles_claim: &str,
@@ -50,7 +52,7 @@ pub(crate) fn principal(
     let subject = claims
         .get("sub")
         .and_then(Value::as_str)
-        .filter(|sub| !sub.is_empty())
+        .filter(|sub| !sub.trim().is_empty() && !sub.chars().any(char::is_control))
         .ok_or(InvalidToken::MissingClaim)?;
     Ok(Principal::new(subject, roles(claims, roles_claim)))
 }
@@ -125,5 +127,20 @@ mod tests {
         // Not trimmed, not lower-cased: the subject is opaque.
         let p = principal(&claims(json!({"sub": " Mixed Case "})), "r").unwrap();
         assert_eq!(p.subject(), " Mixed Case ");
+    }
+
+    #[test]
+    fn a_subject_that_is_blank_or_has_a_control_character_is_a_missing_claim() {
+        for sub in ["  ", "\t", " \n ", "a\nb\0", "a\u{7f}", "\u{1b}[0m", "x\ry"] {
+            assert_eq!(
+                principal(&claims(json!({ "sub": sub })), "r").unwrap_err(),
+                InvalidToken::MissingClaim,
+                "{sub:?}"
+            );
+        }
+        for sub in ["Zoë", "a b", " padded ", "idp|42"] {
+            let p = principal(&claims(json!({ "sub": sub })), "r").unwrap();
+            assert_eq!(p.subject(), sub);
+        }
     }
 }

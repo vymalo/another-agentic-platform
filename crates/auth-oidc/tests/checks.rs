@@ -8,12 +8,12 @@ mod common;
 use aap_auth_oidc::testkit::{
     ALGORITHMS, Alg, Signing, TEST_AUDIENCE, TEST_ROLES_CLAIM, now, set_path,
 };
-use aap_auth_oidc::{MAX_TOKEN_BYTES, OidcAuthenticator, OidcConfig};
+use aap_auth_oidc::{MAX_TOKEN_BYTES, OidcAuthenticator};
 use aap_ports::{AuthError, Authenticator, ErrorClass, InvalidToken};
 use base64::Engine as _;
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
-use common::{ROLES, Rig, SUBJECT, assert_accepted, assert_invalid, seconds_ago, tuning};
-use serde_json::{Map, Value, json};
+use common::{ROLES, Rig, SUBJECT, assert_accepted, assert_invalid, seconds_ago};
+use serde_json::json;
 
 // ---- the algorithms ----------------------------------------------------------------------------------------
 
@@ -212,6 +212,18 @@ async fn a_token_past_its_exp_is_expired_beyond_the_leeway_of_60_seconds() {
         rig.check_claims(&claims).await,
         "expired 30 s ago, inside the leeway",
     );
+    // The edge of the leeway is 60 seconds, not 30 and not 120.
+    claims.insert("exp".into(), json!(seconds_ago(55)));
+    assert_accepted(
+        rig.check_claims(&claims).await,
+        "expired 55 s ago, inside the leeway",
+    );
+    claims.insert("exp".into(), json!(seconds_ago(65)));
+    assert_invalid(
+        rig.check_claims(&claims).await,
+        InvalidToken::Expired,
+        "expired 65 s ago, past the leeway",
+    );
     claims.insert("exp".into(), json!(now() + 3600));
     assert_accepted(rig.check_claims(&claims).await, "valid for an hour");
 }
@@ -231,6 +243,18 @@ async fn a_token_before_its_nbf_is_refused_beyond_the_leeway_of_60_seconds() {
     assert_accepted(
         rig.check_claims(&claims).await,
         "valid in 30 s, inside the leeway",
+    );
+    // The edge of the leeway is 60 seconds, not 30 and not 120.
+    claims.insert("nbf".into(), json!(now() + 55));
+    assert_accepted(
+        rig.check_claims(&claims).await,
+        "valid in 55 s, inside the leeway",
+    );
+    claims.insert("nbf".into(), json!(now() + 65));
+    assert_invalid(
+        rig.check_claims(&claims).await,
+        InvalidToken::Expired,
+        "valid in 65 s, past the leeway",
     );
     claims.insert("nbf".into(), json!(seconds_ago(10)));
     assert_accepted(rig.check_claims(&claims).await, "valid since 10 s");
@@ -314,6 +338,21 @@ async fn the_issuer_must_match_exactly() {
         InvalidToken::WrongIssuer,
         "an issuer that is not text",
     );
+    // The library accepts a list that holds the issuer; an `iss` is one text, and a token that names another
+    // issuer beside ours is not ours.
+    for list in [
+        json!([issuer, "https://evil.example"]),
+        json!(["https://evil.example", issuer]),
+        json!([issuer]),
+        json!([]),
+    ] {
+        claims.insert("iss".into(), list.clone());
+        assert_invalid(
+            rig.check_claims(&claims).await,
+            InvalidToken::WrongIssuer,
+            &format!("iss {list}"),
+        );
+    }
 }
 
 #[tokio::test]
@@ -335,6 +374,13 @@ async fn one_of_the_audiences_must_be_in_aud() {
             what,
         );
     }
+    // A list is a list of texts: one that holds anything else is not read as if it did not.
+    claims.insert("aud".into(), json!([TEST_AUDIENCE, 7]));
+    assert_invalid(
+        rig.check_claims(&claims).await,
+        InvalidToken::WrongAudience,
+        "a list with a number in it",
+    );
     claims.remove("aud");
     assert_invalid(
         rig.check_claims(&claims).await,
@@ -406,6 +452,76 @@ async fn sub_is_required_and_is_the_subject() {
     claims.insert("sub".into(), json!("Some Subject-42"));
     let principal = assert_accepted(rig.check_claims(&claims).await, "a sub");
     assert_eq!(principal.subject(), "Some Subject-42");
+}
+
+#[tokio::test]
+async fn a_sub_that_is_blank_or_holds_a_control_character_is_a_missing_claim() {
+    // A subject is opaque, and kept as the issuer wrote it; one that is only white space, or that a log line or
+    // a header would have to escape, is not a person.
+    let rig = Rig::new().await;
+    let mut claims = rig.claims();
+    for bad in [
+        "  ",
+        " \t ",
+        "\n",
+        "a\nb\0",
+        "a\u{7f}",
+        "\u{1b}[31mred",
+        "tab\there",
+    ] {
+        claims.insert("sub".into(), json!(bad));
+        assert_invalid(
+            rig.check_claims(&claims).await,
+            InvalidToken::MissingClaim,
+            &format!("sub {bad:?}"),
+        );
+    }
+    for kept in [
+        " padded ",
+        "Zoë Ünïcode",
+        "a b",
+        "https://idp.example/users/1",
+    ] {
+        claims.insert("sub".into(), json!(kept));
+        let principal = assert_accepted(rig.check_claims(&claims).await, kept);
+        assert_eq!(principal.subject(), kept, "byte for byte");
+    }
+}
+
+#[tokio::test]
+async fn when_several_required_claims_are_missing_the_word_is_always_the_same() {
+    // The order is the order of the checks: exp, then iss, aud and sub. (It used to depend on the order of a
+    // hash set, so a token that lacked several was refused with a different word from one request to the next.)
+    let rig = Rig::new().await;
+    for _ in 0..40 {
+        let mut claims = rig.claims();
+        for claim in ["exp", "iss", "aud", "sub"] {
+            claims.remove(claim);
+        }
+        assert_invalid(
+            rig.check_claims(&claims).await,
+            InvalidToken::MissingClaim,
+            "no exp, iss, aud or sub",
+        );
+        claims.insert("exp".into(), json!(now() + 300));
+        assert_invalid(
+            rig.check_claims(&claims).await,
+            InvalidToken::WrongIssuer,
+            "no iss, aud or sub",
+        );
+        claims.insert("iss".into(), json!(rig.idp.issuer()));
+        assert_invalid(
+            rig.check_claims(&claims).await,
+            InvalidToken::WrongAudience,
+            "no aud or sub",
+        );
+        claims.insert("aud".into(), json!(TEST_AUDIENCE));
+        assert_invalid(
+            rig.check_claims(&claims).await,
+            InvalidToken::MissingClaim,
+            "no sub",
+        );
+    }
 }
 
 #[tokio::test]
@@ -716,7 +832,4 @@ async fn the_authenticator_is_cheap_to_clone_and_its_futures_can_be_spawned() {
     assert_eq!(principal.subject(), SUBJECT);
     // Clones share the keys: one fetch.
     assert_eq!(rig.idp.jwks_fetches(), 1);
-    let _: OidcConfig = rig.idp.config();
-    let _ = tuning();
-    let _: &Map<String, Value> = &rig.claims();
 }

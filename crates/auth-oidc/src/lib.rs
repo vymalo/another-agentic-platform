@@ -14,9 +14,10 @@
 //!   Nothing has been fetched yet: a token that is not one never makes a request to the issuer.
 //! - **Key**: the key of the issuer's JWKS that the header's `kid` names and whose kind is the algorithm's. A
 //!   JWKS key that cannot verify (symmetric, too small, for encryption, another curve) is skipped.
-//! - **Signature**, then **claims**: `iss` equal to the configured issuer; one of the configured audiences in
-//!   `aud`; `exp` required and not past, `nbf` not in the future, both with 60 seconds of leeway
-//!   ([`LEEWAY_SECS`]); `sub` required. `iat` is **not** required.
+//! - **Signature**, then **claims**, in this order: `exp` required and not past, `nbf` not in the future, both
+//!   with 60 seconds of leeway ([`LEEWAY_SECS`]); `iss` a text equal to the configured issuer; one of the
+//!   configured audiences in `aud`; `sub` required, not blank and without a control character. `iat` is **not**
+//!   required. With several claims wrong, the word is the first in this order.
 //! - **Roles**: the values at the configured claim. A claim that is absent or of another shape is no
 //!   permission, and does not refuse the token.
 //!
@@ -414,17 +415,41 @@ impl Inner {
         Ok(self.usable(&state).unwrap_or_else(|| Arc::clone(seen)))
     }
 
+    /// What the library checks: the signature, then `exp` (required, and not past) and `nbf`, both with the
+    /// leeway. `iss`, `aud` and `sub` are checked after, by [`check_claims`](Self::check_claims) and
+    /// [`claims::principal`], in that order: the library's own checks of them read a list where a text is meant,
+    /// let a claim of the wrong type through, and report the first of several missing claims in the order of a
+    /// hash set.
     fn validation(&self, alg: Algorithm) -> Validation {
         let mut validation = Validation::new(alg);
         validation.leeway = LEEWAY_SECS;
         validation.validate_exp = true;
         validation.validate_nbf = true;
-        validation.validate_aud = true;
-        validation.set_issuer(&[&self.issuer]);
-        validation.set_audience(&self.audiences);
+        validation.validate_aud = false;
         // `iat` is not required: §60a names `exp` only.
-        validation.set_required_spec_claims(&["exp", "iss", "aud"]);
+        validation.set_required_spec_claims(&["exp"]);
         validation
+    }
+
+    /// `iss` and `aud` of a token whose signature and times have passed. `iss` is one text, equal to the issuer:
+    /// the library would accept a list that holds it, and so a token that names another issuer beside ours.
+    /// `aud` is a text, or a list of texts, and one of the configured audiences is among them.
+    fn check_claims(&self, claims: &Map<String, Value>) -> Result<(), InvalidToken> {
+        if claims.get("iss").and_then(Value::as_str) != Some(self.issuer.as_str()) {
+            return Err(InvalidToken::WrongIssuer);
+        }
+        let ours = |aud: &str| self.audiences.iter().any(|ours| ours == aud);
+        let named = match claims.get("aud") {
+            Some(Value::String(aud)) => ours(aud),
+            Some(Value::Array(auds)) => {
+                auds.iter().all(Value::is_string) && auds.iter().filter_map(Value::as_str).any(ours)
+            }
+            _ => false,
+        };
+        if !named {
+            return Err(InvalidToken::WrongAudience);
+        }
+        Ok(())
     }
 
     /// The claims of `token`, once its size, header, key, signature and claims have passed.
@@ -453,6 +478,7 @@ impl Inner {
         };
         let data = decode::<Map<String, Value>>(token, &key, &self.validation(header.alg))
             .map_err(|e| invalid(reason(e.kind())))?;
+        self.check_claims(&data.claims).map_err(invalid)?;
         Ok(data.claims)
     }
 }
@@ -471,19 +497,13 @@ async fn finished(mut wait: watch::Receiver<()>) {
 }
 
 /// The word for what the library refused. The closed set has no word for a token that is not valid *yet*
-/// (`nbf`), and `Expired` is the nearest: the token is outside its time. A missing `iss` or `aud` is the
-/// wrong issuer or audience: the token does not name this API; `MissingClaim` is for `sub` and `exp`.
+/// (`nbf`), and `Expired` is the nearest: the token is outside its time. The only claim the library requires
+/// is `exp`; `iss`, `aud` and `sub` are checked by this crate, with their own words.
 fn reason(kind: &ErrorKind) -> InvalidToken {
     match kind {
         ErrorKind::InvalidSignature => InvalidToken::BadSignature,
         ErrorKind::ExpiredSignature | ErrorKind::ImmatureSignature => InvalidToken::Expired,
-        ErrorKind::InvalidIssuer => InvalidToken::WrongIssuer,
-        ErrorKind::InvalidAudience => InvalidToken::WrongAudience,
-        ErrorKind::MissingRequiredClaim(claim) => match claim.as_str() {
-            "iss" => InvalidToken::WrongIssuer,
-            "aud" => InvalidToken::WrongAudience,
-            _ => InvalidToken::MissingClaim,
-        },
+        ErrorKind::MissingRequiredClaim(_) => InvalidToken::MissingClaim,
         _ => InvalidToken::Malformed,
     }
 }
