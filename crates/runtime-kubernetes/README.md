@@ -143,7 +143,7 @@ stateDiagram-v2
 | `DependencyUnavailable` | the same with 69 |
 | `MissingSecret { name }` | `CreateContainerConfigError` whose message is about a Secret. The name is read from the message (`secret "x" not found`, `couldn't find key K in Secret ns/x`), or else from the container's own `secretKeyRef`s. The **name is in the reason; the message never holds it** |
 | `ImagePull` | `ErrImagePull`, `ImagePullBackOff`, `InvalidImageName` and their kin |
-| `CrashLoop` | `CrashLoopBackOff` after any other exit |
+| `CrashLoop` | `CrashLoopBackOff` after any other exit, or a container that has exited with a non-zero code other than 78 and 69 and has been restarted at least once: between two restarts the kubelet can keep reporting the last exit (`Terminated`, `Error`) and not `CrashLoopBackOff`. A first exit with no restart yet, and an exit with code 0, are no issue |
 | `NameConflict` | the adoption guard, not a pod |
 
 Issues are one per role and reason however many replicas show them, and a pod being deleted shows none. What this

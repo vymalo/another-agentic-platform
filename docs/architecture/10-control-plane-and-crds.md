@@ -223,7 +223,7 @@ Libraries: `kube` 4.0.0 (features `runtime`, `derive`), `k8s-openapi` 0.28.0, `s
 | `DependencyUnavailable` | a dependency of the agent is unreachable (database, an MCP server) | exit code 69 |
 | `MissingSecret{name}` | a referenced Secret or key does not exist | `CreateContainerConfigError` |
 | `ImagePull` | the image cannot be pulled | `ErrImagePull`, `ImagePullBackOff` |
-| `CrashLoop` | the container keeps exiting for another reason | `CrashLoopBackOff` |
+| `CrashLoop` | the container keeps exiting for another reason | `CrashLoopBackOff` (amended 2026-10-16: or a non-zero exit other than 78 and 69 of a container that has been restarted at least once, because between two restarts the kubelet can keep reporting the last exit, `Terminated` with reason `Error`, and not `CrashLoopBackOff`; a first exit and exit code 0 are no issue; *verified 2026-10-16*, CI run 38857024797 of `operator.yml`, job `runtime-kubernetes`, kindest/node v1.35.8: a pod running `sh -c "exit 1"` was `Terminated`, `Error`, exit code 1, restart count 5 after 240 s) |
 | `NameConflict` | an object with the name the runtime needs exists and is not ours | adoption guard |
 
 Exit codes 78 and 69 are adam's (`adam_service`: 0 clean shutdown, 78 configuration, 69 a dependency is unreachable; *verified 2026-10-04*, `bin/adam-agent/README.md`, "The process").
