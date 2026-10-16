@@ -12,8 +12,10 @@
 //! - **Shape**: three base64url parts whose first is a JSON header, and an `alg` among RS256, RS384, ES256 and
 //!   EdDSA. `none` and the HMAC family are refused whatever key they name (the algorithm confusion attack).
 //!   Nothing has been fetched yet: a token that is not one never makes a request to the issuer.
-//! - **Key**: the key of the issuer's JWKS that the header's `kid` names and whose kind is the algorithm's. A
-//!   JWKS key that cannot verify (symmetric, too small, for encryption, another curve) is skipped.
+//! - **Key**: the keys of the issuer's JWKS that the header's `kid` names and whose kind is the algorithm's,
+//!   every one of them (two keys may share a `kid`; the token is good if any of them signed it). A token with
+//!   no `kid` takes the one key of its kind, if there is exactly one. A JWKS key that cannot verify (symmetric,
+//!   too small, for encryption, another curve) is skipped.
 //! - **Signature**, then **claims**, in this order: `exp` required and not past, `nbf` not in the future, both
 //!   with 60 seconds of leeway ([`LEEWAY_SECS`]); `iss` a text equal to the configured issuer; one of the
 //!   configured audiences in `aud`; `sub` required, not blank and without a control character. `iat` is **not**
@@ -59,7 +61,7 @@ use std::time::{Duration, Instant};
 
 use aap_ports::{AuthError, Authenticator, InvalidToken, Principal};
 use jsonwebtoken::errors::ErrorKind;
-use jsonwebtoken::{Algorithm, Validation, decode, decode_header};
+use jsonwebtoken::{Algorithm, DecodingKey, TokenData, Validation, decode, decode_header};
 use serde_json::{Map, Value};
 use tokio::sync::watch;
 use url::Url;
@@ -455,6 +457,25 @@ impl Inner {
         Ok(())
     }
 
+    /// The token decoded with the first of `keys` that verifies its signature. Only a bad signature moves on to
+    /// the next key; any other word (the times, a claim) is of a token that a key did verify, and ends it.
+    fn decode_with_any(
+        &self,
+        token: &str,
+        alg: Algorithm,
+        keys: &[DecodingKey],
+    ) -> Result<TokenData<Map<String, Value>>, AuthError> {
+        let validation = self.validation(alg);
+        for key in keys {
+            match decode::<Map<String, Value>>(token, key, &validation) {
+                Ok(data) => return Ok(data),
+                Err(e) if matches!(e.kind(), ErrorKind::InvalidSignature) => {}
+                Err(e) => return Err(AuthError::Invalid(reason(e.kind()))),
+            }
+        }
+        Err(AuthError::Invalid(InvalidToken::BadSignature))
+    }
+
     /// The claims of `token`, once its size, header, key, signature and claims have passed.
     async fn verify(self: &Arc<Self>, token: &str) -> Result<Map<String, Value>, AuthError> {
         let invalid = |reason: InvalidToken| AuthError::Invalid(reason);
@@ -468,19 +489,22 @@ impl Inner {
             return Err(invalid(InvalidToken::Malformed));
         }
         let unavailable = |e: KeysUnavailable| AuthError::Unavailable(e.into());
-        let mut keys = self.current().await.map_err(unavailable)?;
-        let key = match keys.select(header.alg, header.kid.as_deref()) {
-            Some(key) => key.decoding.clone(),
-            None => {
-                keys = self.after_unknown_kid(&keys).await.map_err(unavailable)?;
-                match keys.select(header.alg, header.kid.as_deref()) {
-                    Some(key) => key.decoding.clone(),
-                    None => return Err(invalid(InvalidToken::UnknownKey)),
-                }
-            }
+        let candidates = |keys: &KeySet| -> Vec<DecodingKey> {
+            keys.select(header.alg, header.kid.as_deref())
+                .into_iter()
+                .map(|key| key.decoding.clone())
+                .collect()
         };
-        let data = decode::<Map<String, Value>>(token, &key, &self.validation(header.alg))
-            .map_err(|e| invalid(reason(e.kind())))?;
+        let mut keys = self.current().await.map_err(unavailable)?;
+        let mut decoding = candidates(&keys);
+        if decoding.is_empty() {
+            keys = self.after_unknown_kid(&keys).await.map_err(unavailable)?;
+            decoding = candidates(&keys);
+            if decoding.is_empty() {
+                return Err(invalid(InvalidToken::UnknownKey));
+            }
+        }
+        let data = self.decode_with_any(token, header.alg, &decoding)?;
         self.check_claims(&data.claims).map_err(invalid)?;
         Ok(data.claims)
     }

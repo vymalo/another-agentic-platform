@@ -7,7 +7,7 @@ mod common;
 
 use aap_auth_oidc::testkit::{TEST_AUDIENCE, now};
 use aap_auth_oidc::{OidcAuthenticator, OidcConfig};
-use aap_ports::{AuthError, Authenticator};
+use aap_ports::{AuthError, Authenticator, InvalidToken};
 use aws_lc_rs::rand::SystemRandom;
 use aws_lc_rs::rsa::{KeyPair as RsaKeyPair, KeySize, PublicKeyComponents};
 use aws_lc_rs::signature::{
@@ -17,7 +17,7 @@ use axum::Router;
 use axum::routing::get;
 use base64::Engine as _;
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
-use common::{assert_accepted, tuning};
+use common::{assert_accepted, assert_invalid, tuning};
 use serde_json::{Value, json};
 
 fn b64(bytes: impl AsRef<[u8]>) -> String {
@@ -255,4 +255,44 @@ async fn an_rsa_modulus_under_2048_bits_is_not_made_big_enough_by_a_sign_byte() 
     .await;
     let error = auth.ready().await.unwrap_err();
     assert!(matches!(error, AuthError::Unavailable(_)), "{error:?}");
+}
+
+// ---- a kid that two keys share -----------------------------------------------------------------------------------
+
+#[tokio::test]
+async fn every_key_of_a_shared_kid_is_tried_and_not_only_the_first() {
+    // A JWKS may hold two keys under one kid (a rotation that kept the name, two issuers merged): the token is
+    // good if any of them signed it.
+    let (first, second, stranger) = (
+        Ed25519KeyPair::generate().unwrap(),
+        Ed25519KeyPair::generate().unwrap(),
+        Ed25519KeyPair::generate().unwrap(),
+    );
+    let jwk = |key: &Ed25519KeyPair| json!({"kty": "OKP", "crv": "Ed25519", "kid": "shared", "x": b64(key.public_key().as_ref())});
+    let (auth, issuer) = issuer_with(vec![jwk(&first), jwk(&second)]).await;
+    for (name, key) in [("the first", &first), ("the second", &second)] {
+        let signed = token("EdDSA", "shared", &issuer, |m| {
+            key.sign(m).as_ref().to_vec()
+        });
+        accepted(&auth, &signed, &format!("signed by {name} key of the kid")).await;
+    }
+    // A key that is not in the set is still a bad signature, and a token with no kid still needs one key only.
+    let forged = token("EdDSA", "shared", &issuer, |m| {
+        stranger.sign(m).as_ref().to_vec()
+    });
+    assert_invalid(
+        auth.authenticate(Some(&forged)).await,
+        InvalidToken::BadSignature,
+        "signed by none of them",
+    );
+    let anonymous = format!(
+        "{}.{}",
+        b64(br#"{"alg":"EdDSA","typ":"JWT"}"#),
+        forged.split_once('.').unwrap().1
+    );
+    assert_invalid(
+        auth.authenticate(Some(&anonymous)).await,
+        InvalidToken::UnknownKey,
+        "no kid and two keys of the kind",
+    );
 }

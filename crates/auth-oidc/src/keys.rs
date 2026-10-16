@@ -243,21 +243,24 @@ impl KeySet {
         self.keys.len()
     }
 
-    /// The key that may verify a token with this `alg` and `kid`: a key of the algorithm's kind,
-    /// whose declared algorithm (if any) is `alg`, and whose `kid` is the token's. A token with
-    /// no `kid` takes the one key of that kind, when there is exactly one.
-    pub(crate) fn select(&self, alg: Algorithm, kid: Option<&str>) -> Option<&Key> {
-        let kind = kind_of(alg)?;
-        let mut fits = self
+    /// The keys that may verify a token with this `alg` and `kid`: those of the algorithm's kind whose declared
+    /// algorithm (if any) is `alg` and whose `kid` is the token's, **all of them** (a JWKS may hold two keys under
+    /// one `kid`, a rotation that kept the name or two sets merged: the token is good if any of them signed it). A
+    /// token with no `kid` takes the one key of that kind, when there is exactly one, and none otherwise.
+    pub(crate) fn select(&self, alg: Algorithm, kid: Option<&str>) -> Vec<&Key> {
+        let Some(kind) = kind_of(alg) else {
+            return Vec::new();
+        };
+        let fits: Vec<&Key> = self
             .keys
             .iter()
             .filter(|k| k.kind == kind && k.declared.is_none_or(|d| d == alg))
-            .filter(|k| kid.is_none_or(|kid| k.kid.as_deref() == Some(kid)));
-        let first = fits.next()?;
-        match kid {
-            Some(_) => Some(first),
-            None => fits.next().is_none().then_some(first),
+            .filter(|k| kid.is_none_or(|kid| k.kid.as_deref() == Some(kid)))
+            .collect();
+        if kid.is_none() && fits.len() != 1 {
+            return Vec::new();
         }
+        fits
     }
 }
 
@@ -386,45 +389,57 @@ mod tests {
             okp("d", "Ed25519", 32),
         ])
         .set;
-        assert_eq!(
-            set.select(Algorithm::RS256, Some("a"))
-                .unwrap()
-                .kid
-                .as_deref(),
-            Some("a")
-        );
-        assert_eq!(
-            set.select(Algorithm::RS384, Some("b"))
-                .unwrap()
-                .kid
-                .as_deref(),
-            Some("b")
-        );
+        let kids = |alg, kid| -> Vec<Option<String>> {
+            set.select(alg, Some(kid))
+                .into_iter()
+                .map(|key| key.kid.clone())
+                .collect()
+        };
+        assert_eq!(kids(Algorithm::RS256, "a"), [Some("a".to_owned())]);
+        assert_eq!(kids(Algorithm::RS384, "b"), [Some("b".to_owned())]);
         // The right kid, the wrong kind of key for the algorithm: no key.
-        assert!(set.select(Algorithm::ES256, Some("a")).is_none());
-        assert!(set.select(Algorithm::RS256, Some("c")).is_none());
-        assert!(set.select(Algorithm::EdDSA, Some("c")).is_none());
-        assert!(set.select(Algorithm::RS256, Some("nope")).is_none());
+        assert!(kids(Algorithm::ES256, "a").is_empty());
+        assert!(kids(Algorithm::RS256, "c").is_empty());
+        assert!(kids(Algorithm::EdDSA, "c").is_empty());
+        assert!(kids(Algorithm::RS256, "nope").is_empty());
         // An algorithm that is not allowed has no kind, so no key.
-        assert!(set.select(Algorithm::HS256, Some("a")).is_none());
-        assert!(set.select(Algorithm::PS256, Some("a")).is_none());
+        assert!(kids(Algorithm::HS256, "a").is_empty());
+        assert!(kids(Algorithm::PS256, "a").is_empty());
+    }
+
+    #[test]
+    fn every_key_of_a_shared_kid_is_a_candidate() {
+        let set = parse(vec![
+            rsa("a", json!({})),
+            rsa("a", json!({"alg": "RS384"})),
+            rsa("b", json!({})),
+            ec("a", "P-256"),
+        ])
+        .set;
+        // Two keys of the kind named "a" fit RS384 (the second declares it), and only the first RS256.
+        assert_eq!(set.select(Algorithm::RS384, Some("a")).len(), 2);
+        assert_eq!(set.select(Algorithm::RS256, Some("a")).len(), 1);
+        assert_eq!(set.select(Algorithm::ES256, Some("a")).len(), 1);
+        // Without a kid it is the one key of the kind, and two of the kind are none.
+        assert!(set.select(Algorithm::RS256, None).is_empty());
+        assert_eq!(set.select(Algorithm::ES256, None).len(), 1);
     }
 
     #[test]
     fn a_token_without_a_kid_takes_the_only_key_of_its_kind() {
         let one = parse(vec![rsa("a", json!({})), ec("c", "P-256")]).set;
-        assert!(one.select(Algorithm::RS256, None).is_some());
-        assert!(one.select(Algorithm::ES256, None).is_some());
-        assert!(one.select(Algorithm::EdDSA, None).is_none());
+        assert_eq!(one.select(Algorithm::RS256, None).len(), 1);
+        assert_eq!(one.select(Algorithm::ES256, None).len(), 1);
+        assert!(one.select(Algorithm::EdDSA, None).is_empty());
         let two = parse(vec![rsa("a", json!({})), rsa("b", json!({}))]).set;
-        assert!(two.select(Algorithm::RS256, None).is_none());
+        assert!(two.select(Algorithm::RS256, None).is_empty());
     }
 
     #[test]
     fn a_key_that_declares_an_algorithm_verifies_only_that_one() {
         let set = parse(vec![rsa("a", json!({"alg": "RS256"}))]).set;
-        assert!(set.select(Algorithm::RS256, Some("a")).is_some());
-        assert!(set.select(Algorithm::RS384, Some("a")).is_none());
+        assert_eq!(set.select(Algorithm::RS256, Some("a")).len(), 1);
+        assert!(set.select(Algorithm::RS384, Some("a")).is_empty());
         // A declared algorithm of another kind makes the key unusable.
         assert!(
             parse(vec![rsa("a", json!({"alg": "ES256"}))])
