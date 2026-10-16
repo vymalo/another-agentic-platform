@@ -803,6 +803,89 @@ async fn a_body_over_the_limit_is_413_whether_or_not_it_says_how_long_it_is() {
 }
 
 #[tokio::test]
+async fn two_content_type_headers_are_an_error_of_the_request_and_not_a_pick_of_one() {
+    // As two Authorization, two If-Match: which one the sender meant is not for the server to guess (400, not 415: the
+    // media type is not wrong, there are two).
+    let (api, token) = Api::seeded().await;
+    let body = serde_json::to_vec(&folder_body("chat")).unwrap();
+    for (first, second) in [
+        ("application/json", "application/json"),
+        ("application/json", "text/plain"),
+        ("text/plain", "application/json"),
+    ] {
+        let r = api
+            .put("/v1/agents/chat")
+            .token(&token)
+            .create()
+            .header("content-type", first)
+            .header("content-type", second)
+            .raw(&body, None)
+            .send()
+            .await;
+        assert_eq!(r.code(), 400, "{first} then {second}: {}", r.text());
+        assert!(r.is_problem("invalid-request"), "{}", r.text());
+        assert!(
+            r.json()["detail"]
+                .as_str()
+                .unwrap()
+                .contains("Content-Type")
+        );
+    }
+    // And one is fine.
+    let r = api
+        .put("/v1/agents/chat")
+        .token(&token)
+        .create()
+        .header("content-type", "application/json")
+        .raw(&body, None)
+        .send()
+        .await;
+    assert_eq!(r.code(), 201, "{}", r.text());
+}
+
+#[tokio::test]
+async fn a_delete_with_if_none_match_is_a_mistake_of_the_request_and_deletes_nothing() {
+    // `If-None-Match` is the precondition of a create. On a DELETE it is not one, whether `If-Match` is there or not: 400
+    // (the request is wrong, so not 428 "send a precondition"), and nothing is deleted.
+    let (api, token) = Api::seeded().await;
+    let created = create(&api, &token, &folder_body("chat")).await;
+    for path in [
+        "/v1/agents/chat",
+        "/v1/models/gateway",
+        "/v1/tool-servers/docs",
+    ] {
+        let current = api.get(path).token(&token).send().await;
+        let etag = if path == "/v1/agents/chat" {
+            created.etag()
+        } else {
+            current.etag()
+        };
+        let both = api
+            .delete(path)
+            .token(&token)
+            .replace(&etag)
+            .header("if-none-match", "*")
+            .send()
+            .await;
+        assert_eq!(both.code(), 400, "{path}: {}", both.text());
+        assert!(both.is_problem("invalid-request"), "{path}");
+        let alone = api
+            .delete(path)
+            .token(&token)
+            .header("if-none-match", "*")
+            .send()
+            .await;
+        assert_eq!(alone.code(), 400, "{path}: {}", alone.text());
+        assert!(alone.is_problem("invalid-request"), "{path}");
+        assert_eq!(
+            api.get(path).token(&token).send().await.code(),
+            200,
+            "{path} is still there"
+        );
+    }
+}
+
+#[tokio::test]
 async fn a_stream_of_chunks_that_are_each_under_the_limit_and_together_over_it_is_413() {
     // The bytes read are counted across the chunks: a body that says no length is checked as it arrives.
     let (api, token) = Api::seeded().await;

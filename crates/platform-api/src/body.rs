@@ -1,7 +1,8 @@
 //! Reading the body of a write: the media type, the size, and a JSON error that quotes nothing.
 //!
-//! The order is the cheap checks first: `415` from the headers, `413` from `Content-Length` before a byte is read (and
-//! from the count of bytes read, for a body that has no length or lies), then `400` for what is not JSON of the form.
+//! The order is the cheap checks first: from the headers, `400` for two `Content-Type` headers and `415` for a media type
+//! that is not JSON; `413` from `Content-Length` before a byte is read (and from the count of bytes read, for a body that has
+//! no length or lies); then `400` for what is not JSON of the form.
 
 use axum::body::Body;
 use axum::http::HeaderMap;
@@ -45,8 +46,12 @@ fn is_json(headers: &HeaderMap) -> bool {
 ///
 /// # Errors
 ///
-/// `415` when the body is not declared as JSON.
+/// `400` for two `Content-Type` headers (which one the sender meant is not for the server to pick, as with two
+/// `Authorization` or two `If-Match`), `415` when the body is not declared as JSON.
 pub fn require_json(headers: &HeaderMap) -> Result<(), Problem> {
+    if headers.get_all(CONTENT_TYPE).iter().nth(1).is_some() {
+        return Err(Problem::invalid_request("send one Content-Type header"));
+    }
     if is_json(headers) {
         Ok(())
     } else {
