@@ -75,7 +75,7 @@ sequence them with the CRDs first (a sync wave, or their Application first).
 | `resources` | 50m / 64Mi requested, 256Mi limit | |
 | `serviceAccount.create`, `.name`, `.annotations` | `true`, the fullname, none | |
 | `podAnnotations`, `podLabels`, `priorityClassName`, `nodeSelector`, `tolerations`, `affinity` | empty | |
-| `api.*` | `api.enabled: false` | The Platform API: [its own table](#the-platform-api). The operator's values above never apply to it (it has its own image, service account, resources and policy) |
+| `api.*` | `api.enabled: false` | The Platform API: [its own table](#the-platform-api). Of the values above only three reach it: `imagePullSecrets` (the pull secrets of both pods), `watchNamespace` (where its `Role` and its `defaults.namespace` are) and `nameOverride` / `fullnameOverride` (its names are `<fullname>-api`). Everything else is its own: image, service account, resources, policy, scheduling, log level. `image.tag` is bumped by CI, and so is `api.image.tag`, apart |
 
 **There is no `replicaCount`** (a value of that name is refused), no `crds.install` (§59a listed one before §93 decided on a
 separate app) and no `values.schema.json`: neither of the sibling charts, `deploy/coder` and `deploy/chart` of
