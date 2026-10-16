@@ -225,10 +225,19 @@ pub fn offered() -> OfferedKeys {
     )
 }
 
+/// A Secret made with `dataFrom`: no key is listed.
+pub fn offer_any_key(secret: &str) -> OfferedSecret {
+    OfferedSecret {
+        secret: secret.to_owned(),
+        key: None,
+        external_secret: format!("{secret}-es"),
+    }
+}
+
 pub fn offer(secret: &str, key: &str) -> OfferedSecret {
     OfferedSecret {
         secret: secret.to_owned(),
-        key: key.to_owned(),
+        key: Some(key.to_owned()),
         external_secret: format!("{secret}-es"),
     }
 }
@@ -309,16 +318,86 @@ fn ident() -> impl Strategy<Value = String> {
     "[a-z][a-z0-9]{0,8}(-[a-z0-9]{1,4}){0,2}"
 }
 
+/// What a person can type where a field takes any text, that is not blank: printable ASCII, letters and digits of
+/// other scripts, a line break, and the words and shapes that a YAML 1.1 reader reads as a boolean, a null, a number
+/// or a date (`yes`, `~`, `12:30`, `2026-10-16`), or that YAML itself reads as a comment, a key or a list.
+const SPECIAL: &[&str] = &[
+    "yes",
+    "No",
+    "on",
+    "OFF",
+    "y",
+    "N",
+    "null",
+    "~",
+    "true",
+    "12:30",
+    "1_000",
+    "1,000",
+    "2026-10-16",
+    "0x1f",
+    "1e3",
+    "-.5",
+    "<<",
+    "=",
+    "a: b",
+    "# not a comment",
+    "- not a list",
+    "[1, 2]",
+    "{a: 1}",
+    "\"quoted\"",
+    "it's",
+    "back\\slash",
+    "tab\there",
+    "Ünïcödé",
+    "日本語のタイトル",
+    "emoji 🙂 ok",
+    "two\nlines",
+    "trailing newline\n",
+    "windows\r\nlines",
+    "\u{2028}separator",
+];
+
+fn special() -> impl Strategy<Value = String> {
+    prop::sample::select(SPECIAL).prop_map(str::to_owned)
+}
+
 fn text() -> impl Strategy<Value = String> {
-    "[A-Za-z0-9][ -~]{0,20}"
+    prop_oneof![
+        6 => "[A-Za-z0-9][ -~]{0,20}",
+        2 => "[\\p{L}\\p{N}][\\p{L}\\p{N} ]{0,10}",
+        2 => special(),
+    ]
+}
+
+/// Free text that may have lines and any character: a description, the content of a file.
+fn multiline(max: usize) -> impl Strategy<Value = String> {
+    prop_oneof![
+        4 => prop::string::string_regex(&format!("[ -~]{{0,{max}}}")).unwrap(),
+        2 => "\\PC{0,20}",
+        2 => "[a-z ]{0,10}(\n[a-z #:-]{0,10}){0,3}\n?",
+        2 => special(),
+    ]
 }
 
 fn alias() -> impl Strategy<Value = String> {
-    "[a-z][a-z0-9.-]{0,14}"
+    prop_oneof![
+        8 => "[a-z][a-z0-9.-]{0,14}",
+        2 => special().prop_filter("an alias has text", |s| !s.trim().is_empty()),
+    ]
 }
 
 fn pick() -> impl Strategy<Value = SecretPick> {
     (ident(), "[A-Za-z][A-Za-z0-9_.-]{0,12}").prop_map(|(s, k)| SecretPick::new(s, k))
+}
+
+/// An audience value: visible ASCII, 1 to 64 characters, and so also the words YAML reads as another type.
+fn audience_value() -> impl Strategy<Value = String> {
+    prop_oneof![
+        8 => "[a-z][a-z.:-]{0,20}",
+        2 => prop::sample::select(vec!["yes", "off", "~", "null", "12:30", "2026-10-16", "a:b", "#x", "\"q\"", "it's", "-", "1e3"])
+            .prop_map(str::to_owned),
+    ]
 }
 
 pub fn arb_audience() -> impl Strategy<Value = Option<Vec<String>>> {
@@ -326,13 +405,13 @@ pub fn arb_audience() -> impl Strategy<Value = Option<Vec<String>>> {
         Just(None),
         Just(Some(Vec::new())),
         Just(Some(vec!["*".to_owned()])),
-        prop::collection::vec("[a-z][a-z.:-]{0,20}", 1..4).prop_map(Some),
+        prop::collection::vec(audience_value(), 1..4).prop_map(Some),
     ]
 }
 
 fn arb_coder_settings() -> impl Strategy<Value = CoderSettings> {
     (
-        "[A-Za-z0-9.]{1,12}",
+        prop_oneof![8 => "[A-Za-z0-9.]{1,12}", 2 => alias()],
         pick(),
         prop::collection::btree_set("[A-Za-z0-9][A-Za-z0-9-]{0,10}", 1..4),
         prop::collection::vec(any::<bool>(), 3),
@@ -365,7 +444,7 @@ fn arb_coder_settings() -> impl Strategy<Value = CoderSettings> {
 }
 
 fn arb_folder_settings() -> impl Strategy<Value = FolderSettings> {
-    prop::collection::btree_map("[a-z]{1,6}(/[a-z]{1,6}){0,2}\\.md", "[ -~]{0,30}", 0..4).prop_map(
+    prop::collection::btree_map("[a-z]{1,6}(/[a-z]{1,6}){0,2}\\.md", multiline(30), 0..4).prop_map(
         |mut files| {
             files.insert(
                 "instructions.md".to_owned(),
@@ -382,7 +461,7 @@ pub fn arb_agent_form() -> impl Strategy<Value = AgentForm> {
         arb_folder_settings().prop_map(AgentKindForm::Folder),
     ];
     (
-        (ident(), text(), prop::option::of("[ -~]{0,60}")),
+        (ident(), text(), prop::option::of(multiline(60))),
         (
             prop::collection::btree_set("[a-z][a-z0-9]{0,6}(-[a-z0-9]{1,3}){0,2}", 0..4),
             any::<bool>(),

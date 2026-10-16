@@ -20,6 +20,7 @@ mod defaults;
 mod error;
 mod export;
 mod image;
+mod referents;
 mod represent;
 mod resources;
 mod secret;
@@ -38,11 +39,12 @@ pub use defaults::{
 pub use error::FormError;
 pub use export::{ExportError, export_agent, export_object};
 pub use image::ImagePolicy;
+pub use referents::{Referents, SharedChange, dependents_after, externals};
 pub use represent::{Loaded, Representation, Unrepresentable};
 pub use resources::{AgentView, Resources, load_agent, to_resources};
 pub use secret::{OfferedKeys, SecretPick};
 pub use shared::{BaseUrlForm, HeaderForm, ModelEndpointForm, ToolServerForm};
 pub use validate::{
-    DEFAULT_IMAGE_STANDIN, FormTarget, check_replace, externals, from_object_errors,
-    validate_agent, validate_model, validate_tool_server,
+    DEFAULT_IMAGE_STANDIN, FormTarget, check_replace, from_object_errors, validate_agent,
+    validate_model, validate_tool_server,
 };

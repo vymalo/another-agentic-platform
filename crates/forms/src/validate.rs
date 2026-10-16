@@ -13,21 +13,20 @@ use std::collections::BTreeSet;
 
 use aap_api::{AgentConfig, AgentService, ModelEndpoint, ToolProvider};
 use aap_domain::{ConfigIssue, Externals, name_issue};
-use aap_ports::{FieldError, Kind, Stored};
-use k8s_openapi::apimachinery::pkg::apis::meta::v1::ObjectMeta;
-use serde::de::DeserializeOwned;
+use aap_ports::{FieldError, Kind};
 use url::Url;
 
 use crate::agent::{AgentForm, AgentKindForm, ModelChoice};
 use crate::defaults::{Defaults, Deployment, StoreDefault};
 use crate::error::{Errors, FormError};
 use crate::image::{ImagePolicy, is_host};
+use crate::referents::Referents;
 use crate::resources::{Resources, to_resources};
-use crate::secret::{OfferedKeys, SecretPick};
+use crate::secret::{OfferedKeys, SecretPick, is_secret_key_name};
 use crate::shared::{BaseUrlForm, ModelEndpointForm, ToolServerForm};
 use crate::syntax::{
-    chars, has_text, is_agent_name, is_github_login, is_model_name, is_tag, is_tool_server_name,
-    is_visible_ascii, shown,
+    chars, has_text, is_agent_name, is_github_login, is_model_name, is_scheme_prefix, is_tag,
+    is_tool_server_name, is_visible_ascii, shown,
 };
 
 /// The image `aap-domain` is told is the operator's default when the Platform API does not know it. The
@@ -35,41 +34,11 @@ use crate::syntax::{
 /// `ConfigInvalid`, not the dashboard's, so a form with no image must not be refused for it.
 pub const DEFAULT_IMAGE_STANDIN: &str = "stand-in.invalid/default-agent-image:unknown";
 
-/// What `aap-domain::validate` reads besides the agent: the `ModelEndpoint` and `ToolProvider` objects the
-/// Platform API listed, and the operator's default image (`None`: [`DEFAULT_IMAGE_STANDIN`]). An object that
-/// cannot be read as its kind is left out, and the agent that names it is told it is missing.
-pub fn externals(
-    models: &[Stored],
-    tool_servers: &[Stored],
-    default_image: Option<&str>,
-) -> Externals {
-    fn object_meta(s: &Stored) -> ObjectMeta {
-        ObjectMeta {
-            name: Some(s.name.clone()),
-            namespace: Some(s.namespace.clone()),
-            ..ObjectMeta::default()
-        }
-    }
-    fn spec<T: DeserializeOwned>(s: &Stored) -> Option<T> {
-        serde_json::from_value(s.spec.clone()).ok()
-    }
-    let mut externals =
-        Externals::default().with_default_image(default_image.unwrap_or(DEFAULT_IMAGE_STANDIN));
-    for stored in models {
-        if let Some(spec) = spec(stored) {
-            let mut object = ModelEndpoint::new(&stored.name, spec);
-            object.metadata = object_meta(stored);
-            externals = externals.with_model_endpoint(object);
-        }
-    }
-    for stored in tool_servers {
-        if let Some(spec) = spec(stored) {
-            let mut object = ToolProvider::new(&stored.name, spec);
-            object.metadata = object_meta(stored);
-            externals = externals.with_tool_provider(object);
-        }
-    }
-    externals
+/// An object that is there and that this version cannot read: not a missing one.
+fn unreadable_message(kind: &str, name: &str) -> String {
+    format!(
+        "the {kind} {name} exists and this version of the dashboard cannot read its spec (it is not the shape of a {kind}): it is not missing, so do not create it; look at it with View YAML"
+    )
 }
 
 fn blank(pick: &SecretPick) -> bool {
@@ -82,6 +51,14 @@ fn check_pick(e: &mut Errors, field: &str, pick: &SecretPick, offered: &OfferedK
         e.add(
             field,
             "name a Secret and a key of it, from the offered keys",
+        );
+    } else if offered.takes_any_key(&pick.secret) && !is_secret_key_name(&pick.key) {
+        e.add(
+            field,
+            format!(
+                "{} is not the name of a Secret key: 1 to 253 letters, digits, `-`, `_` and `.`, not `.` or `..`, not starting with `..`",
+                shown(&pick.key, 64)
+            ),
         );
     } else if !offered.contains(pick) {
         e.add(
@@ -120,7 +97,12 @@ fn check_url(e: &mut Errors, field: &str, text: &str) {
 }
 
 /// The rules of the *Coder* and *Folder agent* screens, the offered keys and the image. Every error with its field.
-fn check_agent(form: &AgentForm, offered: &OfferedKeys, images: &ImagePolicy) -> Errors {
+fn check_agent(
+    form: &AgentForm,
+    offered: &OfferedKeys,
+    images: &ImagePolicy,
+    referents: &Referents,
+) -> Errors {
     let mut e = Errors::default();
     if !is_agent_name(&form.name) {
         e.add(
@@ -164,7 +146,21 @@ fn check_agent(form: &AgentForm, offered: &OfferedKeys, images: &ImagePolicy) ->
             e.add(field, "name a tool server");
         } else if let Some(issue) = name_issue(&field, name) {
             e.add(field, issue.message);
+        } else if referents
+            .unreadable
+            .contains(&(Kind::ToolProvider, name.clone()))
+        {
+            e.add(field, unreadable_message("ToolProvider", name));
         }
+    }
+    if referents
+        .unreadable
+        .contains(&(Kind::ModelEndpoint, endpoint.clone()))
+    {
+        e.add(
+            "model.endpoint",
+            unreadable_message("ModelEndpoint", endpoint),
+        );
     }
     if let Some(image) = &form.image
         && let Err(why) = images.check(image)
@@ -591,7 +587,7 @@ pub fn check_replace(current: &AgentForm, new: &AgentForm) -> Vec<FormError> {
 ///
 /// The screens' rules, the offered keys, the agent's own image against `images` (a tag or a digest, no
 /// credentials, an allowed registry: [`ImagePolicy`]), and then `aap_domain::validate` on the rendered objects with
-/// `externals` ([`externals`] builds them from the store's lists): the agent is refused here for what the
+/// `referents` ([`externals`](crate::externals) builds them from the store's lists): the agent is refused here for what the
 /// operator would mark `ConfigInvalid`. Every error names its form field; an error in the deployment's part is
 /// `deployment.…` (the person cannot edit it: the API's configuration is wrong, and [`Defaults::check`] would have said so).
 ///
@@ -602,13 +598,13 @@ pub fn validate_agent(
     form: &AgentForm,
     deployment: &Deployment,
     namespace: &str,
-    externals: &Externals,
+    referents: &Referents,
     offered: &OfferedKeys,
     images: &ImagePolicy,
 ) -> Result<Resources, Vec<FormError>> {
-    let errors = check_agent(form, offered, images);
+    let errors = check_agent(form, offered, images, referents);
     let resources = to_resources(form, deployment, namespace);
-    let issues = aap_domain::validate(&resources.service, &resources.config, externals)
+    let issues = aap_domain::validate(&resources.service, &resources.config, &referents.externals)
         .err()
         .unwrap_or_default();
     let errors = merge(errors, from_issues(FormTarget::Agent(form), &issues));
@@ -767,6 +763,17 @@ pub fn validate_tool_server(
             &header.secret,
             offered,
         );
+        // Never quoted: it is where a person pastes a token.
+        if header
+            .prefix
+            .as_deref()
+            .is_some_and(|p| !is_scheme_prefix(p))
+        {
+            e.add(
+                format!("headers[{name}].prefix"),
+                "is an authentication scheme and one space (`Bearer `, `Basic `), or nothing: the secret itself is picked from the Secret keys, never typed here",
+            );
+        }
     }
     if form.tools.len() > 32 {
         e.add("tools", "at most 32 tools");

@@ -152,6 +152,11 @@ pub trait ObjectsUnderTest: crate::AgentObjects + 'static {
         external_secret: &str,
     ) -> impl Future<Output = ()> + Send;
 
+    /// An ExternalSecret that carries the offer label and fetches with `dataFrom`: `secret` is offered, and none of
+    /// its keys is listed.
+    fn offer_any_key(&self, secret: &str, external_secret: &str)
+    -> impl Future<Output = ()> + Send;
+
     /// An ExternalSecret that makes the key and does **not** carry the offer label.
     fn decline(
         &self,

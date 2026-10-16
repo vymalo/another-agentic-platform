@@ -225,7 +225,17 @@ impl MemoryObjects {
     pub fn offer(&self, secret: &str, key: &str, external_secret: &str) {
         lock(&self.state).offered.insert(OfferedSecret {
             secret: secret.to_owned(),
-            key: key.to_owned(),
+            key: Some(key.to_owned()),
+            external_secret: external_secret.to_owned(),
+        });
+    }
+
+    /// An ExternalSecret that carries the offer label and fetches with `dataFrom`: the Secret is offered with
+    /// no key listed.
+    pub fn offer_any_key(&self, secret: &str, external_secret: &str) {
+        lock(&self.state).offered.insert(OfferedSecret {
+            secret: secret.to_owned(),
+            key: None,
             external_secret: external_secret.to_owned(),
         });
     }
@@ -234,7 +244,7 @@ impl MemoryObjects {
     pub fn decline(&self, secret: &str, key: &str, external_secret: &str) {
         lock(&self.state).declined.insert(OfferedSecret {
             secret: secret.to_owned(),
-            key: key.to_owned(),
+            key: Some(key.to_owned()),
             external_secret: external_secret.to_owned(),
         });
     }
@@ -498,6 +508,10 @@ impl ObjectsUnderTest for MemoryObjects {
 
     async fn offer(&self, secret: &str, key: &str, external_secret: &str) {
         Self::offer(self, secret, key, external_secret);
+    }
+
+    async fn offer_any_key(&self, secret: &str, external_secret: &str) {
+        Self::offer_any_key(self, secret, external_secret);
     }
 
     async fn decline(&self, secret: &str, key: &str, external_secret: &str) {

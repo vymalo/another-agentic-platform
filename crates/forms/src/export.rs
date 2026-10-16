@@ -55,10 +55,10 @@ fn keeps_annotation(key: &str) -> bool {
     key.starts_with(PLATFORM_PREFIX)
 }
 
-fn kept<'a>(
-    map: &'a BTreeMap<String, String>,
+fn kept(
+    map: &BTreeMap<String, String>,
     keeps: impl Fn(&str, &str) -> bool,
-) -> BTreeMap<&'a str, &'a str> {
+) -> BTreeMap<&str, &str> {
     map.iter()
         .filter(|(k, v)| keeps(k, v))
         .map(|(k, v)| (k.as_str(), v.as_str()))

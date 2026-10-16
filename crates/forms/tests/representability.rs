@@ -591,3 +591,84 @@ fn a_model_endpoint_and_a_tool_server_are_forms_unless_they_hold_what_a_form_can
     stored_tool.spec = json!({ "title": 3 });
     assert!(ToolServerForm::load(&stored_tool).form().is_none());
 }
+
+#[test]
+fn a_field_the_form_always_writes_cannot_be_missing_from_the_object() {
+    // The form says a title and the owners of the App on every save. An object without them is not what a save
+    // would write back (a save would add `title: ""` and `owners: []`), so it is YAML only, and the reason is the
+    // other way round from the other cases: the form has it and the object does not.
+    for (kind, pointer, path) in [
+        (Kind::AgentService, "/registry/title", "spec.registry.title"),
+        (
+            Kind::AgentConfig,
+            "/harness/adam/coder/github/app/owners",
+            "spec.harness.adam.coder.github.app.owners",
+        ),
+    ] {
+        let mut agent = coder_agent();
+        let object = if kind == Kind::AgentService {
+            &mut agent.service
+        } else {
+            agent.config.as_mut().unwrap()
+        };
+        remove(&mut object.spec, pointer);
+        let reasons = reasons_of(&agent);
+        let r = reasons
+            .iter()
+            .find(|r| r.path == path)
+            .unwrap_or_else(|| panic!("{path} is not named by {:#?}", paths(&reasons)));
+        assert_eq!(r.object, kind);
+        assert!(
+            r.reason.contains("is not set, and a form always writes it"),
+            "{}",
+            r.reason
+        );
+    }
+}
+
+#[test]
+fn a_member_this_version_does_not_know_inside_an_element_of_a_list_is_never_dropped_silently() {
+    // `access.allowFrom[i]` and `environment.volumes[i]` are lists of objects: a member of one that the types do
+    // not know is found by walking the lists too, and not only the maps.
+    for (kind, pointer, path) in [
+        (
+            Kind::AgentService,
+            "/access/allowFrom/0/futureField",
+            "spec.access.allowFrom[0].futureField",
+        ),
+        (
+            Kind::AgentService,
+            "/access/allowFrom/0/namespaceSelector/futureField",
+            "spec.access.allowFrom[0].namespaceSelector.futureField",
+        ),
+        (
+            Kind::AgentConfig,
+            "/environment/volumes/0/futureField",
+            "spec.environment.volumes[0].futureField",
+        ),
+        (
+            Kind::AgentConfig,
+            "/environment/volumes/0/source/persistent/futureField",
+            "spec.environment.volumes[0].source.persistent.futureField",
+        ),
+    ] {
+        let mut agent = coder_agent();
+        let object = if kind == Kind::AgentService {
+            &mut agent.service
+        } else {
+            agent.config.as_mut().unwrap()
+        };
+        set(&mut object.spec, pointer, json!("x"));
+        let reasons = reasons_of(&agent);
+        let r = reasons
+            .iter()
+            .find(|r| r.path == path)
+            .unwrap_or_else(|| panic!("{path} is not named by {:#?}", paths(&reasons)));
+        assert!(r.reason.contains("does not know"), "{}", r.reason);
+        assert!(
+            r.reason.contains("a save would drop"),
+            "it says what a save does: {}",
+            r.reason
+        );
+    }
+}

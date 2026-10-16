@@ -1322,7 +1322,7 @@ pub mod cases {
     }
 
     pub async fn offered_secrets_are_references_and_never_values<O: ObjectsUnderTest>(p: O) {
-        let (s1, s2, s3) = (unique("sec"), unique("sec"), unique("sec"));
+        let (s1, s2, s3, s4) = (unique("sec"), unique("sec"), unique("sec"), unique("sec"));
         for (secret, key, external) in [
             (&s2, "TOKEN", "es-two"),
             (&s1, "B_KEY", "es-one"),
@@ -1331,6 +1331,12 @@ pub mod cases {
             p.offer(secret, key, external).await;
             p.plant_secret_value(secret, key, SECRET_VALUE).await;
         }
+        // An ExternalSecret that fetches with `dataFrom`: its keys are not known, and the Secret is offered whole.
+        p.offer_any_key(&s4, "es-four").await;
+        p.plant_secret_value(&s4, "WHATEVER_IT_HOLDS", SECRET_VALUE)
+            .await;
+        // The Secret of the first has a `dataFrom` besides its listed keys.
+        p.offer_any_key(&s1, "es-one").await;
         // It exists, and it is not offered.
         p.decline(&s3, "HIDDEN", "es-three").await;
         p.plant_secret_value(&s3, "HIDDEN", SECRET_VALUE).await;
@@ -1340,22 +1346,24 @@ pub mod cases {
             .await
             .unwrap()
             .into_iter()
-            .filter(|o| [&s1, &s2, &s3].contains(&&o.secret))
+            .filter(|o| [&s1, &s2, &s3, &s4].contains(&&o.secret))
             .collect();
-        let named = |secret: &str, key: &str, external: &str| OfferedSecret {
+        let named = |secret: &str, key: Option<&str>, external: &str| OfferedSecret {
             secret: secret.to_owned(),
-            key: key.to_owned(),
+            key: key.map(str::to_owned),
             external_secret: external.to_owned(),
         };
         let mut expected = vec![
-            named(&s1, "A_KEY", "es-one"),
-            named(&s1, "B_KEY", "es-one"),
-            named(&s2, "TOKEN", "es-two"),
+            named(&s1, None, "es-one"),
+            named(&s1, Some("A_KEY"), "es-one"),
+            named(&s1, Some("B_KEY"), "es-one"),
+            named(&s2, Some("TOKEN"), "es-two"),
+            named(&s4, None, "es-four"),
         ];
-        expected.sort();
+        expected.sort_by(|a, b| a.secret.cmp(&b.secret).then(a.key.cmp(&b.key)));
         assert_eq!(
             mine, expected,
-            "the offered keys, ordered, and not the one without the label"
+            "the offered keys, ordered, a Secret made with dataFrom before its listed keys, and not the one without the label"
         );
 
         let text = serde_json::to_string(&mine).unwrap();
@@ -1373,7 +1381,7 @@ pub mod cases {
             assert_eq!(
                 keys,
                 BTreeSet::from(["secret", "key", "externalSecret"]),
-                "an offer has a name, a key and the ExternalSecret, and no more"
+                "an offer has a name, a key (null for dataFrom) and the ExternalSecret, and no more"
             );
         }
     }

@@ -2,6 +2,7 @@
 //! server, set once and named by the agents that use them (AD-029).
 
 use std::collections::BTreeMap;
+use std::fmt;
 
 use aap_api::{
     BaseUrl, McpHeader, ModelEndpoint, ModelEndpointSpec, ProviderMcp, ToolProvider,
@@ -14,6 +15,7 @@ use serde::{Deserialize, Serialize};
 use crate::represent::{Loaded, Unrepresentable, differences, dropped};
 use crate::resources::json;
 use crate::secret::SecretPick;
+use crate::syntax::redacted_url;
 use aap_ports::{MANAGED_BY_DASHBOARD, MANAGED_BY_LABEL};
 
 fn meta(name: &str, namespace: &str) -> ObjectMeta {
@@ -32,13 +34,29 @@ fn meta(name: &str, namespace: &str) -> ObjectMeta {
 
 /// Where a model endpoint is: an address, or the Secret key that holds it (a deployment keeps the address
 /// out of git when it must).
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+///
+/// `Debug` hides the user name, password, query and fragment of an address (a form that is logged must not
+/// print the password a person typed in it; validation refuses such an address, but a form is logged before it is
+/// validated).
+#[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub enum BaseUrlForm {
     /// The address itself: `http` or `https`, a host, no user name, password, query or fragment.
     Value(String),
     /// A reference to an offered Secret key that holds it.
     Secret(SecretPick),
+}
+
+impl fmt::Debug for BaseUrlForm {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Value(address) => f
+                .debug_tuple("Value")
+                .field(&redacted_url(address))
+                .finish(),
+            Self::Secret(pick) => f.debug_tuple("Secret").field(pick).finish(),
+        }
+    }
 }
 
 /// The model endpoint form (§60a, *Models*): an OpenAI-compatible endpoint.
@@ -150,7 +168,10 @@ impl ModelEndpointForm {
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct HeaderForm {
-    /// Plain text put in front of the secret, e.g. `Bearer `. Never `${…}`: the secret is added from the Secret.
+    /// Plain text put in front of the secret: **an authentication scheme and one space**, `Bearer ` or `Basic `
+    /// (validation refuses free text: a person pastes a token where they are asked for a prefix, and the prefix
+    /// is written to the object, the export and the logs). Never `${…}`: the secret is added from the Secret. The
+    /// inline form of an `AgentConfig` takes any text but `${`; the dashboard takes less.
     #[serde(default)]
     pub prefix: Option<String>,
     /// The Secret key that holds the value: **a reference** to an offered key.
@@ -158,7 +179,9 @@ pub struct HeaderForm {
 }
 
 /// The tool server form (§60a, *Tool servers*): one remote MCP server.
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+///
+/// `Debug` hides the user name, password, query and fragment of the `url`, as [`BaseUrlForm`]'s does.
+#[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct ToolServerForm {
     /// The object's name, `^[a-z][a-z0-9-]{0,30}$`: the prefix of its tools, `<name>__<tool>`. Fixed after the
@@ -177,6 +200,19 @@ pub struct ToolServerForm {
     /// The agent starts without it when it is unreachable. The screen offers it on.
     #[serde(default)]
     pub optional: bool,
+}
+
+impl fmt::Debug for ToolServerForm {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("ToolServerForm")
+            .field("name", &self.name)
+            .field("title", &self.title)
+            .field("url", &redacted_url(&self.url))
+            .field("headers", &self.headers)
+            .field("tools", &self.tools)
+            .field("optional", &self.optional)
+            .finish()
+    }
 }
 
 impl ToolServerForm {

@@ -237,7 +237,7 @@ mod tests {
         if bool_null.contains(&s) || s == "<<" || s == "=" {
             return true;
         }
-        let digits = |t: &str, ok: &dyn Fn(char) -> bool| !t.is_empty() && t.chars().all(|c| ok(c));
+        let digits = |t: &str, ok: &dyn Fn(char) -> bool| !t.is_empty() && t.chars().all(ok);
         let unsigned = s.strip_prefix(['+', '-']).unwrap_or(s);
         // int: binary, octal, decimal, hex, sexagesimal; float: decimal, sexagesimal, .inf, .nan
         if let Some(b) = unsigned.strip_prefix("0b")

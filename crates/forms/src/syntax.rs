@@ -51,6 +51,39 @@ pub(crate) fn is_github_login(s: &str) -> bool {
         && b.iter().all(|c| c.is_ascii_alphanumeric() || *c == b'-')
 }
 
+/// The plain text in front of a header's secret: **an authentication scheme and one space**, `Bearer ` or `Basic ` or `Token `
+/// (1 to 32 letters, digits and `-`, then a single space). Free text here would be written into the object, shown in the
+/// export and logged, and a person pastes a token where they are asked for a prefix.
+pub(crate) fn is_scheme_prefix(s: &str) -> bool {
+    let Some(word) = s.strip_suffix(' ') else {
+        return false;
+    };
+    let b = word.as_bytes();
+    (1..=32).contains(&b.len())
+        && b[0].is_ascii_alphabetic()
+        && b.iter().all(|c| c.is_ascii_alphanumeric() || *c == b'-')
+}
+
+/// `text` as a log may show it: the user name and password of an address, its query and its fragment are hidden. Text that
+/// is not an address and could hold one (an `@`, a `?` or a `#`) is hidden whole.
+pub(crate) fn redacted_url(text: &str) -> String {
+    match url::Url::parse(text) {
+        Ok(mut address) => {
+            if !address.username().is_empty() || address.password().is_some() {
+                let _ = address.set_username("***");
+                let _ = address.set_password(None);
+            }
+            if address.query().is_some() {
+                address.set_query(Some("***"));
+            }
+            address.set_fragment(None);
+            address.to_string()
+        }
+        Err(_) if text.contains(['@', '?', '#']) => "<not an address, hidden>".to_owned(),
+        Err(_) => text.to_owned(),
+    }
+}
+
 /// Visible ASCII, `!` to `~`: the characters of an audience value (decided by the owner on 2026-10-15).
 pub(crate) fn is_visible_ascii(s: &str) -> bool {
     !s.is_empty() && s.bytes().all(|c| (b'!'..=b'~').contains(&c))
@@ -127,6 +160,47 @@ mod tests {
         assert!(!is_tool_server_name(&"a".repeat(32)) && !is_tool_server_name("Web"));
         assert!(is_model_name("gateway") && is_model_name(&"a".repeat(63)));
         assert!(!is_model_name(&"a".repeat(64)) && !is_model_name("1gateway"));
+    }
+
+    #[test]
+    fn a_header_prefix_is_a_scheme_and_a_space() {
+        for ok in ["Bearer ", "Basic ", "Token ", "ApiKey ", "x-y ", "A1 "] {
+            assert!(is_scheme_prefix(ok), "{ok:?}");
+        }
+        for bad in [
+            "",
+            " ",
+            "Bearer",
+            "Bearer  ",
+            " Bearer ",
+            "Bear er ",
+            "1 ",
+            "-x ",
+            "Bearer sk-live-123",
+            "Bearer\t",
+            "${X} ",
+            "Bearer: ",
+            "é ",
+            &format!("{} ", "a".repeat(33)),
+        ] {
+            assert!(!is_scheme_prefix(bad), "{bad:?}");
+        }
+    }
+
+    #[test]
+    fn an_address_is_shown_without_its_user_password_query_or_fragment() {
+        assert_eq!(
+            redacted_url("https://user:pw@x.invalid:8443/mcp?key=k#f"),
+            "https://***@x.invalid:8443/mcp?***"
+        );
+        assert_eq!(
+            redacted_url("https://x.invalid/mcp"),
+            "https://x.invalid/mcp"
+        );
+        for hidden in ["not a url @ all", "x?key=1", "# y"] {
+            assert_eq!(redacted_url(hidden), "<not an address, hidden>", "{hidden}");
+        }
+        assert_eq!(redacted_url("plain words"), "plain words");
     }
 
     #[test]

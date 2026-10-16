@@ -959,6 +959,9 @@ impl ObjectsUnderTest for Faulty {
     async fn offer(&self, secret: &str, key: &str, external_secret: &str) {
         ObjectsUnderTest::offer(&self.inner, secret, key, external_secret).await;
     }
+    async fn offer_any_key(&self, secret: &str, external_secret: &str) {
+        ObjectsUnderTest::offer_any_key(&self.inner, secret, external_secret).await;
+    }
     async fn decline(&self, secret: &str, key: &str, external_secret: &str) {
         ObjectsUnderTest::decline(&self.inner, secret, key, external_secret).await;
     }

@@ -297,13 +297,19 @@ pub enum Precondition {
 
 /// A key of a Secret an agent may name (AD-030): what `GET /v1/secret-keys` lists. **No value**: the
 /// type has no field for one, so nothing that holds an `OfferedSecret` can leak a secret.
+///
+/// An ExternalSecret that lists its keys (`data[].secretKey`) is offered key by key. One that fetches with
+/// `dataFrom` (everything a remote secret holds) has no key to list: it is offered as the Secret with
+/// `key: None`, and a form may name **any key of valid syntax** in it, typed by hand (§60a: "a key fetched with
+/// `dataFrom` is not listed and is typed by hand").
 #[derive(Clone, Debug, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct OfferedSecret {
     /// The Secret's name (the `target.name` of the ExternalSecret).
     pub secret: String,
-    /// The key inside it (the `secretKey` of one of its `data` entries).
-    pub key: String,
+    /// The key inside it (the `secretKey` of one of its `data` entries), or `None` for a Secret made with
+    /// `dataFrom`: its keys are whatever the remote secret holds, none is listed, and any key name is accepted.
+    pub key: Option<String>,
     /// The ExternalSecret that makes the Secret.
     pub external_secret: String,
 }
@@ -608,8 +614,9 @@ pub trait AgentObjects: Send + Sync {
         when: &ETag,
     ) -> impl Future<Output = Result<(), ObjectsError>> + Send;
 
-    /// The Secret keys the forms may name (AD-030), ordered by `(secret, key, external_secret)`: the
-    /// `data[].secretKey` of every ExternalSecret that carries the offer label, under its `target.name`.
+    /// The Secret keys the forms may name (AD-030), ordered by `(secret, key, external_secret)`, a Secret made
+    /// with `dataFrom` (no key) before its listed keys: the `data[].secretKey` of every ExternalSecret that carries
+    /// the offer label, under its `target.name`, and, for one that also has `dataFrom`, the Secret with `key: None`.
     /// An ExternalSecret holds no value, and this reads no Secret.
     ///
     /// # Errors

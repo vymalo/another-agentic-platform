@@ -4,17 +4,16 @@
 
 mod support;
 
-use aap_domain::Externals;
 use aap_forms::{
     AgentForm, AgentKind, AgentKindForm, BaseUrlForm, Deployment, FormError, FormTarget,
-    HeaderForm, ImagePolicy, ModelEndpointForm, OfferedKeys, SecretPick, ToolServerForm,
+    HeaderForm, ImagePolicy, ModelEndpointForm, OfferedKeys, Referents, SecretPick, ToolServerForm,
     from_object_errors, validate_agent, validate_model, validate_tool_server,
 };
 use aap_ports::{FieldError, Kind, OfferedSecret};
 use proptest::prelude::*;
 use support::*;
 
-fn externals() -> Externals {
+fn externals() -> Referents {
     aap_forms::externals(
         &[stored(
             Kind::ModelEndpoint,
@@ -82,38 +81,78 @@ fn the_example_forms_are_valid_and_the_operator_resolves_them() {
         let resolved = aap_domain::resolve(
             &resources.service,
             &resources.config,
-            &externals(),
+            &externals().externals,
             aap_ports::OwnerHandle::none(),
         );
         assert!(resolved.is_ok(), "{:?}", resolved.err());
     }
 }
 
+/// The dashboard and the operator agree: an agent the dashboard accepts resolves. **And the property is not vacuous**:
+/// the cases that were accepted are counted, and a minimum of them is required, so that a generator or a rule that
+/// refuses everything fails the test instead of passing it.
+#[test]
+fn what_the_dashboard_accepts_the_operator_resolves() {
+    use proptest::test_runner::TestRunner;
+    const CASES: u32 = 256;
+    // What is accepted is most of what is generated (the names are valid by construction; what is left out is a
+    // bound: a title or a tag over its length, a duplicate). A property over five accepted forms proves nothing.
+    const AT_LEAST: usize = 200;
+    let accepted = std::cell::Cell::new(0usize);
+    let mut runner = TestRunner::new(config(CASES));
+    runner
+        .run(&arb_agent(), |(form, _d)| {
+            // A tool server the generated form names must exist, and a coder's secret key must be offered.
+            let tools: Vec<_> = form
+                .tool_servers
+                .iter()
+                .map(|n| stored(Kind::ToolProvider, n, tool_form(n).draft().spec, true))
+                .collect();
+            let models = [stored(
+                Kind::ModelEndpoint,
+                &form.model.endpoint,
+                model_form(&form.model.endpoint).draft().spec,
+                true,
+            )];
+            let externals = aap_forms::externals(&models, &tools, None);
+            let offer: Vec<OfferedSecret> = form
+                .secret_picks()
+                .iter()
+                .map(|(_, p)| offer(&p.secret, &p.key))
+                .collect();
+            let offered = OfferedKeys::from_offered(aap_ports::OFFER_LABEL, &offer);
+            let mut form = form;
+            form.allow_insecure_http = true;
+            let deployment = defaults().deployment_for(form.kind(), &form.name);
+            if let Ok(resources) = validate_agent(
+                &form,
+                &deployment,
+                NS,
+                &externals,
+                &offered,
+                &ImagePolicy::any_registry(),
+            ) {
+                accepted.set(accepted.get() + 1);
+                let resolved = aap_domain::resolve(
+                    &resources.service,
+                    &resources.config,
+                    &externals.externals,
+                    aap_ports::OwnerHandle::none(),
+                );
+                prop_assert!(resolved.is_ok(), "{:?}", resolved.err());
+            }
+            Ok(())
+        })
+        .unwrap();
+    assert!(
+        accepted.get() >= AT_LEAST,
+        "only {} of {CASES} generated forms were accepted: the property is nearly vacuous",
+        accepted.get()
+    );
+}
+
 proptest! {
     #![proptest_config(config(128))]
-
-    /// The dashboard and the operator agree: an agent the dashboard accepts resolves.
-    #[test]
-    fn what_the_dashboard_accepts_the_operator_resolves((form, _d) in arb_agent()) {
-        // A tool server the generated form names must exist, and a coder's secret key must be offered.
-        let tools: Vec<_> = form
-            .tool_servers
-            .iter()
-            .map(|n| stored(Kind::ToolProvider, n, tool_form(n).draft().spec, true))
-            .collect();
-        let models = [stored(Kind::ModelEndpoint, &form.model.endpoint, model_form(&form.model.endpoint).draft().spec, true)];
-        let externals = aap_forms::externals(&models, &tools, None);
-        let offer: Vec<OfferedSecret> = form.secret_picks().iter().map(|(_, p)| offer(&p.secret, &p.key)).collect();
-        let offered = OfferedKeys::from_offered(aap_ports::OFFER_LABEL, &offer);
-        let mut form = form;
-        form.allow_insecure_http = true;
-        let deployment = defaults().deployment_for(form.kind(), &form.name);
-        // The generated names are valid by construction except where a rule has a bound; keep to the ones that pass.
-        if let Ok(resources) = validate_agent(&form, &deployment, NS, &externals, &offered, &ImagePolicy::any_registry()) {
-            let resolved = aap_domain::resolve(&resources.service, &resources.config, &externals, aap_ports::OwnerHandle::none());
-            prop_assert!(resolved.is_ok(), "{:?}", resolved.err());
-        }
-    }
 
     /// Every error says where: a field of the form, or a deployment field, and a form with none is not refused.
     #[test]
@@ -130,7 +169,7 @@ proptest! {
             6 => form.tags = vec!["Bad".to_owned()],
             _ => form.allow_insecure_http = false,
         }
-        let result = validate_agent(&form, &d, NS, &Externals::default(), &OfferedKeys::default(), &ImagePolicy::any_registry());
+        let result = validate_agent(&form, &d, NS, &Referents::default(), &OfferedKeys::default(), &ImagePolicy::any_registry());
         let errors = result.err().unwrap_or_default();
         prop_assert!(!errors.is_empty());
         for e in &errors {
@@ -516,6 +555,87 @@ fn the_offered_key_is_the_guard() {
             &ImagePolicy::any_registry()
         )
         .is_ok()
+    );
+}
+
+#[test]
+fn a_secret_made_with_data_from_takes_any_key_of_valid_syntax_and_a_listed_one_takes_only_its_own()
+{
+    // `github-app` lists `private-key.pem`; `fetched` has a `dataFrom`, so none of its keys is known.
+    let offered = OfferedKeys::from_offered(
+        aap_ports::OFFER_LABEL,
+        &[
+            offer("github-app", "private-key.pem"),
+            offer_any_key("fetched"),
+        ],
+    );
+    assert!(offered.takes_any_key("fetched") && !offered.takes_any_key("github-app"));
+    assert_eq!(offered.len(), 2);
+    for key in [
+        "private-key.pem",
+        "ANY_KEY",
+        "a.b-c_d",
+        "0",
+        &"k".repeat(253),
+        "...x",
+    ] {
+        let pick = SecretPick::new("fetched", key);
+        if key == "...x" {
+            assert!(!offered.contains(&pick), "{key}: starts with ..");
+        } else {
+            assert!(offered.contains(&pick), "{key}");
+        }
+    }
+    for key in [
+        "",
+        ".",
+        "..",
+        "..x",
+        "has space",
+        "a/b",
+        "a=b",
+        "é",
+        "line\nbreak",
+        &"k".repeat(254),
+    ] {
+        assert!(
+            !offered.contains(&SecretPick::new("fetched", key)),
+            "{key:?}"
+        );
+    }
+    // The Secret that lists its keys takes only those, and another Secret takes none.
+    assert!(offered.contains(&SecretPick::new("github-app", "private-key.pem")));
+    assert!(!offered.contains(&SecretPick::new("github-app", "other.pem")));
+    assert!(!offered.contains(&SecretPick::new("unknown", "ANY_KEY")));
+
+    // In a form: accepted, and refused with a message that says what a key is.
+    let mut form = coder_form("coder-me");
+    coder_settings(&mut form).github.private_key = SecretPick::new("fetched", "TYPED_BY_HAND");
+    let check = |form: &AgentForm| {
+        validate_agent(
+            form,
+            &deployment(AgentKind::Coder, "coder-me"),
+            NS,
+            &externals(),
+            &offered,
+            &ImagePolicy::any_registry(),
+        )
+    };
+    assert!(check(&form).is_ok(), "{:?}", check(&form).err());
+    coder_settings(&mut form).github.private_key = SecretPick::new("fetched", "has space");
+    let errors = check(&form).unwrap_err();
+    let e = errors
+        .iter()
+        .find(|e| e.field == "agent.github.privateKey")
+        .unwrap();
+    assert!(e.message.contains("not the name of a Secret key"), "{e}");
+    coder_settings(&mut form).github.private_key = SecretPick::new("github-app", "other.pem");
+    let errors = check(&form).unwrap_err();
+    assert!(
+        errors
+            .iter()
+            .any(|e| e.message.contains("not an offered Secret key")),
+        "{errors:?}"
     );
 }
 
@@ -944,6 +1064,21 @@ fn each_rule_of_the_tool_servers_screen_names_its_field() {
             Box::new(|f| f.headers.get_mut("Authorization").unwrap().prefix = Some("${X}".into())),
         ),
         (
+            "a token typed as a prefix",
+            "headers[Authorization].prefix",
+            Box::new(|f| {
+                f.headers.get_mut("Authorization").unwrap().prefix =
+                    Some("Bearer sk-live-1234 ".into())
+            }),
+        ),
+        (
+            "a scheme without its space",
+            "headers[Authorization].prefix",
+            Box::new(|f| {
+                f.headers.get_mut("Authorization").unwrap().prefix = Some("Bearer".into())
+            }),
+        ),
+        (
             "a key not offered",
             "headers[Authorization].secret",
             Box::new(|f| {
@@ -995,6 +1130,68 @@ fn each_rule_of_the_tool_servers_screen_names_its_field() {
             "{what}: expected {field} among {got:?}"
         );
     }
+}
+
+#[test]
+fn a_header_prefix_is_a_scheme_and_a_space_and_an_error_never_quotes_it() {
+    let wide = OfferedKeys::from_offered(
+        aap_ports::OFFER_LABEL,
+        &[offer("agent-tools", "SEARCH_MCP_TOKEN")],
+    );
+    for ok in [None, Some("Bearer "), Some("Basic "), Some("Token ")] {
+        let mut form = tool_form("websearch");
+        form.headers.get_mut("Authorization").unwrap().prefix = ok.map(str::to_owned);
+        assert!(validate_tool_server(&form, NS, &wide).is_ok(), "{ok:?}");
+    }
+    for bad in [
+        format!("Bearer {SENTINEL} "),
+        SENTINEL.to_owned(),
+        format!("{SENTINEL} "),
+        String::new(),
+        " ".to_owned(),
+    ] {
+        let mut form = tool_form("websearch");
+        form.headers.get_mut("Authorization").unwrap().prefix = Some(bad.clone());
+        let errors = validate_tool_server(&form, NS, &wide).unwrap_err();
+        let e = errors
+            .iter()
+            .find(|e| e.field == "headers[Authorization].prefix")
+            .unwrap_or_else(|| panic!("{bad:?}: {errors:?}"));
+        assert!(!format!("{e} {e:?}").contains(SENTINEL), "{e}");
+    }
+}
+
+#[test]
+fn a_form_that_is_logged_does_not_print_the_password_or_the_query_of_its_address() {
+    let address = format!("https://user:{SENTINEL}@x.invalid:8443/v1?key={SENTINEL}#{SENTINEL}");
+    let mut model = model_form("gateway");
+    model.base_url = BaseUrlForm::Value(address.clone());
+    let mut tool = tool_form("websearch");
+    tool.url = address;
+    for shown in [
+        format!("{model:?}"),
+        format!("{model:#?}"),
+        format!("{:?}", model.base_url),
+        format!("{tool:?}"),
+        format!("{tool:#?}"),
+        format!(
+            "{:?}",
+            aap_forms::ModelEndpointForm::load(&stored(
+                Kind::ModelEndpoint,
+                "gateway",
+                model.draft().spec,
+                true
+            ))
+        ),
+    ] {
+        assert!(!shown.contains(SENTINEL), "{shown}");
+        assert!(
+            shown.contains("x.invalid:8443"),
+            "the host is still there: {shown}"
+        );
+    }
+    // The form itself is untouched: it is the address that was typed, so that validation can refuse it.
+    assert!(matches!(&model.base_url, BaseUrlForm::Value(v) if v.contains(SENTINEL)));
 }
 
 // ------------------------------------------------------------------ the defaults
