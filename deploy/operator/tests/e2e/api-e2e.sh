@@ -610,9 +610,28 @@ for attempt in 1 2 3 4 5; do
   esac
 done
 [ "$deleted" = 1 ] || die "five deletes in a row were 412"
-ok "the delete is accepted ($code)"
-until_ok "$gone_timeout" "the AgentService and the AgentConfig to be gone (the operator's finalizer, then the API's last step)" \
-  gone "agentservice/$agent" "agentconfig/$agent"
+delete_code=$code
+ok "the delete is accepted ($delete_code)"
+orphan_removed=0
+if [ "$delete_code" = 204 ]; then
+  # 204: the API saw the service go within its wait (DELETE_WAIT, 5 s) and deleted the config after it. Both are gone.
+  until_ok "$gone_timeout" "the AgentService and the AgentConfig to be gone (the operator's finalizer, then the API's last step)" \
+    gone "agentservice/$agent" "agentconfig/$agent"
+else
+  # 202: the operator's finalizer took longer than the API waits for it. The API returns, the agent is `deleting`, and the config is not
+  # deleted by it: the operator finishes later and the config stays behind as an orphan (aap-objects-kubernetes, "A delete"). The service
+  # must go; the config is then removed here, so that the run ends clean and the model can go.
+  jq -e --arg n "$agent" '.name == $n and .deleting == true' "$work/body" >/dev/null \
+    || die "the delete was 202 and its body does not say that the agent is being deleted: $(head -c 600 "$work/body")"
+  until_ok "$gone_timeout" "the AgentService to be gone (the operator's finalizer)" gone "agentservice/$agent"
+  if gone "agentconfig/$agent"; then
+    echo "     (the config is gone too: the operator was done before the API looked again)"
+  else
+    echo "::warning::the delete was 202: the operator's finalizer took longer than the API waits for it (5 s), so the AgentConfig $agent stays behind as an orphan (D5); the script removes it with kubectl"
+    kubectl -n "$ns" delete "agentconfig/$agent" --ignore-not-found --wait=true --timeout=60s
+    orphan_removed=1
+  fi
+fi
 until_ok 120 "the Deployment, the Service and the pod of the agent to be gone" gone "deployment/$agent" "service/$agent"
 until_ok 120 "the pod of the agent to be gone" sh -c "! kubectl -n '$ns' get pod -l 'app.kubernetes.io/instance=$agent' -o name | grep -q ."
 as reader platform:agents.read GET "/v1/agents/$agent"
@@ -620,7 +639,11 @@ expect_problem 404 not-found "the deleted agent"
 as reader platform:agents.read GET /v1/agents
 expect 200 "the list"
 [ "$(jq -c .agents "$work/body")" = '[]' ] || die "the deleted agent is still listed: $(cat "$work/body")"
-ok "both objects, the workload and the listing are gone: the operator's finalizer completed, then the API deleted the config last"
+if [ "$orphan_removed" = 1 ]; then
+  ok "the AgentService, its Deployment, Service and pod are gone, the listing is empty and the agent is 404; the AgentConfig was an orphan (the delete was 202) and the script removed it"
+else
+  ok "the AgentService and the AgentConfig, the Deployment, the Service and the pod of the agent are gone, the listing is empty and the agent is 404"
+fi
 as reader platform:agents.read GET "/v1/models/$model"
 expect 200 "read the model"
 [ "$(jq -c .usedBy "$work/body")" = '[]' ] || die "the model is still used by $(jq -c .usedBy "$work/body")"
