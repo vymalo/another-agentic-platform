@@ -206,17 +206,14 @@ stateDiagram-v2
   and the pod are gone, the API deleting the config last; the agent is then `404` and the list is empty, and the model can go (`204`). The operator writes its status all
   the time, so a replace or a delete right after a read may be `412`: the script reads again, up to five times.
 * **The NetworkPolicy**: a pod the policy names reaches the API through its Service with a token; a pod it does not name is refused **if the cluster enforces
-  NetworkPolicies**, and otherwise the script says so in a warning and does not fail. Either way the pod was Ready with the policy installed.
+  NetworkPolicies** (kind's does, per the coder end-to-end), and otherwise the script says so in a warning and does not fail. Either way the pod was Ready with the policy installed.
 
 ### What it does not prove
 
 * **A real Keycloak.** The issuer is the testkit's (RS256, a flat roles claim, `http`, keys that never rotate). That a real Keycloak's keys and its roles claim (the
   composite-expanded roles, a nested claim) work is D14, when the realm is tried.
 * **The edge**: TLS, a check of the JWT, rate limits and the Ingress. The script reaches the API with `kubectl port-forward` and, once, through the Service from a pod.
-* **NetworkPolicy enforcement, unless the cluster has it.** kind's default network plugin, kindnet, is given the right to list and watch NetworkPolicies, pods and
-  namespaces by the manifest of kind v0.33.0 (*verified 2026-10-16*, `pkg/build/nodeimage/const_cni.go` of that tag), which suggests that it enforces them; that is *unverified*,
-  and the script says which it saw (`::warning::` when a pod the policy does not name got through). `apiServer.cidrs` is empty in these values (any address on 443 and
-  6443), so the rule that is narrow is the issuer's, a /32.
+* **NetworkPolicy enforcement is kind's, not proven by this script alone.** kind's default network plugin, kindnet, **enforced** a NetworkPolicy in the coder end-to-end (*verified 2026-10-16*, `operator-coder-e2e` of run 38892472909 on `main` (kind v0.33.0, node v1.35.8): `ok   a pod the registry's NetworkPolicy does not name cannot read it (status 000)`; its ClusterRole may list and watch NetworkPolicies, pods and namespaces: `pkg/build/nodeimage/const_cni.go` of kind v0.33.0), so this job most likely runs under enforcement, and the API's pod being Ready then shows that its ingress rule (the health port is not in it: the kubelet's probes come from the node) and its three egress rules were enough. The script accepts either outcome and says which it saw (`::warning::` when a pod the policy does not name got through). `apiServer.cidrs` is empty in these values (any address on 443 and 6443), so the rule that is narrow is the issuer's, a /32.
 * **`preStop.sleep` and a rolling update.** The pod has the hook (the script checks the pod spec) and Kubernetes 1.35 has the feature on; that a request in flight survives a
   rollout, and what the sleep does for a client, is not measured.
 * **A real agent image, CloudNativePG, a coder, a tool server, a suspend.** The agent is a folder agent on the stand-in (it answers `/healthz` and a card), its ledger is a

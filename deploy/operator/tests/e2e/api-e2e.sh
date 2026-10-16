@@ -149,6 +149,7 @@ start_forward() {
   n=0
   until grep -q 'Forwarding from 127.0.0.1:' "$work/forward.log" 2>/dev/null; do
     n=$((n + 1))
+    kill -0 "$fwd_pid" 2>/dev/null || die "kubectl port-forward stopped: $(cat "$work/forward.log")"
     [ "$n" -le 30 ] || die "kubectl port-forward did not start: $(cat "$work/forward.log")"
     sleep 1
   done

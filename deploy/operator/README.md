@@ -305,9 +305,7 @@ different in two ways, and says so: **ingress** is the peers of `api.networkPoli
 from the node, which a NetworkPolicy never blocks, as in the operator's policy; §60a's "NetworkPolicy of D7, which let only the web's pods in, is replaced by the
 edge's"), and **egress** is three rules, not one: the API server (`apiServer.ports`, `.cidrs`), the cluster's DNS (`dns.to` and `.ports`, UDP and TCP), and the
 issuer's keys (`issuer.to`, `.ports`), because the API resolves the issuer's name and fetches its keys. Enforcement is the cluster's
-CNI's: *unverified* that the rules are enough on a cluster that enforces them. The kind end-to-end of D7b2 installs the policy and says whether kind's CNI enforced it
-(kindnet is given the right to list and watch NetworkPolicies by the manifest of kind v0.33.0, *verified 2026-10-16*, which suggests it does; *unverified*): a pod the
-policy names reaches the API through its Service, and one it does not name is refused only if the CNI enforces, otherwise the job warns and does not fail.
+CNI's. kind's kindnet **enforces** them (*verified 2026-10-16*, `operator-coder-e2e` of run 38892472909 on `main` (kind v0.33.0, node v1.35.8): `ok   a pod the registry's NetworkPolicy does not name cannot read it (status 000)`), and the kind end-to-end of D7b2 installs this policy under it: a pod the policy names reaches the API through its Service, one it does not name is refused (or, on a cluster that does not enforce, the job warns and does not fail). *Unverified* until that job has run: that the rules below are enough for the API's pod to be Ready under enforcement.
 
 **The defaults are wider than they look, and you should narrow them.** A rule with `ports` and no `to` allows **any address** on those ports, so with the
 defaults (`apiServer.cidrs: []`, `issuer.to: []`) the pod may reach **every address of the cluster and of the internet on 443 and 6443** (the API server's
@@ -442,8 +440,7 @@ CI also runs kubeconform in strict mode over seven renders (the defaults, netcup
   here and in CI); the image is built by CI (not here: no container daemon runs where this was written). **D7b2 is the job that runs it**, `api-e2e`
   ([`tests/e2e/README.md`](tests/e2e/README.md#the-kind-end-to-end-of-the-platform-api-d7b2)), and it is *unverified* until CI has run it: that the pod starts with a read-only root file system,
   that the `Role` is enough under real RBAC (`/readyz` says so when it is not), that the NetworkPolicy's egress reaches an issuer, and the whole chain: a folder agent created through the
-  API, `Ready` and listed, replaced and deleted. **Still not proven when it has**: a real Keycloak (the issuer is the testkit's), the edge (TLS, a JWT check, rate limits), the policy's
-  enforcement if kind's plugin has none, that `preStop.sleep` and the grace period do what is described under a rolling update (the pod has the hook; nothing measures it, and what 1.29 does without its
+  API, `Ready` and listed, replaced and deleted. **Still not proven when it has**: a real Keycloak (the issuer is the testkit's), the edge (TLS, a JWT check, rate limits), that `preStop.sleep` and the grace period do what is described under a rolling update (the pod has the hook; nothing measures it, and what 1.29 does without its
   gate is not tried), two replicas, and a coder or a tool server made through the API.
 
 * The chart has been rendered, linted and checked with kubeconform; **it has not been installed on a cluster by hand**. The first
