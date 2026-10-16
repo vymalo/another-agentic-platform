@@ -278,6 +278,28 @@ fn secretish_members_are_references(doc: &Value, at: &str, bad: &mut Vec<String>
     }
 }
 
+/// The first document of a YAML stream, as a YAML parser reads it: a value that ends in `---` is not a separator.
+fn first_document(yaml: &str) -> Value {
+    let document = serde_yaml::Deserializer::from_str(yaml).next().unwrap();
+    serde::Deserialize::deserialize(document).unwrap()
+}
+
+#[test]
+fn a_pick_whose_key_ends_like_a_yaml_separator_is_a_reference_in_the_export() {
+    // Found by `the_objects_hold_only_what_they_were_given`: a key such as `tMSQo-yt---`, written before the
+    // name, was cut in two by a split of the YAML on "---\n", and the reference lost its name.
+    let d = defaults();
+    let mut form = coder_form("coder-me");
+    if let aap_forms::AgentKindForm::Coder(c) = &mut form.agent {
+        c.github.private_key = aap_forms::SecretPick::new("coder-github", "tMSQo-yt---");
+    }
+    let r = to_resources(&form, &d.deployment_for(AgentKind::Coder, "coder-me"), NS);
+    let yaml = export_agent(&agent_of(&r, true)).unwrap();
+    let mut bad = Vec::new();
+    secretish_members_are_references(&first_document(&yaml), "", &mut bad);
+    assert!(bad.is_empty(), "{bad:?}");
+}
+
 fn agent_values(agent: &Agent) -> Vec<Value> {
     let mut out = vec![agent.service.spec.clone()];
     out.extend(agent.config.iter().map(|c| c.spec.clone()));
@@ -320,7 +342,7 @@ proptest! {
         docs.iter().for_each(|d| secretish_members_are_references(d, "", &mut bad));
         prop_assert!(bad.is_empty(), "{bad:?}");
         let mut bad = Vec::new();
-        secretish_members_are_references(&serde_yaml::from_str::<Value>(yaml.split("---\n").next().unwrap()).unwrap(), "", &mut bad);
+        secretish_members_are_references(&first_document(&yaml), "", &mut bad);
         prop_assert!(bad.is_empty(), "{bad:?}");
     }
 
