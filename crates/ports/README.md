@@ -12,7 +12,7 @@ types that cross them; and the two seams of the admin dashboard's Platform API
 | `StoreProvisioner` | makes the agent's run ledger exist: a referenced Secret, or an operator-owned CloudNativePG cluster | `store-secret`, `store-cnpg` (S5, S6: `CnpgStore` serves both kinds); `MemoryStore` here |
 | `AgentDirectory` | lists the agents the platform runs, for the registry | the controller's reflector (S5), read by `aap-registry` (S7); `MemoryDirectory` here |
 | `AgentObjects` | the dashboard's custom resources: apply, get, list and delete an agent (`AgentService` + `AgentConfig`), a `ModelEndpoint`, a `ToolProvider`; list the offered secret references (D4) | [`objects-kubernetes`](../objects-kubernetes/README.md) (D5); `MemoryObjects` here |
-| `Authenticator` | a bearer token to a `Principal`: the subject and the values of the roles claim (D4) | `auth-oidc` (D6); `MemoryAuthenticator` here |
+| `Authenticator` | a bearer token to a `Principal`: the subject and the values of the roles claim (D4) | [`auth-oidc`](../auth-oidc/README.md) (D6); `MemoryAuthenticator` here |
 
 **No Kubernetes type, no driver type and no secret value appears in any signature.** A secret has no
 field anywhere in this crate: it travels as a `SecretRef { name, key }` and a provider hands it to the
@@ -121,8 +121,8 @@ instead of depending on that repository.
 ## `AgentObjects` and `Authenticator` (D4)
 
 [§60a](../../docs/architecture/10-control-plane-and-crds.md#the-platform-api-ad-025-ad-027): the Platform API is generic over these two
-traits and a router; the Kubernetes implementation (`objects-kubernetes`, D5) and the OIDC one (`auth-oidc`, D6) are other
-crates. **The contract below is what `agent_objects_conformance!` and `authenticator_conformance!` hold them to.**
+traits and a router; the Kubernetes implementation ([`objects-kubernetes`](../objects-kubernetes/README.md), D5) and the OIDC one
+([`auth-oidc`](../auth-oidc/README.md), D6) are other crates. **The contract below is what `agent_objects_conformance!` and `authenticator_conformance!` hold them to.**
 
 ### What crosses `AgentObjects`
 
@@ -257,7 +257,7 @@ and an empty one would be an authenticated nobody.
 | `AuthError` | Status | Class | When |
 |---|---|---|---|
 | `Missing` | 401 | `Invalid` | no token, or an empty one, whatever the state of the keys |
-| `Invalid(InvalidToken)` | 401 | `Invalid` | the token does not verify. The reason is **a closed enum** (`Malformed`, `BadSignature`, `UnknownKey`, `Expired`, `WrongIssuer`, `WrongAudience`, `MissingClaim`), each a fixed word for a log (`expired`): it cannot hold the token or a claim, whatever an implementer forgets |
+| `Invalid(InvalidToken)` | 401 | `Invalid` | the token does not verify. The reason is **a closed enum** (`Malformed`, `BadSignature`, `UnknownKey`, `Expired`, `WrongIssuer`, `WrongAudience`, `MissingClaim`), each a fixed word for a log (`expired`; `auth-oidc` also says `Expired` of a token whose `nbf` is still ahead: the set has no word for "not yet valid"): it cannot hold the token or a claim, whatever an implementer forgets |
 | `Unavailable(source)` | 503 | `Transient` | the issuer's keys cannot be fetched. Never a 401: a good token is not told it is bad. The source is the failure to fetch the keys: **an implementation must not put the token, a claim or a header of it in it** (a fetch for `kid` X that fails must not say X). The suite reads the message, the debug form and the whole chain of sources |
 
 ## The neutral types

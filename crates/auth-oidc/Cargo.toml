@@ -1,0 +1,58 @@
+[package]
+name = "aap-auth-oidc"
+description = "Authenticator for the Platform API (§60a, D6): a bearer JWT checked against the keys of an OIDC issuer (RS256, RS384, ES256, EdDSA), iss, aud, exp and the configured roles claim, with a key cache that fails closed, and a testkit issuer on a local port"
+readme = "README.md"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+publish.workspace = true
+
+[features]
+default = []
+# `testkit::TestIdp`, an issuer on a local port (discovery document, JWKS, RSA, EC and Ed25519 keys made once per
+# process, tokens signed as a case asks, the ones that must be refused included), and `TestAuthenticator`, which
+# pairs it with an `OidcAuthenticator` and implements `AuthenticatorUnderTest`. For this crate's tests and for the
+# tests of the crates that authenticate with it (the Platform API's router, D7).
+testkit = ["dep:axum", "dep:aws-lc-rs", "aap-ports/testkit", "tokio/net", "tokio/rt"]
+
+[dependencies]
+aap-ports.workspace = true
+# The crypto backend of the signatures is aws-lc-rs: jsonwebtoken has `aws_lc_rs` and `rust_crypto` and no `ring`.
+# `use_pem` is off: keys come from a JWKS, never from a PEM.
+jsonwebtoken.workspace = true
+# Fetching the keys. reqwest 0.12 with `rustls-tls-native-roots` is rustls with ring, the provider kube already
+# brings: this crate adds no second TLS stack.
+reqwest.workspace = true
+base64.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+# `rt` for `tokio::spawn`: a fetch of the keys runs on a task of its own, so that no request holds a lock or loses
+# the fetch by being dropped.
+tokio = { workspace = true, features = ["rt", "sync", "time"] }
+tracing.workspace = true
+url.workspace = true
+aws-lc-rs = { workspace = true, optional = true }
+axum = { workspace = true, features = ["json"], optional = true }
+
+[dev-dependencies]
+# The tests of this crate run the testkit it ships, so `cargo test -p aap-auth-oidc` works on its own (and the
+# tests do not compile to nothing when the feature is off).
+aap-auth-oidc = { workspace = true, features = ["testkit"] }
+aap-ports = { workspace = true, features = ["testkit"] }
+# The keys of tests/keys.rs, made with the library the testkit signs with.
+aws-lc-rs.workspace = true
+axum = { workspace = true, features = ["json"] }
+# A second crypto backend beside aws-lc-rs, as a binary that links another crate with `jsonwebtoken` may have
+# (D7 does): the library cannot choose between two, and panics on first use unless one is installed. The tests of
+# this crate run with both linked, which is what tests/provider.rs is about.
+jsonwebtoken = { workspace = true, features = ["rust_crypto"] }
+serde_yaml.workspace = true
+tokio = { workspace = true, features = ["macros", "rt", "rt-multi-thread", "net", "time", "sync"] }
+tracing-subscriber.workspace = true
+
+[lints]
+workspace = true
