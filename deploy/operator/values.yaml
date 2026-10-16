@@ -103,3 +103,137 @@ priorityClassName: ""
 nodeSelector: {}
 tolerations: []
 affinity: {}
+
+# ---- The Platform API (§60a, AD-025, AD-027; slice D7b1) --------------------------------------------------------------------
+# The admin dashboard's REST API (`bin/api`, binary `api`), a Deployment of its own beside the operator and OFF by default. It has
+# its own ServiceAccount and Role (it may write the specs people edit and list the ExternalSecrets that offer keys; the operator may
+# not, and the operator writes workloads, which the API may not) and takes people's tokens, which the operator does not. Stateless:
+# two replicas are fine. Nothing here is a secret: the API checks a token against the issuer's public keys and reaches the cluster with
+# its ServiceAccount (bin/api/README.md, "The configuration file"). templates/_validate.tpl refuses an `api` that the binary would
+# refuse at start (the `--check` of CI on the rendered file is the real guard). What a deployment must provide, and the edge's part
+# (TLS, a JWT check, a rate limit per token): README "The Platform API".
+api:
+  enabled: false
+  image:
+    repository: ghcr.io/vymalo/another-agentic-platform/api
+    # Bumped on every green build of main by .github/workflows/operator-image.yml (`sha-<7 hex>`), with
+    # `deploy/operator/bump-tag.sh <file> <tag> api`: a plain key, written by that script only, in step with `image.tag`
+    # (one workflow builds both images from one commit). `latest` is refused. `sha-0000000` is a placeholder: no image has that tag.
+    tag: sha-0000000
+    # Optional `sha256:...`: when set the image is `repository:tag@digest`.
+    digest: ""
+    pullPolicy: IfNotPresent
+  # The API is stateless. With more than one, give `affinity` or `topologySpreadConstraints` a reason to spread them.
+  replicas: 1
+  # The API listens on `port` and serves /healthz and /readyz on `healthPort`: the chart writes both into the configuration file
+  # (`listen`, `healthListen`), so a probe, the Service and the file cannot disagree. Neither is a key of `config`.
+  port: 8080
+  healthPort: 8081
+  logLevel: info
+
+  # The configuration file of the binary (`bin/api/config.example.yaml` documents every key), rendered as a ConfigMap and mounted at
+  # /etc/aap-api/config.yaml. An unknown key is refused by the binary at every level. Keys the chart owns: `listen` and `healthListen`
+  # (from `port` and `healthPort`) and `defaults.namespace` (the namespace the operator watches, which is where the Role is).
+  config:
+    # Whose tokens are accepted. REQUIRED, nothing to default: the issuer, at least one audience (`aud`), and the claim whose values
+    # are the person's permissions (`agentic_roles` on netcup). `jwksUrl` is for an issuer whose discovery document does not say it.
+    oidc:
+      issuer: ""
+      audiences: []
+      rolesClaim: ""
+      # jwksUrl: https://keycloak.example.com/realms/another-agentic/protocol/openid-connect/certs
+    # The browser origins that may call the API (the web as a single-page app, the native shells): exact origins, `scheme://host[:port]`,
+    # lower case, no path, no wildcard, and not the default port of the scheme. Empty: no CORS. Added to what the edge does: none.
+    cors:
+      allowedOrigins: []
+    # What every new agent gets besides what its form sets (aap_forms::Defaults). A map is merged with the one here, a list replaces it.
+    # `store` is exactly one of `cnpg` and `secretRef`: to switch, say `cnpg: null` beside the new one.
+    defaults:
+      store:
+        cnpg:
+          instances: 1
+          storage:
+            size: 5Gi
+      # The Secret key that must hold the orchestrator's AGENT_REGISTRY_AGENT_TOKEN, or the orchestrator lists an agent and cannot call it.
+      a2aBearer:
+        name: agent-a2a-bearer
+        key: AGENT_REGISTRY_AGENT_TOKEN
+      # `access.allowFrom` of a new agent: the peers that may reach it (the orchestrator's namespace). Empty: nobody can call a new agent.
+      allowFrom: []
+      # The registries an agent may pin its own image from. REQUIRED, at least one, nothing to default: a person who may write agents can
+      # name a folder agent's image, and that pod is handed the model endpoint's API key and the A2A bearer. An entry is a registry host and
+      # does NOT bound repositories (`ghcr.io` admits every image on ghcr.io): name only registries whose images you trust.
+      allowedImageRegistries: []
+
+  serviceAccount:
+    create: true
+    # Empty: <fullname>-api. Required when `create` is false.
+    name: ""
+    annotations: {}
+
+  # Rolling update with a surge and no unavailable pod. A pod that is going stays in the Service for `preStopSleepSeconds` before the
+  # signal (the API's listener closes at the signal and its endpoints leave the Service a moment later), then drains for at most 25 s
+  # (bin/api/src/run.rs, DRAIN). The sleep counts against `terminationGracePeriodSeconds` (verified 2026-10-16, kubernetes.io container
+  # lifecycle hooks), so the grace period must hold the sleep, the drain and a margin: the chart refuses less than the sleep + 30.
+  # `lifecycle.preStop.sleep` is a feature gate that is alpha and OFF in Kubernetes 1.29, beta and on from 1.30 and GA in 1.34 (verified
+  # 2026-10-16, kubernetes.io feature gates): on 1.29 enable PodLifecycleSleepAction or set 0, which renders no hook.
+  terminationGracePeriodSeconds: 40
+  preStopSleepSeconds: 5
+
+  # The edge's route to the API (§60a, "Clients without a web server"): TLS, a check of the JWT, and RATE LIMITS PER TOKEN are the edge's
+  # and not the API's. This chart makes the Ingress and passes `annotations` through, which is where a Traefik Middleware or an NGINX
+  # setting is attached (README "The Platform API", an example). Off: the API is a ClusterIP Service and a deployment routes to it itself.
+  ingress:
+    enabled: false
+    className: ""
+    host: ""
+    path: /v1
+    pathType: Prefix
+    annotations: {}
+    tls:
+      enabled: true
+      # Empty: the edge's default certificate (a `tls` block with the host and no secret).
+      secretName: ""
+
+  # What may reach the API, and what it may reach. Ingress is closed except `from`; the kubelet's probes come from the node, which a
+  # NetworkPolicy never blocks (as in the operator's). The operator's policy lets the API server in and nothing else out; the API also
+  # resolves names and fetches the issuer's keys, so it has two more egress rules (dns, issuer).
+  networkPolicy:
+    enabled: true
+    # Who may reach the API port (NetworkPolicyPeers: namespaceSelector, podSelector, ipBlock): the edge, that is the pods of the Ingress
+    # controller (Traefik). REQUIRED while the policy is enabled: an empty list would make the API unreachable, which is refused.
+    from: []
+    apiServer:
+      # The ports of the API server as the pod reaches it (the Service is 443, the endpoint of most clusters 6443).
+      ports: [443, 6443]
+      # Optional: only these addresses (`kubectl get endpoints kubernetes`). Empty: any address on those ports.
+      cidrs: []
+    dns:
+      # Where the names are resolved (NetworkPolicyPeers), on `ports` over UDP and TCP. Empty: any address on those ports.
+      to:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: kube-system
+          podSelector:
+            matchLabels:
+              k8s-app: kube-dns
+      ports: [53]
+    issuer:
+      # Where the issuer's keys are fetched from (NetworkPolicyPeers or an ipBlock), on `ports`. Empty: any address on those ports.
+      to: []
+      # The port of the issuer's URL (and of `jwksUrl` when it names another host): 443 for https. An issuer inside the cluster says its own.
+      ports: [443]
+
+  resources:
+    requests:
+      cpu: 50m
+      memory: 64Mi
+    limits:
+      memory: 256Mi
+  podAnnotations: {}
+  podLabels: {}
+  priorityClassName: ""
+  nodeSelector: {}
+  tolerations: []
+  affinity: {}
+  topologySpreadConstraints: []

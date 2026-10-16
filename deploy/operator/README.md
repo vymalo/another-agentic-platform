@@ -4,7 +4,8 @@ The Helm chart of the operator of [§59a](../../docs/architecture/10-control-pla
 of the `operator` binary ([`bin/operator`](../../bin/operator/README.md)), which reconciles `AgentService` and `AgentConfig` in
 **one namespace** and serves the agent registry. The CRDs are another chart, [`deploy/operator-crds`](../operator-crds/README.md)
 (§93: a separate Argo CD app); the agents are custom resources of their own, in adam-rs's chart `deploy/coder-agent` and the
-system chart (S11, S12), not here.
+system chart (S11, S12), not here. The chart also carries, **off by default**, a second component: the [Platform API](#the-platform-api)
+(`api.enabled`), the dashboard's REST API, a Deployment of its own with a ServiceAccount and Role of its own.
 
 ```mermaid
 flowchart LR
@@ -29,6 +30,7 @@ flowchart LR
 | `Service aap-operator-metrics` | ClusterIP 9090 |
 | `NetworkPolicy aap-operator` | Ingress only from who the values name; egress only to the API server's ports |
 | `ExternalSecret aap-operator-registry` | Only with `externalSecrets.enabled`: the registry token from AWS Secrets Manager |
+| `Deployment`, `Service`, `ConfigMap`, `ServiceAccount`, `Role`, `RoleBinding`, `NetworkPolicy` `aap-operator-api` and an optional `Ingress` | Only with `api.enabled`: [the Platform API](#the-platform-api). Nothing of it is rendered, or checked, while it is off |
 
 ## Install
 
@@ -73,6 +75,7 @@ sequence them with the CRDs first (a sync wave, or their Application first).
 | `resources` | 50m / 64Mi requested, 256Mi limit | |
 | `serviceAccount.create`, `.name`, `.annotations` | `true`, the fullname, none | |
 | `podAnnotations`, `podLabels`, `priorityClassName`, `nodeSelector`, `tolerations`, `affinity` | empty | |
+| `api.*` | `api.enabled: false` | The Platform API: [its own table](#the-platform-api). The operator's values above never apply to it (it has its own image, service account, resources and policy) |
 
 **There is no `replicaCount`** (a value of that name is refused), no `crds.install` (§59a listed one before §93 decided on a
 separate app) and no `values.schema.json`: neither of the sibling charts, `deploy/coder` and `deploy/chart` of
@@ -116,17 +119,167 @@ On netcup the token is the AWS property **`agent_registry_token`** of `prod/anot
 cannot differ. It is **not** the agents' bearer (`AGENT_REGISTRY_AGENT_TOKEN`, a member of each agent's `A2A_BEARER_TOKENS`: the
 agent token rule of §59a).
 
+## The Platform API
+
+The dashboard's REST API ([§60a](../../docs/architecture/10-control-plane-and-crds.md#the-platform-api-ad-025-ad-027), slice D7b1;
+the binary is [`bin/api`](../../bin/api/README.md), the router [`aap-platform-api`](../../crates/platform-api/README.md)). **Off by default**
+(`api.enabled: false`): with it off nothing of the component is rendered and none of its values is checked, and the three golden renders
+above are byte for byte what they were before it existed. It is a Deployment of its own, not a part of the operator, for the reasons of §60a:
+least privilege per process (the API may write the specs people edit and list the ExternalSecrets that offer keys; the operator may not, and
+the operator writes workloads, which the API may not), exposure (the API takes people's tokens, the operator takes none) and failure (a bug in
+the API never stops reconciliation).
+
+```mermaid
+flowchart LR
+  C[a client<br/>web, desktop, mobile] -->|HTTPS, Bearer JWT| E[the edge<br/>TLS, JWT check, rate limit per token]
+  E -->|Ingress api.ingress| S[Service aap-operator-api :8080]
+  S --> P[Deployment aap-operator-api<br/>N replicas, RollingUpdate]
+  CM[ConfigMap aap-operator-api<br/>config.yaml] -->|mounted read-only| P
+  P -->|Role: the four kinds, list ExternalSecrets<br/>no Secrets| K[(the API server)]
+  P -->|the issuer's public keys| I[(the OIDC issuer)]
+  K -.->|the operator reconciles| O[Deployment aap-operator]
+```
+
+### What a deployment must provide
+
+| | |
+|---|---|
+| **An issuer** | `api.config.oidc.issuer` (an `http(s)` URL), `audiences` (at least one) and `rolesClaim` (the claim whose values are the person's permissions, `agentic_roles` on netcup). **No default**: the chart refuses `api.enabled` without them. The API only reads the issuer's public keys; nothing secret is configured |
+| **The registries an agent may pin its own image from** | `api.config.defaults.allowedImageRegistries`, at least one, **no default**. A person who may write agents can name a folder agent's image, and that pod is handed the model endpoint's API key and the A2A bearer. An entry is a registry host and does **not** bound repositories: `ghcr.io` admits every image on `ghcr.io` |
+| **Who may reach the API** | `api.networkPolicy.from`: NetworkPolicyPeers, which are the pods of the edge (the Ingress controller). Required while the policy is on (an empty list would make the API unreachable); `api.networkPolicy.enabled=false` for a cluster without a CNI that enforces policies |
+| **Where the issuer is** | `api.networkPolicy.issuer.ports` (default 443) and `.to` (default: any address on those ports). An issuer inside the cluster over plain `http` says its own port and peer. The default DNS rule (`kube-dns` in `kube-system`) is wrong on a cluster with a node-local DNS cache: set `api.networkPolicy.dns.to` |
+| **Who may call a new agent** | `api.config.defaults.allowFrom` (the peers of `access.allowFrom`, usually the orchestrator's namespace). **Empty by default: a new agent made from the dashboard can be called by nobody** |
+| **The A2A bearer's Secret** | `api.config.defaults.a2aBearer` (default `agent-a2a-bearer`, key `AGENT_REGISTRY_AGENT_TOKEN`): the Secret key that must hold the orchestrator's `AGENT_REGISTRY_AGENT_TOKEN`, or the orchestrator lists an agent and cannot call it |
+| **The edge** (below) | TLS, a check of the JWT, CORS passes through, and **a rate limit per token**: the API implements none of them |
+
+### Values
+
+| Value | Default | What |
+|---|---|---|
+| `api.enabled` | `false` | |
+| `api.image.repository`, `.tag`, `.digest`, `.pullPolicy` | `ghcr.io/vymalo/another-agentic-platform/api`, `sha-0000000`, none, `IfNotPresent` | The tag is **written by CI only** (`bump-tag.sh <file> <tag> api`), in step with `image.tag` ([below](#the-image)); `sha-0000000` is a placeholder no image has. `latest` and a malformed digest are refused. `imagePullSecrets` (top level) apply to both images |
+| `api.replicas` | `1` | The API is stateless; two are fine. The operator has no `replicaCount`: this is the API's |
+| `api.port`, `api.healthPort` | `8080`, `8081` | The API, and `/healthz` and `/readyz`. The chart writes both into the file (`listen`, `healthListen`), so the probes, the Service and the file cannot disagree; they are not keys of `api.config` |
+| `api.config.oidc` | none | `issuer`, `audiences`, `rolesClaim` (required), `jwksUrl` (optional) |
+| `api.config.cors.allowedOrigins` | `[]` | Exact origins, `scheme://host[:port]`, lower case, no path, **no wildcard**, not the default port of the scheme (a browser leaves it out). Empty: no CORS. Refused here as the binary refuses it |
+| `api.config.defaults` | cnpg store (1 instance, 5Gi), `a2aBearer`, `allowFrom: []`, `allowedImageRegistries: []` | `aap_forms::Defaults` ([the crate](../../crates/forms/README.md#deployment-defaults-and-what-the-round-trip-does-with-them)); the rest of its keys (`coder`, `folder`, `security`, `offerLabel`) are as in [`bin/api/config.example.yaml`](../../bin/api/config.example.yaml). A map is merged with the default, a list replaces it; `store` holds exactly one of `cnpg` and `secretRef`, so to switch say `cnpg: null` beside the new one. **`defaults.namespace` is the chart's**: the namespace the operator watches, where the `Role` is. A different value is refused |
+| `api.serviceAccount.create`, `.name`, `.annotations` | `true`, `<fullname>-api`, none | |
+| `api.terminationGracePeriodSeconds`, `api.preStopSleepSeconds` | `40`, `5` | [Below](#a-pod-that-leaves) |
+| `api.ingress.enabled`, `.className`, `.host`, `.path`, `.pathType`, `.annotations`, `.tls.enabled`, `.tls.secretName` | off, none, none, `/v1`, `Prefix`, none, `true`, none | The edge's route (below). `host` is required when it is on |
+| `api.networkPolicy.enabled`, `.from`, `.apiServer`, `.dns`, `.issuer` | `true`, `[]`, `443, 6443`, `kube-dns:53`, `443` | [Below](#the-networkpolicy) |
+| `api.logLevel`, `api.resources`, `api.podAnnotations`, `api.podLabels`, `api.priorityClassName`, `api.nodeSelector`, `api.tolerations`, `api.affinity`, `api.topologySpreadConstraints` | `info`, 50m / 64Mi requested and 256Mi limit, empty | |
+
+`templates/_validate.tpl` refuses, with the value's name, what the binary would refuse at start and can be seen at render time (the issuer, the
+audiences, the roles claim, a wildcard or default-port origin, no registries, both or neither store, a tag `latest`, a grace period shorter than
+the sleep plus 30 s) and a few things only the chart can know (a `defaults.namespace` that is not the watched one, a policy with no `from`, an
+Ingress with no host). The real guard is the binary: CI runs **`api --check` on the file the chart renders** ([Tests](#tests)).
+
+### The pod
+
+`runAsNonRoot` (65532, the image's user), `RuntimeDefault` seccomp, no privilege escalation, every capability dropped, a read-only root file
+system; the file is a ConfigMap mounted read-only at `/etc/aap-api/config.yaml` and named by `API_CONFIG_FILE` (a checksum of it is a pod
+annotation, so a change rolls the pods). **It mounts no Secret and reads none**: there is none to give it. It mounts the service account token,
+which is how it reaches the cluster. `RollingUpdate` with `maxSurge: 1, maxUnavailable: 0`. Probes are the operator's: `/healthz` (startup,
+liveness) and `/readyz` (readiness) on the health port; `/readyz` needs the issuer's keys **and** a call that needs the API's own rights, so a
+`Role` that lacks a verb shows as *not ready*.
+
+Its pods carry `app.kubernetes.io/name: aap-operator-api` (and `component: api`), **not** the operator's `name`, so the operator's Deployment
+selector, Services and NetworkPolicy, which select on `name` and `instance`, never match them (a test holds it).
+
+#### A pod that leaves
+
+The API's listener closes at SIGTERM, the requests in flight finish for at most 25 s (`DRAIN` in [`bin/api/src/run.rs`](../../bin/api/src/run.rs)), and
+the Service takes a moment to drop the endpoint. The chart therefore holds the pod for `api.preStopSleepSeconds` (5) **before** the signal, with
+`lifecycle.preStop.sleep`, the kubelet's own action: the image is distroless and has no `sleep` to run. The sleep **counts against**
+`terminationGracePeriodSeconds` (*verified 2026-10-16*, [container lifecycle hooks](https://kubernetes.io/docs/concepts/containers/container-lifecycle-hooks/)),
+so the grace period (40) holds the sleep, the drain and 5 s of margin, and the chart refuses less than the sleep plus 30.
+
+**Kubernetes versions** (*verified 2026-10-16*, [feature gates](https://kubernetes.io/docs/reference/command-line-tools-reference/feature-gates/)): the
+gate `PodLifecycleSleepAction` is alpha and **off** in 1.29, beta and on from 1.30, GA in 1.34; the chart's `kubeVersion` is `>=1.29.0-0`. On 1.29
+enable the gate, or set `api.preStopSleepSeconds: 0`, which renders no hook (the pod then leaves the Service and drains at the same moment, and a request may be
+sent to a pod that has closed its listener). What 1.29 does with a `sleep` handler while the gate is off was not tried (*unverified*).
+
+### The edge
+
+§60a puts the API **on the edge, at a path or host the deployment names**: it is called with a bearer token by the web (a single-page app), the desktop
+app and the mobile shells, with no web server of ours in between. **Rate limits per token, TLS and, if wanted, a first check of the JWT are the edge's**; the
+API does not implement a limiter (a bearer API is open to any script that holds a token). What the chart does for it:
+
+* `api.ingress` makes an `Ingress` for `host` and `path` (`/v1` by default: every route of the API is under it) to the Service's port `http`. `className` and
+  `annotations` are passed through, and **`annotations` is where the edge's policy is attached**. The API answers its own CORS preflights (`OPTIONS`,
+  with no `Authorization`), so the edge must let an `OPTIONS` request through to it and not count it against a token.
+* With a Traefik edge (the Ingress controller the system's chart is routed by), a rate limit per token is a `Middleware` that groups requests by the `Authorization` header,
+  attached by the Ingress annotation. The Middleware's fields `rateLimit.average`, `.period`, `.burst` and `.sourceCriterion.requestHeaderName`, and the
+  annotation `traefik.ingress.kubernetes.io/router.middlewares` with the value `<namespace>-<name>@kubernetescrd`, are as the Traefik documentation has them
+  (*verified 2026-10-16*, doc.traefik.io, *RateLimit* and *Kubernetes Ingress*); **that grouping by the `Authorization` header gives a limit per token was not
+  tried** (*unverified*), and the numbers are the deployment's:
+
+  ```yaml
+  # a Middleware, in the API's namespace (not part of this chart)
+  apiVersion: traefik.io/v1alpha1
+  kind: Middleware
+  metadata: { name: api-ratelimit }
+  spec:
+    rateLimit:
+      average: 20
+      period: 1s
+      burst: 40
+      sourceCriterion: { requestHeaderName: Authorization }
+  ---
+  # and in the values of this chart
+  api:
+    ingress:
+      enabled: true
+      className: traefik
+      host: api.agents.example.com
+      annotations:
+        traefik.ingress.kubernetes.io/router.middlewares: another-agentic-system-api-ratelimit@kubernetescrd
+      tls: { secretName: api-agents-tls }
+  ```
+
+  NGINX's `limit-rps` annotations limit per client address, not per token; per token on NGINX needs configuration this chart does not make.
+* A check of the JWT at the edge (the system's oauth2-proxy runs with `--skip-jwt-bearer-tokens`) is optional: the API checks every token itself, so the edge
+  can only add a first line. Whatever the edge does must pass `Authorization` through unchanged.
+* The origins that may call from a browser are `api.config.cors.allowedOrigins`, **in the API's file**, not the edge's.
+
+### The NetworkPolicy
+
+The operator's policy lets the API server in and nothing else out (it reaches the API server by its address and calls no other service). The API's is
+different in two ways, and says so: **ingress** is the peers of `api.networkPolicy.from`, on the API port only (the kubelet's probes of the health port come
+from the node, which a NetworkPolicy never blocks, as in the operator's policy; §60a's "NetworkPolicy of D7, which let only the web's pods in, is replaced by the
+edge's"), and **egress** is three rules, not one: the API server (`apiServer.ports`, `.cidrs`), the cluster's DNS (`dns.to` and `.ports`, UDP and TCP), and the
+issuer's keys (`issuer.to`, `.ports`), because the API resolves the issuer's name and fetches its keys. Nothing else leaves the pod. Enforcement is the cluster's
+CNI's: *unverified* that the rules are enough on a cluster that enforces them (D7b2, in kind, whose CNI does).
+
+### The rights
+
+The `Role` `aap-operator-api` (in the watched namespace; its `RoleBinding` is to the API's own service account) is **exactly** the one
+[`crates/objects-kubernetes/tests/rbac.yaml`](../../crates/objects-kubernetes/tests/rbac.yaml) holds, which that crate's tests hold equal to the calls it makes
+and run its conformance suite under: `render-check.sh` reads that file and compares it with the rendered `Role`, so the two cannot drift.
+
+| Resources | Verbs |
+|---|---|
+| `agentservices`, `agentconfigs`, `modelendpoints`, `toolproviders` (`agents.vymalo.com`) | `create delete get list patch` |
+| `externalsecrets` (`external-secrets.io`) | `list` |
+
+**No right on Secrets** (a `list` on Secrets would return their values), no `watch`, no workload, pod or ConfigMap, no `ClusterRole`. `/readyz`'s one call
+(a `list` of one `ModelEndpoint`) is inside it. The operator's `Role` gains nothing, and has no right on ExternalSecrets.
+
 ## The image
 
-`ghcr.io/vymalo/another-agentic-platform/operator`, built from [`docker/operator/Dockerfile`](../../docker/operator/Dockerfile) by
-[`operator-image.yml`](../../.github/workflows/operator-image.yml): on a pull request it builds, smoke-tests and runs the kind
-end-to-end of the coder; on `main`, after those pass, it pushes the image **that passed** as `sha-<7>`, and as `latest`
-unless main has moved on to a newer build (image jobs can finish out of order), and a last job
-runs `bump-tag.sh` and pushes `chore(deploy): bump operator to sha-<7>` to `main` as `github-actions[bot]` (§93 allows it). A
-deployment pins `sha-<7>`, never `latest`.
+Two images, one workflow, one commit. [`operator-image.yml`](../../.github/workflows/operator-image.yml) builds both from the same commit:
+`ghcr.io/vymalo/another-agentic-platform/operator` from [`docker/operator/Dockerfile`](../../docker/operator/Dockerfile) and
+`ghcr.io/vymalo/another-agentic-platform/api` (the Platform API) from [`docker/api/Dockerfile`](../../docker/api/Dockerfile). On a pull request it builds
+and smoke-tests each (the API's also runs `api --check` on the configuration this chart renders) and runs the kind end-to-end of the coder; on `main`,
+after all of those pass, it pushes the images **that passed** as `sha-<7>` (the same tag for both), and as `latest` unless main has moved on to a newer
+build (image jobs can finish out of order), and a last job runs `bump-tag.sh` for each (`image.tag`, then `api.image.tag`) and pushes **one** commit,
+`chore(deploy): bump operator and api to sha-<7>`, to `main` as `github-actions[bot]` (§93 allows it). There is one bump job so that two pushes to `main`
+cannot race: the cost is that the API's image waits for the operator's end-to-end, and that both move together even when a change touches one
+(the workspace is one build, so a change in a shared crate touches both anyway). A deployment pins `sha-<7>`, never `latest`.
 
-**A new GHCR package is private until it is made public.** After the first push (owner step): *Packages → operator → Package
-settings → Change visibility → Public*, then check the anonymous pull, from the images repository's `CLAUDE.md`:
+**A new GHCR package is private until it is made public.** After the first push (owner step), for **each** of `operator` and `api`: *Packages → the
+package → Package settings → Change visibility → Public*, then check the anonymous pull, from the images repository's `CLAUDE.md` (for the API, say
+`api` in both places):
 
 ```sh
 TOKEN=$(curl -s "https://ghcr.io/token?scope=repository:vymalo/another-agentic-platform/operator:pull" | python3 -c 'import sys,json;print(json.load(sys.stdin)["token"])')
@@ -175,19 +328,28 @@ helm lint deploy/operator && helm lint deploy/operator-crds
 sh deploy/operator/tests/render-check.sh                    # needs helm
 UPDATE_GOLDEN=1 sh deploy/operator/tests/render-check.sh    # after a deliberate change: rewrites tests/golden
 sh deploy/operator/tests/bump-tag-test.sh
+# the configuration the chart renders for the API, read by the binary (cargo build -p aap-api-server first)
+sh deploy/operator/tests/api-config.sh /tmp/config.yaml -f deploy/operator/tests/api.values.yaml && target/debug/api --config /tmp/config.yaml --check
 ```
 
 | File | What |
 |---|---|
-| `tests/render-check.sh` | the three golden renders (`tests/golden/netcup.yaml` from `examples/netcup.values.yaml`, `secret.yaml` from `tests/secret.values.yaml`, `default.yaml`); no Secret object, no `ClusterRole`, no host access; one replica, `Recreate`, the probes, the security context; the `Role` equal to the table above, with and without `storeCnpg`; the registry only with a token, mounted as a file; the NetworkPolicy; the ExternalSecret; every refusal of `_validate.tpl` (the default agent image's included); the shared kinds read and never written; `DEFAULT_AGENT_IMAGE` pinned by tag and digest, empty rendering none, and the chart's pin equal to the end-to-end's; and `deploy/operator-crds` equal to `deploy/crds` |
-| `tests/bump-tag-test.sh` | `bump-tag.sh` edits only `image.tag` (a `defaultAgentImage` line beside it is left alone), is idempotent, refuses a malformed tag (the test of adam-rs's `deploy/coder`, with this chart's values) |
+| `tests/render-check.sh` | the four golden renders (`tests/golden/netcup.yaml` from `examples/netcup.values.yaml`, `secret.yaml` from `tests/secret.values.yaml`, `default.yaml`, and `api.yaml` from `tests/api.values.yaml`, the Platform API on; the first three have it off and equal what they were before it existed); no Secret object, no `ClusterRole`, no host access; one replica, `Recreate`, the probes, the security context; the `Role` equal to the table above, with and without `storeCnpg`; the registry only with a token, mounted as a file; the NetworkPolicy; the ExternalSecret; every refusal of `_validate.tpl` (the default agent image's included); the shared kinds read and never written; `DEFAULT_AGENT_IMAGE` pinned by tag and digest, empty rendering none, and the chart's pin equal to the end-to-end's; and `deploy/operator-crds` equal to `deploy/crds`. For the API: its objects, pod and labels, the `Role` **equal to `crates/objects-kubernetes/tests/rbac.yaml`** (read from the file) with no right on Secrets, the Service without the health port, the policy, the Ingress and its annotations, no Secret in the render or the file, the second shape (`tests/api-secretref.values.yaml`), nothing rendered or checked while it is off, and every refusal of `_validate.tpl` for it |
+| `tests/bump-tag-test.sh` | `bump-tag.sh` edits only `image.tag` (a `defaultAgentImage` line beside it is left alone) or, with `api`, only `api.image.tag` (each leaves the other, and keys that only look like it, alone), is idempotent, refuses a malformed tag and an unknown component (the test of adam-rs's `deploy/coder`, with this chart's values) |
+| `tests/api.values.yaml`, `tests/api-secretref.values.yaml`, `tests/api-config.sh` | the two shapes of the API component, and the script that renders one and writes the ConfigMap's `config.yaml` to a file, which CI hands to the image's `api --check` |
 | `tests/schemas/` | the `ExternalSecret` schema for kubeconform ([its README](tests/schemas/README.md)) |
 | `tests/e2e/` | the kind end-to-end of the coder (S9): [`tests/e2e/README.md`](tests/e2e/README.md) |
 
-CI also runs kubeconform in strict mode over four renders (the defaults, netcup, `secret.values.yaml`, and the CRDs chart with the
+CI also runs kubeconform in strict mode over six renders (the defaults, netcup, `secret.values.yaml`, the two API shapes, and the CRDs chart with the
 `CustomResourceDefinition` kind skipped, because the schema set has none: the `kind` job of `operator.yml` applies them to a real API server).
 
 ## What is not proven
+
+* **The Platform API component has not run on a cluster.** It is rendered, linted, checked with kubeconform, and its file is read by the binary (`api --check`,
+  here and in CI); the image is built by CI (not here: this slice was written where no container daemon runs). *Unverified* until D7b2, the kind
+  end-to-end through the API: that the pod starts with a read-only root file system, that the `Role` is enough under real RBAC (`/readyz` says so
+  when it is not), that the NetworkPolicy's egress reaches a real issuer, that `preStop.sleep` and the grace period behave as described on a real
+  cluster (the sleep action, and what 1.29 does without its gate), and the whole chain: create a folder agent through the API, see it `Ready` and listed.
 
 * The chart has been rendered, linted and checked with kubeconform; **it has not been installed on a cluster by hand**. The first
   install is the `operator-coder-e2e` job of `operator-image.yml` (*unverified* until CI has run it), which installs this chart

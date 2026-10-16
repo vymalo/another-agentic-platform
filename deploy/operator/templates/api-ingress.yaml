@@ -1,0 +1,40 @@
+{{- include "aap.validate" . -}}
+{{- if and .Values.api.enabled .Values.api.ingress.enabled }}
+{{- $ing := .Values.api.ingress }}
+# The edge's route to the API (§60a, "Clients without a web server"). TLS, a check of the JWT and a rate limit per token are the edge's:
+# attach them with api.ingress.annotations (README "The Platform API"). The API answers CORS preflights itself, so the edge must let an
+# OPTIONS request through to it.
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: {{ include "aap.api.fullname" . }}
+  labels:
+    {{- include "aap.api.labels" . | nindent 4 }}
+  {{- with $ing.annotations }}
+  annotations:
+    {{- toYaml . | nindent 4 }}
+  {{- end }}
+spec:
+  {{- with $ing.className }}
+  ingressClassName: {{ . }}
+  {{- end }}
+  {{- if $ing.tls.enabled }}
+  tls:
+    - hosts:
+        - {{ $ing.host | quote }}
+      {{- with $ing.tls.secretName }}
+      secretName: {{ . }}
+      {{- end }}
+  {{- end }}
+  rules:
+    - host: {{ $ing.host | quote }}
+      http:
+        paths:
+          - path: {{ $ing.path }}
+            pathType: {{ $ing.pathType }}
+            backend:
+              service:
+                name: {{ include "aap.api.fullname" . }}
+                port:
+                  name: http
+{{- end }}

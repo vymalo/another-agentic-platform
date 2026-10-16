@@ -1,0 +1,15 @@
+{{- include "aap.validate" . -}}
+{{- if .Values.api.enabled }}
+# The configuration file of the Platform API (bin/api/config.example.yaml). There is no secret in it and no place for one: the API
+# checks tokens against the issuer's public keys and reaches the cluster with its ServiceAccount. `listen`, `healthListen` and
+# `defaults.namespace` are the chart's (api.port, api.healthPort, the namespace the operator watches).
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ include "aap.api.fullname" . }}
+  labels:
+    {{- include "aap.api.labels" . | nindent 4 }}
+data:
+  config.yaml: |
+    {{- include "aap.api.config" . | nindent 4 }}
+{{- end }}
