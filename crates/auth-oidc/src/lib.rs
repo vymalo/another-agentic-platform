@@ -201,7 +201,10 @@ impl OidcAuthenticator {
         let source = match jwks_url {
             Some(url) => Source::Url(url),
             None => {
-                let base = issuer_url.as_str().trim_end_matches('/');
+                // OpenID Connect Discovery 1.0, 4: a terminating `/` of the issuer is removed (one, never all
+                // of them), and the path is appended. `Url` writes a bare host as `http://host/`.
+                let base = issuer_url.as_str();
+                let base = base.strip_suffix('/').unwrap_or(base);
                 let document = Url::parse(&format!("{base}/.well-known/openid-configuration"))
                     .map_err(|_| ConfigError::Issuer)?;
                 Source::Discover {
