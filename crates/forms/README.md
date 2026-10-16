@@ -107,7 +107,8 @@ a name that starts with `..`. A Secret that lists its keys takes only those. The
 ## Deployment defaults, and what the round trip does with them
 
 [§60a](../../docs/architecture/10-control-plane-and-crds.md#deployment-defaults): the forms show what matters to an administrator; the rest comes
-from the API's configuration file. `Defaults` is that file's section (`deny_unknown_fields`: a typo stops the API at start, and
+from the API's configuration file. `Defaults` is that file's section (`deny_unknown_fields` on it and on the types of this crate, and the binary compares the rest of the file with what `Defaults` writes back,
+because the CRD types below it deny nothing: a typo stops the API at start, and
 `Defaults::check()` makes a sample agent of each kind from the defaults and asks `aap-domain::validate`, so a store with no instances or a
 bearer without a key is found at start and not at the first save). It holds the namespace, the offer label, the registries an agent may pin its own image from (`allowedImageRegistries`, [below](#the-image-of-an-agent)), the store (`cnpg` or a
 `secretRef` named by a pattern with `{name}`), the A2A bearer reference, `allowFrom`, `security`, and per kind: for a coder `gitAuthor`,

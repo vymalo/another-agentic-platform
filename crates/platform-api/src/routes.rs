@@ -2,8 +2,8 @@
 //!
 //! **This table is the one source.** The router is built from it (`router.rs` registers exactly these routes, and has
 //! one handler per [`RouteId`] in an exhaustive `match`, so a route without a handler does not compile), and the
-//! authorization middleware looks the permission of a request up in it by the route template that matched: a route that is
-//! not here is answered `500` and never served (fail closed). The permissions are the constants of
+//! authorization layer (`authz.rs`, over the whole router) looks the permission of a request up in it by the route template
+//! that matched: a route that is not here is answered `500` and never served (fail closed). The permissions are the constants of
 //! [`aap_api::permission`], never a string written here.
 
 use aap_api::permission;

@@ -72,7 +72,7 @@ where
 ///
 /// This is the last thing done to a router, so there is no "after": a route, a service, a nested or merged router or a
 /// fallback that is in `routes` is wrapped, and the authorization layer lets none of them run unless it is in the table
-/// ([`guard`](crate::authz::guard)).
+/// ([`guard`]).
 fn guarded<O, A>(routes: Router<S<O, A>>, state: ApiState<O, A>) -> Router
 where
     O: AgentObjects + 'static,
@@ -95,8 +95,9 @@ where
 
 /// The Platform API, ready to serve (`axum::serve(listener, router)`).
 ///
-/// Every route of [`ROUTES`] is under `/v1` and is authorized by the middleware of this crate before its handler runs. Every
-/// answer is `no-store`, a failure is a problem detail, and CORS is on for exactly the origins of the state.
+/// Every route of [`ROUTES`] is under `/v1` and is authorized by the layer of this crate before its handler runs, and nothing
+/// that is not in the table is served. Every answer of the router, a preflight and a refusal included, is `no-store`, a failure
+/// is a problem detail, and CORS is on for exactly the origins of the state.
 pub fn router<O, A>(state: ApiState<O, A>) -> Router
 where
     O: AgentObjects + 'static,

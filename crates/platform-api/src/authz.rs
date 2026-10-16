@@ -33,7 +33,7 @@ use crate::problem::{Problem, chain};
 use crate::routes::{self, Needs};
 use crate::state::ApiState;
 
-/// The person a request came from, put on the request by [`authorize`]. Cheap to clone.
+/// The person a request came from, put on the request by [`guard`]. Cheap to clone.
 #[derive(Clone, Debug)]
 pub(crate) struct Caller(pub(crate) Arc<Principal>);
 

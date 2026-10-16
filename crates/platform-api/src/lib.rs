@@ -4,8 +4,9 @@
 //! It knows no implementation: `bin/api` composes `aap-objects-kubernetes` and `aap-auth-oidc` (AD-020), and the tests of
 //! this crate compose the `Memory` ports and, once, the OIDC authenticator against its testkit issuer.
 //!
-//! * **One table of routes** ([`ROUTES`]) says what each needs; the router is built from it and the authorization middleware
-//!   reads it. The permissions are the constants of [`aap_api::permission`].
+//! * **One table of routes** ([`ROUTES`]) says what each needs; the router is built from it and one authorization layer over
+//!   the whole router, applied last, reads it: a route that is not in the table is never served, however it was added. The
+//!   permissions are the constants of [`aap_api::permission`].
 //! * **Problem details** (RFC 9457) for every failure, with the form field of every `422` as `aap-forms` names it.
 //! * **ETag preconditions**: `PUT` with `If-None-Match: *` creates, with `If-Match` replaces; `DELETE` takes `If-Match`.
 //! * **CORS** for the deployment's origins only, no wildcard, no credentials.
