@@ -18,7 +18,24 @@ dependencies = [
 name = "aap-api-server"
 version = "0.1.0"
 dependencies = [
+ "aap-auth-oidc",
+ "aap-forms",
+ "aap-objects-kubernetes",
+ "aap-platform-api",
+ "aap-ports",
  "anyhow",
+ "axum",
+ "clap",
+ "futures",
+ "http",
+ "kube",
+ "serde",
+ "serde_json",
+ "serde_yaml_ng",
+ "tokio",
+ "tower",
+ "tracing",
+ "tracing-subscriber",
 ]
 
 [[package]]
