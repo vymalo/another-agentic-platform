@@ -37,7 +37,7 @@ tracing-subscriber.workspace = true
 aap-auth-oidc = { workspace = true, features = ["testkit"] }
 aap-ports = { workspace = true, features = ["testkit"] }
 tokio = { workspace = true, features = ["io-util", "test-util"] }
-tower = { version = "0.5", default-features = false, features = ["util"] }
+tower = { workspace = true, features = ["util"] }
 
 [lints]
 workspace = true
