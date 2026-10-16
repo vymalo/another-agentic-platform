@@ -80,7 +80,7 @@ fn the_router_has_the_routes_of_the_spec_and_no_other() {
 #[test]
 fn the_router_registers_routes_from_the_table_and_nowhere_else() {
     // `.route(` appears once in the crate: the loop over the table. A route written beside it would not be in the table,
-    // and the middleware would refuse it with a 500 (tested in `authz`); this keeps anybody from getting that far.
+    // and the guard would refuse it with a 500 (tested in `router`); this keeps anybody from getting that far.
     let mut found = Vec::new();
     let mut dirs = vec![std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("src")];
     while let Some(dir) = dirs.pop() {
@@ -96,6 +96,23 @@ fn the_router_registers_routes_from_the_table_and_nowhere_else() {
                     let code = line.split("//").next().unwrap_or_default();
                     if code.contains(".route(") {
                         found.push(path.file_name().unwrap().to_string_lossy().into_owned());
+                    }
+                    // Nothing else adds a route either. The guard would refuse it (`router.rs` holds that in a unit
+                    // test), so this is the second wall and not the first.
+                    for other in [
+                        ".route_service(",
+                        ".merge(",
+                        ".nest(",
+                        ".nest_service(",
+                        ".fallback(",
+                        ".fallback_service(",
+                        ".method_not_allowed_fallback(",
+                    ] {
+                        assert!(
+                            !code.contains(other),
+                            "{}: `{other}` adds what is not in the table of routes: {code}",
+                            path.display()
+                        );
                     }
                 }
             }

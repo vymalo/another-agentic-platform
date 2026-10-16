@@ -1,8 +1,17 @@
 //! Who is calling, and whether the route admits them.
 //!
-//! One middleware, on every route (`route_layer`), driven by the table of routes: it looks the permission up by the template
-//! that matched and the method, authenticates the bearer token, and checks the one permission the route needs. A route that is
-//! not in the table is refused with `500` and logged: authorization is never decided by the handler that was written for it.
+//! One layer over the whole router ([`guard`], applied last: `router.rs`), driven by the table of routes. It reads the
+//! template that matched and the method, and decides **before anything else of the router runs**:
+//!
+//! | The request | Answer |
+//! |---|---|
+//! | matched no route | `404` (a fallback added to the router never runs) |
+//! | matched a template the table does not have | `500`, logged: nobody gave that route a permission, so it has no caller |
+//! | matched a template of the table with a method the table does not have | `405` with `Allow`, asking for no token |
+//! | a route of the table | the token and the one permission it needs; then its handler |
+//!
+//! So a route added any other way than the table (`.route_service`, `.merge`, `.nest`, `.fallback`) is never served, and
+//! authorization is never decided by the handler that was written for it.
 //!
 //! * No token, another scheme, an empty token: `401`, `WWW-Authenticate: Bearer`. A token that does not verify: `401` with
 //!   `error="invalid_token"` (RFC 6750 §3). Keys that cannot be fetched: `503`, never `401`.
@@ -63,8 +72,8 @@ fn bearer(headers: &HeaderMap) -> Result<Option<&str>, Problem> {
     Ok((!token.is_empty()).then_some(token))
 }
 
-/// The middleware. `state` holds the authenticator.
-pub(crate) async fn authorize<O, A>(
+/// The layer. `state` holds the authenticator.
+pub(crate) async fn guard<O, A>(
     State(state): State<Arc<ApiState<O, A>>>,
     mut request: Request,
     next: Next,
@@ -73,19 +82,26 @@ where
     O: AgentObjects + 'static,
     A: Authenticator + 'static,
 {
-    let template = request
+    let Some(template) = request
         .extensions()
         .get::<MatchedPath>()
         .map(|m| m.as_str().to_owned())
-        .unwrap_or_default();
+    else {
+        return Problem::no_such_route().into_response();
+    };
     let Some(route) = routes::lookup(request.method(), &template) else {
-        // A route somebody registered without an entry in the table: it has no permission, so it has no caller.
-        tracing::error!(
-            method = %request.method(),
-            route = %template,
-            "a route has no entry in the table of routes: refused"
-        );
-        return Problem::internal().into_response();
+        return match routes::allow(&template) {
+            Some(allow) => Problem::method_not_allowed(&allow).into_response(),
+            None => {
+                // A route somebody registered without an entry in the table: it has no permission, so it has no caller.
+                tracing::error!(
+                    method = %request.method(),
+                    route = %template,
+                    "a route has no entry in the table of routes: refused"
+                );
+                Problem::internal().into_response()
+            }
+        };
     };
 
     let token = match bearer(request.headers()) {
@@ -115,59 +131,7 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
-    use aap_ports::memory::{MemoryAuthenticator, MemoryObjects};
-    use axum::Router;
-    use axum::body::Body;
-    use axum::http::{HeaderValue, StatusCode};
-    use axum::middleware::from_fn_with_state;
-    use axum::routing::{get, post};
-    use tower::ServiceExt;
-
-    fn state() -> Arc<ApiState<MemoryObjects, MemoryAuthenticator>> {
-        let defaults = serde_json::from_value(serde_json::json!({
-            "namespace": "ns",
-            "store": { "cnpg": { "instances": 1, "storage": { "size": "1Gi" } } },
-            "a2aBearer": { "name": "a2a", "key": "TOKEN" },
-        }))
-        .unwrap();
-        let auth = MemoryAuthenticator::new().with_token("t", "alice", permission::ALL);
-        Arc::new(ApiState::new(MemoryObjects::new(), auth, defaults).unwrap())
-    }
-
-    async fn status(app: Router, method: &str, path: &str) -> StatusCode {
-        let request = Request::builder()
-            .method(method)
-            .uri(path)
-            .header("authorization", "Bearer t")
-            .body(Body::empty())
-            .unwrap();
-        app.oneshot(request).await.unwrap().status()
-    }
-
-    #[tokio::test]
-    async fn a_route_that_is_not_in_the_table_is_refused_and_never_served() {
-        let state = state();
-        let app = Router::new()
-            .route("/v1/me", get(|| async { "served" }))
-            // Not in the table: a path nobody gave a permission, and a method the table does not have for a path it has.
-            .route("/v1/stray", get(|| async { "served" }))
-            .route("/v1/me", post(|| async { "served" }))
-            .route_layer(from_fn_with_state(
-                state.clone(),
-                authorize::<MemoryObjects, MemoryAuthenticator>,
-            ))
-            .with_state(state);
-        assert_eq!(status(app.clone(), "GET", "/v1/me").await, StatusCode::OK);
-        assert_eq!(
-            status(app.clone(), "GET", "/v1/stray").await,
-            StatusCode::INTERNAL_SERVER_ERROR,
-            "a route without a permission is not served, even to a person who holds every permission"
-        );
-        assert_eq!(
-            status(app, "POST", "/v1/me").await,
-            StatusCode::INTERNAL_SERVER_ERROR
-        );
-    }
+    use axum::http::HeaderValue;
 
     fn headers(values: &[&str]) -> HeaderMap {
         let mut h = HeaderMap::new();

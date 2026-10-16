@@ -241,6 +241,22 @@ pub fn lookup(method: &Method, template: &str) -> Option<&'static Route> {
     ROUTES.iter().find(|r| r.verb == verb && r.path == template)
 }
 
+/// The `Allow` header of a template that is in the table: its methods, and `HEAD` after `GET`. `None` for a template the
+/// table does not have.
+pub fn allow(template: &str) -> Option<String> {
+    let mut verbs: Vec<&str> = Vec::new();
+    for route in ROUTES.iter().filter(|r| r.path == template) {
+        let verb = route.verb.as_str();
+        if !verbs.contains(&verb) {
+            verbs.push(verb);
+        }
+        if route.verb == Verb::Get && !verbs.contains(&"HEAD") {
+            verbs.push("HEAD");
+        }
+    }
+    (!verbs.is_empty()).then(|| verbs.join(", "))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -256,6 +272,17 @@ mod tests {
                 );
             }
         }
+    }
+
+    #[test]
+    fn allow_is_the_methods_of_a_template_of_the_table_and_nothing_for_another() {
+        assert_eq!(allow("/v1/me").as_deref(), Some("GET, HEAD"));
+        assert_eq!(
+            allow("/v1/agents/{name}").as_deref(),
+            Some("GET, HEAD, PUT, DELETE")
+        );
+        assert_eq!(allow("/v1/agents/x"), None, "a template, not a path");
+        assert_eq!(allow("/v1/stray"), None);
     }
 
     #[test]
