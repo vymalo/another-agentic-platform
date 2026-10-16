@@ -7,7 +7,7 @@
 //! | `DependencyUnavailable` | exit code 69 (adam: a dependency is unreachable) |
 //! | `MissingSecret { name }` | `CreateContainerConfigError` about a Secret or one of its keys |
 //! | `ImagePull` | `ErrImagePull`, `ImagePullBackOff` (and `InvalidImageName` and its kin) |
-//! | `CrashLoop` | `CrashLoopBackOff` after any other exit |
+//! | `CrashLoop` | `CrashLoopBackOff` after any other exit, or a non-zero exit after a restart, other than 78 and 69 (between two restarts the kubelet can keep reporting the last exit) |
 //!
 //! `NameConflict` is not read from pods: the adoption guard reports it.
 //!
@@ -211,7 +211,12 @@ fn container_issue(pod: &Pod, cs: &ContainerStatus) -> Option<(IssueReason, Stri
     }
     // A container that has just exited with one of adam's codes, before the kubelet backs off.
     let code = state.terminated.as_ref()?.exit_code;
-    matches!(code, EXIT_CONFIG | EXIT_UNAVAILABLE).then(|| exit_issue(name, Some(code)))
+    if matches!(code, EXIT_CONFIG | EXIT_UNAVAILABLE) {
+        return Some(exit_issue(name, Some(code)));
+    }
+    // Between two restarts the kubelet may report the last exit and not `CrashLoopBackOff`. A
+    // first exit is nothing yet; a failed exit of a container that was already restarted is a loop.
+    (code != 0 && cs.restart_count > 0).then(|| exit_issue(name, Some(code)))
 }
 
 fn exit_issue(name: &str, code: Option<i32>) -> (IssueReason, String) {
@@ -354,6 +359,16 @@ mod tests {
         }
     }
 
+    /// A container whose state is its last exit: `terminated`, as the kubelet reports it between
+    /// two restarts, with the restarts it has made so far.
+    fn terminated(code: i32, restarts: i32) -> Value {
+        json!({"containerStatuses": [{
+            "name": "agent", "ready": false, "restartCount": restarts, "image": "i", "imageID": "",
+            "state": {"terminated": {"exitCode": code, "reason": "Error"}},
+            "lastState": {"terminated": {"exitCode": code, "reason": "Error"}}
+        }]})
+    }
+
     #[test]
     fn a_container_that_just_exited_with_an_adam_code_is_read_before_the_back_off() {
         let status = |code: i32| {
@@ -372,6 +387,95 @@ mod tests {
         );
         // Another exit is nothing yet: the kubelet restarts it, and only a loop is an issue.
         assert!(pod_issues(&pod("agent", status(1)), Role::All).is_empty());
+    }
+
+    #[test]
+    fn a_restarted_container_that_is_reported_as_its_last_exit_is_a_crash_loop() {
+        // On kind (v1.35.8) a pod running `exit 1` was still described as `Terminated`, `Error`,
+        // exit 1, restart count 5 at the end of a 240 s wait: the kubelet had not said
+        // `CrashLoopBackOff`.
+        for code in [1, 2, 126, 137, 139, 143] {
+            let i = only(&pod("agent", terminated(code, 5)));
+            assert_eq!(i.reason, IssueReason::CrashLoop, "exit {code}");
+            assert_eq!(i.role, Role::All);
+            assert!(i.message.contains("agent"), "{}", i.message);
+        }
+        // The first restart is enough: the container has exited twice.
+        assert_eq!(
+            only(&pod("agent", terminated(1, 1))).reason,
+            IssueReason::CrashLoop
+        );
+        // The adam codes keep their own reasons however many restarts there were.
+        assert_eq!(
+            only(&pod("agent", terminated(78, 5))).reason,
+            IssueReason::ConfigRejected
+        );
+        assert_eq!(
+            only(&pod("agent", terminated(69, 5))).reason,
+            IssueReason::DependencyUnavailable
+        );
+    }
+
+    #[test]
+    fn a_first_exit_with_no_restart_yet_and_a_clean_exit_are_no_crash_loop() {
+        // No restart yet: one exit is not a loop (only adam's codes are read at once).
+        assert!(pod_issues(&pod("agent", terminated(1, 0)), Role::All).is_empty());
+        assert!(pod_issues(&pod("agent", terminated(137, 0)), Role::All).is_empty());
+        // A container that exited 0 is not failing, however often it was restarted.
+        assert!(pod_issues(&pod("agent", terminated(0, 5)), Role::All).is_empty());
+        assert!(pod_issues(&pod("agent", terminated(0, 0)), Role::All).is_empty());
+    }
+
+    #[test]
+    fn a_crash_loop_read_from_the_last_exit_fails_the_runtime_that_is_not_rolled_out() {
+        let rolling = [obs(Role::All, 1, 0, false)];
+        let s = compute(&rolling, &[pod("agent", terminated(1, 5))]);
+        assert_eq!(s.phase, Phase::Failed);
+        assert_eq!(s.issues.len(), 1, "{:?}", s.issues);
+        assert_eq!(s.issues[0].reason, IssueReason::CrashLoop);
+        // A first exit is still only provisioning.
+        let s = compute(&rolling, &[pod("agent", terminated(1, 0))]);
+        assert_eq!(s.phase, Phase::Provisioning);
+        assert!(s.issues.is_empty());
+        // And a runtime that is rolled out is ready whatever the pods once did.
+        let done = [obs(Role::All, 1, 1, true)];
+        let s = compute(&done, &[pod("agent", terminated(1, 5))]);
+        assert_eq!(s.phase, Phase::Ready);
+        assert!(s.issues.is_empty());
+    }
+
+    #[test]
+    fn an_init_container_that_failed_and_then_succeeded_is_no_issue_and_a_failing_one_is() {
+        let init = |code: i32, restarts: i32| {
+            json!({"initContainerStatuses": [{
+                "name": "wait-for-db", "ready": code == 0, "restartCount": restarts,
+                "image": "i", "imageID": "",
+                "state": {"terminated": {"exitCode": code, "reason": if code == 0 { "Completed" } else { "Error" }}},
+                "lastState": {"terminated": {"exitCode": 1, "reason": "Error"}}
+            }]})
+        };
+        // It failed twice, was restarted and completed: its last exit is in `lastState` only.
+        assert!(pod_issues(&pod("agent", init(0, 2)), Role::All).is_empty());
+        // Failing again after a restart is a loop of the pod, named by its container.
+        let i = only(&pod("agent", init(1, 2)));
+        assert_eq!(i.reason, IssueReason::CrashLoop);
+        assert!(i.message.contains("wait-for-db"), "{}", i.message);
+        // Its first failure is nothing yet.
+        assert!(pod_issues(&pod("agent", init(1, 0)), Role::All).is_empty());
+    }
+
+    #[test]
+    fn a_healthy_container_that_was_restarted_once_is_no_issue() {
+        // Running now, with a crash behind it: only `state` is read, never `lastState`.
+        let p = pod(
+            "agent",
+            json!({"containerStatuses": [{
+                "name": "agent", "ready": true, "restartCount": 3, "image": "i", "imageID": "",
+                "state": {"running": {}},
+                "lastState": {"terminated": {"exitCode": 1, "reason": "Error"}}
+            }]}),
+        );
+        assert!(pod_issues(&p, Role::All).is_empty());
     }
 
     #[test]
