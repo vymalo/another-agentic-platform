@@ -71,7 +71,17 @@ impl Api {
     }
 
     pub fn build(objects: MemoryObjects, auth: MemoryAuthenticator, cors: CorsOrigins) -> Self {
-        let state = ApiState::new(objects.clone(), auth.clone(), defaults())
+        Self::over(objects, auth, defaults(), cors)
+    }
+
+    /// A router over these ports with these defaults: the same store behind another deployment's configuration.
+    pub fn over(
+        objects: MemoryObjects,
+        auth: MemoryAuthenticator,
+        defaults: aap_forms::Defaults,
+        cors: CorsOrigins,
+    ) -> Self {
+        let state = ApiState::new(objects.clone(), auth.clone(), defaults)
             .unwrap()
             .with_cors(cors);
         Self {

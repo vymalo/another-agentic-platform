@@ -721,7 +721,9 @@ async fn a_body_that_is_not_declared_as_json_is_415() {
 #[tokio::test]
 async fn a_body_over_the_limit_is_413_whether_or_not_it_says_how_long_it_is() {
     let (api, token) = Api::seeded().await;
-    let limit = aap_platform_api::MAX_BODY_BYTES;
+    // The limit is documented as 2 MiB; a test that took it from the constant could not notice it changing.
+    let limit = 2 * 1024 * 1024;
+    assert_eq!(aap_platform_api::MAX_BODY_BYTES, limit);
     let mut body = folder_body("chat");
     body["agent"]["files"]["big.md"] = json!("x".repeat(limit));
     let r = api
@@ -826,4 +828,59 @@ async fn a_status_the_operator_wrote_is_shown_and_a_sentinel_in_it_is_not_export
         !yaml.contains("status-sentinel-5b1c") && !yaml.contains("Degraded"),
         "{yaml}"
     );
+}
+
+#[tokio::test]
+async fn a_save_never_moves_what_the_person_did_not_edit() {
+    // D4: an existing agent keeps the deployment part its objects hold; today's defaults fill a new agent only. The same
+    // store, behind a router whose deployment has changed its defaults.
+    let (api, token) = Api::seeded().await;
+    let created = create(&api, &token, &coder_body("coder-me")).await;
+    assert_eq!(created.code(), 201, "{}", created.text());
+    let before = created.json()["representation"]["form"]["deployment"].clone();
+    assert!(before["store"]["postgres"]["cnpg"].is_object());
+
+    let mut moved = serde_json::to_value(defaults()).unwrap();
+    moved["store"] = json!({ "secretRef": { "name": "{name}-db", "key": "uri" } });
+    moved["coder"]["gitAuthor"] =
+        json!({ "name": "other", "email": "other@users.noreply.github.com" });
+    let moved: aap_forms::Defaults = serde_json::from_value(moved).unwrap();
+    let later = Api::over(
+        api.objects.clone(),
+        api.auth.clone(),
+        moved,
+        aap_platform_api::CorsOrigins::none(),
+    );
+
+    let mut body = coder_body("coder-me");
+    body["title"] = json!("Coder, renamed");
+    let replaced = later
+        .put("/v1/agents/coder-me")
+        .token(&token)
+        .replace(&created.etag())
+        .json(&body)
+        .send()
+        .await;
+    assert_eq!(replaced.code(), 200, "{}", replaced.text());
+    assert_eq!(
+        replaced.json()["representation"]["form"]["deployment"],
+        before,
+        "an unrelated edit moved the store"
+    );
+
+    // A new agent gets today's defaults.
+    let fresh = later
+        .put("/v1/agents/coder-two")
+        .token(&token)
+        .create()
+        .json(&coder_body("coder-two"))
+        .send()
+        .await;
+    assert_eq!(fresh.code(), 201, "{}", fresh.text());
+    let deployment = fresh.json()["representation"]["form"]["deployment"].clone();
+    assert_eq!(
+        deployment["store"]["postgres"]["secretRef"]["name"],
+        "coder-two-db"
+    );
+    assert_eq!(deployment["coder"]["gitAuthor"]["name"], "other");
 }
