@@ -421,6 +421,18 @@ sh deploy/operator/tests/api-shapes.sh /tmp/api-config && for f in /tmp/api-conf
 CI also runs kubeconform in strict mode over seven renders (the defaults, netcup, `secret.values.yaml`, the three API shapes, and the CRDs chart with the
 `CustomResourceDefinition` kind skipped, because the schema set has none: the `kind` job of `operator.yml` applies them to a real API server).
 
+## Known limitations
+
+* **The API listens on IPv4 only.** The chart writes `listen` and `healthListen` as `0.0.0.0:<port>`, and the binary's own defaults are `0.0.0.0` too. On an
+  IPv6-only cluster the pod's address is IPv6, so the kubelet's probes and the Service cannot reach a socket bound to `0.0.0.0` (a dual-stack cluster gives the
+  pod an IPv4 address as well, and is fine). The address would have to be `[::]`; the chart does not offer it (it owns `listen`, and `API_LISTEN_ADDR` and
+  `HEALTH_ADDR` are refused in `api.extraEnv` because they would win over the ports the probes follow), so supporting it is a change to the chart, not a value. *Not
+  tried*: no IPv6 cluster was available.
+* **The chart's own `version` (`0.1.0`) is moved by nothing.** The chart is installed from this repository's path (an Argo CD Application tracks it; nothing runs
+  `helm package` or publishes it), and the versions that move are the images' `sha-<7>` tags, which `bump-tag.sh` writes. The git history of `Chart.yaml` has two
+  commits (the chart's creation and the description that now names the API), and neither changed `version`; D7b1 changed the chart's content and left it at
+  `0.1.0`, as the convention is. The `helm.sh/chart` label therefore does not change with a release.
+
 ## What is not proven
 
 * **The Platform API component has not run on a cluster.** It is rendered, linted, checked with kubeconform, and its file is read by the binary (`api --check`,
