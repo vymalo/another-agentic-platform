@@ -580,6 +580,31 @@ mod tests {
     }
 
     #[test]
+    fn every_captured_body_is_read_by_a_test() {
+        // A fixture that nothing reads is a claim that nothing holds. The bodies are read here, or answered by the fake
+        // API server (`tests/support`), which the suite runs against.
+        let readers = [
+            include_str!("failure.rs"),
+            include_str!("../tests/support/mod.rs"),
+        ];
+        let dir = concat!(env!("CARGO_MANIFEST_DIR"), "/tests/fixtures/status");
+        let mut seen = 0;
+        for entry in std::fs::read_dir(dir).unwrap() {
+            let name = entry.unwrap().file_name().into_string().unwrap();
+            if name == "README.md" {
+                continue;
+            }
+            seen += 1;
+            let quoted = format!("{name}\"");
+            assert!(
+                readers.iter().any(|r| r.contains(&quoted)),
+                "no test reads tests/fixtures/status/{name}"
+            );
+        }
+        assert_eq!(seen, 29, "the README counts the bodies");
+    }
+
+    #[test]
     fn a_conflict_without_a_cause_is_a_version_and_a_422_without_causes_is_one_problem() {
         assert!(matches!(
             classify(status(409, "Conflict")),

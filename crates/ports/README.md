@@ -56,6 +56,7 @@ trait AgentObjects: Send + Sync {                       // D4: the Platform API'
     async fn get_agent(&self, name: &str) -> Result<Option<Agent>, ObjectsError>;
     async fn put_agent(&self, draft: &AgentDraft, when: &Precondition) -> Result<Agent, ObjectsError>;
     async fn delete_agent(&self, name: &str, when: &ETag) -> Result<(), ObjectsError>;
+    async fn list_orphans(&self) -> Result<Vec<Stored>, ObjectsError>;                       // configs of the dashboard that no service names
     async fn list_shared(&self, kind: SharedKind) -> Result<Vec<Stored>, ObjectsError>;   // Model | ToolServer
     async fn get_shared(&self, kind: SharedKind, name: &str) -> Result<Option<Stored>, ObjectsError>;
     async fn put_shared(&self, kind: SharedKind, draft: &SharedDraft, when: &Precondition) -> Result<Stored, ObjectsError>;
@@ -134,8 +135,8 @@ depending on `aap-api` and so on `kube`, would give every provider that depends 
 | Type | What |
 |---|---|
 | `Kind::{AgentService, AgentConfig, ModelEndpoint, ToolProvider}`, `SharedKind::{Model, ToolServer}` | The four kinds. Closed. `SharedKind` is the pair of routes `/v1/models` and `/v1/tool-servers` |
-| `Stored { kind, namespace, name, version, generation, labels, annotations, spec, status }` | One object as the server holds it, reduced to what the dashboard needs. `status` is the operator's: the dashboard never writes it. `spec` and `status` are **as written**, without the defaults that an API server adds to every object (`aap-objects-kubernetes` reads them through `managedFields`) |
-| `Agent { service, config: Option<Stored> }` | An agent is its `AgentService` and the `AgentConfig` that service names (`spec.configRef.name`); the config is `None` when it is not there. One unit: read, saved and deleted together, with one `ETag` |
+| `Stored { kind, namespace, name, version, generation, labels, annotations, spec, status, deleting }` | One object as the server holds it, reduced to what the dashboard needs. `status` is the operator's: the dashboard never writes it. `deleting` is `true` for an object with a `deletionTimestamp`: its finalizers have not run, and nothing is written to it. `spec` and `status` are **as written**, without the defaults that an API server adds to every object (`aap-objects-kubernetes` reads them through `managedFields`) |
+| `Agent { service, config: Option<Stored> }` | An agent is its `AgentService` and the `AgentConfig` that service names (`spec.configRef.name`); the config is `None` when it is not there. One unit: read, saved and deleted together, with one `ETag`. `Agent::deleting()` is `true` when the service (or the config) is being deleted: the operator has not finished with it, and it is still listed and read, with its status, until it goes |
 | `AgentDraft { name, service, config }`, `SharedDraft { name, spec }` | What the dashboard writes: the two `spec`s of an agent (both objects are named `name`; `service.configRef.name` must say so), or one. Labels are the implementation's |
 | `Precondition::{DoesNotExist, Matches(ETag)}` | `If-None-Match: *` and `If-Match`. **There is no unconditional write, and no unconditional delete**: `delete_agent` and `delete_shared` take the `ETag` the caller read, so that a delete never removes what somebody changed since the list was drawn (the router answers a `DELETE` without `If-Match` itself) |
 | `ResourceVersion`, `ETag` | The `resourceVersion` of one object (opaque), and the token of **every** object of a unit, derived by `Stored::etag` and `Agent::etag` from the **kind, the name and the version** of each (length-prefixed: no two units spell one token), so a token read from one object is the token of no other, whatever the backend's versions are. An object that is not there is part of the token too |
@@ -163,6 +164,20 @@ depending on `aap-api` and so on `kube`, would give every provider that depends 
 * **An agent is two objects.** Written `AgentConfig` first, then `AgentService` (the operator never sees a service whose config is
   not there yet); deleted in the other order. The config of an agent has the agent's name, and a draft whose `configRef` says otherwise is
   `Invalid`.
+* **A delete returns once the service is gone or is being deleted; the config goes when the service is gone.** The operator's finalizer on the
+  `AgentService` releases the compute and the store, and **reads the `AgentConfig` while it does**: `deletionPolicy` is read from the objects at that moment, because
+  a person who saved `Retain` over `Delete` and deleted at once has had no reconcile in between (`Delete` to `Retain` must not lose data), and a config the operator cannot read
+  leaves the policy it remembers standing, `Delete` (*the premise, held by `a_config_that_is_gone_when_the_finalizer_runs_leaves_the_remembered_policy_standing`
+  in `aap-controller`*). So a delete that leaves the service `deleting` leaves the config too. An implementation may wait a short, bounded time for the service to go before it returns,
+  and then deletes the config in the same call; one that does not wait returns with the agent `deleting`. Deleting a service that is already being deleted is accepted.
+* **An agent that is being deleted is read, and refuses every write.** `Stored::deleting` and `Agent::deleting()` say so; it is still listed and read (the operator's status says what it is
+  doing). A replace of it, a create over its name (`DoesNotExist`) and a write of its config are `Deleting { kind, name }` (`409`, class `Conflict`: read again later; the name is free
+  when the operator is done). A write that finds an object begin to be deleted between the read and the apply says the same.
+* **A config the delete left is an orphan, and a delete of its name removes it.** What the wait above did not outwait, and what a create that failed halfway leaves, is a config the dashboard
+  owns and no service names. `list_orphans` lists them (ordered by name, with the tokens a delete of their names takes: `Stored::etag`), they are not agents (`get_agent`
+  and `list_agents` do not have them), and `delete_agent(name, &config.etag())` of a name whose service is **absent** deletes the config of that name, on **its own** token (`NotFound` when there is neither).
+  **A config that is GitOps's (`NotOwned`) or that any service names (`Referenced`) is never deleted that way**, and a stale token is `PreconditionFailed`. This is the smallest way: the alternative,
+  an `Agent` with `service: None` in `list_agents`, would make every reader of an agent handle a half that has no service. The list is for a screen of leftovers; D7 decides whether to draw one.
 * **A config is one agent's.** The dashboard never shares an `AgentConfig` between two services (§60a, decision (f) of D4). When **another** `AgentService` names the
   config the dashboard would write, take over or delete (its `configRef.name` is the agent's name; a GitOps service can name any), the replace, the create (also of a
   config that is not there yet, and the takeover of one a half-failed create left) and the delete are all `Referenced { kind: AgentConfig, name, by }`, with the names of
@@ -190,6 +205,11 @@ the owners and the services that name the config**; run both server-side applies
 token on either object and a rule of the CRDs (a `422` on the service, which would come *after* the config was applied) are refused while nothing has changed; then apply the
 config and the service for real, each with its `resourceVersion`. The window that is left (somebody changes the service between the two real applies) leaves the config written and
 answers `PreconditionFailed`; a retry reads again and succeeds, and the create is retried over the config it left (taken over). That is the one place a refusal changes something, and `aap-objects-kubernetes` shows it, on a fake API server and on a real one.
+Every outcome of that window leaves the config written, and says what happened to the service. When only its `resourceVersion` moved (the operator wrote its `status`, or put its finalizer on:
+a config change makes the operator write the service's status, so this is the common case), the apply is repeated once with the new version and the save **succeeds**; when what the
+save is about changed (the service's `spec`, labels or annotations, or the service is another object or gone) the answer is `PreconditionFailed` (or `NotFound` / `AlreadyExists` for the service itself); when it
+began to be deleted, `Deleting`; when the API server fails the apply, `Unavailable` (a retry succeeds when it is back); when a field is another manager's, `Conflict` (a retry is refused by the dry run until they let go). The half-write is logged
+at `warn`, with names and no value. A delete is the other way round: the service first, and the config only once the service is gone (above).
 
 The ownership of an object is the one thing a write changes and a person does not see, so here is its lifecycle (AD-031; the **Adopt** action is slice D16's,
 the takeover of `coder` and `chat`, and is not built):
@@ -219,6 +239,7 @@ Each variant has one status; `tests/objects.rs` holds this table with an exhaust
 | `NotOwned` | 409 | `Invalid` | the object is GitOps's |
 | `Referenced { by }` | 409 | `Invalid` | agents still name the shared object, or another service names the config of the agent being written or deleted; the body names them |
 | `Conflict` | 409 | `Conflict` | another manager owns a field (a server-side apply conflict) |
+| `Deleting { kind, name }` | 409 | `Conflict` | the service or the config is being deleted (its finalizers have not run): read again later |
 | `NotFound` | 404 | `NotFound` | a replace or a delete found nothing |
 | `PreconditionFailed` | 412 | `Conflict` | the token is stale: somebody saved first |
 | `Invalid(fields)` | 422 | `Invalid` | the backend refused the body, field by field (a CEL rule); the fields are mapped to the form by `aap-forms` |
@@ -283,7 +304,7 @@ Off by default (the controller and the providers depend on the traits only). Wit
 
 * **Conformance macros**, in the style of `adam-store-testkit`:
   `runtime_provider_conformance!(make)` (14 cases), `store_provisioner_conformance!(make)` (7),
-  `agent_directory_conformance!(make)` (6), `agent_objects_conformance!(make)` (28, D4) and
+  `agent_directory_conformance!(make)` (6), `agent_objects_conformance!(make)` (33, D4; the one list of its cases is `agent_objects_cases!`, which a backend's own tests may use to run them all another way: `aap-objects-kubernetes` derives its `Role` from every request of every case) and
   `authenticator_conformance!(make)` (8, D4; its sentinel token is JWT-shaped, three base64url parts with the sentinel as `kid`, `iss`, `aud`, `sub` and signature). `make` is a path to `async fn() -> Option<T>`; `None` skips
   the suite, and `AAP_TEST_REQUIRE_BACKEND=1` turns the skip into a failure (CI sets it for the suites that
   need a cluster). The macros expand to `#[tokio::test]`, so the crate that uses them needs `tokio` with
@@ -296,7 +317,8 @@ Off by default (the controller and the providers depend on the traits only). Wit
   Kubernetes provider feeds it the real objects it applied, minus `secretKeyRef`.
 * `ObjectsUnderTest` (D4) is what the objects cases need of a backend beyond the port: `seed_foreign` (an object the dashboard does
   not own, `Foreign::Unlabelled` or `Foreign::ArgoTracked`; it takes over an object of that kind and name that is there, which is how a case makes an agent whose two objects have two owners),
-  `seed_orphan_config` (a dashboard-owned config and no service: what a create that failed halfway leaves), `set_status` (as the operator), `offer`, `decline` (an ExternalSecret
+  `seed_orphan_config` (a dashboard-owned config and no service: what a create that failed halfway leaves), `seed_finalizer` (the operator's finalizer is on a service: a delete of it
+  leaves it `deleting`), `seed_terminating` (somebody else is deleting a service, with that finalizer), `run_finalizer` (the finalizer ran: a service that was being deleted goes, **the config stays**), `set_status` (as the operator), `offer`, `decline` (an ExternalSecret
   without the label) and `plant_secret_value` (a Secret that holds a value the port must never read), and, with defaults, `unreachable` (the
   same backend made unreachable) and `refused_spec` (a `spec` the backend refuses; a backend with rules of its own, the CEL of the
   CRDs, gives one that breaks one, and the case checks that the 422 names its field). `AuthenticatorUnderTest` is `issue(subject,
@@ -312,7 +334,8 @@ Off by default (the controller and the providers depend on the traits only). Wit
   controller's unit tests: `set_foreign` (the adoption guard), `force_status` (a crash loop),
   `set_unavailable`, `set_cnpg_installed`, `set_cluster_ready`, `set_ready`. `MemoryObjects` refuses what is not an object and a
   `configRef` that is not the agent's name, and nothing else (no CEL); a write that changes nothing keeps the version (as a server-side
-  apply of an unchanged object does: *verified 2026-10-16*). `MemoryAuthenticator` is a table of tokens (`with_token`, `grant`,
+  apply of an unchanged object does: *verified 2026-10-16*), and has the finalizer hooks of `ObjectsUnderTest` (a delete of a service with the finalizer leaves it `deleting`
+  and does not wait) and `remove` (an object removed as an administrator would, with no precondition). `MemoryAuthenticator` is a table of tokens (`with_token`, `grant`,
   `set_unavailable`): it checks no signature.
 
 ```rust
@@ -326,7 +349,7 @@ aap_ports::runtime_provider_conformance!(make);
 
 `cargo test -p aap-ports`:
 
-* `tests/memory.rs`: the seven suites against the in-memory implementations (48 cases, then 28 for `MemoryObjects` and 8 for
+* `tests/memory.rs`: the seven suites against the in-memory implementations (48 cases, then 33 for `MemoryObjects` and 8 for
   `MemoryAuthenticator`).
 * `tests/contract.rs`: `RuntimeSpec::check` names each broken invariant, a spec round-trips through
   JSON, every error has the class that decides retrying, the suites **fail** what they must (a provider
@@ -342,7 +365,7 @@ aap_ports::runtime_provider_conformance!(make);
   delete; one that compares only the service or only the config of the token, or accepts the token of another agent or kind; one that writes the config or the service and
   then refuses; one that replaces, deletes or creates over a GitOps agent, config or shared object, or looks at the owner of only one object of the pair; one that
   deletes what agents name, or replaces, deletes or creates an agent whose config another service names; one whose orphan config blocks a create, or whose list or get
-  leaves out an agent without a config; one that does not label what it writes, or offers or reads a value. For the authenticator: unavailable keys called invalid, the
+  leaves out an agent without a config; one that does not label what it writes, or offers or reads a value; one that hides that an agent is being deleted, writes to one, deletes the config at once while the operator finalizes, lists no orphan, deletes an orphan on a stale token, lists a GitOps config as an orphan or deletes one, or deletes a config a service names. For the authenticator: unavailable keys called invalid, the
   token in an error, an empty token called invalid, permissions matched loosely.
 
 The in-memory implementations are instant: they cannot show that a real provider's `watch` is timely

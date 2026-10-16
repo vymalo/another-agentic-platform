@@ -23,6 +23,15 @@
 //!   `tests/crd_assumptions.rs` fails when a CRD gains a list or a map type, or an atomic map, so this code is
 //!   looked at before it is wrong;
 //! * an object with no `managedFields`, or that no manager owns a `spec` (or a `status`) of, is returned whole.
+//!
+//! # What this hides
+//!
+//! **A value the API server defaulted is not shown, and it is persisted.** The default is written into the object when it
+//! is made, from the schema of that day. If a CRD later changes a default (`scaling.workers` from `1` to `2`), the
+//! objects made before keep the old value in etcd and the dashboard shows neither: not in the form, not in the YAML export,
+//! and a save (an apply of what the person sees) does not name the field, so it stays as it was. What an agent actually runs
+//! with is what the operator resolved (its `status`), not `Stored::spec`. Making a default visible, or changing one on
+//! purpose, is a change of the object by a person (a field the form sets), never a side effect of a read.
 
 use std::collections::BTreeMap;
 

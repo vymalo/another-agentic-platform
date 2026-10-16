@@ -549,10 +549,11 @@ impl Classify for ObjectsError {
 /// **The one window.** Between the two real applies the service can change: the operator writes its `status`
 /// whenever the config changes, and somebody else may save it. When the service's `spec`, labels and annotations are
 /// what was read, the apply is repeated once with the new version; otherwise the write stops with the config
-/// written and answers [`ObjectsError::PreconditionFailed`]. A failure of the service's apply for another reason
-/// (the API server is unavailable, a field conflict) leaves the config written too, and answers
-/// [`ObjectsError::Unavailable`] or [`ObjectsError::Conflict`]. A retry reads again and succeeds, and the create is
-/// retried over the config it left (taken over). The README of this crate says so.
+/// written and answers [`ObjectsError::PreconditionFailed`] ([`ObjectsError::Deleting`] when the service began to be
+/// deleted). A failure of the service's apply for another reason (the API server is unavailable, a field conflict)
+/// leaves the config written too, and answers [`ObjectsError::Unavailable`] or [`ObjectsError::Conflict`]. A retry
+/// reads again and succeeds (a field conflict, until its owner lets go of the field), and the create is retried over
+/// the config it left (taken over). The README of this crate says so.
 pub trait AgentObjects: Send + Sync {
     /// Every agent of the namespace, ordered by name.
     ///
