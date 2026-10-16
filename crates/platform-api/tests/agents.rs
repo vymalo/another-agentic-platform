@@ -750,6 +750,49 @@ async fn a_body_over_the_limit_is_413_whether_or_not_it_says_how_long_it_is() {
 }
 
 #[tokio::test]
+async fn a_stream_of_chunks_that_are_each_under_the_limit_and_together_over_it_is_413() {
+    // The bytes read are counted across the chunks: a body that says no length is checked as it arrives.
+    let (api, token) = Api::seeded().await;
+    let limit = aap_platform_api::MAX_BODY_BYTES;
+    let chunk = vec![b' '; limit / 3 + 1];
+    assert!(chunk.len() < limit && 3 * chunk.len() > limit);
+    let r = api
+        .put("/v1/agents/chat")
+        .token(&token)
+        .create()
+        .chunked(vec![chunk.clone(), chunk.clone(), chunk])
+        .send()
+        .await;
+    assert_eq!(r.code(), 413, "{}", r.text());
+    assert!(r.is_problem("payload-too-large"));
+    assert_eq!(r.json()["limit"], limit);
+
+    // To the byte: a body of exactly the limit is read (and is not a form), one byte more is too large.
+    let at_limit = |extra: usize| {
+        let mut chunks = vec![vec![b' '; limit / 2]; 2];
+        chunks[1].extend(vec![b' '; extra]);
+        chunks
+    };
+    let r = api
+        .put("/v1/agents/chat")
+        .token(&token)
+        .create()
+        .chunked(at_limit(0))
+        .send()
+        .await;
+    assert_eq!(r.code(), 400, "{}", r.text());
+    assert!(r.is_problem("invalid-body"), "{}", r.text());
+    let r = api
+        .put("/v1/agents/chat")
+        .token(&token)
+        .create()
+        .chunked(at_limit(1))
+        .send()
+        .await;
+    assert_eq!(r.code(), 413, "{}", r.text());
+}
+
+#[tokio::test]
 async fn a_folder_of_one_mebibyte_fits_in_the_body_limit() {
     // §60a lets a folder be 1 MiB; its JSON is a little larger, and the limit leaves room for it.
     let (api, token) = Api::seeded().await;

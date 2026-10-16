@@ -112,6 +112,7 @@ impl Api {
             token: None,
             headers: Vec::new(),
             body: None,
+            chunks: None,
             content_type: None,
         }
     }
@@ -136,6 +137,8 @@ pub struct Call<'a> {
     token: Option<String>,
     headers: Vec<(String, String)>,
     body: Option<Vec<u8>>,
+    /// A body sent as these chunks, with no length: a stream.
+    chunks: Option<Vec<Vec<u8>>>,
     content_type: Option<String>,
 }
 
@@ -167,6 +170,15 @@ impl Call<'_> {
         self
     }
 
+    /// The body as a stream of these chunks, which says no length, with the media type JSON.
+    #[must_use]
+    pub fn chunked(mut self, chunks: Vec<Vec<u8>>) -> Self {
+        self.chunks = Some(chunks);
+        self.content_type
+            .get_or_insert_with(|| "application/json".to_owned());
+        self
+    }
+
     #[must_use]
     pub fn create(self) -> Self {
         self.header("if-none-match", "*")
@@ -188,7 +200,14 @@ impl Call<'_> {
         for (k, v) in &self.headers {
             builder = builder.header(k, v);
         }
-        let body = self.body.map_or_else(Body::empty, Body::from);
+        let body = match (self.chunks, self.body) {
+            (Some(chunks), _) => Body::from_stream(futures::stream::iter(
+                chunks
+                    .into_iter()
+                    .map(Ok::<_, std::convert::Infallible>),
+            )),
+            (None, body) => body.map_or_else(Body::empty, Body::from),
+        };
         let response = self
             .api
             .router
