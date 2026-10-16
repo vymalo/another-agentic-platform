@@ -178,19 +178,36 @@ not_foreign() {
   fi
 }
 # until_ok <seconds> <description> <command...>: poll every 3 s.
+# The output of the last attempt is what the failure shows.
 until_ok() {
   limit=$1; what=$2; shift 2
   deadline=$(( $(date +%s) + limit ))
-  while ! "$@" >/dev/null 2>&1; do
-    [ "$(date +%s)" -lt "$deadline" ] || die "gave up after ${limit}s waiting for: $what"
+  while ! last=$("$@" 2>&1); do
+    [ "$(date +%s)" -lt "$deadline" ] || die "gave up after ${limit}s waiting for: $what. The last attempt said: $(printf '%s' "$last" | tail -c 600)"
     sleep 3
   done
 }
-# gone <kind/name>...: none of them exists any more.
+# gone <kind/name>...: none of them exists any more. Only the API server's NotFound says so: any other error (it cannot be asked, a denial) is
+# not "gone", and is printed so that until_ok can show it.
 gone() {
   for r in "$@"; do
-    if kubectl -n "$ns" get "$r" >/dev/null 2>&1; then return 1; fi
+    if kubectl -n "$ns" get "$r" -o name >/dev/null 2>"$work/gone.err"; then
+      echo "$r is still there" >&2
+      return 1
+    fi
+    if ! grep -q 'NotFound' "$work/gone.err"; then
+      echo "cannot tell whether $r is gone: $(head -c 300 "$work/gone.err")" >&2
+      return 1
+    fi
   done
+}
+# no_agent_pod: the agent has no pod (a list that fails is not an empty one).
+no_agent_pod() {
+  if ! names=$(kubectl -n "$ns" get pod -l "app.kubernetes.io/instance=$agent" -o name 2>"$work/gone.err"); then
+    echo "cannot list the pods of $agent: $(head -c 300 "$work/gone.err")" >&2
+    return 1
+  fi
+  [ -z "$names" ] || { echo "still there: $names" >&2; return 1; }
 }
 # In a pod of the cluster: the status code of a request (the body in /tmp/b of the pod), or 000.
 req() { # req <pod> <curl args...>
@@ -223,7 +240,9 @@ start_forward() {
 tok() {
   t=$(curl -sSf --noproxy '*' -m 10 -G --data-urlencode "sub=$1" --data-urlencode "roles=$2" "$control/token") \
     || die "the test issuer's control port gave no token"
+  # What must never be found in an answer or a log: the token, and its payload and its signature on their own (a cut or a half-logged token).
   printf '%s\n' "$t" >> "$work/tokens"
+  printf '%s\n' "$t" | awk -F. 'NF == 3 { if (length($2) >= 20) print $2; if (length($3) >= 20) print $3 }' >> "$work/tokens"
   printf '%s' "$t"
 }
 # api <token|-> <METHOD> <path> [curl args...]: the status is in $code, the body in $work/body and the headers in $work/headers.
@@ -243,7 +262,8 @@ api() {
     echo "     (no answer: $(head -c 200 "$work/curl.err"); the port-forward is started again)"
     start_forward
   done
-  cat "$work/body" >> "$work/seen"
+  # Everything the API said, the headers included, is what the secret and the tokens are looked for in.
+  cat "$work/headers" "$work/body" >> "$work/seen"
 }
 # as <subject> <permission,...> <METHOD> <path> [curl args...]: api, with a token for that person.
 as() {
@@ -636,7 +656,7 @@ else
   fi
 fi
 until_ok 120 "the Deployment, the Service and the pod of the agent to be gone" gone "deployment/$agent" "service/$agent"
-until_ok 120 "the pod of the agent to be gone" sh -c "! kubectl -n '$ns' get pod -l 'app.kubernetes.io/instance=$agent' -o name | grep -q ."
+until_ok 120 "the pod of the agent to be gone" no_agent_pod
 as reader platform:agents.read GET "/v1/agents/$agent"
 expect_problem 404 not-found "the deleted agent"
 as reader platform:agents.read GET /v1/agents
@@ -662,7 +682,9 @@ as_pod() { # as_pod <pod> <token>: GET /v1/me from a pod, through the Service
 }
 tk=$(tok pod-client platform:agents.read)
 [ "$(as_pod "$client_pod" "$tk")" = 200 ] || die "a pod the API's NetworkPolicy names cannot reach the API through its Service"
-kubectl -n "$ns" exec "$client_pod" -- cat /tmp/b | jq -e '.permissions == ["platform:agents.read"]' >/dev/null || die "the API answered a pod with something else than /v1/me"
+kubectl -n "$ns" exec "$client_pod" -- cat /tmp/b > "$work/pod-body"
+cat "$work/pod-body" >> "$work/seen"
+jq -e '.permissions == ["platform:agents.read"]' "$work/pod-body" >/dev/null || die "the API answered a pod with something else than /v1/me"
 ok "a pod the API's NetworkPolicy names (aap-e2e/client) reaches the API through its Service, with a token"
 # The pod the policy does not name has a network: it reaches the issuer, which no policy of this namespace selects. So a refusal by the API's
 # policy is the only way it is not answered.
@@ -694,8 +716,10 @@ grep -q 'route=/v1/agents' "$work/api.log" || die "the API's log holds no reques
 for f in api.log operator.log seen; do
   if grep -qF -- "$sentinel" "$work/$f"; then die "the value of the model's API key is in $f"; fi
 done
-if grep -qF -f "$work/tokens" "$work/api.log" "$work/seen"; then die "a token the issuer minted is in the API's log or in an answer"; fi
+if [ -s "$work/tokens" ] && grep -qF -f "$work/tokens" "$work/api.log" "$work/operator.log" "$work/seen"; then
+  die "a token the issuer minted (or its payload or its signature) is in the API's log, the operator's log or an answer"
+fi
 if grep -qiE 'panic|backtrace' "$work/api.log"; then die "the API's log holds a panic"; fi
-ok "the secret value is in no answer ($(wc -c < "$work/seen") bytes read) and in no log, no token is in the API's log or in an answer, and the API's log has a line per request and no panic"
+ok "the secret value is in no answer, header or log ($(wc -c < "$work/seen") bytes of answers read), no token minted by this run is in either log or in an answer, and the API's log has a line per request and no panic"
 
 printf '\nPlatform API end-to-end passed\n'
