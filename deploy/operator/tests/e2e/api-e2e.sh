@@ -135,6 +135,8 @@ diagnostics() {
 cleanup() {
   status=$?
   trap - EXIT
+  # A second ^C or a second TERM must not stop the undoing half-way.
+  trap '' INT TERM HUP
   if [ "$status" -ne 0 ] && [ "$ns_made" = 1 ]; then diagnostics; fi
   if [ -n "$fwd_pid" ]; then kill "$fwd_pid" 2>/dev/null || true; fi
   # What this run made and only that, in the order that lets the operator, which is still there, run the finalizer of the agent: the agent
@@ -156,6 +158,10 @@ cleanup() {
   exit "$status"
 }
 trap cleanup EXIT
+# dash (sh on the runners) runs the EXIT trap on `exit` and not when a signal ends the script: ^C, a cancelled job and a SIGTERM would leave the
+# release, the namespace and the issuer behind. Each signal becomes an exit, with the usual status, and the cleanup runs.
+trap 'exit 130' INT
+trap 'exit 143' TERM HUP
 
 # jp <resource> <jsonpath>: a field of an object of the namespace, empty when it is not there.
 jp() { kubectl -n "$ns" get "$1" -o "jsonpath=$2" 2>/dev/null || true; }
