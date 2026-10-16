@@ -320,11 +320,12 @@ AAP_TEST_KUBECONFIG=$HOME/.kube/config AAP_TEST_API_KUBECONFIG=/path/to/dashboar
   cargo test -p aap-objects-kubernetes --test cluster
 ```
 
-**What has and has not been run.** On 2026-10-16 the 44 cases of `tests/cluster.rs` passed against a bare kube-apiserver v1.35.8 and etcd
+**What has and has not been run.** On 2026-10-16 the 56 cases of `tests/cluster.rs` passed against a bare kube-apiserver v1.35.8 and etcd
 3.6.4 started by hand with `--authorization-mode=RBAC` (no controller manager, no kubelet), twice: as the administrator, and as a user that
-holds only the `Role` of `tests/rbac.yaml` (a ServiceAccount, as the CI job makes it), with `AAP_TEST_REQUIRE_CLUSTER=1` (the cases about rights
-included) and four test threads, as CI. That proves the crate and the
-suite against a real API server and a real RBAC, and the facts above. It does **not** prove the `kind` job (the pipeline's own run is
-*unverified* until CI has run it), an operator that writes the status concurrently, an External Secrets Operator that reconciles the
-ExternalSecrets (only the CRD is installed: the offer reads the objects, not the Secrets they would make), or Argo CD (a second field manager
-and its annotation stand for it).
+holds only the `Role` of `tests/rbac.yaml` (a user bound to it, as the CI job's ServiceAccount is), with `AAP_TEST_REQUIRE_CLUSTER=1` (the cases about rights
+included) and four test threads, as CI; and nine more times as the second, on a cluster that earlier runs had filled (which is how a scenario that waited a fixed 200 ms for "the operator" was found to
+be a race: the scenarios now wait for the `deletionTimestamp`). That proves the crate and the suite against a real API server, a real RBAC and **real finalizers on custom resources** (the harness
+plays the operator: it puts the finalizer on, and takes it off), and the facts above. It does **not** prove the `kind` job (the pipeline's own run is
+*unverified* until CI has run it), the real operator's cleanup and how long it takes (5 s is a choice, not a measurement; a slower operator leaves an orphan config, which the tests show), an operator that writes the status
+concurrently other than as the harness's stand-in, an External Secrets Operator that reconciles the ExternalSecrets (only the CRD is installed: the offer reads the objects, not the Secrets they would make), or Argo CD
+(a second field manager and its annotation stand for it).
