@@ -414,7 +414,28 @@ check "a missing service account name is refused when none is created" refused '
 refused_api() { frag=$1; shift; refused "$frag" -f "$here/api.values.yaml" "$@"; }
 check "api.enabled must be a boolean" refused 'api.enabled must be true or false' --set-string api.enabled=yes
 check "api must be a map" refused 'api must be a map' --set api=null
-check "api on with no issuer is refused (nothing to default it to)" refused 'api.config.oidc.issuer is required' --set api.enabled=true
+# The least a deployment must say, minus one thing at a time: the chart ships a default for none of these five, so each is refused by name,
+# and with all five the chart renders.
+refused_without() {
+  skip=$1; frag=$2
+  set -- --set api.enabled=true
+  [ "$skip" = issuer ] || set -- "$@" --set api.config.oidc.issuer=https://keycloak.example.com/realms/x
+  [ "$skip" = audiences ] || set -- "$@" --set 'api.config.oidc.audiences[0]=x'
+  [ "$skip" = rolesClaim ] || set -- "$@" --set api.config.oidc.rolesClaim=roles
+  [ "$skip" = registries ] || set -- "$@" --set 'api.config.defaults.allowedImageRegistries[0]=ghcr.io'
+  [ "$skip" = from ] || set -- "$@" --set 'api.networkPolicy.from[0].podSelector.matchLabels.a=b'
+  refused "$frag" "$@"
+}
+renders_ok() { helm template aap-operator "$chart" --namespace "$ns" "$@" > /dev/null 2>&1; }
+check "api on with no issuer is refused (nothing to default it to)" refused_without issuer 'api.config.oidc.issuer is required'
+check "api on with no audience is refused (nothing to default it to)" refused_without audiences 'api.config.oidc.audiences is required'
+check "api on with no roles claim is refused (nothing to default it to)" refused_without rolesClaim 'api.config.oidc.rolesClaim is required'
+check "api on with no image registry is refused (nothing to default it to: the chart does not choose where agents' images may come from)" \
+  refused_without registries 'allowedImageRegistries is required'
+check "api on with no peer that may reach it is refused (nothing to default it to)" refused_without from 'api.networkPolicy.from is required'
+check "the least a deployment must say (an issuer, an audience, a roles claim, a registry, who reaches the API) is enough to render" \
+  renders_ok --set api.enabled=true --set api.config.oidc.issuer=https://keycloak.example.com/realms/x --set 'api.config.oidc.audiences[0]=x' \
+    --set api.config.oidc.rolesClaim=roles --set 'api.config.defaults.allowedImageRegistries[0]=ghcr.io' --set 'api.networkPolicy.from[0].podSelector.matchLabels.a=b'
 check "an issuer that is not an http(s) URL is refused" refused_api 'api.config.oidc.issuer is required' --set api.config.oidc.issuer=keycloak.example.com
 check "an issuer with credentials is refused" refused_api 'api.config.oidc.issuer is required' --set api.config.oidc.issuer=https://u:p@keycloak.example.com/realms/x
 check "no audience is refused" refused_api 'api.config.oidc.audiences is required' --set api.config.oidc.audiences=null
@@ -461,7 +482,6 @@ check "a peer that names nothing is refused" refused_api 'a peer needs a namespa
 check "a DNS peer that names nothing is refused" refused_api 'api.networkPolicy.dns.to: a peer needs' --set-json 'api.networkPolicy.dns.to=[{"foo":"bar"}]'
 check "no API server port is refused" refused_api 'api.networkPolicy.apiServer.ports must name at least one port' --set api.networkPolicy.apiServer.ports=null
 check "an issuer port that is not a port is refused" refused_api 'api.networkPolicy.issuer.ports: 99999 is not a port number' --set-json 'api.networkPolicy.issuer.ports=[99999]'
-renders_ok() { helm template aap-operator "$chart" --namespace "$ns" "$@" > /dev/null 2>&1; }
 check "with the policy off, no peer is needed" renders_ok -f "$here/api.values.yaml" --set api.networkPolicy.enabled=false --set api.networkPolicy.from=null
 check "the secretref shape renders (a Secret per agent, no policy, no Ingress)" renders_ok -f "$here/api-secretref.values.yaml"
 
