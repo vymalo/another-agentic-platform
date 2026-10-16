@@ -20,12 +20,15 @@
 #   5. the operator makes it `Ready`; the API lists it (kind folder, managedBy dashboard), reads it, exports it as YAML without a value or a
 #      status, and the model says the agent uses it and cannot be deleted under it (409);
 #   6. a replace with the current ETag is 200, with the old one 412; a delete with no `If-Match` is 428 and with the old one 412; a delete with
-#      the current one is accepted, the operator's finalizer completes, the objects and the workload are gone, and then the model can go;
-#   7. from a pod the NetworkPolicy of the API names the API answers; from one it does not name it is refused when the cluster's network plugin
-#      enforces NetworkPolicies (otherwise the script says so and does not fail); no token and no secret value is in any answer or log.
+#      the current one is accepted (204; 202 when the operator's finalizer outlasts the API's 5 s wait, and then the AgentConfig stays behind as
+#      an orphan, which the script reports and removes), the operator's finalizer completes, the objects and the workload are gone, and then
+#      the model can go;
+#   7. from a pod the NetworkPolicy of the API names the API answers; from one it does not name, which reaches the issuer, it is refused (kind's
+#      network plugin, kindnet, enforces NetworkPolicies: anything but a dropped connection is a failure; AAP_E2E_CNI_MAY_IGNORE_POLICIES=1,
+#      for a cluster whose plugin does not, turns that into a warning); no token and no secret value is in any answer or log.
 #
 # What it does NOT prove: a real Keycloak (the issuer is the testkit's: RS256, a flat roles claim), the edge (TLS, a JWT check, rate limits),
-# the NetworkPolicy's enforcement if kind's plugin has none, `preStop.sleep` and a rolling update under load, a real agent image (the
+# the NetworkPolicy's enforcement on a plugin that has none, `preStop.sleep` and a rolling update under load, a real agent image (the
 # stand-in answers /healthz), CloudNativePG, and any browser (CORS). deploy/operator/tests/e2e/README.md says what each step shows.
 #
 # Safety. This script installs and uninstalls a Helm release, applies CRDs, makes Secrets and deletes a namespace, so it runs only
@@ -661,12 +664,26 @@ tk=$(tok pod-client platform:agents.read)
 [ "$(as_pod "$client_pod" "$tk")" = 200 ] || die "a pod the API's NetworkPolicy names cannot reach the API through its Service"
 kubectl -n "$ns" exec "$client_pod" -- cat /tmp/b | jq -e '.permissions == ["platform:agents.read"]' >/dev/null || die "the API answered a pod with something else than /v1/me"
 ok "a pod the API's NetworkPolicy names (aap-e2e/client) reaches the API through its Service, with a token"
+# The pod the policy does not name has a network: it reaches the issuer, which no policy of this namespace selects. So a refusal by the API's
+# policy is the only way it is not answered.
+[ "$(req "$stranger_pod" "$issuer/.well-known/openid-configuration")" = 200 ] \
+  || die "the pod that the API's NetworkPolicy does not name cannot reach the issuer either: its network does not work, so it proves nothing about the policy"
 stranger_status=$(as_pod "$stranger_pod" "$tk")
-if [ "$stranger_status" = 200 ]; then
-  echo "::warning::a pod that the API's NetworkPolicy does not name read the API: this cluster does not enforce NetworkPolicies, so the policy is not proven here"
-  ok "kind's network plugin does NOT enforce NetworkPolicies: the policy is installed and valid, and its enforcement is not proven"
+if [ "${AAP_E2E_CNI_MAY_IGNORE_POLICIES:-}" = 1 ]; then
+  # Only for a cluster whose network plugin is known not to enforce NetworkPolicies. kind's (kindnet) does, so CI does not set this.
+  case $stranger_status in
+    000) ok "a pod the API's NetworkPolicy does not name cannot reach the API (status 000): the cluster enforces NetworkPolicies" ;;
+    [0-9][0-9][0-9])
+      echo "::warning::a pod that the API's NetworkPolicy does not name read the API (status $stranger_status): this cluster does not enforce NetworkPolicies and AAP_E2E_CNI_MAY_IGNORE_POLICIES=1 says that is expected, so the policy is installed and valid and its enforcement is not proven here"
+      ok "NetworkPolicies are NOT enforced here (AAP_E2E_CNI_MAY_IGNORE_POLICIES=1): the policy is installed and valid, and its enforcement is not proven"
+      ;;
+    *) die "the pod that the API's NetworkPolicy does not name could not be asked (no status): $stranger_pod" ;;
+  esac
 else
-  ok "a pod the API's NetworkPolicy does not name cannot reach the API (status $stranger_status): the cluster enforces NetworkPolicies, and the API's three egress rules and its ingress rule were enough for it to be Ready"
+  # kind's network plugin, kindnet, enforces NetworkPolicies. A 401 or a 5xx is the API answering: the request got through.
+  [ "$stranger_status" = 000 ] \
+    || die "a pod that the API's NetworkPolicy does not name was not refused: status '${stranger_status:-none}', wanted 000 (the connection dropped). The policy is not enforced here, or does not select the API; AAP_E2E_CNI_MAY_IGNORE_POLICIES=1 accepts a cluster whose network plugin has no NetworkPolicy support"
+  ok "a pod the API's NetworkPolicy does not name cannot reach the API (status 000) though it reaches the issuer: the cluster enforces NetworkPolicies, and the API's three egress rules and its ingress rule were enough for it to be Ready"
 fi
 # The logs, as plain text: tracing-subscriber writes colour codes unless it is told not to, and a pod is not a terminal.
 esc=$(printf '\033')
