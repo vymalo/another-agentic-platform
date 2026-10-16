@@ -119,6 +119,7 @@ impl ApiConfig {
                 problems.join("; ")
             );
         }
+        check_image_registries(self.defaults.allowed_image_registries.as_deref())?;
         Ok(Settings {
             listen: self.listen,
             health_listen: self.health_listen,
@@ -161,6 +162,26 @@ fn collect_unknown(
         }
         _ => {}
     }
+}
+
+/// `defaults.allowedImageRegistries`: **required, and not empty**.
+///
+/// `aap-forms` lets the list be absent (any registry) because the library cannot know the deployment. This binary does: an
+/// administrator who holds `agents.write` and not `secrets.pick` can still name a folder agent's own `image`, and the pod of
+/// that image is handed the model endpoint's API key and the A2A bearer. A deployment that has not said where images may
+/// come from must not start with every registry allowed (the owner may relax this, §60a).
+///
+/// An entry is a registry host (and port, when it has one), as the forms compare it, and `Defaults::check` refuses what is
+/// not one. It does not bound repositories: every image on the registry is admitted.
+fn check_image_registries(list: Option<&[String]>) -> Result<()> {
+    const WHY: &str = "an agent that pins its own image gets its pod the model endpoint's API key and the A2A bearer, so name the registries it may come from, for example [ghcr.io]";
+    let Some(list) = list else {
+        bail!("defaults.allowedImageRegistries: required: {WHY}");
+    };
+    if list.is_empty() {
+        bail!("defaults.allowedImageRegistries: not empty: {WHY}");
+    }
+    Ok(())
 }
 
 /// Read, parse and validate the file at `path`.
@@ -469,6 +490,51 @@ defaults:
         let mut v = example();
         v["defaults"]["namespace"] = "Not A Namespace".into();
         assert!(refused(&v).contains("namespace"));
+    }
+
+    #[test]
+    fn the_registries_an_agent_may_pin_its_image_from_are_required_and_not_empty() {
+        // An agent form with `agents.write` can name its own image, and that pod is handed the model endpoint's API key and
+        // the A2A bearer: the deployment names the registries, and the API does not start with any registry allowed.
+        let mut v = example();
+        v["defaults"]
+            .as_mapping_mut()
+            .unwrap()
+            .remove("allowedImageRegistries");
+        let error = refused(&v);
+        assert!(error.contains("defaults.allowedImageRegistries"), "{error}");
+        assert!(error.contains("required"), "{error}");
+
+        for (bad, why) in [
+            ("[]", "not empty"),
+            ("null", "required"),
+            // An entry is a host, which is `Defaults::check`'s rule: it bounds no repository, so a path is no entry.
+            ("['']", "registry host"),
+            ("['ghcr.io/vymalo']", "no scheme and no path"),
+            (
+                "['ghcr.io', 'registry.example.com/team']",
+                "registry.example.com/team",
+            ),
+            ("['https://ghcr.io']", "no scheme and no path"),
+            ("['ghcr io']", "registry host"),
+        ] {
+            let mut v = example();
+            v["defaults"]["allowedImageRegistries"] = serde_yaml::from_str(bad).unwrap();
+            let error = refused(&v);
+            assert!(
+                error.contains("allowedImageRegistries") && error.contains(why),
+                "{bad}: {error}"
+            );
+        }
+
+        // Hosts, with a port when the registry has one, and upper case is the same host.
+        let mut v = example();
+        v["defaults"]["allowedImageRegistries"] =
+            serde_yaml::from_str("[ghcr.io, 'Registry.Example.com:5000']").unwrap();
+        ApiConfig::parse(&serde_yaml::to_string(&v).unwrap())
+            .unwrap()
+            .validate()
+            .unwrap();
     }
 
     #[test]

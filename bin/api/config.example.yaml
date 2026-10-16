@@ -77,6 +77,8 @@ defaults:
       requests:
         cpu: 100m
         memory: 256Mi
-  # The registries an agent may pin its own image from. Absent: any registry (a tag or a digest is still required).
-  # A list: only those. An empty list: none, so no agent may pin its own image.
+  # The registries an agent may pin its own image from. REQUIRED, and at least one: a person who may write agents can name a
+  # folder agent's own image, and the pod of that image is handed the model endpoint's API key and the A2A bearer. An entry is
+  # a registry host (and port, when it has one) and does not bound repositories: ghcr.io admits every image on ghcr.io, so
+  # name only registries whose images you trust. A tag or a digest is always required.
   allowedImageRegistries: [ghcr.io]
