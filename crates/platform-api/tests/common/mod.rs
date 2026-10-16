@@ -202,9 +202,7 @@ impl Call<'_> {
         }
         let body = match (self.chunks, self.body) {
             (Some(chunks), _) => Body::from_stream(futures::stream::iter(
-                chunks
-                    .into_iter()
-                    .map(Ok::<_, std::convert::Infallible>),
+                chunks.into_iter().map(Ok::<_, std::convert::Infallible>),
             )),
             (None, body) => body.map_or_else(Body::empty, Body::from),
         };

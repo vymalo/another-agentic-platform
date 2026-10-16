@@ -451,6 +451,59 @@ async fn a_config_that_another_agent_names_is_never_touched() {
 }
 
 #[tokio::test]
+async fn the_agents_that_name_a_config_are_named_only_to_a_token_that_may_read_agents() {
+    let (api, admin) = Api::seeded().await;
+    let created = create(&api, &admin, &folder_body("chat")).await;
+    let service = api
+        .objects
+        .get_agent("chat")
+        .await
+        .unwrap()
+        .unwrap()
+        .service
+        .spec;
+    api.objects
+        .seed_foreign(Kind::AgentService, "twin", service, Foreign::Unlabelled);
+    let writer = api.token("writer", &[aap_api::permission::AGENTS_WRITE]);
+    let sighted = api.token(
+        "sighted",
+        &[
+            aap_api::permission::AGENTS_WRITE,
+            aap_api::permission::AGENTS_READ,
+        ],
+    );
+
+    let delete = |token: &str| {
+        api.delete("/v1/agents/chat")
+            .token(token)
+            .replace(&created.etag())
+            .send()
+    };
+    let r = delete(&writer).await;
+    assert_eq!(r.code(), 409, "{}", r.text());
+    assert!(r.is_problem("referenced"));
+    assert!(!r.text().contains("twin"), "{}", r.text());
+    assert_eq!(r.json()["agentCount"], 1);
+    assert!(r.json().get("agents").is_none());
+    let r = delete(&sighted).await;
+    assert_eq!(r.json()["agents"], json!(["twin"]));
+    assert_eq!(r.json()["agentCount"], 1);
+
+    // A replace meets the same refusal.
+    let r = api
+        .put("/v1/agents/chat")
+        .token(&writer)
+        .replace(&created.etag())
+        .json(&folder_body("chat"))
+        .send()
+        .await;
+    assert_eq!(r.code(), 409, "{}", r.text());
+    assert!(r.is_problem("referenced"));
+    assert!(!r.text().contains("twin"), "{}", r.text());
+    assert_eq!(r.json()["agentCount"], 1);
+}
+
+#[tokio::test]
 async fn an_agent_no_form_says_is_read_as_yaml_and_a_form_may_not_replace_it() {
     let (api, token) = Api::seeded().await;
     let created = create(&api, &token, &coder_body("coder-me")).await;

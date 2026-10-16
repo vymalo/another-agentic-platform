@@ -131,6 +131,7 @@ fn detail<F: SharedForm>(stored: &Stored, used_by: Vec<String>) -> SharedDetail<
     }
 }
 
+/// An answer of the port to a read: it names no agent.
 fn from_port(error: &aap_ports::ObjectsError) -> Problem {
     Problem::from_objects(error, None)
 }
@@ -231,35 +232,43 @@ where
         .map_err(|errors| Problem::validation(&errors))?;
 
     // The shared write is the one that can break other people's agents: ask the operator's rules about each agent that
-    // names the object, before and after (`dependents_after`), and refuse a change they cannot survive.
+    // names the object, before and after (`dependents_after`, which leaves out an agent that does not name it), and refuse
+    // a change they cannot survive. GitOps's agents count. A create changes nothing that exists: if the name is taken the
+    // port answers `already-exists`, and no agent is asked.
+    let created = matches!(condition, Condition::DoesNotExist);
     let agents = state
         .objects
         .list_agents()
         .await
         .map_err(|e| from_port(&e))?;
-    let referents = around.referents();
-    let mut broken = Vec::new();
-    let mut errors = Vec::new();
-    for user in view::users_of(&agents, F::KIND, &name) {
-        let Some(agent) = agents.iter().find(|a| a.name() == user) else {
-            continue;
-        };
-        let found = dependents_after(F::change(&object), std::slice::from_ref(agent), &referents);
-        if !found.is_empty() {
-            broken.push(user);
-            errors.extend(found);
+    if !created {
+        let referents = around.referents();
+        let mut broken = Vec::new();
+        let mut errors = Vec::new();
+        for agent in &agents {
+            let found =
+                dependents_after(F::change(&object), std::slice::from_ref(agent), &referents);
+            if !found.is_empty() {
+                broken.push(agent.name().to_owned());
+                errors.extend(found);
+            }
+        }
+        broken.sort();
+        broken.dedup();
+        if !broken.is_empty() {
+            return Err(
+                Problem::breaks_agents(broken, &errors).showing_agents(caller.sees_agents())
+            );
         }
     }
-    if !broken.is_empty() {
-        return Err(Problem::breaks_agents(broken, &errors));
-    }
 
-    let created = matches!(condition, Condition::DoesNotExist);
     let stored = state
         .objects
         .put_shared(F::KIND, &form.draft(), &condition.precondition())
         .await
-        .map_err(|e| Problem::from_objects(&e, Some(F::target())))?;
+        .map_err(|e| {
+            Problem::from_objects(&e, Some(F::target())).showing_agents(caller.sees_agents())
+        })?;
 
     let status = if created {
         StatusCode::CREATED
@@ -278,6 +287,7 @@ where
 /// `DELETE`: refused (`409`, with the agents) while an agent names the object.
 pub(crate) async fn delete<F, O, A>(
     state: St<O, A>,
+    Extension(caller): Extension<Caller>,
     Name(name): Name,
     request: Request,
 ) -> Result<Response, Problem>
@@ -292,6 +302,6 @@ where
         .objects
         .delete_shared(F::KIND, &name, &tag)
         .await
-        .map_err(|e| from_port(&e))?;
+        .map_err(|e| from_port(&e).showing_agents(caller.sees_agents()))?;
     Ok(StatusCode::NO_CONTENT.into_response())
 }

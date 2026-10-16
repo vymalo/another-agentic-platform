@@ -37,6 +37,11 @@ use crate::state::ApiState;
 pub(crate) struct Caller(pub(crate) Arc<Principal>);
 
 impl Caller {
+    /// Whether the person may read agents, and so be told which agents a refusal is about.
+    pub(crate) fn sees_agents(&self) -> bool {
+        self.0.holds(permission::AGENTS_READ)
+    }
+
     /// The `403` for a write that names a secret key, when the person may not pick one.
     pub(crate) fn require_secrets_pick(&self) -> Result<(), Problem> {
         if self.0.holds(permission::SECRETS_PICK) {

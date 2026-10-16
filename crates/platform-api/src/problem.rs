@@ -6,8 +6,9 @@
 //!
 //! | Member | On | Holds |
 //! |---|---|---|
-//! | `errors` | `422` | `[{ field, message }]`, the form fields as `aap-forms` names them |
-//! | `agents` | `409` `referenced`, `breaks-agents` | the agents that name the object, in byte order |
+//! | `errors` | `422`; `409` `breaks-agents` for a caller that may read agents | `[{ field, message }]`, the form fields as `aap-forms` names them (for `breaks-agents`, on no field, naming the agent) |
+//! | `agentCount` | `409` `referenced`, `breaks-agents` | how many agents name the object |
+//! | `agents` | the same, **only for a caller that holds `platform:agents.read`** | the agents that name the object, in byte order |
 //! | `permission` | `403` | the one permission the request lacked |
 //! | `reasons` | `409` `yaml-only` | `[{ object, path, reason }]`, what a form cannot say |
 //!
@@ -37,6 +38,17 @@ pub struct Problem {
     detail: String,
     extra: Map<String, Value>,
     headers: Vec<(HeaderName, HeaderValue)>,
+    /// What a problem that is about other agents says when the caller may read agents, and is withheld otherwise.
+    naming: Option<Box<Naming>>,
+}
+
+/// The agents a problem is about, by name: kept apart from the problem, and put into it only by
+/// [`showing_agents`](Problem::showing_agents). A token that writes a model or a tool server need not read agents, and
+/// a refusal must not be the way it learns their names.
+#[derive(Debug)]
+struct Naming {
+    detail: String,
+    members: Vec<(&'static str, Value)>,
 }
 
 impl Problem {
@@ -53,6 +65,7 @@ impl Problem {
             detail: detail.into(),
             extra: Map::new(),
             headers: Vec::new(),
+            naming: None,
         }
     }
 
@@ -254,16 +267,40 @@ impl Problem {
         .with("reasons", json!(reasons))
     }
 
-    /// `409`: the change would make the operator refuse the agents that name the object.
+    /// `409`: the change would make the operator refuse the agents that name the object. The agents and the errors, which
+    /// name them, are withheld until [`showing_agents`](Self::showing_agents).
     pub fn breaks_agents(agents: Vec<String>, errors: &[FormError]) -> Self {
-        Self::new(
+        let n = agents.len();
+        let mut problem = Self::new(
             StatusCode::CONFLICT,
             "breaks-agents",
             "The change breaks agents that use the object",
-            "agents that name this object would be refused by the operator after this change: change them first",
+            format!(
+                "{} that name this object would be refused by the operator after this change: change them first",
+                agents_phrase(n)
+            ),
         )
-        .with("agents", json!(agents))
-        .with("errors", json!(errors))
+        .with("agentCount", json!(n));
+        problem.naming = Some(Box::new(Naming {
+            detail: "agents that name this object would be refused by the operator after this change: change them first".to_owned(),
+            members: vec![("agents", json!(agents)), ("errors", json!(errors))],
+        }));
+        problem
+    }
+
+    /// This problem as a caller who may read agents sees it: the agents it is about, by name. For a caller who may not,
+    /// leave it as it is.
+    #[must_use]
+    pub fn showing_agents(mut self, may_read_agents: bool) -> Self {
+        if let Some(naming) = self.naming.take()
+            && may_read_agents
+        {
+            self.detail = naming.detail;
+            for (member, value) in naming.members {
+                self.extra.insert(member.to_owned(), value);
+            }
+        }
+        self
     }
 
     /// `404` for an object that is not there.
@@ -357,21 +394,38 @@ impl Problem {
     }
 
     fn referenced(kind: Kind, name: &str, by: &[String]) -> Self {
-        let detail = if kind == Kind::AgentConfig {
-            format!(
-                "the AgentConfig {} is named by other agents ({}): the dashboard never shares a config, so it touches none of them",
-                shown(name),
-                by.iter().map(|b| shown(b)).collect::<Vec<_>>().join(", ")
+        let n = by.len();
+        let listed = by.iter().map(|b| shown(b)).collect::<Vec<_>>().join(", ");
+        let (plain, named) = if kind == Kind::AgentConfig {
+            let rest = "the dashboard never shares a config, so it touches none of them";
+            (
+                format!(
+                    "the AgentConfig {} is named by {}: {rest}",
+                    shown(name),
+                    agents_phrase(n)
+                ),
+                format!(
+                    "the AgentConfig {} is named by other agents ({listed}): {rest}",
+                    shown(name)
+                ),
             )
         } else {
-            format!(
-                "{kind} {} is still used by {}",
-                shown(name),
-                by.iter().map(|b| shown(b)).collect::<Vec<_>>().join(", ")
+            (
+                format!(
+                    "{kind} {} is still used by {}",
+                    shown(name),
+                    agents_phrase(n)
+                ),
+                format!("{kind} {} is still used by {listed}", shown(name)),
             )
         };
-        Self::new(StatusCode::CONFLICT, "referenced", "Still in use", detail)
-            .with("agents", json!(by))
+        let mut problem = Self::new(StatusCode::CONFLICT, "referenced", "Still in use", plain)
+            .with("agentCount", json!(n));
+        problem.naming = Some(Box::new(Naming {
+            detail: named,
+            members: vec![("agents", json!(by))],
+        }));
+        problem
     }
 
     /// `500`. The cause is logged, never answered.
@@ -413,6 +467,15 @@ impl IntoResponse for Problem {
             response.headers_mut().append(name, value);
         }
         response
+    }
+}
+
+/// `1 agent`, `3 agents`.
+fn agents_phrase(n: usize) -> String {
+    if n == 1 {
+        "1 agent".to_owned()
+    } else {
+        format!("{n} agents")
     }
 }
 

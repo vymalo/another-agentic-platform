@@ -162,7 +162,10 @@ where
         .objects
         .put_agent(&draft, &condition.precondition())
         .await
-        .map_err(|e| Problem::from_objects(&e, Some(FormTarget::Agent(&form))))?;
+        .map_err(|e| {
+            Problem::from_objects(&e, Some(FormTarget::Agent(&form)))
+                .showing_agents(caller.sees_agents())
+        })?;
 
     let status = if created {
         StatusCode::CREATED
@@ -180,6 +183,7 @@ where
 /// `DELETE /v1/agents/{name}`: `204` once it is gone, `202` while the operator is still releasing what it ran.
 pub(crate) async fn delete<O, A>(
     state: St<O, A>,
+    Extension(caller): Extension<Caller>,
     Name(name): Name,
     request: Request,
 ) -> Result<Response, Problem>
@@ -193,7 +197,7 @@ where
         .objects
         .delete_agent(&name, &tag)
         .await
-        .map_err(|e| Problem::from_objects(&e, None))?;
+        .map_err(|e| Problem::from_objects(&e, None).showing_agents(caller.sees_agents()))?;
     // The port returns once the service is gone or is being deleted. Say which, so that the page knows to ask again.
     match state.objects.get_agent(&name).await {
         Ok(Some(agent)) if agent.deleting() => {

@@ -3,6 +3,7 @@
 
 mod common;
 
+use aap_api::permission::{AGENTS_READ, AGENTS_WRITE, MODELS_WRITE, TOOLPROVIDERS_WRITE};
 use aap_ports::testkit::Foreign;
 use aap_ports::{AgentObjects, Kind, SharedKind};
 use common::*;
@@ -290,6 +291,201 @@ async fn a_change_the_agents_cannot_survive_is_refused_with_the_agents_it_breaks
         .send()
         .await;
     assert_eq!(r.code(), 200, "{}", r.text());
+}
+
+/// A tool server that makes the coder refuse it: plain http, on another host.
+fn plain_http_docs() -> Value {
+    let mut plain = open_tool_body("docs");
+    plain["url"] = json!("http://docs.elsewhere.example/mcp");
+    plain
+}
+
+#[tokio::test]
+async fn a_create_over_a_name_that_exists_is_already_exists_and_asks_the_operators_rules_nothing() {
+    let (api, token) = Api::seeded().await;
+    assert_eq!(
+        make_agent(&api, &token, &coder_body("coder-me"))
+            .await
+            .code(),
+        201
+    );
+    // `docs` exists and `coder-me` names it. A create of it that would break `coder-me` is not a change of `docs`: there is
+    // nothing to change, and the agents that name it are not the business of a person who only creates.
+    let r = api
+        .put("/v1/tool-servers/docs")
+        .token(&token)
+        .create()
+        .json(&plain_http_docs())
+        .send()
+        .await;
+    assert_eq!(r.code(), 409, "{}", r.text());
+    assert!(r.is_problem("already-exists"), "{}", r.text());
+    assert!(
+        !r.text().contains("coder-me"),
+        "a create over a name names no agent: {}",
+        r.text()
+    );
+    assert!(r.json().get("agents").is_none());
+}
+
+#[tokio::test]
+async fn the_agents_a_409_names_are_named_only_to_a_token_that_may_read_agents() {
+    let (api, admin) = Api::seeded().await;
+    assert_eq!(
+        make_agent(&api, &admin, &coder_body("coder-me"))
+            .await
+            .code(),
+        201
+    );
+    assert_eq!(
+        make_agent(&api, &admin, &folder_body("chat")).await.code(),
+        201
+    );
+    // A person who edits tool servers and models and may not list agents.
+    let blind = api.token("blind", &[TOOLPROVIDERS_WRITE, MODELS_WRITE]);
+    let sighted = api.token("sighted", &[TOOLPROVIDERS_WRITE, MODELS_WRITE, AGENTS_READ]);
+
+    // `breaks-agents`
+    let docs = api.get("/v1/tool-servers/docs").token(&admin).send().await;
+    let blind_put = api
+        .put("/v1/tool-servers/docs")
+        .token(&blind)
+        .replace(&docs.etag())
+        .json(&plain_http_docs())
+        .send()
+        .await;
+    assert_eq!(blind_put.code(), 409, "{}", blind_put.text());
+    assert!(blind_put.is_problem("breaks-agents"));
+    assert!(
+        !blind_put.text().contains("coder-me"),
+        "no name, in the detail, the agents or the errors: {}",
+        blind_put.text()
+    );
+    let body = blind_put.json();
+    assert_eq!(body["agentCount"], 1);
+    assert!(body.get("agents").is_none() && body.get("errors").is_none());
+    let sighted_put = api
+        .put("/v1/tool-servers/docs")
+        .token(&sighted)
+        .replace(&docs.etag())
+        .json(&plain_http_docs())
+        .send()
+        .await;
+    assert_eq!(sighted_put.code(), 409, "{}", sighted_put.text());
+    let body = sighted_put.json();
+    assert_eq!(body["agents"], json!(["coder-me"]));
+    assert_eq!(body["agentCount"], 1);
+    assert!(sighted_put.text().contains("coder-me"));
+
+    // `referenced`, on a delete of a model two agents name.
+    let model = api.get("/v1/models/gateway").token(&admin).send().await;
+    let blind_delete = api
+        .delete("/v1/models/gateway")
+        .token(&blind)
+        .replace(&model.etag())
+        .send()
+        .await;
+    assert_eq!(blind_delete.code(), 409, "{}", blind_delete.text());
+    assert!(blind_delete.is_problem("referenced"));
+    let text = blind_delete.text();
+    assert!(
+        !text.contains("coder-me") && !text.contains("chat"),
+        "{text}"
+    );
+    let body = blind_delete.json();
+    assert_eq!(body["agentCount"], 2);
+    assert!(body.get("agents").is_none());
+    let sighted_delete = api
+        .delete("/v1/models/gateway")
+        .token(&sighted)
+        .replace(&model.etag())
+        .send()
+        .await;
+    assert_eq!(sighted_delete.code(), 409);
+    let body = sighted_delete.json();
+    assert_eq!(body["agents"], json!(["chat", "coder-me"]));
+    assert_eq!(body["agentCount"], 2);
+    assert!(sighted_delete.text().contains("coder-me"));
+    let _ = AGENTS_WRITE;
+}
+
+#[tokio::test]
+async fn every_agent_a_change_breaks_is_reported_and_so_is_one_that_gitops_owns() {
+    let (api, token) = Api::seeded().await;
+    assert_eq!(
+        make_agent(&api, &token, &coder_body("coder-me"))
+            .await
+            .code(),
+        201
+    );
+    assert_eq!(
+        make_agent(&api, &token, &coder_body("coder-two"))
+            .await
+            .code(),
+        201
+    );
+    // A third that GitOps owns, whole: both objects, tracked by Argo CD.
+    let source = api.objects.get_agent("coder-me").await.unwrap().unwrap();
+    let mut service = source.service.spec.clone();
+    service["configRef"] = json!({ "name": "coder-git" });
+    api.objects.seed_foreign(
+        Kind::AgentConfig,
+        "coder-git",
+        source.config.unwrap().spec,
+        Foreign::ArgoTracked,
+    );
+    api.objects.seed_foreign(
+        Kind::AgentService,
+        "coder-git",
+        service,
+        Foreign::ArgoTracked,
+    );
+
+    let docs = api.get("/v1/tool-servers/docs").token(&token).send().await;
+    assert_eq!(
+        docs.json()["usedBy"],
+        json!(["coder-git", "coder-me", "coder-two"]),
+        "an agent of GitOps uses the server all the same"
+    );
+    let list = api
+        .get("/v1/tool-servers")
+        .token(&token)
+        .send()
+        .await
+        .json();
+    assert_eq!(
+        list["toolServers"][0]["usedBy"],
+        json!(["coder-git", "coder-me", "coder-two"])
+    );
+
+    let r = api
+        .put("/v1/tool-servers/docs")
+        .token(&token)
+        .replace(&docs.etag())
+        .json(&plain_http_docs())
+        .send()
+        .await;
+    assert_eq!(r.code(), 409, "{}", r.text());
+    assert!(r.is_problem("breaks-agents"));
+    let body = r.json();
+    assert_eq!(
+        body["agents"],
+        json!(["coder-git", "coder-me", "coder-two"]),
+        "every agent the change breaks, in byte order, and not the first"
+    );
+    assert_eq!(body["agentCount"], 3);
+    let said: Vec<&str> = body["errors"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|e| e["message"].as_str().unwrap())
+        .collect();
+    for agent in ["coder-git", "coder-me", "coder-two"] {
+        assert!(
+            said.iter().any(|m| m.contains(agent)),
+            "no error names {agent}: {said:?}"
+        );
+    }
 }
 
 #[tokio::test]
