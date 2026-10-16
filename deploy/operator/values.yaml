@@ -207,10 +207,11 @@ api:
     apiServer:
       # The ports of the API server as the pod reaches it (the Service is 443, the endpoint of most clusters 6443).
       ports: [443, 6443]
-      # Optional: only these addresses (`kubectl get endpoints kubernetes`). Empty: any address on those ports.
+      # Empty, the default because the chart cannot know the addresses, means ANY ADDRESS on those ports: the whole cluster and the
+      # internet on 443 and 6443, not the API server. SET IT: the addresses of `kubectl get endpoints kubernetes`, one /32 each.
       cidrs: []
     dns:
-      # Where the names are resolved (NetworkPolicyPeers), on `ports` over UDP and TCP. Empty: any address on those ports.
+      # Where the names are resolved (NetworkPolicyPeers), on `ports` over UDP and TCP. Empty: any address on those ports (port 53 to anywhere).
       to:
         - namespaceSelector:
             matchLabels:
@@ -220,7 +221,9 @@ api:
               k8s-app: kube-dns
       ports: [53]
     issuer:
-      # Where the issuer's keys are fetched from (NetworkPolicyPeers or an ipBlock), on `ports`. Empty: any address on those ports.
+      # Where the issuer's keys are fetched from (NetworkPolicyPeers or an ipBlock), on `ports`. Empty, the default because the chart cannot
+      # know where the issuer is, means ANY ADDRESS on those ports: the whole cluster and the internet on 443. SET IT: the issuer's CIDR
+      # (an ipBlock), or, for an issuer inside the cluster, a namespaceSelector and a podSelector for its pods (and its port in `ports`).
       to: []
       # The port of the issuer's URL (and of `jwksUrl` when it names another host): 443 for https. An issuer inside the cluster says its own.
       ports: [443]

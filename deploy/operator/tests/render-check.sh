@@ -20,7 +20,8 @@ ns=another-agentic-system
 out=$(mktemp)
 err=$(mktemp)
 fail=0
-trap 'rm -f "$out" "$err"' EXIT
+notes_chart=$(mktemp -d)
+trap 'rm -rf "$out" "$err" "$notes_chart"' EXIT
 
 check() { # check <description> <command...>
   desc=$1; shift
@@ -32,6 +33,7 @@ check() { # check <description> <command...>
   fi
 }
 has() { grep -Eq -- "$1" "$out"; }
+has_all() { for p in "$@"; do has "$p" || return 1; done; }
 lacks() { ! grep -Eq -- "$1" "$out"; }
 fails() { ! "$@"; }
 # render [helm args]: the chart into $out. The defaults render with no values at all.
@@ -438,6 +440,32 @@ check "api: the POD's securityContext holds nothing of the container's (no escal
   none_of "$(api_pod_security)" 'allowPrivilegeEscalation' 'readOnlyRootFilesystem' 'capabilities'
 check "api: the CONTAINER's securityContext has no privilege escalation, a read-only root file system, runAsNonRoot and no capability" \
   all_of "$(api_container_security)" 'allowPrivilegeEscalation: false$' 'readOnlyRootFilesystem: true$' 'runAsNonRoot: true$' 'drop: \[ALL\]$'
+
+# templates/NOTES.txt is not in `helm template`'s output. A copy of the chart with one more template that includes it as the data of a
+# ConfigMap shows it (the copy is made once; the chart itself is not touched).
+cp -r "$chart/." "$notes_chart/"
+cat > "$notes_chart/templates/zz-notes-check.yaml" <<'NOTES'
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: notes-check
+data:
+  notes: |
+    {{- include (print $.Template.BasePath "/NOTES.txt") . | nindent 4 }}
+NOTES
+render_notes() { helm template aap-operator "$notes_chart" --namespace "$ns" "$@" > "$out"; }
+render_notes
+check "NOTES (api off): the operator's notes, and nothing about the Platform API" lacks 'Platform API'
+render_notes -f "$here/api.values.yaml"
+check "NOTES (api on, no apiServer.cidrs and no issuer.to): it says the NetworkPolicy lets the API reach ANY address on both lists of ports, and what to set" \
+  has_all 'ANY address on 443, 6443 \(the API server.s ports\): set api.networkPolicy.apiServer.cidrs' 'ANY address on 443 \(the issuer.s ports\): set api.networkPolicy.issuer.to'
+render_notes -f "$here/api-full.values.yaml"
+check "NOTES (api on, both set): no warning about ANY address" lacks 'ANY address'
+render_notes -f "$here/api.values.yaml" --set 'api.networkPolicy.apiServer.cidrs[0]=10.96.0.1/32'
+check "NOTES (only the API server's addresses set): the warning is about the issuer alone" has 'ANY address on 443 \(the issuer.s ports\)' && lacks 'API server.s ports'
+render_notes -f "$here/api.values.yaml" --set api.networkPolicy.enabled=false --set api.networkPolicy.from=null
+check "NOTES (api on, the policy off): no warning about a policy that is not there" lacks 'ANY address'
+render
 
 # ---- What is refused -------------------------------------------------------------------------------------------------------
 check "a replica count is refused (no leader election in v0)" refused 'no leader election' --set replicaCount=2

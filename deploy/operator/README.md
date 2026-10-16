@@ -147,7 +147,8 @@ flowchart LR
 | **An issuer** | `api.config.oidc.issuer` (an `http(s)` URL), `audiences` (at least one) and `rolesClaim` (the claim whose values are the person's permissions, `agentic_roles` on netcup). **No default**: the chart refuses `api.enabled` without them. The API only reads the issuer's public keys; nothing secret is configured |
 | **The registries an agent may pin its own image from** | `api.config.defaults.allowedImageRegistries`, at least one, **no default**. A person who may write agents can name a folder agent's image, and that pod is handed the model endpoint's API key and the A2A bearer. An entry is a registry host and does **not** bound repositories: `ghcr.io` admits every image on `ghcr.io` |
 | **Who may reach the API** | `api.networkPolicy.from`: NetworkPolicyPeers, which are the pods of the edge (the Ingress controller). Required while the policy is on (an empty list would make the API unreachable); `api.networkPolicy.enabled=false` for a cluster without a CNI that enforces policies |
-| **Where the issuer is** | `api.networkPolicy.issuer.ports` (default 443) and `.to` (default: any address on those ports). An issuer inside the cluster over plain `http` says its own port and peer. The default DNS rule (`kube-dns` in `kube-system`) is wrong on a cluster with a node-local DNS cache: set `api.networkPolicy.dns.to` |
+| **Where the issuer is** | `api.networkPolicy.issuer.ports` (default 443) and `.to` (default: **any address on those ports**, see [the NetworkPolicy](#the-networkpolicy): set it). An issuer inside the cluster over plain `http` says its own port and peer. The default DNS rule (`kube-dns` in `kube-system`) is wrong on a cluster with a node-local DNS cache: set `api.networkPolicy.dns.to` |
+| **Where the API server is** | `api.networkPolicy.apiServer.cidrs`, from `kubectl get endpoints kubernetes` (default: **any address on 443 and 6443**, see [the NetworkPolicy](#the-networkpolicy): set it) |
 | **Who may call a new agent** | `api.config.defaults.allowFrom` (the peers of `access.allowFrom`, usually the orchestrator's namespace). **Empty by default: a new agent made from the dashboard can be called by nobody** |
 | **The A2A bearer's Secret** | `api.config.defaults.a2aBearer` (default `agent-a2a-bearer`, key `AGENT_REGISTRY_AGENT_TOKEN`): the Secret key that must hold the orchestrator's `AGENT_REGISTRY_AGENT_TOKEN`, or the orchestrator lists an agent and cannot call it |
 | **The edge** (below) | TLS, a check of the JWT, CORS passes through, and **a rate limit per token**: the API implements none of them |
@@ -255,8 +256,22 @@ The operator's policy lets the API server in and nothing else out (it reaches th
 different in two ways, and says so: **ingress** is the peers of `api.networkPolicy.from`, on the API port only (the kubelet's probes of the health port come
 from the node, which a NetworkPolicy never blocks, as in the operator's policy; §60a's "NetworkPolicy of D7, which let only the web's pods in, is replaced by the
 edge's"), and **egress** is three rules, not one: the API server (`apiServer.ports`, `.cidrs`), the cluster's DNS (`dns.to` and `.ports`, UDP and TCP), and the
-issuer's keys (`issuer.to`, `.ports`), because the API resolves the issuer's name and fetches its keys. Nothing else leaves the pod. Enforcement is the cluster's
+issuer's keys (`issuer.to`, `.ports`), because the API resolves the issuer's name and fetches its keys. Enforcement is the cluster's
 CNI's: *unverified* that the rules are enough on a cluster that enforces them (D7b2, in kind, whose CNI does).
+
+**The defaults are wider than they look, and you should narrow them.** A rule with `ports` and no `to` allows **any address** on those ports, so with the
+defaults (`apiServer.cidrs: []`, `issuer.to: []`) the pod may reach **every address of the cluster and of the internet on 443 and 6443** (the API server's
+rule) **and on 443** (the issuer's), not only the API server and the issuer. The chart keeps those defaults because it cannot know the addresses; they
+are what makes it work on any cluster, not a restriction. A policy that is wide on the two ports a compromised pod would use is little of a barrier, so:
+
+* **`api.networkPolicy.apiServer.cidrs`**: the API server's endpoint addresses, `kubectl get endpoints kubernetes -o jsonpath='{.subsets[*].addresses[*].ip}'`,
+  one `/32` each (the policy is applied after the Service's address is translated, so it is the endpoints that count, not the Service's `10.x` address; the
+  ports are then the endpoint's, usually 6443).
+* **`api.networkPolicy.issuer.to`**: for an issuer on the internet, its address range as an `ipBlock` (or the egress gateway's); for an issuer inside the
+  cluster, a `namespaceSelector` and a `podSelector` for its pods, with that pod's port in `issuer.ports`.
+
+The DNS rule is narrow by default (`kube-dns` in `kube-system`, port 53) and wide only if you empty `dns.to`. `helm install` prints a reminder while either
+list is empty (`templates/NOTES.txt`).
 
 ### The rights
 
