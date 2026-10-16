@@ -29,6 +29,7 @@ dependencies = [
  "futures",
  "kube",
  "serde",
+ "serde_json",
  "serde_yaml_ng",
  "tokio",
  "tower",
