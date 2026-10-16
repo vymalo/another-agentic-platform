@@ -1,7 +1,8 @@
 # The values the kind end-to-end of the Platform API (D7b2, api-e2e.sh) installs the operator chart with, the Platform API on. What the
 # script adds in a second values file, because it knows them only when it runs: the images (the ones built in the job and loaded into
 # kind, never pulled), the issuer (a program on the runner, at the host's address on the docker network of kind, on a port it was given)
-# and the one egress rule that reaches it, and the namespace the agents live in.
+# and the one egress rule that reaches it, the namespace the agents live in (a namespace of the script's own, aap-e2e-api) and the Secret of
+# the A2A bearer, which has a name of its own too.
 #
 # Nothing here is a secret. The cluster is a throwaway one; no value below is advice for a deployment (deploy/operator/README.md, "The
 # Platform API", is).
@@ -26,11 +27,9 @@ api:
         secretRef:
           name: "{name}-db-app"
           key: uri
-      # The Secret key every new agent reads its A2A bearer tokens from. The script makes it.
-      a2aBearer:
-        name: agent-a2a-bearer
-        key: AGENT_REGISTRY_AGENT_TOKEN
-      # `access.allowFrom` of a new agent is the script's too (the namespace it lives in).
+      # `a2aBearer`, the Secret key every new agent reads its A2A bearer tokens from, is the script's too: the Secret it makes in its own
+      # namespace (`e2e-a2a-bearer`; the chart's default, `agent-a2a-bearer`, is the one the real orchestrator's token lives in, and
+      # nothing here may name it). So is `access.allowFrom` of a new agent (the namespace it lives in).
       #
       # The agent in this proof pins its own image, the stand-in `aap-stub:ci`, which is Docker Hub's by its name (`docker.io`): the one
       # registry this list admits. A reference from any other registry is `422` (the script asks for one).

@@ -740,30 +740,47 @@ check "api: the shape that sets every value (tests/api-full.values.yaml) renders
 
 # ---- The values of the kind end-to-end of the Platform API (D7b2) ------------------------------------------------------------
 # tests/e2e/api.values.yaml with what api-e2e.sh adds when it runs: the images it loads into kind, the issuer on the runner and the one
-# egress rule that reaches it, the namespace of the agents. That the chart renders them, and renders them as the script depends on, is
-# checked here, so that a change that breaks them fails in the chart job and not in a kind cluster.
+# egress rule that reaches it, the namespace of the agents (its own: aap-e2e-api) and the Secret of the A2A bearer (its own). That the chart
+# renders them, and renders them as the script depends on, is checked here, so that a change that breaks them fails in the chart job and
+# not in a kind cluster.
+e2e_ns=aap-e2e-api
 e2e_render() {
-  render -f "$here/e2e/api.values.yaml" \
+  helm template aap-operator "$chart" --namespace "$e2e_ns" -f "$here/e2e/api.values.yaml" \
     --set image.repository=operator --set image.tag=smoke --set image.pullPolicy=Never \
     --set api.image.repository=api --set api.image.tag=smoke --set api.image.pullPolicy=Never \
     --set api.config.oidc.issuer=http://172.18.0.1:40000 --set 'api.config.oidc.audiences[0]=aap-e2e-api' --set api.config.oidc.rolesClaim=agentic_roles \
-    --set-json 'api.config.defaults.allowFrom=[{"namespaceSelector":{"matchLabels":{"kubernetes.io/metadata.name":"another-agentic-system"}}}]' \
-    --set-json 'api.networkPolicy.issuer.to=[{"ipBlock":{"cidr":"172.18.0.1/32"}}]' --set-json 'api.networkPolicy.issuer.ports=[40000]'
+    --set api.config.defaults.a2aBearer.name=e2e-a2a-bearer --set api.config.defaults.a2aBearer.key=AGENT_REGISTRY_AGENT_TOKEN \
+    --set-json "api.config.defaults.allowFrom=[{\"namespaceSelector\":{\"matchLabels\":{\"kubernetes.io/metadata.name\":\"$e2e_ns\"}}}]" \
+    --set-json 'api.networkPolicy.issuer.to=[{"ipBlock":{"cidr":"172.18.0.1/32"}}]' --set-json 'api.networkPolicy.issuer.ports=[40000]' > "$out"
 }
 e2e_render
 check "e2e: the values of the API end-to-end render" has 'kind: Deployment'
-check "e2e: both images are the ones loaded into kind, never pulled" \
+e2e_images() {
   all_of "$(doc Deployment aap-operator-api)" 'image: "api:smoke"' 'imagePullPolicy: Never' \
-  && dhas Deployment aap-operator 'image: "operator:smoke"' 'imagePullPolicy: Never'
-check "e2e: the ledger of an agent is a Secret named from it, and there is no CloudNativePG store" \
+    && dhas Deployment aap-operator 'image: "operator:smoke"' 'imagePullPolicy: Never'
+}
+check "e2e: both images are the ones loaded into kind, never pulled" e2e_images
+e2e_ledger() {
   dhas ConfigMap aap-operator-api 'secretRef:' '\{name\}-db-app' 'key: uri' && dlacks ConfigMap aap-operator-api 'cnpg'
+}
+check "e2e: the ledger of an agent is a Secret named from it, and there is no CloudNativePG store" e2e_ledger
 check "e2e: the registries an agent may pin its image from are docker.io, the stand-in's" dhas ConfigMap aap-operator-api 'allowedImageRegistries:' '^      - docker.io$'
-check "e2e: the issuer is the runner's address, and the policy's third egress rule reaches exactly it" \
+e2e_issuer() {
   dhas ConfigMap aap-operator-api 'issuer: http://172.18.0.1:40000' \
-  && all_of "$(api_egress_rule 3)" 'cidr: 172.18.0.1/32' 'port: 40000$'
+    && all_of "$(api_egress_rule 3)" 'cidr: 172.18.0.1/32' 'port: 40000$'
+}
+check "e2e: the issuer is the runner's address, and the policy's third egress rule reaches exactly it" e2e_issuer
 check "e2e: the policy admits the pods labelled aap-e2e/client and no other" \
   dhas NetworkPolicy aap-operator-api 'aap-e2e/client: "true"'
 check "e2e: no registry, no ExternalSecret and no Ingress are rendered" lacks 'aap-operator-registry|^kind: (ExternalSecret|Ingress)$'
+# The script runs in a namespace of its own and makes Secrets of its own (it refuses a cluster that is not a kind cluster's, a namespace and a
+# Secret it did not make): nothing the chart renders for it may name the namespace or the A2A bearer's Secret of a real deployment.
+e2e_own_names() {
+  dhas ConfigMap aap-operator-api '^      namespace: aap-e2e-api$' 'kubernetes.io/metadata.name: aap-e2e-api$' \
+    '^      a2aBearer:$' '^        name: e2e-a2a-bearer$' '^        key: AGENT_REGISTRY_AGENT_TOKEN$' \
+    && dhas Role aap-operator-api '^  namespace: aap-e2e-api$' && lacks 'another-agentic-system|agent-a2a-bearer'
+}
+check "e2e: the agents live in the namespace aap-e2e-api and read the bearer from e2e-a2a-bearer; neither the real namespace nor agent-a2a-bearer is named" e2e_own_names
 
 # ---- The CRDs chart: one source ------------------------------------------------------------------------------------------
 check "deploy/operator-crds/files is a copy of deploy/crds (cp deploy/crds/agents.vymalo.com.yaml deploy/operator-crds/files/)" \

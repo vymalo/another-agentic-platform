@@ -1,21 +1,24 @@
 # The ExternalSecret that offers the model's API key to the forms (api-e2e.sh, AD-030): the Platform API lists the labelled ExternalSecrets
 # of its namespace and offers the keys they name, `secretKey` by `secretKey`. Its CRD is the pinned copy of
 # crates/objects-kubernetes/tests/crds. There is no External Secrets Operator in the cluster and nothing reads this object but the API:
-# the Secret `agent-models`, which the script makes with a value of its own, is what the ExternalSecret would have made. An
-# ExternalSecret holds no value, so neither does this file.
+# the Secret `e2e-agent-models`, which the script makes with a value of its own, is what the ExternalSecret would have made. An
+# ExternalSecret holds no value, so neither does this file. The names are the script's own (`offer` and `models_secret` in
+# api-e2e.sh, which checks the target after it applies this file), and the second label is what lets the script overwrite it on a second
+# run and nothing else: api-e2e.sh never applies over an object that lacks it.
 apiVersion: external-secrets.io/v1
 kind: ExternalSecret
 metadata:
-  name: agent-models-es
+  name: e2e-agent-models-es
   labels:
     agents.vymalo.com/offer: "true"
+    aap-e2e/made-by: api-e2e
 spec:
   refreshInterval: 1h
   secretStoreRef:
     kind: ClusterSecretStore
     name: aap-e2e
   target:
-    name: agent-models
+    name: e2e-agent-models
   data:
     - secretKey: GATEWAY_API_KEY
       remoteRef:

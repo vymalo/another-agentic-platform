@@ -28,6 +28,18 @@
 # the NetworkPolicy's enforcement if kind's plugin has none, `preStop.sleep` and a rolling update under load, a real agent image (the
 # stand-in answers /healthz), CloudNativePG, and any browser (CORS). deploy/operator/tests/e2e/README.md says what each step shows.
 #
+# Safety. This script installs and uninstalls a Helm release, applies CRDs, makes Secrets and deletes a namespace, so it runs only
+# against a throwaway cluster and touches only what it made:
+#   * kubectl's current context must be a kind cluster's (`kind-<name>`); AAP_E2E_ALLOW_ANY_CONTEXT=1 says that another cluster is a
+#     throwaway one too. This is checked before anything is made and before the cleanup is armed.
+#   * everything lives in a namespace of its own, AAP_E2E_NAMESPACE (default aap-e2e-api), that the script creates with the label
+#     aap-e2e/made-by=api-e2e. A namespace that exists without the label is never used (another-agentic-system, kube-system, a
+#     colleague's); one with it is a leftover of an earlier run and is used again. The Secrets have names of their own
+#     (e2e-agent-models, e2e-a2a-bearer, e2e-chat-db-app), carry the label, and one that exists without it is never overwritten.
+#   * the cleanup undoes only what this run got as far as making, each step recorded when it happens: the agent and the model (with the
+#     operator still there to run the finalizer), the Helm release, and the namespace. A run that stops before any of that (a missing
+#     tool, a failed build, a refused namespace) deletes and uninstalls nothing. The CRDs stay, as Argo CD would leave them.
+#
 # Needs kubectl, helm, jq, curl and openssl; a cluster that has the images already (kind load docker-image): OPERATOR_IMAGE_* (default
 # operator:smoke), API_IMAGE_* (default api:smoke) and the stand-in AGENT_IMAGE (default aap-stub:ci, the one of bin/operator/tests/stub);
 # and the test issuer, TEST_ISSUER_BIN, built with `cargo build --locked -p aap-auth-oidc --example test-issuer --features testkit` (the script
@@ -37,7 +49,25 @@ set -eu
 
 here=$(cd "$(dirname "$0")" && pwd)
 repo=$(cd "$here/../../../.." && pwd)
-ns=${AAP_E2E_NAMESPACE:-another-agentic-system}
+
+step() { printf '\n== %s\n' "$1"; }
+ok() { echo "ok   $1"; }
+die() { echo "FAIL $1" >&2; exit 1; }
+
+# ---- before anything is made, and before the cleanup exists: the tools, and a cluster that is a throwaway one ----------------------------
+for t in kubectl helm jq curl openssl; do command -v "$t" >/dev/null 2>&1 || die "$t is not installed"; done
+context=$(kubectl config current-context 2>/dev/null) || context=''
+case $context in
+  kind-*) ;;
+  *)
+    [ "${AAP_E2E_ALLOW_ANY_CONTEXT:-}" = 1 ] \
+      || die "kubectl's current context is '${context:-none}', not a kind cluster's (kind-<name>): this script installs a Helm release, applies CRDs and deletes a namespace, so it will not run against it. AAP_E2E_ALLOW_ANY_CONTEXT=1 says that this cluster is a throwaway one"
+    echo "::warning::kubectl's context '${context:-none}' is not a kind cluster's: AAP_E2E_ALLOW_ANY_CONTEXT=1 says it is a throwaway one"
+    ;;
+esac
+ns=${AAP_E2E_NAMESPACE:-aap-e2e-api}
+case $ns in '' | -* | *- | *[!a-z0-9-]*) die "AAP_E2E_NAMESPACE='$ns' is not a namespace name" ;; esac
+
 api_name=aap-operator-api
 api_sa="system:serviceaccount:$ns:$api_name"
 operator_image_repository=${OPERATOR_IMAGE_REPOSITORY:-operator}
@@ -53,6 +83,14 @@ audience=aap-e2e-api
 roles_claim=agentic_roles
 agent=e2e-chat
 model=e2e-gateway
+# The Secrets and the ExternalSecret are this script's own, with names no deployment uses (the chart's default for the bearer is
+# `agent-a2a-bearer`, the Secret the real orchestrator's token lives in). The ledger of the agent is `{name}-db-app`, from api.values.yaml.
+models_secret=e2e-agent-models
+bearer_secret=e2e-a2a-bearer
+offer=e2e-agent-models-es
+# The label on the namespace and on everything the script makes in it: what it may overwrite and delete.
+made_by_key=aap-e2e/made-by
+made_by=api-e2e
 work=$(mktemp -d)
 curl_image='docker.io/curlimages/curl:8.22.0@sha256:58adaa4e8dca9c988bae2aba4ab3434a0bb2da16bbe3f92dec39ec7785166777'
 # The value of the model's API key. It is in a Secret and nowhere else: the API holds no right on Secrets, and no answer of it and no log may
@@ -60,12 +98,17 @@ curl_image='docker.io/curlimages/curl:8.22.0@sha256:58adaa4e8dca9c988bae2aba4ab3
 sentinel="e2e-secret-$(openssl rand -hex 16)"
 issuer_pid=''
 fwd_pid=''
+# The two pods that ask the API from inside the cluster, named for this run: a name that a pod of an earlier run, still terminating, holds
+# would fail `kubectl run`.
+run_id=$(openssl rand -hex 3)
+client_pod=curl-$run_id
+stranger_pod=stranger-$run_id
+# What this run has made, recorded when it happens: the cleanup undoes these and nothing else.
+ns_made=0       # the namespace (or a leftover of ours that is used again): the Secrets, the pods and the offer live in it and go with it
+objects_made=0  # step 4 began: the model and the agent may exist (and the operator's finalizer is on the agent)
+installed=0     # `helm upgrade --install` was started
 : > "$work/tokens"
 : > "$work/seen"
-
-step() { printf '\n== %s\n' "$1"; }
-ok() { echo "ok   $1"; }
-die() { echo "FAIL $1" >&2; exit 1; }
 
 diagnostics() {
   echo "::group::what the cluster says"
@@ -92,21 +135,22 @@ diagnostics() {
 cleanup() {
   status=$?
   trap - EXIT
-  if [ "$status" -ne 0 ]; then diagnostics; fi
+  if [ "$status" -ne 0 ] && [ "$ns_made" = 1 ]; then diagnostics; fi
   if [ -n "$fwd_pid" ]; then kill "$fwd_pid" 2>/dev/null || true; fi
-  # What this script made, and only that, while the operator is still there to run the finalizer of the agent; then the chart. The CRDs stay:
-  # they are the cluster's, and the cluster is a throwaway one.
-  kubectl -n "$ns" delete "agentservice/$agent" "agentconfig/$agent" "modelendpoint/$model" --ignore-not-found --wait=true --timeout=120s >/dev/null 2>&1 || true
-  for r in "agentservice/$agent" "agentconfig/$agent"; do
-    # A finalizer that did not run (the operator was not there) must not keep the object for the next run.
-    if kubectl -n "$ns" get "$r" >/dev/null 2>&1; then
-      kubectl -n "$ns" patch "$r" --type=merge -p '{"metadata":{"finalizers":null}}' >/dev/null 2>&1 || true
-    fi
-  done
-  helm uninstall aap-operator --namespace "$ns" --timeout 120s >/dev/null 2>&1 || true
-  kubectl -n "$ns" delete pod curl stranger --ignore-not-found --wait=false >/dev/null 2>&1 || true
-  kubectl -n "$ns" delete externalsecret/agent-models-es secret/agent-models secret/agent-a2a-bearer "secret/$agent-db-app" \
-    --ignore-not-found --wait=false >/dev/null 2>&1 || true
+  # What this run made and only that, in the order that lets the operator, which is still there, run the finalizer of the agent: the agent
+  # and the model, then the release, then the namespace (and with it the Secrets, the offer and the pods). The CRDs stay: they are the
+  # cluster's, as Argo CD would leave them.
+  if [ "$objects_made" = 1 ]; then
+    kubectl -n "$ns" delete "agentservice/$agent" "agentconfig/$agent" "modelendpoint/$model" --ignore-not-found --wait=true --timeout=120s >/dev/null 2>&1 || true
+    for r in "agentservice/$agent" "agentconfig/$agent"; do
+      # A finalizer that did not run (the operator was not there) must not keep the object, nor the namespace, for the next run.
+      if kubectl -n "$ns" get "$r" >/dev/null 2>&1; then
+        kubectl -n "$ns" patch "$r" --type=merge -p '{"metadata":{"finalizers":null}}' >/dev/null 2>&1 || true
+      fi
+    done
+  fi
+  if [ "$installed" = 1 ]; then helm uninstall aap-operator --namespace "$ns" --timeout 120s >/dev/null 2>&1 || true; fi
+  if [ "$ns_made" = 1 ]; then kubectl delete namespace "$ns" --ignore-not-found --wait=false >/dev/null 2>&1 || true; fi
   if [ -n "$issuer_pid" ]; then kill "$issuer_pid" 2>/dev/null || true; fi
   rm -rf "$work"
   exit "$status"
@@ -115,6 +159,15 @@ trap cleanup EXIT
 
 # jp <resource> <jsonpath>: a field of an object of the namespace, empty when it is not there.
 jp() { kubectl -n "$ns" get "$1" -o "jsonpath=$2" 2>/dev/null || true; }
+# not_foreign <kind/name>: the object is not there, or it carries this script's label. Anything else is somebody's, and is not overwritten.
+not_foreign() {
+  if out=$(kubectl -n "$ns" get "$1" -o json 2>"$work/err"); then
+    [ "$(printf '%s' "$out" | jq -r --arg k "$made_by_key" '.metadata.labels[$k] // ""')" = "$made_by" ] \
+      || die "$1 exists in $ns and this script did not make it (no label $made_by_key=$made_by): it is not overwritten"
+  else
+    grep -q 'NotFound' "$work/err" || die "cannot tell whether $1 is this script's: $(cat "$work/err")"
+  fi
+}
 # until_ok <seconds> <description> <command...>: poll every 3 s.
 until_ok() {
   limit=$1; what=$2; shift 2
@@ -222,8 +275,29 @@ agent_form() { # agent_form <title> [image]
   }'
 }
 
+# ensure_namespace: the namespace of this script exists and is ours. Absent: made, with the label. Present with the label: a leftover of an
+# earlier run, used again (a Terminating one is waited for). Present without it: never used, whatever is in it.
+ensure_namespace() {
+  n=0
+  while :; do
+    if out=$(kubectl get namespace "$ns" -o json 2>"$work/err"); then
+      [ "$(printf '%s' "$out" | jq -r --arg k "$made_by_key" '.metadata.labels[$k] // ""')" = "$made_by" ] \
+        || die "the namespace $ns exists and this script did not make it (no label $made_by_key=$made_by): it is not used. Set AAP_E2E_NAMESPACE to a name that is free"
+      if [ "$(printf '%s' "$out" | jq -r '.status.phase // ""')" != Terminating ]; then ns_made=1; return 0; fi
+      n=$((n + 1))
+      [ "$n" -le 60 ] || die "the namespace $ns of an earlier run is still terminating after 180s"
+      sleep 3
+    else
+      grep -q 'NotFound' "$work/err" || die "cannot read the namespace $ns: $(cat "$work/err")"
+      printf 'apiVersion: v1\nkind: Namespace\nmetadata:\n  name: %s\n  labels:\n    %s: %s\n' "$ns" "$made_by_key" "$made_by" | kubectl create -f - >/dev/null
+      ns_made=1
+      return 0
+    fi
+  done
+}
+
 step "0. what the script needs"
-for t in kubectl helm jq curl openssl; do command -v "$t" >/dev/null 2>&1 || die "$t is not installed"; done
+ok "kubectl's context is $context; everything this script makes is in the namespace $ns, which it makes itself"
 kubectl get nodes
 host_addr=${AAP_TEST_HOST_ADDR:-}
 if [ -z "$host_addr" ] && command -v docker >/dev/null 2>&1; then
@@ -237,7 +311,8 @@ if [ -z "$issuer_bin" ]; then
   issuer_bin="${CARGO_TARGET_DIR:-$repo/target}/debug/examples/test-issuer"
 fi
 [ -x "$issuer_bin" ] || die "the test issuer is not there: $issuer_bin"
-kubectl get namespace "$ns" >/dev/null 2>&1 || kubectl create namespace "$ns"
+ensure_namespace
+ok "the namespace $ns is this script's (label $made_by_key=$made_by)"
 
 step "1. the CRDs, and the test issuer on this machine"
 helm template aap-operator-crds "$repo/deploy/operator-crds" | kubectl apply --server-side -f -
@@ -263,24 +338,35 @@ case $control in http://127.0.0.1:*) ;; *) die "the control port is '$control', 
 [ "$(curl -s --noproxy '*' -m 10 "$issuer/.well-known/openid-configuration" | jq -r .issuer)" = "$issuer" ] \
   || die "the issuer's discovery document does not name the issuer"
 ok "the test issuer is $issuer (audience $audience, roles at $roles_claim); its tokens come from $control"
-kubectl -n "$ns" run curl --image="$curl_image" --labels=aap-e2e/client=true --restart=Never --command -- sleep 3600 >/dev/null
-kubectl -n "$ns" run stranger --image="$curl_image" --restart=Never --command -- sleep 3600 >/dev/null
-kubectl -n "$ns" wait pod/curl pod/stranger --for=condition=Ready --timeout=180s
-[ "$(req curl "$issuer/.well-known/openid-configuration")" = 200 ] || die "a pod cannot reach the issuer at $issuer: the API pod could not fetch its keys"
+kubectl -n "$ns" run "$client_pod" --image="$curl_image" --labels=aap-e2e/client=true --restart=Never --command -- sleep 3600 >/dev/null
+kubectl -n "$ns" run "$stranger_pod" --image="$curl_image" --restart=Never --command -- sleep 3600 >/dev/null
+kubectl -n "$ns" wait "pod/$client_pod" "pod/$stranger_pod" --for=condition=Ready --timeout=180s
+[ "$(req "$client_pod" "$issuer/.well-known/openid-configuration")" = 200 ] || die "a pod cannot reach the issuer at $issuer: the API pod could not fetch its keys"
 ok "a pod reaches the issuer's discovery document at $issuer"
-[ "$(req curl "http://$host_addr:$control_port/token?sub=x")" = 000 ] || die "a pod reached the control port that mints tokens"
+[ "$(req "$client_pod" "http://$host_addr:$control_port/token?sub=x")" = 000 ] || die "a pod reached the control port that mints tokens"
 ok "a pod does not reach the control port that mints tokens ($control is on the loopback)"
 
 step "2. the Secrets, the offer, and the chart with the API on"
-secret() { kubectl -n "$ns" create secret generic "$@" --dry-run=client -o yaml | kubectl apply -f - >/dev/null; }
+# secret <name> <kubectl create secret generic args...>: a Secret of this script, with the label. One that exists and is not this script's is
+# never overwritten (the namespace is the script's too, so this is a second lock, on the one thing `kubectl apply` would replace).
+secret() {
+  name=$1; shift
+  not_foreign "secret/$name"
+  kubectl -n "$ns" create secret generic "$name" "$@" --dry-run=client -o json \
+    | jq --arg k "$made_by_key" --arg v "$made_by" '.metadata.labels = ((.metadata.labels // {}) + {($k): $v})' \
+    | kubectl apply -f - >/dev/null
+}
 # The model's API key, the A2A bearer every new agent reads, and the ledger of the agent (`{name}-db-app`): what the pod of the stand-in is
 # handed and never uses. Dummy values, but for the first, which is the sentinel.
-secret agent-models "--from-literal=GATEWAY_API_KEY=$sentinel"
-secret agent-a2a-bearer "--from-literal=AGENT_REGISTRY_AGENT_TOKEN=$(openssl rand -hex 24)"
+secret "$models_secret" "--from-literal=GATEWAY_API_KEY=$sentinel"
+secret "$bearer_secret" "--from-literal=AGENT_REGISTRY_AGENT_TOKEN=$(openssl rand -hex 24)"
 secret "$agent-db-app" "--from-literal=uri=postgres://postgres:e2e-throwaway@unused.$ns.svc:5432/$agent"
+not_foreign "externalsecret/$offer"
 # The CRD was Established a moment ago; the API server's discovery may need one more to know the kind.
 until_ok 60 "the API server to accept an ExternalSecret" kubectl -n "$ns" apply -f "$here/api-offer.yaml"
-ok "the Secrets exist, and the ExternalSecret agent-models-es offers GATEWAY_API_KEY of agent-models (the key is in no file of the repository)"
+[ "$(jp "externalsecret/$offer" '{.spec.target.name}')" = "$models_secret" ] \
+  || die "api-offer.yaml does not offer the Secret $models_secret as $offer (its target is '$(jp "externalsecret/$offer" '{.spec.target.name}')')"
+ok "the Secrets exist, and the ExternalSecret $offer offers GATEWAY_API_KEY of $models_secret (the key is in no file of the repository)"
 cat > "$work/e2e.values.yaml" <<EOF
 image:
   repository: $operator_image_repository
@@ -297,6 +383,10 @@ api:
       audiences: [$audience]
       rolesClaim: $roles_claim
     defaults:
+      # The Secret key every new agent reads its A2A bearer tokens from: the script's own Secret.
+      a2aBearer:
+        name: $bearer_secret
+        key: AGENT_REGISTRY_AGENT_TOKEN
       allowFrom:
         - namespaceSelector:
             matchLabels:
@@ -308,6 +398,7 @@ api:
             cidr: $host_addr/32
       ports: [$issuer_port]
 EOF
+installed=1
 helm upgrade --install aap-operator "$repo/deploy/operator" --namespace "$ns" -f "$here/api.values.yaml" -f "$work/e2e.values.yaml" \
   --wait --timeout 300s
 ok "the operator and the API are Ready (/readyz of the API: the issuer's keys fetched, a ModelEndpoint listed under its own Role)"
@@ -370,13 +461,14 @@ expect_problem 403 forbidden "the offered keys without platform:secrets.pick"
 [ "$(jq -r .permission "$work/body")" = platform:secrets.pick ] || die "the 403 does not name platform:secrets.pick: $(cat "$work/body")"
 as picker platform:secrets.pick GET /v1/secret-keys
 expect 200 "the offered keys"
-jq -e '.keys | map(select(.secret == "agent-models" and .key == "GATEWAY_API_KEY" and .externalSecret == "agent-models-es")) | length == 1' "$work/body" >/dev/null \
+jq -e --arg secret "$models_secret" --arg offer "$offer" '.keys | map(select(.secret == $secret and .key == "GATEWAY_API_KEY" and .externalSecret == $offer)) | length == 1' "$work/body" >/dev/null \
   || die "the ExternalSecret's key is not offered: $(cat "$work/body")"
 ok "401 without a valid token, 403 naming the permission, /v1/me, /v1/info; the key of the ExternalSecret is offered (read under the Role, with no right on Secrets)"
 
 step "4. a model endpoint, then a folder agent, created through the API"
-model_form=$(jq -n --arg name "$model" '{name: $name, title: "E2E gateway", baseUrl: {value: "http://model.invalid/v1"},
-  apiKey: {secret: "agent-models", key: "GATEWAY_API_KEY"}, models: ["e2e-model"]}')
+objects_made=1
+model_form=$(jq -n --arg name "$model" --arg secret "$models_secret" '{name: $name, title: "E2E gateway", baseUrl: {value: "http://model.invalid/v1"},
+  apiKey: {secret: $secret, key: "GATEWAY_API_KEY"}, models: ["e2e-model"]}')
 as modeler platform:models.write PUT "/v1/models/$model" -H 'If-None-Match: *' -H 'Content-Type: application/json' -d "$model_form"
 expect_problem 403 forbidden "a model that names a secret key, without platform:secrets.pick"
 [ "$(jq -r .permission "$work/body")" = platform:secrets.pick ] || die "the 403 does not name platform:secrets.pick: $(cat "$work/body")"
@@ -385,8 +477,8 @@ as modeler "platform:models.write,platform:secrets.pick" PUT "/v1/models/$model"
 expect 201 "create the model"
 [ -n "$(header etag)" ] || die "the model was created with no ETag"
 [ "$(jp "modelendpoint/$model" '{.metadata.labels.app\.kubernetes\.io/managed-by}')" = dashboard.agents.vymalo.com ] || die "the model has not the dashboard's label"
-[ "$(jp "modelendpoint/$model" '{.spec.apiKeySecretRef.name}/{.spec.apiKeySecretRef.key}')" = agent-models/GATEWAY_API_KEY ] || die "the model does not name the Secret key"
-ok "the model endpoint is created (201, with an ETag), by reference to agent-models/GATEWAY_API_KEY, and not without platform:secrets.pick"
+[ "$(jp "modelendpoint/$model" '{.spec.apiKeySecretRef.name}/{.spec.apiKeySecretRef.key}')" = "$models_secret/GATEWAY_API_KEY" ] || die "the model does not name the Secret key"
+ok "the model endpoint is created (201, with an ETag), by reference to $models_secret/GATEWAY_API_KEY, and not without platform:secrets.pick"
 
 form=$(agent_form "E2E chat")
 all_agents=platform:agents.read,platform:agents.write
@@ -448,7 +540,7 @@ done
 [ "$(jp "deployment/$agent" '{.spec.template.spec.containers[0].image}')" = "$agent_image" ] || die "the agent does not run the stand-in image"
 card=$(jp "agentservice/$agent" '{.status.endpoints.agentCard}')
 [ "$card" = "http://$agent.$ns.svc:8080/.well-known/agent-card.json" ] || die "status.endpoints.agentCard is '$card'"
-[ "$(req curl "$card")" = 200 ] || die "GET $card is not 200"
+[ "$(req "$client_pod" "$card")" = 200 ] || die "GET $card is not 200"
 ok "the operator's view agrees: the AgentService is Ready (four conditions True), its Deployment is Available on the stand-in, its card answers through the Service"
 
 fresh_etag
@@ -537,15 +629,15 @@ as_pod() { # as_pod <pod> <token>: GET /v1/me from a pod, through the Service
   req "$1" -H "Authorization: Bearer $2" "http://$api_name.$ns.svc:8080/v1/me"
 }
 tk=$(tok pod-client platform:agents.read)
-[ "$(as_pod curl "$tk")" = 200 ] || die "a pod the API's NetworkPolicy names cannot reach the API through its Service"
-kubectl -n "$ns" exec curl -- cat /tmp/b | jq -e '.permissions == ["platform:agents.read"]' >/dev/null || die "the API answered a pod with something else than /v1/me"
+[ "$(as_pod "$client_pod" "$tk")" = 200 ] || die "a pod the API's NetworkPolicy names cannot reach the API through its Service"
+kubectl -n "$ns" exec "$client_pod" -- cat /tmp/b | jq -e '.permissions == ["platform:agents.read"]' >/dev/null || die "the API answered a pod with something else than /v1/me"
 ok "a pod the API's NetworkPolicy names (aap-e2e/client) reaches the API through its Service, with a token"
-stranger=$(as_pod stranger "$tk")
-if [ "$stranger" = 200 ]; then
+stranger_status=$(as_pod "$stranger_pod" "$tk")
+if [ "$stranger_status" = 200 ]; then
   echo "::warning::a pod that the API's NetworkPolicy does not name read the API: this cluster does not enforce NetworkPolicies, so the policy is not proven here"
   ok "kind's network plugin does NOT enforce NetworkPolicies: the policy is installed and valid, and its enforcement is not proven"
 else
-  ok "a pod the API's NetworkPolicy does not name cannot reach the API (status $stranger): the cluster enforces NetworkPolicies, and the API's three egress rules and its ingress rule were enough for it to be Ready"
+  ok "a pod the API's NetworkPolicy does not name cannot reach the API (status $stranger_status): the cluster enforces NetworkPolicies, and the API's three egress rules and its ingress rule were enough for it to be Ready"
 fi
 # The logs, as plain text: tracing-subscriber writes colour codes unless it is told not to, and a pod is not a terminal.
 esc=$(printf '\033')
