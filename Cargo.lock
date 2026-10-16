@@ -18,6 +18,7 @@ dependencies = [
 name = "aap-api-server"
 version = "0.1.0"
 dependencies = [
+ "aap-api",
  "aap-auth-oidc",
  "aap-forms",
  "aap-objects-kubernetes",

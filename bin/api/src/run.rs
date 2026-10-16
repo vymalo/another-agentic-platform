@@ -8,14 +8,17 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
+use aap_api::ModelEndpoint;
 use aap_auth_oidc::OidcAuthenticator;
 use aap_forms::Defaults;
 use aap_objects_kubernetes::KubernetesObjects;
 use aap_platform_api::{ApiState, CorsOrigins, router};
-use aap_ports::{AgentObjects, AuthError, Authenticator, SharedKind};
+use aap_ports::{AgentObjects, AuthError, Authenticator};
 use anyhow::{Context, Result};
 use axum::Router;
 use clap::Parser;
+use futures::future::BoxFuture;
+use kube::api::ListParams;
 use tokio::sync::watch;
 
 use crate::config::{self, Settings};
@@ -72,25 +75,47 @@ where
 }
 
 /// What `/readyz` asks: the issuer's keys can be had (at once, while a copy can still verify), and the cluster's API server
-/// answers a call that needs the API's own rights in its namespace (a `Role` that lacks a verb is not ready).
-pub fn readiness<O, K, F>(objects: O, keys: K) -> Check
+/// answers a call that needs the API's own rights in its namespace (a `Role` that lacks a verb is not ready). Both are asked
+/// at most once in a few seconds, however many probes come (`serve.rs`).
+pub fn readiness<C, CF, CE, K, KF>(cluster: C, keys: K) -> Check
 where
-    O: AgentObjects + Clone + 'static,
-    K: Fn() -> F + Send + Sync + 'static,
-    F: Future<Output = Result<(), AuthError>> + Send + 'static,
+    C: Fn() -> CF + Send + Sync + 'static,
+    CF: Future<Output = Result<(), CE>> + Send + 'static,
+    CE: std::error::Error + 'static,
+    K: Fn() -> KF + Send + Sync + 'static,
+    KF: Future<Output = Result<(), AuthError>> + Send + 'static,
 {
     Arc::new(move || {
-        let objects = objects.clone();
+        let cluster = cluster();
         let keys = keys();
         Box::pin(async move {
             keys.await
                 .map_err(|_| "the issuer's keys are not available\n")?;
-            objects.list_shared(SharedKind::Model).await.map_err(
-                |_| "the cluster's API server does not answer, or refuses the API's rights\n",
-            )?;
+            cluster.await.map_err(|error| {
+                tracing::debug!(%error, "the cluster check failed");
+                "the cluster's API server does not answer, or refuses the API's rights\n"
+            })?;
             Ok(())
         })
     })
+}
+
+/// The cluster call of the readiness check: a `list` of the `ModelEndpoint`s of the namespace, which needs the `list` verb
+/// the API's `Role` grants, **of one object**: the check asks the right and moves nothing else.
+pub fn cluster_probe(
+    client: kube::Client,
+    namespace: &str,
+) -> impl Fn() -> BoxFuture<'static, Result<(), kube::Error>> + Send + Sync + 'static {
+    let models: kube::Api<ModelEndpoint> = kube::Api::namespaced(client, namespace);
+    move || {
+        let models = models.clone();
+        Box::pin(async move {
+            models
+                .list(&ListParams::default().limit(1))
+                .await
+                .map(|_| ())
+        })
+    }
 }
 
 /// Resolves on SIGTERM or SIGINT.
@@ -188,12 +213,13 @@ pub async fn run(args: Args) -> Result<()> {
     let client = kube::Client::try_default()
         .await
         .context("connecting to the cluster (in-cluster configuration, or KUBECONFIG)")?;
+    let probe = cluster_probe(client.clone(), &defaults.namespace);
     let objects =
         KubernetesObjects::new(client, &defaults.namespace).with_offer_label(&defaults.offer_label);
     let auth = OidcAuthenticator::new(oidc).context("the token authenticator")?;
     let check = {
         let auth = auth.clone();
-        readiness(objects.clone(), move || {
+        readiness(probe, move || {
             let auth = auth.clone();
             async move { auth.ready().await }
         })
@@ -213,6 +239,7 @@ pub async fn run(args: Args) -> Result<()> {
 #[cfg(test)]
 mod tests {
     #![allow(clippy::unwrap_used, clippy::expect_used)]
+    use std::sync::Mutex;
     use std::sync::atomic::AtomicUsize;
 
     use aap_auth_oidc::testkit::TestAuthenticator;
@@ -258,7 +285,10 @@ mod tests {
         let objects = MemoryObjects::in_namespace(&s.defaults.namespace);
         let auth = MemoryAuthenticator::new().with_token("t", "alice", ["platform:agents.read"]);
         let router = build_router(objects.clone(), auth, s.defaults, s.cors).unwrap();
-        let check = readiness(objects, || async { Ok(()) });
+        let check = readiness(
+            || async { Ok::<(), std::convert::Infallible>(()) },
+            || async { Ok(()) },
+        );
 
         let (api, api_addr) = bound().await;
         let (health, health_addr) = bound().await;
@@ -324,36 +354,111 @@ mod tests {
         );
     }
 
-    #[tokio::test]
+    #[derive(Debug)]
+    struct Down;
+
+    impl std::fmt::Display for Down {
+        fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+            f.write_str("down")
+        }
+    }
+
+    impl std::error::Error for Down {}
+
+    #[tokio::test(start_paused = true)]
     async fn readiness_needs_the_keys_and_the_cluster() {
-        let objects = MemoryObjects::new();
         let keys_up = Arc::new(AtomicBool::new(true));
+        let cluster_up = Arc::new(AtomicBool::new(true));
         let probes = Arc::new(AtomicUsize::new(0));
         let check = {
             let up = keys_up.clone();
+            let cluster = cluster_up.clone();
             let probes = probes.clone();
-            readiness(objects.clone(), move || {
-                let up = up.load(Ordering::Acquire);
-                probes.fetch_add(1, Ordering::Relaxed);
-                async move {
-                    if up {
-                        Ok(())
-                    } else {
-                        Err(AuthError::Unavailable("the keys are down".into()))
+            readiness(
+                move || {
+                    let up = cluster.load(Ordering::Acquire);
+                    async move { if up { Ok(()) } else { Err(Down) } }
+                },
+                move || {
+                    let up = up.load(Ordering::Acquire);
+                    probes.fetch_add(1, Ordering::Relaxed);
+                    async move {
+                        if up {
+                            Ok(())
+                        } else {
+                            Err(AuthError::Unavailable("the keys are down".into()))
+                        }
                     }
-                }
-            })
+                },
+            )
         };
         assert_eq!(check().await, Ok(()));
-        objects.set_unavailable(true);
+        cluster_up.store(false, Ordering::Release);
         assert_eq!(
             check().await,
             Err("the cluster's API server does not answer, or refuses the API's rights\n")
         );
-        objects.set_unavailable(false);
+        cluster_up.store(true, Ordering::Release);
         keys_up.store(false, Ordering::Release);
         assert_eq!(check().await, Err("the issuer's keys are not available\n"));
         assert_eq!(probes.load(Ordering::Relaxed), 3);
+    }
+
+    /// A client whose API server records what it is asked and answers `status` with `body`.
+    fn recording_client(
+        status: u16,
+        body: serde_json::Value,
+    ) -> (kube::Client, Arc<Mutex<Vec<String>>>) {
+        let seen = Arc::new(Mutex::new(Vec::new()));
+        let record = seen.clone();
+        let service = tower::service_fn(move |request: axum::http::Request<kube::client::Body>| {
+            record
+                .lock()
+                .unwrap()
+                .push(format!("{} {}", request.method(), request.uri()));
+            let body = body.clone();
+            async move {
+                Ok::<_, std::convert::Infallible>(
+                    axum::http::Response::builder()
+                        .status(status)
+                        .header("content-type", "application/json")
+                        .body(kube::client::Body::from(serde_json::to_vec(&body).unwrap()))
+                        .unwrap(),
+                )
+            }
+        });
+        (kube::Client::new(service, "default"), seen)
+    }
+
+    #[tokio::test]
+    async fn the_cluster_probe_lists_one_model_endpoint_of_the_namespace_and_no_more() {
+        let (client, seen) = recording_client(
+            200,
+            serde_json::json!({
+                "apiVersion": "agents.vymalo.com/v1alpha1", "kind": "ModelEndpointList",
+                "metadata": { "resourceVersion": "1" }, "items": []
+            }),
+        );
+        let probe = cluster_probe(client, "agents-ns");
+        probe().await.unwrap();
+        let seen = seen.lock().unwrap().clone();
+        assert_eq!(
+            seen,
+            ["GET /apis/agents.vymalo.com/v1alpha1/namespaces/agents-ns/modelendpoints?&limit=1"],
+            "one call, of one object, in the namespace"
+        );
+    }
+
+    #[tokio::test]
+    async fn the_cluster_probe_fails_when_the_server_refuses_the_right() {
+        let (client, _) = recording_client(
+            403,
+            serde_json::json!({
+                "apiVersion": "v1", "kind": "Status", "status": "Failure", "reason": "Forbidden",
+                "message": "modelendpoints is forbidden", "code": 403
+            }),
+        );
+        assert!(cluster_probe(client, "agents-ns")().await.is_err());
     }
 
     #[test]

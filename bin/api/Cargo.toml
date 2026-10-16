@@ -15,6 +15,7 @@ name = "api"
 path = "src/main.rs"
 
 [dependencies]
+aap-api.workspace = true
 aap-auth-oidc.workspace = true
 aap-forms.workspace = true
 aap-objects-kubernetes.workspace = true
