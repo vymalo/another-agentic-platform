@@ -124,7 +124,7 @@ agent token rule of §59a).
 The dashboard's REST API ([§60a](../../docs/architecture/10-control-plane-and-crds.md#the-platform-api-ad-025-ad-027), slice D7b1;
 the binary is [`bin/api`](../../bin/api/README.md), the router [`aap-platform-api`](../../crates/platform-api/README.md)). **Off by default**
 (`api.enabled: false`): with it off nothing of the component is rendered and none of its values is checked, and the three golden renders
-above are byte for byte what they were before it existed. It is a Deployment of its own, not a part of the operator, for the reasons of §60a:
+([Tests](#tests)) are byte for byte what they were before it existed. It is a Deployment of its own, not a part of the operator, for the reasons of §60a:
 least privilege per process (the API may write the specs people edit and list the ExternalSecrets that offer keys; the operator may not, and
 the operator writes workloads, which the API may not), exposure (the API takes people's tokens, the operator takes none) and failure (a bug in
 the API never stops reconciliation).
