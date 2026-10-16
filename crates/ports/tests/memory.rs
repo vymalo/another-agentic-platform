@@ -3,7 +3,9 @@
 
 #![allow(clippy::unwrap_used, clippy::expect_used)]
 
-use aap_ports::memory::{MemoryDirectory, MemoryRuntime, MemoryStore};
+use aap_ports::memory::{
+    MemoryAuthenticator, MemoryDirectory, MemoryObjects, MemoryRuntime, MemoryStore,
+};
 
 mod runtime {
     use super::*;
@@ -48,4 +50,22 @@ mod directory {
         Some(MemoryDirectory::new())
     }
     aap_ports::agent_directory_conformance!(make);
+}
+
+mod objects {
+    use super::*;
+
+    async fn make() -> Option<MemoryObjects> {
+        Some(MemoryObjects::new())
+    }
+    aap_ports::agent_objects_conformance!(make);
+}
+
+mod authenticator {
+    use super::*;
+
+    async fn make() -> Option<MemoryAuthenticator> {
+        Some(MemoryAuthenticator::new())
+    }
+    aap_ports::authenticator_conformance!(make);
 }

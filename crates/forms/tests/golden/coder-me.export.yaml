@@ -1,0 +1,120 @@
+apiVersion: agents.vymalo.com/v1alpha1
+kind: AgentConfig
+metadata:
+  annotations:
+    agents.vymalo.com/note: kept
+  labels:
+    agents.vymalo.com/team: kept
+    app.kubernetes.io/managed-by: dashboard.agents.vymalo.com
+    team: agents
+  name: coder-me
+  namespace: another-agentic-system
+spec:
+  environment:
+    resources:
+      requests:
+        cpu: 500m
+        memory: 1Gi
+    volumes:
+    - mountPath: /work
+      name: work
+      scope: agent
+      source:
+        persistent:
+          perReplica: true
+          size: 20Gi
+          storageClass: longhorn
+  extraEnv: {}
+  harness:
+    adam:
+      agent:
+        embedded: {}
+      binary: adam-coder
+      coder:
+        allowedRepoHosts:
+        - github.com
+        createRepoOwners: []
+        gitAuthor:
+          email: 337696346+bored-giant-panda[bot]@users.noreply.github.com
+          name: bored-giant-panda[bot]
+        github:
+          app:
+            id: Iv1.example
+            owners:
+            - stephane-segning
+            privateKeySecretRef:
+              key: private-key.pem
+              name: github-app
+        githubApiUrl: https://api.github.com
+        opencodeModel: coding-model
+        prDraft: true
+        workers: 2
+    type: adam-rs
+  model:
+    endpointRef:
+      name: gateway
+    model: coding-model
+  security:
+    fsGroup: 10001
+    runAsGroup: 10001
+    runAsUser: 10001
+  tools:
+    allowInsecureHttp: true
+    githubMcp:
+      port: 8082
+      sidecar: true
+    mcpServers:
+      websearch:
+        headers: {}
+        optional: false
+        providerRef:
+          name: websearch
+---
+apiVersion: agents.vymalo.com/v1alpha1
+kind: AgentService
+metadata:
+  annotations:
+    agents.vymalo.com/note: kept
+  labels:
+    agents.vymalo.com/team: kept
+    app.kubernetes.io/managed-by: dashboard.agents.vymalo.com
+    team: agents
+  name: coder-me
+  namespace: another-agentic-system
+spec:
+  access:
+    allowFrom:
+    - namespaceSelector:
+        matchLabels:
+          kubernetes.io/metadata.name: another-agentic-system
+    audience:
+    - agent.use:coder-me
+  configRef:
+    name: coder-me
+  deletionPolicy: Retain
+  description: Coding task to verified pull request.
+  interfaces:
+    a2a:
+      bearerTokensSecretRef:
+        key: AGENT_REGISTRY_AGENT_TOKEN
+        name: agent-a2a
+      enabled: true
+    mcp:
+      enabled: false
+    responses:
+      enabled: false
+  registry:
+    tags:
+    - coding
+    - git
+    title: Coder (me)
+  scaling:
+    topology: combined
+    workers: 1
+  store:
+    postgres:
+      cnpg:
+        instances: 1
+        storage:
+          size: 5Gi
+  suspend: false

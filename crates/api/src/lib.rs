@@ -8,6 +8,7 @@
 mod common;
 mod config;
 mod model_endpoint;
+pub mod permission;
 mod service;
 mod status;
 mod tool_provider;

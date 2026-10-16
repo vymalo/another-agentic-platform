@@ -53,6 +53,22 @@ dependencies = [
 ]
 
 [[package]]
+name = "aap-forms"
+version = "0.1.0"
+dependencies = [
+ "aap-api",
+ "aap-domain",
+ "aap-ports",
+ "k8s-openapi",
+ "proptest",
+ "serde",
+ "serde_json",
+ "serde_yaml_ng",
+ "thiserror 2.0.21",
+ "url",
+]
+
+[[package]]
 name = "aap-operator"
 version = "0.1.0"
 dependencies = [
@@ -83,6 +99,7 @@ dependencies = [
 name = "aap-ports"
 version = "0.1.0"
 dependencies = [
+ "aap-api",
  "aap-ports",
  "futures",
  "serde",

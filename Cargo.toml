@@ -4,6 +4,7 @@ members = [
     "crates/api",
     "crates/ports",
     "crates/domain",
+    "crates/forms",
     "crates/runtime-kubernetes",
     "crates/store-secret",
     "crates/store-cnpg",
@@ -24,6 +25,7 @@ publish = false
 [workspace.dependencies]
 aap-api = { path = "crates/api" }
 aap-domain = { path = "crates/domain" }
+aap-forms = { path = "crates/forms" }
 aap-ports = { path = "crates/ports" }
 aap-runtime-kubernetes = { path = "crates/runtime-kubernetes" }
 aap-store-secret = { path = "crates/store-secret" }

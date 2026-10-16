@@ -1,6 +1,6 @@
 [package]
 name = "aap-ports"
-description = "The provider seams of the v0 operator: RuntimeProvider, StoreProvisioner, AgentDirectory, their neutral types, and a conformance testkit"
+description = "The seams of the v0 operator and of the admin dashboard's Platform API: RuntimeProvider, StoreProvisioner, AgentDirectory, AgentObjects, Authenticator, their neutral types, and conformance testkits"
 readme = "README.md"
 version.workspace = true
 edition.workspace = true
@@ -18,14 +18,18 @@ testkit = ["dep:tokio"]
 [dependencies]
 futures.workspace = true
 serde.workspace = true
+# The bodies of the custom resources the Platform API reads and writes (`AgentObjects`) are JSON.
+serde_json.workspace = true
 thiserror.workspace = true
 # Only for the `Memory` implementations (a broadcast channel) and the timeouts of the conformance cases.
 tokio = { workspace = true, features = ["sync", "time"], optional = true }
 
 [dev-dependencies]
+# Only `tests/objects.rs` reads it: the samples of the testkit are held to the real CRD types there. The
+# library depends on nothing of the workspace.
+aap-api.workspace = true
 # The tests of this crate run the testkit it ships, so `cargo test -p aap-ports` works on its own.
 aap-ports = { workspace = true, features = ["testkit"] }
-serde_json.workspace = true
 tokio = { workspace = true, features = ["macros", "rt", "sync", "time", "test-util"] }
 
 [lints]
