@@ -18,6 +18,13 @@ default = []
 # tests of the crates that authenticate with it (the Platform API's router, D7).
 testkit = ["dep:axum", "dep:aws-lc-rs", "aap-ports/testkit", "tokio/net", "tokio/rt"]
 
+# Test tooling for the kind end-to-end of the Platform API (D7b2): the testkit's issuer on a port a cluster reaches, and tokens on a
+# loopback-only control port. An example, so that nothing ships it.
+[[example]]
+name = "test-issuer"
+path = "examples/test-issuer.rs"
+required-features = ["testkit"]
+
 [dependencies]
 aap-ports.workspace = true
 # The crypto backend of the signatures is aws-lc-rs: jsonwebtoken has `aws_lc_rs` and `rust_crypto` and no `ring`.

@@ -99,13 +99,17 @@ given to stop after it, and 5 s of margin, so the chart refuses less than the sl
 | `serve` (6) | `/healthz` and `/readyz` follow the check; **a burst of 50 probes asks the check once, and the answer is kept 5 s**; a failure and a timeout are kept; a draining pod is not ready at once and is alive; a check that never answers is not ready |
 | `run` (7) | **the router comes up on a real socket with the `Memory` ports and over a real issuer**, answers, and stops when told (the port is closed); a server that ends by itself ends the API with its reason; readiness needs the keys and the cluster; **the cluster probe asks for one `ModelEndpoint` of the namespace (a client that records the request) and fails when the server refuses**; the flags win over the file |
 
+Not a `cargo test`: the binary in a cluster is [`api-e2e.sh`](../../deploy/operator/tests/e2e/README.md#the-kind-end-to-end-of-the-platform-api-d7b2) (D7b2, CI job `api-e2e`): the
+chart's `api` component installed in kind with the image of the job, the issuer a program on the runner (`cargo build -p aap-auth-oidc --example test-issuer --features testkit`), and a
+folder agent created, read, replaced and deleted through the deployed API while the operator makes it Ready.
+
 ## The image and the chart
 
 **The image** is [`docker/api/Dockerfile`](../../docker/api/Dockerfile): `ghcr.io/vymalo/another-agentic-platform/api`, built from the repository root, the operator's
 Dockerfile with the package and the binary changed (cargo-chef on Rust 1.94.1 onto `distroless/cc-debian13:nonroot`, both pinned by tag and digest, user 65532, `ENTRYPOINT ["/api"]`,
 no shell and no `CMD`: the file is required). The build stage runs `--version`, `--help`, `--check` on `config.example.yaml`, and a refusal of that file with a misspelt key. CI
 ([`operator-image.yml`](../../.github/workflows/operator-image.yml), job `api-image`) builds it, runs the same on the final image, and runs `api --check` in it on the
-configuration the chart renders. *Unverified* until CI has run it: no image was built where this was written (the binary was, in release mode).
+configuration the chart renders, and the job `api-e2e` runs the image in a kind cluster (the chart's `api` component, a real issuer, a folder agent made through the API, [D7b2](../../deploy/operator/tests/e2e/README.md#the-kind-end-to-end-of-the-platform-api-d7b2)). *Unverified* until CI has run it: no image was built where this was written (the binary was, in release mode).
 
 **The chart** is the component `api` of [`deploy/operator`](../../deploy/operator/README.md#the-platform-api), off by default: a Deployment with its configuration mounted from a
 ConfigMap at `/etc/aap-api/config.yaml` (`API_CONFIG_FILE`) and **nothing else mounted**, a Service on the API port (the health port is the pod's, for the kubelet), the `Role`
@@ -118,7 +122,10 @@ cargo run -q -p aap-api-server -- --config /tmp/config.yaml --check
 
 ## Not here
 
-* The kind end-to-end (create a folder agent through the API, see it `Ready` and listed) is slice **D7b2**. **Until then the binary has not run against a real API
-  server or a real issuer**: `--check` and the tests are all that was run, and the pod has never been started in a cluster.
+* The kind end-to-end (create a folder agent through the API, see it `Ready` and listed) is slice **D7b2**, built: [`deploy/operator/tests/e2e/api-e2e.sh`](../../deploy/operator/tests/e2e/README.md#the-kind-end-to-end-of-the-platform-api-d7b2),
+  the job `api-e2e` of `operator-image.yml`, which `push` needs. **The binary has still not run against a real API server or a real issuer where this was written** (no container daemon, no kind):
+  the job is the first time, and it is *unverified* until CI has run it. What was run: the script, end to end, against the real router over the `Memory` ports and a real issuer with a fake `kubectl`.
+* **The log carries ANSI colour codes** (`tracing_subscriber::fmt()` with no `with_ansi`, as the operator's; *observed 2026-10-16* with stderr redirected to a file): a log pipeline sees escape sequences in `route=` and the like.
+  The end-to-end strips them. `.with_ansi(std::io::stderr().is_terminal())` would stop it; not changed in D7b2, for the owner.
 * TLS, rate limits and request timeouts are the edge's (§60a, *Clients without a web server*): the chart makes the Ingress and passes its annotations through, where a
   per-token rate limit is attached ([the chart's README](../../deploy/operator/README.md#the-edge)).

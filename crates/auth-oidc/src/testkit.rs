@@ -10,6 +10,8 @@
 
 #![allow(clippy::unwrap_used, clippy::expect_used, missing_docs)]
 
+pub mod issuer_cli;
+
 use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, OnceLock};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
@@ -234,12 +236,25 @@ impl Drop for TestIdp {
 }
 
 impl TestIdp {
-    /// Starts the issuer on a free port.
+    /// Starts the issuer on a free port of `127.0.0.1`.
     pub async fn start() -> Self {
+        Self::start_at("127.0.0.1:0", "127.0.0.1").await
+    }
+
+    /// Starts the issuer on `bind` (`0.0.0.0:0` for a free port on every interface) and names itself
+    /// `http://<public_host>:<the port it got>`: that is the `iss` of its tokens and the `issuer` of its
+    /// discovery document, so a client that reaches it at that address (a pod in a cluster, at the host's address on the
+    /// cluster's network) sees the same name it was configured with. An IPv6 literal is written with its brackets.
+    pub async fn start_at(bind: &str, public_host: &str) -> Self {
+        Self::try_start_at(bind, public_host).await.unwrap()
+    }
+
+    /// [`TestIdp::start_at`] that reports an address it cannot listen on (in use, not this machine's, not allowed) instead of panicking.
+    pub async fn try_start_at(bind: &str, public_host: &str) -> std::io::Result<Self> {
         // The keys are made before the first request needs them.
         let _ = generations();
-        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-        let issuer = format!("http://{}", listener.local_addr().unwrap());
+        let listener = tokio::net::TcpListener::bind(bind).await?;
+        let issuer = format!("http://{public_host}:{}", listener.local_addr()?.port());
         let shared = Arc::new(Shared {
             issuer,
             ..Shared::default()
@@ -251,7 +266,7 @@ impl TestIdp {
         let server = tokio::spawn(async move {
             axum::serve(listener, router).await.unwrap();
         });
-        TestIdp { shared, server }
+        Ok(TestIdp { shared, server })
     }
 
     /// The issuer, as `iss` must say it: `http://127.0.0.1:<port>`.
@@ -331,6 +346,27 @@ impl TestIdp {
             &self.claims(audience, subject),
             Signing::Published(Alg::Rs256),
         )
+    }
+
+    /// A good token (RS256) for `audience` and `subject` that carries `roles` at `roles_claim` (a dotted path is
+    /// nested: `resource_access.client.roles`), and a `jti` no other token of this process has, so that two tokens
+    /// made in the same second differ.
+    pub fn token_with_roles(
+        &self,
+        audience: &str,
+        subject: &str,
+        roles_claim: &str,
+        roles: &[impl AsRef<str>],
+    ) -> String {
+        static NEXT: AtomicU64 = AtomicU64::new(0);
+        let mut claims = self.claims(audience, subject);
+        claims.insert(
+            "jti".to_owned(),
+            json!(NEXT.fetch_add(1, Ordering::Relaxed).to_string()),
+        );
+        let roles: Vec<&str> = roles.iter().map(AsRef::as_ref).collect();
+        set_path(&mut claims, roles_claim, json!(roles));
+        self.mint(&claims, Signing::Published(Alg::Rs256))
     }
 
     /// A token with exactly `claims`, signed as `signing` says.
@@ -434,15 +470,8 @@ impl TestAuthenticator {
 
     /// A token for `subject` that carries `permissions` in the roles claim.
     pub fn token_for(&self, subject: &str, permissions: &[&str]) -> String {
-        static NEXT: AtomicU64 = AtomicU64::new(0);
-        let mut claims = self.idp.claims(TEST_AUDIENCE, subject);
-        // A different token every time, whatever the clock says.
-        claims.insert(
-            "jti".to_owned(),
-            json!(NEXT.fetch_add(1, Ordering::Relaxed).to_string()),
-        );
-        set_path(&mut claims, TEST_ROLES_CLAIM, json!(permissions));
-        self.idp.mint(&claims, Signing::Published(Alg::Rs256))
+        self.idp
+            .token_with_roles(TEST_AUDIENCE, subject, TEST_ROLES_CLAIM, permissions)
     }
 }
 

@@ -1,6 +1,6 @@
 name: Operator and API images
 
-# The images and the chart of the platform (S8, D7b1): checks on pull requests, the images on main, and a tag bump in the chart. Two
+# The images and the chart of the platform (S8, S9, D7b1, D7b2): checks on pull requests, the images on main, and a tag bump in the chart. Two
 # images are built from one commit, `operator` (S8) and `api` (the Platform API, D7b1), and ONE job bumps both tags in one commit: two
 # workflows would each push a bump to main and race (and each one's "has main moved on?" test would count the other's bump commit as a
 # newer build). The cost is that the api image waits for the operator's end-to-end and that both tags always move together; the images
@@ -28,6 +28,15 @@ name: Operator and API images
 #              and dummy Secrets: the AgentService becomes Ready, the agent card answers through the Service, the registry lists the
 #              coder, and a deletion completes its finalizer and keeps the claim (Retain). deploy/operator/tests/e2e/README.md says
 #              what it proves and what it does not (no model, no GitHub).
+# api-e2e (D7b2): a kind cluster, the CRDs chart and the operator chart installed with the operator AND the API image that passed
+#              (`api.enabled`), the stand-in for the adam image (bin/operator/tests/stub) as the agent's image, and the testkit's issuer
+#              (crates/auth-oidc/examples/test-issuer.rs, built in the job) running on the runner, where the API pod fetches its keys and
+#              the script gets tokens. The script drives the DEPLOYED API through a port-forward: 401/403, a model by reference to an
+#              offered Secret key, a folder agent created with the preconditions (428, 422, 201, 409), the operator making it Ready, the
+#              listing, the detail, the YAML, a replace and a delete with their ETags (200, 412), the finalizer completing; and no
+#              secret value in any answer or log. It lives HERE and not in operator.yml because both images are artifacts of this
+#              workflow already (the push uses them), and `push` needs it: no API image is pushed that failed its end-to-end, and no
+#              second workflow races the one bump. deploy/operator/tests/e2e/README.md says what it proves and what it does not.
 # push:        main only, after every job above: `sha-<7>` and `latest` of both images (the same tag). One red job of either image
 #              (the API's included) means no image is pushed and no tag bumped: a decision for the owner (deploy/operator/README.md,
 #              "The image").
@@ -404,10 +413,72 @@ jobs:
           OPERATOR_PULL_POLICY: Never
         run: sh deploy/operator/tests/e2e/coder-e2e.sh
 
+  api-e2e:
+    name: api-e2e
+    needs: [image, api-image]
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    env:
+      # The toolchain of operator.yml, which builds the same workspace.
+      RUST_TOOLCHAIN: "1.94.1"
+    steps:
+      - uses: actions/checkout@v7
+      - uses: azure/setup-helm@v4
+        with:
+          version: ${{ env.HELM_VERSION }}
+      - name: Create a kind cluster
+        uses: helm/kind-action@v1
+        with:
+          version: v0.33.0
+          # The same node image as the other jobs: Kubernetes v1.35.8, the digest of the index of the tag.
+          node_image: kindest/node:v1.35.8@sha256:07b2536e30b803ed61d1677a79df6115f798ce64c80f9e22f6ed45afd09323c0
+          cluster_name: aap-api
+          wait: 120s
+      # The images that passed their smoke tests, loaded into the cluster: the chart runs them with pullPolicy Never. The agent's image is the
+      # stand-in of operator.yml's operator-e2e (busybox pinned by digest that answers /healthz on 8080 as adam-agent would).
+      - uses: actions/download-artifact@v8
+        with:
+          name: operator-image
+          path: ${{ runner.temp }}
+      - uses: actions/download-artifact@v8
+        with:
+          name: api-image
+          path: ${{ runner.temp }}
+      - name: Load the images into kind
+        run: |
+          docker load -i "$RUNNER_TEMP/operator.tar"
+          docker load -i "$RUNNER_TEMP/api.tar"
+          docker build -t aap-stub:ci bin/operator/tests/stub
+          kind load docker-image operator:smoke api:smoke aap-stub:ci --name aap-api
+      - name: Install Rust
+        run: rustup toolchain install "$RUST_TOOLCHAIN" --profile minimal --no-self-update && rustup default "$RUST_TOOLCHAIN"
+      - uses: Swatinem/rust-cache@v2
+      # Test tooling: the testkit's issuer as a program. Nothing ships it (an example of the crate), and it is not in either image.
+      - name: Build the test issuer
+        run: cargo build --locked -p aap-auth-oidc --example test-issuer --features testkit
+      - name: The API creates an agent, the operator makes it Ready
+        env:
+          OPERATOR_IMAGE_REPOSITORY: operator
+          OPERATOR_IMAGE_TAG: smoke
+          OPERATOR_PULL_POLICY: Never
+          API_IMAGE_REPOSITORY: api
+          API_IMAGE_TAG: smoke
+          API_PULL_POLICY: Never
+          AGENT_IMAGE: aap-stub:ci
+          TEST_ISSUER_BIN: ${{ github.workspace }}/target/debug/examples/test-issuer
+        run: |
+          # The issuer runs on this machine, which the pods of kind reach at the IPv4 gateway of the docker network `kind`.
+          AAP_TEST_HOST_ADDR="$(docker network inspect kind --format '{{range .IPAM.Config}}{{println .Gateway}}{{end}}' | grep -E '^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$' | head -1)"
+          test -n "$AAP_TEST_HOST_ADDR" || { echo "::error::no IPv4 gateway found for the docker network kind"; exit 1; }
+          echo "pods reach this machine at $AAP_TEST_HOST_ADDR"
+          export AAP_TEST_HOST_ADDR
+          sh deploy/operator/tests/e2e/api-e2e.sh
+
   push:
     name: push the images that passed
-    # Main only, and only after everything above: the chart, the Dockerfiles, the scripts, both images' own smoke tests, and the coder.
-    needs: [chart, dockerfile, dockerfile-api, scripts, image, api-image, operator-coder-e2e]
+    # Main only, and only after everything above: the chart, the Dockerfiles, the scripts, both images' own smoke tests, the coder, and the API's
+    # end-to-end (no API image is pushed that failed to start in a cluster and serve its first agent).
+    needs: [chart, dockerfile, dockerfile-api, scripts, image, api-image, operator-coder-e2e, api-e2e]
     if: github.event_name == 'push' && github.ref == 'refs/heads/main'
     runs-on: ubuntu-latest
     # One push at a time, so the check below and the push of `latest` are not interleaved with another run's.
