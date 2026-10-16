@@ -317,6 +317,17 @@ jobs:
           node_image: kindest/node:v1.35.8@sha256:07b2536e30b803ed61d1677a79df6115f798ce64c80f9e22f6ed45afd09323c0
           cluster_name: aap-objects
           wait: 120s
+      # The kinds the Role names, so `auth can-i` below can resolve them (kubectl answers "no" for a resource the
+      # server does not serve). The test applies the same files again, forced, under its own field manager.
+      - name: Install the CRDs
+        run: |
+          set -eu
+          kubectl apply --server-side -f deploy/crds/agents.vymalo.com.yaml
+          kubectl apply --server-side -f crates/objects-kubernetes/tests/crds/external-secrets.io_externalsecrets.yaml
+          kubectl wait --for=condition=Established --timeout=60s \
+            crd/agentservices.agents.vymalo.com crd/agentconfigs.agents.vymalo.com \
+            crd/modelendpoints.agents.vymalo.com crd/toolproviders.agents.vymalo.com \
+            crd/externalsecrets.external-secrets.io
       - name: "The identity of the crate, a ServiceAccount with its Role"
         run: |
           set -eu
