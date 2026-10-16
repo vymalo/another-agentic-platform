@@ -75,7 +75,8 @@ pub enum InvalidToken {
     BadSignature,
     /// The token names a key (`kid`) the issuer does not publish.
     UnknownKey,
-    /// Past its `exp`.
+    /// Past its `exp`, or before its `nbf`: outside the time the issuer gave it. The set has no word for "not
+    /// valid yet", and the caller's remedy is the same: another token.
     Expired,
     /// The `iss` is not the issuer this API trusts.
     WrongIssuer,
