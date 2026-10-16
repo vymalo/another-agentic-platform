@@ -10,6 +10,8 @@
 
 #![allow(clippy::unwrap_used, clippy::expect_used, missing_docs)]
 
+pub mod issuer_cli;
+
 use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, OnceLock};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
@@ -244,13 +246,15 @@ impl TestIdp {
     /// discovery document, so a client that reaches it at that address (a pod in a cluster, at the host's address on the
     /// cluster's network) sees the same name it was configured with. An IPv6 literal is written with its brackets.
     pub async fn start_at(bind: &str, public_host: &str) -> Self {
+        Self::try_start_at(bind, public_host).await.unwrap()
+    }
+
+    /// [`TestIdp::start_at`] that reports an address it cannot listen on (in use, not this machine's, not allowed) instead of panicking.
+    pub async fn try_start_at(bind: &str, public_host: &str) -> std::io::Result<Self> {
         // The keys are made before the first request needs them.
         let _ = generations();
-        let listener = tokio::net::TcpListener::bind(bind).await.unwrap();
-        let issuer = format!(
-            "http://{public_host}:{}",
-            listener.local_addr().unwrap().port()
-        );
+        let listener = tokio::net::TcpListener::bind(bind).await?;
+        let issuer = format!("http://{public_host}:{}", listener.local_addr()?.port());
         let shared = Arc::new(Shared {
             issuer,
             ..Shared::default()
@@ -262,7 +266,7 @@ impl TestIdp {
         let server = tokio::spawn(async move {
             axum::serve(listener, router).await.unwrap();
         });
-        TestIdp { shared, server }
+        Ok(TestIdp { shared, server })
     }
 
     /// The issuer, as `iss` must say it: `http://127.0.0.1:<port>`.

@@ -172,7 +172,7 @@ verifies), and `Tuning` (a test shortens them) is not `Deserialize`.
 
 | Feature | Default | Effect |
 |---|---|---|
-| `testkit` | no | `testkit::TestIdp`: an issuer on `127.0.0.1:<port>` (`start_at(bind, public_host)`: on the address you say and named `http://<public_host>:<port>`, which is what a client in a cluster is configured with) serving its discovery document and its JWKS, with RSA 2048, P-256 and Ed25519 keys made at run time, once per process (twice: one set it publishes, one it does not until `publish_unpublished_keys()`; `withdraw_unpublished_keys()` takes it back), `token_with_roles(audience, subject, roles_claim, roles)` for a good token that holds roles (at a dotted path, nested), `mint(claims, Signing)` for the tokens the cases need (the right ones, and `alg: none`, HS256 with a public key as the secret, a key that is not published, one that signs under a published `kid`, one with no `kid`), `forge(header, claims, signature)` for the headers that must be refused unread, `set_jwks_down`, `set_discovery_down` and fetch counters; and `TestAuthenticator`, a `TestIdp` and an `OidcAuthenticator` for it, which is an `Authenticator` and an `AuthenticatorUnderTest` (`issue` gives a token with the permissions asked, `without_keys` an authenticator whose issuer answers 503). For this crate's tests and the Platform API's router tests (D7). **No private key is in the repository.** |
+| `testkit` | no | `testkit::TestIdp`: an issuer on `127.0.0.1:<port>` (`start_at(bind, public_host)`: on the address you say and named `http://<public_host>:<port>`, which is what a client in a cluster is configured with; `try_start_at` answers an address it cannot listen on with an `io::Error` instead of a panic) serving its discovery document and its JWKS, with RSA 2048, P-256 and Ed25519 keys made at run time, once per process (twice: one set it publishes, one it does not until `publish_unpublished_keys()`; `withdraw_unpublished_keys()` takes it back), `token_with_roles(audience, subject, roles_claim, roles)` for a good token that holds roles (at a dotted path, nested), `mint(claims, Signing)` for the tokens the cases need (the right ones, and `alg: none`, HS256 with a public key as the secret, a key that is not published, one that signs under a published `kid`, one with no `kid`), `forge(header, claims, signature)` for the headers that must be refused unread, `set_jwks_down`, `set_discovery_down` and fetch counters; and `TestAuthenticator`, a `TestIdp` and an `OidcAuthenticator` for it, which is an `Authenticator` and an `AuthenticatorUnderTest` (`issue` gives a token with the permissions asked, `without_keys` an authenticator whose issuer answers 503). `testkit::issuer_cli`, the command line of the `test-issuer` example, parsed in the library so that a test covers what it refuses. For this crate's tests and the Platform API's router tests (D7). **No private key is in the repository.** |
 
 ## Test tooling: the issuer as a program
 
@@ -193,9 +193,14 @@ target/debug/examples/test-issuer --bind 0.0.0.0:0 --public-host 172.18.0.1     
 | `--audience` | `aap-test-api` | The `aud` of its tokens |
 | `--roles-claim` | `agentic_roles` | The claim that holds the roles; a dotted path is nested |
 
+Each flag takes the next argument as its value and may be given once. **Exit codes:** `0` served (or `--help`), `1` it could not start (an address it cannot listen on, in use or not this
+machine's), `2` a flag or a value it refuses: a flag given twice, an unknown flag or a stray argument, a flag with no value, a `--bind` or `--control` that is not an address and a port, a
+`--public-host` that is not a host (a scheme, a port, a path, a user or `999.1.1.1`), a blank `--audience`, an empty part of `--roles-claim`, and a `--control` that is not a loopback address.
+All of it is `testkit::issuer_cli::parse` (`tests/issuer_cli.rs`).
+
 It prints `issuer=`, `audience=`, `roles-claim=` and `control=` lines and `ready`, then serves until it is killed. The keys are the testkit's, made when it starts; a token is good for
 five minutes. It serves the discovery document and `/jwks` and nothing else on the issuer's port. *Run 2026-10-16* by hand: the discovery document names the issuer, the
-token's claims are the ones asked for, a missing `sub` is `400`, `/token` on the issuer's port is `404`, and `--control 0.0.0.0:0` exits `1`.
+token's claims are the ones asked for, a missing `sub` is `400`, `/token` on the issuer's port is `404`; and, after the review of 2026-10-16, `--control 0.0.0.0:0`, `--bind nope`, `--public-host http://x`, a flag twice and `--frob` exit `2` with a message that names the flag and `--bind 203.0.113.9:0` exits `1` (all by hand, with the built example).
 
 ## Tests
 
@@ -237,6 +242,11 @@ Over real HTTP, against issuers on local ports; the cache's intervals are shorte
 - `tests/logs.rs` (1, a binary of its own: a callsite that another test hit first, with no subscriber, is cached as uninteresting): nothing logged holds a
   token, a `kid`, a claim, or a secret in the query of a `jwksUrl` (the connection fails and the log is read), read in the output of a
   subscriber; an `http` issuer is warned about once at construction, an `https` one not.
+- `tests/issuer_cli.rs` (11): the command line of the `test-issuer` example. The defaults and what the end-to-end passes; `--help` anywhere; **a control address that is not a loopback address is refused** (`0.0.0.0`, `[::]`, a cluster address, a port of
+  each) and a loopback one is accepted (`127.0.0.2`, `[::1]`); a `--control` or `--bind` that is not an address and a port; a `--public-host` that is not a host (a port, a scheme, a path, a user, an invalid IPv4 address, an empty label, a leading
+  or trailing `-`, an unbracketed or unclosed IPv6 address) and the hosts that are; **each flag given twice, with the same value and another**; a flag with no value, the next flag as its value, an unknown flag, `--flag=value` and a stray
+  argument; a blank audience and an empty part of the roles claim; and `try_start_at` on a port in use and on an address that is not the machine's (an error, not a panic). Each refusal was broken on purpose (no loopback check, duplicates
+  allowed, no read-back of the host through a URL, no label check, no IPv6 parse) and a named test failed.
 - `tests/config.rs` (4): the YAML, what it lacks or says more, what is refused at construction, and that a refusal never shows a value.
 - Unit tests in `src/` (15): the choice of key and of its candidates (`keys.rs`, 8), the claims (`claims.rs`, 5), the `jwks_uri` rule (`fetch.rs`, 2).
 

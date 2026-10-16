@@ -25,26 +25,22 @@
 //!
 //! The keys are made when it starts and are the testkit's throwaway ones: no private key is in the repository, and a token is good
 //! for five minutes.
+//!
+//! Exit codes: 0 on `--help`, 1 when it cannot start (an address it cannot listen on), 2 for a flag or a value it refuses (a flag
+//! given twice, an address or a host that is not one, a control address that is not a loopback address). The command line is
+//! `aap_auth_oidc::testkit::issuer_cli`, whose tests cover each refusal.
 
 use std::error::Error;
 use std::io::Write as _;
-use std::net::SocketAddr;
 use std::process::ExitCode;
 use std::sync::Arc;
 
-use aap_auth_oidc::testkit::{TEST_AUDIENCE, TEST_ROLES_CLAIM, TestIdp};
+use aap_auth_oidc::testkit::TestIdp;
+use aap_auth_oidc::testkit::issuer_cli::{IssuerArgs, Parsed, USAGE, parse};
 use axum::Router;
 use axum::extract::{RawQuery, State};
 use axum::http::StatusCode;
 use axum::routing::get;
-
-const USAGE: &str = "usage: test-issuer [--bind ADDR] [--public-host HOST] [--control LOOPBACK-ADDR] [--audience AUD] [--roles-claim CLAIM]
-
-  --bind ADDR          where the issuer listens (default 127.0.0.1:0; 0.0.0.0:0 for a cluster to reach it)
-  --public-host HOST   the host in its issuer URL, http://HOST:PORT (default 127.0.0.1); an IPv6 literal in brackets
-  --control ADDR       where GET /token?sub=..&roles=a,b is served; a loopback address only (default 127.0.0.1:0)
-  --audience AUD       the `aud` of its tokens (default aap-test-api)
-  --roles-claim CLAIM  the claim that holds the roles; a dotted path is nested (default agentic_roles)";
 
 struct Minting {
     idp: TestIdp,
@@ -83,21 +79,21 @@ async fn token(
     (StatusCode::OK, token)
 }
 
-/// The value of `--name`, else `default`.
-fn flag(args: &[String], name: &str, default: &str) -> Result<String, String> {
-    match args.iter().position(|a| a == name) {
-        None => Ok(default.to_owned()),
-        Some(i) => args
-            .get(i + 1)
-            .filter(|v| !v.starts_with("--"))
-            .cloned()
-            .ok_or_else(|| format!("{name} needs a value\n{USAGE}")),
-    }
-}
-
 #[tokio::main]
 async fn main() -> ExitCode {
-    match run().await {
+    let args: Vec<String> = std::env::args().skip(1).collect();
+    let options = match parse(&args) {
+        Ok(Parsed::Help) => {
+            println!("{USAGE}");
+            return ExitCode::SUCCESS;
+        }
+        Ok(Parsed::Run(options)) => options,
+        Err(e) => {
+            eprintln!("test-issuer: {e}\n{USAGE}");
+            return ExitCode::from(2);
+        }
+    };
+    match serve(options).await {
         Ok(()) => ExitCode::SUCCESS,
         Err(e) => {
             eprintln!("test-issuer: {e}");
@@ -106,45 +102,26 @@ async fn main() -> ExitCode {
     }
 }
 
-async fn run() -> Result<(), Box<dyn Error>> {
-    let args: Vec<String> = std::env::args().skip(1).collect();
-    if args.iter().any(|a| a == "--help" || a == "-h") {
-        println!("{USAGE}");
-        return Ok(());
-    }
-    for a in args.iter().filter(|a| a.starts_with("--")) {
-        let known = [
-            "--bind",
-            "--public-host",
-            "--control",
-            "--audience",
-            "--roles-claim",
-        ];
-        if !known.contains(&a.as_str()) {
-            return Err(format!("unknown flag {a}\n{USAGE}").into());
-        }
-    }
-    let bind = flag(&args, "--bind", "127.0.0.1:0")?;
-    let public_host = flag(&args, "--public-host", "127.0.0.1")?;
-    let control: SocketAddr = flag(&args, "--control", "127.0.0.1:0")?
-        .parse()
-        .map_err(|e| format!("--control is an address and a port such as 127.0.0.1:0: {e}"))?;
-    if !control.ip().is_loopback() {
-        return Err(
-            "--control must be a loopback address: minting tokens must not be reachable from a cluster".into(),
-        );
-    }
-    let audience = flag(&args, "--audience", TEST_AUDIENCE)?;
-    let roles_claim = flag(&args, "--roles-claim", TEST_ROLES_CLAIM)?;
-
-    let idp = TestIdp::start_at(&bind, &public_host).await;
+async fn serve(options: IssuerArgs) -> Result<(), Box<dyn Error>> {
+    let IssuerArgs {
+        bind,
+        public_host,
+        control,
+        audience,
+        roles_claim,
+    } = options;
+    let idp = TestIdp::try_start_at(&bind.to_string(), &public_host)
+        .await
+        .map_err(|e| format!("cannot listen on {bind}: {e}"))?;
     let issuer = idp.issuer();
     let minting = Arc::new(Minting {
         idp,
         audience: audience.clone(),
         roles_claim: roles_claim.clone(),
     });
-    let listener = tokio::net::TcpListener::bind(control).await?;
+    let listener = tokio::net::TcpListener::bind(control)
+        .await
+        .map_err(|e| format!("cannot listen on {control}: {e}"))?;
     let control_url = format!("http://{}", listener.local_addr()?);
     let router = Router::new()
         .route("/token", get(token))
