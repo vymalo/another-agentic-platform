@@ -136,7 +136,65 @@ async fn listed<O: ObjectsUnderTest>(p: &O, prefix: &str) -> Vec<String> {
         .collect()
 }
 
+/// An agent whose model is `model`, for a change of the config that is easy to see.
+fn reconfigured(draft: &AgentDraft, model: &str) -> AgentDraft {
+    let mut changed = draft.clone();
+    changed.config["model"]["model"] = json!(model);
+    changed
+}
+
+/// An `AgentService` spec as `sample_agent(name)` writes it, that names the config `config`.
+fn service_naming(name: &str, config: &str) -> Value {
+    let mut service = sample_agent(name).service;
+    service["configRef"]["name"] = json!(config);
+    service
+}
+
+/// The error of a call that had to be refused. The panic of a call that was accepted names the call, so
+/// that a test of the suite can tell which assertion of a case failed.
+fn refused<T: std::fmt::Debug>(
+    what: impl std::fmt::Display,
+    result: Result<T, ObjectsError>,
+) -> ObjectsError {
+    match result {
+        Err(error) => error,
+        Ok(value) => {
+            let shown: String = format!("{value:?}").chars().take(240).collect();
+            panic!("{what}: was accepted, and gave {shown}")
+        }
+    }
+}
+
+/// Delete an agent on the token it has now.
+async fn delete_agent_now<O: ObjectsUnderTest>(p: &O, name: &str) {
+    let token = agent(p, name).await.etag();
+    p.delete_agent(name, &token).await.unwrap();
+}
+
+/// Delete a shared object on the token it has now.
+async fn delete_shared_now<O: ObjectsUnderTest>(p: &O, kind: SharedKind, name: &str) {
+    let token = p.get_shared(kind, name).await.unwrap().unwrap().etag();
+    p.delete_shared(kind, name, &token).await.unwrap();
+}
+
+/// Whether `error` says that `by` (in this order) name the config `config`.
+fn is_referenced_config(error: &ObjectsError, config: &str, by: &[&str]) -> bool {
+    matches!(
+        error,
+        ObjectsError::Referenced { kind: Kind::AgentConfig, name, by: users }
+            if name == config && users.iter().map(String::as_str).eq(by.iter().copied())
+    )
+}
+
+/// Whether `error` says that the object of `kind` is not the dashboard's.
+fn is_not_owned(error: &ObjectsError, kind: Kind) -> bool {
+    matches!(error, ObjectsError::NotOwned { kind: k, .. } if *k == kind)
+}
+
 /// Cases of the objects suite, as plain async functions for harnesses that do not use the macro.
+///
+/// A case that expects a refusal names the call it refuses in its panic (`refused`), so that the test of
+/// the suite for each fault can require the one assertion that fault has to break.
 #[allow(missing_docs)] // each case is named for what it asserts
 pub mod cases {
     use super::*;
@@ -191,10 +249,12 @@ pub mod cases {
             .put_agent(&draft, &Precondition::DoesNotExist)
             .await
             .unwrap();
-        let err = p
-            .put_agent(&retitled(&draft, "Other"), &Precondition::DoesNotExist)
-            .await
-            .unwrap_err();
+        // Both objects would change if the create were accepted.
+        let other = reconfigured(&retitled(&draft, "Other"), "another-model");
+        let err = refused(
+            "a second create",
+            p.put_agent(&other, &Precondition::DoesNotExist).await,
+        );
         assert!(
             matches!(&err, ObjectsError::AlreadyExists { kind: Kind::AgentService, name: n } if *n == name),
             "{err:?}"
@@ -242,13 +302,14 @@ pub mod cases {
             .await
             .unwrap();
         // The second administrator still holds the first token.
-        let err = p
-            .put_agent(
+        let err = refused(
+            "a replace with a stale token",
+            p.put_agent(
                 &retitled(&draft, "Saved second"),
                 &Precondition::Matches(first.etag()),
             )
-            .await
-            .unwrap_err();
+            .await,
+        );
         assert!(matches!(err, ObjectsError::PreconditionFailed), "{err:?}");
         assert_eq!(
             agent(&p, &name).await,
@@ -256,11 +317,61 @@ pub mod cases {
             "the stale write changed nothing"
         );
         // A token no object ever had is as stale.
-        let err = p
-            .put_agent(&draft, &Precondition::Matches(ETag::new("0.nothing")))
-            .await
-            .unwrap_err();
+        let err = refused(
+            "a replace with a token nothing ever had",
+            p.put_agent(&draft, &Precondition::Matches(ETag::new("0.nothing")))
+                .await,
+        );
         assert!(matches!(err, ObjectsError::PreconditionFailed), "{err:?}");
+    }
+
+    pub async fn a_refused_write_changes_neither_object<O: ObjectsUnderTest>(p: O) {
+        // An agent is two objects and a store may write them one after the other: a write that is refused
+        // for the one must not have written the other.
+        let name = unique("ag");
+        let draft = sample_agent(&name);
+        let first = p
+            .put_agent(&draft, &Precondition::DoesNotExist)
+            .await
+            .unwrap();
+
+        // The token is stale on the service only, and the draft changes the config only.
+        let by_another = retitled(&draft, "Saved by another administrator");
+        let second = p
+            .put_agent(&by_another, &Precondition::Matches(first.etag()))
+            .await
+            .unwrap();
+        let config_edit = reconfigured(&by_another, "the-edit-of-the-config");
+        let err = refused(
+            "a replace that changes the config, on a token stale on the service",
+            p.put_agent(&config_edit, &Precondition::Matches(first.etag()))
+                .await,
+        );
+        assert!(matches!(err, ObjectsError::PreconditionFailed), "{err:?}");
+        assert_eq!(
+            agent(&p, &name).await,
+            second,
+            "the config was written by a refused replace"
+        );
+
+        // The token is stale on the config only, and the draft changes the service only.
+        let by_another = reconfigured(&by_another, "the-model-of-another-administrator");
+        let third = p
+            .put_agent(&by_another, &Precondition::Matches(second.etag()))
+            .await
+            .unwrap();
+        let service_edit = retitled(&by_another, "the-edit-of-the-service");
+        let err = refused(
+            "a replace that changes the service, on a token stale on the config",
+            p.put_agent(&service_edit, &Precondition::Matches(second.etag()))
+                .await,
+        );
+        assert!(matches!(err, ObjectsError::PreconditionFailed), "{err:?}");
+        assert_eq!(
+            agent(&p, &name).await,
+            third,
+            "the service was written by a refused replace"
+        );
     }
 
     pub async fn a_change_of_either_object_makes_the_token_stale<O: ObjectsUnderTest>(p: O) {
@@ -272,35 +383,136 @@ pub mod cases {
             .unwrap();
 
         // Only the config changes.
-        let mut config_only = draft.clone();
-        config_only.config["model"]["model"] = json!("another-model");
+        let config_only = reconfigured(&draft, "another-model");
         let second = p
             .put_agent(&config_only, &Precondition::Matches(first.etag()))
             .await
             .unwrap();
         assert_ne!(second.etag(), first.etag(), "the config moved the token");
         assert_eq!(second.service.spec, first.service.spec);
+        // The token from before is refused, by a replace and by a delete, though the service did not change.
+        let err = refused(
+            "a replace with the token from before a change of the config",
+            p.put_agent(&config_only, &Precondition::Matches(first.etag()))
+                .await,
+        );
+        assert!(matches!(err, ObjectsError::PreconditionFailed), "{err:?}");
+        let err = refused(
+            "a delete with the token from before a change of the config",
+            p.delete_agent(&name, &first.etag()).await,
+        );
+        assert!(matches!(err, ObjectsError::PreconditionFailed), "{err:?}");
+        assert_eq!(
+            agent(&p, &name).await,
+            second,
+            "the refusals changed nothing"
+        );
 
         // Only the service changes.
-        let mut service_only = config_only.clone();
-        service_only.service["registry"]["tags"] = json!(["sample", "more"]);
+        let service_only = retitled(&config_only, "a-title-of-the-service");
         let third = p
             .put_agent(&service_only, &Precondition::Matches(second.etag()))
             .await
             .unwrap();
         assert_ne!(third.etag(), second.etag(), "the service moved the token");
         assert_eq!(config_of(&third).spec, config_of(&second).spec);
+        let err = refused(
+            "a replace with the token from before a change of the service",
+            p.put_agent(&service_only, &Precondition::Matches(second.etag()))
+                .await,
+        );
+        assert!(matches!(err, ObjectsError::PreconditionFailed), "{err:?}");
+        let err = refused(
+            "a delete with the token from before a change of the service",
+            p.delete_agent(&name, &second.etag()).await,
+        );
+        assert!(matches!(err, ObjectsError::PreconditionFailed), "{err:?}");
+        assert_eq!(
+            agent(&p, &name).await,
+            third,
+            "the refusals changed nothing"
+        );
+    }
+
+    pub async fn a_token_is_for_the_object_it_was_read_from<O: ObjectsUnderTest>(p: O) {
+        let (a, b) = (unique("ag"), unique("ag"));
+        let made_a = p
+            .put_agent(&sample_agent(&a), &Precondition::DoesNotExist)
+            .await
+            .unwrap();
+        let made_b = p
+            .put_agent(&sample_agent(&b), &Precondition::DoesNotExist)
+            .await
+            .unwrap();
+        assert_ne!(made_a.etag(), made_b.etag());
+        let err = refused(
+            "a replace of one agent with the token of another",
+            p.put_agent(
+                &retitled(&sample_agent(&b), "Not mine"),
+                &Precondition::Matches(made_a.etag()),
+            )
+            .await,
+        );
+        assert!(matches!(err, ObjectsError::PreconditionFailed), "{err:?}");
+        let err = refused(
+            "a delete of one agent with the token of another",
+            p.delete_agent(&b, &made_a.etag()).await,
+        );
+        assert!(matches!(err, ObjectsError::PreconditionFailed), "{err:?}");
+        assert_eq!(agent(&p, &b).await, made_b, "nothing was changed");
+
+        // A model and a tool server of one name are two objects, and each token is its object's.
+        let name = unique("sh");
+        let model = p
+            .put_shared(
+                SharedKind::Model,
+                &sample_shared(SharedKind::Model, &name),
+                &Precondition::DoesNotExist,
+            )
+            .await
+            .unwrap();
+        let tool = p
+            .put_shared(
+                SharedKind::ToolServer,
+                &sample_shared(SharedKind::ToolServer, &name),
+                &Precondition::DoesNotExist,
+            )
+            .await
+            .unwrap();
+        assert_ne!(model.etag(), tool.etag());
+        let err = refused(
+            "a replace of a tool server with the token of a model",
+            p.put_shared(
+                SharedKind::ToolServer,
+                &sample_shared(SharedKind::ToolServer, &name),
+                &Precondition::Matches(model.etag()),
+            )
+            .await,
+        );
+        assert!(matches!(err, ObjectsError::PreconditionFailed), "{err:?}");
+        let err = refused(
+            "a delete of a tool server with the token of a model",
+            p.delete_shared(SharedKind::ToolServer, &name, &model.etag())
+                .await,
+        );
+        assert!(matches!(err, ObjectsError::PreconditionFailed), "{err:?}");
+        assert_eq!(
+            p.get_shared(SharedKind::ToolServer, &name).await.unwrap(),
+            Some(tool),
+            "nothing was changed"
+        );
     }
 
     pub async fn a_replace_of_an_agent_that_is_not_there_is_not_found<O: ObjectsUnderTest>(p: O) {
         let name = unique("ag");
-        let err = p
-            .put_agent(
+        let err = refused(
+            "a replace of an agent that is not there",
+            p.put_agent(
                 &sample_agent(&name),
                 &Precondition::Matches(ETag::new("1:1.1:1")),
             )
-            .await
-            .unwrap_err();
+            .await,
+        );
         assert!(
             matches!(
                 &err,
@@ -319,10 +531,10 @@ pub mod cases {
         // The config of an agent has the agent's name.
         let mut draft = sample_agent(&name);
         draft.service["configRef"]["name"] = json!("somebody-else");
-        let err = p
-            .put_agent(&draft, &Precondition::DoesNotExist)
-            .await
-            .unwrap_err();
+        let err = refused(
+            "a create whose configRef is not the agent's name",
+            p.put_agent(&draft, &Precondition::DoesNotExist).await,
+        );
         let ObjectsError::Invalid(fields) = &err else {
             panic!("{err:?}")
         };
@@ -344,10 +556,10 @@ pub mod cases {
                 Kind::AgentService => draft.service = spec,
                 _ => draft.config = spec,
             }
-            let err = p
-                .put_agent(&draft, &Precondition::DoesNotExist)
-                .await
-                .unwrap_err();
+            let err = refused(
+                format!("a create of a {kind} the backend refuses"),
+                p.put_agent(&draft, &Precondition::DoesNotExist).await,
+            );
             let ObjectsError::Invalid(fields) = &err else {
                 panic!("{kind}: {err:?}")
             };
@@ -368,10 +580,13 @@ pub mod cases {
             .put_agent(&draft, &Precondition::DoesNotExist)
             .await
             .unwrap();
-        p.delete_agent(&name, None).await.unwrap();
+        p.delete_agent(&name, &made.etag()).await.unwrap();
         assert_eq!(p.get_agent(&name).await.unwrap(), None);
         assert!(!listed(&p, &name).await.contains(&name));
-        let err = p.delete_agent(&name, None).await.unwrap_err();
+        let err = refused(
+            "a delete of an agent that is not there",
+            p.delete_agent(&name, &made.etag()).await,
+        );
         assert!(
             matches!(
                 &err,
@@ -412,17 +627,17 @@ pub mod cases {
             )
             .await
             .unwrap();
-        let err = p
-            .delete_agent(&name, Some(&first.etag()))
-            .await
-            .unwrap_err();
+        let err = refused(
+            "a delete with a stale token",
+            p.delete_agent(&name, &first.etag()).await,
+        );
         assert!(matches!(err, ObjectsError::PreconditionFailed), "{err:?}");
         assert_eq!(
             agent(&p, &name).await,
             second,
             "the stale delete changed nothing"
         );
-        p.delete_agent(&name, Some(&second.etag())).await.unwrap();
+        p.delete_agent(&name, &second.etag()).await.unwrap();
         assert_eq!(p.get_agent(&name).await.unwrap(), None);
     }
 
@@ -448,18 +663,19 @@ pub mod cases {
             );
 
             let changed = retitled(&draft, "Dashboard's edit");
-            let err = p
-                .put_agent(&changed, &Precondition::Matches(seen.etag()))
-                .await
-                .unwrap_err();
+            let err = refused(
+                format!("{how:?}: a replace of a GitOps agent"),
+                p.put_agent(&changed, &Precondition::Matches(seen.etag()))
+                    .await,
+            );
             assert!(
                 matches!(err, ObjectsError::NotOwned { .. }),
                 "{how:?}: {err:?}"
             );
-            let err = p
-                .put_agent(&changed, &Precondition::DoesNotExist)
-                .await
-                .unwrap_err();
+            let err = refused(
+                format!("{how:?}: a create over a GitOps agent"),
+                p.put_agent(&changed, &Precondition::DoesNotExist).await,
+            );
             assert!(
                 matches!(
                     &err,
@@ -470,12 +686,10 @@ pub mod cases {
                 ),
                 "{how:?}: a create over a name that exists: {err:?}"
             );
-            let err = p.delete_agent(&name, None).await.unwrap_err();
-            assert!(
-                matches!(err, ObjectsError::NotOwned { .. }),
-                "{how:?}: {err:?}"
+            let err = refused(
+                format!("{how:?}: a delete of a GitOps agent"),
+                p.delete_agent(&name, &seen.etag()).await,
             );
-            let err = p.delete_agent(&name, Some(&seen.etag())).await.unwrap_err();
             assert!(
                 matches!(err, ObjectsError::NotOwned { .. }),
                 "{how:?}: {err:?}"
@@ -490,26 +704,106 @@ pub mod cases {
             let draft = sample_agent(&name);
             p.seed_foreign(Kind::AgentConfig, &name, draft.config.clone(), how)
                 .await;
-            let err = p
-                .put_agent(&draft, &Precondition::DoesNotExist)
-                .await
-                .unwrap_err();
-            assert!(
-                matches!(
-                    &err,
-                    ObjectsError::NotOwned {
-                        kind: Kind::AgentConfig,
-                        ..
-                    }
-                ),
-                "{how:?}: {err:?}"
+            let err = refused(
+                format!("{how:?}: a create over a GitOps config"),
+                p.put_agent(&draft, &Precondition::DoesNotExist).await,
             );
+            assert!(is_not_owned(&err, Kind::AgentConfig), "{how:?}: {err:?}");
             assert_eq!(
                 p.get_agent(&name).await.unwrap(),
                 None,
                 "{how:?}: no service was made"
             );
         }
+    }
+
+    pub async fn a_pair_with_one_gitops_object_is_gitops<O: ObjectsUnderTest>(p: O) {
+        // The dashboard wrote both; then something else took one of them (Argo CD tracks the config only,
+        // or a GitOps author applies the service over it).
+        for which in [Kind::AgentService, Kind::AgentConfig] {
+            for how in [Foreign::Unlabelled, Foreign::ArgoTracked] {
+                let name = unique("mixed");
+                let draft = sample_agent(&name);
+                p.put_agent(&draft, &Precondition::DoesNotExist)
+                    .await
+                    .unwrap();
+                let spec = match which {
+                    Kind::AgentService => draft.service.clone(),
+                    _ => draft.config.clone(),
+                };
+                p.seed_foreign(which, &name, spec, how).await;
+
+                let seen = agent(&p, &name).await;
+                let (theirs, ours) = match which {
+                    Kind::AgentService => (&seen.service, config_of(&seen)),
+                    _ => (config_of(&seen), &seen.service),
+                };
+                assert_eq!(theirs.owner(), Owner::GitOps, "{which} {how:?}");
+                assert_eq!(ours.owner(), Owner::Dashboard, "{which} {how:?}");
+                assert_eq!(
+                    seen.owner(),
+                    Owner::GitOps,
+                    "{which} {how:?}: one is enough"
+                );
+
+                // A draft that would change both objects.
+                let changed = reconfigured(&retitled(&draft, "Dashboard's edit"), "edited-model");
+                let err = refused(
+                    format!("{how:?}: a replace of an agent whose {which} is GitOps's"),
+                    p.put_agent(&changed, &Precondition::Matches(seen.etag()))
+                        .await,
+                );
+                assert!(is_not_owned(&err, which), "{which} {how:?}: {err:?}");
+                let err = refused(
+                    format!("{how:?}: a delete of an agent whose {which} is GitOps's"),
+                    p.delete_agent(&name, &seen.etag()).await,
+                );
+                assert!(is_not_owned(&err, which), "{which} {how:?}: {err:?}");
+                assert_eq!(
+                    agent(&p, &name).await,
+                    seen,
+                    "{which} {how:?}: neither object was changed"
+                );
+            }
+        }
+    }
+
+    pub async fn a_create_after_a_half_failed_create_takes_the_config_over<O: ObjectsUnderTest>(
+        p: O,
+    ) {
+        // The first write of a create (the config) went through and the second failed: the dashboard's own
+        // config is there and no service. A retry of the create finishes the job.
+        let name = unique("half");
+        let draft = sample_agent(&name);
+        p.seed_orphan_config(&name, reconfigured(&draft, "the-failed-create").config)
+            .await;
+        assert_eq!(
+            p.get_agent(&name).await.unwrap(),
+            None,
+            "a config alone is not an agent"
+        );
+        assert!(!listed(&p, &name).await.contains(&name));
+
+        let made = p
+            .put_agent(&draft, &Precondition::DoesNotExist)
+            .await
+            .expect("a create after a create that failed halfway takes the config over");
+        assert_eq!(
+            config_of(&made).spec,
+            draft.config,
+            "the config is the new create's"
+        );
+        labelled_as_the_dashboards(&made.service);
+        labelled_as_the_dashboards(config_of(&made));
+        assert_eq!(agent(&p, &name).await, made);
+
+        // From then on it is an agent like any other.
+        p.put_agent(
+            &retitled(&draft, "After the retry"),
+            &Precondition::Matches(made.etag()),
+        )
+        .await
+        .unwrap();
     }
 
     pub async fn agents_are_listed_by_name_and_are_independent<O: ObjectsUnderTest>(p: O) {
@@ -526,7 +820,7 @@ pub mod cases {
         let mut sorted = names.clone();
         sorted.sort();
         assert_eq!(listed(&p, &prefix).await, sorted, "ordered by name");
-        p.delete_agent(&names[1], None).await.unwrap();
+        delete_agent_now(&p, &names[1]).await;
         let mut left: Vec<String> = names.iter().filter(|n| **n != names[1]).cloned().collect();
         left.sort();
         assert_eq!(
@@ -537,6 +831,162 @@ pub mod cases {
         for name in left {
             assert!(agent(&p, &name).await.config.is_some());
         }
+    }
+
+    pub async fn an_agent_whose_config_is_missing_is_listed_and_read<O: ObjectsUnderTest>(p: O) {
+        // The operator marks such a service `Blocked`, and the dashboard shows it: it is an agent.
+        let name = unique("blocked");
+        let service = service_naming(&name, &format!("{name}-gone"));
+        p.seed_foreign(
+            Kind::AgentService,
+            &name,
+            service.clone(),
+            Foreign::Unlabelled,
+        )
+        .await;
+        let read = p
+            .get_agent(&name)
+            .await
+            .unwrap()
+            .expect("a service whose config is missing is an agent");
+        assert_eq!(read.service.spec, service);
+        assert_eq!(read.config, None, "its config is not there");
+        let listed = p
+            .list_agents()
+            .await
+            .unwrap()
+            .into_iter()
+            .find(|a| a.name() == name)
+            .expect("a service whose config is missing is listed");
+        assert_eq!(listed, read);
+
+        // The config is the one the service names, whatever its name is.
+        let config = format!("{name}-config");
+        p.seed_foreign(
+            Kind::AgentConfig,
+            &config,
+            sample_agent(&name).config,
+            Foreign::Unlabelled,
+        )
+        .await;
+        let other = unique("names-another");
+        p.seed_foreign(
+            Kind::AgentService,
+            &other,
+            service_naming(&other, &config),
+            Foreign::Unlabelled,
+        )
+        .await;
+        assert_eq!(
+            agent(&p, &other).await.config.map(|c| c.name),
+            Some(config),
+            "the config of a service is the one it names"
+        );
+    }
+
+    pub async fn an_agent_whose_config_another_service_names_is_left_alone<O: ObjectsUnderTest>(
+        p: O,
+    ) {
+        // The dashboard never shares a config between two services; a GitOps service that names the
+        // config of a dashboard agent makes it shared, and the dashboard stops touching it.
+        let name = unique("shared-config");
+        let prefix = unique("sharer");
+        let (a, b) = (format!("{prefix}-a"), format!("{prefix}-b"));
+        let draft = sample_agent(&name);
+        let made = p
+            .put_agent(&draft, &Precondition::DoesNotExist)
+            .await
+            .unwrap();
+        for sharer in [&b, &a] {
+            p.seed_foreign(
+                Kind::AgentService,
+                sharer,
+                service_naming(sharer, &name),
+                Foreign::Unlabelled,
+            )
+            .await;
+        }
+
+        let changed = reconfigured(&retitled(&draft, "Dashboard's edit"), "edited-model");
+        let err = refused(
+            "a replace of an agent whose config another service names",
+            p.put_agent(&changed, &Precondition::Matches(made.etag()))
+                .await,
+        );
+        assert!(is_referenced_config(&err, &name, &[&a, &b]), "{err:?}");
+        let err = refused(
+            "a delete of an agent whose config another service names",
+            p.delete_agent(&name, &made.etag()).await,
+        );
+        assert!(is_referenced_config(&err, &name, &[&a, &b]), "{err:?}");
+        assert_eq!(
+            agent(&p, &name).await,
+            made,
+            "neither the service nor the config was changed or deleted"
+        );
+        for sharer in [&a, &b] {
+            assert_eq!(
+                agent(&p, sharer).await.config.map(|c| c.spec),
+                Some(draft.config.clone()),
+                "{sharer} still has its config"
+            );
+        }
+
+        // A create of a name whose config a service already waits for is refused too: it would give that
+        // service a config it did not get from its author.
+        let pending = unique("pending");
+        let waiting = unique("waiting");
+        p.seed_foreign(
+            Kind::AgentService,
+            &waiting,
+            service_naming(&waiting, &pending),
+            Foreign::Unlabelled,
+        )
+        .await;
+        let err = refused(
+            "a create of an agent whose config another service names",
+            p.put_agent(&sample_agent(&pending), &Precondition::DoesNotExist)
+                .await,
+        );
+        assert!(is_referenced_config(&err, &pending, &[&waiting]), "{err:?}");
+        assert_eq!(p.get_agent(&pending).await.unwrap(), None);
+
+        // Nor does a create take over the config a half-failed create left, when another service names it.
+        let orphan = unique("orphan");
+        let namer = unique("namer");
+        p.seed_orphan_config(&orphan, sample_agent(&orphan).config)
+            .await;
+        p.seed_foreign(
+            Kind::AgentService,
+            &namer,
+            service_naming(&namer, &orphan),
+            Foreign::Unlabelled,
+        )
+        .await;
+        let err = refused(
+            "a create over the config of a half-failed create that another service names",
+            p.put_agent(&sample_agent(&orphan), &Precondition::DoesNotExist)
+                .await,
+        );
+        assert!(is_referenced_config(&err, &orphan, &[&namer]), "{err:?}");
+        assert_eq!(p.get_agent(&orphan).await.unwrap(), None);
+
+        // It is the naming that stops the dashboard, not a mark on the config: once nobody else names it,
+        // the agent is the dashboard's again.
+        for sharer in [&a, &b] {
+            p.seed_foreign(
+                Kind::AgentService,
+                sharer,
+                service_naming(sharer, sharer),
+                Foreign::Unlabelled,
+            )
+            .await;
+        }
+        let saved = p
+            .put_agent(&changed, &Precondition::Matches(made.etag()))
+            .await
+            .expect("nobody else names the config any more");
+        assert_eq!(config_of(&saved).spec, changed.config);
     }
 
     pub async fn shared_objects_have_the_same_life<O: ObjectsUnderTest>(p: O) {
@@ -558,10 +1008,11 @@ pub mod cases {
             assert!(p.list_shared(kind).await.unwrap().contains(&made));
             assert_eq!(p.get_shared(kind, &unique("none")).await.unwrap(), None);
 
-            let err = p
-                .put_shared(kind, &draft, &Precondition::DoesNotExist)
-                .await
-                .unwrap_err();
+            let err = refused(
+                format!("{kind:?}: a second create of a shared object"),
+                p.put_shared(kind, &draft, &Precondition::DoesNotExist)
+                    .await,
+            );
             assert!(
                 matches!(&err, ObjectsError::AlreadyExists { kind: k, .. } if *k == kind.kind()),
                 "{kind:?}: {err:?}"
@@ -578,10 +1029,11 @@ pub mod cases {
             assert!(second.generation > made.generation);
 
             // The first administrator is late.
-            let err = p
-                .put_shared(kind, &draft, &Precondition::Matches(made.etag()))
-                .await
-                .unwrap_err();
+            let err = refused(
+                format!("{kind:?}: a replace of a shared object with a stale token"),
+                p.put_shared(kind, &draft, &Precondition::Matches(made.etag()))
+                    .await,
+            );
             assert!(
                 matches!(err, ObjectsError::PreconditionFailed),
                 "{kind:?}: {err:?}"
@@ -591,32 +1043,39 @@ pub mod cases {
                 Some(second.clone())
             );
 
-            let err = p
-                .put_shared(
+            let err = refused(
+                format!("{kind:?}: a replace of a shared object that is not there"),
+                p.put_shared(
                     kind,
                     &sample_shared(kind, &unique("sh")),
                     &Precondition::Matches(second.etag()),
                 )
-                .await
-                .unwrap_err();
+                .await,
+            );
             assert!(
                 matches!(err, ObjectsError::NotFound { .. }),
                 "{kind:?}: {err:?}"
             );
 
-            let err = p
-                .delete_shared(kind, &name, Some(&made.etag()))
-                .await
-                .unwrap_err();
+            let err = refused(
+                format!("{kind:?}: a delete of a shared object with a stale token"),
+                p.delete_shared(kind, &name, &made.etag()).await,
+            );
             assert!(
                 matches!(err, ObjectsError::PreconditionFailed),
                 "{kind:?}: {err:?}"
             );
-            p.delete_shared(kind, &name, Some(&second.etag()))
-                .await
-                .unwrap();
+            assert_eq!(
+                p.get_shared(kind, &name).await.unwrap(),
+                Some(second.clone()),
+                "{kind:?}: the stale delete changed nothing"
+            );
+            p.delete_shared(kind, &name, &second.etag()).await.unwrap();
             assert_eq!(p.get_shared(kind, &name).await.unwrap(), None);
-            let err = p.delete_shared(kind, &name, None).await.unwrap_err();
+            let err = refused(
+                format!("{kind:?}: a delete of a shared object that is not there"),
+                p.delete_shared(kind, &name, &second.etag()).await,
+            );
             assert!(
                 matches!(err, ObjectsError::NotFound { .. }),
                 "{kind:?}: {err:?}"
@@ -668,23 +1127,28 @@ pub mod cases {
 
                 let mut changed = draft.clone();
                 changed.spec["title"] = json!("Dashboard's edit");
-                let err = p
-                    .put_shared(kind, &changed, &Precondition::Matches(seen.etag()))
-                    .await
-                    .unwrap_err();
+                let err = refused(
+                    format!("{kind:?} {how:?}: a replace of a GitOps shared object"),
+                    p.put_shared(kind, &changed, &Precondition::Matches(seen.etag()))
+                        .await,
+                );
                 assert!(
                     matches!(err, ObjectsError::NotOwned { .. }),
                     "{kind:?} {how:?}: {err:?}"
                 );
-                let err = p
-                    .put_shared(kind, &changed, &Precondition::DoesNotExist)
-                    .await
-                    .unwrap_err();
+                let err = refused(
+                    format!("{kind:?} {how:?}: a create over a GitOps shared object"),
+                    p.put_shared(kind, &changed, &Precondition::DoesNotExist)
+                        .await,
+                );
                 assert!(
                     matches!(err, ObjectsError::AlreadyExists { .. }),
                     "{kind:?} {how:?}: {err:?}"
                 );
-                let err = p.delete_shared(kind, &name, None).await.unwrap_err();
+                let err = refused(
+                    format!("{kind:?} {how:?}: a delete of a GitOps shared object"),
+                    p.delete_shared(kind, &name, &seen.etag()).await,
+                );
                 assert!(
                     matches!(err, ObjectsError::NotOwned { .. }),
                     "{kind:?} {how:?}: {err:?}"
@@ -745,7 +1209,10 @@ pub mod cases {
             .await;
 
             let before = p.get_shared(kind, &shared).await.unwrap().unwrap();
-            let err = p.delete_shared(kind, &shared, None).await.unwrap_err();
+            let err = refused(
+                format!("{kind:?}: a delete of a shared object that agents name"),
+                p.delete_shared(kind, &shared, &before.etag()).await,
+            );
             let ObjectsError::Referenced { by, kind: k, name } = &err else {
                 panic!("{kind:?}: {err:?}")
             };
@@ -758,7 +1225,7 @@ pub mod cases {
             );
             assert_eq!(
                 p.get_shared(kind, &shared).await.unwrap(),
-                Some(before),
+                Some(before.clone()),
                 "{kind:?}: still there"
             );
 
@@ -769,7 +1236,10 @@ pub mod cases {
                     .await
                     .unwrap();
             }
-            let err = p.delete_shared(kind, &shared, None).await.unwrap_err();
+            let err = refused(
+                format!("{kind:?}: a delete of a shared object that a GitOps agent names"),
+                p.delete_shared(kind, &shared, &before.etag()).await,
+            );
             let ObjectsError::Referenced { by, .. } = &err else {
                 panic!("{kind:?}: {err:?}")
             };
@@ -799,12 +1269,13 @@ pub mod cases {
             p.put_agent(&draft, &Precondition::DoesNotExist)
                 .await
                 .unwrap();
+            let token = p.get_shared(kind, &shared).await.unwrap().unwrap().etag();
             assert!(matches!(
-                p.delete_shared(kind, &shared, None).await,
+                p.delete_shared(kind, &shared, &token).await,
                 Err(ObjectsError::Referenced { .. })
             ));
-            p.delete_agent(&name, None).await.unwrap();
-            p.delete_shared(kind, &shared, None).await.unwrap();
+            delete_agent_now(&p, &name).await;
+            delete_shared_now(&p, kind, &shared).await;
             assert_eq!(p.get_shared(kind, &shared).await.unwrap(), None);
         }
     }
@@ -916,6 +1387,8 @@ pub mod cases {
             (super::secret("a2a"), "A2A_BEARER_TOKENS"),
         ] {
             p.plant_secret_value(&secret, key, SECRET_VALUE).await;
+            // The keys the agent names are offered, so that an offer is among the answers a value could reach.
+            p.offer(&secret, key, "es-sample").await;
         }
         let shared = unique("sh");
         let model = sample_shared(SharedKind::Model, &shared);
@@ -930,13 +1403,18 @@ pub mod cases {
             .put_shared(SharedKind::Model, &model, &Precondition::DoesNotExist)
             .await
             .unwrap();
+        let offered = p.offered_secrets().await.unwrap();
+        assert!(
+            offered.iter().any(|o| o.secret == super::secret("models")),
+            "the case offers a key, so that there is an offer to read: {offered:?}"
+        );
         let everything = serde_json::to_string(&(
             made,
             model,
             p.get_agent(&name).await.unwrap(),
             p.list_agents().await.unwrap(),
             p.list_shared(SharedKind::Model).await.unwrap(),
-            p.offered_secrets().await.unwrap(),
+            offered,
         ))
         .unwrap();
         assert!(
@@ -965,13 +1443,27 @@ pub mod cases {
                 .unwrap_err()
         ));
         assert!(is_unavailable(
-            &off.delete_agent(&name, None).await.unwrap_err()
+            &off.delete_agent(&name, &ETag::new("1")).await.unwrap_err()
         ));
         assert!(is_unavailable(
             &off.list_shared(SharedKind::Model).await.unwrap_err()
         ));
         assert!(is_unavailable(
             &off.get_shared(SharedKind::ToolServer, &name)
+                .await
+                .unwrap_err()
+        ));
+        assert!(is_unavailable(
+            &off.put_shared(
+                SharedKind::Model,
+                &sample_shared(SharedKind::Model, &name),
+                &Precondition::DoesNotExist
+            )
+            .await
+            .unwrap_err()
+        ));
+        assert!(is_unavailable(
+            &off.delete_shared(SharedKind::Model, &name, &ETag::new("1"))
                 .await
                 .unwrap_err()
         ));
@@ -990,14 +1482,20 @@ macro_rules! agent_objects_conformance {
             a_second_create_is_refused_and_changes_nothing,
             a_replace_with_the_current_token_changes_the_agent,
             a_stale_token_is_refused_and_nothing_changes,
+            a_refused_write_changes_neither_object,
             a_change_of_either_object_makes_the_token_stale,
+            a_token_is_for_the_object_it_was_read_from,
             a_replace_of_an_agent_that_is_not_there_is_not_found,
             a_body_that_is_not_acceptable_is_invalid_with_fields,
             an_agent_is_deleted_with_its_config,
             a_delete_holds_the_token_it_is_given,
             a_gitops_agent_is_read_and_never_written,
             a_gitops_config_blocks_the_create_of_its_name,
+            a_pair_with_one_gitops_object_is_gitops,
+            a_create_after_a_half_failed_create_takes_the_config_over,
             agents_are_listed_by_name_and_are_independent,
+            an_agent_whose_config_is_missing_is_listed_and_read,
+            an_agent_whose_config_another_service_names_is_left_alone,
             shared_objects_have_the_same_life,
             shared_objects_are_listed_by_name,
             a_gitops_shared_object_is_read_and_never_written,

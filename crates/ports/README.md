@@ -55,11 +55,11 @@ trait AgentObjects: Send + Sync {                       // D4: the Platform API'
     async fn list_agents(&self) -> Result<Vec<Agent>, ObjectsError>;
     async fn get_agent(&self, name: &str) -> Result<Option<Agent>, ObjectsError>;
     async fn put_agent(&self, draft: &AgentDraft, when: &Precondition) -> Result<Agent, ObjectsError>;
-    async fn delete_agent(&self, name: &str, when: Option<&ETag>) -> Result<(), ObjectsError>;
+    async fn delete_agent(&self, name: &str, when: &ETag) -> Result<(), ObjectsError>;
     async fn list_shared(&self, kind: SharedKind) -> Result<Vec<Stored>, ObjectsError>;   // Model | ToolServer
     async fn get_shared(&self, kind: SharedKind, name: &str) -> Result<Option<Stored>, ObjectsError>;
     async fn put_shared(&self, kind: SharedKind, draft: &SharedDraft, when: &Precondition) -> Result<Stored, ObjectsError>;
-    async fn delete_shared(&self, kind: SharedKind, name: &str, when: Option<&ETag>) -> Result<(), ObjectsError>;
+    async fn delete_shared(&self, kind: SharedKind, name: &str, when: &ETag) -> Result<(), ObjectsError>;
     async fn offered_secrets(&self) -> Result<Vec<OfferedSecret>, ObjectsError>;
 }
 trait Authenticator: Send + Sync {                      // D4: a bearer token to a person
@@ -137,8 +137,8 @@ depending on `aap-api` and so on `kube`, would give every provider that depends 
 | `Stored { kind, namespace, name, version, generation, labels, annotations, spec, status }` | One object as the server holds it, reduced to what the dashboard needs. `status` is the operator's: the dashboard never writes it |
 | `Agent { service, config: Option<Stored> }` | An agent is its `AgentService` and the `AgentConfig` that service names (`spec.configRef.name`); the config is `None` when it is not there. One unit: read, saved and deleted together, with one `ETag` |
 | `AgentDraft { name, service, config }`, `SharedDraft { name, spec }` | What the dashboard writes: the two `spec`s of an agent (both objects are named `name`; `service.configRef.name` must say so), or one. Labels are the implementation's |
-| `Precondition::{DoesNotExist, Matches(ETag)}` | `If-None-Match: *` and `If-Match`. **There is no unconditional write** |
-| `ResourceVersion`, `ETag` | The `resourceVersion` of one object (opaque), and the token of **every** object of a unit, derived by `Stored::etag` and `Agent::etag` (length-prefixed: no two pairs of versions spell one token). An object that is not there is part of the token too |
+| `Precondition::{DoesNotExist, Matches(ETag)}` | `If-None-Match: *` and `If-Match`. **There is no unconditional write, and no unconditional delete**: `delete_agent` and `delete_shared` take the `ETag` the caller read, so that a delete never removes what somebody changed since the list was drawn (the router answers a `DELETE` without `If-Match` itself) |
+| `ResourceVersion`, `ETag` | The `resourceVersion` of one object (opaque), and the token of **every** object of a unit, derived by `Stored::etag` and `Agent::etag` from the **kind, the name and the version** of each (length-prefixed: no two units spell one token), so a token read from one object is the token of no other, whatever the backend's versions are. An object that is not there is part of the token too |
 | `Owner::{Dashboard, GitOps}` | AD-031, in `Owner::of(labels, annotations)`: the dashboard owns an object with `app.kubernetes.io/managed-by: dashboard.agents.vymalo.com` and **no** `argocd.argoproj.io/tracking-id`. Anything else is GitOps's to the dashboard: read-only. On the wire `dashboard` and `gitops`, the `managedBy` of `GET /v1/agents` |
 | `OfferedSecret { secret, key, external_secret }` | A Secret key an agent may name (AD-030). **No field for a value**, so nothing that holds one can leak a secret |
 | `FieldError { kind, path, message }` | A mistake with its field: the **kind** of the object and the path from it (`spec.access.audience[2]`), typed so that the forms map it without parsing a sentence, and so that an implementation (D5) produces it from the server's answer. `Display` is `<Kind> <path>: <message>`, the words of `aap-domain`'s issues |
@@ -147,25 +147,48 @@ depending on `aap-api` and so on `kube`, would give every provider that depends 
 
 ### The contract of `AgentObjects`
 
-* **Ownership (AD-031).** A write or a delete of an object that is not `Owner::Dashboard` is `NotOwned`, before anything changes. A
-  write adds the label to what it writes (and keeps the labels the object has). Reads return every object, the dashboard's or not.
-* **No lost update.** A create needs the `AgentService` to be absent (`AlreadyExists`; a dashboard-owned `AgentConfig` of the
+* **Ownership (AD-031).** A write or a delete of an object that is not `Owner::Dashboard` is `NotOwned`, before anything changes. **An agent is
+  the dashboard's only when both its objects are**: one GitOps object of the pair makes a replace and a delete `NotOwned`, naming that object's kind.
+  A write adds the label to what it writes (and keeps the labels the object has). Reads return every object, the dashboard's or not.
+* **A refused write changes nothing.** Every refusal (`PreconditionFailed`, `AlreadyExists`, `NotFound`, `NotOwned`, `Referenced`, `Invalid`, a `Conflict` the
+  backend states) leaves **both objects of an agent exactly as they were**: every precondition of the pair is checked before the first of them is written. A refusal
+  that is about the service must not have written the config, and the reverse; the cases `a_refused_write_changes_neither_object` and the suites that
+  fail a store that writes one half and then refuses hold it.
+* **No lost update, on a write and on a delete.** A create needs the `AgentService` to be absent (`AlreadyExists`; a dashboard-owned `AgentConfig` of the
   name, left by a create that failed halfway, is taken over; a GitOps one is `NotOwned`). A replace of what is not there is `NotFound`
-  (a 404 rather than a 412: the agent was deleted, which is more to say). A replace or a delete with a stale token is
-  `PreconditionFailed` and changes nothing.
+  (a 404 rather than a 412: the agent was deleted, which is more to say). A replace or a delete with a stale token is `PreconditionFailed` and changes nothing.
+  **A delete carries the token too**: an administrator who deletes an agent that somebody saved a minute ago would remove their work unseen, so there is no
+  unconditional delete (it was `Option<&ETag>`, with `None` meaning "whatever is there"; the router (D7) answers a `DELETE` with no `If-Match`, as it answers a `PUT` with no
+  precondition, and a client with no token reads first).
 * **An agent is two objects.** Written `AgentConfig` first, then `AgentService` (the operator never sees a service whose config is
   not there yet); deleted in the other order. The config of an agent has the agent's name, and a draft whose `configRef` says otherwise is
   `Invalid`.
-* **The token is the `resourceVersion`s**, as §60a says, so any write to either object makes an old token stale, **the operator's
+* **A config is one agent's.** The dashboard never shares an `AgentConfig` between two services (§60a, decision (f) of D4). When **another** `AgentService` names the
+  config the dashboard would write, take over or delete (its `configRef.name` is the agent's name; a GitOps service can name any), the replace, the create (also of a
+  config that is not there yet, and the takeover of one a half-failed create left) and the delete are all `Referenced { kind: AgentConfig, name, by }`, with the names of
+  those services in byte order. **A delete refuses whole**: neither the service nor the config is deleted. (The other choice, deleting the service and keeping the
+  config, leaves a dashboard-labelled config that no screen shows.) `NotOwned` would be wrong: the config may be the dashboard's.
+* **The token is the kinds, names and `resourceVersion`s of the objects**, as §60a says (the `resourceVersion`s), so any write to either object makes an old token stale, **the operator's
   status writes included** (a Kubernetes API server gives an object a new `resourceVersion` when its status changes: *unverified* here,
   D5's cluster test shows it). The router answers `412` and the client reads again. Whether a save that changes nothing moves the token is the
-  backend's (`MemoryObjects` keeps it, as a server-side apply of an unchanged object is believed to: *unverified*), and callers must not depend on it.
+  backend's (`MemoryObjects` keeps it, as a server-side apply of an unchanged object is believed to: *unverified*), and callers must not depend on it. `MemoryObjects` numbers the
+  versions **per object** (kept after a delete), so that two objects often share one, which is what makes the token's kind and name testable.
 * **The status is the operator's.** A write never touches it.
 * **References are checked on a delete, not on a write.** An agent may name a model that is not there (the operator marks it
   `ConfigInvalid`, naming it, and the API validates with `aap-domain` before it writes). Deleting a shared object some agent names is
   `Referenced { by }`: the agents (their `AgentService`s) that name it, once each, in byte order, **GitOps's included**.
 * **Secrets.** `offered_secrets` lists the `data[].secretKey` of every ExternalSecret that carries the offer label, under its
-  `target.name`, ordered. It reads no Secret and has no right to; the cases plant values in the backend and fail when one reaches an answer.
+  `target.name`. It reads no Secret and has no right to; the cases plant values in the backend and fail when one reaches an answer.
+* **Ownership is read from two marks, nothing else.** `Owner::of` reads the dashboard's `app.kubernetes.io/managed-by` label and Argo CD's
+  `argocd.argoproj.io/tracking-id` annotation. It does **not** detect Flux (`kustomize.toolkit.fluxcd.io/…` labels) or Argo CD set to label tracking
+  (`app.kubernetes.io/instance`): an object that has the dashboard's label and that one of those now syncs is still read as the dashboard's, and a save would fight it. An object
+  **without** the label is GitOps's whoever applied it. Whoever hands a dashboard object to such a tool removes the label first (AD-031, *Adopt*, D16).
+
+**What `objects-kubernetes` (D5) must do** about the atomicity above, since a Kubernetes API server writes one object at a time: before the first write, **read both objects and compare the token,
+the owners and the services that name the config**; run both server-side applies with `dryRun=All`, each with the `resourceVersion` it was read at, so that a stale
+token on either object and a rule of the CRDs (a `422` on the service, which would come *after* the config was applied) are refused while nothing has changed; then apply the
+config and the service for real, each with its `resourceVersion`. The window that is left (somebody changes the service between the two real applies) leaves the config written and
+answers `PreconditionFailed`; a retry reads again and succeeds, and the create is retried over the config it left (taken over). That is the one place a refusal changes something, and D5's tests show it.
 
 The ownership of an object is the one thing a write changes and a person does not see, so here is its lifecycle (AD-031; the **Adopt** action is slice D16's,
 the takeover of `coder` and `chat`, and is not built):
@@ -193,7 +216,7 @@ Each variant has one status; `tests/objects.rs` holds this table with an exhaust
 |---|---|---|---|
 | `AlreadyExists` | 409 | `Invalid` | a create found the name |
 | `NotOwned` | 409 | `Invalid` | the object is GitOps's |
-| `Referenced { by }` | 409 | `Invalid` | agents still name the shared object; the body names them |
+| `Referenced { by }` | 409 | `Invalid` | agents still name the shared object, or another service names the config of the agent being written or deleted; the body names them |
 | `Conflict` | 409 | `Conflict` | another manager owns a field (a server-side apply conflict) |
 | `NotFound` | 404 | `NotFound` | a replace or a delete found nothing |
 | `PreconditionFailed` | 412 | `Conflict` | the token is stale: somebody saved first |
@@ -258,7 +281,7 @@ Off by default (the controller and the providers depend on the traits only). Wit
 
 * **Conformance macros**, in the style of `adam-store-testkit`:
   `runtime_provider_conformance!(make)` (14 cases), `store_provisioner_conformance!(make)` (7),
-  `agent_directory_conformance!(make)` (6), `agent_objects_conformance!(make)` (22, D4) and
+  `agent_directory_conformance!(make)` (6), `agent_objects_conformance!(make)` (28, D4) and
   `authenticator_conformance!(make)` (8, D4). `make` is a path to `async fn() -> Option<T>`; `None` skips
   the suite, and `AAP_TEST_REQUIRE_BACKEND=1` turns the skip into a failure (CI sets it for the suites that
   need a cluster). The macros expand to `#[tokio::test]`, so the crate that uses them needs `tokio` with
@@ -270,7 +293,8 @@ Off by default (the controller and the providers depend on the traits only). Wit
   fails if it is anywhere in that text or in an issue message. It is as honest as `materialised`: a
   Kubernetes provider feeds it the real objects it applied, minus `secretKeyRef`.
 * `ObjectsUnderTest` (D4) is what the objects cases need of a backend beyond the port: `seed_foreign` (an object the dashboard does
-  not own, `Foreign::Unlabelled` or `Foreign::ArgoTracked`), `set_status` (as the operator), `offer`, `decline` (an ExternalSecret
+  not own, `Foreign::Unlabelled` or `Foreign::ArgoTracked`; it takes over an object of that kind and name that is there, which is how a case makes an agent whose two objects have two owners),
+  `seed_orphan_config` (a dashboard-owned config and no service: what a create that failed halfway leaves), `set_status` (as the operator), `offer`, `decline` (an ExternalSecret
   without the label) and `plant_secret_value` (a Secret that holds a value the port must never read), and, with defaults, `unreachable` (the
   same backend made unreachable) and `refused_spec` (a `spec` the backend refuses; a backend with rules of its own, the CEL of the
   CRDs, gives one that breaks one, and the case checks that the 422 names its field). `AuthenticatorUnderTest` is `issue(subject,
@@ -300,7 +324,7 @@ aap_ports::runtime_provider_conformance!(make);
 
 `cargo test -p aap-ports`:
 
-* `tests/memory.rs`: the seven suites against the in-memory implementations (48 cases, then 22 for `MemoryObjects` and 8 for
+* `tests/memory.rs`: the seven suites against the in-memory implementations (48 cases, then 28 for `MemoryObjects` and 8 for
   `MemoryAuthenticator`).
 * `tests/contract.rs`: `RuntimeSpec::check` names each broken invariant, a spec round-trips through
   JSON, every error has the class that decides retrying, the suites **fail** what they must (a provider
@@ -308,12 +332,16 @@ aap_ports::runtime_provider_conformance!(make);
   unreachable backend, a missing CloudNativePG API, `DirectoryEntry::listed`, a directory that has not
   synced.
 * `tests/objects.rs` (D4): every `ObjectsError` has one status and a class (an exhaustive `match`); the ownership rule as a table
-  (the label's value is compared whole; Argo's annotation beats the label); the token is made of every version and no two pairs of versions
-  spell one; the references of a config read from JSON; **the samples of the testkit are the shape of the real CRDs** (they are
+  (the label's value is compared whole; Argo's annotation beats the label); the token is made of every version, and of the kind and name of
+  each object, and no two units spell one; the references of a config read from JSON; **the samples of the testkit are the shape of the real CRDs** (they are
   decoded as `AgentServiceSpec`, `AgentConfigSpec`, `ModelEndpointSpec` and `ToolProviderSpec`, with nothing lost); a principal is a set;
-  and **the suites fail what they must**: a store that accepts a stale token, writes a GitOps agent or shared object, deletes what agents
-  name, does not label what it writes, or offers a value; an authenticator that calls unavailable keys invalid, echoes the token,
-  calls an empty token invalid or matches permissions loosely.
+  and **the suites fail what they must**, one test per fault and per call, each at the assertion that names the call (a case stops at its first failure, so
+  a fault that shared a test with another would be hidden by it): a store that accepts a stale token on a replace, a delete, a shared replace or a shared
+  delete; one that compares only the service or only the config of the token, or accepts the token of another agent or kind; one that writes the config or the service and
+  then refuses; one that replaces, deletes or creates over a GitOps agent, config or shared object, or looks at the owner of only one object of the pair; one that
+  deletes what agents name, or replaces, deletes or creates an agent whose config another service names; one whose orphan config blocks a create, or whose list or get
+  leaves out an agent without a config; one that does not label what it writes, or offers or reads a value. For the authenticator: unavailable keys called invalid, the
+  token in an error, an empty token called invalid, permissions matched loosely.
 
 The in-memory implementations are instant: they cannot show that a real provider's `watch` is timely
 or that its `status` reflects pod conditions. Those belong to S4's envtest harness, which runs the same

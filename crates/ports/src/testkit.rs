@@ -116,13 +116,23 @@ pub enum Foreign {
 /// no ExternalSecret, and reads no Secret).
 pub trait ObjectsUnderTest: crate::AgentObjects + 'static {
     /// Put an object in the backend that the dashboard does not own, as `how` says. A Kubernetes backend
-    /// applies it with another field manager.
+    /// applies it with another field manager. **An object of that kind and name that is there is taken over
+    /// by it** (the cases use that to make an agent whose two objects have two owners).
     fn seed_foreign(
         &self,
         kind: crate::Kind,
         name: &str,
         spec: serde_json::Value,
         how: Foreign,
+    ) -> impl Future<Output = ()> + Send;
+
+    /// What a create of an agent that failed between its two writes leaves behind: an `AgentConfig` named
+    /// `name`, with `spec`, owned by the dashboard (its label, no tracking annotation), and no
+    /// `AgentService`. A Kubernetes backend applies it with the dashboard's field manager.
+    fn seed_orphan_config(
+        &self,
+        name: &str,
+        spec: serde_json::Value,
     ) -> impl Future<Output = ()> + Send;
 
     /// Write `status` as the operator would.

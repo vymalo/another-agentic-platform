@@ -107,9 +107,11 @@ impl ResourceVersion {
 }
 
 /// The optimistic-concurrency token of what a caller read (§60a: "the `resourceVersion` of both objects
-/// as an `ETag`"). It is made from the versions of **every object** of the unit, so a change of either
-/// the `AgentService` or the `AgentConfig` makes the old token stale. Opaque to a caller, who echoes it
-/// back in `If-Match` and never looks inside; the Platform API quotes it as a strong `ETag`.
+/// as an `ETag`"). It is made from the **kind, the name and the version of every object** of the unit, so
+/// that a change of either the `AgentService` or the `AgentConfig` makes the old token stale, and so that a
+/// token read from one object is never the token of another (a backend whose versions are per object, or
+/// that reuses one, cannot make two objects share a token). Opaque to a caller, who echoes it back in
+/// `If-Match` and never looks inside; the Platform API quotes it as a strong `ETag`.
 ///
 /// It is derived, never stored, by [`Stored::etag`] and [`Agent::etag`]: the encoding is one definition
 /// here, so every implementation agrees on what "the same" means.
@@ -127,19 +129,23 @@ impl ETag {
         &self.0
     }
 
-    /// Length-prefixed, so no pair of versions can spell the token of another pair; an object that is not
-    /// there is `-`, which no length-prefixed version is.
-    fn of(versions: &[Option<&ResourceVersion>]) -> Self {
+    /// Length-prefixed, so no unit can spell the token of another; an object that is not there is `-`, which
+    /// no part with a kind is.
+    fn of(parts: &[Option<&Stored>]) -> Self {
         let mut token = String::new();
-        for (i, v) in versions.iter().enumerate() {
+        for (i, part) in parts.iter().enumerate() {
             if i > 0 {
                 token.push('.');
             }
-            match v {
-                Some(v) => {
-                    token.push_str(&v.as_str().len().to_string());
-                    token.push(':');
-                    token.push_str(v.as_str());
+            match part {
+                Some(o) => {
+                    let (name, version) = (o.name.as_str(), o.version.as_str());
+                    token.push_str(&format!(
+                        "{}:{}:{name}:{}:{version}",
+                        o.kind,
+                        name.len(),
+                        version.len()
+                    ));
                 }
                 None => token.push('-'),
             }
@@ -151,8 +157,16 @@ impl ETag {
 /// Who may write an object (AD-031): **one owner per object**.
 ///
 /// The dashboard owns an object when it carries the label [`MANAGED_BY_LABEL`] with the value
-/// [`MANAGED_BY_DASHBOARD`] **and** no Argo CD tracking annotation. Everything else is GitOps's for the
-/// dashboard, whoever really applied it (Argo CD, Flux, `kubectl`): read-only, with View YAML.
+/// [`MANAGED_BY_DASHBOARD`] **and** no Argo CD tracking annotation ([`ARGO_TRACKING_ANNOTATION`]). Everything
+/// else is GitOps's for the dashboard: read-only, with View YAML.
+///
+/// **That is all it reads.** The owner is read from the dashboard's own label and from Argo CD's tracking
+/// annotation, not detected from whoever applied the object: a Flux label (`kustomize.toolkit.fluxcd.io/…`) and
+/// Argo CD's label-based tracking (`app.kubernetes.io/instance`) are not looked at. An object **without** the
+/// dashboard's label is GitOps's whoever applied it (Argo CD, Flux, `kubectl`); an object **with** the label that
+/// something other than Argo CD's default tracking now syncs (a Flux `Kustomization` that adopted it, Argo CD
+/// set to label tracking) is still read as the dashboard's, and a save would fight it. Whoever adopts a
+/// dashboard object into such a tool removes the label first (AD-031, *Adopt*).
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum Owner {
@@ -211,9 +225,9 @@ impl Stored {
         Owner::of(&self.labels, &self.annotations)
     }
 
-    /// The token of this object alone (a shared object's).
+    /// The token of this object alone (a shared object's): its kind, name and version.
     pub fn etag(&self) -> ETag {
-        ETag::of(&[Some(&self.version)])
+        ETag::of(&[Some(self)])
     }
 }
 
@@ -244,12 +258,9 @@ impl Agent {
         }
     }
 
-    /// The token of the two objects: stale when either changed.
+    /// The token of the two objects: stale when either changed, and the token of no other agent.
     pub fn etag(&self) -> ETag {
-        ETag::of(&[
-            Some(&self.service.version),
-            self.config.as_ref().map(|c| &c.version),
-        ])
+        ETag::of(&[Some(&self.service), self.config.as_ref()])
     }
 }
 
@@ -375,7 +386,7 @@ pub fn config_name(service: &Value) -> Option<&str> {
 }
 
 /// Why a call of [`AgentObjects`] failed. **Each variant has one status in the Platform API** (the table
-/// is in the README of this crate, and `tests/contract.rs` holds it): the router maps by variant.
+/// is in the README of this crate, and `tests/objects.rs` holds it): the router maps by variant.
 #[derive(Debug, thiserror::Error)]
 pub enum ObjectsError {
     /// A create found the object (or, for an agent, its `AgentService`). `409`.
@@ -407,8 +418,11 @@ pub enum ObjectsError {
         /// Its name.
         name: String,
     },
-    /// A delete of a shared object that agents still name. `409`, with `by`, the names of those agents
-    /// (their `AgentService`s), in byte order and once each.
+    /// The object is named by agents that are not the one being written: a delete of a shared object that
+    /// agents still name, or a write or a delete of an agent whose `AgentConfig` another `AgentService`
+    /// names (the dashboard never shares a config between two services, so it does not touch one that is
+    /// shared: `kind` is then [`Kind::AgentConfig`]). `409`, with `by`, the names of those agents (their
+    /// `AgentService`s), in byte order and once each.
     #[error("{kind} {name} is still used by {}", by.join(", "))]
     Referenced {
         /// The shared kind.
@@ -456,17 +470,41 @@ impl Classify for ObjectsError {
 /// What every implementation does, and `agent_objects_conformance!` holds:
 ///
 /// * **Ownership (AD-031).** A write or a delete of an object that is not [`Owner::Dashboard`] is
-///   [`ObjectsError::NotOwned`], before anything is changed. A write adds [`MANAGED_BY_LABEL`] to what it
-///   writes. A read returns every object, the dashboard's or not.
-/// * **No lost update.** Every write has a [`Precondition`]; a stale [`ETag`] is
-///   [`ObjectsError::PreconditionFailed`] and nothing is changed.
+///   [`ObjectsError::NotOwned`], before anything is changed. An agent is the dashboard's only when **both**
+///   its objects are, so one GitOps object of the pair makes a write or a delete of the agent `NotOwned`
+///   (naming that object's kind). A write adds [`MANAGED_BY_LABEL`] to what it writes. A read returns every
+///   object, the dashboard's or not.
+/// * **A refused write changes nothing.** A write or a delete that is refused ([`ObjectsError::PreconditionFailed`],
+///   [`ObjectsError::AlreadyExists`], [`ObjectsError::NotFound`], [`ObjectsError::NotOwned`],
+///   [`ObjectsError::Referenced`], [`ObjectsError::Invalid`] and [`ObjectsError::Conflict`] for a refusal the
+///   backend states) leaves **both** objects of an agent exactly as they were: every precondition of the pair
+///   is checked before the first of them is written. (What an implementation cannot decide before it writes, a
+///   failure of the second object after the first is written, is the backend's and is described below.)
+/// * **No lost update.** Every write and every delete has a precondition ([`Precondition`] for a write, an
+///   [`ETag`] for a delete; there is no unconditional one: two administrators must never overwrite or delete
+///   each other's work silently, §60a, *Revisions*). A stale [`ETag`] is [`ObjectsError::PreconditionFailed`].
+///   A token read from one object is the token of no other ([`ETag`] binds kind and name).
 /// * **The status is the operator's.** A write never touches it.
 /// * **References are not checked on a write** (the operator marks an agent `ConfigInvalid` naming a
 ///   missing referent, and the API validates before it writes); they are checked on a **delete**: a shared
 ///   object some agent names is [`ObjectsError::Referenced`].
+/// * **A config is one agent's.** The dashboard never shares an `AgentConfig` between two services. When
+///   another `AgentService` than the agent's own names the config the dashboard would write, take over or
+///   delete (`configRef.name` is the agent's name), the write, the create and the delete are all
+///   [`ObjectsError::Referenced`] with `kind: AgentConfig` and the names of those services; **a delete
+///   refuses whole** (neither object is deleted), and a create does not take the config over.
 /// * **An agent is two objects, written in order**: the `AgentConfig`, then the `AgentService` (the
 ///   operator never sees a service whose config is not there yet); deleted in the other order. A write
 ///   that fails between the two does not leave a config that a retry of the create cannot take over.
+///
+/// **What an implementation over an API server (D5) must do**, since two objects cannot be written
+/// atomically there: before the first write, read both objects and compare the token and the owners;
+/// run both server-side applies with `dryRun=All` and each object's `resourceVersion` in the apply, so
+/// that a stale token on either object and a rule of the CRDs (a `422`) are refused while nothing has
+/// changed; then apply the config and the service, each with the `resourceVersion` it was read at. The
+/// window that remains (the service changed by somebody else between the two applies) leaves the config
+/// written and answers [`ObjectsError::PreconditionFailed`]; a retry reads again and succeeds, and the
+/// README of this crate says so.
 pub trait AgentObjects: Send + Sync {
     /// Every agent of the namespace, ordered by name.
     ///
@@ -488,15 +526,17 @@ pub trait AgentObjects: Send + Sync {
     /// Create or replace both objects of an agent and return what was written, with the new tokens.
     ///
     /// A create ([`Precondition::DoesNotExist`]) needs **the `AgentService` to be absent**; a
-    /// dashboard-owned `AgentConfig` of that name, left by a create that failed halfway, is taken over.
-    /// A replace ([`Precondition::Matches`]) needs the agent to exist with that token.
+    /// dashboard-owned `AgentConfig` of that name, left by a create that failed halfway, is taken over
+    /// (unless another service names it: [`ObjectsError::Referenced`]). A replace ([`Precondition::Matches`])
+    /// needs the agent to exist with that token.
     ///
     /// # Errors
     ///
     /// [`ObjectsError::AlreadyExists`] (create), [`ObjectsError::NotFound`] (replace),
-    /// [`ObjectsError::PreconditionFailed`], [`ObjectsError::NotOwned`], [`ObjectsError::Invalid`] (a body
-    /// that is not an object, a `configRef` that is not the agent's name, a rule the backend states),
-    /// [`ObjectsError::Conflict`], [`ObjectsError::Unavailable`].
+    /// [`ObjectsError::PreconditionFailed`], [`ObjectsError::NotOwned`], [`ObjectsError::Referenced`] (another
+    /// service names the config), [`ObjectsError::Invalid`] (a body that is not an object, a `configRef` that
+    /// is not the agent's name, a rule the backend states), [`ObjectsError::Conflict`],
+    /// [`ObjectsError::Unavailable`]. None of them changes either object.
     fn put_agent(
         &self,
         draft: &AgentDraft,
@@ -504,16 +544,21 @@ pub trait AgentObjects: Send + Sync {
     ) -> impl Future<Output = Result<Agent, ObjectsError>> + Send;
 
     /// Delete the `AgentService`, then its `AgentConfig`. `deletionPolicy` decides what the operator does
-    /// with the data (§59a). With `Some(etag)` the agent must still be the one that was read.
+    /// with the data (§59a). The agent must still be the one that was read: `when` is the [`ETag`] the
+    /// caller holds, as a write holds one. **There is no unconditional delete**: a delete of an agent that
+    /// somebody changed since it was listed would remove their work unseen, and the router (D7) answers a
+    /// `DELETE` without `If-Match` itself, as it answers a `PUT` without a precondition. A client that holds
+    /// no token reads the agent first.
     ///
     /// # Errors
     ///
     /// [`ObjectsError::NotFound`], [`ObjectsError::PreconditionFailed`], [`ObjectsError::NotOwned`],
+    /// [`ObjectsError::Referenced`] (another service names the config: nothing is deleted),
     /// [`ObjectsError::Unavailable`].
     fn delete_agent(
         &self,
         name: &str,
-        when: Option<&ETag>,
+        when: &ETag,
     ) -> impl Future<Output = Result<(), ObjectsError>> + Send;
 
     /// Every shared object of the kind, ordered by name.
@@ -549,7 +594,8 @@ pub trait AgentObjects: Send + Sync {
         when: &Precondition,
     ) -> impl Future<Output = Result<Stored, ObjectsError>> + Send;
 
-    /// Delete a shared object nobody names.
+    /// Delete a shared object nobody names, on the token the caller holds (see
+    /// [`delete_agent`](Self::delete_agent)).
     ///
     /// # Errors
     ///
@@ -559,7 +605,7 @@ pub trait AgentObjects: Send + Sync {
         &self,
         kind: SharedKind,
         name: &str,
-        when: Option<&ETag>,
+        when: &ETag,
     ) -> impl Future<Output = Result<(), ObjectsError>> + Send;
 
     /// The Secret keys the forms may name (AD-030), ordered by `(secret, key, external_secret)`: the

@@ -16,7 +16,9 @@ use crate::{
 #[derive(Default)]
 struct State {
     objects: BTreeMap<(Kind, String), Stored>,
-    next_version: u64,
+    /// The last version each object has had, kept after the object is deleted: a name that comes back does
+    /// not repeat a version.
+    versions: BTreeMap<(Kind, String), u64>,
     offered: BTreeSet<OfferedSecret>,
     declined: BTreeSet<OfferedSecret>,
     /// Values a Secret of the backend holds. Nothing reads them: they are there so that a case can show
@@ -35,9 +37,13 @@ impl State {
         Ok(())
     }
 
-    fn fresh_version(&mut self) -> ResourceVersion {
-        self.next_version += 1;
-        ResourceVersion::new(self.next_version.to_string())
+    /// The next version of the object `kind` `name`. **Per object**, not global (an API server's are
+    /// global, but a version is opaque and only equal to itself): two objects often have the same one, so
+    /// that a token that did not bind the object it was read from would be the token of another.
+    fn fresh_version(&mut self, kind: Kind, name: &str) -> ResourceVersion {
+        let n = self.versions.entry((kind, name.to_owned())).or_default();
+        *n += 1;
+        ResourceVersion::new(n.to_string())
     }
 
     fn get(&self, kind: Kind, name: &str) -> Option<&Stored> {
@@ -57,7 +63,7 @@ impl State {
     /// holds. The labels it already has stay, and the label of the dashboard is there afterwards. The
     /// status is never touched.
     fn write(&mut self, namespace: &str, kind: Kind, name: &str, spec: &Value) -> Stored {
-        let version = self.fresh_version();
+        let version = self.fresh_version(kind, name);
         let key = (kind, name.to_owned());
         match self.objects.get_mut(&key) {
             Some(o) => {
@@ -93,6 +99,17 @@ impl State {
                 stored
             }
         }
+    }
+
+    /// The services other than `service` that name the config `config`, in byte order: what makes the config
+    /// shared, which the dashboard never touches.
+    fn other_services_naming(&self, config: &str, service: &str) -> Vec<String> {
+        self.objects
+            .iter()
+            .filter(|((kind, name), _)| *kind == Kind::AgentService && name != service)
+            .filter(|(_, o)| config_name(&o.spec) == Some(config))
+            .map(|((_, name), _)| name.clone())
+            .collect()
     }
 
     /// The agents that name the shared object `name` of `kind`, in byte order.
@@ -153,10 +170,11 @@ impl MemoryObjects {
         lock(&self.state).unavailable = on;
     }
 
-    /// An object that is not the dashboard's, as Argo CD or `kubectl` would have made it.
+    /// An object that is not the dashboard's, as Argo CD or `kubectl` would have made it. An object of that
+    /// kind and name that is there is replaced by it.
     pub fn seed_foreign(&self, kind: Kind, name: &str, spec: Value, how: Foreign) {
         let mut s = lock(&self.state);
-        let version = s.fresh_version();
+        let version = s.fresh_version(kind, name);
         let mut labels = BTreeMap::new();
         let mut annotations = BTreeMap::new();
         match how {
@@ -186,10 +204,17 @@ impl MemoryObjects {
         );
     }
 
+    /// What a create that failed between its two writes leaves: a dashboard-owned `AgentConfig` named
+    /// `name` and no `AgentService`.
+    pub fn seed_orphan_config(&self, name: &str, spec: &Value) {
+        let mut s = lock(&self.state);
+        s.write(&self.namespace, Kind::AgentConfig, name, spec);
+    }
+
     /// The status the operator would have written.
     pub fn set_status(&self, kind: Kind, name: &str, status: Value) {
         let mut s = lock(&self.state);
-        let version = s.fresh_version();
+        let version = s.fresh_version(kind, name);
         if let Some(o) = s.objects.get_mut(&(kind, name.to_owned())) {
             o.status = Some(status);
             o.version = version;
@@ -268,6 +293,7 @@ impl AgentObjects for MemoryObjects {
             return Err(ObjectsError::Invalid(invalid));
         }
 
+        // Every refusal is decided here, before the first write: a refused write changes neither object.
         let service_in_place = s.get(Kind::AgentService, name).cloned();
         let config_in_place = s.get(Kind::AgentConfig, name).cloned();
         match when {
@@ -295,6 +321,14 @@ impl AgentObjects for MemoryObjects {
                 });
             }
         }
+        let by = s.other_services_naming(name, name);
+        if !by.is_empty() {
+            return Err(ObjectsError::Referenced {
+                kind: Kind::AgentConfig,
+                name: name.to_owned(),
+                by,
+            });
+        }
         if let Precondition::Matches(etag) = when
             && s.agent(name).map(|a| a.etag()).as_ref() != Some(etag)
         {
@@ -307,7 +341,7 @@ impl AgentObjects for MemoryObjects {
             .ok_or_else(|| ObjectsError::Internal("an agent just written is not there".into()))
     }
 
-    async fn delete_agent(&self, name: &str, when: Option<&ETag>) -> Result<(), ObjectsError> {
+    async fn delete_agent(&self, name: &str, when: &ETag) -> Result<(), ObjectsError> {
         let mut s = lock(&self.state);
         s.up()?;
         let agent = s.agent(name).ok_or_else(|| ObjectsError::NotFound {
@@ -322,7 +356,17 @@ impl AgentObjects for MemoryObjects {
                 });
             }
         }
-        if when.is_some_and(|etag| *etag != agent.etag()) {
+        if let Some(config) = &agent.config {
+            let by = s.other_services_naming(&config.name, name);
+            if !by.is_empty() {
+                return Err(ObjectsError::Referenced {
+                    kind: Kind::AgentConfig,
+                    name: config.name.clone(),
+                    by,
+                });
+            }
+        }
+        if *when != agent.etag() {
             return Err(ObjectsError::PreconditionFailed);
         }
         s.objects.remove(&(Kind::AgentService, name.to_owned()));
@@ -400,7 +444,7 @@ impl AgentObjects for MemoryObjects {
         &self,
         kind: SharedKind,
         name: &str,
-        when: Option<&ETag>,
+        when: &ETag,
     ) -> Result<(), ObjectsError> {
         let mut s = lock(&self.state);
         s.up()?;
@@ -417,7 +461,7 @@ impl AgentObjects for MemoryObjects {
                 name: name.to_owned(),
             });
         }
-        if when.is_some_and(|etag| *etag != object.etag()) {
+        if *when != object.etag() {
             return Err(ObjectsError::PreconditionFailed);
         }
         let by = s.referenced_by(kind, name);
@@ -442,6 +486,10 @@ impl AgentObjects for MemoryObjects {
 impl ObjectsUnderTest for MemoryObjects {
     async fn seed_foreign(&self, kind: Kind, name: &str, spec: Value, how: Foreign) {
         Self::seed_foreign(self, kind, name, spec, how);
+    }
+
+    async fn seed_orphan_config(&self, name: &str, spec: Value) {
+        Self::seed_orphan_config(self, name, &spec);
     }
 
     async fn set_status(&self, kind: Kind, name: &str, status: Value) {
