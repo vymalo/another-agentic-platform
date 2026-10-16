@@ -408,6 +408,19 @@ async fn an_agent_that_gitops_owns_is_read_only_and_every_write_is_409() {
         .await;
     assert_eq!(delete.code(), 409);
     assert!(delete.is_problem("managed-by-gitops"));
+    // The owner is looked at before the form: a person who is told the agent is not theirs is not told what is wrong with
+    // a form they cannot save.
+    let mut bad = folder_body("chat");
+    bad["title"] = json!("");
+    let put = api
+        .put("/v1/agents/chat")
+        .token(&token)
+        .replace(&got.etag())
+        .json(&bad)
+        .send()
+        .await;
+    assert_eq!(put.code(), 409, "{}", put.text());
+    assert!(put.is_problem("managed-by-gitops"));
     let create_over = create(&api, &token, &folder_body("chat")).await;
     assert_eq!(create_over.code(), 409, "a create whose name exists is 409");
 }

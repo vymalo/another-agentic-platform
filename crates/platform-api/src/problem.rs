@@ -461,6 +461,76 @@ mod tests {
         assert_eq!(shown("a\nb\u{7}c"), "a?b?c");
     }
 
+    /// The status the table of `aap-ports` gives each variant. Exhaustive: a new variant does not compile until it has one
+    /// here, as it does not compile in the port's own test.
+    fn status_in_the_ports_table(error: &ObjectsError) -> u16 {
+        match error {
+            ObjectsError::AlreadyExists { .. }
+            | ObjectsError::NotOwned { .. }
+            | ObjectsError::Referenced { .. }
+            | ObjectsError::Conflict(_)
+            | ObjectsError::Deleting { .. } => 409,
+            ObjectsError::NotFound { .. } => 404,
+            ObjectsError::PreconditionFailed => 412,
+            ObjectsError::Invalid(_) => 422,
+            ObjectsError::Unavailable(_) => 503,
+            ObjectsError::Internal(_) => 500,
+        }
+    }
+
+    #[test]
+    fn every_answer_of_the_objects_port_has_the_status_of_the_ports_table_and_leaks_no_source() {
+        const SOURCE: &str = "source-sentinel-7a3f";
+        let name = || "x".to_owned();
+        let errors = [
+            ObjectsError::AlreadyExists {
+                kind: Kind::AgentService,
+                name: name(),
+            },
+            ObjectsError::NotFound {
+                kind: Kind::AgentService,
+                name: name(),
+            },
+            ObjectsError::PreconditionFailed,
+            ObjectsError::NotOwned {
+                kind: Kind::ModelEndpoint,
+                name: name(),
+            },
+            ObjectsError::Referenced {
+                kind: Kind::ToolProvider,
+                name: name(),
+                by: vec!["a".into(), "b".into()],
+            },
+            ObjectsError::Referenced {
+                kind: Kind::AgentConfig,
+                name: name(),
+                by: vec!["a".into()],
+            },
+            ObjectsError::Deleting {
+                kind: Kind::AgentService,
+                name: name(),
+            },
+            ObjectsError::Conflict("a field".into()),
+            ObjectsError::Invalid(vec![aap_ports::FieldError::new(
+                Kind::AgentService,
+                "spec.suspend",
+                "no",
+            )]),
+            ObjectsError::Unavailable(SOURCE.into()),
+            ObjectsError::Internal(SOURCE.into()),
+        ];
+        for error in &errors {
+            let problem = Problem::from_objects(error, None);
+            assert_eq!(
+                problem.status.as_u16(),
+                status_in_the_ports_table(error),
+                "{error:?}"
+            );
+            let body = problem.body().to_string();
+            assert!(!body.contains(SOURCE), "{error:?}: {body}");
+        }
+    }
+
     #[test]
     fn the_body_has_the_four_members_of_rfc_9457() {
         let body = Problem::forbidden("platform:agents.write").body();

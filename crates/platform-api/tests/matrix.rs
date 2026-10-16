@@ -143,6 +143,10 @@ async fn a_token_that_does_not_verify_is_401_invalid_token_on_every_route() {
             "{verb} {template}"
         );
         assert!(r.is_problem("invalid-token"), "{verb} {template}");
+        assert!(
+            !r.text().contains("not-a-token-of-this-issuer"),
+            "{verb} {template}: the token is not echoed"
+        );
     }
 }
 
