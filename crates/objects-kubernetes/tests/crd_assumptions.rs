@@ -82,3 +82,20 @@ fn the_external_secret_crd_is_the_pinned_copy_and_serves_the_version_the_crate_r
     assert_eq!(served["served"], true);
     assert_eq!(served["storage"], true);
 }
+
+/// The harness plays the operator with the finalizer the operator puts on a service. The crate depends on the
+/// operator's crate for nothing (and must not), so the name is held equal by reading its source.
+#[test]
+fn the_finalizer_the_harness_plays_is_the_one_the_operator_puts_on() {
+    let controller = include_str!("../../controller/src/context.rs");
+    let harness = include_str!("support/harness.rs");
+    let name = controller
+        .lines()
+        .find_map(|l| l.strip_prefix("pub const FINALIZER: &str = \""))
+        .and_then(|l| l.strip_suffix("\";"))
+        .expect("the controller names its finalizer");
+    assert!(
+        harness.contains(&format!("pub const FINALIZER: &str = \"{name}\";")),
+        "the harness plays another finalizer than {name}"
+    );
+}
