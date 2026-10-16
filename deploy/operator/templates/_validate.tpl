@@ -156,8 +156,8 @@ registries an agent may pin an image from, the one store, the image's tag. CI al
 {{- fail (printf "api.config.oidc.%s is not a setting: issuer, audiences, rolesClaim or jwksUrl" $k) -}}
 {{- end -}}
 {{- end -}}
-{{- if not (and (kindIs "string" $oidc.issuer) (regexMatch `^https?://[^/@[:space:]]+(/[^[:space:]]*)?$` $oidc.issuer)) -}}
-{{- fail (printf "api.config.oidc.issuer is required: the http(s) URL of the issuer, with no credentials, got %q" (toString $oidc.issuer)) -}}
+{{- if not (and (kindIs "string" $oidc.issuer) (include "aap.api.httpUrlOk" (dict "url" $oidc.issuer "query" false))) -}}
+{{- fail (printf "api.config.oidc.issuer is required: the http(s) URL of the issuer, with a host, no credentials, no query, no fragment and a port from 1 to 65535 (the binary compares it with the `iss` of a token), got %q" (toString $oidc.issuer)) -}}
 {{- end -}}
 {{- if not (and (kindIs "slice" $oidc.audiences) $oidc.audiences) -}}
 {{- fail "api.config.oidc.audiences is required: at least one audience (the `aud` of the tokens)" -}}
@@ -170,8 +170,8 @@ registries an agent may pin an image from, the one store, the image's tag. CI al
 {{- if not (and (kindIs "string" $oidc.rolesClaim) (regexMatch `[^[:space:]]` $oidc.rolesClaim)) -}}
 {{- fail "api.config.oidc.rolesClaim is required: the claim whose values are the person's permissions (agentic_roles on netcup)" -}}
 {{- end -}}
-{{- if and (hasKey $oidc "jwksUrl") (not (and (kindIs "string" $oidc.jwksUrl) (regexMatch `^https?://[^/@[:space:]]+(/[^[:space:]]*)?$` $oidc.jwksUrl))) -}}
-{{- fail (printf "api.config.oidc.jwksUrl must be an http(s) URL with no credentials (or left out), got %q" (toString $oidc.jwksUrl)) -}}
+{{- if and (hasKey $oidc "jwksUrl") (not (and (kindIs "string" $oidc.jwksUrl) (include "aap.api.httpUrlOk" (dict "url" $oidc.jwksUrl "query" true)))) -}}
+{{- fail (printf "api.config.oidc.jwksUrl must be an http(s) URL with a host, no credentials and a port from 1 to 65535 (or left out), got %q" (toString $oidc.jwksUrl)) -}}
 {{- end -}}
 {{- /* CORS: exact origins as a browser writes them, never a wildcard, never the default port of the scheme. */ -}}
 {{- $cors := default (dict) $c.cors -}}
@@ -190,10 +190,17 @@ registries an agent may pin an image from, the one store, the image's tag. CI al
 {{- if eq (lower $o) "null" -}}
 {{- fail "api.config.cors.allowedOrigins: `null` is refused: it is the origin of any sandboxed page" -}}
 {{- end -}}
-{{- if not (regexMatch `^[a-z][a-z0-9+.-]*://([a-z0-9._~-]+|\[[0-9a-f:.]+\])(:[0-9]{1,5})?$` $o) -}}
-{{- fail (printf "api.config.cors.allowedOrigins: %q is not an origin (scheme://host[:port], lower case, no path, no trailing slash)" $o) -}}
+{{- /* scheme://host[:port] as aap-platform-api's CorsOrigins reads it (RFC 6454): a lower-case scheme, a host of lower-case letters, digits, `.` and `-` or an IPv6 literal in brackets, a port from 1 to 65535 with no leading zero. */ -}}
+{{- $originRe := `^([a-z][a-z0-9+.-]*)://([a-z0-9.-]+|\[[a-z0-9.:-]+\])(?::([1-9][0-9]{0,4}))?$` -}}
+{{- if not (regexMatch $originRe $o) -}}
+{{- fail (printf "api.config.cors.allowedOrigins: %q is not an origin (scheme://host[:port], lower case, host of letters, digits, `.` and `-`, port 1 to 65535 with no leading zero, no path, no trailing slash)" $o) -}}
 {{- end -}}
-{{- if or (regexMatch `^https://[^:/]+:443$` $o) (regexMatch `^http://[^:/]+:80$` $o) -}}
+{{- $scheme := regexReplaceAll $originRe $o "${1}" -}}
+{{- $port := regexReplaceAll $originRe $o "${3}" -}}
+{{- if and $port (gt (atoi $port) 65535) -}}
+{{- fail (printf "api.config.cors.allowedOrigins: %q is not an origin (the port is from 1 to 65535)" $o) -}}
+{{- end -}}
+{{- if or (and (has $scheme (list "http" "ws")) (eq $port "80")) (and (has $scheme (list "https" "wss")) (eq $port "443")) -}}
 {{- fail (printf "api.config.cors.allowedOrigins: %q names the default port of its scheme: drop it (a browser sends https://host and not https://host:443)" $o) -}}
 {{- end -}}
 {{- end -}}
@@ -202,12 +209,41 @@ registries an agent may pin an image from, the one store, the image's tag. CI al
 {{- if and (hasKey $d "namespace") (ne (toString $d.namespace) (include "aap.api.namespace" .)) -}}
 {{- fail (printf "api.config.defaults.namespace is %q but the operator watches %q: the API writes the objects the operator reconciles, so it is the same namespace (leave the key out; watchNamespace sets both)" (toString $d.namespace) (include "aap.api.namespace" .)) -}}
 {{- end -}}
+{{- /* The keys of aap_forms::Defaults. The types below them are the CRDs' own and the binary refuses an unknown key there; the chart checks no deeper than this level, the peers and the store. */ -}}
+{{- range $k, $v := $d -}}
+{{- if not (has $k (list "namespace" "offerLabel" "store" "a2aBearer" "allowFrom" "security" "coder" "folder" "allowedImageRegistries")) -}}
+{{- fail (printf "api.config.defaults.%s is not a setting of the API: namespace, offerLabel, store, a2aBearer, allowFrom, security, coder, folder or allowedImageRegistries (a misspelt key would leave a default in its place)" $k) -}}
+{{- end -}}
+{{- end -}}
+{{- if and (hasKey $d "offerLabel") (not (and (kindIs "string" $d.offerLabel) (regexMatch `^[^[:space:]]+$` $d.offerLabel))) -}}
+{{- fail (printf "api.config.defaults.offerLabel must be a label key with no space, got %q" (toString $d.offerLabel)) -}}
+{{- end -}}
+{{- range $peer := (default (list) $d.allowFrom) -}}
+{{- include "aap.checkPeers" (dict "what" "api.config.defaults.allowFrom" "peers" (list $peer)) -}}
+{{- end -}}
 {{- $store := default (dict) $d.store -}}
 {{- if not (kindIs "map" $store) -}}
 {{- fail "api.config.defaults.store must be a map with exactly one of cnpg and secretRef" -}}
 {{- end -}}
 {{- if ne (add (ternary 1 0 (hasKey $store "cnpg")) (ternary 1 0 (hasKey $store "secretRef"))) 1 -}}
 {{- fail "api.config.defaults.store must hold exactly one of cnpg and secretRef (the chart ships cnpg: to use secretRef, say `cnpg: null` beside it)" -}}
+{{- end -}}
+{{- if hasKey $store "cnpg" -}}
+{{- $cnpg := $store.cnpg -}}
+{{- if not (kindIs "map" $cnpg) -}}
+{{- fail "api.config.defaults.store.cnpg must be a map (instances, storage.size)" -}}
+{{- end -}}
+{{- if and (hasKey $cnpg "instances") (not (and (or (kindIs "float64" $cnpg.instances) (kindIs "int" $cnpg.instances) (kindIs "int64" $cnpg.instances)) (ge (int $cnpg.instances) 1))) -}}
+{{- fail (printf "api.config.defaults.store.cnpg.instances must be a whole number of at least 1, got %v" $cnpg.instances) -}}
+{{- end -}}
+{{- /* A Kubernetes quantity with something in it, as aap-domain's is_size reads one: 5Gi, 500m, 1e3, 0.5Ti. */ -}}
+{{- $size := toString (default (dict) $cnpg.storage).size -}}
+{{- if not (and (regexMatch `^([0-9]+\.?[0-9]*|\.[0-9]+)(Ki|Mi|Gi|Ti|Pi|Ei|n|u|m|k|M|G|T|P|E|[eE][+-]?[0-9]+)?$` $size) (regexMatch `^[0.]*[1-9]` $size)) -}}
+{{- fail (printf "api.config.defaults.store.cnpg.storage.size must be a size such as 5Gi, got %q" $size) -}}
+{{- end -}}
+{{- end -}}
+{{- if and (hasKey $store "secretRef") (not (and (kindIs "map" $store.secretRef) (kindIs "string" $store.secretRef.name) (contains "{name}" $store.secretRef.name))) -}}
+{{- fail "api.config.defaults.store.secretRef.name must hold {name}: every agent would share one ledger without it" -}}
 {{- end -}}
 {{- $bearer := default (dict) $d.a2aBearer -}}
 {{- if not (and $bearer.name $bearer.key) -}}
@@ -217,8 +253,9 @@ registries an agent may pin an image from, the one store, the image's tag. CI al
 {{- fail "api.config.defaults.allowedImageRegistries is required, at least one registry host: an agent that pins its own image is handed the model endpoint's API key and the A2A bearer, so name the registries it may come from, for example [ghcr.io]" -}}
 {{- end -}}
 {{- range $r := $d.allowedImageRegistries -}}
-{{- if not (and (kindIs "string" $r) (regexMatch `^[A-Za-z0-9][A-Za-z0-9.-]*(:[0-9]{1,5})?$` $r)) -}}
-{{- fail (printf "api.config.defaults.allowedImageRegistries: %v is not a registry host (and port)" $r) -}}
+{{- /* aap_forms is_host: DNS labels of letters, digits and `-` that start and end with a letter or digit, joined by `.`, and an optional port of 1 to 5 digits. */ -}}
+{{- if not (and (kindIs "string" $r) (regexMatch `^[A-Za-z0-9]([A-Za-z0-9-]*[A-Za-z0-9])?(\.[A-Za-z0-9]([A-Za-z0-9-]*[A-Za-z0-9])?)*(:[0-9]{1,5})?$` $r)) -}}
+{{- fail (printf "api.config.defaults.allowedImageRegistries: %v is not a registry host (and port): labels of letters, digits and `-` joined by `.`, with no scheme and no path" $r) -}}
 {{- end -}}
 {{- end -}}
 {{- /* The edge's route. */ -}}
@@ -264,5 +301,21 @@ registries an agent may pin an image from, the one store, the image's tag. CI al
 {{- if not (and (kindIs "map" $peer) (or (hasKey $peer "namespaceSelector") (hasKey $peer "podSelector") (hasKey $peer "ipBlock"))) -}}
 {{- fail (printf "%s: a peer needs a namespaceSelector, a podSelector or an ipBlock, got %s" $what (toJson $peer)) -}}
 {{- end -}}
+{{- end -}}
+{{- end -}}
+
+{{/*
+"true" when .url is an http(s) URL as aap-auth-oidc reads one (config.rs, http_url): a host, no credentials, no white space, and a
+port, when there is one, from 1 to 65535. The issuer (.query false) has no query and no fragment either, because the binary
+compares it with the `iss` of a token; the JWKS URL (.query true) may have them. Else nothing.
+*/}}
+{{- define "aap.api.httpUrlOk" -}}
+{{- $u := toString .url -}}
+{{- $auth := `(\[[0-9A-Fa-f:.]+\]|[^/?#@:\[\]\s]+)(:[0-9]*)?` -}}
+{{- $tail := ternary `([/?#]\S*)?` `(/[^?#\s]*)?` .query -}}
+{{- $re := printf "^https?://%s%s$" $auth $tail -}}
+{{- if regexMatch $re $u -}}
+{{- $port := trimPrefix ":" (regexReplaceAll $re $u "${2}") -}}
+{{- if or (not $port) (and (ge (atoi $port) 1) (le (atoi $port) 65535)) -}}true{{- end -}}
 {{- end -}}
 {{- end -}}

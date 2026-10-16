@@ -482,6 +482,53 @@ check "a peer that names nothing is refused" refused_api 'a peer needs a namespa
 check "a DNS peer that names nothing is refused" refused_api 'api.networkPolicy.dns.to: a peer needs' --set-json 'api.networkPolicy.dns.to=[{"foo":"bar"}]'
 check "no API server port is refused" refused_api 'api.networkPolicy.apiServer.ports must name at least one port' --set api.networkPolicy.apiServer.ports=null
 check "an issuer port that is not a port is refused" refused_api 'api.networkPolicy.issuer.ports: 99999 is not a port number' --set-json 'api.networkPolicy.issuer.ports=[99999]'
+# The URL, the origins and the registries are read as the binary reads them (aap-auth-oidc's http_url, aap-platform-api's CorsOrigins,
+# aap-forms' is_host): a value the binary refuses at start is refused here, by name, and the edge of what it accepts renders.
+check "an issuer with a query is refused (the binary compares it with the iss of a token)" \
+  refused_api 'api.config.oidc.issuer is required' --set 'api.config.oidc.issuer=https://keycloak.example.com/realms/x?a=1'
+check "an issuer with a fragment is refused" refused_api 'api.config.oidc.issuer is required' --set 'api.config.oidc.issuer=https://keycloak.example.com/realms/x#f'
+check "an issuer with a query and no path is refused" refused_api 'api.config.oidc.issuer is required' --set 'api.config.oidc.issuer=https://keycloak.example.com?a=1'
+check "an issuer with a port above 65535 is refused" refused_api 'api.config.oidc.issuer is required' --set api.config.oidc.issuer=https://keycloak.example.com:70000/realms/x
+check "an issuer with port 0 is refused" refused_api 'api.config.oidc.issuer is required' --set api.config.oidc.issuer=https://keycloak.example.com:0/realms/x
+check "an issuer with a port that is not a number is refused" refused_api 'api.config.oidc.issuer is required' --set api.config.oidc.issuer=https://keycloak.example.com:https/realms/x
+check "an issuer with a port renders" renders_ok -f "$here/api.values.yaml" --set api.config.oidc.issuer=https://keycloak.example.com:8443/realms/x
+check "an issuer that is an IPv6 literal with a port renders" renders_ok -f "$here/api.values.yaml" --set 'api.config.oidc.issuer=http://[::1]:8080/realms/x'
+check "a jwksUrl with a port above 65535 is refused" refused_api 'api.config.oidc.jwksUrl must be an http(s) URL' --set api.config.oidc.jwksUrl=https://keycloak.example.com:99999/certs
+check "a jwksUrl with credentials is refused" refused_api 'api.config.oidc.jwksUrl must be an http(s) URL' --set api.config.oidc.jwksUrl=https://u:p@keycloak.example.com/certs
+check "a jwksUrl may have a query (the binary only asks for a host and no credentials)" renders_ok -f "$here/api.values.yaml" --set 'api.config.oidc.jwksUrl=https://keycloak.example.com/certs?a=1'
+check "a registry with a trailing dot is refused (aap-forms' is_host: an empty label)" refused_api 'is not a registry host' --set-json 'api.config.defaults.allowedImageRegistries=["ghcr.io."]'
+check "a registry with an empty label is refused" refused_api 'is not a registry host' --set-json 'api.config.defaults.allowedImageRegistries=["a..b"]'
+check "a registry whose label starts with - is refused" refused_api 'is not a registry host' --set-json 'api.config.defaults.allowedImageRegistries=["-a.io"]'
+check "a registry whose label ends with - is refused" refused_api 'is not a registry host' --set-json 'api.config.defaults.allowedImageRegistries=["a-.io"]'
+check "a registry with an empty port is refused" refused_api 'is not a registry host' --set-json 'api.config.defaults.allowedImageRegistries=["a.io:"]'
+check "a registry with an underscore is refused" refused_api 'is not a registry host' --set-json 'api.config.defaults.allowedImageRegistries=["a_b.io"]'
+check "registries as the binary reads them (a port, one label, upper case, a hyphen inside a label) render" \
+  renders_ok -f "$here/api.values.yaml" --set-json 'api.config.defaults.allowedImageRegistries=["registry.example:5000","localhost:5000","x","GHCR.io","a-b.c-d.io"]'
+check "an origin with a port above 65535 is refused" refused_api 'is not an origin' --set-json 'api.config.cors.allowedOrigins=["https://a.example.com:99999"]'
+check "an origin with port 0 is refused" refused_api 'is not an origin' --set-json 'api.config.cors.allowedOrigins=["https://a.example.com:0"]'
+check "an origin with a leading zero in the port is refused" refused_api 'is not an origin' --set-json 'api.config.cors.allowedOrigins=["https://a.example.com:08080"]'
+check "an origin with an empty port is refused" refused_api 'is not an origin' --set-json 'api.config.cors.allowedOrigins=["https://a.example.com:"]'
+check "an origin whose host has an underscore is refused" refused_api 'is not an origin' --set-json 'api.config.cors.allowedOrigins=["https://a_b.example.com"]'
+check "an origin whose host has a tilde is refused" refused_api 'is not an origin' --set-json 'api.config.cors.allowedOrigins=["https://a~b.example.com"]'
+check "an origin with user information is refused" refused_api 'is not an origin' --set-json 'api.config.cors.allowedOrigins=["https://u@a.example.com"]'
+check "an origin with port 80 on http is refused (the default port of its scheme)" refused_api 'names the default port of its scheme' --set-json 'api.config.cors.allowedOrigins=["http://a.example.com:80"]'
+check "an origin with port 80 on ws is refused" refused_api 'names the default port of its scheme' --set-json 'api.config.cors.allowedOrigins=["ws://a.example.com:80"]'
+check "an origin with port 443 on wss is refused" refused_api 'names the default port of its scheme' --set-json 'api.config.cors.allowedOrigins=["wss://a.example.com:443"]'
+check "an IPv6 origin with the default port of its scheme is refused" refused_api 'names the default port of its scheme' --set-json 'api.config.cors.allowedOrigins=["https://[::1]:443"]'
+check "origins as a browser writes them (a port, an IPv6 literal, another scheme, 443 on http and 80 on https) render" \
+  renders_ok -f "$here/api.values.yaml" --set-json 'api.config.cors.allowedOrigins=["http://localhost:3000","http://[::1]:8080","tauri://localhost","https://a.example.com:8443","http://a.example.com:443","https://a.example.com:80"]'
+# The keys of defaults and the store, which the binary refuses at start and the chart can see.
+check "a key of api.config.defaults that is not a setting is refused (a typo would leave a default in its place)" \
+  refused_api 'api.config.defaults.bogus is not a setting of the API' --set api.config.defaults.bogus=1
+check "an offerLabel with a space is refused" refused_api 'api.config.defaults.offerLabel must be a label key with no space' --set-string 'api.config.defaults.offerLabel=not a label'
+check "a defaults.allowFrom peer that names nothing is refused" refused_api 'api.config.defaults.allowFrom: a peer needs' --set-json 'api.config.defaults.allowFrom=[{"foo":"bar"}]'
+check "store.cnpg.instances 0 is refused" refused_api 'store.cnpg.instances must be a whole number of at least 1' --set api.config.defaults.store.cnpg.instances=0
+check "store.cnpg.instances 1.5 is refused" refused_api 'store.cnpg.instances must be a whole number of at least 1' --set api.config.defaults.store.cnpg.instances=1.5
+check "store.cnpg.storage.size that is not a size is refused" refused_api 'store.cnpg.storage.size must be a size' --set api.config.defaults.store.cnpg.storage.size=lots
+check "store.cnpg.storage.size 0Gi is refused (a size has something in it)" refused_api 'store.cnpg.storage.size must be a size' --set api.config.defaults.store.cnpg.storage.size=0Gi
+check "a size as the binary reads it (20Gi, 0.5Ti, 1e3) renders" renders_ok -f "$here/api.values.yaml" --set api.config.defaults.store.cnpg.storage.size=0.5Ti
+check "a secretRef name without {name} is refused (every agent would share one ledger)" \
+  refused_api 'store.secretRef.name must hold {name}' --set api.config.defaults.store.cnpg=null --set api.config.defaults.store.secretRef.name=db --set api.config.defaults.store.secretRef.key=k
 check "with the policy off, no peer is needed" renders_ok -f "$here/api.values.yaml" --set api.networkPolicy.enabled=false --set api.networkPolicy.from=null
 check "the secretref shape renders (a Secret per agent, no policy, no Ingress)" renders_ok -f "$here/api-secretref.values.yaml"
 
