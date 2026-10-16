@@ -22,7 +22,7 @@ Where it sits: `aap-ports` depends on nothing of the workspace (its tests read `
 the testkit's samples to the real CRD types). `aap-domain` depends on it for the
 output of `resolve` (§59a: "the mapping of `adam-coder` / `adam-agent` onto `aap_ports::RuntimeSpec`"), and
 `aap-api` knows nothing of it; the controller (S5) is generic over `<R: RuntimeProvider, S: StoreProvisioner>`. `aap-forms` (D4)
-builds the bodies `AgentObjects` takes and reads the bodies it gives; the Platform API (D7) is generic over the two traits of D4.
+builds the bodies `AgentObjects` takes and reads the bodies it gives; the Platform API ([D7a](../platform-api/README.md)) is generic over the two traits of D4.
 
 ## The traits
 
@@ -159,7 +159,7 @@ depending on `aap-api` and so on `kube`, would give every provider that depends 
   name, left by a create that failed halfway, is taken over; a GitOps one is `NotOwned`). A replace of what is not there is `NotFound`
   (a 404 rather than a 412: the agent was deleted, which is more to say). A replace or a delete with a stale token is `PreconditionFailed` and changes nothing.
   **A delete carries the token too**: an administrator who deletes an agent that somebody saved a minute ago would remove their work unseen, so there is no
-  unconditional delete (it was `Option<&ETag>`, with `None` meaning "whatever is there"; the router (D7) answers a `DELETE` with no `If-Match`, as it answers a `PUT` with no
+  unconditional delete (it was `Option<&ETag>`, with `None` meaning "whatever is there"; the router (D7a) answers `428` to a `DELETE` with no `If-Match`, as it does to a `PUT` with no
   precondition, and a client with no token reads first).
 * **An agent is two objects.** Written `AgentConfig` first, then `AgentService` (the operator never sees a service whose config is
   not there yet); deleted in the other order. The config of an agent has the agent's name, and a draft whose `configRef` says otherwise is
@@ -177,7 +177,7 @@ depending on `aap-api` and so on `kube`, would give every provider that depends 
   owns and no service names. `list_orphans` lists them (ordered by name, with the tokens a delete of their names takes: `Stored::etag`), they are not agents (`get_agent`
   and `list_agents` do not have them), and `delete_agent(name, &config.etag())` of a name whose service is **absent** deletes the config of that name, on **its own** token (`NotFound` when there is neither).
   **A config that is GitOps's (`NotOwned`) or that any service names (`Referenced`) is never deleted that way**, and a stale token is `PreconditionFailed`. This is the smallest way: the alternative,
-  an `Agent` with `service: None` in `list_agents`, would make every reader of an agent handle a half that has no service. The list is for a screen of leftovers; D7 decides whether to draw one.
+  an `Agent` with `service: None` in `list_agents`, would make every reader of an agent handle a half that has no service. The list is for a screen of leftovers; D7a draws none, and no route lists them.
 * **A config is one agent's.** The dashboard never shares an `AgentConfig` between two services (§60a, decision (f) of D4). When **another** `AgentService` names the
   config the dashboard would write, take over or delete (its `configRef.name` is the agent's name; a GitOps service can name any), the replace, the create (also of a
   config that is not there yet, and the takeover of one a half-failed create left) and the delete are all `Referenced { kind: AgentConfig, name, by }`, with the names of

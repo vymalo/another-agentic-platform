@@ -6,12 +6,12 @@ the **agent** (a coder or a folder agent), the **model endpoint** and the **tool
 field; and the YAML export.
 
 **Pure**: no async, no I/O, no Kubernetes client. It depends on `aap-api` (the objects), `aap-domain` (the operator's rules) and
-`aap-ports` (the neutral objects a store holds). The Platform API (D7) composes it with `AgentObjects` and `Authenticator`.
+`aap-ports` (the neutral objects a store holds). The Platform API ([D7a](../platform-api/README.md)) composes it with `AgentObjects` and `Authenticator`.
 
 ```mermaid
 sequenceDiagram
     participant C as Client
-    participant A as Platform API (D7)
+    participant A as Platform API (D7a)
     participant F as aap-forms
     participant D as aap-domain
     participant S as AgentObjects
@@ -107,7 +107,8 @@ a name that starts with `..`. A Secret that lists its keys takes only those. The
 ## Deployment defaults, and what the round trip does with them
 
 [§60a](../../docs/architecture/10-control-plane-and-crds.md#deployment-defaults): the forms show what matters to an administrator; the rest comes
-from the API's configuration file. `Defaults` is that file's section (`deny_unknown_fields`: a typo stops the API at start, and
+from the API's configuration file. `Defaults` is that file's section (`deny_unknown_fields` on it and on the types of this crate, and the binary compares the rest of the file with what `Defaults` writes back,
+because the CRD types below it deny nothing: a typo stops the API at start, and
 `Defaults::check()` makes a sample agent of each kind from the defaults and asks `aap-domain::validate`, so a store with no instances or a
 bearer without a key is found at start and not at the first save). It holds the namespace, the offer label, the registries an agent may pin its own image from (`allowedImageRegistries`, [below](#the-image-of-an-agent)), the store (`cnpg` or a
 `secretRef` named by a pattern with `{name}`), the A2A bearer reference, `allowFrom`, `security`, and per kind: for a coder `gitAuthor`,
@@ -194,7 +195,7 @@ A field that takes any text can carry a secret by mistake, and the forms cannot 
 changed to a plain `http://` address on another host passes, and every agent that names it and does not allow plain http becomes `ConfigInvalid` the moment the write is made, unseen. `dependents_after(change,
 agents, referents)` is the check: for each of `agents` (the `Agent`s of `list_agents`) that names the changed object it asks `aap_domain::validate` **twice**, with the object as it is in `referents` and as
 `change` (what `validate_model` and `validate_tool_server` give) makes it, and returns the issues the change **adds**, one `FormError` each (on no field), naming the agent. An agent that was invalid already is not
-blamed on the change; one that cannot be read by this version is reported as unknown. The Platform API (D7) calls it before a shared write and decides between a `422` and a warning the person confirms.
+blamed on the change; one that cannot be read by this version is reported as unknown. The Platform API (D7a) calls it before a shared write, for each agent that names the object, and refuses the write (`409 breaks-agents`, with the agents) when the answer is not empty.
 
 ## The image of an agent
 
@@ -251,7 +252,7 @@ it and quoted when not. It keeps the library's layout (a sequence under a key is
 
 ## Not here
 
-* The route-to-permission table and the status of each route are the router's (D7); the constants are [`aap_api::permission`](../api/README.md#permissions-slice-d4).
+* The route-to-permission table and the status of each route are the router's ([D7a](../platform-api/src/routes.rs)); the constants are [`aap_api::permission`](../api/README.md#permissions-slice-d4).
 * The Agents screen's rows (state, the first false condition, *In chat*) read the status, which is `aap-api`'s `AgentServiceStatus` over `Stored::status`.
 * `runPods.sizeClass` (the run-pod size class of the Coder screen) has no field in `aap-api` until adam-rs has it (D15).
 * Default values of a *screen* (see above) are the client's.

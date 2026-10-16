@@ -1,0 +1,43 @@
+[package]
+name = "aap-api-server"
+description = "The Platform API server: the composition root of the admin dashboard's API (AD-020). It composes the router of aap-platform-api with the Kubernetes objects and the OIDC authenticator, from one YAML configuration file"
+readme = "README.md"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+publish.workspace = true
+
+[[bin]]
+name = "api"
+path = "src/main.rs"
+
+[dependencies]
+aap-api.workspace = true
+aap-auth-oidc.workspace = true
+aap-forms.workspace = true
+aap-objects-kubernetes.workspace = true
+aap-platform-api.workspace = true
+aap-ports.workspace = true
+anyhow.workspace = true
+axum.workspace = true
+clap.workspace = true
+futures.workspace = true
+kube = { workspace = true, features = ["client", "rustls-tls", "ring"] }
+serde.workspace = true
+serde_json.workspace = true
+serde_yaml.workspace = true
+tokio = { workspace = true, features = ["macros", "net", "rt-multi-thread", "signal", "sync", "time"] }
+tracing.workspace = true
+tracing-subscriber.workspace = true
+
+[dev-dependencies]
+aap-auth-oidc = { workspace = true, features = ["testkit"] }
+aap-ports = { workspace = true, features = ["testkit"] }
+tokio = { workspace = true, features = ["io-util", "test-util"] }
+tower = { workspace = true, features = ["util"] }
+
+[lints]
+workspace = true

@@ -12,7 +12,9 @@ members = [
     "crates/auth-oidc",
     "crates/registry",
     "crates/controller",
+    "crates/platform-api",
     "bin/operator",
+    "bin/api",
 ]
 
 [workspace.package]
@@ -36,6 +38,7 @@ aap-objects-kubernetes = { path = "crates/objects-kubernetes" }
 aap-auth-oidc = { path = "crates/auth-oidc" }
 aap-registry = { path = "crates/registry" }
 aap-controller = { path = "crates/controller" }
+aap-platform-api = { path = "crates/platform-api" }
 anyhow = "1"
 aws-lc-rs = "1.15"
 axum = { version = "0.8", default-features = false, features = ["http1", "tokio"] }
@@ -57,6 +60,11 @@ sha2 = "0.10"
 subtle = "2"
 thiserror = "2"
 tokio = { version = "1", default-features = false }
+# `util` (`service_fn`, `ServiceExt::oneshot`) is what tests drive a router and a fake API server with; a crate that uses it
+# names the feature.
+tower = { version = "0.5", default-features = false }
+# Only the CORS layer of the Platform API (D7a): the origin check is tower-http's, the list of origins is ours.
+tower-http = { version = "0.6", default-features = false, features = ["cors"] }
 tracing = "0.1"
 url = "2"
 tracing-subscriber = { version = "0.3", default-features = false, features = ["env-filter", "fmt", "ansi"] }

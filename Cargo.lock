@@ -15,6 +15,30 @@ dependencies = [
 ]
 
 [[package]]
+name = "aap-api-server"
+version = "0.1.0"
+dependencies = [
+ "aap-api",
+ "aap-auth-oidc",
+ "aap-forms",
+ "aap-objects-kubernetes",
+ "aap-platform-api",
+ "aap-ports",
+ "anyhow",
+ "axum",
+ "clap",
+ "futures",
+ "kube",
+ "serde",
+ "serde_json",
+ "serde_yaml_ng",
+ "tokio",
+ "tower",
+ "tracing",
+ "tracing-subscriber",
+]
+
+[[package]]
 name = "aap-auth-oidc"
 version = "0.1.0"
 dependencies = [
@@ -133,6 +157,26 @@ dependencies = [
  "serde_yaml_ng",
  "tokio",
  "tower",
+ "tracing",
+ "tracing-subscriber",
+]
+
+[[package]]
+name = "aap-platform-api"
+version = "0.1.0"
+dependencies = [
+ "aap-api",
+ "aap-auth-oidc",
+ "aap-forms",
+ "aap-ports",
+ "axum",
+ "futures",
+ "serde",
+ "serde_json",
+ "thiserror 2.0.21",
+ "tokio",
+ "tower",
+ "tower-http",
  "tracing",
  "tracing-subscriber",
 ]

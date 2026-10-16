@@ -153,7 +153,7 @@ expanded (AD-032). **The Platform API checks one of these strings and never a ro
 and the dashboard only writes it (`permission::use_permission`). `GET /v1/me` is the values of the claim that start with
 `PREFIX`.
 
-The table of routes to permissions is the router's (slice D7), where each route's test holds it; this crate holds the names,
+The table of routes to permissions is the router's (`ROUTES` in [`aap-platform-api`](../platform-api/src/routes.rs), slice D7a), where `tests/matrix.rs` holds it; this crate holds the names,
 and `tests/permission.rs` holds them equal to the sets §60a prints. The names are *proposed, not final* (§93).
 
 ## Tests

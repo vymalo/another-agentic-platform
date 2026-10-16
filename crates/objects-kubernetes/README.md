@@ -264,7 +264,7 @@ cannot be reached, or that refuses the list, is `Unavailable` as for the other c
 
 ## Rights
 
-The crate needs these verbs in its namespace, and the `Role` of D7 must grant **exactly** these (`tests/rbac.yaml` is the Role the
+The crate needs these verbs in its namespace, and the `Role` of D7b's chart must grant **exactly** these (`tests/rbac.yaml` is the Role the
 cluster test runs under; `tests/rbac.rs` turns the requests of the whole conformance suite into verbs and holds them equal to it and to
 this table, row by row):
 

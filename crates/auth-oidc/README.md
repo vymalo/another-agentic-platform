@@ -22,7 +22,7 @@ if principal.holds("platform:agents.write") { /* ... */ }
 ## Where it sits
 
 An **implementation** of the `Authenticator` port in [`aap-ports`](../ports/README.md#agentobjects-and-authenticator-d4) (AD-020),
-separate from the port and from the router; the binary of the Platform API (`bin/api`, D7) composes it with
+separate from the port and from the router; the binary of the Platform API ([`bin/api`](../../bin/api/README.md), D7a) composes it with
 [`aap-objects-kubernetes`](../objects-kubernetes/README.md). It depends on `aap-ports` and nothing else of the workspace. The port's
 conformance suite, `authenticator_conformance!`, runs against it with an issuer in the test process; the cases only a token with a
 signature has are this crate's own (below).
@@ -152,7 +152,7 @@ a count. Nothing logged holds a token, a `kid`, a claim or a URL, which `tests/l
 
 ## Configuration
 
-`OidcConfig` is the `auth` block of the Platform API's file (D7); `serde` reads it with these names, and an unknown key is an error.
+`OidcConfig` is the `oidc` block of the Platform API's file ([`bin/api`](../../bin/api/README.md), D7a); `serde` reads it with these names, and an unknown key is an error.
 
 ```yaml
 issuer: https://keycloak.example/realms/another-agentic       # iss must equal it exactly; discovery is {issuer}/.well-known/openid-configuration
@@ -254,8 +254,7 @@ itself has only `ring` in its features (`cargo tree -p aap-auth-oidc -e normal -
 
 **The constructor installs aws-lc-rs as `jsonwebtoken`'s process-level provider** (`jsonwebtoken::crypto::aws_lc::DEFAULT_PROVIDER.install_default()`,
 *verified 2026-10-16* in `jsonwebtoken` 11.1.0, `src/crypto/mod.rs` and `src/crypto/aws_lc/mod.rs`), and ignores "already installed". The library
-picks a backend from its features only when exactly one is enabled; with two (a binary that links another crate with `rust_crypto`, as D7
-may) it **panics on the first verification** ("Could not automatically determine the process-level CryptoProvider"). The dev-dependencies of
+picks a backend from its features only when exactly one is enabled; with two (a binary that links another crate with `rust_crypto`; `bin/api` does not: *verified 2026-10-16* with `cargo tree -p aap-api-server -e features -i jsonwebtoken`, which shows `aws_lc_rs` alone) it **panics on the first verification** ("Could not automatically determine the process-level CryptoProvider"). The dev-dependencies of
 this crate enable `rust_crypto` beside `aws_lc_rs`, so every test of the crate runs in that situation (this is why `Cargo.lock` holds the
 RustCrypto crates, for tests only), and `tests/provider.rs` is the case on its own. A binary that wants another provider installs it before
 the first authenticator is built.

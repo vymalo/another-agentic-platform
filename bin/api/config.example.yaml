@@ -1,0 +1,84 @@
+# The configuration of the Platform API (§60a, slice D7a): one file, read at start (`--config`, `API_CONFIG_FILE`).
+# A typo is an error and stops the API (an unknown key is refused), and so is anything the API could not work with.
+#
+# THERE IS NO SECRET IN THIS FILE, and there is no place for one. The API checks a bearer token against the keys of the
+# issuer (public), and reaches the cluster with its ServiceAccount. A secret in an agent is a reference to a Secret key,
+# chosen among the keys the cluster offers (`defaults.offerLabel`).
+
+# Where the API listens, and where /healthz and /readyz are served. These are the defaults;
+# the flags --listen and --health-addr (API_LISTEN_ADDR, HEALTH_ADDR) win over the file.
+listen: 0.0.0.0:8080
+healthListen: 0.0.0.0:8081
+
+# Whose tokens are accepted (aap-auth-oidc). The values of the roles claim are the person's permissions; the API checks
+# the permissions of AD-032 one by one and never compares a role name, so no role is listed here.
+oidc:
+  issuer: https://keycloak.example.com/realms/another-agentic
+  audiences: [another-agentic]
+  rolesClaim: agentic_roles
+  # jwksUrl: https://keycloak.example.com/realms/another-agentic/protocol/openid-connect/certs   # when not in the discovery document
+
+# The origins a browser may call the API from (the web as a single-page app, the native shells). Exact origins as a browser
+# writes them: scheme://host[:port], lower case, no path. No wildcard (refused), no credentials. Empty: no CORS.
+cors:
+  allowedOrigins:
+    - https://agents.example.com
+    - tauri://localhost
+
+# What every new agent gets besides what its form sets (§60a, "Deployment defaults"); shown read-only on each form
+# (GET /v1/info). `namespace` is the one namespace the API reads and writes.
+defaults:
+  namespace: another-agentic-system
+  offerLabel: agents.vymalo.com/offer
+  # Where a new agent's ledger lives: store.cnpg (an operator-owned CloudNativePG cluster per agent) or
+  # store.secretRef ({ name: "{name}-db-app", key: uri }: a Secret per agent, named from the agent's name).
+  store:
+    cnpg:
+      instances: 1
+      storage:
+        size: 5Gi
+  # The Secret key that must hold the orchestrator's AGENT_REGISTRY_AGENT_TOKEN, or the orchestrator lists an agent and
+  # cannot call it.
+  a2aBearer:
+    name: agent-a2a-bearer
+    key: AGENT_REGISTRY_AGENT_TOKEN
+  allowFrom:
+    - namespaceSelector:
+        matchLabels:
+          kubernetes.io/metadata.name: another-agentic-system
+  security:
+    runAsUser: 10001
+    runAsGroup: 10001
+    fsGroup: 10001
+  coder:
+    gitAuthor:
+      name: bored-giant-panda[bot]
+      email: 337696346+bored-giant-panda[bot]@users.noreply.github.com
+    allowedRepoHosts: [github.com]
+    githubApiUrl: https://api.github.com
+    githubMcp:
+      sidecar: true
+      port: 8082
+    workVolume:
+      name: work
+      scope: agent
+      mountPath: /work
+      source:
+        persistent:
+          size: 20Gi
+          storageClass: longhorn
+          perReplica: true
+    resources:
+      requests:
+        cpu: 500m
+        memory: 1Gi
+  folder:
+    resources:
+      requests:
+        cpu: 100m
+        memory: 256Mi
+  # The registries an agent may pin its own image from. REQUIRED, and at least one: a person who may write agents can name a
+  # folder agent's own image, and the pod of that image is handed the model endpoint's API key and the A2A bearer. An entry is
+  # a registry host (and port, when it has one) and does not bound repositories: ghcr.io admits every image on ghcr.io, so
+  # name only registries whose images you trust. A tag or a digest is always required.
+  allowedImageRegistries: [ghcr.io]
