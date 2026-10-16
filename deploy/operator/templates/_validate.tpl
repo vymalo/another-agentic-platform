@@ -142,9 +142,9 @@ for each tested shape (tests/api-shapes.sh) to find such a value before it is de
 {{- if not (and (or (kindIs "float64" $api.preStopSleepSeconds) (kindIs "int" $api.preStopSleepSeconds) (kindIs "int64" $api.preStopSleepSeconds)) (ge (int $api.preStopSleepSeconds) 0)) -}}
 {{- fail (printf "api.preStopSleepSeconds must be a whole number, 0 or more (0: no preStop hook), got %v" $api.preStopSleepSeconds) -}}
 {{- end -}}
-{{- /* The grace period holds the preStop sleep, the 25 s the binary drains for (bin/api/src/run.rs, DRAIN) and a margin of 5 s. */ -}}
-{{- if not (and (or (kindIs "float64" $api.terminationGracePeriodSeconds) (kindIs "int" $api.terminationGracePeriodSeconds) (kindIs "int64" $api.terminationGracePeriodSeconds)) (ge (int $api.terminationGracePeriodSeconds) (add (int $api.preStopSleepSeconds) 30))) -}}
-{{- fail (printf "api.terminationGracePeriodSeconds must be a whole number of at least api.preStopSleepSeconds + 30 (the sleep counts against it, the API drains for up to 25 s, and 5 s of margin), got %v with a sleep of %v" $api.terminationGracePeriodSeconds $api.preStopSleepSeconds) -}}
+{{- /* The grace period holds the preStop sleep, the 25 s the binary drains for (bin/api/src/run.rs, DRAIN), the 2 s it then gives the health endpoints to stop, and a margin of 5 s: sleep + 32. */ -}}
+{{- if not (and (or (kindIs "float64" $api.terminationGracePeriodSeconds) (kindIs "int" $api.terminationGracePeriodSeconds) (kindIs "int64" $api.terminationGracePeriodSeconds)) (ge (int $api.terminationGracePeriodSeconds) (add (int $api.preStopSleepSeconds) 32))) -}}
+{{- fail (printf "api.terminationGracePeriodSeconds must be a whole number of at least api.preStopSleepSeconds + 32 (the sleep counts against it, the API drains for up to 25 s and then takes up to 2 s to stop its health port, and 5 s of margin), got %v with a sleep of %v" $api.terminationGracePeriodSeconds $api.preStopSleepSeconds) -}}
 {{- end -}}
 {{- $_ := include "aap.api.serviceAccountName" . -}}
 {{- /* The configuration file: the keys the chart owns, and the ones the binary requires. */ -}}

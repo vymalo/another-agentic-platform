@@ -91,7 +91,7 @@ api:
     name: dashboard-api
     annotations:
       example.com/owner: platform
-  # The sleep counts against the grace period: 15 + 30 is the least the chart accepts.
+  # The sleep counts against the grace period: 15 + 32 is the least the chart accepts.
   terminationGracePeriodSeconds: 60
   preStopSleepSeconds: 15
   ingress:

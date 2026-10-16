@@ -86,7 +86,8 @@ stateDiagram-v2
 
 A stop closes the API's listener, lets the requests in flight finish for at most 25 s, and only then closes the health port, so that a pod
 that is going is *not ready* for as long as it takes. A Service takes a moment to drop an endpoint, so the chart holds the pod for 5 s before the signal
-(`lifecycle.preStop.sleep`) and gives it 40 s in all: the sleep counts against the grace period, so the chart refuses less than the sleep plus 30.
+(`lifecycle.preStop.sleep`) and gives it 40 s in all: the sleep counts against the grace period, which must also hold the drain, the 2 s the health port is
+given to stop after it, and 5 s of margin, so the chart refuses less than the sleep plus 32.
 
 ## Tests
 

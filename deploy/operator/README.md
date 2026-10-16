@@ -173,7 +173,7 @@ flowchart LR
 
 `templates/_validate.tpl` refuses, with the value's name, what the chart can check at render time and the binary would refuse at start (the issuer
 as a URL with no query, fragment or credentials and a port from 1 to 65535, the audiences, the roles claim, an origin as a browser writes it, a
-registry as a host, the keys of `defaults`, a size, both or neither store, a tag `latest`, a grace period shorter than the sleep plus 30 s) and a few
+registry as a host, the keys of `defaults`, a size, both or neither store, a tag `latest`, a grace period shorter than the sleep plus 32 s) and a few
 things only the chart can know (a `defaults.namespace` that is not the watched one, a policy with no `from`, an Ingress with no host).
 
 **That is not a promise that the binary accepts what is rendered.** The chart cannot check the types below `defaults` (`coder`, `folder`, `security`:
@@ -240,7 +240,8 @@ The API's listener closes at SIGTERM, the requests in flight finish for at most 
 the Service takes a moment to drop the endpoint. The chart therefore holds the pod for `api.preStopSleepSeconds` (5) **before** the signal, with
 `lifecycle.preStop.sleep`, the kubelet's own action: the image is distroless and has no `sleep` to run. The sleep **counts against**
 `terminationGracePeriodSeconds` (*verified 2026-10-16*, [container lifecycle hooks](https://kubernetes.io/docs/concepts/containers/container-lifecycle-hooks/)),
-so the grace period (40) holds the sleep, the drain and 5 s of margin, and the chart refuses less than the sleep plus 30.
+so the grace period must hold the sleep, the drain, the 2 s the binary then gives its health endpoints to stop (`run.rs`) and 5 s of margin, and **the chart
+refuses less than the sleep plus 32** (25 + 2 + 5); the default, 40 with a sleep of 5, leaves 8 s.
 
 **Kubernetes versions** (*verified 2026-10-16*, [feature gates](https://kubernetes.io/docs/reference/command-line-tools-reference/feature-gates/)): the
 gate `PodLifecycleSleepAction` is alpha and **off** in 1.29, beta and on from 1.30, GA in 1.34; the chart's `kubeVersion` is `>=1.29.0-0`. On 1.29

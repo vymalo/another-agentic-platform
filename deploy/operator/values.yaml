@@ -176,7 +176,8 @@ api:
   # Rolling update with a surge and no unavailable pod. A pod that is going stays in the Service for `preStopSleepSeconds` before the
   # signal (the API's listener closes at the signal and its endpoints leave the Service a moment later), then drains for at most 25 s
   # (bin/api/src/run.rs, DRAIN). The sleep counts against `terminationGracePeriodSeconds` (verified 2026-10-16, kubernetes.io container
-  # lifecycle hooks), so the grace period must hold the sleep, the drain and a margin: the chart refuses less than the sleep + 30.
+  # lifecycle hooks), so the grace period must hold the sleep, the drain, the 2 s the binary then gives its health port, and 5 s of margin: the chart refuses less
+  # than the sleep + 32 (the default, 40 with a sleep of 5, leaves 8 s).
   # `lifecycle.preStop.sleep` is a feature gate that is alpha and OFF in Kubernetes 1.29, beta and on from 1.30 and GA in 1.34 (verified
   # 2026-10-16, kubernetes.io feature gates): on 1.29 enable PodLifecycleSleepAction or set 0, which renders no hook.
   terminationGracePeriodSeconds: 40

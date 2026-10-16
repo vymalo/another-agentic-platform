@@ -380,7 +380,7 @@ secretref_objects() {
 }
 check "api (secretref shape): no Ingress, no policy for the API, no ServiceAccount made, and the existing one is the pod's and the binding's" secretref_objects
 secretref_pod() {
-  dhas Deployment aap-operator-api 'api:sha-[0-9a-f]{7}@sha256:0{64}"' 'value: "debug"' 'terminationGracePeriodSeconds: 30' \
+  dhas Deployment aap-operator-api 'api:sha-[0-9a-f]{7}@sha256:0{64}"' 'value: "debug"' 'terminationGracePeriodSeconds: 32' \
     && dlacks Deployment aap-operator-api '^          lifecycle:' 'sleep:'
 }
 check "api (secretref shape): the image is tag and digest, the log level and the grace period are the values, and there is no preStop hook" secretref_pod
@@ -589,6 +589,14 @@ check "a health port that is not a port is refused" refused_api 'api.healthPort:
 check "the same port for the API and its health is refused" refused_api 'api.port and api.healthPort must differ' --set api.healthPort=8080
 check "a negative preStop sleep is refused" refused_api 'api.preStopSleepSeconds must be a whole number' --set api.preStopSleepSeconds=-1
 check "a grace period that cannot hold the sleep and the drain is refused" refused_api 'api.terminationGracePeriodSeconds must be a whole number of at least' --set api.terminationGracePeriodSeconds=34
+check "a grace period of sleep + 31 is refused (25 s of drain, 2 s for the health port and 5 s of margin make 32)" \
+  refused_api 'api.terminationGracePeriodSeconds must be a whole number of at least api.preStopSleepSeconds + 32' --set api.terminationGracePeriodSeconds=36
+check "a grace period of sleep + 32 renders" renders_ok -f "$here/api.values.yaml" --set api.terminationGracePeriodSeconds=37
+grace_with_no_sleep() {
+  renders_ok -f "$here/api.values.yaml" --set api.preStopSleepSeconds=0 --set api.terminationGracePeriodSeconds=32 \
+    && refused_api 'api.terminationGracePeriodSeconds must be a whole number' --set api.preStopSleepSeconds=0 --set api.terminationGracePeriodSeconds=31
+}
+check "with no sleep the grace period of 32 renders and 31 is refused" grace_with_no_sleep
 check "the grace period must grow with the sleep" refused_api 'api.terminationGracePeriodSeconds must be a whole number of at least' --set api.preStopSleepSeconds=20
 check "a service account to use but no name is refused" refused_api 'api.serviceAccount.name is required' --set api.serviceAccount.create=false
 check "an Ingress with no host is refused" refused_api 'api.ingress.host is required' --set api.ingress.host=
