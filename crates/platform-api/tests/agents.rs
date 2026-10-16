@@ -364,6 +364,53 @@ async fn an_agent_the_operator_is_still_releasing_is_202_and_refuses_writes() {
 }
 
 #[tokio::test]
+async fn a_second_delete_of_an_agent_that_is_going_is_accepted_again_and_a_put_is_not() {
+    // The port accepts a delete of a service that is already being deleted, so the answer is `202` and its row again, as
+    // the first was: a client that did not see the first answer can ask again. Only a write that is not a delete is 409.
+    let (api, token) = Api::seeded().await;
+    create(&api, &token, &folder_body("chat")).await;
+    api.objects.seed_finalizer("chat");
+    let current = api.get("/v1/agents/chat").token(&token).send().await;
+    let first = api
+        .delete("/v1/agents/chat")
+        .token(&token)
+        .replace(&current.etag())
+        .send()
+        .await;
+    assert_eq!(first.code(), 202, "{}", first.text());
+
+    let going = api.get("/v1/agents/chat").token(&token).send().await;
+    let again = api
+        .delete("/v1/agents/chat")
+        .token(&token)
+        .replace(&going.etag())
+        .send()
+        .await;
+    assert_eq!(again.code(), 202, "{}", again.text());
+    assert_eq!(again.json()["state"], "deleting");
+    assert_eq!(again.json()["name"], "chat");
+
+    // The token the client held before the first delete is stale for the second.
+    let stale = api
+        .delete("/v1/agents/chat")
+        .token(&token)
+        .replace(&current.etag())
+        .send()
+        .await;
+    assert_eq!(stale.code(), 412, "{}", stale.text());
+
+    let put = api
+        .put("/v1/agents/chat")
+        .token(&token)
+        .replace(&going.etag())
+        .json(&folder_body("chat"))
+        .send()
+        .await;
+    assert_eq!(put.code(), 409, "{}", put.text());
+    assert!(put.is_problem("deleting"));
+}
+
+#[tokio::test]
 async fn an_agent_that_gitops_owns_is_read_only_and_every_write_is_409() {
     let (api, token) = Api::seeded().await;
     let created = create(&api, &token, &folder_body("chat")).await;
