@@ -738,6 +738,33 @@ api_shapes_are_written() {
 check "api: api-shapes.sh writes the file of four shapes (golden, secretref, minimal, full), the full one with the ports it sets" api_shapes_are_written
 check "api: the shape that sets every value (tests/api-full.values.yaml) renders" renders_ok -f "$here/api-full.values.yaml"
 
+# ---- The values of the kind end-to-end of the Platform API (D7b2) ------------------------------------------------------------
+# tests/e2e/api.values.yaml with what api-e2e.sh adds when it runs: the images it loads into kind, the issuer on the runner and the one
+# egress rule that reaches it, the namespace of the agents. That the chart renders them, and renders them as the script depends on, is
+# checked here, so that a change that breaks them fails in the chart job and not in a kind cluster.
+e2e_render() {
+  render -f "$here/e2e/api.values.yaml" \
+    --set image.repository=operator --set image.tag=smoke --set image.pullPolicy=Never \
+    --set api.image.repository=api --set api.image.tag=smoke --set api.image.pullPolicy=Never \
+    --set api.config.oidc.issuer=http://172.18.0.1:40000 --set 'api.config.oidc.audiences[0]=aap-e2e-api' --set api.config.oidc.rolesClaim=agentic_roles \
+    --set-json 'api.config.defaults.allowFrom=[{"namespaceSelector":{"matchLabels":{"kubernetes.io/metadata.name":"another-agentic-system"}}}]' \
+    --set-json 'api.networkPolicy.issuer.to=[{"ipBlock":{"cidr":"172.18.0.1/32"}}]' --set-json 'api.networkPolicy.issuer.ports=[40000]'
+}
+e2e_render
+check "e2e: the values of the API end-to-end render" has 'kind: Deployment'
+check "e2e: both images are the ones loaded into kind, never pulled" \
+  all_of "$(doc Deployment aap-operator-api)" 'image: "api:smoke"' 'imagePullPolicy: Never' \
+  && dhas Deployment aap-operator 'image: "operator:smoke"' 'imagePullPolicy: Never'
+check "e2e: the ledger of an agent is a Secret named from it, and there is no CloudNativePG store" \
+  dhas ConfigMap aap-operator-api 'secretRef:' '\{name\}-db-app' 'key: uri' && dlacks ConfigMap aap-operator-api 'cnpg'
+check "e2e: the registries an agent may pin its image from are docker.io, the stand-in's" dhas ConfigMap aap-operator-api 'allowedImageRegistries:' '^      - docker.io$'
+check "e2e: the issuer is the runner's address, and the policy's third egress rule reaches exactly it" \
+  dhas ConfigMap aap-operator-api 'issuer: http://172.18.0.1:40000' \
+  && all_of "$(api_egress_rule 3)" 'cidr: 172.18.0.1/32' 'port: 40000$'
+check "e2e: the policy admits the pods labelled aap-e2e/client and no other" \
+  dhas NetworkPolicy aap-operator-api 'aap-e2e/client: "true"'
+check "e2e: no registry, no ExternalSecret and no Ingress are rendered" lacks 'aap-operator-registry|^kind: (ExternalSecret|Ingress)$'
+
 # ---- The CRDs chart: one source ------------------------------------------------------------------------------------------
 check "deploy/operator-crds/files is a copy of deploy/crds (cp deploy/crds/agents.vymalo.com.yaml deploy/operator-crds/files/)" \
   cmp -s "$crds_file" "$crds_chart/files/agents.vymalo.com.yaml"

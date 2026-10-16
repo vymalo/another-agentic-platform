@@ -336,7 +336,7 @@ done
 [ "$(can list agentservices.agents.vymalo.com --all-namespaces)" = no ] || die "the API may list agentservices in every namespace"
 ok "the API's service account has the Role's rights and none on Secrets, none on workloads, none outside $ns"
 [ "$(kubectl -n "$ns" get networkpolicy "$api_name" -o json | jq -c --arg cidr "$host_addr/32" --argjson port "$issuer_port" \
-  '[.spec.egress[].to[]?.ipBlock.cidr] == [$cidr] and ([.spec.egress[].ports[]?.port] | index($port)) != null')" = true ] \
+  '([.spec.egress[].to[]? | select(.ipBlock) | .ipBlock.cidr] == [$cidr]) and (([.spec.egress[].ports[]?.port] | index($port)) != null)')" = true ] \
   || die "the API's NetworkPolicy has no egress rule for the issuer at $host_addr:$issuer_port"
 ok "the API's NetworkPolicy is installed, with one rule to $host_addr/32 on port $issuer_port for the issuer"
 
@@ -453,8 +453,8 @@ ok "the operator's view agrees: the AgentService is Ready (four conditions True)
 fresh_etag
 agent_etag_a=$etag
 jq -e --arg n "$agent" '.name == $n and .state == "ready" and (.representation.form.form.title == "E2E chat")
-  and (.representation.form.form.model.endpoint | . == "'"$model"'") and (.status | type == "object") and (.configStatus | type == "object")' "$work/body" >/dev/null \
-  || die "the detail is not the agent: $(head -c 800 "$work/body")"
+  and (.representation.form.form.model.endpoint | . == "'"$model"'") and (.status.state == "Ready") and has("configStatus")' "$work/body" >/dev/null \
+  || die "the detail is not the agent: $(head -c 3000 "$work/body")"
 as admin platform:agents.read GET "/v1/agents/$agent/yaml"
 expect 200 "the YAML"
 [ "$(header content-type)" = application/yaml ] || die "the YAML's content type is '$(header content-type)'"
