@@ -1,10 +1,26 @@
 consumer_linkset.rs   another-agentic-system  orchestrator/crates/registry-platform/src/linkset.rs
-                      commit e5da0a42d089835a390c57ddbcce37b02c95d76b (2026-10-05)
-                      one change: orch_core::is_valid_agent_id is defined in the file
+                      commit 8df44c6f88f0d9eb47aa7c9f5874a914765c8376 (2026-10-17, slice D8: the reader parses `audience`)
+                      earlier copy: e5da0a42d089835a390c57ddbcce37b02c95d76b (2026-10-05, from before `audience`)
+                      four changes from upstream, each in the header of the file:
+                      1. orch_core::is_valid_agent_id is defined in the file (the same function, from
+                         orchestrator/crates/core/src/ids.rs at the same commit)
+                      2. orch_ports::AgentAudience is defined in the file, with AudienceRoles,
+                         AgentAudience::from_values, is_audience_value and the constants MAX_AUDIENCE_VALUES,
+                         MAX_AUDIENCE_VALUE_BYTES and AUDIENCE_EVERYONE, verbatim from
+                         orchestrator/crates/ports/src/registry.rs at the same commit
+                      3. the unit tests of from_values (the contract's malformed vectors, three property tests) are the
+                         module agent_audience_tests at the end, verbatim from the tests module of that same file
+                      4. the file's `//!` comment is `//`
 ../fixtures/consumer-mock-registry-agents.json
                       another-agentic-system  dev/wiremock/registry/__files/agents.json, same commit
-                      the document its compose stack's mock registry serves
+                      the document its compose stack's mock registry serves: four agents with audiences
+                      (platform-coder ["*"], platform-restricted, platform-admins with none, platform-malformed ["*", "x"])
+                      copied unchanged
+(not from there)      ../fixtures/contract-example.json is this repository's: tests/document.rs holds it equal to the first JSON
+                      block of docs/extensions/agent-registry-v1.md, so there is nothing to refresh from the system
 
-To update: copy the files again from the commit you want, reapply the one change, and put the new commit
-here and in the header of consumer_linkset.rs. The other repository's tests/platform.rs holds the HTTP half of
-the consumer (cache headers, ETag, fail closed); crates/registry/tests/router.rs holds this repository's half.
+To update: copy the files again from the commit you want, reapply the four changes (if upstream's reader calls something else
+of orch_core or orch_ports, define that in the file too, verbatim, and add it to the list here and in the header of
+consumer_linkset.rs), and put the new commit here and in the header of consumer_linkset.rs. The other repository's
+tests/platform.rs holds the HTTP half of the consumer (cache headers, ETag, fail closed); crates/registry/tests/router.rs holds this
+repository's half.

@@ -159,31 +159,51 @@ first 128 bits of the SHA-256 of the body, quoted. A change of the `anchor` is a
 The reader of this contract that matters is the system's: `orchestrator/crates/registry-platform/src/linkset.rs` in
 [another-agentic-system](https://github.com/vymalo/another-agentic-system). **It is vendored**, with its unit tests (its
 parsing test vectors), in [`tests/vendored/consumer_linkset.rs`](tests/vendored/consumer_linkset.rs), at commit
-`e5da0a42d089835a390c57ddbcce37b02c95d76b` (2026-10-05), with one change (`orch_core::is_valid_agent_id` is defined in the
-file), so this repository does not depend on that one. [`tests/vendored/UPSTREAM`](tests/vendored/UPSTREAM) says how to
-refresh it. Two fixtures come from there too: the contract's own example and the document its compose stack's mock
-registry serves.
-
-**The reader is from before `audience`** (the commit above is of 2026-10-05) and is *not* re-vendored by slice D3: the
-claim to test is that a reader that does not know the attribute ignores it, which the contract's *Versioning* rests on,
-and the pinned reader is exactly that. It reads only the members it knows and rejects nothing it does not (*verified
-2026-10-15*, `read_item` in the vendored file and its own test `members_and_attributes_this_reader_does_not_know_are_ignored`).
-The system enforces `audience` in its slice D8, which will re-vendor the reader (its parser then reads the attribute) and
-refresh the two fixtures at the commit that has it.
+`8df44c6f88f0d9eb47aa7c9f5874a914765c8376` (2026-10-17), the commit of the system's slice D8, whose reader parses `audience`.
+The file differs from upstream in four ways only, so that this repository does not depend on that one; each is listed in its
+header and in [`tests/vendored/UPSTREAM`](tests/vendored/UPSTREAM), which also says how to refresh it. (1) `is_valid_agent_id` is
+defined in the file, as before. (2) `AgentAudience`, `AudienceRoles` and `AgentAudience::from_values`, which the reader calls
+in `orch-ports`, are defined in it **verbatim**. (3) Their unit tests, the contract's malformed vectors and three property
+tests, are one module at the end. (4) The file's `//!` comment is `//`. One fixture comes from there too, the document its
+compose stack's mock registry serves, now four items with audiences (`platform-coder` for everybody, `platform-restricted` for
+one role value, `platform-admins` with none, `platform-malformed` with `["*", "x"]`). The contract's own example,
+`tests/fixtures/contract-example.json`, is this repository's, and a test holds it equal to the contract's first JSON block.
 
 What the tests hold with it: the fleet's document parses with **nothing skipped**; an empty fleet is an empty list and not
 an unreadable one; a document at 500 items is readable; and a property test over arbitrary entries (names that are and are
-not ids, odd titles, up to 24 tags, cards that are and are not URLs, listed or not) shows that whatever the directory
-holds, the builder either refuses the document or writes one the consumer reads **with no item skipped** and with exactly
-the ids the builder says it listed. The HTTP half of the consumer (its cache headers and its fail-closed reading) is
-tested in that repository, against its own mock; this crate's `tests/router.rs` is the server's half.
+not ids, odd titles, up to 24 tags, cards that are and are not URLs, listed or not, arbitrary audiences) shows that whatever
+the directory holds, the builder either refuses the document or writes one the consumer reads **with no item skipped** and
+with exactly the ids the builder says it listed. The HTTP half of the consumer (its cache headers and its fail-closed reading)
+is tested in that repository, against its own mock; this crate's `tests/router.rs` is the server's half.
 
-For `audience` (D3) the consumer tests say three more things: the old reader makes **exactly the same list** of a document
-whose items carry audiences as of the same fleet without them (`Document` equal, nothing skipped), it keeps an item
-whatever its `audience` member holds (a string, a number, `null`, a list of numbers, an object), and the property test's
-arbitrary entries now carry arbitrary audiences (good, odd, too many, with a star) with the same "nothing skipped" outcome.
-The contract's own example, its first JSON block, is read from `docs/extensions/agent-registry-v1.md` by a test: it equals
-`tests/fixtures/contract-example.json` and what the builder writes for the two services it shows.
+**The audience round trip (D8).** The document this builder publishes for a fleet with audiences reads, through the system's
+reader, as **the same audiences**: `["*"]` as `Everyone`; values as the same *set* (the builder sorts and de-duplicates them, the
+reader takes them as a set, so order and repeats change nothing); no audience, `[]`, and one the builder withholds as malformed
+all as `AdminsOnly` (administrators only); and never `Static`, which is for the deployment's own agents. The reader also reports
+none of the audiences the builder published as malformed: the two grammars agree, and a value the builder lets through, the
+reader accepts. Three tests hold it in `tests/document.rs`: an example (six shapes published and eight withheld, the answers
+written out by hand), a property test over arbitrary lists on many services at once (each keeps its own), and one over order and
+repeats; the two fixtures are read with the audiences they state; and the older test "an item with an audience reads as the same
+item without one" now says so *but for the audience*, which the reader now reads. That a reader that does not know the attribute
+ignores it rests on the reader's own `members_and_attributes_this_reader_does_not_know_are_ignored` (*verified 2026-10-15*, on the
+previous copy), and that an item is kept whatever its `audience` member holds on
+`the_consumer_keeps_an_item_whatever_its_audience_member_holds`, which now also says how each reads.
+
+*Not vacuous* (*verified 2026-10-17*: each change made in `src/document.rs`, `cargo test -p aap-registry --test document` run,
+the change undone):
+
+| The builder's audience output, broken | Fails |
+|---|---|
+| dropped | 15 of 62 tests: the three tests of the round trip, the consumer test of the fleet's audiences, and the builder's own |
+| only the first value published | 12: the three tests of the round trip, the consumer test, and the builder's |
+| unsorted, with the repeats said | 8, **none of the three tests of the round trip**: the reader takes the values as a set, so the order is the builder's own claim, held by its tests and by the text the consumer test looks for |
+| a star allowed beside another value | 5: the three tests of the round trip (`malformed_audience` is not empty), and two of the builder's |
+| a value of 65 characters allowed | 2: the example of the round trip and the builder's test of withheld audiences |
+
+Two differences from the contract are the system's, recorded in its ADR 0045 and in §60a: a role that holds `admin` sees every
+listed agent whatever its audience (the contract's consumer rule 4 says otherwise, pending the owner), and a roles claim with a
+non-string element is read by skipping the element (the contract's rule 2 says no roles). Both are in how the system *uses*
+the audience, not in how its reader reads the document, so neither shows in these tests.
 
 ## Tests
 
@@ -195,7 +215,7 @@ AAP_UPDATE_GOLDENS=1 cargo test -p aap-registry --test document   # rewrite test
 | File | What |
 |---|---|
 | `src/token.rs` unit tests | the token matches only itself, is trimmed, `Debug` hides it, a file is read, a missing or empty one is an error |
-| `tests/document.rs` | what is listed and in what order; the same bytes for the same entries in any order; the strong `ETag` follows the body; **the golden document and its `ETag`** (a fleet with no audience: byte for byte what it was before D3); **the golden with audiences** (`tests/fixtures/golden-document-audience.json`); the version marker and the anchor; cards and names a reader would skip are not listed; titles and tags made to fit; the limits are refusals (501 items, and a body past 1 MiB); the ids; the consumer reads the fleet, the empty fleet, the vendored documents and a document of 500 items; the property test. **Audience (D3):** the §60a item, exactly; none and `[]` publish nothing and the same bytes; `["*"]`; the values as a set in byte order; all 24 orders of four values, each said twice, give the same body and `ETag` (and any change of the values does not); the bounds (32 values of 64 characters) published whole, 33 said with a repeat being 32; eight malformed audiences withheld with the item kept and named in `audience_withheld`; **the size**: 500 items with 32 values are refused whole, the largest number that fits is found and read by the consumer, and a body of **exactly 1 MiB** is accepted and one byte more is refused; the consumer tests above; the contract's example; two property tests (the published audience equals the contract's rule over arbitrary lists, and in any order and said twice it is the same bytes) |
+| `tests/document.rs` | what is listed and in what order; the same bytes for the same entries in any order; the strong `ETag` follows the body; **the golden document and its `ETag`** (a fleet with no audience: byte for byte what it was before D3); **the golden with audiences** (`tests/fixtures/golden-document-audience.json`); the version marker and the anchor; cards and names a reader would skip are not listed; titles and tags made to fit; the limits are refusals (501 items, and a body past 1 MiB); the ids; the consumer reads the fleet, the empty fleet, the vendored documents and a document of 500 items; the property test. **Audience (D3):** the §60a item, exactly; none and `[]` publish nothing and the same bytes; `["*"]`; the values as a set in byte order; all 24 orders of four values, each said twice, give the same body and `ETag` (and any change of the values does not); the bounds (32 values of 64 characters) published whole, 33 said with a repeat being 32; eight malformed audiences withheld with the item kept and named in `audience_withheld`; **the size**: 500 items with 32 values are refused whole, the largest number that fits is found and read by the consumer, and a body of **exactly 1 MiB** is accepted and one byte more is refused; the consumer tests above; the contract's example; two property tests (the published audience equals the contract's rule over arbitrary lists, and in any order and said twice it is the same bytes). **Round trip (D8):** the system's reader, re-vendored, reads the audiences the builder publishes as the same audiences (an example, and two property tests: per service, and over order and repeats); a malformed audience is never published, so the reader reports none; the two fixtures read with their audiences |
 | `tests/router.rs` | `401` for ten kinds of missing or wrong credential on `GET` and `HEAD`, with no body; the scheme is case-insensitive and the token not; no `304` for the unauthenticated; the headers of the contract; `HEAD`; `304` for the five forms of a match and `200` for the four of a mismatch; a change of the fleet is a new `ETag`; a blocked or A2A-less service leaves the list; an empty fleet; `503` before the directory has synced; past a limit `503`, the flag raised and, when it fits again, cleared; `document()` sets the flag without a request; other paths and methods. **Audience (D3):** served in byte order and absent for a service with none; the same values reordered or repeated are still `304` for the old `ETag`, another value is `200` and a new one, and no audience takes the attribute away; 500 services whose audiences pass 1 MiB are `503` with the flag raised and `200` with it cleared once they are open to everybody |
 | `bin/operator/tests/cluster.rs` | against a real cluster: the operator serves the registry with a token, lists the Ready agent **with the audience of its `AgentService`, as a set** (D3) and not a Blocked one, refuses without the token, answers `304` and `HEAD`, reads the registry and the card it lists **from a pod**, and drops a deleted service; without a token nothing listens |
 

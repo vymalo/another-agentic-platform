@@ -5,7 +5,7 @@
 
 mod support;
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 
 use aap_ports::DirectoryEntry;
 use aap_registry::document::{
@@ -658,19 +658,50 @@ fn the_consumer_reads_an_empty_registry_as_an_empty_list_and_not_an_unreadable_o
 
 #[test]
 fn the_vendored_documents_read_as_the_consumer_reads_them() {
-    // The fixtures are what the consumer's own tests and compose stack use: the reader here is the
-    // consumer's, so a drift of the vendored copy shows as a change of what these documents say.
+    // The fixtures are what the consumer's own compose stack serves and the contract's own example: the
+    // reader here is the consumer's, so a drift of the vendored copy shows as a change of what these
+    // documents say, the audiences included.
+    let roles = |values: &[&str]| consumer::AgentAudience::from_values(values.iter().copied());
     for (name, expect) in [
-        ("contract-example.json", vec!["coder", "researcher"]),
-        ("consumer-mock-registry-agents.json", vec!["platform-coder"]),
+        (
+            "contract-example.json",
+            vec![
+                ("coder", roles(&["agent.use:coder"])),
+                ("researcher", consumer::AgentAudience::Everyone),
+            ],
+        ),
+        (
+            "consumer-mock-registry-agents.json",
+            vec![
+                ("platform-coder", consumer::AgentAudience::Everyone),
+                (
+                    "platform-restricted",
+                    roles(&["agent.use:platform-restricted"]),
+                ),
+                ("platform-admins", consumer::AgentAudience::AdminsOnly),
+                // `["*", "x"]` is malformed: none, and the item is kept.
+                ("platform-malformed", consumer::AgentAudience::AdminsOnly),
+            ],
+        ),
     ] {
         let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
             .join("tests/fixtures")
             .join(name);
         let read = consumer::parse(&std::fs::read(path).unwrap()).unwrap();
-        let ids: Vec<&str> = read.items.iter().map(|i| i.service.as_str()).collect();
-        assert_eq!(ids, expect, "{name}");
+        let got: Vec<(&str, consumer::AgentAudience)> = read
+            .items
+            .iter()
+            .map(|i| (i.service.as_str(), i.audience.clone()))
+            .collect();
+        assert_eq!(got, expect, "{name}");
         assert!(read.skipped.is_empty(), "{name}");
+        // Only the mock registry carries a malformed audience, and only on that one item.
+        let malformed: &[&str] = if name == "contract-example.json" {
+            &[]
+        } else {
+            &["platform-malformed"]
+        };
+        assert_eq!(read.malformed_audience, malformed, "{name}");
     }
 }
 
@@ -685,10 +716,10 @@ fn a_document_at_the_limits_is_still_readable_by_the_consumer() {
 }
 
 #[test]
-fn the_consumer_reads_a_fleet_whose_items_carry_an_audience_exactly_as_it_reads_one_without() {
-    // The reader is the system's, vendored at the commit `tests/vendored/UPSTREAM` names, from before
-    // the attribute existed: it must ignore `audience` (the contract's *Versioning*: an optional item
-    // attribute is not breaking), so what it makes of the document is the same with and without.
+fn an_audience_changes_what_the_consumer_reads_of_an_item_in_the_audience_and_nowhere_else() {
+    // The attribute is optional and not breaking (the contract's *Versioning*): with it or without it, the
+    // consumer lists the same items, with the same ids, cards, titles and tags, and skips nothing. The one
+    // thing it adds is the audience, which the reader (re-vendored at the system's D8) now reads.
     let anchor = Some("http://op.ns.svc:8080/registry/v1/agents");
     let with = build(&the_audience_fleet(), anchor).unwrap();
     let without = build(&the_fleet(), anchor).unwrap();
@@ -705,34 +736,74 @@ fn the_consumer_reads_a_fleet_whose_items_carry_an_audience_exactly_as_it_reads_
     );
     assert_ne!(with.etag, without.etag);
 
-    let read_with = consumer::parse(&with.body).expect("the old reader accepts the document");
+    let mut read_with = consumer::parse(&with.body).expect("the reader accepts the document");
     let read_without = consumer::parse(&without.body).unwrap();
     assert!(read_with.skipped.is_empty(), "{:?}", read_with.skipped);
+    assert!(read_with.malformed_audience.is_empty());
     assert_eq!(read_with.items.len(), 3);
+
+    // What it reads of the audiences ...
+    let audience_of = |read: &consumer::Document, service: &str| {
+        read.items
+            .iter()
+            .find(|i| i.service == service)
+            .unwrap()
+            .audience
+            .clone()
+    };
+    assert_eq!(
+        audience_of(&read_with, "coder"),
+        consumer::AgentAudience::from_values(["agent.use:coder", "agent.use:admin"])
+    );
+    assert_eq!(
+        audience_of(&read_with, "researcher"),
+        consumer::AgentAudience::Everyone
+    );
+    assert_eq!(
+        audience_of(&read_with, "chat"),
+        consumer::AgentAudience::AdminsOnly
+    );
+    // ... and of the fleet with none: every item is for administrators only.
+    assert!(
+        read_without
+            .items
+            .iter()
+            .all(|i| i.audience == consumer::AgentAudience::AdminsOnly)
+    );
+
+    // Everything else is the same list, item for item.
+    for item in &mut read_with.items {
+        item.audience = consumer::AgentAudience::AdminsOnly;
+    }
     assert_eq!(
         read_with, read_without,
-        "an item with an audience reads as the same item without one"
+        "an item with an audience reads as the same item without one, but for its audience"
     );
 }
 
 #[test]
 fn the_consumer_keeps_an_item_whatever_its_audience_member_holds() {
-    // An old reader has no idea what `audience` is, so it cannot be a reason to skip an item, whatever
-    // a (future or foreign) server puts there.
+    // An audience can never be a reason to lose an item, whatever a (future or foreign) server puts
+    // there: a malformed one is none (administrators only), and the reader reports it.
     let base = |audience: Value| {
         json!({"href": "https://a.example.com/.well-known/agent-card.json",
                "service": ["a"], "audience": audience})
     };
-    for audience in [
-        json!(["agent.use:a"]),
-        json!([]),
-        json!(["*"]),
-        json!("agent.use:a"),
-        json!(5),
-        json!(null),
-        json!([1, null, {"x": []}]),
-        json!({"roles": ["a"]}),
-        json!(["x".repeat(500)]),
+    let well = |a: consumer::AgentAudience| (a, false);
+    let malformed = (consumer::AgentAudience::AdminsOnly, true);
+    for (audience, (reads_as, reported)) in [
+        (
+            json!(["agent.use:a"]),
+            well(consumer::AgentAudience::from_values(["agent.use:a"])),
+        ),
+        (json!([]), well(consumer::AgentAudience::AdminsOnly)),
+        (json!(["*"]), well(consumer::AgentAudience::Everyone)),
+        (json!("agent.use:a"), malformed.clone()),
+        (json!(5), malformed.clone()),
+        (json!(null), malformed.clone()),
+        (json!([1, null, {"x": []}]), malformed.clone()),
+        (json!({"roles": ["a"]}), malformed.clone()),
+        (json!(["x".repeat(500)]), malformed),
     ] {
         let body = serde_json::to_vec(&json!({"linkset": [{
             "profile": [{"href": PROFILE}], "item": [base(audience.clone())]}]}))
@@ -740,6 +811,12 @@ fn the_consumer_keeps_an_item_whatever_its_audience_member_holds() {
         let read = consumer::parse(&body).unwrap();
         assert_eq!(read.items.len(), 1, "{audience}");
         assert!(read.skipped.is_empty(), "{audience}: {:?}", read.skipped);
+        assert_eq!(read.items[0].audience, reads_as, "{audience}");
+        assert_eq!(
+            read.malformed_audience,
+            if reported { vec!["a"] } else { vec![] },
+            "{audience}"
+        );
     }
 }
 
@@ -904,7 +981,7 @@ proptest! {
         let other = build(&[audienced_with("ns", "x", &again)], None).unwrap();
         prop_assert_eq!(&built.body, &other.body);
         prop_assert_eq!(&built.etag, &other.etag);
-        // And the old reader takes it, whatever it holds.
+        // And the consumer's reader takes it, whatever it holds.
         let read = consumer::parse(&built.body).unwrap();
         prop_assert!(read.skipped.is_empty());
     }
@@ -914,5 +991,173 @@ fn audienced_with(scope: &str, name: &str, audience: &[String]) -> DirectoryEntr
     DirectoryEntry {
         audience: audience.to_vec(),
         ..entry(scope, name)
+    }
+}
+
+// ---------------------------------------------------------------- the audience, round trip
+
+/// The audience of every item the consumer reads from `body`, by service id. The reader must take the
+/// document whole, report no audience as malformed (the builder withholds those, so none is published) and
+/// never read `Static`, which is the deployment's own agents and not a registry item's.
+fn read_audiences(body: &[u8]) -> BTreeMap<String, consumer::AgentAudience> {
+    let read = consumer::parse(body).expect("the consumer's reader accepts the document");
+    assert!(read.skipped.is_empty(), "{:?}", read.skipped);
+    assert!(
+        read.malformed_audience.is_empty(),
+        "an audience the builder published is one the reader calls malformed: {:?}",
+        read.malformed_audience
+    );
+    read.items
+        .into_iter()
+        .map(|item| {
+            assert_ne!(
+                item.audience,
+                consumer::AgentAudience::Static,
+                "{}: a registry item is never static",
+                item.service
+            );
+            (item.service, item.audience)
+        })
+        .collect()
+}
+
+/// That `read` is the audience of a service whose directory entry holds `values`, by the contract's rules
+/// written out again here (not by the reader's own function): none, or a shape the builder withholds, is
+/// administrators only; a star alone is everybody; anything else is the **set** of the values.
+fn assert_reads_as(read: &consumer::AgentAudience, values: &[String]) {
+    match expected_audience(values) {
+        None => assert_eq!(read, &consumer::AgentAudience::AdminsOnly, "{values:?}"),
+        Some(published) if published == ["*"] => {
+            assert_eq!(read, &consumer::AgentAudience::Everyone, "{values:?}");
+        }
+        Some(_) => {
+            let consumer::AgentAudience::Roles(roles) = read else {
+                panic!("{values:?} read as {read:?}, not as a set of values");
+            };
+            let got: BTreeSet<&str> = roles.iter().collect();
+            let want: BTreeSet<&str> = values.iter().map(String::as_str).collect();
+            assert_eq!(got, want, "{values:?}");
+        }
+    }
+}
+
+#[test]
+fn the_consumer_reads_the_audiences_the_builder_publishes_as_the_same_audiences() {
+    // The named cases first, each with the answer the contract gives written out by hand.
+    let withheld: Vec<(&str, Vec<String>)> = vec![
+        ("empty-value", vec![String::new()]),
+        (
+            "value-of-65-characters",
+            vec!["x".repeat(MAX_AUDIENCE_CHARS + 1)],
+        ),
+        ("space", vec!["agent use".to_owned()]),
+        ("control-character", vec!["agent.use:a\u{7}".to_owned()]),
+        ("non-ascii-character", vec!["agent.use:é".to_owned()]),
+        (
+            "bad-value-beside-a-good-one",
+            vec!["agent.use:ok".to_owned(), String::new()],
+        ),
+        ("33-distinct-values", longest_values(MAX_AUDIENCE + 1)),
+        (
+            "star-beside-a-value",
+            vec!["*".to_owned(), "agent.use:x".to_owned()],
+        ),
+    ];
+    let published: Vec<(&str, Vec<String>)> = vec![
+        ("everyone", vec!["*".to_owned()]),
+        ("everyone-twice", vec!["*".to_owned(), "*".to_owned()]),
+        ("one", vec!["agent.use:one".to_owned()]),
+        (
+            "unsorted-with-repeats",
+            ["b", "agent.use:z", "B", "a", "agent.use:a", "b", "a"]
+                .map(str::to_owned)
+                .to_vec(),
+        ),
+        ("widest", longest_values(MAX_AUDIENCE)),
+        ("none", vec![]),
+    ];
+    let entries: Vec<DirectoryEntry> = published
+        .iter()
+        .chain(&withheld)
+        .map(|(name, values)| audienced_with("ns", name, values))
+        .collect();
+    let built = build(&entries, None).unwrap();
+    assert_eq!(built.listed.len(), entries.len(), "{:?}", built.skipped);
+    assert_eq!(built.audience_withheld.len(), withheld.len());
+    let read = read_audiences(&built.body);
+    assert_eq!(read.len(), entries.len());
+
+    // By hand: a star is everybody, in any number; values are the set; none is administrators only.
+    assert_eq!(read["everyone"], consumer::AgentAudience::Everyone);
+    assert_eq!(read["everyone-twice"], consumer::AgentAudience::Everyone);
+    assert_eq!(
+        read["one"],
+        consumer::AgentAudience::from_values(["agent.use:one"])
+    );
+    let consumer::AgentAudience::Roles(roles) = &read["unsorted-with-repeats"] else {
+        panic!("{:?}", read["unsorted-with-repeats"]);
+    };
+    assert_eq!(
+        roles.iter().collect::<Vec<_>>(),
+        ["B", "a", "agent.use:a", "agent.use:z", "b"]
+    );
+    assert!(
+        ["B", "a", "agent.use:a", "agent.use:z", "b"]
+            .iter()
+            .all(|r| roles.contains(r))
+    );
+    assert_eq!(read["none"], consumer::AgentAudience::AdminsOnly);
+    for (name, _) in &withheld {
+        assert_eq!(
+            read[*name],
+            consumer::AgentAudience::AdminsOnly,
+            "{name}: withheld, so none"
+        );
+    }
+
+    // And all of them by the rules written out in `assert_reads_as`.
+    for (name, values) in published.iter().chain(&withheld) {
+        assert_reads_as(&read[*name], values);
+    }
+}
+
+proptest! {
+    #![proptest_config(ProptestConfig::with_cases(128))]
+
+    /// A fleet of services with arbitrary audiences: the document the builder publishes reads, through
+    /// the consumer's reader, as the audience each entry holds, with each service keeping its own.
+    #[test]
+    fn the_consumer_reads_the_audience_each_entry_holds(
+        audiences in proptest::collection::vec(arbitrary_audience(), 1..12)
+    ) {
+        let entries: Vec<DirectoryEntry> = audiences
+            .iter()
+            .enumerate()
+            .map(|(i, values)| audienced_with("ns", &format!("s{i:02}"), values))
+            .collect();
+        let built = build(&entries, None).unwrap();
+        let read = read_audiences(&built.body);
+        prop_assert_eq!(read.len(), audiences.len());
+        for (i, values) in audiences.iter().enumerate() {
+            assert_reads_as(&read[&format!("s{i:02}")], values);
+        }
+    }
+
+    /// The publisher sorts the values and the reader takes them as a set: the same values in another
+    /// order, and said again, are read as the same audience.
+    #[test]
+    fn the_consumer_reads_the_same_audience_whatever_the_order_and_the_repeats(
+        (values, shuffled) in arbitrary_audience()
+            .prop_flat_map(|v| (Just(v.clone()), Just(v).prop_shuffle()))
+    ) {
+        let read_of = |values: &[String]| {
+            let built = build(&[audienced_with("ns", "x", values)], None).unwrap();
+            read_audiences(&built.body).remove("x").unwrap()
+        };
+        let mut again = shuffled.clone();
+        again.extend(values.iter().cloned());
+        assert_reads_as(&read_of(&values), &values);
+        prop_assert_eq!(read_of(&values), read_of(&shuffled));
+        prop_assert_eq!(read_of(&values), read_of(&again));
     }
 }
