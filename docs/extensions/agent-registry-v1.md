@@ -345,9 +345,9 @@ and a document with audiences is a valid `v1` document for a reader that predate
 that such a client ignores the attribute and so shows a restricted agent to everybody, which is why
 a client that offers agents to people implements [the consumer's rule](#audience) before any
 service has an audience. The system's reader from before the attribute (its commit `e5da0a4`) was
-tested to read such a document with no item skipped; the copy vendored now is the system's
+tested to read such a document with no item skipped; the copy vendored since 2026-10-17 is the system's
 reader of its slice D8 (commit `8df44c6`), which parses `audience`, and a round-trip test holds
-that it reads each published audience as the same set
+that it reads each published audience as the same audience
 ([`aap-registry`](../../crates/registry/README.md#the-consumers-reader)).
 
 A service may declare both versions during a transition: the document then carries both `profile`

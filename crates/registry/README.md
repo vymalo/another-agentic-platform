@@ -160,11 +160,12 @@ The reader of this contract that matters is the system's: `orchestrator/crates/r
 [another-agentic-system](https://github.com/vymalo/another-agentic-system). **It is vendored**, with its unit tests (its
 parsing test vectors), in [`tests/vendored/consumer_linkset.rs`](tests/vendored/consumer_linkset.rs), at commit
 `8df44c6f88f0d9eb47aa7c9f5874a914765c8376` (2026-10-17), the commit of the system's slice D8, whose reader parses `audience`.
-The file differs from upstream in four ways only, so that this repository does not depend on that one; each is listed in its
+The file differs from upstream in five ways only, so that this repository does not depend on that one; each is listed in its
 header and in [`tests/vendored/UPSTREAM`](tests/vendored/UPSTREAM), which also says how to refresh it. (1) `is_valid_agent_id` is
-defined in the file, as before. (2) `AgentAudience`, `AudienceRoles` and `AgentAudience::from_values`, which the reader calls
+defined in the file, as before, with its constant `MAX_AGENT_ID_LEN`, private here and `pub` upstream, and shorter doc comments. (2) `AgentAudience`, `AudienceRoles` and `AgentAudience::from_values`, which the reader calls
 in `orch-ports`, are defined in it **verbatim**. (3) Their unit tests, the contract's malformed vectors and three property
-tests, are one module at the end. (4) The file's `//!` comment is `//`. One fixture comes from there too, the document its
+tests, are one module at the end. (4) The file's `//!` comment is `//`. (5) A file-level `#![allow(dead_code, clippy::unwrap_used, clippy::expect_used, missing_docs)]`, which upstream
+does not have: the file is a module of a test binary of this workspace. One fixture comes from there too, the document its
 compose stack's mock registry serves, now four items with audiences (`platform-coder` for everybody, `platform-restricted` for
 one role value, `platform-admins` with none, `platform-malformed` with `["*", "x"]`). The contract's own example,
 `tests/fixtures/contract-example.json`, is this repository's, and a test holds it equal to the contract's first JSON block.
@@ -181,8 +182,8 @@ reader, as **the same audiences**: `["*"]` as `Everyone`; values as the same *se
 reader takes them as a set, so order and repeats change nothing); no audience, `[]`, and one the builder withholds as malformed
 all as `AdminsOnly` (administrators only); and never `Static`, which is for the deployment's own agents. The reader also reports
 none of the audiences the builder published as malformed: the two grammars agree, and a value the builder lets through, the
-reader accepts. Three tests hold it in `tests/document.rs`: an example (six shapes published and eight withheld, the answers
-written out by hand), a property test over arbitrary lists on many services at once (each keeps its own), and one over order and
+reader accepts. Three tests hold it in `tests/document.rs`: an example (six shapes, one of which, `none`, publishes no attribute,
+and nine withheld, the answers written out by hand), a property test over arbitrary lists on many services at once (each keeps its own), and one over order and
 repeats; the two fixtures are read with the audiences they state; and the older test "an item with an audience reads as the same
 item without one" now says so *but for the audience*, which the reader now reads. That a reader that does not know the attribute
 ignores it rests on the reader's own `members_and_attributes_this_reader_does_not_know_are_ignored` (*verified 2026-10-15*, on the
@@ -198,7 +199,8 @@ the change undone):
 | only the first value published | 12: the three tests of the round trip, the consumer test, and the builder's |
 | unsorted, with the repeats said | 8, **none of the three tests of the round trip**: the reader takes the values as a set, so the order is the builder's own claim, held by its tests and by the text the consumer test looks for |
 | a star allowed beside another value | 5: the three tests of the round trip (`malformed_audience` is not empty), and two of the builder's |
-| a value of 65 characters allowed | 2: the example of the round trip and the builder's test of withheld audiences |
+| a value of 65 characters allowed | 5: the three tests of the round trip and two of the builder's (its test of withheld audiences and its property test); the property's strategy reaches 64, 65 and 66 bytes on purpose |
+| a DEL (`0x7F`) allowed in a value | 4: the three tests of the round trip and the builder's property test; the example holds a value with DEL, and the strategy has arms for a space and DEL among visible characters |
 
 Two differences from the contract are the system's, recorded in its ADR 0045 and in §60a: a role that holds `admin` sees every
 listed agent whatever its audience (the contract's consumer rule 4 says otherwise, pending the owner), and a roles claim with a

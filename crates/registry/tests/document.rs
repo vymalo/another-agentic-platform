@@ -862,13 +862,18 @@ fn the_contracts_example_is_what_the_builder_writes_from_the_entries_it_describe
     assert!(read.skipped.is_empty());
 }
 
-/// Audiences of every shape: none, a few good values, a star, odd characters, and long lists.
+/// Audiences of every shape: none, a few good values, a star, odd characters, and long lists. Two arms
+/// sit on the contract's edges: a space or DEL (`0x7F`) among visible characters, and a value of 64, 65
+/// or 66 bytes.
 fn arbitrary_audience() -> impl Strategy<Value = Vec<String>> {
     let value = prop_oneof![
         6 => "[!-~]{1,64}",
         3 => "agent\\.use:[a-z0-9-]{1,12}",
         2 => Just("*".to_owned()),
         1 => "\\PC{0,70}",
+        1 => "[ -\u{7f}]{1,8}",
+        1 => "[!-~]{0,8}[ \u{7f}][!-~]{0,8}",
+        1 => "[!-~]{64,66}",
     ];
     prop_oneof![
         3 => proptest::collection::vec(value.clone(), 0..4),
@@ -1052,6 +1057,7 @@ fn the_consumer_reads_the_audiences_the_builder_publishes_as_the_same_audiences(
         ),
         ("space", vec!["agent use".to_owned()]),
         ("control-character", vec!["agent.use:a\u{7}".to_owned()]),
+        ("del", vec!["agent.use:a\u{7f}".to_owned()]),
         ("non-ascii-character", vec!["agent.use:é".to_owned()]),
         (
             "bad-value-beside-a-good-one",

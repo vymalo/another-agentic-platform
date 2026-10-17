@@ -6,7 +6,8 @@
 // The changes from upstream, and nothing else:
 //  1. `use orch_core::is_valid_agent_id;` is a definition of `is_valid_agent_id` below (the same function,
 //     from `orchestrator/crates/core/src/ids.rs` at the same commit), so that this repository does not depend
-//     on that crate.
+//     on that crate. Its constant `MAX_AGENT_ID_LEN` is defined with it, private here (`pub` upstream), and the
+//     doc comments of the two are one line each (upstream's are longer).
 //  2. `use orch_ports::AgentAudience;` is the definitions below of `AgentAudience`, `AudienceRoles`,
 //     `AgentAudience::from_values`, `is_audience_value` and the constants `MAX_AUDIENCE_VALUES`,
 //     `MAX_AUDIENCE_VALUE_BYTES` and `AUDIENCE_EVERYONE`, copied verbatim from
@@ -16,6 +17,9 @@
 //     `agent_audience_tests` at the end: copied verbatim from the `tests` module of that same file (its two
 //     helpers, its tests and its property tests), under this module's name.
 //  4. The file's `//!` comment is `//` (an inner doc comment cannot follow items); the words are the same.
+//  5. The file-level `#![allow(dead_code, clippy::unwrap_used, clippy::expect_used, missing_docs)]` below,
+//     which upstream does not have: the file is a module of a test binary of this workspace, which sets
+//     lints that upstream's crate does not.
 // The reader's own unit tests come with it and run here too. Re-vendor, do not edit: see UPSTREAM in this
 // directory.
 #![allow(dead_code, clippy::unwrap_used, clippy::expect_used, missing_docs)]
