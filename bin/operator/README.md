@@ -94,7 +94,8 @@ first CI run.
 The pods run [`tests/stub/Dockerfile`](tests/stub/Dockerfile): busybox pinned by digest that answers `/healthz` on 8080, with
 `adam-coder` as its entrypoint and `tini` and `adam-agent` where the operator puts them (`tini -- adam-agent`). **No adam
 image is needed**; CI builds it and loads it into kind. The CRD has no command override, so the stub is the way a test
-image runs as the real binaries would.
+image runs as the real binaries would. Its card is a **valid A2A 1.0 card** (a version, an interface, capabilities, modes, one
+skill) since D13: the system's orchestrator, which the whole-chain end-to-end runs beside it, parses the card to list the agent.
 
 | Case | What it shows |
 |---|---|
