@@ -6,7 +6,9 @@
 #   * `adam-coder` is the ENTRYPOINT (the operator sets no command for the coder);
 #   * `tini -- adam-agent` is how the operator starts the folder agent, so `tini` and `adam-agent` exist
 #     and `tini` drops the `--` and runs the rest;
-#   * the agent listens on 8080 and serves `/healthz` (the probes), and a card at the usual path.
+#   * the agent listens on 8080 and serves `/healthz` (the probes), and a card at the usual path. The card is a **valid A2A 1.0 card**
+#     (D13): the system's orchestrator parses it to list the agent, and one that lacks `version` or `supportedInterfaces` is "unreadable"
+#     there (the agent stays listed, with no description). It describes an agent that does nothing: nothing speaks A2A to this image.
 # It reads no environment variable, so a missing Secret is still the kubelet's to notice.
 # busybox has no /usr/local/bin: the RUN makes it.
 #
@@ -18,7 +20,7 @@ FROM mirror.gcr.io/library/busybox:1.37.0@sha256:bdf57e528e45e4433820e045b29b459
 
 RUN mkdir -p /www/.well-known /usr/local/bin \
  && echo ok > /www/healthz \
- && echo '{"name":"stub","description":"a stand-in for the adam-rs image"}' > /www/.well-known/agent-card.json \
+ && echo '{"name":"stub","description":"a stand-in for the adam-rs image","version":"0.0.0-stub","supportedInterfaces":[{"url":"http://localhost:8080/a2a","protocolBinding":"JSONRPC","protocolVersion":"1.0"}],"capabilities":{"streaming":true},"defaultInputModes":["text/plain"],"defaultOutputModes":["text/plain"],"skills":[{"id":"stub","name":"Stub","description":"does nothing","tags":["stub"]}]}' > /www/.well-known/agent-card.json \
  && printf '#!/bin/sh\nexec httpd -f -p 8080 -h /www\n' > /usr/local/bin/stub-agent \
  && printf '#!/bin/sh\nshift\nexec "$@"\n' > /usr/local/bin/tini \
  && chmod 0755 /usr/local/bin/stub-agent /usr/local/bin/tini \

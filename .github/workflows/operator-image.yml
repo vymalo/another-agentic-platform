@@ -37,8 +37,21 @@ name: Operator and API images
 #              secret value in any answer or log. It lives HERE and not in operator.yml because both images are artifacts of this
 #              workflow already (the push uses them), and `push` needs it: no API image is pushed that failed its end-to-end, and no
 #              second workflow races the one bump. deploy/operator/tests/e2e/README.md says what it proves and what it does not.
-# push:        main only, after every job above: `sha-<7>` and `latest` of both images (the same tag). One red job of either image
-#              (the API's included) means no image is pushed and no tag bumped: a decision for the owner (deploy/operator/README.md,
+# chain-e2e (D13): the whole chain in a kind cluster of its own. The CRDs chart and the operator chart installed with the operator AND the
+#              API image that passed, the registry on, the stand-in for the adam image (bin/operator/tests/stub, whose card is a full A2A
+#              1.0 card) as the agent's image, one testkit issuer on the runner for the API and for the orchestrator, and THE SYSTEM'S
+#              ORCHESTRATOR, a published image of another repository pinned by tag and digest in one file
+#              (deploy/operator/tests/e2e/chain-orchestrator.yaml), with a Postgres. The script makes a coder with an audience through the
+#              deployed API, the operator runs it and lists it in its registry, and the orchestrator lists it for the person who holds the role
+#              and for nobody else: alice (the role), bob (another agent's role: [], the registry ok, the capabilities of an agent that does
+#              not exist), admin (listed: the pinned system's ADR 0045, decision 1.4, which the registry contract does not share: an open
+#              question for the owner), carol (the audience's value alone: 403 no_access); then the coder is deleted and the listing empties.
+#              It runs in parallel with api-e2e and **does not gate the push**: it pulls two third-party images (ghcr.io, mirror.gcr.io) into
+#              kind and reads a pin this repository does not control, so a flake or a bad pin of the system's would block the operator's
+#              release for a reason that is not the operator's. That is a decision for the owner (§60a, D13): to make it gate, add it to
+#              the `needs` of `push` below. deploy/operator/tests/e2e/README.md says what it proves and what it does not.
+# push:        main only, after every job above but chain-e2e: `sha-<7>` and `latest` of both images (the same tag). One red job of either
+#              image (the API's included) means no image is pushed and no tag bumped: a decision for the owner (deploy/operator/README.md,
 #              "The image").
 # bump:        main only, after the push: `deploy/operator/bump-tag.sh` sets `image.tag` and, with `api`, `api.image.tag` in
 #              deploy/operator/values.yaml and `chore(deploy): bump operator and api to sha-<7>` is pushed to main as
@@ -474,10 +487,73 @@ jobs:
           export AAP_TEST_HOST_ADDR
           sh deploy/operator/tests/e2e/api-e2e.sh
 
+  chain-e2e:
+    name: chain-e2e
+    needs: [image, api-image]
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    env:
+      # The toolchain of operator.yml, which builds the same workspace.
+      RUST_TOOLCHAIN: "1.94.1"
+    steps:
+      - uses: actions/checkout@v7
+      - uses: azure/setup-helm@v4
+        with:
+          version: ${{ env.HELM_VERSION }}
+      - name: Create a kind cluster
+        uses: helm/kind-action@v1
+        with:
+          version: v0.33.0
+          # The same node image as the other jobs: Kubernetes v1.35.8, the digest of the index of the tag.
+          node_image: kindest/node:v1.35.8@sha256:07b2536e30b803ed61d1677a79df6115f798ce64c80f9e22f6ed45afd09323c0
+          cluster_name: aap-chain
+          wait: 120s
+      # The images that passed their smoke tests, loaded into the cluster: the chart runs them with pullPolicy Never. The agent's image is the
+      # stand-in of operator.yml's operator-e2e. The orchestrator and Postgres are NOT loaded: the kubelet pulls them, by digest (chain-orchestrator.yaml).
+      - uses: actions/download-artifact@v8
+        with:
+          name: operator-image
+          path: ${{ runner.temp }}
+      - uses: actions/download-artifact@v8
+        with:
+          name: api-image
+          path: ${{ runner.temp }}
+      - name: Load the images into kind
+        run: |
+          docker load -i "$RUNNER_TEMP/operator.tar"
+          docker load -i "$RUNNER_TEMP/api.tar"
+          docker build -t aap-stub:ci bin/operator/tests/stub
+          kind load docker-image operator:smoke api:smoke aap-stub:ci --name aap-chain
+      - name: Install Rust
+        run: rustup toolchain install "$RUST_TOOLCHAIN" --profile minimal --no-self-update && rustup default "$RUST_TOOLCHAIN"
+      - uses: Swatinem/rust-cache@v2
+      # Test tooling: the testkit's issuer as a program. Nothing ships it (an example of the crate), and it is not in either image.
+      - name: Build the test issuer
+        run: cargo build --locked -p aap-auth-oidc --example test-issuer --features testkit
+      - name: The API makes a coder with an audience, the operator runs it, a pinned orchestrator lists it by audience
+        env:
+          OPERATOR_IMAGE_REPOSITORY: operator
+          OPERATOR_IMAGE_TAG: smoke
+          OPERATOR_PULL_POLICY: Never
+          API_IMAGE_REPOSITORY: api
+          API_IMAGE_TAG: smoke
+          API_PULL_POLICY: Never
+          AGENT_IMAGE: aap-stub:ci
+          TEST_ISSUER_BIN: ${{ github.workspace }}/target/debug/examples/test-issuer
+        run: |
+          # The issuer runs on this machine, which the pods of kind reach at the IPv4 gateway of the docker network `kind`.
+          AAP_TEST_HOST_ADDR="$(docker network inspect kind --format '{{range .IPAM.Config}}{{println .Gateway}}{{end}}' | grep -E '^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$' | head -1)"
+          test -n "$AAP_TEST_HOST_ADDR" || { echo "::error::no IPv4 gateway found for the docker network kind"; exit 1; }
+          echo "pods reach this machine at $AAP_TEST_HOST_ADDR"
+          export AAP_TEST_HOST_ADDR
+          sh deploy/operator/tests/e2e/chain-e2e.sh
+
   push:
     name: push the images that passed
     # Main only, and only after everything above: the chart, the Dockerfiles, the scripts, both images' own smoke tests, the coder, and the API's
-    # end-to-end (no API image is pushed that failed to start in a cluster and serve its first agent).
+    # end-to-end (no API image is pushed that failed to start in a cluster and serve its first agent). NOT chain-e2e: it runs another repository's
+    # image, pinned here, and a red run of it is a reason to look, not to withhold the operator's release (an owner decision, §60a D13; to flip it,
+    # add chain-e2e to this list).
     needs: [chart, dockerfile, dockerfile-api, scripts, image, api-image, operator-coder-e2e, api-e2e]
     if: github.event_name == 'push' && github.ref == 'refs/heads/main'
     runs-on: ubuntu-latest
