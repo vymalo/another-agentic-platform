@@ -25,7 +25,8 @@
 #      the model can go;
 #   7. from a pod the NetworkPolicy of the API names the API answers; from one it does not name, which reaches the issuer, it is refused (kind's
 #      network plugin, kindnet, enforces NetworkPolicies: anything but a dropped connection is a failure; AAP_E2E_CNI_MAY_IGNORE_POLICIES=1,
-#      for a cluster whose plugin does not, turns that into a warning); no token and no secret value is in any answer or log.
+#      for a cluster whose plugin does not, turns that into a warning); no token and no secret value is in any answer or log (a log counts
+#      only if its `kubectl logs` succeeded, it is not empty and it holds a line only that component logs).
 #
 # What it does NOT prove: a real Keycloak (the issuer is the testkit's: RS256, a flat roles claim), the edge (TLS, a JWT check, rate limits),
 # the NetworkPolicy's enforcement on a plugin that has none, `preStop.sleep` and a rolling update under load, a real agent image (the
@@ -54,8 +55,9 @@ here=$(cd "$(dirname "$0")" && pwd)
 repo=$(cd "$here/../../../.." && pwd)
 
 step() { printf '\n== %s\n' "$1"; }
-ok() { echo "ok   $1"; }
-die() { echo "FAIL $1" >&2; exit 1; }
+# printf, never echo, for anything that can hold a body: dash's echo interprets backslashes, and a JSON body has them.
+ok() { printf 'ok   %s\n' "$*"; }
+die() { printf 'FAIL %s\n' "$*" >&2; exit 1; }
 
 # ---- before anything is made, and before the cleanup exists: the tools, and a cluster that is a throwaway one ----------------------------
 for t in kubectl helm jq curl openssl; do command -v "$t" >/dev/null 2>&1 || die "$t is not installed"; done
@@ -65,9 +67,11 @@ case $context in
   *)
     [ "${AAP_E2E_ALLOW_ANY_CONTEXT:-}" = 1 ] \
       || die "kubectl's current context is '${context:-none}', not a kind cluster's (kind-<name>): this script installs a Helm release, applies CRDs and deletes a namespace, so it will not run against it. AAP_E2E_ALLOW_ANY_CONTEXT=1 says that this cluster is a throwaway one"
-    echo "::warning::kubectl's context '${context:-none}' is not a kind cluster's: AAP_E2E_ALLOW_ANY_CONTEXT=1 says it is a throwaway one"
+    printf '::warning::%s\n' "kubectl's context '${context:-none}' is not a kind cluster's: AAP_E2E_ALLOW_ANY_CONTEXT=1 says it is a throwaway one"
     ;;
 esac
+# helm resolves its context by itself (the current one of the same kubeconfig, unless told): the one that was just checked is the one it uses.
+if [ -n "$context" ]; then export HELM_KUBECONTEXT="$context"; fi
 ns=${AAP_E2E_NAMESPACE:-aap-e2e-api}
 case $ns in '' | -* | *- | *[!a-z0-9-]*) die "AAP_E2E_NAMESPACE='$ns' is not a namespace name" ;; esac
 
@@ -112,27 +116,35 @@ objects_made=0  # step 4 began: the model and the agent may exist (and the opera
 installed=0     # `helm upgrade --install` was started
 : > "$work/tokens"
 : > "$work/seen"
+printf '%s\n' "$sentinel" > "$work/secrets"
 
+# redact: stdin to stdout without any line that holds the secret value or a token of this run. The diagnostics print logs and answers, and a failure
+# that found a secret (step 7) must not print it again. The two files may not exist yet (a failure before they are written) or may be empty: the
+# output is then unfiltered, and nothing is lost for it.
+redact() {
+  { cat "$work/secrets" "$work/tokens" | grep -v '^$' > "$work/redact.patterns"; } 2>/dev/null || true
+  if [ -s "$work/redact.patterns" ]; then grep -vF -f "$work/redact.patterns" || true; else cat; fi
+}
 diagnostics() {
   echo "::group::what the cluster says"
-  kubectl -n "$ns" get agentservices,agentconfigs,modelendpoints,externalsecrets,deployments,services,networkpolicies,pods -o wide || true
-  kubectl -n "$ns" get agentservice "$agent" -o yaml | tail -n 80 || true
-  kubectl -n "$ns" get events --sort-by=.lastTimestamp | tail -n 60 || true
+  kubectl -n "$ns" get agentservices,agentconfigs,modelendpoints,externalsecrets,deployments,services,networkpolicies,pods -o wide 2>&1 | redact || true
+  kubectl -n "$ns" get agentservice "$agent" -o yaml 2>&1 | redact | tail -n 80 || true
+  kubectl -n "$ns" get events --sort-by=.lastTimestamp 2>&1 | redact | tail -n 60 || true
   echo "::endgroup::"
   echo "::group::the API's log"
-  kubectl -n "$ns" logs "deployment/$api_name" --tail=200 || true
-  kubectl -n "$ns" describe pod -l app.kubernetes.io/component=api | tail -n 80 || true
+  kubectl -n "$ns" logs "deployment/$api_name" --tail=200 2>&1 | redact || true
+  kubectl -n "$ns" describe pod -l app.kubernetes.io/component=api 2>&1 | redact | tail -n 80 || true
   echo "::endgroup::"
   echo "::group::the operator's log"
-  kubectl -n "$ns" logs deployment/aap-operator --tail=150 || true
+  kubectl -n "$ns" logs deployment/aap-operator --tail=150 2>&1 | redact || true
   echo "::endgroup::"
   echo "::group::the agent pod"
-  kubectl -n "$ns" describe pod -l "app.kubernetes.io/instance=$agent" | tail -n 80 || true
+  kubectl -n "$ns" describe pod -l "app.kubernetes.io/instance=$agent" 2>&1 | redact | tail -n 80 || true
   echo "::endgroup::"
   echo "::group::the test issuer and the last answer of the API"
-  cat "$work/issuer.log" 2>/dev/null || true
-  echo "last status ${code:-none}, headers:"; cat "$work/headers" 2>/dev/null || true
-  echo "last body:"; head -c 1500 "$work/body" 2>/dev/null || true; echo
+  redact 2>/dev/null < "$work/issuer.log" || true
+  printf 'last status %s, headers:\n' "${code:-none}"; redact 2>/dev/null < "$work/headers" || true
+  echo "last body:"; redact 2>/dev/null < "$work/body" | head -c 1500 || true; echo
   echo "::endgroup::"
 }
 cleanup() {
@@ -192,11 +204,11 @@ until_ok() {
 gone() {
   for r in "$@"; do
     if kubectl -n "$ns" get "$r" -o name >/dev/null 2>"$work/gone.err"; then
-      echo "$r is still there" >&2
+      printf '%s is still there\n' "$r" >&2
       return 1
     fi
     if ! grep -q 'NotFound' "$work/gone.err"; then
-      echo "cannot tell whether $r is gone: $(head -c 300 "$work/gone.err")" >&2
+      printf '%s\n' "cannot tell whether $r is gone: $(head -c 300 "$work/gone.err")" >&2
       return 1
     fi
   done
@@ -204,10 +216,10 @@ gone() {
 # no_agent_pod: the agent has no pod (a list that fails is not an empty one).
 no_agent_pod() {
   if ! names=$(kubectl -n "$ns" get pod -l "app.kubernetes.io/instance=$agent" -o name 2>"$work/gone.err"); then
-    echo "cannot list the pods of $agent: $(head -c 300 "$work/gone.err")" >&2
+    printf '%s\n' "cannot list the pods of $agent: $(head -c 300 "$work/gone.err")" >&2
     return 1
   fi
-  [ -z "$names" ] || { echo "still there: $names" >&2; return 1; }
+  [ -z "$names" ] || { printf 'still there: %s\n' "$names" >&2; return 1; }
 }
 # In a pod of the cluster: the status code of a request (the body in /tmp/b of the pod), or 000.
 req() { # req <pod> <curl args...>
@@ -259,7 +271,7 @@ api() {
     # A port-forward that died is started again once; the API is not what failed.
     if [ "$code" != 000 ] || [ "$attempt" -ge 2 ]; then break; fi
     attempt=$((attempt + 1))
-    echo "     (no answer: $(head -c 200 "$work/curl.err"); the port-forward is started again)"
+    printf '%s\n' "     (no answer: $(head -c 200 "$work/curl.err"); the port-forward is started again)"
     start_forward
   done
   # Everything the API said, the headers included, is what the secret and the tokens are looked for in.
@@ -555,7 +567,7 @@ while :; do
   # operator sees the config is not a refusal).
   if [ "$state" = blocked ]; then blocked=$((blocked + 1)); else blocked=0; fi
   [ "$blocked" -lt 3 ] || die "the agent is blocked: $(printf '%s' "$row" | jq -c .conditions)"
-  echo "     $(( $(date +%s) - start ))s: $state, pod: $(kubectl -n "$ns" get pod -l "app.kubernetes.io/instance=$agent" --no-headers 2>/dev/null | head -n 1 | tr -s ' ' | cut -d' ' -f2-3 || true)"
+  printf '%s\n' "     $(( $(date +%s) - start ))s: $state, pod: $(kubectl -n "$ns" get pod -l "app.kubernetes.io/instance=$agent" --no-headers 2>/dev/null | head -n 1 | tr -s ' ' | cut -d' ' -f2-3 || true)"
   sleep 5
 done
 ok "the agent is listed as ready after $(( $(date +%s) - start ))s"
@@ -606,7 +618,7 @@ for attempt in 1 2 3 4 5; do
   if [ "$code" = 200 ]; then replaced=1; break; fi
   # The operator writes its status: the tag moved between our read and our write, which is what a 412 is for. Read again.
   [ "$code" = 412 ] || die "the replace: wanted 200 or 412, got $code: $(head -c 600 "$work/body")"
-  echo "     (412 on attempt $attempt: the operator wrote its status; reading again)"
+  printf '%s\n' "     (412 on attempt $attempt: the operator wrote its status; reading again)"
   sleep 1
 done
 [ "$replaced" = 1 ] || die "five replaces in a row were 412"
@@ -629,7 +641,7 @@ for attempt in 1 2 3 4 5; do
   as writer "$all_agents" DELETE "/v1/agents/$agent" -H "If-Match: $etag"
   case $code in
     202 | 204) deleted=1; break ;;
-    412) echo "     (412 on attempt $attempt: the operator wrote its status; reading again)"; sleep 1 ;;
+    412) printf '%s\n' "     (412 on attempt $attempt: the operator wrote its status; reading again)"; sleep 1 ;;
     *) die "the delete: wanted 202 or 204, got $code: $(head -c 600 "$work/body")" ;;
   esac
 done
@@ -649,9 +661,9 @@ else
     || die "the delete was 202 and its body does not say that the agent is being deleted: $(head -c 600 "$work/body")"
   until_ok "$gone_timeout" "the AgentService to be gone (the operator's finalizer)" gone "agentservice/$agent"
   if gone "agentconfig/$agent"; then
-    echo "     (the config is gone too: the operator was done before the API looked again)"
+    printf '%s\n' "     (the config is gone too: the operator was done before the API looked again)"
   else
-    echo "::warning::the delete was 202: the operator's finalizer took longer than the API waits for it (5 s), so the AgentConfig $agent stays behind as an orphan (D5); the script removes it with kubectl"
+    printf '%s\n' "::warning::the delete was 202: the operator's finalizer took longer than the API waits for it (5 s), so the AgentConfig $agent stays behind as an orphan (D5); the script removes it with kubectl"
     kubectl -n "$ns" delete "agentconfig/$agent" --ignore-not-found --wait=true --timeout=60s
     orphan_removed=1
   fi
@@ -697,7 +709,7 @@ if [ "${AAP_E2E_CNI_MAY_IGNORE_POLICIES:-}" = 1 ]; then
   case $stranger_status in
     000) ok "a pod the API's NetworkPolicy does not name cannot reach the API (status 000): the cluster enforces NetworkPolicies" ;;
     [0-9][0-9][0-9])
-      echo "::warning::a pod that the API's NetworkPolicy does not name read the API (status $stranger_status): this cluster does not enforce NetworkPolicies and AAP_E2E_CNI_MAY_IGNORE_POLICIES=1 says that is expected, so the policy is installed and valid and its enforcement is not proven here"
+      printf '%s\n' "::warning::a pod that the API's NetworkPolicy does not name read the API (status $stranger_status): this cluster does not enforce NetworkPolicies and AAP_E2E_CNI_MAY_IGNORE_POLICIES=1 says that is expected, so the policy is installed and valid and its enforcement is not proven here"
       ok "NetworkPolicies are NOT enforced here (AAP_E2E_CNI_MAY_IGNORE_POLICIES=1): the policy is installed and valid, and its enforcement is not proven"
       ;;
     *) die "the pod that the API's NetworkPolicy does not name could not be asked (no status): $stranger_pod" ;;
@@ -709,18 +721,28 @@ else
   ok "a pod the API's NetworkPolicy does not name cannot reach the API (status 000) though it reaches the issuer: the cluster enforces NetworkPolicies, and the API's three egress rules and its ingress rule were enough for it to be Ready"
 fi
 # The logs, as plain text: tracing-subscriber writes colour codes unless it is told not to, and a pod is not a terminal.
+# A log counts only if `kubectl logs` SUCCEEDED, it is not empty, and it holds a line that only a real log of that component has: a log that could not be
+# read, or is another pod's, or is the cluster's error, would hold no secret and no panic, and every check below would pass on it.
 esc=$(printf '\033')
-kubectl -n "$ns" logs "deployment/$api_name" --tail=-1 2>&1 | sed "s/${esc}\[[0-9;]*m//g" > "$work/api.log" || true
-kubectl -n "$ns" logs deployment/aap-operator --tail=-1 2>&1 | sed "s/${esc}\[[0-9;]*m//g" > "$work/operator.log" || true
-[ -s "$work/api.log" ] || die "the API's log is empty"
-grep -q 'route=/v1/agents' "$work/api.log" || die "the API's log holds no request line for /v1/agents (route=): $(head -c 600 "$work/api.log")"
+# read_log <deployment> <file> <text only that component's log holds> <what that line is>
+read_log() {
+  kubectl -n "$ns" logs "deployment/$1" --tail=-1 > "$work/$2.raw" 2> "$work/$2.err" \
+    || die "kubectl logs deployment/$1 failed, so its log was not read: $(head -c 400 "$work/$2.err")"
+  sed "s/${esc}\[[0-9;]*m//g" "$work/$2.raw" > "$work/$2"
+  [ -s "$work/$2" ] || die "the log of deployment/$1 is empty (kubectl's stderr: '$(head -c 300 "$work/$2.err")')"
+  grep -qF -- "$3" "$work/$2" \
+    || die "the log of deployment/$1 does not hold $4 ($3), so it is not the log of that component or the component did not start: $(redact < "$work/$2" | head -c 600)"
+}
+read_log "$api_name" api.log 'route=/v1/agents' "a request line for /v1/agents"
+read_log aap-operator operator.log 'the caches are synced' "the line the operator logs when its caches have listed the cluster"
 for f in api.log operator.log seen; do
   if grep -qF -- "$sentinel" "$work/$f"; then die "the value of the model's API key is in $f"; fi
 done
 if [ -s "$work/tokens" ] && grep -qF -f "$work/tokens" "$work/api.log" "$work/operator.log" "$work/seen"; then
   die "a token the issuer minted (or its payload or its signature) is in the API's log, the operator's log or an answer"
 fi
-if grep -qiE 'panic|backtrace' "$work/api.log"; then die "the API's log holds a panic"; fi
-ok "the secret value is in no answer, header or log ($(wc -c < "$work/seen") bytes of answers read), no token minted by this run is in either log or in an answer, and the API's log has a line per request and no panic"
+# The Rust panic message, and not the words: a third party's log (a dependency's, a library's) may say "panic" or "backtrace" in a harmless sentence.
+if grep -q 'panicked at' "$work/api.log"; then die "the API's log holds a panic ('panicked at')"; fi
+ok "the secret value is in no answer, header or log ($(wc -c < "$work/seen") bytes of answers read; the API's and the operator's logs, each read by a kubectl logs that succeeded and holds a line of its own component), no token minted by this run is in either log or in an answer, and the API's log has a line per request and no panic"
 
 printf '\nPlatform API end-to-end passed\n'
