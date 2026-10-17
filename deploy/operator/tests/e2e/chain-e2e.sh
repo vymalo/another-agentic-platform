@@ -66,8 +66,9 @@ here=$(cd "$(dirname "$0")" && pwd)
 repo=$(cd "$here/../../../.." && pwd)
 
 step() { printf '\n== %s\n' "$1"; }
-ok() { echo "ok   $1"; }
-die() { echo "FAIL $1" >&2; exit 1; }
+# printf, never echo, for anything that can hold a body: dash's echo interprets backslashes, and a JSON body has them.
+ok() { printf 'ok   %s\n' "$*"; }
+die() { printf 'FAIL %s\n' "$*" >&2; exit 1; }
 
 # ---- before anything is made, and before the cleanup exists: the tools, and a cluster that is a throwaway one ----------------------------
 for t in kubectl helm jq curl openssl; do command -v "$t" >/dev/null 2>&1 || die "$t is not installed"; done
@@ -77,9 +78,11 @@ case $context in
   *)
     [ "${AAP_E2E_ALLOW_ANY_CONTEXT:-}" = 1 ] \
       || die "kubectl's current context is '${context:-none}', not a kind cluster's (kind-<name>): this script installs a Helm release, applies CRDs and deletes a namespace, so it will not run against it. AAP_E2E_ALLOW_ANY_CONTEXT=1 says that this cluster is a throwaway one"
-    echo "::warning::kubectl's context '${context:-none}' is not a kind cluster's: AAP_E2E_ALLOW_ANY_CONTEXT=1 says it is a throwaway one"
+    printf '::warning::%s\n' "kubectl's context '${context:-none}' is not a kind cluster's: AAP_E2E_ALLOW_ANY_CONTEXT=1 says it is a throwaway one"
     ;;
 esac
+# helm resolves its context by itself (the current one of the same kubeconfig, unless told): the one that was just checked is the one it uses.
+if [ -n "$context" ]; then export HELM_KUBECONTEXT="$context"; fi
 ns=${AAP_E2E_NAMESPACE:-aap-e2e-chain}
 case $ns in '' | -* | *- | *[!a-z0-9-]*) die "AAP_E2E_NAMESPACE='$ns' is not a namespace name" ;; esac
 
@@ -138,32 +141,39 @@ installed=0     # `helm upgrade --install` was started
 : > "$work/seen"
 printf '%s\n%s\n%s\n%s\n' "$model_sentinel" "$app_sentinel" "$registry_token" "$a2a_token" > "$work/secrets"
 
+# redact: stdin to stdout without any line that holds a secret value or a token of this run. The diagnostics print logs and answers, and a failure
+# that found a secret (step 7) must not print it again. The two files may not exist yet (a failure before they are written) or may be empty: the
+# output is then unfiltered, and nothing is lost for it.
+redact() {
+  { cat "$work/secrets" "$work/tokens" | grep -v '^$' > "$work/redact.patterns"; } 2>/dev/null || true
+  if [ -s "$work/redact.patterns" ]; then grep -vF -f "$work/redact.patterns" || true; else cat; fi
+}
 diagnostics() {
   echo "::group::what the cluster says"
-  kubectl -n "$ns" get agentservices,agentconfigs,modelendpoints,externalsecrets,deployments,services,networkpolicies,pods -o wide || true
-  kubectl -n "$ns" get agentservice "$agent" -o yaml | tail -n 80 || true
-  kubectl -n "$ns" get events --sort-by=.lastTimestamp | tail -n 60 || true
+  kubectl -n "$ns" get agentservices,agentconfigs,modelendpoints,externalsecrets,deployments,services,networkpolicies,pods -o wide 2>&1 | redact || true
+  kubectl -n "$ns" get agentservice "$agent" -o yaml 2>&1 | redact | tail -n 80 || true
+  kubectl -n "$ns" get events --sort-by=.lastTimestamp 2>&1 | redact | tail -n 60 || true
   echo "::endgroup::"
   echo "::group::the orchestrator (the pin, its pod, its log) and its Postgres"
-  kubectl -n "$ns" get pod -l "app.kubernetes.io/name=$orch" -o jsonpath='{range .items[*]}{.metadata.name}{" image "}{.spec.containers[0].image}{" imageID "}{.status.containerStatuses[0].imageID}{"\n"}{end}' || true
-  kubectl -n "$ns" describe pod -l "app.kubernetes.io/name=$orch" | tail -n 60 || true
-  kubectl -n "$ns" logs "deployment/$orch" --tail=200 || true
-  kubectl -n "$ns" logs "deployment/$orch_postgres" --tail=40 || true
+  kubectl -n "$ns" get pod -l "app.kubernetes.io/name=$orch" -o jsonpath='{range .items[*]}{.metadata.name}{" image "}{.spec.containers[0].image}{" imageID "}{.status.containerStatuses[0].imageID}{"\n"}{end}' 2>&1 | redact || true
+  kubectl -n "$ns" describe pod -l "app.kubernetes.io/name=$orch" 2>&1 | redact | tail -n 60 || true
+  kubectl -n "$ns" logs "deployment/$orch" --tail=200 2>&1 | redact || true
+  kubectl -n "$ns" logs "deployment/$orch_postgres" --tail=40 2>&1 | redact || true
   echo "::endgroup::"
   echo "::group::the API's log"
-  kubectl -n "$ns" logs "deployment/$api_name" --tail=200 || true
-  kubectl -n "$ns" describe pod -l app.kubernetes.io/component=api | tail -n 60 || true
+  kubectl -n "$ns" logs "deployment/$api_name" --tail=200 2>&1 | redact || true
+  kubectl -n "$ns" describe pod -l app.kubernetes.io/component=api 2>&1 | redact | tail -n 60 || true
   echo "::endgroup::"
   echo "::group::the operator's log"
-  kubectl -n "$ns" logs deployment/aap-operator --tail=150 || true
+  kubectl -n "$ns" logs deployment/aap-operator --tail=150 2>&1 | redact || true
   echo "::endgroup::"
   echo "::group::the agent pod"
-  kubectl -n "$ns" describe pod -l "app.kubernetes.io/instance=$agent" | tail -n 80 || true
+  kubectl -n "$ns" describe pod -l "app.kubernetes.io/instance=$agent" 2>&1 | redact | tail -n 80 || true
   echo "::endgroup::"
   echo "::group::the test issuer and the last answer"
-  cat "$work/issuer.log" 2>/dev/null || true
-  echo "last status ${code:-none}, headers:"; cat "$work/headers" 2>/dev/null || true
-  echo "last body:"; head -c 1500 "$work/body" 2>/dev/null || true; echo
+  redact 2>/dev/null < "$work/issuer.log" || true
+  printf 'last status %s, headers:\n' "${code:-none}"; redact 2>/dev/null < "$work/headers" || true
+  echo "last body:"; redact 2>/dev/null < "$work/body" | head -c 1500 || true; echo
   echo "::endgroup::"
 }
 cleanup() {
@@ -224,11 +234,11 @@ until_ok() {
 gone() {
   for r in "$@"; do
     if kubectl -n "$ns" get "$r" -o name >/dev/null 2>"$work/gone.err"; then
-      echo "$r is still there" >&2
+      printf '%s is still there\n' "$r" >&2
       return 1
     fi
     if ! grep -q 'NotFound' "$work/gone.err"; then
-      echo "cannot tell whether $r is gone: $(head -c 300 "$work/gone.err")" >&2
+      printf '%s\n' "cannot tell whether $r is gone: $(head -c 300 "$work/gone.err")" >&2
       return 1
     fi
   done
@@ -236,10 +246,10 @@ gone() {
 # no_agent_pod: the agent has no pod (a list that fails is not an empty one).
 no_agent_pod() {
   if ! names=$(kubectl -n "$ns" get pod -l "app.kubernetes.io/instance=$agent" -o name 2>"$work/gone.err"); then
-    echo "cannot list the pods of $agent: $(head -c 300 "$work/gone.err")" >&2
+    printf '%s\n' "cannot list the pods of $agent: $(head -c 300 "$work/gone.err")" >&2
     return 1
   fi
-  [ -z "$names" ] || { echo "still there: $names" >&2; return 1; }
+  [ -z "$names" ] || { printf 'still there: %s\n' "$names" >&2; return 1; }
 }
 # In a pod of the cluster: the status code of a request (the body in /tmp/b of the pod), or 000.
 req() { # req <pod> <curl args...>
@@ -302,7 +312,7 @@ call() {
     # A port-forward that died is started again once; the service is not what failed.
     if [ "$code" != 000 ] || [ "$attempt" -ge 2 ]; then break; fi
     attempt=$((attempt + 1))
-    echo "     (no answer: $(head -c 200 "$work/curl.err"); the port-forward is started again)"
+    printf '%s\n' "     (no answer: $(head -c 200 "$work/curl.err"); the port-forward is started again)"
     if [ "$cbase" = "$api_base" ]; then start_api_forward; cbase=$api_base; else start_orch_forward; cbase=$orch_base; fi
   done
   # Everything the service said, the headers included, is what the secrets and the tokens are looked for in.
@@ -332,6 +342,18 @@ expect_problem() {
   expect "$1" "$3"
   [ "$(header content-type)" = application/problem+json ] || die "$3: the content type is '$(header content-type)', not application/problem+json"
   [ "$(jq -r .type "$work/body")" = "urn:vymalo:agents:problem:$2" ] || die "$3: the problem is $(jq -r .type "$work/body"), not $2"
+}
+# registry_is_empty <file>: the file IS the registry document of an empty fleet, which is a linkset of exactly one context object that carries the v1
+# profile and lists no item: the builder (crates/registry/src/document.rs) writes no `item` member then, and the contract
+# (docs/extensions/agent-registry-v1.md) allows `[]` as well. `{}`, `{"linkset": []}`, a context of another version, an error body and a page of
+# HTML are not an empty registry; a count of items that is 0 for any of them proves nothing.
+registry_profile=https://agents.vymalo.com/registry/v1
+registry_is_empty() {
+  jq -e --arg profile "$registry_profile" '
+    (.linkset | type == "array" and length == 1)
+    and (.linkset[0] | type == "object"
+         and ([.profile[]? | .href?] | index($profile) != null)
+         and ((has("item") | not) or .item == []))' "$1" >/dev/null 2>&1
 }
 agent_row() { # the Platform API's list row of the agent, as JSON, or nothing
   jq -c --arg n "$agent" '.agents[]? | select(.name == $n)' "$work/body" 2>/dev/null || true
@@ -570,7 +592,7 @@ kubectl -n "$ns" rollout status "deployment/$orch" --timeout="${rollout_timeout}
 orch_pod=$(kubectl -n "$ns" get pod -l "app.kubernetes.io/name=$orch" -o jsonpath='{.items[0].metadata.name}')
 [ "$(jp "pod/$orch_pod" '{.spec.containers[0].image}')" = "$pin" ] || die "the orchestrator's pod runs '$(jp "pod/$orch_pod" '{.spec.containers[0].image}')', not the pin $pin"
 [ "$(jp "pod/$orch_pod" '{.status.containerStatuses[0].ready}')" = true ] || die "the orchestrator's container is not ready"
-echo "     imageID: $(jp "pod/$orch_pod" '{.status.containerStatuses[0].imageID}'), restarts: $(jp "pod/$orch_pod" '{.status.containerStatuses[0].restartCount}')"
+printf '%s\n' "     imageID: $(jp "pod/$orch_pod" '{.status.containerStatuses[0].imageID}'), restarts: $(jp "pod/$orch_pod" '{.status.containerStatuses[0].restartCount}')"
 ok "the orchestrator's pod runs the pin ($pin) and is ready (/readyz): its configuration was accepted, its migrations ran, the issuer's keys were fetched"
 
 step "3. the Platform API creates a model and a coder with an audience; the operator makes it Ready"
@@ -620,7 +642,7 @@ while :; do
   # operator sees the config is not a refusal).
   if [ "$state" = blocked ]; then blocked=$((blocked + 1)); else blocked=0; fi
   [ "$blocked" -lt 3 ] || die "the coder is blocked: $(printf '%s' "$row" | jq -c .conditions)"
-  echo "     $(( $(date +%s) - start ))s: $state, pod: $(kubectl -n "$ns" get pod -l "app.kubernetes.io/instance=$agent" --no-headers 2>/dev/null | head -n 1 | tr -s ' ' | cut -d' ' -f2-3 || true)"
+  printf '%s\n' "     $(( $(date +%s) - start ))s: $state, pod: $(kubectl -n "$ns" get pod -l "app.kubernetes.io/instance=$agent" --no-headers 2>/dev/null | head -n 1 | tr -s ' ' | cut -d' ' -f2-3 || true)"
   sleep 5
 done
 printf '%s' "$row" | jq -e --arg n "$agent" --arg role "$agent_role" '.name == $n and .kind == "coder" and .managedBy == "dashboard" and .audience == [$role]' >/dev/null \
@@ -723,7 +745,7 @@ for attempt in 1 2 3 4 5; do
   as writer "$all_agents" DELETE "/v1/agents/$agent" -H "If-Match: $etag"
   case $code in
     202 | 204) deleted=1; break ;;
-    412) echo "     (412 on attempt $attempt: the operator wrote its status; reading again)"; sleep 1 ;;
+    412) printf '%s\n' "     (412 on attempt $attempt: the operator wrote its status; reading again)"; sleep 1 ;;
     *) die "the delete: wanted 202 or 204, got $code: $(head -c 600 "$work/body")" ;;
   esac
 done
@@ -736,15 +758,18 @@ else
   # 202: the operator's finalizer took longer than the API waits for it (5 s). The service must go; the config is an orphan (D5) the script removes.
   until_ok "$gone_timeout" "the AgentService to be gone (the operator's finalizer)" gone "agentservice/$agent"
   if ! gone "agentconfig/$agent"; then
-    echo "::warning::the delete was 202: the AgentConfig $agent stays behind as an orphan (D5); the script removes it with kubectl"
+    printf '%s\n' "::warning::the delete was 202: the AgentConfig $agent stays behind as an orphan (D5); the script removes it with kubectl"
     kubectl -n "$ns" delete "agentconfig/$agent" --ignore-not-found --wait=true --timeout=60s
   fi
 fi
 until_ok 120 "the Deployment, the Service and the pod of the coder to be gone" gone "deployment/$agent" "service/$agent"
 until_ok 120 "the pod of the coder to be gone" no_agent_pod
-[ "$(req "$reader_pod" -H "Authorization: Bearer $registry_token" "$reg")" = 200 ] || die "the registry is not answering"
-[ "$(pod_body "$reader_pod" | jq '[.linkset[0].item // [] | .[]] | length')" = 0 ] || die "the deleted coder is still in the registry: $(pod_body "$reader_pod" | head -c 400)"
-ok "the coder, its Deployment and its pod are gone and the registry lists nothing"
+[ "$(req "$reader_pod" -H "Authorization: Bearer $registry_token" -H 'Accept: application/linkset+json' "$reg")" = 200 ] || die "the registry is not answering"
+pod_body "$reader_pod" > "$work/registry-empty.json"
+cat "$work/registry-empty.json" >> "$work/seen"
+registry_is_empty "$work/registry-empty.json" \
+  || die "the registry is not the document of an empty fleet (one linkset context with the v1 profile and no item): $(head -c 400 "$work/registry-empty.json")"
+ok "the coder, its Deployment and its pod are gone and the registry is the document of an empty fleet: one linkset context, the v1 profile, no item"
 # The orchestrator forgets it within its cache (1 s): nobody is listed it, the administrator included, and the registry is still ok (an empty list
 # because the platform has no agent, not because it cannot be read).
 start=$(date +%s)
@@ -766,20 +791,31 @@ ok "the orchestrator lists nothing to the administrator or to alice $(( $(date +
 
 step "7. nothing secret anywhere"
 # The logs, as plain text: the Platform API's and the operator's tracing-subscriber writes colour codes unless it is told not to, and a pod is not a terminal.
+# A log counts only if `kubectl logs` SUCCEEDED, it is not empty, and it holds a line that only a real log of that component has: a log that could not be
+# read, or is another pod's, or is the cluster's error, would hold no secret and no panic, and every check below would pass on it.
 esc=$(printf '\033')
-kubectl -n "$ns" logs "deployment/$api_name" --tail=-1 2>&1 | sed "s/${esc}\[[0-9;]*m//g" > "$work/api.log" || true
-kubectl -n "$ns" logs deployment/aap-operator --tail=-1 2>&1 | sed "s/${esc}\[[0-9;]*m//g" > "$work/operator.log" || true
-kubectl -n "$ns" logs "deployment/$orch" --tail=-1 2>&1 | sed "s/${esc}\[[0-9;]*m//g" > "$work/orch.log" || true
-[ -s "$work/api.log" ] || die "the API's log is empty"
-[ -s "$work/orch.log" ] || die "the orchestrator's log is empty"
-grep -q 'route=/v1/agents' "$work/api.log" || die "the API's log holds no request line for /v1/agents (route=): $(head -c 600 "$work/api.log")"
+# read_log <deployment> <file> <text only that component's log holds> <what that line is>
+read_log() {
+  kubectl -n "$ns" logs "deployment/$1" --tail=-1 > "$work/$2.raw" 2> "$work/$2.err" \
+    || die "kubectl logs deployment/$1 failed, so its log was not read: $(head -c 400 "$work/$2.err")"
+  sed "s/${esc}\[[0-9;]*m//g" "$work/$2.raw" > "$work/$2"
+  [ -s "$work/$2" ] || die "the log of deployment/$1 is empty (kubectl's stderr: '$(head -c 300 "$work/$2.err")')"
+  grep -qF -- "$3" "$work/$2" \
+    || die "the log of deployment/$1 does not hold $4 ($3), so it is not the log of that component or the component did not start: $(redact < "$work/$2" | head -c 600)"
+}
+read_log "$api_name" api.log 'route=/v1/agents' "a request line for /v1/agents"
+read_log aap-operator operator.log 'the caches are synced' "the line the operator logs when its caches have listed the cluster"
+read_log "$orch" orch.log '"message":"database migrations applied"' "the line the orchestrator logs when its migrations have run"
+# The orchestrator's log is JSON, one object per line (its default and the image's).
+grep -q '^{' "$work/orch.log" || die "the orchestrator's log is not JSON lines: $(redact < "$work/orch.log" | head -c 400)"
 if grep -qF -f "$work/secrets" "$work/api.log" "$work/operator.log" "$work/orch.log" "$work/seen"; then
   die "a secret value (the model's key, the GitHub App's key, the registry's token or the A2A bearer) is in an answer, a header or a log"
 fi
 if [ -s "$work/tokens" ] && grep -qF -f "$work/tokens" "$work/api.log" "$work/operator.log" "$work/orch.log" "$work/seen"; then
   die "a token the issuer minted (or its payload or its signature) is in the API's, the operator's or the orchestrator's log or in an answer"
 fi
-if grep -qiE 'panic|backtrace' "$work/api.log" "$work/orch.log"; then die "the API's or the orchestrator's log holds a panic"; fi
-ok "none of the four secret values and no token minted by this run is in an answer, a header or a log ($(wc -c < "$work/seen") bytes of answers read; the API's, the operator's and the orchestrator's logs), and the API's and the orchestrator's logs hold no panic"
+# The Rust panic message, and not the words: a third party's log (a dependency's, a library's) may say "panic" or "backtrace" in a harmless sentence.
+if grep -q 'panicked at' "$work/api.log" "$work/orch.log"; then die "the API's or the orchestrator's log holds a panic ('panicked at')"; fi
+ok "none of the four secret values and no token minted by this run is in an answer, a header or a log ($(wc -c < "$work/seen") bytes of answers read; the API's, the operator's and the orchestrator's logs, each read by a kubectl logs that succeeded and holds a line of its own component), and the API's and the orchestrator's logs hold no panic"
 
 printf '\nWhole-chain end-to-end passed\n'

@@ -824,17 +824,18 @@ chain_own_names() {
 check "chain: the agents live in the namespace aap-e2e-chain, read the bearer from e2e-a2a-bearer, and the tokens' audience is aap-e2e-chain; neither the real namespace nor the other end-to-end's is named" chain_own_names
 check "chain: the ledger of a coder is a Secret named from it, there is no CloudNativePG store, and the stand-in's registry (docker.io) is the one an image may come from" \
   has_all '\{name\}-db-app' 'key: uri' '^      - docker.io$'
-# The files the script applies, read as text. The orchestrator's pin is a tag AND a digest, one line of one file, and the digest is nowhere else of the
-# chart or the workflows (the script reads the pin from the manifest).
+# The files the script applies, read as text. The orchestrator's pin is a tag AND a digest, one line of one file (not repeated in a comment of that file
+# either: a second copy is a second place to move), and the digest is nowhere else of the chart or the workflows (the script reads the pin from the manifest).
 chain_pin() {
   manifest="$here/e2e/chain-orchestrator.yaml"
   [ "$(grep -Ec '^ +image: ghcr\.io/vymalo/another-agentic-system/orchestrator:' "$manifest")" -eq 1 ] || return 1
   grep -Eq '^ +image: ghcr\.io/vymalo/another-agentic-system/orchestrator:sha-[0-9a-f]{7}@sha256:[0-9a-f]{64}$' "$manifest" || return 1
   grep -Eq '^ +image: mirror\.gcr\.io/library/postgres:[0-9][^@ ]*@sha256:[0-9a-f]{64}$' "$manifest" || return 1
   pin_digest=$(sed -n 's/^ *image: ghcr\.io\/vymalo\/another-agentic-system\/orchestrator:[^@]*@\(sha256:[0-9a-f]*\)$/\1/p' "$manifest")
+  [ -n "$pin_digest" ] && [ "$(grep -cF "$pin_digest" "$manifest")" -eq 1 ] || return 1
   [ "$(grep -rlF "$pin_digest" "$chart/.." "$chart/../../.github" | wc -l)" -eq 1 ]
 }
-check "chain: the orchestrator is pinned by tag and digest in chain-orchestrator.yaml, once, and Postgres by digest; the orchestrator's digest is in no other file of deploy/ or .github/" chain_pin
+check "chain: the orchestrator is pinned by tag and digest in chain-orchestrator.yaml, on one line and nowhere else of that file, and Postgres by digest; the orchestrator's digest is in no other file of deploy/ or .github/" chain_pin
 chain_manifest() {
   manifest="$here/e2e/chain-orchestrator.yaml"
   # The pod carries the label the operator's policy admits, mounts the Secrets and the ConfigMap the script makes, and the manifests name no namespace.

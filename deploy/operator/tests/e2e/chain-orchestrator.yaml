@@ -6,11 +6,12 @@
 # THE PIN OF THE ORCHESTRATOR IS HERE AND NOWHERE ELSE. It is a third party's image (another-agentic-system, this repository's consumer), so a
 # bump is a deliberate change of this line, with the digest read again from ghcr.io, and the job that runs it (chain-e2e) does not gate the
 # push (the workflow says why). `sha-8df44c6` is the system's main at its slice D8 (ADR 0045 there: the orchestrator enforces the registry
-# item's `audience`), PR #263. *Verified 2026-10-17* by an anonymous request to ghcr.io: the manifest of the tag is an OCI index of
-# `sha256:2794587bc94f657e43a65810a6a470c22baff3adf0edd526acb691fb1af8902a` with one linux/amd64 image (the image is amd64 only: kind on the
-# runners is amd64) and an attestation; its config says `org.opencontainers.image.revision` 8df44c6f88f0d9eb47aa7c9f5874a914765c8376, user
-# 65532:65532, entrypoint `/orchestrator`, `LISTEN_ADDR=0.0.0.0:8080`. The package is public, so the kubelet pulls it with no credential. The
-# tag is part of the reference so that the job's log says which commit it ran; the digest is what is pulled.
+# item's `audience`), PR #263. *Verified 2026-10-17* by an anonymous request to ghcr.io: the manifest of the tag is an OCI index (its digest is
+# in the `image:` line of the orchestrator below, and in no other line of this file: render-check.sh counts it) with one linux/amd64 image (the
+# image is amd64 only: kind on the runners is amd64) and an attestation; its config says `org.opencontainers.image.revision`
+# 8df44c6f88f0d9eb47aa7c9f5874a914765c8376, user 65532:65532, entrypoint `/orchestrator`, `LISTEN_ADDR=0.0.0.0:8080`. The package is public, so
+# the kubelet pulls it with no credential (*verified 2026-10-17* by the first run of the job: it pulled the image by that digest). The tag is
+# part of the reference so that the job's log says which commit it ran; the digest is what is pulled.
 #
 # Postgres 16 (the system's own CI runs 16, no extension is needed; the orchestrator migrates at start), Docker Official Images' on Alpine 3.23
 # from mirror.gcr.io, Google's mirror of Docker Hub (see postgres.yaml), pinned by the digest of the index of the tag: *verified 2026-10-17* by
@@ -48,7 +49,9 @@ spec:
               containerPort: 5432
           readinessProbe:
             exec:
-              command: [pg_isready, -U, postgres, -d, orch]
+              # Over TCP: the image's entrypoint first runs a temporary server that listens on its socket only, and a check over the socket
+              # would pass against it, before the server the orchestrator connects to (by the Service, over TCP) exists.
+              command: [pg_isready, -h, 127.0.0.1, -U, postgres, -d, orch]
             periodSeconds: 2
             failureThreshold: 30
           resources:

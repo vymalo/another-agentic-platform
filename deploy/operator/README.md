@@ -358,7 +358,7 @@ alone): an API change would then never hold back the operator, at the price of a
 passed, and of the race that one commit avoids (two bumps pushed to `main` by one run each, and the "has main moved on?" test counting the other's).
 
 **`chain-e2e` does not gate the push (D13).** It pulls two third-party images into kind (the system's orchestrator from `ghcr.io`, Postgres from `mirror.gcr.io`) and reads a pin this repository does not control
-([`tests/e2e/chain-orchestrator.yaml`](tests/e2e/chain-orchestrator.yaml)), so a flake of a pull, or a pin that has gone bad, would block the operator's release for a reason that is not the operator's. A red run is a reason to look. This is a decision
+([`tests/e2e/chain-orchestrator.yaml`](tests/e2e/chain-orchestrator.yaml)), so a flake of a pull, or a pin that has gone bad, would block the operator's release for a reason that is not the operator's. A red run is a reason to look; it passed on its first run (run 38994193619 at `4929e3c`, *verified 2026-10-17*). This is a decision
 for the owner (§60a, D13); to make it gate, add `chain-e2e` to the `needs` of `push`. The chart's registry is the one it reads (`registry.tokenSecret`, `networkPolicy.registry.allowFrom`): that reading, with the system's chart, is D14.
 
 **A new GHCR package is private until it is made public.** After the first push (owner step), for **each** of `operator` and `api`: *Packages → the
