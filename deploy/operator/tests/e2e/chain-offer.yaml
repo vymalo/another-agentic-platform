@@ -1,0 +1,30 @@
+# The ExternalSecret that offers two keys to the forms in the kind end-to-end of the whole chain (chain-e2e.sh, D13): the model's API key and
+# the private key of the coder's GitHub App, both of one Secret, `e2e-agent-models`, which the script makes with values of its own (sentinels,
+# which it then looks for everywhere). The Platform API lists the labelled ExternalSecrets of its namespace and offers the keys they
+# name, `secretKey` by `secretKey` (AD-030); its CRD is the pinned copy of crates/objects-kubernetes/tests/crds. There is no External Secrets
+# Operator in the cluster and nothing reads this object but the API. An ExternalSecret holds no value, so neither does this file. The names
+# are the script's own (`offer` and `models_secret` in chain-e2e.sh, which checks the target after it applies this file), and the second label
+# is what lets the script overwrite it on a second run and nothing else: chain-e2e.sh never applies over an object that lacks it.
+apiVersion: external-secrets.io/v1
+kind: ExternalSecret
+metadata:
+  name: e2e-chain-models-es
+  labels:
+    agents.vymalo.com/offer: "true"
+    aap-e2e/made-by: chain-e2e
+spec:
+  refreshInterval: 1h
+  secretStoreRef:
+    kind: ClusterSecretStore
+    name: aap-e2e
+  target:
+    name: e2e-agent-models
+  data:
+    - secretKey: GATEWAY_API_KEY
+      remoteRef:
+        key: aap/e2e
+        property: GATEWAY_API_KEY
+    - secretKey: GITHUB_APP_PRIVATE_KEY
+      remoteRef:
+        key: aap/e2e
+        property: GITHUB_APP_PRIVATE_KEY

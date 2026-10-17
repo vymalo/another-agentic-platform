@@ -1,0 +1,181 @@
+# The system's orchestrator and its Postgres, for the kind end-to-end of the whole chain (D13, chain-e2e.sh). The manifests carry no namespace:
+# the script applies them in its own (aap-e2e-chain) and gives the orchestrator the configuration it renders when it runs (the issuer's address
+# and port are known only then), as the ConfigMap `e2e-orchestrator-config`, and the Secrets `e2e-orch-db`, `e2e-registry-token` and
+# `e2e-a2a-bearer`, which it makes. Everything here carries the label aap-e2e/made-by=chain-e2e: the script applies over nothing that lacks it.
+#
+# THE PIN OF THE ORCHESTRATOR IS HERE AND NOWHERE ELSE. It is a third party's image (another-agentic-system, this repository's consumer), so a
+# bump is a deliberate change of this line, with the digest read again from ghcr.io, and the job that runs it (chain-e2e) does not gate the
+# push (the workflow says why). `sha-8df44c6` is the system's main at its slice D8 (ADR 0045 there: the orchestrator enforces the registry
+# item's `audience`), PR #263. *Verified 2026-10-17* by an anonymous request to ghcr.io: the manifest of the tag is an OCI index of
+# `sha256:2794587bc94f657e43a65810a6a470c22baff3adf0edd526acb691fb1af8902a` with one linux/amd64 image (the image is amd64 only: kind on the
+# runners is amd64) and an attestation; its config says `org.opencontainers.image.revision` 8df44c6f88f0d9eb47aa7c9f5874a914765c8376, user
+# 65532:65532, entrypoint `/orchestrator`, `LISTEN_ADDR=0.0.0.0:8080`. The package is public, so the kubelet pulls it with no credential. The
+# tag is part of the reference so that the job's log says which commit it ran; the digest is what is pulled.
+#
+# Postgres 16 (the system's own CI runs 16, no extension is needed; the orchestrator migrates at start), Docker Official Images' on Alpine 3.23
+# from mirror.gcr.io, Google's mirror of Docker Hub (see postgres.yaml), pinned by the digest of the index of the tag: *verified 2026-10-17* by
+# an anonymous request to mirror.gcr.io/v2/library/postgres/manifests/16.15-alpine3.23. No volume, a password that is public (it guards nothing).
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: e2e-orch-postgres
+  labels:
+    aap-e2e/made-by: chain-e2e
+    aap-e2e/part: postgres
+spec:
+  replicas: 1
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: e2e-orch-postgres
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: e2e-orch-postgres
+        aap-e2e/made-by: chain-e2e
+    spec:
+      containers:
+        - name: postgres
+          image: mirror.gcr.io/library/postgres:16.15-alpine3.23@sha256:621a761097839bdb50207afd6b87a72f38e2d718dd46c3d744828d8917c4f1e0
+          env:
+            - name: POSTGRES_PASSWORD
+              value: e2e-throwaway
+            - name: POSTGRES_DB
+              value: orch
+          ports:
+            - name: postgres
+              containerPort: 5432
+          readinessProbe:
+            exec:
+              command: [pg_isready, -U, postgres, -d, orch]
+            periodSeconds: 2
+            failureThreshold: 30
+          resources:
+            requests:
+              cpu: 50m
+              memory: 128Mi
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: e2e-orch-postgres
+  labels:
+    aap-e2e/made-by: chain-e2e
+    aap-e2e/part: postgres
+spec:
+  selector:
+    app.kubernetes.io/name: e2e-orch-postgres
+  ports:
+    - name: postgres
+      port: 5432
+      targetPort: postgres
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: e2e-orchestrator
+  labels:
+    aap-e2e/made-by: chain-e2e
+    aap-e2e/part: orchestrator
+spec:
+  replicas: 1
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: e2e-orchestrator
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: e2e-orchestrator
+        aap-e2e/made-by: chain-e2e
+        # The pods the operator's registry lets in (chain.values.yaml): this one reads the registry.
+        aap-e2e/registry-reader: "true"
+    spec:
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 65532
+        runAsGroup: 65532
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: orchestrator
+          image: ghcr.io/vymalo/another-agentic-system/orchestrator:sha-8df44c6@sha256:2794587bc94f657e43a65810a6a470c22baff3adf0edd526acb691fb1af8902a
+          env:
+            # One YAML file is the configuration (the system's docs/api/config.md); the script renders it. The database is the one secret the
+            # file names, by reference to this variable.
+            - name: ORCH_CONFIG_FILE
+              value: /etc/orchestrator/config.yaml
+            - name: DATABASE_URL
+              valueFrom:
+                secretKeyRef:
+                  name: e2e-orch-db
+                  key: DATABASE_URL
+            - name: RUST_LOG
+              value: info
+          ports:
+            - name: http
+              containerPort: 8080
+          # /healthz is the process, /readyz the database (migrations applied) and the issuer's keys, fetched.
+          startupProbe:
+            httpGet:
+              path: /healthz
+              port: http
+            periodSeconds: 2
+            failureThreshold: 60
+          readinessProbe:
+            httpGet:
+              path: /readyz
+              port: http
+            periodSeconds: 5
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: http
+            periodSeconds: 10
+          securityContext:
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop: [ALL]
+          resources:
+            requests:
+              cpu: 50m
+              memory: 128Mi
+          volumeMounts:
+            - name: config
+              mountPath: /etc/orchestrator
+              readOnly: true
+            # The registry's token (the operator's own Secret: chain.values.yaml) and the A2A bearer the orchestrator presents to the agents it
+            # lists (the Secret every agent the API makes reads its bearer tokens from): files, named by `{ file: ... }` in the configuration.
+            - name: registry-token
+              mountPath: /run/secrets/registry
+              readOnly: true
+            - name: agent-token
+              mountPath: /run/secrets/agent
+              readOnly: true
+      volumes:
+        - name: config
+          configMap:
+            name: e2e-orchestrator-config
+        - name: registry-token
+          secret:
+            secretName: e2e-registry-token
+        - name: agent-token
+          secret:
+            secretName: e2e-a2a-bearer
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: e2e-orchestrator
+  labels:
+    aap-e2e/made-by: chain-e2e
+    aap-e2e/part: orchestrator
+spec:
+  selector:
+    app.kubernetes.io/name: e2e-orchestrator
+  ports:
+    - name: http
+      port: 8080
+      targetPort: http

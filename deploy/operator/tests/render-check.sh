@@ -782,6 +782,83 @@ e2e_own_names() {
 }
 check "e2e: the agents live in the namespace aap-e2e-api and read the bearer from e2e-a2a-bearer; neither the real namespace nor agent-a2a-bearer is named" e2e_own_names
 
+# ---- The values of the kind end-to-end of the whole chain (D13) ----------------------------------------------------------------
+# tests/e2e/api.values.yaml and tests/e2e/chain.values.yaml (the operator's registry on, and the coder's defaults) with what chain-e2e.sh adds when it
+# runs, in the namespace of its own, aap-e2e-chain; and the three files it applies (the orchestrator's manifest, the offer) read as text. That the
+# chart renders them as the script depends on is checked here, so that a change that breaks them fails the chart job and not a kind cluster.
+chain_ns=aap-e2e-chain
+chain_render() {
+  helm template aap-operator "$chart" --namespace "$chain_ns" -f "$here/e2e/api.values.yaml" -f "$here/e2e/chain.values.yaml" \
+    --set image.repository=operator --set image.tag=smoke --set image.pullPolicy=Never \
+    --set api.image.repository=api --set api.image.tag=smoke --set api.image.pullPolicy=Never \
+    --set api.config.oidc.issuer=http://172.18.0.1:40000 --set 'api.config.oidc.audiences[0]=aap-e2e-chain' --set api.config.oidc.rolesClaim=agentic_roles \
+    --set api.config.defaults.a2aBearer.name=e2e-a2a-bearer --set api.config.defaults.a2aBearer.key=AGENT_REGISTRY_AGENT_TOKEN \
+    --set-json "api.config.defaults.allowFrom=[{\"namespaceSelector\":{\"matchLabels\":{\"kubernetes.io/metadata.name\":\"$chain_ns\"}}}]" \
+    --set-json 'api.networkPolicy.issuer.to=[{"ipBlock":{"cidr":"172.18.0.1/32"}}]' --set-json 'api.networkPolicy.issuer.ports=[40000]' > "$out"
+}
+if ! chain_render 2> "$err"; then echo "FAIL chain: the values of the whole-chain end-to-end do not render: $(head -c 400 "$err")"; fail=1; fi
+check "chain: the values of the whole-chain end-to-end render, with the API on" has_all 'kind: Deployment' 'name: aap-operator-api'
+# The operator serves its registry with the token of the script's own Secret (the orchestrator reads the same Secret as a file).
+chain_registry() {
+  dhas Service aap-operator-registry 'port: 8080' \
+    && dhas Deployment aap-operator 'name: REGISTRY_TOKEN_FILE' 'secretName: e2e-registry-token' '- key: token'
+}
+check "chain: the operator serves the registry (Service on 8080) with the token of the Secret e2e-registry-token, key token" chain_registry
+# Only the pods the script labels may read it: the orchestrator's pod (the label is in its manifest too: below) and the script's curl pod.
+chain_policy() {
+  dhas NetworkPolicy aap-operator 'aap-e2e/registry-reader: "true"' 'port: 8080' && dlacks NetworkPolicy aap-operator 'aap-e2e/client'
+}
+check "chain: the operator's policy admits the pods labelled aap-e2e/registry-reader on 8080 and not the API end-to-end's clients" chain_policy
+# A new coder gets the deployment's coder defaults: an author, the hosts, the API URL; no GitHub MCP sidecar and no work volume, so the pod is
+# the stand-in running `adam-coder` and a Deployment (a work volume per replica would make it a StatefulSet with a claim to wait for).
+chain_coder() {
+  dhas ConfigMap aap-operator-api '^      coder:$' '^        allowedRepoHosts:$' '^        - github.com$' 'email: e2e-coder@example.invalid' \
+    'githubApiUrl: https://api.github.com' '^          sidecar: false$' && dlacks ConfigMap aap-operator-api 'workVolume'
+}
+check "chain: a new coder gets an author, the hosts and the API URL of chain.values.yaml, no GitHub MCP sidecar and no work volume" chain_coder
+chain_own_names() {
+  dhas ConfigMap aap-operator-api '^      namespace: aap-e2e-chain$' 'kubernetes.io/metadata.name: aap-e2e-chain$' '^      - aap-e2e-chain$' \
+    '^        name: e2e-a2a-bearer$' '^        key: AGENT_REGISTRY_AGENT_TOKEN$' 'issuer: http://172.18.0.1:40000$' \
+    && dhas Role aap-operator-api '^  namespace: aap-e2e-chain$' && lacks 'another-agentic-system|agent-a2a-bearer|aap-e2e-api'
+}
+check "chain: the agents live in the namespace aap-e2e-chain, read the bearer from e2e-a2a-bearer, and the tokens' audience is aap-e2e-chain; neither the real namespace nor the other end-to-end's is named" chain_own_names
+check "chain: the ledger of a coder is a Secret named from it, there is no CloudNativePG store, and the stand-in's registry (docker.io) is the one an image may come from" \
+  has_all '\{name\}-db-app' 'key: uri' '^      - docker.io$'
+# The files the script applies, read as text. The orchestrator's pin is a tag AND a digest, one line of one file, and the digest is nowhere else of the
+# chart or the workflows (the script reads the pin from the manifest).
+chain_pin() {
+  manifest="$here/e2e/chain-orchestrator.yaml"
+  [ "$(grep -Ec '^ +image: ghcr\.io/vymalo/another-agentic-system/orchestrator:' "$manifest")" -eq 1 ] || return 1
+  grep -Eq '^ +image: ghcr\.io/vymalo/another-agentic-system/orchestrator:sha-[0-9a-f]{7}@sha256:[0-9a-f]{64}$' "$manifest" || return 1
+  grep -Eq '^ +image: mirror\.gcr\.io/library/postgres:[0-9][^@ ]*@sha256:[0-9a-f]{64}$' "$manifest" || return 1
+  pin_digest=$(sed -n 's/^ *image: ghcr\.io\/vymalo\/another-agentic-system\/orchestrator:[^@]*@\(sha256:[0-9a-f]*\)$/\1/p' "$manifest")
+  [ "$(grep -rlF "$pin_digest" "$chart/.." "$chart/../../.github" | wc -l)" -eq 1 ]
+}
+check "chain: the orchestrator is pinned by tag and digest in chain-orchestrator.yaml, once, and Postgres by digest; the orchestrator's digest is in no other file of deploy/ or .github/" chain_pin
+chain_manifest() {
+  manifest="$here/e2e/chain-orchestrator.yaml"
+  # The pod carries the label the operator's policy admits, mounts the Secrets and the ConfigMap the script makes, and the manifests name no namespace.
+  grep -q '^        aap-e2e/registry-reader: "true"$' "$manifest" \
+    && grep -q 'secretName: e2e-registry-token$' "$manifest" && grep -q 'secretName: e2e-a2a-bearer$' "$manifest" \
+    && grep -q 'name: e2e-orchestrator-config$' "$manifest" && grep -q 'name: e2e-orch-db$' "$manifest" \
+    && grep -q '^    aap-e2e/part: postgres$' "$manifest" && grep -q '^    aap-e2e/part: orchestrator$' "$manifest" \
+    && ! grep -q '^  namespace:' "$manifest" "$here/e2e/chain-offer.yaml"
+}
+check "chain: the orchestrator's pod has the label the registry's policy admits and mounts the Secrets and ConfigMap the script makes; no manifest names a namespace" chain_manifest
+chain_offer() {
+  offer="$here/e2e/chain-offer.yaml"
+  grep -q '^    agents.vymalo.com/offer: "true"$' "$offer" && grep -q '^    aap-e2e/made-by: chain-e2e$' "$offer" \
+    && grep -q '^    name: e2e-agent-models$' "$offer" && grep -q 'secretKey: GATEWAY_API_KEY$' "$offer" && grep -q 'secretKey: GITHUB_APP_PRIVATE_KEY$' "$offer"
+}
+check "chain: the offer is labelled for the forms and for the script and offers the two keys of e2e-agent-models" chain_offer
+chain_script() {
+  script="$here/e2e/chain-e2e.sh"
+  # shellcheck disable=SC2016 # the pattern is the script's own text, `${...}` and all
+  grep -q 'ns=${AAP_E2E_NAMESPACE:-aap-e2e-chain}$' "$script" && grep -q '^made_by=chain-e2e$' "$script" && grep -q '^audience=aap-e2e-chain$' "$script" \
+    && grep -q '^models_secret=e2e-agent-models$' "$script" && grep -q '^registry_secret=e2e-registry-token$' "$script" && grep -q '^bearer_secret=e2e-a2a-bearer$' "$script"
+}
+check "chain: the script's namespace, label, audience and Secrets are the ones the values and the manifests name" chain_script
+
 # ---- The CRDs chart: one source ------------------------------------------------------------------------------------------
 check "deploy/operator-crds/files is a copy of deploy/crds (cp deploy/crds/agents.vymalo.com.yaml deploy/operator-crds/files/)" \
   cmp -s "$crds_file" "$crds_chart/files/agents.vymalo.com.yaml"

@@ -341,7 +341,8 @@ Two images, one workflow, one commit. [`operator-image.yml`](../../.github/workf
 `ghcr.io/vymalo/another-agentic-platform/operator` from [`docker/operator/Dockerfile`](../../docker/operator/Dockerfile) and
 `ghcr.io/vymalo/another-agentic-platform/api` (the Platform API) from [`docker/api/Dockerfile`](../../docker/api/Dockerfile). On a pull request it builds
 and smoke-tests each (the API's also runs `api --check` on the configuration this chart renders) and runs the kind end-to-ends of the coder and of the API
-(`api-e2e`, D7b2: this chart with the API on, a folder agent made through it); on `main`,
+(`api-e2e`, D7b2: this chart with the API on, a folder agent made through it) and of the whole chain (`chain-e2e`, D13: the API makes a coder with an
+audience, this chart's registry lists it, and a pinned orchestrator of the system lists it by audience; it is **not** among the jobs `push` waits for); on `main`,
 after all of those pass, it pushes the images **that passed** as `sha-<7>` (the same tag for both), and as `latest` unless main has moved on to a newer
 build (image jobs can finish out of order), and a last job runs `bump-tag.sh` for each (`image.tag`, then `api.image.tag`) and pushes **one** commit,
 `chore(deploy): bump operator and api to sha-<7>`, to `main` as `github-actions[bot]` (§93 allows it). There is one bump job so that two pushes to `main`
@@ -355,6 +356,10 @@ flakiest job) is red. `api-e2e` is in this workflow, and not in `operator.yml`, 
 after its own jobs, and a bump that moves each tag only when its own image passed (`bump-tag.sh <file> <tag> operator|api` already moves one key
 alone): an API change would then never hold back the operator, at the price of a bump that has to decide, for each tag, whether its image
 passed, and of the race that one commit avoids (two bumps pushed to `main` by one run each, and the "has main moved on?" test counting the other's).
+
+**`chain-e2e` does not gate the push (D13).** It pulls two third-party images into kind (the system's orchestrator from `ghcr.io`, Postgres from `mirror.gcr.io`) and reads a pin this repository does not control
+([`tests/e2e/chain-orchestrator.yaml`](tests/e2e/chain-orchestrator.yaml)), so a flake of a pull, or a pin that has gone bad, would block the operator's release for a reason that is not the operator's. A red run is a reason to look. This is a decision
+for the owner (§60a, D13); to make it gate, add `chain-e2e` to the `needs` of `push`. The chart's registry is the one it reads (`registry.tokenSecret`, `networkPolicy.registry.allowFrom`): that reading, with the system's chart, is D14.
 
 **A new GHCR package is private until it is made public.** After the first push (owner step), for **each** of `operator` and `api`: *Packages → the
 package → Package settings → Change visibility → Public*, then check the anonymous pull, from the images repository's `CLAUDE.md` (for the API, say
@@ -417,7 +422,7 @@ sh deploy/operator/tests/api-shapes.sh /tmp/api-config && for f in /tmp/api-conf
 | `tests/bump-tag-test.sh` | `bump-tag.sh` edits only `image.tag` (a `defaultAgentImage` line beside it is left alone) or, with `api`, only `api.image.tag` (each leaves the other, and keys that only look like it, alone), is idempotent, refuses a malformed tag and an unknown component (the test of adam-rs's `deploy/coder`, with this chart's values) |
 | `tests/api.values.yaml`, `tests/api-secretref.values.yaml`, `tests/api-full.values.yaml`, `tests/api-shapes.sh`, `tests/api-config.sh` | the shapes of the API component: the golden one, a Secret per agent, and **one that sets every value the chart exposes** (ports, `apiServer.cidrs`, `issuer.to`, every key of `defaults`, the Ingress, the scheduling), and the scripts that render a shape and write the ConfigMap's `config.yaml` to a file (`api-shapes.sh` writes `golden`, `secretref`, `minimal` and `full`), which CI hands to the image's `api --check` |
 | `tests/schemas/` | the `ExternalSecret` schema for kubeconform ([its README](tests/schemas/README.md)) |
-| `tests/e2e/` | the kind end-to-ends: of the coder (S9, `coder-e2e.sh`) and of the Platform API (D7b2, `api-e2e.sh` with `api.values.yaml` and `api-offer.yaml`; `render-check.sh` renders the values it installs and asserts what the script depends on): [`tests/e2e/README.md`](tests/e2e/README.md) |
+| `tests/e2e/` | the kind end-to-ends: of the coder (S9, `coder-e2e.sh`), of the Platform API (D7b2, `api-e2e.sh` with `api.values.yaml` and `api-offer.yaml`) and of the whole chain (D13, `chain-e2e.sh` with `chain.values.yaml`, `chain-orchestrator.yaml`, which holds the pin of the system's orchestrator image, and `chain-offer.yaml`); `render-check.sh` renders the values they install and asserts what the scripts depend on: [`tests/e2e/README.md`](tests/e2e/README.md) |
 
 CI also runs kubeconform in strict mode over seven renders (the defaults, netcup, `secret.values.yaml`, the three API shapes, and the CRDs chart with the
 `CustomResourceDefinition` kind skipped, because the schema set has none: the `kind` job of `operator.yml` applies them to a real API server).

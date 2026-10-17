@@ -1,8 +1,10 @@
-# The kind end-to-ends of the operator: the coder (S9) and the Platform API (D7b2)
+# The kind end-to-ends of the operator: the coder (S9), the Platform API (D7b2) and the whole chain (D13)
 
-Two scripts, two jobs of [`operator-image.yml`](../../../../.github/workflows/operator-image.yml), one kind cluster each: [`coder-e2e.sh`](coder-e2e.sh)
-(the operator runs the real coder, [below](#the-kind-end-to-end-of-the-coder-s9)) and [`api-e2e.sh`](api-e2e.sh) (the Platform API creates an agent the
-operator makes Ready, [further down](#the-kind-end-to-end-of-the-platform-api-d7b2)).
+Three scripts, three jobs of [`operator-image.yml`](../../../../.github/workflows/operator-image.yml), one kind cluster each: [`coder-e2e.sh`](coder-e2e.sh)
+(the operator runs the real coder, [below](#the-kind-end-to-end-of-the-coder-s9)), [`api-e2e.sh`](api-e2e.sh) (the Platform API creates an agent the
+operator makes Ready, [further down](#the-kind-end-to-end-of-the-platform-api-d7b2)) and [`chain-e2e.sh`](chain-e2e.sh) (the API makes a coder with an
+audience, the operator runs it and lists it, and a pinned image of the system's orchestrator lists it for the person who holds the role and for nobody
+else, [at the end](#the-kind-end-to-end-of-the-whole-chain-d13)).
 
 ## The kind end-to-end of the coder (S9)
 
@@ -250,3 +252,119 @@ stateDiagram-v2
 `aap-platform-api` over the `Memory` ports, the real `OidcAuthenticator` and the real `test-issuer`, with a fake `kubectl` and a fake `helm` (scratch programs: not committed) that answer
 from the objects the router wrote**: every `curl` step and `jq` filter of the API half is the real thing; every `kubectl` assertion is the fake's, and the fake says what the script
 wants to hear, except where a scenario makes it say otherwise (a context that is not kind's, a namespace or a Secret that is not the script's, a missing tool, a failed build, a `202` with and without an orphan, a service that lingers, a pod the policy does not refuse, a leaked token, each of the three signals). Where the changes may need a fix in kind: `kubectl create -f -` of the labelled namespace and its deletion, the agents in a namespace other than `another-agentic-system`, and the control that the other pod reaches the issuer.
+
+## The kind end-to-end of the whole chain (D13)
+
+The Platform API, the operator and **the system's orchestrator**, in one kind cluster: the API creates a **coder with an audience**, the operator runs it and lists it in its
+registry with that audience, and the orchestrator, **a published image of another repository pinned by tag and digest**, lists it for the person who holds the role and for nobody
+else. This is the job `chain-e2e` of [`operator-image.yml`](../../../../.github/workflows/operator-image.yml) (it needs the jobs `image` and `api-image`, whose images it runs, and
+**`push` does not need it**: it pulls two third-party images and reads a pin this repository does not control, so a red run is a reason to look and not to withhold the operator's release;
+an owner decision, §60a D13, one line to flip). The script [`chain-e2e.sh`](chain-e2e.sh) is all of it and runs against any kind cluster that has the two images and the stand-in:
+
+```sh
+kind create cluster --name aap-chain
+docker build -t operator:smoke -f docker/operator/Dockerfile . && docker build -t api:smoke -f docker/api/Dockerfile . \
+  && docker build -t aap-stub:ci bin/operator/tests/stub
+kind load docker-image operator:smoke api:smoke aap-stub:ci --name aap-chain
+sh deploy/operator/tests/e2e/chain-e2e.sh    # kubectl on that cluster; needs helm, jq, curl, openssl and cargo (it builds the test issuer)
+```
+
+The cluster must reach `ghcr.io` (the orchestrator, `linux/amd64` only) and `mirror.gcr.io` (Postgres 16); the kubelet pulls both, by digest. The host's address on the docker network of kind (`AAP_TEST_HOST_ADDR`), the test issuer
+(`TEST_ISSUER_BIN`) and the escape for a cluster that is not kind's (`AAP_E2E_ALLOW_ANY_CONTEXT`) are the [API's end-to-end](#the-kind-end-to-end-of-the-platform-api-d7b2)'s, and so are the timeouts' variables (`READY_TIMEOUT_SECS`, `GONE_TIMEOUT_SECS`);
+`ROLLOUT_TIMEOUT_SECS` (420) bounds the two rollouts and `LISTING_TIMEOUT_SECS` (120) the wait for the orchestrator to read the registry.
+
+**It runs only on a throwaway cluster and touches only what it made**, as `api-e2e.sh` does after its review: a context that is not `kind-*` is refused before anything is made (and the cleanup is not yet armed);
+it works in a namespace of its own, **`aap-e2e-chain`** (`AAP_E2E_NAMESPACE`), that it makes with the label `aap-e2e/made-by=chain-e2e` and never uses without it; its Secrets, its ConfigMap, its ExternalSecret
+and its Deployments have names of their own (`e2e-...`), carry the label, and one that exists without it is never overwritten; the cleanup undoes what each step recorded, in the order that lets the operator run
+the finalizer, and `INT`, `TERM` and `HUP` run it. The API's end-to-end uses `aap-e2e-api`: two clusters, two namespaces.
+
+```mermaid
+sequenceDiagram
+    participant J as chain-e2e.sh (the runner)
+    participant I as test-issuer (the runner)
+    participant K as kind (API server, kubelet)
+    participant A as the Platform API pod
+    participant O as the operator
+    participant S as the coder pod (the stand-in)
+    participant R as the orchestrator (the pin)
+    participant P as its Postgres
+
+    J->>K: refuse a context that is not kind-*, make aap-e2e-chain (labelled), the CRDs
+    J->>I: start with the audience aap-e2e-chain: ONE issuer for the API and the orchestrator
+    J->>K: Secrets (two sentinels, the registry's token, the A2A bearer), the offer, helm upgrade --install (API on, registry on)
+    O->>K: serves the registry (Service aap-operator-registry), a bearer token on every request
+    J->>K: apply Postgres and wait, then apply the orchestrator with the configuration the script renders
+    R->>P: migrates
+    R->>I: the issuer's keys (/readyz)
+    J->>A: PUT /v1/models/e2e-gateway (403 without platform:secrets.pick, then 201)
+    J->>A: PUT /v1/agents/e2e-coder, a coder, audience agent.use:e2e-coder (403, then 201)
+    A->>K: server-side apply of the AgentConfig and the AgentService
+    O->>K: Deployment on the stand-in, Service, NetworkPolicy, Ready and Listed
+    J->>O: from a pod it admits: the registry (401, then the document: title, card URL, audience)
+    R->>O: reads the registry (the token, cached at most 1 s)
+    R->>S: reads the card, with the A2A bearer
+    J->>R: alice, bob, admin, carol, each with a token of the one issuer
+    J->>A: DELETE the coder (If-Match)
+    O->>K: removes it, and the registry lists nothing
+    R-->>J: nobody is listed anything, the registry still ok
+    J->>K: the logs hold no secret and no token, then undo what was made
+```
+
+```mermaid
+stateDiagram-v2
+    [*] --> Installed: CRDs, issuer, Secrets, the operator and the API, Postgres, the orchestrator
+    Installed --> Created: the model (201), the coder with its audience (201)
+    Created --> Ready: Ready and Listed (the API's state ready, at most 4 minutes)
+    Created --> Failed: blocked three looks in a row, or the time is up
+    Ready --> Registered: the registry lists it with the audience
+    Registered --> Listed: the orchestrator lists it to alice (at most 2 minutes)
+    Listed --> Asked: bob, admin and carol are asked
+    Asked --> Deleted: DELETE with its ETag
+    Deleted --> Empty: the registry and the orchestrator list nothing
+    Empty --> Checked: no secret and no token in any answer or log
+    Checked --> [*]
+    Failed --> [*]: the script prints what the cluster, the API, the operator and the orchestrator say, and undoes only what it made
+```
+
+### Files
+
+| File | What |
+|---|---|
+| [`chain-e2e.sh`](chain-e2e.sh) | the script: every step bounded, every assertion named, the cluster's state printed on a failure |
+| [`chain.values.yaml`](chain.values.yaml) | laid over `api.values.yaml` (which stays what the API's end-to-end installs): the operator's registry on, with a Secret of the script's own for its token; only the pods labelled `aap-e2e/registry-reader` may read it; the coder's defaults (an author, the hosts, the API URL, no GitHub MCP sidecar, no work volume). The script adds in a third file what it knows when it runs, as `api-e2e.sh` does. `render-check.sh` renders them in `aap-e2e-chain` and asserts what the script depends on |
+| [`chain-orchestrator.yaml`](chain-orchestrator.yaml) | the orchestrator and its Postgres, no namespace in them. **The orchestrator's pin is here and nowhere else**: tag and digest, with the date it was read from `ghcr.io` and what was read; the script takes the pin from this file and `render-check.sh` holds that its digest is in no other file of `deploy/` or `.github/`. The script renders the configuration (a ConfigMap) and makes the Secrets it mounts |
+| [`chain-offer.yaml`](chain-offer.yaml) | the labelled `ExternalSecret` that offers the two keys the forms name, the model's API key and the GitHub App's private key (no External Secrets Operator in the cluster: nothing reads it but the API) |
+| `../../../../bin/operator/tests/stub/Dockerfile` | the agent's image, shared with the other jobs. **Its card is a valid A2A 1.0 card since D13**: the orchestrator parses the card to list the agent, and the old one (a name and a description) is "unreadable" to it |
+
+### What it proves
+
+* **The orchestrator takes what this repository publishes.** Its configuration (the script renders it: the operator's registry as its only source of agents, two files for the tokens, the issuer, two roles that may read and use every
+  agent, `userClaim: sub`, `defaultRole: null`) is accepted, its migrations run, the issuer's keys are fetched (`/readyz`), and the pod runs the pinned image.
+* **The audience is the registry's and the orchestrator enforces it.** The coder is made through the deployed API with `audience: ["agent.use:e2e-coder"]`; the `AgentService` carries it; the operator's registry, read from a pod it admits, answers `401`
+  without its token and, with it, lists the coder with that audience, its title and its card URL; and the orchestrator, which reads that registry, shows the coder to the people the audience admits:
+  * **alice** (roles `user` and `agent.use:e2e-coder`): `GET /api/agents` lists exactly `e2e-coder`, from the registry, with the description **of the card the stand-in serves** (so the orchestrator read the card with the A2A bearer and understood it), its capabilities are `200`, and `/api/me` says her role is `user` only;
+  * **bob** (`user` and `agent.use:other`): `GET /api/agents` is `[]`, `GET /api/registry` says the platform's registry is `ok` (so the empty list is the audience and not a registry that failed), `/api/me` is alice's but for the person, and the capabilities are the `404` of an agent that does not exist, byte for byte;
+  * **admin** (the role `admin`): the list holds the coder and its capabilities are `200`. **This asserts what the pinned system does** (its ADR 0045, decision 1.4: a role that holds `admin` sees every platform agent), **while the contract of the registry (its consumer's rule 4) says the opposite**: an open question for the owner (§60a, D3), which this script does not decide. If the pin moves to a system that follows the contract, this is the check that fails;
+  * **carol** (`agent.use:e2e-coder` and nothing else): `403 no_access` on the list and on the capabilities, and `/api/me` says she holds no role and no permission: a value of the audience admits, it never grants.
+* **The chain ends cleanly.** Deleting the coder through the API (`If-Match`) completes the operator's finalizer; the registry lists nothing, the orchestrator lists nothing to the administrator or to alice, and the registry is still `ok`.
+* **The Platform API makes a coder.** `403` naming `platform:secrets.pick` for a coder that names the GitHub App's key and for a model that names the API key, then `201`; the coder is an `adam-coder` on the stand-in image (docker.io by its name, the one registry `api.values.yaml` admits) with no volume, so a Deployment; its Secrets (the ledger, the model's key, the A2A bearer, the App's key as a file) are the ones the script makes.
+* **No secret value** (the model's key and the App's private key are sentinels, the registry's token and the A2A bearer are random) **and no token minted by the run is in any answer, header or log**: the Platform API's, the operator's and the orchestrator's, whose log is JSON.
+
+### What it does not prove
+
+* **A real Keycloak, the edge, DPoP, the web.** The issuer is the testkit's (RS256, a flat roles claim, no e-mail: the orchestrator reads the user from `sub`); the orchestrator is asked with plain bearer tokens.
+* **A message to the agent.** The coder is the stand-in: it answers `/healthz` and a card, nobody speaks A2A to it, so a thread, a job or a run on `e2e-coder` is not exercised. The real coder is `operator-coder-e2e`'s (up to its startup checks).
+* **A system newer than the pin.** `sha-8df44c6` is the system's `main` at its slice D8; a bump of the pin is a deliberate change of one file, with the digest read again from `ghcr.io`.
+* **The deployment's wiring** (the system's chart reading `agent-registry` through its Service name, the shared token in AWS Secrets Manager): D14.
+* **Two replicas of the orchestrator**, a registry that is down (the system's `dev/registry-e2e.sh` covers it against mocks), and an audience that is narrowed while a job runs.
+
+### What ran where it was written, and what is unverified
+
+*Verified 2026-10-17*: the orchestrator's pin by an anonymous manifest request to `ghcr.io` (the index `sha256:2794587b...`, one `linux/amd64` image and an attestation; the config's revision label is `8df44c6f...`, user `65532:65532`, entrypoint `/orchestrator`); Postgres's by an anonymous request to `mirror.gcr.io`;
+and, with the **orchestrator binary built at `8df44c6`** (the same commit, a debug build with the crate's default features, which are the image's: its `Dockerfile` adds none, and `registry-platform` and `auth-jwt` are default) on a scratch Postgres 16: the configuration the script renders, taken from the script itself, is accepted by `--print-config` and by a live start (migrations applied, `/readyz` `200`), and the tokens the testkit's issuer mints are accepted by it; alice, bob, admin and carol get the answers above
+(`GET /api/agents`, `/api/registry`, `/api/me` and the capabilities).
+
+*Run where it was written, with no container daemon and no kind*: `shellcheck`, `dash -n`, `actionlint`, `render-check.sh`, and **the whole script, end to end, under `dash`**, against the real orchestrator above (in a private mount namespace with the cluster's names in `/etc/hosts` and the Secrets as files, reading the configuration and the Secrets the script made),
+the real Platform API router over the `Memory` ports with the defaults **the chart rendered from these values** (so `chain.values.yaml` is read by the API's own `Defaults`, which refuses a key it does not know), the real registry router over a directory that follows the objects, the real `test-issuer`, and a fake `kubectl` and `helm` (scratch, not committed) that answer from what the script applied.
+The coder the API wrote was also resolved by the operator's own `aap_domain::resolve`: a Deployment, the stand-in image, no sidecar, and every Secret it names is one the script makes. Sixteen of the script's assertions were broken on purpose, one edit at a time in a copy of it, and each failed as written (the pin without a digest, a Secret of the manifest misnamed, an audience that is not the role's, a registry item with another title, alice without the role, bob with it, the registry's expectation for bob turned, the administrator without `admin`, carol with `user`, bob's `/api/me` made different, the 404 compared with another body, a delete that is not made, a secret value and a token planted in the answers, a registry path that does not exist, a coder written without `platform:secrets.pick`); so were the guards (a context that is not kind's, a namespace and a Secret without the label, the opt-in that lets another context through) and the stand-in's old card, and `TERM` and `INT` ran the cleanup.
+**None of the cluster half ran**: the pulls of the orchestrator and Postgres, the kubelet starting the pod, kindnet admitting the orchestrator to the registry and to the agent (the policies), `kubectl rollout status`, the port-forward to a Service of this script, the operator's real status and `Listed`, and the stand-in answering through its Service from the orchestrator's pod. **The job is *unverified* until CI has run it**; where it may need a fix: the first pulls (`ghcr.io` and `mirror.gcr.io` from kind), the orchestrator's readiness in a pod, and the registry's cache on a real cluster.

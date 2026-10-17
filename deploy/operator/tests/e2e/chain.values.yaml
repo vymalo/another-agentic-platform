@@ -1,0 +1,37 @@
+# What the kind end-to-end of the whole chain (D13, chain-e2e.sh) adds to api.values.yaml: the operator's registry on (the orchestrator of
+# the system reads it) and the one thing the coder form needs of the deployment. It is laid over api.values.yaml (which stays what the
+# end-to-end of the Platform API installs: render-check.sh holds that one to having no registry), and what the script knows only when it runs
+# (the images, the issuer and its egress rule, the namespace, the Secret of the A2A bearer) goes in a third file, as api-e2e.sh does.
+#
+# Nothing here is a secret. The cluster is a throwaway one; no value below is advice for a deployment (deploy/operator/README.md is).
+
+registry:
+  # The operator serves the registry only with a bearer token (no token, no registry). The Secret is the script's own: it makes it with a
+  # random token, and the orchestrator reads the same Secret as a file (chain-orchestrator.yaml).
+  tokenSecret:
+    name: e2e-registry-token
+    key: token
+
+networkPolicy:
+  registry:
+    # Who may read the registry: the pods labelled `aap-e2e/registry-reader: "true"` of the namespace, which are the orchestrator's and the
+    # script's curl pod. The label is the script's own, so the chart's policy admits these and nothing else of the namespace.
+    allowFrom:
+      - podSelector:
+          matchLabels:
+            aap-e2e/registry-reader: "true"
+
+api:
+  config:
+    defaults:
+      # What a new coder gets of the deployment. The GitHub App is the form's (an id and a reference to a key), and there is no work
+      # volume and no GitHub MCP sidecar: the pod is the stand-in image running `adam-coder`, which opens no connection to GitHub, so a
+      # volume and a sidecar would only be slower to start and prove nothing (the real coder is operator-coder-e2e's).
+      coder:
+        gitAuthor:
+          name: e2e-coder[bot]
+          email: e2e-coder@example.invalid
+        allowedRepoHosts: [github.com]
+        githubApiUrl: https://api.github.com
+        githubMcp:
+          sidecar: false
