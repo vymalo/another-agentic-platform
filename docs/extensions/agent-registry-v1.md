@@ -344,8 +344,10 @@ attributes (rule 4). That is how `audience` was added on 2026-10-15 (D3): the UR
 and a document with audiences is a valid `v1` document for a reader that predates it. The risk is
 that such a client ignores the attribute and so shows a restricted agent to everybody, which is why
 a client that offers agents to people implements [the consumer's rule](#audience) before any
-service has an audience. A reader of the system's, from before the attribute, is tested to read
-such a document with no item skipped
+service has an audience. The system's reader from before the attribute (its commit `e5da0a4`) was
+tested to read such a document with no item skipped; the copy vendored now is the system's
+reader of its slice D8 (commit `8df44c6`), which parses `audience`, and a round-trip test holds
+that it reads each published audience as the same set
 ([`aap-registry`](../../crates/registry/README.md#the-consumers-reader)).
 
 A service may declare both versions during a transition: the document then carries both `profile`
