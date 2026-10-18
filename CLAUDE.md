@@ -23,6 +23,7 @@ layout table and the root `README.md`.
 | Path | What |
 |---|---|
 | `docs/architecture/README.md` | Index: status, revision history, contents, and the `§N` → file section map |
+| `CONTRIBUTING.md`, `SECURITY.md` | How to contribute (claim an issue, build, test, open a pull request) and how to report a vulnerability privately. The product roadmap is `ROADMAP.md` in another-agentic-system: https://github.com/vymalo/another-agentic-system/blob/main/ROADMAP.md |
 | `docs/architecture/01-…12-*.md` | The architecture, split by topic; sections keep their original numbers |
 | `docs/mvp.md` | v0 cut (scenarios A–C, D for free) and build order |
 | `docs/extensions/release-channels-v1.md` | A2A extension contract consumed by other systems |
