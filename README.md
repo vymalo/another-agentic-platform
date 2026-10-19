@@ -83,6 +83,13 @@ CI is [`.github/workflows/operator.yml`](.github/workflows/operator.yml): the fo
 - **vymalo/another-agentic-images** — the toolchain image recipe (Rust, Flutter/Dart,
   Node, agent CLIs under `/opt`) coding runtimes start from.
 
+## Roadmap and contributing
+
+- **Roadmap:** the product roadmap to launch, with every open piece of work as an issue, is
+  [`ROADMAP.md` in another-agentic-system](https://github.com/vymalo/another-agentic-system/blob/main/ROADMAP.md).
+- **Contributing:** [`CONTRIBUTING.md`](CONTRIBUTING.md).
+- **Security:** report a vulnerability privately, as [`SECURITY.md`](SECURITY.md) says.
+
 ## License
 
 [MIT](LICENSE). Vendored agent skills keep their own licenses; see
