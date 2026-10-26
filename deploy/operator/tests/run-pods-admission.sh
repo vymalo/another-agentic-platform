@@ -39,8 +39,9 @@ claim=$(params claim)
 secret=$(params secretName)
 key=$(params secretKey)
 class=$(params priorityClass)
-[ -n "$account" ] && [ -n "$managed_by" ] && [ -n "$run_label" ] && [ -n "$claim" ] && [ -n "$secret" ] && [ -n "$key" ] && [ -n "$class" ] \
-  || die "the parameters of the guard are incomplete: $(kubectl -n "$ns" get configmap "$svc-run-pods-policy" -o 'jsonpath={.data}')"
+if [ -z "$account" ] || [ -z "$managed_by" ] || [ -z "$run_label" ] || [ -z "$claim" ] || [ -z "$secret" ] || [ -z "$key" ] || [ -z "$class" ]; then
+  die "the parameters of the guard are incomplete: $(kubectl -n "$ns" get configmap "$svc-run-pods-policy" -o 'jsonpath={.data}')"
+fi
 
 # The pod the coder builds from the template: the name, the namespace, the labels and the annotations it fills in.
 printf '%s' "$template" | jq --arg ns "$ns" --arg svc "$svc" --arg by "$managed_by" --arg run "$run_label" '
