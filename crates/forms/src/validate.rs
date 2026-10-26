@@ -12,7 +12,7 @@
 use std::collections::BTreeSet;
 
 use aap_api::{AgentConfig, AgentService, ModelEndpoint, ToolProvider};
-use aap_domain::{ConfigIssue, Externals, name_issue};
+use aap_domain::{ConfigIssue, Externals, RunPodSettings, name_issue};
 use aap_ports::{FieldError, Kind};
 use url::Url;
 
@@ -25,8 +25,8 @@ use crate::resources::{Resources, to_resources};
 use crate::secret::{OfferedKeys, SecretPick, is_secret_key_name};
 use crate::shared::{BaseUrlForm, ModelEndpointForm, ToolServerForm};
 use crate::syntax::{
-    chars, has_text, is_agent_name, is_github_login, is_model_name, is_scheme_prefix, is_tag,
-    is_tool_server_name, is_visible_ascii, shown,
+    chars, has_text, is_agent_name, is_github_login, is_model_name, is_scheme_prefix,
+    is_size_class, is_tag, is_tool_server_name, is_visible_ascii, shown,
 };
 
 /// The image `aap-domain` is told is the operator's default when the Platform API does not know it. The
@@ -227,6 +227,14 @@ fn check_agent(
             if c.opencode_model.as_deref().is_some_and(|m| !has_text(m)) {
                 e.add("agent.opencodeModel", "name a model alias, or leave it out");
             }
+            if let Some(class) = c.run_pod_size_class.as_deref()
+                && !is_size_class(class)
+            {
+                e.add(
+                    "agent.runPodSizeClass",
+                    "name a size class (lower-case letters, digits and `-`, at most 63 characters), or leave it out",
+                );
+            }
         }
         AgentKindForm::Folder(f) => {
             for path in f.files.keys() {
@@ -403,6 +411,7 @@ fn config_field(form: &AgentForm, path: &str) -> String {
             "spec.harness.adam.coder.opencodeModel",
             "agent.opencodeModel",
         ),
+        ("spec.harness.adam.coder.runPods", "agent.runPodSizeClass"),
         (
             "spec.harness.adam.coder.gitAuthor",
             "deployment.coder.gitAuthor",
@@ -889,7 +898,7 @@ impl Defaults {
             audience: None,
             agent,
         };
-        let forms = [
+        let mut forms = vec![
             sample(AgentKindForm::Coder(CoderSettings {
                 github: GithubAppForm {
                     app_id: "Iv1.sample".to_owned(),
@@ -900,14 +909,45 @@ impl Defaults {
                 workers: None,
                 pr_draft: None,
                 opencode_model: None,
+                run_pod_size_class: None,
             })),
             sample(AgentKindForm::Folder(FolderSettings {
                 files: [("instructions.md".to_owned(), "sample\n".to_owned())].into(),
             })),
         ];
-        let externals = Externals::default()
+        let mut externals = Externals::default()
             .with_default_image(DEFAULT_IMAGE_STANDIN)
             .with_model_endpoint(probe_endpoint(ns));
+        for class in &self.run_pod_size_classes {
+            if !is_size_class(class) {
+                problems.push(format!(
+                    "runPodSizeClasses: {class:?} is not the name of a class (lower-case letters, digits and `-`, at most 63 characters)"
+                ));
+            }
+        }
+        let mut classes: Vec<&str> = self
+            .run_pod_size_classes
+            .iter()
+            .map(String::as_str)
+            .collect();
+        classes.sort_unstable();
+        classes.dedup();
+        if classes.len() != self.run_pod_size_classes.len() {
+            problems.push("runPodSizeClasses: a class is named twice".to_owned());
+        }
+        if let Some(first) = classes
+            .first()
+            .filter(|_| classes.iter().all(|c| is_size_class(c)))
+        {
+            externals = externals.with_run_pods(RunPodSettings::offering(classes.iter().copied()));
+            // With run pods the deployment's coder must be able to have them: the sample of a coder that asks for the first
+            // class is valid (it has the work volume run pods mount), or the API would refuse every coder form that does.
+            let mut with = forms[0].clone();
+            if let AgentKindForm::Coder(c) = &mut with.agent {
+                c.run_pod_size_class = Some((*first).to_owned());
+            }
+            forms.push(with);
+        }
         for form in &forms {
             let deployment = self.deployment_for(form.kind(), &form.name);
             let resources = to_resources(form, &deployment, ns);

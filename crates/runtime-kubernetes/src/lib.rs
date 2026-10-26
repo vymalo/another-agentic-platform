@@ -23,4 +23,4 @@ mod watch;
 
 pub use error::Error;
 pub use provider::KubernetesRuntime;
-pub use render::{Rendered, WorkloadObject, owner_handle, render};
+pub use render::{Rendered, RunPodObjects, WorkloadObject, owner_handle, render};

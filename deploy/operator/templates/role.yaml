@@ -41,6 +41,26 @@ rules:
   - apiGroups: [""]
     resources: [pods]
     verbs: [list, watch]
+  {{- if include "aap.runPods" . }}
+  # aap-runtime-kubernetes, run pods (slice D15a): the account an agent's workers run as, what its run pods may use, and the binding of
+  # the account to the Role made for run pods (run-pods-role.yaml). The operator makes no Role: it holds the right to BIND that one, by
+  # name, and no right of its own to make a pod or exec, which Kubernetes would require of it to make a Role with those verbs itself
+  # (verified 2026-10-26 on a kube-apiserver v1.35.8). `delete` on pods is for clearing the run pods of a service that stops making
+  # them or goes (the coder that swept them is gone), found by the labels the service's policy parameters name.
+  - apiGroups: [""]
+    resources: [serviceaccounts, resourcequotas]
+    verbs: [get, list, patch, create, delete]
+  - apiGroups: [rbac.authorization.k8s.io]
+    resources: [rolebindings]
+    verbs: [get, list, patch, create, delete]
+  - apiGroups: [rbac.authorization.k8s.io]
+    resources: [roles]
+    verbs: [bind]
+    resourceNames: [{{ include "aap.runPodsRole" . }}]
+  - apiGroups: [""]
+    resources: [pods]
+    verbs: [delete]
+  {{- end }}
   {{- if .Values.storeCnpg }}
   # aap-store-cnpg: the Cluster of a service that asks for one. None on databases, poolers or clusters/status.
   - apiGroups: [postgresql.cnpg.io]

@@ -1,0 +1,75 @@
+{{- if include "aap.runPods" . }}
+# runPods.enabled: the guard that lets an agent's account make pods without being able to read the namespace's other Secrets, mount
+# the host or run anything privileged. It is the coder chart's policy (adam-rs `run-pods-admission.yaml`) with what differs per agent
+# read from a parameter: a ConfigMap of the agent's, labelled {{ include "aap.runPodsPolicyLabel" . }}, which the operator makes for each agent
+# that asks for run pods (the account it is for, the images, the one claim, the one Secret key). It applies to the pods CREATED BY
+# that account (the match condition, once per parameter object), and refuses any that is not the intended run pod. Without it the RBAC
+# alone would let the account make any pod in its namespace. The policy and its binding are cluster-scoped and made here: the operator
+# is namespaced, and writes only the parameters, which the account cannot (its Role has pods and nothing else).
+# `parameterNotFoundAction: Allow`: a namespace in which no agent asks for run pods has no parameter, and every pod creation in it
+# would be denied by `Deny`, the operator's own among them. The cost is stated in the README ("Run pods"): an account whose parameters
+# are gone is not guarded, so the operator makes the parameters before the binding that lets the account make pods and removes the
+# binding first. Needs the v1 admission policy API (Kubernetes 1.30 or later) and `params` in a match condition, which was verified on a
+# kube-apiserver v1.35.8 only: the oldest version where it works is not known (README "Run pods").
+apiVersion: admissionregistration.k8s.io/v1
+kind: ValidatingAdmissionPolicy
+metadata:
+  name: {{ include "aap.runPodsPolicy" . }}
+  labels:
+    {{- include "aap.labels" . | nindent 4 }}
+spec:
+  failurePolicy: Fail
+  paramKind:
+    apiVersion: v1
+    kind: ConfigMap
+  matchConstraints:
+    resourceRules:
+      - apiGroups: [""]
+        apiVersions: ["v1"]
+        operations: ["CREATE"]
+        resources: ["pods"]
+  matchConditions:
+    - name: made-by-the-coder
+      expression: "request.userInfo.username == params.data.serviceAccount"
+  variables:
+    - name: containers
+      expression: "object.spec.containers + (has(object.spec.initContainers) ? object.spec.initContainers : [])"
+  validations:
+    - expression: "has(object.metadata.labels) && params.data.runLabel in object.metadata.labels && 'app.kubernetes.io/managed-by' in object.metadata.labels && object.metadata.labels['app.kubernetes.io/managed-by'] == params.data.managedBy"
+      messageExpression: "'a run pod carries the labels app.kubernetes.io/managed-by=' + params.data.managedBy + ' and ' + params.data.runLabel"
+    - expression: "has(object.spec.priorityClassName) && object.spec.priorityClassName == params.data.priorityClass"
+      messageExpression: "'a run pod has the priority class ' + params.data.priorityClass + ', which the quota is scoped to'"
+    - expression: "variables.containers.all(c, c.image in params.data.images.split('\\n'))"
+      message: "a run pod uses only the images the chart allows"
+    - expression: "!has(object.spec.volumes) || object.spec.volumes.all(v, has(v.emptyDir) || (has(v.persistentVolumeClaim) && v.persistentVolumeClaim.claimName == params.data.claim))"
+      messageExpression: "'a run pod mounts only emptyDir volumes and the claim ' + params.data.claim + ': no hostPath, no Secret, no other claim'"
+    - expression: "variables.containers.all(c, (!has(c.env) || c.env.all(e, !has(e.valueFrom) || !has(e.valueFrom.secretKeyRef) || (e.valueFrom.secretKeyRef.name == params.data.secretName && e.valueFrom.secretKeyRef.key == params.data.secretKey))) && (!has(c.envFrom) || c.envFrom.all(f, !has(f.secretRef))))"
+      messageExpression: "'a run pod references no Secret but the key ' + params.data.secretKey + ' of ' + params.data.secretName + ' (as one variable): no Secret volume, no envFrom, no other key'"
+    - expression: "variables.containers.all(c, has(c.securityContext) && has(c.securityContext.allowPrivilegeEscalation) && c.securityContext.allowPrivilegeEscalation == false && (!has(c.securityContext.privileged) || c.securityContext.privileged == false))"
+      message: "a run pod is not privileged and sets allowPrivilegeEscalation: false on every container"
+    - expression: "variables.containers.all(c, (has(c.securityContext) && has(c.securityContext.runAsUser) ? c.securityContext.runAsUser : (has(object.spec.securityContext) && has(object.spec.securityContext.runAsUser) ? object.spec.securityContext.runAsUser : 0)) != 0 && (has(c.securityContext) && has(c.securityContext.runAsNonRoot) ? c.securityContext.runAsNonRoot : (has(object.spec.securityContext) && has(object.spec.securityContext.runAsNonRoot) ? object.spec.securityContext.runAsNonRoot : false)))"
+      message: "a run pod does not run as root: a runAsUser other than 0 and runAsNonRoot: true on every container"
+    - expression: "(!has(object.spec.hostNetwork) || !object.spec.hostNetwork) && (!has(object.spec.hostPID) || !object.spec.hostPID) && (!has(object.spec.hostIPC) || !object.spec.hostIPC)"
+      message: "a run pod uses its own network, PID and IPC namespaces"
+    - expression: "has(object.spec.automountServiceAccountToken) && object.spec.automountServiceAccountToken == false"
+      message: "a run pod sets automountServiceAccountToken: false: it holds no credential for the cluster"
+---
+apiVersion: admissionregistration.k8s.io/v1
+kind: ValidatingAdmissionPolicyBinding
+metadata:
+  name: {{ include "aap.runPodsPolicy" . }}
+  labels:
+    {{- include "aap.labels" . | nindent 4 }}
+spec:
+  policyName: {{ include "aap.runPodsPolicy" . }}
+  validationActions: ["Deny"]
+  paramRef:
+    selector:
+      matchLabels:
+        {{ include "aap.runPodsPolicyLabel" . }}: "true"
+    parameterNotFoundAction: Allow
+  matchResources:
+    namespaceSelector:
+      matchLabels:
+        kubernetes.io/metadata.name: {{ include "aap.watchNamespace" . }}
+{{- end }}

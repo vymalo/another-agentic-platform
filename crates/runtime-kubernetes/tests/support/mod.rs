@@ -25,6 +25,9 @@ pub enum K {
     Pod,
     NetworkPolicy,
     Budget,
+    ServiceAccount,
+    Quota,
+    RoleBinding,
 }
 
 impl K {
@@ -39,6 +42,9 @@ impl K {
             Self::Pod => ("/api/v1", "pods"),
             Self::NetworkPolicy => ("/apis/networking.k8s.io/v1", "networkpolicies"),
             Self::Budget => ("/apis/policy/v1", "poddisruptionbudgets"),
+            Self::ServiceAccount => ("/api/v1", "serviceaccounts"),
+            Self::Quota => ("/api/v1", "resourcequotas"),
+            Self::RoleBinding => ("/apis/rbac.authorization.k8s.io/v1", "rolebindings"),
         };
         format!("{prefix}/namespaces/{ns}/{plural}")
     }
@@ -54,6 +60,9 @@ impl K {
             Self::Pod,
             Self::NetworkPolicy,
             Self::Budget,
+            Self::ServiceAccount,
+            Self::Quota,
+            Self::RoleBinding,
         ]
         .into_iter()
         .find(|k| {

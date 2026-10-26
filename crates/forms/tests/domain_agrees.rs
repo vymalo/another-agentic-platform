@@ -84,7 +84,8 @@ fn a_stored_object_that_cannot_be_read_is_missing_for_the_operators_rules() {
         serde_json::json!({ "title": 3 }),
         true,
     );
-    let referents = aap_forms::externals(&[good, bad], &[], Some("registry.invalid/agent:tag"));
+    let referents =
+        aap_forms::externals(&[good, bad], &[], Some("registry.invalid/agent:tag"), &[]);
     assert!(referents.externals.model_endpoints.contains_key("gateway"));
     assert!(!referents.externals.model_endpoints.contains_key("broken"));
     assert_eq!(
@@ -96,7 +97,7 @@ fn a_stored_object_that_cannot_be_read_is_missing_for_the_operators_rules() {
         referents.externals.default_image.as_deref(),
         Some("registry.invalid/agent:tag")
     );
-    let standin = aap_forms::externals(&[], &[], None);
+    let standin = aap_forms::externals(&[], &[], None, &[]);
     assert_eq!(
         standin.externals.default_image.as_deref(),
         Some(aap_forms::DEFAULT_IMAGE_STANDIN)

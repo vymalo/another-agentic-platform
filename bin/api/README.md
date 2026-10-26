@@ -37,6 +37,7 @@ file that does not come back, with its path (`defaults.allowFrom[0].podSelectr`)
 | `oidc` | required | [`aap_auth_oidc::OidcConfig`](../../crates/auth-oidc/README.md): `issuer` (an `http(s)` URL, no credentials), `audiences` (at least one, none blank), `rolesClaim` (no default), `jwksUrl` (optional). Validated at load |
 | `cors.allowedOrigins` | `[]` | Exact origins as a browser writes them, `scheme://host[:port]`. **A wildcard, `null`, anything else and the default port of the scheme (`https://host:443`) are refused**: a browser leaves that port out, so the entry would match nothing. Empty is no CORS |
 | `defaults` | required | [`aap_forms::Defaults`](../../crates/forms/README.md#deployment-defaults-and-what-the-round-trip-does-with-them): the store, the A2A bearer reference, `allowFrom`, `security`, what a coder and a folder agent get, `offerLabel`, `allowedImageRegistries`. **`defaults.namespace` is the one namespace the API reads and writes** (there is no second `namespace` to disagree with it). Checked at load with `Defaults::check`: what would make the operator refuse every agent stops the API |
+| `defaults.runPodSizeClasses` | optional, default none | The names of the classes of the operator's run pods (D15a): what `GET /v1/info` offers and what a coder form may pick. **The operator chart writes it** from `runPodClasses` while `runPods.enabled` (and refuses a hand-written list); written by hand it must be the classes the operator has, or the operator marks the agent `ConfigInvalid` naming the class. With classes, `defaults.coder.workVolume` is required (run pods mount it) and the binary checks at start that a coder asking for the first class is a valid one. See `config.example.yaml` |
 | `defaults.allowedImageRegistries` | **required, at least one** | The registries a folder agent may pin its own image from. **The binary does not start without it** (`aap-forms` alone reads "absent" as "any registry"): a person who holds `agents.write` and not `secrets.pick` can still name an agent's image, and that pod is handed the model endpoint's API key and the A2A bearer. An entry is a registry host (and port) and **does not bound repositories**: `ghcr.io` admits every image on `ghcr.io`, so name only registries whose images you trust. A tag or a digest is always required |
 
 ## What it runs
@@ -116,7 +117,7 @@ ConfigMap at `/etc/aap-api/config.yaml` (`API_CONFIG_FILE`) and **nothing else m
 above, a NetworkPolicy and an optional Ingress. The chart owns `listen`, `healthListen` and `defaults.namespace`; the rest is `api.config`. To read what it renders with this binary:
 
 ```sh
-sh deploy/operator/tests/api-config.sh /tmp/config.yaml -f deploy/operator/tests/api.values.yaml   # or tests/api-shapes.sh for all four shapes
+sh deploy/operator/tests/api-config.sh /tmp/config.yaml -f deploy/operator/tests/api.values.yaml   # or tests/api-shapes.sh for all five shapes
 cargo run -q -p aap-api-server -- --config /tmp/config.yaml --check
 ```
 

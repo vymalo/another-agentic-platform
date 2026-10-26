@@ -14,6 +14,10 @@ use proptest::prelude::*;
 use support::*;
 
 fn externals() -> Referents {
+    externals_offering(&classes())
+}
+
+fn externals_offering(classes: &[String]) -> Referents {
     aap_forms::externals(
         &[stored(
             Kind::ModelEndpoint,
@@ -28,7 +32,13 @@ fn externals() -> Referents {
             true,
         )],
         None,
+        classes,
     )
+}
+
+/// The size classes of the sample deployment, as the API hands them to `externals`.
+fn classes() -> Vec<String> {
+    RUN_POD_CLASSES.iter().map(|c| (*c).to_owned()).collect()
 }
 
 fn deployment(kind: AgentKind, name: &str) -> Deployment {
@@ -114,7 +124,7 @@ fn what_the_dashboard_accepts_the_operator_resolves() {
                 model_form(&form.model.endpoint).draft().spec,
                 true,
             )];
-            let externals = aap_forms::externals(&models, &tools, None);
+            let externals = aap_forms::externals(&models, &tools, None, &classes());
             let offer: Vec<OfferedSecret> = form
                 .secret_picks()
                 .iter()
@@ -346,6 +356,21 @@ fn each_rule_of_the_coder_screen_names_its_field() {
             Box::new(|f| coder_settings(f).opencode_model = Some(" ".into())),
         ),
         (
+            "a size class that is no name",
+            "agent.runPodSizeClass",
+            Box::new(|f| coder_settings(f).run_pod_size_class = Some("Big Class".into())),
+        ),
+        (
+            "an empty size class",
+            "agent.runPodSizeClass",
+            Box::new(|f| coder_settings(f).run_pod_size_class = Some(String::new())),
+        ),
+        (
+            "a size class the operator does not have",
+            "agent.runPodSizeClass",
+            Box::new(|f| coder_settings(f).run_pod_size_class = Some("gigantic".into())),
+        ),
+        (
             "a key with no Secret",
             "agent.github.privateKey",
             Box::new(|f| coder_settings(f).github.private_key = SecretPick::new("", "k")),
@@ -467,6 +492,7 @@ fn an_error_of_a_referent_is_on_the_field_that_names_it_and_says_which_object() 
             true,
         )],
         None,
+        &[],
     );
     let form = coder_form("coder-me");
     let errors = validate_agent(
@@ -1195,6 +1221,101 @@ fn a_form_that_is_logged_does_not_print_the_password_or_the_query_of_its_address
 }
 
 // ------------------------------------------------------------------ the defaults
+
+#[test]
+fn a_coder_asks_for_run_pods_by_a_size_class_the_operator_has() {
+    // A class the operator offers is a form, and the object says it: `coder.runPods.sizeClass`.
+    let mut form = coder_form("coder-me");
+    coder_settings(&mut form).run_pod_size_class = Some("large".into());
+    let resources = check(&form).unwrap_or_else(|e| panic!("{e:?}"));
+    let config = serde_json::to_value(&resources.config.spec).unwrap();
+    assert_eq!(
+        config["harness"]["adam"]["coder"]["runPods"],
+        serde_json::json!({ "sizeClass": "large" })
+    );
+    // The operator resolves it into a runtime that has them.
+    let resolved = aap_domain::resolve(
+        &resources.service,
+        &resources.config,
+        &externals().externals,
+        aap_ports::OwnerHandle::none(),
+    )
+    .unwrap_or_else(|e| panic!("{e:?}"));
+    assert!(resolved.runtime.run_pods.is_some());
+    // And none asked for is none: no key in the object (so a coder made before the field is the object it was).
+    let none = check(&coder_form("coder-me")).unwrap();
+    let config = serde_json::to_value(&none.config.spec).unwrap();
+    assert!(config["harness"]["adam"]["coder"].get("runPods").is_none());
+}
+
+#[test]
+fn a_deployment_with_no_size_classes_has_no_run_pods_and_a_form_that_asks_for_them_is_told_so() {
+    let none = externals_offering(&[]);
+    let mut form = coder_form("coder-me");
+    coder_settings(&mut form).run_pod_size_class = Some("standard".into());
+    let errors = validate_agent(
+        &form,
+        &deployment(AgentKind::Coder, "coder-me"),
+        NS,
+        &none,
+        &offered(),
+        &ImagePolicy::any_registry(),
+    )
+    .unwrap_err();
+    let error = errors
+        .iter()
+        .find(|e| e.field == "agent.runPodSizeClass")
+        .unwrap_or_else(|| panic!("{errors:?}"));
+    assert!(
+        error.message.contains("no run pods"),
+        "it says why: {}",
+        error.message
+    );
+    // The same form without the field is fine: nobody is forced into run pods.
+    assert!(
+        validate_agent(
+            &coder_form("coder-me"),
+            &deployment(AgentKind::Coder, "coder-me"),
+            NS,
+            &none,
+            &offered(),
+            &ImagePolicy::any_registry(),
+        )
+        .is_ok()
+    );
+}
+
+#[test]
+fn the_size_classes_of_the_defaults_are_checked_when_the_api_starts() {
+    let mut ok = defaults();
+    assert_eq!(ok.run_pod_size_classes, classes());
+    assert_eq!(ok.check(), Vec::<String>::new());
+    // None is fine: a deployment without run pods.
+    ok.run_pod_size_classes.clear();
+    assert_eq!(ok.check(), Vec::<String>::new());
+    for (what, list, expected) in [
+        (
+            "a name that is no label",
+            vec!["Big Class"],
+            "not the name of a class",
+        ),
+        ("an empty name", vec![""], "not the name of a class"),
+        ("a name twice", vec!["standard", "standard"], "named twice"),
+    ] {
+        let mut d = defaults();
+        d.run_pod_size_classes = list.into_iter().map(str::to_owned).collect();
+        let problems = d.check();
+        assert!(
+            problems.iter().any(|p| p.contains(expected)),
+            "{what}: {problems:?}"
+        );
+        assert_eq!(
+            problems.len(),
+            1,
+            "{what}: one problem, not a cascade: {problems:?}"
+        );
+    }
+}
 
 #[test]
 fn the_defaults_are_checked_by_the_operators_rules_when_the_api_starts() {

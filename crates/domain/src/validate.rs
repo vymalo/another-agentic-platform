@@ -70,19 +70,51 @@ pub fn validate(
     config: &AgentConfig,
     externals: &Externals,
 ) -> Result<(), Vec<ConfigIssue>> {
-    check_all(service, &materialize(config, externals))
+    check_all(service, &materialize(config, externals), externals)
 }
 
 /// The issues of a service and a config whose references have been read.
 pub(crate) fn check_all(
     service: &AgentService,
     read: &Materialized,
+    externals: &Externals,
 ) -> Result<(), Vec<ConfigIssue>> {
     let mut v = Issues(Vec::new());
     check_service(&mut v, service, &read.config);
     v.0.extend(read.issues.iter().cloned());
     check_config(&mut v, &read.config, &read.origins);
+    check_run_pods_offered(&mut v, &read.config, externals);
     if v.0.is_empty() { Ok(()) } else { Err(v.0) }
+}
+
+/// What a config that asks for run pods needs of the deployment: settings, and the size class among them.
+fn check_run_pods_offered(v: &mut Issues, cfg: &AgentConfig, externals: &Externals) {
+    let Some(asked) = plan::run_pods(cfg) else {
+        return;
+    };
+    let at = "AgentConfig spec.harness.adam.coder.runPods";
+    let Some(settings) = &externals.run_pods else {
+        v.add(
+            at,
+            "this operator has no run pods: its chart has runPods.enabled false (so no admission policy guards the pods the coder would make, and the operator makes no right to make them), or this is a build or a test without the settings; turn run pods on in the operator's chart (runPods.enabled, runPodClasses), or remove the field",
+        );
+        return;
+    };
+    if !settings.classes.contains_key(&asked.size_class) {
+        v.add(
+            format!("{at}.sizeClass"),
+            format!(
+                "{:?} is not a size class of this operator; it has {}",
+                asked.size_class,
+                settings
+                    .classes
+                    .keys()
+                    .map(|c| format!("{c:?}"))
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            ),
+        );
+    }
 }
 
 /// Check an `AgentConfig` by itself: the rules of [`validate`] that need no `AgentService` and no
@@ -217,6 +249,21 @@ fn check_service(v: &mut Issues, svc: &AgentService, cfg: &AgentConfig) {
             format!("{me} spec.scaling.workers"),
             format!(
                 "{} workers need AgentConfig spec.harness.adam.coder.workspacePlacement (shared, affinity or isolated): runs move between workers at every step, and a run that lands on a worker without its worktree would fork into a second pull request",
+                scaling.workers
+            ),
+        );
+    }
+
+    // The chart's rule for run pods: a run pod mounts one claim, and the per-replica claim of one worker cannot serve
+    // the runs of the others.
+    if plan::run_pods(cfg).is_some()
+        && scaling.workers > 1
+        && plan::work_volume(cfg).is_some_and(|w| w.source.persistent.per_replica)
+    {
+        v.add(
+            format!("{me} spec.scaling.workers"),
+            format!(
+                "{} workers with run pods need the work volume to be one ReadWriteMany claim (perReplica: false, with workspacePlacement shared or affinity): a run pod mounts one claim, and the claim of one worker cannot serve the runs of the others",
                 scaling.workers
             ),
         );
@@ -508,6 +555,10 @@ fn check_coder(v: &mut Issues, cfg: &AgentConfig, coder: &aap_api::Coder) {
         }
     }
 
+    if let Some(asked) = &coder.run_pods {
+        check_run_pods(v, cfg, asked);
+    }
+
     let github = &coder.github;
     match (&github.app, &github.token) {
         (Some(app), None) => {
@@ -563,6 +614,70 @@ fn check_coder(v: &mut Issues, cfg: &AgentConfig, coder: &aap_api::Coder) {
             format!("{me} {base}.github"),
             "exactly one of app and token",
         ),
+    }
+}
+
+/// The rules of `coder.runPods` that need the config alone (the deployment's side is `check_run_pods_offered`).
+fn check_run_pods(v: &mut Issues, cfg: &AgentConfig, asked: &aap_api::RunPods) {
+    let me = "AgentConfig";
+    let at = "spec.harness.adam.coder.runPods";
+    if !is_dns_label(&asked.size_class) {
+        v.add(
+            format!("{me} {at}.sizeClass"),
+            format!(
+                "{:?} is not the name of a class (lower case letters, digits and -, at most 63 characters)",
+                asked.size_class
+            ),
+        );
+    }
+    // The run pod mounts the coder's work volume, whole, at the same path (the coder replaces that mount by the
+    // run's own directory), and the guard allows its claim and no other.
+    if plan::work_volume(cfg).is_none() {
+        v.add(
+            format!("{me} spec.environment.volumes"),
+            format!(
+                "run pods mount the coder's work volume, and there is none: add a volume named `{}` (the chart's `workspace`)",
+                contract::WORK_VOLUME
+            ),
+        );
+    }
+    for name in cfg.spec.extra_env.keys() {
+        if contract::run_pods::SET.contains(&name.as_str()) {
+            v.add(
+                format!("{me} spec.extraEnv.{name}"),
+                "the operator sets this variable itself when run pods are on (runPods)",
+            );
+        }
+    }
+    if cfg
+        .spec
+        .extra_env
+        .get("DEVCONTAINER_RUNTIME")
+        .is_some_and(|r| r.trim().eq_ignore_ascii_case("podman"))
+    {
+        v.add(
+            format!("{me} spec.extraEnv.DEVCONTAINER_RUNTIME"),
+            "podman: the commands of a run run in a pod of their own or in the repository's devcontainer, not both, and the coder refuses to start (exit 78) with RUN_ENVIRONMENT=kubernetes and DEVCONTAINER_RUNTIME=podman",
+        );
+    }
+    for vol in &cfg.spec.environment.volumes {
+        if vol.name == contract::run_pods::TEMPLATE_VOLUME {
+            v.add(
+                format!("{me} spec.environment.volumes[{}]", vol.name),
+                "the operator uses this volume name itself when run pods are on",
+            );
+        }
+        if is_mount_path(&vol.mount_path)
+            && paths_overlap(&vol.mount_path, contract::run_pods::TEMPLATE_DIR)
+        {
+            v.add(
+                format!("{me} spec.environment.volumes[{}].mountPath", vol.name),
+                format!(
+                    "overlaps {}, which the operator mounts itself when run pods are on",
+                    contract::run_pods::TEMPLATE_DIR
+                ),
+            );
+        }
     }
 }
 

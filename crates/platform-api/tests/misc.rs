@@ -3,7 +3,7 @@
 
 mod common;
 
-use aap_platform_api::{ApiState, StateError, router};
+use aap_platform_api::{ApiState, CorsOrigins, StateError, router};
 use aap_ports::memory::{MemoryAuthenticator, MemoryObjects};
 use common::*;
 use serde_json::json;
@@ -47,7 +47,7 @@ async fn info_is_the_capability_document() {
     assert_eq!(
         info["runPodSizeClasses"],
         json!([]),
-        "adam-rs has none yet (D15)"
+        "a deployment whose configuration names no size class has no run pods"
     );
     assert_eq!(
         info["limits"]["maxBodyBytes"],
@@ -63,6 +63,26 @@ async fn info_is_the_capability_document() {
     assert_eq!(
         info["defaults"]["coder"]["allowedRepoHosts"],
         json!(["github.com"])
+    );
+}
+
+#[tokio::test]
+async fn info_offers_the_size_classes_of_the_configuration() {
+    let api = Api::over(
+        MemoryObjects::in_namespace(NS),
+        MemoryAuthenticator::new(),
+        defaults_with_run_pods(),
+        CorsOrigins::none(),
+    );
+    let token = api.admin();
+    let r = api.get("/v1/info").token(&token).send().await;
+    assert_eq!(r.code(), 200, "{}", r.text());
+    let info = r.json();
+    assert_eq!(info["runPodSizeClasses"], json!(["standard", "large"]));
+    // The defaults the forms show carry the same list: it is one setting, read twice.
+    assert_eq!(
+        info["defaults"]["runPodSizeClasses"],
+        info["runPodSizeClasses"]
     );
 }
 

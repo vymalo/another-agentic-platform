@@ -3,7 +3,9 @@
 #![allow(clippy::unwrap_used, clippy::expect_used)]
 
 use aap_ports::memory::{MemoryDirectory, MemoryRuntime, MemoryStore};
-use aap_ports::testkit::{self, RuntimeUnderTest, SENTINEL, sample_spec};
+use aap_ports::testkit::{
+    self, RuntimeUnderTest, SENTINEL, sample_spec, sample_spec_with_run_pods,
+};
 use aap_ports::{
     AgentDirectory, Capabilities, Classify, CnpgSpec, DeleteOutcome, DeletionPolicy,
     DirectoryEntry, DirectoryError, Endpoint, EnvValue, ErrorClass, IssueReason, OwnerHandle,
@@ -78,6 +80,101 @@ fn check_names_the_broken_invariant() {
         assert_eq!(err.class(), ErrorClass::Invalid);
         assert!(err.to_string().contains(needle), "{needle}: {err}");
     }
+}
+
+#[test]
+fn the_sample_spec_with_run_pods_is_valid() {
+    sample_spec_with_run_pods(&id()).check().unwrap();
+}
+
+#[test]
+fn check_names_the_broken_invariant_of_run_pods() {
+    let base = sample_spec_with_run_pods(&id());
+    let broken: Vec<(&str, Break)> = vec![
+        (
+            "runs as an account, and the spec has no run pods",
+            Box::new(|s| s.run_pods = None),
+        ),
+        (
+            "and the run pods are for",
+            Box::new(|s| s.workloads[0].service_account = Some("another".into())),
+        ),
+        (
+            "no workload runs as it",
+            Box::new(|s| s.workloads[0].service_account = None),
+        ),
+        (
+            "the service account is empty",
+            Box::new(|s| s.run_pods.as_mut().unwrap().service_account = " ".into()),
+        ),
+        (
+            "the role is empty",
+            Box::new(|s| s.run_pods.as_mut().unwrap().role.clear()),
+        ),
+        (
+            "the priority class is empty",
+            Box::new(|s| s.run_pods.as_mut().unwrap().priority_class.clear()),
+        ),
+        (
+            "the memory limit of the quota is empty",
+            Box::new(|s| s.run_pods.as_mut().unwrap().quota.limits_memory.clear()),
+        ),
+        (
+            "the quota allows no pod",
+            Box::new(|s| s.run_pods.as_mut().unwrap().quota.pods = 0),
+        ),
+        (
+            "the label that marks a pod managed is empty",
+            Box::new(|s| s.run_pods.as_mut().unwrap().pods.managed_by.clear()),
+        ),
+        (
+            "the label that carries the run is empty",
+            Box::new(|s| s.run_pods.as_mut().unwrap().pods.run_label.clear()),
+        ),
+        (
+            "the work claim is empty",
+            Box::new(|s| s.run_pods.as_mut().unwrap().guard.claim.clear()),
+        ),
+        (
+            "the name of the model key's Secret is empty",
+            Box::new(|s| s.run_pods.as_mut().unwrap().guard.secret = SecretRef::new("", "k")),
+        ),
+        (
+            "the key of the model key's Secret is empty",
+            Box::new(|s| s.run_pods.as_mut().unwrap().guard.secret = SecretRef::new("n", "")),
+        ),
+        (
+            "the guard allows no image",
+            Box::new(|s| s.run_pods.as_mut().unwrap().guard.images.clear()),
+        ),
+        (
+            "the guard allows no image, or an empty one",
+            Box::new(|s| s.run_pods.as_mut().unwrap().guard.images.push(" ".into())),
+        ),
+    ];
+    for (needle, break_it) in broken {
+        let mut spec = base.clone();
+        break_it(&mut spec);
+        let err = spec.check().unwrap_err();
+        assert_eq!(err.class(), ErrorClass::Invalid, "{needle}");
+        assert!(err.to_string().contains(needle), "{needle}: {err}");
+    }
+}
+
+#[test]
+fn a_spec_without_run_pods_is_the_json_it_was_before_they_existed() {
+    // The fields are absent, not null: a stored spec and a digest written before run pods read the same, and a spec written before them reads back.
+    let spec = sample_spec(&id());
+    let value = serde_json::to_value(&spec).unwrap();
+    assert!(value.get("run_pods").is_none(), "{value}");
+    assert!(value["workloads"][0].get("service_account").is_none());
+    assert_eq!(serde_json::from_value::<RuntimeSpec>(value).unwrap(), spec);
+    // With them, the fields are there and the spec round-trips.
+    let with = sample_spec_with_run_pods(&id());
+    let value = serde_json::to_value(&with).unwrap();
+    assert!(value.get("run_pods").is_some());
+    assert!(value["workloads"][0].get("service_account").is_some());
+    assert_eq!(serde_json::from_value::<RuntimeSpec>(value).unwrap(), with);
 }
 
 #[test]

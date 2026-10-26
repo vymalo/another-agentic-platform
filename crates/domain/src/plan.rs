@@ -3,7 +3,7 @@
 
 use std::collections::BTreeMap;
 
-use aap_api::{AgentConfig, Binary, SecretKeyRef, Tools, Volume};
+use aap_api::{AgentConfig, Binary, RunPods, SecretKeyRef, Tools, Volume};
 
 /// `WORKSPACE_PLACEMENT` as the binary parses it: trimmed and lower-cased; empty is "not set".
 pub fn placement(config: &AgentConfig) -> String {
@@ -33,6 +33,17 @@ pub fn work_volume(config: &AgentConfig) -> Option<&Volume> {
         .volumes
         .iter()
         .find(|v| v.name == crate::contract::WORK_VOLUME)
+}
+
+/// The coder's run pods, if the config asks for them (`coder.runPods`, slice D15).
+pub fn run_pods(config: &AgentConfig) -> Option<&RunPods> {
+    config
+        .spec
+        .harness
+        .adam
+        .coder
+        .as_ref()
+        .and_then(|c| c.run_pods.as_ref())
 }
 
 /// Whether the binary is `adam-coder`.

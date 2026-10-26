@@ -21,6 +21,10 @@ config:
   prDraft: true
   gitAuthorName: "bored-giant-panda[bot]"
   gitAuthorEmail: "337696346+bored-giant-panda[bot]@users.noreply.github.com"
+runPods:
+  # adam-rs #131: the chart refuses github.auth=app with no run pods unless the risk is accepted by name. These cases are about
+  # the pods of the agent, not about run pods, so they accept it (the operator takes the variable in `extraEnv`).
+  allowCommandsNextToSecrets: true
 github:
   auth: app
   createRepoOwners: []

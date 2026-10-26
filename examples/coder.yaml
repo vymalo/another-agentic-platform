@@ -76,6 +76,7 @@ spec:
               name: coder-github-app
               key: private-key.pem
           # token: { secretRef: { name: coder-secrets, key: GITHUB_TOKEN } } # instead of app, never both
+        # runPods: { sizeClass: standard } # the commands of a run in pods of their own (D15a): see examples/coder-run-pods.yaml
   model:
     model: coding-model
     baseUrl: # or { value: https://…/v1 }
@@ -136,3 +137,5 @@ spec:
     fsGroup: 10001
     fsGroupChangePolicy: OnRootMismatch
   extraEnv: {}
+  # A coder image that includes adam-rs#131 (3f714d0) exits 78 with a GitHub App key file and no run pods, unless the risk is
+  # accepted by name: turn on runPods (above), or say it here: extraEnv: { ALLOW_COMMANDS_NEXT_TO_SECRETS: "true" }.

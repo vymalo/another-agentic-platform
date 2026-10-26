@@ -1,0 +1,62 @@
+# Run pods on (runPods.enabled, slice D15a) beside the Platform API, in a namespace of its own: the render tests/golden/runpods.yaml.
+# Two size classes, a cluster CIDR and one extra egress rule, so that every list the chart writes into the operator's settings is
+# there. The Platform API's part is the least it must say; it is here to show that it is told the names of the classes.
+watchNamespace: agents
+runPods:
+  enabled: true
+  quota:
+    limitsMemory: 16Gi
+    pods: 6
+  extraEnv:
+    RUSTFLAGS: "-C debuginfo=0"
+  nodeSelector:
+    kubernetes.io/arch: amd64
+  tolerations:
+    - key: workload
+      operator: Equal
+      value: runs
+      effect: NoSchedule
+  extraAllowedImages:
+    - docker.io/library/postgres:16
+  networkPolicy:
+    clusterCIDRs:
+      - 10.42.0.0/16
+    extraEgress:
+      - to:
+          - namespaceSelector:
+              matchLabels:
+                kubernetes.io/metadata.name: models
+        ports:
+          - protocol: TCP
+            port: 8080
+runPodClasses:
+  large:
+    requests:
+      cpu: "1"
+      memory: 2Gi
+    limits:
+      memory: 8Gi
+api:
+  enabled: true
+  config:
+    oidc:
+      issuer: https://keycloak.example.com/realms/another-agentic
+      audiences: [another-agentic]
+      rolesClaim: agentic_roles
+    defaults:
+      allowedImageRegistries: [ghcr.io]
+      # Run pods mount the coder's work volume: a coder form that asks for them needs it, and the API refuses to start without one.
+      coder:
+        workVolume:
+          name: work
+          scope: agent
+          mountPath: /work
+          source:
+            persistent:
+              size: 20Gi
+              perReplica: true
+  networkPolicy:
+    from:
+      - namespaceSelector:
+          matchLabels:
+            kubernetes.io/metadata.name: kube-system

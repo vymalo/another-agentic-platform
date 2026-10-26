@@ -67,6 +67,14 @@ pub struct RunArgs {
     /// (and no other), through the config digest.
     #[arg(long, env = "DEFAULT_AGENT_IMAGE")]
     pub default_agent_image: Option<String>,
+
+    /// The file that holds the deployment's settings for run pods (slice D15a): the size classes, the run image,
+    /// the quota, the network policy and the names of the cluster-scoped objects the chart made (a YAML file, a
+    /// mounted ConfigMap; `aap_domain::RunPodSettings`, an unknown key refused). **Unset or empty: this operator has
+    /// no run pods**, and an `AgentConfig` that asks for them is `ConfigInvalid`, saying so. Set and not a file
+    /// that parses and passes the checks: the operator does not start. Read once, at start: a change is a new pod.
+    #[arg(long, env = "RUN_PODS_FILE")]
+    pub run_pods_file: Option<String>,
 }
 
 // What `run` composes needs a runtime provider; without one the settings are parsed and unused.
@@ -96,6 +104,48 @@ impl RunArgs {
         Ok(Some(image.to_owned()))
     }
 
+    /// The settings for run pods, if there are any: an unset or empty `RUN_PODS_FILE` is none, and a file that cannot be
+    /// read, is not YAML of the settings or fails their checks stops the operator at start, naming every mistake: a
+    /// pod that ran with half the settings would make run pods the guard does not match.
+    ///
+    /// # Errors
+    ///
+    /// The file cannot be read or parsed, or a setting is refused.
+    pub fn run_pod_settings(&self) -> Result<Option<aap_domain::RunPodSettings>> {
+        use anyhow::Context;
+        let Some(path) = self
+            .run_pods_file
+            .as_deref()
+            .map(str::trim)
+            .filter(|p| !p.is_empty())
+            .map(PathBuf::from)
+        else {
+            return Ok(None);
+        };
+        let path = path.as_path();
+        let text = std::fs::read_to_string(path).with_context(|| {
+            format!(
+                "RUN_PODS_FILE (--run-pods-file) {}: cannot be read",
+                path.display()
+            )
+        })?;
+        let settings: aap_domain::RunPodSettings =
+            serde_yaml::from_str(&text).with_context(|| {
+                format!(
+                    "RUN_PODS_FILE (--run-pods-file) {}: not the settings of run pods",
+                    path.display()
+                )
+            })?;
+        if let Err(problems) = settings.validate() {
+            anyhow::bail!(
+                "RUN_PODS_FILE (--run-pods-file) {}:\n  {}",
+                path.display(),
+                problems.join("\n  ")
+            );
+        }
+        Ok(Some(settings))
+    }
+
     /// An empty `WATCH_NAMESPACE` (a chart value left blank) means no namespace.
     fn namespace(&self) -> Option<String> {
         self.watch_namespace
@@ -108,6 +158,7 @@ impl RunArgs {
         registry: bool,
         registry_full: std::sync::Arc<std::sync::atomic::AtomicBool>,
         default_agent_image: Option<String>,
+        run_pods: Option<aap_domain::RunPodSettings>,
     ) -> aap_controller::Options {
         aap_controller::Options {
             watch_namespace: self.namespace(),
@@ -126,6 +177,7 @@ impl RunArgs {
             pass_timeout: std::time::Duration::from_secs(self.reconcile_timeout_secs.max(1)),
             instance: self.instance.clone().filter(|i| !i.is_empty()),
             default_agent_image,
+            run_pods,
         }
     }
 }
@@ -200,24 +252,50 @@ async fn termination() {
     let _ = tokio::signal::ctrl_c().await;
 }
 
+/// The Kubernetes provider the controllers reconcile through. It looks for run pod objects to clear **only with settings
+/// for run pods**: that is when the chart gives the operator the rights to read them, and looking without them would fail
+/// every reconcile and every delete with `Forbidden` (slice D15a).
+#[cfg(feature = "runtime-kubernetes")]
+fn kubernetes_runtime(
+    client: kube::Client,
+    options: &aap_controller::Options,
+) -> aap_runtime_kubernetes::KubernetesRuntime {
+    let runtime = aap_runtime_kubernetes::KubernetesRuntime::new(client)
+        .clearing_run_pods(options.run_pods.is_some());
+    match &options.watch_namespace {
+        Some(ns) => runtime.watching_namespace(ns),
+        None => runtime,
+    }
+}
+
 #[cfg(feature = "runtime-kubernetes")]
 pub async fn run(args: RunArgs) -> Result<()> {
     use std::sync::Arc;
 
     use aap_api::AgentService;
     use aap_controller::{Operator, OwnerOf};
-    use aap_runtime_kubernetes::{KubernetesRuntime, owner_handle};
+    use aap_runtime_kubernetes::owner_handle;
     use anyhow::Context;
     use kube::{Resource, ResourceExt};
     use tokio::sync::watch;
 
     let default_image = args.default_image()?;
+    let run_pods = args.run_pod_settings()?;
     let registry_full = Arc::new(std::sync::atomic::AtomicBool::new(false));
     let token = registry_token(&args);
-    let options = args.options(token.is_some(), registry_full.clone(), default_image);
+    let options = args.options(
+        token.is_some(),
+        registry_full.clone(),
+        default_image,
+        run_pods,
+    );
     tracing::info!(
         namespace = options.watch_namespace.as_deref().unwrap_or("(all)"),
         default_agent_image = options.default_agent_image.as_deref().unwrap_or("(none)"),
+        run_pod_size_classes = options
+            .run_pods
+            .as_ref()
+            .map_or_else(|| "(no run pods)".to_owned(), |s| s.class_names().join(",")),
         "starting the operator {}",
         env!("CARGO_PKG_VERSION")
     );
@@ -226,10 +304,7 @@ pub async fn run(args: RunArgs) -> Result<()> {
     let client = kube::Client::try_default()
         .await
         .context("connecting to the cluster (in-cluster configuration, or KUBECONFIG)")?;
-    let mut runtime = KubernetesRuntime::new(client.clone());
-    if let Some(ns) = &options.watch_namespace {
-        runtime = runtime.watching_namespace(ns);
-    }
+    let runtime = kubernetes_runtime(client.clone(), &options);
     // The encoding of an owner is the runtime provider's, so this is where it is made (the
     // controller never looks inside a handle).
     let owner: OwnerOf = Arc::new(|svc: &AgentService| {
@@ -332,4 +407,32 @@ pub async fn run(args: RunArgs) -> Result<()> {
     anyhow::bail!(
         "this build has no runtime provider: rebuild with `--features runtime-kubernetes` (the default)"
     )
+}
+
+#[cfg(all(test, feature = "runtime-kubernetes"))]
+#[allow(clippy::expect_used)] // a test may
+mod tests {
+    use super::*;
+
+    /// A client that is never used: building one makes no request.
+    fn client() -> kube::Client {
+        let config = kube::Config::new("http://127.0.0.1:9".parse().expect("a URL"));
+        kube::Client::try_from(config).expect("a client")
+    }
+
+    #[tokio::test]
+    async fn the_provider_looks_for_run_pods_to_clear_only_with_settings_for_them() {
+        let mut options = aap_controller::Options::default();
+        assert!(
+            !kubernetes_runtime(client(), &options).is_clearing_run_pods(),
+            "without settings the operator has no right to read an account, a quota or a binding: it must not look"
+        );
+        options.run_pods = Some(aap_domain::RunPodSettings::offering(["standard"]));
+        assert!(kubernetes_runtime(client(), &options).is_clearing_run_pods());
+        options.watch_namespace = Some("agents".to_owned());
+        assert!(
+            kubernetes_runtime(client(), &options).is_clearing_run_pods(),
+            "and watching one namespace changes nothing of it"
+        );
+    }
 }

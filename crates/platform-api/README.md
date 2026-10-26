@@ -30,7 +30,7 @@ The table is [`routes.rs`](src/routes.rs) (`ROUTES`), which is §60a's table wri
 | Route | Permission | Success | What |
 |---|---|---|---|
 | `GET /v1/me` | a valid token | `200` | `{ "permissions": [...] }`: the values of the roles claim that start with `platform:` (an empty list is a `200`) |
-| `GET /v1/info` | `platform:agents.read` | `200` | The capability document: `version`, `namespace`, `offerLabel`, `defaults` (the deployment's defaults as the forms show them), `runPodSizeClasses` (empty: adam-rs has none yet, D15), `limits.maxBodyBytes` |
+| `GET /v1/info` | `platform:agents.read` | `200` | The capability document: `version`, `namespace`, `offerLabel`, `defaults` (the deployment's defaults as the forms show them), `runPodSizeClasses` (the names of the classes of the operator's run pods, from the API's configuration `defaults.runPodSizeClasses`, which the operator chart writes from `runPodClasses`; **empty: this deployment has no run pods**, D15a), `limits.maxBodyBytes` |
 | `GET /v1/agents` | `platform:agents.read` | `200` | `{ "agents": [...] }`, a row each: `name`, `title`, `description`, `kind` (`coder` or `folder`), `state`, `conditions`, `suspend`, `tags`, `audience`, `managedBy`, `deleting`, `configDigest` |
 | `GET /v1/agents/{name}` | `platform:agents.read` | `200` + `ETag` | The row, `representation` (`{ "form": { "form", "deployment" } }` or `{ "yamlOnly": [reasons] }`), `status`, `configStatus` |
 | `PUT /v1/agents/{name}` | `platform:agents.write` (+ `platform:secrets.pick` when the form names a secret key) | `201` + `Location` + `ETag` (create), `200` + `ETag` (replace) | The agent form (`aap-forms`), both objects |

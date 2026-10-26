@@ -1,6 +1,6 @@
 # Parity goldens
 
-What the adam-rs chart [`deploy/coder`](https://github.com/vymalo/another-adam-rs/tree/039180993666f0d45eec52f60b1e01e88bc62dbd/deploy/coder)
+What the adam-rs chart [`deploy/coder`](https://github.com/vymalo/another-adam-rs/tree/3f714d08132c6b4bb5530753105cfdb12d97a914/deploy/coder)
 renders, projected onto the shape `tests/parity.rs` reads, so that `aap-domain` can be held equal to it
 (§59a, "Testing", and the risk "adam's env contract is copied into `aap-domain`").
 
@@ -9,11 +9,19 @@ renders, projected onto the shape `tests/parity.rs` reads, so that `aap-domain` 
 | `coder.json` | the netcup coder: topology combined, a GitHub App by owners, a per-replica `work` volume, two extra MCP servers, the sidecar | [`tools/adam-parity/cases/coder.yaml`](../../../../tools/adam-parity/cases/coder.yaml), equivalent to `examples/coder.yaml` |
 | `coder-split.json` | the same, split: a control-plane front (2 replicas, with a budget) and 2 isolated workers | `cases/coder-split.yaml` |
 | `coder-affinity-token.json` | two affinity workers on one shared ReadWriteMany claim, a GitHub token, `createRepoOwners`, a GitHub Enterprise sidecar on port 9090, a literal gateway URL, `extraEnv`, no extra MCP servers | `cases/coder-affinity-token.yaml` |
+| `coder-run-pods.json` | the same coder with **run pods on** (D15a): the pod template, the quota, the priority class, the network policy, the account, the Role and its binding, and the admission policy with its binding, projected under `runPods`; the pods of the coder run as their own account, with its token | `cases/coder-run-pods.yaml` |
+| `coder-run-pods-shared.json` | `coder-affinity-token` with run pods on: two `affinity` workers on one shared ReadWriteMany volume (a run pod mounts the shared claim and may go anywhere), a GitHub token, a GitHub Enterprise sidecar host, a literal gateway URL, `extraEnv` | `cases/coder-run-pods-shared.yaml` |
+| `coder-run-pods-split.json` | `coder-split` with run pods on and the workers on one shared ReadWriteMany volume (the chart refuses run pods with several workers on per-replica volumes): the front makes no run pod and holds no token; the two workers do | `cases/coder-run-pods-split.yaml` |
+| `coder-run-pods-tuned.json` | run pods with every setting moved off its default (image, quota, times, node selector, tolerations, affinity, the network policy's ranges and an extra rule, a second class) | `cases/coder-run-pods-tuned.yaml` |
 | `chat-env.json` | `adam-agent` for `examples/chat.yaml`. **Written by hand, not rendered**: the chart renders `adam-coder` only. Derived from `bin/adam-agent/README.md` and `docker/coder/Dockerfile`; *verified 2026-10-05 by reading them, not by running the binary* | |
 
 Each rendered file records where it came from (`source`: repository, full revision, chart, values file,
-helm version). Revision: `039180993666f0d45eec52f60b1e01e88bc62dbd` (`0391809`, the one §59a cites; it is
-still in the history of adam-rs `main`, which has moved on).
+helm version). Revision: `3f714d08132c6b4bb5530753105cfdb12d97a914` (`3f714d0`, adam-rs `main` on 2026-10-26: the
+coder refuses to start with a GitHub App key file beside local commands unless it is accepted by name, adam-rs
+[#131](https://github.com/vymalo/another-adam-rs/pull/131)). The goldens were at `0391809` (the revision §59a cites)
+until slice D15a. *Verified 2026-10-26*: the diff between the two sets of renders of the three first cases is the
+two keys the projection gained (`serviceAccount`, `automountServiceAccountToken` of each pod) and the revision; **the
+env contract of a coder with run pods off did not move between the two revisions**.
 
 ## Regenerating them
 
@@ -60,6 +68,27 @@ And these are not compared, because they are structure or the chart's own busine
   `websearch` and `context7`, one header each), `MCP_ALLOW_INSECURE=true` whenever `tools.allowInsecureHttp` is
   (the chart sets it only for a plain-http extra server; `examples/chat.yaml` has none and still needs it for the
   orchestrator's thread tools), and the whole of `adam-agent` (a folder, `ADAM_AGENT_DIR`, the command).
+* **`ALLOW_COMMANDS_NEXT_TO_SECRETS`** (adam-rs #131). The chart refuses `github.auth: app` with `runPods.enabled: false`
+  unless `runPods.allowCommandsNextToSecrets: true`, and then renders that variable on the pods that run workers. The two
+  cases with a GitHub App and no run pods (`coder`, `coder-split`) are about the pods of the agent, so **they keep their
+  meaning and set the acknowledgement** (the other choice, `runPods.enabled: true`, would change the case into a run-pods
+  one: another service account, token, volume, variables and resources); `extract.py` does not project the variable
+  (`NOT_PROJECTED_ENV`) and the operator has no field for it: **an `AgentConfig` takes it in `extraEnv`**
+  (`ALLOW_COMMANDS_NEXT_TO_SECRETS: "true"`), which puts it on every workload, a split front included, where the chart renders
+  it on the workers only. **`aap-domain` does not refuse an App coder with no run pods** (§60a, "D15a built": the image the
+  chart pins, `9a1fd4e`, predates the refusal, and refusing would make every such service `ConfigInvalid` at the operator's next
+  upgrade); an image that includes #131 exits 78 with it, and the remedy is `runPods` or that variable.
+* **Run pods (D15a).** `tests/parity.rs` compares the template of each of the four run pod cases (the Pod, its env, volumes, security,
+  affinity and the account of each workload) with the chart's. The rest of `runPods` in the goldens (quota, priority class, network policy,
+  account, Role, binding, admission policy and its binding) is compared in `aap-runtime-kubernetes` (`tests/run_pods_parity.rs`) and not here,
+  because the operator makes them as objects and the chart's policy and Role are written once for every agent. What differs there, on purpose:
+  the **names of the cluster-scoped objects** (the operator chart's are the release's and the namespace's, the coder chart's the agent's), the
+  **match condition** of the policy (it reads the account from the parameter, so one policy serves every agent), and the **coder's image digest**
+  (as the workloads'). The policy is compared **after the agent's parameters are substituted into the chart's expressions**, so a reworded rule fails.
+* **The coder container's resources with run pods on.** The coder chart replaces them with `runPods.coderResources` (a smaller container: the commands
+  run elsewhere). The operator does not swap them: a config's `environment.resources` are the coder's, and **the four cases set the config's to the
+  chart's `coderResources`** (`tests/parity.rs`, `run_pods_case`) so that the comparison is of the rest. A deployment that wants the smaller coder sets it in
+  the agent's config (or the Platform API's `defaults.coder.resources`).
 * **Validation messages** differ (the chart's are `fail` strings, the operator's are `ConfigIssue`s); the
   *mistakes* are the same.
 

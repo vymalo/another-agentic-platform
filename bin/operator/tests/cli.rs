@@ -116,6 +116,8 @@ fn run_lists_its_settings_and_the_environment_variables_that_set_them() {
         "AAP_RECONCILE_TIMEOUT_SECS",
         "DEFAULT_AGENT_IMAGE",
         "--default-agent-image",
+        "RUN_PODS_FILE",
+        "--run-pods-file",
     ] {
         assert!(help.contains(variable), "{variable} is not in:\n{help}");
     }
@@ -180,4 +182,105 @@ fn a_default_image_that_is_empty_or_a_reference_goes_on_to_look_for_a_cluster() 
             "{value:?}: {stderr}"
         );
     }
+}
+
+/// `run` with a `RUN_PODS_FILE` and no cluster to reach.
+#[cfg(feature = "runtime-kubernetes")]
+fn run_with_run_pods_file(file: &std::path::Path) -> (bool, String) {
+    let mut command = operator();
+    command
+        .arg("run")
+        .env_remove("KUBERNETES_SERVICE_HOST")
+        .env_remove("DEFAULT_AGENT_IMAGE")
+        .env("RUN_PODS_FILE", file)
+        .env("KUBECONFIG", "/nonexistent/kubeconfig")
+        .env("HOME", "/nonexistent")
+        .env("HEALTH_ADDR", "127.0.0.1:0")
+        .env("METRICS_ADDR", "127.0.0.1:0");
+    let out = command.output().expect("runs the operator");
+    (
+        out.status.success(),
+        String::from_utf8_lossy(&out.stderr).into_owned(),
+    )
+}
+
+/// The settings the operator chart ships, as the file the chart renders for the operator.
+#[cfg(feature = "runtime-kubernetes")]
+fn chart_settings_file(
+    dir: &std::path::Path,
+    change: impl FnOnce(&mut serde_json::Value),
+) -> std::path::PathBuf {
+    let values: serde_json::Value = serde_yaml::from_str(
+        &std::fs::read_to_string(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../deploy/operator/values.yaml"
+        ))
+        .expect("the chart's values"),
+    )
+    .expect("YAML");
+    let mut settings = values["runPods"].clone();
+    let object = settings.as_object_mut().expect("a map");
+    object.remove("enabled");
+    object.remove("priorityClassName");
+    object.insert("classes".into(), values["runPodClasses"].clone());
+    object.insert(
+        "priorityClass".into(),
+        serde_json::json!("aap-operator-ns-run"),
+    );
+    object.insert("role".into(), serde_json::json!("aap-operator-run-pods"));
+    change(&mut settings);
+    let path = dir.join("run-pods.yaml");
+    std::fs::write(&path, serde_yaml::to_string(&settings).expect("YAML")).expect("writes");
+    path
+}
+
+#[cfg(feature = "runtime-kubernetes")]
+#[test]
+fn settings_for_run_pods_that_are_not_valid_stop_the_operator_before_it_looks_for_a_cluster() {
+    let dir = std::env::temp_dir().join(format!("aap-cli-run-pods-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).expect("a directory");
+    // A file that is not there, one that is not the settings, and settings that fail their checks: each says what and where.
+    let (ok, stderr) = run_with_run_pods_file(&dir.join("absent.yaml"));
+    assert!(
+        !ok && stderr.contains("RUN_PODS_FILE") && stderr.contains("cannot be read"),
+        "{stderr}"
+    );
+    let junk = dir.join("junk.yaml");
+    std::fs::write(&junk, "classes: 3\n").expect("writes");
+    let (ok, stderr) = run_with_run_pods_file(&junk);
+    assert!(
+        !ok && stderr.contains("not the settings of run pods"),
+        "{stderr}"
+    );
+    let unknown = chart_settings_file(&dir, |s| {
+        s["admissionPolicy"] = serde_json::json!({"enabled": false});
+    });
+    let (ok, stderr) = run_with_run_pods_file(&unknown);
+    assert!(
+        !ok && stderr.contains("not the settings of run pods"),
+        "{stderr:?}"
+    );
+    let invalid = chart_settings_file(&dir, |s| {
+        s["quota"]["pods"] = serde_json::json!(0);
+        s["image"]["digest"] = serde_json::json!("sha256:short");
+    });
+    let (ok, stderr) = run_with_run_pods_file(&invalid);
+    assert!(
+        !ok && stderr.contains("quota.pods") && stderr.contains("image.digest"),
+        "every mistake is named: {stderr}"
+    );
+    assert!(!stderr.contains("connecting to the cluster"), "{stderr}");
+    // Valid settings go on to look for a cluster; so does an empty name, which is no run pods.
+    let valid = chart_settings_file(&dir, |_| {});
+    let (ok, stderr) = run_with_run_pods_file(&valid);
+    assert!(
+        !ok && stderr.contains("connecting to the cluster"),
+        "{stderr}"
+    );
+    let (ok, stderr) = run_with_run_pods_file(std::path::Path::new(""));
+    assert!(
+        !ok && stderr.contains("connecting to the cluster"),
+        "{stderr}"
+    );
+    let _ = std::fs::remove_dir_all(&dir);
 }

@@ -90,6 +90,8 @@ Included from deployment.yaml, which every render has, so they always run.
 {{- fail (printf "tuning.%s must be a whole number of at least 1, got %v" $k $v) -}}
 {{- end -}}
 {{- end -}}
+{{- /* Run pods (slice D15a): off by default, and then nothing of them is checked or rendered. */ -}}
+{{- include "aap.runPods.validate" . -}}
 {{- /* The Platform API component: off by default, and then nothing of it is checked or rendered. */ -}}
 {{- if not (kindIs "map" .Values.api) -}}
 {{- fail "api must be a map (the Platform API component, off by default)" -}}
@@ -99,6 +101,168 @@ Included from deployment.yaml, which every render has, so they always run.
 {{- end -}}
 {{- if .Values.api.enabled -}}
 {{- include "aap.api.validate" . -}}
+{{- end -}}
+{{- end -}}
+
+{{/*
+Run pods (values `runPods` and `runPodClasses`, slice D15a). The shape of the two blocks is checked always, so that a null where a block
+belongs is a named refusal and not a nil pointer; the rest only with `runPods.enabled`, and then it is what the operator would refuse at
+start (RunPodSettings::validate, crates/domain/src/run_pods.rs) and a pod that never starts is worse than a refused render: every key
+the operator reads is a known one (it refuses an unknown key), the run image is pinned by tag and digest, the quota and the classes are
+quantities, every class has the memory limit the quota counts. Not here: that a class fits the quota (a comparison of two quantities),
+the CIDRs, a toleration or an egress rule, which the operator checks at start and the domain's tests check on the chart's own values.
+*/}}
+{{- define "aap.runPods.validate" -}}
+{{- if not (kindIs "map" .Values.runPods) -}}
+{{- fail "runPods must be a map (run pods, off by default; a null removes every default of values.yaml)" -}}
+{{- end -}}
+{{- if not (kindIs "bool" .Values.runPods.enabled) -}}
+{{- fail "runPods.enabled must be true or false" -}}
+{{- end -}}
+{{- if not (kindIs "map" .Values.runPodClasses) -}}
+{{- fail "runPodClasses must be a map of size classes (a name -> requests and limits)" -}}
+{{- end -}}
+{{- if .Values.runPods.enabled -}}
+{{- $r := .Values.runPods -}}
+{{- $quantity := `^([0-9]+\.?[0-9]*|\.[0-9]+)(Ki|Mi|Gi|Ti|Pi|Ei|n|u|m|k|M|G|T|P|E|[eE][+-]?[0-9]+)?$` -}}
+{{- $label := `^[a-z0-9]([-a-z0-9]*[a-z0-9])?$` -}}
+{{- range $k, $v := $r -}}
+{{- if not (has $k (list "enabled" "image" "container" "cargoBuildJobs" "extraEnv" "priorityClassName" "quota" "idleSecs" "readyTimeoutSecs" "waitSecs" "nodeSelector" "tolerations" "nodeAffinity" "extraAllowedImages" "networkPolicy")) -}}
+{{- fail (printf "runPods.%s is not a setting: enabled, image, container, cargoBuildJobs, extraEnv, priorityClassName, quota, idleSecs, readyTimeoutSecs, waitSecs, nodeSelector, tolerations, nodeAffinity, extraAllowedImages or networkPolicy (the operator refuses an unknown key at start)" $k) -}}
+{{- end -}}
+{{- end -}}
+{{- range $k := list "image" "quota" "networkPolicy" "extraEnv" "nodeSelector" -}}
+{{- if not (kindIs "map" (get $r $k)) -}}
+{{- fail (printf "runPods.%s must be a map (the defaults of values.yaml are its keys; a null removes them all)" $k) -}}
+{{- end -}}
+{{- end -}}
+{{- /* The run image: the same bar as defaultAgentImage, a tag and a digest that nothing moves. */ -}}
+{{- range $k, $v := $r.image -}}
+{{- if not (has $k (list "repository" "tag" "digest" "pullPolicy")) -}}
+{{- fail (printf "runPods.image.%s is not a setting: repository, tag, digest or pullPolicy" $k) -}}
+{{- end -}}
+{{- end -}}
+{{- if not (and (kindIs "string" $r.image.repository) (regexMatch `^[^[:space:]]+$` $r.image.repository)) -}}
+{{- fail "runPods.image.repository is required, with no space: the workspace image of another-agentic-images" -}}
+{{- end -}}
+{{- if not (and (kindIs "string" $r.image.tag) (regexMatch `^[A-Za-z0-9_][A-Za-z0-9._-]*$` $r.image.tag)) -}}
+{{- fail (printf "runPods.image.tag is required: a tag of the run image, got %q" (toString $r.image.tag)) -}}
+{{- end -}}
+{{- if eq (toString $r.image.tag) "latest" -}}
+{{- fail "runPods.image.tag must not be latest: a moving tag would change what every run executes without a commit" -}}
+{{- end -}}
+{{- if not (and (kindIs "string" $r.image.digest) (regexMatch `^sha256:[0-9a-f]{64}$` $r.image.digest)) -}}
+{{- fail (printf "runPods.image.digest must be sha256: and 64 hex digits, got %q: the run pods run what the commands of an agent are given, so the image is pinned by tag and digest" (toString $r.image.digest)) -}}
+{{- end -}}
+{{- if not (has (toString $r.image.pullPolicy) (list "IfNotPresent" "Always" "Never")) -}}
+{{- fail (printf "runPods.image.pullPolicy must be IfNotPresent, Always or Never, got %q" (toString $r.image.pullPolicy)) -}}
+{{- end -}}
+{{- if not (and (kindIs "string" $r.container) (regexMatch $label $r.container)) -}}
+{{- fail (printf "runPods.container must be a container name (lower-case letters, digits and -), got %q" (toString $r.container)) -}}
+{{- end -}}
+{{- /* Counts: whole numbers (a float with a fraction is not one). */ -}}
+{{- range $k, $min := dict "cargoBuildJobs" 1 "idleSecs" 0 "readyTimeoutSecs" 1 "waitSecs" 0 -}}
+{{- $v := get $r $k -}}
+{{- if not (and (or (kindIs "float64" $v) (kindIs "int" $v) (kindIs "int64" $v)) (eq (toString (int $v)) (toString $v)) (ge (int $v) (int $min))) -}}
+{{- fail (printf "runPods.%s must be a whole number, %d or more, got %v" $k (int $min) $v) -}}
+{{- end -}}
+{{- end -}}
+{{- /* The quota of the run pods of one agent. */ -}}
+{{- range $k, $v := $r.quota -}}
+{{- if not (has $k (list "limitsMemory" "pods")) -}}
+{{- fail (printf "runPods.quota.%s is not a setting: limitsMemory or pods" $k) -}}
+{{- end -}}
+{{- end -}}
+{{- if not (and (or (kindIs "float64" $r.quota.pods) (kindIs "int" $r.quota.pods) (kindIs "int64" $r.quota.pods)) (eq (toString (int $r.quota.pods)) (toString $r.quota.pods)) (ge (int $r.quota.pods) 1)) -}}
+{{- fail (printf "runPods.quota.pods must be a whole number of at least 1, got %v" $r.quota.pods) -}}
+{{- end -}}
+{{- if not (and (or (kindIs "string" $r.quota.limitsMemory) (kindIs "float64" $r.quota.limitsMemory)) (regexMatch $quantity (toString $r.quota.limitsMemory)) (regexMatch `^[0.]*[1-9]` (toString $r.quota.limitsMemory))) -}}
+{{- fail (printf "runPods.quota.limitsMemory must be a quantity above zero such as 8Gi, got %q" (toString $r.quota.limitsMemory)) -}}
+{{- end -}}
+{{- /* The variables of the run container: texts, named as variables, and not the two the operator sets itself. */ -}}
+{{- range $k, $v := $r.extraEnv -}}
+{{- if not (regexMatch `^[A-Za-z_][A-Za-z0-9_]*$` $k) -}}
+{{- fail (printf "runPods.extraEnv: %q is not the name of a variable" $k) -}}
+{{- end -}}
+{{- if has $k (list "MODEL_API_KEY" "CARGO_BUILD_JOBS") -}}
+{{- fail (printf "runPods.extraEnv.%s: the operator sets this variable itself (a secret is never a setting: the model key comes from the agent's Secret)" $k) -}}
+{{- end -}}
+{{- if not (kindIs "string" $v) -}}
+{{- fail (printf "runPods.extraEnv.%s must be a text (quote a number: \"2\")" $k) -}}
+{{- end -}}
+{{- end -}}
+{{- if not (kindIs "slice" $r.tolerations) -}}
+{{- fail "runPods.tolerations must be a list" -}}
+{{- end -}}
+{{- if not (kindIs "slice" $r.extraAllowedImages) -}}
+{{- fail "runPods.extraAllowedImages must be a list of image references" -}}
+{{- end -}}
+{{- if and (hasKey $r "nodeAffinity") (not (or (kindIs "invalid" $r.nodeAffinity) (kindIs "map" $r.nodeAffinity))) -}}
+{{- fail "runPods.nodeAffinity must be a map (an affinity.nodeAffinity) or empty" -}}
+{{- end -}}
+{{- /* The PriorityClass: the chart's own, or a name of an object the deployment manages. */ -}}
+{{- if not (regexMatch `^([a-z0-9]([-a-z0-9]*[a-z0-9])?)?(\.[a-z0-9]([-a-z0-9]*[a-z0-9])?)*$` (toString (default "" $r.priorityClassName))) -}}
+{{- fail (printf "runPods.priorityClassName must be the name of a PriorityClass (a DNS name) or empty, got %q" (toString $r.priorityClassName)) -}}
+{{- end -}}
+{{- /* What a run pod may reach. */ -}}
+{{- $n := $r.networkPolicy -}}
+{{- range $k, $v := $n -}}
+{{- if not (has $k (list "enabled" "clusterCIDRs" "blockedCIDRs" "dnsNamespace" "dnsPodLabels" "extraEgress")) -}}
+{{- fail (printf "runPods.networkPolicy.%s is not a setting: enabled, clusterCIDRs, blockedCIDRs, dnsNamespace, dnsPodLabels or extraEgress" $k) -}}
+{{- end -}}
+{{- end -}}
+{{- if not (kindIs "bool" $n.enabled) -}}
+{{- fail "runPods.networkPolicy.enabled must be true or false" -}}
+{{- end -}}
+{{- if $n.enabled -}}
+{{- range $list := list "clusterCIDRs" "blockedCIDRs" -}}
+{{- if not (kindIs "slice" (get $n $list)) -}}
+{{- fail (printf "runPods.networkPolicy.%s must be a list of IPv4 CIDRs" $list) -}}
+{{- end -}}
+{{- range $c := (get $n $list) -}}
+{{- if not (and (kindIs "string" $c) (regexMatch `^((25[0-5]|2[0-4][0-9]|1[0-9][0-9]|[1-9]?[0-9])\.){3}(25[0-5]|2[0-4][0-9]|1[0-9][0-9]|[1-9]?[0-9])/(3[0-2]|[12]?[0-9])$` $c)) -}}
+{{- fail (printf "runPods.networkPolicy.%s: %v is not an IPv4 CIDR such as 10.0.0.0/8" $list $c) -}}
+{{- end -}}
+{{- end -}}
+{{- end -}}
+{{- if not (and (kindIs "string" $n.dnsNamespace) (regexMatch $label $n.dnsNamespace)) -}}
+{{- fail (printf "runPods.networkPolicy.dnsNamespace must be a namespace name, got %q" (toString $n.dnsNamespace)) -}}
+{{- end -}}
+{{- if not (and (kindIs "map" $n.dnsPodLabels) $n.dnsPodLabels) -}}
+{{- fail "runPods.networkPolicy.dnsPodLabels must name at least one label of the DNS pods" -}}
+{{- end -}}
+{{- if not (kindIs "slice" $n.extraEgress) -}}
+{{- fail "runPods.networkPolicy.extraEgress must be a list of NetworkPolicy egress rules" -}}
+{{- end -}}
+{{- end -}}
+{{- /* The size classes: at least one, and every one with the memory limit the quota counts. */ -}}
+{{- if not .Values.runPodClasses -}}
+{{- fail "runPodClasses must name at least one size class while runPods.enabled: without one the operator has no run pods and refuses to start" -}}
+{{- end -}}
+{{- range $name, $class := .Values.runPodClasses -}}
+{{- if not (regexMatch $label $name) -}}
+{{- fail (printf "runPodClasses.%s: the name of a class is a DNS label (lower-case letters, digits and -)" $name) -}}
+{{- end -}}
+{{- if not (kindIs "map" $class) -}}
+{{- fail (printf "runPodClasses.%s must be a map with requests and limits" $name) -}}
+{{- end -}}
+{{- range $k, $v := $class -}}
+{{- if not (has $k (list "requests" "limits")) -}}
+{{- fail (printf "runPodClasses.%s.%s is not a setting: requests or limits" $name $k) -}}
+{{- end -}}
+{{- if not (kindIs "map" $v) -}}
+{{- fail (printf "runPodClasses.%s.%s must be a map of resource -> quantity" $name $k) -}}
+{{- end -}}
+{{- range $res, $q := $v -}}
+{{- if not (and (or (kindIs "string" $q) (kindIs "float64" $q) (kindIs "int" $q) (kindIs "int64" $q)) (regexMatch $quantity (toString $q))) -}}
+{{- fail (printf "runPodClasses.%s.%s.%s: %v is not a quantity such as 512Mi" $name $k $res $q) -}}
+{{- end -}}
+{{- end -}}
+{{- end -}}
+{{- if not (hasKey (default (dict) $class.limits) "memory") -}}
+{{- fail (printf "runPodClasses.%s.limits.memory is required: the quota counts it, and a pod with no memory limit is refused by the quota" $name) -}}
+{{- end -}}
+{{- end -}}
 {{- end -}}
 {{- end -}}
 
@@ -231,6 +395,13 @@ for each tested shape (tests/api-shapes.sh) to find such a value before it is de
 {{- fail (printf "api.config.defaults.namespace is %q but the operator watches %q: the API writes the objects the operator reconciles, so it is the same namespace (leave the key out; watchNamespace sets both)" (toString $d.namespace) (include "aap.api.namespace" .)) -}}
 {{- end -}}
 {{- /* The keys of aap_forms::Defaults. The types below them are the CRDs' own and the binary refuses an unknown key there; the chart checks no deeper than this level, the peers and the store. */ -}}
+{{- /* Run pods mount the coder's work volume, whole: the API refuses to start when its defaults offer run pods and a coder could not have them. */ -}}
+{{- if and (include "aap.runPods" .) (not (default (dict) $d.coder).workVolume) -}}
+{{- fail "api.config.defaults.coder.workVolume is required while runPods.enabled: run pods mount the work volume of the coder (name work, a persistent source), so a coder form that asks for them needs one; the API would refuse to start without it" -}}
+{{- end -}}
+{{- if hasKey $d "runPodSizeClasses" -}}
+{{- fail "api.config.defaults.runPodSizeClasses is the chart's: it writes the keys of runPodClasses there while runPods.enabled (a list of its own would offer a class the operator does not have)" -}}
+{{- end -}}
 {{- range $k, $v := $d -}}
 {{- if not (has $k (list "namespace" "offerLabel" "store" "a2aBearer" "allowFrom" "security" "coder" "folder" "allowedImageRegistries")) -}}
 {{- fail (printf "api.config.defaults.%s is not a setting of the API: namespace, offerLabel, store, a2aBearer, allowFrom, security, coder, folder or allowedImageRegistries (a misspelt key would leave a default in its place)" $k) -}}

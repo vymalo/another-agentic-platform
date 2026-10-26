@@ -25,8 +25,9 @@ use std::time::Duration;
 
 use crate::{
     Classify, Container, DeletionPolicy, DirectoryEntry, EnvVar, ErrorClass, FileSet,
-    FsGroupChangePolicy, Mount, Network, OwnerHandle, PersistentVolume, Phase, Probe, ProbeAction,
-    Probes, Resources, Role, RuntimeId, RuntimeProvider, RuntimeSpec, SecretRef, Security, Sharing,
+    FsGroupChangePolicy, Mount, Network, OwnerHandle, Peer, PersistentVolume, Phase, Probe,
+    ProbeAction, Probes, Resources, Role, RunPodGuard, RunPodLabels, RunPodNetwork, RunPodQuota,
+    RunPods, RuntimeId, RuntimeProvider, RuntimeSpec, SecretRef, Security, Selector, Sharing,
     StoreId, StoreProvisioner, VolumeSource, VolumeSpec, Workload,
 };
 
@@ -354,6 +355,7 @@ pub fn sample_spec(id: &RuntimeId) -> RuntimeSpec {
             },
             termination_grace_secs: Some(120),
             min_available: None,
+            service_account: None,
         }],
         file_sets: vec![FileSet {
             name: format!("{name}-agent-0a1b2c3d"),
@@ -365,7 +367,53 @@ pub fn sample_spec(id: &RuntimeId) -> RuntimeSpec {
             selects: name,
             allow_from: Vec::new(),
         },
+        run_pods: None,
     }
+}
+
+/// [`sample_spec`] with run pods (slice D15a): its workload runs as the account that makes them, and the spec says what the account may
+/// have, what the pods may use in all, where they may go, how they are labelled and what the guard lets one be.
+pub fn sample_spec_with_run_pods(id: &RuntimeId) -> RuntimeSpec {
+    let mut spec = sample_spec(id);
+    let account = id.name().to_owned();
+    spec.workloads[0].service_account = Some(account.clone());
+    spec.run_pods = Some(RunPods {
+        service_account: account,
+        role: "run-pods".to_owned(),
+        priority_class: "run".to_owned(),
+        quota: RunPodQuota {
+            pods: 4,
+            limits_memory: "8Gi".to_owned(),
+        },
+        network: Some(RunPodNetwork {
+            dns: Peer {
+                namespaces: Some(Selector {
+                    match_labels: BTreeMap::from([(
+                        "kubernetes.io/metadata.name".to_owned(),
+                        "kube-system".to_owned(),
+                    )]),
+                    ..Selector::default()
+                }),
+                pods: Some(Selector {
+                    match_labels: BTreeMap::from([("k8s-app".to_owned(), "kube-dns".to_owned())]),
+                    ..Selector::default()
+                }),
+                cidr: None,
+            },
+            except_cidrs: vec!["10.0.0.0/8".to_owned()],
+            extra_egress: Vec::new(),
+        }),
+        pods: RunPodLabels {
+            managed_by: "sample-coder".to_owned(),
+            run_label: "sample.example/run".to_owned(),
+        },
+        guard: RunPodGuard {
+            images: vec!["registry.invalid/run:1".to_owned()],
+            claim: "work-sample-0".to_owned(),
+            secret: SecretRef::new(format!("{SENTINEL}-key"), "MODEL_API_KEY"),
+        },
+    });
+    spec
 }
 
 pub mod auth;

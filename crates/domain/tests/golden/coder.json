@@ -37,7 +37,7 @@
     "namespace": "another-agentic-system",
     "release": "coder",
     "repository": "https://github.com/vymalo/another-adam-rs",
-    "revision": "039180993666f0d45eec52f60b1e01e88bc62dbd",
+    "revision": "3f714d08132c6b4bb5530753105cfdb12d97a914",
     "values": "tools/adam-parity/cases/coder.yaml"
   },
   "workloads": {
@@ -222,6 +222,7 @@
           }
         }
       },
+      "automountServiceAccountToken": false,
       "claimTemplates": [
         {
           "accessModes": [
@@ -240,6 +241,7 @@
         "runAsGroup": 10001,
         "runAsUser": 10001
       },
+      "serviceAccount": null,
       "sidecars": {
         "github-mcp": {
           "args": [

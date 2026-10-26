@@ -72,6 +72,8 @@ pub(crate) struct Surroundings {
     pub(crate) models: Vec<aap_ports::Stored>,
     pub(crate) tool_servers: Vec<aap_ports::Stored>,
     pub(crate) offered: aap_forms::OfferedKeys,
+    /// The size classes of run pods the operator has (the API's configuration), which a coder form may pick.
+    pub(crate) run_pod_size_classes: Vec<String>,
 }
 
 impl Surroundings {
@@ -91,12 +93,18 @@ impl Surroundings {
             models,
             tool_servers,
             offered: aap_forms::OfferedKeys::from_offered(&state.defaults.offer_label, &offered),
+            run_pod_size_classes: state.defaults.run_pod_size_classes.clone(),
         })
     }
 
     /// The operator's rules need these to resolve an agent. The operator's default image is its own flag, which the API
     /// does not know: a stand-in (`aap-forms` says so).
     pub(crate) fn referents(&self) -> aap_forms::Referents {
-        aap_forms::externals(&self.models, &self.tool_servers, None)
+        aap_forms::externals(
+            &self.models,
+            &self.tool_servers,
+            None,
+            &self.run_pod_size_classes,
+        )
     }
 }

@@ -200,6 +200,39 @@ pub struct Coder {
 
     /// How the coder authenticates to GitHub.
     pub github: Github,
+
+    /// Run pods (D15, adam-rs ADR 0019 and 0041): the commands of a run, `run_command`, `run_checks` and
+    /// OpenCode, run in a pod of their own, which sees only its own run and none of the coder's secrets,
+    /// and not in the coder's container, where they could read the GitHub App's private key. Absent: no
+    /// run pods, and the objects of an agent are exactly what they were. Present: the operator makes what
+    /// the coder's chart makes for them (the pod template, a service account that may make and exec in
+    /// pods, a quota, a network policy and the parameters of the admission policy that guards the pods
+    /// it may make) and sets `RUN_ENVIRONMENT=kubernetes` and the `RUN_POD_*` variables. Needs an operator
+    /// whose chart has run pods on (`runPods.enabled`, `runPodClasses`): with none, the config is
+    /// `ConfigInvalid`, saying so.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub run_pods: Option<RunPods>,
+}
+
+/// Run pods for the coder (`coder.runPods`). The only field is the size of a pod; everything else
+/// (the image, the quota, the network policy, the timings) is the deployment's, in the operator
+/// chart's `runPods` block.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct RunPods {
+    /// A class of the operator chart's `runPodClasses`, by name (`standard`: 250m CPU and 512Mi of
+    /// memory requested, 2Gi of memory at most). It is the resources of the run container. A name the
+    /// operator does not have is `ConfigInvalid`, saying which it has.
+    #[serde(default = "standard_class")]
+    #[schemars(length(min = 1))]
+    pub size_class: String,
+}
+
+/// The size class of a `runPods` that names none.
+pub const STANDARD_CLASS: &str = "standard";
+
+fn standard_class() -> String {
+    STANDARD_CLASS.to_owned()
 }
 
 /// The author of the coder's commits.

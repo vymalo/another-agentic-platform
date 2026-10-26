@@ -10,8 +10,8 @@ use std::collections::BTreeMap;
 use aap_api::{
     A2aInterface, Access, Adam, AgentConfig, AgentConfigSpec, AgentService, AgentServiceSpec,
     AgentSource, Binary, Coder, DeletionPolicy, Empty, Environment, Folder, Github, GithubApp,
-    Harness, HarnessType, Image, Interfaces, McpServer, Model, NameRef, Registry, Scaling, Tools,
-    UnsupportedInterface,
+    Harness, HarnessType, Image, Interfaces, McpServer, Model, NameRef, Registry, RunPods, Scaling,
+    Tools, UnsupportedInterface,
 };
 use aap_ports::{Agent, AgentDraft, Kind, MANAGED_BY_DASHBOARD, MANAGED_BY_LABEL};
 use k8s_openapi::apimachinery::pkg::apis::meta::v1::ObjectMeta;
@@ -129,6 +129,9 @@ pub fn to_resources(form: &AgentForm, deployment: &Deployment, namespace: &str) 
                 git_author: deployment.coder.git_author.clone(),
                 create_repo_owners: c.create_repo_owners.clone(),
                 opencode_model: c.opencode_model.clone(),
+                run_pods: c.run_pod_size_class.as_ref().map(|size_class| RunPods {
+                    size_class: size_class.clone(),
+                }),
                 github: Github {
                     app: Some(GithubApp {
                         id: c.github.app_id.clone(),
@@ -308,6 +311,9 @@ fn extract(
                 workers: coder.and_then(|c| c.workers),
                 pr_draft: coder.and_then(|c| c.pr_draft),
                 opencode_model: coder.and_then(|c| c.opencode_model.clone()),
+                run_pod_size_class: coder
+                    .and_then(|c| c.run_pods.as_ref())
+                    .map(|r| r.size_class.clone()),
             })
         }
         Binary::AdamAgent => AgentKindForm::Folder(FolderSettings {

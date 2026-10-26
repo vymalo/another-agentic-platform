@@ -61,7 +61,9 @@ pub fn digest_json(value: &Value) -> String {
 /// what a pod runs set aside.
 ///
 /// Set aside: the owner, the deletion policy, the digest itself, `suspend`, each workload's
-/// `replicas` and `min_available`, and who may reach the port. A bigger `scaling.workers`, a
+/// `replicas` and `min_available`, who may reach the port, and the run pods' own objects (`run_pods`: a
+/// quota, a policy and an account's rights are applied, and what a pod reads of them, the template, the
+/// variables and the account's name, is in the workloads and the file sets). A bigger `scaling.workers`, a
 /// suspend, a different `allowFrom` or a new owner must not roll the running pods; a changed image,
 /// variable, file, volume, probe or sidecar must (adam reads its files and variables at startup
 /// only).
@@ -78,6 +80,7 @@ pub fn spec_digest(spec: &RuntimeSpec) -> String {
         allow_from: Vec::new(),
         ..pods.network
     };
+    pods.run_pods = None;
     for w in &mut pods.workloads {
         w.replicas = 0;
         w.min_available = None;

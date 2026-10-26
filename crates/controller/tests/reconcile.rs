@@ -1370,3 +1370,102 @@ async fn an_agentconfig_gets_its_valid_condition() {
             .contains("instructions.md")
     );
 }
+
+// ------------------------------------------------------------- run pods (D15a)
+
+/// The deployment's settings for run pods, as the operator chart's defaults say them.
+fn run_pod_settings() -> aap_domain::RunPodSettings {
+    serde_json::from_value(json!({
+        "priorityClass": "coder-run",
+        "role": "coder-run-pods",
+        "classes": {"standard": {"requests": {"cpu": "250m", "memory": "512Mi"}, "limits": {"memory": "2Gi"}}},
+        "image": {"repository": "ghcr.io/vymalo/another-agentic-images/workspace", "tag": "1.98.1-e6a528f"},
+        "container": "run",
+        "cargoBuildJobs": 2,
+        "quota": {"limitsMemory": "8Gi", "pods": 4},
+        "idleSecs": 900,
+        "readyTimeoutSecs": 600,
+        "waitSecs": 600,
+        "networkPolicy": {"enabled": true, "blockedCIDRs": ["10.0.0.0/8"], "dnsNamespace": "kube-system",
+                          "dnsPodLabels": {"k8s-app": "kube-dns"}},
+    }))
+    .unwrap()
+}
+
+#[tokio::test]
+async fn run_pods_the_operator_does_not_have_block_the_service_and_say_so() {
+    let w = World::with_options("coder", Options::default());
+    w.edit_config(|c| {
+        c["spec"]["harness"]["adam"]["coder"]["runPods"] = json!({"sizeClass": "standard"});
+    });
+    w.settle().await;
+    let status = w.status();
+    assert_eq!(status["state"], "Blocked");
+    is(&status, "ConfigResolved", "False", "ConfigInvalid");
+    assert!(
+        w.message().contains("this operator has no run pods"),
+        "{}",
+        w.message()
+    );
+    assert!(
+        w.runtime.ids().is_empty(),
+        "nothing is made out of half an agent"
+    );
+}
+
+#[tokio::test]
+async fn run_pods_the_operator_has_reach_the_runtime_and_leave_with_the_field() {
+    let w = World::with_options(
+        "coder",
+        Options {
+            run_pods: Some(run_pod_settings()),
+            ..Options::default()
+        },
+    );
+    // Not asked for: nothing of it, though the operator could.
+    w.settle().await;
+    assert_eq!(w.status()["state"], "Ready");
+    assert!(w.runtime.spec(&w.id()).unwrap().run_pods.is_none());
+    let without = w.digest();
+
+    w.edit_config(|c| {
+        c["spec"]["harness"]["adam"]["coder"]["runPods"] = json!({"sizeClass": "standard"});
+    });
+    w.pass().await.unwrap();
+    assert_eq!(w.status()["state"], "Ready");
+    let spec = w.runtime.spec(&w.id()).unwrap();
+    let rp = spec.run_pods.as_ref().expect("run pods");
+    assert_eq!(rp.service_account, "coder");
+    assert_eq!(spec.workloads[0].service_account.as_deref(), Some("coder"));
+    assert_ne!(
+        w.digest(),
+        without,
+        "the coder is rolled: it reads the template at startup"
+    );
+
+    // A size class the operator lacks is refused, and what runs is left as it is.
+    w.edit_config(|c| {
+        c["spec"]["harness"]["adam"]["coder"]["runPods"] = json!({"sizeClass": "huge"});
+    });
+    w.pass().await.unwrap();
+    assert_eq!(w.status()["state"], "Blocked");
+    assert!(
+        w.message()
+            .contains("\"huge\" is not a size class of this operator"),
+        "{}",
+        w.message()
+    );
+    assert!(w.runtime.spec(&w.id()).unwrap().run_pods.is_some());
+
+    // The field goes: so do the run pods, and the digest is what it was.
+    w.edit_config(|c| {
+        c["spec"]["harness"]["adam"]["coder"]
+            .as_object_mut()
+            .unwrap()
+            .remove("runPods");
+    });
+    w.pass().await.unwrap();
+    assert_eq!(w.status()["state"], "Ready");
+    assert!(w.runtime.spec(&w.id()).unwrap().run_pods.is_none());
+    assert_eq!(w.digest(), without);
+}

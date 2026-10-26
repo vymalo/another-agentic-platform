@@ -57,6 +57,13 @@ pub struct RuntimeSpec {
     pub file_sets: Vec<FileSet>,
     /// How the agent is reached.
     pub network: Network,
+    /// Run pods (slice D15): what the provider makes besides the workloads so that the workers can make
+    /// pods of their own for the commands of a run, and what guards the pods they make. `None`: none, and
+    /// the spec serialises exactly as it did before the field existed. Not part of the digest: it is
+    /// *applied*, and what a pod reads of it is already in the workloads (`service_account`, the
+    /// variables, the template's file set).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub run_pods: Option<RunPods>,
 }
 
 impl RuntimeSpec {
@@ -182,6 +189,65 @@ impl RuntimeSpec {
         if self.network.port == 0 {
             return bad("the network port is 0".into());
         }
+        self.check_run_pods()
+    }
+
+    /// The invariants of [`run_pods`](Self::run_pods): a workload runs as the account only if the spec has
+    /// run pods and names that account, at least one workload does when it has, and nothing the provider
+    /// writes a name or a number from is empty or zero.
+    fn check_run_pods(&self) -> Result<(), RuntimeError> {
+        let bad = |what: String| Err(RuntimeError::InvalidSpec(what));
+        let Some(rp) = &self.run_pods else {
+            return match self.workloads.iter().find(|w| w.service_account.is_some()) {
+                Some(w) => bad(format!(
+                    "workload {} runs as an account, and the spec has no run pods",
+                    w.name
+                )),
+                None => Ok(()),
+            };
+        };
+        let empty = |name: &str, value: &str| -> Result<(), RuntimeError> {
+            if value.trim().is_empty() {
+                bad(format!("run pods: {name} is empty"))
+            } else {
+                Ok(())
+            }
+        };
+        empty("the service account", &rp.service_account)?;
+        empty("the role", &rp.role)?;
+        empty("the priority class", &rp.priority_class)?;
+        empty("the memory limit of the quota", &rp.quota.limits_memory)?;
+        empty("the label that marks a pod managed", &rp.pods.managed_by)?;
+        empty("the label that carries the run", &rp.pods.run_label)?;
+        empty("the work claim", &rp.guard.claim)?;
+        empty("the name of the model key's Secret", &rp.guard.secret.name)?;
+        empty("the key of the model key's Secret", &rp.guard.secret.key)?;
+        if rp.quota.pods == 0 {
+            return bad("run pods: the quota allows no pod".into());
+        }
+        if rp.guard.images.is_empty() || rp.guard.images.iter().any(|i| i.trim().is_empty()) {
+            return bad("run pods: the guard allows no image, or an empty one".into());
+        }
+        for w in &self.workloads {
+            if let Some(account) = &w.service_account
+                && account != &rp.service_account
+            {
+                return bad(format!(
+                    "workload {} runs as {account}, and the run pods are for {}",
+                    w.name, rp.service_account
+                ));
+            }
+        }
+        if !self
+            .workloads
+            .iter()
+            .any(|w| w.service_account.as_ref() == Some(&rp.service_account))
+        {
+            return bad(format!(
+                "run pods are for {}, and no workload runs as it",
+                rp.service_account
+            ));
+        }
         Ok(())
     }
 }
@@ -214,6 +280,11 @@ pub struct Workload {
     /// Pods that must stay up through a voluntary disruption (a PodDisruptionBudget); `None`: no
     /// budget. Not part of the digest.
     pub min_available: Option<u32>,
+    /// The account the pods run as, with its token mounted: the one that may make run pods
+    /// ([`RuntimeSpec::run_pods`]). `None`: the namespace's default account and no token, as ever. Part of
+    /// the digest only when set.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub service_account: Option<String>,
 }
 
 /// One container.
@@ -276,6 +347,8 @@ pub enum EnvValue {
     Secret(SecretRef),
     /// The name of the pod itself (the downward API's `metadata.name`).
     PodName,
+    /// The namespace of the pod itself (the downward API's `metadata.namespace`).
+    PodNamespace,
 }
 
 /// A volume mounted into a container.
@@ -498,4 +571,111 @@ pub struct IpBlock {
     pub cidr: String,
     /// Sub-ranges left out.
     pub except: Vec<String>,
+}
+
+// ------------------------------------------------------------------------------------ run pods
+
+/// Run pods (slice D15, adam-rs ADR 0019 and 0041): the pods the workers make for the commands of a
+/// run, and what the provider makes so that they may, and may only, make those. Nothing in it is a
+/// Kubernetes type; a provider that cannot make pods refuses a spec that has it.
+///
+/// The pod template the workers read is a file set of the spec and a volume of the workloads
+/// (`aap-domain` makes both); what is here is what is applied beside the workloads.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RunPods {
+    /// The account the workers run as ([`Workload::service_account`]): the one account that may make
+    /// the pods, and the one the guard is for. The provider makes it.
+    pub service_account: String,
+    /// The set of rights the account is given (on Kubernetes: a `Role` of the namespace that lets it
+    /// make, find, watch and delete pods and `exec` in them, which the deployment made and the provider
+    /// binds the account to: the provider holds the right to bind that role and no right of its own to
+    /// make a pod or `exec`).
+    pub role: String,
+    /// The class the pods have, and the quota is scoped to (a quota cannot select pods by label, but it
+    /// can by priority class). The deployment made it.
+    pub priority_class: String,
+    /// What the pods may use in all.
+    pub quota: RunPodQuota,
+    /// What the pods may reach. `None`: no policy.
+    pub network: Option<RunPodNetwork>,
+    /// How the workers label what they make.
+    pub pods: RunPodLabels,
+    /// What the guard lets a pod made by the account be.
+    pub guard: RunPodGuard,
+}
+
+/// What the pods of one agent may use in all. A pod beyond it is refused with a quota error, which the
+/// workers wait out.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RunPodQuota {
+    /// At most this many pods.
+    pub pods: u32,
+    /// At most this much memory, as a quantity (`8Gi`), counted on the limits of the pods.
+    pub limits_memory: String,
+}
+
+/// How the workers label the pods they make: what a policy that selects them reads.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RunPodLabels {
+    /// The value of `app.kubernetes.io/managed-by` on a run pod (adam's `adam-coder`).
+    pub managed_by: String,
+    /// The label whose presence marks a pod as a run's (adam's `adam.vymalo.com/run`).
+    pub run_label: String,
+}
+
+/// What a run pod may reach: nothing connects to it (the workers `exec` in it through the API server), and
+/// it reaches names, the internet except private ranges, and what `extra_egress` adds.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RunPodNetwork {
+    /// Where names are resolved: the peer, on port 53 over UDP and TCP.
+    pub dns: Peer,
+    /// The internet (`0.0.0.0/0`) except these ranges. IPv4 only.
+    pub except_cidrs: Vec<String>,
+    /// Further egress rules.
+    pub extra_egress: Vec<EgressRule>,
+}
+
+/// One egress rule: to these peers (empty: to anywhere), on these ports (empty: on any).
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct EgressRule {
+    /// The peers.
+    pub to: Vec<Peer>,
+    /// The ports.
+    pub ports: Vec<EgressPort>,
+}
+
+/// One port of an [`EgressRule`].
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct EgressPort {
+    /// The protocol.
+    pub protocol: Protocol,
+    /// The port, a number. `None`: every port of the protocol.
+    pub port: Option<u16>,
+    /// The last port of a range that starts at `port`.
+    pub end_port: Option<u16>,
+}
+
+/// A transport protocol of a network rule.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub enum Protocol {
+    /// TCP.
+    Tcp,
+    /// UDP.
+    Udp,
+    /// SCTP.
+    Sctp,
+}
+
+/// What the guard lets a pod made by the run-pods account be: the guard refuses any other. The images,
+/// the claim and the one Secret key are the agent's; the rest of the guard (not privileged, not root, no
+/// host namespace, no `hostPath`, no Secret volume, no token) is the same for every agent and is the
+/// provider's.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RunPodGuard {
+    /// The images a container of a pod may have, spelled as the pod spells them.
+    pub images: Vec<String>,
+    /// The one persistent claim a pod may mount (besides empty directories): the work volume.
+    pub claim: String,
+    /// The one Secret key a pod may reference, as one variable: the model key.
+    pub secret: SecretRef,
 }

@@ -72,6 +72,11 @@ pub struct Options {
     /// `None`: the operator has no default, and such a config is `ConfigInvalid`. A change of it is a
     /// new digest, and so a rollout, for exactly the agents that name no image.
     pub default_agent_image: Option<String>,
+    /// What the deployment says about run pods (`RUN_PODS_FILE`; slice D15a): the size classes, the image, the
+    /// quota, the network policy. `None`: this operator has no run pods, and a config that asks for them is
+    /// `ConfigInvalid`, saying so. Changing it is a new digest, and so a rollout, for exactly the agents that
+    /// ask for run pods and read what changed.
+    pub run_pods: Option<aap_domain::RunPodSettings>,
 }
 
 impl Default for Options {
@@ -85,6 +90,7 @@ impl Default for Options {
             pass_timeout: PASS_TIMEOUT,
             instance: None,
             default_agent_image: None,
+            run_pods: None,
         }
     }
 }
