@@ -13,8 +13,9 @@
 # the diff of the goldens (that diff is the change of the env contract), and fix `aap-domain`.
 set -eu
 
-# The revision the netcup coder image is built from (§59a cites 0391809; full hash read from git).
-ADAM_RS_REV="039180993666f0d45eec52f60b1e01e88bc62dbd"
+# adam-rs `main` at the revision D15a read (3f714d0: the coder refuses a GitHub App key file beside local commands, #131;
+# §59a cites 0391809, the revision of the goldens before). Full hash read from git.
+ADAM_RS_REV="3f714d08132c6b4bb5530753105cfdb12d97a914"
 NAMESPACE="another-agentic-system"
 
 here=$(cd "$(dirname "$0")" && pwd)

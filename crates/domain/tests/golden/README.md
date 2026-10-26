@@ -1,6 +1,6 @@
 # Parity goldens
 
-What the adam-rs chart [`deploy/coder`](https://github.com/vymalo/another-adam-rs/tree/039180993666f0d45eec52f60b1e01e88bc62dbd/deploy/coder)
+What the adam-rs chart [`deploy/coder`](https://github.com/vymalo/another-adam-rs/tree/3f714d08132c6b4bb5530753105cfdb12d97a914/deploy/coder)
 renders, projected onto the shape `tests/parity.rs` reads, so that `aap-domain` can be held equal to it
 (§59a, "Testing", and the risk "adam's env contract is copied into `aap-domain`").
 
@@ -12,8 +12,12 @@ renders, projected onto the shape `tests/parity.rs` reads, so that `aap-domain` 
 | `chat-env.json` | `adam-agent` for `examples/chat.yaml`. **Written by hand, not rendered**: the chart renders `adam-coder` only. Derived from `bin/adam-agent/README.md` and `docker/coder/Dockerfile`; *verified 2026-10-05 by reading them, not by running the binary* | |
 
 Each rendered file records where it came from (`source`: repository, full revision, chart, values file,
-helm version). Revision: `039180993666f0d45eec52f60b1e01e88bc62dbd` (`0391809`, the one §59a cites; it is
-still in the history of adam-rs `main`, which has moved on).
+helm version). Revision: `3f714d08132c6b4bb5530753105cfdb12d97a914` (`3f714d0`, adam-rs `main` on 2026-10-26: the
+coder refuses to start with a GitHub App key file beside local commands unless it is accepted by name, adam-rs
+[#131](https://github.com/vymalo/another-adam-rs/pull/131)). The goldens were at `0391809` (the revision §59a cites)
+until slice D15a. *Verified 2026-10-26*: the diff between the two sets of renders of the three first cases is the
+two keys the projection gained (`serviceAccount`, `automountServiceAccountToken` of each pod) and the revision; **the
+env contract of a coder with run pods off did not move between the two revisions**.
 
 ## Regenerating them
 
@@ -60,6 +64,16 @@ And these are not compared, because they are structure or the chart's own busine
   `websearch` and `context7`, one header each), `MCP_ALLOW_INSECURE=true` whenever `tools.allowInsecureHttp` is
   (the chart sets it only for a plain-http extra server; `examples/chat.yaml` has none and still needs it for the
   orchestrator's thread tools), and the whole of `adam-agent` (a folder, `ADAM_AGENT_DIR`, the command).
+* **`ALLOW_COMMANDS_NEXT_TO_SECRETS`** (adam-rs #131). The chart refuses `github.auth: app` with `runPods.enabled: false`
+  unless `runPods.allowCommandsNextToSecrets: true`, and then renders that variable on the pods that run workers. The two
+  cases with a GitHub App and no run pods (`coder`, `coder-split`) are about the pods of the agent, so **they keep their
+  meaning and set the acknowledgement** (the other choice, `runPods.enabled: true`, would change the case into a run-pods
+  one: another service account, token, volume, variables and resources); `extract.py` does not project the variable
+  (`NOT_PROJECTED_ENV`) and the operator has no field for it: **an `AgentConfig` takes it in `extraEnv`**
+  (`ALLOW_COMMANDS_NEXT_TO_SECRETS: "true"`), which puts it on every workload, a split front included, where the chart renders
+  it on the workers only. **`aap-domain` does not refuse an App coder with no run pods** (§60a, "D15a built": the image the
+  chart pins, `9a1fd4e`, predates the refusal, and refusing would make every such service `ConfigInvalid` at the operator's next
+  upgrade); an image that includes #131 exits 78 with it, and the remedy is `runPods` or that variable.
 * **Validation messages** differ (the chart's are `fail` strings, the operator's are `ConfigIssue`s); the
   *mistakes* are the same.
 
