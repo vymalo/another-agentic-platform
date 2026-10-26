@@ -410,6 +410,7 @@ pub async fn run(args: RunArgs) -> Result<()> {
 }
 
 #[cfg(all(test, feature = "runtime-kubernetes"))]
+#[allow(clippy::expect_used)] // a test may
 mod tests {
     use super::*;
 
