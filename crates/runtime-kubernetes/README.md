@@ -17,7 +17,7 @@ else: the provider has no right on Secrets, never reads one, and copies no kubel
 
 | Item | What |
 |---|---|
-| `KubernetesRuntime` | the provider. `new(client)`, `try_default()`, `watching_namespace(ns)` |
+| `KubernetesRuntime` | the provider. `new(client)`, `try_default()`, `watching_namespace(ns)`, `clearing_run_pods(bool)` (D15a, [below](#run-pods-d15a)) |
 | `render(id, spec) -> Rendered` | the objects of a spec, pure; `Rendered::documents()` is what the golden files hold |
 | `status::compute`, `pod_issues` | workloads and pods into `RuntimeStatus`, pure |
 | `owner_handle(api_version, kind, name, uid)` | the encoding of the opaque `OwnerHandle` this provider understands |
@@ -36,6 +36,11 @@ else: the provider has no right on Secrets, never reads one, and copies no kubel
 | `NetworkPolicy` | `<svc>` | `Network::allow_from` is not empty: ingress on the container port from those peers, **no egress rule**. An empty list makes no policy (and deletes one an earlier spec made) |
 | `ConfigMap` | the `FileSet`'s name | one per file set. A path with `/` is a key by an injective encoding (`skills/review/SKILL.md` is `skills_sreview_sSKILL.md`) and is mounted at its path through `items` |
 | `PersistentVolumeClaim` | `<svc>-<volume>` | a `Shared` persistent volume: one ReadWriteMany claim for every replica |
+| `ServiceAccount` | the account `RunPods::service_account` names | `RuntimeSpec::run_pods` is set ([run pods](#run-pods-d15a)): `automountServiceAccountToken: false`, and the workers' pods ask for the token |
+| `ResourceQuota` | `<svc>-run-pods` | run pods: `pods` and `limits.memory`, scoped to the priority class |
+| `NetworkPolicy` | `<svc>-run-pods` | run pods with a `network`: the run pods of the service by label, no ingress, DNS and the internet except the private ranges |
+| `RoleBinding` | `<svc>-run-pods` | run pods: the account to the Role the deployment made (`RunPods::role`) |
+| `ConfigMap` | `<svc>-run-pods-policy` | run pods: the parameters of the deployment's admission policy, labelled `agents.vymalo.com/run-pods-policy: "true"` |
 | (the StatefulSet's `volumeClaimTemplates`) | `<volume>`, claims `<volume>-<workload>-<n>` | a `PerReplica` volume: ReadWriteOnce, one per replica |
 
 **The pod template** is the adam-rs chart's `statefulset.yaml`: no service-account token, `runAsNonRoot` with the ids of
@@ -107,6 +112,16 @@ sequenceDiagram
 * **`suspend(id)`** is a JSON merge patch of `spec.replicas: 0` on every workload (a partial server-side apply would
   drop every other field the manager owns), and **keeps everything else, claims included**. `ensure` of a spec whose
   `suspend` is false wakes it; `ensure` of one whose `suspend` is true applies zero replicas.
+
+## Run pods (D15a)
+
+`RuntimeSpec::run_pods` makes five more objects (above), nothing else, and **the policy and the Role are not among them**: they are cluster-scoped or a cluster administrator's, and the operator's chart makes them (`deploy/operator`, README "Run pods"). The provider holds `bind` on that one Role and no right to make a pod or `exec`.
+
+* **Looking is a choice (`clearing_run_pods`, off by default).** Clearing reads `serviceaccounts`, `resourcequotas` and `rolebindings`, which an operator whose chart has run pods off has **no right on**: a provider that looked anyway would fail every `ensure` and every `delete` of every agent with `Forbidden`, and the fake API server enforces no RBAC, so `tests/run_pods_api.rs` holds it by asserting that a default provider makes not one request that names those kinds, nor deletes a pod. `operator run` turns it on when it has settings for run pods. A spec that **has** run pods is applied whatever the flag says; a service that made run pods under a provider that was not looking keeps their objects when it stops asking (they carry its owner reference, so they go with the service): **remove `coder.runPods` from the configs before turning `runPods.enabled` off**.
+* **Order.** Applied: the parameters of the guard, the account, the quota, the network policy, **the binding last** (the right to make pods comes after the parameters the policy reads, and before the workloads whose pods use it). Removed, when a spec has no run pods any more (`ensure`, before anything is applied) or on `delete`: **the binding first**, then the run pods found by the labels the parameters name (`app.kubernetes.io/managed-by`, `instance`, and the run label; with the parameters gone nothing can be found and nothing is deleted), the quota, the network policy, the parameters, the account. A service that never had run pods costs three reads (bindings, accounts, quotas by label) and nothing is deleted, **and none at all when the provider is not looking**.
+* **Only ours.** Each of the five is under the adoption guard: one of the name that is not ours is a `NameConflict` and nothing is written; a removal lists by label and deletes by name only what carries our labels, so a quota or a binding someone else made is never touched.
+* **The token** is mounted in the pods of the workers (`automountServiceAccountToken` follows `Workload::service_account`) and in no other.
+* `tests/run_pods.rs` (13) states each object, the golden `tests/golden/coder-run-pods.yaml` holds all of them, `tests/run_pods_api.rs` (8) drives the order against the fake API server, and `tests/run_pods_parity.rs` (4) compares them with what the coder chart renders ([`aap-domain`'s goldens](../domain/tests/golden/README.md)), the admission policy with the parameters substituted.
 
 ## Status
 
@@ -187,6 +202,9 @@ namespace):
 | `services`, `configmaps`, `persistentvolumeclaims` | `get list patch create delete` |
 | `networkpolicies` (networking.k8s.io), `poddisruptionbudgets` (policy) | `get list patch create delete` |
 | `pods` | `list watch` |
+| with run pods: `serviceaccounts`, `resourcequotas`, `rolebindings` (rbac.authorization.k8s.io) | `get list patch create delete` |
+| with run pods: `roles` (rbac.authorization.k8s.io), **`resourceNames` the deployment's Role of run pods** | `bind` |
+| with run pods: `pods` | `delete` |
 
 `patch` and `create` both: a server-side apply of an object that is not there creates it, and Kubernetes authorises that
 with both verbs. **No right on Secrets**, and none on the custom resources: the controller's.
@@ -203,6 +221,7 @@ AAP_TEST_KUBECONFIG=$HOME/.kube/config cargo test -p aap-runtime-kubernetes --te
 |---|---|
 | `src/*` unit tests | the key encoding, the error classes, the status mapping from crafted Pods (every row of the issue table, the phases, the rollout checks), the plain-text audit |
 | `tests/render.rs` | golden YAML of `examples/coder.yaml` (combined and split) and `examples/chat.yaml`, and each rule stated: labels, digest, owner (compute has one, data has none), the chart's pod template, the policy, the budget, shared claims, suspend, no Secret name in plain text, what is refused |
+| `tests/run_pods.rs`, `tests/run_pods_api.rs`, `tests/run_pods_parity.rs` | run pods (D15a): the objects and their golden; the requests, their order and the removals against the fake API server; parity with the coder chart's quota, network policy, binding, account, Role, `PriorityClass` and admission policy |
 | `tests/api.rs` | the provider against a **fake API server** (`tests/support`): the real requests of a real `kube::Client` against an in-memory store. The order of calls (reads before writes), `fieldManager` and `force`, the guard (no write at all), stale objects, `suspend`, both deletion policies and their order, status from seeded pods, endpoints, failures by class. It is not an API server: no controllers, no validation, no garbage collection |
 | `tests/cluster.rs` | against a real API server: `runtime_provider_conformance!` (14 cases) and the cases only a cluster shows (below) |
 

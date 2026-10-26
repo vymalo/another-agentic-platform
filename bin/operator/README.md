@@ -34,6 +34,7 @@ Each is a flag and an environment variable, which is how the chart sets them (S8
 | `REGISTRY_TOKEN_FILE` | `--registry-token-file` | none | The file that holds the registry's bearer token (a mounted Secret), read once at start. **No token, no registry**: unset, missing, unreadable or empty, nothing is served on the port, the operator logs why and keeps reconciling, and every service is `Listed: False`, reason `RegistryDisabled` |
 | `REGISTRY_PUBLIC_URL` | `--registry-public-url` | none | The URL of the registry document itself, sent as its `anchor` (optional in the contract) |
 | `DEFAULT_AGENT_IMAGE` | `--default-agent-image` | none | The image of an agent whose `AgentConfig` names none (slice D2, AD-029): the coder image, a reference such as `repository:tag@sha256:…`. Unset or empty (a chart value left blank): **no default**, and such a config is `ConfigInvalid`, naming this flag. White space in it stops the operator at start (a deployment mistake, not an error on every agent that would have used it). A new value rolls every agent that names no image, through the config digest, and no other |
+| `RUN_PODS_FILE` | `--run-pods-file` | none | The deployment's settings for run pods (slice D15a): a YAML file, `aap_domain::RunPodSettings`, that the chart renders from `runPods` and `runPodClasses` and mounts. Read **once**, at start. Unset or empty: **the operator has no run pods**, and an `AgentConfig` that sets `coder.runPods` is `ConfigInvalid` saying so. A file that does not exist, does not parse (an unknown key is refused), or fails `RunPodSettings::validate()` stops the operator at start, naming every mistake: a pod that cannot start is the better way to hear it than agents that run without the guard |
 | `RUST_LOG` | | `info` | `tracing` filter; logs go to standard error |
 | `KUBECONFIG` | | | Used when there is no in-cluster environment (`kube::Client::try_default`) |
 
@@ -59,7 +60,7 @@ the feature, and the controller is generic over `StoreProvisioner` (AD-020).
 Everything `run` does to the API, for the chart of S8 (a namespaced `Role`, §59a): the
 [controller's](../../crates/controller/README.md#cluster-rights) plus the
 [provider's](../../crates/runtime-kubernetes/README.md#cluster-rights), and with `store-cnpg` the
-[store's](../../crates/store-cnpg/README.md#cluster-rights). **No right on Secrets**, and the shared kinds of the dashboard (`modelendpoints`, `toolproviders`) are read and watched, never written.
+[store's](../../crates/store-cnpg/README.md#cluster-rights). **No right on Secrets**, and the shared kinds of the dashboard (`modelendpoints`, `toolproviders`) are read and watched, never written. With `RUN_PODS_FILE` the chart adds the run pods rows of the provider's table (`serviceaccounts`, `resourcequotas`, `rolebindings`, `bind` on one named Role, `delete` on pods): it makes the Role and the admission policy itself, and the operator has no `ClusterRole`. The provider looks for run pod objects to clear (`KubernetesRuntime::clearing_run_pods`) only with the settings: without them the operator has no right on those kinds, and looking would fail every reconcile.
 
 ## The CRDs are a checked-in file
 
@@ -78,7 +79,7 @@ AAP_TEST_KUBECONFIG=$HOME/.kube/config AAP_TEST_STUB_IMAGE=aap-stub:ci cargo tes
 | File | What |
 |---|---|
 | `src/serve.rs` unit tests | `/healthz` is up at once, `/readyz` answers 503 until the readiness handle is marked, `/metrics` is Prometheus text |
-| `tests/cli.rs` | runs the built binary: `crdgen` equals the checked-in file and prints one document per kind; `run` without a cluster fails and says it was connecting; `run --help` lists every variable above; a default image with white space stops `run` before it looks for a cluster, and an empty one or a reference does not |
+| `tests/cli.rs` | runs the built binary (`RUN_PODS_FILE`: an absent file, junk, an unknown key and a setting that fails its checks each stop it before it looks for a cluster, naming the variable and the mistake): `crdgen` equals the checked-in file and prints one document per kind; `run` without a cluster fails and says it was connecting; `run --help` lists every variable above; a default image with white space stops `run` before it looks for a cluster, and an empty one or a reference does not |
 | `tests/e2e_fixture.rs` | the fixtures of the chart's kind end-to-end resolve; **the chart's `defaultAgentImage` is the image `tests/e2e/coder.yaml` runs**, and the fixture with its image removed, on an operator given that default, is the same agent, digest included |
 | `tests/cluster.rs` | **the end-to-end**: the binary against a real cluster (below) |
 

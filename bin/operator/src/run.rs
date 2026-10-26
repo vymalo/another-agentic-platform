@@ -288,7 +288,9 @@ pub async fn run(args: RunArgs) -> Result<()> {
     let client = kube::Client::try_default()
         .await
         .context("connecting to the cluster (in-cluster configuration, or KUBECONFIG)")?;
-    let mut runtime = KubernetesRuntime::new(client.clone());
+    // Only with settings for run pods does the operator hold the rights to look for them (the chart gives them with `runPods.enabled`).
+    let mut runtime =
+        KubernetesRuntime::new(client.clone()).clearing_run_pods(options.run_pods.is_some());
     if let Some(ns) = &options.watch_namespace {
         runtime = runtime.watching_namespace(ns);
     }

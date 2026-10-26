@@ -83,6 +83,7 @@ fn is_ours(meta: &ObjectMeta, id: &RuntimeId) -> bool {
 pub struct KubernetesRuntime {
     client: Client,
     watch_namespace: Option<String>,
+    clear_run_pods: bool,
 }
 
 impl KubernetesRuntime {
@@ -92,7 +93,23 @@ impl KubernetesRuntime {
         Self {
             client,
             watch_namespace: None,
+            clear_run_pods: false,
         }
+    }
+
+    /// Look for the run pod objects of a service (its account, quota and binding, and the pods it made) and clear them when
+    /// an [`ensure`](RuntimeProvider::ensure) finds that the spec has none and on [`delete`](RuntimeProvider::delete).
+    ///
+    /// **Off by default.** The look reads `serviceaccounts`, `resourcequotas` and `rolebindings`, which an operator that
+    /// has no run pods has no right on (the chart gives them only with `runPods.enabled`): a provider that looked anyway
+    /// would fail every `ensure` and every `delete` of every agent with `Forbidden`. Turn it on where run pods are (the
+    /// operator does when it has settings for them). A spec that **has** run pods is applied whatever this says, and a
+    /// service that made run pods under a provider that was not looking keeps their objects until the service goes (they
+    /// carry its owner reference).
+    #[must_use]
+    pub fn clearing_run_pods(mut self, on: bool) -> Self {
+        self.clear_run_pods = on;
+        self
     }
 
     /// A provider on the client the environment gives: the in-cluster configuration, or the
@@ -193,7 +210,7 @@ impl KubernetesRuntime {
             status.issues.extend(conflicts);
             return Ok(status);
         }
-        if rendered.run_pods.is_none() {
+        if rendered.run_pods.is_none() && self.clear_run_pods {
             // A service that made run pods and no longer asks: the right to make them goes before anything else is
             // applied, and then the pods.
             self.remove_run_pods(id).await?;
@@ -585,7 +602,9 @@ impl KubernetesRuntime {
         let mut existed = !sts.is_empty() || !deploys.is_empty();
         // The right to make run pods first, then the pods they made (the guard's parameters are read to find them,
         // so they go with the rest below): nothing is left to make a pod again.
-        existed |= self.remove_run_pods(id).await?;
+        if self.clear_run_pods {
+            existed |= self.remove_run_pods(id).await?;
+        }
         // Compute next: nothing is left to make a claim again.
         for s in &sts {
             self.delete_named::<StatefulSet>(ns, s.metadata.name.as_deref().unwrap_or_default())

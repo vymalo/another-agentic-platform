@@ -17,10 +17,16 @@ use support::{Call, Fake, K};
 
 const NS: &str = "another-agentic-system";
 
+/// A provider that looks for run pods to clear: the operator's, when it has settings for them.
 fn setup() -> (Fake, KubernetesRuntime) {
     let fake = Fake::new();
-    let runtime = KubernetesRuntime::new(fake.client());
+    let runtime = KubernetesRuntime::new(fake.client()).clearing_run_pods(true);
     (fake, runtime)
+}
+
+/// The kinds that are not in an operator's `Role` unless the chart has run pods on.
+fn is_a_run_pods_kind(k: K) -> bool {
+    matches!(k, K::ServiceAccount | K::Quota | K::RoleBinding)
 }
 
 fn writes(calls: &[Call], method: &str) -> Vec<(K, String)> {
@@ -334,4 +340,52 @@ async fn the_run_pods_of_a_service_are_not_part_of_its_status() {
     fake.put(K::Pod, NS, "adam-run-aaa", crashing);
     let after = runtime.status(&on.id).await.unwrap();
     assert_eq!(before, after);
+}
+
+#[tokio::test]
+async fn a_provider_that_is_not_looking_for_run_pods_reads_and_writes_none_of_their_kinds() {
+    // The operator of a chart with run pods off has no right on serviceaccounts, resourcequotas and rolebindings, and
+    // none to delete a pod: a provider that looked for run pods anyway would fail every ensure and every delete of every
+    // agent with Forbidden. The fake API server enforces no RBAC, so this is where it is held: not one request names them.
+    let fake = Fake::new();
+    let runtime = KubernetesRuntime::new(fake.client());
+    let off = resolved("coder", |_, _| {});
+    runtime.ensure(&off.id, &off.runtime).await.unwrap();
+    runtime.ensure(&off.id, &off.runtime).await.unwrap();
+    runtime.status(&off.id).await.unwrap();
+    runtime.delete(&off.id).await.unwrap();
+    let calls = fake.calls();
+    assert!(!calls.is_empty());
+    for c in &calls {
+        assert!(
+            !is_a_run_pods_kind(c.kind()),
+            "a request for a kind the default Role has no right on: {} {}",
+            c.method,
+            c.path
+        );
+        assert!(
+            !(c.method == "DELETE" && matches!(c.kind(), K::Pod)),
+            "a pod deleted by a provider that does not look: {}",
+            c.path
+        );
+    }
+}
+
+#[tokio::test]
+async fn a_provider_that_is_not_looking_applies_run_pods_when_the_spec_has_them_and_leaves_them_when_it_does_not()
+ {
+    // A spec that has run pods is applied whatever the provider was told (only an operator with settings can resolve one);
+    // a later spec without them is not a reason to look for what the operator may not read: the objects stay, with the
+    // owner reference that takes them away with the service.
+    let fake = Fake::new();
+    let runtime = KubernetesRuntime::new(fake.client());
+    let on = resolved_run_pods(|_, _| {});
+    runtime.ensure(&on.id, &on.runtime).await.unwrap();
+    assert!(fake.get(K::RoleBinding, NS, "coder-run-pods").is_some());
+    let off = resolved("coder", |_, _| {});
+    runtime.ensure(&off.id, &off.runtime).await.unwrap();
+    assert!(
+        fake.get(K::RoleBinding, NS, "coder-run-pods").is_some(),
+        "left in place: clearing is the operator's choice, made with the rights to do it"
+    );
 }
