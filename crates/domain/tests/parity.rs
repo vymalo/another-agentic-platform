@@ -18,11 +18,14 @@ mod common;
 use std::collections::BTreeMap;
 use std::path::PathBuf;
 
-use aap_domain::contract;
+use aap_domain::{Externals, contract};
 use aap_ports::{
     Container, EnvValue, FsGroupChangePolicy, ProbeAction, RuntimeSpec, Sharing, VolumeSource,
 };
-use common::{must_resolve, remove, repo_root, set};
+use common::{
+    must_resolve, must_resolve_with, parity_case_values, remove, repo_root, run_pod_settings_of,
+    set,
+};
 use serde_json::{Value, json};
 
 fn golden(name: &str) -> Value {
@@ -40,6 +43,7 @@ fn env_source(v: &EnvValue) -> Value {
         EnvValue::Literal(s) => json!({ "literal": s }),
         EnvValue::Secret(r) => json!({ "secret": { "name": r.name, "key": r.key } }),
         EnvValue::PodName => json!({ "field": "metadata.name" }),
+        EnvValue::PodNamespace => json!({ "field": "metadata.namespace" }),
     }
 }
 
@@ -126,6 +130,8 @@ fn project(spec: &RuntimeSpec, svc: &str) -> Value {
             json!({
                 "kind": if stateful { "StatefulSet" } else { "Deployment" },
                 "replicas": w.replicas,
+                "serviceAccount": w.service_account,
+                "automountServiceAccountToken": w.service_account.is_some(),
                 "terminationGracePeriodSeconds": w.termination_grace_secs,
                 "securityContext": {
                     "runAsUser": sec.run_as_user,
@@ -155,13 +161,21 @@ fn project(spec: &RuntimeSpec, svc: &str) -> Value {
             .collect();
         config_maps.insert(f.name.clone(), Value::Object(files));
     }
-    json!({
+    let mut out = json!({
         "workloads": workloads,
         "claims": claims,
         "configMaps": config_maps,
         "podDisruptionBudgets": pdbs,
         "service": { "name": svc, "port": spec.network.port, "selects": spec.network.selects },
-    })
+    });
+    // The pod template of run pods, which adam reads: a file set of the spec, parsed as the chart's is.
+    if let Some(f) = spec.file_sets.iter().find(|f| f.name.ends_with("-run-pod")) {
+        out["runPods"] = json!({ "template": {
+            "name": f.name,
+            "pod": serde_json::from_str::<Value>(&f.files["pod.yaml"]).unwrap(),
+        } });
+    }
+    out
 }
 
 // --------------------------------------------------------- normalisations
@@ -197,18 +211,23 @@ fn normalise_chart(golden: &mut Value, applied: &mut Applied) {
     }
 }
 
-/// The operator's image carries `@sha256:…` after the tag; the chart's has none.
+/// The operator's image carries `@sha256:…` after the tag; the chart's has none. That holds for the init container
+/// of the run pod template too, which is the coder's image.
 fn strip_digest(projection: &mut Value) {
+    if let Some(Value::String(s)) =
+        projection.pointer_mut("/runPods/template/pod/spec/initContainers/0/image")
+        && let Some((tag, _)) = s.split_once('@')
+    {
+        *s = tag.to_owned();
+    }
     let Some(workloads) = projection["workloads"].as_object_mut() else {
         return;
     };
     for w in workloads.values_mut() {
-        for path in ["/agent/image"] {
-            if let Some(Value::String(s)) = w.pointer_mut(path)
-                && let Some((tag, _)) = s.split_once('@')
-            {
-                *s = tag.to_owned();
-            }
+        if let Some(Value::String(s)) = w.pointer_mut("/agent/image")
+            && let Some((tag, _)) = s.split_once('@')
+        {
+            *s = tag.to_owned();
         }
         if let Some(sidecars) = w["sidecars"].as_object_mut() {
             for c in sidecars.values_mut() {
@@ -284,6 +303,11 @@ fn compare(case: &str, chart: &Value, mine: &Value) {
         chart["podDisruptionBudgets"], mine["podDisruptionBudgets"],
         "{case}: budgets"
     );
+    // The pod run pods are made from: the chart's ConfigMap and ours, parsed. Absent for a case without run pods.
+    assert_eq!(
+        chart["runPods"]["template"], mine["runPods"]["template"],
+        "{case}: the run pod template"
+    );
     let cw = chart["workloads"].as_object().unwrap();
     let mw = mine["workloads"].as_object().unwrap();
     assert_eq!(
@@ -297,6 +321,8 @@ fn compare(case: &str, chart: &Value, mine: &Value) {
         for key in [
             "kind",
             "replicas",
+            "serviceAccount",
+            "automountServiceAccountToken",
             "terminationGracePeriodSeconds",
             "securityContext",
             "claimTemplates",
@@ -441,6 +467,121 @@ fn an_affinity_coder_on_a_token_renders_what_the_chart_renders() {
     );
 }
 
+// ---------------------------------------------------------------- run pods (slice D15a)
+
+/// `cases/coder-run-pods-split.yaml`: the split case on one shared ReadWriteMany volume, which run pods need with several workers.
+fn split_shared(service: &mut Value, config: &mut Value) {
+    split(service, config);
+    set(
+        config,
+        "/spec/harness/adam/coder/workspacePlacement",
+        json!("shared"),
+    );
+    set(
+        config,
+        "/spec/environment/volumes/0/source/persistent/perReplica",
+        json!(false),
+    );
+    set(
+        config,
+        "/spec/environment/volumes/0/source/persistent/storageClass",
+        json!("longhorn-rwx"),
+    );
+}
+
+/// The case's operator side: the example changed by `change`, with run pods on and the settings and the size class the case's
+/// values for the chart say, and the coder container sized as the chart sizes it with run pods on (`runPods.coderResources`:
+/// the operator does not swap it for the config's own).
+fn run_pods_case(case: &str, change: Change) -> aap_domain::ResolvedAgent {
+    let (settings, class) = run_pod_settings_of(case);
+    let coder_resources = parity_case_values(case)["runPods"]["coderResources"].clone();
+    assert!(
+        coder_resources.is_object(),
+        "{case} names its coderResources"
+    );
+    must_resolve_with(
+        "coder",
+        &Externals::default().with_run_pods(settings),
+        |service, config| {
+            change(service, config);
+            set(
+                config,
+                "/spec/harness/adam/coder/runPods",
+                json!({ "sizeClass": class }),
+            );
+            set(config, "/spec/environment/resources", coder_resources);
+        },
+    )
+}
+
+/// A change a case makes to the example (the service, then the config) before it is resolved.
+type Change = fn(&mut Value, &mut Value);
+
+const RUN_POD_CASES: [(&str, Change); 4] = [
+    ("coder-run-pods", |_, _| {}),
+    ("coder-run-pods-shared", affinity_token),
+    ("coder-run-pods-split", split_shared),
+    ("coder-run-pods-tuned", |_, _| {}),
+];
+
+#[test]
+fn a_coder_with_run_pods_makes_the_pods_the_chart_makes() {
+    for (case, change) in RUN_POD_CASES {
+        let r = run_pods_case(case, change);
+        let mut applied = Applied::default();
+        parity(case, &project(&r.runtime, "coder"), &mut applied);
+    }
+}
+
+#[test]
+fn the_run_pod_goldens_have_run_pods_and_the_others_have_none() {
+    for (case, _) in RUN_POD_CASES {
+        let g = golden(case);
+        for key in [
+            "template",
+            "quota",
+            "networkPolicy",
+            "serviceAccount",
+            "role",
+            "roleBinding",
+            "admissionPolicy",
+            "admissionBinding",
+        ] {
+            assert!(
+                g["runPods"][key].is_object(),
+                "{case}: the chart renders no {key} for run pods"
+            );
+        }
+    }
+    for case in ["coder", "coder-split", "coder-affinity-token"] {
+        assert!(golden(case).get("runPods").is_none(), "{case}");
+    }
+}
+
+#[test]
+fn run_pods_set_the_variables_the_chart_sets_and_the_workers_alone() {
+    let r = run_pods_case("coder-run-pods-split", split_shared);
+    let [workers, front] = &r.runtime.workloads[..] else {
+        panic!("a split coder has two workloads");
+    };
+    for name in contract::run_pods::SET {
+        assert!(
+            workers.container.env.iter().any(|e| e.name == *name),
+            "{name} is not set on the workers"
+        );
+        assert!(
+            front.container.env.iter().all(|e| e.name != *name),
+            "{name} is set on the control plane, which starts no command"
+        );
+    }
+    assert_eq!(workers.service_account.as_deref(), Some("coder"));
+    assert_eq!(front.service_account, None, "the front holds no token");
+    assert!(
+        front.volumes.iter().all(|v| v.name != "run-pod"),
+        "the front does not read the template"
+    );
+}
+
 #[test]
 fn the_normalisations_are_the_documented_ones() {
     let mut applied = Applied::default();
@@ -478,7 +619,15 @@ fn the_normalisations_are_the_documented_ones() {
 
 #[test]
 fn the_goldens_say_where_they_came_from() {
-    for case in ["coder", "coder-split", "coder-affinity-token"] {
+    for case in [
+        "coder",
+        "coder-split",
+        "coder-affinity-token",
+        "coder-run-pods",
+        "coder-run-pods-shared",
+        "coder-run-pods-split",
+        "coder-run-pods-tuned",
+    ] {
         let g = golden(case);
         let s = &g["source"];
         assert_eq!(s["repository"], "https://github.com/vymalo/another-adam-rs");
@@ -536,7 +685,12 @@ fn every_variable_of_the_contract_is_covered_by_a_golden_or_a_test() {
     // ones this crate's other tests cover (GITHUB_APP_INSTALLATION_ID, MCP_ALLOW_INSECURE off, …).
     // This lists them, so a new variable added to the contract cannot be forgotten silently.
     let mut seen = std::collections::BTreeSet::new();
-    for case in ["coder", "coder-split", "coder-affinity-token"] {
+    for case in [
+        "coder",
+        "coder-split",
+        "coder-affinity-token",
+        "coder-run-pods",
+    ] {
         for w in golden(case)["workloads"].as_object().unwrap().values() {
             for e in w["agent"]["env"].as_array().unwrap() {
                 seen.insert(e["name"].as_str().unwrap().to_owned());

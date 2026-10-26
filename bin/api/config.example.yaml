@@ -37,6 +37,11 @@ defaults:
       instances: 1
       storage:
         size: 5Gi
+  # The size classes of the operator's run pods (the keys of its chart's `runPodClasses`; the chart writes this list itself when it has
+  # run pods on, D15a): what GET /v1/info offers as `runPodSizeClasses` and what a coder form may pick. Absent or empty: this deployment
+  # has no run pods, and a form that asks for them is refused. When it names a class, `coder.workVolume` below is required (run pods
+  # mount it) and the API checks, at start, that a coder asking for the first class is a valid one.
+  # runPodSizeClasses: [standard]
   # The Secret key that must hold the orchestrator's AGENT_REGISTRY_AGENT_TOKEN, or the orchestrator lists an agent and
   # cannot call it.
   a2aBearer:

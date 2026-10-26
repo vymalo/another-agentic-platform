@@ -65,6 +65,13 @@ pub struct Defaults {
     /// own image (it fails closed: somebody wrote it). See [`ImagePolicy`].
     #[serde(default)]
     pub allowed_image_registries: Option<Vec<String>>,
+
+    /// The size classes of run pods the operator has (the names of its chart's `runPodClasses`; the chart writes
+    /// them here when it has run pods on, slice D15a): what `GET /v1/info` offers as `runPodSizeClasses` and what a
+    /// coder form may pick (`agent.runPodSizeClass`). **Empty: this deployment has no run pods**, and a form that asks
+    /// for them is refused, saying so. A name the operator does not have is a form the operator would mark `ConfigInvalid`.
+    #[serde(default)]
+    pub run_pod_size_classes: Vec<String>,
 }
 
 fn default_offer_label() -> String {

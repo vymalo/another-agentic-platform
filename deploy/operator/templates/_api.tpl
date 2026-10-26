@@ -53,6 +53,10 @@ api.port and api.healthPort, which the probes and the Service use) and `defaults
 {{- $c := .Values.api.config -}}
 {{- $defaults := deepCopy (default (dict) $c.defaults) -}}
 {{- $_ := set $defaults "namespace" (include "aap.api.namespace" .) -}}
+{{- /* The size classes the operator has (run pods on): the API offers them on GET /v1/info and refuses a coder form that names another. Off: the key is not written, and the file is what it was. */ -}}
+{{- if include "aap.runPods" . -}}
+{{- $_ := set $defaults "runPodSizeClasses" (keys .Values.runPodClasses | sortAlpha) -}}
+{{- end -}}
 {{- $cfg := dict "listen" (printf "0.0.0.0:%d" (int .Values.api.port)) "healthListen" (printf "0.0.0.0:%d" (int .Values.api.healthPort)) "oidc" $c.oidc "cors" (default (dict) $c.cors) "defaults" $defaults -}}
 {{- toYaml $cfg -}}
 {{- end -}}

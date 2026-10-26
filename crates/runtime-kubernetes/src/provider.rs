@@ -10,9 +10,12 @@ use aap_ports::{
 use futures::stream::BoxStream;
 use k8s_openapi::NamespaceResourceScope;
 use k8s_openapi::api::apps::v1::{Deployment, StatefulSet};
-use k8s_openapi::api::core::v1::{ConfigMap, PersistentVolumeClaim, Pod, Service};
+use k8s_openapi::api::core::v1::{
+    ConfigMap, PersistentVolumeClaim, Pod, ResourceQuota, Service, ServiceAccount,
+};
 use k8s_openapi::api::networking::v1::NetworkPolicy;
 use k8s_openapi::api::policy::v1::PodDisruptionBudget;
+use k8s_openapi::api::rbac::v1::RoleBinding;
 use k8s_openapi::apimachinery::pkg::apis::meta::v1::ObjectMeta;
 use kube::api::{DeleteParams, ListParams, Patch, PatchParams};
 use kube::{Api, Client, Resource};
@@ -70,8 +73,12 @@ fn is_ours(meta: &ObjectMeta, id: &RuntimeId) -> bool {
 ///
 /// Cheap to clone: every clone shares one client. It needs the right to `get`, `list`, `watch`,
 /// `patch` and `delete` the kinds it owns (StatefulSets, Deployments, Services, NetworkPolicies,
-/// PodDisruptionBudgets, ConfigMaps, claims) and to `list` and `watch` pods. **It never touches a
-/// Secret**: a Secret is a reference in a pod spec, and the kubelet is who reads it.
+/// PodDisruptionBudgets, ConfigMaps, claims, and for run pods ServiceAccounts, ResourceQuotas and RoleBindings) and
+/// to `list` and `watch` pods, and, only to clear the pods of a service that stops making run pods, to `delete`
+/// them. For run pods it also needs the right to **bind** the one Role the deployment made for them: it holds no
+/// right to make a pod or to `exec`, and Kubernetes refuses a binding of a role its maker could not use unless the
+/// maker may bind it (*verified 2026-10-26* on a bare kube-apiserver v1.35.8). **It never touches a Secret**: a
+/// Secret is a reference in a pod spec, and the kubelet is who reads it.
 #[derive(Clone)]
 pub struct KubernetesRuntime {
     client: Client,
@@ -186,6 +193,11 @@ impl KubernetesRuntime {
             status.issues.extend(conflicts);
             return Ok(status);
         }
+        if rendered.run_pods.is_none() {
+            // A service that made run pods and no longer asks: the right to make them goes before anything else is
+            // applied, and then the pods.
+            self.remove_run_pods(id).await?;
+        }
         self.apply_all(id, &rendered).await?;
         self.remove_stale(id, &rendered).await?;
         let status = self.observe(id).await?;
@@ -241,6 +253,38 @@ impl KubernetesRuntime {
                 self.foreign::<NetworkPolicy>(id, id.name()).await?,
             );
         }
+        if let Some(run) = &r.run_pods {
+            let name_of = |m: &k8s_openapi::apimachinery::pkg::apis::meta::v1::ObjectMeta| {
+                m.name.clone().unwrap_or_default()
+            };
+            note(
+                first_role,
+                self.foreign::<ConfigMap>(id, &name_of(&run.policy_params.metadata))
+                    .await?,
+            );
+            note(
+                first_role,
+                self.foreign::<ServiceAccount>(id, &name_of(&run.service_account.metadata))
+                    .await?,
+            );
+            note(
+                first_role,
+                self.foreign::<ResourceQuota>(id, &name_of(&run.quota.metadata))
+                    .await?,
+            );
+            if let Some(np) = &run.network_policy {
+                note(
+                    first_role,
+                    self.foreign::<NetworkPolicy>(id, &name_of(&np.metadata))
+                        .await?,
+                );
+            }
+            note(
+                first_role,
+                self.foreign::<RoleBinding>(id, &name_of(&run.role_binding.metadata))
+                    .await?,
+            );
+        }
         Ok(taken
             .into_iter()
             .map(|(role, what)| Issue {
@@ -260,6 +304,17 @@ impl KubernetesRuntime {
         }
         for o in &r.claims {
             self.apply(ns, o).await?;
+        }
+        if let Some(run) = &r.run_pods {
+            // The guard's parameters and the account are there before the right to make pods is: the parameters
+            // are what the admission policy reads, and a binding without them would let the account make any pod.
+            self.apply(ns, &run.policy_params).await?;
+            self.apply(ns, &run.service_account).await?;
+            self.apply(ns, &run.quota).await?;
+            if let Some(np) = &run.network_policy {
+                self.apply(ns, np).await?;
+            }
+            self.apply(ns, &run.role_binding).await?;
         }
         self.apply(ns, &r.service).await?;
         for (_, w) in &r.workloads {
@@ -312,11 +367,95 @@ impl KubernetesRuntime {
                 self.delete_named::<PodDisruptionBudget>(ns, &name).await?;
             }
         }
-        if r.network_policy.is_none() {
-            for p in self.list_ours::<NetworkPolicy>(id).await? {
-                let name = p.metadata.name.unwrap_or_default();
+        // The policy of the agent's ingress is `<svc>`; the run pods' is `<svc>-run-pods`. Each goes when the spec no
+        // longer has it, and not for the other's sake.
+        let wanted_policies: BTreeSet<&str> = r
+            .network_policy
+            .iter()
+            .chain(
+                r.run_pods
+                    .iter()
+                    .filter_map(|run| run.network_policy.as_ref()),
+            )
+            .filter_map(|p| p.metadata.name.as_deref())
+            .collect();
+        for p in self.list_ours::<NetworkPolicy>(id).await? {
+            let name = p.metadata.name.unwrap_or_default();
+            if !wanted_policies.contains(name.as_str()) {
                 self.delete_named::<NetworkPolicy>(ns, &name).await?;
             }
+        }
+        Ok(())
+    }
+
+    /// A service that made run pods and does not any more: take the right to make them away first, then clear the
+    /// pods that were made (nothing sweeps them now: the coder that did runs its commands in its own container),
+    /// then the rest. A service that never had any costs three reads.
+    async fn remove_run_pods(&self, id: &RuntimeId) -> Result<bool> {
+        let ns = id.scope();
+        let bindings = self.list_ours::<RoleBinding>(id).await?;
+        let accounts = self.list_ours::<ServiceAccount>(id).await?;
+        let quotas = self.list_ours::<ResourceQuota>(id).await?;
+        if bindings.is_empty() && accounts.is_empty() && quotas.is_empty() {
+            return Ok(false);
+        }
+        for b in &bindings {
+            self.delete_named::<RoleBinding>(ns, b.metadata.name.as_deref().unwrap_or_default())
+                .await?;
+        }
+        self.delete_run_pods(id).await?;
+        for q in &quotas {
+            self.delete_named::<ResourceQuota>(ns, q.metadata.name.as_deref().unwrap_or_default())
+                .await?;
+        }
+        // By name, but only ours: a policy or a ConfigMap of the same name that someone else made is theirs.
+        let (policy, params) = (names::run_pods(id), names::run_pods_policy_params(id));
+        for p in self.list_ours::<NetworkPolicy>(id).await? {
+            if p.metadata.name.as_deref() == Some(policy.as_str()) {
+                self.delete_named::<NetworkPolicy>(ns, &policy).await?;
+            }
+        }
+        for c in self.list_ours::<ConfigMap>(id).await? {
+            if c.metadata.name.as_deref() == Some(params.as_str()) {
+                self.delete_named::<ConfigMap>(ns, &params).await?;
+            }
+        }
+        for a in &accounts {
+            self.delete_named::<ServiceAccount>(ns, a.metadata.name.as_deref().unwrap_or_default())
+                .await?;
+        }
+        Ok(true)
+    }
+
+    /// Delete the run pods of a service: the pods its coder labelled, found by the labels the parameters of its guard
+    /// name (the operator wrote them from the spec; it knows nothing of adam's labels but through the spec). With the
+    /// parameters gone there is nothing to find them by, and nothing is deleted.
+    async fn delete_run_pods(&self, id: &RuntimeId) -> Result<()> {
+        let ns = id.scope();
+        let Some(params) = self
+            .get_opt::<ConfigMap>(ns, &names::run_pods_policy_params(id))
+            .await?
+            .filter(|c| is_ours(&c.metadata, id))
+        else {
+            return Ok(());
+        };
+        let data = params.data.unwrap_or_default();
+        let (Some(managed_by), Some(run_label)) = (data.get("managedBy"), data.get("runLabel"))
+        else {
+            return Ok(());
+        };
+        let selector = format!(
+            "{MANAGED_BY_LABEL}={managed_by},{INSTANCE_LABEL}={},{run_label}",
+            id.name()
+        );
+        let pods = self
+            .api::<Pod>(ns)
+            .list(&ListParams::default().labels(&selector))
+            .await
+            .map_err(|e| Error::from_kube(what::<Pod>("(list)"), e))?;
+        for pod in pods.items {
+            let name = pod.metadata.name.unwrap_or_default();
+            self.delete_named::<Pod>(ns, &name).await?;
         }
         Ok(())
     }
@@ -325,6 +464,7 @@ impl KubernetesRuntime {
         let wanted: BTreeSet<&str> = r
             .config_maps
             .iter()
+            .chain(r.run_pods.iter().map(|run| &run.policy_params))
             .filter_map(|c| c.metadata.name.as_deref())
             .collect();
         for c in self.list_ours::<ConfigMap>(id).await? {
@@ -443,7 +583,10 @@ impl KubernetesRuntime {
         }
 
         let mut existed = !sts.is_empty() || !deploys.is_empty();
-        // Compute first: nothing is left to make a claim again.
+        // The right to make run pods first, then the pods they made (the guard's parameters are read to find them,
+        // so they go with the rest below): nothing is left to make a pod again.
+        existed |= self.remove_run_pods(id).await?;
+        // Compute next: nothing is left to make a claim again.
         for s in &sts {
             self.delete_named::<StatefulSet>(ns, s.metadata.name.as_deref().unwrap_or_default())
                 .await?;
@@ -584,6 +727,9 @@ impl KubernetesRuntime {
         push(&mut docs, self.list_ours::<Deployment>(id).await?);
         push(&mut docs, self.list_ours::<NetworkPolicy>(id).await?);
         push(&mut docs, self.list_ours::<PodDisruptionBudget>(id).await?);
+        push(&mut docs, self.list_ours::<ServiceAccount>(id).await?);
+        push(&mut docs, self.list_ours::<ResourceQuota>(id).await?);
+        push(&mut docs, self.list_ours::<RoleBinding>(id).await?);
         push(
             &mut docs,
             self.list_ours::<PersistentVolumeClaim>(id).await?,

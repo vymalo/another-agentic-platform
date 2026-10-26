@@ -13,10 +13,11 @@ use aap_ports::{
 };
 use serde_json::json;
 
-use crate::contract::{self, env, probes, sidecar};
+use crate::contract::{self, env, probes, run_pods as rp, sidecar};
 use crate::digest::{files_hash8, spec_digest};
 use crate::externals::Externals;
 use crate::refs::{Origins, materialize};
+use crate::run_pods::{ForService, RunPodClass, RunPodSettings};
 use crate::validate::{ConfigIssue, check_all};
 use crate::{convert, plan};
 
@@ -64,11 +65,11 @@ pub fn resolve(
     owner: OwnerHandle,
 ) -> Result<ResolvedAgent, Vec<ConfigIssue>> {
     let read = materialize(config, externals);
-    check_all(service, &read)?;
+    check_all(service, &read, externals)?;
     let config = &read.config;
     let name = service.metadata.name.clone().unwrap_or_default();
     let namespace = service.metadata.namespace.clone().unwrap_or_default();
-    let cx = Cx::new(service, config, &read.origins, &name, &namespace);
+    let cx = Cx::new(service, config, &read.origins, &name, &namespace, externals);
 
     let (store_kind, database) = match (
         &service.spec.store.postgres.secret_ref,
@@ -120,6 +121,7 @@ pub fn resolve(
             selects,
             allow_from,
         },
+        run_pods: cx.run_pods_spec().map_err(|issue| vec![issue])?,
     };
     let digest = spec_digest(&runtime);
     runtime.digest.clone_from(&digest);
@@ -165,6 +167,14 @@ struct Cx<'a> {
     public_url: String,
     /// The agent is `adam-coder` (it has the coder's variables and a workspace).
     is_coder: bool,
+    /// The run pods the config asks for, with the deployment's side of them (slice D15).
+    run: Option<Run<'a>>,
+}
+
+/// What the config asks of run pods and the deployment gives: the settings, and the class chosen.
+struct Run<'a> {
+    settings: &'a RunPodSettings,
+    class: &'a RunPodClass,
 }
 
 impl<'a> Cx<'a> {
@@ -174,6 +184,7 @@ impl<'a> Cx<'a> {
         origins: &'a Origins,
         name: &'a str,
         namespace: &str,
+        externals: &'a Externals,
     ) -> Self {
         let configured = service
             .spec
@@ -192,6 +203,16 @@ impl<'a> Cx<'a> {
             public_url: configured
                 .map_or_else(|| plan::default_public_url(name, namespace), str::to_owned),
             is_coder: config.spec.harness.adam.binary == Binary::AdamCoder,
+            // `validate` refused a config that asks for run pods the deployment does not give: there is no
+            // run, and `run_pods_spec` says so if it is ever asked.
+            run: plan::run_pods(config)
+                .zip(externals.run_pods.as_ref())
+                .and_then(|(asked, settings)| {
+                    settings
+                        .classes
+                        .get(&asked.size_class)
+                        .map(|class| Run { settings, class })
+                }),
         }
     }
 
@@ -260,6 +281,33 @@ impl<'a> Cx<'a> {
             })
         };
 
+        // The pod every run pod is made from: adam reads it at startup, so a changed one is a rollout (it is in
+        // the digest as a file set is), and only the workers read it.
+        let run_volume = match &self.run {
+            Some(run) => {
+                let mut text = serde_json::to_string_pretty(&self.run_service(run)?.template())
+                    .unwrap_or_default();
+                text.push('\n');
+                let set = format!("{}-run-pod", self.name);
+                file_sets.push(FileSet {
+                    name: set.clone(),
+                    files: BTreeMap::from([(
+                        contract::run_pods::TEMPLATE_FILE_NAME.to_owned(),
+                        text,
+                    )]),
+                    immutable: false,
+                });
+                Some(VolumeSpec {
+                    name: contract::run_pods::TEMPLATE_VOLUME.to_owned(),
+                    source: VolumeSource::Files {
+                        file_set: set,
+                        mode: contract::FILES_MODE,
+                    },
+                })
+            }
+            None => None,
+        };
+
         let scaling = &self.service.spec.scaling;
         let workers = u32::try_from(scaling.workers).unwrap_or(1);
         let mut workloads = Vec::new();
@@ -271,6 +319,7 @@ impl<'a> Cx<'a> {
                 database,
                 folder_volume.as_ref(),
                 mcp_volume.as_ref(),
+                run_volume.as_ref(),
             )?),
             Topology::Split => {
                 workloads.push(self.workload(
@@ -280,6 +329,7 @@ impl<'a> Cx<'a> {
                     database,
                     folder_volume.as_ref(),
                     mcp_volume.as_ref(),
+                    run_volume.as_ref(),
                 )?);
                 let replicas =
                     u32::try_from(scaling.front.as_ref().map_or(1, |f| f.replicas)).unwrap_or(1);
@@ -290,10 +340,90 @@ impl<'a> Cx<'a> {
                     database,
                     folder_volume.as_ref(),
                     None,
+                    None,
                 )?);
             }
         }
         Ok((file_sets, workloads))
+    }
+
+    /// What the template and the provider's run-pod objects are made from, for this service.
+    fn run_service<'r>(&'r self, run: &'r Run<'a>) -> Result<ForService<'r>, ConfigIssue> {
+        let spec = &self.config.spec;
+        let tools_image = spec
+            .environment
+            .image
+            .as_ref()
+            .map(|i| i.reference.as_str())
+            .ok_or_else(|| {
+                refused(
+                    "AgentConfig spec.environment.image",
+                    "no image, and no default was applied",
+                )
+            })?;
+        // `validate` refused run pods with no work volume, and a model with no key.
+        let work = plan::work_volume(self.config).ok_or_else(|| {
+            refused(
+                "AgentConfig spec.environment.volumes",
+                "run pods need the coder's work volume",
+            )
+        })?;
+        let model_key = spec.model.api_key_secret_ref.as_ref().ok_or_else(|| {
+            refused(
+                "AgentConfig spec.model.apiKeySecretRef",
+                "no key: the ModelEndpoint it names was not read",
+            )
+        })?;
+        // The claim a run pod mounts: the shared claim of a ReadWriteMany volume, or the claim the StatefulSet makes
+        // for the first worker (`<volume>-<workload>-0`), which only that worker's node has attached.
+        let per_replica = work.source.persistent.per_replica;
+        let claim = if per_replica {
+            format!("{}-{}-0", work.name, self.name)
+        } else {
+            format!("{}-{}", self.name, work.name)
+        };
+        Ok(ForService {
+            service: self.name,
+            workload: self.name,
+            settings: run.settings,
+            class: run.class,
+            tools_image,
+            security: self.security(),
+            mount_path: &work.mount_path,
+            claim,
+            beside_the_coder: per_replica,
+            model_key,
+        })
+    }
+
+    /// The run pods of the runtime spec, if the config asks for them.
+    fn run_pods_spec(&self) -> Result<Option<aap_ports::RunPods>, ConfigIssue> {
+        if plan::run_pods(self.config).is_none() {
+            return Ok(None);
+        }
+        let Some(run) = &self.run else {
+            return Err(refused(
+                "AgentConfig spec.harness.adam.coder.runPods",
+                "the deployment gives no run pods, or no such size class",
+            ));
+        };
+        Ok(Some(self.run_service(run)?.spec()))
+    }
+
+    /// The pod's security context, from the config.
+    fn security(&self) -> Security {
+        let sec = &self.config.spec.security;
+        Security {
+            run_as_user: sec.run_as_user.unwrap_or(contract::DEFAULT_ID),
+            run_as_group: sec.run_as_group.unwrap_or(contract::DEFAULT_ID),
+            fs_group: sec.fs_group.unwrap_or(contract::DEFAULT_ID),
+            fs_group_change_policy: sec.fs_group_change_policy.map(|p| match p {
+                FsGroupChangePolicy::OnRootMismatch => {
+                    aap_ports::FsGroupChangePolicy::OnRootMismatch
+                }
+                FsGroupChangePolicy::Always => aap_ports::FsGroupChangePolicy::Always,
+            }),
+        }
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -305,6 +435,7 @@ impl<'a> Cx<'a> {
         database: &SecretRef,
         folder: Option<&VolumeSpec>,
         mcp: Option<&VolumeSpec>,
+        run_pods: Option<&VolumeSpec>,
     ) -> Result<Workload, ConfigIssue> {
         let spec = &self.config.spec;
         let runs_workers = role.runs_workers();
@@ -361,6 +492,14 @@ impl<'a> Cx<'a> {
                 mounts.push(Mount {
                     volume: m.name.clone(),
                     path: contract::EXTRA_MCP_DIR.to_owned(),
+                    read_only: true,
+                });
+            }
+            if let Some(t) = run_pods {
+                volumes.push(t.clone());
+                mounts.push(Mount {
+                    volume: t.name.clone(),
+                    path: contract::run_pods::TEMPLATE_DIR.to_owned(),
                     read_only: true,
                 });
             }
@@ -492,7 +631,6 @@ impl<'a> Cx<'a> {
             _ => Vec::new(),
         };
 
-        let sec = &spec.security;
         let front_replicas = role == Role::ControlPlane && replicas > 1;
         Ok(Workload {
             name,
@@ -502,17 +640,7 @@ impl<'a> Cx<'a> {
             container,
             sidecars,
             volumes,
-            security: Security {
-                run_as_user: sec.run_as_user.unwrap_or(contract::DEFAULT_ID),
-                run_as_group: sec.run_as_group.unwrap_or(contract::DEFAULT_ID),
-                fs_group: sec.fs_group.unwrap_or(contract::DEFAULT_ID),
-                fs_group_change_policy: sec.fs_group_change_policy.map(|p| match p {
-                    FsGroupChangePolicy::OnRootMismatch => {
-                        aap_ports::FsGroupChangePolicy::OnRootMismatch
-                    }
-                    FsGroupChangePolicy::Always => aap_ports::FsGroupChangePolicy::Always,
-                }),
-            },
+            security: self.security(),
             termination_grace_secs: if runs_workers {
                 spec.environment
                     .termination_grace_period_seconds
@@ -521,6 +649,8 @@ impl<'a> Cx<'a> {
                 Some(contract::front::TERMINATION_GRACE_SECS)
             },
             min_available: front_replicas.then_some(contract::front::MIN_AVAILABLE),
+            // Only the workers make run pods; they hold the token of the account that may.
+            service_account: (runs_workers && self.run.is_some()).then(|| self.name.to_owned()),
         })
     }
 
@@ -547,7 +677,9 @@ impl<'a> Cx<'a> {
             if !self.placement.is_empty() {
                 e.push(lit(env::WORKSPACE_PLACEMENT, &self.placement));
             }
-            if plan::pins_runs(&self.placement) {
+            // A pinned run stays with the worker of that name, and a run pod is annotated with it: with run pods on,
+            // the pod name is the worker's identity whatever the placement.
+            if plan::pins_runs(&self.placement) || self.run.is_some() {
                 e.push(EnvVar {
                     name: env::WORKER_ID.to_owned(),
                     value: EnvValue::PodName,
@@ -666,6 +798,25 @@ impl<'a> Cx<'a> {
             }
         }
 
+        if runs_workers && let Some(run) = &self.run {
+            // The commands of a run run in a pod of their own, made from the template (ADR 0019).
+            let s = run.settings;
+            e.push(lit(rp::RUN_ENVIRONMENT, rp::KUBERNETES));
+            e.push(lit(rp::RUN_POD_TEMPLATE_FILE, rp::TEMPLATE_FILE));
+            e.push(EnvVar {
+                name: rp::RUN_POD_NAMESPACE.to_owned(),
+                value: EnvValue::PodNamespace,
+            });
+            e.push(lit(rp::RUN_POD_INSTANCE, self.name));
+            e.push(lit(rp::RUN_POD_CONTAINER, &s.container));
+            e.push(lit(
+                rp::RUN_POD_READY_TIMEOUT_SECS,
+                s.ready_timeout_secs.to_string(),
+            ));
+            e.push(lit(rp::RUN_POD_IDLE_SECS, s.idle_secs.to_string()));
+            e.push(lit(rp::RUN_POD_WAIT_SECS, s.wait_secs.to_string()));
+        }
+
         for (name, value) in &spec.extra_env {
             e.push(lit(name, value));
         }
@@ -771,9 +922,16 @@ mod tests {
         let service: AgentService = serde_json::from_value(service).unwrap();
         let config: AgentConfig = serde_json::from_value(config).unwrap();
         let origins = Origins::default();
-        Cx::new(&service, &config, &origins, "chat", "ns")
-            .workloads(&SecretRef::new("db", "uri"))
-            .map(|_| ())
+        Cx::new(
+            &service,
+            &config,
+            &origins,
+            "chat",
+            "ns",
+            &Externals::default(),
+        )
+        .workloads(&SecretRef::new("db", "uri"))
+        .map(|_| ())
     }
 
     #[test]

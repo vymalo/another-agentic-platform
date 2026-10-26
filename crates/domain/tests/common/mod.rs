@@ -4,7 +4,7 @@
 use std::path::{Path, PathBuf};
 
 use aap_api::{AgentConfig, AgentService};
-use aap_domain::{ConfigIssue, Externals, ResolvedAgent};
+use aap_domain::{ConfigIssue, Externals, ResolvedAgent, RunPodSettings};
 use aap_ports::OwnerHandle;
 use serde::Deserialize;
 use serde_json::Value;
@@ -194,4 +194,101 @@ pub fn shared_objects(name: &str) -> Externals {
         }
     }
     ext
+}
+
+// ------------------------------------------------------------------------------------ run pods
+
+/// `deploy/operator/values.yaml`, parsed.
+pub fn operator_chart_values() -> Value {
+    let path = repo_root().join("deploy/operator/values.yaml");
+    let text = std::fs::read_to_string(&path).unwrap_or_else(|e| panic!("{}: {e}", path.display()));
+    serde_yaml::from_str(&text).unwrap_or_else(|e| panic!("{}: {e}", path.display()))
+}
+
+/// A values file of `tools/adam-parity/cases`, parsed.
+pub fn parity_case_values(case: &str) -> Value {
+    let path = repo_root()
+        .join("tools/adam-parity/cases")
+        .join(format!("{case}.yaml"));
+    let text = std::fs::read_to_string(&path).unwrap_or_else(|e| panic!("{}: {e}", path.display()));
+    serde_yaml::from_str(&text).unwrap_or_else(|e| panic!("{}: {e}", path.display()))
+}
+
+/// Helm's merge of values: a map is merged key by key, `null` removes the key, anything else replaces.
+pub fn helm_merge(base: &mut Value, over: &Value) {
+    match (base, over) {
+        (Value::Object(b), Value::Object(o)) => {
+            for (k, v) in o {
+                if v.is_null() {
+                    b.remove(k);
+                } else if let Some(existing) = b.get_mut(k) {
+                    helm_merge(existing, v);
+                } else {
+                    b.insert(k.clone(), v.clone());
+                }
+            }
+        }
+        (b, o) => *b = o.clone(),
+    }
+}
+
+/// The settings the operator chart ships (its `runPods` block and `runPodClasses`, `deploy/operator/values.yaml`) as the
+/// file the chart renders for the operator, with the names of the cluster-scoped objects the chart would make.
+pub fn chart_run_pod_settings() -> Value {
+    let values = operator_chart_values();
+    let mut settings = values["runPods"].clone();
+    let object = settings.as_object_mut().expect("runPods is a map");
+    object.remove("enabled");
+    object.remove("priorityClassName");
+    object.insert("classes".into(), values["runPodClasses"].clone());
+    object.insert("priorityClass".into(), serde_json::json!("coder-run"));
+    object.insert("role".into(), serde_json::json!("coder-run-pods"));
+    settings
+}
+
+/// The settings the operator side of a parity case runs with: the operator chart's defaults, changed by the
+/// `runPods` block of the case's values for the adam-rs chart, whose keys the operator chart's keep (`resources` is
+/// the class `tuned`; `admissionPolicy.extraAllowedImages` is `extraAllowedImages`; `priorityClassName` names the
+/// class the chart is told to use). Returns the settings and the name of the size class the config picks.
+pub fn run_pod_settings_of(case: &str) -> (RunPodSettings, String) {
+    let case_values = parity_case_values(case);
+    let rp = &case_values["runPods"];
+    let mut settings = chart_run_pod_settings();
+    let mut over = serde_json::Map::new();
+    for key in [
+        "image",
+        "container",
+        "cargoBuildJobs",
+        "extraEnv",
+        "quota",
+        "idleSecs",
+        "readyTimeoutSecs",
+        "waitSecs",
+        "nodeSelector",
+        "tolerations",
+        "nodeAffinity",
+        "networkPolicy",
+    ] {
+        if let Some(v) = rp.get(key) {
+            over.insert(key.to_owned(), v.clone());
+        }
+    }
+    if let Some(v) = rp["admissionPolicy"].get("extraAllowedImages") {
+        over.insert("extraAllowedImages".into(), v.clone());
+    }
+    if let Some(v) = rp.get("priorityClassName") {
+        over.insert("priorityClass".into(), v.clone());
+    }
+    let mut class = "standard".to_owned();
+    if let Some(resources) = rp.get("resources") {
+        over.insert("classes".into(), serde_json::json!({ "tuned": resources }));
+        class = "tuned".into();
+    }
+    helm_merge(&mut settings, &Value::Object(over));
+    let settings: RunPodSettings =
+        serde_json::from_value(settings).expect("settings of the operator chart");
+    if let Err(problems) = settings.validate() {
+        panic!("the settings of {case} are refused: {problems:?}");
+    }
+    (settings, class)
 }

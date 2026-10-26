@@ -124,8 +124,12 @@ pub fn defaults() -> Defaults {
             resources: Some(requests("100m", "256Mi")),
         },
         allowed_image_registries: None,
+        run_pod_size_classes: RUN_POD_CLASSES.iter().map(|c| (*c).to_owned()).collect(),
     }
 }
+
+/// The size classes the sample deployment offers.
+pub const RUN_POD_CLASSES: [&str; 2] = ["standard", "large"];
 
 // ---------------------------------------------------------------- the forms
 
@@ -154,6 +158,7 @@ pub fn coder_form(name: &str) -> AgentForm {
             workers: Some(2),
             pr_draft: Some(true),
             opencode_model: Some("coding-model".to_owned()),
+            run_pod_size_class: None,
         }),
     }
 }
@@ -419,9 +424,19 @@ fn arb_coder_settings() -> impl Strategy<Value = CoderSettings> {
         prop::option::of(1i32..=16),
         prop::option::of(any::<bool>()),
         prop::option::of(alias()),
+        prop::option::of(prop::sample::select(&RUN_POD_CLASSES[..]).prop_map(str::to_owned)),
     )
         .prop_map(
-            |(app_id, key, owners, subset, workers, pr_draft, opencode_model)| {
+            |(
+                app_id,
+                key,
+                owners,
+                subset,
+                workers,
+                pr_draft,
+                opencode_model,
+                run_pod_size_class,
+            )| {
                 let owners: Vec<String> = owners.into_iter().collect();
                 let create_repo_owners = owners
                     .iter()
@@ -439,6 +454,7 @@ fn arb_coder_settings() -> impl Strategy<Value = CoderSettings> {
                     workers,
                     pr_draft,
                     opencode_model,
+                    run_pod_size_class,
                 }
             },
         )

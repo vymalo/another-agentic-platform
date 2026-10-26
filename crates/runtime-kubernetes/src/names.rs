@@ -89,6 +89,21 @@ pub fn shared_claim(id: &RuntimeId, volume: &str) -> String {
     format!("{}-{volume}", id.name())
 }
 
+/// On the ConfigMap that holds the parameters of the admission policy of a service's run pods (`"true"`): what
+/// the policy's binding selects its parameters by (the operator chart renders the binding, slice D15a).
+pub const RUN_PODS_POLICY_LABEL: &str = "agents.vymalo.com/run-pods-policy";
+
+/// The name of the account's role binding, the quota and the network policy of a service's run pods:
+/// `<service>-run-pods`, as the coder's chart names them (`<release>-run-pods`).
+pub fn run_pods(id: &RuntimeId) -> String {
+    format!("{}-run-pods", id.name())
+}
+
+/// The name of the ConfigMap that holds the parameters of the admission policy for a service's run pods.
+pub fn run_pods_policy_params(id: &RuntimeId) -> String {
+    format!("{}-run-pods-policy", id.name())
+}
+
 /// The longest key a ConfigMap accepts.
 const MAX_KEY: usize = 253;
 

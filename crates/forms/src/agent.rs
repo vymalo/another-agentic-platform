@@ -109,6 +109,12 @@ pub struct CoderSettings {
     /// same as the model").
     #[serde(default)]
     pub opencode_model: Option<String>,
+    /// The commands of a run in pods of their own (`coder.runPods.sizeClass`, slice D15): a size class of the
+    /// operator's chart, offered by `GET /v1/info` (`runPodSizeClasses`). Absent: no run pods, and a GitHub App coder
+    /// runs its commands next to the App's private key (the access tiers are no boundary against a command).
+    /// Absent on the wire when absent, so a form with no run pods is the wire form it was before the field.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub run_pod_size_class: Option<String>,
 }
 
 /// The GitHub App of a coder: its id, its private key as an offered secret key, and the owners it acts on.

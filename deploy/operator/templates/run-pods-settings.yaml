@@ -1,0 +1,17 @@
+{{- if include "aap.runPods" . }}
+{{- $s := omit .Values.runPods "enabled" "priorityClassName" }}
+{{- $file := merge (dict "priorityClass" (include "aap.runPodsPriorityClass" .) "role" (include "aap.runPodsRole" .) "classes" .Values.runPodClasses) $s }}
+# runPods.enabled: what the operator reads about run pods (RUN_PODS_FILE, read once at start; a change is a new pod). The names of
+# the cluster-scoped objects this chart made are in it, and the values of `runPods` and `runPodClasses`, which are the coder
+# chart's. No secret: the model key is the agent's, and a run pod gets it by reference.
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ include "aap.runPodsSettings" . }}
+  namespace: {{ include "aap.watchNamespace" . }}
+  labels:
+    {{- include "aap.labels" . | nindent 4 }}
+data:
+  settings.yaml: |
+    {{- toYaml $file | nindent 4 }}
+{{- end }}

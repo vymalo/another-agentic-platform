@@ -257,3 +257,100 @@ pub mod front {
     /// Pods that must stay up when the front has more than one replica.
     pub const MIN_AVAILABLE: u32 = 1;
 }
+
+/// Run pods: the variables the coder reads to put the commands of a run in pods of their own, the template it
+/// reads, and the labels it puts on the pods (slice D15; adam-rs ADR 0019 and 0041, read at `3f714d0`, *verified
+/// 2026-10-26*: `bin/adam-coder/README.md` "Where the processes of a run run", `docs/reference/environment.md`,
+/// `crates/adam-env-kubernetes/src/names.rs`, `deploy/coder/templates/_runpods.tpl` and `statefulset.yaml`). The
+/// parity goldens (`tests/golden/coder-run-pods*.json`) hold it equal to what the chart renders.
+pub mod run_pods {
+    /// `local` or `kubernetes`.
+    pub const RUN_ENVIRONMENT: &str = "RUN_ENVIRONMENT";
+    /// The Pod every run pod is made from (YAML or JSON).
+    pub const RUN_POD_TEMPLATE_FILE: &str = "RUN_POD_TEMPLATE_FILE";
+    /// The namespace of the run pods.
+    pub const RUN_POD_NAMESPACE: &str = "RUN_POD_NAMESPACE";
+    /// The release's `app.kubernetes.io/instance`, which finds this deployment's pods.
+    pub const RUN_POD_INSTANCE: &str = "RUN_POD_INSTANCE";
+    /// The template container the commands run in.
+    pub const RUN_POD_CONTAINER: &str = "RUN_POD_CONTAINER";
+    /// How long a pod may take to be ready.
+    pub const RUN_POD_READY_TIMEOUT_SECS: &str = "RUN_POD_READY_TIMEOUT_SECS";
+    /// Idle time before a pod is deleted.
+    pub const RUN_POD_IDLE_SECS: &str = "RUN_POD_IDLE_SECS";
+    /// How long a run retries for a pod the cluster cannot give now.
+    pub const RUN_POD_WAIT_SECS: &str = "RUN_POD_WAIT_SECS";
+
+    /// Every variable the operator sets for run pods (`WORKER_ID` is set already for pinned runs). With run pods
+    /// on, `extraEnv` may name none of them. Not part of [`super::env::OPERATOR_SET`]: that would make an
+    /// `extraEnv` that names one invalid for every agent, run pods or not.
+    pub const SET: &[&str] = &[
+        RUN_ENVIRONMENT,
+        RUN_POD_TEMPLATE_FILE,
+        RUN_POD_NAMESPACE,
+        RUN_POD_INSTANCE,
+        RUN_POD_CONTAINER,
+        RUN_POD_READY_TIMEOUT_SECS,
+        RUN_POD_IDLE_SECS,
+        RUN_POD_WAIT_SECS,
+    ];
+
+    /// The value of `RUN_ENVIRONMENT`.
+    pub const KUBERNETES: &str = "kubernetes";
+
+    /// The volume of the template in the coder pod.
+    pub const TEMPLATE_VOLUME: &str = "run-pod";
+    /// Where the template is mounted.
+    pub const TEMPLATE_DIR: &str = "/etc/adam/run-pod";
+    /// The template's file name in the mount.
+    pub const TEMPLATE_FILE_NAME: &str = "pod.yaml";
+    /// `RUN_POD_TEMPLATE_FILE`.
+    pub const TEMPLATE_FILE: &str = "/etc/adam/run-pod/pod.yaml";
+
+    /// The value of `app.kubernetes.io/managed-by` on a run pod: the coder sets it, and the policy and the
+    /// network policy select by it.
+    pub const MANAGED_BY: &str = "adam-coder";
+    /// The label whose presence marks a pod as a run's.
+    pub const RUN_LABEL: &str = "adam.vymalo.com/run";
+
+    /// The name label of the run pods of a service: not the workloads', so that no selector of the service
+    /// ever matches them.
+    pub fn name_label(service: &str) -> String {
+        format!("{service}-run")
+    }
+
+    /// The model key's variable in the run container (the one Secret reference a run pod may have).
+    pub const MODEL_API_KEY: &str = super::env::MODEL_API_KEY;
+
+    /// The init container that copies the coder's tools into the directory the run container mounts.
+    pub const TOOLS_CONTAINER: &str = "tools";
+    /// The volume of those tools, and where the init container mounts it.
+    pub const TOOLS_VOLUME: &str = "tools";
+    /// Where the init container writes the tools.
+    pub const TOOLS_COPY_DIR: &str = "/tools";
+    /// Where the run container mounts them, read-only: the layout of a devcontainer's tools directory.
+    pub const TOOLS_DIR: &str = "/opt/adam/bin";
+    /// What the init container runs.
+    pub const TOOLS_COMMAND: [&str; 3] = [
+        "sh",
+        "-c",
+        "cp -L /opt/adam/bin/adam-exec /opt/adam/bin/opencode /tools/ && chmod 0755 /tools/adam-exec /tools/opencode",
+    ];
+    /// What the run container runs: `tini` reaps what a killed command leaves; the commands are `exec`ed into the
+    /// container.
+    pub const RUN_COMMAND: [&str; 4] = ["tini", "--", "sleep", "infinity"];
+    /// The seconds a run pod has to stop.
+    pub const TERMINATION_GRACE_SECS: u32 = 5;
+    /// The init container's own small resources (the chart's, not configurable).
+    pub const TOOLS_REQUEST_CPU: &str = "10m";
+    /// Memory request.
+    pub const TOOLS_REQUEST_MEMORY: &str = "32Mi";
+    /// Memory limit.
+    pub const TOOLS_LIMIT_MEMORY: &str = "256Mi";
+
+    /// The labels of the pods of a workload, which a run pod's affinity selects (`aap-runtime-kubernetes` puts
+    /// them on, `tests/run_pods.rs` there holds the two equal).
+    pub const AFFINITY_NAME_LABEL: &str = "app.kubernetes.io/name";
+    /// The service label of the same.
+    pub const AFFINITY_INSTANCE_LABEL: &str = "app.kubernetes.io/instance";
+}

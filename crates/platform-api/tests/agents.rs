@@ -3,6 +3,8 @@
 
 mod common;
 
+use aap_platform_api::CorsOrigins;
+use aap_ports::memory::{MemoryAuthenticator, MemoryObjects};
 use aap_ports::testkit::Foreign;
 use aap_ports::{AgentObjects, Kind};
 use common::*;
@@ -661,6 +663,82 @@ async fn a_key_that_is_not_offered_is_422_on_the_field_that_names_it() {
         field_errors(&r)
             .iter()
             .any(|(f, _)| f == "agent.github.privateKey"),
+        "{}",
+        r.text()
+    );
+}
+
+#[tokio::test]
+async fn a_coder_asks_for_run_pods_by_a_size_class_the_deployment_offers() {
+    let api = Api::over(
+        MemoryObjects::in_namespace(NS),
+        MemoryAuthenticator::new(),
+        defaults_with_run_pods(),
+        CorsOrigins::none(),
+    );
+    offer_everything(&api.objects);
+    let token = api.admin();
+    for (path, body) in [
+        ("/v1/models/gateway", model_body("gateway")),
+        ("/v1/tool-servers/docs", tool_body("docs")),
+    ] {
+        let r = api
+            .put(path)
+            .token(&token)
+            .create()
+            .json(&body)
+            .send()
+            .await;
+        assert_eq!(r.code(), 201, "{}", r.text());
+    }
+    // A class the deployment offers is a coder, and the form says it back.
+    let mut body = coder_body("coder-me");
+    body["agent"]["runPodSizeClass"] = json!("large");
+    let r = create(&api, &token, &body).await;
+    assert_eq!(r.code(), 201, "{}", r.text());
+    assert_eq!(
+        r.json()["representation"]["form"]["form"]["agent"]["runPodSizeClass"],
+        "large"
+    );
+    // The object the operator reads says it in the field of the CRD.
+    let yaml = api
+        .get("/v1/agents/coder-me/yaml")
+        .token(&token)
+        .send()
+        .await;
+    assert_eq!(yaml.code(), 200, "{}", yaml.text());
+    assert!(
+        yaml.text().contains("runPods:") && yaml.text().contains("sizeClass: large"),
+        "{}",
+        yaml.text()
+    );
+    // A class it does not have is a 422 on the field, and nothing is written.
+    let mut body = coder_body("coder-two");
+    body["agent"]["runPodSizeClass"] = json!("gigantic");
+    let r = create(&api, &token, &body).await;
+    assert_eq!(r.code(), 422, "{}", r.text());
+    assert!(
+        field_errors(&r)
+            .iter()
+            .any(|(f, m)| f == "agent.runPodSizeClass" && m.contains("standard")),
+        "the error names the field and the classes there are: {}",
+        r.text()
+    );
+    let missing = api.get("/v1/agents/coder-two").token(&token).send().await;
+    assert_eq!(missing.code(), 404);
+}
+
+#[tokio::test]
+async fn a_deployment_with_no_run_pods_refuses_a_form_that_asks_for_them() {
+    let (api, token) = Api::seeded().await;
+    let mut body = coder_body("coder-me");
+    body["agent"]["runPodSizeClass"] = json!("standard");
+    let r = create(&api, &token, &body).await;
+    assert_eq!(r.code(), 422, "{}", r.text());
+    assert!(
+        field_errors(&r)
+            .iter()
+            .any(|(f, m)| f == "agent.runPodSizeClass" && m.contains("no run pods")),
         "{}",
         r.text()
     );

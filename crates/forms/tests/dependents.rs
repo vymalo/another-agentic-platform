@@ -35,6 +35,7 @@ fn referents() -> aap_forms::Referents {
             true,
         )],
         None,
+        &[],
     )
 }
 
@@ -107,6 +108,7 @@ fn an_agent_that_was_already_refused_is_not_blamed_on_the_change() {
         )],
         &[plain],
         None,
+        &[],
     );
     let changed = plain_http().to_resource(NS);
     let errors = dependents_after(
@@ -169,6 +171,7 @@ fn an_object_that_exists_and_cannot_be_read_is_not_said_to_be_missing() {
             false,
         )],
         None,
+        &[],
     );
     let form = coder_form("coder-me");
     let errors = validate_agent(

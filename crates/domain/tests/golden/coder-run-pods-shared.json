@@ -1,0 +1,665 @@
+{
+  "claims": {
+    "coder-work": {
+      "accessModes": [
+        "ReadWriteMany"
+      ],
+      "storage": "20Gi",
+      "storageClass": "longhorn-rwx"
+    }
+  },
+  "configMaps": {},
+  "podDisruptionBudgets": {},
+  "runPods": {
+    "admissionBinding": {
+      "matchResources": {
+        "namespaceSelector": {
+          "matchLabels": {
+            "kubernetes.io/metadata.name": "another-agentic-system"
+          }
+        }
+      },
+      "name": "coder-another-agentic-system-run-pods",
+      "policyName": "coder-another-agentic-system-run-pods",
+      "validationActions": [
+        "Deny"
+      ]
+    },
+    "admissionPolicy": {
+      "failurePolicy": "Fail",
+      "matchConditions": [
+        {
+          "expression": "request.userInfo.username == 'system:serviceaccount:another-agentic-system:coder'",
+          "name": "made-by-the-coder"
+        }
+      ],
+      "matchConstraints": {
+        "resourceRules": [
+          {
+            "apiGroups": [
+              ""
+            ],
+            "apiVersions": [
+              "v1"
+            ],
+            "operations": [
+              "CREATE"
+            ],
+            "resources": [
+              "pods"
+            ]
+          }
+        ]
+      },
+      "name": "coder-another-agentic-system-run-pods",
+      "validations": [
+        {
+          "expression": "has(object.metadata.labels) && 'adam.vymalo.com/run' in object.metadata.labels && 'app.kubernetes.io/managed-by' in object.metadata.labels && object.metadata.labels['app.kubernetes.io/managed-by'] == 'adam-coder'",
+          "message": "a run pod carries the labels app.kubernetes.io/managed-by=adam-coder and adam.vymalo.com/run"
+        },
+        {
+          "expression": "has(object.spec.priorityClassName) && object.spec.priorityClassName == 'coder-run'",
+          "message": "a run pod has the priority class coder-run, which the quota is scoped to"
+        },
+        {
+          "expression": "variables.containers.all(c, c.image in ['ghcr.io/vymalo/another-agentic-images/workspace:1.98.1-e6a528f@sha256:d2aae762ecad2c13bb697332507d236a75d8233d061f38cc97dc9227192b0797', 'ghcr.io/vymalo/another-adam-rs/coder:sha-0391809'])",
+          "message": "a run pod uses only the images the chart allows"
+        },
+        {
+          "expression": "!has(object.spec.volumes) || object.spec.volumes.all(v, has(v.emptyDir) || (has(v.persistentVolumeClaim) && v.persistentVolumeClaim.claimName == 'coder-work'))",
+          "message": "a run pod mounts only emptyDir volumes and the claim coder-work: no hostPath, no Secret, no other claim"
+        },
+        {
+          "expression": "variables.containers.all(c, (!has(c.env) || c.env.all(e, !has(e.valueFrom) || !has(e.valueFrom.secretKeyRef) || (e.valueFrom.secretKeyRef.name == 'coder-secrets' && e.valueFrom.secretKeyRef.key == 'MODEL_API_KEY'))) && (!has(c.envFrom) || c.envFrom.all(f, !has(f.secretRef))))",
+          "message": "a run pod references no Secret but the key MODEL_API_KEY of coder-secrets (as one variable): no Secret volume, no envFrom, no other key"
+        },
+        {
+          "expression": "variables.containers.all(c, has(c.securityContext) && has(c.securityContext.allowPrivilegeEscalation) && c.securityContext.allowPrivilegeEscalation == false && (!has(c.securityContext.privileged) || c.securityContext.privileged == false))",
+          "message": "a run pod is not privileged and sets allowPrivilegeEscalation: false on every container"
+        },
+        {
+          "expression": "variables.containers.all(c, (has(c.securityContext) && has(c.securityContext.runAsUser) ? c.securityContext.runAsUser : (has(object.spec.securityContext) && has(object.spec.securityContext.runAsUser) ? object.spec.securityContext.runAsUser : 0)) != 0 && (has(c.securityContext) && has(c.securityContext.runAsNonRoot) ? c.securityContext.runAsNonRoot : (has(object.spec.securityContext) && has(object.spec.securityContext.runAsNonRoot) ? object.spec.securityContext.runAsNonRoot : false)))",
+          "message": "a run pod does not run as root: a runAsUser other than 0 and runAsNonRoot: true on every container"
+        },
+        {
+          "expression": "(!has(object.spec.hostNetwork) || !object.spec.hostNetwork) && (!has(object.spec.hostPID) || !object.spec.hostPID) && (!has(object.spec.hostIPC) || !object.spec.hostIPC)",
+          "message": "a run pod uses its own network, PID and IPC namespaces"
+        },
+        {
+          "expression": "has(object.spec.automountServiceAccountToken) && object.spec.automountServiceAccountToken == false",
+          "message": "a run pod sets automountServiceAccountToken: false: it holds no credential for the cluster"
+        }
+      ],
+      "variables": [
+        {
+          "expression": "object.spec.containers + (has(object.spec.initContainers) ? object.spec.initContainers : [])",
+          "name": "containers"
+        }
+      ]
+    },
+    "networkPolicy": {
+      "egress": [
+        {
+          "ports": [
+            {
+              "port": 53,
+              "protocol": "UDP"
+            },
+            {
+              "port": 53,
+              "protocol": "TCP"
+            }
+          ],
+          "to": [
+            {
+              "namespaceSelector": {
+                "matchLabels": {
+                  "kubernetes.io/metadata.name": "kube-system"
+                }
+              },
+              "podSelector": {
+                "matchLabels": {
+                  "k8s-app": "kube-dns"
+                }
+              }
+            }
+          ]
+        },
+        {
+          "to": [
+            {
+              "ipBlock": {
+                "cidr": "0.0.0.0/0",
+                "except": [
+                  "10.0.0.0/8",
+                  "172.16.0.0/12",
+                  "192.168.0.0/16",
+                  "169.254.0.0/16",
+                  "100.64.0.0/10"
+                ]
+              }
+            }
+          ]
+        }
+      ],
+      "ingress": [],
+      "name": "coder-run-pods",
+      "podSelector": {
+        "matchExpressions": [
+          {
+            "key": "adam.vymalo.com/run",
+            "operator": "Exists"
+          }
+        ],
+        "matchLabels": {
+          "app.kubernetes.io/instance": "coder",
+          "app.kubernetes.io/managed-by": "adam-coder"
+        }
+      },
+      "policyTypes": [
+        "Ingress",
+        "Egress"
+      ]
+    },
+    "priorityClass": {
+      "globalDefault": false,
+      "name": "coder-run",
+      "preemptionPolicy": "Never",
+      "value": 0
+    },
+    "quota": {
+      "hard": {
+        "limits.memory": "8Gi",
+        "pods": "4"
+      },
+      "name": "coder-run-pods",
+      "scopeSelector": {
+        "matchExpressions": [
+          {
+            "operator": "In",
+            "scopeName": "PriorityClass",
+            "values": [
+              "coder-run"
+            ]
+          }
+        ]
+      }
+    },
+    "role": {
+      "name": "coder-run-pods",
+      "rules": [
+        {
+          "apiGroups": [
+            ""
+          ],
+          "resources": [
+            "pods"
+          ],
+          "verbs": [
+            "create",
+            "delete",
+            "get",
+            "list",
+            "watch"
+          ]
+        },
+        {
+          "apiGroups": [
+            ""
+          ],
+          "resources": [
+            "pods/exec"
+          ],
+          "verbs": [
+            "create",
+            "get"
+          ]
+        }
+      ]
+    },
+    "roleBinding": {
+      "name": "coder-run-pods",
+      "roleRef": {
+        "apiGroup": "rbac.authorization.k8s.io",
+        "kind": "Role",
+        "name": "coder-run-pods"
+      },
+      "subjects": [
+        {
+          "kind": "ServiceAccount",
+          "name": "coder",
+          "namespace": "another-agentic-system"
+        }
+      ]
+    },
+    "serviceAccount": {
+      "automountServiceAccountToken": false,
+      "name": "coder"
+    },
+    "template": {
+      "name": "coder-run-pod",
+      "pod": {
+        "apiVersion": "v1",
+        "kind": "Pod",
+        "metadata": {
+          "labels": {
+            "app.kubernetes.io/component": "run",
+            "app.kubernetes.io/name": "coder-run"
+          }
+        },
+        "spec": {
+          "automountServiceAccountToken": false,
+          "containers": [
+            {
+              "command": [
+                "tini",
+                "--",
+                "sleep",
+                "infinity"
+              ],
+              "env": [
+                {
+                  "name": "CARGO_BUILD_JOBS",
+                  "value": "2"
+                },
+                {
+                  "name": "MODEL_API_KEY",
+                  "valueFrom": {
+                    "secretKeyRef": {
+                      "key": "MODEL_API_KEY",
+                      "name": "coder-secrets"
+                    }
+                  }
+                }
+              ],
+              "image": "ghcr.io/vymalo/another-agentic-images/workspace:1.98.1-e6a528f@sha256:d2aae762ecad2c13bb697332507d236a75d8233d061f38cc97dc9227192b0797",
+              "imagePullPolicy": "IfNotPresent",
+              "name": "run",
+              "resources": {
+                "limits": {
+                  "memory": "2Gi"
+                },
+                "requests": {
+                  "cpu": "250m",
+                  "memory": "512Mi"
+                }
+              },
+              "securityContext": {
+                "allowPrivilegeEscalation": false,
+                "capabilities": {
+                  "drop": [
+                    "ALL"
+                  ]
+                }
+              },
+              "volumeMounts": [
+                {
+                  "mountPath": "/work",
+                  "name": "work"
+                },
+                {
+                  "mountPath": "/opt/adam/bin",
+                  "name": "tools",
+                  "readOnly": true
+                }
+              ],
+              "workingDir": "/work"
+            }
+          ],
+          "enableServiceLinks": false,
+          "initContainers": [
+            {
+              "command": [
+                "sh",
+                "-c",
+                "cp -L /opt/adam/bin/adam-exec /opt/adam/bin/opencode /tools/ && chmod 0755 /tools/adam-exec /tools/opencode"
+              ],
+              "image": "ghcr.io/vymalo/another-adam-rs/coder:sha-0391809",
+              "imagePullPolicy": "IfNotPresent",
+              "name": "tools",
+              "resources": {
+                "limits": {
+                  "memory": "256Mi"
+                },
+                "requests": {
+                  "cpu": "10m",
+                  "memory": "32Mi"
+                }
+              },
+              "securityContext": {
+                "allowPrivilegeEscalation": false,
+                "capabilities": {
+                  "drop": [
+                    "ALL"
+                  ]
+                }
+              },
+              "volumeMounts": [
+                {
+                  "mountPath": "/tools",
+                  "name": "tools"
+                }
+              ]
+            }
+          ],
+          "priorityClassName": "coder-run",
+          "securityContext": {
+            "fsGroup": 10001,
+            "fsGroupChangePolicy": "OnRootMismatch",
+            "runAsGroup": 10001,
+            "runAsNonRoot": true,
+            "runAsUser": 10001,
+            "seccompProfile": {
+              "type": "RuntimeDefault"
+            }
+          },
+          "terminationGracePeriodSeconds": 5,
+          "volumes": [
+            {
+              "name": "work",
+              "persistentVolumeClaim": {
+                "claimName": "coder-work"
+              }
+            },
+            {
+              "emptyDir": {},
+              "name": "tools"
+            }
+          ]
+        }
+      }
+    }
+  },
+  "service": {
+    "name": "coder",
+    "port": 8080,
+    "selects": "coder"
+  },
+  "source": {
+    "chart": "deploy/coder",
+    "generatedBy": "tools/adam-parity/regen.sh",
+    "helm": "v3.19.0+g3d8990f",
+    "namespace": "another-agentic-system",
+    "release": "coder",
+    "repository": "https://github.com/vymalo/another-adam-rs",
+    "revision": "3f714d08132c6b4bb5530753105cfdb12d97a914",
+    "values": "tools/adam-parity/cases/coder-run-pods-shared.yaml"
+  },
+  "workloads": {
+    "coder": {
+      "agent": {
+        "args": [],
+        "command": [],
+        "env": [
+          {
+            "literal": "0.0.0.0:8080",
+            "name": "LISTEN_ADDR"
+          },
+          {
+            "literal": "/work",
+            "name": "WORKSPACE_ROOT"
+          },
+          {
+            "literal": "affinity",
+            "name": "WORKSPACE_PLACEMENT"
+          },
+          {
+            "field": "metadata.name",
+            "name": "WORKER_ID"
+          },
+          {
+            "literal": "https://coder.example.com/",
+            "name": "PUBLIC_URL"
+          },
+          {
+            "literal": "https://gateway.example.com/v1",
+            "name": "MODEL_BASE_URL"
+          },
+          {
+            "literal": "coding-model",
+            "name": "MODEL"
+          },
+          {
+            "literal": "coding-model",
+            "name": "OPENCODE_MODEL"
+          },
+          {
+            "literal": "4",
+            "name": "WORKERS"
+          },
+          {
+            "literal": "3",
+            "name": "MAX_CHECK_CYCLES"
+          },
+          {
+            "literal": "900",
+            "name": "CHECK_TIMEOUT_SECS"
+          },
+          {
+            "literal": "300",
+            "name": "WORKSPACE_SWEEP_SECS"
+          },
+          {
+            "literal": "true",
+            "name": "MCP_ALLOW_STDIO"
+          },
+          {
+            "literal": "http://127.0.0.1:9090",
+            "name": "GITHUB_MCP_URL"
+          },
+          {
+            "literal": "github.com,ghe.example.com",
+            "name": "ALLOWED_REPO_HOSTS"
+          },
+          {
+            "literal": "https://ghe.example.com/api/v3",
+            "name": "GITHUB_API_URL"
+          },
+          {
+            "literal": "vymalo,acme",
+            "name": "CREATE_REPO_OWNERS"
+          },
+          {
+            "literal": "false",
+            "name": "PR_DRAFT"
+          },
+          {
+            "literal": "bored-giant-panda[bot]",
+            "name": "GIT_AUTHOR_NAME"
+          },
+          {
+            "literal": "337696346+bored-giant-panda[bot]@users.noreply.github.com",
+            "name": "GIT_AUTHOR_EMAIL"
+          },
+          {
+            "literal": "kubernetes",
+            "name": "RUN_ENVIRONMENT"
+          },
+          {
+            "literal": "/etc/adam/run-pod/pod.yaml",
+            "name": "RUN_POD_TEMPLATE_FILE"
+          },
+          {
+            "field": "metadata.namespace",
+            "name": "RUN_POD_NAMESPACE"
+          },
+          {
+            "literal": "coder",
+            "name": "RUN_POD_INSTANCE"
+          },
+          {
+            "literal": "run",
+            "name": "RUN_POD_CONTAINER"
+          },
+          {
+            "literal": "600",
+            "name": "RUN_POD_READY_TIMEOUT_SECS"
+          },
+          {
+            "literal": "900",
+            "name": "RUN_POD_IDLE_SECS"
+          },
+          {
+            "literal": "600",
+            "name": "RUN_POD_WAIT_SECS"
+          },
+          {
+            "literal": "bar",
+            "name": "FOO"
+          },
+          {
+            "literal": "debug",
+            "name": "RUST_LOG"
+          },
+          {
+            "name": "DATABASE_URL",
+            "secret": {
+              "key": "uri",
+              "name": "coder-db-uri"
+            }
+          },
+          {
+            "name": "MODEL_API_KEY",
+            "secret": {
+              "key": "MODEL_API_KEY",
+              "name": "coder-secrets"
+            }
+          },
+          {
+            "name": "GITHUB_TOKEN",
+            "secret": {
+              "key": "GITHUB_TOKEN",
+              "name": "coder-secrets"
+            }
+          },
+          {
+            "name": "A2A_BEARER_TOKENS",
+            "secret": {
+              "key": "A2A_BEARER_TOKENS",
+              "name": "coder-secrets"
+            }
+          }
+        ],
+        "image": "ghcr.io/vymalo/another-adam-rs/coder:sha-0391809",
+        "mounts": [
+          {
+            "name": "work",
+            "path": "/work",
+            "readOnly": false
+          },
+          {
+            "name": "run-pod",
+            "path": "/etc/adam/run-pod",
+            "readOnly": true
+          }
+        ],
+        "port": 8080,
+        "probes": {
+          "liveness": {
+            "failureThreshold": 4,
+            "http": "/healthz",
+            "period": 15,
+            "timeout": 3
+          },
+          "readiness": {
+            "failureThreshold": null,
+            "http": "/healthz",
+            "period": 5,
+            "timeout": 3
+          },
+          "startup": {
+            "failureThreshold": 40,
+            "http": "/healthz",
+            "period": 3,
+            "timeout": null
+          }
+        },
+        "resources": {
+          "limits": {
+            "memory": "1Gi"
+          },
+          "requests": {
+            "cpu": "250m",
+            "memory": "512Mi"
+          }
+        }
+      },
+      "automountServiceAccountToken": true,
+      "claimTemplates": [],
+      "kind": "StatefulSet",
+      "replicas": 2,
+      "securityContext": {
+        "fsGroup": 10001,
+        "fsGroupChangePolicy": "OnRootMismatch",
+        "runAsGroup": 10001,
+        "runAsUser": 10001
+      },
+      "serviceAccount": "coder",
+      "sidecars": {
+        "github-mcp": {
+          "args": [
+            "http",
+            "--read-only",
+            "--toolsets",
+            "context,repos,issues,pull_requests",
+            "--listen-host",
+            "127.0.0.1",
+            "--port",
+            "9090"
+          ],
+          "command": [
+            "tini",
+            "--",
+            "github-mcp-server"
+          ],
+          "env": [
+            {
+              "literal": "ghe.example.com",
+              "name": "GITHUB_HOST"
+            }
+          ],
+          "image": "ghcr.io/vymalo/another-adam-rs/coder:sha-0391809",
+          "mounts": [],
+          "port": null,
+          "probes": {
+            "liveness": null,
+            "readiness": null,
+            "startup": {
+              "exec": [
+                "bash",
+                "-c",
+                "exec 3<>/dev/tcp/127.0.0.1/9090"
+              ],
+              "failureThreshold": 30,
+              "period": 2,
+              "timeout": null
+            }
+          },
+          "resources": {
+            "limits": {
+              "memory": "256Mi"
+            },
+            "requests": {
+              "cpu": "50m",
+              "memory": "64Mi"
+            }
+          }
+        }
+      },
+      "terminationGracePeriodSeconds": 120,
+      "volumes": [
+        {
+          "claim": "coder-work",
+          "kind": "persistentVolumeClaim",
+          "name": "work"
+        },
+        {
+          "configMap": "coder-run-pod",
+          "kind": "configMap",
+          "mode": 292,
+          "name": "run-pod"
+        }
+      ]
+    }
+  }
+}

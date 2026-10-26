@@ -55,6 +55,7 @@ fn a_form_with_every_optional_field_set_round_trips() {
         c.workers = Some(16);
         c.pr_draft = Some(false);
         c.opencode_model = Some("another-model".to_owned());
+        c.run_pod_size_class = Some("large".to_owned());
     }
     let deployment = defaults().deployment_for(AgentKind::Coder, "coder-max");
     let view = view_of(&form, &deployment).unwrap();
@@ -255,6 +256,24 @@ fn the_wire_form_of_a_coder_is_the_one_the_clients_are_told() {
         })
     );
     assert_eq!(j(&form), example_json_of_a_coder_form(), "and back");
+}
+
+#[test]
+fn a_coder_with_run_pods_has_the_size_class_on_the_wire_and_one_without_has_no_key() {
+    let mut wire = example_json_of_a_coder_form();
+    wire["agent"]["runPodSizeClass"] = "large".into();
+    let form: AgentForm = serde_json::from_value(wire.clone()).unwrap();
+    let AgentKindForm::Coder(c) = &form.agent else {
+        panic!("a coder")
+    };
+    assert_eq!(c.run_pod_size_class.as_deref(), Some("large"));
+    assert_eq!(j(&form), wire, "and back");
+    assert!(
+        example_json_of_a_coder_form()["agent"]
+            .get("runPodSizeClass")
+            .is_none(),
+        "the wire form of a coder with no run pods is the one it was"
+    );
 }
 
 trait Tap: Sized {

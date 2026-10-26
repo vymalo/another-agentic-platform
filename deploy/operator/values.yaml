@@ -40,6 +40,83 @@ serviceAccount:
 # and `false` is for a cluster that has no CloudNativePG at all.
 storeCnpg: true
 
+# ---- Run pods (§60a, slice D15a; adam-rs ADR 0019 and 0041) --------------------------------------------------------------
+# `coder.runPods` of an AgentConfig puts the commands of a run (`run_command`, `run_checks`, OpenCode) in a pod of their own that sees
+# only its own run, instead of the coder's container, where they could read the GitHub App's private key. This is the deployment's
+# side: OFF by default, and then nothing of it is rendered and an AgentConfig that asks for run pods is `ConfigInvalid`, saying so.
+# On, the chart renders what is cluster-scoped, which the operator never makes (it is namespaced, with no ClusterRole): a PriorityClass
+# the quota is scoped to (unless `priorityClassName` names one you manage), a ValidatingAdmissionPolicy that guards the pods an
+# agent's account may make (the parameters are a ConfigMap per agent, which the operator makes) and its binding to the watched
+# namespace, and the Role that lets an account make, find, watch and delete pods and exec in them, which the operator binds each
+# agent's account to (it holds the right to bind that one Role and no right of its own to make a pod or exec). Needs Kubernetes 1.30
+# or later (ValidatingAdmissionPolicy is GA there). The values below are the coder chart's (adam-rs `deploy/coder`, `runPods`) at the
+# revision of the parity goldens, and a test holds them equal; `templates/_validate.tpl` refuses what the chart's does.
+runPods:
+  enabled: false
+  # The run container's image: the workspace image of another-agentic-images (the toolchains, user 10001, /work), by tag AND digest
+  # (*verified 2026-10-11*, as in the coder chart: an anonymous ghcr.io token and a manifest request for the tag returned this digest).
+  image:
+    repository: ghcr.io/vymalo/another-agentic-images/workspace
+    tag: 1.98.1-e6a528f
+    digest: sha256:d2aae762ecad2c13bb697332507d236a75d8233d061f38cc97dc9227192b0797
+    pullPolicy: IfNotPresent
+  # The container of the template the commands run in (RUN_POD_CONTAINER).
+  container: run
+  # A Rust build is limited to two jobs so that it stays inside the 2Gi of `runPodClasses.standard`.
+  cargoBuildJobs: 2
+  # More variables of the run container, a name -> value map (never a secret: the model key is the only one, and it is the agent's).
+  extraEnv: {}
+  # Empty: the chart renders a PriorityClass <fullname>-<namespace>-run (value 0, preemptionPolicy Never) and the quota and the
+  # admission policy use it. A name: a class you manage (the chart renders none).
+  priorityClassName: ""
+  # What the run pods of ONE agent may use in all: a ResourceQuota scoped to the priority class. A pod beyond it is refused (403
+  # "exceeded quota") and the coder waits for a slot (waitSecs). The class is shared by the run pods of the namespace, so two agents in
+  # one namespace share the tighter of their quotas.
+  quota:
+    limitsMemory: 8Gi
+    pods: 4
+  # A pod that no command used for this long is deleted (the files are on the volume). 0 keeps it until its run ends.
+  idleSecs: 900
+  # How long a pod may take to be ready (scheduling, the first pull of the image on a node).
+  readyTimeoutSecs: 600
+  # How long a run waits for a slot when the quota (or the nodes) cannot give one now.
+  waitSecs: 600
+  # Where run pods may be scheduled, on top of what the volume needs.
+  nodeSelector: {}
+  tolerations: []
+  # An affinity.nodeAffinity (the pod affinity to the coder is added when the volume is a ReadWriteOnce claim of the coder's pod).
+  nodeAffinity: {}
+  # Images a run pod may use besides the run image and the coder's own, spelled as the pod spells them.
+  extraAllowedImages: []
+  # No ingress; egress to DNS and to the internet, but not to private ranges, so builds reach registries and the model gateway but not
+  # the services of the cluster. Only as real as the CNI that enforces it. The pod and service CIDRs of the cluster are yours to name.
+  networkPolicy:
+    enabled: true
+    # The pod and service CIDRs of the cluster, besides the ranges below.
+    clusterCIDRs: []
+    # Never reachable: RFC 1918, the link-local range (cloud metadata) and the shared address space.
+    blockedCIDRs:
+      - 10.0.0.0/8
+      - 172.16.0.0/12
+      - 192.168.0.0/16
+      - 169.254.0.0/16
+      - 100.64.0.0/10
+    dnsNamespace: kube-system
+    dnsPodLabels:
+      k8s-app: kube-dns
+    # More egress rules, as NetworkPolicy `egress` entries (the model gateway when it is in the cluster, for one).
+    extraEgress: []
+
+# The size classes an AgentConfig picks by name (`coder.runPods.sizeClass`, AD-031): the resources of the run container. A class whose
+# memory limit is above `runPods.quota.limitsMemory` is refused (no pod of it could ever be made). `GET /v1/info` offers the names.
+runPodClasses:
+  standard:
+    requests:
+      cpu: 250m
+      memory: 512Mi
+    limits:
+      memory: 2Gi
+
 # The agent registry (§12b, crates/registry/README.md), served on 8080 only with a bearer token: no token, no registry. The
 # token comes from exactly one of the two below, and none of them is a value of this chart.
 registry:

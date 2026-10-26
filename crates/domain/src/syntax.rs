@@ -201,6 +201,55 @@ pub fn is_quantity(s: &str) -> bool {
     !exp.is_empty() && exp.chars().all(|c| c.is_ascii_digit())
 }
 
+/// A quantity in nano-units, so two can be compared without a float: `500m` is 500 000 000, `2Gi` is
+/// 2 147 483 648 000 000 000. `None` when it is not a quantity, has an exponent (never in a setting of ours) or
+/// does not fit 128 bits.
+pub fn quantity_nanos(s: &str) -> Option<u128> {
+    if !is_quantity(s) {
+        return None;
+    }
+    let digits_end = s
+        .find(|c: char| !(c.is_ascii_digit() || c == '.'))
+        .unwrap_or(s.len());
+    let (number, suffix) = s.split_at(digits_end);
+    let unit: u128 = match suffix {
+        "n" => 1,
+        "u" => 1_000,
+        "m" => 1_000_000,
+        "" => 1_000_000_000,
+        "k" => 1_000_000_000_000,
+        "M" => 1_000_000_000_000_000,
+        "G" => 1_000_000_000_000_000_000,
+        "T" => 1_000_000_000_000_000_000_000,
+        "P" => 1_000_000_000_000_000_000_000_000,
+        "E" => 1_000_000_000_000_000_000_000_000_000,
+        "Ki" => 1_000_000_000_u128 << 10,
+        "Mi" => 1_000_000_000_u128 << 20,
+        "Gi" => 1_000_000_000_u128 << 30,
+        "Ti" => 1_000_000_000_u128 << 40,
+        "Pi" => 1_000_000_000_u128 << 50,
+        "Ei" => 1_000_000_000_u128 << 60,
+        _ => return None,
+    };
+    let (whole, fraction) = number.split_once('.').unwrap_or((number, ""));
+    let whole: u128 = if whole.is_empty() {
+        0
+    } else {
+        whole.parse().ok()?
+    };
+    let mut nanos = whole.checked_mul(unit)?;
+    // The fraction, to the nano-unit: more digits than that are below one.
+    let mut scale = unit;
+    for digit in fraction.bytes() {
+        scale /= 10;
+        if scale == 0 {
+            break;
+        }
+        nanos = nanos.checked_add(u128::from(digit - b'0') * scale)?;
+    }
+    Some(nanos)
+}
+
 /// The longest `<server>__<tool>` name adam shows a model (`MODEL_NAME_MAX`).
 pub const MODEL_NAME_MAX: usize = 64;
 

@@ -5,10 +5,11 @@
 #   sh deploy/operator/tests/render-check.sh                    (from the repository root)
 #   UPDATE_GOLDEN=1 sh deploy/operator/tests/render-check.sh    rewrites tests/golden/*.yaml, for a deliberate change
 #
-# Four renders are golden: the values of the Application on netcup (examples/netcup.values.yaml), the other shape those
-# values do not make (tests/secret.values.yaml), the defaults, and the Platform API component on (tests/api.values.yaml; the first
-# three have it off, and equal to what they were before it existed). Also checked: deploy/operator-crds against deploy/crds, and the
-# API's Role against crates/objects-kubernetes/tests/rbac.yaml, the Role that crate is tested under.
+# Five renders are golden: the values of the Application on netcup (examples/netcup.values.yaml), the other shape those
+# values do not make (tests/secret.values.yaml), the defaults, the Platform API component on (tests/api.values.yaml) and run pods on
+# (tests/runpods.values.yaml; the first four have both off, and the first three are equal to what they were before either existed).
+# Also checked: deploy/operator-crds against deploy/crds, and the API's Role against crates/objects-kubernetes/tests/rbac.yaml, the
+# Role that crate is tested under.
 set -eu
 
 here=$(cd "$(dirname "$0")" && pwd)
@@ -110,6 +111,7 @@ check "the netcup render equals tests/golden/netcup.yaml" golden netcup -f "$cha
 check "the render of tests/secret.values.yaml equals tests/golden/secret.yaml" golden secret -f "$here/secret.values.yaml"
 check "the default render equals tests/golden/default.yaml" golden default
 check "the Platform API render (tests/api.values.yaml) equals tests/golden/api.yaml" golden api -f "$here/api.values.yaml"
+check "the run pods render (tests/runpods.values.yaml) equals tests/golden/runpods.yaml" golden runpods -f "$here/runpods.values.yaml"
 
 # ---- The default render: no registry, nothing a secret could be in --------------------------------------------------------
 render
@@ -728,14 +730,15 @@ check "the secretref shape renders (a Secret per agent, no policy, no Ingress)" 
 api_shapes_are_written() {
   d=$(mktemp -d) || return 1
   sh "$here/api-shapes.sh" "$d" > /dev/null 2>&1 \
-    && [ "$(find "$d" -type f | wc -l)" -eq 4 ] && [ -s "$d/golden.yaml" ] && [ -s "$d/secretref.yaml" ] && [ -s "$d/minimal.yaml" ] \
+    && [ "$(find "$d" -type f | wc -l)" -eq 5 ] && [ -s "$d/golden.yaml" ] && [ -s "$d/secretref.yaml" ] && [ -s "$d/minimal.yaml" ] && [ -s "$d/runpods.yaml" ] \
+    && grep -q '^  - standard$' "$d/runpods.yaml" && ! grep -q 'runPodSizeClasses' "$d/golden.yaml" \
     && grep -q '^listen: 0.0.0.0:8443$' "$d/full.yaml" && grep -q '^healthListen: 0.0.0.0:9091$' "$d/full.yaml" \
     && grep -q '^listen: 0.0.0.0:8080$' "$d/minimal.yaml"
   r=$?
   rm -rf "$d"
   return "$r"
 }
-check "api: api-shapes.sh writes the file of four shapes (golden, secretref, minimal, full), the full one with the ports it sets" api_shapes_are_written
+check "api: api-shapes.sh writes the file of five shapes (golden, secretref, minimal, full, runpods), the full one with the ports it sets, only the last with size classes" api_shapes_are_written
 check "api: the shape that sets every value (tests/api-full.values.yaml) renders" renders_ok -f "$here/api-full.values.yaml"
 
 # ---- The values of the kind end-to-end of the Platform API (D7b2) ------------------------------------------------------------
@@ -859,6 +862,174 @@ chain_script() {
     && grep -q '^models_secret=e2e-agent-models$' "$script" && grep -q '^registry_secret=e2e-registry-token$' "$script" && grep -q '^bearer_secret=e2e-a2a-bearer$' "$script"
 }
 check "chain: the script's namespace, label, audience and Secrets are the ones the values and the manifests name" chain_script
+
+# ---- Run pods (slice D15a): off by default, and then not a trace; on, exactly these rights and this guard ---------------------------
+# What a render with run pods off must not contain, anywhere: an object, a variable, a right, a mount, a key of the API's file.
+run_pods_traces='run-pods|RUN_PODS_FILE|PriorityClass|ValidatingAdmissionPolicy|runPodSizeClasses|serviceaccounts|resourcequotas|rolebindings|checksum/run-pods'
+render
+check "run pods off (the default): nothing of them is rendered, in any object" lacks "$run_pods_traces"
+render -f "$chart/examples/netcup.values.yaml"
+check "run pods off (netcup): nothing of them is rendered" lacks "$run_pods_traces"
+render -f "$here/secret.values.yaml"
+check "run pods off (secret.values.yaml): nothing of them is rendered" lacks "$run_pods_traces"
+render -f "$here/api.values.yaml"
+check "run pods off (the API on): nothing of them is rendered, and the API is told no size class" lacks "$run_pods_traces"
+render --set runPods.enabled=false --set runPods.image.digest=not-a-digest --set runPods.bogus=1 --set runPodClasses.standard.limits=null
+check "run pods off: their values are not checked and not rendered, whatever they say" lacks "$run_pods_traces"
+
+render -f "$here/runpods.values.yaml"
+run_pods_objects() {
+  dhas ConfigMap aap-operator-run-pods-settings 'namespace: agents' 'settings.yaml' \
+    && dhas Role aap-operator-run-pods 'namespace: agents' \
+    && dhas PriorityClass aap-operator-agents-run 'kind: PriorityClass' \
+    && dhas ValidatingAdmissionPolicy aap-operator-agents-run-pods 'kind: ValidatingAdmissionPolicy' \
+    && dhas ValidatingAdmissionPolicyBinding aap-operator-agents-run-pods 'kind: ValidatingAdmissionPolicyBinding'
+}
+check "run pods on: the settings, the Role, the PriorityClass, the admission policy and its binding, and nothing more of them" run_pods_objects
+run_pods_kinds_are_these() {
+  # The cluster-scoped kinds of the whole render are three, and none is a right: no ClusterRole, no ClusterRoleBinding.
+  [ "$(grep -E '^kind: (PriorityClass|ValidatingAdmissionPolicy|ValidatingAdmissionPolicyBinding|ClusterRole|ClusterRoleBinding|CustomResourceDefinition|Namespace|Node)$' "$out" | sort | tr '\n' ' ')" = 'kind: PriorityClass kind: ValidatingAdmissionPolicy kind: ValidatingAdmissionPolicyBinding ' ]
+}
+check "run pods on: the cluster-scoped objects are the PriorityClass and the policy with its binding, no ClusterRole, no Namespace" run_pods_kinds_are_these
+run_pods_render_holds_no_secret() {
+  # The host access is checked on the workloads: the admission policy names hostNetwork, hostPID and hostIPC to forbid them.
+  lacks '^kind: Secret$' && lacks '(ghp_|github_pat_|gho_|sk-[A-Za-z0-9]{8}|-----BEGIN|AKIA[0-9A-Z]{16}|xox[bp]-|eyJ[A-Za-z0-9_-]{20})' \
+    && lacks '^kind: Cluster(Role|RoleBinding)$' && dlacks Deployment aap-operator '(hostNetwork|hostPID|hostIPC|hostPath|privileged: true)' \
+    && dlacks Deployment aap-operator-api '(hostNetwork|hostPID|hostIPC|hostPath|privileged: true)'
+}
+check "run pods on: no Secret object, no token-looking value, no ClusterRole, no host access in a workload" run_pods_render_holds_no_secret
+
+# The operator's Role gains exactly the verbs it needs, and holds the right to BIND the Role of run pods, by name, and no right of its own
+# to make a pod or exec (Kubernetes would require them of it to make a Role that carries them: the escalation check).
+run_pod_rules='[""] [serviceaccounts, resourcequotas] [get, list, patch, create, delete]
+[rbac.authorization.k8s.io] [rolebindings] [get, list, patch, create, delete]
+[rbac.authorization.k8s.io] [roles] [bind]
+[""] [pods] [delete]'
+check "run pods on: the operator's Role is the base rules, then exactly the run pods rules, then CloudNativePG's" \
+  rules_are "$base_rules
+$run_pod_rules
+$cnpg_rule"
+check "run pods on: the right on roles is bind, on the one Role of run pods by name (and on no other)" \
+  dhas Role aap-operator 'resources: \[roles\]' 'verbs: \[bind\]' 'resourceNames: \[aap-operator-run-pods\]'
+check "run pods on: one resourceNames in the operator's Role, and no escalate, impersonate, pods/exec, create on pods or write on a Role" \
+  dcount Role aap-operator 'resourceNames:' 1
+operator_role_cannot_escalate() {
+  # The rules only (a comment may say what the Role cannot do).
+  ! role_rules | grep -Eq 'escalate|impersonate|pods/|secrets|\*|clusterroles|nodes|namespaces' \
+    && ! role_rules | grep -E '^\[""\] \[pods\] ' | grep -Eq 'create|patch|update|exec' \
+    && ! role_rules | grep -E 'roles\]' | grep -Eq 'create|patch|update|delete|escalate'
+}
+check "run pods on: the operator holds no right to make a pod, exec, read a Secret or write a Role" operator_role_cannot_escalate
+check "run pods on: the Role of run pods is the coder chart's: pods create delete get list watch, pods/exec create get, and nothing else" \
+  [ "$(doc Role aap-operator-run-pods | rules_from)" = '[""] ["pods"] ["create", "delete", "get", "list", "watch"]
+[""] ["pods/exec"] ["create", "get"]' ]
+run_pods_role_has_no_other_right() {
+  ! doc Role aap-operator-run-pods | rules_from | grep -Eq 'secrets|configmaps|services|\*|bind|escalate|roles|serviceaccounts'
+}
+check "run pods on: the Role of run pods has no right on Secrets, ConfigMaps, services, roles or a wildcard" run_pods_role_has_no_other_right
+check "run pods on: no RoleBinding of the Role of run pods is rendered: the operator makes one per agent" \
+  lacks 'roleRef:[[:space:]]+(apiGroup: rbac.authorization.k8s.io[[:space:]]+)?kind: Role[[:space:]]+name: aap-operator-run-pods'
+
+# The Deployment reads the settings once, at start: a file, mounted read-only, and a change to it is a new pod.
+run_pods_deployment() {
+  dhas Deployment aap-operator 'name: RUN_PODS_FILE' 'value: /etc/aap/run-pods/settings.yaml' 'name: run-pods' 'mountPath: /etc/aap/run-pods' 'readOnly: true' \
+    'name: aap-operator-run-pods-settings' 'checksum/run-pods: [0-9a-f]{64}'
+}
+check "run pods on: the operator reads RUN_PODS_FILE from the ConfigMap, mounted read-only, and rolls with it (a checksum)" run_pods_deployment
+check "run pods on: the operator's pod is as locked down as before (non-root, read-only root, no capability)" \
+  dhas Deployment aap-operator 'runAsUser: 65532' 'readOnlyRootFilesystem: true' 'drop: \[ALL\]' 'allowPrivilegeEscalation: false'
+
+# The settings: the operator's own file, with what values.yaml says, and the names of the objects of this chart.
+run_pods_settings() {
+  dhas ConfigMap aap-operator-run-pods-settings '^    priorityClass: aap-operator-agents-run$' '^    role: aap-operator-run-pods$' '^      large:$' '^      standard:$' \
+    '^      limitsMemory: 16Gi$' '^      pods: 6$' '^      - 10.42.0.0/16$' 'RUSTFLAGS: -C debuginfo=0' 'image: *$' \
+    'repository: ghcr.io/vymalo/another-agentic-images/workspace' 'digest: sha256:[0-9a-f]{64}'
+}
+check "run pods on: the settings hold the names of the PriorityClass and the Role, the classes (large and standard), the quota, the CIDR and the variable" run_pods_settings
+check "run pods on: the run image is pinned by tag and digest, and the tag is not latest" \
+  dhas ConfigMap aap-operator-run-pods-settings 'tag: [0-9A-Za-z._-]+$' 'digest: sha256:[0-9a-f]{64}$'
+settings_hold_no_secret() {
+  # The data only: the comment above the object says there is none.
+  ! doc ConfigMap aap-operator-run-pods-settings | grep -v '^#' | grep -Eiq 'secret|token|password|MODEL_API_KEY|apikey'
+}
+check "run pods on: the settings are a ConfigMap and hold no secret, no token and not the model key" settings_hold_no_secret
+
+# The PriorityClass the quota is scoped by: ranks nothing, evicts nobody, is nobody's default.
+check "run pods on: the PriorityClass has value 0, never preempts and is not the cluster's default" \
+  dhas PriorityClass aap-operator-agents-run '^value: 0$' '^preemptionPolicy: Never$' '^globalDefault: false$'
+
+# The admission policy: the parameters of an agent select the pods it judges; a deleted parameter is not a denial, and the cost is in the README.
+run_pods_policy() {
+  dhas ValidatingAdmissionPolicy aap-operator-agents-run-pods 'failurePolicy: Fail' 'paramKind:' 'kind: ConfigMap' 'operations: \["CREATE"\]' 'resources: \["pods"\]' \
+    'request.userInfo.username == params.data.serviceAccount' \
+    && [ "$(doc ValidatingAdmissionPolicy aap-operator-agents-run-pods | grep -c '^    - expression:')" -eq 9 ]
+}
+check "run pods on: the policy fails closed, takes a ConfigMap of parameters, judges the pods CREATED by the account its parameters name, and has nine rules" run_pods_policy
+run_pods_binding() {
+  dhas ValidatingAdmissionPolicyBinding aap-operator-agents-run-pods 'policyName: aap-operator-agents-run-pods' 'validationActions: \["Deny"\]' \
+    'agents.vymalo.com/run-pods-policy: "true"' 'parameterNotFoundAction: Allow' 'kubernetes.io/metadata.name: agents' \
+    && dlacks ValidatingAdmissionPolicyBinding aap-operator-agents-run-pods 'Audit|Warn' 'parameterNotFoundAction: Deny'
+}
+check "run pods on: the binding denies, selects the parameters by their label, lets a namespace without parameters alone, and covers the watched namespace only" run_pods_binding
+check "run pods on: the policy asks for no Secret and the binding for no namespace but the watched one" \
+  dcount ValidatingAdmissionPolicyBinding aap-operator-agents-run-pods 'kubernetes.io/metadata.name' 1
+policy_rules_are_the_scripts() {
+  # Every rule the admission test (run-pods-admission.sh) expects a message of is in the policy.
+  for frag in 'a run pod carries the labels' 'a run pod has the priority class' 'a run pod uses only the images' 'a run pod mounts only emptyDir volumes and the claim' \
+    'a run pod references no Secret but the key' 'a run pod is not privileged' 'allowPrivilegeEscalation: false on every container' 'a run pod does not run as root' \
+    'a run pod uses its own network, PID and IPC namespaces' 'a run pod sets automountServiceAccountToken: false'; do
+    doc ValidatingAdmissionPolicy aap-operator-agents-run-pods | grep -qF -- "$frag" || { echo "no rule says: $frag" >&2; return 1; }
+  done
+}
+check "run pods on: every message the admission test expects (tests/run-pods-admission.sh) is a message of the policy" policy_rules_are_the_scripts
+check "the admission test is a shell script sh can read" sh -n "$here/run-pods-admission.sh"
+
+# The Platform API is told the names of the classes, the keys of runPodClasses in order, and nothing else of them.
+check "run pods on, the API on: the API's file lists the size classes, large then standard" \
+  dhas ConfigMap aap-operator-api '^      runPodSizeClasses:$' '^      - large$' '^      - standard$'
+render -f "$here/runpods.values.yaml" --set runPods.priorityClassName=managed-elsewhere
+check "runPods.priorityClassName: the chart renders no PriorityClass, and the settings name the one given" \
+  lacks '^kind: PriorityClass$' && dhas ConfigMap aap-operator-run-pods-settings '^    priorityClass: managed-elsewhere$'
+render -f "$here/runpods.values.yaml" --set storeCnpg=false
+check "run pods on, storeCnpg=false: the base rules and the run pods rules, no CloudNativePG" rules_are "$base_rules
+$run_pod_rules"
+render -f "$here/runpods.values.yaml" --set runPods.networkPolicy.enabled=false
+check "runPods.networkPolicy.enabled=false: the settings say so and the rest of the render is unchanged" \
+  dhas ConfigMap aap-operator-run-pods-settings '^      enabled: false$' && dhas Role aap-operator-run-pods 'pods/exec'
+
+# What the chart refuses, with the name of the value: the operator would refuse the same at start, and a pod that never starts is the worse way to hear it.
+check "refused: run pods on with no size class" refused "runPodClasses must name at least one size class" --set runPods.enabled=true --set runPodClasses.standard=null
+check "refused: a size class with no memory limit" refused "runPodClasses.standard.limits.memory is required" --set runPods.enabled=true --set runPodClasses.standard.limits=null
+check "refused: a size class named as no DNS label" refused "the name of a class is a DNS label" --set runPods.enabled=true --set 'runPodClasses.Big_One.limits.memory=1Gi'
+check "refused: a size class resource that is not a quantity" refused "is not a quantity" --set runPods.enabled=true --set runPodClasses.standard.limits.memory=lots
+check "refused: a key of a size class that is not requests or limits" refused "is not a setting: requests or limits" --set runPods.enabled=true --set runPodClasses.standard.cpu=1
+check "refused: a run image with no digest" refused "runPods.image.digest must be sha256:" --set runPods.enabled=true --set runPods.image.digest=
+check "refused: a run image whose digest is not one" refused "runPods.image.digest must be sha256:" --set runPods.enabled=true --set runPods.image.digest=sha256:abc
+check "refused: a run image tagged latest" refused "runPods.image.tag must not be latest" --set runPods.enabled=true --set runPods.image.tag=latest
+check "refused: a run image with no repository" refused "runPods.image.repository is required" --set runPods.enabled=true --set runPods.image.repository=
+check "refused: a pull policy that is not one" refused "runPods.image.pullPolicy must be" --set runPods.enabled=true --set runPods.image.pullPolicy=Sometimes
+check "refused: a quota of no pod" refused "runPods.quota.pods must be a whole number of at least 1" --set runPods.enabled=true --set runPods.quota.pods=0
+check "refused: a quota of a fraction of a pod" refused "runPods.quota.pods must be a whole number of at least 1" --set runPods.enabled=true --set runPods.quota.pods=1.5
+check "refused: a memory quota that is not a quantity" refused "runPods.quota.limitsMemory must be a quantity above zero" --set runPods.enabled=true --set runPods.quota.limitsMemory=lots
+check "refused: a memory quota of zero" refused "runPods.quota.limitsMemory must be a quantity above zero" --set runPods.enabled=true --set runPods.quota.limitsMemory=0
+check "refused: a key of runPods the operator does not read" refused "runPods.bogus is not a setting" --set runPods.enabled=true --set runPods.bogus=1
+check "refused: a key of the quota the operator does not read" refused "runPods.quota.bogus is not a setting" --set runPods.enabled=true --set runPods.quota.bogus=1
+check "refused: a key of the image the operator does not read" refused "runPods.image.bogus is not a setting" --set runPods.enabled=true --set runPods.image.bogus=1
+check "refused: a key of the network policy the operator does not read" refused "runPods.networkPolicy.bogus is not a setting" --set runPods.enabled=true --set runPods.networkPolicy.bogus=1
+check "refused: a block that is null" refused "runPods.quota must be a map" --set runPods.enabled=true --set runPods.quota=null
+check "refused: runPods itself null" refused "runPods must be a map" --set runPods=null
+check "refused: runPods.enabled that is not a boolean" refused "runPods.enabled must be true or false" --set runPods.enabled=maybe
+check "refused: a container name that is none" refused "runPods.container must be a container name" --set runPods.enabled=true --set runPods.container=Run_Container
+check "refused: a negative idle time" refused "runPods.idleSecs must be a whole number, 0 or more" --set runPods.enabled=true --set runPods.idleSecs=-1
+check "refused: no time to be ready" refused "runPods.readyTimeoutSecs must be a whole number, 1 or more" --set runPods.enabled=true --set runPods.readyTimeoutSecs=0
+check "refused: a variable the operator sets itself (the model key)" refused "runPods.extraEnv.MODEL_API_KEY: the operator sets this variable itself" --set runPods.enabled=true --set runPods.extraEnv.MODEL_API_KEY=x
+check "refused: a variable the operator sets itself (the build jobs)" refused "runPods.extraEnv.CARGO_BUILD_JOBS: the operator sets this variable itself" --set runPods.enabled=true --set runPods.extraEnv.CARGO_BUILD_JOBS=8
+check "refused: a variable that is a number and not a text" refused "runPods.extraEnv.JOBS must be a text" --set runPods.enabled=true --set runPods.extraEnv.JOBS=2
+check "refused: a CIDR that is none" refused "is not an IPv4 CIDR" --set runPods.enabled=true --set 'runPods.networkPolicy.clusterCIDRs[0]=10.0.0.0/33'
+check "refused: no label of the DNS pods" refused "runPods.networkPolicy.dnsPodLabels must name at least one label" --set runPods.enabled=true --set runPods.networkPolicy.dnsPodLabels=null
+check "refused: a PriorityClass name that is none" refused "runPods.priorityClassName must be the name of a PriorityClass" --set runPods.enabled=true --set 'runPods.priorityClassName=Not A Name'
+check "refused: a size class list written by hand into the API's file" refused "api.config.defaults.runPodSizeClasses is the chart's" \
+  -f "$here/api.values.yaml" --set 'api.config.defaults.runPodSizeClasses[0]=standard'
 
 # ---- The CRDs chart: one source ------------------------------------------------------------------------------------------
 check "deploy/operator-crds/files is a copy of deploy/crds (cp deploy/crds/agents.vymalo.com.yaml deploy/operator-crds/files/)" \

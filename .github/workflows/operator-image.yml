@@ -19,7 +19,7 @@ name: Operator and API images
 # api-image:   (D7b1) builds docker/api/Dockerfile and smoke-tests the image like the operator's (the user, the version, the usage, the
 #              example configuration accepted, a misspelt key refused, no cluster to reach said so, no shell), and runs `api --check`
 #              in the image on the configuration the chart renders for each shape of values it is tested in (deploy/operator/tests/
-#              api-shapes.sh: the golden one, a Secret per agent, the least a deployment must say, and one that sets every value). That
+#              api-shapes.sh: the golden one, a Secret per agent, the least a deployment must say, one that sets every value, and one with run pods). That
 #              finds a shape the chart renders and the binary refuses; it does not prove there is none: the chart refuses what it can check
 #              at render time, and anything else the binary refuses at start, failing closed. It is kept as an artifact for the push, as
 #              the operator's is.
@@ -360,7 +360,7 @@ jobs:
           size=$(docker image inspect -f '{{.Size}}' api:smoke)
           echo "api image size: $size bytes" | tee -a "$GITHUB_STEP_SUMMARY"
       # The image's own `--check` on what `helm template` renders for each shape the chart is tested in (tests/api-shapes.sh: the golden one,
-      # the Secret-per-agent one, the least a deployment must say, and one that sets every value the chart exposes). The chart refuses what
+      # the Secret-per-agent one, the least a deployment must say, one that sets every value the chart exposes, and the one with run pods on). The chart refuses what
       # it can check at render time; what it cannot, the binary refuses at start (a pod that never becomes ready), and this is where a shape
       # the chart renders and the binary refuses is found, before it is deployed.
       - name: The configuration the chart renders is one the image accepts

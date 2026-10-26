@@ -33,8 +33,9 @@ where
             "namespace": state.defaults.namespace,
             "offerLabel": state.defaults.offer_label,
             "defaults": state.defaults,
-            // Run-pod size classes wait for adam-rs (D15): `aap-api` has no field for one.
-            "runPodSizeClasses": [],
+            // The size classes of run pods the operator has (slice D15a): the names of its chart's `runPodClasses`, which the
+            // chart writes into the API's configuration. Empty: the operator has no run pods, and a coder form that asks is refused.
+            "runPodSizeClasses": state.defaults.run_pod_size_classes,
             "limits": { "maxBodyBytes": MAX_BODY_BYTES },
         }),
     )

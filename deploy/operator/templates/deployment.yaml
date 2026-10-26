@@ -21,9 +21,15 @@ spec:
         {{- with .Values.podLabels }}
         {{- toYaml . | nindent 8 }}
         {{- end }}
-      {{- with .Values.podAnnotations }}
+      {{- if or .Values.podAnnotations (include "aap.runPods" .) }}
       annotations:
+        {{- with .Values.podAnnotations }}
         {{- toYaml . | nindent 8 }}
+        {{- end }}
+        {{- if include "aap.runPods" . }}
+        # The settings for run pods are read once, at start: a changed file is a new pod.
+        checksum/run-pods: {{ include (print $.Template.BasePath "/run-pods-settings.yaml") . | sha256sum }}
+        {{- end }}
       {{- end }}
     spec:
       serviceAccountName: {{ include "aap.serviceAccountName" . }}
@@ -77,6 +83,12 @@ spec:
             - name: AAP_RESYNC_PENDING_SECS
               value: {{ . | quote }}
             {{- end }}
+            {{- if include "aap.runPods" . }}
+            # Run pods (slice D15a): present, the operator has them, with the size classes, image and quota this file says. Absent, it has none
+            # and an AgentConfig that asks for them is ConfigInvalid.
+            - name: RUN_PODS_FILE
+              value: /etc/aap/run-pods/settings.yaml
+            {{- end }}
             {{- if include "aap.registrySecretName" . }}
             # No token, no registry: this variable is what turns it on.
             - name: REGISTRY_TOKEN_FILE
@@ -126,14 +138,22 @@ spec:
             runAsNonRoot: true
             capabilities:
               drop: [ALL]
-          {{- if include "aap.registrySecretName" . }}
+          {{- if or (include "aap.registrySecretName" .) (include "aap.runPods" .) }}
           volumeMounts:
+            {{- if include "aap.registrySecretName" . }}
             - name: registry-token
               mountPath: /var/run/secrets/aap/registry
               readOnly: true
+            {{- end }}
+            {{- if include "aap.runPods" . }}
+            - name: run-pods
+              mountPath: /etc/aap/run-pods
+              readOnly: true
+            {{- end }}
           {{- end }}
-      {{- if include "aap.registrySecretName" . }}
+      {{- if or (include "aap.registrySecretName" .) (include "aap.runPods" .) }}
       volumes:
+        {{- if include "aap.registrySecretName" . }}
         - name: registry-token
           secret:
             secretName: {{ include "aap.registrySecretName" . }}
@@ -141,6 +161,13 @@ spec:
             items:
               - key: {{ include "aap.registrySecretKey" . }}
                 path: token
+        {{- end }}
+        {{- if include "aap.runPods" . }}
+        - name: run-pods
+          configMap:
+            name: {{ include "aap.runPodsSettings" . }}
+            defaultMode: 288 # 0440
+        {{- end }}
       {{- end }}
       {{- with .Values.nodeSelector }}
       nodeSelector:

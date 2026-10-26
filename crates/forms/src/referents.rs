@@ -4,7 +4,7 @@
 use std::collections::BTreeSet;
 
 use aap_api::{AgentConfig, AgentService, ModelEndpoint, ToolProvider};
-use aap_domain::Externals;
+use aap_domain::{Externals, RunPodSettings};
 use aap_ports::{Agent, Kind, SharedKind, Stored, config_references};
 use k8s_openapi::apimachinery::pkg::apis::meta::v1::ObjectMeta;
 use serde::de::DeserializeOwned;
@@ -38,15 +38,23 @@ fn spec<T: DeserializeOwned>(s: &Stored) -> Option<T> {
     serde_json::from_value(s.spec.clone()).ok()
 }
 
-/// The referents for a list of the store's shared objects, and the operator's default image (`None`:
-/// [`DEFAULT_IMAGE_STANDIN`]).
+/// The referents for a list of the store's shared objects, the operator's default image (`None`:
+/// [`DEFAULT_IMAGE_STANDIN`]) and the size classes of run pods the operator has (empty: it has no run pods, and
+/// an agent that asks for them is refused; otherwise [`RunPodSettings::offering`] stands for its settings, which
+/// the API does not read).
 pub fn externals(
     models: &[Stored],
     tool_servers: &[Stored],
     default_image: Option<&str>,
+    run_pod_size_classes: &[String],
 ) -> Referents {
     let mut externals =
         Externals::default().with_default_image(default_image.unwrap_or(DEFAULT_IMAGE_STANDIN));
+    if !run_pod_size_classes.is_empty() {
+        externals = externals.with_run_pods(RunPodSettings::offering(
+            run_pod_size_classes.iter().map(String::as_str),
+        ));
+    }
     let mut unreadable = BTreeSet::new();
     for stored in models {
         if let Some(spec) = spec(stored) {

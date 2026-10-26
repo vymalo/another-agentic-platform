@@ -9,10 +9,11 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use aap_api::{AgentConfig, ModelEndpoint, ToolProvider};
 
+use crate::run_pods::RunPodSettings;
 use crate::syntax::is_dns_subdomain;
 
 /// The objects an `AgentConfig` may name, and the settings of the operator that fill what it leaves
-/// out. [`Externals::default`] is the empty one: no object and no default image, which is all an
+/// out. [`Externals::default`] is the empty one: no object, no default image and no run pods, which is all an
 /// inline config needs.
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct Externals {
@@ -27,6 +28,9 @@ pub struct Externals {
     /// CustomResourceDefinition is not installed. A reference to one is missing for a reason other than a
     /// forgotten object, and the issue says so: nobody can create the referent until the CRDs are there.
     pub kinds_not_installed: BTreeSet<String>,
+    /// What the operator's deployment says about run pods (`RUN_PODS_FILE`, slice D15a). `None`: this operator
+    /// has no run pods (the chart's `runPods.enabled` is false), and a config that asks for them is invalid.
+    pub run_pods: Option<RunPodSettings>,
 }
 
 impl Externals {
@@ -34,6 +38,13 @@ impl Externals {
     #[must_use]
     pub fn with_default_image(mut self, image: impl Into<String>) -> Self {
         self.default_image = Some(image.into());
+        self
+    }
+
+    /// The deployment's settings for run pods.
+    #[must_use]
+    pub fn with_run_pods(mut self, settings: RunPodSettings) -> Self {
+        self.run_pods = Some(settings);
         self
     }
 

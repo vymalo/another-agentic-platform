@@ -10,6 +10,9 @@
 //! | `NetworkPolicy` `<service>` | `Network::allow_from` is not empty |
 //! | `ConfigMap` `<file set>` | one per `FileSet` |
 //! | `PersistentVolumeClaim` `<service>-<volume>` | a `Shared` persistent volume |
+//! | `ServiceAccount` `<account>` | `RuntimeSpec::run_pods` (slice D15a): the account the workers run as |
+//! | `RoleBinding`, `ResourceQuota`, `NetworkPolicy` `<service>-run-pods` | run pods: the account bound to the deployment's role, what the run pods may use, what they may reach |
+//! | `ConfigMap` `<service>-run-pods-policy` | run pods: the parameters of the admission policy that guards the pods the account makes |
 //!
 //! The claims of a `PerReplica` volume are the StatefulSet's `volumeClaimTemplates`. **Data objects
 //! carry no owner reference**; compute objects carry the owner reference the `OwnerHandle` stands for.
@@ -18,8 +21,8 @@ use std::collections::BTreeMap;
 
 use aap_ports::{
     Container, DeletionPolicy, EnvValue, FileSet, FsGroupChangePolicy, Network, OwnerHandle,
-    PersistentVolume, Probe, ProbeAction, Resources, Role, RuntimeId, RuntimeSpec, Security,
-    Sharing, VolumeSource, VolumeSpec, Workload,
+    PersistentVolume, Probe, ProbeAction, Protocol, Resources, Role, RunPods, RuntimeId,
+    RuntimeSpec, Security, Sharing, VolumeSource, VolumeSpec, Workload,
 };
 use k8s_openapi::api::apps::v1::{
     Deployment, DeploymentSpec, StatefulSet, StatefulSetPersistentVolumeClaimRetentionPolicy,
@@ -28,6 +31,7 @@ use k8s_openapi::api::apps::v1::{
 use k8s_openapi::api::core::v1 as core;
 use k8s_openapi::api::networking::v1 as net;
 use k8s_openapi::api::policy::v1::{PodDisruptionBudget, PodDisruptionBudgetSpec};
+use k8s_openapi::api::rbac::v1 as rbac;
 use k8s_openapi::apimachinery::pkg::api::resource::Quantity;
 use k8s_openapi::apimachinery::pkg::apis::meta::v1::{LabelSelector, ObjectMeta, OwnerReference};
 use k8s_openapi::apimachinery::pkg::util::intstr::IntOrString;
@@ -35,7 +39,8 @@ use serde::{Deserialize, Serialize};
 
 use crate::error::Error;
 use crate::names::{
-    self, DELETION_POLICY_ANNOTATION, DIGEST_ANNOTATION, VOLUME_LABEL, service_labels,
+    self, DELETION_POLICY_ANNOTATION, DIGEST_ANNOTATION, RUN_PODS_POLICY_LABEL, VOLUME_LABEL,
+    service_labels,
 };
 
 /// The name of the container port every agent serves.
@@ -85,6 +90,26 @@ pub struct Rendered {
     pub disruption_budgets: Vec<PodDisruptionBudget>,
     /// Only when someone is allowed from.
     pub network_policy: Option<net::NetworkPolicy>,
+    /// Only with run pods: what the account that makes them, and what they, may do.
+    pub run_pods: Option<RunPodObjects>,
+}
+
+/// The objects of a service's run pods (slice D15a), beside the template, which is a file set. None of them
+/// is cluster-scoped: the operator is namespaced, and what is (the priority class, the admission policy and its
+/// binding, the role) is the operator chart's.
+#[derive(Clone, Debug, PartialEq)]
+pub struct RunPodObjects {
+    /// The parameters of the admission policy for this service: which account it is for and what the pods it makes
+    /// may be. The policy and its binding are the chart's; the binding selects this by a label.
+    pub policy_params: core::ConfigMap,
+    /// The account the workers run as. Its token is mounted by the workers' pods alone.
+    pub service_account: core::ServiceAccount,
+    /// What the run pods of the service may use in all.
+    pub quota: core::ResourceQuota,
+    /// What they may reach. `None`: the spec has no network policy for them.
+    pub network_policy: Option<net::NetworkPolicy>,
+    /// The account bound to the deployment's role: the right to make, find, watch and delete pods and `exec` in them.
+    pub role_binding: rbac::RoleBinding,
 }
 
 impl Rendered {
@@ -95,6 +120,14 @@ impl Rendered {
         }
         let mut out: Vec<serde_json::Value> = Vec::new();
         out.extend(self.config_maps.iter().map(doc));
+        if let Some(r) = &self.run_pods {
+            // The parameters of the guard and the account exist before the right to make pods does.
+            out.push(doc(&r.policy_params));
+            out.push(doc(&r.service_account));
+            out.push(doc(&r.quota));
+            out.extend(r.network_policy.iter().map(doc));
+            out.push(doc(&r.role_binding));
+        }
         out.extend(self.claims.iter().map(doc));
         out.push(doc(&self.service));
         for (_, w) in &self.workloads {
@@ -212,6 +245,7 @@ pub fn render(id: &RuntimeId, spec: &RuntimeSpec) -> Result<Rendered, Error> {
         workloads,
         disruption_budgets,
         network_policy: cx.network_policy(),
+        run_pods: spec.run_pods.as_ref().map(|r| cx.run_pods(r)).transpose()?,
     })
 }
 
@@ -342,6 +376,145 @@ impl Cx<'_> {
         })
     }
 
+    /// The objects of the run pods of the service (slice D15a), as the coder's chart makes them
+    /// (`run-pods-quota.yaml`, `run-pods-networkpolicy.yaml`, `run-pods-rbac.yaml`, `run-pods-admission.yaml`).
+    fn run_pods(&self, r: &RunPods) -> Result<RunPodObjects, Error> {
+        let name = names::run_pods(self.id);
+        // The guard's parameters, read by the admission policy of the chart with `params.data.<key>`. A value that
+        // is a list is one item per line.
+        let ns = self.id.scope();
+        let data = BTreeMap::from([
+            (
+                "serviceAccount".to_owned(),
+                format!("system:serviceaccount:{ns}:{}", r.service_account),
+            ),
+            ("priorityClass".to_owned(), r.priority_class.clone()),
+            ("managedBy".to_owned(), r.pods.managed_by.clone()),
+            ("runLabel".to_owned(), r.pods.run_label.clone()),
+            ("images".to_owned(), r.guard.images.join("\n")),
+            ("claim".to_owned(), r.guard.claim.clone()),
+            ("secretName".to_owned(), r.guard.secret.name.clone()),
+            ("secretKey".to_owned(), r.guard.secret.key.clone()),
+        ]);
+        let mut labels = service_labels(self.id);
+        labels.insert(RUN_PODS_POLICY_LABEL.to_owned(), "true".to_owned());
+        let policy_params = core::ConfigMap {
+            metadata: self.meta(&names::run_pods_policy_params(self.id), labels, true, false),
+            data: Some(data),
+            ..core::ConfigMap::default()
+        };
+
+        let service_account = core::ServiceAccount {
+            metadata: self.meta(&r.service_account, service_labels(self.id), true, false),
+            // The token is mounted in the pods of the workers alone, which ask for it.
+            automount_service_account_token: Some(false),
+            ..core::ServiceAccount::default()
+        };
+
+        let quota = core::ResourceQuota {
+            metadata: self.meta(&name, service_labels(self.id), true, false),
+            spec: Some(core::ResourceQuotaSpec {
+                hard: Some(BTreeMap::from([
+                    (
+                        "limits.memory".to_owned(),
+                        Quantity(r.quota.limits_memory.clone()),
+                    ),
+                    ("pods".to_owned(), Quantity(r.quota.pods.to_string())),
+                ])),
+                // A quota cannot select pods by label, but it can by priority class.
+                scope_selector: Some(core::ScopeSelector {
+                    match_expressions: Some(vec![core::ScopedResourceSelectorRequirement {
+                        scope_name: "PriorityClass".to_owned(),
+                        operator: "In".to_owned(),
+                        values: Some(vec![r.priority_class.clone()]),
+                    }]),
+                }),
+                scopes: None,
+            }),
+            ..core::ResourceQuota::default()
+        };
+
+        let network_policy = r.network.as_ref().map(|n| {
+            // The pods the coder labelled, of this service.
+            let mut egress = vec![
+                net::NetworkPolicyEgressRule {
+                    to: Some(vec![peer(&n.dns)]),
+                    ports: Some(vec![
+                        egress_port(Protocol::Udp, Some(53), None),
+                        egress_port(Protocol::Tcp, Some(53), None),
+                    ]),
+                },
+                net::NetworkPolicyEgressRule {
+                    to: Some(vec![net::NetworkPolicyPeer {
+                        ip_block: Some(net::IPBlock {
+                            cidr: "0.0.0.0/0".to_owned(),
+                            except: Some(n.except_cidrs.clone()),
+                        }),
+                        ..net::NetworkPolicyPeer::default()
+                    }]),
+                    ports: None,
+                },
+            ];
+            egress.extend(n.extra_egress.iter().map(|rule| net::NetworkPolicyEgressRule {
+                to: (!rule.to.is_empty()).then(|| rule.to.iter().map(peer).collect()),
+                ports: (!rule.ports.is_empty()).then(|| {
+                    rule.ports
+                        .iter()
+                        .map(|p| egress_port(p.protocol, p.port, p.end_port))
+                        .collect()
+                }),
+            }));
+            net::NetworkPolicy {
+                metadata: self.meta(&name, service_labels(self.id), true, false),
+                spec: Some(net::NetworkPolicySpec {
+                    pod_selector: Some(LabelSelector {
+                        match_labels: Some(BTreeMap::from([
+                            (
+                                names::MANAGED_BY_LABEL.to_owned(),
+                                r.pods.managed_by.clone(),
+                            ),
+                            (names::INSTANCE_LABEL.to_owned(), self.id.name().to_owned()),
+                        ])),
+                        match_expressions: Some(vec![
+                            k8s_openapi::apimachinery::pkg::apis::meta::v1::LabelSelectorRequirement {
+                                key: r.pods.run_label.clone(),
+                                operator: "Exists".to_owned(),
+                                values: None,
+                            },
+                        ]),
+                    }),
+                    policy_types: Some(vec!["Ingress".to_owned(), "Egress".to_owned()]),
+                    // Nothing connects to a run pod: the coder `exec`s in it through the API server.
+                    ingress: Some(Vec::new()),
+                    egress: Some(egress),
+                }),
+            }
+        });
+
+        let role_binding = rbac::RoleBinding {
+            metadata: self.meta(&name, service_labels(self.id), true, false),
+            role_ref: rbac::RoleRef {
+                api_group: "rbac.authorization.k8s.io".to_owned(),
+                kind: "Role".to_owned(),
+                name: r.role.clone(),
+            },
+            subjects: Some(vec![rbac::Subject {
+                kind: "ServiceAccount".to_owned(),
+                name: r.service_account.clone(),
+                namespace: Some(ns.to_owned()),
+                api_group: None,
+            }]),
+        };
+
+        Ok(RunPodObjects {
+            policy_params,
+            service_account,
+            quota,
+            network_policy,
+            role_binding,
+        })
+    }
+
     fn disruption_budget(&self, w: &Workload, min: u32) -> Result<PodDisruptionBudget, Error> {
         Ok(PodDisruptionBudget {
             metadata: self.meta(&w.name, service_labels(self.id), true, false),
@@ -416,7 +589,9 @@ impl Cx<'_> {
                 ..ObjectMeta::default()
             }),
             spec: Some(core::PodSpec {
-                automount_service_account_token: Some(false),
+                // The pods of the workers that make run pods hold the token of their account, and nothing else holds one.
+                automount_service_account_token: Some(w.service_account.is_some()),
+                service_account_name: w.service_account.clone(),
                 termination_grace_period_seconds: w.termination_grace_secs.map(i64::from),
                 security_context: Some(pod_security(&w.security)),
                 init_containers: (!w.sidecars.is_empty())
@@ -643,7 +818,7 @@ fn container(c: &Container) -> Result<core::Container, Error> {
             name: e.name.clone(),
             value: match &e.value {
                 EnvValue::Literal(v) => Some(v.clone()),
-                EnvValue::Secret(_) | EnvValue::PodName => None,
+                EnvValue::Secret(_) | EnvValue::PodName | EnvValue::PodNamespace => None,
             },
             value_from: match &e.value {
                 EnvValue::Literal(_) => None,
@@ -658,6 +833,13 @@ fn container(c: &Container) -> Result<core::Container, Error> {
                 EnvValue::PodName => Some(core::EnvVarSource {
                     field_ref: Some(core::ObjectFieldSelector {
                         field_path: "metadata.name".to_owned(),
+                        api_version: None,
+                    }),
+                    ..core::EnvVarSource::default()
+                }),
+                EnvValue::PodNamespace => Some(core::EnvVarSource {
+                    field_ref: Some(core::ObjectFieldSelector {
+                        field_path: "metadata.namespace".to_owned(),
                         api_version: None,
                     }),
                     ..core::EnvVarSource::default()
@@ -789,5 +971,24 @@ fn peer(p: &aap_ports::Peer) -> net::NetworkPolicyPeer {
             cidr: b.cidr.clone(),
             except: (!b.except.is_empty()).then(|| b.except.clone()),
         }),
+    }
+}
+
+fn egress_port(
+    protocol: Protocol,
+    port: Option<u16>,
+    end_port: Option<u16>,
+) -> net::NetworkPolicyPort {
+    net::NetworkPolicyPort {
+        protocol: Some(
+            match protocol {
+                Protocol::Tcp => "TCP",
+                Protocol::Udp => "UDP",
+                Protocol::Sctp => "SCTP",
+            }
+            .to_owned(),
+        ),
+        port: port.map(|p| IntOrString::Int(i32::from(p))),
+        end_port: end_port.map(i32::from),
     }
 }

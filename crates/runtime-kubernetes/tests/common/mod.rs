@@ -85,3 +85,69 @@ pub fn resolved(name: &str, change: impl FnOnce(&mut Value, &mut Value)) -> Reso
         },
     )
 }
+
+// ------------------------------------------------------------------------------------ run pods
+
+/// `deploy/operator/values.yaml`, parsed.
+pub fn operator_chart_values() -> Value {
+    let path = repo_root().join("deploy/operator/values.yaml");
+    let text = std::fs::read_to_string(&path).unwrap_or_else(|e| panic!("{}: {e}", path.display()));
+    serde_yaml::from_str(&text).unwrap_or_else(|e| panic!("{}: {e}", path.display()))
+}
+
+/// The settings the operator chart ships for run pods, as the file the chart renders for the operator.
+pub fn chart_run_pod_settings() -> aap_domain::RunPodSettings {
+    let values = operator_chart_values();
+    let mut settings = values["runPods"].clone();
+    let object = settings.as_object_mut().expect("runPods is a map");
+    object.remove("enabled");
+    object.remove("priorityClassName");
+    object.insert("classes".into(), values["runPodClasses"].clone());
+    object.insert("priorityClass".into(), serde_json::json!("coder-run"));
+    object.insert("role".into(), serde_json::json!("coder-run-pods"));
+    let settings: aap_domain::RunPodSettings =
+        serde_json::from_value(settings).expect("the chart's settings");
+    settings.validate().expect("the chart's settings are valid");
+    settings
+}
+
+/// The coder example with run pods on (the chart's settings and `standard`), changed by `change`.
+pub fn resolved_run_pods(change: impl FnOnce(&mut Value, &mut Value)) -> ResolvedAgent {
+    resolved_with("coder", &chart_run_pod_settings(), |s, c| {
+        set(
+            c,
+            "/spec/harness/adam/coder/runPods",
+            serde_json::json!({"sizeClass": "standard"}),
+        );
+        change(s, c);
+    })
+}
+
+/// An example with changes, run pods settings given, resolved with an owner that has a uid.
+pub fn resolved_with(
+    name: &str,
+    settings: &aap_domain::RunPodSettings,
+    change: impl FnOnce(&mut Value, &mut Value),
+) -> ResolvedAgent {
+    let (mut service, mut config) = example(name);
+    change(&mut service, &mut config);
+    let service: AgentService = serde_json::from_value(service).unwrap();
+    let config: AgentConfig = serde_json::from_value(config).unwrap();
+    let owner = owner_handle(
+        "agents.vymalo.com/v1alpha1",
+        "AgentService",
+        service.metadata.name.clone().unwrap(),
+        "0b1f3c5e-1111-4222-8333-444455556666",
+    );
+    let externals = aap_domain::Externals::default().with_run_pods(settings.clone());
+    aap_domain::resolve(&service, &config, &externals, owner).unwrap_or_else(|issues| {
+        panic!(
+            "the example does not resolve: {}",
+            issues
+                .iter()
+                .map(ToString::to_string)
+                .collect::<Vec<_>>()
+                .join("; ")
+        )
+    })
+}

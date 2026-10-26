@@ -15,10 +15,14 @@ mod externals;
 mod plan;
 mod refs;
 mod resolve;
+mod run_pods;
 mod syntax;
 mod validate;
 
 pub use digest::{canonical_json, digest_json, spec_digest};
 pub use externals::{Externals, References, references};
 pub use resolve::{ResolvedAgent, resolve};
+pub use run_pods::{
+    RunImage, RunPodClass, RunPodNetworkSettings, RunPodQuotaSettings, RunPodSettings,
+};
 pub use validate::{ConfigIssue, name_issue, validate, validate_config};

@@ -1,0 +1,132 @@
+# cases/coder-run-pods.yaml with every setting of run pods changed from its default (D15a): another run image, container, size class
+# (resources), build jobs, extra variables, a priority class the deployment manages, quota, timings, node placement, one more allowed
+# image, and a network policy with other CIDRs, DNS and an extra egress rule. The operator side of the test says each in the operator
+# chart's terms (`runPods`, `runPodClasses`), and the two renders must agree on all of it.
+fullnameOverride: coder
+image:
+  tag: sha-0391809
+topology: combined
+replicaCount: 1
+config:
+  modelBaseUrlFromSecret: true
+  modelBaseUrl: ""
+  model: coding-model
+  opencodeModel: coding-model
+  publicUrl: ""
+  workers: 4
+  maxCheckCycles: 3
+  checkTimeoutSecs: 900
+  workspaceSweepSecs: 300
+  allowedRepoHosts: [github.com]
+  githubApiUrl: https://api.github.com
+  prDraft: true
+  gitAuthorName: "bored-giant-panda[bot]"
+  gitAuthorEmail: "337696346+bored-giant-panda[bot]@users.noreply.github.com"
+runPods:
+  enabled: true
+  image:
+    repository: registry.example.com/team/workspace
+    tag: 2.0.0-abc1234
+    digest: sha256:1111111111111111111111111111111111111111111111111111111111111111
+    pullPolicy: Always
+  container: shell
+  resources:
+    requests:
+      cpu: "1"
+      memory: 2Gi
+    limits:
+      memory: 4Gi
+  cargoBuildJobs: 4
+  extraEnv:
+    NPM_CONFIG_REGISTRY: https://npm.example.com/
+    FOO: bar
+  priorityClassName: team-run-pods
+  quota:
+    limitsMemory: 16Gi
+    pods: 8
+  idleSecs: 300
+  readyTimeoutSecs: 900
+  waitSecs: 1200
+  coderResources:
+    requests:
+      cpu: 250m
+      memory: 512Mi
+    limits:
+      memory: 1Gi
+  nodeSelector:
+    disktype: ssd
+  tolerations:
+    - key: dedicated
+      operator: Equal
+      value: runs
+      effect: NoSchedule
+  nodeAffinity:
+    requiredDuringSchedulingIgnoredDuringExecution:
+      nodeSelectorTerms:
+        - matchExpressions:
+            - key: kubernetes.io/arch
+              operator: In
+              values: [amd64]
+  admissionPolicy:
+    extraAllowedImages:
+      - registry.example.com/team/helper:1.0@sha256:2222222222222222222222222222222222222222222222222222222222222222
+  networkPolicy:
+    clusterCIDRs: [10.42.0.0/16, 10.43.0.0/16]
+    dnsNamespace: dns-system
+    dnsPodLabels:
+      k8s-app: null
+      app: coredns
+    extraEgress:
+      - to:
+          - ipBlock:
+              cidr: 10.9.0.5/32
+        ports:
+          - protocol: TCP
+            port: 443
+github:
+  auth: app
+  createRepoOwners: []
+  app:
+    id: Iv23li4m1ZrQ8wdwjnQH
+    owners: [vymalo]
+    privateKeySecret: coder-github-app
+githubMcp:
+  enabled: true
+  port: 8082
+  host: ""
+mcp:
+  websearch:
+    url: http://another-agentic-websearch.another-agentic-system.svc:8080/mcp
+    header: Authorization
+    valuePrefix: "Bearer "
+    optional: true
+    allowInsecure: true
+  context7:
+    enabled: true
+    url: https://mcp.context7.com/mcp
+    header: Authorization
+    valuePrefix: "Bearer "
+    optional: true
+database:
+  enabled: false
+  existingSecret:
+    name: coder-db-uri
+    key: uri
+externalSecrets:
+  enabled: true
+  targetSecretName: coder-secrets
+workspace:
+  placement: ""
+persistence:
+  size: 20Gi
+  storageClass: longhorn
+terminationGracePeriodSeconds: 120
+resources:
+  requests:
+    cpu: 500m
+    memory: 1Gi
+  limits:
+    memory: 6Gi
+networkPolicy:
+  enabled: true
+  allowedNamespace: another-agentic-system

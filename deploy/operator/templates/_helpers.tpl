@@ -66,3 +66,41 @@ helm.sh/chart: {{ printf "%s-%s" .Chart.Name .Chart.Version | replace "+" "_" | 
 {{- define "aap.registrySecretKey" -}}
 {{- if .Values.externalSecrets.enabled -}}token{{- else -}}{{- .Values.registry.tokenSecret.key -}}{{- end -}}
 {{- end -}}
+
+{{/*
+Run pods (values `runPods`, `runPodClasses`; slice D15a): "true" or nothing. Off by default, and then nothing of them is rendered,
+checked or given a right.
+*/}}
+{{- define "aap.runPods" -}}
+{{- /* A value that is no map is refused by aap.validate with its name: here it is "off", so that no template fails on it first. */ -}}
+{{- $r := .Values.runPods -}}
+{{- if and (kindIs "map" $r) (eq (toString $r.enabled) "true") -}}true{{- end -}}
+{{- end -}}
+
+{{/* The Role that lets an account make, find, watch and delete pods and exec in them, which the operator binds each agent's account to, and the name of the ConfigMap of the operator's settings is built on. */}}
+{{- define "aap.runPodsRole" -}}
+{{- printf "%s-run-pods" (include "aap.fullname" .) | trunc 63 | trimSuffix "-" -}}
+{{- end -}}
+
+{{/* The ConfigMap that holds the operator's settings for run pods (RUN_PODS_FILE). */}}
+{{- define "aap.runPodsSettings" -}}
+{{- printf "%s-run-pods-settings" (include "aap.fullname" .) | trunc 63 | trimSuffix "-" -}}
+{{- end -}}
+
+{{/* The names of the admission policy and its binding, and of the PriorityClass: cluster-scoped, so they carry the namespace as well as the release. */}}
+{{- define "aap.runPodsPolicy" -}}
+{{- printf "%s-%s-run-pods" (include "aap.fullname" .) (include "aap.watchNamespace" .) | trunc 63 | trimSuffix "-" -}}
+{{- end -}}
+
+{{/* The priority class run pods have: the one named in values, else the chart's own <fullname>-<namespace>-run. */}}
+{{- define "aap.runPodsPriorityClass" -}}
+{{- default (printf "%s-%s-run" (include "aap.fullname" .) (include "aap.watchNamespace" .) | trunc 63 | trimSuffix "-") (default "" .Values.runPods.priorityClassName | toString | trim) -}}
+{{- end -}}
+
+{{/* Whether the chart renders that PriorityClass itself: no name in values. "true" or nothing. */}}
+{{- define "aap.runPodsOwnPriorityClass" -}}
+{{- if not (default "" .Values.runPods.priorityClassName | toString | trim) -}}true{{- end -}}
+{{- end -}}
+
+{{/* The label the admission policy's binding selects the parameters of a service by (the operator puts it on the ConfigMap it makes). */}}
+{{- define "aap.runPodsPolicyLabel" -}}agents.vymalo.com/run-pods-policy{{- end -}}

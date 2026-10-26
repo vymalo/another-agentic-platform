@@ -1,0 +1,22 @@
+{{- if include "aap.runPods" . }}
+# runPods.enabled: what an agent's account may do with pods: make, find, watch and delete them, and exec in them. Nothing else: no
+# Secret, no ConfigMap, no other kind. `get` on pods/exec as well as `create`: kube's exec is a WebSocket, which the API server
+# authorizes as a GET (and, from Kubernetes 1.35, as a create too; *unverified*). It is the coder chart's Role (adam-rs
+# `run-pods-rbac.yaml`), once for the namespace: the operator makes a RoleBinding of it for each agent that asks for run pods, and
+# holds the right to bind this Role and no right of its own to make a pod or exec. A Role cannot name the pods it may exec in, so an
+# account bound to it may exec in ANY pod of this namespace (the coder chart's Role has the same reach): README "Run pods".
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: {{ include "aap.runPodsRole" . }}
+  namespace: {{ include "aap.watchNamespace" . }}
+  labels:
+    {{- include "aap.labels" . | nindent 4 }}
+rules:
+  - apiGroups: [""]
+    resources: ["pods"]
+    verbs: ["create", "delete", "get", "list", "watch"]
+  - apiGroups: [""]
+    resources: ["pods/exec"]
+    verbs: ["create", "get"]
+{{- end }}

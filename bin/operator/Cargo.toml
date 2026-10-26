@@ -27,6 +27,7 @@ registry = ["dep:aap-registry"]
 [dependencies]
 aap-api.workspace = true
 aap-controller.workspace = true
+aap-domain.workspace = true
 aap-registry = { workspace = true, optional = true }
 aap-runtime-kubernetes = { workspace = true, optional = true }
 aap-store-cnpg = { workspace = true, optional = true }
@@ -41,7 +42,6 @@ tracing.workspace = true
 tracing-subscriber.workspace = true
 
 [dev-dependencies]
-aap-domain.workspace = true
 aap-ports.workspace = true
 http = "1"
 k8s-openapi.workspace = true

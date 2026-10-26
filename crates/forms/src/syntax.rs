@@ -109,6 +109,16 @@ pub(crate) fn shown(s: &str, n: usize) -> String {
     }
 }
 
+/// A size class of run pods (slice D15): a DNS label, which is what the operator chart's keys of `runPodClasses` are.
+pub(crate) fn is_size_class(s: &str) -> bool {
+    !s.is_empty()
+        && s.len() <= 63
+        && s.bytes()
+            .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'-')
+        && !s.starts_with('-')
+        && !s.ends_with('-')
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -201,6 +211,26 @@ mod tests {
             assert_eq!(redacted_url(hidden), "<not an address, hidden>", "{hidden}");
         }
         assert_eq!(redacted_url("plain words"), "plain words");
+    }
+
+    #[test]
+    fn size_classes() {
+        for ok in ["standard", "large", "a", "x1", "big-2", &"a".repeat(63)] {
+            assert!(is_size_class(ok), "{ok}");
+        }
+        for bad in [
+            "",
+            "-a",
+            "a-",
+            "Big",
+            "a_b",
+            "a.b",
+            "a b",
+            "a\n",
+            &"a".repeat(64),
+        ] {
+            assert!(!is_size_class(bad), "{bad:?}");
+        }
     }
 
     #[test]

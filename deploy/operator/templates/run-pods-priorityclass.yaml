@@ -1,0 +1,15 @@
+{{- if and (include "aap.runPods" .) (include "aap.runPodsOwnPriorityClass" .) }}
+# runPods.enabled: the priority class of run pods. It exists to be scoped by: a ResourceQuota cannot select pods by label, but it can
+# by priority class. Value 0 and preemptionPolicy Never: it ranks nothing and evicts nobody. Cluster-scoped (so the operator, which
+# is namespaced, does not make it), and shared by the run pods of the namespace: two agents here share the tighter of their quotas.
+apiVersion: scheduling.k8s.io/v1
+kind: PriorityClass
+metadata:
+  name: {{ include "aap.runPodsPriorityClass" . }}
+  labels:
+    {{- include "aap.labels" . | nindent 4 }}
+value: 0
+preemptionPolicy: Never
+globalDefault: false
+description: "Run pods of the agents of {{ include "aap.watchNamespace" . }} ({{ include "aap.fullname" . }}): scoped by a ResourceQuota, ranks nothing."
+{{- end }}

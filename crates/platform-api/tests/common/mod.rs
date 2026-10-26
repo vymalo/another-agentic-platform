@@ -18,7 +18,24 @@ pub const TOKEN_SENTINEL: &str = "tok-sentinel-6f2a9d1c";
 
 /// The deployment's defaults, as the example configuration file has them.
 pub fn defaults() -> Defaults {
-    serde_json::from_value(json!({
+    serde_json::from_value(defaults_json()).unwrap()
+}
+
+/// The same deployment with run pods (D15): the operator's size classes, and the coder's work volume they mount.
+pub fn defaults_with_run_pods() -> Defaults {
+    let mut d = defaults_json();
+    d["runPodSizeClasses"] = json!(["standard", "large"]);
+    d["coder"]["workVolume"] = json!({
+        "name": "work",
+        "scope": "agent",
+        "mountPath": "/work",
+        "source": { "persistent": { "size": "20Gi", "perReplica": true } }
+    });
+    serde_json::from_value(d).unwrap()
+}
+
+fn defaults_json() -> Value {
+    json!({
         "namespace": NS,
         "store": { "cnpg": { "instances": 1, "storage": { "size": "5Gi" } } },
         "a2aBearer": { "name": "agent-a2a", "key": "AGENT_REGISTRY_AGENT_TOKEN" },
@@ -33,8 +50,7 @@ pub fn defaults() -> Defaults {
             "githubMcp": { "sidecar": true, "port": 8082 }
         },
         "folder": {}
-    }))
-    .unwrap()
+    })
 }
 
 /// The five permissions of the dashboard, and one that is not (an orchestrator role).

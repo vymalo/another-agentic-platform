@@ -6,8 +6,10 @@
 #   for f in /tmp/api-config/*.yaml; do target/release/api --config "$f" --check; done
 #
 # The shapes: `golden` (tests/api.values.yaml), `secretref` (tests/api-secretref.values.yaml: no CloudNativePG, an issuer over plain http),
-# `minimal` (the least a deployment must say, nothing else) and `full` (tests/api-full.values.yaml: every value the chart exposes, none left
-# to its default, so a value the chart writes into the file is read by the binary). Needs `helm` and `awk` (api-config.sh).
+# `minimal` (the least a deployment must say, nothing else), `full` (tests/api-full.values.yaml: every value the chart exposes, none left
+# to its default, so a value the chart writes into the file is read by the binary) and `runpods` (tests/runpods.values.yaml: run pods on, so
+# the file lists the size classes and a work volume, and the binary checks that a coder asking for the first class is a valid one).
+# Needs `helm` and `awk` (api-config.sh).
 set -eu
 
 if [ "$#" -ne 1 ]; then
@@ -26,3 +28,4 @@ sh "$here/api-config.sh" "$dir/minimal.yaml" \
   --set 'api.config.defaults.allowedImageRegistries[0]=ghcr.io' \
   --set 'api.networkPolicy.from[0].podSelector.matchLabels.app=edge'
 sh "$here/api-config.sh" "$dir/full.yaml" -f "$here/api-full.values.yaml"
+sh "$here/api-config.sh" "$dir/runpods.yaml" -f "$here/runpods.values.yaml"
