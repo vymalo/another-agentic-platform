@@ -112,6 +112,12 @@ impl KubernetesRuntime {
         self
     }
 
+    /// Whether this provider looks for run pod objects to clear ([`clearing_run_pods`](Self::clearing_run_pods)).
+    #[must_use]
+    pub fn is_clearing_run_pods(&self) -> bool {
+        self.clear_run_pods
+    }
+
     /// A provider on the client the environment gives: the in-cluster configuration, or the
     /// kubeconfig of `KUBECONFIG`.
     ///
