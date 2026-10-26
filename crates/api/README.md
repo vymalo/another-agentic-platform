@@ -41,6 +41,16 @@ default applies (the operator does not copy adam's defaults). The defaults the s
 are the platform's own: `scaling` (`combined`, 1 worker), `suspend: false`, `deletionPolicy:
 Retain`, `interfaces` (nothing exposed), `githubMcp` (`sidecar: true`, `port: 8082`).
 
+## Run pods (D15a)
+
+| Field | Shape |
+|---|---|
+| `AgentConfig.spec.harness.adam.coder.runPods` | Optional `{ sizeClass }` (`aap_api::RunPods`). **Absent: no run pods**, and the object serialises as it did before the field. `sizeClass` is a non-empty text and defaults to `standard` (`aap_api::STANDARD_CLASS`) when `runPods: {}` is written; the name of a class of the operator chart's `runPodClasses`. Whether the class exists, and the rest (the work volume, the variables), is `aap-domain`'s, because it depends on what the deployment gives |
+
+A coder that sets it runs the commands of a run in pods of their own (adam-rs #131); `adam-agent` has no `coder` block, so
+there it is nothing. Nothing else about run pods is a field of the config: the image, the quota, the network policy and the placement are the
+deployment's (the operator chart's `runPods`), so that a person who may edit an agent cannot widen them. [`examples/coder-run-pods.yaml`](../../examples/coder-run-pods.yaml).
+
 ## The dashboard's fields (D1)
 
 | Field | Shape |

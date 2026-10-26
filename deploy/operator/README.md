@@ -30,6 +30,7 @@ flowchart LR
 | `Service aap-operator-metrics` | ClusterIP 9090 |
 | `NetworkPolicy aap-operator` | Ingress only from who the values name; egress only to the API server's ports |
 | `ExternalSecret aap-operator-registry` | Only with `externalSecrets.enabled`: the registry token from AWS Secrets Manager |
+| `ConfigMap` `aap-operator-run-pods-settings`, `Role` `aap-operator-run-pods`, `PriorityClass`, `ValidatingAdmissionPolicy` and its binding | Only with `runPods.enabled`: [run pods](#run-pods). Nothing of them is rendered, or checked, while it is off, and the render is then byte for byte what it was before they existed |
 | `Deployment`, `Service`, `ConfigMap`, `ServiceAccount`, `Role`, `RoleBinding`, `NetworkPolicy` `aap-operator-api` and an optional `Ingress` | Only with `api.enabled`: [the Platform API](#the-platform-api). Nothing of it is rendered, or checked, while it is off |
 
 ## Install
@@ -62,6 +63,7 @@ sequence them with the CRDs first (a sync wave, or their Application first).
 | `imagePullSecrets` | `[]` | For a private package ([below](#the-image)) |
 | `watchNamespace` | the release's namespace | The one namespace watched; the `Role` and `RoleBinding` are made there. A name, never a list or a wildcard: **there is no value that gives the operator a `ClusterRole`** |
 | `defaultAgentImage` | `ghcr.io/vymalo/another-adam-rs/coder:sha-9a1fd4e@sha256:c3c178b7d73599f40d53f798616e510346abd3300a622b09b2bc233109f12b44` | The image of an agent whose `AgentConfig` names none (`DEFAULT_AGENT_IMAGE`, `operator run --default-agent-image`; AD-029): the coder image, **by tag and digest** (the chart refuses a value without both, and `latest`). Empty: no variable, no default, and such an agent is `ConfigInvalid`. **Not** moved by `bump-tag.sh`: [below](#the-default-agent-image) |
+| `runPods.enabled` and the rest of `runPods.*`, `runPodClasses.*` | off | The operator sets up run pods for a coder that asks for them (`coder.runPods.sizeClass`): [its own section](#run-pods) lists every value. On, the operator reads them from `RUN_PODS_FILE`, and the chart refuses what the operator would refuse at start |
 | `storeCnpg` | `true` | The right on CloudNativePG `Cluster`s (`get patch create delete`). The image is built with the `store-cnpg` feature; `false` is for a cluster that has no CloudNativePG |
 | `registry.tokenSecret.name`, `.key` | none, `token` | An existing Secret that holds the registry's bearer token. The operator reads the file **once**, at start: after a rotation, restart the pod |
 | `registry.publicUrl` | none | `REGISTRY_PUBLIC_URL`: the registry document's own URL, its `anchor` |
@@ -104,8 +106,120 @@ The `Role` is the sum of the three crates' tables, no more
 | `pods` | `list watch` |
 | `clusters` (`postgresql.cnpg.io`), with `storeCnpg` | `get patch create delete` |
 
+With `runPods.enabled` the table gains these rows, and no other (`tests/render-check.sh` compares the whole `Role`, and lists what it must not hold):
+
+| Resources | Verbs |
+|---|---|
+| `serviceaccounts`, `resourcequotas` | `get list patch create delete` |
+| `rolebindings` (`rbac.authorization.k8s.io`) | `get list patch create delete` |
+| `roles` (`rbac.authorization.k8s.io`), **named `<fullname>-run-pods`** (`resourceNames`) | `bind` |
+| `pods` | `delete` (the run pods of a service that stops asking for them or goes: `list watch` above is all it has otherwise) |
+
 **No right on Secrets** (a Secret an agent names is read by the kubelet; the operator never sees a value), none on
 `agentservices/finalizers`, none on `databases`, `poolers` or `clusters/status`, and nothing outside the watched namespace.
+
+## Run pods
+
+A coder can run the commands of a run in **pods of their own** instead of in its own container (adam-rs [#131](https://github.com/vymalo/another-adam-rs/pull/131)): it makes a pod from a template, runs `exec` in it, and deletes it. That needs, besides the coder, a template, an account that may make pods, a quota, a network policy and a guard that stops the account making any other pod. adam-rs's coder chart renders them; with `runPods.enabled` this chart and the operator do, for an `AgentConfig` that sets `coder.runPods.sizeClass`, and for no other (slice D15a, [§60a](../../docs/architecture/10-control-plane-and-crds.md), the *D15a built* note).
+
+```mermaid
+sequenceDiagram
+  participant P as a person or GitOps
+  participant O as the operator
+  participant K as the API server
+  participant G as admission: the chart's policy
+  participant W as the coder's worker
+  P->>K: AgentConfig with coder.runPods.sizeClass
+  O->>K: ConfigMap <service>-run-pods-policy (the guard's parameters)
+  O->>K: ServiceAccount, ResourceQuota, NetworkPolicy
+  O->>K: RoleBinding <service>-run-pods (the right to make pods), then the Service and the workers
+  W->>K: create a pod from the template, as the account
+  K->>G: the 9 rules, with the account's parameters
+  G-->>K: admitted, or refused with the message of the rule it breaks
+  P->>K: the config stops asking, or the service is deleted
+  O->>K: delete the RoleBinding first, then the run pods, the quota, the network policy, the parameters, the account
+```
+
+```mermaid
+stateDiagram-v2
+  [*] --> NoRunPods: no sizeClass
+  NoRunPods --> Guarded: sizeClass set (parameters, account, quota, network policy)
+  Guarded --> MayMakePods: the RoleBinding is applied
+  MayMakePods --> Removing: sizeClass removed, or the service deleted
+  Removing --> NoRunPods: binding, pods, quota, network policy, parameters, account gone
+  MayMakePods --> Unguarded: a person deletes the parameters
+  Unguarded --> MayMakePods: the next reconcile makes them again
+```
+
+### Turning it on
+
+```yaml
+runPods:
+  enabled: true          # the image, the quota and the rest keep the defaults of values.yaml
+api:
+  config:
+    defaults:
+      coder:
+        workVolume: { name: work, scope: agent, mountPath: /work, source: { persistent: { size: 20Gi, perReplica: true } } }   # with the API on
+```
+
+| Value | Default | What |
+|---|---|---|
+| `runPods.enabled` | `false` | Off: nothing below is rendered, checked or given a right, and an `AgentConfig` that asks is `ConfigInvalid` saying the operator has no run pods |
+| `runPods.image.repository`, `.tag`, `.digest`, `.pullPolicy` | the `workspace` image of another-agentic-images, `1.98.1-e6a528f`, its digest, `IfNotPresent` | The run container. **Tag and digest are required**, and `latest` is refused: the commands of every run execute in it. *Verified 2026-10-11* in the coder chart by an anonymous manifest request; not re-checked here |
+| `runPods.container` | `run` | The container of the template the commands run in (`RUN_POD_CONTAINER`) |
+| `runPods.cargoBuildJobs` | `2` | `CARGO_BUILD_JOBS`, so that a Rust build stays inside the 2Gi of `standard` |
+| `runPods.extraEnv` | `{}` | More variables of the run container, text values; `MODEL_API_KEY` and `CARGO_BUILD_JOBS` are the operator's and refused |
+| `runPods.priorityClassName` | `""` | Empty: the chart makes `<fullname>-<namespace>-run` (value 0, never preempts). A name: yours, and the chart makes none |
+| `runPods.quota.limitsMemory`, `.pods` | `8Gi`, `4` | What the run pods **of the namespace's priority class** may use in all. A pod beyond it is refused (`exceeded quota`) and the coder waits (`waitSecs`) |
+| `runPods.idleSecs`, `.readyTimeoutSecs`, `.waitSecs` | `900`, `600`, `600` | A pod nobody used for this long is deleted (0: when its run ends); how long a pod may take to be ready; how long a run waits for a slot |
+| `runPods.nodeSelector`, `.tolerations`, `.nodeAffinity` | none | Where run pods may go, on top of what the volume needs |
+| `runPods.extraAllowedImages` | `[]` | Images a run pod may use besides the run image and the coder's own, spelled as the pod spells them |
+| `runPods.networkPolicy.*` | on; no cluster CIDR; the RFC 1918 ranges, link-local and shared address space blocked; DNS in `kube-system` | No ingress. Egress to DNS and the internet except the blocked ranges. Name your pod and service CIDRs in `clusterCIDRs`; `extraEgress` takes `NetworkPolicy` egress rules (the model gateway, when it is in the cluster). IPv4 only. Only as real as the CNI |
+| `runPodClasses.<name>.requests`, `.limits` | `standard`: 250m / 512Mi, limit 2Gi | The size classes an `AgentConfig` picks by name. **`limits.memory` is required** (the quota counts it) and must not exceed `runPods.quota.limitsMemory` (the operator refuses to start otherwise, naming the class) |
+
+**The operator's and the API's images must be from slice D15a or later** before this is turned on: an older operator ignores `RUN_PODS_FILE` and `coder.runPods` (the agent runs without run pods, silently), and an older API refuses, at start, the `defaults.runPodSizeClasses` the chart then writes (it fails closed). `image.tag` and `api.image.tag` are bumped by CI after the build of the commit that introduced this.
+
+The chart writes the operator's settings (`runPods`, `runPodClasses`, and the names of the `PriorityClass` and the Role) into the ConfigMap `<fullname>-run-pods-settings`; the Deployment mounts it at `/etc/aap/run-pods` and sets `RUN_PODS_FILE`, and rolls when it changes (a checksum): the operator reads it once, at start. With the API on, the chart also writes the **names of the classes** into the API's file (`defaults.runPodSizeClasses`), which is what `GET /v1/info` offers and what a coder form may pick; it refuses a list written by hand, and **requires `api.config.defaults.coder.workVolume`** (run pods mount the coder's work volume, and the API refuses to start otherwise: it checks that a coder asking for the first class is a valid one).
+
+### What the operator makes for an agent, and what the chart made once
+
+| Object | Made by | Name | Why |
+|---|---|---|---|
+| Pod template | the operator | ConfigMap `<service>-run-pod`, mounted at `/etc/adam/run-pod/pod.yaml` in the workers | `RUN_POD_TEMPLATE_FILE`; the pod is the coder chart's, from the same values |
+| Account | the operator | ServiceAccount `<service>` | The workers run as it, with its token; no other pod mounts the token |
+| Quota | the operator | ResourceQuota `<service>-run-pods` | `pods` and `limits.memory`, scoped to the priority class |
+| Network policy | the operator | NetworkPolicy `<service>-run-pods` | Selects the run pods of the service by label: no ingress, DNS and the internet except the private ranges |
+| Right to make pods | the operator | RoleBinding `<service>-run-pods` to the Role below | Made last, removed first |
+| Guard's parameters | the operator | ConfigMap `<service>-run-pods-policy`, labelled `agents.vymalo.com/run-pods-policy` | The account, the labels, the images, the claim, the Secret key; read by the policy |
+| Role | **the chart** | `<fullname>-run-pods` | `pods` create, delete, get, list, watch; `pods/exec` create, get. Nothing else |
+| PriorityClass | **the chart** | `<fullname>-<namespace>-run` | A quota cannot select pods by label, it can by priority class. Cluster-scoped |
+| Admission policy and binding | **the chart** | `<fullname>-<namespace>-run-pods` | One policy for every agent: the 9 rules of the coder chart's policy, with the values read from the parameters of the account that makes the pod. Cluster-scoped |
+
+The operator makes nothing cluster-scoped and has **no `ClusterRole`**; the chart makes the four objects marked *the chart* above (the `PriorityClass`, the policy and its binding are cluster-scoped, and Helm's administrator may make them). Every object the operator makes carries the labels, the digest annotation and the owner reference of the agent's other objects, so a deleted service takes them with it; an object of the same name that the operator did not make is a reported conflict and is left alone.
+
+### What a person must know
+
+1. **The operator can `bind` the Role of run pods.** It holds `bind` on that one Role, by name, and nothing of `pods`, `pods/exec` or `roles` beyond it: it cannot make a pod, `exec`, or read a Secret itself (*verified 2026-10-26* on a bare kube-apiserver v1.35.8, with `kubectl auth can-i --as` and by trying). It can bind the Role to **any** account of the namespace, itself included, and so give that account the right to make pods and `exec`. It already makes workloads that run any pod, so this is not a new class of reach, but it is not visible in the verbs a reader of its `Role` sees. The alternative, a `ClusterRole` to make a policy per agent, would let it switch admission off.
+2. **The guard fails open for an account whose parameters are gone.** The binding must say `parameterNotFoundAction: Allow`: with `Deny`, a namespace in which no agent has run pods would refuse **every** pod creation in it, the operator's own included (*verified 2026-10-26*). So an account that has the right to make pods and no parameter object is not guarded. The operator makes the parameters before the right and removes the right first; the account's Role has no right on ConfigMaps; but **a person who can delete ConfigMaps in the namespace can delete the guard of an agent** until the next reconcile makes it again.
+3. **The run pods of the agents of one namespace share the tighter of their quotas.** A `ResourceQuota` selects by priority class and not by label, so every agent of the namespace has the same class, and each agent's quota counts the pods of all of them. One namespace per coder keeps them apart.
+4. **The account may `exec` in any pod of its namespace.** A `Role` cannot name the pods it may `exec` in. It holds no right on Secrets, ConfigMaps or Services, but another agent's pod in the same namespace is within reach. The coder chart's Role has the same reach; the namespace is the boundary.
+5. **Turning `runPods.enabled` off does not clear anything.** Without the settings the operator has no right on the account, the quota and the binding, so it does not look for them: an agent that made run pods keeps their objects (and the right to make pods that its binding gives, and the guard's parameters) until the agent is deleted, when its owner reference takes them away. **Remove `coder.runPods` from the configs first**, wait for the objects to go, then turn the value off.
+6. **Kubernetes 1.30 or later** has the v1 admission policy API; the policy uses `params` in a **match condition**, which was *verified 2026-10-26* on v1.35.8 and **not on an older version**. A cluster whose API server refuses the policy fails the install, not an agent.
+7. **A GitHub App coder without run pods** is not refused by the operator. At adam-rs `3f714d0` the coder itself exits 78 and says why unless the risk is accepted by name (`ALLOW_COMMANDS_NEXT_TO_SECRETS` in the `AgentConfig`'s `extraEnv`); `defaultAgentImage` is older and does not. **The day it moves to an image that includes #131, a coder with an App needs run pods or the acknowledgement in the same change.**
+
+### Checking a cluster
+
+```sh
+# After an agent with run pods is Ready: the pod the coder would build from the operator's template is admitted, and 25 mutations are
+# refused with the message of the rule each breaks (it creates nothing: --dry-run=server, as the agent's account; needs kubectl and jq).
+sh deploy/operator/tests/run-pods-admission.sh <namespace> <service>
+kubectl auth can-i create pods --as system:serviceaccount:<namespace>:aap-operator -n <namespace>     # no
+kubectl auth can-i create pods --as system:serviceaccount:<namespace>:<service> -n <namespace>        # yes
+kubectl auth can-i get secrets --as system:serviceaccount:<namespace>:<service> -n <namespace>        # no
+```
+
+`run-pods-admission.sh` was run against a real API server (a bare kube-apiserver v1.35.8, no controller) with the objects this chart and the operator make, and against the coder chart's own policy with the same table. What a bare server cannot show, and D15b (the kind end-to-end) is to: that a kubelet starts the pod, that the quota counts it, that the network policy is enforced, that the coder reads the mounted template and runs a command in the pod, and that a deleted service leaves nothing.
 
 ## The registry and its token
 
@@ -412,19 +526,20 @@ helm lint deploy/operator && helm lint deploy/operator-crds
 sh deploy/operator/tests/render-check.sh                    # needs helm
 UPDATE_GOLDEN=1 sh deploy/operator/tests/render-check.sh    # after a deliberate change: rewrites tests/golden
 sh deploy/operator/tests/bump-tag-test.sh
-# the configuration the chart renders for the API in each of its four shapes, read by the binary (cargo build -p aap-api-server first)
+# the configuration the chart renders for the API in each of its five shapes, read by the binary (cargo build -p aap-api-server first)
 sh deploy/operator/tests/api-shapes.sh /tmp/api-config && for f in /tmp/api-config/*.yaml; do target/debug/api --config "$f" --check; done
 ```
 
 | File | What |
 |---|---|
-| `tests/render-check.sh` | the four golden renders (`tests/golden/netcup.yaml` from `examples/netcup.values.yaml`, `secret.yaml` from `tests/secret.values.yaml`, `default.yaml`, and `api.yaml` from `tests/api.values.yaml`, the Platform API on; the first three have it off and equal what they were before it existed); no Secret object, no `ClusterRole`, no host access; one replica, `Recreate`, the probes, the security context; the `Role` equal to the table above, with and without `storeCnpg`; the registry only with a token, mounted as a file; the NetworkPolicy; the ExternalSecret; every refusal of `_validate.tpl` (the default agent image's included); the shared kinds read and never written; `DEFAULT_AGENT_IMAGE` pinned by tag and digest, empty rendering none, and the chart's pin equal to the end-to-end's; and `deploy/operator-crds` equal to `deploy/crds`. For the API: its objects, pod and labels, the `Role` **equal to `crates/objects-kubernetes/tests/rbac.yaml`** (read from the file) with no right on Secrets, the Service without the health port, the policy, the Ingress and its annotations, no Secret in the render or the file, the second shape (`tests/api-secretref.values.yaml`), **the full shape** (`tests/api-full.values.yaml`: the ports in the file, the container, the probes, the Service and the policy; each of the three egress rules with its peers; the extra environment, volumes and mounts), the pod's `securityContext` and the container's each by themselves, `NOTES.txt` (read through a copy of the chart that includes it), nothing rendered or checked while it is off, and every refusal of `_validate.tpl` for it |
+| `tests/render-check.sh` | the five golden renders (`tests/golden/netcup.yaml` from `examples/netcup.values.yaml`, `secret.yaml` from `tests/secret.values.yaml`, `default.yaml`, `api.yaml` from `tests/api.values.yaml`, the Platform API on, and `runpods.yaml` from `tests/runpods.values.yaml`, run pods on; the first three have both off and equal what they were before either existed); **for run pods: not a trace of them in any render while they are off, the objects they add, the operator's `Role` rule by rule (and that it cannot make a pod, `exec`, read a Secret, write a Role or `bind` any other), the Role of run pods equal to the coder chart's, the policy's nine rules, the binding that denies and lets a namespace without parameters alone, the settings and the Deployment that reads them, the API told the names of the classes, and 32 refusals of `_validate.tpl` for them**; no Secret object, no `ClusterRole`, no host access; one replica, `Recreate`, the probes, the security context; the `Role` equal to the table above, with and without `storeCnpg`; the registry only with a token, mounted as a file; the NetworkPolicy; the ExternalSecret; every refusal of `_validate.tpl` (the default agent image's included); the shared kinds read and never written; `DEFAULT_AGENT_IMAGE` pinned by tag and digest, empty rendering none, and the chart's pin equal to the end-to-end's; and `deploy/operator-crds` equal to `deploy/crds`. For the API: its objects, pod and labels, the `Role` **equal to `crates/objects-kubernetes/tests/rbac.yaml`** (read from the file) with no right on Secrets, the Service without the health port, the policy, the Ingress and its annotations, no Secret in the render or the file, the second shape (`tests/api-secretref.values.yaml`), **the full shape** (`tests/api-full.values.yaml`: the ports in the file, the container, the probes, the Service and the policy; each of the three egress rules with its peers; the extra environment, volumes and mounts), the pod's `securityContext` and the container's each by themselves, `NOTES.txt` (read through a copy of the chart that includes it), nothing rendered or checked while it is off, and every refusal of `_validate.tpl` for it |
 | `tests/bump-tag-test.sh` | `bump-tag.sh` edits only `image.tag` (a `defaultAgentImage` line beside it is left alone) or, with `api`, only `api.image.tag` (each leaves the other, and keys that only look like it, alone), is idempotent, refuses a malformed tag and an unknown component (the test of adam-rs's `deploy/coder`, with this chart's values) |
+| `tests/runpods.values.yaml`, `tests/golden/runpods.yaml`, `tests/run-pods-admission.sh` | run pods on beside the Platform API (two classes, a cluster CIDR, one extra egress rule, a toleration), its golden render, which `aap-domain` reads as the operator would (`RunPodSettings`, validated) and `aap-runtime-kubernetes` compares with the coder chart's policy and Role, and the admission test for a real cluster ([above](#checking-a-cluster)) |
 | `tests/api.values.yaml`, `tests/api-secretref.values.yaml`, `tests/api-full.values.yaml`, `tests/api-shapes.sh`, `tests/api-config.sh` | the shapes of the API component: the golden one, a Secret per agent, and **one that sets every value the chart exposes** (ports, `apiServer.cidrs`, `issuer.to`, every key of `defaults`, the Ingress, the scheduling), and the scripts that render a shape and write the ConfigMap's `config.yaml` to a file (`api-shapes.sh` writes `golden`, `secretref`, `minimal` and `full`), which CI hands to the image's `api --check` |
 | `tests/schemas/` | the `ExternalSecret` schema for kubeconform ([its README](tests/schemas/README.md)) |
 | `tests/e2e/` | the kind end-to-ends: of the coder (S9, `coder-e2e.sh`), of the Platform API (D7b2, `api-e2e.sh` with `api.values.yaml` and `api-offer.yaml`) and of the whole chain (D13, `chain-e2e.sh` with `chain.values.yaml`, `chain-orchestrator.yaml`, which holds the pin of the system's orchestrator image, and `chain-offer.yaml`); `render-check.sh` renders the values they install and asserts what the scripts depend on: [`tests/e2e/README.md`](tests/e2e/README.md) |
 
-CI also runs kubeconform in strict mode over seven renders (the defaults, netcup, `secret.values.yaml`, the three API shapes, and the CRDs chart with the
+CI also runs kubeconform in strict mode over eight renders (the defaults, netcup, `secret.values.yaml`, the three API shapes, run pods on, and the CRDs chart with the
 `CustomResourceDefinition` kind skipped, because the schema set has none: the `kind` job of `operator.yml` applies them to a real API server).
 
 ## Known limitations
@@ -440,6 +555,8 @@ CI also runs kubeconform in strict mode over seven renders (the defaults, netcup
   `0.1.0`, as the convention is. The `helm.sh/chart` label therefore does not change with a release.
 
 ## What is not proven
+
+* **Run pods have not run on a cluster.** The chart renders, lints, passes kubeconform (strict, Kubernetes 1.31 schemas), and the policy was run against a **bare kube-apiserver v1.35.8** with `tests/run-pods-admission.sh` (25 refusals, each with its rule's message). Not proven: that a kubelet starts the pod, that the quota counts it, that the network policy is enforced, that the coder reads the template and runs a command in the pod, that a deleted service leaves nothing, a Kubernetes older than 1.35 (`params` in a match condition) and the `exec` verb on 1.35 and later. **D15b is the job that runs them** ([§60a, *D15a built*](../../docs/architecture/10-control-plane-and-crds.md)).
 
 * **The Platform API component has not run on a cluster where it was written.** It is rendered, linted, checked with kubeconform, and its file is read by the binary (`api --check`,
   here and in CI); the image is built by CI (not here: no container daemon runs where this was written). **D7b2 is the job that runs it**, `api-e2e`

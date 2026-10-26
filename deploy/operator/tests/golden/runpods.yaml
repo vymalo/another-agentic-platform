@@ -715,7 +715,8 @@ spec:
 # `parameterNotFoundAction: Allow`: a namespace in which no agent asks for run pods has no parameter, and every pod creation in it
 # would be denied by `Deny`, the operator's own among them. The cost is stated in the README ("Run pods"): an account whose parameters
 # are gone is not guarded, so the operator makes the parameters before the binding that lets the account make pods and removes the
-# binding first. Needs Kubernetes 1.30 or later (admissionregistration.k8s.io/v1).
+# binding first. Needs the v1 admission policy API (Kubernetes 1.30 or later) and `params` in a match condition, which was verified on a
+# kube-apiserver v1.35.8 only: the oldest version where it works is not known (README "Run pods").
 apiVersion: admissionregistration.k8s.io/v1
 kind: ValidatingAdmissionPolicy
 metadata:

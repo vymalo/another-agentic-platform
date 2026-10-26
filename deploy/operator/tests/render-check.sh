@@ -1028,6 +1028,8 @@ check "refused: a variable that is a number and not a text" refused "runPods.ext
 check "refused: a CIDR that is none" refused "is not an IPv4 CIDR" --set runPods.enabled=true --set 'runPods.networkPolicy.clusterCIDRs[0]=10.0.0.0/33'
 check "refused: no label of the DNS pods" refused "runPods.networkPolicy.dnsPodLabels must name at least one label" --set runPods.enabled=true --set runPods.networkPolicy.dnsPodLabels=null
 check "refused: a PriorityClass name that is none" refused "runPods.priorityClassName must be the name of a PriorityClass" --set runPods.enabled=true --set 'runPods.priorityClassName=Not A Name'
+check "refused: run pods and the API on, and no work volume among the coder defaults" refused "api.config.defaults.coder.workVolume is required while runPods.enabled" \
+  -f "$here/api.values.yaml" --set runPods.enabled=true
 check "refused: a size class list written by hand into the API's file" refused "api.config.defaults.runPodSizeClasses is the chart's" \
   -f "$here/api.values.yaml" --set 'api.config.defaults.runPodSizeClasses[0]=standard'
 

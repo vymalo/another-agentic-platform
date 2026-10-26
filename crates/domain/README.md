@@ -49,7 +49,8 @@ Dependency direction, as §59a's table has it: `aap-domain` depends on `aap-api`
 | `resolve(service, config, externals, owner)` | `validate`, then the specs. The owner is the opaque handle the controller got from the object; it is copied into the specs unread and is not part of the digest |
 | `ResolvedAgent { id, store_id, runtime, store, digest, public_url }` | what the controller needs to reconcile. `runtime.digest == digest` |
 | `spec_digest(&RuntimeSpec)`, `digest_json`, `canonical_json` | the digest and the canonical serialisation it is of, so a provider or a test can recompute it |
-| `contract` | the names, paths, ports, probe periods, sidecar command and defaults of adam, as constants (`contract::env::OPERATOR_SET` lists every variable the operator may set) |
+| `contract` | the names, paths, ports, probe periods, sidecar command and defaults of adam, as constants (`contract::env::OPERATOR_SET` lists every variable the operator may set; `contract::run_pods` is the contract of run pods, D15a) |
+| `RunPodSettings`, `RunPodClass`, `RunImage`, `RunPodQuotaSettings`, `RunPodNetworkSettings`; `Externals::with_run_pods` | **Run pods (D15a)**: what the deployment gives, read by the operator from the file the chart renders (`RUN_PODS_FILE`): the classes, the image, the quota, the network policy, the node placement, the names of the `PriorityClass` and the Role. `RunPodSettings::validate()` returns every mistake of the file, each naming its key, and the operator refuses to start with one; `RunPodSettings::offering(names)` is the stand-in a client that only knows the class names validates with (the Platform API) |
 
 ## What `resolve` makes
 
@@ -202,6 +203,14 @@ of them; a name the server lacks skips an optional server (and stops a required 
 (`validate_config`) does not read the referents: it says the config is well formed, and a referent that is missing or wrong
 is the **service's** `ConfigResolved: False`.
 
+## Run pods (slice D15a)
+
+A coder whose `AgentConfig` sets `coder.runPods.sizeClass` runs the commands of a run in pods of their own. `resolve` makes, from the config and the deployment's `RunPodSettings` (`Externals::run_pods`): the **pod template** as a file set of the workers (`<svc>-run-pod`, `pod.yaml`, mounted at `/etc/adam/run-pod`, named by `RUN_POD_TEMPLATE_FILE`), the variables of adam's contract (`RUN_ENVIRONMENT=kubernetes`, `RUN_POD_NAMESPACE` from the pod's own namespace, `RUN_POD_INSTANCE`, `RUN_POD_CONTAINER`, the three times), the account the workers run as (and its token, in the workers' pods alone), and the neutral `RunPods` the provider renders. `contract::run_pods` is the one place that spells adam's names for it. A config that does not set the field resolves to exactly what it did, digest included.
+
+`validate` refuses, naming the field: run pods when the operator has none (`RUN_PODS_FILE` absent: the chart's `runPods.enabled` is false); a class it does not have (the message lists the ones it has); no work volume (run pods mount it, whole, at the same path); a volume named like the template's or mounted over its directory; an `extraEnv` that names a variable the operator sets for run pods (only when they are on: otherwise it is a valid name for a variable of the agent's own); `DEVCONTAINER_RUNTIME=podman` (the coder exits 78 with run pods and Podman); and several workers sharing a per-replica claim. **It does not refuse a GitHub App coder that has no run pods**: at adam-rs `3f714d0` the coder exits 78 and says why unless `ALLOW_COMMANDS_NEXT_TO_SECRETS` is accepted by name in `extraEnv`, and a second copy of that rule here would drift from adam's (§60a, *D15a built*, decision 7).
+
+`RunPodSettings` is **`deny_unknown_fields`**: the chart writes it all, so the defaults are in one place (the chart's `values.yaml`), and a key the operator does not read is a refusal at start and not a setting that does nothing.
+
 ## Deviations from §59a
 
 Choices where §59a says little or says something this crate could not keep. Each is a decision the owner can
@@ -223,9 +232,8 @@ reverse in one place.
 ## Parity with the chart
 
 §59a's risk "adam's env contract is copied into `aap-domain`" is handled by **parity goldens**: what the
-adam-rs chart `deploy/coder` renders (`helm template`) at the revision §59a cites, `0391809` (*verified
-2026-10-05*), for three sets of values equivalent to `examples/coder.yaml` and two variations (`split` with
-isolated workers; two affinity workers on a token with a GitHub Enterprise host). `tests/parity.rs` projects
+adam-rs chart `deploy/coder` renders (`helm template`) at the revision of [`tools/adam-parity/regen.sh`](../../tools/adam-parity/regen.sh), `3f714d0` since D15a (*verified 2026-10-26*; `0391809`, the revision §59a cites, before), for three sets of values equivalent to `examples/coder.yaml` and two variations (`split` with
+isolated workers; two affinity workers on a token with a GitHub Enterprise host), and, since D15a, **four with run pods on** (defaults; a shared ReadWriteMany claim; split; tuned settings), for which the pod template, its environment, volumes and security, and the account of each workload are compared too. The quota, network policy, binding, Role, `PriorityClass` and admission policy are compared in [`aap-runtime-kubernetes`](../runtime-kubernetes/README.md#run-pods-d15a). `tests/parity.rs` projects
 `RuntimeSpec` onto the same shape (as a Kubernetes provider makes the pods) and compares, section by section,
 the environment (name and source of every variable), command, mounts, probes, resources, the sidecar, the
 volumes and claims, the extra MCP file, the security context, the Service and the budget.
@@ -249,7 +257,8 @@ runs the tests against the checked-in goldens only.
 | `tests/references.rs` | slice D2: a reference gives what the inline form gives (model, servers, a whole config, digest included); `optional` over its four cases; the allow-list written sorted, once each, absent when empty, refused when adam cannot name it; the digest follows a referent's content and not its title; a missing referent named, one of another namespace not read; a referent checked as the inline form is (sentence for sentence); the header-variable clash across providers and with an inline server; the default image everywhere the image goes, the digest rule, the refusals; `references()` |
 | `tests/digest.rs` | the digest rules above, the pinned digest and the properties; the audience reaches no pod (the resolved agent and the digest are the same with any audience) |
 | `tests/secrets.rs` | the sentinel walk: no secret value in a spec |
-| `tests/parity.rs` | the goldens |
+| `tests/parity.rs` | the goldens, the four run pod cases included (the template of each equal to the chart's; the variables of run pods on the workers alone) |
+| `tests/run_pods.rs` | slice D15a (22): a config without run pods resolves as it always did; the variables, the template mount and the account; the claim follows the volume; a split front holds no token; classes; the network policy off and with more egress; **what a pod reads rolls it and what is applied does not**; each refusal naming its field; each setting checked; unknown keys refused; the model key by reference and no other secret; and the settings the chart **renders** (`deploy/operator/tests/golden/runpods.yaml`) are the settings the operator accepts, with the classes the API is told |
 | `tests/conformance.rs` | every resolved spec passes `RuntimeSpec::check` and is made by `MemoryRuntime`/`MemoryStore`; `DATABASE_URL` and the provisioner's connection agree |
 | `src/*` unit tests | the syntax checks (DNS label, URL and how a URL is shown, quantity, paths) and the canonical JSON |
 

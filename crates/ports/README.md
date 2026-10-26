@@ -267,10 +267,11 @@ and an empty one would be an authenticated nobody.
 | `RuntimeId`, `StoreId` | scope (a namespace) and name of the service. The same on every call |
 | `OwnerHandle` | **opaque** token the controller got from the object and a provider understands (owner references). Never read by the controller, never part of a digest |
 | `SecretRef { name, key }` | the only form of a secret |
-| `RuntimeSpec` | what to make: `workloads`, `file_sets`, `network`, `suspend`, `deletion`, `owner`, and the `digest` the pods are stamped with |
-| `Workload` | one set of identical pods: `role`, `replicas`, `stable_identity`, an agent `Container`, native `sidecars`, `volumes`, `security`, the grace period and a disruption budget |
+| `RuntimeSpec` | what to make: `workloads`, `file_sets`, `network`, `suspend`, `deletion`, `owner`, `run_pods` (D15a, below), and the `digest` the pods are stamped with |
+| `Workload` | one set of identical pods: `role`, `replicas`, `stable_identity`, an agent `Container`, native `sidecars`, `volumes`, `security`, the grace period, a disruption budget and, with run pods, the `service_account` its pods run as |
 | `Container`, `EnvVar`, `Mount`, `Probe`, `Resources` | what runs |
-| `EnvValue::{Literal, Secret(SecretRef), PodName}` | where a variable comes from. Closed: a new source fails to compile in every provider |
+| `EnvValue::{Literal, Secret(SecretRef), PodName, PodNamespace}` | where a variable comes from (`PodNamespace` is the pod's own namespace, D15a: `RUN_POD_NAMESPACE`). Closed: a new source fails to compile in every provider |
+| `RunPods`, `RunPodQuota`, `RunPodNetwork`, `EgressRule`, `EgressPort`, `RunPodLabels`, `RunPodGuard` | **Run pods (D15a)**: what the provider makes besides the workloads so that the workers can make pods of their own for the commands of a run, and what guards the pods they make: the account and the Role it is bound to, the priority class, the quota, the network policy, the labels the workers put on what they make, and what the guard lets a pod be (its images, its one claim, its one Secret key). The template the pods are made from is **not** here: it is a file set of the workloads (`aap-domain` makes both) |
 | `VolumeSpec`, `VolumeSource::{Persistent, Files, ExternalFiles, SecretFile}`, `Sharing::{PerReplica, Shared}` | volumes; persistent ones are data |
 | `FileSet` | files materialised by name (ConfigMaps); paths may contain `/` and a provider maps them |
 | `Network`, `Peer`, `Selector`, `IpBlock` | the Service port, which workload it selects, and the peers of the ingress rule (the neutral form of a `NetworkPolicyPeer`) |
@@ -283,6 +284,8 @@ and an empty one would be an authenticated nobody.
 | `Kind`, `SharedKind`, `Stored`, `Agent`, `AgentDraft`, `SharedDraft`, `Precondition`, `ResourceVersion`, `ETag`, `Owner`, `OfferedSecret`, `FieldError`, `ObjectsError`, `Principal`, `AuthError` | the vocabulary of `AgentObjects` and `Authenticator` (D4): [above](#what-crosses-agentobjects) |
 
 Choices worth knowing, because §59a does not say:
+
+* **Run pods are applied, and what a pod reads is in the digest.** `RuntimeSpec::run_pods` and `Workload::service_account` are absent from the JSON when absent (`skip_serializing_if`), so a spec without run pods is the JSON it was before the fields existed (`tests/contract.rs` holds it), and the digest leaves `run_pods` out: a bigger quota must not roll the pods. What a pod does read of run pods (its account, its variables, the template's file set) is in the workloads, and rolls them. `check()` refuses a workload that runs as an account when the spec has no run pods, an account other than the run pods' own, no workload that runs as it, and an empty name, label, class, claim, Secret reference or image list, or a quota of no pod.
 
 * **`stable_identity`.** §59a picks a StatefulSet "when a `perReplica` persistent volume exists". A
   placement of `affinity` pins runs to a worker by `WORKER_ID` = the pod name, and then needs the name to
@@ -326,6 +329,7 @@ Off by default (the controller and the providers depend on the traits only). Wit
   token it would have to verify with them).
 * `sample_agent`, `sample_agent_using` and `sample_shared`: bodies of the real shape (a test reads them through the CRD types), with
   Secret names that carry the sentinel. `SECRET_VALUE` is what the cases plant as a Secret's content.
+* `sample_spec_with_run_pods(id)`: `sample_spec` with run pods on (D15a).
 * `sample_spec(id)`: a spec that uses every kind of thing a provider must handle (a sidecar, literal,
   secret and pod-name variables, a per-replica volume, a file set, a secret file, probes). Providers reuse
   it in their own tests.
@@ -351,8 +355,8 @@ aap_ports::runtime_provider_conformance!(make);
 
 * `tests/memory.rs`: the seven suites against the in-memory implementations (48 cases, then 33 for `MemoryObjects` and 8 for
   `MemoryAuthenticator`).
-* `tests/contract.rs`: `RuntimeSpec::check` names each broken invariant, a spec round-trips through
-  JSON, every error has the class that decides retrying, the suites **fail** what they must (a provider
+* `tests/contract.rs`: `RuntimeSpec::check` names each broken invariant (and each of run pods, 15), a spec round-trips through
+  JSON (and a spec without run pods is the JSON it was), every error has the class that decides retrying, the suites **fail** what they must (a provider
   that materialises a secret, a `watch` that never speaks), the adoption guard, a forced status, an
   unreachable backend, a missing CloudNativePG API, `DirectoryEntry::listed`, a directory that has not
   synced.

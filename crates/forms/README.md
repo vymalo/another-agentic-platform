@@ -44,7 +44,7 @@ sequenceDiagram
 | `validate_agent`, `validate_model`, `validate_tool_server` | The screens' rules and the operator's, each error a `FormError { field, message }` |
 | `from_object_errors(FormTarget, &[FieldError])` | What a store answered `Invalid` (an API server's validation), named by form field |
 | `check_replace(current, new)` | What an edit may not change: the name, and the kind |
-| `externals(models, tool_servers, default_image) -> Referents` | The `aap-domain::Externals` for a list of the store's shared objects, and the objects that **exist and cannot be read** (an agent that names one is told so, not that it is missing) |
+| `externals(models, tool_servers, default_image, run_pod_size_classes) -> Referents` | The `aap-domain::Externals` for a list of the store's shared objects, and the objects that **exist and cannot be read** (an agent that names one is told so, not that it is missing). With size classes (D15a: `Defaults.run_pod_size_classes`) it also tells `aap-domain` the operator has run pods and which classes, so that a form that asks for a class there is not refused for the operator having none, and one that asks for another is; with none, the operator has no run pods and a form that asks is refused saying so |
 | `dependents_after(SharedChange, agents, &Referents)` | What editing a shared object breaks in the agents that name it: [below](#what-editing-a-shared-object-does-to-its-agents) |
 | `export_agent(&Agent)`, `export_object(&Stored)` | The YAML of the objects, without `status`, `managedFields`, server-set metadata and any label or annotation a tool wrote: [below](#the-yaml-export) |
 | `AgentForm::secret_picks()`, `names_a_secret()` | The secret keys a body names: a write that names one needs `platform:secrets.pick` besides its own permission |
@@ -68,7 +68,7 @@ that is how a value sent in a field called `value` or `password` is stopped, not
       "privateKey": { "secret": "github-app", "key": "private-key.pem" },
       "owners": ["stephane-segning"]
     },
-    "createRepoOwners": [], "workers": 2, "prDraft": true, "opencodeModel": "coding-model"
+    "createRepoOwners": [], "workers": 2, "prDraft": true, "opencodeModel": "coding-model", "runPodSizeClass": "standard"
   }
 }
 ```
@@ -78,7 +78,7 @@ baseUrl: { "value": "https://…" } | { "secret": { secret, key } }, apiKey: { s
 headers: { "Authorization": { prefix, secret: { secret, key } } }, tools, optional }`.
 
 **A form mirrors the objects, including whether a field may be absent.** `description`, `audience`, `workers`, `prDraft`,
-`opencodeModel` and `image` are `Option`s because the objects' fields are: a form that wrote an absent field as an empty one would
+`opencodeModel`, `runPodSizeClass` (D15a: a class of `GET /v1/info`'s `runPodSizeClasses`; absent means no run pods, and the wire form of a coder without them has no key, as it was before the field) and `image` are `Option`s because the objects' fields are: a form that wrote an absent field as an empty one would
 change an object the person did not edit. The defaults of a *screen* (the audience `agent.use:<name>`, the OpenCode model "the same as
 the model", `optional` on for a tool server) are the client's to fill in. `toolServers` is a **set** (the objects keep them by name);
 its elements are named in errors by name, `toolServers[websearch]`, like `files[skills/x.md]` and `headers[Authorization]`.
@@ -112,7 +112,7 @@ because the CRD types below it deny nothing: a typo stops the API at start, and
 `Defaults::check()` makes a sample agent of each kind from the defaults and asks `aap-domain::validate`, so a store with no instances or a
 bearer without a key is found at start and not at the first save). It holds the namespace, the offer label, the registries an agent may pin its own image from (`allowedImageRegistries`, [below](#the-image-of-an-agent)), the store (`cnpg` or a
 `secretRef` named by a pattern with `{name}`), the A2A bearer reference, `allowFrom`, `security`, and per kind: for a coder `gitAuthor`,
-`allowedRepoHosts`, `githubApiUrl`, the GitHub MCP sidecar, the work volume and the resources; for a folder agent the resources.
+`allowedRepoHosts`, `githubApiUrl`, the GitHub MCP sidecar, the work volume and the resources; for a folder agent the resources. **`runPodSizeClasses`** (D15a) is the names of the classes of the operator's run pods: what `GET /v1/info` offers and what a coder form may pick (`agent.runPodSizeClass`). Empty: this deployment has no run pods. `Defaults::check()` refuses a name that is no DNS label and a name twice, and, with classes, asks `aap-domain` about a coder that asks for the first one (it needs `coder.workVolume`: run pods mount it), so the API does not start with defaults that would refuse every coder form that picks a class. The chart writes the list from `runPodClasses`; the operator, which reads the same values, answers for a class it does not have.
 
 **A default is never a field of a form and is never shown as if a person had set it.** It enters the objects as a `Deployment`, the part of an
 agent's objects that no form edits, shown on the form read-only under *Deployment defaults*:
@@ -142,7 +142,7 @@ know is a reason too, found on the raw JSON, since serde would drop it.
 What the forms do not carry, so that an object that sets it is YAML only: an inline model (`baseUrl`, `apiKeySecretRef`), an inline MCP server or a server's own
 `optional`, a GitHub token or a pinned installation instead of an App, a folder in a ConfigMap, `scaling` other than one combined worker, `interfaces` other than A2A at
 the default address, `deletionPolicy: Delete`, `extraEnv`, `terminationGracePeriodSeconds`, and the coder's tunables (`maxCheckCycles`, `checkTimeoutSecs`,
-`workspaceSweepSecs`, `workspacePlacement`). The coder's run-pod size class is not a field of `aap-api` yet (it waits for adam-rs, D15), so it is in no form. `examples/coder.yaml` and
+`workspaceSweepSecs`, `workspacePlacement`). The coder's run-pod size class (`coder.runPods.sizeClass`, D15a) **is** a field of the form (`agent.runPodSizeClass`). `examples/coder.yaml` and
 `examples/chat.yaml` are YAML only today (inline model and servers; `coder.yaml` also has the tunables), and `examples/coder-me.yaml` is a form: `tests/representability.rs`.
 
 The laws, held by property tests over arbitrary forms and deployments: **`load_agent(to_resources(form, deployment))` is `(form, deployment)`**, and **an object is a form only
@@ -254,5 +254,5 @@ it and quoted when not. It keeps the library's layout (a sequence under a key is
 
 * The route-to-permission table and the status of each route are the router's ([D7a](../platform-api/src/routes.rs)); the constants are [`aap_api::permission`](../api/README.md#permissions-slice-d4).
 * The Agents screen's rows (state, the first false condition, *In chat*) read the status, which is `aap-api`'s `AgentServiceStatus` over `Stored::status`.
-* `runPods.sizeClass` (the run-pod size class of the Coder screen) has no field in `aap-api` until adam-rs has it (D15).
+* The run-pod size class of the Coder screen is `agent.runPodSizeClass` (D15a: `coder.runPods.sizeClass`); the classes there are come from `Defaults::run_pod_size_classes`, which the Platform API serves in `GET /v1/info`.
 * Default values of a *screen* (see above) are the client's.
