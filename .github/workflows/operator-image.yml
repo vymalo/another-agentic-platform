@@ -50,7 +50,18 @@ name: Operator and API images
 #              kind and reads a pin this repository does not control, so a flake or a bad pin of the system's would block the operator's
 #              release for a reason that is not the operator's. That is a decision for the owner (§60a, D13): to make it gate, add it to
 #              the `needs` of `push` below. deploy/operator/tests/e2e/README.md says what it proves and what it does not.
-# push:        main only, after every job above but chain-e2e: `sha-<7>` and `latest` of both images (the same tag). One red job of either
+# run-pods-e2e (D15b): a kind cluster of its own. The operator's chart installed with THAT image, first WITHOUT run pods and then with them (the same values
+#              file, one flag apart: the upgrade), and the REAL adam-rs coder at or after #131 (ghcr.io/vymalo/another-adam-rs/coder, by tag and digest in
+#              deploy/operator/tests/e2e/run-pods.yaml, 3 GB) run by the operator twice: a coder with no run pods, which must be exactly as it was after the
+#              upgrade, and a GitHub App coder with them. A scripted model (a Node script that the coder's own image runs from a ConfigMap) makes the coder start
+#              a project and run a command; the script shows the run pod made from the operator's template and started by the kubelet, the command in it, that a
+#              pod sees only its own run (two runs, then one in a repository with a mirror and a worktree), the quota (a third pod refused, a run that waits for a
+#              slot), the network policy, run-pods-admission.sh run in the cluster, `kubectl auth can-i --as` under the real RBAC, and a deleted service leaving
+#              nothing, run pods included. It runs in parallel with the others and **does not gate the push**: it pulls a 3 GB image of another repository, pinned
+#              here, and its waits are for pods and a quota, so a flake or a bad pin would block the operator's release for a reason that is not the operator's;
+#              run pods are off by default, so a red run of it does not put a broken default into the image. That is a decision for the owner (§60a, D15b): to make
+#              it gate, add it to the `needs` of `push` below. deploy/operator/tests/e2e/README.md says what it proves and what it does not.
+# push:        main only, after every job above but chain-e2e and run-pods-e2e: `sha-<7>` and `latest` of both images (the same tag). One red job of either
 #              image (the API's included) means no image is pushed and no tag bumped: a decision for the owner (deploy/operator/README.md,
 #              "The image").
 # bump:        main only, after the push: `deploy/operator/bump-tag.sh` sets `image.tag` and, with `api`, `api.image.tag` in
@@ -213,6 +224,12 @@ jobs:
       - uses: actions/checkout@v7
       - name: shellcheck
         run: shellcheck deploy/operator/bump-tag.sh deploy/operator/tests/*.sh deploy/operator/tests/e2e/*.sh
+      # The scripted model of the run pods end-to-end (a Node script the coder's image runs in the cluster): its turns, its probe (valid shell, run for real), and its two
+      # shapes of answer, with no cluster and no coder. Node 18 or later (the runner's) for fetch and node:test.
+      - name: the scripted model of the run pods end-to-end
+        run: |
+          node --check deploy/operator/tests/e2e/run-pods-model.js
+          node --test deploy/operator/tests/e2e/run-pods-model.test.js
       - name: bump-tag.sh is idempotent and edits only the tag it was asked for (image.tag, or api.image.tag)
         run: sh deploy/operator/tests/bump-tag-test.sh
 
@@ -551,12 +568,54 @@ jobs:
           export AAP_TEST_HOST_ADDR
           sh deploy/operator/tests/e2e/chain-e2e.sh
 
+  run-pods-e2e:
+    name: run-pods-e2e
+    needs: image
+    runs-on: ubuntu-latest
+    timeout-minutes: 75
+    steps:
+      - uses: actions/checkout@v7
+      # The coder image is 3 GB compressed and a good 8 GB on disk once kind has it (the run image shares six of its seven layers): make room first.
+      - name: Free disk space
+        run: |
+          df -h /
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /opt/hostedtoolcache/CodeQL /usr/local/share/boost
+          df -h /
+      - uses: azure/setup-helm@v4
+        with:
+          version: ${{ env.HELM_VERSION }}
+      - name: Create a kind cluster
+        uses: helm/kind-action@v1
+        with:
+          version: v0.33.0
+          # The same node image as the other jobs: Kubernetes v1.35.8, the digest of the index of the tag. Its network plugin, kindnet, enforces NetworkPolicies
+          # (the end-to-end of the API relies on that), which the network policy of run pods needs to be shown.
+          node_image: kindest/node:v1.35.8@sha256:07b2536e30b803ed61d1677a79df6115f798ce64c80f9e22f6ed45afd09323c0
+          cluster_name: aap-runpods
+          wait: 120s
+      # The image that passed the smoke test, loaded into the cluster: the chart runs it with pullPolicy Never. The coder, the run image and Postgres are NOT
+      # loaded: the kubelet pulls them, by digest (run-pods.yaml, the chart's runPods.image, run-pods-support.yaml).
+      - uses: actions/download-artifact@v8
+        with:
+          name: operator-image
+          path: ${{ runner.temp }}
+      - name: Load the image into kind
+        run: |
+          docker load -i "$RUNNER_TEMP/operator.tar"
+          kind load docker-image operator:smoke --name aap-runpods
+      - name: The operator runs a coder with run pods, and one without
+        env:
+          OPERATOR_IMAGE_REPOSITORY: operator
+          OPERATOR_IMAGE_TAG: smoke
+          OPERATOR_PULL_POLICY: Never
+        run: sh deploy/operator/tests/e2e/run-pods-e2e.sh
+
   push:
     name: push the images that passed
     # Main only, and only after everything above: the chart, the Dockerfiles, the scripts, both images' own smoke tests, the coder, and the API's
-    # end-to-end (no API image is pushed that failed to start in a cluster and serve its first agent). NOT chain-e2e: it runs another repository's
-    # image, pinned here, and a red run of it is a reason to look, not to withhold the operator's release (an owner decision, §60a D13; to flip it,
-    # add chain-e2e to this list).
+    # end-to-end (no API image is pushed that failed to start in a cluster and serve its first agent). NOT chain-e2e and NOT run-pods-e2e: they run
+    # other repositories' images, pinned here, and a red run of either is a reason to look, not to withhold the operator's release (owner decisions,
+    # §60a D13 and D15b; to flip one, add it to this list).
     needs: [chart, dockerfile, dockerfile-api, scripts, image, api-image, operator-coder-e2e, api-e2e]
     if: github.event_name == 'push' && github.ref == 'refs/heads/main'
     runs-on: ubuntu-latest
