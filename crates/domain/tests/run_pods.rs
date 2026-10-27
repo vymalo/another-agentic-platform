@@ -152,8 +152,9 @@ fn the_neutral_spec_holds_what_the_provider_makes() {
         (rp.guard.secret.name.as_str(), rp.guard.secret.key.as_str()),
         ("coder-secrets", "MODEL_API_KEY")
     );
-    let net = rp.network.as_ref().expect("a network policy by default");
-    assert_eq!(net.except_cidrs.len(), 5);
+    // Deny by default, with the egress proxy as the one way out (D15c).
+    let net = &rp.network;
+    assert_eq!(net.proxy.deny_cidrs.len(), 5);
     assert!(net.extra_egress.is_empty());
 }
 
@@ -280,14 +281,14 @@ fn the_default_class_is_standard_and_a_class_is_the_resources_of_the_run_contain
 }
 
 #[test]
-fn the_network_policy_can_be_off_and_can_name_more_egress() {
-    let r = must_resolve_with(
-        "coder",
-        &Externals::default()
-            .with_run_pods(settings_with(json!({"networkPolicy": {"enabled": false}}))),
-        on,
+fn the_network_policy_has_no_switch_and_can_name_more_egress() {
+    // Deny by default: a file that still says `enabled` is refused (an unknown key), as the chart refuses `false`.
+    let mut v = chart_run_pod_settings();
+    v["networkPolicy"]["enabled"] = json!(false);
+    assert!(
+        serde_json::from_value::<RunPodSettings>(v).is_err(),
+        "there is no way to run pods without the policy that makes the proxy the one way out"
     );
-    assert!(r.runtime.run_pods.unwrap().network.is_none());
 
     let more = settings_with(json!({"networkPolicy": {
     "clusterCIDRs": ["10.0.0.0/8", "10.42.0.0/16"],
@@ -296,14 +297,15 @@ fn the_network_policy_can_be_off_and_can_name_more_egress() {
         "ports": [{"protocol": "TCP", "port": 443}, {"protocol": "UDP", "port": 5000, "endPort": 5100}]
     }]}}));
     let r = must_resolve_with("coder", &Externals::default().with_run_pods(more), on);
-    let net = r.runtime.run_pods.unwrap().network.unwrap();
-    // The union, in the chart's order and each once.
+    let net = r.runtime.run_pods.unwrap().network;
+    // The union, in the chart's order and each once: what the proxy never connects to.
     assert_eq!(
-        net.except_cidrs.last().map(String::as_str),
+        net.proxy.deny_cidrs.last().map(String::as_str),
         Some("10.42.0.0/16")
     );
     assert_eq!(
-        net.except_cidrs
+        net.proxy
+            .deny_cidrs
             .iter()
             .filter(|c| *c == "10.0.0.0/8")
             .count(),
@@ -314,6 +316,124 @@ fn the_network_policy_can_be_off_and_can_name_more_egress() {
     assert_eq!(rule.ports[0].protocol, Protocol::Tcp);
     assert_eq!(rule.ports[0].port, Some(443));
     assert_eq!(rule.ports[1].end_port, Some(5100));
+}
+
+// ---------------------------------------------------------------- the egress proxy (D15c)
+
+#[test]
+fn the_egress_proxy_runs_the_agents_own_image_and_is_told_its_settings_by_variables() {
+    let r = resolved_on();
+    let proxy = &r.runtime.run_pods.as_ref().unwrap().network.proxy;
+    let coder_image = &r.runtime.workloads[0].container.image;
+    assert_eq!(&proxy.image, coder_image, "no other image to pin");
+    assert_eq!(proxy.command, ["tini", "--", "adam-egress"]);
+    let env: Vec<(&str, String)> = proxy
+        .env
+        .iter()
+        .map(|e| match &e.value {
+            EnvValue::Literal(v) => (e.name.as_str(), v.clone()),
+            other => panic!("{}: {other:?}, and the proxy holds no secret", e.name),
+        })
+        .collect();
+    assert_eq!(
+        env,
+        [
+            ("EGRESS_LISTEN", "0.0.0.0:3128".to_owned()),
+            ("EGRESS_ALLOW_FILE", "/etc/adam-egress/allow.txt".to_owned()),
+            ("EGRESS_PORTS", "443".to_owned()),
+            (
+                "EGRESS_DENY_CIDRS",
+                "10.0.0.0/8,172.16.0.0/12,192.168.0.0/16,169.254.0.0/16,100.64.0.0/10".to_owned()
+            ),
+        ]
+    );
+    assert_eq!((proxy.port, proxy.replicas, proxy.run_as), (3128, 2, 10001));
+    assert_eq!(proxy.egress_ports, [443]);
+    assert_eq!(proxy.allow.name, "coder-egress-allow");
+    assert!(
+        !proxy.allow.immutable,
+        "edited in place; the checksum rolls the pods"
+    );
+    let list = &proxy.allow.files["allow.txt"];
+    assert!(list.starts_with("# The hosts a run pod may reach through the egress proxy"));
+    for host in ["registry.npmjs.org", "github.com", "pub.dev"] {
+        assert!(list.lines().any(|l| l == host), "{host}");
+    }
+    assert!(
+        !list.lines().any(|l| l.contains("storage.googleapis.com")),
+        "the default list serves no bucket of Google Cloud Storage"
+    );
+}
+
+#[test]
+fn the_run_pod_template_names_the_proxy_and_what_bypasses_it() {
+    let pod_of = |s: RunPodSettings| -> Value {
+        let r = must_resolve_with("coder", &Externals::default().with_run_pods(s), on);
+        let set = r
+            .runtime
+            .file_sets
+            .iter()
+            .find(|f| f.name == "coder-run-pod")
+            .unwrap();
+        serde_json::from_str(&set.files["pod.yaml"]).unwrap()
+    };
+    let value = |pod: &Value, name: &str| -> String {
+        pod["spec"]["containers"][0]["env"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|e| e["name"] == name)
+            .unwrap_or_else(|| panic!("{name} is not set"))["value"]
+            .as_str()
+            .unwrap()
+            .to_owned()
+    };
+    let pod = pod_of(settings());
+    // The namespace of the service, not the operator's: the Service is beside the agent.
+    for name in ["HTTPS_PROXY", "https_proxy", "HTTP_PROXY", "http_proxy"] {
+        assert_eq!(
+            value(&pod, name),
+            "http://coder-egress.another-agentic-system.svc:3128"
+        );
+    }
+    for name in ["NO_PROXY", "no_proxy"] {
+        assert_eq!(value(&pod, name), "localhost,127.0.0.1");
+    }
+    let pod = pod_of(settings_with(
+        json!({"egressProxy": {"extraNoProxy": ["models.internal", ".svc"]}}),
+    ));
+    assert_eq!(
+        value(&pod, "NO_PROXY"),
+        "localhost,127.0.0.1,models.internal,.svc"
+    );
+    assert_eq!(value(&pod, "no_proxy"), value(&pod, "NO_PROXY"));
+}
+
+#[test]
+fn the_allow_list_is_the_deployments_lower_case_and_once_each() {
+    let s = settings_with(json!({"egressProxy": {"extraAllow": [
+        "Artifacts.Example.com", " .mirror.example.com ", "PyPI.org"
+    ]}}));
+    let list = s.egress_proxy.allow_list();
+    assert_eq!(
+        &list[list.len() - 2..],
+        ["artifacts.example.com", ".mirror.example.com"],
+        "added after the defaults, lower case, trimmed"
+    );
+    assert_eq!(
+        list.iter().filter(|h| *h == "pypi.org").count(),
+        1,
+        "listed twice, written once"
+    );
+    // A change of the list is a rollout of the proxy and no more: the agent's pods read none of it.
+    let digest = |s: RunPodSettings| {
+        must_resolve_with("coder", &Externals::default().with_run_pods(s), on).digest
+    };
+    assert_eq!(
+        digest(s),
+        digest(settings()),
+        "the allow-list is not in the digest"
+    );
 }
 
 // ---------------------------------------------------------------- the digest
@@ -342,6 +462,10 @@ fn what_a_pod_reads_rolls_it_and_what_is_applied_does_not() {
         ),
         ("an extra variable", json!({"extraEnv": {"A": "b"}})),
         ("the priority class", json!({"priorityClass": "other"})),
+        (
+            "the names that bypass the proxy",
+            json!({"egressProxy": {"extraNoProxy": ["a.internal"]}}),
+        ),
     ] {
         assert_ne!(
             digest(settings_with(over)),
@@ -355,6 +479,14 @@ fn what_a_pod_reads_rolls_it_and_what_is_applied_does_not() {
         (
             "the network policy",
             json!({"networkPolicy": {"clusterCIDRs": ["10.1.0.0/16"]}}),
+        ),
+        (
+            "the egress proxy's replicas",
+            json!({"egressProxy": {"replicas": 5}}),
+        ),
+        (
+            "the egress proxy's hosts",
+            json!({"egressProxy": {"extraAllow": ["x.example.com"]}}),
         ),
         ("the role", json!({"role": "another-role"})),
         (
@@ -655,6 +787,70 @@ fn each_setting_is_checked() {
         &refused(json!({"networkPolicy": {"blockedCIDRs": ["10.0.0.0/33"]}})),
         "not an IPv4 CIDR",
     );
+    for name in [
+        "HTTPS_PROXY",
+        "https_proxy",
+        "HTTP_PROXY",
+        "http_proxy",
+        "NO_PROXY",
+        "no_proxy",
+    ] {
+        says(
+            &refused(json!({"extraEnv": {name: "http://elsewhere"}})),
+            &format!("extraEnv.{name}"),
+        );
+    }
+    says(
+        &refused(json!({"egressProxy": {"replicas": 0}})),
+        "egressProxy.replicas",
+    );
+    says(
+        &refused(json!({"egressProxy": {"ports": []}})),
+        "egressProxy.ports",
+    );
+    says(
+        &refused(json!({"egressProxy": {"ports": [0]}})),
+        "egressProxy.ports",
+    );
+    for (entry, part) in [
+        ("https://example.com", "is not a host name"),
+        ("example.com:443", "is not a host name"),
+        ("*.example.com", "is not a host name"),
+        ("example.com/path", "is not a host name"),
+        ("-bad.example.com", "is not a host name"),
+        ("under_score.example.com", "is not a host name"),
+        ("", "is not a host name"),
+        (".", "is not a host name"),
+        ("10.0.0.1", "IP address"),
+        ("1234", "IP address"),
+        (".com", "bare suffix"),
+        (".io ", "bare suffix"),
+    ] {
+        says(
+            &refused(json!({"egressProxy": {"extraAllow": [entry]}})),
+            part,
+        );
+        says(
+            &refused(json!({"egressProxy": {"allow": [entry]}})),
+            "egressProxy.allow[0]",
+        );
+    }
+    says(
+        &refused(json!({"egressProxy": {"allow": [], "extraAllow": []}})),
+        "hold no host",
+    );
+    says(
+        &refused(json!({"egressProxy": {"extraNoProxy": ["a b"]}})),
+        "extraNoProxy[0]",
+    );
+    says(
+        &refused(json!({"egressProxy": {"extraNoProxy": ["a,b"]}})),
+        "extraNoProxy[0]",
+    );
+    says(
+        &refused(json!({"egressProxy": {"resources": {"limits": {"memory": "lots"}}}})),
+        "egressProxy.resources.limits.memory",
+    );
     says(
         &refused(json!({"networkPolicy": {"clusterCIDRs": ["fe80::/10"]}})),
         "not an IPv4 CIDR",
@@ -680,10 +876,12 @@ fn each_setting_is_checked() {
 }
 
 #[test]
-fn a_disabled_network_policy_is_not_checked_for_what_it_will_not_make() {
-    settings_with(json!({"networkPolicy": {"enabled": false, "blockedCIDRs": ["nonsense"]}}))
-        .validate()
-        .expect("nothing is made from them");
+fn the_exact_hosts_and_suffixes_of_the_allow_list_are_accepted() {
+    settings_with(json!({"egressProxy": {"extraAllow": [
+        "example.com", ".example.com", "a-b.example.co.uk", "xn--bcher-kva.example", "Example.COM", "a.b.c.d.e.f"
+    ]}}))
+    .validate()
+    .expect("host names");
 }
 
 #[test]

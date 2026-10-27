@@ -1,6 +1,7 @@
 # cases/coder-run-pods.yaml with every setting of run pods changed from its default (D15a): another run image, container, size class
 # (resources), build jobs, extra variables, a priority class the deployment manages, quota, timings, node placement, one more allowed
-# image, and a network policy with other CIDRs, DNS and an extra egress rule. The operator side of the test says each in the operator
+# image, and a network policy with other CIDRs, DNS and an extra egress rule, and (D15c) an egress proxy with three replicas, two ports,
+# more allowed hosts, names that bypass it and other resources. The operator side of the test says each in the operator
 # chart's terms (`runPods`, `runPodClasses`), and the two renders must agree on all of it.
 fullnameOverride: coder
 image:
@@ -70,6 +71,24 @@ runPods:
   admissionPolicy:
     extraAllowedImages:
       - registry.example.com/team/helper:1.0@sha256:2222222222222222222222222222222222222222222222222222222222222222
+  egressProxy:
+    replicas: 3
+    ports: [443, 8443]
+    extraAllow:
+      - Artifacts.Example.com
+      - .mirror.example.com
+      # Already on the default list: listed once.
+      - PyPI.org
+    extraNoProxy:
+      - models.internal
+      - .svc
+    resources:
+      requests:
+        cpu: 100m
+        memory: 64Mi
+      limits:
+        cpu: 500m
+        memory: 128Mi
   networkPolicy:
     clusterCIDRs: [10.42.0.0/16, 10.43.0.0/16]
     dnsNamespace: dns-system

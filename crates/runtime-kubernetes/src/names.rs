@@ -99,6 +99,41 @@ pub fn run_pods(id: &RuntimeId) -> String {
     format!("{}-run-pods", id.name())
 }
 
+/// `app.kubernetes.io/component` of the egress proxy's objects and pods (slice D15c): not a [`Role`], so that no
+/// observation of a workload ever reads the proxy's Deployment as one.
+pub const EGRESS_COMPONENT: &str = "egress-proxy";
+
+/// The name of the egress proxy's Deployment, Service, ServiceAccount, PodDisruptionBudget and NetworkPolicy, and the
+/// name label of its pods: `<service>-egress`, as the coder's chart names them (`<release>-egress`;
+/// `aap_domain::contract::run_pods::egress::name` is the same, `tests/run_pods.rs` holds the two equal).
+pub fn egress_proxy(id: &RuntimeId) -> String {
+    format!("{}-egress", id.name())
+}
+
+/// The name of the ConfigMap that holds the egress proxy's allow-list: `<service>-egress-allow`.
+pub fn egress_allow(id: &RuntimeId) -> String {
+    format!("{}-egress-allow", id.name())
+}
+
+/// The labels that select the proxy's pods: what its Service, its PodDisruptionBudget, its NetworkPolicy and the run pods'
+/// NetworkPolicy name. They carry no `managed-by`, so the service's own ingress policy (which selects `managed-by` and the
+/// instance) and the listing of its pods never take them.
+pub fn egress_selector_labels(id: &RuntimeId) -> BTreeMap<String, String> {
+    BTreeMap::from([
+        (NAME_LABEL.to_owned(), egress_proxy(id)),
+        (INSTANCE_LABEL.to_owned(), id.name().to_owned()),
+        (COMPONENT_LABEL.to_owned(), EGRESS_COMPONENT.to_owned()),
+    ])
+}
+
+/// The labels of the proxy's objects: its selector labels and `managed-by`, which is what makes them ours (the adoption
+/// guard, the listing for a delete or a stale object).
+pub fn egress_labels(id: &RuntimeId) -> BTreeMap<String, String> {
+    let mut labels = egress_selector_labels(id);
+    labels.insert(MANAGED_BY_LABEL.to_owned(), MANAGED_BY_VALUE.to_owned());
+    labels
+}
+
 /// The name of the ConfigMap that holds the run pod template of a service: the file set `aap-domain` makes for the
 /// workers, `<service>-run-pod` (`tests/run_pods.rs` holds the two equal). Mounted by the workers' pods alone, so it goes
 /// with the account, once the workers no longer mount it.

@@ -1,5 +1,7 @@
 {{- if include "aap.runPods" . }}
+{{- /* networkPolicy.enabled is not a setting any more (deny by default, adam-rs ADR 0042): `true` is tolerated and not written. */}}
 {{- $s := omit .Values.runPods "enabled" "priorityClassName" }}
+{{- $s = set $s "networkPolicy" (omit .Values.runPods.networkPolicy "enabled") }}
 {{- $file := merge (dict "priorityClass" (include "aap.runPodsPriorityClass" .) "role" (include "aap.runPodsRole" .) "classes" .Values.runPodClasses) $s }}
 # runPods.enabled: what the operator reads about run pods (RUN_PODS_FILE, read once at start; a change is a new pod). The names of
 # the cluster-scoped objects this chart made are in it, and the values of `runPods` and `runPodClasses`, which are the coder

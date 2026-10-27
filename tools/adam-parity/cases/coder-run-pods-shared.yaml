@@ -8,6 +8,9 @@ topology: combined
 replicaCount: 2
 runPods:
   enabled: true
+  # One proxy replica: no PodDisruptionBudget (a budget of 1 of 1 would block every drain).
+  egressProxy:
+    replicas: 1
   coderResources:
     requests:
       cpu: 250m

@@ -85,6 +85,14 @@ async fn the_account_and_the_guards_parameters_come_before_the_right_to_make_pod
             (K::ConfigMap, "coder-run-pods-policy".to_owned()),
             (K::ServiceAccount, "coder".to_owned()),
             (K::Quota, "coder-run-pods".to_owned()),
+            // The egress proxy, then the policy that makes it the one way out, then the right to make a pod: a run pod
+            // is never made into a network that has a policy and no way out, or no policy at all.
+            (K::ConfigMap, "coder-egress-allow".to_owned()),
+            (K::ServiceAccount, "coder-egress".to_owned()),
+            (K::Deployment, "coder-egress".to_owned()),
+            (K::Service, "coder-egress".to_owned()),
+            (K::Budget, "coder-egress".to_owned()),
+            (K::NetworkPolicy, "coder-egress".to_owned()),
             (K::NetworkPolicy, "coder-run-pods".to_owned()),
             (K::RoleBinding, "coder-run-pods".to_owned()),
             (K::Service, "coder".to_owned()),
@@ -99,6 +107,12 @@ async fn the_account_and_the_guards_parameters_come_before_the_right_to_make_pod
         (K::RoleBinding, "coder-run-pods"),
         (K::NetworkPolicy, "coder-run-pods"),
         (K::ConfigMap, "coder-run-pods-policy"),
+        (K::ConfigMap, "coder-egress-allow"),
+        (K::ServiceAccount, "coder-egress"),
+        (K::Deployment, "coder-egress"),
+        (K::Service, "coder-egress"),
+        (K::Budget, "coder-egress"),
+        (K::NetworkPolicy, "coder-egress"),
     ] {
         let o = fake
             .get(kind, NS, name)
@@ -114,7 +128,11 @@ async fn the_account_and_the_guards_parameters_come_before_the_right_to_make_pod
     runtime.ensure(&r.id, &r.runtime).await.unwrap();
     let calls = fake.calls();
     assert!(calls.iter().all(|c| c.method != "DELETE"), "{calls:#?}");
-    assert_eq!(writes(&calls, "PATCH").len(), 10);
+    assert_eq!(
+        writes(&calls, "PATCH").len(),
+        16,
+        "the same sixteen objects: nothing of the proxy is taken for stale"
+    );
 }
 
 #[tokio::test]
@@ -181,12 +199,34 @@ async fn a_service_that_stops_asking_for_run_pods_loses_the_right_first_then_its
         (K::NetworkPolicy, "coder-run-pods"),
         (K::ConfigMap, "coder-run-pods-policy"),
         (K::ServiceAccount, "coder"),
+        // The egress proxy goes with them (D15c), and after the pods too.
+        (K::Deployment, "coder-egress"),
+        (K::Service, "coder-egress"),
+        (K::Budget, "coder-egress"),
+        (K::NetworkPolicy, "coder-egress"),
+        (K::ConfigMap, "coder-egress-allow"),
+        (K::ServiceAccount, "coder-egress"),
     ] {
         assert!(
             position(K::Pod, "adam-run-bbb") < position(kind, name),
             "{name} goes after the pods"
         );
     }
+    // The run pods' own policy, the one that denies, is the last policy to go: while it stands a run pod that was made in the
+    // instant before the right went is cut off from the way out and never under no policy at all. The proxy's pods and then
+    // its account go before it is gone too.
+    assert!(
+        position(K::Deployment, "coder-egress") < position(K::NetworkPolicy, "coder-egress"),
+        "the proxy's pods go before the policy that confines them"
+    );
+    assert!(
+        position(K::NetworkPolicy, "coder-egress") < position(K::NetworkPolicy, "coder-run-pods"),
+        "the run pods' policy goes after the proxy's"
+    );
+    assert!(
+        position(K::Deployment, "coder-egress") < position(K::ServiceAccount, "coder-egress"),
+        "no pod of the proxy outlives its account"
+    );
     assert!(fake.get(K::Pod, NS, "adam-run-aaa").is_none());
     assert!(fake.get(K::Pod, NS, "adam-run-bbb").is_none());
     assert!(
@@ -201,6 +241,12 @@ async fn a_service_that_stops_asking_for_run_pods_loses_the_right_first_then_its
         (K::NetworkPolicy, "coder-run-pods"),
         (K::ConfigMap, "coder-run-pods-policy"),
         (K::ConfigMap, "coder-run-pod"),
+        (K::ServiceAccount, "coder-egress"),
+        (K::Deployment, "coder-egress"),
+        (K::Service, "coder-egress"),
+        (K::Budget, "coder-egress"),
+        (K::NetworkPolicy, "coder-egress"),
+        (K::ConfigMap, "coder-egress-allow"),
     ] {
         // The template goes in the same pass although the phase is not Ready: it is the account's, and the workload
         // that mounted it is applied without it before it goes.
@@ -275,16 +321,41 @@ async fn the_account_is_deleted_only_after_the_workload_stopped_naming_it() {
         (K::Quota, "coder-run-pods"),
         (K::ConfigMap, "coder-run-pods-policy"),
         (K::ConfigMap, "coder-run-pod"),
+        (K::Deployment, "coder-egress"),
+        (K::Service, "coder-egress"),
+        (K::NetworkPolicy, "coder-egress"),
+        (K::ConfigMap, "coder-egress-allow"),
     ] {
         let deleted = at(&calls, "DELETE", kind, name);
         assert_eq!(deleted.len(), 1, "{name}: {calls:#?}");
         assert!(
-            freed[0] < deleted[0],
+            freed[0] < deleted[0]
+                || kind == K::Deployment
+                || kind == K::Service
+                || kind == K::NetworkPolicy
+                || name.ends_with("-allow"),
             "{name} goes after the workload stopped naming the account"
         );
         assert!(deleted[0] < account[0], "the account goes last");
     }
     assert!(freed[0] < account[0]);
+    // The proxy's own account goes with the agent's, last of all, and after the Deployment whose pods run as it.
+    let proxy_account = at(&calls, "DELETE", K::ServiceAccount, "coder-egress");
+    let proxy_pods = at(&calls, "DELETE", K::Deployment, "coder-egress");
+    assert_eq!(
+        (proxy_account.len(), proxy_pods.len()),
+        (1, 1),
+        "{calls:#?}"
+    );
+    assert!(
+        proxy_pods[0] < proxy_account[0],
+        "no pod of the proxy outlives its account"
+    );
+    assert_eq!(
+        fake.accounts_deleted_while_named(),
+        [],
+        "neither account was deleted while a Deployment or a StatefulSet named it"
+    );
 
     // Both names, null, on the one workload: a merge patch of only `serviceAccountName` changes nothing on a real server.
     let patches = merge_patches(&calls);
@@ -361,8 +432,36 @@ async fn a_workload_left_naming_a_deleted_account_is_freed_by_the_next_pass_and_
             .delete("coder-run-pods-policy", &d)
             .await
             .unwrap();
-        kube::Api::<ServiceAccount>::namespaced(client, NS)
+        kube::Api::<ServiceAccount>::namespaced(client.clone(), NS)
             .delete("coder", &d)
+            .await
+            .unwrap();
+        // The proxy of the same operator is gone too: what is left is what the operator before this fix left.
+        kube::Api::<ServiceAccount>::namespaced(client.clone(), NS)
+            .delete("coder-egress", &d)
+            .await
+            .unwrap();
+        kube::Api::<k8s_openapi::api::apps::v1::Deployment>::namespaced(client.clone(), NS)
+            .delete("coder-egress", &d)
+            .await
+            .unwrap();
+        kube::Api::<k8s_openapi::api::core::v1::Service>::namespaced(client.clone(), NS)
+            .delete("coder-egress", &d)
+            .await
+            .unwrap();
+        kube::Api::<k8s_openapi::api::policy::v1::PodDisruptionBudget>::namespaced(
+            client.clone(),
+            NS,
+        )
+        .delete("coder-egress", &d)
+        .await
+        .unwrap();
+        kube::Api::<NetworkPolicy>::namespaced(client.clone(), NS)
+            .delete("coder-egress", &d)
+            .await
+            .unwrap();
+        kube::Api::<ConfigMap>::namespaced(client, NS)
+            .delete("coder-egress-allow", &d)
             .await
             .unwrap();
     }
@@ -480,9 +579,36 @@ async fn deleting_the_service_clears_its_run_pods_too() {
         (K::NetworkPolicy, "coder-run-pods"),
         (K::ConfigMap, "coder-run-pods-policy"),
         (K::ConfigMap, "coder-run-pod"),
+        (K::ServiceAccount, "coder-egress"),
+        (K::Deployment, "coder-egress"),
+        (K::Service, "coder-egress"),
+        (K::Budget, "coder-egress"),
+        (K::NetworkPolicy, "coder-egress"),
+        (K::ConfigMap, "coder-egress-allow"),
     ] {
         assert!(fake.get(kind, NS, name).is_none(), "{name} is still there");
     }
+    // The proxy's pods are gone before the account they run as (the agent's own StatefulSet is deleted right after its account
+    // on this path, which is the service going and no pod to make again).
+    assert!(
+        fake.accounts_deleted_while_named()
+            .iter()
+            .all(|(account, _)| account != "coder-egress"),
+        "{:?}",
+        fake.accounts_deleted_while_named()
+    );
+    // The proxy goes before the run pods' policy here too, and its pods before its account.
+    let deleted = writes(&fake.calls(), "DELETE");
+    let at = |kind: K, name: &str| {
+        deleted
+            .iter()
+            .position(|(k, n)| *k == kind && n == name)
+            .unwrap()
+    };
+    assert!(at(K::Pod, "adam-run-aaa") < at(K::Deployment, "coder-egress"));
+    assert!(at(K::Deployment, "coder-egress") < at(K::NetworkPolicy, "coder-egress"));
+    assert!(at(K::NetworkPolicy, "coder-egress") < at(K::NetworkPolicy, "coder-run-pods"));
+    assert!(at(K::Deployment, "coder-egress") < at(K::ServiceAccount, "coder-egress"));
 }
 
 #[tokio::test]
@@ -523,6 +649,13 @@ async fn an_object_of_a_name_run_pods_need_that_is_not_ours_blocks_and_nothing_i
         (K::RoleBinding, "coder-run-pods"),
         (K::NetworkPolicy, "coder-run-pods"),
         (K::ConfigMap, "coder-run-pods-policy"),
+        // The egress proxy's names (D15c): a Service, a Deployment, an account, a policy, a budget, a file.
+        (K::Service, "coder-egress"),
+        (K::Deployment, "coder-egress"),
+        (K::ServiceAccount, "coder-egress"),
+        (K::NetworkPolicy, "coder-egress"),
+        (K::Budget, "coder-egress"),
+        (K::ConfigMap, "coder-egress-allow"),
     ] {
         let (fake, runtime) = setup();
         fake.put(kind, NS, name, json!({"metadata": {"labels": {"app.kubernetes.io/managed-by": "Helm", "app.kubernetes.io/instance": "coder"}}}));
@@ -563,6 +696,78 @@ async fn the_run_pods_of_a_service_are_not_part_of_its_status() {
     fake.put(K::Pod, NS, "adam-run-aaa", crashing);
     let after = runtime.status(&on.id).await.unwrap();
     assert_eq!(before, after);
+
+    // Nor is the egress proxy a workload of the service (§60a, D15c, decision 4): its Deployment is not rolled out, and the
+    // service's phase, its replicas and its issues are what they were.
+    let mut proxy = fake.get(K::Deployment, NS, "coder-egress").unwrap();
+    proxy["status"] =
+        json!({"replicas": 2, "readyReplicas": 0, "updatedReplicas": 2, "observedGeneration": 1});
+    fake.put(K::Deployment, NS, "coder-egress", proxy);
+    assert_eq!(before, runtime.status(&on.id).await.unwrap());
+}
+
+#[tokio::test]
+async fn fewer_replicas_of_the_proxy_take_its_budget_away_and_nothing_else() {
+    let (fake, runtime) = setup();
+    let two = resolved_run_pods(|_, _| {});
+    runtime.ensure(&two.id, &two.runtime).await.unwrap();
+    assert!(fake.get(K::Budget, NS, "coder-egress").is_some());
+    let one = common::resolved_run_pods_with(
+        |settings| settings["egressProxy"]["replicas"] = json!(1),
+        |_, _| {},
+    );
+    fake.clear_calls();
+    runtime.ensure(&one.id, &one.runtime).await.unwrap();
+    assert_eq!(
+        writes(&fake.calls(), "DELETE"),
+        [(K::Budget, "coder-egress".to_owned())],
+        "a budget of 1 of 1 would block every drain; nothing else of the proxy is stale"
+    );
+    assert!(fake.get(K::Deployment, NS, "coder-egress").is_some());
+    assert!(fake.get(K::NetworkPolicy, NS, "coder-egress").is_some());
+    assert_eq!(
+        fake.get(K::Deployment, NS, "coder-egress").unwrap()["spec"]["replicas"],
+        1
+    );
+}
+
+#[tokio::test]
+async fn a_changed_allow_list_rolls_the_proxy_and_strands_nothing() {
+    let (fake, runtime) = setup();
+    let base = resolved_run_pods(|_, _| {});
+    runtime.ensure(&base.id, &base.runtime).await.unwrap();
+    let rolled = |fake: &Fake| {
+        fake.get(K::Deployment, NS, "coder-egress").unwrap()["spec"]["template"]["metadata"]
+            ["annotations"]["checksum/egress-allow"]
+            .clone()
+    };
+    let before = rolled(&fake);
+    let more = common::resolved_run_pods_with(
+        |settings| settings["egressProxy"]["extraAllow"] = json!(["artifacts.example.com"]),
+        |_, _| {},
+    );
+    runtime.ensure(&more.id, &more.runtime).await.unwrap();
+    assert_ne!(
+        before,
+        rolled(&fake),
+        "the pods are rolled by the file they read at start"
+    );
+    let file = fake.get(K::ConfigMap, NS, "coder-egress-allow").unwrap();
+    assert!(
+        file["data"]["allow.txt"]
+            .as_str()
+            .unwrap()
+            .contains("artifacts.example.com")
+    );
+    // Nothing is deleted: the file is edited in place, and the sweep of superseded file sets never takes the proxy's.
+    fake.clear_calls();
+    runtime.ensure(&more.id, &more.runtime).await.unwrap();
+    assert!(fake.get(K::ConfigMap, NS, "coder-egress-allow").is_some());
+    assert!(
+        fake.calls().iter().all(|c| c.method != "DELETE"),
+        "{:#?}",
+        fake.calls()
+    );
 }
 
 #[tokio::test]

@@ -261,8 +261,10 @@ pub mod front {
 /// Run pods: the variables the coder reads to put the commands of a run in pods of their own, the template it
 /// reads, and the labels it puts on the pods (slice D15; adam-rs ADR 0019 and 0041, read at `3f714d0`, *verified
 /// 2026-10-26*: `bin/adam-coder/README.md` "Where the processes of a run run", `docs/reference/environment.md`,
-/// `crates/adam-env-kubernetes/src/names.rs`, `deploy/coder/templates/_runpods.tpl` and `statefulset.yaml`). The
-/// parity goldens (`tests/golden/coder-run-pods*.json`) hold it equal to what the chart renders.
+/// `crates/adam-env-kubernetes/src/names.rs`, `deploy/coder/templates/_runpods.tpl` and `statefulset.yaml`; the egress
+/// proxy, slice D15c, adam-rs ADR 0042, at `7598255`, *verified 2026-10-27*: `deploy/coder/templates/_runpods.tpl` and
+/// `run-pods-egress-*.yaml`, `bin/adam-egress/README.md`). The parity goldens (`tests/golden/coder-run-pods*.json`) hold it
+/// equal to what the chart renders.
 pub mod run_pods {
     /// `local` or `kubernetes`.
     pub const RUN_ENVIRONMENT: &str = "RUN_ENVIRONMENT";
@@ -353,4 +355,59 @@ pub mod run_pods {
     pub const AFFINITY_NAME_LABEL: &str = "app.kubernetes.io/name";
     /// The service label of the same.
     pub const AFFINITY_INSTANCE_LABEL: &str = "app.kubernetes.io/instance";
+
+    /// The egress proxy (slice D15c; adam-rs ADR 0042 and `bin/adam-egress`): the one way out of a run pod to the
+    /// internet. It runs the agent's own coder image.
+    pub mod egress {
+        /// The port the proxy serves, and the run pods' policy names (`coder.egressProxyPort`).
+        pub const PORT: u16 = 3128;
+        /// The path that answers 200 while it serves (its probes).
+        pub const HEALTH_PATH: &str = "/healthz";
+        /// What the proxy runs: `tini` reaps, `adam-egress` serves.
+        pub const COMMAND: [&str; 3] = ["tini", "--", "adam-egress"];
+        /// The address it listens on.
+        pub const LISTEN: &str = "EGRESS_LISTEN";
+        /// The allow-list file it reads at start.
+        pub const ALLOW_FILE: &str = "EGRESS_ALLOW_FILE";
+        /// The ports a `CONNECT` may name, comma separated.
+        pub const PORTS: &str = "EGRESS_PORTS";
+        /// The ranges it never connects to, comma separated.
+        pub const DENY_CIDRS: &str = "EGRESS_DENY_CIDRS";
+        /// Where the allow-list's directory is mounted.
+        pub const ALLOW_DIR: &str = "/etc/adam-egress";
+        /// The allow-list's file name in it.
+        pub const ALLOW_FILE_NAME: &str = "allow.txt";
+        /// The user the proxy runs as: the coder image's.
+        pub const USER: i64 = 10001;
+        /// The first line of the allow-list file.
+        pub const ALLOW_HEADER: &str = "# The hosts a run pod may reach through the egress proxy: runPods.egressProxy.allow and extraAllow.";
+        /// The names the run container's proxy variables have, which `runPods.extraEnv` may not set: the chart sets them
+        /// from `runPods.egressProxy`.
+        pub const PROXY_ENV: [&str; 6] = [
+            "HTTPS_PROXY",
+            "https_proxy",
+            "HTTP_PROXY",
+            "http_proxy",
+            "NO_PROXY",
+            "no_proxy",
+        ];
+        /// What a run pod never sends to the proxy.
+        pub const NO_PROXY: [&str; 2] = ["localhost", "127.0.0.1"];
+
+        /// The proxy's Deployment, Service, ServiceAccount, PodDisruptionBudget and NetworkPolicy:
+        /// `<service>-egress` (`coder.egressProxyName`), and the name label of its pods.
+        pub fn name(service: &str) -> String {
+            format!("{service}-egress")
+        }
+
+        /// The ConfigMap that holds the allow-list: `<service>-egress-allow`.
+        pub fn allow_name(service: &str) -> String {
+            format!("{service}-egress-allow")
+        }
+
+        /// What `HTTPS_PROXY` and `HTTP_PROXY` of a run pod say: `http://<name>.<namespace>.svc:<port>`.
+        pub fn url(service: &str, namespace: &str) -> String {
+            format!("http://{}.{namespace}.svc:{PORT}", name(service))
+        }
+    }
 }

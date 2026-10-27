@@ -225,6 +225,37 @@ impl RuntimeSpec {
         if rp.quota.pods == 0 {
             return bad("run pods: the quota allows no pod".into());
         }
+        let proxy = &rp.network.proxy;
+        empty("the image of the egress proxy", &proxy.image)?;
+        empty(
+            "the allow-list directory of the egress proxy",
+            &proxy.allow_dir,
+        )?;
+        empty(
+            "the name of the egress proxy's allow-list",
+            &proxy.allow.name,
+        )?;
+        if proxy.command.is_empty() {
+            return bad("run pods: the egress proxy has no command".into());
+        }
+        if proxy.port == 0 {
+            return bad("run pods: the egress proxy's port is 0".into());
+        }
+        if !proxy.health_path.starts_with('/') {
+            return bad("run pods: the egress proxy's health path is not a path".into());
+        }
+        if proxy.replicas == 0 {
+            return bad("run pods: the egress proxy has no replica".into());
+        }
+        if proxy.egress_ports.is_empty() || proxy.egress_ports.contains(&0) {
+            return bad("run pods: the egress proxy may reach no port, or port 0".into());
+        }
+        if proxy.allow.files.is_empty() {
+            return bad("run pods: the egress proxy's allow-list has no file".into());
+        }
+        if proxy.run_as == 0 {
+            return bad("run pods: the egress proxy would run as root".into());
+        }
         if rp.guard.images.is_empty() || rp.guard.images.iter().any(|i| i.trim().is_empty()) {
             return bad("run pods: the guard allows no image, or an empty one".into());
         }
@@ -596,8 +627,9 @@ pub struct RunPods {
     pub priority_class: String,
     /// What the pods may use in all.
     pub quota: RunPodQuota,
-    /// What the pods may reach. `None`: no policy.
-    pub network: Option<RunPodNetwork>,
+    /// What the pods may reach: deny by default, and the egress proxy. Always present: a spec with run pods and no
+    /// network policy for them is not one.
+    pub network: RunPodNetwork,
     /// How the workers label what they make.
     pub pods: RunPodLabels,
     /// What the guard lets a pod made by the account be.
@@ -623,16 +655,53 @@ pub struct RunPodLabels {
     pub run_label: String,
 }
 
-/// What a run pod may reach: nothing connects to it (the workers `exec` in it through the API server), and
-/// it reaches names, the internet except private ranges, and what `extra_egress` adds.
+/// What a run pod may reach, **deny by default** (adam-rs ADR 0042): nothing connects to it (the workers `exec` in it
+/// through the API server), and it reaches names, the egress proxy of its service, and what `extra_egress` adds, and
+/// nothing else. There is no value that opens the internet to it, and no spec without this: run pods and their network
+/// go together.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct RunPodNetwork {
     /// Where names are resolved: the peer, on port 53 over UDP and TCP.
     pub dns: Peer,
-    /// The internet (`0.0.0.0/0`) except these ranges. IPv4 only.
-    pub except_cidrs: Vec<String>,
-    /// Further egress rules.
+    /// The one way out to the internet: the proxy the provider makes beside the run pods.
+    pub proxy: EgressProxy,
+    /// Further egress rules, for what the proxy cannot serve (an in-cluster target such as a model gateway).
     pub extra_egress: Vec<EgressRule>,
+}
+
+/// The HTTPS-only egress proxy of a service's run pods (adam-rs ADR 0042): a small workload of its own, from the
+/// agent's image, that accepts `CONNECT host:port` to the hosts of an allow-list and nothing else, and the one
+/// destination the network policy of the run pods names besides DNS. The provider makes its Deployment, Service,
+/// ServiceAccount (no token), allow-list file, PodDisruptionBudget (more than one replica) and NetworkPolicy; what
+/// the process is and how it is told its settings (command, variables) are the spec's, so that the provider knows
+/// nothing of adam.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct EgressProxy {
+    /// The image, a tag or a tag and a digest: the agent's own.
+    pub image: String,
+    /// The command (the image's entrypoint is replaced).
+    pub command: Vec<String>,
+    /// The environment: literals only.
+    pub env: Vec<EnvVar>,
+    /// The port it serves: the Service, the container and the run pods' policy name it.
+    pub port: u16,
+    /// The path that answers 200 on [`port`](Self::port) while it serves: its readiness and liveness probes.
+    pub health_path: String,
+    /// Pods. With more than one a budget keeps one up through a voluntary disruption.
+    pub replicas: u32,
+    /// The allow-list, a file set of one file. Mounted read-only at [`allow_dir`](Self::allow_dir); the process reads it at
+    /// start only, so a changed list is a rollout of the proxy.
+    pub allow: FileSet,
+    /// Where the allow-list's directory is mounted.
+    pub allow_dir: String,
+    /// The TCP ports its pods may reach, besides DNS: the only ones the proxy's policy opens.
+    pub egress_ports: Vec<u16>,
+    /// Ranges its pods never reach: left out of the internet its policy opens. IPv4 only.
+    pub deny_cidrs: Vec<String>,
+    /// The user its pods run as (non-root).
+    pub run_as: i64,
+    /// CPU and memory.
+    pub resources: Resources,
 }
 
 /// One egress rule: to these peers (empty: to anywhere), on these ports (empty: on any).

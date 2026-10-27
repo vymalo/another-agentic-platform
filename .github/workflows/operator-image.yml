@@ -50,13 +50,15 @@ name: Operator and API images
 #              kind and reads a pin this repository does not control, so a flake or a bad pin of the system's would block the operator's
 #              release for a reason that is not the operator's. That is a decision for the owner (§60a, D13): to make it gate, add it to
 #              the `needs` of `push` below. deploy/operator/tests/e2e/README.md says what it proves and what it does not.
-# run-pods-e2e (D15b): a kind cluster of its own. The operator's chart installed with THAT image, first WITHOUT run pods and then with them (the same values
-#              file, one flag apart: the upgrade), and the REAL adam-rs coder at or after #131 (ghcr.io/vymalo/another-adam-rs/coder, by tag and digest in
-#              deploy/operator/tests/e2e/run-pods.yaml, 3 GB) run by the operator twice: a coder with no run pods, which must be exactly as it was after the
+# run-pods-e2e (D15b, D15c): a kind cluster of its own. The operator's chart installed with THAT image, first WITHOUT run pods and then with them (the same values
+#              file, one flag apart: the upgrade), and the REAL adam-rs coder at or after #134 (the image with `adam-egress`: ghcr.io/vymalo/another-adam-rs/coder, by tag
+#              and digest in deploy/operator/tests/e2e/run-pods.yaml, 3 GB) run by the operator twice: a coder with no run pods, which must be exactly as it was after the
 #              upgrade, and a GitHub App coder with them. A scripted model (a Node script that the coder's own image runs from a ConfigMap) makes the coder start
 #              a project and run a command; the script shows the run pod made from the operator's template and started by the kubelet, the command in it, that a
 #              pod sees only its own run (two runs, then one in a repository with a mirror and a worktree), the quota (a third pod refused, a run that waits for a
-#              slot), the network policy, run-pods-admission.sh run in the cluster, `kubectl auth can-i --as` under the real RBAC, and a deleted service leaving
+#              slot), the network of a run pod (D15c: deny by default, the egress proxy the operator made is the one way out: a direct connection to a public address,
+#              the API server and another pod is refused after the controls, curl and npm reach the registry through the proxy, example.com is 403, its log holds the
+#              decisions and nothing of the requests; the job FAILS where the network plugin does not enforce), run-pods-admission.sh run in the cluster, `kubectl auth can-i --as` under the real RBAC, and a deleted service leaving
 #              nothing, run pods included. It runs in parallel with the others and **does not gate the push**: it pulls a 3 GB image of another repository, pinned
 #              here, and its waits are for pods and a quota, so a flake or a bad pin would block the operator's release for a reason that is not the operator's;
 #              run pods are off by default, so a red run of it does not put a broken default into the image. That is a decision for the owner (§60a, D15b): to make

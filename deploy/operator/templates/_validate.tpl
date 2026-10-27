@@ -105,7 +105,7 @@ Included from deployment.yaml, which every render has, so they always run.
 {{- end -}}
 
 {{/*
-Run pods (values `runPods` and `runPodClasses`, slice D15a). The shape of the two blocks is checked always, so that a null where a block
+Run pods (values `runPods` and `runPodClasses`, slice D15a; the egress proxy, D15c). The shape of the two blocks is checked always, so that a null where a block
 belongs is a named refusal and not a nil pointer; the rest only with `runPods.enabled`, and then it is what the operator would refuse at
 start (RunPodSettings::validate, crates/domain/src/run_pods.rs) and a pod that never starts is worse than a refused render: every key
 the operator reads is a known one (it refuses an unknown key), the run image is pinned by tag and digest, the quota and the classes are
@@ -127,11 +127,11 @@ the CIDRs, a toleration or an egress rule, which the operator checks at start an
 {{- $quantity := `^([0-9]+\.?[0-9]*|\.[0-9]+)(Ki|Mi|Gi|Ti|Pi|Ei|n|u|m|k|M|G|T|P|E|[eE][+-]?[0-9]+)?$` -}}
 {{- $label := `^[a-z0-9]([-a-z0-9]*[a-z0-9])?$` -}}
 {{- range $k, $v := $r -}}
-{{- if not (has $k (list "enabled" "image" "container" "cargoBuildJobs" "extraEnv" "priorityClassName" "quota" "idleSecs" "readyTimeoutSecs" "waitSecs" "nodeSelector" "tolerations" "nodeAffinity" "extraAllowedImages" "networkPolicy")) -}}
-{{- fail (printf "runPods.%s is not a setting: enabled, image, container, cargoBuildJobs, extraEnv, priorityClassName, quota, idleSecs, readyTimeoutSecs, waitSecs, nodeSelector, tolerations, nodeAffinity, extraAllowedImages or networkPolicy (the operator refuses an unknown key at start)" $k) -}}
+{{- if not (has $k (list "enabled" "image" "container" "cargoBuildJobs" "extraEnv" "priorityClassName" "quota" "idleSecs" "readyTimeoutSecs" "waitSecs" "nodeSelector" "tolerations" "nodeAffinity" "extraAllowedImages" "networkPolicy" "egressProxy")) -}}
+{{- fail (printf "runPods.%s is not a setting: enabled, image, container, cargoBuildJobs, extraEnv, priorityClassName, quota, idleSecs, readyTimeoutSecs, waitSecs, nodeSelector, tolerations, nodeAffinity, extraAllowedImages, networkPolicy or egressProxy (the operator refuses an unknown key at start)" $k) -}}
 {{- end -}}
 {{- end -}}
-{{- range $k := list "image" "quota" "networkPolicy" "extraEnv" "nodeSelector" -}}
+{{- range $k := list "image" "quota" "networkPolicy" "egressProxy" "extraEnv" "nodeSelector" -}}
 {{- if not (kindIs "map" (get $r $k)) -}}
 {{- fail (printf "runPods.%s must be a map (the defaults of values.yaml are its keys; a null removes them all)" $k) -}}
 {{- end -}}
@@ -187,6 +187,9 @@ the CIDRs, a toleration or an egress rule, which the operator checks at start an
 {{- if has $k (list "MODEL_API_KEY" "CARGO_BUILD_JOBS") -}}
 {{- fail (printf "runPods.extraEnv.%s: the operator sets this variable itself (a secret is never a setting: the model key comes from the agent's Secret)" $k) -}}
 {{- end -}}
+{{- if has $k (list "HTTPS_PROXY" "https_proxy" "HTTP_PROXY" "http_proxy" "NO_PROXY" "no_proxy") -}}
+{{- fail (printf "runPods.extraEnv.%s: the operator sets the proxy variables of a run pod from runPods.egressProxy (the egress proxy is the only way out, adam-rs ADR 0042); to add names that bypass it, use runPods.egressProxy.extraNoProxy" $k) -}}
+{{- end -}}
 {{- if not (kindIs "string" $v) -}}
 {{- fail (printf "runPods.extraEnv.%s must be a text (quote a number: \"2\")" $k) -}}
 {{- end -}}
@@ -204,24 +207,23 @@ the CIDRs, a toleration or an egress rule, which the operator checks at start an
 {{- if not (regexMatch `^([a-z0-9]([-a-z0-9]*[a-z0-9])?)?(\.[a-z0-9]([-a-z0-9]*[a-z0-9])?)*$` (toString (default "" $r.priorityClassName))) -}}
 {{- fail (printf "runPods.priorityClassName must be the name of a PriorityClass (a DNS name) or empty, got %q" (toString $r.priorityClassName)) -}}
 {{- end -}}
-{{- /* What a run pod may reach. */ -}}
+{{- /* What a run pod may reach: deny by default (adam-rs ADR 0042), so the policy has no switch. */ -}}
 {{- $n := $r.networkPolicy -}}
 {{- range $k, $v := $n -}}
 {{- if not (has $k (list "enabled" "clusterCIDRs" "blockedCIDRs" "dnsNamespace" "dnsPodLabels" "extraEgress")) -}}
-{{- fail (printf "runPods.networkPolicy.%s is not a setting: enabled, clusterCIDRs, blockedCIDRs, dnsNamespace, dnsPodLabels or extraEgress" $k) -}}
+{{- fail (printf "runPods.networkPolicy.%s is not a setting: clusterCIDRs, blockedCIDRs, dnsNamespace, dnsPodLabels or extraEgress" $k) -}}
 {{- end -}}
 {{- end -}}
-{{- if not (kindIs "bool" $n.enabled) -}}
-{{- fail "runPods.networkPolicy.enabled must be true or false" -}}
+{{- if and (hasKey $n "enabled") (not (eq (toString $n.enabled) "true")) -}}
+{{- fail "runPods.networkPolicy.enabled is no longer a choice: run pods reach the internet only through the egress proxy, and the policy that makes it the one way out is always made (adam-rs ADR 0042, slice D15c). Remove the value. To let a run pod reach an in-cluster target, add a rule to runPods.networkPolicy.extraEgress and its host to runPods.egressProxy.extraNoProxy; to let it reach a host on the internet, add the host to runPods.egressProxy.extraAllow" -}}
 {{- end -}}
-{{- if $n.enabled -}}
 {{- range $list := list "clusterCIDRs" "blockedCIDRs" -}}
 {{- if not (kindIs "slice" (get $n $list)) -}}
 {{- fail (printf "runPods.networkPolicy.%s must be a list of IPv4 CIDRs" $list) -}}
 {{- end -}}
 {{- range $c := (get $n $list) -}}
 {{- if not (and (kindIs "string" $c) (regexMatch `^((25[0-5]|2[0-4][0-9]|1[0-9][0-9]|[1-9]?[0-9])\.){3}(25[0-5]|2[0-4][0-9]|1[0-9][0-9]|[1-9]?[0-9])/(3[0-2]|[12]?[0-9])$` $c)) -}}
-{{- fail (printf "runPods.networkPolicy.%s: %v is not an IPv4 CIDR such as 10.0.0.0/8" $list $c) -}}
+{{- fail (printf "runPods.networkPolicy.%s: %v is not an IPv4 CIDR such as 10.0.0.0/8 (IPv6 is denied, not allowed)" $list $c) -}}
 {{- end -}}
 {{- end -}}
 {{- end -}}
@@ -233,6 +235,69 @@ the CIDRs, a toleration or an egress rule, which the operator checks at start an
 {{- end -}}
 {{- if not (kindIs "slice" $n.extraEgress) -}}
 {{- fail "runPods.networkPolicy.extraEgress must be a list of NetworkPolicy egress rules" -}}
+{{- end -}}
+{{- /* The egress proxy (adam-rs ADR 0042, slice D15c): the checks of the coder chart's _validate.tpl, which RunPodSettings::validate repeats. */ -}}
+{{- $ep := $r.egressProxy -}}
+{{- range $k, $v := $ep -}}
+{{- if not (has $k (list "replicas" "ports" "allow" "extraAllow" "extraNoProxy" "resources")) -}}
+{{- fail (printf "runPods.egressProxy.%s is not a setting: replicas, ports, allow, extraAllow, extraNoProxy or resources (the operator refuses an unknown key at start)" $k) -}}
+{{- end -}}
+{{- end -}}
+{{- if or (not (regexMatch "^[0-9]+$" (toString $ep.replicas))) (lt (int64 $ep.replicas) 1) -}}
+{{- fail (printf "runPods.egressProxy.replicas must be a whole number of at least 1, got %q" (toString $ep.replicas)) -}}
+{{- end -}}
+{{- if or (not (kindIs "slice" $ep.ports)) (not $ep.ports) -}}
+{{- fail "runPods.egressProxy.ports must be a non-empty list of port numbers (443 by default)" -}}
+{{- end -}}
+{{- range $ep.ports -}}
+{{- if or (not (regexMatch "^[0-9]+$" (toString .))) (lt (int64 .) 1) (gt (int64 .) 65535) -}}
+{{- fail (printf "runPods.egressProxy.ports entries must be port numbers from 1 to 65535, got %q" (toString .)) -}}
+{{- end -}}
+{{- end -}}
+{{- $hosts := list -}}
+{{- range $name, $list := dict "allow" $ep.allow "extraAllow" $ep.extraAllow -}}
+{{- if not (kindIs "slice" $list) -}}
+{{- fail (printf "runPods.egressProxy.%s must be a list of host names, got %q" $name (toString $list)) -}}
+{{- end -}}
+{{- range $list -}}
+{{- $host := lower (trim (toString .)) -}}
+{{- if not (regexMatch "^[.]?[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?([.][a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?)*$" $host) -}}
+{{- fail (printf "runPods.egressProxy.%s entry %q is not a host name: write example.com for one host and .example.com for every subdomain of it (no scheme, port, path, wildcard or IP address)" $name (toString .)) -}}
+{{- end -}}
+{{- if regexMatch "(^|[.])[0-9]+$" $host -}}
+{{- fail (printf "runPods.egressProxy.%s entry %q ends in digits only, which reads as an IP address, and the proxy refuses IP literals" $name (toString .)) -}}
+{{- end -}}
+{{- if regexMatch "^[.][^.]+$" $host -}}
+{{- fail (printf "runPods.egressProxy.%s entry %q is a bare suffix, which would allow every host of a top-level domain: name the registrable domain, such as .example.com" $name (toString .)) -}}
+{{- end -}}
+{{- $hosts = append $hosts $host -}}
+{{- end -}}
+{{- end -}}
+{{- if not $hosts -}}
+{{- fail "runPods.egressProxy.allow and extraAllow hold no host: the proxy refuses an empty allow-list (exit 78) and a run pod would reach nothing. Keep the defaults of allow, or list the hosts it needs" -}}
+{{- end -}}
+{{- if not (kindIs "slice" $ep.extraNoProxy) -}}
+{{- fail (printf "runPods.egressProxy.extraNoProxy must be a list of names, got %q" (toString $ep.extraNoProxy)) -}}
+{{- end -}}
+{{- range $ep.extraNoProxy -}}
+{{- if not (regexMatch "^[A-Za-z0-9.*:/_-]+$" (toString .)) -}}
+{{- fail (printf "runPods.egressProxy.extraNoProxy entries are names for NO_PROXY, with no comma or space, got %q" (toString .)) -}}
+{{- end -}}
+{{- end -}}
+{{- if not (kindIs "map" $ep.resources) -}}
+{{- fail "runPods.egressProxy.resources must be a map with requests and limits" -}}
+{{- end -}}
+{{- range $k, $v := $ep.resources -}}
+{{- if not (has $k (list "requests" "limits")) -}}
+{{- fail (printf "runPods.egressProxy.resources.%s is not a setting: requests or limits" $k) -}}
+{{- end -}}
+{{- if not (kindIs "map" $v) -}}
+{{- fail (printf "runPods.egressProxy.resources.%s must be a map of quantities" $k) -}}
+{{- end -}}
+{{- range $res, $q := $v -}}
+{{- if not (and (or (kindIs "string" $q) (kindIs "float64" $q)) (regexMatch $quantity (toString $q))) -}}
+{{- fail (printf "runPods.egressProxy.resources.%s.%s must be a quantity such as 32Mi or 25m, got %q" $k $res (toString $q)) -}}
+{{- end -}}
 {{- end -}}
 {{- end -}}
 {{- /* The size classes: at least one, and every one with the memory limit the quota counts. */ -}}

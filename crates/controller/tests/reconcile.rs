@@ -1386,8 +1386,10 @@ fn run_pod_settings() -> aap_domain::RunPodSettings {
         "idleSecs": 900,
         "readyTimeoutSecs": 600,
         "waitSecs": 600,
-        "networkPolicy": {"enabled": true, "blockedCIDRs": ["10.0.0.0/8"], "dnsNamespace": "kube-system",
+        "networkPolicy": {"blockedCIDRs": ["10.0.0.0/8"], "dnsNamespace": "kube-system",
                           "dnsPodLabels": {"k8s-app": "kube-dns"}},
+        "egressProxy": {"replicas": 2, "ports": [443], "allow": ["registry.npmjs.org"],
+                        "resources": {"requests": {"cpu": "25m", "memory": "32Mi"}, "limits": {"memory": "256Mi"}}},
     }))
     .unwrap()
 }

@@ -162,6 +162,8 @@ struct Cx<'a> {
     /// Where the servers of `config` came from: a provider's `tools` is written to the MCP file.
     origins: &'a Origins,
     name: &'a str,
+    /// The namespace of the service: where its run pods' egress proxy is.
+    namespace: String,
     coder: Option<&'a Coder>,
     placement: String,
     public_url: String,
@@ -198,6 +200,7 @@ impl<'a> Cx<'a> {
             config,
             origins,
             name,
+            namespace: namespace.to_owned(),
             coder: config.spec.harness.adam.coder.as_ref(),
             placement: plan::placement(config),
             public_url: configured
@@ -384,6 +387,7 @@ impl<'a> Cx<'a> {
         };
         Ok(ForService {
             service: self.name,
+            namespace: &self.namespace,
             workload: self.name,
             settings: run.settings,
             class: run.class,

@@ -94,6 +94,13 @@ fn the_objects_and_their_order() {
             "\"ConfigMap\"/\"coder-run-pods-policy\"",
             "\"ServiceAccount\"/\"coder\"",
             "\"ResourceQuota\"/\"coder-run-pods\"",
+            // The egress proxy is there before the policy that makes it the one way out, and both before the right to make a pod.
+            "\"ConfigMap\"/\"coder-egress-allow\"",
+            "\"ServiceAccount\"/\"coder-egress\"",
+            "\"Deployment\"/\"coder-egress\"",
+            "\"Service\"/\"coder-egress\"",
+            "\"PodDisruptionBudget\"/\"coder-egress\"",
+            "\"NetworkPolicy\"/\"coder-egress\"",
             "\"NetworkPolicy\"/\"coder-run-pods\"",
             "\"RoleBinding\"/\"coder-run-pods\"",
             "\"Service\"/\"coder\"",
@@ -128,7 +135,13 @@ fn without_run_pods_none_of_it_is_made() {
 fn every_object_carries_the_labels_the_digest_and_the_owner_and_the_parameters_the_policys_label() {
     let r = resolved_run_pods(|_, _| {});
     let docs = rendered(&r).documents();
-    for name in ["coder-run-pods-policy", "coder-run-pods", "coder"] {
+    for name in [
+        "coder-run-pods-policy",
+        "coder-run-pods",
+        "coder",
+        "coder-egress",
+        "coder-egress-allow",
+    ] {
         for d in docs.iter().filter(|d| d["metadata"]["name"] == name) {
             let what = format!("{}/{name}", d["kind"]);
             let labels = &d["metadata"]["labels"];
@@ -235,8 +248,7 @@ fn the_quota_is_scoped_to_the_priority_class() {
 }
 
 #[test]
-fn the_network_policy_selects_the_coders_run_pods_and_opens_dns_and_the_internet_but_not_the_private_ranges()
- {
+fn the_network_policy_selects_the_coders_run_pods_and_denies_all_but_dns_and_the_proxy() {
     let docs = rendered(&resolved_run_pods(|_, _| {})).documents();
     let np = &find(&docs, "NetworkPolicy", "coder-run-pods")["spec"];
     assert_eq!(
@@ -264,10 +276,240 @@ fn the_network_policy_selects_the_coders_run_pods_and_opens_dns_and_the_internet
         dns["ports"],
         json!([{"protocol": "UDP", "port": 53}, {"protocol": "TCP", "port": 53}])
     );
-    let internet = &np["egress"][1]["to"][0]["ipBlock"];
-    assert_eq!(internet["cidr"], "0.0.0.0/0");
+    // The one way out: the proxy's pods, on its port.
     assert_eq!(
-        internet["except"],
+        np["egress"][1],
+        json!({
+            "to": [{"podSelector": {"matchLabels": {
+                "app.kubernetes.io/name": "coder-egress",
+                "app.kubernetes.io/instance": "coder",
+                "app.kubernetes.io/component": "egress-proxy",
+            }}}],
+            "ports": [{"protocol": "TCP", "port": 3128}],
+        })
+    );
+    assert_eq!(np["egress"].as_array().unwrap().len(), 2);
+    // Deny by default: no rule names an address range, so the old rule that opened the internet is not there.
+    let text = serde_json::to_string(np).unwrap();
+    for open in ["ipBlock", "0.0.0.0/0", "except", "::/0"] {
+        assert!(
+            !text.contains(open),
+            "the run pods' policy has {open}: {text}"
+        );
+    }
+    // The agent's own ingress policy (`coder`) does not select a run pod: they are managed by adam-coder, not by us.
+    let own = &find(&docs, "NetworkPolicy", "coder")["spec"]["podSelector"]["matchLabels"];
+    assert_eq!(own[MANAGED_BY_LABEL], MANAGED_BY_VALUE);
+}
+
+#[test]
+fn the_extra_egress_of_the_deployment_follows_the_proxy_and_nothing_else_is_added() {
+    let r = common::resolved_run_pods_with(
+        |settings| {
+            settings["networkPolicy"]["extraEgress"] = json!([{
+                "to": [{"ipBlock": {"cidr": "10.9.0.5/32"}}],
+                "ports": [{"protocol": "TCP", "port": 443}],
+            }]);
+            settings["egressProxy"]["extraNoProxy"] = json!(["models.internal"]);
+        },
+        |_, _| {},
+    );
+    let docs = rendered(&r).documents();
+    let egress = &find(&docs, "NetworkPolicy", "coder-run-pods")["spec"]["egress"];
+    assert_eq!(
+        egress.as_array().unwrap().len(),
+        3,
+        "DNS, the proxy, the rule"
+    );
+    assert_eq!(
+        egress[2],
+        json!({"to": [{"ipBlock": {"cidr": "10.9.0.5/32"}}], "ports": [{"protocol": "TCP", "port": 443}]})
+    );
+}
+
+// ---------------------------------------------------------------- the egress proxy (D15c)
+
+#[test]
+fn the_proxy_is_named_and_labelled_for_the_service_as_the_chart_does_for_a_release() {
+    let docs = rendered(&resolved_run_pods(|_, _| {})).documents();
+    let selector = json!({
+        "app.kubernetes.io/name": "coder-egress",
+        "app.kubernetes.io/instance": "coder",
+        "app.kubernetes.io/component": "egress-proxy",
+    });
+    let deployment = find(&docs, "Deployment", "coder-egress");
+    assert_eq!(deployment["spec"]["selector"]["matchLabels"], selector);
+    // The pods carry the selector labels and not `managed-by`: the service's own ingress policy and the listing of its pods
+    // select by it, and neither may take the proxy's pods.
+    assert_eq!(
+        deployment["spec"]["template"]["metadata"]["labels"],
+        selector
+    );
+    assert_eq!(
+        find(&docs, "Service", "coder-egress")["spec"]["selector"],
+        selector
+    );
+    assert_eq!(
+        find(&docs, "PodDisruptionBudget", "coder-egress")["spec"]["selector"]["matchLabels"],
+        selector
+    );
+    assert_eq!(
+        find(&docs, "NetworkPolicy", "coder-egress")["spec"]["podSelector"]["matchLabels"],
+        selector
+    );
+    // …and its object labels are those and `managed-by`, which makes them ours.
+    assert_eq!(
+        deployment["metadata"]["labels"],
+        json!({
+            "app.kubernetes.io/name": "coder-egress",
+            "app.kubernetes.io/instance": "coder",
+            "app.kubernetes.io/component": "egress-proxy",
+            MANAGED_BY_LABEL: MANAGED_BY_VALUE,
+        })
+    );
+    // It is a Role of no workload: the observation of the service reads the `component` label.
+    assert!(aap_runtime_kubernetes::names::role_of("egress-proxy").is_none());
+    // The service's own policy selects the agent's pods by `managed-by` and the instance: not these.
+    let own = &find(&docs, "NetworkPolicy", "coder")["spec"]["podSelector"]["matchLabels"];
+    assert_eq!(own[MANAGED_BY_LABEL], MANAGED_BY_VALUE);
+    assert!(
+        deployment["spec"]["template"]["metadata"]["labels"]
+            .get(MANAGED_BY_LABEL)
+            .is_none()
+    );
+}
+
+#[test]
+fn the_proxy_holds_no_token_no_secret_and_writes_nothing() {
+    let docs = rendered(&resolved_run_pods(|_, _| {})).documents();
+    let account = find(&docs, "ServiceAccount", "coder-egress");
+    assert_eq!(account["automountServiceAccountToken"], false);
+    let pod = &find(&docs, "Deployment", "coder-egress")["spec"]["template"]["spec"];
+    assert_eq!(pod["serviceAccountName"], "coder-egress");
+    assert_eq!(pod["automountServiceAccountToken"], false);
+    assert_eq!(pod["enableServiceLinks"], false);
+    assert_eq!(pod["securityContext"]["runAsNonRoot"], true);
+    assert_eq!(pod["securityContext"]["runAsUser"], 10001);
+    assert_eq!(
+        pod["securityContext"]["seccompProfile"]["type"],
+        "RuntimeDefault"
+    );
+    let c = &pod["containers"][0];
+    assert_eq!(c["securityContext"]["readOnlyRootFilesystem"], true);
+    assert_eq!(c["securityContext"]["allowPrivilegeEscalation"], false);
+    assert_eq!(c["securityContext"]["capabilities"]["drop"], json!(["ALL"]));
+    let text = serde_json::to_string(pod).unwrap();
+    for secret in [
+        "secretKeyRef",
+        "\"secret\"",
+        "envFrom",
+        "MODEL_API_KEY",
+        "coder-secrets",
+    ] {
+        assert!(!text.contains(secret), "the proxy's pod has {secret}");
+    }
+    // The only thing it mounts is its allow-list, read-only.
+    assert_eq!(
+        pod["volumes"],
+        json!([{"name": "allow", "configMap": {"name": "coder-egress-allow"}}])
+    );
+    assert_eq!(
+        c["volumeMounts"],
+        json!([{"name": "allow", "mountPath": "/etc/adam-egress", "readOnly": true}])
+    );
+}
+
+#[test]
+fn the_proxys_pods_roll_with_their_allow_list_and_with_nothing_else() {
+    let rolled = |over: fn(&mut Value)| -> String {
+        let r = common::resolved_run_pods_with(over, |_, _| {});
+        let docs = rendered(&r).documents();
+        find(&docs, "Deployment", "coder-egress")["spec"]["template"]["metadata"]["annotations"]
+            ["checksum/egress-allow"]
+            .as_str()
+            .unwrap()
+            .to_owned()
+    };
+    let base = rolled(|_| {});
+    assert_eq!(base.len(), 64);
+    assert_ne!(
+        base,
+        rolled(|s| s["egressProxy"]["extraAllow"] = json!(["artifacts.example.com"])),
+        "a changed list is a changed annotation: the file is read at start only"
+    );
+    assert_eq!(
+        base,
+        rolled(|s| s["egressProxy"]["replicas"] = json!(5)),
+        "a number of replicas is not a roll"
+    );
+    assert_eq!(
+        base,
+        rolled(|s| s["egressProxy"]["extraNoProxy"] = json!(["x.internal"]))
+    );
+}
+
+#[test]
+fn one_replica_has_no_budget_and_a_suspended_service_has_none_to_run() {
+    let one =
+        common::resolved_run_pods_with(|s| s["egressProxy"]["replicas"] = json!(1), |_, _| {});
+    let docs = rendered(&one).documents();
+    assert!(
+        docs.iter().all(|d| d["kind"] != "PodDisruptionBudget"),
+        "a budget of 1 of 1 would block every drain"
+    );
+    assert_eq!(
+        find(&docs, "Deployment", "coder-egress")["spec"]["replicas"],
+        1
+    );
+
+    let many =
+        common::resolved_run_pods_with(|s| s["egressProxy"]["replicas"] = json!(3), |_, _| {});
+    let docs = rendered(&many).documents();
+    assert_eq!(
+        find(&docs, "Deployment", "coder-egress")["spec"]["replicas"],
+        3
+    );
+    assert_eq!(
+        find(&docs, "PodDisruptionBudget", "coder-egress")["spec"]["minAvailable"],
+        1
+    );
+
+    // Suspended: the proxy is scaled with the agent, so that `ensure` of a suspended service does not start it.
+    let mut suspended = resolved_run_pods(|_, _| {});
+    suspended.runtime.suspend = true;
+    let docs = rendered(&suspended).documents();
+    assert_eq!(
+        find(&docs, "Deployment", "coder-egress")["spec"]["replicas"],
+        0
+    );
+}
+
+#[test]
+fn the_proxys_policy_admits_the_run_pods_only_and_reaches_dns_and_the_internet_on_its_ports_but_not_the_ranges()
+ {
+    let docs = rendered(&resolved_run_pods(|_, _| {})).documents();
+    let np = &find(&docs, "NetworkPolicy", "coder-egress")["spec"];
+    assert_eq!(np["policyTypes"], json!(["Ingress", "Egress"]));
+    assert_eq!(
+        np["ingress"],
+        json!([{
+            "from": [{"podSelector": {
+                "matchLabels": {"app.kubernetes.io/managed-by": "adam-coder", "app.kubernetes.io/instance": "coder"},
+                "matchExpressions": [{"key": "adam.vymalo.com/run", "operator": "Exists"}],
+            }}],
+            "ports": [{"protocol": "TCP", "port": 3128}],
+        }]),
+        "the same selector as the run pods' own policy"
+    );
+    assert_eq!(
+        np["egress"][0]["ports"],
+        json!([{"protocol": "UDP", "port": 53}, {"protocol": "TCP", "port": 53}])
+    );
+    let internet = &np["egress"][1];
+    assert_eq!(internet["ports"], json!([{"protocol": "TCP", "port": 443}]));
+    assert_eq!(internet["to"][0]["ipBlock"]["cidr"], "0.0.0.0/0");
+    assert_eq!(
+        internet["to"][0]["ipBlock"]["except"],
         json!([
             "10.0.0.0/8",
             "172.16.0.0/12",
@@ -277,9 +519,21 @@ fn the_network_policy_selects_the_coders_run_pods_and_opens_dns_and_the_internet
         ])
     );
     assert_eq!(np["egress"].as_array().unwrap().len(), 2);
-    // The agent's own ingress policy (`coder`) does not select a run pod: they are managed by adam-coder, not by us.
-    let own = &find(&docs, "NetworkPolicy", "coder")["spec"]["podSelector"]["matchLabels"];
-    assert_eq!(own[MANAGED_BY_LABEL], MANAGED_BY_VALUE);
+    // IPv4 only: no rule of any policy of run pods names an IPv6 range, so IPv6 egress is denied.
+    for name in ["coder-egress", "coder-run-pods"] {
+        let spec = &find(&docs, "NetworkPolicy", name)["spec"];
+        for rule in spec["egress"].as_array().unwrap() {
+            for peer in rule["to"].as_array().unwrap() {
+                let block = &peer["ipBlock"];
+                let ranges = std::iter::once(&block["cidr"])
+                    .chain(block["except"].as_array().into_iter().flatten())
+                    .filter_map(Value::as_str);
+                for range in ranges {
+                    assert!(!range.contains(':'), "{name}: {range} is not IPv4");
+                }
+            }
+        }
+    }
 }
 
 #[test]

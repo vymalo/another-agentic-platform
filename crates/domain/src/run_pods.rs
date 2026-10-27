@@ -10,8 +10,8 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use aap_api::SecretKeyRef;
 use aap_ports::{
-    EgressPort, EgressRule, Peer, Protocol, RunPodGuard, RunPodLabels, RunPodNetwork, RunPodQuota,
-    RunPods, Security, Selector,
+    EgressPort, EgressProxy, EgressRule, EnvVar, FileSet, Peer, Protocol, Resources, RunPodGuard,
+    RunPodLabels, RunPodNetwork, RunPodQuota, RunPods, Security, Selector,
 };
 use k8s_openapi::api::core::v1::{NodeAffinity, Toleration};
 use k8s_openapi::api::networking::v1::NetworkPolicyEgressRule;
@@ -69,8 +69,10 @@ pub struct RunPodSettings {
     /// pod spells them.
     #[serde(default)]
     pub extra_allowed_images: Vec<String>,
-    /// What a run pod may reach.
+    /// What a run pod may reach: names, the egress proxy and `extraEgress`, and nothing else.
     pub network_policy: RunPodNetworkSettings,
+    /// The one way out of a run pod to the internet (slice D15c; adam-rs ADR 0042).
+    pub egress_proxy: EgressProxySettings,
 }
 
 /// One size class: the resources of the run container.
@@ -127,26 +129,131 @@ pub struct RunPodQuotaSettings {
     pub pods: u32,
 }
 
-/// What a run pod may reach: no ingress; DNS and the internet except private ranges.
+/// What a run pod may reach, deny by default (adam-rs ADR 0042): no ingress; egress to DNS, to the egress proxy and to
+/// `extraEgress`. There is no setting that opens the internet to a run pod, and none that turns the policy off: the
+/// operator chart refuses `networkPolicy.enabled: false`, and a file that still has the key is refused here (an unknown key).
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct RunPodNetworkSettings {
-    /// Make the policy. False: none, and the pods reach what the cluster lets them.
-    pub enabled: bool,
-    /// The pod and service CIDRs of the cluster, besides the ranges below. IPv4.
+    /// The pod and service CIDRs of the cluster, besides the ranges below: what the proxy never connects to. IPv4.
     #[serde(default, rename = "clusterCIDRs")]
     pub cluster_cidrs: Vec<String>,
-    /// Never reachable: RFC 1918, the link-local range, the shared address space. IPv4.
+    /// Never reachable through the proxy: RFC 1918, the link-local range, the shared address space. IPv4.
     #[serde(rename = "blockedCIDRs")]
     pub blocked_cidrs: Vec<String>,
     /// The namespace DNS is in.
     pub dns_namespace: String,
     /// The labels of the DNS pods.
     pub dns_pod_labels: BTreeMap<String, String>,
-    /// More egress rules, as `NetworkPolicy` `egress` entries: `to` (an `ipBlock`, a `namespaceSelector` or a
-    /// `podSelector`) and `ports` (numbers).
+    /// More egress rules for a run pod, as `NetworkPolicy` `egress` entries: `to` (an `ipBlock`, a `namespaceSelector` or a
+    /// `podSelector`) and `ports` (numbers). An in-cluster target the proxy cannot serve (it connects to public IPv4
+    /// addresses only), such as a model gateway: its host goes in `egressProxy.extraNoProxy` too.
     #[serde(default)]
     pub extra_egress: Vec<Value>,
+}
+
+/// The egress proxy of the run pods of one agent (slice D15c; adam-rs ADR 0042, `runPods.egressProxy`): `adam-egress`, an
+/// HTTPS-only forward proxy, from the agent's own coder image. It accepts `CONNECT host:port` to the hosts of the allow-list
+/// and nothing else, resolves the name itself and connects to public IPv4 addresses only. The allow-list is the
+/// **deployment's**: an `AgentConfig` cannot extend it (§60a, D15c, decision 1).
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct EgressProxySettings {
+    /// Pods of the proxy, at least 1. With more than one, a PodDisruptionBudget keeps one up through a drain.
+    pub replicas: u32,
+    /// The ports a `CONNECT` may name, and the only TCP ports the proxy's pods may reach (443 is HTTPS).
+    pub ports: Vec<u16>,
+    /// The hosts a run pod may reach: `example.com` is that host, `.example.com` every subdomain of it and not the apex.
+    pub allow: Vec<String>,
+    /// More hosts, added to `allow` (lower-cased, once each).
+    #[serde(default)]
+    pub extra_allow: Vec<String>,
+    /// More names the tools reach without the proxy (`NO_PROXY`), after `localhost,127.0.0.1`.
+    #[serde(default)]
+    pub extra_no_proxy: Vec<String>,
+    /// CPU and memory of the proxy's container.
+    pub resources: EgressResources,
+}
+
+/// The resources of the egress proxy's container.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct EgressResources {
+    /// What the container is guaranteed.
+    #[serde(default)]
+    pub requests: BTreeMap<String, String>,
+    /// What it may not exceed.
+    #[serde(default)]
+    pub limits: BTreeMap<String, String>,
+}
+
+impl EgressProxySettings {
+    /// The hosts the proxy allows, as its allow-list file says them: `allow`, then `extraAllow`, trimmed, lower case, once
+    /// each, in order.
+    #[must_use]
+    pub fn allow_list(&self) -> Vec<String> {
+        let mut seen = BTreeSet::new();
+        self.allow
+            .iter()
+            .chain(&self.extra_allow)
+            .map(|h| h.trim().to_ascii_lowercase())
+            .filter(|h| seen.insert(h.clone()))
+            .collect()
+    }
+
+    /// `NO_PROXY` of a run pod: the loopback names, then `extraNoProxy`.
+    #[must_use]
+    pub fn no_proxy(&self) -> String {
+        rp::egress::NO_PROXY
+            .iter()
+            .map(|n| (*n).to_owned())
+            .chain(self.extra_no_proxy.iter().cloned())
+            .collect::<Vec<_>>()
+            .join(",")
+    }
+
+    /// The text of the allow-list file: a header line, then one host per line.
+    #[must_use]
+    pub fn allow_file(&self) -> String {
+        let mut text = format!("{}\n", rp::egress::ALLOW_HEADER);
+        for host in self.allow_list() {
+            text.push_str(&host);
+            text.push('\n');
+        }
+        text
+    }
+}
+
+/// Why an entry of the allow-list is not one, as the coder chart's `_validate.tpl` says it: a host name (no scheme, port,
+/// path, wildcard or IP address), not a bare suffix. `None` when it is fine.
+fn allow_entry_problem(entry: &str) -> Option<&'static str> {
+    let host = entry.trim().to_ascii_lowercase();
+    let body = host.strip_prefix('.').unwrap_or(&host);
+    if body.is_empty() || !body.split('.').all(is_dns_label) {
+        return Some(
+            "is not a host name: write example.com for one host and .example.com for every subdomain of it (no scheme, port, path, wildcard or IP address)",
+        );
+    }
+    let last = body.rsplit('.').next().unwrap_or(body);
+    if last.bytes().all(|b| b.is_ascii_digit()) {
+        return Some(
+            "ends in digits only, which reads as an IP address, and the proxy refuses IP literals",
+        );
+    }
+    if host.starts_with('.') && !body.contains('.') {
+        return Some(
+            "is a bare suffix, which would allow every host of a top-level domain: name the registrable domain, such as .example.com",
+        );
+    }
+    None
+}
+
+/// A `NO_PROXY` entry: a name or a suffix, with no comma and no space.
+fn is_no_proxy_entry(entry: &str) -> bool {
+    !entry.is_empty()
+        && entry
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || b".*:/_-".contains(&b))
 }
 
 impl RunPodSettings {
@@ -193,12 +300,22 @@ impl RunPodSettings {
             node_affinity: None,
             extra_allowed_images: Vec::new(),
             network_policy: RunPodNetworkSettings {
-                enabled: false,
                 cluster_cidrs: Vec::new(),
                 blocked_cidrs: Vec::new(),
                 dns_namespace: "kube-system".to_owned(),
                 dns_pod_labels: BTreeMap::from([("k8s-app".to_owned(), "kube-dns".to_owned())]),
                 extra_egress: Vec::new(),
+            },
+            egress_proxy: EgressProxySettings {
+                replicas: 1,
+                ports: vec![443],
+                allow: vec!["stand-in.invalid".to_owned()],
+                extra_allow: Vec::new(),
+                extra_no_proxy: Vec::new(),
+                resources: EgressResources {
+                    requests: BTreeMap::new(),
+                    limits: BTreeMap::new(),
+                },
             },
         }
     }
@@ -311,6 +428,10 @@ impl RunPodSettings {
         for (name, value) in &self.extra_env {
             if !is_env_name(name) {
                 bad(format!("extraEnv.{name}: not a variable name"));
+            } else if rp::egress::PROXY_ENV.contains(&name.as_str()) {
+                bad(format!(
+                    "extraEnv.{name}: the operator sets the proxy variables of a run pod from egressProxy (the egress proxy is the only way out); to add names that bypass it, use egressProxy.extraNoProxy"
+                ));
             } else if name == contract::env::MODEL_API_KEY || name == "CARGO_BUILD_JOBS" {
                 bad(format!(
                     "extraEnv.{name}: the operator sets this variable itself ({})",
@@ -341,26 +462,60 @@ impl RunPodSettings {
             }
         }
         let net = &self.network_policy;
-        if net.enabled {
-            for cidr in net.blocked_cidrs.iter().chain(&net.cluster_cidrs) {
-                if !is_ipv4_cidr(cidr) {
-                    bad(format!(
-                        "networkPolicy: {cidr:?} is not an IPv4 CIDR such as 10.0.0.0/8"
-                    ));
-                }
-            }
-            if !is_dns_label(&net.dns_namespace) {
+        for cidr in net.blocked_cidrs.iter().chain(&net.cluster_cidrs) {
+            if !is_ipv4_cidr(cidr) {
                 bad(format!(
-                    "networkPolicy.dnsNamespace: {:?} is not a namespace name",
-                    net.dns_namespace
+                    "networkPolicy: {cidr:?} is not an IPv4 CIDR such as 10.0.0.0/8 (IPv6 is denied, not allowed)"
                 ));
             }
-            if net.dns_pod_labels.is_empty() {
-                bad("networkPolicy.dnsPodLabels: at least one label (the DNS pods)".into());
+        }
+        if !is_dns_label(&net.dns_namespace) {
+            bad(format!(
+                "networkPolicy.dnsNamespace: {:?} is not a namespace name",
+                net.dns_namespace
+            ));
+        }
+        if net.dns_pod_labels.is_empty() {
+            bad("networkPolicy.dnsPodLabels: at least one label (the DNS pods)".into());
+        }
+        for (i, rule) in net.extra_egress.iter().enumerate() {
+            if let Err(why) = egress_rule(rule) {
+                bad(format!("networkPolicy.extraEgress[{i}]: {why}"));
             }
-            for (i, rule) in net.extra_egress.iter().enumerate() {
-                if let Err(why) = egress_rule(rule) {
-                    bad(format!("networkPolicy.extraEgress[{i}]: {why}"));
+        }
+        let proxy = &self.egress_proxy;
+        if proxy.replicas == 0 {
+            bad("egressProxy.replicas: at least 1".into());
+        }
+        if proxy.ports.is_empty() || proxy.ports.contains(&0) {
+            bad("egressProxy.ports: a non-empty list of port numbers from 1 to 65535 (443 by default)".into());
+        }
+        for (key, list) in [("allow", &proxy.allow), ("extraAllow", &proxy.extra_allow)] {
+            for (i, entry) in list.iter().enumerate() {
+                if let Some(why) = allow_entry_problem(entry) {
+                    bad(format!("egressProxy.{key}[{i}]: {entry:?} {why}"));
+                }
+            }
+        }
+        if proxy.allow_list().is_empty() {
+            bad("egressProxy.allow and extraAllow hold no host: the proxy refuses an empty allow-list (exit 78) and a run pod would reach nothing. Keep the defaults of allow, or list the hosts it needs".into());
+        }
+        for (i, entry) in proxy.extra_no_proxy.iter().enumerate() {
+            if !is_no_proxy_entry(entry) {
+                bad(format!(
+                    "egressProxy.extraNoProxy[{i}]: {entry:?} is not a name for NO_PROXY (no comma or space)"
+                ));
+            }
+        }
+        for (kind, map) in [
+            ("requests", &proxy.resources.requests),
+            ("limits", &proxy.resources.limits),
+        ] {
+            for (resource, value) in map {
+                if !is_quantity(value) {
+                    bad(format!(
+                        "egressProxy.resources.{kind}.{resource}: {value:?} is not a quantity"
+                    ));
                 }
             }
         }
@@ -447,6 +602,8 @@ fn egress_rule(value: &Value) -> Result<EgressRule, String> {
 pub(crate) struct ForService<'a> {
     /// The service's name: the account, `RUN_POD_INSTANCE`, the name label of the pods.
     pub service: &'a str,
+    /// The service's namespace: where the egress proxy's Service is, as the run pods' variables name it.
+    pub namespace: &'a str,
     /// The workload whose pods make run pods (the workers), and so whose pods a run pod is placed beside.
     pub workload: &'a str,
     pub settings: &'a RunPodSettings,
@@ -493,6 +650,16 @@ impl ForService<'_> {
             "name": "CARGO_BUILD_JOBS",
             "value": s.cargo_build_jobs.to_string(),
         })];
+        // The only way out to the internet (adam-rs ADR 0042): the egress proxy. The pod's network policy allows nothing
+        // else, so a tool that ignores these gets no connection.
+        let proxy_url = rp::egress::url(self.service, self.namespace);
+        for name in &rp::egress::PROXY_ENV[..4] {
+            env.push(json!({ "name": name, "value": proxy_url }));
+        }
+        let no_proxy = s.egress_proxy.no_proxy();
+        for name in &rp::egress::PROXY_ENV[4..] {
+            env.push(json!({ "name": name, "value": no_proxy }));
+        }
         for (name, value) in &s.extra_env {
             env.push(json!({ "name": name, "value": value }));
         }
@@ -607,41 +774,85 @@ impl ForService<'_> {
         out
     }
 
+    /// The egress proxy of this service: the agent's own image, `adam-egress` told its settings by variables, and the
+    /// allow-list as a file (adam-rs `run-pods-egress-proxy.yaml`). `deny` is what it never connects to.
+    fn egress_proxy(&self, deny: &[String]) -> EgressProxy {
+        use rp::egress as e;
+        let p = &self.settings.egress_proxy;
+        let mut env = vec![
+            EnvVar::literal(e::LISTEN, format!("0.0.0.0:{}", e::PORT)),
+            EnvVar::literal(
+                e::ALLOW_FILE,
+                format!("{}/{}", e::ALLOW_DIR, e::ALLOW_FILE_NAME),
+            ),
+            EnvVar::literal(
+                e::PORTS,
+                p.ports
+                    .iter()
+                    .map(u16::to_string)
+                    .collect::<Vec<_>>()
+                    .join(","),
+            ),
+        ];
+        if !deny.is_empty() {
+            env.push(EnvVar::literal(e::DENY_CIDRS, deny.join(",")));
+        }
+        EgressProxy {
+            image: self.tools_image.to_owned(),
+            command: e::COMMAND.iter().map(|c| (*c).to_owned()).collect(),
+            env,
+            port: e::PORT,
+            health_path: e::HEALTH_PATH.to_owned(),
+            replicas: p.replicas,
+            allow: FileSet {
+                name: e::allow_name(self.service),
+                files: BTreeMap::from([(e::ALLOW_FILE_NAME.to_owned(), p.allow_file())]),
+                immutable: false,
+            },
+            allow_dir: e::ALLOW_DIR.to_owned(),
+            egress_ports: p.ports.clone(),
+            deny_cidrs: deny.to_vec(),
+            run_as: e::USER,
+            resources: Resources {
+                requests: p.resources.requests.clone(),
+                limits: p.resources.limits.clone(),
+            },
+        }
+    }
+
     /// What the provider makes beside the workloads.
     pub(crate) fn spec(&self) -> RunPods {
         let s = self.settings;
         let net = &s.network_policy;
-        let network = net.enabled.then(|| {
-            let mut except = Vec::new();
-            for cidr in net.blocked_cidrs.iter().chain(&net.cluster_cidrs) {
-                if !except.contains(cidr) {
-                    except.push(cidr.clone());
-                }
+        let mut except = Vec::new();
+        for cidr in net.blocked_cidrs.iter().chain(&net.cluster_cidrs) {
+            if !except.contains(cidr) {
+                except.push(cidr.clone());
             }
-            RunPodNetwork {
-                dns: Peer {
-                    namespaces: Some(Selector {
-                        match_labels: BTreeMap::from([(
-                            "kubernetes.io/metadata.name".to_owned(),
-                            net.dns_namespace.clone(),
-                        )]),
-                        match_expressions: Vec::new(),
-                    }),
-                    pods: Some(Selector {
-                        match_labels: net.dns_pod_labels.clone(),
-                        match_expressions: Vec::new(),
-                    }),
-                    cidr: None,
-                },
-                except_cidrs: except,
-                // `validate` has refused a rule that is not one; there is nothing to skip.
-                extra_egress: net
-                    .extra_egress
-                    .iter()
-                    .filter_map(|r| egress_rule(r).ok())
-                    .collect(),
-            }
-        });
+        }
+        let network = RunPodNetwork {
+            dns: Peer {
+                namespaces: Some(Selector {
+                    match_labels: BTreeMap::from([(
+                        "kubernetes.io/metadata.name".to_owned(),
+                        net.dns_namespace.clone(),
+                    )]),
+                    match_expressions: Vec::new(),
+                }),
+                pods: Some(Selector {
+                    match_labels: net.dns_pod_labels.clone(),
+                    match_expressions: Vec::new(),
+                }),
+                cidr: None,
+            },
+            proxy: self.egress_proxy(&except),
+            // `validate` has refused a rule that is not one; there is nothing to skip.
+            extra_egress: net
+                .extra_egress
+                .iter()
+                .filter_map(|r| egress_rule(r).ok())
+                .collect(),
+        };
         RunPods {
             service_account: self.service.to_owned(),
             role: s.role.clone(),

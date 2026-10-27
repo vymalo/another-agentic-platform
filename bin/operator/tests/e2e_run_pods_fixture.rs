@@ -156,10 +156,35 @@ fn the_coder_with_run_pods_is_refused_by_an_operator_that_has_none_and_resolves_
         pod["spec"]["volumes"][0]["persistentVolumeClaim"]["claimName"],
         "work-e2e-coder-0"
     );
+    let template_env = pod["spec"]["containers"][0]["env"].as_array().expect("env");
+    let model_key = template_env
+        .iter()
+        .find(|e| e["name"] == "MODEL_API_KEY")
+        .expect("the model key");
     assert_eq!(
-        pod["spec"]["containers"][0]["env"][1]["valueFrom"]["secretKeyRef"],
+        model_key["valueFrom"]["secretKeyRef"],
         serde_json::json!({"name": "e2e-secrets", "key": "MODEL_API_KEY"})
     );
+    // The egress proxy (D15c): the script expects it named `<service>-egress`, to run the coder's own image (the pin of the fixture, which has
+    // `adam-egress`), and the run pod's variables to name its Service.
+    let proxy = &run_pods.network.proxy;
+    assert_eq!(proxy.allow.name, "e2e-coder-egress-allow");
+    assert_eq!(proxy.image, w.container.image, "no other image to pull");
+    // (The number of replicas the script expects, two and a budget, is the chart's default: `render-check.sh` holds it. These settings are the
+    // placeholders of `RunPodSettings::offering`.)
+    assert_eq!(proxy.port, 3128);
+    for name in ["HTTPS_PROXY", "https_proxy", "HTTP_PROXY", "http_proxy"] {
+        let value = template_env
+            .iter()
+            .find(|e| e["name"] == name)
+            .unwrap_or_else(|| panic!("{name} is not in the template"))["value"]
+            .as_str()
+            .expect("a text");
+        assert!(
+            value.starts_with("http://e2e-coder-egress.") && value.ends_with(".svc:3128"),
+            "{name}: {value}"
+        );
+    }
 }
 
 #[test]
