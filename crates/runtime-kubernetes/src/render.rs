@@ -13,6 +13,7 @@
 //! | `ServiceAccount` `<account>` | `RuntimeSpec::run_pods` (slice D15a): the account the workers run as |
 //! | `RoleBinding`, `ResourceQuota`, `NetworkPolicy` `<service>-run-pods` | run pods: the account bound to the deployment's role, what the run pods may use, what they may reach |
 //! | `ConfigMap` `<service>-run-pods-policy` | run pods: the parameters of the admission policy that guards the pods the account makes |
+//! | `Deployment`, `Service`, `ServiceAccount`, `NetworkPolicy`, `ConfigMap` `<service>-egress` (`-allow`), `PodDisruptionBudget` | run pods (slice D15c): the egress proxy, the one way out of a run pod |
 //!
 //! The claims of a `PerReplica` volume are the StatefulSet's `volumeClaimTemplates`. **Data objects
 //! carry no owner reference**; compute objects carry the owner reference the `OwnerHandle` stands for.
@@ -42,6 +43,20 @@ use crate::names::{
     self, DELETION_POLICY_ANNOTATION, DIGEST_ANNOTATION, RUN_PODS_POLICY_LABEL, VOLUME_LABEL,
     service_labels,
 };
+
+/// The annotation of the egress proxy's pods that carries the digest of its allow-list. The process reads the file at
+/// start only, so a changed list changes the annotation and is a rollout of the proxy (the coder chart's name for it).
+pub const EGRESS_ALLOW_ANNOTATION: &str = "checksum/egress-allow";
+
+/// The seconds an egress proxy's pod has to stop: the 25 s `adam-egress` drains its tunnels for after the signal, after the
+/// sleep that lets the Service stop sending it connections (adam-rs ADR 0042).
+const EGRESS_GRACE_SECS: i64 = 45;
+/// The sleep before the signal, in seconds.
+const EGRESS_PRESTOP_SLEEP: &str = "5";
+/// The name of the proxy's container, of its port and of the volume of its allow-list.
+const EGRESS_CONTAINER: &str = "egress";
+const EGRESS_PORT_NAME: &str = "proxy";
+const EGRESS_ALLOW_VOLUME: &str = "allow";
 
 /// The name of the container port every agent serves.
 pub const PORT_NAME: &str = "http";
@@ -106,10 +121,49 @@ pub struct RunPodObjects {
     pub service_account: core::ServiceAccount,
     /// What the run pods of the service may use in all.
     pub quota: core::ResourceQuota,
-    /// What they may reach. `None`: the spec has no network policy for them.
-    pub network_policy: Option<net::NetworkPolicy>,
+    /// What they may reach: DNS, the egress proxy and nothing else (deny by default).
+    pub network_policy: net::NetworkPolicy,
+    /// The one way out of a run pod to the internet (slice D15c).
+    pub egress_proxy: EgressProxyObjects,
     /// The account bound to the deployment's role: the right to make, find, watch and delete pods and `exec` in them.
     pub role_binding: rbac::RoleBinding,
+}
+
+/// The objects of a service's egress proxy (slice D15c; adam-rs ADR 0042), named and labelled as the coder chart's are for a
+/// release, with the service's name in place of the release's.
+#[derive(Clone, Debug, PartialEq)]
+pub struct EgressProxyObjects {
+    /// The allow-list, a file the proxy reads at start.
+    pub allow_list: core::ConfigMap,
+    /// The account of its pods: no token.
+    pub service_account: core::ServiceAccount,
+    /// Its pods.
+    pub deployment: Deployment,
+    /// What the run pods' variables name.
+    pub service: core::Service,
+    /// Keeps one pod up through a drain. Only with more than one replica.
+    pub disruption_budget: Option<PodDisruptionBudget>,
+    /// Ingress from the run pods alone; egress to DNS and the internet on the proxy's ports, except the ranges it never reaches.
+    pub network_policy: net::NetworkPolicy,
+}
+
+impl EgressProxyObjects {
+    /// Every object, in the order it is applied: the file and the account its pods mount, the pods, what routes to them and
+    /// the policy.
+    pub fn documents(&self) -> Vec<serde_json::Value> {
+        fn doc<T: Serialize>(o: &T) -> serde_json::Value {
+            serde_json::to_value(o).unwrap_or(serde_json::Value::Null)
+        }
+        let mut out = vec![
+            doc(&self.allow_list),
+            doc(&self.service_account),
+            doc(&self.deployment),
+            doc(&self.service),
+        ];
+        out.extend(self.disruption_budget.iter().map(doc));
+        out.push(doc(&self.network_policy));
+        out
+    }
 }
 
 impl Rendered {
@@ -125,7 +179,8 @@ impl Rendered {
             out.push(doc(&r.policy_params));
             out.push(doc(&r.service_account));
             out.push(doc(&r.quota));
-            out.extend(r.network_policy.iter().map(doc));
+            out.extend(r.egress_proxy.documents());
+            out.push(doc(&r.network_policy));
             out.push(doc(&r.role_binding));
         }
         out.extend(self.claims.iter().map(doc));
@@ -253,6 +308,16 @@ fn invalid(what: impl Into<String>) -> Error {
     Error::InvalidSpec(what.into())
 }
 
+fn sha256_hex(bytes: &[u8]) -> String {
+    use sha2::{Digest, Sha256};
+    Sha256::digest(bytes)
+        .iter()
+        .fold(String::with_capacity(64), |mut hex, b| {
+            hex.push_str(&format!("{b:02x}"));
+            hex
+        })
+}
+
 fn int32(what: &str, n: u32) -> Result<i32, Error> {
     i32::try_from(n).map_err(|_| invalid(format!("{what} {n} is out of range")))
 }
@@ -302,6 +367,14 @@ impl Cx<'_> {
     }
 
     fn config_map(&self, set: &FileSet) -> Result<core::ConfigMap, Error> {
+        self.config_map_labelled(set, service_labels(self.id))
+    }
+
+    fn config_map_labelled(
+        &self,
+        set: &FileSet,
+        labels: BTreeMap<String, String>,
+    ) -> Result<core::ConfigMap, Error> {
         let mut data = BTreeMap::new();
         for (path, content) in &set.files {
             let key = names::config_map_key(path).ok_or_else(|| {
@@ -313,7 +386,7 @@ impl Cx<'_> {
             data.insert(key, content.clone());
         }
         Ok(core::ConfigMap {
-            metadata: self.meta(&set.name, service_labels(self.id), true, false),
+            metadata: self.meta(&set.name, labels, true, false),
             data: Some(data),
             immutable: set.immutable.then_some(true),
             ..core::ConfigMap::default()
@@ -434,62 +507,70 @@ impl Cx<'_> {
             ..core::ResourceQuota::default()
         };
 
-        let network_policy = r.network.as_ref().map(|n| {
-            // The pods the coder labelled, of this service.
-            let mut egress = vec![
-                net::NetworkPolicyEgressRule {
-                    to: Some(vec![peer(&n.dns)]),
-                    ports: Some(vec![
-                        egress_port(Protocol::Udp, Some(53), None),
-                        egress_port(Protocol::Tcp, Some(53), None),
-                    ]),
+        let n = &r.network;
+        // The pods the coder labelled, of this service.
+        let run_pods_selector = LabelSelector {
+            match_labels: Some(BTreeMap::from([
+                (
+                    names::MANAGED_BY_LABEL.to_owned(),
+                    r.pods.managed_by.clone(),
+                ),
+                (names::INSTANCE_LABEL.to_owned(), self.id.name().to_owned()),
+            ])),
+            match_expressions: Some(vec![
+                k8s_openapi::apimachinery::pkg::apis::meta::v1::LabelSelectorRequirement {
+                    key: r.pods.run_label.clone(),
+                    operator: "Exists".to_owned(),
+                    values: None,
                 },
-                net::NetworkPolicyEgressRule {
-                    to: Some(vec![net::NetworkPolicyPeer {
-                        ip_block: Some(net::IPBlock {
-                            cidr: "0.0.0.0/0".to_owned(),
-                            except: Some(n.except_cidrs.clone()),
-                        }),
-                        ..net::NetworkPolicyPeer::default()
-                    }]),
-                    ports: None,
-                },
-            ];
-            egress.extend(n.extra_egress.iter().map(|rule| net::NetworkPolicyEgressRule {
-                to: (!rule.to.is_empty()).then(|| rule.to.iter().map(peer).collect()),
-                ports: (!rule.ports.is_empty()).then(|| {
-                    rule.ports
-                        .iter()
-                        .map(|p| egress_port(p.protocol, p.port, p.end_port))
-                        .collect()
-                }),
-            }));
-            net::NetworkPolicy {
-                metadata: self.meta(&name, service_labels(self.id), true, false),
-                spec: Some(net::NetworkPolicySpec {
+            ]),
+        };
+        let dns_rule = || net::NetworkPolicyEgressRule {
+            to: Some(vec![peer(&n.dns)]),
+            ports: Some(vec![
+                egress_port(Protocol::Udp, Some(53), None),
+                egress_port(Protocol::Tcp, Some(53), None),
+            ]),
+        };
+        // Deny by default (adam-rs ADR 0042): DNS, the egress proxy's pods on its port, and what the deployment adds.
+        // There is no rule for the internet.
+        let mut egress = vec![
+            dns_rule(),
+            net::NetworkPolicyEgressRule {
+                to: Some(vec![net::NetworkPolicyPeer {
                     pod_selector: Some(LabelSelector {
-                        match_labels: Some(BTreeMap::from([
-                            (
-                                names::MANAGED_BY_LABEL.to_owned(),
-                                r.pods.managed_by.clone(),
-                            ),
-                            (names::INSTANCE_LABEL.to_owned(), self.id.name().to_owned()),
-                        ])),
-                        match_expressions: Some(vec![
-                            k8s_openapi::apimachinery::pkg::apis::meta::v1::LabelSelectorRequirement {
-                                key: r.pods.run_label.clone(),
-                                operator: "Exists".to_owned(),
-                                values: None,
-                            },
-                        ]),
+                        match_labels: Some(names::egress_selector_labels(self.id)),
+                        match_expressions: None,
                     }),
-                    policy_types: Some(vec!["Ingress".to_owned(), "Egress".to_owned()]),
-                    // Nothing connects to a run pod: the coder `exec`s in it through the API server.
-                    ingress: Some(Vec::new()),
-                    egress: Some(egress),
+                    ..net::NetworkPolicyPeer::default()
+                }]),
+                ports: Some(vec![egress_port(Protocol::Tcp, Some(n.proxy.port), None)]),
+            },
+        ];
+        egress.extend(
+            n.extra_egress
+                .iter()
+                .map(|rule| net::NetworkPolicyEgressRule {
+                    to: (!rule.to.is_empty()).then(|| rule.to.iter().map(peer).collect()),
+                    ports: (!rule.ports.is_empty()).then(|| {
+                        rule.ports
+                            .iter()
+                            .map(|p| egress_port(p.protocol, p.port, p.end_port))
+                            .collect()
+                    }),
                 }),
-            }
-        });
+        );
+        let network_policy = net::NetworkPolicy {
+            metadata: self.meta(&name, service_labels(self.id), true, false),
+            spec: Some(net::NetworkPolicySpec {
+                pod_selector: Some(run_pods_selector.clone()),
+                policy_types: Some(vec!["Ingress".to_owned(), "Egress".to_owned()]),
+                // Nothing connects to a run pod: the coder `exec`s in it through the API server.
+                ingress: Some(Vec::new()),
+                egress: Some(egress),
+            }),
+        };
+        let egress_proxy = self.egress_proxy(r, &run_pods_selector, dns_rule())?;
 
         let role_binding = rbac::RoleBinding {
             metadata: self.meta(&name, service_labels(self.id), true, false),
@@ -511,7 +592,232 @@ impl Cx<'_> {
             service_account,
             quota,
             network_policy,
+            egress_proxy,
             role_binding,
+        })
+    }
+
+    /// The egress proxy of the run pods (slice D15c), as the coder chart's `run-pods-egress-proxy.yaml`,
+    /// `run-pods-egress-allow.yaml` and `run-pods-egress-networkpolicy.yaml` make it. `run_pods` selects the pods it
+    /// serves (its only ingress) and `dns` is the rule that lets it resolve names.
+    fn egress_proxy(
+        &self,
+        r: &RunPods,
+        run_pods: &LabelSelector,
+        dns: net::NetworkPolicyEgressRule,
+    ) -> Result<EgressProxyObjects, Error> {
+        let p = &r.network.proxy;
+        let name = names::egress_proxy(self.id);
+        let labels = names::egress_labels(self.id);
+        let selector_labels = names::egress_selector_labels(self.id);
+        let selector = LabelSelector {
+            match_labels: Some(selector_labels.clone()),
+            match_expressions: None,
+        };
+        let allow_list = self.config_map_labelled(&p.allow, labels.clone())?;
+        let allow_text: String = p.allow.files.values().cloned().collect();
+
+        let service_account = core::ServiceAccount {
+            metadata: self.meta(&name, labels.clone(), true, false),
+            automount_service_account_token: Some(false),
+            ..core::ServiceAccount::default()
+        };
+
+        let port = IntOrString::String(EGRESS_PORT_NAME.to_owned());
+        let http = |path: &str| core::HTTPGetAction {
+            path: Some(path.to_owned()),
+            port: port.clone(),
+            ..core::HTTPGetAction::default()
+        };
+        let container = container(&Container {
+            name: EGRESS_CONTAINER.to_owned(),
+            image: p.image.clone(),
+            command: p.command.clone(),
+            args: Vec::new(),
+            env: p.env.clone(),
+            port: None,
+            mounts: Vec::new(),
+            probes: aap_ports::Probes::default(),
+            resources: p.resources.clone(),
+        })?;
+        let container = core::Container {
+            image_pull_policy: Some("IfNotPresent".to_owned()),
+            ports: Some(vec![core::ContainerPort {
+                name: Some(EGRESS_PORT_NAME.to_owned()),
+                container_port: i32::from(p.port),
+                protocol: Some("TCP".to_owned()),
+                ..core::ContainerPort::default()
+            }]),
+            security_context: Some(core::SecurityContext {
+                allow_privilege_escalation: Some(false),
+                read_only_root_filesystem: Some(true),
+                capabilities: Some(core::Capabilities {
+                    add: None,
+                    drop: Some(vec!["ALL".to_owned()]),
+                }),
+                ..core::SecurityContext::default()
+            }),
+            lifecycle: Some(core::Lifecycle {
+                pre_stop: Some(core::LifecycleHandler {
+                    exec: Some(core::ExecAction {
+                        command: Some(vec!["sleep".to_owned(), EGRESS_PRESTOP_SLEEP.to_owned()]),
+                    }),
+                    ..core::LifecycleHandler::default()
+                }),
+                ..core::Lifecycle::default()
+            }),
+            readiness_probe: Some(core::Probe {
+                http_get: Some(http(&p.health_path)),
+                period_seconds: Some(5),
+                timeout_seconds: Some(3),
+                ..core::Probe::default()
+            }),
+            liveness_probe: Some(core::Probe {
+                http_get: Some(http(&p.health_path)),
+                period_seconds: Some(15),
+                timeout_seconds: Some(3),
+                failure_threshold: Some(4),
+                ..core::Probe::default()
+            }),
+            volume_mounts: Some(vec![core::VolumeMount {
+                name: EGRESS_ALLOW_VOLUME.to_owned(),
+                mount_path: p.allow_dir.clone(),
+                read_only: Some(true),
+                ..core::VolumeMount::default()
+            }]),
+            ..container
+        };
+        let replicas = if self.spec.suspend {
+            0
+        } else {
+            int32("egress proxy replicas", p.replicas)?
+        };
+        let deployment = Deployment {
+            metadata: self.meta(&name, labels.clone(), true, false),
+            spec: Some(DeploymentSpec {
+                replicas: Some(replicas),
+                strategy: Some(k8s_openapi::api::apps::v1::DeploymentStrategy {
+                    type_: Some("RollingUpdate".to_owned()),
+                    rolling_update: Some(k8s_openapi::api::apps::v1::RollingUpdateDeployment {
+                        max_surge: Some(IntOrString::Int(1)),
+                        max_unavailable: Some(IntOrString::Int(0)),
+                    }),
+                }),
+                selector: selector.clone(),
+                template: core::PodTemplateSpec {
+                    metadata: Some(ObjectMeta {
+                        // No `managed-by`: the service's own policy and its pod listing select by it.
+                        labels: Some(selector_labels.clone()),
+                        annotations: Some(BTreeMap::from([(
+                            EGRESS_ALLOW_ANNOTATION.to_owned(),
+                            sha256_hex(allow_text.as_bytes()),
+                        )])),
+                        ..ObjectMeta::default()
+                    }),
+                    spec: Some(core::PodSpec {
+                        service_account_name: Some(name.clone()),
+                        automount_service_account_token: Some(false),
+                        enable_service_links: Some(false),
+                        termination_grace_period_seconds: Some(EGRESS_GRACE_SECS),
+                        security_context: Some(core::PodSecurityContext {
+                            run_as_non_root: Some(true),
+                            run_as_user: Some(p.run_as),
+                            run_as_group: Some(p.run_as),
+                            seccomp_profile: Some(core::SeccompProfile {
+                                type_: "RuntimeDefault".to_owned(),
+                                localhost_profile: None,
+                            }),
+                            ..core::PodSecurityContext::default()
+                        }),
+                        containers: vec![container],
+                        volumes: Some(vec![core::Volume {
+                            name: EGRESS_ALLOW_VOLUME.to_owned(),
+                            config_map: Some(core::ConfigMapVolumeSource {
+                                name: p.allow.name.clone(),
+                                ..core::ConfigMapVolumeSource::default()
+                            }),
+                            ..core::Volume::default()
+                        }]),
+                        ..core::PodSpec::default()
+                    }),
+                },
+                ..DeploymentSpec::default()
+            }),
+            ..Deployment::default()
+        };
+
+        // ClusterIP only: nothing outside the cluster connects to it, and the proxy's policy admits the run pods alone.
+        let service = core::Service {
+            metadata: self.meta(&name, labels.clone(), true, false),
+            spec: Some(core::ServiceSpec {
+                type_: Some("ClusterIP".to_owned()),
+                selector: Some(selector_labels),
+                ports: Some(vec![core::ServicePort {
+                    name: Some(EGRESS_PORT_NAME.to_owned()),
+                    port: i32::from(p.port),
+                    target_port: Some(port),
+                    protocol: Some("TCP".to_owned()),
+                    ..core::ServicePort::default()
+                }]),
+                ..core::ServiceSpec::default()
+            }),
+            ..core::Service::default()
+        };
+
+        // Not for one replica: a budget of 1 of 1 would block every drain.
+        let disruption_budget = (p.replicas > 1).then(|| PodDisruptionBudget {
+            metadata: self.meta(&name, labels.clone(), true, false),
+            spec: Some(PodDisruptionBudgetSpec {
+                min_available: Some(IntOrString::Int(1)),
+                selector: Some(selector.clone()),
+                ..PodDisruptionBudgetSpec::default()
+            }),
+            ..PodDisruptionBudget::default()
+        });
+
+        // Ingress from the run pods alone, on its port; egress to DNS and to the internet on its ports, except the ranges
+        // it never reaches, so that even a bug of the proxy cannot open a connection to the cluster. IPv4 only: no rule
+        // names an IPv6 range, so IPv6 egress is denied.
+        let network_policy = net::NetworkPolicy {
+            metadata: self.meta(&name, labels, true, false),
+            spec: Some(net::NetworkPolicySpec {
+                pod_selector: Some(selector),
+                policy_types: Some(vec!["Ingress".to_owned(), "Egress".to_owned()]),
+                ingress: Some(vec![net::NetworkPolicyIngressRule {
+                    from: Some(vec![net::NetworkPolicyPeer {
+                        pod_selector: Some(run_pods.clone()),
+                        ..net::NetworkPolicyPeer::default()
+                    }]),
+                    ports: Some(vec![egress_port(Protocol::Tcp, Some(p.port), None)]),
+                }]),
+                egress: Some(vec![
+                    dns,
+                    net::NetworkPolicyEgressRule {
+                        to: Some(vec![net::NetworkPolicyPeer {
+                            ip_block: Some(net::IPBlock {
+                                cidr: "0.0.0.0/0".to_owned(),
+                                except: (!p.deny_cidrs.is_empty()).then(|| p.deny_cidrs.clone()),
+                            }),
+                            ..net::NetworkPolicyPeer::default()
+                        }]),
+                        ports: Some(
+                            p.egress_ports
+                                .iter()
+                                .map(|port| egress_port(Protocol::Tcp, Some(*port), None))
+                                .collect(),
+                        ),
+                    },
+                ]),
+            }),
+        };
+
+        Ok(EgressProxyObjects {
+            allow_list,
+            service_account,
+            deployment,
+            service,
+            disruption_budget,
+            network_policy,
         })
     }
 

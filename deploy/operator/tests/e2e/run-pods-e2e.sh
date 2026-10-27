@@ -1,9 +1,10 @@
 #!/bin/sh
 # shellcheck disable=SC2016  # the jq programs given to jqok are single-quoted on purpose: $name in them is jq's variable, not the shell's
-# The kind end-to-end of run pods (D15b): the operator, installed from its chart with `runPods.enabled`, runs the REAL adam-rs coder (at or after
-# #131, `3f714d0`) with `coder.runPods`; a task makes the coder run a command in a pod of its own, that pod sees only its own run, the quota counts it
-# and refuses one past the limit (the coder waits), the network policy holds, the admission policy and the Roles do what they say under the real
-# RBAC of a real API server, and a deleted service leaves nothing, run pods included. An agent without run pods is as it was.
+# The kind end-to-end of run pods (D15b, D15c): the operator, installed from its chart with `runPods.enabled`, runs the REAL adam-rs coder (at or after
+# #134, `ff10395`, the image with `adam-egress`) with `coder.runPods`; a task makes the coder run a command in a pod of its own, that pod sees only its own
+# run, the quota counts it and refuses one past the limit (the coder waits), the network of a run pod is deny by default and the egress proxy the operator
+# made is its one way out, the admission policy and the Roles do what they say under the real RBAC of a real API server, and a deleted service leaves
+# nothing, run pods and proxy included. An agent without run pods is as it was.
 #
 #   sh deploy/operator/tests/e2e/run-pods-e2e.sh        (from the repository root, kubectl pointed at a kind cluster)
 #
@@ -17,7 +18,9 @@
 #      its binding (Deny; a parameter not found: Allow) exist; the operator holds `bind` on that Role and nothing of `pods`, `pods/exec` or Secrets
 #      (`kubectl auth can-i --as`); and `e2e-plain` is the same: its objects, the uid and restarts of its pod and its digest are unchanged;
 #   4. `e2e-coder`, a coder on the GitHub App variant with `coder.runPods` (the App's key is a file of its pod): Ready; the account, the quota (2
-#      pods), the network policy, the binding and the ConfigMaps of the template and of the guard's parameters are there; the coder's pod runs as its
+#      pods), the network policy, the binding and the ConfigMaps of the template and of the guard's parameters are there, and so is the egress proxy
+#      (D15c: a Deployment of two pods that run the coder's own image, rolled out; its Service, account, budget, policy and allow-list), each owned by
+#      the service and `e2e-plain` having none; the coder's pod runs as its
 #      account with the template mounted; the coder says in its log that its commands run in a pod of their own; the account may make pods and `exec`
 #      in them and may not read a Secret; and `run-pods-admission.sh`, run in this cluster as the account: the pod of the template is admitted and
 #      each of 25 mutations is refused with the message of its rule;
@@ -28,22 +31,26 @@
 #   6. the quota: two pods are used (`status.used`), a third made by an administrator with the run class is refused (`exceeded quota`), and run C
 #      (a repository of the coder's volume, with a mirror and a worktree, and a second mirror on the volume that is not C's) is told to start: the
 #      coder says it waits for a slot (a step, with the cluster's words), no pod is made, the task works on;
-#   7. the network policy, asked of a run pod while A and B hold theirs: a public address answers, DNS answers, and the cluster's private addresses
-#      (the model's Service) do not, while the coder's own pod reaches them (kind's network plugin enforces policies;
-#      AAP_E2E_CNI_MAY_IGNORE_POLICIES=1 makes that a warning);
+#   7. the network of a run pod (D15c), asked of the pod of A while A and B hold theirs, after the controls (the coder's own pod, which no egress policy
+#      selects, reaches the model's pod and Service; the proxy's own pod reaches a public address on 443): a direct connection from the run pod to a public
+#      address, to the API server (by its Service name and by its address) and to another pod's IP is refused, DNS answers, the proxy's pods reach no public
+#      address on 80 and no pod, and a pod that is not a run pod cannot use the proxy; through the proxy (the HTTPS_PROXY of the template) `curl` and
+#      `npm view` reach registry.npmjs.org, `example.com` is answered 403, the proxy's log has the decisions and no byte of what the requests carried, and
+#      no policy names an IPv6 range (kind's network plugin enforces policies; AAP_E2E_CNI_MAY_IGNORE_POLICIES=1 makes the refusals warnings);
 #   8. A is released: it completes, its pod goes with it, C gets the slot and its pod: it sees its own run, its own mirror (read-only: a write is
 #      refused) and its worktree, git works in it, and it sees neither A's, nor B's, nor the other mirror; then B and C complete and their pods go;
-#   9. `e2e-plain` runs a task: its command runs in its own container and no run pod is made; then it asks for run pods (the objects appear and its
-#      pod is replaced) and stops asking (the objects go, its set of objects is what it was at the start);
-#  10. run D holds a pod and `e2e-coder` is deleted: the finalizer completes, the run pod goes, every object of the service goes and the claim stays
-#      (Retain), the chart's own objects stay;
-#  11. no secret value and no panic in any answer or log (a log counts only if its `kubectl logs` succeeded, it is not empty and it holds a line
-#      only that component logs).
+#   9. `e2e-plain` runs a task: its command runs in its own container and no run pod is made; then it asks for run pods (the objects appear, the
+#      proxy's among them, and its pod is replaced) and stops asking (the objects go, the proxy's included, and its set of objects is what it was at the start);
+#  10. run D holds a pod and `e2e-coder` is deleted: the finalizer completes, the run pod goes, every object of the service goes (the proxy's too) and the
+#      claim stays (Retain), the chart's own objects stay;
+#  11. no secret value and no panic in any answer or log, the proxy's included (a log counts only if its `kubectl logs` succeeded, it is not empty and it
+#      holds a line only that component logs).
 #
 # What it does NOT prove: a real model (the model is a script that makes the same three calls for every task), GitHub (the App's id is made up and its
-# key is generated: the coder parses it at start and never uses it), a task that edits files and opens a pull request, OpenCode, a Kubernetes older than
-# the cluster's (kind's node image, v1.35.8), a CNI that has no NetworkPolicy support, Pod Security admission, a run pod on another node than the
-# coder's (kind has one), and a coder whose volume is shared by several workers. deploy/operator/tests/e2e/README.md says what each step shows.
+# key is generated: the coder parses it at start and never uses it), a task that edits files and opens a pull request, OpenCode, git, cargo, pip and go
+# reading the proxy variables (curl and npm are tried; the others are documented to), IPv6 egress (kind is IPv4 only: the proof is the absence of a rule), a
+# Kubernetes older than the cluster's (kind's node image, v1.35.8), a CNI that has no NetworkPolicy support, Pod Security admission, a run pod on another
+# node than the coder's (kind has one), and a coder whose volume is shared by several workers. deploy/operator/tests/e2e/README.md says what each step shows.
 #
 # Safety. As api-e2e.sh and chain-e2e.sh: this script installs and uninstalls a Helm release (which makes and deletes cluster-scoped objects), applies
 # CRDs, makes Secrets and deletes a namespace, so it runs only against a throwaway cluster and touches only what it made:
@@ -99,6 +106,8 @@ gone_timeout=${GONE_TIMEOUT_SECS:-300}
 op=aap-operator                      # the chart's fullname (fullnameOverride)
 plain=e2e-plain
 coder=e2e-coder
+proxy=$coder-egress                  # the egress proxy of the coder's run pods: the operator names it <service>-egress
+proxy_url="http://$proxy.$ns.svc:3128"
 class=$op-$ns-run                    # the PriorityClass of the chart (cluster-scoped)
 policy=$op-$ns-run-pods              # the admission policy and its binding (cluster-scoped)
 run_role=$op-run-pods                # the Role of run pods (the chart's)
@@ -144,6 +153,13 @@ diagnostics() {
   echo "::endgroup::"
   echo "::group::the operator's log"
   kubectl -n "$ns" logs "deployment/$op" --tail=200 2>&1 | redact || true
+  echo "::endgroup::"
+  echo "::group::the egress proxy of the coder and the network policies"
+  kubectl -n "$ns" get deployments,services,networkpolicies,poddisruptionbudgets -o wide 2>&1 | redact || true
+  kubectl -n "$ns" logs -l "app.kubernetes.io/component=egress-proxy,app.kubernetes.io/instance=$coder" --all-containers --prefix --tail=60 2>&1 | redact || true
+  kubectl -n "$ns" describe networkpolicy 2>&1 | redact | tail -n 120 || true
+  kubectl -n kube-system get pods -o wide 2>&1 | redact || true
+  kubectl -n kube-system logs -l app=kindnet --tail=30 2>&1 | redact || true
   echo "::endgroup::"
   echo "::group::the run pods (what the kubelet says)"
   kubectl -n "$ns" get pods -l adam.vymalo.com/run -o wide 2>&1 | redact || true
@@ -302,7 +318,7 @@ await_ready() {
 }
 # owned <instance>: the kind and name of every namespaced object that carries the instance label (pods left out), sorted.
 owned() {
-  kubectl -n "$ns" get configmaps,serviceaccounts,services,statefulsets,resourcequotas,networkpolicies,rolebindings,persistentvolumeclaims,poddisruptionbudgets \
+  kubectl -n "$ns" get configmaps,serviceaccounts,services,statefulsets,deployments,resourcequotas,networkpolicies,rolebindings,persistentvolumeclaims,poddisruptionbudgets \
     -l "app.kubernetes.io/instance=$1" -o jsonpath='{range .items[*]}{.kind}/{.metadata.name}{"\n"}{end}' | sort
 }
 # The waits, as commands that succeed when the thing is so and say what they saw when it is not (until_ok shows that).
@@ -318,6 +334,10 @@ replaced_and_ready() { # replaced_and_ready <pod> <uid it had>: another pod of t
   uid=$(jp "pod/$1" '{.metadata.uid}')
   { [ -n "$uid" ] && [ "$uid" != "$2" ]; } || { printf 'the pod %s has uid "%s"\n' "$1" "$uid" >&2; return 1; }
   [ "$(jp "pod/$1" '{.status.conditions[?(@.type=="Ready")].status}')" = True ] || { printf 'the new pod %s is not Ready\n' "$1" >&2; return 1; }
+}
+no_egress_pods() { # no_egress_pods <service>: no pod of its egress proxy
+  names=$(kubectl -n "$ns" get pods -l "app.kubernetes.io/component=egress-proxy,app.kubernetes.io/instance=$1" -o name) || return 1
+  [ -z "$names" ] || { printf 'still there: %s\n' "$names" >&2; return 1; }
 }
 runs_here() { # runs_here <service>: its pod has no RUN_ENVIRONMENT (its commands run in its own container) and is Ready
   [ -z "$(jp "pod/$1-0" '{.spec.containers[?(@.name=="agent")].env[?(@.name=="RUN_ENVIRONMENT")].value}')" ] || { printf '%s still has RUN_ENVIRONMENT\n' "$1" >&2; return 1; }
@@ -336,6 +356,9 @@ plain_unchanged() { # plain_unchanged <when>: $plain is what it was before the u
   [ "$(jp "statefulset/$plain" '{.metadata.generation}')" = "$plain_generation" ] || die "$plain's StatefulSet was written by the upgrade ($1)"
   [ "$(jp "statefulset/$plain" '{.metadata.annotations.agents\.vymalo\.com/config-digest}')" = "$plain_digest" ] || die "$plain's config digest changed with the upgrade ($1)"
   [ "$(jp "agentservice/$plain" '{.status.state}')" = Ready ] || die "$plain is not Ready ($1)"
+}
+egress_objects() { # egress_objects <service>: the six objects of its egress proxy, as kind/name
+  printf '%s\n' "deployment/$1-egress" "service/$1-egress" "serviceaccount/$1-egress" "poddisruptionbudget/$1-egress" "networkpolicy/$1-egress" "configmap/$1-egress-allow"
 }
 has_all() { # has_all <kind/name>...: they exist
   for r in "$@"; do kubectl -n "$ns" get "$r" -o name >/dev/null || return 1; done
@@ -421,6 +444,46 @@ await_probe() {
   done
 }
 release_run() { kubectl -n "$ns" exec "$1" -c run -- touch "/tmp/release-$2" || die "cannot release run $2 in $1"; }
+# ---- the network checks of step 7: curl in a pod, a refusal that is the policy's and nothing else ---------------------------------------------------
+cni_may_ignore=${AAP_E2E_CNI_MAY_IGNORE_POLICIES:-}
+only_timeout=
+# curl_in <pod> <container> <curl arguments...>: runs curl in a pod and prints what it printed, then `exit=<status>` on a line.
+curl_in() {
+  pod=$1; container=$2; shift 2
+  kubectl -n "$ns" exec "$pod" -c "$container" -- sh -c 'curl "$@" 2>&1; echo "exit=$?"' curl "$@"
+}
+# refused <pod> <container> <curl arguments...>: succeeds when the connection was dropped (curl 28, the timeout) or refused (curl 7), and says what happened
+# otherwise. Exit 6 (the name did not resolve) proves nothing about the network and is not "refused". Where nothing listens, an RST (curl 7) is what a pod
+# with no policy answers, so with only_timeout=1 only a drop counts.
+refused() {
+  r_pod=$1; r_container=$2; shift 2
+  r_out=$(curl_in "$r_pod" "$r_container" -sS -m 6 -o /dev/null -w 'http=%{http_code}\n' "$@") || { printf 'kubectl exec failed: %s\n' "$r_out"; return 1; }
+  case $r_out in
+    *exit=28*) return 0 ;;
+    *exit=7*)
+      [ -z "$only_timeout" ] && return 0
+      printf 'the connection was reset where nothing listens, which a policy that drops packets would not do: %s\n' "$r_out"
+      return 1
+      ;;
+    *exit=6*) printf 'the name did not resolve, which says nothing about the network: %s\n' "$r_out"; return 1 ;;
+    *) printf 'the connection was not refused: %s\n' "$r_out"; return 1 ;;
+  esac
+}
+# must_be_refused <description> <pod> <container> <curl arguments...>: refused, retried for up to 60 s (kindnet programs a policy a moment after it sees a
+# pod). With AAP_E2E_CNI_MAY_IGNORE_POLICIES=1 a connection that is not refused is a warning, and the policies are shown installed and valid and not enforced.
+must_be_refused() {
+  m_what=$1; shift
+  if [ "$cni_may_ignore" = 1 ]; then
+    if m_last=$(refused "$@"); then
+      ok "$m_what"
+    else
+      printf '%s\n' "::warning::$m_what: NOT refused ($(printf '%s' "$m_last" | tail -c 200)). AAP_E2E_CNI_MAY_IGNORE_POLICIES=1 says this cluster does not enforce NetworkPolicies, so the policies are installed and valid and their enforcement is not proven here"
+    fi
+  else
+    until_ok 60 "$m_what (the network policy to be enforced)" refused "$@"
+    ok "$m_what"
+  fi
+}
 # check_pod <pod> <task id> <name>: the pod the kubelet runs is the one the operator's template describes, narrowed to the run. Saves it in $work/pod-<name>.json.
 check_pod() {
   kubectl -n "$ns" get pod "$1" -o json > "$work/pod-$3.json"
@@ -443,6 +506,12 @@ check_pod() {
     and .spec.securityContext.runAsUser == 10001
     and .spec.securityContext.runAsNonRoot == true
     and ((.status.containerStatuses | map(select(.name == "run")) | .[0].imageID) | endswith(($tpl[0].spec.containers[0].image | split("@")[1])))'
+  # The proxy variables are the template's, all six: the pod's network is deny by default, so a command reaches the internet through the proxy or not at all.
+  jqok "$work/pod-$3.json" "$1: its proxy variables are not the template's six" --slurpfile tpl "$work/template.json" --arg url "$proxy_url" '
+    def proxy: [.spec.containers[0].env[] | select(.name | test("^(HTTPS_PROXY|HTTP_PROXY|NO_PROXY|https_proxy|http_proxy|no_proxy)$"))] | sort_by(.name);
+    (proxy | length) == 6 and proxy == ($tpl[0] | proxy)
+    and ([proxy[] | select(.name | test("^(HTTPS?|https?)_proxy$"; "i")) | .value] | unique) == [$url]
+    and ([proxy[] | select(.name | test("^no_proxy$"; "i")) | .value] | unique) == ["localhost,127.0.0.1"]'
   # No Secret reaches a run pod but the model key as one variable, and no token: the pod is the template, and the template is narrow.
   jqok "$work/pod-$3.json" "$1 has a Secret, a token or a variable it should not have" '
     ([.spec.volumes[]? | select(.secret != null or .projected != null or .configMap != null or .hostPath != null)] | length) == 0
@@ -587,11 +656,14 @@ for f in sa quota netpol rolebinding template-cm params-cm; do
 done
 jqok "$work/quota.json" "the quota is not 2 pods scoped to the run class $class" --arg class "$class" \
   '.spec.hard.pods == "2" and .spec.scopeSelector.matchExpressions == [{"operator": "In", "scopeName": "PriorityClass", "values": [$class]}]'
-jqok "$work/netpol.json" "the network policy is not: no ingress, DNS and the internet but not the private ranges, for the run pods of $coder" --arg svc "$coder" '
+jqok "$work/netpol.json" "the network policy is not: no ingress, DNS and the egress proxy's pods on 3128 and nothing else (deny by default), for the run pods of $coder" --arg svc "$coder" --arg proxy "$proxy" '
   .spec.policyTypes == ["Ingress", "Egress"] and (.spec.ingress // []) == []
   and .spec.podSelector.matchLabels["app.kubernetes.io/instance"] == $svc and .spec.podSelector.matchLabels["app.kubernetes.io/managed-by"] == "adam-coder"
   and (.spec.egress | length) == 2
-  and ([.spec.egress[1].to[].ipBlock.except[]] | index("10.0.0.0/8") != null and index("192.168.0.0/16") != null)'
+  and .spec.egress[0].ports == [{"protocol": "UDP", "port": 53}, {"protocol": "TCP", "port": 53}]
+  and .spec.egress[1].to == [{"podSelector": {"matchLabels": {"app.kubernetes.io/name": $proxy, "app.kubernetes.io/instance": $svc, "app.kubernetes.io/component": "egress-proxy"}}}]
+  and .spec.egress[1].ports == [{"protocol": "TCP", "port": 3128}]
+  and ([.. | objects | select(has("ipBlock"))] | length) == 0'
 jqok "$work/rolebinding.json" "the binding does not give $coder's account the Role $run_role" --arg svc "$coder" --arg role "$run_role" --arg ns "$ns" \
   '.roleRef.name == $role and .roleRef.kind == "Role" and .subjects == [{"kind": "ServiceAccount", "name": $svc, "namespace": $ns}]'
 jqok "$work/params-cm.json" "the guard's parameters are not the agent's account, the class and the model key" --arg svc "$coder" --arg class "$class" --arg ns "$ns" \
@@ -605,10 +677,50 @@ jqok "$work/statefulset.json" "the coder's pod is not given the account, the tem
 jq -r '.data["pod.yaml"]' "$work/template-cm.json" > "$work/template.json"
 jqok "$work/template.json" "the template is not a Pod with a container run and an init container tools" '.kind == "Pod" and (.spec.containers | map(.name)) == ["run"] and (.spec.initContainers | map(.name)) == ["tools"]'
 ok "the operator made, for $coder alone: the account, the quota (2 pods, scoped to $class), the network policy, the binding to $run_role, the template and the guard's parameters, each owned by the service; the coder's pod runs as the account with the template mounted"
-for r in serviceaccount/$plain resourcequota/$plain-run-pods networkpolicy/$plain-run-pods rolebinding/$plain-run-pods; do
+# The egress proxy (D15c): the one way out of a run pod, made beside the rest, from the coder's own image. The operator does not wait for it (it is no
+# workload of the service), so this script does.
+kubectl -n "$ns" rollout status "deployment/$proxy" --timeout="${rollout_timeout}s" \
+  || die "the egress proxy did not become ready (is adam-egress in the coder's image? $coder_image): $(kubectl -n "$ns" get pods -l app.kubernetes.io/component=egress-proxy -o wide 2>&1 | head -c 600)"
+kubectl -n "$ns" get deployment "$proxy" -o json > "$work/proxy-deployment.json"
+kubectl -n "$ns" get service "$proxy" -o json > "$work/proxy-service.json"
+kubectl -n "$ns" get serviceaccount "$proxy" -o json > "$work/proxy-sa.json"
+kubectl -n "$ns" get poddisruptionbudget "$proxy" -o json > "$work/proxy-pdb.json"
+kubectl -n "$ns" get networkpolicy "$proxy" -o json > "$work/proxy-netpol.json"
+kubectl -n "$ns" get configmap "$proxy-allow" -o json > "$work/proxy-allow.json"
+for f in proxy-deployment proxy-service proxy-sa proxy-pdb proxy-netpol proxy-allow; do
+  jqok "$work/$f.json" "$f: not owned by the AgentService $coder, or not labelled as the operator's and the proxy's" --arg svc "$coder" --arg proxy "$proxy" '
+    .metadata.ownerReferences[0].kind == "AgentService" and .metadata.ownerReferences[0].name == $svc and .metadata.labels["app.kubernetes.io/managed-by"] == "aap-operator"
+    and .metadata.labels["app.kubernetes.io/instance"] == $svc and .metadata.labels["app.kubernetes.io/name"] == $proxy and .metadata.labels["app.kubernetes.io/component"] == "egress-proxy"'
+done
+jqok "$work/proxy-deployment.json" "the proxy is not two pods of the coder's own image, running adam-egress as 10001 with no token, a read-only root file system and nothing but its allow-list mounted" \
+  --arg image "$coder_image" --arg sa "$proxy" '
+  .spec.replicas == 2 and .status.readyReplicas == 2
+  and .spec.template.spec.containers[0].image == $image and .spec.template.spec.containers[0].command == ["tini", "--", "adam-egress"]
+  and .spec.template.spec.serviceAccountName == $sa and .spec.template.spec.automountServiceAccountToken == false
+  and .spec.template.spec.securityContext.runAsUser == 10001 and .spec.template.spec.securityContext.runAsNonRoot == true
+  and .spec.template.spec.containers[0].securityContext.readOnlyRootFilesystem == true
+  and .spec.template.spec.containers[0].securityContext.allowPrivilegeEscalation == false
+  and .spec.template.spec.containers[0].securityContext.capabilities.drop == ["ALL"]
+  and ([.spec.template.spec.volumes[] | select(.configMap == null and .emptyDir == null and .projected == null)] | length) == 0
+  and ([.spec.template.spec.containers[0].env[] | .name] == ["EGRESS_LISTEN", "EGRESS_ALLOW_FILE", "EGRESS_PORTS", "EGRESS_DENY_CIDRS"])
+  and ([.spec.template.spec.containers[0].env[] | select(.valueFrom != null)] | length) == 0'
+jqok "$work/proxy-service.json" "the proxy's Service is not a ClusterIP on 3128 that selects its pods" --arg svc "$coder" --arg proxy "$proxy" '
+  .spec.type == "ClusterIP" and (.spec.ports | map(.port)) == [3128]
+  and .spec.selector == {"app.kubernetes.io/name": $proxy, "app.kubernetes.io/instance": $svc, "app.kubernetes.io/component": "egress-proxy"}'
+jqok "$work/proxy-netpol.json" "the proxy's policy does not admit the run pods alone on 3128, and reach DNS and the internet on 443 but not the private ranges" --arg svc "$coder" '
+  .spec.policyTypes == ["Ingress", "Egress"]
+  and .spec.ingress == [{"from": [{"podSelector": {"matchLabels": {"app.kubernetes.io/managed-by": "adam-coder", "app.kubernetes.io/instance": $svc}, "matchExpressions": [{"key": "adam.vymalo.com/run", "operator": "Exists"}]}}], "ports": [{"protocol": "TCP", "port": 3128}]}]
+  and (.spec.egress | length) == 2 and .spec.egress[1].ports == [{"protocol": "TCP", "port": 443}]
+  and .spec.egress[1].to[0].ipBlock.cidr == "0.0.0.0/0"
+  and ([.spec.egress[1].to[0].ipBlock.except[]] | index("10.0.0.0/8") != null and index("192.168.0.0/16") != null and index("169.254.0.0/16") != null)'
+jqok "$work/proxy-pdb.json" "the proxy's budget is not one pod of its own" --arg proxy "$proxy" '.spec.minAvailable == 1 and .spec.selector.matchLabels["app.kubernetes.io/name"] == $proxy'
+jqok "$work/proxy-allow.json" "the allow-list does not hold registry.npmjs.org and github.com, or holds storage.googleapis.com" \
+  '(.data["allow.txt"] | split("\n")) as $l | ($l | index("registry.npmjs.org") != null) and ($l | index("github.com") != null) and ($l | index("storage.googleapis.com") == null)'
+ok "the operator made the egress proxy of $coder: $proxy (two pods of the coder's own image, rolled out; no token, a read-only root file system), its Service on 3128, account, budget, policy (the run pods in, DNS and 443 out, the private ranges excepted) and allow-list, each owned by the service; the run pods' policy names the proxy and no address"
+for r in serviceaccount/$plain resourcequota/$plain-run-pods networkpolicy/$plain-run-pods rolebinding/$plain-run-pods $(egress_objects "$plain"); do
   absent -n "$ns" get "$r" || die "$plain gained $r with the coder"
 done
-ok "$plain still has none of them"
+ok "$plain still has none of them, the proxy's objects included"
 # The coder reads the mounted template and connects to the API server: it says so at start (adam-rs bin/adam-coder serve.rs).
 kubectl -n "$ns" logs "$coder-0" -c agent --tail=-1 > "$work/coder-start.log" 2>"$work/err" || die "cannot read the log of $coder-0: $(cat "$work/err")"
 grep -qF "a run's commands run in a pod of its own" "$work/coder-start.log" \
@@ -658,11 +770,14 @@ await_run_pod "$coder" "$a_id"
 a_pod=$runpod
 check_pod "$a_pod" "$a_id" a
 ok "run A (task $a_id): the coder made the run pod $a_pod and the kubelet started it: Running and Ready, the priority class, the labels, the resources, the images (by digest; the run container's imageID is the template's), no Secret and no token but the model key"
-printf '%s\n' "rw /work/workspaces/$a_id <- workspaces/$a_id" > "$work/mounts-a.expected"
+# The run's directory, and its project's slot as a mount of its own on top of it (adam-rs #133: a slot's directory is a name the pod cannot
+# rename), and nothing else of the volume.
+printf '%s\n' "rw /work/workspaces/$a_id <- workspaces/$a_id" "rw /work/workspaces/$a_id/iso-a <- workspaces/$a_id/iso-a" | sort > "$work/mounts-a.expected"
 work_mounts "$work/pod-a.json" > "$work/mounts-a.actual"
-diff "$work/mounts-a.expected" "$work/mounts-a.actual" >/dev/null || die "the run pod of A mounts $(tr '\n' ';' < "$work/mounts-a.actual") of the volume, not only its own run: $(cat "$work/mounts-a.expected")"
-jqok "$work/pod-a.json" "the annotation of the pod's mounts is not A's directory alone" --arg id "$a_id" \
-  '(.metadata.annotations["adam.vymalo.com/workspace-mounts"] | rtrimstr("\n")) == ("rw /work/workspaces/" + $id)'
+diff "$work/mounts-a.expected" "$work/mounts-a.actual" >/dev/null || die "the run pod of A mounts $(tr '\n' ';' < "$work/mounts-a.actual") of the volume, not only its own run and its project's slot: $(tr '\n' ';' < "$work/mounts-a.expected")"
+jqok "$work/pod-a.json" "the annotation of the pod's mounts is not A's directory and its project's slot alone" --arg id "$a_id" \
+  '(.metadata.annotations["adam.vymalo.com/workspace-mounts"] | rtrimstr("\n") | split("\n")) as $l
+   | ($l | length) == 2 and $l[0] == ("rw /work/workspaces/" + $id) and ($l[1] | test("^rw /work/workspaces/" + $id + "/iso-a( @\\S+)?$"))'
 await_probe "$a_pod" a envnames
 [ "$(kv "$work/probe-a.txt" host)" = "$a_pod" ] || die "the command of run A ran on '$(kv "$work/probe-a.txt" host)', not in its run pod $a_pod"
 [ "$(kv "$work/probe-a.txt" uid)" = 10001 ] || die "the command of run A ran as $(kv "$work/probe-a.txt" uid), not 10001"
@@ -683,9 +798,9 @@ await_run_pod "$coder" "$b_id"
 b_pod=$runpod
 [ "$b_pod" != "$a_pod" ] || die "two runs have one run pod"
 check_pod "$b_pod" "$b_id" b
-printf '%s\n' "rw /work/workspaces/$b_id <- workspaces/$b_id" > "$work/mounts-b.expected"
+printf '%s\n' "rw /work/workspaces/$b_id <- workspaces/$b_id" "rw /work/workspaces/$b_id/iso-b <- workspaces/$b_id/iso-b" | sort > "$work/mounts-b.expected"
 work_mounts "$work/pod-b.json" > "$work/mounts-b.actual"
-diff "$work/mounts-b.expected" "$work/mounts-b.actual" >/dev/null || die "the run pod of B mounts $(tr '\n' ';' < "$work/mounts-b.actual") of the volume, not only its own run"
+diff "$work/mounts-b.expected" "$work/mounts-b.actual" >/dev/null || die "the run pod of B mounts $(tr '\n' ';' < "$work/mounts-b.actual") of the volume, not only its own run and its project's slot"
 await_probe "$b_pod" b peer0-ls
 [ "$(kv "$work/probe-b.txt" host)" = "$b_pod" ] || die "the command of run B ran on '$(kv "$work/probe-b.txt" host)', not in its run pod $b_pod"
 [ "$(kv "$work/probe-b.txt" workspaces)" = "$b_id" ] || die "B's pod sees these runs: '$(kv "$work/probe-b.txt" workspaces)', not B alone"
@@ -746,35 +861,122 @@ journal
 [ "$(turns c)" = "1 2" ] || die "the model was asked more than the two first turns of C while it had no pod: $(jq -c '[.[] | select(.run == "c") | .step]' "$work/journal.json")"
 ok "run C has no pod, is working, and has asked the model for two turns only: it waits for a slot, it does not fail and it does not run its command elsewhere"
 
-step "7. the network policy of run pods, asked of the pod of A while A and B hold theirs"
-# A pod that is not a run pod, the coder's, reaches the model's Service: the control that the Service answers. The run pod resolves the name (DNS is
-# allowed), reaches a public address, and cannot reach the private address the name resolves to (the cluster's ranges are blocked).
+step "7. the network of a run pod: deny by default, and the egress proxy is the one way out"
+# A and B hold their pods. The run pod of A is asked, after the controls that make a refusal mean the policy and nothing else.
+run_pod=$a_pod
+in_run_pod() { kubectl -n "$ns" exec "$run_pod" -c run -- "$@"; }
+proxy_pod=$(kubectl -n "$ns" get pod -l "app.kubernetes.io/component=egress-proxy,app.kubernetes.io/instance=$coder" -o jsonpath='{.items[0].metadata.name}')
+proxy_ip=$(kubectl -n "$ns" get pod "$proxy_pod" -o jsonpath='{.status.podIP}')
+target_ip=$(kubectl -n "$ns" get pod -l app.kubernetes.io/name=e2e-model -o jsonpath='{.items[0].status.podIP}')
+{ [ -n "$proxy_pod" ] && [ -n "$proxy_ip" ] && [ -n "$target_ip" ]; } || die "no proxy pod ($proxy_pod, $proxy_ip) or no IP for the model's pod ($target_ip)"
+
+for v in HTTPS_PROXY https_proxy HTTP_PROXY http_proxy; do
+  got=$(in_run_pod printenv "$v") || die "$v is not set in the run pod"
+  [ "$got" = "$proxy_url" ] || die "$v in the run pod is '$got', not '$proxy_url'"
+done
+for v in NO_PROXY no_proxy; do
+  got=$(in_run_pod printenv "$v") || die "$v is not set in the run pod"
+  [ "$got" = "localhost,127.0.0.1" ] || die "$v in the run pod is '$got', not 'localhost,127.0.0.1'"
+done
+ok "the run pod's environment is the operator's template: HTTPS_PROXY, https_proxy, HTTP_PROXY and http_proxy are $proxy_url, NO_PROXY and no_proxy are localhost,127.0.0.1"
+
+api_name=kubernetes.default.svc
+in_run_pod getent hosts "$api_name" > "$work/dns-api.out" || die "the run pod cannot resolve $api_name: DNS is cut off, so the refusals below would prove nothing"
+in_run_pod getent hosts registry.npmjs.org > "$work/dns-npm.out" || die "the run pod cannot resolve registry.npmjs.org: DNS is cut off, so the refusals below would prove nothing"
+in_run_pod getent hosts "$proxy.$ns.svc" > "$work/dns-proxy.out" || die "the run pod cannot resolve the proxy's Service name"
+api_ip=$(awk 'NR == 1 { print $1 }' "$work/dns-api.out")
+ok "DNS works from the run pod (the policy allows it): it resolves $api_name ($api_ip), registry.npmjs.org and $proxy.$ns.svc"
+
+# The controls. The coder's own pod is selected by no egress policy: it reaches the model's pod and its Service, so the pod network works and a refusal of the
+# run pod is the policy's. The proxy's own pod reaches a public address on 443 (its policy allows it): the cluster reaches the internet, and a refusal of
+# the run pod is not an offline runner. Retried: a pod's policy is programmed a moment after it starts.
+control=$(agent_curl "$coder" -m 10 -o /dev/null -w '%{http_code}' "http://$target_ip:8080/healthz" || true)
+[ "$control" = 200 ] || die "the coder's own pod does not reach the model's pod at $target_ip:8080 (status '$control'): the control of the network checks fails"
 control=$(agent_curl "$coder" -m 10 -o /dev/null -w '%{http_code}' http://e2e-model:8080/healthz || true)
-[ "$control" = 200 ] || die "the coder's own pod does not reach the model's Service (status '$control'): the control of the network check fails"
-model_ip=$(kubectl -n "$ns" exec "$a_pod" -c run -- getent hosts "e2e-model.$ns.svc.cluster.local" 2>/dev/null | awk 'NR == 1 { print $1 }' || true)
-[ -n "$model_ip" ] || die "a run pod cannot resolve a name: DNS is not reachable from it, so the policy keeps more than it should"
-public=$(kubectl -n "$ns" exec "$a_pod" -c run -- curl -s -o /dev/null -m 20 -w '%{http_code}' https://ghcr.io/v2/ 2>/dev/null || true)
-case $public in 000 | '') die "a run pod cannot reach a public address (https://ghcr.io/v2/ gave '$public'): the policy keeps more than it should, or the cluster has no internet" ;; esac
-private_status() { kubectl -n "$ns" exec "$a_pod" -c run -- curl -s -o /dev/null -m 6 -w '%{http_code}' "http://$model_ip:8080/healthz" 2>/dev/null || true; }
-private_blocked() { # the run pod's request to the private address is dropped
-  got=$(private_status)
-  [ "$got" = 000 ] || { printf 'a run pod reached %s: status "%s"\n' "$model_ip" "$got" >&2; return 1; }
+[ "$control" = 200 ] || die "the coder's own pod does not reach the model's Service (status '$control'): the control of the network checks fails"
+ok "the control: the coder's own pod, which no egress policy selects, reaches the model's pod ($target_ip:8080) and its Service: the pod network works"
+proxy_reaches() {
+  p_out=$(curl_in "$proxy_pod" egress -sS -m 15 -o /dev/null -w 'http=%{http_code}\n' https://registry.npmjs.org/) || { printf '%s\n' "$p_out"; return 1; }
+  case $p_out in *http=200*exit=0*) ;; *) printf '%s\n' "$p_out"; return 1 ;; esac
 }
-if [ "${AAP_E2E_CNI_MAY_IGNORE_POLICIES:-}" = 1 ]; then
-  # Only for a cluster whose network plugin is known not to enforce NetworkPolicies. kind's (kindnet) does, so CI does not set this.
-  case $(private_status) in
-    000) ok "a run pod cannot reach the private address $model_ip of the model's Service (status 000): the cluster enforces NetworkPolicies" ;;
-    [0-9][0-9][0-9])
-      printf '%s\n' "::warning::a run pod reached a private address ($model_ip): this cluster does not enforce NetworkPolicies and AAP_E2E_CNI_MAY_IGNORE_POLICIES=1 says that is expected, so the policy is installed and valid and its enforcement is not proven here"
-      ok "NetworkPolicies are NOT enforced here (AAP_E2E_CNI_MAY_IGNORE_POLICIES=1): the policy is installed and valid, and its enforcement is not proven"
-      ;;
-    *) die "a run pod could not be asked" ;;
-  esac
-else
-  # kind's network plugin, kindnet, enforces NetworkPolicies, after a moment (it programs a policy for a pod once it has seen it).
-  until_ok 60 "the run pod to be refused a private address (the network policy to be enforced)" private_blocked
-  ok "a run pod resolves names (DNS) and reaches a public address (ghcr.io: status $public), and cannot reach the private address $model_ip of the model's Service (status 000), which the coder's own pod reaches (200): the cluster enforces the network policy of run pods"
-fi
+until_ok 60 "the proxy's own pod to reach https://registry.npmjs.org/ (the control: this cluster reaches the internet, and the proxy's policy allows 443)" proxy_reaches
+ok "the control: the proxy's own pod reaches https://registry.npmjs.org/ on 443: the cluster has a way to the internet"
+
+must_be_refused "a direct connection from the run pod to a public address it resolves (curl --noproxy '*' https://registry.npmjs.org/) is refused" \
+  "$run_pod" run --noproxy '*' https://registry.npmjs.org/
+must_be_refused "a direct connection from the run pod to the API server by its Service name, which DNS resolves ($api_name), is refused" \
+  "$run_pod" run --noproxy '*' -k "https://$api_name/version"
+api_endpoint=$(kubectl get endpoints kubernetes -o jsonpath='{.subsets[0].addresses[0].ip}:{.subsets[0].ports[0].port}')
+[ -n "$api_endpoint" ] || die "no address of the API server in the endpoints of the kubernetes Service"
+must_be_refused "... and by its address ($api_endpoint) is refused" \
+  "$run_pod" run --noproxy '*' -k "https://$api_endpoint/version"
+must_be_refused "a direct connection from the run pod to another pod's IP ($target_ip:8080, which the control reached) is refused" \
+  "$run_pod" run --noproxy '*' "http://$target_ip:8080/healthz"
+only_timeout=1
+must_be_refused "a run pod reaches the proxy's pod on its port only: a packet to another port ($proxy_ip:8080) is dropped" \
+  "$run_pod" run --noproxy '*' "http://$proxy_ip:8080/healthz"
+only_timeout=
+must_be_refused "a pod that is not a run pod (the coder's own) cannot use the proxy: its policy admits the run pods alone" \
+  "$coder-0" agent -x "$proxy_url" https://registry.npmjs.org/
+must_be_refused "the proxy's own pod reaches no public address on 80 (its policy allows 443 only)" \
+  "$proxy_pod" egress http://registry.npmjs.org/
+must_be_refused "... and no pod of the cluster ($target_ip:8080)" \
+  "$proxy_pod" egress "http://$target_ip:8080/healthz"
+
+through_proxy() {
+  t_out=$(curl_in "$run_pod" run -sS -m 30 -o /dev/null -w 'http=%{http_code}\n' https://registry.npmjs.org/) || { printf '%s\n' "$t_out"; return 1; }
+  case $t_out in *http=200*exit=0*) ;; *) printf '%s\n' "$t_out"; return 1 ;; esac
+}
+until_ok 90 "curl in the run pod to reach https://registry.npmjs.org/ through the proxy" through_proxy
+ok "curl https://registry.npmjs.org/ in the run pod answers 200 through the proxy, with the environment the template gave it"
+npm_view() {
+  n_out=$(in_run_pod env HOME=/tmp npm_config_cache=/tmp/npm-cache npm_config_update_notifier=false npm view is-number version 2>&1) || { printf '%s\n' "$n_out"; return 1; }
+  printf '%s\n' "$n_out" | grep -Eq '^[0-9]+\.[0-9]+\.[0-9]+' || { printf 'not a version: %s\n' "$n_out"; return 1; }
+}
+until_ok 120 "npm view is-number version in the run pod to succeed through the proxy" npm_view
+ok "npm view is-number version in the run pod succeeds through the proxy"
+
+not_allowed=$(curl_in "$run_pod" run -sS -m 20 -o /dev/null -w 'http=%{http_code} connect=%{http_connect}\n' https://example.com/) \
+  || die "kubectl exec failed: $not_allowed"
+case $not_allowed in
+  *connect=403*exit=56*) ;;
+  *) die "https://example.com/ through the proxy was not refused with 403 on the CONNECT (curl 56): $not_allowed" ;;
+esac
+ok "curl https://example.com/ through the proxy: the CONNECT is answered 403 (curl exit 56): the host is not on the allow-list"
+# A request that carries what must never reach a log: a Proxy-Authorization header and a query. Plain HTTP to the proxy, as an absolute URL (the proxy
+# answers 403, only HTTPS through CONNECT), and a CONNECT with the header (--proxy-header).
+plain_http=$(curl_in "$run_pod" run -sS -m 15 -o /dev/null -w 'http=%{http_code}\n' -x "$proxy_url" \
+  -H 'Proxy-Authorization: Basic c2VjcmV0' 'http://example.com/private/path?token=secret') || die "kubectl exec failed: $plain_http"
+case $plain_http in *http=403*exit=0*) ;; *) die "plain HTTP to the proxy was not answered 403: $plain_http" ;; esac
+with_header=$(curl_in "$run_pod" run -sS -m 15 -o /dev/null -w 'http=%{http_code} connect=%{http_connect}\n' \
+  --proxy-header 'Proxy-Authorization: Basic c2VjcmV0' 'https://example.com/private/path?token=secret') || die "kubectl exec failed: $with_header"
+case $with_header in *connect=403*exit=56*) ;; *) die "a CONNECT with a Proxy-Authorization header was not refused 403: $with_header" ;; esac
+ok "plain HTTP (an absolute URL, a header, a query) is answered 403, and so is a CONNECT that carries the header"
+proxy_log() { kubectl -n "$ns" logs -l "app.kubernetes.io/component=egress-proxy,app.kubernetes.io/instance=$coder" --all-containers --prefix --tail=-1; }
+log_has_decisions() {
+  proxy_log > "$work/proxy.log" 2> "$work/proxy.err" || { cat "$work/proxy.err"; return 1; }
+  grep -F '"decision":"refuse"' "$work/proxy.log" | grep -Fq '"host":"example.com"' || { echo 'no refusal of example.com yet'; return 1; }
+  grep -F '"decision":"refuse"' "$work/proxy.log" | grep -Fq '"reason":"host not allowed"' || { echo 'no "host not allowed" yet'; return 1; }
+  grep -F '"decision":"refuse"' "$work/proxy.log" | grep -Fq '"reason":"plain http request"' || { echo 'no "plain http request" yet'; return 1; }
+  grep -F '"decision":"allow"' "$work/proxy.log" | grep -Fq '"host":"registry.npmjs.org"' || { echo 'no allow line for registry.npmjs.org yet'; return 1; }
+}
+until_ok 30 "the proxy's log to hold the decisions (refuse example.com: host not allowed, plain http request; allow registry.npmjs.org)" log_has_decisions
+ok "the proxy's log has decision=refuse for example.com (host not allowed) and for the plain HTTP request, and decision=allow for registry.npmjs.org"
+for leak in secret c2VjcmV0 token private/path Proxy-Authorization; do
+  if grep -Fq -- "$leak" "$work/proxy.log"; then
+    die "the proxy's log holds '$leak', which only the request carried: $(grep -F -- "$leak" "$work/proxy.log" | head -n 3)"
+  fi
+done
+cat "$work/proxy.log" >> "$work/seen"
+ok "no line of the proxy's log holds the credential, the query or the path that the refused requests carried, and none holds a secret of this run"
+
+# IPv6: kind is IPv4 only, so IPv6 egress cannot be tried. The proof available is that no policy has a rule that would allow it: every ipBlock of every policy
+# of the namespace is an IPv4 range (and there are some, so the check looks at something).
+kubectl -n "$ns" get networkpolicy -o json > "$work/policies.json"
+jqok "$work/policies.json" "a policy names an IPv6 range, or no policy has an ipBlock at all" '
+  ([.items[].spec | (.egress // [])[], (.ingress // [])[] | ((.to // []) + (.from // []))[] | .ipBlock // empty | .cidr, (.except // [])[]] ) as $ranges
+  | ($ranges | length) > 0 and ([$ranges[] | select(contains(":"))] | length) == 0'
+ok "no rule of any policy in $ns names an IPv6 range (kind is IPv4 only: IPv6 egress is denied by the absence of a rule, which is the proof available here)"
 
 step "8. A is released: its pod goes with its run, C gets the slot, and sees only its own run"
 release_run "$a_pod" a
@@ -808,10 +1010,11 @@ kubectl -n "$ns" exec "$coder-0" -c agent -- test -d "/work/workspaces/$b_id/iso
 case "$(kv "$work/probe-c.txt" mirror-write)" in *"Read-only file system"*) ;; *) die "the mirror can be written from C's pod: '$(kv "$work/probe-c.txt" mirror-write)'" ;; esac
 kv "$work/probe-c.txt" status | grep -Eq '^## agent/[0-9a-f]{8}' || die "git does not work in C's worktree: '$(kv "$work/probe-c.txt" status)'"
 work_mounts "$work/pod-c.json" > "$work/mounts-c.actual"
-[ "$(grep -c '^rw /work/workspaces/' "$work/mounts-c.actual")" = 1 ] || die "C's pod mounts more than its own run's directory read-write: $(cat "$work/mounts-c.actual")"
+[ "$(grep -c '^rw /work/workspaces/' "$work/mounts-c.actual")" = 2 ] || die "C's pod mounts more than its own run's directory and its worktree's slot read-write: $(cat "$work/mounts-c.actual")"
 grep -q "^rw /work/workspaces/$c_id <- workspaces/$c_id\$" "$work/mounts-c.actual" || die "C's pod does not mount its own run: $(cat "$work/mounts-c.actual")"
+grep -q "^rw /work/workspaces/$c_id/r1 <- workspaces/$c_id/r1\$" "$work/mounts-c.actual" || die "C's pod does not mount its worktree's slot on its own: $(cat "$work/mounts-c.actual")"
 grep -Eq '^ro /work/git/local/[0-9a-f]{16}/r1\.git <- git/local/[0-9a-f]{16}/r1\.git$' "$work/mounts-c.actual" || die "C's pod does not mount its mirror read-only: $(cat "$work/mounts-c.actual")"
-grep -Ev "^rw /work/workspaces/$c_id |^(ro|rw) /work/git/local/[0-9a-f]{16}/r1\\.git" "$work/mounts-c.actual" > "$work/mounts-c.other" || true
+grep -Ev "^rw /work/workspaces/$c_id(/r1)? |^(ro|rw) /work/git/local/[0-9a-f]{16}/r1\\.git" "$work/mounts-c.actual" > "$work/mounts-c.other" || true
 [ ! -s "$work/mounts-c.other" ] || die "C's pod mounts something besides its run, its mirror and the mirror's worktree directory: $(cat "$work/mounts-c.other")"
 for other in "$a_id" "$b_id"; do
   if grep -q "$other" "$work/mounts-c.actual"; then die "C's pod mounts a path of another run ($other)"; fi
@@ -859,20 +1062,23 @@ answer_output plain
 [ "$(count_run_pods "$plain")" = 0 ] || die "$plain, which asks for no run pods, has a run pod"
 ok "$plain's command ran in its own container ($plain-0), in the run's project, and no run pod was made: an agent without run pods works as it did"
 kubectl -n "$ns" patch agentconfig "$plain" --type=merge -p '{"spec":{"harness":{"adam":{"coder":{"runPods":{"sizeClass":"standard"}}}}}}' >/dev/null
+# shellcheck disable=SC2046  # the six names are words
 until_ok 120 "the operator to make the run-pod objects of $plain" has_all "serviceaccount/$plain" "resourcequota/$plain-run-pods" "networkpolicy/$plain-run-pods" \
-  "rolebinding/$plain-run-pods" "configmap/$plain-run-pod" "configmap/$plain-run-pods-policy"
-ok "$plain asks for run pods: the account, quota, network policy, binding, template and guard's parameters appear"
+  "rolebinding/$plain-run-pods" "configmap/$plain-run-pod" "configmap/$plain-run-pods-policy" $(egress_objects "$plain")
+ok "$plain asks for run pods: the account, quota, network policy, binding, template, guard's parameters and the egress proxy's six objects appear"
 until_ok "$((pod_timeout * 2))" "$plain's pod to be replaced by one that runs with run pods" replaced_and_ready "$plain-0" "$plain_pod_uid"
 plain_pod_uid_on=$(jp "pod/$plain-0" '{.metadata.uid}')
 [ "$(jp "pod/$plain-0" '{.spec.containers[?(@.name=="agent")].env[?(@.name=="RUN_ENVIRONMENT")].value}')" = kubernetes ] || die "$plain's new pod does not run its commands in pods"
 kubectl -n "$ns" patch agentconfig "$plain" --type=json -p '[{"op":"remove","path":"/spec/harness/adam/coder/runPods"}]' >/dev/null
 until_ok 120 "the operator to remove the run-pod objects of $plain" is_baseline "$plain" "$work/plain-owned.before"
-for r in serviceaccount/$plain resourcequota/$plain-run-pods networkpolicy/$plain-run-pods rolebinding/$plain-run-pods configmap/$plain-run-pod configmap/$plain-run-pods-policy; do
+# shellcheck disable=SC2046  # the six names are words
+for r in serviceaccount/$plain resourcequota/$plain-run-pods networkpolicy/$plain-run-pods rolebinding/$plain-run-pods configmap/$plain-run-pod configmap/$plain-run-pods-policy $(egress_objects "$plain"); do
   absent -n "$ns" get "$r" || die "$plain stopped asking for run pods and $r is still there"
 done
+until_ok 120 "the proxy's pods of $plain to be gone" no_egress_pods "$plain"
 until_ok "$((pod_timeout * 2))" "$plain's pod to be replaced by one that runs its commands in its own container" replaced_and_ready "$plain-0" "$plain_pod_uid_on"
 runs_here "$plain" || die "$plain's pod still runs its commands in pods"
-ok "$plain stops asking: every run-pod object goes, its set of objects is what it was before the upgrade, and its new pod runs its commands in its own container again"
+ok "$plain stops asking: every run-pod object goes, the egress proxy's pods and objects with them, its set of objects is what it was before the upgrade, and its new pod runs its commands in its own container again"
 
 step "10. run D holds a pod, and $coder is deleted: nothing is left of it, run pods included"
 send_task "$coder" d "[run:d] [hold:/tmp/release-d] Look around."
@@ -884,13 +1090,15 @@ kubectl -n "$ns" delete agentservice "$coder" --wait=true --timeout=300s >/dev/n
 ok "the AgentService $coder is deleted: its finalizer completed"
 until_ok "$gone_timeout" "the run pod of D to be gone" no_run_pods "$coder"
 until_ok 120 "the coder's pod to be gone" absent -n "$ns" get pod "$coder-0"
+until_ok 120 "the proxy's pods of $coder to be gone" no_egress_pods "$coder"
+# shellcheck disable=SC2046  # the six names are words
 for r in statefulset/$coder service/$coder serviceaccount/$coder resourcequota/$coder-run-pods networkpolicy/$coder-run-pods networkpolicy/$coder \
-         rolebinding/$coder-run-pods configmap/$coder-run-pod configmap/$coder-run-pods-policy; do
+         rolebinding/$coder-run-pods configmap/$coder-run-pod configmap/$coder-run-pods-policy $(egress_objects "$coder"); do
   absent -n "$ns" get "$r" || die "$coder was deleted and $r is still there"
 done
 owned "$coder" > "$work/coder-owned.after"
 [ "$(cat "$work/coder-owned.after")" = "PersistentVolumeClaim/work-$coder-0" ] || die "$coder was deleted and these objects are left: $(tr '\n' ' ' < "$work/coder-owned.after")"
-ok "the run pod of D ($d_pod), the coder, its service, account, quota, network policies, binding, template and parameters are gone; only the claim work-$coder-0 stays (deletionPolicy Retain)"
+ok "the run pod of D ($d_pod), the coder, its service, account, quota, network policies, binding, template and parameters, and the egress proxy (its pods, Service, account, budget, policy and allow-list) are gone; only the claim work-$coder-0 stays (deletionPolicy Retain)"
 if kubectl get priorityclass "$class" >/dev/null && kubectl get validatingadmissionpolicy "$policy" >/dev/null \
   && kubectl get validatingadmissionpolicybinding "$policy" >/dev/null && kubectl -n "$ns" get role "$run_role" >/dev/null; then
   ok "the chart's objects (the PriorityClass, the policy and its binding, the Role) stay: they are the release's, not the agent's"
@@ -924,6 +1132,6 @@ if grep -F -f "$work/secrets" "$work/seen" >/dev/null 2>&1; then
   die "a secret value of this run (the model's key, the GitHub token, the A2A bearer or the App's key) is in an answer or a log"
 fi
 if grep -F 'panicked at' "$work/seen" >/dev/null 2>&1; then die "an answer or a log says a process panicked: $(grep -F 'panicked at' "$work/seen" | head -n 3 | head -c 600)"; fi
-ok "none of the four secrets of the run (the model's key, the GitHub token, the A2A bearer, the App's key) and no panic is in an answer, in the model's journal, or in the logs of the operator, of $plain, of the model and of $coder at its start"
+ok "none of the four secrets of the run (the model's key, the GitHub token, the A2A bearer, the App's key) and no panic is in an answer, in the model's journal, or in the logs of the operator, of $plain, of the model, of the egress proxy and of $coder at its start"
 
 printf '\nrun pods end-to-end passed\n'

@@ -24,7 +24,7 @@ data:
 kind: ConfigMap
 metadata:
   annotations:
-    agents.vymalo.com/config-digest: sha256:dcce0421033b24f0e21585a9ea8b843d12866b6574e35a1a3ea6240da3854580
+    agents.vymalo.com/config-digest: sha256:86920e53874b51eabb4f5c019956cff2fdc3320c2ee7a0c79a497a967192d292
   labels:
     app.kubernetes.io/instance: coder
     app.kubernetes.io/managed-by: aap-operator
@@ -79,6 +79,30 @@ data:
               {
                 "name": "CARGO_BUILD_JOBS",
                 "value": "2"
+              },
+              {
+                "name": "HTTPS_PROXY",
+                "value": "http://coder-egress.another-agentic-system.svc:3128"
+              },
+              {
+                "name": "https_proxy",
+                "value": "http://coder-egress.another-agentic-system.svc:3128"
+              },
+              {
+                "name": "HTTP_PROXY",
+                "value": "http://coder-egress.another-agentic-system.svc:3128"
+              },
+              {
+                "name": "http_proxy",
+                "value": "http://coder-egress.another-agentic-system.svc:3128"
+              },
+              {
+                "name": "NO_PROXY",
+                "value": "localhost,127.0.0.1"
+              },
+              {
+                "name": "no_proxy",
+                "value": "localhost,127.0.0.1"
               },
               {
                 "name": "MODEL_API_KEY",
@@ -189,7 +213,7 @@ data:
 kind: ConfigMap
 metadata:
   annotations:
-    agents.vymalo.com/config-digest: sha256:dcce0421033b24f0e21585a9ea8b843d12866b6574e35a1a3ea6240da3854580
+    agents.vymalo.com/config-digest: sha256:86920e53874b51eabb4f5c019956cff2fdc3320c2ee7a0c79a497a967192d292
   labels:
     app.kubernetes.io/instance: coder
     app.kubernetes.io/managed-by: aap-operator
@@ -218,7 +242,7 @@ data:
 kind: ConfigMap
 metadata:
   annotations:
-    agents.vymalo.com/config-digest: sha256:dcce0421033b24f0e21585a9ea8b843d12866b6574e35a1a3ea6240da3854580
+    agents.vymalo.com/config-digest: sha256:86920e53874b51eabb4f5c019956cff2fdc3320c2ee7a0c79a497a967192d292
   labels:
     agents.vymalo.com/run-pods-policy: 'true'
     app.kubernetes.io/instance: coder
@@ -238,7 +262,7 @@ automountServiceAccountToken: false
 kind: ServiceAccount
 metadata:
   annotations:
-    agents.vymalo.com/config-digest: sha256:dcce0421033b24f0e21585a9ea8b843d12866b6574e35a1a3ea6240da3854580
+    agents.vymalo.com/config-digest: sha256:86920e53874b51eabb4f5c019956cff2fdc3320c2ee7a0c79a497a967192d292
   labels:
     app.kubernetes.io/instance: coder
     app.kubernetes.io/managed-by: aap-operator
@@ -256,7 +280,7 @@ apiVersion: v1
 kind: ResourceQuota
 metadata:
   annotations:
-    agents.vymalo.com/config-digest: sha256:dcce0421033b24f0e21585a9ea8b843d12866b6574e35a1a3ea6240da3854580
+    agents.vymalo.com/config-digest: sha256:86920e53874b51eabb4f5c019956cff2fdc3320c2ee7a0c79a497a967192d292
   labels:
     app.kubernetes.io/instance: coder
     app.kubernetes.io/managed-by: aap-operator
@@ -280,11 +304,297 @@ spec:
       values:
       - coder-run
 ---
+apiVersion: v1
+data:
+  allow.txt: |
+    # The hosts a run pod may reach through the egress proxy: runPods.egressProxy.allow and extraAllow.
+    registry.npmjs.org
+    pypi.org
+    files.pythonhosted.org
+    crates.io
+    index.crates.io
+    static.crates.io
+    proxy.golang.org
+    sum.golang.org
+    github.com
+    codeload.github.com
+    objects.githubusercontent.com
+    release-assets.githubusercontent.com
+    pub.dev
+kind: ConfigMap
+metadata:
+  annotations:
+    agents.vymalo.com/config-digest: sha256:86920e53874b51eabb4f5c019956cff2fdc3320c2ee7a0c79a497a967192d292
+  labels:
+    app.kubernetes.io/component: egress-proxy
+    app.kubernetes.io/instance: coder
+    app.kubernetes.io/managed-by: aap-operator
+    app.kubernetes.io/name: coder-egress
+  name: coder-egress-allow
+  namespace: another-agentic-system
+  ownerReferences:
+  - apiVersion: agents.vymalo.com/v1alpha1
+    controller: true
+    kind: AgentService
+    name: coder
+    uid: 0b1f3c5e-1111-4222-8333-444455556666
+---
+apiVersion: v1
+automountServiceAccountToken: false
+kind: ServiceAccount
+metadata:
+  annotations:
+    agents.vymalo.com/config-digest: sha256:86920e53874b51eabb4f5c019956cff2fdc3320c2ee7a0c79a497a967192d292
+  labels:
+    app.kubernetes.io/component: egress-proxy
+    app.kubernetes.io/instance: coder
+    app.kubernetes.io/managed-by: aap-operator
+    app.kubernetes.io/name: coder-egress
+  name: coder-egress
+  namespace: another-agentic-system
+  ownerReferences:
+  - apiVersion: agents.vymalo.com/v1alpha1
+    controller: true
+    kind: AgentService
+    name: coder
+    uid: 0b1f3c5e-1111-4222-8333-444455556666
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  annotations:
+    agents.vymalo.com/config-digest: sha256:86920e53874b51eabb4f5c019956cff2fdc3320c2ee7a0c79a497a967192d292
+  labels:
+    app.kubernetes.io/component: egress-proxy
+    app.kubernetes.io/instance: coder
+    app.kubernetes.io/managed-by: aap-operator
+    app.kubernetes.io/name: coder-egress
+  name: coder-egress
+  namespace: another-agentic-system
+  ownerReferences:
+  - apiVersion: agents.vymalo.com/v1alpha1
+    controller: true
+    kind: AgentService
+    name: coder
+    uid: 0b1f3c5e-1111-4222-8333-444455556666
+spec:
+  replicas: 2
+  selector:
+    matchLabels:
+      app.kubernetes.io/component: egress-proxy
+      app.kubernetes.io/instance: coder
+      app.kubernetes.io/name: coder-egress
+  strategy:
+    rollingUpdate:
+      maxSurge: 1
+      maxUnavailable: 0
+    type: RollingUpdate
+  template:
+    metadata:
+      annotations:
+        checksum/egress-allow: 45a14425f69b8e64ef0898a5967755bde40862ff2d1f79de32e68f4a2caca7ab
+      labels:
+        app.kubernetes.io/component: egress-proxy
+        app.kubernetes.io/instance: coder
+        app.kubernetes.io/name: coder-egress
+    spec:
+      automountServiceAccountToken: false
+      containers:
+      - command:
+        - tini
+        - --
+        - adam-egress
+        env:
+        - name: EGRESS_LISTEN
+          value: 0.0.0.0:3128
+        - name: EGRESS_ALLOW_FILE
+          value: /etc/adam-egress/allow.txt
+        - name: EGRESS_PORTS
+          value: '443'
+        - name: EGRESS_DENY_CIDRS
+          value: 10.0.0.0/8,172.16.0.0/12,192.168.0.0/16,169.254.0.0/16,100.64.0.0/10
+        image: ghcr.io/vymalo/another-adam-rs/coder:sha-0391809@sha256:814d8ee329a5e4d8634e8a82532c035999c4be27aac086508b742a635449ea40
+        imagePullPolicy: IfNotPresent
+        lifecycle:
+          preStop:
+            exec:
+              command:
+              - sleep
+              - '5'
+        livenessProbe:
+          failureThreshold: 4
+          httpGet:
+            path: /healthz
+            port: proxy
+          periodSeconds: 15
+          timeoutSeconds: 3
+        name: egress
+        ports:
+        - containerPort: 3128
+          name: proxy
+          protocol: TCP
+        readinessProbe:
+          httpGet:
+            path: /healthz
+            port: proxy
+          periodSeconds: 5
+          timeoutSeconds: 3
+        resources:
+          limits:
+            memory: 256Mi
+          requests:
+            cpu: 25m
+            memory: 32Mi
+        securityContext:
+          allowPrivilegeEscalation: false
+          capabilities:
+            drop:
+            - ALL
+          readOnlyRootFilesystem: true
+        volumeMounts:
+        - mountPath: /etc/adam-egress
+          name: allow
+          readOnly: true
+      enableServiceLinks: false
+      securityContext:
+        runAsGroup: 10001
+        runAsNonRoot: true
+        runAsUser: 10001
+        seccompProfile:
+          type: RuntimeDefault
+      serviceAccountName: coder-egress
+      terminationGracePeriodSeconds: 45
+      volumes:
+      - configMap:
+          name: coder-egress-allow
+        name: allow
+---
+apiVersion: v1
+kind: Service
+metadata:
+  annotations:
+    agents.vymalo.com/config-digest: sha256:86920e53874b51eabb4f5c019956cff2fdc3320c2ee7a0c79a497a967192d292
+  labels:
+    app.kubernetes.io/component: egress-proxy
+    app.kubernetes.io/instance: coder
+    app.kubernetes.io/managed-by: aap-operator
+    app.kubernetes.io/name: coder-egress
+  name: coder-egress
+  namespace: another-agentic-system
+  ownerReferences:
+  - apiVersion: agents.vymalo.com/v1alpha1
+    controller: true
+    kind: AgentService
+    name: coder
+    uid: 0b1f3c5e-1111-4222-8333-444455556666
+spec:
+  ports:
+  - name: proxy
+    port: 3128
+    protocol: TCP
+    targetPort: proxy
+  selector:
+    app.kubernetes.io/component: egress-proxy
+    app.kubernetes.io/instance: coder
+    app.kubernetes.io/name: coder-egress
+  type: ClusterIP
+---
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  annotations:
+    agents.vymalo.com/config-digest: sha256:86920e53874b51eabb4f5c019956cff2fdc3320c2ee7a0c79a497a967192d292
+  labels:
+    app.kubernetes.io/component: egress-proxy
+    app.kubernetes.io/instance: coder
+    app.kubernetes.io/managed-by: aap-operator
+    app.kubernetes.io/name: coder-egress
+  name: coder-egress
+  namespace: another-agentic-system
+  ownerReferences:
+  - apiVersion: agents.vymalo.com/v1alpha1
+    controller: true
+    kind: AgentService
+    name: coder
+    uid: 0b1f3c5e-1111-4222-8333-444455556666
+spec:
+  minAvailable: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/component: egress-proxy
+      app.kubernetes.io/instance: coder
+      app.kubernetes.io/name: coder-egress
+---
 apiVersion: networking.k8s.io/v1
 kind: NetworkPolicy
 metadata:
   annotations:
-    agents.vymalo.com/config-digest: sha256:dcce0421033b24f0e21585a9ea8b843d12866b6574e35a1a3ea6240da3854580
+    agents.vymalo.com/config-digest: sha256:86920e53874b51eabb4f5c019956cff2fdc3320c2ee7a0c79a497a967192d292
+  labels:
+    app.kubernetes.io/component: egress-proxy
+    app.kubernetes.io/instance: coder
+    app.kubernetes.io/managed-by: aap-operator
+    app.kubernetes.io/name: coder-egress
+  name: coder-egress
+  namespace: another-agentic-system
+  ownerReferences:
+  - apiVersion: agents.vymalo.com/v1alpha1
+    controller: true
+    kind: AgentService
+    name: coder
+    uid: 0b1f3c5e-1111-4222-8333-444455556666
+spec:
+  egress:
+  - ports:
+    - port: 53
+      protocol: UDP
+    - port: 53
+      protocol: TCP
+    to:
+    - namespaceSelector:
+        matchLabels:
+          kubernetes.io/metadata.name: kube-system
+      podSelector:
+        matchLabels:
+          k8s-app: kube-dns
+  - ports:
+    - port: 443
+      protocol: TCP
+    to:
+    - ipBlock:
+        cidr: 0.0.0.0/0
+        except:
+        - 10.0.0.0/8
+        - 172.16.0.0/12
+        - 192.168.0.0/16
+        - 169.254.0.0/16
+        - 100.64.0.0/10
+  ingress:
+  - from:
+    - podSelector:
+        matchExpressions:
+        - key: adam.vymalo.com/run
+          operator: Exists
+        matchLabels:
+          app.kubernetes.io/instance: coder
+          app.kubernetes.io/managed-by: adam-coder
+    ports:
+    - port: 3128
+      protocol: TCP
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/component: egress-proxy
+      app.kubernetes.io/instance: coder
+      app.kubernetes.io/name: coder-egress
+  policyTypes:
+  - Ingress
+  - Egress
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  annotations:
+    agents.vymalo.com/config-digest: sha256:86920e53874b51eabb4f5c019956cff2fdc3320c2ee7a0c79a497a967192d292
   labels:
     app.kubernetes.io/instance: coder
     app.kubernetes.io/managed-by: aap-operator
@@ -311,15 +621,15 @@ spec:
       podSelector:
         matchLabels:
           k8s-app: kube-dns
-  - to:
-    - ipBlock:
-        cidr: 0.0.0.0/0
-        except:
-        - 10.0.0.0/8
-        - 172.16.0.0/12
-        - 192.168.0.0/16
-        - 169.254.0.0/16
-        - 100.64.0.0/10
+  - ports:
+    - port: 3128
+      protocol: TCP
+    to:
+    - podSelector:
+        matchLabels:
+          app.kubernetes.io/component: egress-proxy
+          app.kubernetes.io/instance: coder
+          app.kubernetes.io/name: coder-egress
   ingress: []
   podSelector:
     matchExpressions:
@@ -336,7 +646,7 @@ apiVersion: rbac.authorization.k8s.io/v1
 kind: RoleBinding
 metadata:
   annotations:
-    agents.vymalo.com/config-digest: sha256:dcce0421033b24f0e21585a9ea8b843d12866b6574e35a1a3ea6240da3854580
+    agents.vymalo.com/config-digest: sha256:86920e53874b51eabb4f5c019956cff2fdc3320c2ee7a0c79a497a967192d292
   labels:
     app.kubernetes.io/instance: coder
     app.kubernetes.io/managed-by: aap-operator
@@ -362,7 +672,7 @@ apiVersion: v1
 kind: Service
 metadata:
   annotations:
-    agents.vymalo.com/config-digest: sha256:dcce0421033b24f0e21585a9ea8b843d12866b6574e35a1a3ea6240da3854580
+    agents.vymalo.com/config-digest: sha256:86920e53874b51eabb4f5c019956cff2fdc3320c2ee7a0c79a497a967192d292
   labels:
     app.kubernetes.io/instance: coder
     app.kubernetes.io/managed-by: aap-operator
@@ -390,7 +700,7 @@ apiVersion: apps/v1
 kind: StatefulSet
 metadata:
   annotations:
-    agents.vymalo.com/config-digest: sha256:dcce0421033b24f0e21585a9ea8b843d12866b6574e35a1a3ea6240da3854580
+    agents.vymalo.com/config-digest: sha256:86920e53874b51eabb4f5c019956cff2fdc3320c2ee7a0c79a497a967192d292
     agents.vymalo.com/deletion-policy: Retain
   labels:
     app.kubernetes.io/component: agent
@@ -419,7 +729,7 @@ spec:
   template:
     metadata:
       annotations:
-        agents.vymalo.com/config-digest: sha256:dcce0421033b24f0e21585a9ea8b843d12866b6574e35a1a3ea6240da3854580
+        agents.vymalo.com/config-digest: sha256:86920e53874b51eabb4f5c019956cff2fdc3320c2ee7a0c79a497a967192d292
       labels:
         app.kubernetes.io/component: agent
         app.kubernetes.io/instance: coder
@@ -663,7 +973,7 @@ apiVersion: networking.k8s.io/v1
 kind: NetworkPolicy
 metadata:
   annotations:
-    agents.vymalo.com/config-digest: sha256:dcce0421033b24f0e21585a9ea8b843d12866b6574e35a1a3ea6240da3854580
+    agents.vymalo.com/config-digest: sha256:86920e53874b51eabb4f5c019956cff2fdc3320c2ee7a0c79a497a967192d292
   labels:
     app.kubernetes.io/instance: coder
     app.kubernetes.io/managed-by: aap-operator

@@ -112,6 +112,309 @@
         }
       ]
     },
+    "egressProxy": {
+      "allowList": {
+        "data": {
+          "allow.txt": "# The hosts a run pod may reach through the egress proxy: runPods.egressProxy.allow and extraAllow.\nregistry.npmjs.org\npypi.org\nfiles.pythonhosted.org\ncrates.io\nindex.crates.io\nstatic.crates.io\nproxy.golang.org\nsum.golang.org\ngithub.com\ncodeload.github.com\nobjects.githubusercontent.com\nrelease-assets.githubusercontent.com\npub.dev\nartifacts.example.com\n.mirror.example.com\n"
+        },
+        "labels": {
+          "app.kubernetes.io/component": "egress-proxy",
+          "app.kubernetes.io/instance": "coder",
+          "app.kubernetes.io/name": "coder-egress"
+        },
+        "name": "coder-egress-allow"
+      },
+      "deployment": {
+        "automountServiceAccountToken": false,
+        "containers": [
+          {
+            "args": [],
+            "command": [
+              "tini",
+              "--",
+              "adam-egress"
+            ],
+            "env": [
+              {
+                "literal": "0.0.0.0:3128",
+                "name": "EGRESS_LISTEN"
+              },
+              {
+                "literal": "/etc/adam-egress/allow.txt",
+                "name": "EGRESS_ALLOW_FILE"
+              },
+              {
+                "literal": "443,8443",
+                "name": "EGRESS_PORTS"
+              },
+              {
+                "literal": "10.0.0.0/8,172.16.0.0/12,192.168.0.0/16,169.254.0.0/16,100.64.0.0/10,10.42.0.0/16,10.43.0.0/16",
+                "name": "EGRESS_DENY_CIDRS"
+              }
+            ],
+            "image": "ghcr.io/vymalo/another-adam-rs/coder:sha-0391809",
+            "imagePullPolicy": "IfNotPresent",
+            "lifecycle": {
+              "preStop": {
+                "exec": {
+                  "command": [
+                    "sleep",
+                    "5"
+                  ]
+                }
+              }
+            },
+            "livenessProbe": {
+              "failureThreshold": 4,
+              "httpGet": {
+                "path": "/healthz",
+                "port": "proxy"
+              },
+              "periodSeconds": 15,
+              "timeoutSeconds": 3
+            },
+            "name": "egress",
+            "ports": [
+              {
+                "containerPort": 3128,
+                "name": "proxy",
+                "protocol": "TCP"
+              }
+            ],
+            "readinessProbe": {
+              "httpGet": {
+                "path": "/healthz",
+                "port": "proxy"
+              },
+              "periodSeconds": 5,
+              "timeoutSeconds": 3
+            },
+            "resources": {
+              "limits": {
+                "cpu": "500m",
+                "memory": "128Mi"
+              },
+              "requests": {
+                "cpu": "100m",
+                "memory": "64Mi"
+              }
+            },
+            "securityContext": {
+              "allowPrivilegeEscalation": false,
+              "capabilities": {
+                "drop": [
+                  "ALL"
+                ]
+              },
+              "readOnlyRootFilesystem": true
+            },
+            "volumeMounts": [
+              {
+                "mountPath": "/etc/adam-egress",
+                "name": "allow",
+                "readOnly": true
+              }
+            ]
+          }
+        ],
+        "enableServiceLinks": false,
+        "labels": {
+          "app.kubernetes.io/component": "egress-proxy",
+          "app.kubernetes.io/instance": "coder",
+          "app.kubernetes.io/name": "coder-egress"
+        },
+        "name": "coder-egress",
+        "podAnnotationKeys": [
+          "checksum/egress-allow"
+        ],
+        "podLabels": {
+          "app.kubernetes.io/component": "egress-proxy",
+          "app.kubernetes.io/instance": "coder",
+          "app.kubernetes.io/name": "coder-egress"
+        },
+        "replicas": 3,
+        "securityContext": {
+          "runAsGroup": 10001,
+          "runAsNonRoot": true,
+          "runAsUser": 10001,
+          "seccompProfile": {
+            "type": "RuntimeDefault"
+          }
+        },
+        "selector": {
+          "matchLabels": {
+            "app.kubernetes.io/component": "egress-proxy",
+            "app.kubernetes.io/instance": "coder",
+            "app.kubernetes.io/name": "coder-egress"
+          }
+        },
+        "serviceAccountName": "coder-egress",
+        "strategy": {
+          "rollingUpdate": {
+            "maxSurge": 1,
+            "maxUnavailable": 0
+          },
+          "type": "RollingUpdate"
+        },
+        "terminationGracePeriodSeconds": 45,
+        "volumes": [
+          {
+            "configMap": {
+              "name": "coder-egress-allow"
+            },
+            "name": "allow"
+          }
+        ]
+      },
+      "networkPolicy": {
+        "egress": [
+          {
+            "ports": [
+              {
+                "port": 53,
+                "protocol": "UDP"
+              },
+              {
+                "port": 53,
+                "protocol": "TCP"
+              }
+            ],
+            "to": [
+              {
+                "namespaceSelector": {
+                  "matchLabels": {
+                    "kubernetes.io/metadata.name": "dns-system"
+                  }
+                },
+                "podSelector": {
+                  "matchLabels": {
+                    "app": "coredns"
+                  }
+                }
+              }
+            ]
+          },
+          {
+            "ports": [
+              {
+                "port": 443,
+                "protocol": "TCP"
+              },
+              {
+                "port": 8443,
+                "protocol": "TCP"
+              }
+            ],
+            "to": [
+              {
+                "ipBlock": {
+                  "cidr": "0.0.0.0/0",
+                  "except": [
+                    "10.0.0.0/8",
+                    "172.16.0.0/12",
+                    "192.168.0.0/16",
+                    "169.254.0.0/16",
+                    "100.64.0.0/10",
+                    "10.42.0.0/16",
+                    "10.43.0.0/16"
+                  ]
+                }
+              }
+            ]
+          }
+        ],
+        "ingress": [
+          {
+            "from": [
+              {
+                "podSelector": {
+                  "matchExpressions": [
+                    {
+                      "key": "adam.vymalo.com/run",
+                      "operator": "Exists"
+                    }
+                  ],
+                  "matchLabels": {
+                    "app.kubernetes.io/instance": "coder",
+                    "app.kubernetes.io/managed-by": "adam-coder"
+                  }
+                }
+              }
+            ],
+            "ports": [
+              {
+                "port": 3128,
+                "protocol": "TCP"
+              }
+            ]
+          }
+        ],
+        "labels": {
+          "app.kubernetes.io/component": "egress-proxy",
+          "app.kubernetes.io/instance": "coder",
+          "app.kubernetes.io/name": "coder-egress"
+        },
+        "name": "coder-egress",
+        "podSelector": {
+          "matchLabels": {
+            "app.kubernetes.io/component": "egress-proxy",
+            "app.kubernetes.io/instance": "coder",
+            "app.kubernetes.io/name": "coder-egress"
+          }
+        },
+        "policyTypes": [
+          "Ingress",
+          "Egress"
+        ]
+      },
+      "podDisruptionBudget": {
+        "labels": {
+          "app.kubernetes.io/component": "egress-proxy",
+          "app.kubernetes.io/instance": "coder",
+          "app.kubernetes.io/name": "coder-egress"
+        },
+        "minAvailable": 1,
+        "name": "coder-egress",
+        "selector": {
+          "matchLabels": {
+            "app.kubernetes.io/component": "egress-proxy",
+            "app.kubernetes.io/instance": "coder",
+            "app.kubernetes.io/name": "coder-egress"
+          }
+        }
+      },
+      "service": {
+        "labels": {
+          "app.kubernetes.io/component": "egress-proxy",
+          "app.kubernetes.io/instance": "coder",
+          "app.kubernetes.io/name": "coder-egress"
+        },
+        "name": "coder-egress",
+        "ports": [
+          {
+            "name": "proxy",
+            "port": 3128,
+            "protocol": "TCP",
+            "targetPort": "proxy"
+          }
+        ],
+        "selector": {
+          "app.kubernetes.io/component": "egress-proxy",
+          "app.kubernetes.io/instance": "coder",
+          "app.kubernetes.io/name": "coder-egress"
+        },
+        "type": "ClusterIP"
+      },
+      "serviceAccount": {
+        "automountServiceAccountToken": false,
+        "labels": {
+          "app.kubernetes.io/component": "egress-proxy",
+          "app.kubernetes.io/instance": "coder",
+          "app.kubernetes.io/name": "coder-egress"
+        },
+        "name": "coder-egress"
+      }
+    },
     "networkPolicy": {
       "egress": [
         {
@@ -141,19 +444,20 @@
           ]
         },
         {
+          "ports": [
+            {
+              "port": 3128,
+              "protocol": "TCP"
+            }
+          ],
           "to": [
             {
-              "ipBlock": {
-                "cidr": "0.0.0.0/0",
-                "except": [
-                  "10.0.0.0/8",
-                  "172.16.0.0/12",
-                  "192.168.0.0/16",
-                  "169.254.0.0/16",
-                  "100.64.0.0/10",
-                  "10.42.0.0/16",
-                  "10.43.0.0/16"
-                ]
+              "podSelector": {
+                "matchLabels": {
+                  "app.kubernetes.io/component": "egress-proxy",
+                  "app.kubernetes.io/instance": "coder",
+                  "app.kubernetes.io/name": "coder-egress"
+                }
               }
             }
           ]
@@ -321,6 +625,30 @@
                   "value": "4"
                 },
                 {
+                  "name": "HTTPS_PROXY",
+                  "value": "http://coder-egress.another-agentic-system.svc:3128"
+                },
+                {
+                  "name": "https_proxy",
+                  "value": "http://coder-egress.another-agentic-system.svc:3128"
+                },
+                {
+                  "name": "HTTP_PROXY",
+                  "value": "http://coder-egress.another-agentic-system.svc:3128"
+                },
+                {
+                  "name": "http_proxy",
+                  "value": "http://coder-egress.another-agentic-system.svc:3128"
+                },
+                {
+                  "name": "NO_PROXY",
+                  "value": "localhost,127.0.0.1,models.internal,.svc"
+                },
+                {
+                  "name": "no_proxy",
+                  "value": "localhost,127.0.0.1,models.internal,.svc"
+                },
+                {
                   "name": "FOO",
                   "value": "bar"
                 },
@@ -459,7 +787,7 @@
     "namespace": "another-agentic-system",
     "release": "coder",
     "repository": "https://github.com/vymalo/another-adam-rs",
-    "revision": "3f714d08132c6b4bb5530753105cfdb12d97a914",
+    "revision": "75982554a5e90e274ec6f7cad19e742a7fae0495",
     "values": "tools/adam-parity/cases/coder-run-pods-tuned.yaml"
   },
   "workloads": {

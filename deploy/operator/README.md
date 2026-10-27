@@ -120,7 +120,7 @@ With `runPods.enabled` the table gains these rows, and no other (`tests/render-c
 
 ## Run pods
 
-A coder can run the commands of a run in **pods of their own** instead of in its own container (adam-rs [#131](https://github.com/vymalo/another-adam-rs/pull/131)): it makes a pod from a template, runs `exec` in it, and deletes it. That needs, besides the coder, a template, an account that may make pods, a quota, a network policy and a guard that stops the account making any other pod. adam-rs's coder chart renders them; with `runPods.enabled` this chart and the operator do, for an `AgentConfig` that sets `coder.runPods.sizeClass`, and for no other (slice D15a, [§60a](../../docs/architecture/10-control-plane-and-crds.md), the *D15a built* note).
+A coder can run the commands of a run in **pods of their own** instead of in its own container (adam-rs [#131](https://github.com/vymalo/another-adam-rs/pull/131)): it makes a pod from a template, runs `exec` in it, and deletes it. That needs, besides the coder, a template, an account that may make pods, a quota, a network policy that is **deny by default** with an **egress proxy** as the one way out (D15c, adam-rs's ADR 0042), and a guard that stops the account making any other pod. adam-rs's coder chart renders them; with `runPods.enabled` this chart and the operator do, for an `AgentConfig` that sets `coder.runPods.sizeClass`, and for no other (slices D15a and D15c, [§60a](../../docs/architecture/10-control-plane-and-crds.md), the *D15a built* and *D15c built* notes).
 
 ```mermaid
 sequenceDiagram
@@ -131,7 +131,8 @@ sequenceDiagram
   participant W as the coder's worker
   P->>K: AgentConfig with coder.runPods.sizeClass
   O->>K: ConfigMap <service>-run-pods-policy (the guard's parameters)
-  O->>K: ServiceAccount, ResourceQuota, NetworkPolicy
+  O->>K: ServiceAccount, ResourceQuota
+  O->>K: the egress proxy (file, account, Deployment, Service, budget, policy), then the run pods' NetworkPolicy (deny by default)
   O->>K: RoleBinding <service>-run-pods (the right to make pods), then the Service and the workers
   W->>K: create a pod from the template, as the account
   K->>G: the 9 rules, with the account's parameters
@@ -139,16 +140,16 @@ sequenceDiagram
   P->>K: the config stops asking, or the service is deleted
   O->>K: delete the RoleBinding first, then the run pods
   O->>K: apply the workers without the account (and null both names it has for it)
-  O->>K: delete the quota, the network policy, the parameters, the template, and the account last
+  O->>K: delete the egress proxy and its policy, the run pods' policy last of the policies, then the quota, the parameters, the template, and the accounts last
 ```
 
 ```mermaid
 stateDiagram-v2
   [*] --> NoRunPods: no sizeClass
-  NoRunPods --> Guarded: sizeClass set (parameters, account, quota, network policy)
+  NoRunPods --> Guarded: sizeClass set (parameters, account, quota, egress proxy, network policy)
   Guarded --> MayMakePods: the RoleBinding is applied
   MayMakePods --> Removing: sizeClass removed, or the service deleted
-  Removing --> NoRunPods: binding and pods gone, workers freed of the account, then quota, network policy, parameters, template, account gone
+  Removing --> NoRunPods: binding and pods gone, workers freed of the account, then the proxy, network policies, quota, parameters, template, accounts gone
   MayMakePods --> Unguarded: a person deletes the parameters
   Unguarded --> MayMakePods: the next reconcile makes them again
 ```
@@ -171,13 +172,16 @@ api:
 | `runPods.image.repository`, `.tag`, `.digest`, `.pullPolicy` | the `workspace` image of another-agentic-images, `1.98.1-e6a528f`, its digest, `IfNotPresent` | The run container. **Tag and digest are required**, and `latest` is refused: the commands of every run execute in it. *Verified 2026-10-11* in the coder chart by an anonymous manifest request; not re-checked here |
 | `runPods.container` | `run` | The container of the template the commands run in (`RUN_POD_CONTAINER`) |
 | `runPods.cargoBuildJobs` | `2` | `CARGO_BUILD_JOBS`, so that a Rust build stays inside the 2Gi of `standard` |
-| `runPods.extraEnv` | `{}` | More variables of the run container, text values; `MODEL_API_KEY` and `CARGO_BUILD_JOBS` are the operator's and refused |
+| `runPods.extraEnv` | `{}` | More variables of the run container, text values; `MODEL_API_KEY`, `CARGO_BUILD_JOBS` and the six proxy variables (`HTTPS_PROXY`, `HTTP_PROXY`, `NO_PROXY`, lower case too) are the operator's and refused |
 | `runPods.priorityClassName` | `""` | Empty: the chart makes `<fullname>-<namespace>-run` (value 0, never preempts). A name: yours, and the chart makes none |
 | `runPods.quota.limitsMemory`, `.pods` | `8Gi`, `4` | What the run pods **of the namespace's priority class** may use in all. A pod beyond it is refused (`exceeded quota`) and the coder waits (`waitSecs`) |
 | `runPods.idleSecs`, `.readyTimeoutSecs`, `.waitSecs` | `900`, `600`, `600` | A pod nobody used for this long is deleted (0: when its run ends); how long a pod may take to be ready; how long a run waits for a slot |
 | `runPods.nodeSelector`, `.tolerations`, `.nodeAffinity` | none | Where run pods may go, on top of what the volume needs |
 | `runPods.extraAllowedImages` | `[]` | Images a run pod may use besides the run image and the coder's own, spelled as the pod spells them |
-| `runPods.networkPolicy.*` | on; no cluster CIDR; the RFC 1918 ranges, link-local and shared address space blocked; DNS in `kube-system` | No ingress. Egress to DNS and the internet except the blocked ranges. Name your pod and service CIDRs in `clusterCIDRs`; `extraEgress` takes `NetworkPolicy` egress rules (the model gateway, when it is in the cluster). IPv4 only. Only as real as the CNI |
+| `runPods.networkPolicy.*` | no cluster CIDR; the RFC 1918 ranges, link-local and shared address space blocked; DNS in `kube-system` | **Deny by default (D15c)**: no ingress, egress to DNS, to the egress proxy and to `extraEgress`, and nothing else. **There is no switch**: `enabled: false` is refused, `true` is tolerated and ignored. The ranges are what the **proxy** never connects to and its own policy leaves out; name your pod and service CIDRs in `clusterCIDRs`. `extraEgress` takes `NetworkPolicy` egress rules for an in-cluster target the proxy cannot serve (the model gateway, when it is in the cluster; add its host to `egressProxy.extraNoProxy` too). IPv4 only: no rule names an IPv6 range. Only as real as the CNI |
+| `runPods.egressProxy.allow`, `.extraAllow` | the coder chart's list: npm, PyPI, crates.io, Go, GitHub, pub.dev (13 hosts; no `storage.googleapis.com`); `[]` | The hosts a run pod may reach, through the proxy and nowhere else. `example.com` is that host, `.example.com` every subdomain of it and not the apex; a bare suffix (`.com`), a URL, a port, a wildcard, an IP address and an empty list are refused at render. **A deployment setting: an `AgentConfig` cannot extend it.** A model gateway outside the cluster that run pods call goes in `extraAllow`, which survives a change of the defaults |
+| `runPods.egressProxy.extraNoProxy` | `[]` | Names the tools reach without the proxy (`NO_PROXY`, after `localhost,127.0.0.1`): the host of an `extraEgress` target |
+| `runPods.egressProxy.replicas`, `.ports`, `.resources` | `2` (a budget keeps one up through a drain), `[443]`, 25m / 32Mi, limit 256Mi | Pods of the proxy per agent; the ports a `CONNECT` may name and the only TCP ports the proxy's pods may reach; its container |
 | `runPodClasses.<name>.requests`, `.limits` | `standard`: 250m / 512Mi, limit 2Gi | The size classes an `AgentConfig` picks by name. **`limits.memory` is required** (the quota counts it) and must not exceed `runPods.quota.limitsMemory` (the operator refuses to start otherwise, naming the class) |
 
 **The operator's and the API's images must be from slice D15a or later** before this is turned on: an older operator ignores `RUN_PODS_FILE` and `coder.runPods` (the agent runs without run pods, silently), and an older API refuses, at start, the `defaults.runPodSizeClasses` the chart then writes (it fails closed). `image.tag` and `api.image.tag` are bumped by CI after the build of the commit that introduced this.
@@ -191,12 +195,15 @@ The chart writes the operator's settings (`runPods`, `runPodClasses`, and the na
 | Pod template | the operator | ConfigMap `<service>-run-pod`, mounted at `/etc/adam/run-pod/pod.yaml` in the workers | `RUN_POD_TEMPLATE_FILE`; the pod is the coder chart's, from the same values |
 | Account | the operator | ServiceAccount `<service>` | The workers run as it, with its token; no other pod mounts the token |
 | Quota | the operator | ResourceQuota `<service>-run-pods` | `pods` and `limits.memory`, scoped to the priority class |
-| Network policy | the operator | NetworkPolicy `<service>-run-pods` | Selects the run pods of the service by label: no ingress, DNS and the internet except the private ranges |
+| Network policy | the operator | NetworkPolicy `<service>-run-pods` | Selects the run pods of the service by label: no ingress, egress to DNS and to the egress proxy's pods on 3128 (and `extraEgress`), nothing else |
+| Egress proxy | the operator | Deployment, Service, ServiceAccount, PodDisruptionBudget, NetworkPolicy `<service>-egress`, ConfigMap `<service>-egress-allow` | The one way out (D15c, adam-rs ADR 0042): `adam-egress` from the agent's own image accepts `CONNECT host:443` to the allow-listed hosts and nothing else, resolves the name itself and connects to public IPv4 addresses only. Its policy admits the run pods alone and reaches DNS and the internet on 443 except the blocked ranges. No token, a read-only root file system, uid 10001. Made before the policy that names it and before the right to make pods; removed before the run pods' policy |
 | Right to make pods | the operator | RoleBinding `<service>-run-pods` to the Role below | Made last, removed first |
 | Guard's parameters | the operator | ConfigMap `<service>-run-pods-policy`, labelled `agents.vymalo.com/run-pods-policy` | The account, the labels, the images, the claim, the Secret key; read by the policy |
 | Role | **the chart** | `<fullname>-run-pods` | `pods` create, delete, get, list, watch; `pods/exec` create, get. Nothing else |
 | PriorityClass | **the chart** | `<fullname>-<namespace>-run` | A quota cannot select pods by label, it can by priority class. Cluster-scoped |
 | Admission policy and binding | **the chart** | `<fullname>-<namespace>-run-pods` | One policy for every agent: the 9 rules of the coder chart's policy, with the values read from the parameters of the account that makes the pod. Cluster-scoped |
+
+**The proxy runs the agent's own coder image, and that image must contain `adam-egress`** (adam-rs `ff10395` or later, [#134](https://github.com/vymalo/another-adam-rs/pull/134)): with an older one the proxy's pod cannot start, and a run pod, under a policy that denies the rest, reaches nothing (a command that fetches fails; one that does not, runs). The operator cannot tell (an image is a tag, and tags have no order) and does not refuse, and the proxy is no workload of the service, so a proxy that does not start does not make the service `Failed`: look at `kubectl get pods -l app.kubernetes.io/component=egress-proxy`. **`defaultAgentImage` below is older than `ff10395`**: an agent with run pods that names no image of its own gets a proxy that does not start; name `environment.image` (tag and digest) from adam-rs `ff10395` or later, as `tests/e2e/run-pods.yaml` does.
 
 The operator makes nothing cluster-scoped and has **no `ClusterRole`**; the chart makes the four objects marked *the chart* above (the `PriorityClass`, the policy and its binding are cluster-scoped, and Helm's administrator may make them). Every object the operator makes carries the labels, the digest annotation and the owner reference of the agent's other objects, so a deleted service takes them with it; an object of the same name that the operator did not make is a reported conflict and is left alone.
 
@@ -209,6 +216,7 @@ The operator makes nothing cluster-scoped and has **no `ClusterRole`**; the char
 5. **Turning `runPods.enabled` off does not clear anything.** Without the settings the operator has no right on the account, the quota and the binding, so it does not look for them: an agent that made run pods keeps their objects (and the right to make pods that its binding gives, and the guard's parameters) until the agent is deleted, when its owner reference takes them away. **Remove `coder.runPods` from the configs first**, wait for the objects to go, then turn the value off.
 6. **Kubernetes 1.30 or later** has the v1 admission policy API; the policy uses `params` in a **match condition**, which was *verified 2026-10-26* on v1.35.8 and **not on an older version**. A cluster whose API server refuses the policy fails the install, not an agent.
 7. **A GitHub App coder without run pods** is not refused by the operator. At adam-rs `3f714d0` the coder itself exits 78 and says why unless the risk is accepted by name (`ALLOW_COMMANDS_NEXT_TO_SECRETS` in the `AgentConfig`'s `extraEnv`); `defaultAgentImage` is older and does not. **The day it moves to an image that includes #131, a coder with an App needs run pods or the acknowledgement in the same change.**
+8. **A run pod reaches the internet through the proxy or not at all** (D15c, adam-rs ADR 0042). A tool that ignores `HTTPS_PROXY` gets no connection (a timeout, not a leak); plain `http://` is answered `403` by the proxy; `apt` is out (run pods are not root). curl and npm are tried by `run-pods-e2e` (*unverified* until CI has run it); git, cargo, pip and go are documented to read the variables and not tried. **Not covered:** domain fronting (a client can name an allowed host in the `CONNECT` and another in the TLS handshake), what an allowed host accepts (an upload with a credential of the attacker's own), DNS as a channel, and the proxy having no authentication (the policy says who may reach it). **Pods made before the upgrade have no proxy variables** and, under the new policy, no way out, until the idle sweep or the end of their run replaces them (at most `runPods.idleSecs`, 900 by default, after their last command). A cluster whose CNI does not enforce `NetworkPolicy` gets the proxy and no deny.
 
 ### Checking a cluster
 
@@ -558,7 +566,7 @@ CI also runs kubeconform in strict mode over eight renders (the defaults, netcup
 
 ## What is not proven
 
-* **Run pods have not run on a kubelet.** The chart renders, lints, passes kubeconform (strict, Kubernetes 1.31 schemas), the policy was run against a **bare kube-apiserver v1.35.8** with `tests/run-pods-admission.sh` (25 refusals, each with its rule's message), and `tests/e2e/run-pods-e2e.sh` was walked (2026-10-27) against that server with RBAC on, **the real operator running as its own service account** (the Role of this chart was enough: no reconcile was refused), the real coder (the code of adam-rs `3f714d0`) and a Postgres, with a stand-in for the kubelet and no network plugin. **Not proven until the job `run-pods-e2e` has run in CI** ([`tests/e2e/README.md`](tests/e2e/README.md#the-kind-end-to-end-of-run-pods-d15b), [§60a, *D15b built*](../../docs/architecture/10-control-plane-and-crds.md)): that a real kubelet starts the pod, that the quota counts it there, that kindnet enforces the egress rule, that the `exec` works over a WebSocket on 1.35 with this Role, a Kubernetes older than 1.35 (`params` in a match condition) and Pod Security admission. D15 stays open until the job has run green.
+* **Run pods have run on a kubelet, the egress proxy has not (yet).** The chart renders, lints, passes kubeconform (strict, Kubernetes 1.31 schemas), the policy was run against a **bare kube-apiserver v1.35.8** with `tests/run-pods-admission.sh` (25 refusals, each with its rule's message), and the job `run-pods-e2e` has run green in CI (D15b: run 40435825771 at `0b5a67f`, *verified 2026-10-27* with `gh run view`): a real kubelet started the run pod, the quota counted it, kindnet refused a run pod a private address, the `exec` worked with this Role on 1.35. **D15c** (the egress proxy: deny by default, the one way out, [§60a, *D15c built*](../../docs/architecture/10-control-plane-and-crds.md)) changed the script and the pin (`sha-7598255`), and its checks are **not proven until the job has run again**: that a kubelet starts the proxy from the pinned image, that kindnet drops a direct connection from a run pod to a public address, the API server and another pod, that `curl` and `npm` succeed through the proxy, that the proxy's log holds the decisions and nothing of the requests, and (not on kind) IPv6. Also unproven: a Kubernetes older than 1.35 (`params` in a match condition), Pod Security admission, git, cargo, pip and go through the proxy, and an agent whose image has no `adam-egress` (`defaultAgentImage` is one). D15 stays open until the job has run green with D15c's checks.
 
 * **The Platform API component has not run on a cluster where it was written.** It is rendered, linted, checked with kubeconform, and its file is read by the binary (`api --check`,
   here and in CI); the image is built by CI (not here: no container daemon runs where this was written). **D7b2 is the job that runs it**, `api-e2e`

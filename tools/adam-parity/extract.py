@@ -11,6 +11,12 @@ pod template (`<svc>-run-pod`, parsed), the ResourceQuota, the PriorityClass, th
 pods, the ServiceAccount, the Role and its binding, and the admission policy with its binding. A render
 without run pods has no `runPods` key.
 
+Since adam-rs #135 (the egress proxy, ADR 0042, slice D15c) it also projects, under `runPods.egressProxy`, the
+six objects of the proxy: its Deployment, Service, ServiceAccount, allow-list ConfigMap, PodDisruptionBudget and
+NetworkPolicy. They are found by the label `app.kubernetes.io/component: egress-proxy`, which no other object of
+the chart carries; their ServiceAccount, Service, ConfigMap, NetworkPolicy, PodDisruptionBudget and Deployment would
+otherwise be taken for the coder's own.
+
 Only facts the operator promises to keep are projected. The chart's own conveniences (labels,
 ExternalSecret, the CloudNativePG cluster, pull secrets, scheduling hints) are left out: the golden's
 README lists them. Needs PyYAML (`pip install pyyaml`).
@@ -147,14 +153,87 @@ def run_pod_object(doc, run_pods):
     return True
 
 
+# The labels that select the proxy's pods; the chart's other labels (version, managed-by, chart) are the release's.
+EGRESS_COMPONENT = "egress-proxy"
+EGRESS_LABELS = ("app.kubernetes.io/name", "app.kubernetes.io/instance", "app.kubernetes.io/component")
+
+
+def egress_labels(doc):
+    labels = doc["metadata"].get("labels", {})
+    return {k: labels[k] for k in EGRESS_LABELS if k in labels}
+
+
+def egress_container(c):
+    """The proxy's container, whole: every field the operator reproduces."""
+    return {
+        "name": c["name"],
+        "image": c["image"],
+        "imagePullPolicy": c.get("imagePullPolicy"),
+        "command": c.get("command", []),
+        "args": c.get("args", []),
+        "env": [source(e) for e in c.get("env", [])],
+        "ports": c.get("ports", []),
+        "securityContext": c.get("securityContext"),
+        "lifecycle": c.get("lifecycle"),
+        "readinessProbe": c.get("readinessProbe"),
+        "livenessProbe": c.get("livenessProbe"),
+        "resources": c.get("resources", {}),
+        "volumeMounts": c.get("volumeMounts", []),
+    }
+
+
+def egress_object(doc, egress):
+    """Project one object of the egress proxy (adam-rs ADR 0042)."""
+    kind, name = doc["kind"], doc["metadata"]["name"]
+    labels = egress_labels(doc)
+    if kind == "Deployment":
+        spec = doc["spec"]
+        pod = spec["template"]["spec"]
+        egress["deployment"] = {
+            "name": name, "labels": labels, "replicas": spec["replicas"], "strategy": spec["strategy"],
+            "selector": spec["selector"],
+            "podLabels": spec["template"]["metadata"]["labels"],
+            # The checksum itself is the chart's (a hash of its rendered ConfigMap): only that there is one is compared.
+            "podAnnotationKeys": sorted(spec["template"]["metadata"].get("annotations", {})),
+            "serviceAccountName": pod.get("serviceAccountName"),
+            "automountServiceAccountToken": pod.get("automountServiceAccountToken"),
+            "enableServiceLinks": pod.get("enableServiceLinks"),
+            "terminationGracePeriodSeconds": pod.get("terminationGracePeriodSeconds"),
+            "securityContext": pod.get("securityContext"),
+            "containers": [egress_container(c) for c in pod["containers"]],
+            "volumes": pod.get("volumes", []),
+        }
+    elif kind == "Service":
+        egress["service"] = {"name": name, "labels": labels, "type": doc["spec"]["type"],
+                             "selector": doc["spec"]["selector"], "ports": doc["spec"]["ports"]}
+    elif kind == "ServiceAccount":
+        egress["serviceAccount"] = {"name": name, "labels": labels,
+                                    "automountServiceAccountToken": doc.get("automountServiceAccountToken")}
+    elif kind == "ConfigMap":
+        egress["allowList"] = {"name": name, "labels": labels, "data": doc["data"]}
+    elif kind == "PodDisruptionBudget":
+        egress["podDisruptionBudget"] = {"name": name, "labels": labels, "minAvailable": doc["spec"]["minAvailable"],
+                                         "selector": doc["spec"]["selector"]}
+    elif kind == "NetworkPolicy":
+        s = doc["spec"]
+        egress["networkPolicy"] = {"name": name, "labels": labels, "podSelector": s["podSelector"],
+                                   "policyTypes": s["policyTypes"], "ingress": s.get("ingress", []),
+                                   "egress": s.get("egress", [])}
+    else:
+        raise SystemExit(f"an object of the egress proxy this projection does not know: {kind} {name}")
+
+
 def main():
     out = {"workloads": {}, "claims": {}, "configMaps": {}, "podDisruptionBudgets": {}, "service": None}
     run_pods = {}
+    egress = {}
     for doc in yaml.safe_load_all(sys.stdin):
         if not doc:
             continue
         kind, name = doc["kind"], doc["metadata"]["name"]
-        if kind in ("StatefulSet", "Deployment"):
+        if doc["metadata"].get("labels", {}).get("app.kubernetes.io/component") == EGRESS_COMPONENT:
+            egress_object(doc, egress)
+        elif kind in ("StatefulSet", "Deployment"):
             out["workloads"][name] = workload(doc)
         elif kind == "PersistentVolumeClaim":
             s = doc["spec"]
@@ -169,7 +248,17 @@ def main():
         elif kind == "Service":
             out["service"] = {"name": name, "port": doc["spec"]["ports"][0]["port"],
                               "selects": doc["spec"]["selector"]["app.kubernetes.io/name"]}
+    if egress and not run_pods:
+        raise SystemExit("an egress proxy without run pods")
     if run_pods:
+        # The budget is rendered for more than one replica only.
+        needed = {"deployment", "service", "serviceAccount", "allowList", "networkPolicy"}
+        if egress.get("deployment", {}).get("replicas", 0) > 1:
+            needed.add("podDisruptionBudget")
+        missing = needed - set(egress)
+        if missing:
+            raise SystemExit(f"run pods without these objects of the egress proxy: {sorted(missing)}")
+        run_pods["egressProxy"] = egress
         out["runPods"] = run_pods
     json.dump(out, sys.stdout, indent=2, sort_keys=True)
     sys.stdout.write("\n")

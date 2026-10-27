@@ -260,6 +260,36 @@ fn settings_for_run_pods_that_are_not_valid_stop_the_operator_before_it_looks_fo
         !ok && stderr.contains("not the settings of run pods"),
         "{stderr:?}"
     );
+    // The egress proxy (D15c): a file from before it (no `egressProxy`) and one that still has the switch the policy lost
+    // are not the settings of run pods; a list that would be empty, an entry that is a bare suffix, and a port that is none are named.
+    let without_proxy = chart_settings_file(&dir, |s| {
+        s.as_object_mut().expect("a map").remove("egressProxy");
+    });
+    let (ok, stderr) = run_with_run_pods_file(&without_proxy);
+    assert!(
+        !ok && stderr.contains("not the settings of run pods"),
+        "{stderr:?}"
+    );
+    let switch = chart_settings_file(&dir, |s| {
+        s["networkPolicy"]["enabled"] = serde_json::json!(false);
+    });
+    let (ok, stderr) = run_with_run_pods_file(&switch);
+    assert!(
+        !ok && stderr.contains("not the settings of run pods"),
+        "no way to run pods without the policy: {stderr:?}"
+    );
+    let bad_proxy = chart_settings_file(&dir, |s| {
+        s["egressProxy"]["allow"] = serde_json::json!([".com"]);
+        s["egressProxy"]["extraAllow"] = serde_json::json!([]);
+        s["egressProxy"]["ports"] = serde_json::json!([0]);
+    });
+    let (ok, stderr) = run_with_run_pods_file(&bad_proxy);
+    assert!(
+        !ok && stderr.contains("egressProxy.allow[0]")
+            && stderr.contains("bare suffix")
+            && stderr.contains("egressProxy.ports"),
+        "every mistake is named: {stderr}"
+    );
     let invalid = chart_settings_file(&dir, |s| {
         s["quota"]["pods"] = serde_json::json!(0);
         s["image"]["digest"] = serde_json::json!("sha256:short");

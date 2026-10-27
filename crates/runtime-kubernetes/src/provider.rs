@@ -107,7 +107,9 @@ impl PodTemplated for Deployment {
 ///
 /// Cheap to clone: every clone shares one client. It needs the right to `get`, `list`, `watch`,
 /// `patch` and `delete` the kinds it owns (StatefulSets, Deployments, Services, NetworkPolicies,
-/// PodDisruptionBudgets, ConfigMaps, claims, and for run pods ServiceAccounts, ResourceQuotas and RoleBindings) and
+/// PodDisruptionBudgets, ConfigMaps, claims, and for run pods ServiceAccounts, ResourceQuotas and RoleBindings; the egress
+/// proxy of run pods (D15c) is a Deployment, a Service, a ServiceAccount, a NetworkPolicy, a ConfigMap and a
+/// PodDisruptionBudget, so it needs no right the others do not) and
 /// to `list` and `watch` pods, and, only to clear the pods of a service that stops making run pods, to `delete`
 /// them. For run pods it also needs the right to **bind** the one Role the deployment made for them: it holds no
 /// right to make a pod or to `exec`, and Kubernetes refuses a binding of a role its maker could not use unless the
@@ -335,13 +337,44 @@ impl KubernetesRuntime {
                 self.foreign::<ResourceQuota>(id, &name_of(&run.quota.metadata))
                     .await?,
             );
-            if let Some(np) = &run.network_policy {
+            note(
+                first_role,
+                self.foreign::<NetworkPolicy>(id, &name_of(&run.network_policy.metadata))
+                    .await?,
+            );
+            let proxy = &run.egress_proxy;
+            note(
+                first_role,
+                self.foreign::<ConfigMap>(id, &name_of(&proxy.allow_list.metadata))
+                    .await?,
+            );
+            note(
+                first_role,
+                self.foreign::<ServiceAccount>(id, &name_of(&proxy.service_account.metadata))
+                    .await?,
+            );
+            note(
+                first_role,
+                self.foreign::<Deployment>(id, &name_of(&proxy.deployment.metadata))
+                    .await?,
+            );
+            note(
+                first_role,
+                self.foreign::<Service>(id, &name_of(&proxy.service.metadata))
+                    .await?,
+            );
+            if let Some(budget) = &proxy.disruption_budget {
                 note(
                     first_role,
-                    self.foreign::<NetworkPolicy>(id, &name_of(&np.metadata))
+                    self.foreign::<PodDisruptionBudget>(id, &name_of(&budget.metadata))
                         .await?,
                 );
             }
+            note(
+                first_role,
+                self.foreign::<NetworkPolicy>(id, &name_of(&proxy.network_policy.metadata))
+                    .await?,
+            );
             note(
                 first_role,
                 self.foreign::<RoleBinding>(id, &name_of(&run.role_binding.metadata))
@@ -374,9 +407,18 @@ impl KubernetesRuntime {
             self.apply(ns, &run.policy_params).await?;
             self.apply(ns, &run.service_account).await?;
             self.apply(ns, &run.quota).await?;
-            if let Some(np) = &run.network_policy {
-                self.apply(ns, np).await?;
+            // The proxy is there before the policy that makes it the one way out, and both before the right to make a
+            // pod: a run pod is never made into a network that has a policy and no way out, or no policy at all.
+            let proxy = &run.egress_proxy;
+            self.apply(ns, &proxy.allow_list).await?;
+            self.apply(ns, &proxy.service_account).await?;
+            self.apply(ns, &proxy.deployment).await?;
+            self.apply(ns, &proxy.service).await?;
+            if let Some(budget) = &proxy.disruption_budget {
+                self.apply(ns, budget).await?;
             }
+            self.apply(ns, &proxy.network_policy).await?;
+            self.apply(ns, &run.network_policy).await?;
             self.apply(ns, &run.role_binding).await?;
         }
         self.apply(ns, &r.service).await?;
@@ -412,7 +454,16 @@ impl KubernetesRuntime {
                 .map(|(_, w)| w.name())
                 .collect()
         };
-        let (want_sts, want_deploy) = (want("StatefulSet"), want("Deployment"));
+        let (want_sts, want_deploy) = (want("StatefulSet"), {
+            // The egress proxy's Deployment is no workload of the spec: it is wanted as long as the spec has run pods.
+            let mut names = want("Deployment");
+            names.extend(
+                r.run_pods
+                    .iter()
+                    .filter_map(|run| run.egress_proxy.deployment.metadata.name.as_deref()),
+            );
+            names
+        });
         for s in self.list_ours::<StatefulSet>(id).await? {
             let name = s.metadata.name.unwrap_or_default();
             if !want_sts.contains(name.as_str()) {
@@ -428,6 +479,11 @@ impl KubernetesRuntime {
         let budgets: BTreeSet<&str> = r
             .disruption_budgets
             .iter()
+            .chain(
+                r.run_pods
+                    .iter()
+                    .filter_map(|run| run.egress_proxy.disruption_budget.as_ref()),
+            )
             .filter_map(|b| b.metadata.name.as_deref())
             .collect();
         for b in self.list_ours::<PodDisruptionBudget>(id).await? {
@@ -436,23 +492,31 @@ impl KubernetesRuntime {
                 self.delete_named::<PodDisruptionBudget>(ns, &name).await?;
             }
         }
-        // The policy of the agent's ingress is `<svc>`; the run pods' is `<svc>-run-pods`. Each goes when the spec no
-        // longer has it, and not for the other's sake.
+        // The policy of the agent's ingress is `<svc>`; the run pods' is `<svc>-run-pods`; the egress proxy's is
+        // `<svc>-egress`. Each goes when the spec no longer has it, and not for the other's sake.
         let wanted_policies: BTreeSet<&str> = r
             .network_policy
             .iter()
             .chain(
                 r.run_pods
                     .iter()
-                    .filter_map(|run| run.network_policy.as_ref()),
+                    .flat_map(|run| [&run.network_policy, &run.egress_proxy.network_policy]),
             )
             .filter_map(|p| p.metadata.name.as_deref())
             .collect();
-        for p in self.list_ours::<NetworkPolicy>(id).await? {
-            let name = p.metadata.name.unwrap_or_default();
-            if !wanted_policies.contains(name.as_str()) {
-                self.delete_named::<NetworkPolicy>(ns, &name).await?;
-            }
+        // The run pods' policy goes **last**: it is the one that denies, and nothing may leave a run pod under no policy while
+        // the way out that the others describe is already gone (the order of the listing says nothing about that).
+        let run_pods_policy = names::run_pods(id);
+        let mut stale: Vec<String> = self
+            .list_ours::<NetworkPolicy>(id)
+            .await?
+            .into_iter()
+            .filter_map(|p| p.metadata.name)
+            .filter(|name| !wanted_policies.contains(name.as_str()))
+            .collect();
+        order_run_pods_policy_last(&mut stale, &run_pods_policy);
+        for name in stale {
+            self.delete_named::<NetworkPolicy>(ns, &name).await?;
         }
         Ok(())
     }
@@ -522,12 +586,19 @@ impl KubernetesRuntime {
         }))
     }
 
-    /// The rest of a service's run pod objects, after [`revoke_run_pods`](Self::revoke_run_pods): the quota, the network
-    /// policy, the parameters of the guard and, with `template`, the run pod template (a file set that only the workers'
-    /// pods mount, so it goes once they are applied without it), then **the account last**, so that an interrupted pass
-    /// still finds one and comes back. By name, and only what is ours: a policy or a ConfigMap of the same name that
-    /// someone else made is theirs. With `template` off (the service is going: its ConfigMaps all go with it) the template
-    /// is left to that.
+    /// The rest of a service's run pod objects, after [`revoke_run_pods`](Self::revoke_run_pods): the quota, **the egress
+    /// proxy**, the network policy, the parameters of the guard and, with `template`, the run pod template (a file set that
+    /// only the workers' pods mount, so it goes once they are applied without it), then **the accounts last**, so that an
+    /// interrupted pass still finds one and comes back. By name, and only what is ours: a policy or a ConfigMap of the same
+    /// name that someone else made is theirs. With `template` off (the service is going: its ConfigMaps all go with it) the
+    /// template is left to that.
+    ///
+    /// The order is the one that never leaves a run pod with a network it should not have. By now the binding is gone
+    /// and the run pods are deleted (`revoke_run_pods`); the **proxy goes before the run pods' policy**, so that a pod
+    /// that was made in the instant before the binding went is cut off from the way out first (its policy denies the
+    /// rest) and is never under no policy; the proxy's Deployment goes before its account and its policy, so that no pod
+    /// of it outlives what it runs as; and the run pods' policy goes before the parameters of the guard, which find the
+    /// pods.
     async fn clear_run_pod_objects(
         &self,
         id: &RuntimeId,
@@ -538,6 +609,7 @@ impl KubernetesRuntime {
         for q in &revoked.quotas {
             self.delete_named::<ResourceQuota>(ns, q).await?;
         }
+        self.clear_egress_proxy(id).await?;
         let (policy, params) = (names::run_pods(id), names::run_pods_policy_params(id));
         for p in self.list_ours::<NetworkPolicy>(id).await? {
             if p.metadata.name.as_deref() == Some(policy.as_str()) {
@@ -554,6 +626,30 @@ impl KubernetesRuntime {
         }
         for a in &revoked.accounts {
             self.delete_named::<ServiceAccount>(ns, a).await?;
+        }
+        Ok(())
+    }
+
+    /// The egress proxy of a service, from the pods to the policy: its Deployment (and so its pods), what routes to it, its
+    /// budget, its policy and its allow-list. Its account is in [`Revoked::accounts`] and goes last of all. Only what is
+    /// ours, by name.
+    async fn clear_egress_proxy(&self, id: &RuntimeId) -> Result<()> {
+        let name = names::egress_proxy(id);
+        self.delete_ours_named::<Deployment>(id, &name).await?;
+        self.delete_ours_named::<Service>(id, &name).await?;
+        self.delete_ours_named::<PodDisruptionBudget>(id, &name)
+            .await?;
+        self.delete_ours_named::<NetworkPolicy>(id, &name).await?;
+        self.delete_ours_named::<ConfigMap>(id, &names::egress_allow(id))
+            .await
+    }
+
+    /// Delete the object of this name if it is this service's and ours.
+    async fn delete_ours_named<K: Kind>(&self, id: &RuntimeId, name: &str) -> Result<()> {
+        for o in self.list_ours::<K>(id).await? {
+            if o.meta().name.as_deref() == Some(name) {
+                self.delete_named::<K>(id.scope(), name).await?;
+            }
         }
         Ok(())
     }
@@ -595,7 +691,11 @@ impl KubernetesRuntime {
         let wanted: BTreeSet<&str> = r
             .config_maps
             .iter()
-            .chain(r.run_pods.iter().map(|run| &run.policy_params))
+            .chain(
+                r.run_pods
+                    .iter()
+                    .flat_map(|run| [&run.policy_params, &run.egress_proxy.allow_list]),
+            )
             .filter_map(|c| c.metadata.name.as_deref())
             .collect();
         for c in self.list_ours::<ConfigMap>(id).await? {
@@ -871,6 +971,11 @@ impl KubernetesRuntime {
     }
 }
 
+/// Put the run pods' policy last among the policies to delete, the others in name order.
+fn order_run_pods_policy_last(names: &mut [String], run_pods_policy: &str) {
+    names.sort_by_key(|name| (name == run_pods_policy, name.clone()));
+}
+
 /// Remove what is a reference to a Secret and not a value: `secretKeyRef`, the `secret` source of a
 /// volume, and the server's bookkeeping.
 fn strip_references(v: &mut Value) {
@@ -989,6 +1094,19 @@ mod tests {
         for secret in ["the-secret", "the-key", "manager"] {
             assert!(!text.iter().any(|t| t == secret), "{secret}");
         }
+    }
+
+    #[test]
+    fn the_run_pods_policy_is_deleted_after_every_other_policy_whatever_the_names() {
+        let mut names: Vec<String> = ["svc-run-pods", "svc", "svc-egress", "a-late-comer"]
+            .map(str::to_owned)
+            .into();
+        order_run_pods_policy_last(&mut names, "svc-run-pods");
+        assert_eq!(names, ["a-late-comer", "svc", "svc-egress", "svc-run-pods"]);
+        // Even when it would sort first.
+        let mut names: Vec<String> = ["b", "a-run-pods"].map(str::to_owned).into();
+        order_run_pods_policy_last(&mut names, "a-run-pods");
+        assert_eq!(names, ["b", "a-run-pods"]);
     }
 
     #[test]

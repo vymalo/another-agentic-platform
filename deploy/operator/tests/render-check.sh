@@ -865,7 +865,7 @@ check "chain: the script's namespace, label, audience and Secrets are the ones t
 
 # ---- Run pods (slice D15a): off by default, and then not a trace; on, exactly these rights and this guard ---------------------------
 # What a render with run pods off must not contain, anywhere: an object, a variable, a right, a mount, a key of the API's file.
-run_pods_traces='run-pods|RUN_PODS_FILE|PriorityClass|ValidatingAdmissionPolicy|runPodSizeClasses|serviceaccounts|resourcequotas|rolebindings|checksum/run-pods'
+run_pods_traces='run-pods|RUN_PODS_FILE|PriorityClass|ValidatingAdmissionPolicy|runPodSizeClasses|serviceaccounts|resourcequotas|rolebindings|checksum/run-pods|egressProxy|adam-egress'
 render
 check "run pods off (the default): nothing of them is rendered, in any object" lacks "$run_pods_traces"
 render -f "$chart/examples/netcup.values.yaml"
@@ -946,6 +946,20 @@ run_pods_settings() {
     'repository: ghcr.io/vymalo/another-agentic-images/workspace' 'digest: sha256:[0-9a-f]{64}'
 }
 check "run pods on: the settings hold the names of the PriorityClass and the Role, the classes (large and standard), the quota, the CIDR and the variable" run_pods_settings
+# The egress proxy's settings (D15c): the coder chart's default list, plus what the values of this render add, written as the operator reads them. The proxy's own
+# objects are the operator's, per agent (aap-runtime-kubernetes): none is rendered here, and the operator's Role gains nothing for it (Deployments, Services,
+# ConfigMaps, NetworkPolicies and PodDisruptionBudgets were its rights already, and ServiceAccounts came with run pods).
+run_pods_egress_proxy() {
+  dhas ConfigMap aap-operator-run-pods-settings '^    egressProxy:$' '^      - registry.npmjs.org$' '^      - pypi.org$' '^      - files.pythonhosted.org$' '^      - crates.io$' \
+    '^      - index.crates.io$' '^      - static.crates.io$' '^      - proxy.golang.org$' '^      - sum.golang.org$' '^      - github.com$' '^      - codeload.github.com$' \
+    '^      - objects.githubusercontent.com$' '^      - release-assets.githubusercontent.com$' '^      - pub.dev$' \
+    '^      extraAllow:$' '^      - artifacts.example.com$' '^      extraNoProxy:$' '^      - models.internal$' '^      replicas: 3$' '^      - 443$' '^      - 8443$' \
+    'cpu: 25m' 'memory: 32Mi' 'memory: 256Mi' \
+    && dlacks ConfigMap aap-operator-run-pods-settings 'storage.googleapis.com'
+}
+check "run pods on: the settings hold the egress proxy: the coder chart's allow-list, the extra host, the names that bypass it, three replicas, two ports and the resources" run_pods_egress_proxy
+check "run pods on: the chart renders no object of the egress proxy (the operator makes one per agent) and the operator's Role has no right more for it" \
+  lacks 'adam-egress|[a-z]-egress'
 check "run pods on: the run image is pinned by tag and digest, and the tag is not latest" \
   dhas ConfigMap aap-operator-run-pods-settings 'tag: [0-9A-Za-z._-]+$' 'digest: sha256:[0-9a-f]{64}$'
 settings_hold_no_secret() {
@@ -993,9 +1007,12 @@ check "runPods.priorityClassName: the chart renders no PriorityClass, and the se
 render -f "$here/runpods.values.yaml" --set storeCnpg=false
 check "run pods on, storeCnpg=false: the base rules and the run pods rules, no CloudNativePG" rules_are "$base_rules
 $run_pod_rules"
-render -f "$here/runpods.values.yaml" --set runPods.networkPolicy.enabled=false
-check "runPods.networkPolicy.enabled=false: the settings say so and the rest of the render is unchanged" \
-  dhas ConfigMap aap-operator-run-pods-settings '^      enabled: false$' && dhas Role aap-operator-run-pods 'pods/exec'
+# The network of a run pod is deny by default and has no switch (adam-rs ADR 0042, slice D15c): `false` is refused, `true` is tolerated and not written.
+check "refused: networkPolicy.enabled=false (it would be open egress: the policy that makes the egress proxy the one way out is always made)" \
+  refused "runPods.networkPolicy.enabled is no longer a choice" -f "$here/runpods.values.yaml" --set runPods.networkPolicy.enabled=false
+render -f "$here/runpods.values.yaml" --set runPods.networkPolicy.enabled=true
+enabled_true_is_not_written() { dhas ConfigMap aap-operator-run-pods-settings '^    networkPolicy:$' && dlacks ConfigMap aap-operator-run-pods-settings '^      enabled:'; }
+check "runPods.networkPolicy.enabled=true: tolerated, and not written to the operator's settings (it refuses an unknown key)" enabled_true_is_not_written
 
 # What the chart refuses, with the name of the value: the operator would refuse the same at start, and a pod that never starts is the worse way to hear it.
 check "refused: run pods on with no size class" refused "runPodClasses must name at least one size class" --set runPods.enabled=true --set runPodClasses.standard=null
@@ -1027,6 +1044,27 @@ check "refused: a variable the operator sets itself (the build jobs)" refused "r
 check "refused: a variable that is a number and not a text" refused "runPods.extraEnv.JOBS must be a text" --set runPods.enabled=true --set runPods.extraEnv.JOBS=2
 check "refused: a CIDR that is none" refused "is not an IPv4 CIDR" --set runPods.enabled=true --set 'runPods.networkPolicy.clusterCIDRs[0]=10.0.0.0/33'
 check "refused: no label of the DNS pods" refused "runPods.networkPolicy.dnsPodLabels must name at least one label" --set runPods.enabled=true --set runPods.networkPolicy.dnsPodLabels=null
+# The egress proxy (D15c): the checks of the coder chart's _validate.tpl, which RunPodSettings::validate repeats.
+check "refused: an allow-list of no host" refused "hold no host" --set runPods.enabled=true --set-json 'runPods.egressProxy.allow=[]'
+check "refused: an allow-list entry that is a URL" refused "is not a host name" --set runPods.enabled=true --set 'runPods.egressProxy.extraAllow[0]=https://example.com'
+check "refused: an allow-list entry with a port" refused "is not a host name" --set runPods.enabled=true --set 'runPods.egressProxy.extraAllow[0]=example.com:443'
+check "refused: an allow-list entry that is a wildcard" refused "is not a host name" --set runPods.enabled=true --set 'runPods.egressProxy.extraAllow[0]=*.example.com'
+check "refused: an allow-list entry that is an IP address" refused "ends in digits only" --set runPods.enabled=true --set 'runPods.egressProxy.extraAllow[0]=10.0.0.1'
+check "refused: an allow-list entry that is a bare suffix" refused "is a bare suffix" --set runPods.enabled=true --set 'runPods.egressProxy.extraAllow[0]=.com'
+check "refused: an entry of the default list that is none" refused "runPods.egressProxy.allow entry" --set runPods.enabled=true --set 'runPods.egressProxy.allow[0]=not a host'
+check "refused: an allow-list that is not a list" refused "must be a list of host names" --set runPods.enabled=true --set runPods.egressProxy.extraAllow=example.com
+check "refused: no port for the proxy" refused "runPods.egressProxy.ports must be a non-empty list" --set runPods.enabled=true --set-json 'runPods.egressProxy.ports=[]'
+check "refused: port 0 for the proxy" refused "must be port numbers from 1 to 65535" --set runPods.enabled=true --set-json 'runPods.egressProxy.ports=[0]'
+check "refused: a port above 65535 for the proxy" refused "must be port numbers from 1 to 65535" --set runPods.enabled=true --set-json 'runPods.egressProxy.ports=[70000]'
+check "refused: no replica of the proxy" refused "runPods.egressProxy.replicas must be a whole number of at least 1" --set runPods.enabled=true --set runPods.egressProxy.replicas=0
+check "refused: a NO_PROXY entry with a space" refused "extraNoProxy entries are names for NO_PROXY" --set runPods.enabled=true --set 'runPods.egressProxy.extraNoProxy[0]=a b'
+check "refused: a NO_PROXY entry with a comma" refused "extraNoProxy entries are names for NO_PROXY" --set runPods.enabled=true --set 'runPods.egressProxy.extraNoProxy[0]=a\,b'
+check "refused: a key of the egress proxy the operator does not read" refused "runPods.egressProxy.bogus is not a setting" --set runPods.enabled=true --set runPods.egressProxy.bogus=1
+check "refused: the egress proxy null" refused "runPods.egressProxy must be a map" --set runPods.enabled=true --set runPods.egressProxy=null
+check "refused: a resource of the egress proxy that is not a quantity" refused "must be a quantity" --set runPods.enabled=true --set runPods.egressProxy.resources.limits.memory=lots
+check "refused: a variable of the proxy set by hand (HTTPS_PROXY)" refused "the operator sets the proxy variables of a run pod" --set runPods.enabled=true --set runPods.extraEnv.HTTPS_PROXY=http://elsewhere
+check "refused: a variable of the proxy set by hand (no_proxy)" refused "the operator sets the proxy variables of a run pod" --set runPods.enabled=true --set runPods.extraEnv.no_proxy=example.com
+check "refused: an IPv6 range among the ranges the proxy never reaches" refused "(IPv6 is denied, not allowed)" --set runPods.enabled=true --set 'runPods.networkPolicy.blockedCIDRs[0]=fe80::/10'
 check "refused: a PriorityClass name that is none" refused "runPods.priorityClassName must be the name of a PriorityClass" --set runPods.enabled=true --set 'runPods.priorityClassName=Not A Name'
 check "refused: run pods and the API on, and no work volume among the coder defaults" refused "api.config.defaults.coder.workVolume is required while runPods.enabled" \
   -f "$here/api.values.yaml" --set runPods.enabled=true
@@ -1052,7 +1090,8 @@ rp_objects() {
 }
 check "run pods e2e: the values render the PriorityClass, the policy and its binding for the namespace aap-e2e-runpods, the Role of run pods, and the settings that name them" rp_objects
 rp_settings() {
-  dhas ConfigMap aap-operator-run-pods-settings '^      pods: 2$' '^  idleSecs: 120$|idleSecs: 120' '^  standard:$|standard:' 'memory: 2Gi' 'digest: sha256:[0-9a-f]{64}' 'tag: [0-9]'
+  dhas ConfigMap aap-operator-run-pods-settings '^      pods: 2$' '^  idleSecs: 120$|idleSecs: 120' '^  standard:$|standard:' 'memory: 2Gi' 'digest: sha256:[0-9a-f]{64}' 'tag: [0-9]' \
+    '^      replicas: 2$' '^      - 443$' '^      - registry.npmjs.org$' '^      extraAllow: \[\]$'
 }
 check "run pods e2e: the quota is two pods (the script fills it, is refused a third pod and makes a third run wait), a pod idle for 120 s goes, the class is standard, and the run image is pinned by digest" rp_settings
 check "run pods e2e: no registry, no Platform API, no Ingress and no ExternalSecret are rendered: this end-to-end is about the operator and the coder" \
@@ -1097,7 +1136,7 @@ rp_script() {
   # shellcheck disable=SC2016 # the patterns are the script's own text, `${...}` and `$ns` and all
   grep -q 'ns=${AAP_E2E_NAMESPACE:-aap-e2e-runpods}$' "$script" && grep -q '^made_by=run-pods-e2e$' "$script" && grep -q '^op=aap-operator ' "$script" \
     && grep -q '^class=$op-$ns-run ' "$script" && grep -q '^policy=$op-$ns-run-pods ' "$script" && grep -q '^run_role=$op-run-pods ' "$script" \
-    && grep -q '^plain=e2e-plain$' "$script" && grep -q '^coder=e2e-coder$' "$script" \
+    && grep -q '^plain=e2e-plain$' "$script" && grep -q '^coder=e2e-coder$' "$script" && grep -q '^proxy=$coder-egress ' "$script" \
     && grep -q '^  name: e2e-plain$' "$here/e2e/run-pods.yaml" && grep -q '^  name: e2e-coder$' "$here/e2e/run-pods.yaml" \
     && grep -q 'kind-\*) ;;' "$script" && grep -q 'export HELM_KUBECONTEXT=' "$script" && grep -q "grep -F 'panicked at'" "$script"
 }

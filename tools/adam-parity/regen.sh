@@ -13,9 +13,10 @@
 # the diff of the goldens (that diff is the change of the env contract), and fix `aap-domain`.
 set -eu
 
-# adam-rs `main` at the revision D15a read (3f714d0: the coder refuses a GitHub App key file beside local commands, #131;
-# §59a cites 0391809, the revision of the goldens before). Full hash read from git.
-ADAM_RS_REV="3f714d08132c6b4bb5530753105cfdb12d97a914"
+# adam-rs `main` at the revision D15c read (7598255: run pods reach the internet only through the egress proxy, #134 and #135,
+# ADR 0042; 3f714d0 was D15a's, the coder refuses a GitHub App key file beside local commands, #131; §59a cites 0391809, the
+# revision of the goldens before). Full hash read from git.
+ADAM_RS_REV="75982554a5e90e274ec6f7cad19e742a7fae0495"
 NAMESPACE="another-agentic-system"
 
 here=$(cd "$(dirname "$0")" && pwd)

@@ -222,6 +222,35 @@ data:
           cpu: 250m
           memory: 512Mi
     container: run
+    egressProxy:
+      allow:
+      - registry.npmjs.org
+      - pypi.org
+      - files.pythonhosted.org
+      - crates.io
+      - index.crates.io
+      - static.crates.io
+      - proxy.golang.org
+      - sum.golang.org
+      - github.com
+      - codeload.github.com
+      - objects.githubusercontent.com
+      - release-assets.githubusercontent.com
+      - pub.dev
+      extraAllow:
+      - artifacts.example.com
+      extraNoProxy:
+      - models.internal
+      ports:
+      - 443
+      - 8443
+      replicas: 3
+      resources:
+        limits:
+          memory: 256Mi
+        requests:
+          cpu: 25m
+          memory: 32Mi
     extraAllowedImages:
     - docker.io/library/postgres:16
     extraEnv:
@@ -244,7 +273,6 @@ data:
       dnsNamespace: kube-system
       dnsPodLabels:
         k8s-app: kube-dns
-      enabled: true
       extraEgress:
       - ports:
         - port: 8080
@@ -619,7 +647,7 @@ spec:
         app.kubernetes.io/instance: aap-operator
       annotations:
         # The settings for run pods are read once, at start: a changed file is a new pod.
-        checksum/run-pods: aada6e9f5f0a5056782047400dfe15dff9631cae15a1042dbf7a8bf4ccb1f94c
+        checksum/run-pods: 224bfe4a6f64003f95e6fb06ea7fe1cd566593dde749cec830fcff6f50615f4c
     spec:
       serviceAccountName: aap-operator
       # The API token is the operator's way in.

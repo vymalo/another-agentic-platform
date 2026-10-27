@@ -24,7 +24,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
 
 use crate::{
-    Classify, Container, DeletionPolicy, DirectoryEntry, EnvVar, ErrorClass, FileSet,
+    Classify, Container, DeletionPolicy, DirectoryEntry, EgressProxy, EnvVar, ErrorClass, FileSet,
     FsGroupChangePolicy, Mount, Network, OwnerHandle, Peer, PersistentVolume, Phase, Probe,
     ProbeAction, Probes, Resources, Role, RunPodGuard, RunPodLabels, RunPodNetwork, RunPodQuota,
     RunPods, RuntimeId, RuntimeProvider, RuntimeSpec, SecretRef, Security, Selector, Sharing,
@@ -385,7 +385,7 @@ pub fn sample_spec_with_run_pods(id: &RuntimeId) -> RuntimeSpec {
             pods: 4,
             limits_memory: "8Gi".to_owned(),
         },
-        network: Some(RunPodNetwork {
+        network: RunPodNetwork {
             dns: Peer {
                 namespaces: Some(Selector {
                     match_labels: BTreeMap::from([(
@@ -400,9 +400,29 @@ pub fn sample_spec_with_run_pods(id: &RuntimeId) -> RuntimeSpec {
                 }),
                 cidr: None,
             },
-            except_cidrs: vec!["10.0.0.0/8".to_owned()],
+            proxy: EgressProxy {
+                image: "registry.invalid/sample:1".to_owned(),
+                command: vec!["sample-egress".to_owned()],
+                env: vec![EnvVar::literal("EGRESS_LISTEN", "0.0.0.0:3128")],
+                port: 3128,
+                health_path: "/healthz".to_owned(),
+                replicas: 2,
+                allow: FileSet {
+                    name: format!("{}-egress-allow", id.name()),
+                    files: BTreeMap::from([(
+                        "allow.txt".to_owned(),
+                        "registry.example.com\n".to_owned(),
+                    )]),
+                    immutable: false,
+                },
+                allow_dir: "/etc/sample-egress".to_owned(),
+                egress_ports: vec![443],
+                deny_cidrs: vec!["10.0.0.0/8".to_owned()],
+                run_as: 10001,
+                resources: Resources::default(),
+            },
             extra_egress: Vec::new(),
-        }),
+        },
         pods: RunPodLabels {
             managed_by: "sample-coder".to_owned(),
             run_label: "sample.example/run".to_owned(),

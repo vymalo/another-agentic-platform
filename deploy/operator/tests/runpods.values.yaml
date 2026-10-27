@@ -1,6 +1,6 @@
 # Run pods on (runPods.enabled, slice D15a) beside the Platform API, in a namespace of its own: the render tests/golden/runpods.yaml.
-# Two size classes, a cluster CIDR and one extra egress rule, so that every list the chart writes into the operator's settings is
-# there. The Platform API's part is the least it must say; it is here to show that it is told the names of the classes.
+# Two size classes, a cluster CIDR, one extra egress rule, and (D15c) an egress proxy with three replicas, two ports, one more host and one name that
+# bypasses it, so that every list the chart writes into the operator's settings is there. The Platform API's part is the least it must say; it is here to show that it is told the names of the classes.
 watchNamespace: agents
 runPods:
   enabled: true
@@ -18,6 +18,13 @@ runPods:
       effect: NoSchedule
   extraAllowedImages:
     - docker.io/library/postgres:16
+  egressProxy:
+    replicas: 3
+    ports: [443, 8443]
+    extraAllow:
+      - artifacts.example.com
+    extraNoProxy:
+      - models.internal
   networkPolicy:
     clusterCIDRs:
       - 10.42.0.0/16
