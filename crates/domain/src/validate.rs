@@ -660,23 +660,39 @@ fn check_run_pods(v: &mut Issues, cfg: &AgentConfig, asked: &aap_api::RunPods) {
             "podman: the commands of a run run in a pod of their own or in the repository's devcontainer, not both, and the coder refuses to start (exit 78) with RUN_ENVIRONMENT=kubernetes and DEVCONTAINER_RUNTIME=podman",
         );
     }
+    // The volumes and directories the operator makes the coder pod of a coder with run pods from: the template, the
+    // account's credentials and the git sandbox's socket and `/tmp` (a user volume of those names would be a second volume of the
+    // same name in the pod; one mounted over them would hide them).
+    use contract::run_pods as rp;
     for vol in &cfg.spec.environment.volumes {
-        if vol.name == contract::run_pods::TEMPLATE_VOLUME {
+        if [
+            rp::TEMPLATE_VOLUME,
+            rp::ACCOUNT_VOLUME,
+            rp::git_sandbox::SOCKET_VOLUME,
+            rp::git_sandbox::TMP_VOLUME,
+        ]
+        .contains(&vol.name.as_str())
+        {
             v.add(
                 format!("{me} spec.environment.volumes[{}]", vol.name),
                 "the operator uses this volume name itself when run pods are on",
             );
         }
-        if is_mount_path(&vol.mount_path)
-            && paths_overlap(&vol.mount_path, contract::run_pods::TEMPLATE_DIR)
-        {
-            v.add(
-                format!("{me} spec.environment.volumes[{}].mountPath", vol.name),
-                format!(
-                    "overlaps {}, which the operator mounts itself when run pods are on",
-                    contract::run_pods::TEMPLATE_DIR
-                ),
-            );
+        if is_mount_path(&vol.mount_path) {
+            for dir in [
+                rp::TEMPLATE_DIR,
+                rp::ACCOUNT_DIR,
+                rp::git_sandbox::SOCKET_DIR,
+            ] {
+                if paths_overlap(&vol.mount_path, dir) {
+                    v.add(
+                        format!("{me} spec.environment.volumes[{}].mountPath", vol.name),
+                        format!(
+                            "overlaps {dir}, which the operator mounts itself when run pods are on"
+                        ),
+                    );
+                }
+            }
         }
     }
 }

@@ -229,6 +229,7 @@ pub fn run_pod_settings_of(case: &str) -> (aap_domain::RunPodSettings, String) {
         "nodeAffinity",
         "networkPolicy",
         "egressProxy",
+        "gitSandbox",
     ] {
         if let Some(v) = rp.get(key) {
             over.insert(key.to_owned(), v.clone());

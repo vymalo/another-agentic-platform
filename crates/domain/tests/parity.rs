@@ -62,7 +62,7 @@ fn probe(p: &Option<aap_ports::Probe>) -> Value {
 }
 
 fn container(c: &Container) -> Value {
-    json!({
+    let mut out = json!({
         "image": c.image,
         "command": c.command,
         "args": c.args,
@@ -79,6 +79,31 @@ fn container(c: &Container) -> Value {
         },
         "resources": { "requests": c.resources.requests, "limits": c.resources.limits },
         "port": c.port,
+    });
+    // Only when on, as the projection of the chart has it.
+    if c.read_only_root_filesystem {
+        out["readOnlyRootFilesystem"] = json!(true);
+    }
+    out
+}
+
+/// The `kube-api-access` volume as a Kubernetes provider makes it for `VolumeSource::AccountToken`: what the kubelet's own
+/// volume holds, which is what an in-cluster client reads. The chart writes the same sources by hand (the golden holds them as
+/// the chart renders them), and `aap-runtime-kubernetes`' `tests/run_pods_parity.rs` holds the provider's real render equal to
+/// the golden's.
+fn account_token_volume(name: &str) -> Value {
+    json!({
+        "name": name,
+        "kind": "projected",
+        "mode": 420,
+        "sources": [
+            { "serviceAccountToken": { "expirationSeconds": 3607, "path": "token" } },
+            { "configMap": { "name": "kube-root-ca.crt", "items": [{ "key": "ca.crt", "path": "ca.crt" }] } },
+            { "downwardAPI": { "items": [{
+                "path": "namespace",
+                "fieldRef": { "apiVersion": "v1", "fieldPath": "metadata.namespace" },
+            }] } },
+        ],
     })
 }
 
@@ -121,6 +146,12 @@ fn project(spec: &RuntimeSpec, svc: &str) -> Value {
                     "name": v.name, "kind": "secret", "secret": secret.name, "mode": mode,
                     "items": [{"key": secret.key, "path": file}],
                 })),
+                VolumeSource::Scratch(scratch) => volumes.push(json!({
+                    "name": v.name, "kind": "emptyDir",
+                    "medium": scratch.in_memory.then_some("Memory"),
+                    "sizeLimit": scratch.size_limit,
+                })),
+                VolumeSource::AccountToken => volumes.push(account_token_volume(&v.name)),
             }
         }
         let stateful = w.stable_identity || !templates.is_empty();
@@ -131,7 +162,8 @@ fn project(spec: &RuntimeSpec, svc: &str) -> Value {
                 "kind": if stateful { "StatefulSet" } else { "Deployment" },
                 "replicas": w.replicas,
                 "serviceAccount": w.service_account,
-                "automountServiceAccountToken": w.service_account.is_some(),
+                // No pod automounts a token; the account's is a volume that the agent container alone mounts.
+                "automountServiceAccountToken": false,
                 "terminationGracePeriodSeconds": w.termination_grace_secs,
                 "securityContext": {
                     "runAsUser": sec.run_as_user,
@@ -279,7 +311,15 @@ fn compare_container(case: &str, who: &str, chart: &Value, mine: &Value) {
         "{case}: {who}: environment (name -> source) differs:\n{}",
         differences.join("\n")
     );
-    for key in ["image", "command", "args", "probes", "resources", "port"] {
+    for key in [
+        "image",
+        "command",
+        "args",
+        "probes",
+        "resources",
+        "port",
+        "readOnlyRootFilesystem",
+    ] {
         assert_eq!(chart[key], mine[key], "{case}: {who}: {key}");
     }
     assert_eq!(
@@ -582,6 +622,216 @@ fn run_pods_set_the_variables_the_chart_sets_and_the_workers_alone() {
     );
 }
 
+/// What makes the git sandbox a sandbox, asked of a workload in the shape of the goldens: it mounts the work volume, its
+/// socket's directory and its own `/tmp` and nothing else, has no variable from a Secret, a read-only root file system, and
+/// the coder container alone mounts the account's credentials. The same function is asked of the chart's render and of the
+/// operator's, so a property that moves in one and not in the other fails here and not only as a difference.
+fn assert_git_sandbox_holds_nothing(at: &str, workload: &Value) {
+    // A per-replica claim is a `volumeClaimTemplate` of the set and not an entry of the pod's volumes.
+    let volumes: BTreeMap<&str, &str> = workload["volumes"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|v| (v["name"].as_str().unwrap(), v["kind"].as_str().unwrap()))
+        .chain(
+            workload["claimTemplates"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|t| (t["name"].as_str().unwrap(), "persistentVolumeClaim")),
+        )
+        .collect();
+    let sandbox = &workload["sidecars"]["git-sandbox"];
+    assert!(sandbox.is_object(), "{at}: no git-sandbox sidecar");
+    assert_eq!(
+        sandbox["readOnlyRootFilesystem"], true,
+        "{at}: the sandbox's root file system"
+    );
+    for e in sandbox["env"].as_array().unwrap() {
+        assert!(
+            e.get("secret").is_none() && e.get("field").is_none(),
+            "{at}: the sandbox's variable {} comes from {e}",
+            e["name"]
+        );
+    }
+    let mut mounted: Vec<(&str, &str)> = sandbox["mounts"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|m| {
+            (
+                m["name"].as_str().unwrap(),
+                volumes[m["name"].as_str().unwrap()],
+            )
+        })
+        .collect();
+    mounted.sort_unstable();
+    assert_eq!(
+        mounted,
+        vec![
+            ("git-sandbox", "emptyDir"),
+            ("git-sandbox-tmp", "emptyDir"),
+            ("work", "persistentVolumeClaim"),
+        ],
+        "{at}: the sandbox mounts the work volume, its socket and its /tmp, and nothing else"
+    );
+    assert_eq!(
+        workload["automountServiceAccountToken"], false,
+        "{at}: the pod would put the token in every container"
+    );
+    let token_volumes: Vec<&str> = volumes
+        .iter()
+        .filter(|(_, kind)| **kind == "projected")
+        .map(|(name, _)| *name)
+        .collect();
+    assert_eq!(token_volumes, vec!["kube-api-access"], "{at}");
+    let holders: Vec<String> = std::iter::once(("coder container", &workload["agent"]))
+        .chain(
+            workload["sidecars"]
+                .as_object()
+                .unwrap()
+                .iter()
+                .map(|(n, c)| (n.as_str(), c)),
+        )
+        .filter(|(_, c)| {
+            c["mounts"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|m| m["name"] == "kube-api-access")
+        })
+        .map(|(n, _)| n.to_owned())
+        .collect();
+    assert_eq!(
+        holders,
+        vec!["coder container"],
+        "{at}: who mounts the account's credentials"
+    );
+}
+
+#[test]
+fn the_git_sandbox_holds_nothing_secret_in_the_chart_and_in_the_operator() {
+    for (case, change) in RUN_POD_CASES {
+        let chart = golden(case);
+        let r = run_pods_case(case, change);
+        let mine = project(&r.runtime, "coder");
+        for (who, doc) in [("chart", &chart), ("operator", &mine)] {
+            for (name, w) in doc["workloads"].as_object().unwrap() {
+                let sidecars = w["sidecars"].as_object().unwrap();
+                if w["serviceAccount"].is_null() {
+                    // The control plane of `split`: it starts no command, runs no git and holds no credential.
+                    assert!(
+                        !sidecars.contains_key("git-sandbox"),
+                        "{case}/{name} ({who}): a front with a sandbox"
+                    );
+                    assert!(
+                        w["volumes"]
+                            .as_array()
+                            .unwrap()
+                            .iter()
+                            .all(|v| v["kind"] != "projected" && v["kind"] != "emptyDir"),
+                        "{case}/{name} ({who}): a front with the account's credentials or a socket"
+                    );
+                    assert!(
+                        w["agent"]["env"]
+                            .as_array()
+                            .unwrap()
+                            .iter()
+                            .all(|e| e["name"] != "GIT_SANDBOX_SOCKET"),
+                        "{case}/{name} ({who}): a front told of a sandbox"
+                    );
+                } else {
+                    assert_git_sandbox_holds_nothing(&format!("{case}/{name} ({who})"), w);
+                }
+            }
+        }
+    }
+    // Without run pods nothing of it exists: no sidecar of that name, no volume of those kinds, the pod as it was.
+    for case in ["coder", "coder-split", "coder-affinity-token"] {
+        for (name, w) in golden(case)["workloads"].as_object().unwrap() {
+            assert!(
+                !w["sidecars"]
+                    .as_object()
+                    .unwrap()
+                    .contains_key("git-sandbox"),
+                "{case}/{name}"
+            );
+            assert_eq!(w["automountServiceAccountToken"], false, "{case}/{name}");
+        }
+    }
+}
+
+#[test]
+fn the_git_sandbox_follows_the_settings_and_the_work_volumes_path() {
+    // The tuned case changes the sandbox's resources, size and number of commands (the chart's `runPods.gitSandbox`): the
+    // operator's reading of its own chart's values must produce what the coder chart renders for the same.
+    let tuned = golden("coder-run-pods-tuned");
+    let sandbox = &tuned["workloads"]["coder"]["sidecars"]["git-sandbox"];
+    assert_eq!(sandbox["resources"]["limits"]["memory"], "2Gi");
+    assert_eq!(sandbox["resources"]["requests"]["cpu"], "250m");
+    let tmp = tuned["workloads"]["coder"]["volumes"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|v| v["name"] == "git-sandbox-tmp")
+        .unwrap();
+    assert_eq!(tmp["sizeLimit"], "128Mi");
+    let max = sandbox["env"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|e| e["name"] == "GIT_SANDBOX_MAX_COMMANDS")
+        .unwrap();
+    assert_eq!(max["literal"], "16");
+    let r = run_pods_case("coder-run-pods-tuned", |_, _| {});
+    let mut mine = project(&r.runtime, "coder");
+    strip_digest(&mut mine);
+    assert_eq!(
+        mine["workloads"]["coder"]["sidecars"]["git-sandbox"],
+        *sandbox
+    );
+
+    // The chart's work volume is at `/work`; the operator's is wherever the config puts it, and the sandbox, its root, its probe
+    // and the coder's WORKSPACE_ROOT follow it, so that the paths the coder sends the sandbox are the paths the sandbox has.
+    let moved = must_resolve_with(
+        "coder",
+        &Externals::default().with_run_pods(run_pod_settings_of("coder-run-pods").0),
+        |_, config| {
+            set(
+                config,
+                "/spec/harness/adam/coder/runPods",
+                json!({ "sizeClass": "standard" }),
+            );
+            set(
+                config,
+                "/spec/environment/volumes/0/mountPath",
+                json!("/srv/the work"),
+            );
+        },
+    );
+    let mine = project(&moved.runtime, "coder");
+    let w = &mine["workloads"]["coder"];
+    let sandbox = &w["sidecars"]["git-sandbox"];
+    let env = env_map(&sandbox["env"]);
+    assert_eq!(env["GIT_SANDBOX_ROOT"], json!({"literal": "/srv/the work"}));
+    assert_eq!(
+        env_map(&w["agent"]["env"])["WORKSPACE_ROOT"],
+        json!({"literal": "/srv/the work"})
+    );
+    let work_mount = sandbox["mounts"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|m| m["name"] == "work")
+        .unwrap();
+    assert_eq!(work_mount["path"], "/srv/the work");
+    let probe = sandbox["probes"]["startup"]["exec"][2].as_str().unwrap();
+    assert!(
+        probe.starts_with("cd '/srv/the work' && exec env GIT_SANDBOX_SOCKET="),
+        "the probe quotes the path: {probe}"
+    );
+}
+
 #[test]
 fn the_normalisations_are_the_documented_ones() {
     let mut applied = Applied::default();
@@ -631,7 +881,7 @@ fn the_goldens_say_where_they_came_from() {
         let g = golden(case);
         let s = &g["source"];
         assert_eq!(s["repository"], "https://github.com/vymalo/another-adam-rs");
-        assert_eq!(s["revision"], "75982554a5e90e274ec6f7cad19e742a7fae0495");
+        assert_eq!(s["revision"], "581aeed75e56f903b2a9f59217ea9dcd449c8466");
         assert_eq!(s["chart"], "deploy/coder");
         assert!(
             repo_root().join(s["values"].as_str().unwrap()).is_file(),

@@ -385,6 +385,295 @@ fn the_egress_proxy_is_the_coder_charts_in_every_case() {
     }
 }
 
+// ---------------------------------------------------------------- the coder's pod: the git sandbox (slice D15d)
+
+/// The projection of `tools/adam-parity/extract.py` for the workloads of a case: what the coder chart renders for its pods.
+fn adam_workloads(case: &str) -> Value {
+    let path = repo_root().join(format!("crates/domain/tests/golden/{case}.json"));
+    let text = std::fs::read_to_string(&path).unwrap_or_else(|e| panic!("{}: {e}", path.display()));
+    let golden: Value = serde_json::from_str(&text).unwrap();
+    golden["workloads"].clone()
+}
+
+/// A probe of the pod spec, in the golden's shape.
+fn probe_of(p: &Value) -> Value {
+    if p.is_null() {
+        return Value::Null;
+    }
+    json!({
+        "exec": p["exec"]["command"],
+        "failureThreshold": p["failureThreshold"],
+        "period": p["periodSeconds"],
+        "timeout": p["timeoutSeconds"],
+    })
+}
+
+/// A container of the pod spec, in the golden's shape (`extract.py`'s `container`): the fields the sandbox has.
+fn container_of(c: &Value) -> Value {
+    let image = c["image"].as_str().unwrap();
+    let mut out = json!({
+        "image": image.split_once('@').map_or(image, |(tag, _)| tag),
+        "command": c["command"],
+        "args": c.get("args").cloned().unwrap_or_else(|| json!([])),
+        "env": c["env"].as_array().unwrap().iter().map(|e| {
+            json!({"name": e["name"], "literal": e["value"]})
+        }).collect::<Vec<_>>(),
+        "mounts": c["volumeMounts"].as_array().unwrap().iter().map(|m| {
+            json!({"name": m["name"], "path": m["mountPath"], "readOnly": m.get("readOnly").and_then(Value::as_bool).unwrap_or(false)})
+        }).collect::<Vec<_>>(),
+        "probes": {
+            "startup": probe_of(&c["startupProbe"]),
+            "liveness": probe_of(&c["livenessProbe"]),
+            "readiness": probe_of(&c["readinessProbe"]),
+        },
+        "resources": {
+            "requests": c["resources"].get("requests").cloned().unwrap_or_else(|| json!({})),
+            "limits": c["resources"].get("limits").cloned().unwrap_or_else(|| json!({})),
+        },
+        "port": Value::Null,
+    });
+    if c["securityContext"]["readOnlyRootFilesystem"] == true {
+        out["readOnlyRootFilesystem"] = json!(true);
+    }
+    out
+}
+
+/// A volume of the pod spec of one of the kinds the sandbox adds, in the golden's shape.
+fn volume_of(v: &Value) -> Option<Value> {
+    if let Some(e) = v.get("emptyDir") {
+        return Some(json!({
+            "name": v["name"], "kind": "emptyDir",
+            "medium": e.get("medium").cloned().unwrap_or(Value::Null),
+            "sizeLimit": e.get("sizeLimit").cloned().unwrap_or(Value::Null),
+        }));
+    }
+    v.get("projected").map(|p| {
+        json!({
+            "name": v["name"], "kind": "projected",
+            "mode": p["defaultMode"], "sources": p["sources"],
+        })
+    })
+}
+
+#[test]
+fn the_coders_pod_has_the_git_sandbox_the_coder_chart_renders_in_every_case() {
+    // The cases are about the settings and the objects of run pods, as the case above: the worker's pod, with the case's settings.
+    for case in [
+        "coder-run-pods",
+        "coder-run-pods-shared",
+        "coder-run-pods-split",
+        "coder-run-pods-tuned",
+    ] {
+        let adam = adam_workloads(case);
+        let docs = if case == "coder-run-pods" {
+            operator()
+        } else {
+            operator_case(case)
+        };
+        let at = |what: &str| format!("{case}: {what}");
+        let pod = &find(&docs, "StatefulSet", "coder")["spec"]["template"]["spec"];
+        let theirs = &adam["coder"];
+
+        // The pod: no automounted token, the account named.
+        assert_eq!(
+            pod["automountServiceAccountToken"],
+            json!(theirs["automountServiceAccountToken"]),
+            "{}",
+            at("automountServiceAccountToken")
+        );
+        assert_eq!(pod["serviceAccountName"], theirs["serviceAccount"]);
+
+        // The sandbox: command, variables, mounts, probes, resources and the read-only root, field by field, as the chart renders them.
+        let sandbox = pod["initContainers"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|c| c["name"] == "git-sandbox")
+            .unwrap_or_else(|| panic!("{}", at("no git-sandbox")));
+        assert_eq!(
+            container_of(sandbox),
+            theirs["sidecars"]["git-sandbox"],
+            "{}",
+            at("the git-sandbox container")
+        );
+        assert_eq!(
+            sandbox["restartPolicy"],
+            "Always",
+            "{}",
+            at("a native sidecar")
+        );
+        // The chart says the seccomp profile once more at the container; the operator says it once for the pod.
+        assert_eq!(
+            pod["securityContext"]["seccompProfile"],
+            json!({"type": "RuntimeDefault"})
+        );
+
+        // The volumes of those kinds: the account's credentials and the two scratch directories, as the chart renders them.
+        let mut ours: Vec<Value> = pod["volumes"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter_map(volume_of)
+            .collect();
+        let mut chart: Vec<Value> = theirs["volumes"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter(|v| v["kind"] == "emptyDir" || v["kind"] == "projected")
+            .cloned()
+            .collect();
+        ours.sort_by_key(|v| v["name"].as_str().unwrap().to_owned());
+        chart.sort_by_key(|v| v["name"].as_str().unwrap().to_owned());
+        assert_eq!(
+            ours.len(),
+            3,
+            "{}",
+            at("the credentials and two scratch volumes")
+        );
+        assert_eq!(ours, chart, "{}", at("the volumes"));
+
+        // The coder container: the credentials, read-only, where an in-cluster client reads them, and the socket's directory.
+        let coder = container_of(&pod["containers"][0]);
+        for name in ["kube-api-access", "git-sandbox"] {
+            let mount = |c: &Value| {
+                c["mounts"]
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .find(|m| m["name"] == name)
+                    .cloned()
+            };
+            assert!(mount(&coder).is_some(), "{}", at(name));
+            assert_eq!(mount(&coder), mount(&theirs["agent"]), "{}", at(name));
+        }
+        let socket = |c: &Value| {
+            c["env"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .find(|e| e["name"] == "GIT_SANDBOX_SOCKET")
+                .cloned()
+        };
+        assert!(socket(&coder).is_some());
+        assert_eq!(
+            socket(&coder),
+            socket(&theirs["agent"]),
+            "{}",
+            at("GIT_SANDBOX_SOCKET")
+        );
+
+        // Who holds the credentials, in the render itself: the coder container and no other.
+        let holders: Vec<&str> = pod["containers"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .chain(pod["initContainers"].as_array().unwrap())
+            .filter(|c| {
+                c["volumeMounts"]
+                    .as_array()
+                    .is_some_and(|m| m.iter().any(|m| m["name"] == "kube-api-access"))
+            })
+            .map(|c| c["name"].as_str().unwrap())
+            .collect();
+        assert_eq!(holders, ["agent"], "{}", at("who mounts the credentials"));
+    }
+}
+
+#[test]
+fn a_split_front_has_none_of_it_in_the_chart_and_in_the_operator() {
+    let adam = adam_workloads("coder-run-pods-split");
+    let front = &adam["coder-front"];
+    assert!(front["sidecars"].as_object().unwrap().is_empty());
+    assert!(front["serviceAccount"].is_null());
+    assert_eq!(front["automountServiceAccountToken"], false);
+    assert!(
+        front["volumes"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|v| v["kind"] != "projected" && v["kind"] != "emptyDir")
+    );
+    assert!(
+        front["agent"]["env"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|e| e["name"] != "GIT_SANDBOX_SOCKET")
+    );
+    let split = common::resolved_run_pods(|s, c| {
+        common::set(s, "/spec/scaling/topology", json!("split"));
+        common::set(s, "/spec/scaling/workers", json!(2));
+        common::set(s, "/spec/scaling/front", json!({"replicas": 2}));
+        common::set(
+            c,
+            "/spec/harness/adam/coder/workspacePlacement",
+            json!("shared"),
+        );
+        common::set(
+            c,
+            "/spec/environment/volumes/0/source/persistent/perReplica",
+            json!(false),
+        );
+    });
+    let docs = render(&split.id, &split.runtime).unwrap().documents();
+    let ours = &find(&docs, "Deployment", "coder-front")["spec"]["template"]["spec"];
+    assert!(
+        ours.get("initContainers").is_none(),
+        "a front with a sidecar"
+    );
+    assert!(ours.get("serviceAccountName").is_none());
+    assert_eq!(ours["automountServiceAccountToken"], false);
+    assert!(
+        ours["volumes"].is_null()
+            || ours["volumes"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .all(|v| v.get("projected").is_none() && v.get("emptyDir").is_none())
+    );
+    let workers = &find(&docs, "StatefulSet", "coder")["spec"]["template"]["spec"];
+    assert!(
+        workers["initContainers"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|c| c["name"] == "git-sandbox")
+    );
+}
+
+#[test]
+fn the_chart_ships_the_coder_charts_defaults_for_the_git_sandbox() {
+    // The operator chart's defaults are the coder chart's: resources, size of /tmp and number of commands, read from the golden.
+    let adam = adam_workloads("coder-run-pods");
+    let sandbox = &adam["coder"]["sidecars"]["git-sandbox"];
+    let values = common::operator_chart_values();
+    let ours = &values["runPods"]["gitSandbox"];
+    assert_eq!(
+        ours["resources"]["requests"],
+        sandbox["resources"]["requests"]
+    );
+    assert_eq!(ours["resources"]["limits"], sandbox["resources"]["limits"]);
+    let tmp = adam["coder"]["volumes"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|v| v["name"] == "git-sandbox-tmp")
+        .unwrap();
+    assert_eq!(ours["tmpSize"], tmp["sizeLimit"]);
+    let max = sandbox["env"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|e| e["name"] == "GIT_SANDBOX_MAX_COMMANDS")
+        .unwrap();
+    assert_eq!(
+        ours["maxCommands"].to_string(),
+        max["literal"].as_str().unwrap()
+    );
+    // And no switch in the operator chart's values, as in the coder chart's.
+    assert!(ours.get("enabled").is_none());
+}
+
 #[test]
 fn the_chart_ships_the_coder_charts_default_allow_list_and_nothing_is_open_by_default() {
     // The operator chart's default list is the coder chart's, host for host, in order: a host added to one and not the other

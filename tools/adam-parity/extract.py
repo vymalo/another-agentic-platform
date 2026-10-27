@@ -17,6 +17,12 @@ NetworkPolicy. They are found by the label `app.kubernetes.io/component: egress-
 the chart carries; their ServiceAccount, Service, ConfigMap, NetworkPolicy, PodDisruptionBudget and Deployment would
 otherwise be taken for the coder's own.
 
+Since adam-rs #137 (the git sandbox, slice D15d) the coder's pod with run pods has the `git-sandbox` native sidecar, three
+volumes of kinds the projection did not know (`emptyDir` twice and the `projected` volume `kube-api-access`, the account's
+credentials, mounted in the coder container alone), `automountServiceAccountToken: false` and `GIT_SANDBOX_SOCKET`. The
+volumes are projected whole (the sources of the projected one as the chart writes them), and a container's
+`readOnlyRootFilesystem` is projected when it is on; any other deviation from the chart's `containerSecurityContext` raises.
+
 Only facts the operator promises to keep are projected. The chart's own conveniences (labels,
 ExternalSecret, the CloudNativePG cluster, pull secrets, scheduling hints) are left out: the golden's
 README lists them. Needs PyYAML (`pip install pyyaml`).
@@ -60,8 +66,34 @@ def probe(p):
     return out
 
 
+# What `containerSecurityContext` of the chart says, and so what the operator does to every container (`aap-runtime-kubernetes`).
+STANDARD_CONTAINER_SECURITY = {"allowPrivilegeEscalation": False, "capabilities": {"drop": ["ALL"]}}
+
+
+def read_only_root(c):
+    """Whether the container's root file system is read-only (the git sandbox's is). Raises for any other deviation from the
+    standard container security, so that a hardening the operator does not make is not skipped silently. The pod-wide seccomp
+    profile (`RuntimeDefault`) is the operator's too, so a container that says it again says nothing new."""
+    sc = dict(c.get("securityContext") or {})
+    read_only = bool(sc.pop("readOnlyRootFilesystem", False))
+    seccomp = sc.pop("seccompProfile", None)
+    if seccomp not in (None, {"type": "RuntimeDefault"}):
+        raise SystemExit(f"container {c['name']}: a seccomp profile this projection does not know: {seccomp}")
+    if sc != STANDARD_CONTAINER_SECURITY:
+        raise SystemExit(f"container {c['name']}: a security context this projection does not know: {sc}")
+    return read_only
+
+
 def container(c):
     res = c.get("resources", {})
+    out = container_facts(c, res)
+    # Only when on, so that the containers that never set it are projected as they always were.
+    if read_only_root(c):
+        out["readOnlyRootFilesystem"] = True
+    return out
+
+
+def container_facts(c, res):
     return {
         "image": c["image"],
         "command": c.get("command", []),
@@ -86,6 +118,13 @@ def volume(v):
     elif "configMap" in v:
         c = v["configMap"]
         out.update(kind="configMap", configMap=c["name"], mode=c.get("defaultMode"))
+    elif "emptyDir" in v:
+        e = v["emptyDir"] or {}
+        out.update(kind="emptyDir", medium=e.get("medium"), sizeLimit=e.get("sizeLimit"))
+    elif "projected" in v:
+        # The account's credentials (`kube-api-access`): the sources are the chart's own, whole.
+        p = v["projected"]
+        out.update(kind="projected", mode=p.get("defaultMode"), sources=p["sources"])
     else:
         raise SystemExit(f"a volume this projection does not know: {v}")
     return out

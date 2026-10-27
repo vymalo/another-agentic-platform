@@ -22,7 +22,7 @@
     "namespace": "another-agentic-system",
     "release": "coder",
     "repository": "https://github.com/vymalo/another-adam-rs",
-    "revision": "75982554a5e90e274ec6f7cad19e742a7fae0495",
+    "revision": "581aeed75e56f903b2a9f59217ea9dcd449c8466",
     "values": "tools/adam-parity/cases/coder-affinity-token.yaml"
   },
   "workloads": {

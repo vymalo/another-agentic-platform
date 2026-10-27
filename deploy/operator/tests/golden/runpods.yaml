@@ -255,6 +255,15 @@ data:
     - docker.io/library/postgres:16
     extraEnv:
       RUSTFLAGS: -C debuginfo=0
+    gitSandbox:
+      maxCommands: 32
+      resources:
+        limits:
+          memory: 2Gi
+        requests:
+          cpu: 100m
+          memory: 128Mi
+      tmpSize: 128Mi
     idleSecs: 900
     image:
       digest: sha256:d2aae762ecad2c13bb697332507d236a75d8233d061f38cc97dc9227192b0797
@@ -647,7 +656,7 @@ spec:
         app.kubernetes.io/instance: aap-operator
       annotations:
         # The settings for run pods are read once, at start: a changed file is a new pod.
-        checksum/run-pods: 224bfe4a6f64003f95e6fb06ea7fe1cd566593dde749cec830fcff6f50615f4c
+        checksum/run-pods: b5e9bbbbe09e34ecb2bbfba0983232bb19689388b15d8b5ed8045e8549733360
     spec:
       serviceAccountName: aap-operator
       # The API token is the operator's way in.

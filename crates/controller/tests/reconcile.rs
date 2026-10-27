@@ -1390,6 +1390,8 @@ fn run_pod_settings() -> aap_domain::RunPodSettings {
                           "dnsPodLabels": {"k8s-app": "kube-dns"}},
         "egressProxy": {"replicas": 2, "ports": [443], "allow": ["registry.npmjs.org"],
                         "resources": {"requests": {"cpu": "25m", "memory": "32Mi"}, "limits": {"memory": "256Mi"}}},
+        "gitSandbox": {"resources": {"requests": {"cpu": "100m", "memory": "128Mi"}, "limits": {"memory": "1Gi"}},
+                       "tmpSize": "64Mi", "maxCommands": 64},
     }))
     .unwrap()
 }

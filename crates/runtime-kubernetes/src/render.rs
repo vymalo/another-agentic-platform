@@ -58,6 +58,13 @@ const EGRESS_CONTAINER: &str = "egress";
 const EGRESS_PORT_NAME: &str = "proxy";
 const EGRESS_ALLOW_VOLUME: &str = "allow";
 
+/// The `kube-api-access` volume a pod with [`VolumeSource::AccountToken`] gets, as the kubelet makes its own: the lifetime of
+/// the token (an hour, plus the seven seconds the kubelet adds), the ConfigMap that holds the cluster's certificate authority
+/// in every namespace, and the mode of the files (0644, written in decimal so that no YAML reader takes it for another number).
+const ACCOUNT_TOKEN_EXPIRATION_SECS: i64 = 3607;
+const ROOT_CA_CONFIG_MAP: &str = "kube-root-ca.crt";
+const ACCOUNT_VOLUME_MODE: i32 = 420;
+
 /// The name of the container port every agent serves.
 pub const PORT_NAME: &str = "http";
 
@@ -639,6 +646,7 @@ impl Cx<'_> {
             mounts: Vec::new(),
             probes: aap_ports::Probes::default(),
             resources: p.resources.clone(),
+            read_only_root_filesystem: false,
         })?;
         let container = core::Container {
             image_pull_policy: Some("IfNotPresent".to_owned()),
@@ -895,8 +903,10 @@ impl Cx<'_> {
                 ..ObjectMeta::default()
             }),
             spec: Some(core::PodSpec {
-                // The pods of the workers that make run pods hold the token of their account, and nothing else holds one.
-                automount_service_account_token: Some(w.service_account.is_some()),
+                // No pod automounts a token: that would put it in every container, the sidecars' too. The account of a
+                // worker that makes run pods has its token as a volume (`VolumeSource::AccountToken`) that the agent
+                // container alone mounts.
+                automount_service_account_token: Some(false),
                 service_account_name: w.service_account.clone(),
                 termination_grace_period_seconds: w.termination_grace_secs.map(i64::from),
                 security_context: Some(pod_security(&w.security)),
@@ -1034,6 +1044,55 @@ impl Cx<'_> {
                     default_mode: Some(file_mode(*mode)?),
                     items: None,
                     optional: None,
+                });
+            }
+            VolumeSource::Scratch(scratch) => {
+                volume.empty_dir = Some(core::EmptyDirVolumeSource {
+                    medium: scratch.in_memory.then(|| "Memory".to_owned()),
+                    size_limit: scratch.size_limit.clone().map(Quantity),
+                });
+            }
+            VolumeSource::AccountToken => {
+                // What the kubelet's own `kube-api-access-*` volume holds, which is what an in-cluster client reads: the
+                // token (a short-lived one the kubelet renews), the cluster's certificate authority and the namespace.
+                volume.projected = Some(core::ProjectedVolumeSource {
+                    default_mode: Some(ACCOUNT_VOLUME_MODE),
+                    sources: Some(vec![
+                        core::VolumeProjection {
+                            service_account_token: Some(core::ServiceAccountTokenProjection {
+                                expiration_seconds: Some(ACCOUNT_TOKEN_EXPIRATION_SECS),
+                                path: "token".to_owned(),
+                                audience: None,
+                            }),
+                            ..core::VolumeProjection::default()
+                        },
+                        core::VolumeProjection {
+                            config_map: Some(core::ConfigMapProjection {
+                                name: ROOT_CA_CONFIG_MAP.to_owned(),
+                                items: Some(vec![core::KeyToPath {
+                                    key: "ca.crt".to_owned(),
+                                    path: "ca.crt".to_owned(),
+                                    mode: None,
+                                }]),
+                                optional: None,
+                            }),
+                            ..core::VolumeProjection::default()
+                        },
+                        core::VolumeProjection {
+                            downward_api: Some(core::DownwardAPIProjection {
+                                items: Some(vec![core::DownwardAPIVolumeFile {
+                                    path: "namespace".to_owned(),
+                                    field_ref: Some(core::ObjectFieldSelector {
+                                        api_version: Some("v1".to_owned()),
+                                        field_path: "metadata.namespace".to_owned(),
+                                    }),
+                                    mode: None,
+                                    resource_field_ref: None,
+                                }]),
+                            }),
+                            ..core::VolumeProjection::default()
+                        },
+                    ]),
                 });
             }
             VolumeSource::SecretFile { secret, file, mode } => {
@@ -1187,9 +1246,11 @@ fn container(c: &Container) -> Result<core::Container, Error> {
         liveness_probe: probe(&c.probes.liveness)?,
         readiness_probe: probe(&c.probes.readiness)?,
         resources,
-        // Every container drops every capability and refuses privilege escalation.
+        // Every container drops every capability and refuses privilege escalation; one that asks for it also has a
+        // read-only root file system.
         security_context: Some(core::SecurityContext {
             allow_privilege_escalation: Some(false),
+            read_only_root_filesystem: c.read_only_root_filesystem.then_some(true),
             capabilities: Some(core::Capabilities {
                 add: None,
                 drop: Some(vec!["ALL".to_owned()]),

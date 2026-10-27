@@ -127,11 +127,11 @@ the CIDRs, a toleration or an egress rule, which the operator checks at start an
 {{- $quantity := `^([0-9]+\.?[0-9]*|\.[0-9]+)(Ki|Mi|Gi|Ti|Pi|Ei|n|u|m|k|M|G|T|P|E|[eE][+-]?[0-9]+)?$` -}}
 {{- $label := `^[a-z0-9]([-a-z0-9]*[a-z0-9])?$` -}}
 {{- range $k, $v := $r -}}
-{{- if not (has $k (list "enabled" "image" "container" "cargoBuildJobs" "extraEnv" "priorityClassName" "quota" "idleSecs" "readyTimeoutSecs" "waitSecs" "nodeSelector" "tolerations" "nodeAffinity" "extraAllowedImages" "networkPolicy" "egressProxy")) -}}
-{{- fail (printf "runPods.%s is not a setting: enabled, image, container, cargoBuildJobs, extraEnv, priorityClassName, quota, idleSecs, readyTimeoutSecs, waitSecs, nodeSelector, tolerations, nodeAffinity, extraAllowedImages, networkPolicy or egressProxy (the operator refuses an unknown key at start)" $k) -}}
+{{- if not (has $k (list "enabled" "image" "container" "cargoBuildJobs" "extraEnv" "priorityClassName" "quota" "idleSecs" "readyTimeoutSecs" "waitSecs" "nodeSelector" "tolerations" "nodeAffinity" "extraAllowedImages" "networkPolicy" "egressProxy" "gitSandbox")) -}}
+{{- fail (printf "runPods.%s is not a setting: enabled, image, container, cargoBuildJobs, extraEnv, priorityClassName, quota, idleSecs, readyTimeoutSecs, waitSecs, nodeSelector, tolerations, nodeAffinity, extraAllowedImages, networkPolicy, egressProxy or gitSandbox (the operator refuses an unknown key at start)" $k) -}}
 {{- end -}}
 {{- end -}}
-{{- range $k := list "image" "quota" "networkPolicy" "egressProxy" "extraEnv" "nodeSelector" -}}
+{{- range $k := list "image" "quota" "networkPolicy" "egressProxy" "gitSandbox" "extraEnv" "nodeSelector" -}}
 {{- if not (kindIs "map" (get $r $k)) -}}
 {{- fail (printf "runPods.%s must be a map (the defaults of values.yaml are its keys; a null removes them all)" $k) -}}
 {{- end -}}
@@ -299,6 +299,39 @@ the CIDRs, a toleration or an egress rule, which the operator checks at start an
 {{- fail (printf "runPods.egressProxy.resources.%s.%s must be a quantity such as 32Mi or 25m, got %q" $k $res (toString $q)) -}}
 {{- end -}}
 {{- end -}}
+{{- end -}}
+{{- /* The git sandbox (adam-rs ADR 0041 open decision 6, slice D15d): the checks of the coder chart's _validate.tpl, which RunPodSettings::validate repeats. There is no switch. */ -}}
+{{- $gs := $r.gitSandbox -}}
+{{- range $k, $v := $gs -}}
+{{- if not (has $k (list "resources" "tmpSize" "maxCommands")) -}}
+{{- fail (printf "runPods.gitSandbox.%s is not a setting: resources, tmpSize or maxCommands (there is no switch: the git sandbox is on with run pods, and the operator refuses an unknown key at start)" $k) -}}
+{{- end -}}
+{{- end -}}
+{{- if not (kindIs "map" $gs.resources) -}}
+{{- fail "runPods.gitSandbox.resources must be a map with requests and limits" -}}
+{{- end -}}
+{{- range $k, $v := $gs.resources -}}
+{{- if not (has $k (list "requests" "limits")) -}}
+{{- fail (printf "runPods.gitSandbox.resources.%s is not a setting: requests or limits" $k) -}}
+{{- end -}}
+{{- if not (kindIs "map" $v) -}}
+{{- fail (printf "runPods.gitSandbox.resources.%s must be a map of quantities" $k) -}}
+{{- end -}}
+{{- range $res, $q := $v -}}
+{{- if not (and (or (kindIs "string" $q) (kindIs "float64" $q)) (regexMatch $quantity (toString $q))) -}}
+{{- fail (printf "runPods.gitSandbox.resources.%s.%s must be a quantity such as 128Mi or 100m, got %q" $k $res (toString $q)) -}}
+{{- end -}}
+{{- end -}}
+{{- end -}}
+{{- if not (get (get $gs.resources "limits" | default dict) "memory") -}}
+{{- fail "runPods.gitSandbox.resources.limits.memory is required: a program that a repository's configuration makes git run in the sandbox must be stopped by the container's limit, not by the node's, and the sandbox's /tmp counts against it" -}}
+{{- end -}}
+{{- /* Stricter than the coder chart on one point: zero is refused, because a tmpfs given size=0 has no limit at all. */ -}}
+{{- if or (not (regexMatch "^[0-9]+([.][0-9]+)?(Ki|Mi|Gi|Ti|k|M|G|T)?$" (toString $gs.tmpSize))) (regexMatch "^0+([.]0+)?(Ki|Mi|Gi|Ti|k|M|G|T)?$" (toString $gs.tmpSize)) -}}
+{{- fail (printf "runPods.gitSandbox.tmpSize must be a quantity above zero such as 64Mi, got %q" (toString $gs.tmpSize)) -}}
+{{- end -}}
+{{- if or (not (regexMatch "^[0-9]+$" (toString $gs.maxCommands))) (lt (int64 $gs.maxCommands) 1) (gt (int64 $gs.maxCommands) 4096) -}}
+{{- fail (printf "runPods.gitSandbox.maxCommands must be a whole number from 1 to 4096 (GIT_SANDBOX_MAX_COMMANDS), got %q" (toString $gs.maxCommands)) -}}
 {{- end -}}
 {{- /* The size classes: at least one, and every one with the memory limit the quota counts. */ -}}
 {{- if not .Values.runPodClasses -}}

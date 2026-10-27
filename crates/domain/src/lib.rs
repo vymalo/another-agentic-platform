@@ -23,7 +23,7 @@ pub use digest::{canonical_json, digest_json, spec_digest};
 pub use externals::{Externals, References, references};
 pub use resolve::{ResolvedAgent, resolve};
 pub use run_pods::{
-    EgressProxySettings, EgressResources, RunImage, RunPodClass, RunPodNetworkSettings,
-    RunPodQuotaSettings, RunPodSettings,
+    ContainerResources, EgressProxySettings, EgressResources, GitSandboxSettings, RunImage,
+    RunPodClass, RunPodNetworkSettings, RunPodQuotaSettings, RunPodSettings,
 };
 pub use validate::{ConfigIssue, name_issue, validate, validate_config};
