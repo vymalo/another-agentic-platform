@@ -1,0 +1,232 @@
+# The two coders of the kind end-to-end of run pods (D15b, run-pods-e2e.sh), both the REAL adam-rs coder image at or after #131 (`3f714d0`):
+# `e2e-plain`, a coder on the token variant with NO run pods (an agent as it was before run pods existed: the script makes it first, with the
+# operator's chart installed without them, and shows the chart's upgrade leaves it as it was), and `e2e-coder`, a coder on the GitHub App
+# variant with `coder.runPods` (the commands of its runs run in pods of their own, and the App's key, a file in the coder's pod, is not in
+# any of them). The manifest carries no namespace: the script applies it in its own (aap-e2e-runpods), one part at a time (the label
+# aap-e2e/part), and every object carries the label aap-e2e/made-by=run-pods-e2e, the only objects the script applies over or deletes.
+#
+# THE PIN OF THE CODER IS HERE (the two `ref:` lines, which are one pin: bin/operator/tests/e2e_run_pods_fixture.rs and render-check.sh hold
+# them equal) AND IN NO OTHER FILE: the chart's `defaultAgentImage` is a pin of its own and is NOT moved by this slice (it is the image of
+# coder.yaml, S9's end-to-end: `sha-9a1fd4e`, from before #131). The script gives the same image to the scripted model (run-pods-support.yaml),
+# which runs a Node script in it. `sha-3f714d0` is adam-rs's main at #131, "refuse to start with the App key file next to local commands",
+# which contains #117 (ADR 0041, a run pod sees only its own run). *Verified 2026-10-26* by anonymous requests to ghcr.io: the manifest of
+# the tag is a Docker v2 image manifest (not an index) whose digest is the one below, one linux/amd64 image of 14 layers and 3.0 GB, user
+# 10001, entrypoint `tini -- adam-coder`, label org.opencontainers.image.revision 3f714d08132c6b4bb5530753105cfdb12d97a914, 6 of whose layers are the
+# `workspace` image's that the run pods run (the chart's runPods.image, 1.98.1-e6a528f, the digest of whose manifest was read again the same day):
+# the kubelet that pulled the coder pulls one layer more for the run pods. The package is public (no credential is needed to pull it).
+#
+# No value here is a secret: every Secret is a reference to a key the script makes, with a random or a dummy value. The model is the script's own
+# (run-pods-model.js: nothing is asked of a real model), GitHub is never reached (the App's id is made up, its key is generated for the run
+# and parsed at start, and the tasks name no GitHub repository), and the Postgres is a throwaway one (run-pods-support.yaml).
+#
+# The coder of the App variant sets ALLOW_LOCAL_REPOS, a development setting of the coder that lets a run work in a repository that is a path of
+# its own volume: it is how a run in a repository (with a mirror and a worktree, which a pod mounts as ADR 0041 says) needs no git server.
+apiVersion: agents.vymalo.com/v1alpha1
+kind: AgentConfig
+metadata:
+  name: e2e-plain
+  labels:
+    aap-e2e/made-by: run-pods-e2e
+    aap-e2e/part: plain
+spec:
+  harness:
+    type: adam-rs
+    adam:
+      binary: adam-coder
+      agent:
+        embedded: {}
+      coder:
+        workers: 2
+        maxCheckCycles: 3
+        checkTimeoutSecs: 900
+        workspaceSweepSecs: 10
+        allowedRepoHosts: [github.com]
+        githubApiUrl: https://api.github.com
+        prDraft: true
+        gitAuthor:
+          name: "e2e[bot]"
+          email: "e2e@example.invalid"
+        opencodeModel: coding-model
+        github:
+          token: # the token variant with a dummy token: nothing here reaches GitHub
+            secretRef:
+              name: e2e-secrets
+              key: GITHUB_TOKEN
+  model:
+    model: coding-model
+    baseUrl:
+      value: http://e2e-model:8080/v1 # the script's own model, in this namespace
+    apiKeySecretRef:
+      name: e2e-secrets
+      key: MODEL_API_KEY
+  tools:
+    # The embedded agent reads GitHub through this server (a native sidecar, the same image): without it the coder exits 69.
+    githubMcp:
+      sidecar: true
+      port: 8082
+      host: ""
+    mcpServers: {}
+  environment:
+    image:
+      ref: ghcr.io/vymalo/another-adam-rs/coder:sha-3f714d0@sha256:368614551d855f96444aa91a1112b0659f39a74ec959dd9a5ca081154c24a1cc
+    resources: # a runner, not netcup
+      requests:
+        cpu: 100m
+        memory: 256Mi
+      limits:
+        memory: 2Gi
+    volumes:
+      - name: work
+        scope: agent
+        mountPath: /work
+        source:
+          persistent:
+            size: 1Gi
+            perReplica: true
+    terminationGracePeriodSeconds: 30
+  security:
+    runAsUser: 10001
+    runAsGroup: 10001
+    fsGroup: 10001
+    fsGroupChangePolicy: OnRootMismatch
+  extraEnv: {}
+---
+apiVersion: agents.vymalo.com/v1alpha1
+kind: AgentService
+metadata:
+  name: e2e-plain
+  labels:
+    aap-e2e/made-by: run-pods-e2e
+    aap-e2e/part: plain
+spec:
+  description: A coder with no run pods, for the end-to-end of run pods.
+  configRef:
+    name: e2e-plain
+  interfaces:
+    a2a:
+      enabled: true
+      bearerTokensSecretRef:
+        name: e2e-secrets
+        key: A2A_BEARER_TOKENS
+      publicUrl: "" # empty: http://<name>.<ns>.svc:8080/
+  scaling:
+    topology: combined
+    workers: 1
+  store:
+    postgres:
+      secretRef:
+        name: e2e-db-uris
+        key: plain-uri
+  access:
+    allowFrom:
+      - podSelector:
+          matchLabels:
+            aap-e2e/client: "true" # the script reaches the agent from inside its own pod: nobody else is named
+  deletionPolicy: Retain
+---
+apiVersion: agents.vymalo.com/v1alpha1
+kind: AgentConfig
+metadata:
+  name: e2e-coder
+  labels:
+    aap-e2e/made-by: run-pods-e2e
+    aap-e2e/part: coder
+spec:
+  harness:
+    type: adam-rs
+    adam:
+      binary: adam-coder
+      agent:
+        embedded: {}
+      coder:
+        workers: 4 # four runs at once in one pod: two hold their pods, a third waits for a slot, a fourth is deleted with its pod
+        maxCheckCycles: 3
+        checkTimeoutSecs: 900
+        workspaceSweepSecs: 10 # a finished run's pod is released within a sweep
+        allowedRepoHosts: [github.com]
+        githubApiUrl: https://api.github.com
+        prDraft: true
+        gitAuthor:
+          name: "e2e[bot]"
+          email: "e2e@example.invalid"
+        opencodeModel: coding-model
+        runPods:
+          sizeClass: standard # a class of the operator chart's runPodClasses
+        github:
+          app: # the variant #131 is about: the key is a file of the coder's pod, and its commands may not run next to it
+            id: Iv1.e2e0000000000000
+            owners: [e2e-owner]
+            privateKeySecretRef:
+              name: e2e-github-app
+              key: private-key.pem
+  model:
+    model: coding-model
+    baseUrl:
+      value: http://e2e-model:8080/v1
+    apiKeySecretRef:
+      name: e2e-secrets
+      key: MODEL_API_KEY
+  tools:
+    githubMcp:
+      sidecar: true
+      port: 8082
+      host: ""
+    mcpServers: {}
+  environment:
+    image:
+      ref: ghcr.io/vymalo/another-adam-rs/coder:sha-3f714d0@sha256:368614551d855f96444aa91a1112b0659f39a74ec959dd9a5ca081154c24a1cc
+    resources: # the coder alone: no build runs in it with run pods on
+      requests:
+        cpu: 100m
+        memory: 256Mi
+      limits:
+        memory: 2Gi
+    volumes:
+      - name: work
+        scope: agent
+        mountPath: /work
+        source:
+          persistent:
+            size: 1Gi
+            perReplica: true
+    terminationGracePeriodSeconds: 30
+  security:
+    runAsUser: 10001
+    runAsGroup: 10001
+    fsGroup: 10001
+    fsGroupChangePolicy: OnRootMismatch
+  extraEnv:
+    ALLOW_LOCAL_REPOS: "true" # development only: a repository may be a path of the coder's own volume (see the header)
+---
+apiVersion: agents.vymalo.com/v1alpha1
+kind: AgentService
+metadata:
+  name: e2e-coder
+  labels:
+    aap-e2e/made-by: run-pods-e2e
+    aap-e2e/part: coder
+spec:
+  description: A coder with run pods, for the end-to-end of run pods.
+  configRef:
+    name: e2e-coder
+  interfaces:
+    a2a:
+      enabled: true
+      bearerTokensSecretRef:
+        name: e2e-secrets
+        key: A2A_BEARER_TOKENS
+      publicUrl: ""
+  scaling:
+    topology: combined
+    workers: 1
+  store:
+    postgres:
+      secretRef:
+        name: e2e-db-uris
+        key: coder-uri
+  access:
+    allowFrom:
+      - podSelector:
+          matchLabels:
+            aap-e2e/client: "true"
+  deletionPolicy: Retain # the claim stays when the service goes (the script checks it)

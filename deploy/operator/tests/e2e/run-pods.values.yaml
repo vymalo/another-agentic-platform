@@ -1,0 +1,20 @@
+# The values the kind end-to-end of run pods (D15b, run-pods-e2e.sh) installs the operator chart with. The script adds the image (the one built in
+# the job and loaded into kind, never pulled) and installs TWICE with these: first with `--set runPods.enabled=false` (the operator as it was before
+# run pods, and an agent with none made under it), then without that flag, which is the whole of the upgrade this file is about.
+#
+# The quota allows TWO run pods, so that the script can fill it (two runs that hold their pods), see that a pod over it is refused and that the coder
+# waits, and see it go on when a slot is free. Everything else is the chart's default: the `standard` class (250m of CPU, 512Mi, a limit of 2Gi), the
+# run image of another-agentic-images by tag and digest, the network policy (no ingress, DNS and the internet but not the private ranges), and a
+# watched namespace that is the release's. There is no registry and no Platform API: this end-to-end is about the operator and the coder.
+#
+# Nothing here is a secret. The cluster is a throwaway one; no value below is advice for a deployment (deploy/operator/README.md, "Run pods", is).
+tuning:
+  # A pending service is looked at again every 5 s instead of 15: the job waits for pods, not for a timer.
+  resyncPendingSecs: 5
+runPods:
+  enabled: true
+  quota:
+    pods: 2
+  # A pod nobody used for this long is deleted. The janitor of the coder (workspaceSweepSecs: 10 in run-pods.yaml) releases a finished run's pod far
+  # sooner; this is the bound if it did not.
+  idleSecs: 120
