@@ -1033,6 +1033,88 @@ check "refused: run pods and the API on, and no work volume among the coder defa
 check "refused: a size class list written by hand into the API's file" refused "api.config.defaults.runPodSizeClasses is the chart's" \
   -f "$here/api.values.yaml" --set 'api.config.defaults.runPodSizeClasses[0]=standard'
 
+# ---- The values of the kind end-to-end of run pods (D15b) ---------------------------------------------------------------------
+# tests/e2e/run-pods.values.yaml with what run-pods-e2e.sh adds when it runs (the image of the job, loaded into kind and never pulled), in the
+# namespace of its own, aap-e2e-runpods; and the files it applies, read as text. That the script does what it says is the job's; that what it
+# depends on is in the chart, in the fixtures and in the script's own constants is what is held here.
+rp_ns=aap-e2e-runpods
+rp_render() {
+  helm template aap-operator "$chart" --namespace "$rp_ns" -f "$here/e2e/run-pods.values.yaml" \
+    --set image.repository=operator --set image.tag=smoke --set image.pullPolicy=Never "$@" > "$out"
+}
+if ! rp_render 2> "$err"; then echo "FAIL run pods e2e: the values of the run pods end-to-end do not render: $(head -c 400 "$err")"; fail=1; fi
+rp_objects() {
+  dhas PriorityClass aap-operator-aap-e2e-runpods-run 'value: 0' 'preemptionPolicy: Never' \
+    && dhas ValidatingAdmissionPolicy aap-operator-aap-e2e-runpods-run-pods 'kind: ValidatingAdmissionPolicy' \
+    && dhas ValidatingAdmissionPolicyBinding aap-operator-aap-e2e-runpods-run-pods 'validationActions:' 'parameterNotFoundAction: Allow' 'kubernetes.io/metadata.name: aap-e2e-runpods' \
+    && dhas Role aap-operator-run-pods 'namespace: aap-e2e-runpods' 'resources: \["pods/exec"\]' \
+    && dhas ConfigMap aap-operator-run-pods-settings 'namespace: aap-e2e-runpods' 'priorityClass: aap-operator-aap-e2e-runpods-run' 'role: aap-operator-run-pods'
+}
+check "run pods e2e: the values render the PriorityClass, the policy and its binding for the namespace aap-e2e-runpods, the Role of run pods, and the settings that name them" rp_objects
+rp_settings() {
+  dhas ConfigMap aap-operator-run-pods-settings '^      pods: 2$' '^  idleSecs: 120$|idleSecs: 120' '^  standard:$|standard:' 'memory: 2Gi' 'digest: sha256:[0-9a-f]{64}' 'tag: [0-9]'
+}
+check "run pods e2e: the quota is two pods (the script fills it, is refused a third pod and makes a third run wait), a pod idle for 120 s goes, the class is standard, and the run image is pinned by digest" rp_settings
+check "run pods e2e: no registry, no Platform API, no Ingress and no ExternalSecret are rendered: this end-to-end is about the operator and the coder" \
+  lacks 'aap-operator-registry|aap-operator-api|^kind: (Ingress|ExternalSecret)$|REGISTRY_TOKEN_FILE'
+check "run pods e2e: the operator watches the namespace of the release, runs the image of the job and never pulls it" \
+  dhas Deployment aap-operator 'name: WATCH_NAMESPACE' 'value: "aap-e2e-runpods"' 'image: "operator:smoke"' 'imagePullPolicy: Never' 'name: RUN_PODS_FILE'
+rp_one_flag_apart() {
+  # The script installs twice with one values file: with run pods off, nothing of them is rendered, and the keys they leave behind (the quota, the idle time)
+  # are not checked; with the flag removed, they are all there.
+  rp_render --set runPods.enabled=false && lacks "$run_pods_traces" && dhas Deployment aap-operator 'name: WATCH_NAMESPACE' \
+    && rp_render && has_all 'kind: PriorityClass' 'kind: ValidatingAdmissionPolicy$' 'name: RUN_PODS_FILE'
+}
+check "run pods e2e: the same values file renders no trace of run pods with runPods.enabled=false (the first install) and all of them without the flag (the upgrade)" rp_one_flag_apart
+rp_render
+rp_pin() {
+  fixtures="$here/e2e/run-pods.yaml"
+  [ "$(grep -Ec '^ +ref: ghcr\.io/vymalo/another-adam-rs/coder:' "$fixtures")" -eq 2 ] || return 1
+  [ "$(grep -E '^ +ref: ghcr\.io/vymalo/another-adam-rs/coder:' "$fixtures" | sed 's/^ *//' | sort -u | wc -l)" -eq 1 ] || return 1
+  grep -Eq '^ +ref: ghcr\.io/vymalo/another-adam-rs/coder:sha-[0-9a-f]{7}@sha256:[0-9a-f]{64}$' "$fixtures" || return 1
+  pin_digest=$(sed -n 's/^ *ref: ghcr\.io\/vymalo\/another-adam-rs\/coder:[^@]*@\(sha256:[0-9a-f]*\)$/\1/p' "$fixtures" | sort -u)
+  [ -n "$pin_digest" ] && [ "$(grep -cF "$pin_digest" "$fixtures")" -eq 2 ] || return 1
+  # The digest is in this one file of deploy/ and .github/ (the script reads the pin from it, the model's manifest gets it from the script), and the
+  # coder's image of the kind end-to-end of the coder (S9) and the chart's default agent image are pins of their own.
+  [ "$(grep -rlF "$pin_digest" "$chart/.." "$chart/../../.github" | wc -l)" -eq 1 ]
+}
+check "run pods e2e: the coder is pinned by tag and digest, on two lines of run-pods.yaml that are one pin, and its digest is in no other file of deploy/ or .github/" rp_pin
+rp_support() {
+  support="$here/e2e/run-pods-support.yaml"
+  [ "$(grep -c '^          image: __CODER_IMAGE__$' "$support")" -eq 1 ] || return 1
+  support_postgres=$(sed -n 's/^ *image: \(mirror\.gcr\.io\/library\/postgres:[^ ]*@sha256:[0-9a-f]\{64\}\)$/\1/p' "$support")
+  [ -n "$support_postgres" ] && grep -qF "image: $support_postgres" "$here/e2e/postgres.yaml" || return 1
+  ! grep -q '^  namespace:' "$support" "$here/e2e/run-pods.yaml" || return 1
+  # Every object carries the label the script applies over and deletes by, and the part it is applied in.
+  [ "$(grep -c '^    aap-e2e/made-by: run-pods-e2e$' "$support")" -eq "$(grep -c '^kind: ' "$support")" ] || return 1
+  [ "$(grep -c '^    aap-e2e/made-by: run-pods-e2e$' "$here/e2e/run-pods.yaml")" -eq "$(grep -c '^kind: ' "$here/e2e/run-pods.yaml")" ] || return 1
+  grep -q '^    aap-e2e/part: postgres$' "$support" && grep -q '^    aap-e2e/part: model$' "$support" \
+    && grep -q '^    aap-e2e/part: plain$' "$here/e2e/run-pods.yaml" && grep -q '^    aap-e2e/part: coder$' "$here/e2e/run-pods.yaml"
+}
+check "run pods e2e: the support manifest runs the coder's pin for the model and Postgres by digest (the pin of postgres.yaml); every object of it and of the fixtures carries the script's label; none names a namespace" rp_support
+rp_script() {
+  script="$here/e2e/run-pods-e2e.sh"
+  # shellcheck disable=SC2016 # the patterns are the script's own text, `${...}` and `$ns` and all
+  grep -q 'ns=${AAP_E2E_NAMESPACE:-aap-e2e-runpods}$' "$script" && grep -q '^made_by=run-pods-e2e$' "$script" && grep -q '^op=aap-operator ' "$script" \
+    && grep -q '^class=$op-$ns-run ' "$script" && grep -q '^policy=$op-$ns-run-pods ' "$script" && grep -q '^run_role=$op-run-pods ' "$script" \
+    && grep -q '^plain=e2e-plain$' "$script" && grep -q '^coder=e2e-coder$' "$script" \
+    && grep -q '^  name: e2e-plain$' "$here/e2e/run-pods.yaml" && grep -q '^  name: e2e-coder$' "$here/e2e/run-pods.yaml" \
+    && grep -q 'kind-\*) ;;' "$script" && grep -q 'export HELM_KUBECONTEXT=' "$script" && grep -q "grep -F 'panicked at'" "$script"
+}
+check "run pods e2e: the script's namespace, label, names (the class, the policy, the Role, the two agents) and guards are the ones the values and the fixtures name" rp_script
+rp_model() {
+  model="$here/e2e/run-pods-model.js"
+  script="$here/e2e/run-pods-e2e.sh"
+  # The script and the model agree on the file names, the answer's first line and the keys the probe prints.
+  # shellcheck disable=SC2016 # the patterns are the files' own text, `$(...)` and `$2` and all
+  grep -qF "'RUNPODS-PROBE '" "$model" && grep -qF 'RUNPODS-PROBE a' "$script" \
+    && grep -qF "/tmp/probe-' + name + '.out'" "$model" && grep -qF '/tmp/probe-$2.out' "$script" \
+    && grep -qF "/tmp/release-" "$script" && grep -qF 'until [ -f' "$model" \
+    && grep -qF -- '-ls=$(ls -a' "$model" && grep -qF 'peer0-ls' "$script" && grep -qF 'mirror-write' "$model" && grep -qF 'mirror-write' "$script" \
+    && grep -qF 'run-pods-model: listening' "$model" && grep -qF 'run-pods-model: listening' "$script"
+}
+check "run pods e2e: the model's script and the end-to-end script agree on the first line of the answer, the probe file and the release file, and the keys the probe prints" rp_model
+
 # ---- The CRDs chart: one source ------------------------------------------------------------------------------------------
 check "deploy/operator-crds/files is a copy of deploy/crds (cp deploy/crds/agents.vymalo.com.yaml deploy/operator-crds/files/)" \
   cmp -s "$crds_file" "$crds_chart/files/agents.vymalo.com.yaml"
