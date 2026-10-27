@@ -770,11 +770,14 @@ await_run_pod "$coder" "$a_id"
 a_pod=$runpod
 check_pod "$a_pod" "$a_id" a
 ok "run A (task $a_id): the coder made the run pod $a_pod and the kubelet started it: Running and Ready, the priority class, the labels, the resources, the images (by digest; the run container's imageID is the template's), no Secret and no token but the model key"
-printf '%s\n' "rw /work/workspaces/$a_id <- workspaces/$a_id" > "$work/mounts-a.expected"
+# The run's directory, and its project's slot as a mount of its own on top of it (adam-rs #133: a slot's directory is a name the pod cannot
+# rename), and nothing else of the volume.
+printf '%s\n' "rw /work/workspaces/$a_id <- workspaces/$a_id" "rw /work/workspaces/$a_id/iso-a <- workspaces/$a_id/iso-a" | sort > "$work/mounts-a.expected"
 work_mounts "$work/pod-a.json" > "$work/mounts-a.actual"
-diff "$work/mounts-a.expected" "$work/mounts-a.actual" >/dev/null || die "the run pod of A mounts $(tr '\n' ';' < "$work/mounts-a.actual") of the volume, not only its own run: $(cat "$work/mounts-a.expected")"
-jqok "$work/pod-a.json" "the annotation of the pod's mounts is not A's directory alone" --arg id "$a_id" \
-  '(.metadata.annotations["adam.vymalo.com/workspace-mounts"] | rtrimstr("\n")) == ("rw /work/workspaces/" + $id)'
+diff "$work/mounts-a.expected" "$work/mounts-a.actual" >/dev/null || die "the run pod of A mounts $(tr '\n' ';' < "$work/mounts-a.actual") of the volume, not only its own run and its project's slot: $(tr '\n' ';' < "$work/mounts-a.expected")"
+jqok "$work/pod-a.json" "the annotation of the pod's mounts is not A's directory and its project's slot alone" --arg id "$a_id" \
+  '(.metadata.annotations["adam.vymalo.com/workspace-mounts"] | rtrimstr("\n") | split("\n")) as $l
+   | ($l | length) == 2 and $l[0] == ("rw /work/workspaces/" + $id) and ($l[1] | test("^rw /work/workspaces/" + $id + "/iso-a( @\\S+)?$"))'
 await_probe "$a_pod" a envnames
 [ "$(kv "$work/probe-a.txt" host)" = "$a_pod" ] || die "the command of run A ran on '$(kv "$work/probe-a.txt" host)', not in its run pod $a_pod"
 [ "$(kv "$work/probe-a.txt" uid)" = 10001 ] || die "the command of run A ran as $(kv "$work/probe-a.txt" uid), not 10001"
@@ -795,9 +798,9 @@ await_run_pod "$coder" "$b_id"
 b_pod=$runpod
 [ "$b_pod" != "$a_pod" ] || die "two runs have one run pod"
 check_pod "$b_pod" "$b_id" b
-printf '%s\n' "rw /work/workspaces/$b_id <- workspaces/$b_id" > "$work/mounts-b.expected"
+printf '%s\n' "rw /work/workspaces/$b_id <- workspaces/$b_id" "rw /work/workspaces/$b_id/iso-b <- workspaces/$b_id/iso-b" | sort > "$work/mounts-b.expected"
 work_mounts "$work/pod-b.json" > "$work/mounts-b.actual"
-diff "$work/mounts-b.expected" "$work/mounts-b.actual" >/dev/null || die "the run pod of B mounts $(tr '\n' ';' < "$work/mounts-b.actual") of the volume, not only its own run"
+diff "$work/mounts-b.expected" "$work/mounts-b.actual" >/dev/null || die "the run pod of B mounts $(tr '\n' ';' < "$work/mounts-b.actual") of the volume, not only its own run and its project's slot"
 await_probe "$b_pod" b peer0-ls
 [ "$(kv "$work/probe-b.txt" host)" = "$b_pod" ] || die "the command of run B ran on '$(kv "$work/probe-b.txt" host)', not in its run pod $b_pod"
 [ "$(kv "$work/probe-b.txt" workspaces)" = "$b_id" ] || die "B's pod sees these runs: '$(kv "$work/probe-b.txt" workspaces)', not B alone"
@@ -1007,10 +1010,11 @@ kubectl -n "$ns" exec "$coder-0" -c agent -- test -d "/work/workspaces/$b_id/iso
 case "$(kv "$work/probe-c.txt" mirror-write)" in *"Read-only file system"*) ;; *) die "the mirror can be written from C's pod: '$(kv "$work/probe-c.txt" mirror-write)'" ;; esac
 kv "$work/probe-c.txt" status | grep -Eq '^## agent/[0-9a-f]{8}' || die "git does not work in C's worktree: '$(kv "$work/probe-c.txt" status)'"
 work_mounts "$work/pod-c.json" > "$work/mounts-c.actual"
-[ "$(grep -c '^rw /work/workspaces/' "$work/mounts-c.actual")" = 1 ] || die "C's pod mounts more than its own run's directory read-write: $(cat "$work/mounts-c.actual")"
+[ "$(grep -c '^rw /work/workspaces/' "$work/mounts-c.actual")" = 2 ] || die "C's pod mounts more than its own run's directory and its worktree's slot read-write: $(cat "$work/mounts-c.actual")"
 grep -q "^rw /work/workspaces/$c_id <- workspaces/$c_id\$" "$work/mounts-c.actual" || die "C's pod does not mount its own run: $(cat "$work/mounts-c.actual")"
+grep -q "^rw /work/workspaces/$c_id/r1 <- workspaces/$c_id/r1\$" "$work/mounts-c.actual" || die "C's pod does not mount its worktree's slot on its own: $(cat "$work/mounts-c.actual")"
 grep -Eq '^ro /work/git/local/[0-9a-f]{16}/r1\.git <- git/local/[0-9a-f]{16}/r1\.git$' "$work/mounts-c.actual" || die "C's pod does not mount its mirror read-only: $(cat "$work/mounts-c.actual")"
-grep -Ev "^rw /work/workspaces/$c_id |^(ro|rw) /work/git/local/[0-9a-f]{16}/r1\\.git" "$work/mounts-c.actual" > "$work/mounts-c.other" || true
+grep -Ev "^rw /work/workspaces/$c_id(/r1)? |^(ro|rw) /work/git/local/[0-9a-f]{16}/r1\\.git" "$work/mounts-c.actual" > "$work/mounts-c.other" || true
 [ ! -s "$work/mounts-c.other" ] || die "C's pod mounts something besides its run, its mirror and the mirror's worktree directory: $(cat "$work/mounts-c.other")"
 for other in "$a_id" "$b_id"; do
   if grep -q "$other" "$work/mounts-c.actual"; then die "C's pod mounts a path of another run ($other)"; fi
