@@ -99,8 +99,13 @@ try "no runAsNonRoot" denied "a run pod does not run as root" 'del(.spec.securit
 try "the host network" denied "a run pod uses its own network, PID and IPC namespaces" '.spec.hostNetwork = true'
 try "the host PID namespace" denied "a run pod uses its own network, PID and IPC namespaces" '.spec.hostPID = true'
 try "the host IPC namespace" denied "a run pod uses its own network, PID and IPC namespaces" '.spec.hostIPC = true'
-try "the account's token" denied "a run pod sets automountServiceAccountToken: false" '.spec.automountServiceAccountToken = true'
-try "no word on the token" denied "a run pod sets automountServiceAccountToken: false" 'del(.spec.automountServiceAccountToken)'
+# A pod that may mount the account's token is refused by one rule or the other. A cluster runs the ServiceAccount admission plugin
+# (every real one does, kind's included) before the policy, and it adds the token as a projected volume, so the volume rule says no
+# first; a bare API server without it reaches the token rule. The fragment is two lines: grep -F takes each as a pattern of its own.
+token_refused="a run pod sets automountServiceAccountToken: false
+a run pod mounts only emptyDir volumes and the claim $claim"
+try "the account's token" denied "$token_refused" '.spec.automountServiceAccountToken = true'
+try "no word on the token" denied "$token_refused" 'del(.spec.automountServiceAccountToken)'
 
 # The guard is for the agent's account, and for it alone: another account is judged by what the cluster judges everybody by.
 if out=$(kubectl --dry-run=server create -f - 2>&1 <<EOF
