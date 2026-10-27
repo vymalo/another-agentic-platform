@@ -1,0 +1,163 @@
+# What the kind end-to-end of run pods (D15b, run-pods-e2e.sh) runs beside the operator and the two coders: a throwaway Postgres for their run
+# stores (two databases, `coder` and `plain`) and the scripted model they talk to (run-pods-model.js). The manifest carries no namespace: the script
+# applies it in its own (aap-e2e-runpods), and every object carries the label aap-e2e/made-by=run-pods-e2e, the only objects it applies over.
+#
+# The model is a Node script that the coder's own image runs (`__CODER_IMAGE__` is replaced by the script with the pin of
+# run-pods.yaml, so that the pin is in one file and nothing else is pulled for the model): the script's file is in the ConfigMap `e2e-model-script`,
+# which the script makes from run-pods-model.js. It listens on 8080 and is reached as http://e2e-model:8080/v1 by the coders (and, to read its
+# journal, by the script from inside a coder's pod). It holds no secret and asks nothing of anyone.
+#
+# Postgres is Docker Official Images' 17.9 on Alpine 3.23 from mirror.gcr.io, Google's mirror of Docker Hub, pinned by the digest of the index of the
+# tag (the pin of postgres.yaml, which verified it; the same line). No volume, a password that is public (it guards nothing). The second database is
+# made by the image's own init mechanism (/docker-entrypoint-initdb.d), from the ConfigMap `e2e-postgres-init`.
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: e2e-postgres-init
+  labels:
+    aap-e2e/made-by: run-pods-e2e
+    aap-e2e/part: postgres
+data:
+  10-plain.sql: |
+    CREATE DATABASE plain;
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: e2e-postgres
+  labels:
+    aap-e2e/made-by: run-pods-e2e
+    aap-e2e/part: postgres
+spec:
+  replicas: 1
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: e2e-postgres
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: e2e-postgres
+        aap-e2e/made-by: run-pods-e2e
+    spec:
+      containers:
+        - name: postgres
+          image: mirror.gcr.io/library/postgres:17.9-alpine3.23@sha256:c7526c0f6c3f30260a563d7bcf8ad778effac59a44f8ffa86678c35418338609
+          env:
+            - name: POSTGRES_PASSWORD
+              value: e2e-throwaway
+            - name: POSTGRES_DB
+              value: coder
+          ports:
+            - name: postgres
+              containerPort: 5432
+          readinessProbe:
+            exec:
+              # Over TCP: the image's entrypoint first runs a temporary server that listens on its socket only, and a check over the socket would
+              # pass against it, before the server the coders connect to (by the Service, over TCP) exists, and before the init script has run.
+              command: [pg_isready, -h, 127.0.0.1, -U, postgres, -d, plain]
+            periodSeconds: 2
+            failureThreshold: 60
+          volumeMounts:
+            - name: init
+              mountPath: /docker-entrypoint-initdb.d
+              readOnly: true
+          resources:
+            requests:
+              cpu: 50m
+              memory: 128Mi
+      volumes:
+        - name: init
+          configMap:
+            name: e2e-postgres-init
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: e2e-postgres
+  labels:
+    aap-e2e/made-by: run-pods-e2e
+    aap-e2e/part: postgres
+spec:
+  selector:
+    app.kubernetes.io/name: e2e-postgres
+  ports:
+    - name: postgres
+      port: 5432
+      targetPort: postgres
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: e2e-model
+  labels:
+    aap-e2e/made-by: run-pods-e2e
+    aap-e2e/part: model
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: e2e-model
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: e2e-model
+        aap-e2e/made-by: run-pods-e2e
+    spec:
+      automountServiceAccountToken: false
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 10001
+        runAsGroup: 10001
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: model
+          image: __CODER_IMAGE__
+          command: [node, /srv/model/run-pods-model.js]
+          env:
+            - name: PORT
+              value: "8080"
+          ports:
+            - name: http
+              containerPort: 8080
+          readinessProbe:
+            httpGet:
+              path: /healthz
+              port: http
+            periodSeconds: 2
+            failureThreshold: 30
+          securityContext:
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop: [ALL]
+          volumeMounts:
+            - name: script
+              mountPath: /srv/model
+              readOnly: true
+          resources:
+            requests:
+              cpu: 10m
+              memory: 48Mi
+            limits:
+              memory: 256Mi
+      volumes:
+        - name: script
+          configMap:
+            name: e2e-model-script
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: e2e-model
+  labels:
+    aap-e2e/made-by: run-pods-e2e
+    aap-e2e/part: model
+spec:
+  selector:
+    app.kubernetes.io/name: e2e-model
+  ports:
+    - name: http
+      port: 8080
+      targetPort: http

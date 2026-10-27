@@ -1,10 +1,11 @@
-# The kind end-to-ends of the operator: the coder (S9), the Platform API (D7b2) and the whole chain (D13)
+# The kind end-to-ends of the operator: the coder (S9), the Platform API (D7b2), the whole chain (D13) and run pods (D15b)
 
-Three scripts, three jobs of [`operator-image.yml`](../../../../.github/workflows/operator-image.yml), one kind cluster each: [`coder-e2e.sh`](coder-e2e.sh)
+Four scripts, four jobs of [`operator-image.yml`](../../../../.github/workflows/operator-image.yml), one kind cluster each: [`coder-e2e.sh`](coder-e2e.sh)
 (the operator runs the real coder, [below](#the-kind-end-to-end-of-the-coder-s9)), [`api-e2e.sh`](api-e2e.sh) (the Platform API creates an agent the
 operator makes Ready, [further down](#the-kind-end-to-end-of-the-platform-api-d7b2)) and [`chain-e2e.sh`](chain-e2e.sh) (the API makes a coder with an
 audience, the operator runs it and lists it, and a pinned image of the system's orchestrator lists it for the person who holds the role and for nobody
-else, [at the end](#the-kind-end-to-end-of-the-whole-chain-d13)).
+else, [further down](#the-kind-end-to-end-of-the-whole-chain-d13)) and [`run-pods-e2e.sh`](run-pods-e2e.sh) (a coder runs the commands of its runs in pods of their own, the operator having
+set them up, [at the end](#the-kind-end-to-end-of-run-pods-d15b)).
 
 ## The kind end-to-end of the coder (S9)
 
@@ -377,6 +378,124 @@ The coder the API wrote was also resolved by the operator's own `aap_domain::res
 
 **Still unverified**: a real Keycloak and the system's chart reading the registry (D14), a message to the agent, a system newer than the pin, and an orchestrator with more than one replica.
 
-## Run pods (D15b): not built yet
+## The kind end-to-end of run pods (D15b)
 
-D15a built everything that needs no cluster (the [`D15a built` note of §60a](../../../../docs/architecture/10-control-plane-and-crds.md) lists what, and how it was proven). **D15b is the kind end-to-end** and is not here: the operator chart installed with `runPods.enabled` on a kind whose API server has the v1 admission policy API and whose CNI enforces `NetworkPolicy`, a coder with `coder.runPods` running the real image at or after adam-rs `3f714d0`, and then, in this order: [`run-pods-admission.sh`](../run-pods-admission.sh) against the policy the chart installed and the parameters the operator made (25 refusals and one admitted pod); `kubectl auth can-i --as` for the operator (no pod, no `exec`, no Secret) and for the agent's account (pods and `exec`, no Secret); a command run in a run pod by the coder (the pod is made from the operator's template, becomes ready, answers an `exec`); a fifth pod refused by the quota and waited for; a run pod that cannot reach a private address; the service deleted and no object left, run pods included; and an agent without the field untouched by the upgrade (the same digest, no restart). Until it has run, a kubelet starting the pod, the quota counting it, the network policy enforced and the coder reading the mounted template are *unverified*.
+The operator, installed from its chart **with `runPods.enabled`**, runs **the real adam-rs coder** (the image at or after adam-rs [#131](https://github.com/vymalo/another-adam-rs/pull/131), `3f714d0`, which contains #117, ADR 0041) with
+`coder.runPods`. A task makes the coder run a command **in a pod of its own** that the operator's template describes; the pod sees only its own run; the quota counts it and refuses one past the limit (the coder waits); the network policy
+holds; the admission policy and the Roles do what they say under the real RBAC of a real API server; a deleted service leaves nothing, run pods included; and an agent without run pods is as it was. This is the job `run-pods-e2e` of
+[`operator-image.yml`](../../../../.github/workflows/operator-image.yml) (it needs the job `image`, whose operator image it runs, and **`push` does not need it**: it pulls a 3 GB image and the run pods are off by default, so a red run is a reason to look
+and does not put a broken default into the release; an owner decision, §60a D15b, one line to flip). The script [`run-pods-e2e.sh`](run-pods-e2e.sh) is all of it and runs against any kind cluster that has the operator image:
+
+```sh
+kind create cluster --name aap-runpods --image kindest/node:v1.35.8   # any cluster whose network plugin enforces NetworkPolicy (kind's does), Kubernetes 1.30 or later
+docker build -t operator:smoke -f docker/operator/Dockerfile . && kind load docker-image operator:smoke --name aap-runpods
+sh deploy/operator/tests/e2e/run-pods-e2e.sh    # kubectl on that cluster; needs helm, jq and openssl; pulls the coder, 3 GB
+```
+
+The cluster must reach `ghcr.io` (the coder, and the run image, whose layers the coder's mostly are: the kubelet that pulled the coder pulls one layer more) and `mirror.gcr.io` (Postgres), by digest. The timeouts are the other scripts' variables
+(`READY_TIMEOUT_SECS`, `ROLLOUT_TIMEOUT_SECS`, `GONE_TIMEOUT_SECS`) and `POD_TIMEOUT_SECS` (300, a pod to start) and `TASK_TIMEOUT_SECS` (240, a task to finish); `AAP_E2E_CNI_MAY_IGNORE_POLICIES=1` turns the one check that needs a network plugin
+that enforces policies into a warning (step 7), as `api-e2e.sh`'s variable does; the escape for a cluster that is not kind's is `AAP_E2E_ALLOW_ANY_CONTEXT`.
+
+**It runs only on a throwaway cluster and touches only what it made**, as the other two do: a context that is not `kind-*` is refused before anything is made (and the cleanup is not yet armed); it works in a namespace of its own, **`aap-e2e-runpods`**
+(`AAP_E2E_NAMESPACE`), made with the label `aap-e2e/made-by=run-pods-e2e` and never used without it; every object it makes carries the label and one that exists without it is never overwritten; the cleanup undoes what each step recorded (the agents
+first, with the operator still there to run the finalizer, then the Helm release, which takes the chart's cluster-scoped objects, then the namespace), and `INT`, `TERM` and `HUP` run it. The CRDs stay. Three clusters, three namespaces:
+`aap-e2e-api`, `aap-e2e-chain` and this one.
+
+```mermaid
+sequenceDiagram
+    participant J as run-pods-e2e.sh
+    participant K as kind (API server, kubelet, network plugin)
+    participant O as the operator (the chart's image)
+    participant C as e2e-coder (the real coder, App variant)
+    participant M as e2e-model (a script, run by the coder's image)
+    participant R as a run pod (the operator's template)
+
+    J->>K: the CRDs, Secrets (sentinels), Postgres, helm install WITHOUT run pods
+    J->>K: e2e-plain, a coder with no run pods: Ready, its objects and its pod recorded
+    J->>K: helm upgrade with run pods on (quota of 2 pods)
+    K-->>J: PriorityClass, policy and binding, Role exist, the operator may bind that Role and not make a pod, e2e-plain unchanged
+    J->>K: e2e-coder, coder.runPods
+    O->>K: the account, quota, network policy, binding, the template and the guard's parameters
+    J->>R: run-pods-admission.sh as the account: the pod of the template admitted, each of the mutations refused
+    J->>C: runs A and B (SendMessage)
+    C->>M: the model's three turns: a scratch project, run_command, the answer
+    C->>K: a pod from the template, then exec in it
+    K->>R: the kubelet starts it, the quota counts it
+    R-->>C: the command's output reaches the run, J reads the probe from inside each pod
+    J->>K: a third pod with the run class: exceeded quota
+    J->>C: run C (streamed): waits for a slot, no pod, still working
+    J->>R: the pod of A reaches a public address and DNS, not a private address
+    J->>R: A is released, C gets the slot and sees only its own run
+    J->>K: e2e-plain asks for run pods and stops asking, delete e2e-coder with run D holding a pod
+    K-->>J: nothing is left of the service, run pods included, the claim stays, the chart's objects stay
+    J->>K: no secret and no panic in any answer or log, then undo what was made
+```
+
+```mermaid
+stateDiagram-v2
+    [*] --> Off: CRDs, Secrets, Postgres, the chart with runPods.enabled=false
+    Off --> PlainReady: e2e-plain, no run pods (recorded)
+    PlainReady --> On: the same chart with run pods
+    On --> Unchanged: e2e-plain has the same objects, pod uid, restarts and digest
+    Unchanged --> CoderReady: e2e-coder, the operator's objects, the policy and the Roles under real RBAC
+    CoderReady --> TwoPods: runs A and B, a pod each, isolated
+    TwoPods --> Full: the quota counts 2 of 2, a third pod refused, run C waits
+    Full --> Released: A released, C gets its slot and its own view
+    Released --> Toggled: e2e-plain asks for run pods and stops asking
+    Toggled --> Deleted: run D holds a pod, e2e-coder deleted
+    Deleted --> Checked: no secret, no panic
+    Checked --> [*]
+    Off --> [*]: a missing tool, a refused namespace, a failed wait: the script prints what the cluster says and undoes only what it made
+```
+
+### Files
+
+| File | What |
+|---|---|
+| [`run-pods-e2e.sh`](run-pods-e2e.sh) | the script: steps 0 to 11, every wait bounded, every assertion named, the cluster's state printed on a failure (without any line that holds a secret of the run) |
+| [`run-pods.yaml`](run-pods.yaml) | the two coders, `AgentConfig` and `AgentService` each: `e2e-plain` (token variant, no run pods) and `e2e-coder` (GitHub App variant, `coder.runPods { sizeClass: standard }`, four workers, a janitor every 10 s, `ALLOW_LOCAL_REPOS`). **The coder's pin is here and nowhere else**: tag and digest on two `ref:` lines that a test and `render-check.sh` hold equal, with what was read from `ghcr.io` and when. The chart's `defaultAgentImage` is **not** moved by this slice |
+| [`run-pods.values.yaml`](run-pods.values.yaml) | laid over the chart: `runPods.enabled`, a quota of **two pods** (so the script can fill it), a pending service looked at every 5 s. `render-check.sh` renders it |
+| [`run-pods-support.yaml`](run-pods-support.yaml) | a throwaway Postgres with two databases, and the scripted model (a Deployment of the coder's own image, so nothing else is pulled) |
+| [`run-pods-model.js`](run-pods-model.js), [`run-pods-model.test.js`](run-pods-model.test.js) | the model: an OpenAI-compatible endpoint that answers every task with the same three turns (a scratch project or, with a repository, `prepare_workspace`; then `run_command` with a probe written for the task; then the answer, which holds the probe's output), keeps a journal of what it was asked (run, turn, whether the request carried a tool result) and ends the task with the probe's output. Its tests run in the workflow's `scripts` job (`node --test`) |
+| `../run-pods-admission.sh` | D15a's: run here as the agent's account, against the policy the chart installed and the parameters the operator made |
+| [`../../../../bin/operator/tests/e2e_run_pods_fixture.rs`](../../../../bin/operator/tests/e2e_run_pods_fixture.rs) | no cluster: the two coders pass `aap_domain::resolve` (the plain one on an operator with and without run pods, the other refused by one without and resolved by one with), the claim is `work-e2e-coder-0`, the pin is one pin, and the fixtures name the Secrets, Services and files the script makes |
+
+### What it proves
+
+* **The upgrade, and an agent that asks for nothing.** The chart is installed twice, first with `--set runPods.enabled=false`: the `PriorityClass`, the policy and its binding and the Role of run pods are not there, and the operator may not make a service account. `e2e-plain` is made under it (Ready, its set of objects, its pod's uid and start time and restart count, its `generation` and its config digest recorded). The second install, **the only difference being the flag**, makes those objects (the policy type-checked with no warning; its binding with the action Deny and a missing parameter allowed), and `e2e-plain` has the same objects, the same pod (not restarted) and the same digest. It gets no account, quota, network policy, binding, template or parameters, then and at the end.
+* **The Roles, asked of the API server.** `kubectl auth can-i --as`, with run pods off and on. The operator's account: with them off, no service account, quota, binding, pod deletion or creation, no Secret; with them on, it may make a service account, a quota and a binding, delete pods and `bind` the Role of run pods by name, and it may not make a pod, `exec`, read or make a Secret, make a Role, `escalate`, bind another Role, or make a policy or a class. The coder's account: pods (make, get, list, watch, delete) and `exec` in its namespace, and no Secret, no ConfigMap, no `patch` of a pod, no binding, no pod in `kube-system`. The operator is a pod running as its own service account, so every reconcile of the run is also the proof that its Role is enough.
+* **What the operator made for `e2e-coder`.** The account (the coder's pod runs as it, with the template mounted at `/etc/adam/run-pod`), the quota (two pods, scoped to the class), the network policy, the binding to the Role, the ConfigMaps of the template and of the guard's parameters, and the coder's log line that its commands run in a pod of their own. **`run-pods-admission.sh` runs in this cluster as that account**: the pod of the template is admitted and each of the mutations is refused with the message of its rule, so the policy and the parameters the operator made are asked, under real RBAC.
+* **A command runs in a run pod, and the pod sees only its own run (ADR 0041).** Two runs hold their pods: each has a pod from the operator's template (the kubelet started it: Running, Ready, the labels, the priority class, the template's resources, the image by digest, the init container, no Secret volume and no service account token), the command ran in it (the pod's name is the host the command saw, and the lines it wrote are the lines in the run's answer), the pod mounts the run's directory of the coder's volume **and nothing else of the volume** (checked in its spec, in its annotation, and from inside with `ls`), and B, told to look at A's directory, finds it absent, with `/work/workspaces` holding B alone. A third run, in **a repository of the coder's volume** (a local bare repository, its mirror and a worktree), sees its own mirror (read-only: a write is refused), its worktree, and neither A's nor B's nor the other mirror on the volume; git works in it.
+* **The quota counts the pod and the coder waits.** `status.used.pods` is 2 of 2; a pod of the run class made by the administrator is refused with the API server's `exceeded quota`; run C is told to start and says, as a step of its stream, "Waiting for a slot for the run's environment" with the cluster's words, has **no pod**, is still `working`, and the model was asked only its first two turns. When A is released, C gets the slot.
+* **The network policy is enforced.** From the pod of A: DNS answers, a public address answers (`https://ghcr.io/v2/`), and the model's Service address (a private range) does not (status `000`), while the coder's own pod (not a run pod) reaches that Service. This needs a network plugin that enforces policies (kind's does; the variable above makes it a warning on a cluster that does not).
+* **The release.** A completes, its pod goes with its run (the coder's janitor), C and B complete and their pods go, the quota is back to zero.
+* **A service that asks, and stops asking.** `e2e-plain` runs a task: the command runs in its own container and **no run pod is made**. Then it is given `coder.runPods` (the objects appear and its pod is replaced) and has it taken away (the objects go, and its set of objects is again the one recorded at the start).
+* **A deleted service takes everything.** With run D holding a pod, `e2e-coder` is deleted: the finalizer completes, the run pod goes, the StatefulSet, Service, account, quota, network policies, binding, template and parameters go, **only the claim `work-e2e-coder-0` stays** (`deletionPolicy: Retain`), and the chart's own objects (the class, the policy and its binding, the Role) stay.
+* **No secret and no panic.** The model's key and the GitHub token are sentinels, the A2A bearer is random and the App's private key is generated for the run: none is in any answer, in the model's journal, or in the logs of the operator, of `e2e-plain`, of the model and of `e2e-coder` at its start. A log counts only if its `kubectl logs` succeeded, is not empty and holds a line only that component logs; the panic check is `panicked at`.
+
+### What it does not prove
+
+* **A real model, GitHub, a pull request.** The model is a script that makes the same three calls for every task; the App's id is made up and its key is generated (the coder parses it at start and never uses it); no task edits files. The coder's work with a real model is `operator-coder-e2e`'s up to its startup checks, and the shipped system's.
+* **Another Kubernetes, another network plugin, Pod Security admission, a second node.** kind's node image (v1.35.8), kindnet, no Pod Security labels on the namespace, one node (a run pod on another node than the coder's, and a work volume shared by several workers, are not exercised).
+* **OpenCode, Podman, devcontainers** in the run pod, and a coder whose image is not the pin.
+* **The Platform API and the dashboard**: `agent.runPodSizeClass` is proven by the API's tests; this script makes the objects by `kubectl`.
+* **A deployment**: netcup, Argo CD, External Secrets.
+
+### What ran, and what is unverified
+
+*Verified 2026-10-27*: the coder's pin by an anonymous request to `ghcr.io` (the tag's manifest is a Docker v2 image manifest, not an index; `docker-content-digest` and the sha256 of the body are the digest in `run-pods.yaml`; 14 layers, user `10001`, entrypoint `tini -- adam-coder`, `PATH` with `/usr/local/bin`, which is where the model's `node` is found; six of the seven layers of the `workspace` run image are the coder's, so the kubelet pulls one layer more for the run pods) and what the run image has (`curl`, `getent`, `git`, a writable root and `/tmp`: the template sets no `readOnlyRootFilesystem`).
+
+*Run where it was written, with no container daemon and no kind*: `shellcheck`, `dash -n`, `actionlint`, `node --test` on the model, `render-check.sh`, `cargo test` on the fixtures, and **the whole script, under `dash`, start to finish**, against a world made of real parts and one stand-in (scratch tooling, not committed):
+
+| Real | Stand-in |
+|---|---|
+| a bare **kube-apiserver v1.35.8 with etcd** (RBAC on, the v1 admission policy API, quota admission); `kubectl` and `helm template` (v3.19.0) | the **kubelet and the controllers**: a pod gets a mount namespace with its volumes bind-mounted as its spec says (sub-paths, read-only), its account's token, `status`; the quota's `status.used`; garbage collection of owned objects; `exec` over a socket |
+| **the operator, built from this branch, running as its own service account** (a token from `kubectl create token`: the Role the chart made is the only right it has) | the init container that copies the tools |
+| the **coder** (`adam-coder` built from adam-rs `main`, the code of `3f714d0`) in Kubernetes mode, and a Postgres 16 | a network plugin: none; step 7 passes there only because the run pod has no route to the Service address by construction |
+
+All eleven steps passed (44 `ok` lines, exit 0), with the real answers of the API server for the refusal of the quota (`exceeded quota: e2e-coder-run-pods, requested: pods=1, used: pods=2, limited: pods=2`), the 25 refusals of `run-pods-admission.sh`, `kubectl auth can-i`, and the real coder's own step "Waiting for a slot for the run's environment"; **the operator was refused nothing** under its own Role (no `Forbidden` in its log). The operator's log has one `WARN ... 404 page not found` per deleted agent, run pods or not: it is `kube-rs` reading the API server's plain-text `404` for the CloudNativePG `Cluster` that a cluster without that CRD does not have, which `aap-store-cnpg` treats as "there is none" (its source documents it); the script does not look at it. **That is the script's mechanics and the operator's and the coder's behaviour against a real API server. It is not a kubelet.**
+
+*Each assertion that matters was broken on purpose*, one edit at a time in a copy of the tree or in the stand-in, a fresh world each time, and the script failed where it should (a quota of three pods in the values: step 4 refuses the quota object, and, with that one assertion neutralised, step 6 finds that the third pod was admitted; the second install with run pods off: step 3 finds no `RUN_PODS_FILE`; a stand-in kubelet that mounts the whole `workspaces` directory in a run pod: step 5 sees the other run's lock file where its own directory alone should be; a run pod that can reach the Service address: step 7 gives up after its 60 s, and with `AAP_E2E_CNI_MAY_IGNORE_POLICIES=1` the same world passes with a warning that says the enforcement was not proven; a quota named for the plain agent: step 2 finds it; a model that ends a run without the command's output: step 8 finds the answer without it; a model whose journal keeps the key it was sent: step 11 finds the secret). Two mutations did not take effect the first time (a wrong mount path in the stand-in, an address nothing reached, a stray quota the script never applied, an environment dump that leaked nothing because the stand-in gives a command a clean environment) and were redone; the walks that had run beside a leftover process of the stand-in were thrown away and run again. `render-check.sh`: each of the nine checks it gained for this end-to-end (its values render, the objects and the settings they name, no registry or API, the namespace and the image, one flag apart, the pin, the support manifest, the script's constants, the model's agreement with the script) fails when its input is broken (a flag turned off, a quota of three, a registry added, a watched namespace set, a template that renders without the flag, a tag changed, the digest copied into another file, a label removed, a name changed, the first line of the answer changed).
+
+**Still unverified, and what only the job can show**: that a **real kubelet** pulls the coder, the run image and Postgres by digest and starts the run pod from the operator's template (the init container, uid `10001`, the mounts with sub-paths on a real volume, the readiness); that the coder's `adam-kube-exec` reaches it by the WebSocket `exec` of Kubernetes 1.35 with the Role the chart made; that **kindnet enforces the egress rule** (`ipBlock` with `except`) of a new pod, which `api-e2e.sh` has not asked of it (it asked for an ingress rule), and refuses the model's Service address while the coder's pod reaches it; the timings; the runner's disk; the workflow's syntax in a runner (`actionlint` passes). **D15 stays open until the job has run green.**
+

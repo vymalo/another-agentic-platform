@@ -99,6 +99,13 @@ pub fn run_pods(id: &RuntimeId) -> String {
     format!("{}-run-pods", id.name())
 }
 
+/// The name of the ConfigMap that holds the run pod template of a service: the file set `aap-domain` makes for the
+/// workers, `<service>-run-pod` (`tests/run_pods.rs` holds the two equal). Mounted by the workers' pods alone, so it goes
+/// with the account, once the workers no longer mount it.
+pub fn run_pod_template(id: &RuntimeId) -> String {
+    format!("{}-run-pod", id.name())
+}
+
 /// The name of the ConfigMap that holds the parameters of the admission policy for a service's run pods.
 pub fn run_pods_policy_params(id: &RuntimeId) -> String {
     format!("{}-run-pods-policy", id.name())

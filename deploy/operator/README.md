@@ -137,7 +137,9 @@ sequenceDiagram
   K->>G: the 9 rules, with the account's parameters
   G-->>K: admitted, or refused with the message of the rule it breaks
   P->>K: the config stops asking, or the service is deleted
-  O->>K: delete the RoleBinding first, then the run pods, the quota, the network policy, the parameters, the account
+  O->>K: delete the RoleBinding first, then the run pods
+  O->>K: apply the workers without the account (and null both names it has for it)
+  O->>K: delete the quota, the network policy, the parameters, the template, and the account last
 ```
 
 ```mermaid
@@ -146,7 +148,7 @@ stateDiagram-v2
   NoRunPods --> Guarded: sizeClass set (parameters, account, quota, network policy)
   Guarded --> MayMakePods: the RoleBinding is applied
   MayMakePods --> Removing: sizeClass removed, or the service deleted
-  Removing --> NoRunPods: binding, pods, quota, network policy, parameters, account gone
+  Removing --> NoRunPods: binding and pods gone, workers freed of the account, then quota, network policy, parameters, template, account gone
   MayMakePods --> Unguarded: a person deletes the parameters
   Unguarded --> MayMakePods: the next reconcile makes them again
 ```
@@ -219,7 +221,7 @@ kubectl auth can-i create pods --as system:serviceaccount:<namespace>:<service> 
 kubectl auth can-i get secrets --as system:serviceaccount:<namespace>:<service> -n <namespace>        # no
 ```
 
-`run-pods-admission.sh` was run against a real API server (a bare kube-apiserver v1.35.8, no controller) with the objects this chart and the operator make, and against the coder chart's own policy with the same table. What a bare server cannot show, and D15b (the kind end-to-end) is to: that a kubelet starts the pod, that the quota counts it, that the network policy is enforced, that the coder reads the mounted template and runs a command in the pod, and that a deleted service leaves nothing.
+`run-pods-admission.sh` was run against a real API server (a bare kube-apiserver v1.35.8, no controller) with the objects this chart and the operator make, and against the coder chart's own policy with the same table. What a bare server cannot show is what D15b's kind end-to-end ([`tests/e2e/run-pods-e2e.sh`](tests/e2e/README.md#the-kind-end-to-end-of-run-pods-d15b), the job `run-pods-e2e`) shows: that a kubelet starts the pod, that the quota counts it, that the network policy is enforced, that the coder reads the mounted template and runs a command in the pod, that the pod sees only its own run, and that a deleted service leaves nothing. It has not run in CI yet (see *What is not proven*).
 
 ## The registry and its token
 
@@ -537,7 +539,7 @@ sh deploy/operator/tests/api-shapes.sh /tmp/api-config && for f in /tmp/api-conf
 | `tests/runpods.values.yaml`, `tests/golden/runpods.yaml`, `tests/run-pods-admission.sh` | run pods on beside the Platform API (two classes, a cluster CIDR, one extra egress rule, a toleration), its golden render, which `aap-domain` reads as the operator would (`RunPodSettings`, validated) and `aap-runtime-kubernetes` compares with the coder chart's policy and Role, and the admission test for a real cluster ([above](#checking-a-cluster)) |
 | `tests/api.values.yaml`, `tests/api-secretref.values.yaml`, `tests/api-full.values.yaml`, `tests/api-shapes.sh`, `tests/api-config.sh` | the shapes of the API component: the golden one, a Secret per agent, and **one that sets every value the chart exposes** (ports, `apiServer.cidrs`, `issuer.to`, every key of `defaults`, the Ingress, the scheduling), and the scripts that render a shape and write the ConfigMap's `config.yaml` to a file (`api-shapes.sh` writes `golden`, `secretref`, `minimal` and `full`), which CI hands to the image's `api --check` |
 | `tests/schemas/` | the `ExternalSecret` schema for kubeconform ([its README](tests/schemas/README.md)) |
-| `tests/e2e/` | the kind end-to-ends: of the coder (S9, `coder-e2e.sh`), of the Platform API (D7b2, `api-e2e.sh` with `api.values.yaml` and `api-offer.yaml`) and of the whole chain (D13, `chain-e2e.sh` with `chain.values.yaml`, `chain-orchestrator.yaml`, which holds the pin of the system's orchestrator image, and `chain-offer.yaml`); `render-check.sh` renders the values they install and asserts what the scripts depend on: [`tests/e2e/README.md`](tests/e2e/README.md) |
+| `tests/e2e/` | the kind end-to-ends: of the coder (S9, `coder-e2e.sh`), of the Platform API (D7b2, `api-e2e.sh` with `api.values.yaml` and `api-offer.yaml`), of the whole chain (D13, `chain-e2e.sh` with `chain.values.yaml`, `chain-orchestrator.yaml`, which holds the pin of the system's orchestrator image, and `chain-offer.yaml`) and of run pods (D15b, `run-pods-e2e.sh` with `run-pods.yaml`, which holds the pin of the coder it runs, `run-pods.values.yaml`, `run-pods-support.yaml` and the scripted model `run-pods-model.js`); `render-check.sh` renders the values they install and asserts what the scripts depend on: [`tests/e2e/README.md`](tests/e2e/README.md) |
 
 CI also runs kubeconform in strict mode over eight renders (the defaults, netcup, `secret.values.yaml`, the three API shapes, run pods on, and the CRDs chart with the
 `CustomResourceDefinition` kind skipped, because the schema set has none: the `kind` job of `operator.yml` applies them to a real API server).
@@ -556,7 +558,7 @@ CI also runs kubeconform in strict mode over eight renders (the defaults, netcup
 
 ## What is not proven
 
-* **Run pods have not run on a cluster.** The chart renders, lints, passes kubeconform (strict, Kubernetes 1.31 schemas), and the policy was run against a **bare kube-apiserver v1.35.8** with `tests/run-pods-admission.sh` (25 refusals, each with its rule's message). Not proven: that a kubelet starts the pod, that the quota counts it, that the network policy is enforced, that the coder reads the template and runs a command in the pod, that a deleted service leaves nothing, a Kubernetes older than 1.35 (`params` in a match condition) and the `exec` verb on 1.35 and later. **D15b is the job that runs them** ([§60a, *D15a built*](../../docs/architecture/10-control-plane-and-crds.md)).
+* **Run pods have not run on a kubelet.** The chart renders, lints, passes kubeconform (strict, Kubernetes 1.31 schemas), the policy was run against a **bare kube-apiserver v1.35.8** with `tests/run-pods-admission.sh` (25 refusals, each with its rule's message), and `tests/e2e/run-pods-e2e.sh` was walked (2026-10-27) against that server with RBAC on, **the real operator running as its own service account** (the Role of this chart was enough: no reconcile was refused), the real coder (the code of adam-rs `3f714d0`) and a Postgres, with a stand-in for the kubelet and no network plugin. **Not proven until the job `run-pods-e2e` has run in CI** ([`tests/e2e/README.md`](tests/e2e/README.md#the-kind-end-to-end-of-run-pods-d15b), [§60a, *D15b built*](../../docs/architecture/10-control-plane-and-crds.md)): that a real kubelet starts the pod, that the quota counts it there, that kindnet enforces the egress rule, that the `exec` works over a WebSocket on 1.35 with this Role, a Kubernetes older than 1.35 (`params` in a match condition) and Pod Security admission. D15 stays open until the job has run green.
 
 * **The Platform API component has not run on a cluster where it was written.** It is rendered, linted, checked with kubeconform, and its file is read by the binary (`api --check`,
   here and in CI); the image is built by CI (not here: no container daemon runs where this was written). **D7b2 is the job that runs it**, `api-e2e`

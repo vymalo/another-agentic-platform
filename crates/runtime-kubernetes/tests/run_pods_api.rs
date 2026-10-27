@@ -29,6 +29,31 @@ fn is_a_run_pods_kind(k: K) -> bool {
     matches!(k, K::ServiceAccount | K::Quota | K::RoleBinding)
 }
 
+/// The indexes in `calls` of every request of this method on this object.
+fn at(calls: &[Call], method: &str, kind: K, name: &str) -> Vec<usize> {
+    calls
+        .iter()
+        .enumerate()
+        .filter(|(_, c)| c.method == method && c.kind() == kind && c.name() == name)
+        .map(|(i, _)| i)
+        .collect()
+}
+
+/// The merge patches (not the applies) among the requests: the only way to take a name out of a pod template.
+fn merge_patches(calls: &[Call]) -> Vec<&Call> {
+    calls
+        .iter()
+        .filter(|c| c.method == "PATCH" && c.content_type.contains("merge-patch"))
+        .collect()
+}
+
+/// What a pod template of a workload names: `(serviceAccountName, serviceAccount)`.
+fn account_of(workload: &Value) -> (Option<String>, Option<String>) {
+    let pod = &workload["spec"]["template"]["spec"];
+    let text = |k: &str| pod.get(k).and_then(Value::as_str).map(str::to_owned);
+    (text("serviceAccountName"), text("serviceAccount"))
+}
+
 fn writes(calls: &[Call], method: &str) -> Vec<(K, String)> {
     calls
         .iter()
@@ -177,22 +202,218 @@ async fn a_service_that_stops_asking_for_run_pods_loses_the_right_first_then_its
         (K::ConfigMap, "coder-run-pods-policy"),
         (K::ConfigMap, "coder-run-pod"),
     ] {
-        // The template is a file set: it goes with the others once the rollout is done (the phase is not Ready here).
-        if name == "coder-run-pod" {
-            continue;
-        }
+        // The template goes in the same pass although the phase is not Ready: it is the account's, and the workload
+        // that mounted it is applied without it before it goes.
         assert!(fake.get(kind, NS, name).is_none(), "{name} is still there");
     }
-    // The workload no longer runs as the account and holds no token.
+    // The workload no longer runs as the account and holds no token. Neither of the two names it has for its account
+    // is left (a real API server keeps the deprecated one through an apply that leaves the first out: see the fake).
     let sts = fake.get(K::StatefulSet, NS, "coder").unwrap();
-    assert!(
-        sts["spec"]["template"]["spec"]
-            .get("serviceAccountName")
-            .is_none()
-    );
+    assert_eq!(account_of(&sts), (None, None));
     assert_eq!(
         sts["spec"]["template"]["spec"]["automountServiceAccountToken"],
         false
+    );
+}
+
+#[tokio::test]
+async fn the_account_is_deleted_only_after_the_workload_stopped_naming_it() {
+    // Found by run-pods-e2e's first full run (run 40432460348): the account went first, the StatefulSet still named it,
+    // and the pod its controller made next was refused ("serviceaccount not found"): 0/1, Degraded, for good. A real
+    // API server also keeps the deprecated `serviceAccount` through an apply that leaves `serviceAccountName` out.
+    let (fake, runtime) = setup();
+    let on = resolved_run_pods(|_, _| {});
+    runtime.ensure(&on.id, &on.runtime).await.unwrap();
+    assert_eq!(
+        account_of(&fake.get(K::StatefulSet, NS, "coder").unwrap()),
+        (Some("coder".to_owned()), Some("coder".to_owned())),
+        "the workload runs as the account, by both of its names"
+    );
+
+    let off = resolved("coder", |_, _| {});
+    fake.clear_calls();
+    runtime.ensure(&off.id, &off.runtime).await.unwrap();
+
+    assert_eq!(
+        fake.accounts_deleted_while_named(),
+        [],
+        "the account was deleted while a workload's pod template still named it"
+    );
+    let calls = fake.calls();
+    let sts = fake.get(K::StatefulSet, NS, "coder").unwrap();
+    assert_eq!(account_of(&sts), (None, None));
+
+    // The order: the right and the pods first; then the workload, applied without the account and then freed of the
+    // name the server keeps; only then the account and what only the account used.
+    let binding = at(&calls, "DELETE", K::RoleBinding, "coder-run-pods");
+    let applied = at(&calls, "PATCH", K::StatefulSet, "coder");
+    let account = at(&calls, "DELETE", K::ServiceAccount, "coder");
+    assert_eq!((binding.len(), account.len()), (1, 1), "{calls:#?}");
+    let freed: Vec<usize> = calls
+        .iter()
+        .enumerate()
+        .filter(|(_, c)| {
+            c.method == "PATCH" && c.content_type.contains("merge-patch") && c.name() == "coder"
+        })
+        .map(|(i, _)| i)
+        .collect();
+    assert_eq!(
+        applied.len(),
+        2,
+        "applied, then freed of the name: {calls:#?}"
+    );
+    assert_eq!(freed.len(), 1, "{calls:#?}");
+    assert!(
+        binding[0] < applied[0],
+        "the right goes before the workload is touched"
+    );
+    assert!(
+        applied[0] < freed[0],
+        "the name is taken out of what was applied"
+    );
+    for (kind, name) in [
+        (K::Quota, "coder-run-pods"),
+        (K::ConfigMap, "coder-run-pods-policy"),
+        (K::ConfigMap, "coder-run-pod"),
+    ] {
+        let deleted = at(&calls, "DELETE", kind, name);
+        assert_eq!(deleted.len(), 1, "{name}: {calls:#?}");
+        assert!(
+            freed[0] < deleted[0],
+            "{name} goes after the workload stopped naming the account"
+        );
+        assert!(deleted[0] < account[0], "the account goes last");
+    }
+    assert!(freed[0] < account[0]);
+
+    // Both names, null, on the one workload: a merge patch of only `serviceAccountName` changes nothing on a real server.
+    let patches = merge_patches(&calls);
+    assert_eq!(patches.len(), 1);
+    assert_eq!(
+        patches[0].body,
+        Some(
+            json!({"spec": {"template": {"spec": {"serviceAccountName": null, "serviceAccount": null}}}})
+        )
+    );
+    assert!(
+        patches[0].query.contains("fieldManager=aap-operator"),
+        "{}",
+        patches[0].query
+    );
+}
+
+#[tokio::test]
+async fn a_template_that_is_not_ours_is_not_deleted_with_the_run_pod_objects() {
+    let (fake, runtime) = setup();
+    let on = resolved_run_pods(|_, _| {});
+    runtime.ensure(&on.id, &on.runtime).await.unwrap();
+    // Someone else's ConfigMap of the template's name (and of the parameters'): theirs, whatever it is called.
+    for name in ["coder-run-pod", "coder-run-pods-policy"] {
+        fake.put(
+            K::ConfigMap,
+            NS,
+            name,
+            json!({"metadata": {"labels": {"app.kubernetes.io/managed-by": "Helm", "app.kubernetes.io/instance": "coder"}}}),
+        );
+    }
+    let off = resolved("coder", |_, _| {});
+    runtime.ensure(&off.id, &off.runtime).await.unwrap();
+    for name in ["coder-run-pod", "coder-run-pods-policy"] {
+        let o = fake
+            .get(K::ConfigMap, NS, name)
+            .unwrap_or_else(|| panic!("{name} was deleted"));
+        assert_eq!(
+            o["metadata"]["labels"]["app.kubernetes.io/managed-by"],
+            "Helm"
+        );
+    }
+    // The run pod objects that are ours still went.
+    assert!(fake.get(K::RoleBinding, NS, "coder-run-pods").is_none());
+    assert!(fake.get(K::ServiceAccount, NS, "coder").is_none());
+}
+
+#[tokio::test]
+async fn a_workload_left_naming_a_deleted_account_is_freed_by_the_next_pass_and_only_once() {
+    // What the operator before this fix left behind: no account, no binding, no quota, and a StatefulSet at 0 pods
+    // whose template names the account. The next pass, finding nothing of run pods to clear, still frees it.
+    let (fake, runtime) = setup();
+    let on = resolved_run_pods(|_, _| {});
+    runtime.ensure(&on.id, &on.runtime).await.unwrap();
+    {
+        use k8s_openapi::api::core::v1::{ConfigMap, ResourceQuota, ServiceAccount};
+        use k8s_openapi::api::networking::v1::NetworkPolicy;
+        use k8s_openapi::api::rbac::v1::RoleBinding;
+        let client = fake.client();
+        let d = kube::api::DeleteParams::default();
+        kube::Api::<RoleBinding>::namespaced(client.clone(), NS)
+            .delete("coder-run-pods", &d)
+            .await
+            .unwrap();
+        kube::Api::<ResourceQuota>::namespaced(client.clone(), NS)
+            .delete("coder-run-pods", &d)
+            .await
+            .unwrap();
+        kube::Api::<NetworkPolicy>::namespaced(client.clone(), NS)
+            .delete("coder-run-pods", &d)
+            .await
+            .unwrap();
+        kube::Api::<ConfigMap>::namespaced(client.clone(), NS)
+            .delete("coder-run-pods-policy", &d)
+            .await
+            .unwrap();
+        kube::Api::<ServiceAccount>::namespaced(client, NS)
+            .delete("coder", &d)
+            .await
+            .unwrap();
+    }
+    assert_eq!(
+        account_of(&fake.get(K::StatefulSet, NS, "coder").unwrap()),
+        (Some("coder".to_owned()), Some("coder".to_owned()))
+    );
+
+    let off = resolved("coder", |_, _| {});
+    fake.clear_calls();
+    runtime.ensure(&off.id, &off.runtime).await.unwrap();
+    assert_eq!(
+        account_of(&fake.get(K::StatefulSet, NS, "coder").unwrap()),
+        (None, None)
+    );
+    assert_eq!(merge_patches(&fake.calls()).len(), 1);
+
+    // And then it is as it should be: no patch, nothing deleted.
+    fake.clear_calls();
+    runtime.ensure(&off.id, &off.runtime).await.unwrap();
+    assert!(
+        merge_patches(&fake.calls()).is_empty(),
+        "{:#?}",
+        fake.calls()
+    );
+    assert!(fake.calls().iter().all(|c| c.method != "DELETE"));
+}
+
+#[tokio::test]
+async fn a_deployment_that_names_an_account_the_spec_does_not_want_is_freed_too() {
+    let (fake, runtime) = setup();
+    let chat = resolved("chat", |_, _| {});
+    runtime.ensure(&chat.id, &chat.runtime).await.unwrap();
+    // Not something the operator renders today: a Deployment that someone's earlier spec had run as an account.
+    let mut d = fake.get(K::Deployment, NS, "chat").unwrap();
+    d["spec"]["template"]["spec"]["serviceAccountName"] = json!("chat");
+    d["spec"]["template"]["spec"]["serviceAccount"] = json!("chat");
+    fake.put(K::Deployment, NS, "chat", d);
+    fake.clear_calls();
+    runtime.ensure(&chat.id, &chat.runtime).await.unwrap();
+    assert_eq!(
+        account_of(&fake.get(K::Deployment, NS, "chat").unwrap()),
+        (None, None)
+    );
+    let calls = fake.calls();
+    let patches = merge_patches(&calls);
+    assert_eq!(patches.len(), 1);
+    assert!(
+        patches[0].path.contains("/deployments/chat"),
+        "{}",
+        patches[0].path
     );
 }
 
@@ -204,6 +425,8 @@ async fn a_service_that_never_had_run_pods_pays_three_reads_and_nothing_is_delet
     runtime.ensure(&off.id, &off.runtime).await.unwrap();
     let calls = fake.calls();
     assert!(calls.iter().all(|c| c.method != "DELETE"));
+    // Every render without run pods stays as it was: the workload is applied, and nothing is patched after it.
+    assert!(merge_patches(&calls).is_empty(), "{calls:#?}");
     let lists = |kind: K| {
         calls
             .iter()
@@ -387,5 +610,11 @@ async fn a_provider_that_is_not_looking_applies_run_pods_when_the_spec_has_them_
     assert!(
         fake.get(K::RoleBinding, NS, "coder-run-pods").is_some(),
         "left in place: clearing is the operator's choice, made with the rights to do it"
+    );
+    assert!(fake.get(K::ServiceAccount, NS, "coder").is_some());
+    // What is not the choice: the workload runs as the account no more, by neither of its names.
+    assert_eq!(
+        account_of(&fake.get(K::StatefulSet, NS, "coder").unwrap()),
+        (None, None)
     );
 }
