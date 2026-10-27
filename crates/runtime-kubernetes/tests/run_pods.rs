@@ -71,6 +71,17 @@ fn the_coder_with_run_pods() {
 }
 
 #[test]
+fn the_template_is_the_file_set_the_provider_removes_by_name() {
+    // The provider clears the template when a service stops asking for run pods, and finds it by this name: the file set
+    // the domain makes, `<service>-run-pod`.
+    let r = resolved_run_pods(|_, _| {});
+    let name = aap_runtime_kubernetes::names::run_pod_template(&r.id);
+    let docs = rendered(&r).documents();
+    let template = find(&docs, "ConfigMap", &name);
+    assert!(template["data"]["pod.yaml"].is_string());
+}
+
+#[test]
 fn the_objects_and_their_order() {
     let docs = rendered(&resolved_run_pods(|_, _| {})).documents();
     assert_eq!(

@@ -137,7 +137,9 @@ sequenceDiagram
   K->>G: the 9 rules, with the account's parameters
   G-->>K: admitted, or refused with the message of the rule it breaks
   P->>K: the config stops asking, or the service is deleted
-  O->>K: delete the RoleBinding first, then the run pods, the quota, the network policy, the parameters, the account
+  O->>K: delete the RoleBinding first, then the run pods
+  O->>K: apply the workers without the account (and null both names it has for it)
+  O->>K: delete the quota, the network policy, the parameters, the template, and the account last
 ```
 
 ```mermaid
@@ -146,7 +148,7 @@ stateDiagram-v2
   NoRunPods --> Guarded: sizeClass set (parameters, account, quota, network policy)
   Guarded --> MayMakePods: the RoleBinding is applied
   MayMakePods --> Removing: sizeClass removed, or the service deleted
-  Removing --> NoRunPods: binding, pods, quota, network policy, parameters, account gone
+  Removing --> NoRunPods: binding and pods gone, workers freed of the account, then quota, network policy, parameters, template, account gone
   MayMakePods --> Unguarded: a person deletes the parameters
   Unguarded --> MayMakePods: the next reconcile makes them again
 ```

@@ -11,7 +11,7 @@ use futures::stream::BoxStream;
 use k8s_openapi::NamespaceResourceScope;
 use k8s_openapi::api::apps::v1::{Deployment, StatefulSet};
 use k8s_openapi::api::core::v1::{
-    ConfigMap, PersistentVolumeClaim, Pod, ResourceQuota, Service, ServiceAccount,
+    ConfigMap, PersistentVolumeClaim, Pod, PodTemplateSpec, ResourceQuota, Service, ServiceAccount,
 };
 use k8s_openapi::api::networking::v1::NetworkPolicy;
 use k8s_openapi::api::policy::v1::PodDisruptionBudget;
@@ -67,6 +67,40 @@ fn is_ours(meta: &ObjectMeta, id: &RuntimeId) -> bool {
     let labels = meta.labels.as_ref();
     let label = |k: &str| labels.and_then(|l| l.get(k)).map(String::as_str);
     label(MANAGED_BY_LABEL) == Some(MANAGED_BY_VALUE) && label(INSTANCE_LABEL) == Some(id.name())
+}
+
+/// What [`KubernetesRuntime::revoke_run_pods`] leaves of a service's run pod objects: the names of the quotas and
+/// the accounts it found, which go after the workloads no longer name the account.
+struct Revoked {
+    quotas: Vec<String>,
+    accounts: Vec<String>,
+}
+
+/// A workload with a pod template: a StatefulSet or a Deployment.
+trait PodTemplated {
+    /// Whether the pod template runs as a named account, by either of the two fields it has for it
+    /// (`serviceAccountName` and the deprecated `serviceAccount`).
+    fn names_an_account(&self) -> bool;
+}
+
+fn template_names_an_account(template: Option<&PodTemplateSpec>) -> bool {
+    template.and_then(|t| t.spec.as_ref()).is_some_and(|pod| {
+        [&pod.service_account_name, &pod.service_account]
+            .into_iter()
+            .any(|n| n.as_deref().is_some_and(|n| !n.is_empty()))
+    })
+}
+
+impl PodTemplated for StatefulSet {
+    fn names_an_account(&self) -> bool {
+        template_names_an_account(self.spec.as_ref().map(|s| &s.template))
+    }
+}
+
+impl PodTemplated for Deployment {
+    fn names_an_account(&self) -> bool {
+        template_names_an_account(self.spec.as_ref().map(|s| &s.template))
+    }
 }
 
 /// The runtime provider for native Kubernetes.
@@ -216,13 +250,19 @@ impl KubernetesRuntime {
             status.issues.extend(conflicts);
             return Ok(status);
         }
-        if rendered.run_pods.is_none() && self.clear_run_pods {
-            // A service that made run pods and no longer asks: the right to make them goes before anything else is
-            // applied, and then the pods.
-            self.remove_run_pods(id).await?;
-        }
+        // A service that made run pods and no longer asks: the right to make them goes before anything else is applied,
+        // and then the pods; the account and the rest only after the workloads are applied without it, or the pod their
+        // controller makes next names an account that is not there and is refused, for good.
+        let revoked = if rendered.run_pods.is_none() && self.clear_run_pods {
+            self.revoke_run_pods(id).await?
+        } else {
+            None
+        };
         self.apply_all(id, &rendered).await?;
         self.remove_stale(id, &rendered).await?;
+        if let Some(revoked) = &revoked {
+            self.clear_run_pod_objects(id, revoked, true).await?;
+        }
         let status = self.observe(id).await?;
         if matches!(
             status.phase,
@@ -342,8 +382,14 @@ impl KubernetesRuntime {
         self.apply(ns, &r.service).await?;
         for (_, w) in &r.workloads {
             match w {
-                WorkloadObject::StatefulSet(s) => self.apply(ns, s.as_ref()).await.map(drop)?,
-                WorkloadObject::Deployment(d) => self.apply(ns, d.as_ref()).await.map(drop)?,
+                WorkloadObject::StatefulSet(s) => {
+                    let live = self.apply(ns, s.as_ref()).await?;
+                    self.stop_naming_account(ns, s.as_ref(), &live).await?;
+                }
+                WorkloadObject::Deployment(d) => {
+                    let live = self.apply(ns, d.as_ref()).await?;
+                    self.stop_naming_account(ns, d.as_ref(), &live).await?;
+                }
             }
         }
         for o in &r.disruption_budgets {
@@ -411,43 +457,105 @@ impl KubernetesRuntime {
         Ok(())
     }
 
+    /// A workload that was applied without an account but still names one. A real API server keeps the deprecated
+    /// `serviceAccount` of a pod template through an apply that leaves `serviceAccountName` out (server-side apply
+    /// releases the field this manager owned, the deprecated one was never owned, and conversion fills the first from the
+    /// second), so the template of a service that stopped asking for run pods would name an account for good, and the
+    /// pod its controller makes after the account is deleted is refused. Only a merge patch that nulls **both** takes the
+    /// name out (*verified 2026-10-27* on a bare kube-apiserver v1.35.8, StatefulSet and Deployment; a patch of only
+    /// `serviceAccountName` changes nothing). Sent only when the object the apply answered with names an account that the
+    /// render does not: a render without run pods costs nothing, and a workload that an earlier pass left naming an account
+    /// is freed by the next.
+    async fn stop_naming_account<K>(&self, namespace: &str, wanted: &K, live: &K) -> Result<()>
+    where
+        K: Kind + PodTemplated,
+    {
+        if wanted.names_an_account() || !live.names_an_account() {
+            return Ok(());
+        }
+        let name = live.meta().name.clone().unwrap_or_default();
+        self.merge_patch::<K>(
+            namespace,
+            &name,
+            json!({"spec": {"template": {"spec": {"serviceAccountName": null, "serviceAccount": null}}}}),
+        )
+        .await
+    }
+
+    /// A JSON merge patch of one object, under our field manager. (A server-side apply of a partial object would drop
+    /// every other field this manager owns.)
+    async fn merge_patch<K: Kind>(&self, namespace: &str, name: &str, patch: Value) -> Result<()> {
+        let params = PatchParams {
+            field_manager: Some(FIELD_MANAGER.to_owned()),
+            ..PatchParams::default()
+        };
+        self.api::<K>(namespace)
+            .patch(name, &params, &Patch::Merge(patch))
+            .await
+            .map(drop)
+            .map_err(|e| Error::from_kube(what::<K>(name), e))
+    }
+
     /// A service that made run pods and does not any more: take the right to make them away first, then clear the
-    /// pods that were made (nothing sweeps them now: the coder that did runs its commands in its own container),
-    /// then the rest. A service that never had any costs three reads.
-    async fn remove_run_pods(&self, id: &RuntimeId) -> Result<bool> {
+    /// pods that were made (nothing sweeps them now: the coder that did runs its commands in its own container). What
+    /// is left is [`Revoked`], for [`clear_run_pod_objects`](Self::clear_run_pod_objects). `None` for a service that
+    /// never had any, which costs three reads.
+    async fn revoke_run_pods(&self, id: &RuntimeId) -> Result<Option<Revoked>> {
         let ns = id.scope();
         let bindings = self.list_ours::<RoleBinding>(id).await?;
         let accounts = self.list_ours::<ServiceAccount>(id).await?;
         let quotas = self.list_ours::<ResourceQuota>(id).await?;
         if bindings.is_empty() && accounts.is_empty() && quotas.is_empty() {
-            return Ok(false);
+            return Ok(None);
         }
         for b in &bindings {
             self.delete_named::<RoleBinding>(ns, b.metadata.name.as_deref().unwrap_or_default())
                 .await?;
         }
         self.delete_run_pods(id).await?;
-        for q in &quotas {
-            self.delete_named::<ResourceQuota>(ns, q.metadata.name.as_deref().unwrap_or_default())
-                .await?;
+        Ok(Some(Revoked {
+            quotas: quotas.into_iter().filter_map(|q| q.metadata.name).collect(),
+            accounts: accounts
+                .into_iter()
+                .filter_map(|a| a.metadata.name)
+                .collect(),
+        }))
+    }
+
+    /// The rest of a service's run pod objects, after [`revoke_run_pods`](Self::revoke_run_pods): the quota, the network
+    /// policy, the parameters of the guard and, with `template`, the run pod template (a file set that only the workers'
+    /// pods mount, so it goes once they are applied without it), then **the account last**, so that an interrupted pass
+    /// still finds one and comes back. By name, and only what is ours: a policy or a ConfigMap of the same name that
+    /// someone else made is theirs. With `template` off (the service is going: its ConfigMaps all go with it) the template
+    /// is left to that.
+    async fn clear_run_pod_objects(
+        &self,
+        id: &RuntimeId,
+        revoked: &Revoked,
+        template: bool,
+    ) -> Result<()> {
+        let ns = id.scope();
+        for q in &revoked.quotas {
+            self.delete_named::<ResourceQuota>(ns, q).await?;
         }
-        // By name, but only ours: a policy or a ConfigMap of the same name that someone else made is theirs.
         let (policy, params) = (names::run_pods(id), names::run_pods_policy_params(id));
         for p in self.list_ours::<NetworkPolicy>(id).await? {
             if p.metadata.name.as_deref() == Some(policy.as_str()) {
                 self.delete_named::<NetworkPolicy>(ns, &policy).await?;
             }
         }
+        let template_map = names::run_pod_template(id);
         for c in self.list_ours::<ConfigMap>(id).await? {
-            if c.metadata.name.as_deref() == Some(params.as_str()) {
-                self.delete_named::<ConfigMap>(ns, &params).await?;
+            let name = c.metadata.name.as_deref();
+            if name == Some(params.as_str()) || (template && name == Some(template_map.as_str())) {
+                self.delete_named::<ConfigMap>(ns, name.unwrap_or_default())
+                    .await?;
             }
         }
-        for a in &accounts {
-            self.delete_named::<ServiceAccount>(ns, a.metadata.name.as_deref().unwrap_or_default())
-                .await?;
+        for a in &revoked.accounts {
+            self.delete_named::<ServiceAccount>(ns, a).await?;
         }
-        Ok(true)
+        Ok(())
     }
 
     /// Delete the run pods of a service: the pods its coder labelled, found by the labels the parameters of its guard
@@ -551,24 +659,16 @@ impl KubernetesRuntime {
         }
         // A merge patch of one field: a server-side apply of a partial object would drop every
         // other field this manager owns.
-        let patch = Patch::Merge(json!({"spec": {"replicas": 0}}));
-        let params = PatchParams {
-            field_manager: Some(FIELD_MANAGER.to_owned()),
-            ..PatchParams::default()
-        };
+        let patch = json!({"spec": {"replicas": 0}});
         for s in sts {
             let name = s.metadata.name.unwrap_or_default();
-            self.api::<StatefulSet>(ns)
-                .patch(&name, &params, &patch)
-                .await
-                .map_err(|e| Error::from_kube(what::<StatefulSet>(&name), e))?;
+            self.merge_patch::<StatefulSet>(ns, &name, patch.clone())
+                .await?;
         }
         for d in deploys {
             let name = d.metadata.name.unwrap_or_default();
-            self.api::<Deployment>(ns)
-                .patch(&name, &params, &patch)
-                .await
-                .map_err(|e| Error::from_kube(what::<Deployment>(&name), e))?;
+            self.merge_patch::<Deployment>(ns, &name, patch.clone())
+                .await?;
         }
         self.observe(id).await
     }
@@ -608,8 +708,11 @@ impl KubernetesRuntime {
         let mut existed = !sts.is_empty() || !deploys.is_empty();
         // The right to make run pods first, then the pods they made (the guard's parameters are read to find them,
         // so they go with the rest below): nothing is left to make a pod again.
-        if self.clear_run_pods {
-            existed |= self.remove_run_pods(id).await?;
+        if self.clear_run_pods
+            && let Some(revoked) = self.revoke_run_pods(id).await?
+        {
+            self.clear_run_pod_objects(id, &revoked, false).await?;
+            existed = true;
         }
         // Compute next: nothing is left to make a claim again.
         for s in &sts {

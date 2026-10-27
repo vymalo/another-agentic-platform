@@ -2,7 +2,9 @@
 //! the real ones and what it does with the answers is the real code. It keeps objects by path,
 //! answers `GET`, lists with a label selector, server-side apply and merge patches, and `DELETE`,
 //! and records every call. It is not an API server: there are no controllers (no pod ever appears
-//! by itself), no validation and no garbage collection. What a cluster does is the cluster test's.
+//! by itself), no validation and no garbage collection, and no field ownership (an apply replaces the
+//! object). What a cluster does is the cluster test's. The one rule of a real server that it copies on
+//! purpose is the pod template's two names for its account ([`mirror_service_account`]).
 
 use std::collections::BTreeMap;
 use std::convert::Infallible;
@@ -104,6 +106,8 @@ struct State {
     calls: Vec<Call>,
     fail_with: Option<u16>,
     next_version: u64,
+    /// `(account, workload)` for every delete of a `ServiceAccount` that a workload's pod template still named.
+    dangling: Vec<(String, String)>,
 }
 
 /// The fake server. Clones share one state.
@@ -183,6 +187,14 @@ impl Fake {
         lock(&self.state).calls.clear();
     }
 
+    /// `(account, workload)` for each `ServiceAccount` that was deleted while the pod template of a StatefulSet or
+    /// Deployment still named it: the pod its controller makes next is refused ("serviceaccount not found"), and the
+    /// workload stays at 0 pods until somebody takes the name out.
+    #[allow(dead_code)] // only tests/run_pods_api.rs asks
+    pub fn accounts_deleted_while_named(&self) -> Vec<(String, String)> {
+        lock(&self.state).dangling.clone()
+    }
+
     /// The calls that change something.
     pub fn writes(&self) -> Vec<Call> {
         self.calls().into_iter().filter(Call::writes).collect()
@@ -248,6 +260,14 @@ impl Fake {
                         }
                         object["metadata"]["generation"] = old["metadata"]["generation"].clone();
                         object["metadata"]["uid"] = old["metadata"]["uid"].clone();
+                        // And what the apply does not own: the deprecated name of a pod template's account (see
+                        // `mirror_service_account`). A merge patch starts from the live object, so it has it.
+                        if let Some(live) = old.pointer("/spec/template/spec/serviceAccount")
+                            && let Some(pod) = object.pointer_mut("/spec/template/spec")
+                            && pod.get("serviceAccount").is_none()
+                        {
+                            pod["serviceAccount"] = live.clone();
+                        }
                     } else {
                         object["metadata"]["generation"] = json!(1);
                         object["metadata"]["uid"] = json!(format!("uid-{version}"));
@@ -261,11 +281,32 @@ impl Fake {
                     old
                 };
                 let mut merged = merged;
+                if matches!(K::of_path(&call.path), Some(K::StatefulSet | K::Deployment)) {
+                    mirror_service_account(&mut merged);
+                }
                 merged["metadata"]["resourceVersion"] = json!(version);
                 s.objects.insert(call.path.clone(), merged.clone());
                 json_response(200, &merged)
             }
-            ("DELETE", [_plural, _name]) => {
+            ("DELETE", [_plural, name]) => {
+                if K::of_path(&call.path) == Some(K::ServiceAccount) {
+                    let named: Vec<(String, String)> = s
+                        .objects
+                        .iter()
+                        .filter(|(p, o)| {
+                            matches!(K::of_path(p), Some(K::StatefulSet | K::Deployment))
+                                && o.pointer("/spec/template/spec/serviceAccountName")
+                                    == Some(&json!(name))
+                        })
+                        .map(|(p, _)| {
+                            (
+                                (*name).to_owned(),
+                                p.rsplit('/').next().unwrap_or_default().to_owned(),
+                            )
+                        })
+                        .collect();
+                    s.dangling.extend(named);
+                }
                 if s.objects.remove(&call.path).is_some() {
                     json_response(
                         200,
@@ -276,6 +317,39 @@ impl Fake {
                 }
             }
             _ => status(405, "not supported by the fake", "MethodNotAllowed"),
+        }
+    }
+}
+
+/// The two names a pod template has for its account, as a real API server keeps them. `serviceAccountName` and the
+/// deprecated `serviceAccount` are one value on write: conversion fills the first from the second when the first is
+/// empty, and the second from the first. So an apply that leaves `serviceAccountName` out of a template whose live
+/// object has the account **keeps both** (server-side apply releases the field it owned, and the deprecated one was never
+/// owned), and a merge patch that nulls only `serviceAccountName` changes nothing; nulling both takes the account out.
+/// *Verified 2026-10-27* on a bare kube-apiserver v1.35.8, StatefulSet and Deployment: `kubectl apply --server-side`
+/// of the template without the field left `serviceAccountName: acct` and `serviceAccount: acct`; `patch --type=merge`
+/// with only `serviceAccountName: null` answered "no change"; with both null the two fields were gone and a later apply
+/// without them kept them gone.
+fn mirror_service_account(object: &mut Value) {
+    let Some(pod) = object.pointer_mut("/spec/template/spec") else {
+        return;
+    };
+    let text = |v: Option<&Value>| {
+        v.and_then(Value::as_str)
+            .filter(|t| !t.is_empty())
+            .map(str::to_owned)
+    };
+    let effective = text(pod.get("serviceAccountName")).or_else(|| text(pod.get("serviceAccount")));
+    if let Some(map) = pod.as_object_mut() {
+        match effective {
+            Some(name) => {
+                map.insert("serviceAccountName".to_owned(), json!(name));
+                map.insert("serviceAccount".to_owned(), json!(name));
+            }
+            None => {
+                map.remove("serviceAccountName");
+                map.remove("serviceAccount");
+            }
         }
     }
 }

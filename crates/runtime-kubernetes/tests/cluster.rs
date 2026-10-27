@@ -25,7 +25,9 @@ use std::collections::BTreeMap;
 use std::future::Future;
 use std::time::Duration;
 
-use aap_ports::testkit::{RuntimeUnderTest, SENTINEL, sample_spec, unique};
+use aap_ports::testkit::{
+    RuntimeUnderTest, SENTINEL, sample_spec, sample_spec_with_run_pods, unique,
+};
 use aap_ports::{
     Capabilities, Classify, DeleteOutcome, DeletionPolicy, Endpoint, EnvValue, ErrorClass,
     IssueReason, Phase, RuntimeError, RuntimeId, RuntimeProvider, RuntimeSpec, RuntimeStatus,
@@ -34,7 +36,10 @@ use aap_ports::{
 use aap_runtime_kubernetes::{KubernetesRuntime, owner_handle};
 use futures::stream::BoxStream;
 use k8s_openapi::api::apps::v1::{Deployment, StatefulSet};
-use k8s_openapi::api::core::v1::{ConfigMap, Namespace, PersistentVolumeClaim, Secret, Service};
+use k8s_openapi::api::core::v1::{
+    ConfigMap, Namespace, PersistentVolumeClaim, ResourceQuota, Secret, Service, ServiceAccount,
+};
+use k8s_openapi::api::rbac::v1::RoleBinding;
 use kube::api::{DeleteParams, ListParams, Patch, PatchParams};
 use kube::config::{KubeConfigOptions, Kubeconfig};
 use kube::{Api, Client, Config};
@@ -655,6 +660,97 @@ async fn a_superseded_file_set_goes_after_the_rollout() {
     })
     .await;
     assert!(maps.get_opt(&new).await.unwrap().is_some());
+    h.delete(&id).await.unwrap();
+}
+
+/// Run pods stopped: the workload stops naming the account, **by both of its names**, and only then does the account go.
+/// Only a real API server shows why this is more than an apply without the field: it keeps the deprecated
+/// `serviceAccount` of the pod template through a server-side apply (found by run-pods-e2e's first full run, run
+/// 40432460348: the account was deleted, the StatefulSet still named it, and its next pod was refused for good). The
+/// objects are all this reads: no pod has to run, and the Role, the PriorityClass and the admission policy of the run pods
+/// are the chart's, not the provider's.
+#[tokio::test]
+async fn a_service_that_stops_asking_for_run_pods_stops_naming_its_account_before_the_account_goes()
+{
+    let Some(client) = connect().await else {
+        return;
+    };
+    namespace(&client).await;
+    let h = Harness {
+        runtime: KubernetesRuntime::new(client.clone()).clearing_run_pods(true),
+        client: client.clone(),
+    };
+    let id = fresh();
+    let mut on = sample_spec_with_run_pods(&id);
+    on.workloads[0].replicas = 1;
+    let mut off = sample_spec(&id);
+    off.workloads[0].replicas = 1;
+    let account = id.name().to_owned();
+    let sets = Api::<StatefulSet>::namespaced(client.clone(), NAMESPACE);
+    let accounts = |s: &StatefulSet| {
+        let pod = s.spec.as_ref().and_then(|s| s.template.spec.as_ref());
+        (
+            pod.and_then(|p| p.service_account_name.clone()),
+            pod.and_then(|p| p.service_account.clone()),
+        )
+    };
+
+    h.ensure(&id, &on).await.unwrap();
+    assert_eq!(
+        accounts(&sets.get(id.name()).await.unwrap()),
+        (Some(account.clone()), Some(account.clone()))
+    );
+    assert!(
+        Api::<ServiceAccount>::namespaced(client.clone(), NAMESPACE)
+            .get_opt(&account)
+            .await
+            .unwrap()
+            .is_some()
+    );
+
+    h.ensure(&id, &off).await.unwrap();
+    assert_eq!(
+        accounts(&sets.get(id.name()).await.unwrap()),
+        (None, None),
+        "the StatefulSet still names the account the operator deleted: its next pod would be refused"
+    );
+    let gone = |what: &str, found: bool| assert!(!found, "{what} is still there");
+    gone(
+        "the account",
+        Api::<ServiceAccount>::namespaced(client.clone(), NAMESPACE)
+            .get_opt(&account)
+            .await
+            .unwrap()
+            .is_some(),
+    );
+    gone(
+        "the quota",
+        Api::<ResourceQuota>::namespaced(client.clone(), NAMESPACE)
+            .get_opt(&format!("{}-run-pods", id.name()))
+            .await
+            .unwrap()
+            .is_some(),
+    );
+    gone(
+        "the binding",
+        Api::<RoleBinding>::namespaced(client.clone(), NAMESPACE)
+            .get_opt(&format!("{}-run-pods", id.name()))
+            .await
+            .unwrap()
+            .is_some(),
+    );
+    gone(
+        "the guard's parameters",
+        Api::<ConfigMap>::namespaced(client.clone(), NAMESPACE)
+            .get_opt(&format!("{}-run-pods-policy", id.name()))
+            .await
+            .unwrap()
+            .is_some(),
+    );
+
+    // And it stays so: another pass changes nothing (a server-side apply must not bring the name back).
+    h.ensure(&id, &off).await.unwrap();
+    assert_eq!(accounts(&sets.get(id.name()).await.unwrap()), (None, None));
     h.delete(&id).await.unwrap();
 }
 
