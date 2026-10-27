@@ -662,7 +662,8 @@ fn check_run_pods(v: &mut Issues, cfg: &AgentConfig, asked: &aap_api::RunPods) {
     }
     // The volumes and directories the operator makes the coder pod of a coder with run pods from: the template, the
     // account's credentials and the git sandbox's socket and `/tmp` (a user volume of those names would be a second volume of the
-    // same name in the pod; one mounted over them would hide them).
+    // same name in the pod; one mounted over them would hide them). Of the person's volumes the sandbox mounts only the
+    // work volume, beside its own `/tmp`, so only that one may not overlap `/tmp`.
     use contract::run_pods as rp;
     for vol in &cfg.spec.environment.volumes {
         if [
@@ -679,11 +680,16 @@ fn check_run_pods(v: &mut Issues, cfg: &AgentConfig, asked: &aap_api::RunPods) {
             );
         }
         if is_mount_path(&vol.mount_path) {
+            let sandbox_tmp =
+                (vol.name == contract::WORK_VOLUME).then_some(rp::git_sandbox::TMP_DIR);
             for dir in [
                 rp::TEMPLATE_DIR,
                 rp::ACCOUNT_DIR,
                 rp::git_sandbox::SOCKET_DIR,
-            ] {
+            ]
+            .into_iter()
+            .chain(sandbox_tmp)
+            {
                 if paths_overlap(&vol.mount_path, dir) {
                     v.add(
                         format!("{me} spec.environment.volumes[{}].mountPath", vol.name),

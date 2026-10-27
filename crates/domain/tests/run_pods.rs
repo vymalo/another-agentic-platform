@@ -1046,6 +1046,26 @@ fn the_template_volume_and_its_directory_are_the_operators_when_run_pods_are_on(
             "{dir}: {issues:?}"
         );
     }
+    // The sandbox mounts the work volume at the coder's path beside its own `/tmp`: the work volume may not overlap it
+    // (two mounts at one path are refused by the API server, and the pod is never made). Another volume may: the
+    // sandbox does not mount it.
+    for dir in ["/tmp", "/tmp/work"] {
+        let issues = issues_with("coder", &externals(), |s, c| {
+            on(s, c);
+            set(c, "/spec/environment/volumes/0/mountPath", json!(dir));
+        });
+        assert_issue(&issues, "volumes[work].mountPath", "overlaps /tmp");
+    }
+    must_resolve_with("coder", &externals(), |s, c| {
+        on(s, c);
+        set(
+            c,
+            "/spec/environment/volumes/1",
+            json!({
+            "name": "other", "scope": "agent", "mountPath": "/tmp",
+            "source": {"persistent": {"size": "1Gi"}}}),
+        );
+    });
     // Off, those names and paths are the person's, as they were before run pods existed.
     must_resolve("coder", |_, c| {
         set(
