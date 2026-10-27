@@ -61,7 +61,16 @@ fn a_config_without_run_pods_resolves_to_what_it_always_did_whatever_the_deploym
     );
     // And the serialised spec does not mention the fields, so the digest of every existing agent is what it was.
     let json = serde_json::to_string(&without.runtime).unwrap();
-    for absent in ["run_pods", "service_account", "run-pod"] {
+    for absent in [
+        "run_pods",
+        "service_account",
+        "run-pod",
+        "read_only_root_filesystem",
+        "Scratch",
+        "AccountToken",
+        "git-sandbox",
+        "GIT_SANDBOX",
+    ] {
         assert!(
             !json.contains(absent),
             "{absent} is in the spec of an agent with no run pods"
@@ -129,6 +138,351 @@ fn run_pods_set_the_variables_and_mount_the_template_in_the_workers_pod() {
     let pod: Value =
         serde_json::from_str(&set.files["pod.yaml"]).expect("a JSON Pod, which YAML reads");
     assert_eq!(pod["kind"], "Pod");
+}
+
+// ---------------------------------------------------------------- the git sandbox (D15d)
+
+/// The values of a container's literal variables, and a failure for any that is not one: a sandbox has no secret.
+fn literals(c: &aap_ports::Container) -> Vec<(String, String)> {
+    c.env
+        .iter()
+        .map(|e| match &e.value {
+            EnvValue::Literal(v) => (e.name.clone(), v.clone()),
+            other => panic!("{}: {other:?}, and the git sandbox holds no secret", e.name),
+        })
+        .collect()
+}
+
+#[test]
+fn the_git_sandbox_is_a_sidecar_of_the_agents_own_image_that_mounts_three_things() {
+    let r = resolved_on();
+    let w = &r.runtime.workloads[0];
+    let sandbox = &w.sidecars[0];
+    assert_eq!(
+        sandbox.name, "git-sandbox",
+        "first, before the GitHub server"
+    );
+    assert_eq!(
+        sandbox.image, w.container.image,
+        "no other image to pin: the agent's own, which needs adam-git-sandbox"
+    );
+    assert_eq!(sandbox.command, ["tini", "--", "adam-git-sandbox"]);
+    assert!(sandbox.read_only_root_filesystem);
+    assert!(!w.container.read_only_root_filesystem, "the coder writes");
+    assert_eq!(
+        literals(sandbox),
+        [
+            (
+                "GIT_SANDBOX_LISTEN".to_owned(),
+                "/run/git-sandbox/git.sock".to_owned()
+            ),
+            ("GIT_SANDBOX_ROOT".to_owned(), "/work".to_owned()),
+            ("GIT_SANDBOX_MAX_COMMANDS".to_owned(), "64".to_owned()),
+        ]
+    );
+    let mounts: Vec<(&str, &str, bool)> = sandbox
+        .mounts
+        .iter()
+        .map(|m| (m.volume.as_str(), m.path.as_str(), m.read_only))
+        .collect();
+    assert_eq!(
+        mounts,
+        [
+            ("work", "/work", false),
+            ("git-sandbox", "/run/git-sandbox", false),
+            ("git-sandbox-tmp", "/tmp", false),
+        ],
+        "the work volume at the coder's own path, the socket's directory and a /tmp of its own: no Secret, no token, nothing else"
+    );
+    // A real command through the relay is its probe: the server has no health endpoint.
+    let startup = sandbox.probes.startup.as_ref().unwrap();
+    let aap_ports::ProbeAction::Exec { command } = &startup.action else {
+        panic!("an exec probe")
+    };
+    assert_eq!(
+        command[2],
+        "cd /work && exec env GIT_SANDBOX_SOCKET=/run/git-sandbox/git.sock adam-git --version"
+    );
+    assert_eq!(
+        (
+            startup.period_secs,
+            startup.timeout_secs,
+            startup.failure_threshold
+        ),
+        (2, Some(5), Some(30))
+    );
+    let live = sandbox.probes.liveness.as_ref().unwrap();
+    assert_eq!(
+        (live.period_secs, live.timeout_secs, live.failure_threshold),
+        (30, Some(10), Some(6))
+    );
+    assert!(sandbox.probes.readiness.is_none());
+    assert_eq!(sandbox.resources.limits["memory"], "1Gi");
+    assert_eq!(sandbox.resources.requests["memory"], "128Mi");
+    assert_eq!(sandbox.resources.requests["cpu"], "100m");
+}
+
+#[test]
+fn the_account_token_and_the_socket_are_the_coder_containers_and_the_sandbox_has_neither_the_token_nor_a_secret()
+ {
+    let r = resolved_on();
+    let w = &r.runtime.workloads[0];
+    let kind = |name: &str| &w.volumes.iter().find(|v| v.name == name).unwrap().source;
+    assert_eq!(*kind("kube-api-access"), VolumeSource::AccountToken);
+    assert_eq!(
+        *kind("git-sandbox"),
+        VolumeSource::Scratch(aap_ports::ScratchVolume {
+            in_memory: false,
+            size_limit: None
+        })
+    );
+    assert_eq!(
+        *kind("git-sandbox-tmp"),
+        VolumeSource::Scratch(aap_ports::ScratchVolume {
+            in_memory: true,
+            size_limit: Some("64Mi".to_owned())
+        })
+    );
+    let mounts: Vec<(&str, &str, bool)> = w
+        .container
+        .mounts
+        .iter()
+        .filter(|m| ["kube-api-access", "git-sandbox"].contains(&m.volume.as_str()))
+        .map(|m| (m.volume.as_str(), m.path.as_str(), m.read_only))
+        .collect();
+    assert_eq!(
+        mounts,
+        [
+            (
+                "kube-api-access",
+                "/var/run/secrets/kubernetes.io/serviceaccount",
+                true
+            ),
+            ("git-sandbox", "/run/git-sandbox", false),
+        ]
+    );
+    let env = w
+        .container
+        .env
+        .iter()
+        .find(|e| e.name == "GIT_SANDBOX_SOCKET")
+        .map(|e| e.value.clone());
+    assert_eq!(
+        env,
+        Some(EnvValue::Literal("/run/git-sandbox/git.sock".to_owned()))
+    );
+    // Who holds what, over every sidecar and every volume that carries a credential: the coder container alone.
+    let carries = |name: &str| {
+        matches!(
+            kind(name),
+            VolumeSource::AccountToken | VolumeSource::SecretFile { .. }
+        )
+    };
+    for sidecar in &w.sidecars {
+        for m in &sidecar.mounts {
+            assert!(
+                !carries(&m.volume),
+                "{} mounts {}, which carries a credential",
+                sidecar.name,
+                m.volume
+            );
+        }
+        for e in &sidecar.env {
+            assert!(
+                matches!(e.value, EnvValue::Literal(_)),
+                "{}: {}",
+                sidecar.name,
+                e.name
+            );
+        }
+    }
+    // The neutral spec says so itself: a provider is handed a spec whose invariants hold.
+    r.runtime.check().unwrap();
+}
+
+#[test]
+fn the_sandbox_follows_the_work_volume_wherever_the_config_mounts_it() {
+    let r = must_resolve_with("coder", &externals(), |s, c| {
+        on(s, c);
+        set(
+            c,
+            "/spec/environment/volumes/0/mountPath",
+            json!("/srv/the work"),
+        );
+    });
+    let w = &r.runtime.workloads[0];
+    let sandbox = &w.sidecars[0];
+    assert!(
+        sandbox
+            .mounts
+            .iter()
+            .any(|m| m.volume == "work" && m.path == "/srv/the work")
+    );
+    assert!(
+        literals(sandbox).contains(&("GIT_SANDBOX_ROOT".to_owned(), "/srv/the work".to_owned()))
+    );
+    let aap_ports::ProbeAction::Exec { command } = &sandbox.probes.startup.as_ref().unwrap().action
+    else {
+        panic!()
+    };
+    assert_eq!(
+        command[2],
+        "cd '/srv/the work' && exec env GIT_SANDBOX_SOCKET=/run/git-sandbox/git.sock adam-git --version",
+        "a path with a space is one word to the shell"
+    );
+}
+
+#[test]
+fn the_sandbox_comes_before_the_github_server_and_beside_it() {
+    // The example has the GitHub server as a sidecar: both are there, the sandbox first (native sidecars start in order).
+    let r = resolved_on();
+    let names: Vec<&str> = r.runtime.workloads[0]
+        .sidecars
+        .iter()
+        .map(|c| c.name.as_str())
+        .collect();
+    assert_eq!(names, ["git-sandbox", "github-mcp"]);
+    // And alone when the config asks for no GitHub server.
+    let r = must_resolve_with("coder", &externals(), |s, c| {
+        on(s, c);
+        set(c, "/spec/tools/githubMcp/sidecar", json!(false));
+    });
+    let names: Vec<&str> = r.runtime.workloads[0]
+        .sidecars
+        .iter()
+        .map(|c| c.name.as_str())
+        .collect();
+    assert_eq!(names, ["git-sandbox"]);
+}
+
+#[test]
+fn what_the_sandbox_is_told_rolls_the_coder_and_what_the_proxy_is_told_still_does_not() {
+    let base = resolved_on();
+    let digest = |s: RunPodSettings| {
+        must_resolve_with("coder", &Externals::default().with_run_pods(s), on).digest
+    };
+    for (what, over) in [
+        (
+            "the sandbox's memory",
+            json!({"gitSandbox": {"resources": {"limits": {"memory": "2Gi"}}}}),
+        ),
+        (
+            "the sandbox's CPU",
+            json!({"gitSandbox": {"resources": {"requests": {"cpu": "1"}}}}),
+        ),
+        (
+            "the sandbox's /tmp",
+            json!({"gitSandbox": {"tmpSize": "128Mi"}}),
+        ),
+        (
+            "the number of commands at once",
+            json!({"gitSandbox": {"maxCommands": 8}}),
+        ),
+    ] {
+        assert_ne!(
+            digest(settings_with(over)),
+            base.digest,
+            "{what} is read by the pod"
+        );
+    }
+}
+
+#[test]
+fn a_split_front_has_no_sandbox_no_socket_and_no_credentials() {
+    let r = must_resolve_with("coder", &externals(), |s, c| {
+        on(s, c);
+        set(s, "/spec/scaling/topology", json!("split"));
+        set(s, "/spec/scaling/workers", json!(2));
+        set(s, "/spec/scaling/front", json!({"replicas": 2}));
+        set(
+            c,
+            "/spec/harness/adam/coder/workspacePlacement",
+            json!("shared"),
+        );
+        set(
+            c,
+            "/spec/environment/volumes/0/source/persistent/perReplica",
+            json!(false),
+        );
+    });
+    let [workers, front] = &r.runtime.workloads[..] else {
+        panic!()
+    };
+    assert_eq!(workers.sidecars[0].name, "git-sandbox");
+    assert!(front.sidecars.iter().all(|c| c.name != "git-sandbox"));
+    assert!(
+        front
+            .container
+            .env
+            .iter()
+            .all(|e| !e.name.starts_with("GIT_SANDBOX"))
+    );
+    assert!(front.volumes.iter().all(|v| !matches!(
+        v.source,
+        VolumeSource::AccountToken | VolumeSource::Scratch(_)
+    )));
+    assert!(
+        front
+            .container
+            .mounts
+            .iter()
+            .all(|m| m.volume != "kube-api-access")
+    );
+}
+
+#[test]
+fn the_sandboxs_settings_are_checked_as_the_coder_chart_checks_them_and_there_is_no_switch() {
+    // No `enabled`, no `off`: while run pods are on the coder's git runs in the sandbox.
+    let mut v = chart_run_pod_settings();
+    v["gitSandbox"]["enabled"] = json!(false);
+    assert!(
+        serde_json::from_value::<RunPodSettings>(v).is_err(),
+        "there is no way to run pods without the git sandbox"
+    );
+    // The key is required (the chart writes it), as `egressProxy` is.
+    let mut v = chart_run_pod_settings();
+    v.as_object_mut().unwrap().remove("gitSandbox");
+    assert!(serde_json::from_value::<RunPodSettings>(v).is_err());
+    let mut v = chart_run_pod_settings();
+    v["gitSandbox"]["surprise"] = json!(1);
+    assert!(serde_json::from_value::<RunPodSettings>(v).is_err());
+
+    says(
+        &refused(json!({"gitSandbox": {"resources": {"limits": {"memory": null}}}})),
+        "gitSandbox.resources.limits.memory is required",
+    );
+    says(
+        &refused(json!({"gitSandbox": {"resources": {"limits": {"memory": "lots"}}}})),
+        "gitSandbox.resources.limits.memory",
+    );
+    says(
+        &refused(json!({"gitSandbox": {"resources": {"requests": {"cpu": "fast"}}}})),
+        "gitSandbox.resources.requests.cpu",
+    );
+    for bad in [
+        "lots", "", "64 Mi", "0", "0Mi", "0.0Gi", "1e3", "100m", "-1Mi", "1.Mi", ".5Mi", "64MiB",
+    ] {
+        says(
+            &refused(json!({"gitSandbox": {"tmpSize": bad}})),
+            "gitSandbox.tmpSize",
+        );
+    }
+    for bad in [0, 4097, 100_000] {
+        says(
+            &refused(json!({"gitSandbox": {"maxCommands": bad}})),
+            "gitSandbox.maxCommands",
+        );
+    }
+    for good in ["64Mi", "1Gi", "128M", "0.5Gi", "1024k", "1Ti", "64"] {
+        settings_with(json!({"gitSandbox": {"tmpSize": good}}))
+            .validate()
+            .unwrap_or_else(|p| panic!("{good}: {p:?}"));
+    }
+    for good in [1, 64, 4096] {
+        settings_with(json!({"gitSandbox": {"maxCommands": good}}))
+            .validate()
+            .unwrap_or_else(|p| panic!("{good}: {p:?}"));
+    }
 }
 
 #[test]
@@ -585,6 +939,28 @@ fn the_variables_the_operator_sets_for_run_pods_are_not_extra_env_when_they_are_
 }
 
 #[test]
+fn the_variable_the_coder_is_told_the_sandbox_by_is_the_operators_when_run_pods_are_on() {
+    // By its name and not through `SET`, which a test that walks it would follow wherever it went.
+    assert!(
+        aap_domain::contract::run_pods::SET.contains(&"GIT_SANDBOX_SOCKET"),
+        "the contract says the operator sets it"
+    );
+    let issues = issues_with("coder", &externals(), |s, c| {
+        on(s, c);
+        set(c, "/spec/extraEnv/GIT_SANDBOX_SOCKET", json!("/tmp/x.sock"));
+    });
+    assert_issue(
+        &issues,
+        "spec.extraEnv.GIT_SANDBOX_SOCKET",
+        "the operator sets this variable itself when run pods are on",
+    );
+    // Off, it is the person's, as it was.
+    must_resolve("coder", |_, c| {
+        set(c, "/spec/extraEnv/GIT_SANDBOX_SOCKET", json!("/tmp/x.sock"))
+    });
+}
+
+#[test]
 fn podman_devcontainers_and_run_pods_are_not_both() {
     let issues = issues_with("coder", &externals(), |s, c| {
         on(s, c);
@@ -628,6 +1004,78 @@ fn the_template_volume_and_its_directory_are_the_operators_when_run_pods_are_on(
         "volumes[other].mountPath",
         "overlaps /etc/adam/run-pod",
     );
+    // The account's credentials and the git sandbox's volumes and socket directory are the operator's too (D15d).
+    for name in ["kube-api-access", "git-sandbox", "git-sandbox-tmp"] {
+        let issues = issues_with("coder", &externals(), |s, c| {
+            on(s, c);
+            set(
+                c,
+                "/spec/environment/volumes/1",
+                json!({
+                "name": name, "scope": "agent", "mountPath": "/data",
+                "source": {"persistent": {"size": "1Gi"}}}),
+            );
+        });
+        assert_issue(
+            &issues,
+            &format!("volumes[{name}]"),
+            "the operator uses this volume name itself when run pods are on",
+        );
+    }
+    for dir in [
+        "/var/run/secrets/kubernetes.io/serviceaccount",
+        "/run/git-sandbox/x",
+        "/run",
+    ] {
+        let issues = issues_with("coder", &externals(), |s, c| {
+            on(s, c);
+            set(
+                c,
+                "/spec/environment/volumes/1",
+                json!({
+                "name": "other", "scope": "agent", "mountPath": dir,
+                "source": {"persistent": {"size": "1Gi"}}}),
+            );
+        });
+        assert!(
+            issues
+                .iter()
+                .any(|i| i.field.contains("volumes[other].mountPath")
+                    && i.message
+                        .contains("which the operator mounts itself when run pods are on")),
+            "{dir}: {issues:?}"
+        );
+    }
+    // The sandbox mounts the work volume at the coder's path beside its own `/tmp`: the work volume may not overlap it
+    // (two mounts at one path are refused by the API server, and the pod is never made). Another volume may: the
+    // sandbox does not mount it.
+    for dir in ["/tmp", "/tmp/work"] {
+        let issues = issues_with("coder", &externals(), |s, c| {
+            on(s, c);
+            set(c, "/spec/environment/volumes/0/mountPath", json!(dir));
+        });
+        assert_issue(&issues, "volumes[work].mountPath", "overlaps /tmp");
+    }
+    must_resolve_with("coder", &externals(), |s, c| {
+        on(s, c);
+        set(
+            c,
+            "/spec/environment/volumes/1",
+            json!({
+            "name": "other", "scope": "agent", "mountPath": "/tmp",
+            "source": {"persistent": {"size": "1Gi"}}}),
+        );
+    });
+    // Off, those names and paths are the person's, as they were before run pods existed.
+    must_resolve("coder", |_, c| {
+        set(
+            c,
+            "/spec/environment/volumes/1",
+            json!({
+            "name": "git-sandbox", "scope": "agent", "mountPath": "/run/git-sandbox",
+            "source": {"persistent": {"size": "1Gi"}}}),
+        );
+    });
 }
 
 #[test]

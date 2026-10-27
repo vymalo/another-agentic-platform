@@ -263,8 +263,10 @@ pub mod front {
 /// 2026-10-26*: `bin/adam-coder/README.md` "Where the processes of a run run", `docs/reference/environment.md`,
 /// `crates/adam-env-kubernetes/src/names.rs`, `deploy/coder/templates/_runpods.tpl` and `statefulset.yaml`; the egress
 /// proxy, slice D15c, adam-rs ADR 0042, at `7598255`, *verified 2026-10-27*: `deploy/coder/templates/_runpods.tpl` and
-/// `run-pods-egress-*.yaml`, `bin/adam-egress/README.md`). The parity goldens (`tests/golden/coder-run-pods*.json`) hold it
-/// equal to what the chart renders.
+/// `run-pods-egress-*.yaml`, `bin/adam-egress/README.md`; the git sandbox, slice D15d, adam-rs ADR 0041 open decision 6, at
+/// `581aeed`, *verified 2026-10-27*: `deploy/coder/templates/statefulset.yaml` and `_runpods.tpl`,
+/// `crates/adam-git-sandbox/README.md`). The parity goldens (`tests/golden/coder-run-pods*.json`) hold it equal to what the
+/// chart renders.
 pub mod run_pods {
     /// `local` or `kubernetes`.
     pub const RUN_ENVIRONMENT: &str = "RUN_ENVIRONMENT";
@@ -295,7 +297,101 @@ pub mod run_pods {
         RUN_POD_READY_TIMEOUT_SECS,
         RUN_POD_IDLE_SECS,
         RUN_POD_WAIT_SECS,
+        git_sandbox::SOCKET_ENV,
     ];
+
+    /// The volume of the account's credentials (the token, the cluster's CA and the namespace) in the coder pod. With run
+    /// pods the pod does not automount them: this volume is mounted in the coder container alone (adam-rs `581aeed`,
+    /// the chart's `kube-api-access`).
+    pub const ACCOUNT_VOLUME: &str = "kube-api-access";
+    /// Where an in-cluster client reads them.
+    pub const ACCOUNT_DIR: &str = "/var/run/secrets/kubernetes.io/serviceaccount";
+
+    /// The git sandbox (slice D15d; adam-rs ADR 0041 open decision 6, `crates/adam-git-sandbox` and the chart's
+    /// `statefulset.yaml` at `581aeed`, *verified 2026-10-27*): a native sidecar of the coder pod, from the coder's own
+    /// image, in which the coder's local git runs, because git runs what a repository's configuration names (a filter, an
+    /// fsmonitor) and some repositories are the run's own. What makes it a sandbox is what it does not have: no Secret
+    /// volume, no variable from a Secret, no service-account token, a pid namespace of its own, a read-only root file system.
+    pub mod git_sandbox {
+        /// The sidecar's name.
+        pub const CONTAINER: &str = "git-sandbox";
+        /// What it runs: `tini` reaps, `adam-git-sandbox` serves a Unix socket.
+        pub const COMMAND: [&str; 3] = ["tini", "--", "adam-git-sandbox"];
+        /// The emptyDir that holds the socket: shared by the coder container and the sidecar, and nothing else is.
+        pub const SOCKET_VOLUME: &str = "git-sandbox";
+        /// Where both mount it.
+        pub const SOCKET_DIR: &str = "/run/git-sandbox";
+        /// The socket the server makes in it (`GIT_SANDBOX_LISTEN`), and the coder's `GIT_SANDBOX_SOCKET`.
+        pub const SOCKET: &str = "/run/git-sandbox/git.sock";
+        /// The sidecar's own `/tmp`: in memory and sized.
+        pub const TMP_VOLUME: &str = "git-sandbox-tmp";
+        /// Where the sidecar mounts it.
+        pub const TMP_DIR: &str = "/tmp";
+        /// The socket to listen on (the sidecar).
+        pub const LISTEN: &str = "GIT_SANDBOX_LISTEN";
+        /// The directory commands may run below: the work volume (the sidecar).
+        pub const ROOT: &str = "GIT_SANDBOX_ROOT";
+        /// Commands run at once (the sidecar).
+        pub const MAX_COMMANDS: &str = "GIT_SANDBOX_MAX_COMMANDS";
+        /// The socket the coder sends its local git commands to (the coder container). Unset: no sandbox.
+        pub const SOCKET_ENV: &str = "GIT_SANDBOX_SOCKET";
+        /// Startup probe: seconds between probes, seconds a probe may take, failures allowed.
+        pub const STARTUP_PERIOD: u32 = 2;
+        /// Seconds a startup probe may take.
+        pub const STARTUP_TIMEOUT: u32 = 5;
+        /// Failures the startup probe allows.
+        pub const STARTUP_FAILURES: u32 = 30;
+        /// Liveness: seconds between probes.
+        pub const LIVENESS_PERIOD: u32 = 30;
+        /// Liveness: seconds a probe may take.
+        pub const LIVENESS_TIMEOUT: u32 = 10;
+        /// Liveness: failures allowed.
+        pub const LIVENESS_FAILURES: u32 = 6;
+
+        /// The probe: the server has no health endpoint, so it is a real command through the relay (`adam-git` in the
+        /// root, a directory the server accepts) and it is the server that answers. `root` is the work volume's path,
+        /// quoted for the shell if it needs it.
+        pub fn probe_command(root: &str) -> Vec<String> {
+            vec![
+                "sh".to_owned(),
+                "-c".to_owned(),
+                format!(
+                    "cd {} && exec env {SOCKET_ENV}={SOCKET} adam-git --version",
+                    shell_word(root)
+                ),
+            ]
+        }
+
+        /// A word for `sh -c`: as it is when it holds nothing the shell reads, else in single quotes.
+        fn shell_word(word: &str) -> String {
+            if !word.is_empty()
+                && word
+                    .bytes()
+                    .all(|b| b.is_ascii_alphanumeric() || b"/._-+=:@%,".contains(&b))
+            {
+                word.to_owned()
+            } else {
+                format!("'{}'", word.replace('\'', "'\\''"))
+            }
+        }
+
+        #[cfg(test)]
+        mod tests {
+            use super::*;
+
+            #[test]
+            fn a_plain_path_is_left_alone_and_any_other_is_one_word() {
+                assert_eq!(
+                    probe_command("/work")[2],
+                    "cd /work && exec env GIT_SANDBOX_SOCKET=/run/git-sandbox/git.sock adam-git --version"
+                );
+                assert_eq!(shell_word("/my work"), "'/my work'");
+                assert_eq!(shell_word("/it's"), "'/it'\\''s'");
+                assert_eq!(shell_word("/a;b"), "'/a;b'");
+                assert_eq!(shell_word("/$HOME"), "'/$HOME'");
+            }
+        }
+    }
 
     /// The value of `RUN_ENVIRONMENT`.
     pub const KUBERNETES: &str = "kubernetes";

@@ -12,6 +12,7 @@ use aap_ports::{
     Phase, RuntimeError, RuntimeId, RuntimeProvider, RuntimeSpec, RuntimeStatus, SecretRef,
     StoreError, StoreId, StoreKind, StoreProvisioner, StoreSpec, Surface, VolumeSource,
 };
+use aap_ports::{Mount, ScratchVolume};
 use futures::StreamExt;
 use futures::stream::BoxStream;
 
@@ -101,7 +102,13 @@ fn check_names_the_broken_invariant_of_run_pods() {
         ),
         (
             "no workload runs as it",
-            Box::new(|s| s.workloads[0].service_account = None),
+            Box::new(|s| {
+                // Without the account, the credentials of the account are no volume of the workload either.
+                let w = &mut s.workloads[0];
+                w.service_account = None;
+                w.volumes.retain(|v| v.name != "kube-api-access");
+                w.container.mounts.retain(|m| m.volume != "kube-api-access");
+            }),
         ),
         (
             "the service account is empty",
@@ -159,6 +166,66 @@ fn check_names_the_broken_invariant_of_run_pods() {
         assert_eq!(err.class(), ErrorClass::Invalid, "{needle}");
         assert!(err.to_string().contains(needle), "{needle}: {err}");
     }
+}
+
+#[test]
+fn check_names_the_broken_invariant_of_the_accounts_credentials_and_the_scratch_volumes() {
+    let base = sample_spec_with_run_pods(&id());
+    // The sample has the credentials mounted by the agent container alone.
+    base.check().unwrap();
+    let token_mount = || Mount {
+        volume: "kube-api-access".to_owned(),
+        path: "/var/run/secrets/kubernetes.io/serviceaccount".to_owned(),
+        read_only: true,
+    };
+    let broken: Vec<(&str, Break)> = vec![
+        (
+            "which only the agent container may hold",
+            Box::new(move |s| s.workloads[0].sidecars[0].mounts.push(token_mount())),
+        ),
+        (
+            "runs as none",
+            // Another workload with the credentials and no account: the pod would hold the default account's.
+            Box::new(|s| {
+                let mut w = s.workloads[0].clone();
+                w.name = "other".into();
+                w.service_account = None;
+                s.workloads.push(w);
+            }),
+        ),
+        (
+            "has an empty size limit",
+            Box::new(|s| {
+                s.workloads[0].volumes[4].source = VolumeSource::Scratch(ScratchVolume {
+                    in_memory: true,
+                    size_limit: Some(" ".into()),
+                });
+            }),
+        ),
+    ];
+    for (needle, break_it) in broken {
+        let mut spec = base.clone();
+        break_it(&mut spec);
+        let err = spec.check().unwrap_err();
+        assert_eq!(err.class(), ErrorClass::Invalid, "{needle}");
+        assert!(err.to_string().contains(needle), "{needle}: {err}");
+    }
+}
+
+#[test]
+fn a_container_that_never_sets_the_new_flag_serialises_as_before() {
+    // `read_only_root_filesystem` is absent when off: the digest of every spec written before the flag existed is what it was.
+    let value = serde_json::to_value(sample_spec(&id())).unwrap();
+    assert!(
+        value["workloads"][0]["container"]
+            .get("read_only_root_filesystem")
+            .is_none()
+    );
+    let on = serde_json::to_value(sample_spec_with_run_pods(&id())).unwrap();
+    assert_eq!(
+        on["workloads"][0]["sidecars"][0]["read_only_root_filesystem"],
+        true
+    );
 }
 
 #[test]

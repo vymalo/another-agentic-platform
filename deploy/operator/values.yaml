@@ -164,6 +164,30 @@ runPods:
         memory: 32Mi
       limits:
         memory: 256Mi
+  # The git sandbox (adam-rs ADR 0041, open decision 6; slice D15d): a second container in the coder's pod, `git-sandbox`, from THE AGENT'S
+  # OWN CODER IMAGE (`tini -- adam-git-sandbox`; no other image to pin), in which the coder's local `git` runs. `git` runs what a
+  # repository's configuration names (a `filter.*.clean`, a `core.fsmonitor`), and some repositories are the run's own, so that program has
+  # to run where nothing secret is readable: the container has no Secret volume, no variable from a Secret and no service-account token
+  # (the pod automounts none; the token is a projected volume of the coder container alone), a process namespace of its own, a read-only
+  # root file system and a `/tmp` of its own. It mounts the work volume at the same path as the coder and runs as the same user. There is no
+  # switch to turn it off: it is on with `runPods.enabled`, which is the mode where a run's commands leave the coder's container too.
+  # THE AGENT'S IMAGE MUST CONTAIN `adam-git-sandbox` (adam-rs `05cda7f` or later, #136): with an older one the sidecar cannot start, and
+  # neither can the coder's pod (its startup probe, an `adam-git --version` through the socket, never passes). The operator cannot tell (an
+  # image is a tag with no order) and does not refuse: README "The git sandbox of the coder's pod". `defaultAgentImage` above is older.
+  gitSandbox:
+    # Its own, not the coder's: the git that used to run in the coder's memory runs here, and a program a filter starts is stopped by this
+    # limit and not by the node's. A memory limit is required.
+    resources:
+      requests:
+        cpu: 100m
+        memory: 128Mi
+      limits:
+        memory: 1Gi
+    # The size of its `/tmp`, in memory (a file there counts against the limit above); above zero. A program that fills it gets "no space
+    # left on device"; a disk-backed volume would get the whole coder pod evicted.
+    tmpSize: 64Mi
+    # GIT_SANDBOX_MAX_COMMANDS: git commands run at once (1 to 4096); the next waits.
+    maxCommands: 64
 
 # The size classes an AgentConfig picks by name (`coder.runPods.sizeClass`, AD-031): the resources of the run container. A class whose
 # memory limit is above `runPods.quota.limitsMemory` is refused (no pod of it could ever be made). `GET /v1/info` offers the names.

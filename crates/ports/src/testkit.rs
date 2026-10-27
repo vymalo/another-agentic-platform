@@ -27,8 +27,8 @@ use crate::{
     Classify, Container, DeletionPolicy, DirectoryEntry, EgressProxy, EnvVar, ErrorClass, FileSet,
     FsGroupChangePolicy, Mount, Network, OwnerHandle, Peer, PersistentVolume, Phase, Probe,
     ProbeAction, Probes, Resources, Role, RunPodGuard, RunPodLabels, RunPodNetwork, RunPodQuota,
-    RunPods, RuntimeId, RuntimeProvider, RuntimeSpec, SecretRef, Security, Selector, Sharing,
-    StoreId, StoreProvisioner, VolumeSource, VolumeSpec, Workload,
+    RunPods, RuntimeId, RuntimeProvider, RuntimeSpec, ScratchVolume, SecretRef, Security, Selector,
+    Sharing, StoreId, StoreProvisioner, VolumeSource, VolumeSpec, Workload,
 };
 
 /// The environment variable that turns a skipped suite into a failure (CI sets it).
@@ -299,6 +299,7 @@ pub fn sample_spec(id: &RuntimeId) -> RuntimeSpec {
                     readiness: Some(probe("/healthz", 5)),
                 },
                 resources: Resources { requests, limits },
+                read_only_root_filesystem: false,
             },
             sidecars: vec![Container {
                 name: "helper".to_owned(),
@@ -321,6 +322,7 @@ pub fn sample_spec(id: &RuntimeId) -> RuntimeSpec {
                     readiness: None,
                 },
                 resources: Resources::default(),
+                read_only_root_filesystem: false,
             }],
             volumes: vec![
                 VolumeSpec {
@@ -376,7 +378,60 @@ pub fn sample_spec(id: &RuntimeId) -> RuntimeSpec {
 pub fn sample_spec_with_run_pods(id: &RuntimeId) -> RuntimeSpec {
     let mut spec = sample_spec(id);
     let account = id.name().to_owned();
-    spec.workloads[0].service_account = Some(account.clone());
+    let w = &mut spec.workloads[0];
+    w.service_account = Some(account.clone());
+    // What the git sandbox of a coder with run pods is made of: the account's credentials for the agent container alone, a
+    // scratch directory the two containers share and a read-only sidecar with a scratch `/tmp` of its own.
+    w.volumes.extend([
+        VolumeSpec {
+            name: "kube-api-access".to_owned(),
+            source: VolumeSource::AccountToken,
+        },
+        VolumeSpec {
+            name: "sandbox".to_owned(),
+            source: VolumeSource::Scratch(ScratchVolume {
+                in_memory: false,
+                size_limit: None,
+            }),
+        },
+        VolumeSpec {
+            name: "sandbox-tmp".to_owned(),
+            source: VolumeSource::Scratch(ScratchVolume {
+                in_memory: true,
+                size_limit: Some("64Mi".to_owned()),
+            }),
+        },
+    ]);
+    w.container.mounts.extend([
+        Mount {
+            volume: "kube-api-access".to_owned(),
+            path: "/var/run/secrets/kubernetes.io/serviceaccount".to_owned(),
+            read_only: true,
+        },
+        Mount {
+            volume: "sandbox".to_owned(),
+            path: "/run/sandbox".to_owned(),
+            read_only: false,
+        },
+    ]);
+    w.sidecars[0].read_only_root_filesystem = true;
+    w.sidecars[0].mounts = vec![
+        Mount {
+            volume: "work".to_owned(),
+            path: "/work".to_owned(),
+            read_only: false,
+        },
+        Mount {
+            volume: "sandbox".to_owned(),
+            path: "/run/sandbox".to_owned(),
+            read_only: false,
+        },
+        Mount {
+            volume: "sandbox-tmp".to_owned(),
+            path: "/tmp".to_owned(),
+            read_only: false,
+        },
+    ];
     spec.run_pods = Some(RunPods {
         service_account: account,
         role: "run-pods".to_owned(),

@@ -507,6 +507,13 @@ impl<'a> Cx<'a> {
                     read_only: true,
                 });
             }
+            // Run pods: the account's credentials are the coder container's alone (the pod mounts no token by itself),
+            // and the git sandbox's socket is shared with the sidecar below.
+            if let Some(run) = &self.run {
+                let service = self.run_service(run)?;
+                volumes.extend(service.volumes());
+                mounts.extend(service.agent_mounts());
+            }
             if let Some(app) = self.github_app() {
                 volumes.push(VolumeSpec {
                     name: contract::GITHUB_APP_VOLUME.to_owned(),
@@ -587,10 +594,16 @@ impl<'a> Cx<'a> {
                 )),
             },
             resources,
+            read_only_root_filesystem: false,
         };
 
-        // The GitHub MCP server: a native sidecar of every process that runs workers, on loopback.
-        let sidecars = match &spec.tools.github_mcp {
+        // The sidecars of every process that runs workers: the git sandbox first (run pods), then the GitHub MCP server
+        // (on loopback). Native sidecars start in this order and stop in the reverse one.
+        let mut sidecars = Vec::new();
+        if runs_workers && let Some(run) = &self.run {
+            sidecars.push(self.run_service(run)?.git_sandbox(&image));
+        }
+        sidecars.extend(match &spec.tools.github_mcp {
             Some(g) if g.sidecar && runs_workers => {
                 let port = u16::try_from(g.port).unwrap_or(sidecar::DEFAULT_PORT);
                 let (command, args) = sidecar::command_and_args(port);
@@ -630,10 +643,11 @@ impl<'a> Cx<'a> {
                             sidecar::LIMIT_MEMORY.to_owned(),
                         )]),
                     },
+                    read_only_root_filesystem: false,
                 }]
             }
             _ => Vec::new(),
-        };
+        });
 
         let front_replicas = role == Role::ControlPlane && replicas > 1;
         Ok(Workload {
@@ -819,6 +833,8 @@ impl<'a> Cx<'a> {
             ));
             e.push(lit(rp::RUN_POD_IDLE_SECS, s.idle_secs.to_string()));
             e.push(lit(rp::RUN_POD_WAIT_SECS, s.wait_secs.to_string()));
+            // The coder's local git commands that carry no credential run in the git sandbox, never here instead.
+            e.push(self.run_service(run)?.agent_env());
         }
 
         for (name, value) in &spec.extra_env {

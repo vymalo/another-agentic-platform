@@ -865,7 +865,7 @@ check "chain: the script's namespace, label, audience and Secrets are the ones t
 
 # ---- Run pods (slice D15a): off by default, and then not a trace; on, exactly these rights and this guard ---------------------------
 # What a render with run pods off must not contain, anywhere: an object, a variable, a right, a mount, a key of the API's file.
-run_pods_traces='run-pods|RUN_PODS_FILE|PriorityClass|ValidatingAdmissionPolicy|runPodSizeClasses|serviceaccounts|resourcequotas|rolebindings|checksum/run-pods|egressProxy|adam-egress'
+run_pods_traces='run-pods|RUN_PODS_FILE|PriorityClass|ValidatingAdmissionPolicy|runPodSizeClasses|serviceaccounts|resourcequotas|rolebindings|checksum/run-pods|egressProxy|adam-egress|gitSandbox|adam-git-sandbox|GIT_SANDBOX'
 render
 check "run pods off (the default): nothing of them is rendered, in any object" lacks "$run_pods_traces"
 render -f "$chart/examples/netcup.values.yaml"
@@ -960,6 +960,17 @@ run_pods_egress_proxy() {
 check "run pods on: the settings hold the egress proxy: the coder chart's allow-list, the extra host, the names that bypass it, three replicas, two ports and the resources" run_pods_egress_proxy
 check "run pods on: the chart renders no object of the egress proxy (the operator makes one per agent) and the operator's Role has no right more for it" \
   lacks 'adam-egress|[a-z]-egress'
+# The git sandbox's settings (D15d): the coder chart's defaults, with what the values of this render change (the memory limit, the size of /tmp, the number of
+# commands), written as the operator reads them. The sidecar itself is the operator's, per agent, in the coder's pod (aap-domain, aap-runtime-kubernetes): no
+# object of it is rendered here, and the operator's Role gains nothing for it (it is the pod spec of a StatefulSet it applied already).
+run_pods_git_sandbox() {
+  dhas ConfigMap aap-operator-run-pods-settings '^    gitSandbox:$' '^      maxCommands: 32$' '^      tmpSize: 128Mi$' \
+    && [ "$(doc ConfigMap aap-operator-run-pods-settings | sed -n '/^    gitSandbox:$/,/^    [a-z]/p' | sed '$d' | tr -d '\n ')" \
+      = 'gitSandbox:maxCommands:32resources:limits:memory:2Girequests:cpu:100mmemory:128MitmpSize:128Mi' ]
+}
+check "run pods on: the settings hold the git sandbox: its resources (the memory limit of this render, the coder chart's requests), the size of its /tmp and the number of commands, and no switch" run_pods_git_sandbox
+check "run pods on: the chart renders no object of the git sandbox (the operator puts it in the coder's pod) and the operator's Role has no right more for it" \
+  lacks 'adam-git|git-sandbox|kube-api-access'
 check "run pods on: the run image is pinned by tag and digest, and the tag is not latest" \
   dhas ConfigMap aap-operator-run-pods-settings 'tag: [0-9A-Za-z._-]+$' 'digest: sha256:[0-9a-f]{64}$'
 settings_hold_no_secret() {
@@ -1062,6 +1073,20 @@ check "refused: a NO_PROXY entry with a comma" refused "extraNoProxy entries are
 check "refused: a key of the egress proxy the operator does not read" refused "runPods.egressProxy.bogus is not a setting" --set runPods.enabled=true --set runPods.egressProxy.bogus=1
 check "refused: the egress proxy null" refused "runPods.egressProxy must be a map" --set runPods.enabled=true --set runPods.egressProxy=null
 check "refused: a resource of the egress proxy that is not a quantity" refused "must be a quantity" --set runPods.enabled=true --set runPods.egressProxy.resources.limits.memory=lots
+# The git sandbox (D15d): the checks of the coder chart's _validate.tpl, which RunPodSettings::validate repeats, and no switch.
+check "refused: no memory limit for the git sandbox" refused "runPods.gitSandbox.resources.limits.memory is required" --set runPods.enabled=true --set runPods.gitSandbox.resources.limits=null
+check "refused: a memory limit of the git sandbox that is not a quantity" refused "must be a quantity" --set runPods.enabled=true --set runPods.gitSandbox.resources.limits.memory=lots
+check "refused: a request of the git sandbox that is not a quantity" refused "runPods.gitSandbox.resources.requests.cpu must be a quantity" --set runPods.enabled=true --set runPods.gitSandbox.resources.requests.cpu=fast
+check "refused: a size of the sandbox's /tmp that is not a quantity" refused "runPods.gitSandbox.tmpSize must be a quantity above zero" --set runPods.enabled=true --set runPods.gitSandbox.tmpSize=lots
+check "refused: a size of the sandbox's /tmp of zero (a tmpfs of size 0 has no limit)" refused "runPods.gitSandbox.tmpSize must be a quantity above zero" --set runPods.enabled=true --set runPods.gitSandbox.tmpSize=0Mi
+check "refused: a size of the sandbox's /tmp with a milli suffix" refused "runPods.gitSandbox.tmpSize must be a quantity above zero" --set runPods.enabled=true --set runPods.gitSandbox.tmpSize=100m
+check "refused: no command at once" refused "runPods.gitSandbox.maxCommands must be a whole number from 1 to 4096" --set runPods.enabled=true --set runPods.gitSandbox.maxCommands=0
+check "refused: more than 4096 commands at once" refused "runPods.gitSandbox.maxCommands must be a whole number from 1 to 4096" --set runPods.enabled=true --set runPods.gitSandbox.maxCommands=4097
+check "refused: a fraction of a command" refused "runPods.gitSandbox.maxCommands must be a whole number from 1 to 4096" --set runPods.enabled=true --set runPods.gitSandbox.maxCommands=1.5
+check "refused: a switch for the git sandbox (it is on with run pods)" refused "runPods.gitSandbox.enabled is not a setting" --set runPods.enabled=true --set runPods.gitSandbox.enabled=false
+check "refused: a key of the git sandbox the operator does not read" refused "runPods.gitSandbox.bogus is not a setting" --set runPods.enabled=true --set runPods.gitSandbox.bogus=1
+check "refused: a key of the git sandbox's resources the operator does not read" refused "runPods.gitSandbox.resources.bogus is not a setting" --set runPods.enabled=true --set runPods.gitSandbox.resources.bogus.memory=1Gi
+check "refused: the git sandbox null" refused "runPods.gitSandbox must be a map" --set runPods.enabled=true --set runPods.gitSandbox=null
 check "refused: a variable of the proxy set by hand (HTTPS_PROXY)" refused "the operator sets the proxy variables of a run pod" --set runPods.enabled=true --set runPods.extraEnv.HTTPS_PROXY=http://elsewhere
 check "refused: a variable of the proxy set by hand (no_proxy)" refused "the operator sets the proxy variables of a run pod" --set runPods.enabled=true --set runPods.extraEnv.no_proxy=example.com
 check "refused: an IPv6 range among the ranges the proxy never reaches" refused "(IPv6 is denied, not allowed)" --set runPods.enabled=true --set 'runPods.networkPolicy.blockedCIDRs[0]=fe80::/10'
@@ -1153,6 +1178,29 @@ rp_model() {
     && grep -qF 'run-pods-model: listening' "$model" && grep -qF 'run-pods-model: listening' "$script"
 }
 check "run pods e2e: the model's script and the end-to-end script agree on the first line of the answer, the probe file and the release file, and the keys the probe prints" rp_model
+rp_vector() {
+  vector="$here/e2e/git-sandbox-vector.sh"
+  # Vendored, not written here: line 2 says from where and at which revision, line 4 the sha256 of everything from line 5 on, which is the upstream file
+  # from its second line on. An edit of the file is a hash that no longer fits; a revision that is not the parity goldens' is a vector nobody re-read.
+  rev=$(sed -n '2s/^# VENDORED from vymalo\/another-adam-rs, deploy\/coder\/tests\/git-sandbox-vector\.sh at \([0-9a-f]\{40\}\) .*/\1/p' "$vector")
+  want=$(sed -n '4s/^# Everything below this block is the upstream file from its second line on, byte for byte; its sha256 is \([0-9a-f]\{64\}\) .*/\1/p' "$vector")
+  [ -n "$rev" ] && [ -n "$want" ] || return 1
+  [ "$(tail -n +5 "$vector" | sha256sum | cut -d' ' -f1)" = "$want" ] || return 1
+  grep -q "^ADAM_RS_REV=\"$rev\"\$" "$chart/../../tools/adam-parity/regen.sh" && sh -n "$vector" && head -n 1 "$vector" | grep -qx '#!/bin/sh'
+}
+check "run pods e2e: the vector script is the one of adam-rs at the revision of the parity goldens, vendored byte for byte (its header says where from and the hash of the rest)" rp_vector
+rp_sandbox_step() {
+  script="$here/e2e/run-pods-e2e.sh"
+  # The step asks of the pod the operator made what adam-rs's kind-run-pods.sh asks of the pod of its chart: each of these is a line of the script.
+  # shellcheck disable=SC2016 # the patterns are the script's own text
+  grep -q '^step "4b\. the git sandbox of ' "$script" && grep -qF '"$here/git-sandbox-vector.sh"' "$script" \
+    && grep -qF 'secrets5="token appkey modelkey bearer databaseurl"' "$script" && grep -qF 'finds_all "$work/marker.coder"' "$script" && grep -qF 'finds_none "$work/marker.sandbox"' "$script" \
+    && grep -qF "tini -- adam-git-sandbox" "$script" && grep -qF 'readOnlyRootFilesystem == true' "$script" && grep -qF 'automountServiceAccountToken == false' "$script" \
+    && grep -qF 'kube-api-access' "$script" && grep -qF 'GIT_SANDBOX_SOCKET' "$script" && grep -qF '"subcommand":"worktree"' "$script" \
+    && grep -qF 'no_sandbox "$work/plain-statefulset.json"' "$script" && grep -qF 'no_sandbox "$work/plain-statefulset.after.json"' "$script" \
+    && grep -qF 'for f in operator.log plain.log model.log coder-start.log sandbox.log' "$script"
+}
+check "run pods e2e: the script has the sandbox step (4b): the pod's shape, the controls, the sandbox's emptiness, a commit through the socket, the vector with its control, the coder's own worktree in the sandbox's log, and the plain coder without any of it" rp_sandbox_step
 
 # ---- The CRDs chart: one source ------------------------------------------------------------------------------------------
 check "deploy/operator-crds/files is a copy of deploy/crds (cp deploy/crds/agents.vymalo.com.yaml deploy/operator-crds/files/)" \

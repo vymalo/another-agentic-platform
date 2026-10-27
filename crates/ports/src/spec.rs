@@ -141,6 +141,42 @@ impl RuntimeSpec {
                             ));
                         }
                     }
+                    VolumeSource::Scratch(s) => {
+                        if s.size_limit.as_deref().is_some_and(|l| l.trim().is_empty()) {
+                            return bad(format!(
+                                "workload {}: volume {} has an empty size limit",
+                                w.name, v.name
+                            ));
+                        }
+                    }
+                    VolumeSource::AccountToken => {
+                        if w.service_account.is_none() {
+                            return bad(format!(
+                                "workload {}: volume {} is the credentials of the workload's service account, and it runs as none",
+                                w.name, v.name
+                            ));
+                        }
+                    }
+                }
+            }
+            // The account's token is for the agent container alone: a sidecar that holds it is a sidecar that can act as
+            // the account (the git sandbox exists because one container must not).
+            let token_volumes: BTreeSet<&str> = w
+                .volumes
+                .iter()
+                .filter(|v| matches!(v.source, VolumeSource::AccountToken))
+                .map(|v| v.name.as_str())
+                .collect();
+            for c in &w.sidecars {
+                if let Some(m) = c
+                    .mounts
+                    .iter()
+                    .find(|m| token_volumes.contains(m.volume.as_str()))
+                {
+                    return bad(format!(
+                        "workload {}: the sidecar {} mounts {}, the credentials of the service account, which only the agent container may hold",
+                        w.name, c.name, m.volume
+                    ));
                 }
             }
             for c in std::iter::once(&w.container).chain(&w.sidecars) {
@@ -311,9 +347,10 @@ pub struct Workload {
     /// Pods that must stay up through a voluntary disruption (a PodDisruptionBudget); `None`: no
     /// budget. Not part of the digest.
     pub min_available: Option<u32>,
-    /// The account the pods run as, with its token mounted: the one that may make run pods
-    /// ([`RuntimeSpec::run_pods`]). `None`: the namespace's default account and no token, as ever. Part of
-    /// the digest only when set.
+    /// The account the pods run as: the one that may make run pods ([`RuntimeSpec::run_pods`]). `None`: the
+    /// namespace's default account and no token, as ever. The pod never mounts the account's token by itself: it
+    /// is a volume of the workload ([`VolumeSource::AccountToken`]) that **the agent container alone** mounts
+    /// (`check` refuses a sidecar that does). Part of the digest only when set.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub service_account: Option<String>,
 }
@@ -339,6 +376,14 @@ pub struct Container {
     pub probes: Probes,
     /// CPU and memory.
     pub resources: Resources,
+    /// The container's root file system is read-only: it writes to its volumes and nothing else. Off unless set, and
+    /// then not in the serialised spec, so the digest of a spec that never sets it is what it was.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub read_only_root_filesystem: bool,
+}
+
+fn is_false(b: &bool) -> bool {
+    !*b
 }
 
 /// One environment variable.
@@ -501,6 +546,26 @@ pub enum VolumeSource {
         /// The permission bits (`0o440`).
         mode: u32,
     },
+    /// Space that lives and dies with the pod (on Kubernetes an `emptyDir`): a socket two containers share, a
+    /// `/tmp` of one. It is **not** data: nothing of it survives the pod.
+    Scratch(ScratchVolume),
+    /// The credentials of the workload's service account ([`Workload::service_account`]) as an in-cluster client
+    /// reads them: a short-lived token, the cluster's certificate authority and the namespace, in one directory
+    /// (on Kubernetes the projected `kube-api-access` volume the kubelet would otherwise mount into **every**
+    /// container). Mounted into the agent container alone, so that a sidecar holds no credential for the cluster:
+    /// `RuntimeSpec::check` refuses a sidecar that mounts it, and a workload with no account.
+    AccountToken,
+}
+
+/// A [`VolumeSource::Scratch`] volume.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ScratchVolume {
+    /// In memory (a tmpfs) and not on the node's disk: what is written counts against the memory limit of the
+    /// containers that write it.
+    pub in_memory: bool,
+    /// The most it may hold, a quantity (`64Mi`). `None`: no limit of its own. A program that fills a limited
+    /// volume gets "no space left on device"; one that fills an unlimited volume on disk gets the pod evicted.
+    pub size_limit: Option<String>,
 }
 
 /// A persistent volume.

@@ -290,6 +290,36 @@ fn settings_for_run_pods_that_are_not_valid_stop_the_operator_before_it_looks_fo
             && stderr.contains("egressProxy.ports"),
         "every mistake is named: {stderr}"
     );
+    // The git sandbox (D15d): a file from before it, and one that still has a switch for it, are not the settings of run pods; a
+    // sandbox with no memory limit, a /tmp of zero and no command at once are named.
+    let without_sandbox = chart_settings_file(&dir, |s| {
+        s.as_object_mut().expect("a map").remove("gitSandbox");
+    });
+    let (ok, stderr) = run_with_run_pods_file(&without_sandbox);
+    assert!(
+        !ok && stderr.contains("not the settings of run pods"),
+        "{stderr:?}"
+    );
+    let sandbox_switch = chart_settings_file(&dir, |s| {
+        s["gitSandbox"]["enabled"] = serde_json::json!(false);
+    });
+    let (ok, stderr) = run_with_run_pods_file(&sandbox_switch);
+    assert!(
+        !ok && stderr.contains("not the settings of run pods"),
+        "no way to run pods without the git sandbox: {stderr:?}"
+    );
+    let bad_sandbox = chart_settings_file(&dir, |s| {
+        s["gitSandbox"]["resources"]["limits"] = serde_json::json!({});
+        s["gitSandbox"]["tmpSize"] = serde_json::json!("0Mi");
+        s["gitSandbox"]["maxCommands"] = serde_json::json!(0);
+    });
+    let (ok, stderr) = run_with_run_pods_file(&bad_sandbox);
+    assert!(
+        !ok && stderr.contains("gitSandbox.resources.limits.memory is required")
+            && stderr.contains("gitSandbox.tmpSize")
+            && stderr.contains("gitSandbox.maxCommands"),
+        "every mistake is named: {stderr}"
+    );
     let invalid = chart_settings_file(&dir, |s| {
         s["quota"]["pods"] = serde_json::json!(0);
         s["image"]["digest"] = serde_json::json!("sha256:short");

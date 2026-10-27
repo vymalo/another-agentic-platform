@@ -182,7 +182,61 @@ fn the_account_holds_its_token_in_the_workers_pod_alone() {
     );
     let pod = &find(&docs, "StatefulSet", "coder")["spec"]["template"]["spec"];
     assert_eq!(pod["serviceAccountName"], "coder");
-    assert_eq!(pod["automountServiceAccountToken"], true);
+    // The pod mounts no token by itself: that would put it in every container, the git sandbox's included. It is a projected
+    // volume that the coder container alone mounts, where an in-cluster client reads it.
+    assert_eq!(pod["automountServiceAccountToken"], false);
+    let volume = pod["volumes"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|v| v["name"] == "kube-api-access")
+        .expect("the account's credentials are a volume of the pod");
+    assert_eq!(volume["projected"]["defaultMode"], 420);
+    let sources = volume["projected"]["sources"].as_array().unwrap();
+    assert_eq!(
+        sources.len(),
+        3,
+        "the token, the cluster's CA and the namespace"
+    );
+    assert_eq!(
+        sources[0]["serviceAccountToken"],
+        json!({"expirationSeconds": 3607, "path": "token"})
+    );
+    assert_eq!(sources[1]["configMap"]["name"], "kube-root-ca.crt");
+    assert_eq!(
+        sources[2]["downwardAPI"]["items"][0]["fieldRef"]["fieldPath"],
+        "metadata.namespace"
+    );
+    let holders: Vec<&str> = pod["containers"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .chain(pod["initContainers"].as_array().unwrap())
+        .filter(|c| {
+            c["volumeMounts"]
+                .as_array()
+                .is_some_and(|m| m.iter().any(|m| m["name"] == "kube-api-access"))
+        })
+        .map(|c| c["name"].as_str().unwrap())
+        .collect();
+    assert_eq!(
+        holders,
+        ["agent"],
+        "the coder container alone holds the token"
+    );
+    let mount = pod["containers"][0]["volumeMounts"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|m| m["name"] == "kube-api-access")
+        .unwrap();
+    assert_eq!(
+        (mount["mountPath"].as_str(), mount["readOnly"].as_bool()),
+        (
+            Some("/var/run/secrets/kubernetes.io/serviceaccount"),
+            Some(true)
+        )
+    );
     let env = pod["containers"][0]["env"].as_array().unwrap();
     let namespace = env
         .iter()
@@ -215,6 +269,158 @@ fn the_account_holds_its_token_in_the_workers_pod_alone() {
     assert!(front.get("serviceAccountName").is_none());
     let workers = &find(&docs, "StatefulSet", "coder")["spec"]["template"]["spec"];
     assert_eq!(workers["serviceAccountName"], "coder");
+    assert_eq!(workers["automountServiceAccountToken"], false);
+    assert!(
+        front["volumes"].is_null()
+            || front["volumes"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .all(|v| { v.get("projected").is_none() && v.get("emptyDir").is_none() })
+    );
+    assert!(
+        front.get("initContainers").is_none(),
+        "no sandbox for a front"
+    );
+}
+
+#[test]
+fn the_git_sandbox_is_a_native_sidecar_with_no_secret_no_token_and_a_read_only_root() {
+    let docs = rendered(&resolved_run_pods(|_, _| {})).documents();
+    let pod = &find(&docs, "StatefulSet", "coder")["spec"]["template"]["spec"];
+    let inits = pod["initContainers"].as_array().unwrap();
+    let names: Vec<&str> = inits.iter().map(|c| c["name"].as_str().unwrap()).collect();
+    assert_eq!(
+        names,
+        ["git-sandbox", "github-mcp"],
+        "the sandbox starts first"
+    );
+    let sandbox = &inits[0];
+    assert_eq!(sandbox["restartPolicy"], "Always", "a native sidecar");
+    assert_eq!(
+        sandbox["command"],
+        json!(["tini", "--", "adam-git-sandbox"])
+    );
+    assert_eq!(
+        sandbox["image"], pod["containers"][0]["image"],
+        "the agent's own image"
+    );
+    assert_eq!(
+        sandbox["securityContext"],
+        json!({
+            "allowPrivilegeEscalation": false,
+            "capabilities": {"drop": ["ALL"]},
+            "readOnlyRootFilesystem": true,
+        })
+    );
+    // No Secret anywhere in it: no envFrom, no variable from a source, no mount of a volume that carries a credential.
+    assert!(sandbox.get("envFrom").is_none());
+    assert!(
+        sandbox["env"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|e| e.get("valueFrom").is_none() && e["value"].is_string())
+    );
+    let volumes = pod["volumes"].as_array().unwrap();
+    let volume = |name: &str| volumes.iter().find(|v| v["name"] == name).unwrap();
+    let mounted: Vec<(&str, &str)> = sandbox["volumeMounts"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|m| {
+            (
+                m["name"].as_str().unwrap(),
+                m["mountPath"].as_str().unwrap(),
+            )
+        })
+        .collect();
+    assert_eq!(
+        mounted,
+        [
+            ("work", "/work"),
+            ("git-sandbox", "/run/git-sandbox"),
+            ("git-sandbox-tmp", "/tmp"),
+        ]
+    );
+    for (name, _) in &mounted {
+        if *name == "work" {
+            continue; // a claim: the StatefulSet's claim template, or a shared claim
+        }
+        let v = volume(name);
+        assert!(
+            v.get("emptyDir").is_some()
+                && v.get("secret").is_none()
+                && v.get("projected").is_none()
+                && v.get("configMap").is_none(),
+            "{name}: {v}"
+        );
+    }
+    assert_eq!(volume("git-sandbox")["emptyDir"], json!({}));
+    assert_eq!(
+        volume("git-sandbox-tmp")["emptyDir"],
+        json!({"medium": "Memory", "sizeLimit": "64Mi"})
+    );
+    // No process namespace shared with the coder's container: the pod says nothing of it.
+    for key in ["shareProcessNamespace", "hostPID", "hostIPC", "hostNetwork"] {
+        assert!(pod.get(key).is_none(), "{key}");
+    }
+    // The coder container talks to it over the socket, and nothing else of the sandbox is its.
+    let coder_env = pod["containers"][0]["env"].as_array().unwrap();
+    let socket = coder_env
+        .iter()
+        .find(|e| e["name"] == "GIT_SANDBOX_SOCKET")
+        .unwrap();
+    assert_eq!(socket["value"], "/run/git-sandbox/git.sock");
+    let listen = sandbox["env"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|e| e["name"] == "GIT_SANDBOX_LISTEN")
+        .unwrap();
+    assert_eq!(socket["value"], listen["value"]);
+    // Its probes are real commands through the relay.
+    for probe in ["startupProbe", "livenessProbe"] {
+        assert_eq!(
+            sandbox[probe]["exec"]["command"][2],
+            "cd /work && exec env GIT_SANDBOX_SOCKET=/run/git-sandbox/git.sock adam-git --version",
+            "{probe}"
+        );
+    }
+}
+
+#[test]
+fn a_coder_without_run_pods_has_none_of_it() {
+    // The example as it is: the GitHub server is its only sidecar, there is no volume of those kinds and the pod mounts no token.
+    let docs = rendered(&resolved("coder", |_, _| {})).documents();
+    let pod = &find(&docs, "StatefulSet", "coder")["spec"]["template"]["spec"];
+    let names: Vec<&str> = pod["initContainers"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|c| c["name"].as_str().unwrap())
+        .collect();
+    assert_eq!(names, ["github-mcp"]);
+    assert_eq!(pod["automountServiceAccountToken"], false);
+    assert!(pod.get("serviceAccountName").is_none());
+    for v in pod["volumes"].as_array().unwrap() {
+        assert!(
+            v.get("projected").is_none() && v.get("emptyDir").is_none(),
+            "{v}"
+        );
+    }
+    let text = serde_json::to_string(pod).unwrap();
+    for absent in [
+        "git-sandbox",
+        "GIT_SANDBOX",
+        "kube-api-access",
+        "readOnlyRootFilesystem",
+    ] {
+        assert!(
+            !text.contains(absent),
+            "{absent} is in the pod of a coder without run pods"
+        );
+    }
 }
 
 #[test]

@@ -1,5 +1,5 @@
-# The two coders of the kind end-to-end of run pods (D15b, run-pods-e2e.sh), both the REAL adam-rs coder image at or after #134 (`ff10395`, which
-# has `adam-egress`; D15c), and `e2e-plain`, a coder on the token variant with NO run pods (an agent as it was before run pods existed: the script
+# The two coders of the kind end-to-end of run pods (D15b, run-pods-e2e.sh), both the REAL adam-rs coder image at or after #136 (`05cda7f`, which
+# has `adam-egress` and `adam-git-sandbox`; D15c, D15d), and `e2e-plain`, a coder on the token variant with NO run pods (an agent as it was before run pods existed: the script
 # makes it first, with the operator's chart installed without them, and shows the chart's upgrade leaves it as it was), and `e2e-coder`, a coder on
 # the GitHub App variant with `coder.runPods` (the commands of its runs run in pods of their own, and the App's key, a file in the coder's pod, is not
 # in any of them; its egress proxy runs this same image). The manifest carries no namespace: the script applies it in its own (aap-e2e-runpods), one
@@ -8,15 +8,19 @@
 #
 # THE PIN OF THE CODER IS HERE (the two `ref:` lines, which are one pin: bin/operator/tests/e2e_run_pods_fixture.rs and render-check.sh hold
 # them equal) AND IN NO OTHER FILE: the chart's `defaultAgentImage` is a pin of its own and is NOT moved by this slice (it is the image of
-# coder.yaml, S9's end-to-end: `sha-9a1fd4e`, from before #131 and before `adam-egress`: an agent that runs on it and asks for run pods has a proxy
-# that cannot start, which is why this fixture names its image). The script gives the same image to the scripted model (run-pods-support.yaml),
-# which runs a Node script in it. `sha-7598255` is adam-rs's main at #135, "run pods reach the internet only through the egress proxy", which
-# contains #134 (`adam-egress`, in the image: `/usr/local/bin/adam-egress`), #131 ("refuse to start with the App key file next to local commands")
-# and #117 (ADR 0041, a run pod sees only its own run). *Verified 2026-10-27* by anonymous requests to ghcr.io: the manifest of the tag is a Docker v2
-# image manifest (not an index) whose digest is the one below, one linux/amd64 image of 14 layers and 3.0 GB, user 10001, entrypoint `tini --
-# adam-coder`, label org.opencontainers.image.revision 75982554a5e90e274ec6f7cad19e742a7fae0495, whose history has the layer that copies `adam-egress`
-# next to `adam-coder`; 6 of its layers are the `workspace` image's that the run pods run (the chart's runPods.image, 1.98.1-e6a528f): the kubelet
-# that pulled the coder pulls one layer more for the run pods. The package is public (no credential is needed to pull it).
+# coder.yaml, S9's end-to-end: `sha-9a1fd4e`, from before #131, before `adam-egress` and before `adam-git-sandbox`: an agent that runs on it and
+# asks for run pods has a proxy and a git sandbox that cannot start, which is why this fixture names its image). The script gives the same image to
+# the scripted model (run-pods-support.yaml), which runs a Node script in it. `sha-581aeed` is adam-rs's main at #137, "the coder's local git runs in a
+# sidecar with no secret", which contains #136 (`adam-git-sandbox` and its relay `adam-git`, in the image: `/usr/local/bin/adam-git-sandbox` and
+# `adam-git`, D15d), #135 ("run pods reach the internet only through the egress proxy"), #134 (`adam-egress`), #131 ("refuse to start with the App
+# key file next to local commands") and #117 (ADR 0041, a run pod sees only its own run). *Verified 2026-10-27* by anonymous requests to ghcr.io: the
+# manifest of the tag is a Docker v2 image manifest (not an index) whose digest is the one below, one linux/amd64 image of 14 layers and 3.0 GB, user
+# 10001, entrypoint `tini -- adam-coder`, label org.opencontainers.image.revision 581aeed75e56f903b2a9f59217ea9dcd449c8466, whose history has the layer
+# that copies `adam-coder`, `adam-agent`, `adam-kube-exec`, `adam-egress`, `adam-git-sandbox` and `adam-git` into /usr/local/bin; 6 of its layers are the
+# `workspace` image's that the run pods run (the chart's runPods.image, 1.98.1-e6a528f): the kubelet that pulled the coder pulls one layer more for the
+# run pods. The package is public (no credential is needed to pull it). (adam-rs's `deploy/coder/values.yaml` named `sha-05cda7f`, #136, when this was
+# read: the bump to the tag of #137 had not been committed yet. Both tags exist and both have the layer above; the newer is the one whose chart the
+# parity goldens are rendered from.)
 #
 # No value here is a secret: every Secret is a reference to a key the script makes, with a random or a dummy value. The model is the script's own
 # (run-pods-model.js: nothing is asked of a real model), GitHub is never reached (the App's id is made up, its key is generated for the run
@@ -71,7 +75,7 @@ spec:
     mcpServers: {}
   environment:
     image:
-      ref: ghcr.io/vymalo/another-adam-rs/coder:sha-7598255@sha256:6e74b29282a19a80e8dc6b8284095a8838b30611cec6d9c6d39265728ed94675
+      ref: ghcr.io/vymalo/another-adam-rs/coder:sha-581aeed@sha256:5e851765331dd88c5529a96a51bf26c579915e5f35ac887bf17f8529e87f45ae
     resources: # a runner, not netcup
       requests:
         cpu: 100m
@@ -177,7 +181,7 @@ spec:
     mcpServers: {}
   environment:
     image:
-      ref: ghcr.io/vymalo/another-adam-rs/coder:sha-7598255@sha256:6e74b29282a19a80e8dc6b8284095a8838b30611cec6d9c6d39265728ed94675
+      ref: ghcr.io/vymalo/another-adam-rs/coder:sha-581aeed@sha256:5e851765331dd88c5529a96a51bf26c579915e5f35ac887bf17f8529e87f45ae
     resources: # the coder alone: no build runs in it with run pods on
       requests:
         cpu: 100m

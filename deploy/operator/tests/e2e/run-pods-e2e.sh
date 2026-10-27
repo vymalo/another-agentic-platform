@@ -1,10 +1,11 @@
 #!/bin/sh
 # shellcheck disable=SC2016  # the jq programs given to jqok are single-quoted on purpose: $name in them is jq's variable, not the shell's
-# The kind end-to-end of run pods (D15b, D15c): the operator, installed from its chart with `runPods.enabled`, runs the REAL adam-rs coder (at or after
-# #134, `ff10395`, the image with `adam-egress`) with `coder.runPods`; a task makes the coder run a command in a pod of its own, that pod sees only its own
-# run, the quota counts it and refuses one past the limit (the coder waits), the network of a run pod is deny by default and the egress proxy the operator
-# made is its one way out, the admission policy and the Roles do what they say under the real RBAC of a real API server, and a deleted service leaves
-# nothing, run pods and proxy included. An agent without run pods is as it was.
+# The kind end-to-end of run pods (D15b, D15c, D15d): the operator, installed from its chart with `runPods.enabled`, runs the REAL adam-rs coder (at or after
+# #136, `05cda7f`, the image with `adam-egress` and `adam-git-sandbox`) with `coder.runPods`; a task makes the coder run a command in a pod of its own, that
+# pod sees only its own run, the quota counts it and refuses one past the limit (the coder waits), the network of a run pod is deny by default and the egress
+# proxy the operator made is its one way out, the coder's own git runs in a sidecar of its pod that holds no token, no key and no Secret, the admission policy
+# and the Roles do what they say under the real RBAC of a real API server, and a deleted service leaves nothing, run pods and proxy included. An agent without
+# run pods is as it was.
 #
 #   sh deploy/operator/tests/e2e/run-pods-e2e.sh        (from the repository root, kubectl pointed at a kind cluster)
 #
@@ -24,6 +25,15 @@
 #      account with the template mounted; the coder says in its log that its commands run in a pod of their own; the account may make pods and `exec`
 #      in them and may not read a Secret; and `run-pods-admission.sh`, run in this cluster as the account: the pod of the template is admitted and
 #      each of 25 mutations is refused with the message of its rule;
+#  4b. the git sandbox (D15d), asked of the coder's pod the operator made, as adam-rs's kind-run-pods.sh asks it of the pod of its chart: the pod does not
+#      automount a token, shares no process namespace, and the `git-sandbox` sidecar (the coder's own image, a read-only root file system) mounts the work
+#      volume, its socket's directory and its own /tmp and nothing else: no token file, no key, nothing under /run/secrets, no mount of a Secret, a projected
+#      volume or the template, no variable from a Secret, none of the five secrets of the coder (the token, the App's key, the model's key, the A2A bearer, the
+#      database URL) in its environment, and no view of the coder's processes (its process 1 is its own `tini -- adam-git-sandbox`); the coder container has
+#      the token (the API server accepts it), the key and the other three, as the controls; a commit through the socket (`adam-git`) works and is seen from
+#      both containers; and a scratch repository whose own .git/config names a `filter.x.clean` and a `core.fsmonitor`, run through `adam-git`, leaves a marker
+#      that holds none of the secrets while plain git in the coder container, the control, reads all five (vendored: git-sandbox-vector.sh); and `e2e-plain`,
+#      which asks for no run pods, has no sandbox, no socket and no projected volume;
 #   5. run A (a scratch project) and run B (a scratch project, told to look at A's): each makes a run pod from the operator's template (the kubelet
 #      starts it: Running, Ready, the labels, the priority class, the resources, the image by digest, the init container, no Secret volume, no token),
 #      the command runs in it (its output is in the pod's /tmp and in the answer of the run: the same lines), the pod mounts the run's directory and
@@ -38,9 +48,11 @@
 #      `npm view` reach registry.npmjs.org, `example.com` is answered 403, the proxy's log has the decisions and no byte of what the requests carried, and
 #      no policy names an IPv6 range (kind's network plugin enforces policies; AAP_E2E_CNI_MAY_IGNORE_POLICIES=1 makes the refusals warnings);
 #   8. A is released: it completes, its pod goes with it, C gets the slot and its pod: it sees its own run, its own mirror (read-only: a write is
-#      refused) and its worktree, git works in it, and it sees neither A's, nor B's, nor the other mirror; then B and C complete and their pods go;
+#      refused) and its worktree, git works in it, and it sees neither A's, nor B's, nor the other mirror; then B and C complete and their pods go; the
+#      sandbox's log has the commands the coder itself ran for C (a `worktree`) and no secret (D15d);
 #   9. `e2e-plain` runs a task: its command runs in its own container and no run pod is made; then it asks for run pods (the objects appear, the
-#      proxy's among them, and its pod is replaced) and stops asking (the objects go, the proxy's included, and its set of objects is what it was at the start);
+#      proxy's among them, and its pod is replaced by one with the git sandbox, the token being a volume of the coder container alone) and stops asking (the
+#      objects go, the proxy's included, the sandbox with them, and its set of objects is what it was at the start);
 #  10. run D holds a pod and `e2e-coder` is deleted: the finalizer completes, the run pod goes, every object of the service goes (the proxy's too) and the
 #      claim stays (Retain), the chart's own objects stay;
 #  11. no secret value and no panic in any answer or log, the proxy's included (a log counts only if its `kubectl logs` succeeded, it is not empty and it
@@ -48,7 +60,9 @@
 #
 # What it does NOT prove: a real model (the model is a script that makes the same three calls for every task), GitHub (the App's id is made up and its
 # key is generated: the coder parses it at start and never uses it), a task that edits files and opens a pull request, OpenCode, git, cargo, pip and go
-# reading the proxy variables (curl and npm are tried; the others are documented to), IPv6 egress (kind is IPv4 only: the proof is the absence of a rule), a
+# reading the proxy variables (curl and npm are tried; the others are documented to), that every git command of the coder goes through the sandbox (the
+# log shows a `worktree` of C's, and adam-rs's own tests show the rest), a filter in the sandbox that cannot read the whole work volume (it can: README "The
+# git sandbox of the coder's pod"), a coder image without adam-git-sandbox (the pod would never be ready), IPv6 egress (kind is IPv4 only: the proof is the absence of a rule), a
 # Kubernetes older than the cluster's (kind's node image, v1.35.8), a CNI that has no NetworkPolicy support, Pod Security admission, a run pod on another
 # node than the coder's (kind has one), and a coder whose volume is shared by several workers. deploy/operator/tests/e2e/README.md says what each step shows.
 #
@@ -169,6 +183,7 @@ diagnostics() {
   kubectl -n "$ns" describe pod "$coder-0" 2>&1 | redact | tail -n 80 || true
   kubectl -n "$ns" logs "$coder-0" -c agent --tail=150 2>&1 | redact || true
   kubectl -n "$ns" logs "$coder-0" -c github-mcp --tail=20 2>&1 | redact || true
+  kubectl -n "$ns" logs "$coder-0" -c git-sandbox --tail=40 2>&1 | redact || true
   echo "::endgroup::"
   echo "::group::the coder without run pods"
   kubectl -n "$ns" logs "$plain-0" -c agent --tail=60 2>&1 | redact || true
@@ -593,6 +608,19 @@ for r in serviceaccount/$plain resourcequota/$plain-run-pods networkpolicy/$plai
   absent -n "$ns" get "$r" || die "$plain, which asks for no run pods, has $r"
 done
 printf '%s\n' "     $plain owns: $(tr '\n' ' ' < "$work/plain-owned.before")"
+# No run pods, no git sandbox: its pod has the one sidecar it had, no socket, no projected volume or scratch directory, and mounts no token.
+kubectl -n "$ns" get statefulset "$plain" -o json > "$work/plain-statefulset.json"
+no_sandbox() { # no_sandbox <statefulset json file> <what it is>: the pod template has none of the git sandbox
+  jqok "$1" "$2: has the git sandbox, its socket, the account's credentials or a scratch directory, with no run pods" '
+    .spec.template.spec as $pod
+    | ($pod.automountServiceAccountToken == false and ($pod.serviceAccountName // "") == ""
+      and ([($pod.initContainers // [])[] | .name] | index("git-sandbox")) == null
+      and ([$pod.containers[] | (.env // [])[] | select(.name | startswith("GIT_SANDBOX"))] | length) == 0
+      and ([($pod.volumes // [])[] | select(.projected != null or .emptyDir != null)] | length) == 0
+      and ([($pod.containers + ($pod.initContainers // []))[] | select(.securityContext.readOnlyRootFilesystem == true)] | length) == 0)'
+}
+no_sandbox "$work/plain-statefulset.json" "$plain"
+ok "$plain has no git sandbox, no socket, no scratch directory, no projected volume and no token: the pod of an agent that asks for no run pods"
 ok "$plain has no run-pod object; its objects, its pod ($plain_pod_uid, restarts $plain_pod_restarts) and its config digest ($plain_digest) are recorded"
 
 step "3. the upgrade: the same chart with run pods on"
@@ -668,8 +696,8 @@ jqok "$work/rolebinding.json" "the binding does not give $coder's account the Ro
   '.roleRef.name == $role and .roleRef.kind == "Role" and .subjects == [{"kind": "ServiceAccount", "name": $svc, "namespace": $ns}]'
 jqok "$work/params-cm.json" "the guard's parameters are not the agent's account, the class and the model key" --arg svc "$coder" --arg class "$class" --arg ns "$ns" \
   '.metadata.labels["agents.vymalo.com/run-pods-policy"] == "true" and .data.serviceAccount == ("system:serviceaccount:" + $ns + ":" + $svc) and .data.priorityClass == $class and .data.secretName == "e2e-secrets" and .data.secretKey == "MODEL_API_KEY" and .data.managedBy == "adam-coder"'
-jqok "$work/statefulset.json" "the coder's pod is not given the account, the template and the variables of run pods" --arg svc "$coder" '
-  .spec.template.spec.serviceAccountName == $svc and .spec.template.spec.automountServiceAccountToken == true
+jqok "$work/statefulset.json" "the coder's pod is not given the account, the template and the variables of run pods (and no automounted token: it is a volume of the coder container alone, 4b)" --arg svc "$coder" '
+  .spec.template.spec.serviceAccountName == $svc and .spec.template.spec.automountServiceAccountToken == false
   and ([.spec.template.spec.containers[] | select(.name == "agent") | .env[] | select(.name == "RUN_ENVIRONMENT") | .value] == ["kubernetes"])
   and ([.spec.template.spec.containers[] | select(.name == "agent") | .env[] | select(.name == "RUN_POD_TEMPLATE_FILE") | .value] == ["/etc/adam/run-pod/pod.yaml"])
   and ([.spec.template.spec.containers[] | select(.name == "agent") | .env[] | select(.name == "RUN_POD_INSTANCE") | .value] == [$svc])
@@ -745,6 +773,171 @@ sh "$here/../run-pods-admission.sh" "$ns" "$coder" > "$work/admission.out" 2>&1 
 [ "$(grep -c '^ok ' "$work/admission.out")" -ge 27 ] || die "run-pods-admission.sh ran fewer than 27 cases: $(redact < "$work/admission.out" | tail -n 8)"
 if grep -q '^FAIL' "$work/admission.out"; then die "run-pods-admission.sh printed a failure: $(grep '^FAIL' "$work/admission.out" | head -n 3)"; fi
 ok "run-pods-admission.sh, run here against the policy the chart installed and the parameters the operator made: $(tail -n 1 "$work/admission.out")"
+
+step "4b. the git sandbox of $coder: the coder's own git runs where no secret is readable (D15d)"
+in_coder() { kubectl -n "$ns" exec "$coder-0" -c agent -- "$@"; }
+in_sandbox() { kubectl -n "$ns" exec "$coder-0" -c git-sandbox -- "$@"; }
+sa_dir=/var/run/secrets/kubernetes.io/serviceaccount
+app_key=/var/run/secrets/github-app/private-key.pem
+coder_database="postgres://postgres:e2e-throwaway@e2e-postgres.$ns.svc:5432/coder"
+# What the operator wrote, in the StatefulSet: the sidecar first, the scratch directories, the credentials as a projected volume, no automounted token.
+jqok "$work/statefulset.json" "the coder's pod is not given the git sandbox, its directories and the account's credentials as the operator makes them" --arg image "$coder_image" '
+  .spec.template.spec as $pod
+  | ([$pod.initContainers[].name] == ["git-sandbox", "github-mcp"])
+  and ($pod.initContainers[0].restartPolicy == "Always") and ($pod.initContainers[0].image == $image)
+  and ($pod.initContainers[0].command == ["tini", "--", "adam-git-sandbox"])
+  and ([$pod.volumes[] | select(.name == "git-sandbox") | .emptyDir] == [{}])
+  and ([$pod.volumes[] | select(.name == "git-sandbox-tmp") | .emptyDir] == [{"medium": "Memory", "sizeLimit": "64Mi"}])
+  and ([$pod.volumes[] | select(.name == "kube-api-access") | .projected.sources | length] == [3])
+  and ([$pod.containers[0].env[] | select(.name == "GIT_SANDBOX_SOCKET") | .value] == ["/run/git-sandbox/git.sock"])'
+kubectl -n "$ns" get pod "$coder-0" -o json > "$work/coder-pod.json"
+jqok "$work/coder-pod.json" "the coder's pod shares a process namespace or the host's, or automounts a token, or the API server injected one" --arg svc "$coder" '
+  (.spec.shareProcessNamespace // false) == false and (.spec.hostPID // false) == false and (.spec.hostIPC // false) == false and (.spec.hostNetwork // false) == false
+  and .spec.automountServiceAccountToken == false and .spec.serviceAccountName == $svc
+  and ([.spec.volumes[].name | select(startswith("kube-api-access-"))] | length) == 0'
+jqok "$work/coder-pod.json" "the git-sandbox container is not a native sidecar of the coder's image with a read-only root file system, no variable from a Secret and no envFrom" --arg image "$coder_image" '
+  (.spec.initContainers[] | select(.name == "git-sandbox")) as $s
+  | $s.restartPolicy == "Always" and $s.image == $image
+  and (($s.envFrom // []) | length) == 0 and ([$s.env[] | select(.valueFrom != null)] | length) == 0
+  and $s.securityContext.readOnlyRootFilesystem == true and $s.securityContext.allowPrivilegeEscalation == false and $s.securityContext.capabilities.drop == ["ALL"]'
+# What each container may mount: the sandbox the work volume, its socket and its /tmp and nothing else; no container but the coder's any volume that carries a
+# credential (a Secret, a projected volume, a ConfigMap, the downward API); the coder container the credentials where an in-cluster client reads them.
+jqok "$work/coder-pod.json" "the git-sandbox container mounts something besides the work volume, its socket's directory and its /tmp, or those are not what they should be" '
+  (.spec.volumes | map({key: .name, value: (del(.name) | keys[0])}) | from_entries) as $kind
+  | (.spec.initContainers[] | select(.name == "git-sandbox")) as $s
+  | ([$s.volumeMounts[] | {n: .name, p: .mountPath, k: $kind[.name]}] | sort_by(.n))
+    == [{"n": "git-sandbox", "p": "/run/git-sandbox", "k": "emptyDir"}, {"n": "git-sandbox-tmp", "p": "/tmp", "k": "emptyDir"}, {"n": "work", "p": "/work", "k": "persistentVolumeClaim"}]'
+jqok "$work/coder-pod.json" "a container besides the coder's mounts a volume that carries a credential" '
+  (.spec.volumes | map({key: .name, value: (del(.name) | keys | map(select(. == "secret" or . == "projected" or . == "configMap" or . == "downwardAPI")) | length > 0)}) | from_entries) as $carrying
+  | [(.spec.containers + .spec.initContainers)[] | select(.name != "agent") | (.volumeMounts // [])[] | select($carrying[.name])] | length == 0'
+jqok "$work/coder-pod.json" "the coder container does not mount the account's credentials, the App's key, the work volume and the socket where it should" --arg sa "$sa_dir" '
+  (.spec.containers[] | select(.name == "agent")) as $a
+  | ([$a.volumeMounts[] | select(.name == "kube-api-access") | [.mountPath, (.readOnly // false)]] == [[$sa, true]])
+  and ([$a.volumeMounts[] | select(.name == "github-app") | .mountPath] == ["/var/run/secrets/github-app"])
+  and ([$a.volumeMounts[] | select(.name == "work") | .mountPath] == ["/work"]) and ([$a.volumeMounts[] | select(.name == "git-sandbox") | .mountPath] == ["/run/git-sandbox"])
+  and ([$a.env[] | select(.name == "GIT_SANDBOX_SOCKET") | .value] == [(.spec.initContainers[] | select(.name == "git-sandbox") | .env[] | select(.name == "GIT_SANDBOX_LISTEN") | .value)])'
+jqok "$work/coder-pod.json" "the git-sandbox container restarted, or is not ready" '
+  [.status.initContainerStatuses[] | select(.name == "git-sandbox") | (.ready == true and .restartCount == 0)] == [true]'
+ok "the coder's pod: no automounted token, no shared process namespace; the git-sandbox native sidecar (the coder's image, a read-only root file system, no envFrom, no variable from a Secret) mounts the work volume, its socket and its /tmp and nothing else; only the coder container mounts a volume that carries a credential; it is ready and has not restarted"
+
+# The patterns a leak is looked for by: one file for each secret, whose NAME is all a failure prints.
+in_coder cat "$sa_dir/token" > "$work/secret.token" || die "cannot read the token in the coder container"
+[ -s "$work/secret.token" ] || die "the token in the coder container is empty"
+sed -e '/^-----/d' "$work/app-key.pem" | grep -v '^$' > "$work/secret.appkey"
+printf '%s' "$model_sentinel" > "$work/secret.modelkey"
+printf '%s' "$a2a_token" > "$work/secret.bearer"
+printf '%s' "$coder_database" > "$work/secret.databaseurl"
+secrets5="token appkey modelkey bearer databaseurl"
+# finds_none <file> <what it is>: dies, naming the secret and not its value, when the file holds one of the five.
+finds_none() {
+  for secret in $secrets5; do
+    if grep -Fq -f "$work/secret.$secret" "$1"; then die "$2 holds the $secret (a secret of the coder container)"; fi
+  done
+}
+finds_all() { # finds_all <file> <what it is>: dies when the file lacks one of the five, so that "none of them" would prove nothing
+  for secret in $secrets5; do
+    grep -Fq -f "$work/secret.$secret" "$1" || die "$2 does not hold the $secret, so a check that it is absent from the sandbox's proves nothing"
+  done
+}
+
+# The controls: the coder container has the token (the API server accepts it), the key, and the other three.
+[ "$(in_coder cat "$sa_dir/namespace")" = "$ns" ] || die "the coder container's namespace file is not $ns"
+in_coder test -s "$sa_dir/ca.crt" || die "the coder container has no CA file beside its token"
+# shellcheck disable=SC2016  # the pod's shell expands these
+api_status=$(in_coder sh -c 'curl -sS -m 20 --cacert "$1/ca.crt" -H "Authorization: Bearer $(cat "$1/token")" -o /dev/null -w "http=%{http_code}" "https://kubernetes.default.svc/api/v1/namespaces/$2/pods"' sh "$sa_dir" "$ns") \
+  || die "the coder container could not reach the API server with its token"
+[ "$api_status" = "http=200" ] || die "the API server did not accept the coder container's projected token: $api_status"
+[ "$(in_coder cat "$app_key")" = "$(cat "$work/app-key.pem")" ] || die "the coder container does not hold the App's key"
+in_coder env > "$work/coder.env" || die "env failed in the coder container"
+for pair in "MODEL_API_KEY=$model_sentinel" "A2A_BEARER_TOKENS=$a2a_token" "DATABASE_URL=$coder_database"; do
+  grep -Fxq -- "$pair" "$work/coder.env" || die "the coder container lacks ${pair%%=*}"
+done
+ok "the controls: the coder container's projected token is accepted by the API server (it lists the pods of $ns), with its CA and namespace beside it; it holds the App's key, MODEL_API_KEY, A2A_BEARER_TOKENS and DATABASE_URL"
+
+# The sandbox holds nothing and sees nothing of the coder.
+# shellcheck disable=SC2016  # the pod's shell expands these
+in_sandbox sh -c 'test ! -e "$1/token" && test ! -e "$2" && test -z "$(find /run/secrets /var/run/secrets -type f 2>/dev/null)"' sh "$sa_dir" "$app_key" \
+  || die "the git-sandbox container has a token, a key or a file under /run/secrets"
+# shellcheck disable=SC2016  # the pod's shell expands these
+in_sandbox awk '$5 ~ /secrets|serviceaccount|github-app|run-pod|^\/cache|^\/etc\/adam/ { print $5 }' /proc/self/mountinfo > "$work/sandbox.mounts" || die "cannot read the sandbox's mounts"
+[ ! -s "$work/sandbox.mounts" ] || die "the sandbox has mounts of secrets, tokens or the pod template: $(tr '\n' ' ' < "$work/sandbox.mounts")"
+# shellcheck disable=SC2016  # the pod's shell expands these
+in_coder awk '$5 ~ /secrets|serviceaccount|github-app/ { print $5 }' /proc/self/mountinfo > "$work/coder.mounts" || die "cannot read the coder container's mounts"
+# (/var/run is a link to /run in the image, so the mount points are listed under /run/secrets.)
+grep -Eq '/secrets/kubernetes.io/serviceaccount$' "$work/coder.mounts" || die "the coder container has no token mount, so the sandbox's lacking one proves nothing"
+grep -Eq '/secrets/github-app$' "$work/coder.mounts" || die "the coder container has no key mount, so the sandbox's lacking one proves nothing"
+in_sandbox env > "$work/sandbox.env" || die "env failed in the sandbox container"
+for name in MODEL_API_KEY A2A_BEARER_TOKENS DATABASE_URL GITHUB_APP_ID GITHUB_APP_PRIVATE_KEY_PATH GITHUB_TOKEN; do
+  if grep -q "^$name=" "$work/sandbox.env"; then die "the sandbox's environment has $name"; fi
+done
+finds_none "$work/sandbox.env" "the sandbox's environment"
+ps_of() { # ps_of <container function>: pid and command line of every process the container can see, one per line
+  "$1" sh -c 'for p in /proc/[0-9]*; do printf "%s " "${p#/proc/}"; tr "\0" " " < "$p/cmdline"; echo; done'
+}
+ps_of in_sandbox > "$work/sandbox.ps" || die "cannot list the sandbox's processes"
+ps_of in_coder > "$work/coder.ps" || die "cannot list the coder container's processes"
+grep -Eq '^1 .*tini -- adam-git-sandbox' "$work/sandbox.ps" \
+  || die "the first process of the sandbox is not its own tini and server (a shared process namespace would show the pause process here): $(sed -n '1,3p' "$work/sandbox.ps")"
+if grep -q 'adam-coder' "$work/sandbox.ps"; then die "the sandbox sees the coder's processes: $(grep 'adam-coder' "$work/sandbox.ps" | head -n 2)"; fi
+grep -Eq '^1 .*tini -- adam-coder' "$work/coder.ps" || die "the coder container's first process is not its own tini and coder: $(sed -n '1,3p' "$work/coder.ps")"
+if grep -q 'adam-git-sandbox' "$work/coder.ps"; then die "the coder container sees the sandbox's processes"; fi
+ok "the sandbox has no token file, no key, nothing under /run/secrets, no mount of a secret, a projected volume or the template, none of MODEL_API_KEY, A2A_BEARER_TOKENS, DATABASE_URL or the App's settings, none of the five secrets in its environment, and its process 1 is its own 'tini -- adam-git-sandbox' with no process of the coder in sight (two process namespaces)"
+
+# A git command through the socket works, and its effects are seen from both containers.
+work_dir=/work/sandbox-check
+in_coder sh -c 'cd /work && rm -rf sandbox-check && mkdir sandbox-check && adam-git init -q -b main sandbox-check/repo' || die "adam-git init through the socket failed"
+in_coder sh -c 'cd /work/sandbox-check/repo && printf "hello\n" > a.txt && adam-git add a.txt \
+  && GIT_AUTHOR_NAME=ci GIT_AUTHOR_EMAIL=ci@example.test GIT_COMMITTER_NAME=ci GIT_COMMITTER_EMAIL=ci@example.test adam-git commit -q -m "through the sandbox"' \
+  || die "adam-git add and commit through the socket failed"
+head_through=$(in_coder sh -c 'cd /work/sandbox-check/repo && adam-git rev-parse HEAD') || die "adam-git rev-parse failed"
+head_in_sandbox=$(in_sandbox git -C "$work_dir/repo" rev-parse HEAD) || die "git in the sandbox container cannot read the repository"
+[ -n "$head_through" ] || die "adam-git rev-parse HEAD printed nothing"
+[ "$head_through" = "$head_in_sandbox" ] || die "the commit seen through the socket ($head_through) is not the one in the sandbox ($head_in_sandbox)"
+[ "$(in_coder sh -c 'cd /work/sandbox-check/repo && adam-git log -1 --format=%s')" = "through the sandbox" ] || die "adam-git log does not show the commit"
+[ "$(in_coder git -C "$work_dir/repo" cat-file -t "$head_through")" = commit ] || die "the coder container cannot read the commit the sandbox made"
+[ "$(in_sandbox stat -c %u "$work_dir/repo/.git/HEAD")" = "$(in_coder id -u)" ] || die "the sandbox writes as another user than the coder"
+[ "$(in_coder sh -c 'cd /tmp && adam-git status >/dev/null 2>&1; echo $?')" = 77 ] \
+  || die "adam-git outside the work volume's root was not refused with exit 77 (the sandbox's refusal of a directory outside its root)"
+ok "adam-git init, add, commit, rev-parse and log through the socket work from the coder container; the commit is the same in both containers, the files are the same user's, and a directory outside /work is refused (77)"
+
+# The vector: a scratch repository whose own configuration runs a program, added through the sandbox and, as the control, by plain git in the coder container.
+base=/work/sandbox-vector
+kubectl -n "$ns" exec -i "$coder-0" -c agent -- sh -c 'cat > /tmp/git-sandbox-vector.sh' < "$here/git-sandbox-vector.sh" || die "cannot copy the vector script into the coder container"
+in_coder rm -rf "$base"
+in_coder sh /tmp/git-sandbox-vector.sh "$base/via-sandbox" || die "cannot make the repository for the sandbox"
+in_coder sh /tmp/git-sandbox-vector.sh "$base/via-coder" || die "cannot make the repository for the control"
+# status, add and diff, as the coder's own commands are: the relay carries no hardening, and the configuration still runs its filter.
+# shellcheck disable=SC2016  # the pod's shell expands these
+in_coder sh -c 'cd /work && adam-git -C "$1/via-sandbox/repo" status --porcelain && adam-git -C "$1/via-sandbox/repo" add -A && adam-git -C "$1/via-sandbox/repo" diff --cached --stat' sh "$base" >/dev/null 2>&1 \
+  || die "git status, add and diff through the sandbox failed on the repository whose configuration names a program"
+# shellcheck disable=SC2016  # the pod's shell expands these
+in_coder sh -c 'cd "$1/via-coder/repo" && env -i PATH="$PATH" HOME=/tmp GIT_CONFIG_GLOBAL=/dev/null git add -A' sh "$base" >/dev/null 2>&1 \
+  || die "git add -A in the coder container failed on the control repository"
+in_coder cat "$base/via-sandbox/marker" > "$work/marker.sandbox" 2>/dev/null || die "the program the configuration names left no marker: it did not run through the sandbox at all, so nothing was tried"
+in_coder cat "$base/via-coder/marker" > "$work/marker.coder" 2>/dev/null || die "the control left no marker: plain git did not run the program"
+# The control: the same program, run by the coder container's own git, read everything.
+grep -Eq '^== ran as uid 10001, first process: .*tini -- adam-coder' "$work/marker.coder" || die "the control did not run in the coder container"
+finds_all "$work/marker.coder" "the control's marker (the program run by plain git in the coder container)"
+ok "the control: the program run by plain git in the coder container read the token, the App's key, MODEL_API_KEY, the A2A bearer and DATABASE_URL (the checks below can fail)"
+# The test: the program run through the sandbox.
+grep -Eq '^== ran as uid 10001, first process: .*tini -- adam-git-sandbox' "$work/marker.sandbox" || die "the program did not run in the sandbox container (its marker does not say so)"
+if grep -qF 'tini -- adam-coder' "$work/marker.sandbox"; then die "the program saw the coder container's first process"; fi
+finds_none "$work/marker.sandbox" "the marker of the program that ran in the sandbox"
+if grep -Eq 'MODEL_API_KEY|A2A_BEARER_TOKENS|DATABASE_URL|GITHUB_APP' "$work/marker.sandbox"; then
+  die "the marker of the program that ran in the sandbox names a variable of the coder's secrets"
+fi
+for path in serviceaccount/token github-app/private-key.pem; do
+  tried=$(grep -c "^== file .*$path\$" "$work/marker.sandbox" || true)
+  failed=$(grep -c "^cat: .*$path: No such file or directory\$" "$work/marker.sandbox" || true)
+  { [ "$tried" -ge 1 ] && [ "$tried" = "$failed" ]; } || die "the program tried to read $path $tried times and was refused $failed times"
+done
+ok "the program the configuration names (a filter.x.clean and a core.fsmonitor) ran in the sandbox container, as its tini's child, and its marker holds none of the five secrets: the token and the key are 'No such file or directory', no variable of the coder's secrets, no process of the coder container"
+kubectl -n "$ns" logs "$coder-0" -c git-sandbox --tail=-1 > "$work/sandbox-4b.log" 2>"$work/err" || die "cannot read the sandbox's log: $(cat "$work/err")"
+grep -Fq '"subcommand":"add"' "$work/sandbox-4b.log" || die "the sandbox's log has no line for the add it ran"
+grep -Fq '"subcommand":"commit"' "$work/sandbox-4b.log" || die "the sandbox's log has no line for the commit it ran"
+finds_none "$work/sandbox-4b.log" "the sandbox's log"
+ok "the sandbox's log has a line for the commands it ran (the subcommand and the directory, never an argument) and no secret"
+in_coder rm -rf /work/sandbox-check /work/sandbox-vector /tmp/git-sandbox-vector.sh || true
 
 step "5. runs A and B: a pod each, a command in it, and each sees only its own run"
 # The volume of the coder holds, beside the runs' directories, two repositories for run C below: a repository of its own (a bare repository with a
@@ -1048,6 +1241,13 @@ for r in a b c; do
   [ "$(turns "$r")" = "1 2 3" ] || die "the model was not asked the three turns of run $r, once each: $(jq -c --arg r "$r" '[.[] | select(.run == $r) | .step]' "$work/journal.json")"
 done
 ok "the model was asked the three turns of each of A, B and C, once each"
+# The sandbox's log, read while the coder is there: the commands the coder itself ran for C (its worktree) went through the sandbox, and no secret is in it.
+kubectl -n "$ns" logs "$coder-0" -c git-sandbox --tail=-1 > "$work/sandbox.log" 2> "$work/err" || die "cannot read the sandbox's log: $(cat "$work/err")"
+[ -s "$work/sandbox.log" ] || die "the sandbox's log is empty"
+grep -Fq '"message":"git command"' "$work/sandbox.log" || die "the sandbox's log holds no line of a git command: $(redact < "$work/sandbox.log" | head -c 600)"
+grep -Fq '"subcommand":"worktree"' "$work/sandbox.log" \
+  || die "the sandbox ran no 'git worktree' although run C worked in a worktree of a repository: the coder's own git did not go through the sandbox: $(redact < "$work/sandbox.log" | tail -n 8 | head -c 900)"
+ok "the git sandbox's log holds the commands the coder itself ran for run C (a worktree among them): the coder's local git goes through the sandbox, and the sandbox has no secret to log"
 
 step "9. $plain: its command runs in its own container, no run pod is made; then it asks for run pods, and stops asking"
 plain_unchanged "at the end of the run, minutes after the upgrade"
@@ -1069,6 +1269,12 @@ ok "$plain asks for run pods: the account, quota, network policy, binding, templ
 until_ok "$((pod_timeout * 2))" "$plain's pod to be replaced by one that runs with run pods" replaced_and_ready "$plain-0" "$plain_pod_uid"
 plain_pod_uid_on=$(jp "pod/$plain-0" '{.metadata.uid}')
 [ "$(jp "pod/$plain-0" '{.spec.containers[?(@.name=="agent")].env[?(@.name=="RUN_ENVIRONMENT")].value}')" = kubernetes ] || die "$plain's new pod does not run its commands in pods"
+kubectl -n "$ns" get pod "$plain-0" -o json > "$work/plain-pod-on.json"
+jqok "$work/plain-pod-on.json" "$plain's new pod has no git sandbox that is ready, or the token is automounted, or another container than the coder's mounts the account's credentials" --arg svc "$plain" '
+  .spec.automountServiceAccountToken == false and .spec.serviceAccountName == $svc
+  and ([.status.initContainerStatuses[] | select(.name == "git-sandbox") | .ready] == [true])
+  and ([(.spec.containers + .spec.initContainers)[] | select(any((.volumeMounts // [])[]; .name == "kube-api-access")) | .name] == ["agent"])'
+ok "$plain asks for run pods and its new pod has the git sandbox (ready) and the account's credentials in the coder container alone"
 kubectl -n "$ns" patch agentconfig "$plain" --type=json -p '[{"op":"remove","path":"/spec/harness/adam/coder/runPods"}]' >/dev/null
 until_ok 120 "the operator to remove the run-pod objects of $plain" is_baseline "$plain" "$work/plain-owned.before"
 # shellcheck disable=SC2046  # the six names are words
@@ -1078,6 +1284,8 @@ done
 until_ok 120 "the proxy's pods of $plain to be gone" no_egress_pods "$plain"
 until_ok "$((pod_timeout * 2))" "$plain's pod to be replaced by one that runs its commands in its own container" replaced_and_ready "$plain-0" "$plain_pod_uid_on"
 runs_here "$plain" || die "$plain's pod still runs its commands in pods"
+kubectl -n "$ns" get statefulset "$plain" -o json > "$work/plain-statefulset.after.json"
+no_sandbox "$work/plain-statefulset.after.json" "$plain, which stopped asking for run pods,"
 ok "$plain stops asking: every run-pod object goes, the egress proxy's pods and objects with them, its set of objects is what it was before the upgrade, and its new pod runs its commands in its own container again"
 
 step "10. run D holds a pod, and $coder is deleted: nothing is left of it, run pods included"
@@ -1127,11 +1335,11 @@ read_log deployment/e2e-model -- model.log 'run-pods-model: listening' "the mode
 # $coder is deleted: its log is the one read at its start (above), and the one a failure prints. The run pods' logs are gone with them.
 journal "$plain"
 cat "$work/journal.json" >> "$work/seen"
-for f in operator.log plain.log model.log coder-start.log; do cat "$work/$f" >> "$work/seen"; done
+for f in operator.log plain.log model.log coder-start.log sandbox.log; do cat "$work/$f" >> "$work/seen"; done
 if grep -F -f "$work/secrets" "$work/seen" >/dev/null 2>&1; then
   die "a secret value of this run (the model's key, the GitHub token, the A2A bearer or the App's key) is in an answer or a log"
 fi
 if grep -F 'panicked at' "$work/seen" >/dev/null 2>&1; then die "an answer or a log says a process panicked: $(grep -F 'panicked at' "$work/seen" | head -n 3 | head -c 600)"; fi
-ok "none of the four secrets of the run (the model's key, the GitHub token, the A2A bearer, the App's key) and no panic is in an answer, in the model's journal, or in the logs of the operator, of $plain, of the model, of the egress proxy and of $coder at its start"
+ok "none of the four secrets of the run (the model's key, the GitHub token, the A2A bearer, the App's key) and no panic is in an answer, in the model's journal, or in the logs of the operator, of $plain, of the model, of the egress proxy, of the git sandbox and of $coder at its start"
 
 printf '\nrun pods end-to-end passed\n'

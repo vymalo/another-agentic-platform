@@ -135,6 +135,123 @@ async fn the_account_and_the_guards_parameters_come_before_the_right_to_make_pod
     );
 }
 
+/// The pod a workload's object holds on the fake API server, and the names of the containers that mount a volume.
+fn pod_of(workload: &Value) -> &Value {
+    &workload["spec"]["template"]["spec"]
+}
+
+fn mounting(pod: &Value, volume: &str) -> Vec<String> {
+    pod["containers"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .chain(pod["initContainers"].as_array().into_iter().flatten())
+        .filter(|c| {
+            c["volumeMounts"]
+                .as_array()
+                .is_some_and(|m| m.iter().any(|m| m["name"] == volume))
+        })
+        .map(|c| c["name"].as_str().unwrap().to_owned())
+        .collect()
+}
+
+#[tokio::test]
+async fn the_workers_pod_on_the_server_has_the_git_sandbox_and_the_token_in_the_coder_container_alone()
+ {
+    // D15d: what the provider applies for a coder with run pods, as the API server holds it: the sidecar first, its directories, the
+    // account's credentials as a volume of the coder container alone, the pod's own token setting off.
+    let (fake, runtime) = setup();
+    let on = resolved_run_pods(|_, _| {});
+    runtime.ensure(&on.id, &on.runtime).await.unwrap();
+    let sts = fake.get(K::StatefulSet, NS, "coder").unwrap();
+    let pod = pod_of(&sts);
+    assert_eq!(pod["automountServiceAccountToken"], false);
+    assert_eq!(pod["serviceAccountName"], "coder");
+    let inits: Vec<&str> = pod["initContainers"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|c| c["name"].as_str().unwrap())
+        .collect();
+    assert_eq!(inits, ["git-sandbox", "github-mcp"]);
+    assert_eq!(pod["initContainers"][0]["restartPolicy"], "Always");
+    assert_eq!(
+        pod["initContainers"][0]["securityContext"]["readOnlyRootFilesystem"],
+        true
+    );
+    assert_eq!(mounting(pod, "kube-api-access"), ["agent"]);
+    assert_eq!(mounting(pod, "git-sandbox"), ["agent", "git-sandbox"]);
+    assert_eq!(mounting(pod, "git-sandbox-tmp"), ["git-sandbox"]);
+    let volume = |name: &str| {
+        pod["volumes"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|v| v["name"] == name)
+            .unwrap_or_else(|| panic!("no volume {name}"))
+    };
+    assert!(volume("kube-api-access").get("projected").is_some());
+    assert_eq!(volume("git-sandbox")["emptyDir"], json!({}));
+    assert_eq!(
+        volume("git-sandbox-tmp")["emptyDir"],
+        json!({"medium": "Memory", "sizeLimit": "64Mi"})
+    );
+    // The front of a split coder has none of it, and holds no token.
+    let split = resolved_run_pods(|s, c| {
+        common::set(s, "/spec/scaling/topology", json!("split"));
+        common::set(s, "/spec/scaling/workers", json!(2));
+        common::set(s, "/spec/scaling/front", json!({"replicas": 1}));
+        common::set(
+            c,
+            "/spec/harness/adam/coder/workspacePlacement",
+            json!("shared"),
+        );
+        common::set(
+            c,
+            "/spec/environment/volumes/0/source/persistent/perReplica",
+            json!(false),
+        );
+    });
+    let (fake, runtime) = setup();
+    runtime.ensure(&split.id, &split.runtime).await.unwrap();
+    let front = fake.get(K::Deployment, NS, "coder-front").unwrap();
+    assert_eq!(pod_of(&front)["automountServiceAccountToken"], false);
+    assert!(pod_of(&front).get("initContainers").is_none());
+    assert!(mounting(pod_of(&front), "kube-api-access").is_empty());
+}
+
+#[tokio::test]
+async fn a_coder_without_run_pods_holds_no_sandbox_no_scratch_and_no_token_on_the_server_and_loses_them_when_it_stops_asking()
+ {
+    let (fake, runtime) = setup();
+    let off = resolved("coder", |_, _| {});
+    runtime.ensure(&off.id, &off.runtime).await.unwrap();
+    let text = |fake: &Fake| {
+        let sts = fake.get(K::StatefulSet, NS, "coder").unwrap();
+        serde_json::to_string(pod_of(&sts)).unwrap()
+    };
+    let before = text(&fake);
+    for absent in [
+        "git-sandbox",
+        "GIT_SANDBOX",
+        "kube-api-access",
+        "emptyDir",
+        "readOnlyRootFilesystem",
+        "projected",
+    ] {
+        assert!(
+            !before.contains(absent),
+            "{absent} is in a coder without run pods"
+        );
+    }
+    // It asks, and has them; it stops asking, and the pod is what it was.
+    let on = resolved_run_pods(|_, _| {});
+    runtime.ensure(&on.id, &on.runtime).await.unwrap();
+    assert!(text(&fake).contains("git-sandbox"));
+    runtime.ensure(&off.id, &off.runtime).await.unwrap();
+    assert_eq!(text(&fake), before);
+}
+
 #[tokio::test]
 async fn the_policy_of_the_agent_and_the_policy_of_its_run_pods_do_not_delete_each_other() {
     // With no `allowFrom` the agent has no policy of its own: the run pods' is not "the policy we no longer want".

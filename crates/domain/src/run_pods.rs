@@ -10,8 +10,9 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use aap_api::SecretKeyRef;
 use aap_ports::{
-    EgressPort, EgressProxy, EgressRule, EnvVar, FileSet, Peer, Protocol, Resources, RunPodGuard,
-    RunPodLabels, RunPodNetwork, RunPodQuota, RunPods, Security, Selector,
+    Container, EgressPort, EgressProxy, EgressRule, EnvVar, FileSet, Mount, Peer, Probe,
+    ProbeAction, Probes, Protocol, Resources, RunPodGuard, RunPodLabels, RunPodNetwork,
+    RunPodQuota, RunPods, ScratchVolume, Security, Selector, VolumeSource, VolumeSpec,
 };
 use k8s_openapi::api::core::v1::{NodeAffinity, Toleration};
 use k8s_openapi::api::networking::v1::NetworkPolicyEgressRule;
@@ -73,6 +74,9 @@ pub struct RunPodSettings {
     pub network_policy: RunPodNetworkSettings,
     /// The one way out of a run pod to the internet (slice D15c; adam-rs ADR 0042).
     pub egress_proxy: EgressProxySettings,
+    /// The git sandbox of the coder's pod (slice D15d; adam-rs ADR 0041, open decision 6): the sidecar the coder's local git
+    /// runs in. There is no switch that turns it off while run pods are on.
+    pub git_sandbox: GitSandboxSettings,
 }
 
 /// One size class: the resources of the run container.
@@ -175,10 +179,10 @@ pub struct EgressProxySettings {
     pub resources: EgressResources,
 }
 
-/// The resources of the egress proxy's container.
+/// The resources of a container the operator makes beside the agent's: the egress proxy's, the git sandbox's.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
-pub struct EgressResources {
+pub struct ContainerResources {
     /// What the container is guaranteed.
     #[serde(default)]
     pub requests: BTreeMap<String, String>,
@@ -186,6 +190,32 @@ pub struct EgressResources {
     #[serde(default)]
     pub limits: BTreeMap<String, String>,
 }
+
+/// [`ContainerResources`], by the name D15c gave them.
+pub type EgressResources = ContainerResources;
+
+/// The git sandbox of a coder with run pods (slice D15d; adam-rs ADR 0041, open decision 6, `runPods.gitSandbox` of the
+/// coder chart): `adam-git-sandbox`, from **the agent's own coder image**, a native sidecar of the coder's pod in which the
+/// coder's local `git` runs. A repository's configuration can name a program (a `filter.x.clean`, a `core.fsmonitor`) that
+/// git runs, and some repositories are the run's own, so that program has to run where nothing secret is readable: the
+/// sidecar has no Secret volume, no variable from a Secret, no service-account token (the token is a volume of the coder
+/// container alone), a pid namespace of its own, a read-only root file system and a `/tmp` of its own. It mounts the work
+/// volume at the same path as the coder and runs as the same user. It is on with run pods and has no switch.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct GitSandboxSettings {
+    /// CPU and memory of the sidecar. The memory limit is required: a program that a filter starts is stopped by this limit
+    /// and not by the node's, and the sidecar's `/tmp` counts against it.
+    pub resources: ContainerResources,
+    /// The size of the sidecar's `/tmp`, in memory (`64Mi`): a program that fills it gets "no space left on device"; a
+    /// disk-backed volume would get the whole coder pod evicted.
+    pub tmp_size: String,
+    /// `GIT_SANDBOX_MAX_COMMANDS`: git commands run at once, 1 to 4096; the next waits.
+    pub max_commands: u32,
+}
+
+/// The most commands a sandbox may run at once (the server's own bound).
+pub const MAX_SANDBOX_COMMANDS: u32 = 4096;
 
 impl EgressProxySettings {
     /// The hosts the proxy allows, as its allow-list file says them: `allow`, then `extraAllow`, trimmed, lower case, once
@@ -312,10 +342,18 @@ impl RunPodSettings {
                 allow: vec!["stand-in.invalid".to_owned()],
                 extra_allow: Vec::new(),
                 extra_no_proxy: Vec::new(),
-                resources: EgressResources {
+                resources: ContainerResources {
                     requests: BTreeMap::new(),
                     limits: BTreeMap::new(),
                 },
+            },
+            git_sandbox: GitSandboxSettings {
+                resources: ContainerResources {
+                    requests: BTreeMap::new(),
+                    limits: BTreeMap::from([("memory".to_owned(), "1Gi".to_owned())]),
+                },
+                tmp_size: "64Mi".to_owned(),
+                max_commands: 64,
             },
         }
     }
@@ -519,6 +557,37 @@ impl RunPodSettings {
                 }
             }
         }
+        let sandbox = &self.git_sandbox;
+        for (kind, map) in [
+            ("requests", &sandbox.resources.requests),
+            ("limits", &sandbox.resources.limits),
+        ] {
+            for (resource, value) in map {
+                if !is_quantity(value) {
+                    bad(format!(
+                        "gitSandbox.resources.{kind}.{resource}: {value:?} is not a quantity"
+                    ));
+                }
+            }
+        }
+        if !sandbox.resources.limits.contains_key("memory") {
+            bad("gitSandbox.resources.limits.memory is required: a program that a repository's configuration makes git run in the sandbox must be stopped by the container's limit, not by the node's, and the sandbox's /tmp counts against it".into());
+        }
+        // Stricter than the coder chart on one point: a size of zero is refused. A tmpfs given `size=0` has no limit at all.
+        if !is_plain_quantity(&sandbox.tmp_size)
+            || quantity_nanos(&sandbox.tmp_size).is_none_or(|q| q == 0)
+        {
+            bad(format!(
+                "gitSandbox.tmpSize: {:?} is not a quantity above zero such as 64Mi",
+                sandbox.tmp_size
+            ));
+        }
+        if !(1..=MAX_SANDBOX_COMMANDS).contains(&sandbox.max_commands) {
+            bad(format!(
+                "gitSandbox.maxCommands: {} is not a whole number from 1 to {MAX_SANDBOX_COMMANDS} (GIT_SANDBOX_MAX_COMMANDS)",
+                sandbox.max_commands
+            ));
+        }
         if problems.is_empty() {
             Ok(())
         } else {
@@ -532,6 +601,29 @@ impl RunPodSettings {
             .as_ref()
             .filter(|v| v.as_object().is_none_or(|o| !o.is_empty()) && !v.is_null())
     }
+}
+
+/// A quantity as the coder chart's `_validate.tpl` takes the size of the sandbox's `/tmp`: digits, an optional fraction and
+/// an optional binary or decimal suffix (`64Mi`, `0.5Gi`); no exponent, no milli.
+fn is_plain_quantity(s: &str) -> bool {
+    let digits_end = s.find(|c: char| !c.is_ascii_digit()).unwrap_or(s.len());
+    let (whole, rest) = s.split_at(digits_end);
+    if whole.is_empty() {
+        return false;
+    }
+    let rest = match rest.strip_prefix('.') {
+        Some(fraction) => {
+            let end = fraction
+                .find(|c: char| !c.is_ascii_digit())
+                .unwrap_or(fraction.len());
+            if end == 0 {
+                return false;
+            }
+            &fraction[end..]
+        }
+        None => rest,
+    };
+    matches!(rest, "" | "Ki" | "Mi" | "Gi" | "Ti" | "k" | "M" | "G" | "T")
 }
 
 fn is_sha256(s: &str) -> bool {
@@ -756,6 +848,118 @@ impl ForService<'_> {
             } },
             "spec": Value::Object(spec),
         })
+    }
+
+    /// The volumes of the workers' pods that the git sandbox and the account's token are made of (the volume of the pod
+    /// template is `resolve`'s): the account's credentials, which only the coder container mounts; the socket's directory,
+    /// which the coder container and the sandbox share; and the sandbox's `/tmp`.
+    pub(crate) fn volumes(&self) -> Vec<VolumeSpec> {
+        vec![
+            VolumeSpec {
+                name: rp::ACCOUNT_VOLUME.to_owned(),
+                source: VolumeSource::AccountToken,
+            },
+            VolumeSpec {
+                name: rp::git_sandbox::SOCKET_VOLUME.to_owned(),
+                source: VolumeSource::Scratch(ScratchVolume {
+                    in_memory: false,
+                    size_limit: None,
+                }),
+            },
+            VolumeSpec {
+                name: rp::git_sandbox::TMP_VOLUME.to_owned(),
+                source: VolumeSource::Scratch(ScratchVolume {
+                    in_memory: true,
+                    size_limit: Some(self.settings.git_sandbox.tmp_size.clone()),
+                }),
+            },
+        ]
+    }
+
+    /// What the coder container mounts of them: the account's credentials, and the sandbox's socket.
+    pub(crate) fn agent_mounts(&self) -> Vec<Mount> {
+        vec![
+            Mount {
+                volume: rp::ACCOUNT_VOLUME.to_owned(),
+                path: rp::ACCOUNT_DIR.to_owned(),
+                read_only: true,
+            },
+            Mount {
+                volume: rp::git_sandbox::SOCKET_VOLUME.to_owned(),
+                path: rp::git_sandbox::SOCKET_DIR.to_owned(),
+                read_only: false,
+            },
+        ]
+    }
+
+    /// The variable that tells the coder where the sandbox listens.
+    pub(crate) fn agent_env(&self) -> EnvVar {
+        EnvVar::literal(rp::git_sandbox::SOCKET_ENV, rp::git_sandbox::SOCKET)
+    }
+
+    /// The git sandbox: a native sidecar from the coder's own image (adam-rs `statefulset.yaml`, `git-sandbox`). It mounts
+    /// the work volume at the same path as the coder (the commands carry paths), its socket's directory and a `/tmp` of its
+    /// own, and **nothing else**: no Secret, no variable from a Secret, no token. It runs as the pod's user, with a
+    /// read-only root file system. Its startup and liveness probes run a real command through the relay, because the server
+    /// has no health endpoint.
+    pub(crate) fn git_sandbox(&self, image: &str) -> Container {
+        use rp::git_sandbox as g;
+        let s = &self.settings.git_sandbox;
+        let probe = |period, timeout, failures| Probe {
+            action: ProbeAction::Exec {
+                command: g::probe_command(self.mount_path),
+            },
+            period_secs: period,
+            timeout_secs: Some(timeout),
+            failure_threshold: Some(failures),
+        };
+        Container {
+            name: g::CONTAINER.to_owned(),
+            image: image.to_owned(),
+            command: g::COMMAND.map(str::to_owned).to_vec(),
+            args: Vec::new(),
+            env: vec![
+                EnvVar::literal(g::LISTEN, g::SOCKET),
+                EnvVar::literal(g::ROOT, self.mount_path),
+                EnvVar::literal(g::MAX_COMMANDS, s.max_commands.to_string()),
+            ],
+            port: None,
+            mounts: vec![
+                Mount {
+                    volume: contract::WORK_VOLUME.to_owned(),
+                    path: self.mount_path.to_owned(),
+                    read_only: false,
+                },
+                Mount {
+                    volume: g::SOCKET_VOLUME.to_owned(),
+                    path: g::SOCKET_DIR.to_owned(),
+                    read_only: false,
+                },
+                Mount {
+                    volume: g::TMP_VOLUME.to_owned(),
+                    path: g::TMP_DIR.to_owned(),
+                    read_only: false,
+                },
+            ],
+            probes: Probes {
+                startup: Some(probe(
+                    g::STARTUP_PERIOD,
+                    g::STARTUP_TIMEOUT,
+                    g::STARTUP_FAILURES,
+                )),
+                liveness: Some(probe(
+                    g::LIVENESS_PERIOD,
+                    g::LIVENESS_TIMEOUT,
+                    g::LIVENESS_FAILURES,
+                )),
+                readiness: None,
+            },
+            resources: Resources {
+                requests: s.resources.requests.clone(),
+                limits: s.resources.limits.clone(),
+            },
+            read_only_root_filesystem: true,
+        }
     }
 
     /// The images a run pod may use, in the order the chart lists them: the run image, the coder's, the extras,

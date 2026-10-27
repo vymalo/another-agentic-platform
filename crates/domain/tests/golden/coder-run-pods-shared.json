@@ -689,7 +689,7 @@
     "namespace": "another-agentic-system",
     "release": "coder",
     "repository": "https://github.com/vymalo/another-adam-rs",
-    "revision": "75982554a5e90e274ec6f7cad19e742a7fae0495",
+    "revision": "581aeed75e56f903b2a9f59217ea9dcd449c8466",
     "values": "tools/adam-parity/cases/coder-run-pods-shared.yaml"
   },
   "workloads": {
@@ -811,6 +811,10 @@
             "name": "RUN_POD_WAIT_SECS"
           },
           {
+            "literal": "/run/git-sandbox/git.sock",
+            "name": "GIT_SANDBOX_SOCKET"
+          },
+          {
             "literal": "bar",
             "name": "FOO"
           },
@@ -858,6 +862,16 @@
             "name": "run-pod",
             "path": "/etc/adam/run-pod",
             "readOnly": true
+          },
+          {
+            "name": "kube-api-access",
+            "path": "/var/run/secrets/kubernetes.io/serviceaccount",
+            "readOnly": true
+          },
+          {
+            "name": "git-sandbox",
+            "path": "/run/git-sandbox",
+            "readOnly": false
           }
         ],
         "port": 8080,
@@ -891,7 +905,7 @@
           }
         }
       },
-      "automountServiceAccountToken": true,
+      "automountServiceAccountToken": false,
       "claimTemplates": [],
       "kind": "StatefulSet",
       "replicas": 2,
@@ -903,6 +917,80 @@
       },
       "serviceAccount": "coder",
       "sidecars": {
+        "git-sandbox": {
+          "args": [],
+          "command": [
+            "tini",
+            "--",
+            "adam-git-sandbox"
+          ],
+          "env": [
+            {
+              "literal": "/run/git-sandbox/git.sock",
+              "name": "GIT_SANDBOX_LISTEN"
+            },
+            {
+              "literal": "/work",
+              "name": "GIT_SANDBOX_ROOT"
+            },
+            {
+              "literal": "64",
+              "name": "GIT_SANDBOX_MAX_COMMANDS"
+            }
+          ],
+          "image": "ghcr.io/vymalo/another-adam-rs/coder:sha-0391809",
+          "mounts": [
+            {
+              "name": "work",
+              "path": "/work",
+              "readOnly": false
+            },
+            {
+              "name": "git-sandbox",
+              "path": "/run/git-sandbox",
+              "readOnly": false
+            },
+            {
+              "name": "git-sandbox-tmp",
+              "path": "/tmp",
+              "readOnly": false
+            }
+          ],
+          "port": null,
+          "probes": {
+            "liveness": {
+              "exec": [
+                "sh",
+                "-c",
+                "cd /work && exec env GIT_SANDBOX_SOCKET=/run/git-sandbox/git.sock adam-git --version"
+              ],
+              "failureThreshold": 6,
+              "period": 30,
+              "timeout": 10
+            },
+            "readiness": null,
+            "startup": {
+              "exec": [
+                "sh",
+                "-c",
+                "cd /work && exec env GIT_SANDBOX_SOCKET=/run/git-sandbox/git.sock adam-git --version"
+              ],
+              "failureThreshold": 30,
+              "period": 2,
+              "timeout": 5
+            }
+          },
+          "readOnlyRootFilesystem": true,
+          "resources": {
+            "limits": {
+              "memory": "1Gi"
+            },
+            "requests": {
+              "cpu": "100m",
+              "memory": "128Mi"
+            }
+          }
+        },
         "github-mcp": {
           "args": [
             "http",
@@ -965,6 +1053,55 @@
           "kind": "configMap",
           "mode": 292,
           "name": "run-pod"
+        },
+        {
+          "kind": "projected",
+          "mode": 420,
+          "name": "kube-api-access",
+          "sources": [
+            {
+              "serviceAccountToken": {
+                "expirationSeconds": 3607,
+                "path": "token"
+              }
+            },
+            {
+              "configMap": {
+                "items": [
+                  {
+                    "key": "ca.crt",
+                    "path": "ca.crt"
+                  }
+                ],
+                "name": "kube-root-ca.crt"
+              }
+            },
+            {
+              "downwardAPI": {
+                "items": [
+                  {
+                    "fieldRef": {
+                      "apiVersion": "v1",
+                      "fieldPath": "metadata.namespace"
+                    },
+                    "path": "namespace"
+                  }
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "kind": "emptyDir",
+          "medium": null,
+          "name": "git-sandbox",
+          "sizeLimit": null
+        },
+        {
+          "kind": "emptyDir",
+          "medium": "Memory",
+          "name": "git-sandbox-tmp",
+          "sizeLimit": "64Mi"
         }
       ]
     }
