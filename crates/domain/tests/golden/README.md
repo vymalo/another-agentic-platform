@@ -1,6 +1,6 @@
 # Parity goldens
 
-What the adam-rs chart [`deploy/coder`](https://github.com/vymalo/another-adam-rs/tree/75982554a5e90e274ec6f7cad19e742a7fae0495/deploy/coder)
+What the adam-rs chart [`deploy/coder`](https://github.com/vymalo/another-adam-rs/tree/581aeed75e56f903b2a9f59217ea9dcd449c8466/deploy/coder)
 renders, projected onto the shape `tests/parity.rs` reads, so that `aap-domain` can be held equal to it
 (§59a, "Testing", and the risk "adam's env contract is copied into `aap-domain`").
 
@@ -9,25 +9,28 @@ renders, projected onto the shape `tests/parity.rs` reads, so that `aap-domain` 
 | `coder.json` | the netcup coder: topology combined, a GitHub App by owners, a per-replica `work` volume, two extra MCP servers, the sidecar | [`tools/adam-parity/cases/coder.yaml`](../../../../tools/adam-parity/cases/coder.yaml), equivalent to `examples/coder.yaml` |
 | `coder-split.json` | the same, split: a control-plane front (2 replicas, with a budget) and 2 isolated workers | `cases/coder-split.yaml` |
 | `coder-affinity-token.json` | two affinity workers on one shared ReadWriteMany claim, a GitHub token, `createRepoOwners`, a GitHub Enterprise sidecar on port 9090, a literal gateway URL, `extraEnv`, no extra MCP servers | `cases/coder-affinity-token.yaml` |
-| `coder-run-pods.json` | the same coder with **run pods on** (D15a): the pod template, the quota, the priority class, the network policy, the account, the Role and its binding, and the admission policy with its binding, projected under `runPods`; the pods of the coder run as their own account, with its token. Since D15c also **the egress proxy**, under `runPods.egressProxy`: its Deployment, Service, ServiceAccount, allow-list, PodDisruptionBudget and NetworkPolicy, and the template carries the six proxy variables | `cases/coder-run-pods.yaml` |
+| `coder-run-pods.json` | the same coder with **run pods on** (D15a): the pod template, the quota, the priority class, the network policy, the account, the Role and its binding, and the admission policy with its binding, projected under `runPods`; the pods of the coder run as their own account, with its token. Since D15c also **the egress proxy**, under `runPods.egressProxy`: its Deployment, Service, ServiceAccount, allow-list, PodDisruptionBudget and NetworkPolicy, and the template carries the six proxy variables. Since D15d also **the git sandbox**: the `git-sandbox` native sidecar, the three volumes of the kinds the projection gained (`emptyDir` twice and the projected `kube-api-access`), `GIT_SANDBOX_SOCKET`, and `automountServiceAccountToken: false` | `cases/coder-run-pods.yaml` |
 | `coder-run-pods-shared.json` | `coder-affinity-token` with run pods on: two `affinity` workers on one shared ReadWriteMany volume (a run pod mounts the shared claim and may go anywhere), a GitHub token, a GitHub Enterprise sidecar host, a literal gateway URL, `extraEnv` | `cases/coder-run-pods-shared.yaml` (the egress proxy at **one replica**: no PodDisruptionBudget) |
 | `coder-run-pods-split.json` | `coder-split` with run pods on and the workers on one shared ReadWriteMany volume (the chart refuses run pods with several workers on per-replica volumes): the front makes no run pod and holds no token; the two workers do | `cases/coder-run-pods-split.yaml` |
-| `coder-run-pods-tuned.json` | run pods with every setting moved off its default (image, quota, times, node selector, tolerations, affinity, the network policy's ranges and an extra rule, a second class, and the egress proxy: three replicas, two ports, more hosts (one written in upper case and one already on the list), names that bypass it, other resources) | `cases/coder-run-pods-tuned.yaml` |
+| `coder-run-pods-tuned.json` | run pods with every setting moved off its default (image, quota, times, node selector, tolerations, affinity, the network policy's ranges and an extra rule, a second class, and the egress proxy: three replicas, two ports, more hosts (one written in upper case and one already on the list), names that bypass it, other resources, and, D15d, a git sandbox with other resources, a larger `/tmp` and fewer commands at once) | `cases/coder-run-pods-tuned.yaml` |
 | `chat-env.json` | `adam-agent` for `examples/chat.yaml`. **Written by hand, not rendered**: the chart renders `adam-coder` only. Derived from `bin/adam-agent/README.md` and `docker/coder/Dockerfile`; *verified 2026-10-05 by reading them, not by running the binary* | |
 
 Each rendered file records where it came from (`source`: repository, full revision, chart, values file,
-helm version). Revision: `75982554a5e90e274ec6f7cad19e742a7fae0495` (`7598255`, adam-rs `main` on 2026-10-27: run pods
-reach the internet only through the egress proxy, adam-rs [#134](https://github.com/vymalo/another-adam-rs/pull/134) and
-[#135](https://github.com/vymalo/another-adam-rs/pull/135), its ADR 0042; the commits after it only bump `deploy/` tags).
-The goldens were at `3f714d0` (the coder refuses to start with a GitHub App key file beside local commands unless it is
-accepted by name, [#131](https://github.com/vymalo/another-adam-rs/pull/131)) from slice D15a to slice D15c, and at `0391809`
-(the revision §59a cites) before. *Verified 2026-10-27*: the diff between the two sets of renders (`3f714d0` and `7598255`)
-of the three cases without run pods is the revision alone, **so the env contract of a coder with run pods off did not move**;
-the diff of the four cases with run pods is the revision, the six proxy variables of the template (`HTTPS_PROXY`,
-`https_proxy`, `HTTP_PROXY`, `http_proxy` after `CARGO_BUILD_JOBS`, then `NO_PROXY`, `no_proxy`, then `extraEnv`), the run pods'
-network policy (its second rule, the internet minus the private ranges, becomes the proxy's pods on 3128) and the new key
-`runPods.egressProxy`. (Earlier, *verified 2026-10-26*: the diff between `0391809` and `3f714d0` of the three first cases was the
-two keys the projection gained (`serviceAccount`, `automountServiceAccountToken` of each pod) and the revision.)
+helm version). Revision: `581aeed75e56f903b2a9f59217ea9dcd449c8466` (`581aeed`, adam-rs `main` on 2026-10-27: the coder's local git runs
+in a sidecar with no secret, adam-rs [#136](https://github.com/vymalo/another-adam-rs/pull/136) (the binaries) and
+[#137](https://github.com/vymalo/another-adam-rs/pull/137) (the chart), its ADR 0041, open decision 6; `deploy/coder` did not change after it, and
+the commits that follow only bump `deploy/` tags). The goldens were at `7598255` (run pods reach the internet only through the egress proxy,
+[#134](https://github.com/vymalo/another-adam-rs/pull/134) and [#135](https://github.com/vymalo/another-adam-rs/pull/135), its ADR 0042) in slice D15c, at
+`3f714d0` (the coder refuses to start with a GitHub App key file beside local commands unless it is accepted by name,
+[#131](https://github.com/vymalo/another-adam-rs/pull/131)) from slice D15a to slice D15c, and at `0391809` (the revision §59a cites) before.
+*Verified 2026-10-27*: the diff between the two sets of renders (`7598255` and `581aeed`) of the three cases without run pods is the revision
+alone, **so the env contract of a coder with run pods off did not move, and neither did the pod of one**; the diff of the four cases with run pods
+is the revision, `GIT_SANDBOX_SOCKET` (after `RUN_POD_WAIT_SECS`), two mounts of the coder container (`kube-api-access`, read-only, and
+`git-sandbox`), the `git-sandbox` sidecar, three volumes (the projected `kube-api-access`, the `emptyDir` `git-sandbox` and the in-memory, sized
+`git-sandbox-tmp`) and `automountServiceAccountToken` of the workers, which is `false` now (it was `true`: the token is a volume of the coder container
+alone). (Earlier, *verified 2026-10-27*: between `3f714d0` and `7598255` the three cases without run pods differed by the revision alone, and the four
+with them by the six proxy variables, the run pods' network policy and `runPods.egressProxy`; *verified 2026-10-26*: between `0391809` and `3f714d0` the
+three first cases differed by the two keys the projection gained (`serviceAccount`, `automountServiceAccountToken` of each pod) and the revision.)
 
 ## Regenerating them
 
@@ -98,6 +101,19 @@ And these are not compared, because they are structure or the chart's own busine
   image** (the proxy runs it). The operator chart's default allow-list is held equal to the coder chart's, host for host and in order. Not compared because the
   operator has no setting for them: the proxy's `nodeSelector`, `tolerations` and `affinity` (§60a, D15c, decision 8). `networkPolicy.enabled` of the coder chart
   is gone from both (adam-rs refuses `false`; the operator's settings file refuses the key).
+* **The git sandbox (D15d).** The `git-sandbox` sidecar, the volumes and the mounts are compared in `tests/parity.rs`, in all four run pod cases: the
+  sidecar's image (tag without the digest), command, variables, mounts, probes (the two `exec` probes), resources and `readOnlyRootFilesystem`; the
+  volumes (`emptyDir` with its medium and size, and the projected `kube-api-access` with the chart's sources, whole); the coder container's two mounts and
+  `GIT_SANDBOX_SOCKET`; the pod's `automountServiceAccountToken`, which is `false` in every case of the chart now, with and without run pods.
+  `aap-runtime-kubernetes` holds its **real render** equal to the same golden (`tests/run_pods_parity.rs`), so the three agree. What differs, on purpose:
+  (1) the chart repeats `seccompProfile: RuntimeDefault` on the sandbox container, which the pod already has; the operator sets it once, for the pod
+  (`extract.py` accepts that and raises for any other container security context it does not know); (2) the chart writes `/work` in the sandbox's
+  `GIT_SANDBOX_ROOT`, its mount and its probes; the operator writes **the path the config mounts the work volume at**, which is `/work` in all four cases and
+  anything else for an agent (`tests/parity.rs` shows a path with a space, quoted for the shell in the probe); (3) the sandbox's memory limit, size and
+  commands come from the operator chart's `runPods.gitSandbox`, with the coder chart's defaults and checks (a size of zero is refused here and not there: a tmpfs of
+  size 0 has no limit); (4) the sandbox is always on with run pods, in both charts (no switch); (5) the chart renders the sandbox with `imagePullPolicy` of the
+  release, the operator with none for either container (as for the coder's). `automountServiceAccountToken` was `true` for the workers of a run pods case and
+  is `false` now in the chart and in the operator.
 * **The coder container's resources with run pods on.** The coder chart replaces them with `runPods.coderResources` (a smaller container: the commands
   run elsewhere). The operator does not swap them: a config's `environment.resources` are the coder's, and **the four cases set the config's to the
   chart's `coderResources`** (`tests/parity.rs`, `run_pods_case`) so that the comparison is of the rest. A deployment that wants the smaller coder sets it in
