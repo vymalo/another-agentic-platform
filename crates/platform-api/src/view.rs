@@ -193,6 +193,9 @@ pub struct SharedDetail<F: Serialize> {
     pub deleting: bool,
     /// The agents that name it, in byte order: GitOps's agents count.
     pub used_by: Vec<String>,
+    /// How many agents name it, GitOps's included: what a person who may not read agents is told instead of their
+    /// names.
+    pub used_by_count: usize,
     /// What the operator observed (K2): who uses it as the operator counts them (at most 64 names and a count of the
     /// rest), whether it is valid and whether its agents are ready. Read from the object the answer already holds, as
     /// the status type says it, so a member that is not in the type is not passed on. `None` before the operator wrote
@@ -210,6 +213,22 @@ pub fn shared_status_of(stored: &Stored) -> Option<SharedStatus> {
         .status
         .as_ref()
         .and_then(|s| serde_json::from_value(s.clone()).ok())
+}
+
+/// The status with the names of agents taken out, for a person who may not read agents (`403` on the agents' routes; an
+/// error answer hides them too): `usedBy` is emptied, `usedByMore` goes with it (the count is `usedByCount`), and the
+/// message of a condition that lists agents is replaced by one that lists none. A reason and a count stay.
+pub fn without_agent_names(mut status: SharedStatus) -> SharedStatus {
+    status.used_by = Vec::new();
+    status.used_by_more = 0;
+    for condition in &mut status.conditions {
+        if condition.type_ == aap_api::condition_type::AGENTS_READY
+            && condition.reason == aap_api::reason::SOME_NOT_READY
+        {
+            condition.message = "some of the agents that name it are not ready".to_owned();
+        }
+    }
+    status
 }
 
 /// For every shared object of `kind`, the agents that name it.
