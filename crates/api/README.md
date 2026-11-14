@@ -28,10 +28,11 @@ let crds: Vec<CustomResourceDefinition> = aap_api::crds(); // AgentConfig, Agent
 |---|---|
 | `AgentService`, `AgentServiceSpec`, `AgentServiceStatus` | The service: `configRef`, `interfaces`, `scaling`, `suspend`, `store`, `access`, `registry`, `deletionPolicy`, and the status the controller writes |
 | `AgentConfig`, `AgentConfigSpec`, `AgentConfigStatus` | The config: `harness`, `model`, `tools`, `environment`, `security`, `extraEnv` |
-| `ModelEndpoint`, `ModelEndpointSpec` | An OpenAI-compatible endpoint set once (`title`, `baseUrl`, `apiKeySecretRef`, `models`), named by `AgentConfig.spec.model.endpointRef`. No status |
-| `ToolProvider`, `ToolProviderSpec`, `ProviderMcp` | One remote MCP server set once (`title`, `mcp: { url, headers, tools, optional }`), named by `AgentConfig.spec.tools.mcpServers.<n>.providerRef`. No status |
+| `ModelEndpoint`, `ModelEndpointSpec` | An OpenAI-compatible endpoint set once (`title`, `baseUrl`, `apiKeySecretRef`, `models`), named by `AgentConfig.spec.model.endpointRef`. Its status is a `SharedStatus` (K2) |
+| `ToolProvider`, `ToolProviderSpec`, `ProviderMcp` | One remote MCP server set once (`title`, `mcp: { url, headers, tools, optional }`), named by `AgentConfig.spec.tools.mcpServers.<n>.providerRef`. Its status is a `SharedStatus` (K2) |
+| `SharedStatus`, `MAX_USED_BY` | K2: the status of the two shared kinds, written by the operator and never by a person: `observedGeneration`, `usedBy` (the `AgentService`s of the namespace that run a config naming the object, sorted, **at most `MAX_USED_BY` = 64**, the bound being the operator's and not the schema's), `usedByMore` (how many are not listed; absent at zero) and the conditions `Accepted` (`Valid` / `Invalid`), `InUse` (`Referenced` / `Unreferenced`) and `AgentsReady` (`AllReady` / `SomeNotReady` / `NoAgents`, status `Unknown`). **It never holds a secret, a header value, a URL's credentials or a token** (§60a) |
 | `SecretKeyRef { name, key }` | **A secret is never a value (AD-024)**: a field that needs one names a Secret and a key. A test fails if a string field is named like a secret |
-| `condition_type`, `reason` | The condition types and reasons of §59a, "Status", as constants, so the controller and its tests do not spell them twice |
+| `condition_type`, `reason` | The condition types and reasons of §59a, "Status" (and K2's, §60a), as constants, so the controller and its tests do not spell them twice |
 | `crds()` | The four `CustomResourceDefinition`s, in a fixed order: `AgentConfig`, `AgentService`, `ModelEndpoint`, `ToolProvider` |
 | `GROUP`, `VERSION` | `agents.vymalo.com`, `v1alpha1` |
 | `permission::{AGENTS_READ, AGENTS_WRITE, MODELS_WRITE, TOOLPROVIDERS_WRITE, SECRETS_PICK, ALL, PREFIX}` | The permissions of the Platform API as compile-time constants (slice D4, AD-032): what a route asks of the roles claim of a token. See *Permissions* below |

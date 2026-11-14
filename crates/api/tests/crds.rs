@@ -68,16 +68,10 @@ fn every_kind_is_namespaced_v1alpha1_of_the_platform_group() {
         assert_eq!(v.name, VERSION);
         assert_eq!(v.name, "v1alpha1");
         assert!(v.served && v.storage);
-        // The two kinds of §59a have a status the controller writes; the two of §60a are
-        // configuration only (the Platform API computes "used by" itself).
+        // Every kind has a status the controller writes: the two of §59a, and (K2) the two of §60a, whose status says
+        // who uses them, whether they are valid and whether their agents are Ready.
         let has_status = v.subresources.as_ref().is_some_and(|s| s.status.is_some());
-        let configuration_only =
-            ["ModelEndpoint", "ToolProvider"].contains(&crd.spec.names.kind.as_str());
-        assert_eq!(
-            has_status, !configuration_only,
-            "status subresource of {}",
-            crd.spec.names.kind
-        );
+        assert!(has_status, "status subresource of {}", crd.spec.names.kind);
     }
     assert_eq!(AgentService::crd().spec.names.kind, "AgentService");
     assert_eq!(AgentConfig::crd().spec.names.kind, "AgentConfig");
