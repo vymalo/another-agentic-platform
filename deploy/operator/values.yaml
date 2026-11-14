@@ -242,6 +242,17 @@ networkPolicy:
     # Optional: only these addresses (`kubectl get endpoints kubernetes`). Empty: any address on those ports.
     cidrs: []
 
+# A Prometheus Operator `ServiceMonitor` (monitoring.coreos.com/v1) for the operator's /metrics (9090), through the Service
+# `<fullname>-metrics`. Off: nothing is rendered, and the CRD need not be installed. On, it needs `networkPolicy.metrics.allowFrom`
+# (the Prometheus pods) while the operator's NetworkPolicy is enabled, or the policy would drop the scrape: the chart refuses less.
+metrics:
+  serviceMonitor:
+    enabled: false
+    # Scrape interval, a duration (`30s`).
+    interval: 30s
+    # Labels the Prometheus selects ServiceMonitors by (`release: kube-prometheus-stack`).
+    labels: {}
+
 # Settings of `operator run` that have a default (bin/operator/README.md, "run: settings"); a key left out keeps the default.
 logLevel: info
 tuning: {}
@@ -395,6 +406,20 @@ api:
       memory: 64Mi
     limits:
       memory: 256Mi
+
+  # The API's /metrics (Prometheus text: `aap_api_requests_total{route,method,status}`, `aap_api_auth_failures_total{reason}`), on a port
+  # of its own that is never the API's. Nothing is exposed until a peer is named or a ServiceMonitor is on: then the chart writes `port`
+  # into the file (`metricsListen`), opens the container port, makes the Service `<fullname>-api-metrics` and opens the port in the
+  # NetworkPolicy to `allowFrom` and to nobody else. Off, the binary still listens on its default 9090 and nothing reaches it.
+  metrics:
+    port: 9090
+    # Who may scrape (NetworkPolicyPeers: namespaceSelector, podSelector, ipBlock), the Prometheus pods. Empty: nobody. REQUIRED for
+    # `serviceMonitor.enabled` while `networkPolicy` is enabled: the policy would drop the scrape, which the chart refuses.
+    allowFrom: []
+    serviceMonitor:
+      enabled: false
+      interval: 30s
+      labels: {}
 
   # Environment, volumes and mounts of the API's container beyond the chart's own, for an issuer behind a private CA or a proxy: `extraEnv`
   # is a list of EnvVar (`HTTPS_PROXY`, `NO_PROXY`, `SSL_CERT_FILE`), `extraVolumes` a list of Volume (a ConfigMap that holds a CA bundle) and

@@ -23,6 +23,9 @@ metadata:
   name: {{ include "aap.fullname" . }}-metrics
   labels:
     {{- include "aap.labels" . | nindent 4 }}
+    {{- if .Values.metrics.serviceMonitor.enabled }}
+    aap.vymalo.com/scrape: metrics
+    {{- end }}
 spec:
   type: ClusterIP
   selector:

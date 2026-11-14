@@ -3,6 +3,19 @@ Value checks that must stop a render, not surface as a broken rollout or a quiet
 Included from deployment.yaml, which every render has, so they always run.
 */}}
 {{- define "aap.validate" -}}
+{{- /* The operator's ServiceMonitor. */ -}}
+{{- if not (and (kindIs "map" .Values.metrics) (kindIs "map" .Values.metrics.serviceMonitor)) -}}
+{{- fail "metrics.serviceMonitor must be a map (the defaults of values.yaml are its keys; a null removes them)" -}}
+{{- end -}}
+{{- if .Values.metrics.serviceMonitor.enabled -}}
+{{- if and .Values.networkPolicy.enabled (not .Values.networkPolicy.metrics.allowFrom) -}}
+{{- fail "metrics.serviceMonitor.enabled needs networkPolicy.metrics.allowFrom: with none, the operator's NetworkPolicy drops the scrape (list the Prometheus pods or namespace, or set networkPolicy.enabled=false)" -}}
+{{- end -}}
+{{- include "aap.checkInterval" (dict "what" "metrics.serviceMonitor.interval" "value" .Values.metrics.serviceMonitor.interval) -}}
+{{- if not (kindIs "map" (default (dict) .Values.metrics.serviceMonitor.labels)) -}}
+{{- fail "metrics.serviceMonitor.labels must be a map of label names to values" -}}
+{{- end -}}
+{{- end -}}
 {{- /* One replica and no leader election in v0 (§59a): a second reconciler would only race the first. */ -}}
 {{- if or (hasKey .Values "replicaCount") (hasKey .Values "replicas") -}}
 {{- fail "the operator has no leader election in v0 and runs one replica: there is no replicaCount (§59a, \"The operator chart\")" -}}
@@ -376,7 +389,7 @@ for each tested shape (tests/api-shapes.sh) to find such a value before it is de
 {{- define "aap.api.validate" -}}
 {{- $api := .Values.api -}}
 {{- /* The blocks the templates read a field of: a null (or a text) in their place is a named refusal and not a nil pointer in a template. */ -}}
-{{- range $k := list "image" "serviceAccount" "ingress" "networkPolicy" -}}
+{{- range $k := list "image" "serviceAccount" "ingress" "networkPolicy" "metrics" -}}
 {{- if not (kindIs "map" (get $api $k)) -}}
 {{- fail (printf "api.%s must be a map (the defaults of values.yaml are its keys; a null removes them all)" $k) -}}
 {{- end -}}
@@ -407,6 +420,27 @@ for each tested shape (tests/api-shapes.sh) to find such a value before it is de
 {{- if eq (int $api.port) (int $api.healthPort) -}}
 {{- fail "api.port and api.healthPort must differ: the API and its health endpoints are two listeners" -}}
 {{- end -}}
+{{- /* The metrics port: a port of its own, and a ServiceMonitor only where the NetworkPolicy lets the scrape in. */ -}}
+{{- $m := $api.metrics -}}
+{{- if not (kindIs "map" $m.serviceMonitor) -}}
+{{- fail "api.metrics.serviceMonitor must be a map (the defaults of values.yaml are its keys; a null removes them)" -}}
+{{- end -}}
+{{- if not (include "aap.isPort" $m.port) -}}
+{{- fail (printf "api.metrics.port: %v is not a port number" $m.port) -}}
+{{- end -}}
+{{- if or (eq (int $m.port) (int $api.port)) (eq (int $m.port) (int $api.healthPort)) -}}
+{{- fail "api.metrics.port must differ from api.port and api.healthPort: /metrics is a listener of its own, never the API's" -}}
+{{- end -}}
+{{- include "aap.checkPeers" (dict "what" "api.metrics.allowFrom" "peers" (default (list) $m.allowFrom)) -}}
+{{- if $m.serviceMonitor.enabled -}}
+{{- if and $api.networkPolicy.enabled (not $m.allowFrom) -}}
+{{- fail "api.metrics.serviceMonitor.enabled needs api.metrics.allowFrom: with none, the API's NetworkPolicy drops the scrape (list the Prometheus pods or namespace, or set api.networkPolicy.enabled=false)" -}}
+{{- end -}}
+{{- include "aap.checkInterval" (dict "what" "api.metrics.serviceMonitor.interval" "value" $m.serviceMonitor.interval) -}}
+{{- if not (kindIs "map" (default (dict) $m.serviceMonitor.labels)) -}}
+{{- fail "api.metrics.serviceMonitor.labels must be a map of label names to values" -}}
+{{- end -}}
+{{- end -}}
 {{- if not (and (or (kindIs "float64" $api.preStopSleepSeconds) (kindIs "int" $api.preStopSleepSeconds) (kindIs "int64" $api.preStopSleepSeconds)) (ge (int $api.preStopSleepSeconds) 0)) -}}
 {{- fail (printf "api.preStopSleepSeconds must be a whole number, 0 or more (0: no preStop hook), got %v" $api.preStopSleepSeconds) -}}
 {{- end -}}
@@ -430,7 +464,7 @@ for each tested shape (tests/api-shapes.sh) to find such a value before it is de
 {{- $c := $api.config -}}
 {{- range $k, $v := $c -}}
 {{- if not (has $k (list "oidc" "cors" "defaults")) -}}
-{{- fail (printf "api.config.%s is not a setting of the chart: oidc, cors or defaults (listen and healthListen are api.port and api.healthPort)" $k) -}}
+{{- fail (printf "api.config.%s is not a setting of the chart: oidc, cors or defaults (listen, healthListen and metricsListen are api.port, api.healthPort and api.metrics.port)" $k) -}}
 {{- end -}}
 {{- end -}}
 {{- $oidc := default (dict) $c.oidc -}}
@@ -594,6 +628,13 @@ for each tested shape (tests/api-shapes.sh) to find such a value before it is de
 {{- end -}}
 {{- end -}}
 
+{{/* A Prometheus duration of one unit (`30s`, `1m`): .what is the value's name, .value its content. */}}
+{{- define "aap.checkInterval" -}}
+{{- if not (regexMatch "^[1-9][0-9]*(ms|s|m|h)$" (toString .value)) -}}
+{{- fail (printf "%s must be a duration such as 30s or 1m, got %q" .what (toString .value)) -}}
+{{- end -}}
+{{- end -}}
+
 {{/* Each peer of a NetworkPolicy list names who: .what (the value's name) and .peers. */}}
 {{- define "aap.checkPeers" -}}
 {{- $what := .what -}}
@@ -643,8 +684,8 @@ extraVolumes, and a name is used once.
 {{- if not (regexMatch `^[-._a-zA-Z][-._a-zA-Z0-9]*$` $e.name) -}}
 {{- fail (printf "api.extraEnv: %q is not an environment variable name" $e.name) -}}
 {{- end -}}
-{{- if has $e.name (list "API_CONFIG_FILE" "RUST_LOG" "API_LISTEN_ADDR" "HEALTH_ADDR") -}}
-{{- fail (printf "api.extraEnv: %s is the chart's: API_CONFIG_FILE is the mounted file, RUST_LOG is api.logLevel, and API_LISTEN_ADDR and HEALTH_ADDR would win over api.port and api.healthPort in the file, which the probes and the Service follow" $e.name) -}}
+{{- if has $e.name (list "API_CONFIG_FILE" "RUST_LOG" "API_LISTEN_ADDR" "HEALTH_ADDR" "METRICS_ADDR") -}}
+{{- fail (printf "api.extraEnv: %s is the chart's: API_CONFIG_FILE is the mounted file, RUST_LOG is api.logLevel, and API_LISTEN_ADDR, HEALTH_ADDR and METRICS_ADDR would win over api.port, api.healthPort and api.metrics.port in the file, which the probes and the Service follow" $e.name) -}}
 {{- end -}}
 {{- if hasKey $seen $e.name -}}
 {{- fail (printf "api.extraEnv: %s is set twice" $e.name) -}}

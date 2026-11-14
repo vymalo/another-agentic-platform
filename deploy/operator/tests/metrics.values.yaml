@@ -1,0 +1,47 @@
+# K4: the operator's and the Platform API's ServiceMonitors on, with every metrics value set (a port other than the default, an
+# interval, labels, the Prometheus pods as the peer that may scrape). Rendered by kubeconform against the vendored ServiceMonitor
+# schema (operator-image.yml) and read by `api --check` as the shape `metrics` (api-shapes.sh): the file carries `metricsListen`.
+watchNamespace: agents
+networkPolicy:
+  metrics:
+    allowFrom:
+      - namespaceSelector:
+          matchLabels:
+            kubernetes.io/metadata.name: monitoring
+        podSelector:
+          matchLabels:
+            app.kubernetes.io/name: prometheus
+metrics:
+  serviceMonitor:
+    enabled: true
+    interval: 1m
+    labels:
+      release: kube-prometheus-stack
+api:
+  enabled: true
+  config:
+    oidc:
+      issuer: https://keycloak.example.com/realms/another-agentic
+      audiences: [another-agentic]
+      rolesClaim: agentic_roles
+    defaults:
+      allowedImageRegistries: [ghcr.io]
+  networkPolicy:
+    from:
+      - podSelector:
+          matchLabels:
+            app.kubernetes.io/name: traefik
+  metrics:
+    port: 9191
+    allowFrom:
+      - namespaceSelector:
+          matchLabels:
+            kubernetes.io/metadata.name: monitoring
+        podSelector:
+          matchLabels:
+            app.kubernetes.io/name: prometheus
+    serviceMonitor:
+      enabled: true
+      interval: 15s
+      labels:
+        release: kube-prometheus-stack

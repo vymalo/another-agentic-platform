@@ -17,3 +17,23 @@ spec:
       targetPort: http
       protocol: TCP
 {{- end }}
+{{- if and .Values.api.enabled (include "aap.api.metricsExposed" .) }}
+---
+# /metrics of the API on a Service of its own: the API's port never carries it, and the NetworkPolicy opens it to api.metrics.allowFrom only.
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ include "aap.api.fullname" . }}-metrics
+  labels:
+    {{- include "aap.api.labels" . | nindent 4 }}
+    aap.vymalo.com/scrape: metrics
+spec:
+  type: ClusterIP
+  selector:
+    {{- include "aap.api.selectorLabels" . | nindent 4 }}
+  ports:
+    - name: metrics
+      port: {{ .Values.api.metrics.port }}
+      targetPort: metrics
+      protocol: TCP
+{{- end }}

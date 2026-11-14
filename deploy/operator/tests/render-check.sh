@@ -730,15 +730,16 @@ check "the secretref shape renders (a Secret per agent, no policy, no Ingress)" 
 api_shapes_are_written() {
   d=$(mktemp -d) || return 1
   sh "$here/api-shapes.sh" "$d" > /dev/null 2>&1 \
-    && [ "$(find "$d" -type f | wc -l)" -eq 5 ] && [ -s "$d/golden.yaml" ] && [ -s "$d/secretref.yaml" ] && [ -s "$d/minimal.yaml" ] && [ -s "$d/runpods.yaml" ] \
+    && [ "$(find "$d" -type f | wc -l)" -eq 6 ] && [ -s "$d/golden.yaml" ] && [ -s "$d/secretref.yaml" ] && [ -s "$d/minimal.yaml" ] && [ -s "$d/runpods.yaml" ] && [ -s "$d/metrics.yaml" ] \
     && grep -q '^  - standard$' "$d/runpods.yaml" && ! grep -q 'runPodSizeClasses' "$d/golden.yaml" \
     && grep -q '^listen: 0.0.0.0:8443$' "$d/full.yaml" && grep -q '^healthListen: 0.0.0.0:9091$' "$d/full.yaml" \
-    && grep -q '^listen: 0.0.0.0:8080$' "$d/minimal.yaml"
+    && grep -q '^listen: 0.0.0.0:8080$' "$d/minimal.yaml" \
+    && grep -q "^metricsListen: 0.0.0.0:9191$" "$d/metrics.yaml" && ! grep -q metricsListen "$d/golden.yaml"
   r=$?
   rm -rf "$d"
   return "$r"
 }
-check "api: api-shapes.sh writes the file of five shapes (golden, secretref, minimal, full, runpods), the full one with the ports it sets, only the last with size classes" api_shapes_are_written
+check "api: api-shapes.sh writes the file of six shapes (golden, secretref, minimal, full, runpods, metrics), the full one with the ports it sets, run pods alone with size classes, metrics alone with metricsListen" api_shapes_are_written
 check "api: the shape that sets every value (tests/api-full.values.yaml) renders" renders_ok -f "$here/api-full.values.yaml"
 
 # ---- The values of the kind end-to-end of the Platform API (D7b2) ------------------------------------------------------------
@@ -1201,6 +1202,96 @@ rp_sandbox_step() {
     && grep -qF 'for f in operator.log plain.log model.log coder-start.log sandbox.log' "$script"
 }
 check "run pods e2e: the script has the sandbox step (4b): the pod's shape, the controls, the sandbox's emptiness, a commit through the socket, the vector with its control, the coder's own worktree in the sandbox's log, and the plain coder without any of it" rp_sandbox_step
+
+# ---- ServiceMonitors and the API's metrics (K4): off by default and then not a trace; on, exactly these objects --------------------
+prom='[{"namespaceSelector":{"matchLabels":{"kubernetes.io/metadata.name":"monitoring"}},"podSelector":{"matchLabels":{"app.kubernetes.io/name":"prometheus"}}}]'
+sm_off() { render "$@"; lacks '^kind: ServiceMonitor$' && lacks 'monitoring\.coreos\.com' && lacks 'aap\.vymalo\.com/scrape' && lacks 'metricsListen'; }
+check "K4 off (defaults): no ServiceMonitor, no scrape label, no metricsListen" sm_off
+check "K4 off (netcup): no ServiceMonitor, no scrape label, no metricsListen" sm_off -f "$chart/examples/netcup.values.yaml"
+check "K4 off (api on, tests/api.values.yaml): no ServiceMonitor, no metrics Service, no metrics port, no metricsListen" \
+  sm_off -f "$here/api.values.yaml"
+render -f "$here/api.values.yaml"
+check "K4 off (api on): the API's Service is the one it was, with no metrics Service beside it" \
+  lacks 'aap-operator-api-metrics' && dlacks Service aap-operator-api 'name: metrics'
+
+# The operator's ServiceMonitor.
+operator_sm() {
+  render --set metrics.serviceMonitor.enabled=true --set-json "networkPolicy.metrics.allowFrom=$prom" \
+    --set metrics.serviceMonitor.interval=1m --set metrics.serviceMonitor.labels.release=prom || return 1
+  dhas ServiceMonitor aap-operator 'apiVersion: monitoring.coreos.com/v1' 'release: prom' 'interval: 1m' 'port: metrics' 'path: /metrics' \
+    'aap.vymalo.com/scrape: metrics' 'app.kubernetes.io/name: aap-operator' "- $ns" || return 1
+  dcount ServiceMonitor aap-operator '^    - port: ' 1 || return 1
+  # The Service it selects: the metrics Service (and not the registry's), with that label and a port of that name.
+  dhas Service aap-operator-metrics 'aap.vymalo.com/scrape: metrics' 'name: metrics' 'port: 9090' || return 1
+  render --set metrics.serviceMonitor.enabled=true --set-json "networkPolicy.metrics.allowFrom=$prom" || return 1
+  [ "$(grep -c '^ *aap.vymalo.com/scrape: metrics' "$out")" -eq 2 ]
+}
+check "the operator's ServiceMonitor selects the metrics Service by the label it alone carries, on its port metrics, with the interval and labels" operator_sm
+operator_sm_policy() {
+  render --set metrics.serviceMonitor.enabled=true --set-json "networkPolicy.metrics.allowFrom=$prom" || return 1
+  dhas NetworkPolicy aap-operator 'monitoring' 'port: 9090'
+}
+check "the operator's NetworkPolicy lets the Prometheus pods in on 9090" operator_sm_policy
+check "the operator's ServiceMonitor with no networkPolicy.metrics.allowFrom is refused, by name (the policy would drop the scrape)" \
+  refused 'metrics.serviceMonitor.enabled needs networkPolicy.metrics.allowFrom' --set metrics.serviceMonitor.enabled=true
+check "the operator's ServiceMonitor with the NetworkPolicy off needs no peer" renders_ok --set metrics.serviceMonitor.enabled=true --set networkPolicy.enabled=false
+check "an interval that is not a duration is refused" refused 'metrics.serviceMonitor.interval must be a duration' \
+  --set metrics.serviceMonitor.enabled=true --set networkPolicy.enabled=false --set metrics.serviceMonitor.interval=often
+check "metrics must be a map" refused 'metrics.serviceMonitor must be a map' --set metrics=null
+
+# The API's metrics: the port is exposed only for who is named, or for a ServiceMonitor.
+api_metrics_peers() {
+  render -f "$here/api.values.yaml" --set-json "api.metrics.allowFrom=$prom" || return 1
+  dhas Service aap-operator-api-metrics 'aap.vymalo.com/scrape: metrics' 'name: metrics' 'port: 9090' 'targetPort: metrics' || return 1
+  dhas Deployment aap-operator-api 'name: metrics' 'containerPort: 9090' || return 1
+  dhas ConfigMap aap-operator-api 'metricsListen: 0.0.0.0:9090' || return 1
+  lacks '^kind: ServiceMonitor$' || return 1
+  # Two ingress rules: the edge on the API port, and the named peers on 9090 and on nothing else.
+  [ "$(doc NetworkPolicy aap-operator-api | awk '/^  ingress:$/ { i = 1; next } /^  egress:$/ { i = 0 } i && /^    - from:/ { n++ } END { print n }')" -eq 2 ] || return 1
+  dhas NetworkPolicy aap-operator-api 'monitoring' 'port: 9090' 'port: 8080'
+}
+check "api.metrics.allowFrom exposes the port: a Service, a container port, the file's metricsListen and a policy rule for those peers alone" api_metrics_peers
+api_metrics_port() {
+  render -f "$here/api.values.yaml" --set-json "api.metrics.allowFrom=$prom" --set api.metrics.port=9191 || return 1
+  dhas Service aap-operator-api-metrics 'port: 9191' && dhas ConfigMap aap-operator-api 'metricsListen: 0.0.0.0:9191' \
+    && dhas Deployment aap-operator-api 'containerPort: 9191' && dhas NetworkPolicy aap-operator-api 'port: 9191'
+}
+check "api.metrics.port is the Service's, the container's, the file's and the policy's" api_metrics_port
+api_sm() {
+  render -f "$here/api.values.yaml" --set api.metrics.serviceMonitor.enabled=true --set-json "api.metrics.allowFrom=$prom" \
+    --set api.metrics.serviceMonitor.interval=15s --set api.metrics.serviceMonitor.labels.release=prom || return 1
+  dhas ServiceMonitor aap-operator-api 'apiVersion: monitoring.coreos.com/v1' 'release: prom' 'interval: 15s' 'port: metrics' 'path: /metrics' \
+    'aap.vymalo.com/scrape: metrics' 'app.kubernetes.io/component: api' "- $ns" || return 1
+  dcount ServiceMonitor aap-operator-api '^    - port: ' 1 || return 1
+  # What it selects is the metrics Service and not the API's own: the label is on that one alone.
+  dlacks Service aap-operator-api 'aap.vymalo.com/scrape' || return 1
+  dhas Service aap-operator-api-metrics 'aap.vymalo.com/scrape: metrics'
+}
+check "the API's ServiceMonitor selects its metrics Service (and not the API's own) on the port metrics, with the interval and labels" api_sm
+api_sm_no_np() {
+  render -f "$here/api.values.yaml" --set api.metrics.serviceMonitor.enabled=true --set-json "api.metrics.allowFrom=$prom" || return 1
+  dhas NetworkPolicy aap-operator-api 'port: 9090'
+}
+check "the API's ServiceMonitor, with peers named, renders the policy rule too" api_sm_no_np
+check "the API's ServiceMonitor with no api.metrics.allowFrom is refused, by name (the policy would drop the scrape)" \
+  refused_api 'api.metrics.serviceMonitor.enabled needs api.metrics.allowFrom' --set api.metrics.serviceMonitor.enabled=true
+check "the API's ServiceMonitor with the API's NetworkPolicy off needs no peer" \
+  renders_ok -f "$here/api.values.yaml" --set api.metrics.serviceMonitor.enabled=true --set api.networkPolicy.enabled=false
+check "the API's metrics port may not be the API's port" refused_api 'api.metrics.port must differ' --set api.metrics.port=8080
+check "the API's metrics port may not be the health port" refused_api 'api.metrics.port must differ' --set api.metrics.port=8081
+check "the API's metrics port must be a port" refused_api 'api.metrics.port: 70000 is not a port number' --set api.metrics.port=70000
+check "a peer of api.metrics.allowFrom must say who" refused_api 'api.metrics.allowFrom: a peer needs' --set-json 'api.metrics.allowFrom=[{"x":1}]'
+check "an API interval that is not a duration is refused" refused_api 'api.metrics.serviceMonitor.interval must be a duration' \
+  --set api.metrics.serviceMonitor.enabled=true --set api.networkPolicy.enabled=false --set api.metrics.serviceMonitor.interval=soon
+check "METRICS_ADDR is the chart's, as the other two addresses are" refused_api 'api.extraEnv: METRICS_ADDR is the chart' \
+  --set-json 'api.extraEnv=[{"name":"METRICS_ADDR","value":"0.0.0.0:1"}]'
+check "api off: an API ServiceMonitor is neither rendered nor checked" sm_off --set api.metrics.serviceMonitor.enabled=true
+metrics_values() {
+  render -f "$here/metrics.values.yaml" || return 1
+  dhas ServiceMonitor aap-operator 'port: metrics' 'interval: 1m' && dhas ServiceMonitor aap-operator-api 'interval: 15s' \
+    && dhas ConfigMap aap-operator-api 'metricsListen: 0.0.0.0:9191' && [ -s "$here/schemas/monitoring.coreos.com/servicemonitor_v1.json" ]
+}
+check "tests/metrics.values.yaml (both ServiceMonitors, every metrics value set, the schema vendored for kubeconform) renders what CI validates" metrics_values
 
 # ---- The CRDs chart: one source ------------------------------------------------------------------------------------------
 check "deploy/operator-crds/files is a copy of deploy/crds (cp deploy/crds/agents.vymalo.com.yaml deploy/operator-crds/files/)" \
