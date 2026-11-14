@@ -163,8 +163,8 @@ async fn serve_both(
     let (stop_api, api_stopped) = watch::channel(false);
     let (stop_health, health_stopped) = watch::channel(false);
     let (stop_metrics, metrics_stopped) = watch::channel(false);
-    let mut api = tokio::spawn(serve::serve(api, router, signalled(api_stopped)));
-    let mut health = tokio::spawn(serve::serve(
+    let api = tokio::spawn(serve::serve(api, router, signalled(api_stopped)));
+    let health = tokio::spawn(serve::serve(
         health,
         serve::health(Health {
             draining: draining.clone(),
@@ -174,32 +174,66 @@ async fn serve_both(
     ));
 
     let (metrics_listener, counters) = metrics;
-    let mut metrics_server = tokio::spawn(serve::serve(
+    let metrics_server = tokio::spawn(serve::serve(
         metrics_listener,
         serve::metrics(counters),
         signalled(metrics_stopped),
     ));
 
+    supervise(
+        Running {
+            draining,
+            api,
+            health,
+            metrics: metrics_server,
+            stop_api,
+            stop_health,
+            stop_metrics,
+        },
+        stop,
+    )
+    .await
+}
+
+type Server = tokio::task::JoinHandle<Result<()>>;
+
+/// The three servers as they run, and what stops each.
+struct Running {
+    draining: Arc<AtomicBool>,
+    api: Server,
+    health: Server,
+    metrics: Server,
+    stop_api: watch::Sender<bool>,
+    stop_health: watch::Sender<bool>,
+    stop_metrics: watch::Sender<bool>,
+}
+
+/// Wait for the stop or for a server to end, then drain. **A handle that has completed is never polled again** (a second poll
+/// of a `JoinHandle` panics): the one that ended is reported, the others are awaited only if they still run.
+async fn supervise(mut s: Running, stop: impl Future<Output = ()>) -> Result<()> {
     // The servers fail fast (a port in use is a deployment mistake); a stop is asked for by the signal.
     let outcome = tokio::select! {
         () = stop => {
             tracing::info!("shutting down");
             Ok(())
         }
-        r = &mut api => Err(ended("the API server", r)),
-        r = &mut health => Err(ended("the health server", r)),
-        r = &mut metrics_server => Err(ended("the metrics server", r)),
+        r = &mut s.api => Err(ended("the API server", r)),
+        r = &mut s.health => Err(ended("the health server", r)),
+        r = &mut s.metrics => Err(ended("the metrics server", r)),
     };
-    draining.store(true, Ordering::Release);
-    let _ = stop_api.send(true);
-    if !api.is_finished() && tokio::time::timeout(DRAIN, &mut api).await.is_err() {
+    s.draining.store(true, Ordering::Release);
+    let _ = s.stop_api.send(true);
+    if !s.api.is_finished() && tokio::time::timeout(DRAIN, &mut s.api).await.is_err() {
         tracing::warn!("requests were still in flight after {DRAIN:?}; stopping anyway");
-        api.abort();
+        s.api.abort();
     }
-    let _ = stop_health.send(true);
-    let _ = stop_metrics.send(true);
-    let _ = tokio::time::timeout(Duration::from_secs(2), &mut health).await;
-    let _ = tokio::time::timeout(Duration::from_secs(2), &mut metrics_server).await;
+    let _ = s.stop_health.send(true);
+    let _ = s.stop_metrics.send(true);
+    for server in [&mut s.health, &mut s.metrics] {
+        if !server.is_finished() {
+            let _ = tokio::time::timeout(Duration::from_secs(2), server).await;
+        }
+    }
     outcome
 }
 
@@ -426,6 +460,44 @@ mod tests {
             format!("{failed:#}").contains("the health server failed: boom"),
             "{failed:#}"
         );
+    }
+
+    fn running(api: Server, health: Server, metrics: Server) -> Running {
+        Running {
+            draining: Arc::new(AtomicBool::new(false)),
+            api,
+            health,
+            metrics,
+            stop_api: watch::channel(false).0,
+            stop_health: watch::channel(false).0,
+            stop_metrics: watch::channel(false).0,
+        }
+    }
+
+    /// A server that has already ended when the others are drained is not polled again: the error is the clean one, never a
+    /// panic of a `JoinHandle` polled after completion. Each of the three, first.
+    #[tokio::test(start_paused = true)]
+    async fn the_server_that_ended_first_is_reported_and_never_polled_twice() {
+        let pending = || tokio::spawn(std::future::pending::<Result<()>>());
+        let gone = || tokio::spawn(async { Ok(()) });
+        for (what, s) in [
+            ("the metrics server", running(pending(), pending(), gone())),
+            ("the health server", running(pending(), gone(), pending())),
+            ("the API server", running(gone(), pending(), pending())),
+        ] {
+            let error = tokio::time::timeout(
+                Duration::from_secs(30),
+                supervise(s, std::future::pending()),
+            )
+            .await
+            .expect("it returned")
+            .unwrap_err();
+            let text = format!("{error:#}");
+            assert!(
+                text.contains(what) && text.contains("without being asked"),
+                "{text}"
+            );
+        }
     }
 
     #[derive(Debug)]

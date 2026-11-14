@@ -8,6 +8,7 @@ use std::sync::Arc;
 
 use aap_platform_api::{ApiMetrics, ApiState, metric, router};
 use aap_ports::memory::{MemoryAuthenticator, MemoryObjects};
+use aap_ports::{AuthError, Authenticator, InvalidToken, Principal};
 use axum::body::Body;
 use axum::http::{Method, Request};
 use common::*;
@@ -197,6 +198,93 @@ async fn the_text_is_prometheus_format_with_help_and_type() {
     );
     assert!(
         text.contains("aap_api_requests_total{route=\"/v1/me\",method=\"GET\",status=\"200\"} 1"),
+        "{text}"
+    );
+}
+
+#[tokio::test]
+async fn refusals_are_counted() {
+    let (api, metrics, _) = api();
+    let reader = api.token("reader", &["platform:models.write"]);
+    api.get("/v1/info").send().await; // no token
+    api.get("/v1/info").token("not-a-token").send().await; // a token nobody knows
+    let lacking = api.get("/v1/info").token(&reader).send().await; // a token without the permission
+    assert_eq!(lacking.code(), 403);
+
+    let series = |status| {
+        metrics.get(
+            metric::REQUESTS,
+            &[("route", "/v1/info"), ("method", "GET"), ("status", status)],
+        )
+    };
+    assert_eq!(series("401"), 2);
+    assert_eq!(series("403"), 1);
+    assert_eq!(series("200"), 0);
+}
+
+/// An authenticator that answers with the error its token names.
+struct Scripted;
+
+const SOURCE_SENTINEL: &str = "source-sentinel-keys-at-https-issuer-7f3a";
+
+impl Authenticator for Scripted {
+    async fn authenticate(&self, token: Option<&str>) -> Result<Principal, AuthError> {
+        match token {
+            None | Some("") => Err(AuthError::Missing),
+            Some("unavailable") => Err(AuthError::Unavailable(SOURCE_SENTINEL.into())),
+            Some(name) => InvalidToken::ALL
+                .iter()
+                .find(|r| format!("{r:?}") == name)
+                .map_or_else(
+                    || panic!("no reason named {name}"),
+                    |r| Err(AuthError::Invalid(*r)),
+                ),
+        }
+    }
+}
+
+#[tokio::test]
+async fn every_auth_reason_has_its_word() {
+    let metrics = Arc::new(ApiMetrics::new());
+    let objects = MemoryObjects::in_namespace(NS);
+    let state = ApiState::new(objects.clone(), Scripted, defaults())
+        .unwrap()
+        .with_metrics(metrics.clone());
+    let api = Api::from_router(router(state), objects);
+
+    api.get("/v1/me").send().await;
+    for reason in InvalidToken::ALL {
+        api.get("/v1/me").token(&format!("{reason:?}")).send().await;
+    }
+    let down = api.get("/v1/me").token("unavailable").send().await;
+    assert_eq!(down.code(), 503);
+
+    let words = [
+        "missing",
+        "malformed",
+        "bad_signature",
+        "unknown_key",
+        "expired",
+        "wrong_issuer",
+        "wrong_audience",
+        "missing_claim",
+        "unavailable",
+    ];
+    for word in words {
+        assert_eq!(
+            metrics.get(metric::AUTH_FAILURES, &[("reason", word)]),
+            1,
+            "{word}: {}",
+            metrics.render()
+        );
+    }
+    let text = metrics.render();
+    assert!(!text.contains(SOURCE_SENTINEL), "{text}");
+    assert_eq!(
+        text.lines()
+            .filter(|l| l.starts_with("aap_api_auth_failures_total{"))
+            .count(),
+        words.len(),
         "{text}"
     );
 }

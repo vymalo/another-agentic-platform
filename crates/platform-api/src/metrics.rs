@@ -2,7 +2,7 @@
 //! library, a counter is a number and the exposition format is lines of text.
 //!
 //! **Every label value is chosen by this crate from a closed set**, never taken from a request: the route is a template of
-//! [`ROUTES`](crate::ROUTES) or `unmatched`, the method one of five words or `other`, the status a number, the reason one of
+//! [`ROUTES`](crate::ROUTES) or `unmatched`, the method one of six words or `other`, the status a number, the reason one of
 //! nine words. So the series are bounded, and no token, body, path, name or user id can reach them.
 
 use std::collections::BTreeMap;

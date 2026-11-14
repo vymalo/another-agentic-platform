@@ -16,7 +16,7 @@ use serde::Deserialize;
 
 const DEFAULT_LISTEN: &str = "0.0.0.0:8080";
 const DEFAULT_HEALTH: &str = "0.0.0.0:8081";
-const DEFAULT_METRICS: &str = "0.0.0.0:9090";
+const DEFAULT_METRICS: &str = "127.0.0.1:9090";
 
 fn listen() -> SocketAddr {
     DEFAULT_LISTEN
@@ -33,7 +33,7 @@ fn health() -> SocketAddr {
 fn metrics() -> SocketAddr {
     DEFAULT_METRICS
         .parse()
-        .unwrap_or_else(|_| SocketAddr::from(([0, 0, 0, 0], 9090)))
+        .unwrap_or_else(|_| SocketAddr::from(([127, 0, 0, 1], 9090)))
 }
 
 /// The file, as it is read. [`validate`](Self::validate) says whether the API can work with it.
@@ -132,6 +132,11 @@ impl ApiConfig {
             );
         }
         check_image_registries(self.defaults.allowed_image_registries.as_deref())?;
+        check_ports(&[
+            ("listen", self.listen),
+            ("healthListen", self.health_listen),
+            ("metricsListen", self.metrics_listen),
+        ])?;
         Ok(Settings {
             listen: self.listen,
             health_listen: self.health_listen,
@@ -141,6 +146,21 @@ impl ApiConfig {
             defaults: self.defaults,
         })
     }
+}
+
+/// No two listeners on one port: the second `bind` would fail at start ("Address already in use"), so `--check` says it first.
+fn check_ports(listeners: &[(&str, SocketAddr)]) -> Result<()> {
+    for (i, (a, addr_a)) in listeners.iter().enumerate() {
+        for (b, addr_b) in &listeners[i + 1..] {
+            if addr_a.port() == addr_b.port() {
+                bail!(
+                    "{a} and {b} are both on port {}: the API, the health endpoints and /metrics are three listeners and each needs a port of its own",
+                    addr_a.port()
+                );
+            }
+        }
+    }
+    Ok(())
 }
 
 /// The members of `raw` (what the file says) that `typed` (the types it was read into, written back) does not have:
@@ -232,11 +252,33 @@ mod tests {
     }
 
     #[test]
+    fn two_listeners_on_one_port_are_refused_naming_both_keys() {
+        let base: serde_yaml::Value = serde_yaml::from_str(EXAMPLE).unwrap();
+        for (a, b) in [
+            ("listen", "healthListen"),
+            ("listen", "metricsListen"),
+            ("healthListen", "metricsListen"),
+        ] {
+            let mut v = base.clone();
+            v[a] = "0.0.0.0:9090".into();
+            v[b] = "127.0.0.1:9090".into();
+            let message = refused(&v);
+            assert!(message.contains(a) && message.contains(b), "{message}");
+            assert!(message.contains("9090"), "{message}");
+        }
+        // The default of /metrics is a loopback address, and it clashes with a health port set to 9090 all the same.
+        let mut v = base;
+        v.as_mapping_mut().unwrap().remove("metricsListen");
+        v["healthListen"] = "0.0.0.0:9090".into();
+        assert!(refused(&v).contains("metricsListen"));
+    }
+
+    #[test]
     fn the_example_is_a_configuration_the_api_can_work_with() {
         let settings = ApiConfig::parse(EXAMPLE).unwrap().validate().unwrap();
         assert_eq!(settings.listen, "0.0.0.0:8080".parse().unwrap());
         assert_eq!(settings.health_listen, "0.0.0.0:8081".parse().unwrap());
-        assert_eq!(settings.metrics_listen, "0.0.0.0:9090".parse().unwrap());
+        assert_eq!(settings.metrics_listen, "127.0.0.1:9090".parse().unwrap());
         assert_eq!(settings.defaults.namespace, "another-agentic-system");
         assert_eq!(
             settings.cors.as_slice(),
