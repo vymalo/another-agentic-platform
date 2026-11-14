@@ -148,7 +148,7 @@ adam-rs runs the coder's local `git` in a native sidecar of the coder's pod (its
 
 `VolumeSource::ExistingClaim { name }` is rendered as a `persistentVolumeClaim` volume of that name, with no `readOnly`: the user's claim, mounted as
 it is (the shared package cache at `/cache`, adam-rs ADR 0040). No object of ours is made for it, it has no owner reference and no
-label, and neither `Retain` nor `Delete` touches it. A claim that does not exist keeps the pod `Pending`. Test: `the_package_cache_is_the_users_claim_mounted_as_it_is`.
+label, and neither `Retain` nor `Delete` touches it. A claim that does not exist keeps the pod `Pending`. With run pods the policy's parameters (`<svc>-run-pods-policy`) gain `claims` (the work claim and the cache's, one per line; `claim` stays), which the operator chart's policy reads, and the template mounts it. Tests: `the_package_cache_is_the_users_claim_mounted_as_it_is`, `with_a_package_cache_the_policy_admits_its_claim_as_the_coder_charts_does` (against the chart's golden).
 
 ## Status
 

@@ -143,6 +143,18 @@ fn check_names_the_broken_invariant_of_run_pods() {
             Box::new(|s| s.run_pods.as_mut().unwrap().guard.claim.clear()),
         ),
         (
+            "the cache claim",
+            Box::new(|s| s.run_pods.as_mut().unwrap().guard.cache_claim = Some(" ".into())),
+        ),
+        (
+            "names no claim",
+            Box::new(|s| {
+                s.workloads[0].volumes[6].source = VolumeSource::ExistingClaim {
+                    name: String::new(),
+                }
+            }),
+        ),
+        (
             "the name of the model key's Secret is empty",
             Box::new(|s| s.run_pods.as_mut().unwrap().guard.secret = SecretRef::new("", "k")),
         ),

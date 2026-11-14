@@ -708,6 +708,8 @@ pub(crate) struct ForService<'a> {
     pub mount_path: &'a str,
     /// The claim behind it.
     pub claim: String,
+    /// The package cache's claim (K1): mounted at `/cache` by every run pod, and the second claim the guard admits.
+    pub cache_claim: Option<&'a str>,
     /// The claim is `ReadWriteOnce` and the coder's: the pod must go where the coder is.
     pub beside_the_coder: bool,
     pub model_key: &'a SecretKeyRef,
@@ -814,6 +816,24 @@ impl ForService<'_> {
                 "volumeMounts": [{ "name": rp::TOOLS_VOLUME, "mountPath": rp::TOOLS_COPY_DIR }],
             }]),
         );
+        // The one mount of the workspace volume, whole: the coder replaces it by the run's own mounts. Then the
+        // package cache, shared with the coder pod and the other run pods (K1, adam-rs ADR 0040), and the tools.
+        let mut mounts =
+            vec![json!({ "name": contract::WORK_VOLUME, "mountPath": self.mount_path })];
+        let mut volumes = vec![
+            json!({ "name": contract::WORK_VOLUME, "persistentVolumeClaim": { "claimName": &self.claim } }),
+        ];
+        if let Some(cache) = self.cache_claim {
+            mounts
+                .push(json!({ "name": contract::CACHE_VOLUME, "mountPath": contract::CACHE_DIR }));
+            volumes.push(
+                json!({ "name": contract::CACHE_VOLUME, "persistentVolumeClaim": { "claimName": cache } }),
+            );
+        }
+        mounts.push(
+            json!({ "name": rp::TOOLS_VOLUME, "mountPath": rp::TOOLS_DIR, "readOnly": true }),
+        );
+        volumes.push(json!({ "name": rp::TOOLS_VOLUME, "emptyDir": {} }));
         spec.insert(
             "containers".into(),
             json!([{
@@ -825,20 +845,10 @@ impl ForService<'_> {
                 "securityContext": container_security,
                 "env": env,
                 "resources": { "requests": self.class.requests, "limits": self.class.limits },
-                "volumeMounts": [
-                    // The one mount of the workspace volume, whole: the coder replaces it by the run's own mounts.
-                    { "name": contract::WORK_VOLUME, "mountPath": self.mount_path },
-                    { "name": rp::TOOLS_VOLUME, "mountPath": rp::TOOLS_DIR, "readOnly": true },
-                ],
+                "volumeMounts": mounts,
             }]),
         );
-        spec.insert(
-            "volumes".into(),
-            json!([
-                { "name": contract::WORK_VOLUME, "persistentVolumeClaim": { "claimName": &self.claim } },
-                { "name": rp::TOOLS_VOLUME, "emptyDir": {} },
-            ]),
-        );
+        spec.insert("volumes".into(), Value::Array(volumes));
         json!({
             "apiVersion": "v1",
             "kind": "Pod",
@@ -1073,6 +1083,7 @@ impl ForService<'_> {
             guard: RunPodGuard {
                 images: self.allowed_images(),
                 claim: self.claim.clone(),
+                cache_claim: self.cache_claim.map(str::to_owned),
                 secret: aap_ports::SecretRef::new(&self.model_key.name, &self.model_key.key),
             },
         }

@@ -395,6 +395,11 @@ impl<'a> Cx<'a> {
             security: self.security(),
             mount_path: &work.mount_path,
             claim,
+            cache_claim: spec
+                .environment
+                .cache
+                .as_ref()
+                .map(|c| c.existing_claim.as_str()),
             beside_the_coder: per_replica,
             model_key,
         })

@@ -560,11 +560,55 @@ fn run_pods_case(case: &str, change: Change) -> aap_domain::ResolvedAgent {
 /// A change a case makes to the example (the service, then the config) before it is resolved.
 type Change = fn(&mut Value, &mut Value);
 
-const RUN_POD_CASES: [(&str, Change); 4] = [
+/// `cases/coder-cache.yaml`, and the cache of `coder-run-pods-cache.yaml`: the user's claim at `/cache`.
+fn cache(_service: &mut Value, config: &mut Value) {
+    set(
+        config,
+        "/spec/environment/cache",
+        json!({ "existingClaim": "package-cache" }),
+    );
+}
+
+/// `cases/coder-tiers.yaml`: the model's three optional variables and the access tier cap.
+fn tiers(_service: &mut Value, config: &mut Value) {
+    set(
+        config,
+        "/spec/model/extraBody",
+        json!({ "reasoning_effort": "medium", "chat_template_kwargs": { "thinking": true } }),
+    );
+    set(
+        config,
+        "/spec/model/echoReasoning",
+        json!("reasoning_content"),
+    );
+    set(config, "/spec/model/contextWindow", json!(128_000));
+    set(
+        config,
+        "/spec/harness/adam/coder/maxAccessTier",
+        json!("edits"),
+    );
+}
+
+#[test]
+fn a_coder_with_a_package_cache_renders_what_the_chart_renders() {
+    let r = must_resolve("coder", cache);
+    let mut applied = Applied::default();
+    parity("coder-cache", &project(&r.runtime, "coder"), &mut applied);
+}
+
+#[test]
+fn a_coder_with_the_models_optional_variables_and_a_tier_cap_renders_what_the_chart_renders() {
+    let r = must_resolve("coder", tiers);
+    let mut applied = Applied::default();
+    parity("coder-tiers", &project(&r.runtime, "coder"), &mut applied);
+}
+
+const RUN_POD_CASES: [(&str, Change); 5] = [
     ("coder-run-pods", |_, _| {}),
     ("coder-run-pods-shared", affinity_token),
     ("coder-run-pods-split", split_shared),
     ("coder-run-pods-tuned", |_, _| {}),
+    ("coder-run-pods-cache", cache),
 ];
 
 #[test]
@@ -880,11 +924,14 @@ fn the_goldens_say_where_they_came_from() {
         "coder-run-pods-shared",
         "coder-run-pods-split",
         "coder-run-pods-tuned",
+        "coder-run-pods-cache",
+        "coder-cache",
+        "coder-tiers",
     ] {
         let g = golden(case);
         let s = &g["source"];
         assert_eq!(s["repository"], "https://github.com/vymalo/another-adam-rs");
-        assert_eq!(s["revision"], "581aeed75e56f903b2a9f59217ea9dcd449c8466");
+        assert_eq!(s["revision"], "4bc6742deca699a5e25fb07d892b5ce7d4a42e25");
         assert_eq!(s["chart"], "deploy/coder");
         assert!(
             repo_root().join(s["values"].as_str().unwrap()).is_file(),
@@ -943,6 +990,8 @@ fn every_variable_of_the_contract_is_covered_by_a_golden_or_a_test() {
         "coder-split",
         "coder-affinity-token",
         "coder-run-pods",
+        "coder-cache",
+        "coder-tiers",
     ] {
         for w in golden(case)["workloads"].as_object().unwrap().values() {
             for e in w["agent"]["env"].as_array().unwrap() {
@@ -956,16 +1005,7 @@ fn every_variable_of_the_contract_is_covered_by_a_golden_or_a_test() {
         .collect();
     assert_eq!(
         unseen,
-        // K1: the four variables of adam-rs's operator are covered in tests/examples.rs until the goldens `coder-cache`
-        // and `coder-tiers` are rendered (they need helm: crates/domain/tests/golden/README.md, "K1").
-        vec![
-            &"MODEL_EXTRA_BODY",
-            &"MODEL_ECHO_REASONING",
-            &"MODEL_CONTEXT_WINDOW",
-            &"ADAM_AGENT_DIR",
-            &"MAX_ACCESS_TIER",
-            &"GITHUB_APP_INSTALLATION_ID"
-        ],
+        vec![&"ADAM_AGENT_DIR", &"GITHUB_APP_INSTALLATION_ID"],
         "the contract names a variable no golden sets: cover it in tests/examples.rs"
     );
 }

@@ -401,8 +401,20 @@ pub fn sample_spec_with_run_pods(id: &RuntimeId) -> RuntimeSpec {
                 size_limit: Some("64Mi".to_owned()),
             }),
         },
+        // The package cache (K1): a claim that someone else owns, which a provider mounts and never makes or deletes.
+        VolumeSpec {
+            name: "cache".to_owned(),
+            source: VolumeSource::ExistingClaim {
+                name: "package-cache".to_owned(),
+            },
+        },
     ]);
     w.container.mounts.extend([
+        Mount {
+            volume: "cache".to_owned(),
+            path: "/cache".to_owned(),
+            read_only: false,
+        },
         Mount {
             volume: "kube-api-access".to_owned(),
             path: "/var/run/secrets/kubernetes.io/serviceaccount".to_owned(),
@@ -485,6 +497,7 @@ pub fn sample_spec_with_run_pods(id: &RuntimeId) -> RuntimeSpec {
         guard: RunPodGuard {
             images: vec!["registry.invalid/run:1".to_owned()],
             claim: "work-sample-0".to_owned(),
+            cache_claim: Some("package-cache".to_owned()),
             secret: SecretRef::new(format!("{SENTINEL}-key"), "MODEL_API_KEY"),
         },
     });

@@ -745,7 +745,7 @@ spec:
 # runPods.enabled: the guard that lets an agent's account make pods without being able to read the namespace's other Secrets, mount
 # the host or run anything privileged. It is the coder chart's policy (adam-rs `run-pods-admission.yaml`) with what differs per agent
 # read from a parameter: a ConfigMap of the agent's, labelled agents.vymalo.com/run-pods-policy, which the operator makes for each agent
-# that asks for run pods (the account it is for, the images, the one claim, the one Secret key). It applies to the pods CREATED BY
+# that asks for run pods (the account it is for, the images, the claims, the one Secret key). It applies to the pods CREATED BY
 # that account (the match condition, once per parameter object), and refuses any that is not the intended run pod. Without it the RBAC
 # alone would let the account make any pod in its namespace. The policy and its binding are cluster-scoped and made here: the operator
 # is namespaced, and writes only the parameters, which the account cannot (its Role has pods and nothing else).
@@ -789,8 +789,8 @@ spec:
       messageExpression: "'a run pod has the priority class ' + params.data.priorityClass + ', which the quota is scoped to'"
     - expression: "variables.containers.all(c, c.image in params.data.images.split('\\n'))"
       message: "a run pod uses only the images the chart allows"
-    - expression: "!has(object.spec.volumes) || object.spec.volumes.all(v, has(v.emptyDir) || (has(v.persistentVolumeClaim) && v.persistentVolumeClaim.claimName == params.data.claim))"
-      messageExpression: "'a run pod mounts only emptyDir volumes and the claim ' + params.data.claim + ': no hostPath, no Secret, no other claim'"
+    - expression: "!has(object.spec.volumes) || object.spec.volumes.all(v, has(v.emptyDir) || (has(v.persistentVolumeClaim) && v.persistentVolumeClaim.claimName in params.data.claims.split('\\n')))"
+      messageExpression: "'a run pod mounts only emptyDir volumes and the ' + (params.data.claims.split('\\n').size() > 1 ? 'claims ' : 'claim ') + params.data.claims.split('\\n').join(' and ') + ': no hostPath, no Secret, no other claim'"
     - expression: "variables.containers.all(c, (!has(c.env) || c.env.all(e, !has(e.valueFrom) || !has(e.valueFrom.secretKeyRef) || (e.valueFrom.secretKeyRef.name == params.data.secretName && e.valueFrom.secretKeyRef.key == params.data.secretKey))) && (!has(c.envFrom) || c.envFrom.all(f, !has(f.secretRef))))"
       messageExpression: "'a run pod references no Secret but the key ' + params.data.secretKey + ' of ' + params.data.secretName + ' (as one variable): no Secret volume, no envFrom, no other key'"
     - expression: "variables.containers.all(c, has(c.securityContext) && has(c.securityContext.allowPrivilegeEscalation) && c.securityContext.allowPrivilegeEscalation == false && (!has(c.securityContext.privileged) || c.securityContext.privileged == false))"
