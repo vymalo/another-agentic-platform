@@ -13,7 +13,7 @@ use std::time::Duration;
 
 use aap_api::{AgentConfig, AgentService, ModelEndpoint, ToolProvider};
 use aap_objects_kubernetes::{FIELD_MANAGER, KubernetesObjects};
-use aap_ports::testkit::{Foreign, ObjectsUnderTest, sample_agent};
+use aap_ports::testkit::{EventSeed, Foreign, ObjectsUnderTest, sample_agent};
 use aap_ports::{
     ARGO_TRACKING_ANNOTATION, Agent, AgentDraft, AgentObjects, ETag, Kind, MANAGED_BY_DASHBOARD,
     MANAGED_BY_LABEL, OFFER_LABEL, ObjectsError, OfferedSecret, Precondition, SharedDraft,
@@ -198,7 +198,13 @@ impl Harness {
     }
 }
 
+static EVENTS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
 impl AgentObjects for Harness {
+    async fn agent_events(&self, name: &str) -> Result<aap_ports::AgentEvents, ObjectsError> {
+        self.objects.agent_events(name).await
+    }
+
     async fn list_agents(&self) -> Result<Vec<Agent>, ObjectsError> {
         self.objects.list_agents().await
     }
@@ -387,6 +393,30 @@ impl ObjectsUnderTest for Harness {
             body,
         )
         .await;
+    }
+
+    async fn seed_event(&self, _agent: &str, event: &EventSeed) {
+        // A core/v1 Event, as the kubelet or a controller's recorder writes one (the API reference's shape).
+        let n = EVENTS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        let name = format!("{}.{n:x}", event.object_name);
+        let body = json!({
+            "apiVersion": "v1", "kind": "Event",
+            "metadata": { "name": name, "namespace": self.namespace },
+            "involvedObject": {
+                "kind": event.object_kind, "name": event.object_name, "namespace": self.namespace,
+                "uid": event.object_uid,
+            },
+            "type": event.event_type, "reason": event.reason, "message": event.message,
+            "count": event.count,
+            "firstTimestamp": event.first_seen, "lastTimestamp": event.last_seen,
+            "source": { "component": "aap-test-harness" },
+            "reportingComponent": "aap-test-harness",
+        });
+        let resource = ApiResource::from_gvk_with_plural(
+            &kube::api::GroupVersionKind::gvk("", "v1", "Event"),
+            "events",
+        );
+        self.apply_as(HARNESS, true, &resource, &name, body).await;
     }
 
     async fn unreachable(&self) -> Option<Self> {

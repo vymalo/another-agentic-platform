@@ -93,6 +93,23 @@ pub fn sample_shared(kind: SharedKind, name: &str) -> SharedDraft {
     }
 }
 
+/// A `Warning` about the object `object_name` of `kind`, whose last occurrence is `n` seconds into an hour (so that a bigger `n`
+/// is a newer event).
+pub fn event_seed(kind: &str, object_name: &str, n: u32) -> EventSeed {
+    let at = |s: u32| format!("2026-11-14T10:{:02}:{:02}Z", s / 60, s % 60);
+    EventSeed {
+        object_kind: kind.to_owned(),
+        object_name: object_name.to_owned(),
+        event_type: "Warning".to_owned(),
+        reason: format!("Reason{n}"),
+        message: format!("message {n}"),
+        count: 2,
+        first_seen: at(0),
+        last_seen: at(n),
+        object_uid: None,
+    }
+}
+
 /// An agent whose title is `title`, for a change that is easy to see.
 fn retitled(draft: &AgentDraft, title: &str) -> AgentDraft {
     let mut changed = draft.clone();
@@ -1873,6 +1890,152 @@ pub mod cases {
         assert!(everything.contains(&super::secret("models")));
     }
 
+    pub async fn the_events_of_an_agent_are_its_own_and_newest_first<O: ObjectsUnderTest>(p: O) {
+        let (a, b) = (unique("ev"), unique("ev"));
+        for name in [&a, &b] {
+            p.put_agent(&sample_agent(name), &Precondition::DoesNotExist)
+                .await
+                .unwrap();
+        }
+        p.seed_event(&a, &event_seed("AgentService", &a, 10)).await;
+        p.seed_event(&a, &event_seed("AgentConfig", &a, 30)).await;
+        p.seed_event(&a, &event_seed("Deployment", &a, 20)).await;
+        p.seed_event(&b, &event_seed("AgentService", &b, 40)).await;
+        let got = p.agent_events(&a).await.unwrap().events;
+        let seen: Vec<(&str, &str)> = got
+            .iter()
+            .map(|e| (e.object.kind.as_str(), e.last_seen.as_str()))
+            .collect();
+        assert_eq!(
+            seen,
+            vec![
+                ("AgentConfig", "2026-11-14T10:00:30Z"),
+                ("Deployment", "2026-11-14T10:00:20Z"),
+                ("AgentService", "2026-11-14T10:00:10Z"),
+            ],
+            "the events of the agent, newest first"
+        );
+        assert!(
+            got.iter().all(|e| e.object.name == a),
+            "an event about another agent's object is in the events of this one"
+        );
+        assert_eq!(got[0].event_type, crate::EventType::Warning);
+        assert_eq!(got[0].reason, "Reason30");
+        assert_eq!(got[0].count, 2);
+        assert_eq!(got[0].first_seen, "2026-11-14T10:00:00Z");
+        let other = p.agent_events(&b).await.unwrap().events;
+        assert_eq!(other.len(), 1, "the other agent's events are its own");
+        assert_eq!(other[0].object.name, b);
+    }
+
+    pub async fn the_events_of_an_agent_are_bounded_to_the_newest<O: ObjectsUnderTest>(p: O) {
+        let name = unique("ev");
+        p.put_agent(&sample_agent(&name), &Precondition::DoesNotExist)
+            .await
+            .unwrap();
+        let total = u32::try_from(crate::MAX_EVENTS).unwrap() + 5;
+        for n in 0..total {
+            p.seed_event(&name, &event_seed("Deployment", &name, n))
+                .await;
+        }
+        let got = p.agent_events(&name).await.unwrap().events;
+        assert_eq!(got.len(), crate::MAX_EVENTS, "at most MAX_EVENTS");
+        assert_eq!(
+            got[0].reason,
+            format!("Reason{}", total - 1),
+            "the newest first"
+        );
+        assert_eq!(
+            got[got.len() - 1].reason,
+            "Reason5",
+            "the bound drops the oldest"
+        );
+    }
+
+    pub async fn an_event_of_an_object_made_again_is_not_the_agents<O: ObjectsUnderTest>(p: O) {
+        let name = unique("ev");
+        let made = p
+            .put_agent(&sample_agent(&name), &Precondition::DoesNotExist)
+            .await
+            .unwrap();
+        let mut now = event_seed("AgentService", &name, 10);
+        now.object_uid = Some(made.service.uid.clone());
+        let mut old = event_seed("AgentService", &name, 20);
+        old.object_uid = Some("uid-of-an-agent-that-was-deleted".to_owned());
+        let mut config = event_seed("AgentConfig", &name, 30);
+        config.object_uid = Some(made.config.as_ref().unwrap().uid.clone());
+        let mut config_old = event_seed("AgentConfig", &name, 40);
+        config_old.object_uid = Some("old-config".to_owned());
+        for seed in [
+            &now,
+            &old,
+            &config,
+            &config_old,
+            &event_seed("Deployment", &name, 5),
+        ] {
+            p.seed_event(&name, seed).await;
+        }
+        let got = p.agent_events(&name).await.unwrap();
+        assert!(!got.incomplete, "nothing was cut");
+        let seen: Vec<(&str, crate::Attribution)> = got
+            .events
+            .iter()
+            .map(|e| (e.object.kind.as_str(), e.by))
+            .collect();
+        assert_eq!(
+            seen,
+            vec![
+                ("AgentConfig", crate::Attribution::Uid),
+                ("AgentService", crate::Attribution::Uid),
+                ("Deployment", crate::Attribution::Name),
+            ],
+            "an event that names the uid of an object made again is not this agent's"
+        );
+    }
+
+    pub async fn an_event_message_is_cleaned_and_cut<O: ObjectsUnderTest>(p: O) {
+        let name = unique("ev");
+        p.put_agent(&sample_agent(&name), &Precondition::DoesNotExist)
+            .await
+            .unwrap();
+        let mut seed = event_seed("Deployment", &name, 1);
+        seed.message = format!("first\nsecond\t\u{1b}[31mred\u{0}{}", "x".repeat(3000));
+        p.seed_event(&name, &seed).await;
+        let got = p.agent_events(&name).await.unwrap().events;
+        assert_eq!(got.len(), 1);
+        let message = &got[0].message;
+        assert!(
+            message.chars().all(|c| !c.is_control()),
+            "a control character reaches the answer: {message:?}"
+        );
+        assert!(
+            message.chars().count() <= crate::MAX_MESSAGE_CHARS,
+            "a message is cut to MAX_MESSAGE_CHARS"
+        );
+        assert!(message.starts_with("first second"), "{message:?}");
+    }
+
+    pub async fn an_agent_without_events_has_none_and_one_that_is_not_there_is_not_found<
+        O: ObjectsUnderTest,
+    >(
+        p: O,
+    ) {
+        let name = unique("ev");
+        p.put_agent(&sample_agent(&name), &Precondition::DoesNotExist)
+            .await
+            .unwrap();
+        assert!(p.agent_events(&name).await.unwrap().events.is_empty());
+        let missing = unique("no-such-agent");
+        let error = refused(
+            "the events of an agent that is not there",
+            p.agent_events(&missing).await,
+        );
+        assert!(
+            matches!(&error, ObjectsError::NotFound { kind: Kind::AgentService, name: n } if *n == missing),
+            "{error:?}"
+        );
+    }
+
     pub async fn an_unreachable_store_is_unavailable<O: ObjectsUnderTest>(p: O) {
         let Some(off) = p.unreachable().await else {
             skipped("this object store cannot be made unreachable");
@@ -1916,6 +2079,7 @@ pub mod cases {
                 .unwrap_err()
         ));
         assert!(is_unavailable(&off.offered_secrets().await.unwrap_err()));
+        assert!(is_unavailable(&off.agent_events(&name).await.unwrap_err()));
     }
 }
 
@@ -1961,6 +2125,11 @@ macro_rules! agent_objects_cases {
             a_status_write_does_not_invalidate_the_token_of_a_shared_object,
             offered_secrets_are_references_and_never_values,
             no_read_carries_a_secret_value,
+            the_events_of_an_agent_are_its_own_and_newest_first,
+            the_events_of_an_agent_are_bounded_to_the_newest,
+            an_event_of_an_object_made_again_is_not_the_agents,
+            an_event_message_is_cleaned_and_cut,
+            an_agent_without_events_has_none_and_one_that_is_not_there_is_not_found,
             an_unreachable_store_is_unavailable,
         );
     };

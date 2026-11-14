@@ -26,6 +26,7 @@ so they cannot drift from the CRDs; a body is read and written as the JSON the s
 | `put_shared` | `GET`, then the writes below for one object |
 | `delete_shared` | `GET`, `LIST` services and configs (who names it), `DELETE` |
 | `offered_secrets` | `LIST` `externalsecrets` with the label selector `agents.vymalo.com/offer=true` |
+| `agent_events` (K8) | `GET` the service, `LIST` services, `LIST` `events` (core/v1) of the namespace, 500 a page and at most 10 pages: see "The events of an agent" |
 
 ## A write
 
@@ -264,7 +265,26 @@ deployment without the External Secrets Operator has nothing that could have opt
 deployment an outage and take `GET /v1/secret-keys` down with it. (The other choice is in `failure.rs`: `NotServed`.) A server that
 cannot be reached, or that refuses the list, is `Unavailable` as for the other calls.
 
-## Rights
+## The events of an agent (K8)
+
+`agent_events` reads **`core/v1` `Event`s** (`events`, group `""`: what `kubectl get events` reads and the kubelet and the controllers write; `events.k8s.io/v1` is the same store with
+`regarding` and `eventTime`, and reading both would double the right and the code). It `GET`s the service (`NotFound` if it is not there) and its config (their uids), `LIST`s the services (the other
+agents' names) and `LIST`s the namespace's Events with **`limit=500`**, at most 10 pages (a list is in key order, so what is past the bound is not "the oldest": the answer says `incomplete: true`);
+a `410` on an expired continue token restarts the listing once and then answers what was read with `incomplete: true`.
+
+**Each event is attributed by the names the operator gives an agent's objects** ([`src/events.rs`](src/events.rs) is the table, with the source of the alphabets and what is *unverified*): the
+role has no right on pods or workloads, so no owner reference is read. `AgentService` and `AgentConfig` `<agent>`, **by uid** when the event names one (an object made again under the name does
+not inherit the old one's events); `Deployment`, `StatefulSet`, `Service`, `PodDisruptionBudget` `<agent>`, `<agent>-front` or `<agent>-egress`; `ReplicaSet` `W-<hash>`; `Pod` `W-<ordinal>` or
+`W-<hash>-<suffix>` (hash 5 to 10 and suffix exactly 5 characters of `bcdfghjklmnpqrstvwxz2456789`: no vowel, no `0`, `1`, `3`); the store's `Cluster` `<agent>-db`, its pods, jobs and services.
+**An event is dropped when another agent could own the same object, or when another agent's name is one of this agent's bases** (`-front`, `-egress`, `-db`). **An event of another agent's object
+never appears; an unrelated object whose name has the same shape can**, and each event says `by`. Not selected: volume claims and the pods a coder makes for its runs. The time of an event is
+`series.lastObservedTime`, `lastTimestamp`, `eventTime`, `firstTimestamp` or the creation time, to the second (a time that does not parse is the epoch, never a panic); the count is `series.count`,
+`count` or 1; an unknown `type` is a `Warning`. **No Secret is read.** A `403` is `Unavailable`, as everywhere in this crate: an API image newer than its `Role` answers `503` on this route alone.
+
+`tests/events.rs` runs it on the fake API server (which pages as the real one does: `limit`, `continue`, and a `410` it can be told to answer) with `tests/fixtures/events/event-list.json`, **hand-written
+from the Kubernetes API reference and *unverified* against a real API server** (its README says so), and `tests/cluster.rs` writes real Events through the harness and asks the API server which verbs the
+identity has on `events` (`list` and nothing else).
+
 
 The crate needs these verbs in its namespace, and the `Role` of D7b's chart must grant **exactly** these (`tests/rbac.yaml` is the Role the
 cluster test runs under; `tests/rbac.rs` turns the requests of the whole conformance suite into verbs and holds them equal to it and to
@@ -274,6 +294,7 @@ this table, row by row):
 |---|---|---|
 | `agents.vymalo.com` | `agentservices`, `agentconfigs`, `modelendpoints`, `toolproviders` | `create`, `delete`, `get`, `list`, `patch` |
 | `external-secrets.io` | `externalsecrets` | `list` |
+| (core) | `events` | `list` |
 
 **No right on Secrets**, not even `get`: `list` on Secrets would return their values (*verified 2026-10-05*,
 <https://kubernetes.io/docs/concepts/security/rbac-good-practices/>, "Listing secrets"). Against §60a's RBAC paragraph this is **fewer**:

@@ -699,6 +699,22 @@ async fn the_identity_of_the_crate_has_the_role_and_no_right_on_secrets() {
             "{verb} externalsecrets"
         );
     }
+    // The Events (K8): a list, and no write, no get and no watch.
+    for (verb, allowed) in [
+        ("list", true),
+        ("get", false),
+        ("watch", false),
+        ("create", false),
+        ("patch", false),
+        ("update", false),
+        ("delete", false),
+    ] {
+        assert_eq!(
+            can(&dashboard, verb, "", "events").await,
+            allowed,
+            "{verb} events"
+        );
+    }
     // The Secrets: nothing, not a list (which would return their values).
     for verb in [
         "get", "list", "watch", "create", "patch", "update", "delete",

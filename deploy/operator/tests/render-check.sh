@@ -334,12 +334,13 @@ check "api: no Secret object, no token-looking value, no ClusterRole, no host ac
 # RBAC: exactly the Role the objects crate is tested under, and nothing else.
 the_api_role_is_the_crates_role() {
   from_file=$(rules_from < "$api_rbac_file")
-  [ "$(printf '%s\n' "$from_file" | grep -c .)" -eq 2 ] && [ "$(api_role_rules)" = "$from_file" ]
+  [ "$(printf '%s\n' "$from_file" | grep -c .)" -eq 3 ] && [ "$(api_role_rules)" = "$from_file" ]
 }
-check "api: the Role's rules are exactly those of crates/objects-kubernetes/tests/rbac.yaml (two rules, read from that file)" the_api_role_is_the_crates_role
-check "api: ... the four kinds with create delete get list patch, and list on externalsecrets (§60a, D5)" \
+check "api: the Role's rules are exactly those of crates/objects-kubernetes/tests/rbac.yaml (three rules, read from that file)" the_api_role_is_the_crates_role
+check "api: ... the four kinds with create delete get list patch, list on externalsecrets (§60a, D5) and list on the core events (K8)" \
   api_rules_are '[agents.vymalo.com] [agentservices, agentconfigs, modelendpoints, toolproviders] [create, delete, get, list, patch]
-[external-secrets.io] [externalsecrets] [list]'
+[external-secrets.io] [externalsecrets] [list]
+[""] [events] [list]'
 check "api: no right on Secrets, none on a wildcard, none on watch, none on a workload, a pod, a ConfigMap or a CRD" \
   dlacks Role aap-operator-api '\*' 'watch' \
     '[[ ,](secrets|deployments|statefulsets|pods|configmaps|services|persistentvolumeclaims|networkpolicies|customresourcedefinitions|nodes|namespaces)[],]'

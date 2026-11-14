@@ -3,7 +3,7 @@
 {{- /*
 The rights of `api`, namespaced: exactly crates/objects-kubernetes/tests/rbac.yaml, the Role that crate is tested under (tests/render-check.sh
 holds the two equal). No right on Secrets (a `list` on Secrets would return their values), no `watch` (nothing watches), no ClusterRole, no
-wildcard, nothing on workloads: the API writes the specs people edit and the operator makes the pods.
+wildcard, nothing on workloads (`list` on Events is the one right on the core group): the API writes the specs people edit and the operator makes the pods.
 */ -}}
 apiVersion: rbac.authorization.k8s.io/v1
 kind: Role
@@ -18,5 +18,9 @@ rules:
     verbs: [create, delete, get, list, patch]
   - apiGroups: [external-secrets.io]
     resources: [externalsecrets]
+    verbs: [list]
+  # K8: `GET /v1/agents/{name}/events` reads the core/v1 Events of the namespace. `list` and nothing wider.
+  - apiGroups: [""]
+    resources: [events]
     verbs: [list]
 {{- end }}

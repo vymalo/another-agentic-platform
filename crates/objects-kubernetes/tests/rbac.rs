@@ -59,7 +59,7 @@ fn group_of(plural: &str) -> &'static str {
             "agents.vymalo.com"
         }
         "externalsecrets" => "external-secrets.io",
-        "secrets" => "",
+        "events" | "secrets" => "",
         other => panic!("the crate asked about {other}"),
     }
 }
@@ -123,8 +123,9 @@ async fn the_role_is_exactly_what_the_crate_asks_for() {
 async fn no_secret_and_no_watch_are_among_the_rights() {
     for (group, resource, verb) in used().await.into_iter().chain(granted()) {
         assert!(resource != "secrets", "a right on Secrets: {verb}");
+        // The one right on the core group is `list` on Events (K8).
         assert!(
-            !group.is_empty(),
+            !group.is_empty() || (resource == "events" && verb == "list"),
             "a right on the core group: {resource} {verb}"
         );
         assert!(verb != "watch" && verb != "*", "{resource}: {verb}");
@@ -138,7 +139,13 @@ fn the_readme_lists_the_rights_of_the_role_row_by_row() {
     let list = |items: &[String]| {
         items
             .iter()
-            .map(|i| format!("`{i}`"))
+            .map(|i| {
+                if i.is_empty() {
+                    "(core)".to_owned()
+                } else {
+                    format!("`{i}`")
+                }
+            })
             .collect::<Vec<_>>()
             .join(", ")
     };

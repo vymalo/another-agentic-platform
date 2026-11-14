@@ -2,7 +2,8 @@
 //!
 //! `api --config <file>` reads one YAML configuration file, composes the router of `aap-platform-api` with the Kubernetes
 //! objects (`aap-objects-kubernetes`) and the OIDC authenticator (`aap-auth-oidc`), serves it, and serves `/healthz` and
-//! `/readyz` on a port of their own. `api --config <file> --check` only says whether the file is usable.
+//! `/readyz` on a port of their own. `api --config <file> --check` only says whether the file is usable. `api openapi` prints
+//! the OpenAPI document of the API (K8) and needs no file.
 
 mod config;
 mod run;
@@ -15,6 +16,12 @@ use anyhow::{Context, Result};
 use clap::Parser;
 
 fn main() -> ExitCode {
+    // `api openapi` prints the OpenAPI document of the API and needs no configuration, as the operator's `crdgen` needs none:
+    // it is how `docs/api/platform-api-v1.openapi.json` is regenerated.
+    if std::env::args().nth(1).as_deref() == Some("openapi") {
+        print!("{}", aap_platform_api::openapi::pretty());
+        return ExitCode::SUCCESS;
+    }
     match real_main(run::Args::parse()) {
         Ok(()) => ExitCode::SUCCESS,
         Err(err) => {

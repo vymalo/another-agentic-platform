@@ -494,9 +494,10 @@ and run its conformance suite under: `render-check.sh` reads that file and compa
 |---|---|
 | `agentservices`, `agentconfigs`, `modelendpoints`, `toolproviders` (`agents.vymalo.com`) | `create delete get list patch` |
 | `externalsecrets` (`external-secrets.io`) | `list` |
+| `events` (the core group) | `list` (K8: `GET /v1/agents/{name}/events`; nothing wider, no `get`, no `watch`) |
 
 **No right on Secrets** (a `list` on Secrets would return their values), no `watch`, no workload, pod or ConfigMap, no `ClusterRole`. `/readyz`'s one call
-(a `list` of one `ModelEndpoint`) is inside it. The operator's `Role` gains nothing, and has no right on ExternalSecrets.
+(a `list` of one `ModelEndpoint`) is inside it. The operator's `Role` gains nothing, and has no right on ExternalSecrets or on Events. The goldens that render the API's `Role` (`api.yaml`, `runpods.yaml`) moved by the rule `events: list` (K8) and the others did not.
 
 ## The image
 

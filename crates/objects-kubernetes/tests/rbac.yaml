@@ -14,3 +14,7 @@ rules:
   - apiGroups: [external-secrets.io]
     resources: [externalsecrets]
     verbs: [list]
+  # K8: the Events of an agent's objects (core/v1). `list` and nothing wider: no `get`, no `watch`, no write.
+  - apiGroups: [""]
+    resources: [events]
+    verbs: [list]

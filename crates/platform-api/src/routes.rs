@@ -26,6 +26,10 @@ pub enum RouteId {
     DeleteAgent,
     /// `GET /v1/agents/{name}/yaml`.
     AgentYaml,
+    /// `GET /v1/agents/{name}/events`.
+    AgentEvents,
+    /// `GET /v1/openapi.json`.
+    OpenApi,
     /// `GET /v1/models`.
     ListModels,
     /// `GET /v1/models/{name}`.
@@ -120,7 +124,7 @@ const fn route(
 }
 
 /// Every route, in the order of §60a's table.
-pub const ROUTES: [Route; 16] = [
+pub const ROUTES: [Route; 18] = [
     route(RouteId::Me, Verb::Get, "/v1/me", Needs::Token, false),
     route(
         RouteId::Info,
@@ -161,6 +165,20 @@ pub const ROUTES: [Route; 16] = [
         RouteId::AgentYaml,
         Verb::Get,
         "/v1/agents/{name}/yaml",
+        Needs::Permission(permission::AGENTS_READ),
+        false,
+    ),
+    route(
+        RouteId::AgentEvents,
+        Verb::Get,
+        "/v1/agents/{name}/events",
+        Needs::Permission(permission::AGENTS_READ),
+        false,
+    ),
+    route(
+        RouteId::OpenApi,
+        Verb::Get,
+        "/v1/openapi.json",
         Needs::Permission(permission::AGENTS_READ),
         false,
     ),

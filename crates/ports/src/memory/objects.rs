@@ -6,11 +6,12 @@ use std::sync::{Arc, Mutex};
 use serde_json::Value;
 
 use super::lock;
-use crate::testkit::{Foreign, ObjectsUnderTest};
+use crate::testkit::{EventSeed, Foreign, ObjectsUnderTest};
 use crate::{
-    ARGO_TRACKING_ANNOTATION, Agent, AgentDraft, AgentObjects, ETag, FieldError, Kind,
-    MANAGED_BY_DASHBOARD, MANAGED_BY_LABEL, ObjectsError, OfferedSecret, Precondition,
-    ResourceVersion, SharedDraft, SharedKind, Stored, config_name, config_references,
+    ARGO_TRACKING_ANNOTATION, Agent, AgentDraft, AgentEvent, AgentEvents, AgentObjects,
+    Attribution, ETag, EventType, FieldError, Kind, MANAGED_BY_DASHBOARD, MANAGED_BY_LABEL,
+    ObjectsError, OfferedSecret, Precondition, ResourceVersion, SharedDraft, SharedKind, Stored,
+    config_name, config_references,
 };
 
 #[derive(Default)]
@@ -26,6 +27,8 @@ struct State {
     values: BTreeMap<(String, String), String>,
     /// The services that have the operator's finalizer: a delete of one leaves it deleting.
     finalized: BTreeSet<String>,
+    /// The events of each agent, in the order they were planted.
+    events: BTreeMap<String, Vec<(AgentEvent, Option<String>)>>,
     unavailable: bool,
 }
 
@@ -332,6 +335,26 @@ impl MemoryObjects {
         });
     }
 
+    /// An event about an object of the agent `agent`, as a backend would hold it.
+    pub fn seed_event(&self, agent: &str, event: &EventSeed) {
+        lock(&self.state)
+            .events
+            .entry(agent.to_owned())
+            .or_default()
+            .push((
+                AgentEvent::new(
+                    EventType::parse(&event.event_type),
+                    &event.reason,
+                    &event.message,
+                    (&event.object_kind, &event.object_name),
+                    event.count,
+                    &event.first_seen,
+                    &event.last_seen,
+                ),
+                event.object_uid.clone(),
+            ));
+    }
+
     /// A Secret that holds `value` under `key`. Nothing in the store reads it.
     pub fn plant_secret_value(&self, secret: &str, key: &str, value: &str) {
         lock(&self.state)
@@ -594,6 +617,35 @@ impl AgentObjects for MemoryObjects {
         s.up()?;
         Ok(s.offered.iter().cloned().collect())
     }
+
+    async fn agent_events(&self, name: &str) -> Result<AgentEvents, ObjectsError> {
+        let s = lock(&self.state);
+        s.up()?;
+        let Some(agent) = s.agent(name) else {
+            return Err(ObjectsError::NotFound {
+                kind: Kind::AgentService,
+                name: name.to_owned(),
+            });
+        };
+        let mut events = Vec::new();
+        for (event, uid) in s.events.get(name).cloned().unwrap_or_default() {
+            let current = match event.object.kind.as_str() {
+                "AgentService" => Some(agent.service.uid.as_str()),
+                "AgentConfig" => agent.config.as_ref().map(|c| c.uid.as_str()),
+                _ => None,
+            };
+            match (uid, current) {
+                // The event is about an object made again under the name: it is not this agent's.
+                (Some(seen), Some(now)) if seen != now => {}
+                (Some(_), Some(_)) => events.push(event.attributed(Attribution::Uid)),
+                _ => events.push(event),
+            }
+        }
+        Ok(AgentEvents {
+            events: crate::newest_first(events),
+            incomplete: false,
+        })
+    }
 }
 
 /// A delete of a name whose service is absent: the orphan config of that name, or nothing.
@@ -666,6 +718,10 @@ impl ObjectsUnderTest for MemoryObjects {
 
     async fn plant_secret_value(&self, secret: &str, key: &str, value: &str) {
         Self::plant_secret_value(self, secret, key, value);
+    }
+
+    async fn seed_event(&self, agent: &str, event: &EventSeed) {
+        Self::seed_event(self, agent, event);
     }
 
     async fn unreachable(&self) -> Option<Self> {

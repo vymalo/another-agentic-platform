@@ -34,6 +34,8 @@ where
         RouteId::PutAgent => mr.on(filter, agents::put::<O, A>),
         RouteId::DeleteAgent => mr.on(filter, agents::delete::<O, A>),
         RouteId::AgentYaml => mr.on(filter, agents::yaml::<O, A>),
+        RouteId::AgentEvents => mr.on(filter, agents::events::<O, A>),
+        RouteId::OpenApi => mr.on(filter, misc::openapi),
         RouteId::ListModels => mr.on(filter, shared::list::<ModelEndpointForm, O, A>),
         RouteId::GetModel => mr.on(filter, shared::get::<ModelEndpointForm, O, A>),
         RouteId::PutModel => mr.on(filter, shared::put::<ModelEndpointForm, O, A>),

@@ -81,6 +81,29 @@ where
     Ok(with_etag(response, &agent.etag()))
 }
 
+/// `GET /v1/agents/{name}/events`: the events about the agent's objects, newest first, at most 100 (K8). A member of an object,
+/// like every list answer; the texts are as the cluster wrote them, cleaned and cut by the port, and **never logged**.
+pub(crate) async fn events<O, A>(state: St<O, A>, Name(name): Name) -> Result<Response, Problem>
+where
+    O: AgentObjects + 'static,
+    A: Authenticator + 'static,
+{
+    let events = state
+        .0
+        .objects
+        .agent_events(&name)
+        .await
+        .map_err(|e| match e {
+            // The same problem, for the same missing agent, as `GET /v1/agents/{name}`.
+            ObjectsError::NotFound { .. } => Problem::not_found("agent", &name),
+            other => read_failed(&other),
+        })?;
+    Ok(json(
+        StatusCode::OK,
+        &json!({ "events": events.events, "incomplete": events.incomplete }),
+    ))
+}
+
 fn name_mismatch() -> Problem {
     Problem::validation(&[FormError {
         field: "name".to_owned(),
@@ -201,7 +224,11 @@ where
     // The port returns once the service is gone or is being deleted. Say which, so that the page knows to ask again.
     match state.objects.get_agent(&name).await {
         Ok(Some(agent)) if agent.deleting() => {
-            Ok(json(StatusCode::ACCEPTED, &view::summary(&agent)))
+            // The tag of what is left: a repeated `DELETE` takes it (the operator's status writes move it).
+            Ok(with_etag(
+                json(StatusCode::ACCEPTED, &view::summary(&agent)),
+                &agent.etag(),
+            ))
         }
         // Gone, or not to be read now: the delete itself was accepted.
         _ => Ok(StatusCode::NO_CONTENT.into_response()),
