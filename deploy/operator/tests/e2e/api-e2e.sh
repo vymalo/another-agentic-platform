@@ -607,6 +607,7 @@ done
 # an object with `incomplete` and an `events` array, newest first, at most 100, **every event about an object of this agent** (its name is
 # the agent's or starts with the agent's name and a dash: not `$agent` + anything), a type, a count, a message of at most 1 KiB with no
 # control character, a time in the API's form and an attribution; and **one event is about the agent's own object, by its exact name or by uid**.
+# shellcheck disable=SC2016  # $a is jq's own variable (--arg a), not the shell's
 events_jq='(.events | type == "array" and length >= 1 and length <= 100) and (.incomplete | type == "boolean")
   and (.events | all(.[]; (.type == "Normal" or .type == "Warning") and (.by == "uid" or .by == "name")
        and (.object.name == $a or (.object.name | startswith($a + "-"))) and .count >= 1
