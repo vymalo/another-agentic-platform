@@ -12,7 +12,7 @@ use aap_api::ModelEndpoint;
 use aap_auth_oidc::OidcAuthenticator;
 use aap_forms::Defaults;
 use aap_objects_kubernetes::KubernetesObjects;
-use aap_platform_api::{ApiState, CorsOrigins, router};
+use aap_platform_api::{ApiMetrics, ApiState, CorsOrigins, router};
 use aap_ports::{AgentObjects, AuthError, Authenticator};
 use anyhow::{Context, Result};
 use axum::Router;
@@ -44,6 +44,10 @@ pub struct Args {
     #[arg(long, env = "HEALTH_ADDR")]
     pub health_addr: Option<SocketAddr>,
 
+    /// Where `/metrics` is served. Wins over `metricsListen` in the file.
+    #[arg(long, env = "METRICS_ADDR")]
+    pub metrics_addr: Option<SocketAddr>,
+
     /// Read the configuration file, say whether the API can work with it, and exit. Needs no cluster and no issuer.
     #[arg(long)]
     pub check: bool,
@@ -52,7 +56,8 @@ pub struct Args {
 /// How long the requests in flight have to finish after a stop is asked for, kept under Kubernetes' 30 seconds.
 const DRAIN: Duration = Duration::from_secs(25);
 
-/// The router over any two ports: the configuration of the deployment, and nothing of how the ports are made.
+/// The router over any two ports, counting into `metrics`: the configuration of the deployment, and nothing of how the ports
+/// are made.
 ///
 /// # Errors
 ///
@@ -62,6 +67,7 @@ pub fn build_router<O, A>(
     auth: A,
     defaults: Defaults,
     cors: CorsOrigins,
+    metrics: Arc<ApiMetrics>,
 ) -> Result<Router>
 where
     O: AgentObjects + 'static,
@@ -70,6 +76,7 @@ where
     let state = ApiState::new(objects, auth, defaults)
         .context("the deployment's defaults")?
         .with_cors(cors)
+        .with_metrics(metrics)
         .with_version(env!("CARGO_PKG_VERSION"));
     Ok(router(state))
 }
@@ -149,11 +156,13 @@ async fn serve_both(
     router: Router,
     health: tokio::net::TcpListener,
     check: Check,
+    metrics: (tokio::net::TcpListener, Arc<ApiMetrics>),
     stop: impl Future<Output = ()>,
 ) -> Result<()> {
     let draining = Arc::new(AtomicBool::new(false));
     let (stop_api, api_stopped) = watch::channel(false);
     let (stop_health, health_stopped) = watch::channel(false);
+    let (stop_metrics, metrics_stopped) = watch::channel(false);
     let mut api = tokio::spawn(serve::serve(api, router, signalled(api_stopped)));
     let mut health = tokio::spawn(serve::serve(
         health,
@@ -164,6 +173,13 @@ async fn serve_both(
         signalled(health_stopped),
     ));
 
+    let (metrics_listener, counters) = metrics;
+    let mut metrics_server = tokio::spawn(serve::serve(
+        metrics_listener,
+        serve::metrics(counters),
+        signalled(metrics_stopped),
+    ));
+
     // The servers fail fast (a port in use is a deployment mistake); a stop is asked for by the signal.
     let outcome = tokio::select! {
         () = stop => {
@@ -172,6 +188,7 @@ async fn serve_both(
         }
         r = &mut api => Err(ended("the API server", r)),
         r = &mut health => Err(ended("the health server", r)),
+        r = &mut metrics_server => Err(ended("the metrics server", r)),
     };
     draining.store(true, Ordering::Release);
     let _ = stop_api.send(true);
@@ -180,7 +197,9 @@ async fn serve_both(
         api.abort();
     }
     let _ = stop_health.send(true);
+    let _ = stop_metrics.send(true);
     let _ = tokio::time::timeout(Duration::from_secs(2), &mut health).await;
+    let _ = tokio::time::timeout(Duration::from_secs(2), &mut metrics_server).await;
     outcome
 }
 
@@ -197,12 +216,14 @@ pub async fn run(args: Args) -> Result<()> {
     let Settings {
         listen,
         health_listen,
+        metrics_listen,
         oidc,
         cors,
         defaults,
     } = config::load(&args.config)?;
     let listen = args.listen.unwrap_or(listen);
     let health_listen = args.health_addr.unwrap_or(health_listen);
+    let metrics_listen = args.metrics_addr.unwrap_or(metrics_listen);
     tracing::info!(
         namespace = %defaults.namespace,
         origins = cors.as_slice().len(),
@@ -224,7 +245,8 @@ pub async fn run(args: Args) -> Result<()> {
             async move { auth.ready().await }
         })
     };
-    let router = build_router(objects, auth, defaults, cors)?;
+    let counters = Arc::new(ApiMetrics::new());
+    let router = build_router(objects, auth, defaults, cors, counters.clone())?;
 
     // Bound before anything is served: a port in use is found at once.
     let api = tokio::net::TcpListener::bind(listen)
@@ -233,7 +255,18 @@ pub async fn run(args: Args) -> Result<()> {
     let health = tokio::net::TcpListener::bind(health_listen)
         .await
         .with_context(|| format!("binding {health_listen}"))?;
-    serve_both(api, router, health, check, termination()).await
+    let metrics = tokio::net::TcpListener::bind(metrics_listen)
+        .await
+        .with_context(|| format!("binding {metrics_listen}"))?;
+    serve_both(
+        api,
+        router,
+        health,
+        check,
+        (metrics, counters),
+        termination(),
+    )
+    .await
 }
 
 #[cfg(test)]
@@ -284,7 +317,9 @@ mod tests {
         let s = settings();
         let objects = MemoryObjects::in_namespace(&s.defaults.namespace);
         let auth = MemoryAuthenticator::new().with_token("t", "alice", ["platform:agents.read"]);
-        let router = build_router(objects.clone(), auth, s.defaults, s.cors).unwrap();
+        let counters = Arc::new(ApiMetrics::new());
+        let router =
+            build_router(objects.clone(), auth, s.defaults, s.cors, counters.clone()).unwrap();
         let check = readiness(
             || async { Ok::<(), std::convert::Infallible>(()) },
             || async { Ok(()) },
@@ -292,8 +327,16 @@ mod tests {
 
         let (api, api_addr) = bound().await;
         let (health, health_addr) = bound().await;
+        let (metrics, metrics_addr) = bound().await;
         let (stop, stopped) = watch::channel(false);
-        let running = tokio::spawn(serve_both(api, router, health, check, signalled(stopped)));
+        let running = tokio::spawn(serve_both(
+            api,
+            router,
+            health,
+            check,
+            (metrics, counters),
+            signalled(stopped),
+        ));
 
         assert_eq!(
             http(api_addr, "/v1/me", Some("t")).await,
@@ -305,6 +348,22 @@ mod tests {
         assert_eq!(http(api_addr, "/v1/me", None).await.0, 401);
         assert_eq!(http(api_addr, "/v1/agents", Some("t")).await.0, 200);
         assert_eq!(http(api_addr, "/v1/secret-keys", Some("t")).await.0, 403);
+        // The requests above were counted, and the text is on the metrics port and nowhere else.
+        let (status, text) = http(metrics_addr, "/metrics", None).await;
+        assert_eq!(status, 200);
+        assert!(
+            text.contains(
+                "aap_api_requests_total{route=\"/v1/me\",method=\"GET\",status=\"200\"} 1"
+            ),
+            "{text}"
+        );
+        assert!(
+            text.contains("aap_api_auth_failures_total{reason=\"missing\"} 1"),
+            "{text}"
+        );
+        assert!(!text.contains("\"t\""), "no token: {text}");
+        assert_eq!(http(api_addr, "/metrics", None).await.0, 404);
+        assert_eq!(http(health_addr, "/metrics", None).await.0, 404);
         assert_eq!(http(health_addr, "/healthz", None).await.0, 200);
         assert_eq!(http(health_addr, "/readyz", None).await.0, 200);
         assert_eq!(
@@ -327,13 +386,28 @@ mod tests {
         let issuer = TestAuthenticator::start().await;
         let token = issuer.token_for("alice", &["platform:agents.read", "user"]);
         let objects = MemoryObjects::in_namespace(&s.defaults.namespace);
-        let router =
-            build_router(objects, issuer.authenticator().clone(), s.defaults, s.cors).unwrap();
+        let counters = Arc::new(ApiMetrics::new());
+        let router = build_router(
+            objects,
+            issuer.authenticator().clone(),
+            s.defaults,
+            s.cors,
+            counters.clone(),
+        )
+        .unwrap();
         let (api, api_addr) = bound().await;
         let (health, _) = bound().await;
+        let (metrics, _) = bound().await;
         let (stop, stopped) = watch::channel(false);
         let check: Check = Arc::new(|| Box::pin(async { Ok(()) }));
-        let running = tokio::spawn(serve_both(api, router, health, check, signalled(stopped)));
+        let running = tokio::spawn(serve_both(
+            api,
+            router,
+            health,
+            check,
+            (metrics, counters),
+            signalled(stopped),
+        ));
         assert_eq!(http(api_addr, "/v1/me", Some(&token)).await.0, 200);
         assert_eq!(http(api_addr, "/v1/me", Some("garbage")).await.0, 401);
         stop.send(true).unwrap();
@@ -471,10 +545,13 @@ mod tests {
             "127.0.0.1:9000",
             "--health-addr",
             "127.0.0.1:9001",
+            "--metrics-addr",
+            "127.0.0.1:9002",
         ])
         .unwrap();
         assert_eq!(args.listen, Some("127.0.0.1:9000".parse().unwrap()));
         assert_eq!(args.health_addr, Some("127.0.0.1:9001".parse().unwrap()));
+        assert_eq!(args.metrics_addr, Some("127.0.0.1:9002".parse().unwrap()));
         assert!(!args.check);
         assert!(
             Args::try_parse_from(["api"]).is_err(),

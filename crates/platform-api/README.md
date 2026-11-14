@@ -197,6 +197,24 @@ The cause of a `503` from the cluster, and of a `500`, is logged as the chain of
 token, claim or value). Keys that cannot be fetched are **one warning when it starts and one line when they are back**, not a line per request
 (`tests/key_logs.rs`). `tests/logs.rs` holds it with a sentinel for each, in a test binary of its own (`tracing` caches a callsite per binary).
 
+## Metrics
+
+Two counters in the Prometheus text format, in the style of the controller's (`aap-controller`, `metrics.rs`) and with no metrics library: `ApiMetrics`
+(`src/metrics.rs`), shared with the binary in an `Arc` (`ApiState::with_metrics`), which serves `render()` on a port of its own (`metricsListen`,
+[`bin/api`](../../bin/api/README.md)); the router serves no `/metrics` itself.
+
+| Series | Labels | Counts |
+|---|---|---|
+| `aap_api_requests_total` | `route`, `method`, `status` | every request, once, by the layer outside the guard (a refusal, a `404` and a `405` are counted) |
+| `aap_api_auth_failures_total` | `reason` | a request whose token was refused or could not be checked |
+
+**Every label value is chosen by this crate from a closed set, never copied from a request.** `route` is a template of [`ROUTES`](src/routes.rs) (the
+one `&'static str` of the table, found by `routes::template`) or `unmatched` for a path that matched nothing, so the series are bounded however many names
+and paths clients send; `method` is `GET`, `PUT`, `DELETE`, `POST`, `HEAD`, `OPTIONS` or `other`; `status` is the number; `reason` is `missing`,
+`malformed`, `bad_signature`, `unknown_key`, `expired`, `wrong_issuer`, `wrong_audience`, `missing_claim` (the authenticator's `InvalidToken`, exhaustively
+matched, so a new reason does not compile until it has a word) or `unavailable` (the keys could not be fetched). **No token, header, body, path, user id or
+secret key name is a label or a value.** Two `Authorization` headers are a `400` of the request and not an authentication failure: counted as a request only.
+
 ## CORS
 
 `CorsOrigins::new` takes **exact origins** as a browser writes them (`scheme://host[:port]`, lower case, no path, no trailing slash) and refuses `*`,
@@ -221,6 +239,7 @@ entry would match nothing. Every answer of the router, a preflight and a refusal
 | `tests/cors.rs` (6) | a listed origin's preflight, an unlisted one's, simple requests, no CORS configured, a wildcard refused, **the hardening headers on a preflight, a 404, a 405 and a 401** |
 | `tests/oidc.rs` (3) | a real signed token over the router: permissions, `403`, every reason for a `401`, keys down is `503` |
 | `tests/logs.rs` (1), `tests/key_logs.rs` (1) | the log holds a method, a template, a status, a latency and a subject, and none of the sentinels; keys that are down are one warning and their return one line. Each in a test binary of its own |
+| `tests/metrics.rs` (5) | **`metrics_label_is_route_template`** (three names, one series; no name in the text), **`unknown_path_counts_as_unmatched`** (four paths and an unknown method: `unmatched` and `other`; a `405` keeps its template), the closed reasons of an authentication failure, **`no_token_in_metrics`** (sentinels for a token, a subject and a path are nowhere in the text; every line is one of the two series), the text format with `HELP` and `TYPE` |
 | `tests/misc.rs` (4) | `me`, `info`, a version, defaults the operator would refuse stop the API |
 
 ## Not here

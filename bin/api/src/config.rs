@@ -16,6 +16,7 @@ use serde::Deserialize;
 
 const DEFAULT_LISTEN: &str = "0.0.0.0:8080";
 const DEFAULT_HEALTH: &str = "0.0.0.0:8081";
+const DEFAULT_METRICS: &str = "0.0.0.0:9090";
 
 fn listen() -> SocketAddr {
     DEFAULT_LISTEN
@@ -29,6 +30,12 @@ fn health() -> SocketAddr {
         .unwrap_or_else(|_| SocketAddr::from(([0, 0, 0, 0], 8081)))
 }
 
+fn metrics() -> SocketAddr {
+    DEFAULT_METRICS
+        .parse()
+        .unwrap_or_else(|_| SocketAddr::from(([0, 0, 0, 0], 9090)))
+}
+
 /// The file, as it is read. [`validate`](Self::validate) says whether the API can work with it.
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
@@ -39,6 +46,9 @@ pub struct ApiConfig {
     /// Where `/healthz` and `/readyz` are served.
     #[serde(default = "health")]
     pub health_listen: SocketAddr,
+    /// Where `/metrics` is served (Prometheus text, no authentication: a port of its own, never the API's).
+    #[serde(default = "metrics")]
+    pub metrics_listen: SocketAddr,
     /// Whose tokens are accepted.
     pub oidc: OidcConfig,
     /// Which browser origins may call the API.
@@ -64,6 +74,8 @@ pub struct Settings {
     pub listen: SocketAddr,
     /// Where the health endpoints are.
     pub health_listen: SocketAddr,
+    /// Where `/metrics` is.
+    pub metrics_listen: SocketAddr,
     /// The authenticator's configuration (validated).
     pub oidc: OidcConfig,
     /// The browser origins (validated).
@@ -123,6 +135,7 @@ impl ApiConfig {
         Ok(Settings {
             listen: self.listen,
             health_listen: self.health_listen,
+            metrics_listen: self.metrics_listen,
             oidc: self.oidc,
             cors,
             defaults: self.defaults,
@@ -223,6 +236,7 @@ mod tests {
         let settings = ApiConfig::parse(EXAMPLE).unwrap().validate().unwrap();
         assert_eq!(settings.listen, "0.0.0.0:8080".parse().unwrap());
         assert_eq!(settings.health_listen, "0.0.0.0:8081".parse().unwrap());
+        assert_eq!(settings.metrics_listen, "0.0.0.0:9090".parse().unwrap());
         assert_eq!(settings.defaults.namespace, "another-agentic-system");
         assert_eq!(
             settings.cors.as_slice(),
@@ -254,6 +268,7 @@ mod tests {
         let map = v.as_mapping_mut().unwrap();
         map.remove("listen");
         map.remove("healthListen");
+        map.remove("metricsListen");
         map.remove("cors");
         let settings = ApiConfig::parse(&serde_yaml::to_string(&v).unwrap())
             .unwrap()
@@ -261,6 +276,7 @@ mod tests {
             .unwrap();
         assert_eq!(settings.listen.port(), 8080);
         assert_eq!(settings.health_listen.port(), 8081);
+        assert_eq!(settings.metrics_listen.port(), 9090);
         assert!(settings.cors.is_empty(), "no cors block is no CORS");
 
         for required in ["oidc", "defaults"] {

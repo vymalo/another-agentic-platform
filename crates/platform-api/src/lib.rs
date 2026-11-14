@@ -21,6 +21,7 @@ mod body;
 mod cors;
 mod etag;
 mod handlers;
+mod metrics;
 mod problem;
 mod router;
 mod routes;
@@ -30,6 +31,7 @@ mod view;
 
 pub use body::MAX_BODY_BYTES;
 pub use cors::{CorsError, CorsOrigins, PREFLIGHT_MAX_AGE};
+pub use metrics::{ApiMetrics, UNMATCHED, metric};
 pub use problem::PROBLEM_JSON;
 pub use router::router;
 pub use routes::{Needs, ROUTES, Route, RouteId, Verb};

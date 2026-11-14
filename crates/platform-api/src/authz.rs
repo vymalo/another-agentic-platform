@@ -122,6 +122,7 @@ where
             principal
         }
         Err(error) => {
+            state.metrics.auth_failure(&error);
             // Said when it starts, not once per request while it lasts: every request of every person is a line otherwise.
             if let AuthError::Unavailable(source) = &error
                 && !state.keys_down.swap(true, Ordering::Relaxed)

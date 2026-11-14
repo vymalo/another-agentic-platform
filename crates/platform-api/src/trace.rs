@@ -5,14 +5,17 @@
 //! person typed. A name is not a secret, but a path of a request that matched nothing is whatever a client sent, and it is
 //! not logged. **Never logged: the token, a header, a body, the answer.**
 
+use std::sync::Arc;
 use std::time::Instant;
 
-use axum::extract::{MatchedPath, Request};
+use axum::extract::{MatchedPath, Request, State};
 use axum::http::HeaderValue;
 use axum::http::header::{CACHE_CONTROL, HeaderName};
 use axum::middleware::Next;
 use axum::response::Response;
 use tracing::Instrument;
+
+use crate::metrics::ApiMetrics;
 
 const NOSNIFF: HeaderName = HeaderName::from_static("x-content-type-options");
 
@@ -46,6 +49,23 @@ pub(crate) async fn request(request: Request, next: Next) -> Response {
             tracing::info!("request");
         }
     });
+    response
+}
+
+/// One count per request, with the template that matched (or none), the method and the status. Outside the guard, so a refusal
+/// is counted too.
+pub(crate) async fn count(
+    State(metrics): State<Arc<ApiMetrics>>,
+    request: Request,
+    next: Next,
+) -> Response {
+    let method = request.method().clone();
+    let template = request
+        .extensions()
+        .get::<MatchedPath>()
+        .map(|m| m.as_str().to_owned());
+    let response = next.run(request).await;
+    metrics.request(template.as_deref(), &method, response.status().as_u16());
     response
 }
 
