@@ -127,6 +127,7 @@ fn detail<F: SharedForm>(stored: &Stored, used_by: Vec<String>) -> SharedDetail<
         managed_by,
         deleting: stored.deleting,
         used_by,
+        status: view::shared_status_of(stored),
         representation,
     }
 }

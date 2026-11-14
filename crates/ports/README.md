@@ -311,7 +311,7 @@ Off by default (the controller and the providers depend on the traits only). Wit
 
 * **Conformance macros**, in the style of `adam-store-testkit`:
   `runtime_provider_conformance!(make)` (14 cases), `store_provisioner_conformance!(make)` (7),
-  `agent_directory_conformance!(make)` (6), `agent_objects_conformance!(make)` (33, D4; the one list of its cases is `agent_objects_cases!`, which a backend's own tests may use to run them all another way: `aap-objects-kubernetes` derives its `Role` from every request of every case) and
+  `agent_directory_conformance!(make)` (6), `agent_objects_conformance!(make)` (34, D4, K2 added `the_status_of_a_shared_object_is_read_back`; the one list of its cases is `agent_objects_cases!`, which a backend's own tests may use to run them all another way: `aap-objects-kubernetes` derives its `Role` from every request of every case) and
   `authenticator_conformance!(make)` (8, D4; its sentinel token is JWT-shaped, three base64url parts with the sentinel as `kid`, `iss`, `aud`, `sub` and signature). `make` is a path to `async fn() -> Option<T>`; `None` skips
   the suite, and `AAP_TEST_REQUIRE_BACKEND=1` turns the skip into a failure (CI sets it for the suites that
   need a cluster). The macros expand to `#[tokio::test]`, so the crate that uses them needs `tokio` with
@@ -357,7 +357,7 @@ aap_ports::runtime_provider_conformance!(make);
 
 `cargo test -p aap-ports`:
 
-* `tests/memory.rs`: the seven suites against the in-memory implementations (48 cases, then 33 for `MemoryObjects` and 8 for
+* `tests/memory.rs`: the seven suites against the in-memory implementations (48 cases, then 34 for `MemoryObjects` and 8 for
   `MemoryAuthenticator`).
 * `tests/contract.rs`: `RuntimeSpec::check` names each broken invariant (and each of run pods, 15), a spec round-trips through
   JSON (and a spec without run pods is the JSON it was), every error has the class that decides retrying, the suites **fail** what they must (a provider

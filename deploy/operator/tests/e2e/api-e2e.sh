@@ -602,6 +602,24 @@ done
 as reader platform:agents.read GET "/v1/models/$model"
 expect 200 "read the model"
 [ "$(jq -c .usedBy "$work/body")" = "[\"$agent\"]" ] || die "the model is used by $(jq -c .usedBy "$work/body"), not by the agent"
+# K2: the operator's own status of the shared object, written a moment after the agent is Ready (its controller sees the agent's
+# status change), read through the API from the object it already gets. Unverified until CI has run it: no kind exists where it was written.
+status_deadline=$(( $(date +%s) + 60 ))
+until [ "$(jq -c '.status.usedBy // empty' "$work/body")" = "[\"$agent\"]" ] \
+  && jq -e '.status.conditions | map(select(.type == "AgentsReady" and .status == "True")) | length == 1' "$work/body" >/dev/null 2>&1; do
+  [ "$(date +%s)" -lt "$status_deadline" ] || die "the model's status does not list the agent as its only user, Ready, after 60s: $(jq -c .status "$work/body")"
+  sleep 3
+  as reader platform:agents.read GET "/v1/models/$model"
+  expect 200 "read the model's status"
+done
+jq -e '.status.conditions | map(select(.type == "Accepted" and .status == "True" and .reason == "Valid")) | length == 1' "$work/body" >/dev/null \
+  || die "the model is not Accepted: $(jq -c .status "$work/body")"
+jq -e '.status.conditions | map(select(.type == "InUse" and .status == "True" and .reason == "Referenced")) | length == 1' "$work/body" >/dev/null \
+  || die "the model is not InUse: $(jq -c .status "$work/body")"
+[ "$(jp "modelendpoint/$model" '{.status.usedBy[0]}')" = "$agent" ] || die "the ModelEndpoint's status on the cluster does not list the agent"
+# A status holds names and reasons, never a value: not the Secret's, not a token.
+if grep -qF -- "$sentinel" "$work/body"; then die "the model's status holds the Secret's value"; fi
+ok "the model's status, written by the operator and read through GET /v1/models/$model, lists the agent as its only user (usedBy == [$agent]), is Accepted, InUse and AgentsReady, and holds no value"
 model_etag=$(header etag)
 as modeler "platform:models.write,platform:secrets.pick" DELETE "/v1/models/$model" -H "If-Match: $model_etag"
 expect_problem 409 referenced "a delete of the model the agent names"

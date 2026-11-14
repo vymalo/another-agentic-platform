@@ -1614,6 +1614,44 @@ pub mod cases {
         );
     }
 
+    pub async fn the_status_of_a_shared_object_is_read_back<O: ObjectsUnderTest>(p: O) {
+        // K2: the operator writes a status on a model and on a tool server (who uses it, whether it is valid); the dashboard
+        // reads it with the object and never writes it.
+        for (shared, kind) in [
+            (SharedKind::Model, Kind::ModelEndpoint),
+            (SharedKind::ToolServer, Kind::ToolProvider),
+        ] {
+            let name = unique("sh");
+            let draft = sample_shared(shared, &name);
+            let made = p
+                .put_shared(shared, &draft, &Precondition::DoesNotExist)
+                .await
+                .unwrap();
+            assert_eq!(
+                made.status, None,
+                "{shared:?}: no status before the operator"
+            );
+            let status = json!({
+                "observedGeneration": 1,
+                "usedBy": ["alpha", "beta"],
+                "conditions": [{ "type": "Accepted", "status": "True", "reason": "Valid", "message": "ok",
+                                 "lastTransitionTime": "2026-11-14T00:00:00Z" }]
+            });
+            p.set_status(kind, &name, status.clone()).await;
+            let seen = p.get_shared(shared, &name).await.unwrap().unwrap();
+            assert_eq!(seen.status, Some(status.clone()), "{shared:?}");
+            assert_eq!(seen.spec, made.spec, "{shared:?}: a status is not a spec");
+            assert!(
+                p.list_shared(shared)
+                    .await
+                    .unwrap()
+                    .iter()
+                    .any(|o| o.name == name && o.status == Some(status.clone())),
+                "{shared:?}: the list carries it too"
+            );
+        }
+    }
+
     pub async fn offered_secrets_are_references_and_never_values<O: ObjectsUnderTest>(p: O) {
         let (s1, s2, s3, s4) = (unique("sec"), unique("sec"), unique("sec"), unique("sec"));
         for (secret, key, external) in [
@@ -1810,6 +1848,7 @@ macro_rules! agent_objects_cases {
             a_shared_object_nobody_names_is_deleted,
             a_write_does_not_check_what_the_agent_names,
             the_status_is_the_operators_and_is_read_back,
+            the_status_of_a_shared_object_is_read_back,
             offered_secrets_are_references_and_never_values,
             no_read_carries_a_secret_value,
             an_unreachable_store_is_unavailable,

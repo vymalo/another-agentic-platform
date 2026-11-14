@@ -715,3 +715,86 @@ async fn an_object_with_a_member_no_form_says_is_yaml_only_and_a_form_may_not_re
     assert_eq!(r.code(), 409, "{}", r.text());
     assert!(r.is_problem("yaml-only"));
 }
+
+#[tokio::test]
+async fn model_detail_carries_status() {
+    let api = Api::new();
+    offer_everything(&api.objects);
+    let token = api.admin();
+    let created = api
+        .put("/v1/models/gateway")
+        .token(&token)
+        .create()
+        .json(&model_body("gateway"))
+        .send()
+        .await;
+    assert_eq!(created.code(), 201, "{}", created.text());
+    // Before the operator has written one, there is none.
+    let before = api
+        .get("/v1/models/gateway")
+        .token(&token)
+        .send()
+        .await
+        .json();
+    assert!(before.get("status").is_none(), "{before}");
+
+    api.objects.set_status(
+        Kind::ModelEndpoint,
+        "gateway",
+        json!({
+            "observedGeneration": 1,
+            "usedBy": ["alpha", "beta"],
+            "usedByMore": 3,
+            "conditions": [
+                { "type": "Accepted", "status": "True", "reason": "Valid", "message": "the object passed validation", "lastTransitionTime": "2026-11-14T00:00:00Z" },
+                { "type": "AgentsReady", "status": "False", "reason": "SomeNotReady", "message": "not Ready: beta", "lastTransitionTime": "2026-11-14T00:00:00Z" }
+            ],
+            "sentinel-in-status": "status-sentinel-9d2e"
+        }),
+    );
+    let got = api.get("/v1/models/gateway").token(&token).send().await;
+    let body = got.json();
+    assert_eq!(body["status"]["usedBy"], json!(["alpha", "beta"]), "{body}");
+    assert_eq!(body["status"]["usedByMore"], 3);
+    assert_eq!(body["status"]["observedGeneration"], 1);
+    assert_eq!(body["status"]["conditions"][1]["reason"], "SomeNotReady");
+    assert!(
+        !got.text().contains("status-sentinel-9d2e"),
+        "only what the status type names goes out: {}",
+        got.text()
+    );
+    // The list carries it too, and the object's own `usedBy` (the API's count of agents) is a different member.
+    let list = api.get("/v1/models").token(&token).send().await.json();
+    assert_eq!(
+        list["models"][0]["status"]["usedBy"],
+        json!(["alpha", "beta"])
+    );
+    assert_eq!(list["models"][0]["usedBy"], json!([]));
+}
+
+#[tokio::test]
+async fn tool_server_detail_carries_status() {
+    let api = Api::new();
+    offer_everything(&api.objects);
+    let token = api.admin();
+    let created = api
+        .put("/v1/tool-servers/search")
+        .token(&token)
+        .create()
+        .json(&tool_body("search"))
+        .send()
+        .await;
+    assert_eq!(created.code(), 201, "{}", created.text());
+    api.objects.set_status(
+        Kind::ToolProvider,
+        "search",
+        json!({ "usedBy": ["alpha"], "conditions": [] }),
+    );
+    let body = api
+        .get("/v1/tool-servers/search")
+        .token(&token)
+        .send()
+        .await
+        .json();
+    assert_eq!(body["status"]["usedBy"], json!(["alpha"]), "{body}");
+}

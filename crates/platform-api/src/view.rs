@@ -6,7 +6,7 @@
 
 use std::collections::BTreeMap;
 
-use aap_api::{AgentServiceStatus, ServiceState};
+use aap_api::{AgentServiceStatus, ServiceState, SharedStatus};
 use aap_forms::{AgentKind, AgentView, Loaded, Representation, load_agent};
 use aap_ports::{Agent, ObjectsError, Owner, SharedKind, Stored, config_references};
 use serde::Serialize;
@@ -193,8 +193,23 @@ pub struct SharedDetail<F: Serialize> {
     pub deleting: bool,
     /// The agents that name it, in byte order: GitOps's agents count.
     pub used_by: Vec<String>,
+    /// What the operator observed (K2): who uses it as the operator counts them (at most 64 names and a count of the
+    /// rest), whether it is valid and whether its agents are ready. Read from the object the answer already holds, as
+    /// the status type says it, so a member that is not in the type is not passed on. `None` before the operator wrote
+    /// one, or when what is there does not read as a status. Absent for a GitOps-managed object too if the operator
+    /// has not reached it.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub status: Option<SharedStatus>,
     /// The form, or why there is none.
     pub representation: Representation<F>,
+}
+
+/// The status the operator wrote on a shared object, as [`SharedStatus`]: nothing the type does not name goes out.
+pub fn shared_status_of(stored: &Stored) -> Option<SharedStatus> {
+    stored
+        .status
+        .as_ref()
+        .and_then(|s| serde_json::from_value(s.clone()).ok())
 }
 
 /// For every shared object of `kind`, the agents that name it.

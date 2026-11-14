@@ -105,6 +105,7 @@ The `Role` is the sum of the three crates' tables, no more
 | `agentservices`, `agentconfigs` (`agents.vymalo.com`) | `get list watch patch` |
 | `modelendpoints`, `toolproviders` (`agents.vymalo.com`) | `get list watch` (the shared objects of the dashboard, AD-029: read to resolve a reference and watched, **never written**) |
 | `agentservices/status`, `agentconfigs/status` | `patch` |
+| `modelendpoints/status`, `toolproviders/status` | `patch` (K2: the status of the shared kinds, in a rule of its own with that verb alone; `render-check.sh` holds it, and that the kinds themselves stay read-only) |
 | `events` (`events.k8s.io`) | `create patch` |
 | `statefulsets`, `deployments` (`apps`) | `get list watch patch create delete` |
 | `services`, `configmaps`, `persistentvolumeclaims` | `get list patch create delete` |
