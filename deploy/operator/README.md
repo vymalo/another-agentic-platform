@@ -54,7 +54,7 @@ list that fails holds no other agent back), but an agent whose config references
 kind is not installed, until they are there. Never run an operator older than D1 against CRDs that store a reference
 (`endpointRef`, `providerRef`): it types `baseUrl` as required and cannot decode such an `AgentConfig`. The same rule is in
 [`deploy/operator-crds`](../operator-crds/README.md#upgrading), with the reasons. The two Argo CD Applications sync apart:
-sequence them with the CRDs first (a sync wave, or their Application first).
+sequence them with the CRDs first (a sync wave, or their Application first). **K2:** the operator writes the `status` of `modelendpoints` and `toolproviders`, which only a CRDs chart from K2 onward gives them a subresource for. With an older CRDs chart the API server answers `404` to every such write: the operator logs a warning that says to install the CRDs chart, retries with the back-off of an internal error (30 s, doubling, 10 minutes at most: not every 5 s) and reconciles every agent as before, so nothing is lost but the status until the chart is there.
 
 **K1, run pods:** the admission policy reads the parameter `claims` of each agent's `<service>-run-pods-policy` ConfigMap and falls back to `claim` when there is none, which is what an operator before K1 wrote: upgrade the chart and the operator's image together (one release). Between the new policy and the new operator's first pass over an agent its run pods are admitted for the work claim alone, not refused; the pass rewrites the ConfigMap, whatever the agent's digest.
 

@@ -858,7 +858,7 @@ fn nothing_outside_the_contract_is_set_unless_the_user_asked() {
     }
 }
 
-// ------------------------------------------------------------- K1: what adam-rs's operator accepts too
+// ------------------------------------------------------------- K1: what adam-rs's former operator (removed, its ADR 0046) accepted too
 
 #[test]
 fn extra_body_owned_member_is_config_invalid() {

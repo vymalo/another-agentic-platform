@@ -1,4 +1,4 @@
-//! K1: the platform's CRDs read everything adam-rs's operator accepts, except the listed differences (§59a, "K1"). The adam-rs
+//! K1: the platform's CRDs read everything adam-rs's former operator (removed, its ADR 0046) accepted, except the listed differences (§59a, "K1"). The adam-rs
 //! copy is vendored in `tests/vendored/` (its revision is in `UPSTREAM`, and is the revision of the parity goldens: a test holds
 //! them equal). For every property path of its two kinds, ours has the path; and for each keyword that bounds what a value may be,
 //! ours is **never stricter**: the same `type`; a `minimum`, `minLength` or `minItems` no higher, a `maximum`, `maxLength`,
@@ -199,7 +199,7 @@ fn crd_reads_everything_adam_rs_accepts_except_the_listed_differences() {
     assert_eq!(
         theirs.keys().map(String::as_str).collect::<Vec<_>>(),
         ["AgentConfig", "AgentService"],
-        "the vendored file has the two kinds of adam-rs's operator"
+        "the vendored file has the two kinds of adam-rs's former operator (removed, its ADR 0046)"
     );
     let mut seen = BTreeSet::new();
     let mut problems = Vec::new();

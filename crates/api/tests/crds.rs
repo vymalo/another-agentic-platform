@@ -390,7 +390,7 @@ fn the_new_kinds_are_bounded_and_the_inline_forms_are_not_tightened() {
 
 #[test]
 fn an_a2a_written_without_enabled_stays_disabled_and_the_default_agrees() {
-    // K1: adam-rs's operator reads it as enabled; here a manifest that writes `a2a` with a token alone must not turn a
+    // K1: adam-rs's former operator (removed, its ADR 0046) read it as enabled; here a manifest that writes `a2a` with a token alone must not turn a
     // disabled agent on at the next apply, as before K1. The derived default and the serde default are one value.
     let written: aap_api::A2aInterface = serde_json::from_value(serde_json::json!({
         "bearerTokensSecretRef": { "name": "s", "key": "k" }
