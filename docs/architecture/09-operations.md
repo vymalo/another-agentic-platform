@@ -113,6 +113,12 @@ acp
 internal
 ```
 
+*Amended 2026-11-14 (K4), the Platform API's metrics:* the API of the admin dashboard (§60a) serves two counters in the Prometheus text format on a listener of its own,
+`aap_api_requests_total{route,method,status}` and `aap_api_auth_failures_total{reason}`, beside the operator's `aap_*` counters (§59a). Every label value is
+chosen by the API from a closed set (a template of its table of routes or `unmatched`, a method word, a status, an authentication reason); nothing from a token, a
+body, a path, a user or a secret key name is a label or a value. The chart's `ServiceMonitor`s for both are in §59a, *The operator chart*. No tracing or OpenTelemetry
+signal is added by this note.
+
 ---
 
 ## 49. End-to-End Trace
