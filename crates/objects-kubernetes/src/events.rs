@@ -30,9 +30,11 @@
 //! `aap-store-cnpg`'s `cluster_name`). A **hash** is the pod-template-hash a Deployment adds to its ReplicaSet and pods: the
 //! decimal digits of a 32-bit FNV hash, each mapped to the alphabet `bcdfghjklmnpqrstvwxz2456789` (no vowel, no `0`, no `1`,
 //! no `3`), so 1 to 10 characters; **5 to 10 are matched** (a shorter one has a probability of about 2e-6). A **suffix** is
-//! the 5 characters a `generateName` adds, from the same alphabet. *Both are unverified here* (from `k8s.io/apimachinery/pkg/util/rand`
-//! `SafeEncodeString`, `k8s.io/apiserver/pkg/storage/names` and `k8s.io/kubernetes/pkg/controller/controller_utils.go`, read from
-//! memory and not fetched in this session). CloudNativePG's names are also *unverified* (from its documentation, from memory).
+//! the 5 characters a `generateName` adds, from the same alphabet. *Both verified 2026-11-14* in the sources at `master`:
+//! the alphabet and `SafeEncodeString` in `k8s.io/apimachinery/pkg/util/rand/rand.go`, `randomLength = 5` in
+//! `k8s.io/apiserver/pkg/storage/names/generate.go`, and `ComputeHash` (a 32-bit FNV-1a sum, printed in decimal and encoded)
+//! in `k8s.io/kubernetes/pkg/controller/controller_utils.go`. CloudNativePG's names are *unverified* (from its documentation,
+//! from memory).
 //! The names are matched exactly with a `-` between the parts: `a7` and `abcdefg` are not `a`'s.
 //!
 //! **An ambiguous name is attributed to neither agent.** An event is dropped when another agent of the namespace could own the
@@ -44,7 +46,7 @@
 use aap_ports::{AgentEvent, Attribution, EventType};
 use serde_json::Value;
 
-/// The alphabet of the pod-template-hash and of the 5 random characters a `generateName` adds (*unverified*, see above).
+/// The alphabet of the pod-template-hash and of the 5 random characters a `generateName` adds (*verified*, see above).
 const SAFE: &str = "bcdfghjklmnpqrstvwxz2456789";
 
 fn safe(text: &str) -> bool {
