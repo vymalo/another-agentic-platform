@@ -203,6 +203,16 @@ of them; a name the server lacks skips an optional server (and stops a required 
 (`validate_config`) does not read the referents: it says the config is well formed, and a referent that is missing or wrong
 is the **service's** `ConfigResolved: False`.
 
+## What adam-rs's operator accepts too (slice K1)
+
+`model.extraBody` becomes `MODEL_EXTRA_BODY` (canonical JSON, none when empty), `model.echoReasoning` `MODEL_ECHO_REASONING`, `model.contextWindow`
+`MODEL_CONTEXT_WINDOW`, `coder.maxAccessTier` `MAX_ACCESS_TIER` (on every role of a coder), and `environment.cache.existingClaim` the volume `cache`
+(`VolumeSource::ExistingClaim`) mounted at `/cache` of the workers. `validate` refuses an `extraBody` member the runtime owns
+(`contract::MODEL_EXTRA_BODY_OWNED`: `model`, `messages`, `tools`, `tool_choice`, `stream`), a `contextWindow` outside 1 to 2^53 - 1, a claim that is not a DNS
+subdomain, and a user volume named `cache` or mounted over `/cache` when the cache is on. All of it is the same as adam-rs's `adam-operator-domain` at `bec3e32`.
+Tests: `extra_body_owned_member_is_config_invalid`, `cache_mounts_at_slash_cache` and three more in `tests/examples.rs`. **No golden holds them yet**
+(`tests/golden/README.md`, "K1": the cases need helm), and a run pod does not mount the cache.
+
 ## Run pods (slice D15a)
 
 A coder whose `AgentConfig` sets `coder.runPods.sizeClass` runs the commands of a run in pods of their own. `resolve` makes, from the config and the deployment's `RunPodSettings` (`Externals::run_pods`): the **pod template** as a file set of the workers (`<svc>-run-pod`, `pod.yaml`, mounted at `/etc/adam/run-pod`, named by `RUN_POD_TEMPLATE_FILE`), the variables of adam's contract (`RUN_ENVIRONMENT=kubernetes`, `RUN_POD_NAMESPACE` from the pod's own namespace, `RUN_POD_INSTANCE`, `RUN_POD_CONTAINER`, the three times), the account the workers run as (and its token, in the workers' pods alone), and the neutral `RunPods` the provider renders. `contract::run_pods` is the one place that spells adam's names for it. A config that does not set the field resolves to exactly what it did, digest included.

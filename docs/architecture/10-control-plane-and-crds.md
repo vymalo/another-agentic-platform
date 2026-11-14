@@ -391,7 +391,7 @@ There is no `volumes`, so the operator renders a Deployment. `files` is the whol
 
 Two layers, so a bad object is refused at the earliest place that can know.
 
-- **CEL on the CRD** (shape, no other object needed): `interfaces.responses.enabled` and `interfaces.mcp.enabled` must be `false` in v0; exactly one of `store.postgres.secretRef` and `store.postgres.cnpg`; exactly one of `github.app` and `github.token`; exactly one of `app.installationId` and `app.owners`; exactly one of `agent.folder.files` and `agent.folder.configMapRef`, and exactly one of `folder` and `embedded`; `binary: adam-coder` needs `embedded` and the `coder` block, `binary: adam-agent` needs `folder` and no `coder` block; `scaling.front` only with `topology: split`.
+- **CEL on the CRD** (shape, no other object needed): `interfaces.responses.enabled` and `interfaces.mcp.enabled` must be `false` in v0; an `interfaces.a2a` that is enabled (K1: `enabled` is true when `a2a` is written without it) names `bearerTokensSecretRef`; exactly one of `store.postgres.secretRef` and `store.postgres.cnpg`; exactly one of `github.app` and `github.token`; exactly one of `app.installationId` and `app.owners`; exactly one of `agent.folder.files` and `agent.folder.configMapRef`, and exactly one of `folder` and `embedded`; `binary: adam-coder` needs `embedded` and the `coder` block, `binary: adam-agent` needs `folder` and no `coder` block; `scaling.front` only with `topology: split`.
 - **The reconciler** (`aap-domain::validate`, cross-object, reported as `ConfigInvalid`): the rules of the adam-rs chart's [`_validate.tpl`](https://github.com/vymalo/another-adam-rs/blob/0391809/deploy/coder/templates/_validate.tpl), mirrored so the same mistakes fail the same way: a placement is one of `""`, `shared`, `affinity`, `isolated` (`a2a-only` is refused for the coder); more than one worker needs a placement; `shared` and `affinity` need the `work` volume to be a single ReadWriteMany claim (`perReplica: false`) and `isolated` needs it per replica; `githubMcp.port` is 1 to 65535; an MCP server URL is `http` or `https`, with no user name, password or `${…}` in it; a header name is an HTTP token and its prefix is plain text; a plain `http://` URL to another machine needs `tools.allowInsecureHttp` (adam refuses such a server at startup otherwise); `extraEnv` may not name a variable the operator sets.
 
 ### What each field becomes
@@ -420,6 +420,7 @@ The field-to-environment contract. It is the only place in the operator that kno
 | `…coder.gitAuthor` | `GIT_AUTHOR_NAME`, `GIT_AUTHOR_EMAIL` | |
 | `…coder.createRepoOwners` | `CREATE_REPO_OWNERS` (comma-joined) | Not set when empty: the tool stays off |
 | `…coder.opencodeModel` | `OPENCODE_MODEL` | |
+| `…coder.maxAccessTier` (K1) | `MAX_ACCESS_TIER` (`plan`, `edits`, `auto`, `bypass`) | Every role of a coder reads it. Not set when absent: the coder's own default is `auto` |
 | `…coder.runPods.sizeClass` (D15a) | `RUN_ENVIRONMENT=kubernetes` and seven `RUN_POD_*` variables, **since D15d the git sandbox: `GIT_SANDBOX_SOCKET`, a `git-sandbox` native sidecar, two `emptyDir`s and the account's credentials as a projected volume of the coder container alone (the pod automounts no token any more)**, the template (a ConfigMap `<svc>-run-pod` mounted at `/etc/adam/run-pod`, `RUN_POD_TEMPLATE_FILE`), the account the workers run as with its token, a `ResourceQuota`, a `NetworkPolicy` (deny by default since D15c) and a `RoleBinding` `<svc>-run-pods`, a ConfigMap `<svc>-run-pods-policy` for the chart's admission policy, and since D15c **the egress proxy** (a `Deployment`, `Service`, `ServiceAccount`, `PodDisruptionBudget`, `NetworkPolicy` `<svc>-egress` and a ConfigMap `<svc>-egress-allow`) and the template's six proxy variables | Absent: none of it, and the digest does not move. The class is a key of the operator chart's `runPodClasses`; the rest is the deployment's (*D15a built*) |
 | `…coder.github.app.id`, `owners`, `installationId` | `GITHUB_APP_ID`, `GITHUB_APP_OWNERS`, `GITHUB_APP_INSTALLATION_ID` | Exactly one of the last two |
 | `…coder.github.app.privateKeySecretRef` | a Secret volume at `/var/run/secrets/github-app` (mode 0440) and `GITHUB_APP_PRIVATE_KEY_PATH` | The key is a file, never a variable. See the gap in AD-024 |
@@ -427,6 +428,10 @@ The field-to-environment contract. It is the only place in the operator that kno
 | `…model.model` | `MODEL` | |
 | `…model.baseUrl` | `MODEL_BASE_URL`, a value or a `secretKeyRef` | |
 | `…model.apiKeySecretRef` | `MODEL_API_KEY` from `secretKeyRef` | |
+| `…model.extraBody` (K1) | `MODEL_EXTRA_BODY`, the object as canonical JSON (keys sorted, no space) | Not a secret: it shows in the pod's environment. `model`, `messages`, `tools`, `tool_choice` and `stream` are the runtime's: a config that sets one is `ConfigInvalid`. An empty object sets nothing |
+| `…model.echoReasoning` (K1) | `MODEL_ECHO_REASONING` (`reasoning_content` or `reasoning`) | Not set when absent |
+| `…model.contextWindow` (K1) | `MODEL_CONTEXT_WINDOW` | 1 to 2^53 - 1 tokens; otherwise `ConfigInvalid` |
+| `…environment.cache.existingClaim` (K1) | the volume `cache`, the user's PersistentVolumeClaim by name, mounted at `/cache` of the workers | The operator makes no claim and deletes none, whatever `deletionPolicy` says. The name `cache` and the path `/cache` are the operator's then. Not on a `split` front |
 | `…tools.githubMcp` | a native sidecar `github-mcp`, `GITHUB_MCP_URL=http://127.0.0.1:<port>`, and `GITHUB_HOST` on the sidecar when `host` is set | The sidecar holds no credential: the coder sends the credentials of each call. Loopback only |
 | `…tools.mcpServers` | a ConfigMap `<svc>-mcp` (`mcp.json`, mounted at `/etc/adam/extra-mcp`), `ADAM_EXTRA_MCP_FILE`, and one variable per header Secret | The file holds `${VAR}` references only. The variable is named by the Secret key (`SEARCH_MCP_TOKEN`), and the file refers to it |
 | `…tools.allowInsecureHttp` | `MCP_ALLOW_INSECURE=true` | Covers every MCP server of the agent and the endpoints a sender announces. Never automatic |
@@ -538,6 +543,21 @@ Compute objects carry an owner reference to the `AgentService` (through the `Own
 - the annotation `agents.vymalo.com/config-digest`, and `OrderedReady` with `RollingUpdate` for the StatefulSet.
 
 The goldens in *Testing* hold the parity, not this list.
+
+#### K1: the CRDs are a superset of adam-rs's operator's
+
+*Added 2026-11-14.* adam-rs made a copy of this operator on 2026-10-07 (`crates/adam-operator-api`, `crates/adam-operator-domain`) and kept its own CRD file, [`deploy/crds/agents.vymalo.com.yaml`](https://github.com/vymalo/another-adam-rs/blob/bec3e32cc576501ced68bebd0e001cd8fbde5959/deploy/crds/agents.vymalo.com.yaml). The owner wants one operator, so this one reads everything the other accepts. At adam-rs `bec3e32` (*verified 2026-11-14*, by reading its CRD and its two crates) its two kinds have these differences from ours, and K1 closes them with the same serde names, bounds and environment variables:
+
+| Field | Becomes | Checked |
+|---|---|---|
+| `model.extraBody` | `MODEL_EXTRA_BODY` | the five members the runtime owns are refused |
+| `model.echoReasoning` | `MODEL_ECHO_REASONING` | enum `reasoning_content`, `reasoning` |
+| `model.contextWindow` | `MODEL_CONTEXT_WINDOW` | 1 to 2^53 - 1 (schema bound and `ConfigInvalid`) |
+| `coder.maxAccessTier` | `MAX_ACCESS_TIER` | enum `plan`, `edits`, `auto`, `bypass` |
+| `environment.cache.existingClaim` | the claim at `/cache` | a DNS subdomain; `cache` and `/cache` reserved |
+| `interfaces.a2a` | the CEL rule "no token, no server" and `enabled` true when `a2a` is written without it | an invalid example |
+
+`aap-ports` gains `VolumeSource::ExistingClaim { name }`, **a new variant of a closed enum**: a provider that matches `VolumeSource` stops compiling until it handles it (`aap-runtime-kubernetes` renders a `persistentVolumeClaim` volume with no owner reference). The test `crd_is_superset_of_adam_rs` (`crates/api/tests/superset.rs`, with adam-rs's file vendored in `crates/api/tests/vendored/`) holds every property path and enum value of its two kinds present in ours. **Not the same on purpose:** ours keeps `interfaces` optional (adam-rs requires it) and `model.baseUrl` and `apiKeySecretRef` optional beside `endpointRef` (AD-029), so ours accepts more; the one CEL message of `baseUrl` is worded for both kinds that use it. In a form (§60a) only `maxAccessTier` is a field; the other three are YAML only. **Unverified until helm has rendered them:** the parity goldens `coder-cache` and `coder-tiers` (adam-rs's chart at `bec3e32`; `helm` was not installed where K1 was written), so the four variables are held by `tests/examples.rs` and not yet by a golden, and the goldens stay at `581aeed`. A run pod does not mount the cache yet (adam-rs's chart mounts it in the run pod template and lets its admission policy admit the claim: not ported, it needs the goldens).
 
 #### Adoption guard
 

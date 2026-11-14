@@ -32,6 +32,18 @@ alone). (Earlier, *verified 2026-10-27*: between `3f714d0` and `7598255` the thr
 with them by the six proxy variables, the run pods' network policy and `runPods.egressProxy`; *verified 2026-10-26*: between `0391809` and `3f714d0` the
 three first cases differed by the two keys the projection gained (`serviceAccount`, `automountServiceAccountToken` of each pod) and the revision.)
 
+## K1: the two goldens still to render
+
+Slice K1 (2026-11-14) ported adam-rs's `model.extraBody`, `model.echoReasoning`, `model.contextWindow`, `coder.maxAccessTier` and
+`environment.cache.existingClaim`. They are held by `tests/examples.rs` (`extra_body_owned_member_is_config_invalid`,
+`cache_mounts_at_slash_cache`, ...) and by the CRD test `crd_is_superset_of_adam_rs`, **not yet by a golden**: the cases `coder-cache` (a cache claim)
+and `coder-tiers` (a `MAX_ACCESS_TIER`, the model's three variables) have to be rendered from adam-rs's `deploy/coder` at `bec3e32`
+(*verified 2026-11-14*: the CRD file did not change at the commit that followed it) with helm, which was not installed where K1 was written, and the
+README says goldens are never written by hand. To do it: add `tools/adam-parity/cases/coder-cache.yaml` and `coder-tiers.yaml`, move `ADAM_RS_REV` and the
+revision of `tests/parity.rs` to the new revision, regenerate, and read the whole diff (every case moves: that diff is the env contract between `581aeed` and
+`bec3e32`), then drop the four names from the list in `every_variable_of_the_contract_is_covered_by_a_golden_or_a_test`. adam-rs's chart also mounts the cache
+into a run pod and lets its admission policy admit the claim; the operator does not yet (the regeneration shows the template).
+
 ## Regenerating them
 
 By hand; they need `helm` 3.x, `python3` with PyYAML and a clone of adam-rs that contains the revision. No

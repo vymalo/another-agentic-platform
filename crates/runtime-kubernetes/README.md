@@ -144,6 +144,12 @@ adam-rs runs the coder's local `git` in a native sidecar of the coder's pod (its
 
 `tests/run_pods_parity.rs` holds the **real render** equal to the coder chart's, in all four cases of the goldens: the pod's token setting, the `git-sandbox` container field by field (command, variables, mounts, probes, resources, the read-only root), the three volumes (with the chart's projected sources, whole), the coder container's two mounts and `GIT_SANDBOX_SOCKET`, and that no container but the coder's mounts the credentials; a split front has none of it. `tests/run_pods.rs` states the sandbox rule by rule (no `envFrom`, no variable from a source, no volume that carries a credential, no process namespace shared) and that a coder without run pods has none of it. The one thing the chart does that the provider does not: it repeats the pod's seccomp profile on the sandbox container (same effect, §60a, *D15d built*). **That the sidecar starts, and holds nothing, on a kubelet is `run-pods-e2e.sh` step 4b** ([`deploy/operator/tests/e2e/README.md`](../../deploy/operator/tests/e2e/README.md)).
 
+### The package cache (K1)
+
+`VolumeSource::ExistingClaim { name }` is rendered as a `persistentVolumeClaim` volume of that name, with no `readOnly`: the user's claim, mounted as
+it is (the shared package cache at `/cache`, adam-rs ADR 0040). No object of ours is made for it, it has no owner reference and no
+label, and neither `Retain` nor `Delete` touches it. A claim that does not exist keeps the pod `Pending`. Test: `the_package_cache_is_the_users_claim_mounted_as_it_is`.
+
 ## Status
 
 `status(id)` lists the workloads and pods that are ours (not those being deleted) and maps them:
