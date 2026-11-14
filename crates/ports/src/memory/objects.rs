@@ -84,6 +84,7 @@ impl State {
             }
             None => {
                 let stored = Stored {
+                    uid: format!("{kind}-{name}-{}", version.as_str()),
                     kind,
                     namespace: namespace.to_owned(),
                     name: name.to_owned(),
@@ -226,6 +227,7 @@ impl MemoryObjects {
         s.objects.insert(
             (kind, name.to_owned()),
             Stored {
+                uid: format!("{kind}-{name}-{}", version.as_str()),
                 kind,
                 namespace: self.namespace.clone(),
                 name: name.to_owned(),
