@@ -187,6 +187,10 @@ rules:
   - apiGroups: [external-secrets.io]
     resources: [externalsecrets]
     verbs: [list]
+  # K8: `GET /v1/agents/{name}/events` reads the core/v1 Events of the namespace. `list` and nothing wider.
+  - apiGroups: [""]
+    resources: [events]
+    verbs: [list]
 ---
 # Source: aap-operator/templates/role.yaml
 apiVersion: rbac.authorization.k8s.io/v1

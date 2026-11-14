@@ -12,10 +12,10 @@ use aap_ports::testkit::{
     sample_agent_using, sample_shared,
 };
 use aap_ports::{
-    ARGO_TRACKING_ANNOTATION, Agent, AgentDraft, AgentObjects, AuthError, Authenticator, Classify,
-    ETag, ErrorClass, FieldError, InvalidToken, Kind, MANAGED_BY_DASHBOARD, MANAGED_BY_LABEL,
-    ObjectsError, OfferedSecret, Owner, Precondition, Principal, ResourceVersion, SharedDraft,
-    SharedKind, Stored, config_name, config_references,
+    ARGO_TRACKING_ANNOTATION, Agent, AgentDraft, AgentEvent, AgentObjects, AuthError,
+    Authenticator, Classify, ETag, ErrorClass, EventType, FieldError, InvalidToken, Kind,
+    MANAGED_BY_DASHBOARD, MANAGED_BY_LABEL, ObjectsError, OfferedSecret, Owner, Precondition,
+    Principal, ResourceVersion, SharedDraft, SharedKind, Stored, config_name, config_references,
 };
 use serde_json::{Value, json};
 
@@ -709,6 +709,16 @@ enum Fault {
     DropsOrphans,
     /// `list_orphans` lists the configs of GitOps as well.
     ListsGitOpsConfigsAsOrphans,
+    /// The events of an agent are those of every agent.
+    EventsOfEveryAgent,
+    /// The events are not bounded.
+    EventsUnbounded,
+    /// The events are the oldest first.
+    EventsOldestFirst,
+    /// The messages are as written.
+    EventsUncleaned,
+    /// The events of an agent that is not there are an empty list.
+    EventsOfNobody,
 }
 
 struct Faulty {
@@ -722,6 +732,8 @@ struct Faulty {
     orphans: Mutex<BTreeSet<String>>,
     /// The configs seeded as GitOps's.
     foreign_configs: Mutex<BTreeSet<String>>,
+    /// Every event planted, as written.
+    raw_events: Mutex<Vec<testkit::EventSeed>>,
 }
 
 fn faulty(fault: Fault) -> Faulty {
@@ -732,6 +744,7 @@ fn faulty(fault: Fault) -> Faulty {
         tokens: Mutex::default(),
         orphans: Mutex::default(),
         foreign_configs: Mutex::default(),
+        raw_events: Mutex::default(),
     }
 }
 
@@ -1035,9 +1048,63 @@ impl AgentObjects for Faulty {
         }
         Ok(offered)
     }
+
+    async fn agent_events(&self, name: &str) -> Result<Vec<AgentEvent>, ObjectsError> {
+        let raw = self.raw_events.lock().unwrap().clone();
+        let events = |keep: &dyn Fn(&testkit::EventSeed) -> bool| -> Vec<AgentEvent> {
+            raw.iter()
+                .filter(|e| keep(e))
+                .map(|e| {
+                    AgentEvent::new(
+                        EventType::parse(&e.event_type),
+                        &e.reason,
+                        &e.message,
+                        (&e.object_kind, &e.object_name),
+                        e.count,
+                        &e.first_seen,
+                        &e.last_seen,
+                    )
+                })
+                .collect()
+        };
+        match self.fault {
+            Fault::EventsOfEveryAgent => {
+                self.inner.agent_events(name).await?;
+                Ok(aap_ports::newest_first(events(&|_| true)))
+            }
+            Fault::EventsUnbounded => {
+                self.inner.agent_events(name).await?;
+                let mut all = events(&|e| e.object_name == name);
+                all.sort_by(|a, b| b.last_seen.cmp(&a.last_seen));
+                Ok(all)
+            }
+            Fault::EventsOldestFirst => {
+                let mut got = self.inner.agent_events(name).await?;
+                got.reverse();
+                Ok(got)
+            }
+            Fault::EventsUncleaned => {
+                self.inner.agent_events(name).await?;
+                let mut got = aap_ports::newest_first(events(&|e| e.object_name == name));
+                for e in &mut got {
+                    if let Some(seed) = raw.iter().find(|s| s.reason == e.reason) {
+                        e.message.clone_from(&seed.message);
+                    }
+                }
+                Ok(got)
+            }
+            Fault::EventsOfNobody => Ok(self.inner.agent_events(name).await.unwrap_or_default()),
+            _ => self.inner.agent_events(name).await,
+        }
+    }
 }
 
 impl ObjectsUnderTest for Faulty {
+    async fn seed_event(&self, agent: &str, event: &testkit::EventSeed) {
+        self.raw_events.lock().unwrap().push(event.clone());
+        ObjectsUnderTest::seed_event(&self.inner, agent, event).await;
+    }
+
     async fn seed_foreign(&self, kind: Kind, name: &str, spec: Value, how: Foreign) {
         if kind == Kind::AgentConfig {
             self.foreign_configs.lock().unwrap().insert(name.to_owned());
@@ -1239,6 +1306,21 @@ the_suite_fails! {
 
 // What the store writes, and what it answers.
 the_suite_fails! {
+    the_suite_fails_a_store_whose_events_are_every_agents:
+        Fault::EventsOfEveryAgent => the_events_of_an_agent_are_its_own_and_newest_first,
+        "the events of the agent, newest first";
+    the_suite_fails_a_store_whose_events_are_not_bounded:
+        Fault::EventsUnbounded => the_events_of_an_agent_are_bounded_to_the_newest,
+        "at most MAX_EVENTS";
+    the_suite_fails_a_store_whose_events_are_the_oldest_first:
+        Fault::EventsOldestFirst => the_events_of_an_agent_are_its_own_and_newest_first,
+        "the events of the agent, newest first";
+    the_suite_fails_a_store_whose_event_messages_are_as_written:
+        Fault::EventsUncleaned => an_event_message_is_cleaned_and_cut,
+        "reaches the answer";
+    the_suite_fails_a_store_that_has_events_for_an_agent_that_is_not_there:
+        Fault::EventsOfNobody => an_agent_without_events_has_none_and_one_that_is_not_there_is_not_found,
+        "the events of an agent that is not there: was accepted";
     the_suite_fails_a_store_that_does_not_label_what_it_writes:
         Fault::ForgetsTheLabel => an_agent_is_created_and_read_back,
         "carries the label of the dashboard";

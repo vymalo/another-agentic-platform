@@ -80,6 +80,7 @@
 #![warn(missing_docs)]
 #![cfg_attr(test, allow(clippy::unwrap_used, clippy::expect_used))]
 
+mod events;
 mod external;
 mod failure;
 mod stored;
@@ -89,7 +90,7 @@ use std::time::{Duration, Instant};
 
 use aap_api::{AgentConfig, AgentService, ModelEndpoint, ToolProvider};
 use aap_ports::{
-    Agent, AgentDraft, AgentObjects, ETag, FieldError, Kind, MANAGED_BY_DASHBOARD,
+    Agent, AgentDraft, AgentEvent, AgentObjects, ETag, FieldError, Kind, MANAGED_BY_DASHBOARD,
     MANAGED_BY_LABEL, OFFER_LABEL, ObjectsError, OfferedSecret, Precondition, SharedDraft,
     SharedKind, Stored, config_name, config_references,
 };
@@ -635,6 +636,18 @@ fn resource(kind: Kind) -> ApiResource {
     }
 }
 
+/// How the API server addresses an Event: `core/v1` (see `events.rs` for why not `events.k8s.io/v1`).
+fn event_resource() -> ApiResource {
+    ApiResource::from_gvk_with_plural(&GroupVersionKind::gvk("", "v1", "Event"), "events")
+}
+
+/// How many events one page of the list asks for, and how many pages are read at most: a namespace's events expire after an
+/// hour by default, so a namespace with more than the product is not a namespace of this API (what is left unread is the
+/// oldest the server happens to list last, and the answer is the newest 100 of what was read, so a very busy namespace shows
+/// fewer than 100 for one agent rather than a wrong one).
+const EVENT_PAGE: u32 = 500;
+const EVENT_PAGES: usize = 10;
+
 /// How the API server addresses an ExternalSecret.
 fn external_secret_resource() -> ApiResource {
     ApiResource::from_gvk_with_plural(
@@ -1065,5 +1078,50 @@ impl AgentObjects for KubernetesObjects {
         let offers: BTreeSet<OfferedSecret> =
             list.items.iter().flat_map(external::offers_of).collect();
         Ok(offers.into_iter().collect())
+    }
+
+    async fn agent_events(&self, name: &str) -> Result<Vec<AgentEvent>, ObjectsError> {
+        if self.get(Kind::AgentService, name).await?.is_none() {
+            return Err(ObjectsError::NotFound {
+                kind: Kind::AgentService,
+                name: name.to_owned(),
+            });
+        }
+        // An event is attributed to an agent only when no other agent could own it, so the other agents are needed.
+        let agents: Vec<String> = self
+            .list(Kind::AgentService)
+            .await?
+            .into_iter()
+            .map(|live| live.stored.name)
+            .collect();
+        let resource = event_resource();
+        let api: Api<DynamicObject> =
+            Api::namespaced_with(self.client.clone(), &self.namespace, &resource);
+        let mut params = ListParams::default().limit(EVENT_PAGE);
+        let mut mine: Vec<AgentEvent> = Vec::new();
+        for _ in 0..EVENT_PAGES {
+            let page = api
+                .list(&params)
+                .await
+                .map_err(|e| failed(&resource, classify(e)))?;
+            for item in &page.items {
+                let Ok(event) = serde_json::to_value(item) else {
+                    continue;
+                };
+                let Some((kind, object)) = events::involved(&event) else {
+                    continue;
+                };
+                if events::is_only_about(name, &agents, kind, object)
+                    && let Some(event) = events::read(&event)
+                {
+                    mine.push(event);
+                }
+            }
+            match page.metadata.continue_.as_deref() {
+                Some(token) if !token.is_empty() => params = params.continue_token(token),
+                _ => break,
+            }
+        }
+        Ok(aap_ports::newest_first(mine))
     }
 }

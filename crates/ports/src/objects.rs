@@ -723,4 +723,21 @@ pub trait AgentObjects: Send + Sync {
     fn offered_secrets(
         &self,
     ) -> impl Future<Output = Result<Vec<OfferedSecret>, ObjectsError>> + Send;
+
+    /// The events about the objects of one agent (K8, §60a *Events*): its `AgentService`, its `AgentConfig` and what the
+    /// runtime made for it, **the newest first and at most [`MAX_EVENTS`](crate::MAX_EVENTS)**
+    /// ([`newest_first`](crate::newest_first) is the one place that orders and bounds them). Only that agent's: an event about
+    /// another agent's object, or about an object that belongs to no agent, is never in it. Every text is as
+    /// [`AgentEvent::new`](crate::AgentEvent::new) makes it (cleaned and cut). An agent whose service is being deleted still
+    /// has its events.
+    ///
+    /// **Adding this method broke every implementer of the trait**, which must now have it (a required method, no default).
+    ///
+    /// # Errors
+    ///
+    /// [`ObjectsError::NotFound`] for an agent that has no `AgentService`; [`ObjectsError::Unavailable`].
+    fn agent_events(
+        &self,
+        name: &str,
+    ) -> impl Future<Output = Result<Vec<crate::AgentEvent>, ObjectsError>> + Send;
 }

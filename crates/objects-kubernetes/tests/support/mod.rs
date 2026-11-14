@@ -230,6 +230,18 @@ impl Fake {
             .map(|o| o.value.clone())
     }
 
+    /// Store an object as it is, with no defaults and no managed fields: an Event, which an API server's recorders write
+    /// and the dashboard only reads.
+    pub fn put_raw(&self, plural: &str, name: &str, value: Value) {
+        lock(&self.state).objects.insert(
+            key(plural, name),
+            Obj {
+                value,
+                entries: Vec::new(),
+            },
+        );
+    }
+
     /// Change an object as somebody else would, now.
     pub fn edit(&self, edit: impl FnOnce(&mut State)) {
         edit(&mut lock(&self.state));
@@ -588,6 +600,7 @@ fn kind_of(plural: &str) -> (&'static str, &'static str) {
         "toolproviders" => ("agents.vymalo.com/v1alpha1", "ToolProvider"),
         "externalsecrets" => ("external-secrets.io/v1", "ExternalSecret"),
         "secrets" => ("v1", "Secret"),
+        "events" => ("v1", "Event"),
         _ => ("v1", "Unknown"),
     }
 }

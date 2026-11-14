@@ -1,0 +1,100 @@
+{
+  "kind": "EventList",
+  "apiVersion": "v1",
+  "metadata": { "resourceVersion": "5821" },
+  "items": [
+    {
+      "metadata": { "name": "coder-7d9f8b6c5-x2x4q.18a1b2c3d4e5f601", "namespace": "agents", "uid": "00000000-0000-0000-0000-000000000001", "resourceVersion": "5801", "creationTimestamp": "2026-11-14T10:00:05Z" },
+      "involvedObject": { "kind": "Pod", "namespace": "agents", "name": "coder-7d9f8b6c5-x2x4q", "uid": "11111111-0000-0000-0000-000000000001", "apiVersion": "v1", "fieldPath": "spec.containers{agent}" },
+      "reason": "BackOff",
+      "message": "Back-off pulling image \"ghcr.io/example/coder:sha-0000000\"",
+      "source": { "component": "kubelet", "host": "node-1" },
+      "firstTimestamp": "2026-11-14T10:00:05Z",
+      "lastTimestamp": "2026-11-14T10:07:41Z",
+      "count": 12,
+      "type": "Normal",
+      "reportingComponent": "kubelet",
+      "reportingInstance": "node-1"
+    },
+    {
+      "metadata": { "name": "coder-7d9f8b6c5-x2x4q.18a1b2c3d4e5f602", "namespace": "agents", "uid": "00000000-0000-0000-0000-000000000002", "resourceVersion": "5802", "creationTimestamp": "2026-11-14T10:00:04Z" },
+      "involvedObject": { "kind": "Pod", "namespace": "agents", "name": "coder-7d9f8b6c5-x2x4q", "uid": "11111111-0000-0000-0000-000000000001", "apiVersion": "v1" },
+      "reason": "Failed",
+      "message": "Failed to pull image \"ghcr.io/example/coder:sha-0000000\": rpc error: code = NotFound desc = not found\nsecond line\u001b[31m",
+      "source": { "component": "kubelet", "host": "node-1" },
+      "firstTimestamp": "2026-11-14T10:00:04Z",
+      "lastTimestamp": "2026-11-14T10:07:40Z",
+      "count": 12,
+      "type": "Warning",
+      "reportingComponent": "kubelet",
+      "reportingInstance": "node-1"
+    },
+    {
+      "metadata": { "name": "coder-7d9f8b6c5.18a1b2c3d4e5f603", "namespace": "agents", "uid": "00000000-0000-0000-0000-000000000003", "resourceVersion": "5803", "creationTimestamp": "2026-11-14T10:00:03Z" },
+      "involvedObject": { "kind": "ReplicaSet", "namespace": "agents", "name": "coder-7d9f8b6c5", "uid": "11111111-0000-0000-0000-000000000002", "apiVersion": "apps/v1" },
+      "reason": "SuccessfulCreate",
+      "message": "Created pod: coder-7d9f8b6c5-x2x4q",
+      "source": { "component": "replicaset-controller" },
+      "firstTimestamp": "2026-11-14T10:00:03Z",
+      "lastTimestamp": "2026-11-14T10:00:03Z",
+      "count": 1,
+      "type": "Normal",
+      "reportingComponent": "replicaset-controller"
+    },
+    {
+      "metadata": { "name": "coder.18a1b2c3d4e5f604", "namespace": "agents", "uid": "00000000-0000-0000-0000-000000000004", "resourceVersion": "5804", "creationTimestamp": "2026-11-14T10:00:02Z" },
+      "involvedObject": { "kind": "Deployment", "namespace": "agents", "name": "coder", "uid": "11111111-0000-0000-0000-000000000003", "apiVersion": "apps/v1" },
+      "reason": "ScalingReplicaSet",
+      "message": "Scaled up replica set coder-7d9f8b6c5 to 1",
+      "source": { "component": "deployment-controller" },
+      "firstTimestamp": "2026-11-14T10:00:02Z",
+      "lastTimestamp": "2026-11-14T10:00:02Z",
+      "count": 1,
+      "type": "Normal"
+    },
+    {
+      "metadata": { "name": "coder.18a1b2c3d4e5f605", "namespace": "agents", "uid": "00000000-0000-0000-0000-000000000005", "resourceVersion": "5805", "creationTimestamp": "2026-11-14T10:00:01Z" },
+      "involvedObject": { "kind": "AgentService", "namespace": "agents", "name": "coder", "uid": "11111111-0000-0000-0000-000000000004", "apiVersion": "agents.vymalo.com/v1alpha1" },
+      "reason": "ConfigInvalid",
+      "message": "ModelEndpoint gateway was not found",
+      "source": { "component": "aap-operator" },
+      "firstTimestamp": "2026-11-14T10:00:01Z",
+      "lastTimestamp": "2026-11-14T10:00:01Z",
+      "count": 1,
+      "type": "Warning"
+    },
+    {
+      "metadata": { "name": "coder-ab.18a1b2c3d4e5f606", "namespace": "agents", "uid": "00000000-0000-0000-0000-000000000006", "resourceVersion": "5806", "creationTimestamp": "2026-11-14T10:00:06Z" },
+      "involvedObject": { "kind": "Pod", "namespace": "agents", "name": "coder-ab-6b7c8d9f4-abcde", "uid": "11111111-0000-0000-0000-000000000005", "apiVersion": "v1" },
+      "reason": "FailedScheduling",
+      "message": "0/3 nodes are available: 3 Insufficient memory.",
+      "source": { "component": "default-scheduler" },
+      "firstTimestamp": "2026-11-14T10:00:06Z",
+      "lastTimestamp": "2026-11-14T10:08:00Z",
+      "count": 4,
+      "type": "Warning"
+    },
+    {
+      "metadata": { "name": "node-1.18a1b2c3d4e5f607", "namespace": "agents", "uid": "00000000-0000-0000-0000-000000000007", "resourceVersion": "5807", "creationTimestamp": "2026-11-14T10:00:07Z" },
+      "involvedObject": { "kind": "Node", "name": "coder", "uid": "11111111-0000-0000-0000-000000000006" },
+      "reason": "NodeNotReady",
+      "message": "a node, not an object of an agent, though its name is the agent's",
+      "firstTimestamp": "2026-11-14T10:00:07Z",
+      "lastTimestamp": "2026-11-14T10:00:07Z",
+      "count": 1,
+      "type": "Warning"
+    },
+    {
+      "metadata": { "name": "coder-egress.18a1b2c3d4e5f608", "namespace": "agents", "uid": "00000000-0000-0000-0000-000000000008", "resourceVersion": "5808", "creationTimestamp": "2026-11-14T10:09:00Z" },
+      "involvedObject": { "kind": "Pod", "namespace": "agents", "name": "coder-egress-5f6d7c8b9-q1w2e", "uid": "11111111-0000-0000-0000-000000000007", "apiVersion": "v1" },
+      "reason": "Pulled",
+      "message": "Successfully pulled image",
+      "eventTime": "2026-11-14T10:09:00.123456Z",
+      "series": { "count": 2, "lastObservedTime": "2026-11-14T10:09:30.654321Z" },
+      "reportingController": "kubelet",
+      "reportingInstance": "node-1",
+      "source": {},
+      "type": "Normal"
+    }
+  ]
+}

@@ -112,6 +112,29 @@ pub enum Foreign {
     ArgoTracked,
 }
 
+/// An event as the cases plant it in a backend: raw, as a cluster writes one, so that the suite can show what the port does
+/// with a message that is too long or holds control characters.
+#[derive(Clone, Debug)]
+pub struct EventSeed {
+    /// The kind of the object it is about (`AgentService`, `Deployment`, `Pod`).
+    pub object_kind: String,
+    /// The object's name. **A name the backend attributes to the agent**: the agent's own name is one for every backend
+    /// (its service, its config and its workload are named so).
+    pub object_name: String,
+    /// `Normal` or `Warning`.
+    pub event_type: String,
+    /// The reason.
+    pub reason: String,
+    /// The message, as written.
+    pub message: String,
+    /// How many times.
+    pub count: u32,
+    /// `YYYY-MM-DDTHH:MM:SSZ`.
+    pub first_seen: String,
+    /// `YYYY-MM-DDTHH:MM:SSZ`.
+    pub last_seen: String,
+}
+
 /// An [`AgentObjects`](crate::AgentObjects) the suite can set up and inspect: what the cases need of
 /// a backend that the port itself does not offer (the dashboard writes no foreign object, no status and
 /// no ExternalSecret, and reads no Secret).
@@ -187,6 +210,9 @@ pub trait ObjectsUnderTest: crate::AgentObjects + 'static {
         key: &str,
         value: &str,
     ) -> impl Future<Output = ()> + Send;
+
+    /// An event about an object of the agent `agent` (see [`EventSeed::object_name`]).
+    fn seed_event(&self, agent: &str, event: &EventSeed) -> impl Future<Output = ()> + Send;
 
     /// The same backend, made unreachable, or `None` when this one cannot be (the case is then
     /// skipped).
@@ -507,7 +533,7 @@ pub fn sample_spec_with_run_pods(id: &RuntimeId) -> RuntimeSpec {
 pub mod auth;
 pub mod objects;
 
-pub use objects::{SECRET_VALUE, sample_agent, sample_agent_using, sample_shared};
+pub use objects::{SECRET_VALUE, event_seed, sample_agent, sample_agent_using, sample_shared};
 
 /// Cases of the runtime suite, as plain async functions for harnesses that do not use the macro.
 #[allow(missing_docs)] // each case is named for what it asserts

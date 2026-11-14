@@ -26,6 +26,7 @@ so they cannot drift from the CRDs; a body is read and written as the JSON the s
 | `put_shared` | `GET`, then the writes below for one object |
 | `delete_shared` | `GET`, `LIST` services and configs (who names it), `DELETE` |
 | `offered_secrets` | `LIST` `externalsecrets` with the label selector `agents.vymalo.com/offer=true` |
+| `agent_events` (K8) | `GET` the service, `LIST` services, `LIST` `events` (core/v1) of the namespace, 500 a page and at most 10 pages: see "The events of an agent" |
 
 ## A write
 
@@ -274,6 +275,7 @@ this table, row by row):
 |---|---|---|
 | `agents.vymalo.com` | `agentservices`, `agentconfigs`, `modelendpoints`, `toolproviders` | `create`, `delete`, `get`, `list`, `patch` |
 | `external-secrets.io` | `externalsecrets` | `list` |
+| (core) | `events` | `list` |
 
 **No right on Secrets**, not even `get`: `list` on Secrets would return their values (*verified 2026-10-05*,
 <https://kubernetes.io/docs/concepts/security/rbac-good-practices/>, "Listing secrets"). Against §60a's RBAC paragraph this is **fewer**:
