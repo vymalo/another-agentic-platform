@@ -144,6 +144,53 @@ fn the_coder_is_a_stateful_set_with_a_claim_per_replica() {
 }
 
 #[test]
+fn the_package_cache_is_the_users_claim_mounted_as_it_is() {
+    let r = resolved("coder", |_, c| {
+        set(
+            c,
+            "/spec/environment/cache",
+            json!({ "existingClaim": "package-cache" }),
+        );
+    });
+    let docs = rendered(&(r.id, r.runtime)).documents();
+    // K1: no object of ours is made for it: the claim is the person's, whatever the deletion policy says.
+    assert!(
+        !docs
+            .iter()
+            .any(|d| d["kind"] == "PersistentVolumeClaim" && d["metadata"]["name"] == "coder-cache"),
+        "{:?}",
+        kinds(&docs)
+    );
+    let sts = find(&docs, "StatefulSet", "coder");
+    let pod = &sts["spec"]["template"]["spec"];
+    let volume = pod["volumes"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|v| v["name"] == "cache")
+        .unwrap();
+    assert_eq!(
+        volume["persistentVolumeClaim"]["claimName"],
+        "package-cache"
+    );
+    assert!(volume["persistentVolumeClaim"].get("readOnly").is_none());
+    let mount = pod["containers"][0]["volumeMounts"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|m| m["name"] == "cache")
+        .unwrap();
+    assert_eq!(mount["mountPath"], "/cache");
+    assert!(
+        sts["spec"]["volumeClaimTemplates"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|t| t["metadata"]["name"] != "cache")
+    );
+}
+
+#[test]
 fn every_object_carries_the_labels_the_digest_and_the_owner() {
     let (id, spec) = coder();
     let docs = rendered(&(id, spec.clone())).documents();

@@ -93,6 +93,17 @@ the clash of two headers that want one variable from different Secrets. For an e
 the checks of the two `SecretKeyRef`s. This is why `ToolProvider` has no printer column for its URL: a URL with a password in it would
 be printed by `kubectl get` before any check had looked at it.
 
+## K1: a superset of adam-rs's operator's CRDs
+
+Slice K1 (2026-11-14) added what adam-rs's copy of this operator accepts and this one did not, with its serde names and bounds:
+`model.extraBody` (a free-form object), `model.echoReasoning` (`reasoning_content` | `reasoning`, `EchoReasoning`), `model.contextWindow`
+(1 to `MAX_CONTEXT_WINDOW`, 2^53 - 1), `coder.maxAccessTier` (`plan` | `edits` | `auto` | `bypass`, `AccessTierCap`),
+`environment.cache.existingClaim` (`Cache`), and on `A2aInterface` the default `enabled: true` of a written `a2a` and the rule above.
+They are optional, so an object that does not set them is what it was. **Nothing here validates them**: `aap-domain` refuses an `extraBody`
+that sets a member the runtime owns and a bad claim name. `tests/superset.rs` (`crd_is_superset_of_adam_rs`) holds every property path and enum value
+of adam-rs's two kinds in ours, against its CRD file vendored in `tests/vendored/` (`UPSTREAM` names the revision, `bec3e32`); to move it, re-vendor the file
+and read the failures.
+
 ## CEL rules (`x-kubernetes-validations`)
 
 Every rule §59a lists for the CRD is a CEL rule on the schema, so an API server refuses the
@@ -115,6 +126,7 @@ object. Each has an invalid example in [`examples/invalid`](../../examples/inval
 | `endpointRef`, or both `baseUrl` and `apiKeySecretRef` | `Model` (D1; **replaces** the schema's `required` on the two fields, which an `endpointRef` makes optional) |
 | `providerRef` is exclusive with `url` and `headers` | `McpServer` (D1) |
 | `url`, or `providerRef` | `McpServer` (D1; **replaces** the schema's `required` on `url`) |
+| an enabled `interfaces.a2a` (`enabled` absent is true) names `bearerTokensSecretRef` | `A2aInterface` (K1: adam-rs's rule; the example `a2a-no-token`) |
 | `*` only alone in `access.audience` | `Access.audience` (D1) |
 | an `access.audience` value is visible ASCII (`^[!-~]+$`; **decided by the owner on 2026-10-15**) | `Access.audience` (D1) |
 
@@ -175,6 +187,7 @@ and `tests/permission.rs` holds them equal to the sets §60a prints. The names a
 - `tests/crds.rs`: the identity of the four CRDs, every rule above is in the generated schema, the
   schema has no rule the tests do not know, the schema bounds the rules need, the optional fields, the shapes the
   dashboard's kinds share with the inline forms, and no string field is named like a secret.
+- `tests/superset.rs`: `crd_is_superset_of_adam_rs` (above).
 - `tests/examples.rs`: the examples round-trip through the types and **lose nothing** (a misspelt
   field would be dropped silently by serde); the valid ones pass every CEL rule; each invalid one
   is refused with the message it states; every rule has an invalid example; every bound of D1's fields has one,

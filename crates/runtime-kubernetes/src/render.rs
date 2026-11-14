@@ -1046,6 +1046,14 @@ impl Cx<'_> {
                     optional: None,
                 });
             }
+            VolumeSource::ExistingClaim { name } => {
+                // The user's claim, mounted as it is: no owner reference, so deleting the service
+                // never deletes it.
+                volume.persistent_volume_claim = Some(core::PersistentVolumeClaimVolumeSource {
+                    claim_name: name.clone(),
+                    read_only: None,
+                });
+            }
             VolumeSource::Scratch(scratch) => {
                 volume.empty_dir = Some(core::EmptyDirVolumeSource {
                     medium: scratch.in_memory.then(|| "Memory".to_owned()),

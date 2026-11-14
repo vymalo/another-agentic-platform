@@ -4,7 +4,10 @@
 use std::collections::BTreeSet;
 use std::fmt;
 
-use aap_api::{AgentConfig, AgentService, Binary, SecretKeyRef, Tools, Topology, VolumeScope};
+use aap_api::{
+    AgentConfig, AgentService, Binary, MAX_CONTEXT_WINDOW, SecretKeyRef, Tools, Topology,
+    VolumeScope,
+};
 
 use crate::contract::{self, env};
 use crate::externals::Externals;
@@ -384,6 +387,25 @@ fn check_config(v: &mut Issues, cfg: &AgentConfig, origins: &Origins) {
             format!("{me} spec.model"),
             "needs an endpointRef, or both a baseUrl and an apiKeySecretRef",
         ),
+    }
+
+    if let Some(body) = &model.extra_body {
+        for key in contract::MODEL_EXTRA_BODY_OWNED {
+            if body.contains_key(key) {
+                v.add(
+                    format!("{me} spec.model.extraBody.{key}"),
+                    "the runtime owns this member of every request: extraBody may not set it",
+                );
+            }
+        }
+    }
+    if let Some(window) = model.context_window
+        && !(1..=MAX_CONTEXT_WINDOW).contains(&window)
+    {
+        v.add(
+            format!("{me} spec.model.contextWindow"),
+            format!("{window}: a number of tokens from 1 to {MAX_CONTEXT_WINDOW} (adam exits 78 on anything else), or leave it out"),
+        );
     }
 
     check_tools(v, cfg, origins);
@@ -878,6 +900,15 @@ fn check_environment(v: &mut Issues, cfg: &AgentConfig) {
         v.add(format!("{me} {field}"), message);
     }
 
+    if let Some(cache) = &e.cache
+        && !is_dns_subdomain(&cache.existing_claim)
+    {
+        v.add(
+            format!("{me} spec.environment.cache.existingClaim"),
+            "the name of a PersistentVolumeClaim: lower-case letters, digits, `-` and `.`, at most 253 characters",
+        );
+    }
+    let cache_on = e.cache.is_some();
     let mut names = BTreeSet::new();
     let mut mounts: Vec<&str> = Vec::new();
     for vol in &e.volumes {
@@ -887,7 +918,9 @@ fn check_environment(v: &mut Issues, cfg: &AgentConfig) {
                 &at,
                 "a volume's name is a DNS label: a claim is named after it",
             );
-        } else if contract::RESERVED_VOLUMES.contains(&vol.name.as_str()) {
+        } else if contract::RESERVED_VOLUMES.contains(&vol.name.as_str())
+            || (cache_on && vol.name == contract::CACHE_VOLUME)
+        {
             v.add(&at, "the operator uses this volume name itself");
         }
         if !names.insert(vol.name.as_str()) {
@@ -905,7 +938,8 @@ fn check_environment(v: &mut Issues, cfg: &AgentConfig) {
                 "an absolute path with no empty, `.` or `..` segment",
             );
         } else {
-            for reserved in contract::RESERVED_MOUNTS {
+            let cache_dir = cache_on.then_some(contract::CACHE_DIR);
+            for reserved in contract::RESERVED_MOUNTS.iter().copied().chain(cache_dir) {
                 if paths_overlap(&vol.mount_path, reserved) {
                     v.add(
                         format!("{at}.mountPath"),

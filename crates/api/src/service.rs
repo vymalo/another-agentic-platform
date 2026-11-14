@@ -89,11 +89,14 @@ pub struct Interfaces {
 }
 
 /// The A2A surface of a service.
-#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize, JsonSchema)]
+// K1: the rule and the default of `enabled` are adam-rs's (its `A2aInterface`), so a document it accepts is read the same.
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize, KubeSchema)]
 #[serde(rename_all = "camelCase")]
+#[x_kube(validation = Rule::new("(has(self.enabled) && !self.enabled) || has(self.bearerTokensSecretRef)").message("interfaces.a2a needs bearerTokensSecretRef: no token, no server"))]
 pub struct A2aInterface {
-    /// Serve A2A. Without it the agent is not listed in the registry.
-    #[serde(default)]
+    /// Serve A2A. Without it the agent is not listed in the registry. A written `a2a` that omits it
+    /// serves A2A, as in adam-rs's operator; an absent `a2a` (or `interfaces`) is the default object, off.
+    #[serde(default = "a2a_enabled")]
     pub enabled: bool,
 
     /// The Secret key that holds the bearer tokens (`A2A_BEARER_TOKENS`). No token, no server:
@@ -104,6 +107,10 @@ pub struct A2aInterface {
     /// The URL clients reach the agent at (`PUBLIC_URL`). Empty: `http://<name>.<ns>.svc:8080/`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub public_url: Option<String>,
+}
+
+fn a2a_enabled() -> bool {
+    true
 }
 
 /// A surface the v0 operator does not serve.

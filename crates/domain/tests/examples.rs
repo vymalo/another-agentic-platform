@@ -10,7 +10,7 @@ use aap_ports::{
     DeletionPolicy, EnvValue, Role, RuntimeSpec, SecretRef, Sharing, StoreKind, VolumeSource,
     Workload,
 };
-use common::{must_resolve, remove, set};
+use common::{assert_issue, issues, must_resolve, remove, set};
 use serde_json::{Value, json};
 
 fn env_of<'a>(w: &'a Workload, name: &str) -> Option<&'a EnvValue> {
@@ -854,4 +854,178 @@ fn nothing_outside_the_contract_is_set_unless_the_user_asked() {
             }
         }
     }
+}
+
+// ------------------------------------------------------------- K1: what adam-rs's operator accepts too
+
+#[test]
+fn extra_body_owned_member_is_config_invalid() {
+    for owned in ["model", "messages", "tools", "tool_choice", "stream"] {
+        let found = issues("coder", |_, c| {
+            set(
+                c,
+                "/spec/model/extraBody",
+                json!({ "reasoning_effort": "medium", owned: 1 }),
+            );
+        });
+        assert_issue(
+            &found,
+            &format!("spec.model.extraBody.{owned}"),
+            "the runtime owns this member",
+        );
+    }
+    // a member of its own is fine and is one canonical JSON text, sorted by key
+    let r = must_resolve("coder", |_, c| {
+        set(
+            c,
+            "/spec/model/extraBody",
+            json!({ "reasoning_effort": "medium", "chat_template_kwargs": { "thinking": true } }),
+        );
+    });
+    let w = workload(&r.runtime, "coder");
+    assert_eq!(
+        lit(w, env::MODEL_EXTRA_BODY),
+        r#"{"chat_template_kwargs":{"thinking":true},"reasoning_effort":"medium"}"#
+    );
+    // an empty object sets nothing
+    let r = must_resolve("coder", |_, c| set(c, "/spec/model/extraBody", json!({})));
+    unset(workload(&r.runtime, "coder"), env::MODEL_EXTRA_BODY);
+}
+
+#[test]
+fn echo_reasoning_and_context_window_are_variables_of_the_workers() {
+    let r = must_resolve("coder", |_, c| {
+        set(c, "/spec/model/echoReasoning", json!("reasoning_content"));
+        set(c, "/spec/model/contextWindow", json!(128_000));
+    });
+    let w = workload(&r.runtime, "coder");
+    assert_eq!(lit(w, env::MODEL_ECHO_REASONING), "reasoning_content");
+    assert_eq!(lit(w, env::MODEL_CONTEXT_WINDOW), "128000");
+    let r = must_resolve("coder", |_, c| {
+        set(c, "/spec/model/echoReasoning", json!("reasoning"))
+    });
+    assert_eq!(
+        lit(workload(&r.runtime, "coder"), env::MODEL_ECHO_REASONING),
+        "reasoning"
+    );
+    // none of the three on the pods of a plain coder
+    let r = must_resolve("coder", no_change);
+    let w = workload(&r.runtime, "coder");
+    for name in [
+        env::MODEL_EXTRA_BODY,
+        env::MODEL_ECHO_REASONING,
+        env::MODEL_CONTEXT_WINDOW,
+        env::MAX_ACCESS_TIER,
+    ] {
+        unset(w, name);
+    }
+    // the window is a number of tokens from 1 to 2^53 - 1
+    for bad in [0_i64, 9_007_199_254_740_992] {
+        let found = issues("coder", |_, c| {
+            set(c, "/spec/model/contextWindow", json!(bad))
+        });
+        assert_issue(&found, "spec.model.contextWindow", "a number of tokens");
+    }
+}
+
+#[test]
+fn max_access_tier_is_on_every_role_of_a_coder_and_unset_by_default() {
+    for tier in ["plan", "edits", "auto", "bypass"] {
+        let r = must_resolve("coder", |s, c| {
+            set(s, "/spec/scaling/topology", json!("split"));
+            set(c, "/spec/harness/adam/coder/maxAccessTier", json!(tier));
+        });
+        assert_eq!(r.runtime.workloads.len(), 2);
+        for w in &r.runtime.workloads {
+            assert_eq!(lit(w, env::MAX_ACCESS_TIER), tier, "{}", w.name);
+        }
+    }
+    let r = must_resolve("coder", no_change);
+    unset(workload(&r.runtime, "coder"), env::MAX_ACCESS_TIER);
+}
+
+#[test]
+fn cache_mounts_at_slash_cache() {
+    let r = must_resolve("coder", |_, c| {
+        set(
+            c,
+            "/spec/environment/cache",
+            json!({ "existingClaim": "package-cache" }),
+        );
+    });
+    let w = workload(&r.runtime, "coder");
+    let volume = w.volumes.iter().find(|v| v.name == "cache").unwrap();
+    assert_eq!(
+        volume.source,
+        VolumeSource::ExistingClaim {
+            name: "package-cache".to_owned()
+        }
+    );
+    let mount = w
+        .container
+        .mounts
+        .iter()
+        .find(|m| m.volume == "cache")
+        .unwrap();
+    assert_eq!((mount.path.as_str(), mount.read_only), ("/cache", false));
+    // the claim is the user's: no claim of the service's is made for it
+    assert!(!w.volumes.iter().any(
+        |v| matches!(&v.source, VolumeSource::Persistent(p) if p.sharing == Sharing::Shared)
+            && v.name == "cache"
+    ));
+    // a split front runs no toolchain and has no cache
+    let r = must_resolve("coder", |s, c| {
+        set(s, "/spec/scaling/topology", json!("split"));
+        set(
+            c,
+            "/spec/environment/cache",
+            json!({ "existingClaim": "package-cache" }),
+        );
+    });
+    let front = workload(&r.runtime, "coder-front");
+    assert!(front.volumes.iter().all(|v| v.name != "cache"));
+    let worker = workload(&r.runtime, "coder");
+    assert!(worker.volumes.iter().any(|v| v.name == "cache"));
+}
+
+#[test]
+fn the_cache_claim_is_a_name_and_its_volume_and_path_are_the_operators() {
+    let found = issues("coder", |_, c| {
+        set(
+            c,
+            "/spec/environment/cache",
+            json!({ "existingClaim": "Not A Name" }),
+        )
+    });
+    assert_issue(
+        &found,
+        "spec.environment.cache.existingClaim",
+        "PersistentVolumeClaim",
+    );
+    let found = issues("coder", |_, c| {
+        set(
+            c,
+            "/spec/environment/cache",
+            json!({ "existingClaim": "package-cache" }),
+        );
+        set(
+            c,
+            "/spec/environment/volumes/1",
+            json!({ "name": "cache", "scope": "agent", "mountPath": "/data/cache", "source": { "persistent": { "size": "1Gi" } } }),
+        );
+    });
+    assert_issue(&found, "volumes[cache]", "uses this volume name itself");
+    let found = issues("coder", |_, c| {
+        set(
+            c,
+            "/spec/environment/cache",
+            json!({ "existingClaim": "package-cache" }),
+        );
+        set(
+            c,
+            "/spec/environment/volumes/1",
+            json!({ "name": "pkgs", "scope": "agent", "mountPath": "/cache/npm", "source": { "persistent": { "size": "1Gi" } } }),
+        );
+    });
+    assert_issue(&found, "volumes[pkgs].mountPath", "overlaps /cache");
 }

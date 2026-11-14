@@ -152,6 +152,9 @@ fn project(spec: &RuntimeSpec, svc: &str) -> Value {
                     "sizeLimit": scratch.size_limit,
                 })),
                 VolumeSource::AccountToken => volumes.push(account_token_volume(&v.name)),
+                // The user's own claim: mounted by name, and no claim of the service's is made for it.
+                VolumeSource::ExistingClaim { name } => volumes
+                    .push(json!({"name": v.name, "kind": "persistentVolumeClaim", "claim": name})),
             }
         }
         let stateful = w.stable_identity || !templates.is_empty();
@@ -953,7 +956,16 @@ fn every_variable_of_the_contract_is_covered_by_a_golden_or_a_test() {
         .collect();
     assert_eq!(
         unseen,
-        vec![&"ADAM_AGENT_DIR", &"GITHUB_APP_INSTALLATION_ID"],
+        // K1: the four variables of adam-rs's operator are covered in tests/examples.rs until the goldens `coder-cache`
+        // and `coder-tiers` are rendered (they need helm: crates/domain/tests/golden/README.md, "K1").
+        vec![
+            &"MODEL_EXTRA_BODY",
+            &"MODEL_ECHO_REASONING",
+            &"MODEL_CONTEXT_WINDOW",
+            &"ADAM_AGENT_DIR",
+            &"MAX_ACCESS_TIER",
+            &"GITHUB_APP_INSTALLATION_ID"
+        ],
         "the contract names a variable no golden sets: cover it in tests/examples.rs"
     );
 }

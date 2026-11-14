@@ -87,6 +87,11 @@ fn every_kind_is_namespaced_v1alpha1_of_the_platform_group() {
 
 /// The rules §59a, "Validation", lists for the CRD. `(rule, message)`.
 const SPEC_RULES: &[(&str, &str)] = &[
+    // K1, adam-rs's rule: an enabled A2A surface has a token (no token, no server)
+    (
+        "(has(self.enabled) && !self.enabled) || has(self.bearerTokensSecretRef)",
+        "interfaces.a2a needs bearerTokensSecretRef: no token, no server",
+    ),
     // interfaces.responses.enabled and interfaces.mcp.enabled must be false (one field type, used twice)
     (
         "self == false",

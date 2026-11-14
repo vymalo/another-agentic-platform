@@ -39,6 +39,22 @@ spec:
               environment:
                 description: The image, resources and volumes of the agent's pods.
                 properties:
+                  cache:
+                    description: |-
+                      The shared package cache: a claim you manage, mounted at `/cache` in every pod that runs
+                      toolchains (adam-rs ADR 0040). Unset: `/cache` is a directory of the container.
+                    nullable: true
+                    properties:
+                      existingClaim:
+                        description: |-
+                          The name of a PersistentVolumeClaim in the service's namespace, `ReadWriteMany`, that you manage and
+                          whose root is writable by uid and gid 10001. The operator creates and deletes nothing; a missing
+                          claim keeps the pod `Pending`.
+                        minLength: 1
+                        type: string
+                    required:
+                    - existingClaim
+                    type: object
                   image:
                     description: |-
                       The image. adam-rs ships one image for both binaries. Absent: the operator's default coder
@@ -315,6 +331,15 @@ spec:
                             description: '`GITHUB_API_URL`.'
                             nullable: true
                             type: string
+                          maxAccessTier:
+                            description: The highest access tier a deployment lets a person pick (`access-tier/v1`).
+                            enum:
+                            - plan
+                            - edits
+                            - auto
+                            - bypass
+                            nullable: true
+                            type: string
                           maxCheckCycles:
                             description: '`MAX_CHECK_CYCLES`.'
                             format: int32
@@ -441,6 +466,23 @@ spec:
                     x-kubernetes-validations:
                     - message: exactly one of baseUrl.value and baseUrl.secretRef
                       rule: has(self.value) != has(self.secretRef)
+                  contextWindow:
+                    description: |-
+                      The context window of the model `model` names, in tokens (`MODEL_CONTEXT_WINDOW`): what each
+                      usage report of a call on that alias says as its window, so a screen shows how full the context
+                      is. Unset: reports carry no window.
+                    format: int64
+                    maximum: 9007199254740991.0
+                    minimum: 1.0
+                    nullable: true
+                    type: integer
+                  echoReasoning:
+                    description: The member a model's earlier reasoning is sent back under.
+                    enum:
+                    - reasoning_content
+                    - reasoning
+                    nullable: true
+                    type: string
                   endpointRef:
                     description: |-
                       A `ModelEndpoint` of the same namespace that holds the address and the key (AD-029).
@@ -456,6 +498,13 @@ spec:
                     required:
                     - name
                     type: object
+                  extraBody:
+                    description: |-
+                      A JSON object merged into every chat-completions request (`MODEL_EXTRA_BODY`), to make a gateway
+                      or a model emit its reasoning, for example `{reasoning_effort: medium}`. Not a secret: it shows in
+                      the pod's environment. It may not set `model`, `messages`, `tools`, `tool_choice` or `stream`.
+                    type: object
+                    x-kubernetes-preserve-unknown-fields: true
                   model:
                     description: The model alias (`MODEL`).
                     minLength: 1
@@ -870,14 +919,19 @@ spec:
                         - name
                         type: object
                       enabled:
-                        default: false
-                        description: Serve A2A. Without it the agent is not listed in the registry.
+                        default: true
+                        description: |-
+                          Serve A2A. Without it the agent is not listed in the registry. A written `a2a` that omits it
+                          serves A2A, as in adam-rs's operator; an absent `a2a` (or `interfaces`) is the default object, off.
                         type: boolean
                       publicUrl:
                         description: 'The URL clients reach the agent at (`PUBLIC_URL`). Empty: `http://<name>.<ns>.svc:8080/`.'
                         nullable: true
                         type: string
                     type: object
+                    x-kubernetes-validations:
+                    - message: 'interfaces.a2a needs bearerTokensSecretRef: no token, no server'
+                      rule: (has(self.enabled) && !self.enabled) || has(self.bearerTokensSecretRef)
                   mcp:
                     default:
                       enabled: false

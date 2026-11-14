@@ -481,6 +481,20 @@ impl<'a> Cx<'a> {
                     read_only: false,
                 });
             }
+            // The shared package cache: where the image keeps the caches of npm, pnpm and cargo.
+            if let Some(cache) = &spec.environment.cache {
+                volumes.push(VolumeSpec {
+                    name: contract::CACHE_VOLUME.to_owned(),
+                    source: VolumeSource::ExistingClaim {
+                        name: cache.existing_claim.clone(),
+                    },
+                });
+                mounts.push(Mount {
+                    volume: contract::CACHE_VOLUME.to_owned(),
+                    path: contract::CACHE_DIR.to_owned(),
+                    read_only: false,
+                });
+            }
         }
         if let Some(f) = folder {
             volumes.push(f.clone());
@@ -712,6 +726,13 @@ impl<'a> Cx<'a> {
         if serves_a2a {
             e.push(lit(env::PUBLIC_URL, &self.public_url));
         }
+        // Every role reads the cap: the control plane declares the tiers up to it and refuses a
+        // higher one, a worker's tools check it again. Nothing is set for the default (`auto`).
+        if self.is_coder
+            && let Some(max) = self.coder.and_then(|c| c.max_access_tier)
+        {
+            e.push(lit(env::MAX_ACCESS_TIER, max.as_str()));
+        }
         if self.config.spec.harness.adam.agent.folder.is_some() {
             e.push(lit(env::ADAM_AGENT_DIR, contract::AGENT_DIR));
         }
@@ -740,6 +761,20 @@ impl<'a> Cx<'a> {
                 }
             }
             e.push(lit(env::MODEL, &spec.model.model));
+            if let Some(body) = &spec.model.extra_body
+                && !body.is_empty()
+            {
+                e.push(lit(
+                    env::MODEL_EXTRA_BODY,
+                    crate::digest::canonical_json(&serde_json::Value::Object(body.clone())),
+                ));
+            }
+            if let Some(echo) = spec.model.echo_reasoning {
+                e.push(lit(env::MODEL_ECHO_REASONING, echo.as_str()));
+            }
+            if let Some(window) = spec.model.context_window {
+                e.push(lit(env::MODEL_CONTEXT_WINDOW, window.to_string()));
+            }
             if let Some(c) = self.coder {
                 if let Some(m) = &c.opencode_model {
                     e.push(lit(env::OPENCODE_MODEL, m));

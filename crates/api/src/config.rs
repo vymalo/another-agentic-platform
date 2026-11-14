@@ -198,6 +198,11 @@ pub struct Coder {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub opencode_model: Option<String>,
 
+    /// `MAX_ACCESS_TIER`: the highest access tier a person may pick for a message, on every role.
+    /// Unset: `auto`. `bypass` (renaming and deleting repositories) is the deployment's opt-in.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_access_tier: Option<AccessTierCap>,
+
     /// How the coder authenticates to GitHub.
     pub github: Github,
 
@@ -226,6 +231,33 @@ pub struct RunPods {
     #[serde(default = "standard_class")]
     #[schemars(length(min = 1))]
     pub size_class: String,
+}
+
+/// The highest access tier a deployment lets a person pick (`access-tier/v1`).
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "lowercase")]
+pub enum AccessTierCap {
+    /// Read and plan only.
+    Plan,
+    /// Also change files, commit, push and open pull requests.
+    Edits,
+    /// Also merge pull requests and create repositories (the coder's default).
+    Auto,
+    /// Also rename and delete repositories, with no consent form for a repository.
+    Bypass,
+}
+
+impl AccessTierCap {
+    /// The value of `MAX_ACCESS_TIER`.
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Plan => "plan",
+            Self::Edits => "edits",
+            Self::Auto => "auto",
+            Self::Bypass => "bypass",
+        }
+    }
 }
 
 /// The size class of a `runPods` that names none.
@@ -318,6 +350,55 @@ pub struct Model {
     /// `endpointRef` is set.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub api_key_secret_ref: Option<SecretKeyRef>,
+
+    /// A JSON object merged into every chat-completions request (`MODEL_EXTRA_BODY`), to make a gateway
+    /// or a model emit its reasoning, for example `{reasoning_effort: medium}`. Not a secret: it shows in
+    /// the pod's environment. It may not set `model`, `messages`, `tools`, `tool_choice` or `stream`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schemars(schema_with = "free_form_object")]
+    pub extra_body: Option<serde_json::Map<String, serde_json::Value>>,
+
+    /// Send the reasoning of earlier turns back to the model, under this member name
+    /// (`MODEL_ECHO_REASONING`). Unset: never sent, which is what almost every model wants.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub echo_reasoning: Option<EchoReasoning>,
+
+    /// The context window of the model `model` names, in tokens (`MODEL_CONTEXT_WINDOW`): what each
+    /// usage report of a call on that alias says as its window, so a screen shows how full the context
+    /// is. Unset: reports carry no window.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schemars(range(min = 1, max = MAX_CONTEXT_WINDOW), extend("format" = "int64"))]
+    pub context_window: Option<u64>,
+}
+
+/// The largest `model.contextWindow`: 2^53 - 1, the largest count a usage report carries (what
+/// `adam_service::MAX_CONTEXT_WINDOW` accepts).
+pub const MAX_CONTEXT_WINDOW: u64 = (1 << 53) - 1;
+
+/// The member a model's earlier reasoning is sent back under.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum EchoReasoning {
+    /// `reasoning_content`.
+    ReasoningContent,
+    /// `reasoning`.
+    Reasoning,
+}
+
+impl EchoReasoning {
+    /// The value of `MODEL_ECHO_REASONING`.
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::ReasoningContent => "reasoning_content",
+            Self::Reasoning => "reasoning",
+        }
+    }
+}
+
+/// An object whose members the schema does not describe.
+fn free_form_object(_: &mut schemars::SchemaGenerator) -> schemars::Schema {
+    schemars::json_schema!({ "type": "object", "x-kubernetes-preserve-unknown-fields": true })
 }
 
 /// The model endpoint: a plain value, or a Secret key when the deployment keeps it out of git.
@@ -450,6 +531,11 @@ pub struct Environment {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub resources: Option<ResourceRequirements>,
 
+    /// The shared package cache: a claim you manage, mounted at `/cache` in every pod that runs
+    /// toolchains (adam-rs ADR 0040). Unset: `/cache` is a directory of the container.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cache: Option<Cache>,
+
     /// Volumes. None: the operator renders a Deployment.
     #[serde(default)]
     pub volumes: Vec<Volume>,
@@ -458,6 +544,19 @@ pub struct Environment {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[schemars(range(min = 0))]
     pub termination_grace_period_seconds: Option<i64>,
+}
+
+/// The package cache of the agent's pods: npm's, pnpm's and cargo's caches, which the image keeps under
+/// `/cache`. One trust domain: whatever a run writes there every run reads, so share the claim only with
+/// agents you trust.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct Cache {
+    /// The name of a PersistentVolumeClaim in the service's namespace, `ReadWriteMany`, that you manage and
+    /// whose root is writable by uid and gid 10001. The operator creates and deletes nothing; a missing
+    /// claim keeps the pod `Pending`.
+    #[schemars(length(min = 1))]
+    pub existing_claim: String,
 }
 
 /// An image.
