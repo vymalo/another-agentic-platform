@@ -7,6 +7,7 @@
 //! `ModelEndpoint` was deleted `ConfigInvalid` at once and not at its next timer.
 
 use std::collections::BTreeSet;
+use std::sync::Arc;
 
 use aap_api::{AgentConfig, AgentService, ModelEndpoint, ToolProvider};
 use aap_domain::{References, references};
@@ -20,6 +21,19 @@ fn services_using(
     namespace: Option<&str>,
     uses: impl Fn(&References) -> bool,
 ) -> Vec<ObjectRef<AgentService>> {
+    users(services, configs, namespace, uses)
+        .iter()
+        .map(|s| ObjectRef::from_obj(&**s))
+        .collect()
+}
+
+/// The services themselves, for the status of a shared object (K2): the same two hops.
+fn users(
+    services: &Store<AgentService>,
+    configs: &Store<AgentConfig>,
+    namespace: Option<&str>,
+    uses: impl Fn(&References) -> bool,
+) -> Vec<Arc<AgentService>> {
     let Some(namespace) = namespace else {
         return Vec::new();
     };
@@ -38,7 +52,7 @@ fn services_using(
         .filter(|s| {
             s.namespace().as_deref() == Some(namespace) && names.contains(&s.spec.config_ref.name)
         })
-        .map(|s| ObjectRef::from_obj(&**s))
+        .cloned()
         .collect()
 }
 
@@ -66,4 +80,49 @@ pub fn services_of_provider(
     services_using(services, configs, provider.namespace().as_deref(), |r| {
         r.tool_providers.contains(&name)
     })
+}
+
+/// The services that run a config naming `endpoint`, as the caches have them (K2: the users of a `ModelEndpoint`).
+pub(crate) fn users_of_endpoint(
+    services: &Store<AgentService>,
+    configs: &Store<AgentConfig>,
+    endpoint: &ModelEndpoint,
+) -> Vec<Arc<AgentService>> {
+    let name = endpoint.name_any();
+    users(services, configs, endpoint.namespace().as_deref(), |r| {
+        r.model_endpoint.as_deref() == Some(name.as_str())
+    })
+}
+
+/// The services that run a config naming `provider` (K2: the users of a `ToolProvider`).
+pub(crate) fn users_of_provider(
+    services: &Store<AgentService>,
+    configs: &Store<AgentConfig>,
+    provider: &ToolProvider,
+) -> Vec<Arc<AgentService>> {
+    let name = provider.name_any();
+    users(services, configs, provider.namespace().as_deref(), |r| {
+        r.tool_providers.contains(&name)
+    })
+}
+
+/// The shared objects of a namespace that `config` names: the endpoint, then the providers. What a changed or
+/// deleted config or service triggers (K2).
+pub(crate) fn endpoint_of_config(config: &AgentConfig) -> Vec<ObjectRef<ModelEndpoint>> {
+    let (Some(ns), Some(name)) = (config.namespace(), references(config).model_endpoint) else {
+        return Vec::new();
+    };
+    vec![ObjectRef::new(&name).within(&ns)]
+}
+
+/// The tool providers of a namespace that `config` names.
+pub(crate) fn providers_of_config(config: &AgentConfig) -> Vec<ObjectRef<ToolProvider>> {
+    let Some(ns) = config.namespace() else {
+        return Vec::new();
+    };
+    references(config)
+        .tool_providers
+        .iter()
+        .map(|name| ObjectRef::new(name).within(&ns))
+        .collect()
 }

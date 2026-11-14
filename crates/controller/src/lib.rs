@@ -5,6 +5,8 @@
 //! * [`Operator`] wires the two controllers to their triggers and runs them.
 //! * [`services_of_endpoint`] and [`services_of_provider`] say which services a changed `ModelEndpoint` or
 //!   `ToolProvider` concerns, for the watches the operator runs.
+//! * [`reconcile_endpoint`] and [`reconcile_provider`] write the status of the shared kinds (K2): who uses them, whether they
+//!   are valid, whether their agents are `Ready`.
 //! * [`reconcile_service`] and [`reconcile_config`] are one pass each, public so that a test can drive
 //!   them against the `Memory` providers and a fake API server.
 //! * [`derive`](mod@derive) is the pure part: what a pass saw, as conditions and a state.
@@ -27,6 +29,7 @@ mod operator;
 mod options;
 mod pass;
 mod service;
+mod shared;
 mod watches;
 
 pub use config::{config_error_policy, reconcile_config};
@@ -39,4 +42,8 @@ pub use metrics::{Metrics, name as metric};
 pub use operator::{Operator, Readiness};
 pub use options::{Options, RegistryMode, Resync};
 pub use service::{reconcile_service, service_error_policy};
+pub use shared::{
+    RESYNC, SharedContext, endpoint_error_policy, provider_error_policy, reconcile_endpoint,
+    reconcile_provider,
+};
 pub use watches::{services_of_endpoint, services_of_provider};
