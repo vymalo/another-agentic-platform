@@ -1,5 +1,5 @@
 # Refused: interfaces.a2a is enabled and names no bearerTokensSecretRef: no token, no server. (`enabled` left out is false here, as before K1:
-# adam-rs's operator reads it as true, and a manifest that writes `a2a` with a token alone must not turn an agent on.)
+# adam-rs's former operator (removed, its ADR 0046) read it as true, and a manifest that writes `a2a` with a token alone must not turn an agent on.)
 # expect: interfaces.a2a needs bearerTokensSecretRef: no token, no server
 apiVersion: agents.vymalo.com/v1alpha1
 kind: AgentService

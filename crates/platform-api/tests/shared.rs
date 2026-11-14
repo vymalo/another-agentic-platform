@@ -715,3 +715,170 @@ async fn an_object_with_a_member_no_form_says_is_yaml_only_and_a_form_may_not_re
     assert_eq!(r.code(), 409, "{}", r.text());
     assert!(r.is_problem("yaml-only"));
 }
+
+#[tokio::test]
+async fn model_detail_carries_status() {
+    let api = Api::new();
+    offer_everything(&api.objects);
+    let token = api.admin();
+    let created = api
+        .put("/v1/models/gateway")
+        .token(&token)
+        .create()
+        .json(&model_body("gateway"))
+        .send()
+        .await;
+    assert_eq!(created.code(), 201, "{}", created.text());
+    // Before the operator has written one, there is none.
+    let before = api
+        .get("/v1/models/gateway")
+        .token(&token)
+        .send()
+        .await
+        .json();
+    assert!(before.get("status").is_none(), "{before}");
+
+    api.objects.set_status(
+        Kind::ModelEndpoint,
+        "gateway",
+        json!({
+            "observedGeneration": 1,
+            "usedBy": ["alpha", "beta"],
+            "usedByMore": 3,
+            "conditions": [
+                { "type": "Accepted", "status": "True", "reason": "Valid", "message": "the object passed validation", "lastTransitionTime": "2026-11-14T00:00:00Z" },
+                { "type": "AgentsReady", "status": "False", "reason": "SomeNotReady", "message": "not Ready: beta", "lastTransitionTime": "2026-11-14T00:00:00Z" }
+            ],
+            "sentinel-in-status": "status-sentinel-9d2e"
+        }),
+    );
+    let got = api.get("/v1/models/gateway").token(&token).send().await;
+    let body = got.json();
+    assert_eq!(body["status"]["usedBy"], json!(["alpha", "beta"]), "{body}");
+    assert_eq!(body["status"]["usedByMore"], 3);
+    assert_eq!(body["status"]["observedGeneration"], 1);
+    assert_eq!(body["status"]["conditions"][1]["reason"], "SomeNotReady");
+    assert!(
+        !got.text().contains("status-sentinel-9d2e"),
+        "only what the status type names goes out: {}",
+        got.text()
+    );
+    // The list carries it too, and the object's own `usedBy` (the API's count of agents) is a different member.
+    let list = api.get("/v1/models").token(&token).send().await.json();
+    assert_eq!(
+        list["models"][0]["status"]["usedBy"],
+        json!(["alpha", "beta"])
+    );
+    assert_eq!(list["models"][0]["usedBy"], json!([]));
+}
+
+#[tokio::test]
+async fn tool_server_detail_carries_status() {
+    let api = Api::new();
+    offer_everything(&api.objects);
+    let token = api.admin();
+    let created = api
+        .put("/v1/tool-servers/search")
+        .token(&token)
+        .create()
+        .json(&tool_body("search"))
+        .send()
+        .await;
+    assert_eq!(created.code(), 201, "{}", created.text());
+    api.objects.set_status(
+        Kind::ToolProvider,
+        "search",
+        json!({ "usedBy": ["alpha"], "conditions": [] }),
+    );
+    let body = api
+        .get("/v1/tool-servers/search")
+        .token(&token)
+        .send()
+        .await
+        .json();
+    assert_eq!(body["status"]["usedBy"], json!(["alpha"]), "{body}");
+}
+
+/// K2: a status names agents. A person who writes tool servers and may not read agents is answered a replace with
+/// counts only, as a refusal is: no name of an agent, in `usedBy`, in the status or in a condition's message.
+#[tokio::test]
+async fn the_answer_to_a_replace_names_agents_only_to_a_token_that_may_read_them() {
+    let (api, admin) = Api::seeded().await;
+    assert_eq!(
+        make_agent(&api, &admin, &coder_body("coder-me"))
+            .await
+            .code(),
+        201
+    );
+    api.objects.set_status(
+        Kind::ToolProvider,
+        "docs",
+        json!({
+            "observedGeneration": 1,
+            "usedBy": ["coder-me", "chat"],
+            "usedByMore": 3,
+            "conditions": [
+                { "type": "InUse", "status": "True", "reason": "Referenced", "message": "named by 5 agents (3 are not listed in usedBy)", "lastTransitionTime": "2026-11-14T00:00:00Z" },
+                { "type": "AgentsReady", "status": "False", "reason": "SomeNotReady", "message": "not Ready: coder-me, chat and 3 more", "lastTransitionTime": "2026-11-14T00:00:00Z" }
+            ]
+        }),
+    );
+    let blind = api.token("blind", &[TOOLPROVIDERS_WRITE]);
+    let sighted = api.token("sighted", &[TOOLPROVIDERS_WRITE, AGENTS_READ]);
+
+    let docs = api.get("/v1/tool-servers/docs").token(&admin).send().await;
+    let blind_put = api
+        .put("/v1/tool-servers/docs")
+        .token(&blind)
+        .replace(&docs.etag())
+        .json(&open_tool_body("docs"))
+        .send()
+        .await;
+    assert_eq!(blind_put.code(), 200, "{}", blind_put.text());
+    let text = blind_put.text();
+    assert!(
+        !text.contains("coder-me") && !text.contains("chat"),
+        "no agent's name for a person who may not read agents: {text}"
+    );
+    let body = blind_put.json();
+    assert_eq!(body["usedBy"], json!([]));
+    assert_eq!(body["usedByCount"], 1, "the count is the API's own: {body}");
+    assert_eq!(body["status"]["usedBy"], json!([]), "{body}");
+    assert!(body["status"].get("usedByMore").is_none(), "{body}");
+    let ready = body["status"]["conditions"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|c| c["type"] == "AgentsReady")
+        .unwrap();
+    assert_eq!(ready["reason"], "SomeNotReady", "the reason stays: {ready}");
+    assert!(
+        !ready["message"].as_str().unwrap().contains(':'),
+        "the message names nobody: {ready}"
+    );
+    let in_use = body["status"]["conditions"][0]["message"].as_str().unwrap();
+    assert!(in_use.contains("5 agents"), "a count may stay: {in_use}");
+
+    // A holder of `agents.read` is told, as `GET` tells them.
+    let docs = api.get("/v1/tool-servers/docs").token(&admin).send().await;
+    let sighted_put = api
+        .put("/v1/tool-servers/docs")
+        .token(&sighted)
+        .replace(&docs.etag())
+        .json(&open_tool_body("docs"))
+        .send()
+        .await;
+    assert_eq!(sighted_put.code(), 200, "{}", sighted_put.text());
+    let body = sighted_put.json();
+    assert_eq!(body["usedBy"], json!(["coder-me"]));
+    assert_eq!(body["status"]["usedBy"], json!(["coder-me", "chat"]));
+    assert_eq!(body["usedByCount"], 1);
+    assert!(sighted_put.text().contains("not Ready: coder-me"));
+    let got = api
+        .get("/v1/tool-servers/docs")
+        .token(&sighted)
+        .send()
+        .await
+        .json();
+    assert_eq!(got["usedByCount"], 1);
+}

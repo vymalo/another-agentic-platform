@@ -15,12 +15,17 @@ rules:
   - apiGroups: [agents.vymalo.com]
     resources: [agentservices, agentconfigs]
     verbs: [get, list, watch, patch]
-  # aap-controller: the shared objects of the dashboard (AD-029) are read, to resolve a reference and to watch it, and never written.
+  # aap-controller: the shared objects of the dashboard (AD-029) are read, to resolve a reference and to watch it, and never written (their status is, below).
   - apiGroups: [agents.vymalo.com]
     resources: [modelendpoints, toolproviders]
     verbs: [get, list, watch]
   - apiGroups: [agents.vymalo.com]
     resources: [agentservices/status, agentconfigs/status]
+    verbs: [patch]
+  # aap-controller, K2: the status of the shared kinds (who uses them, whether they are valid, whether their agents are Ready), written
+  # by server-side apply and nothing more: `patch` on the status subresource only. The two kinds themselves stay read-only (the rule above).
+  - apiGroups: [agents.vymalo.com]
+    resources: [modelendpoints/status, toolproviders/status]
     verbs: [patch]
   - apiGroups: [events.k8s.io]
     resources: [events]

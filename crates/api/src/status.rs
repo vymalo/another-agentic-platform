@@ -113,6 +113,39 @@ pub struct AgentConfigStatus {
     pub conditions: Vec<Condition>,
 }
 
+/// What the controller observed of a `ModelEndpoint` or a `ToolProvider` (§60a, K2): who uses it, whether it is valid and
+/// whether the agents that use it are `Ready`. **No secret is ever in it**: no header value, no URL with credentials, no
+/// token; the names are those of `AgentService`s of the object's own namespace.
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct SharedStatus {
+    /// The `metadata.generation` the controller last judged.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub observed_generation: Option<i64>,
+
+    /// The `AgentService`s of the namespace that run a config naming this object, sorted, each once, **at most
+    /// [`MAX_USED_BY`]** (the operator's bound: the schema has none, because only the operator writes it): the rest are counted
+    /// in `usedByMore`.
+    #[serde(default)]
+    pub used_by: Vec<String>,
+
+    /// How many users are not in `usedBy` (absent when there are at most [`MAX_USED_BY`]).
+    #[serde(default, skip_serializing_if = "is_zero")]
+    pub used_by_more: i32,
+
+    /// `Accepted`, `InUse` and `AgentsReady`.
+    #[serde(default)]
+    pub conditions: Vec<Condition>,
+}
+
+fn is_zero(n: &i32) -> bool {
+    *n == 0
+}
+
+/// The most users a [`SharedStatus`] lists by name. The status of an object that a whole fleet names must stay
+/// a bounded size (every change of it is sent to every watcher).
+pub const MAX_USED_BY: usize = 64;
+
 /// Condition types (§59a, "Status").
 pub mod condition_type {
     /// AgentConfig: it passed the validation of `aap-domain`.
@@ -127,6 +160,12 @@ pub mod condition_type {
     pub const LISTED: &str = "Listed";
     /// AgentService: the first three are true.
     pub const READY: &str = "Ready";
+    /// ModelEndpoint, ToolProvider: the object passed the validation of `aap-domain` on its own (K2).
+    pub const ACCEPTED: &str = "Accepted";
+    /// ModelEndpoint, ToolProvider: whether an agent names it (K2). Informs.
+    pub const IN_USE: &str = "InUse";
+    /// ModelEndpoint, ToolProvider: whether the agents that name it are `Ready` (K2). Informs, gates nothing.
+    pub const AGENTS_READY: &str = "AgentsReady";
 }
 
 /// Condition reasons (§59a, "Status").
@@ -175,6 +214,18 @@ pub mod reason {
     pub const REGISTRY_DISABLED: &str = "RegistryDisabled";
     /// `Ready` true.
     pub const RECONCILED: &str = "Reconciled";
-    /// `Valid` true.
+    /// `Valid` true, and `Accepted` true.
     pub const VALID: &str = "Valid";
+    /// `Accepted` false: the object fails the validation of `aap-domain`; the message names each field.
+    pub const INVALID: &str = "Invalid";
+    /// `InUse` true.
+    pub const REFERENCED: &str = "Referenced";
+    /// `InUse` false.
+    pub const UNREFERENCED: &str = "Unreferenced";
+    /// `AgentsReady` true: every agent that names it is `Ready` or `Suspended` (healthy).
+    pub const ALL_READY: &str = "AllReady";
+    /// `AgentsReady` false: some agent that names it is not; the message names them.
+    pub const SOME_NOT_READY: &str = "SomeNotReady";
+    /// `AgentsReady` unknown: no agent names it, so there is nothing to be ready.
+    pub const NO_AGENTS: &str = "NoAgents";
 }

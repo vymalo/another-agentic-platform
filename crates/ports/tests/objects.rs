@@ -187,6 +187,7 @@ fn the_owner_is_on_the_wire_as_managed_by_says() {
 
 fn stored(kind: Kind, version: &str, labels: &[(&str, &str)]) -> Stored {
     Stored {
+        uid: "uid-1".into(),
         kind,
         namespace: "ns".into(),
         name: "a".into(),
@@ -286,10 +287,12 @@ fn a_token_binds_the_kind_and_the_name_as_well_as_the_version() {
         named(Kind::ToolProvider, "gateway", "7").etag(),
         "the kind"
     );
-    assert_ne!(
+    // The version of a shared object is not in its token (K2: the operator's status moves it): its generation and
+    // its uid are.
+    assert_eq!(
         base,
         named(Kind::ModelEndpoint, "gateway", "8").etag(),
-        "the version"
+        "a shared object's token does not move with the version"
     );
 
     let agent = |service: &str, config: &str, version: &str| Agent {
@@ -348,11 +351,28 @@ fn a_token_binds_the_kind_and_the_name_as_well_as_the_version() {
 }
 
 #[test]
-fn a_shared_object_has_a_token_of_its_own_version() {
-    let a = stored(Kind::ModelEndpoint, "7", &[]);
-    let b = stored(Kind::ModelEndpoint, "8", &[]);
+fn a_shared_object_has_a_token_of_its_generation_and_its_uid_and_not_of_its_version() {
+    let own = [(MANAGED_BY_LABEL, MANAGED_BY_DASHBOARD)];
+    let a = stored(Kind::ModelEndpoint, "7", &own);
+    let b = stored(Kind::ModelEndpoint, "8", &own);
     assert_eq!(a.etag(), a.clone().etag());
-    assert_ne!(a.etag(), b.etag());
+    assert_eq!(a.etag(), b.etag(), "a status write moves the version only");
+    let mut spec_changed = a.clone();
+    spec_changed.generation += 1;
+    assert_ne!(a.etag(), spec_changed.etag(), "the generation");
+    let mut made_again = a.clone();
+    made_again.uid = "uid-2".into();
+    assert_ne!(a.etag(), made_again.etag(), "the uid");
+    let mut adopted = a.clone();
+    adopted
+        .annotations
+        .insert(ARGO_TRACKING_ANNOTATION.to_owned(), "app:x".into());
+    assert_ne!(a.etag(), adopted.etag(), "who owns it");
+    // An agent's object keeps the version in its token.
+    assert_ne!(
+        stored(Kind::AgentConfig, "7", &[]).etag(),
+        stored(Kind::AgentConfig, "8", &[]).etag()
+    );
     assert_eq!(
         ETag::new(a.etag().as_str()),
         a.etag(),
@@ -718,6 +738,7 @@ fn faulty(fault: Fault) -> Faulty {
 /// What a store that accepted the draft would say is there.
 fn pretend(name: &str, draft: &AgentDraft) -> Agent {
     let object = |kind, spec: &Value| Stored {
+        uid: "uid-1".into(),
         kind,
         namespace: "aap-test".into(),
         name: name.into(),

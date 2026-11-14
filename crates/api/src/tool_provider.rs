@@ -7,6 +7,7 @@ use kube::{CustomResource, KubeSchema};
 use serde::{Deserialize, Serialize};
 
 use crate::config::McpHeader;
+use crate::status::SharedStatus;
 
 /// Where some tools come from: one remote MCP server. An `AgentConfig` names it with
 /// `spec.tools.mcpServers.<name>.providerRef`; the operator resolves the reference into the same
@@ -21,6 +22,7 @@ use crate::config::McpHeader;
     kind = "ToolProvider",
     plural = "toolproviders",
     namespaced,
+    status = "SharedStatus",
     derive = "PartialEq",
     doc = "Where tools come from, set once and named by the AgentConfigs that use it (spec.tools.mcpServers.<name>.providerRef). v0: one remote MCP server.",
     printcolumn(name = "Title", type_ = "string", json_path = ".spec.title"),

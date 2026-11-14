@@ -714,3 +714,100 @@ async fn a_request_that_is_never_answered_does_not_leave_a_new_service_without_a
     );
     r.stop().await;
 }
+
+/// K2: the shared kinds get a status from the controllers that `Operator::run` wires, and follow the agents: a service
+/// that becomes `Ready`, a config that stops naming an endpoint (the endpoint it left is told, though the new config
+/// does not name it), a service that goes.
+#[tokio::test]
+async fn a_shared_object_gets_its_status_and_follows_the_agents_that_use_it() {
+    let r = start(None).await;
+    running_dashboard(&r, "team").await;
+    let status =
+        |plural: &str, name: &str| r.fake.get(plural, "team", name).unwrap()["status"].clone();
+    eventually("the endpoint to list its user, Ready", || {
+        let s = status(ENDPOINTS, "gateway");
+        s["usedBy"] == json!(["coder-me"])
+            && s["conditions"].as_array().is_some_and(|c| {
+                c.iter()
+                    .any(|c| c["type"] == "AgentsReady" && c["status"] == "True")
+            })
+    })
+    .await;
+    eventually("the provider to list its user", || {
+        status(PROVIDERS, "websearch")["usedBy"] == json!(["coder-me"])
+    })
+    .await;
+
+    // The config goes inline for its model: the endpoint is no longer named, the provider still is.
+    let mut config = r.fake.get(CONFIGS, "team", "coder-me").unwrap();
+    config["spec"]["model"] = json!({
+        "baseUrl": { "value": "https://models.example/v1" },
+        "apiKeySecretRef": { "name": "agent-models", "key": "GATEWAY_API_KEY" },
+        "model": "coding-model"
+    });
+    r.fake.put(CONFIGS, config);
+    eventually("the endpoint it left to say so", || {
+        status(ENDPOINTS, "gateway")["usedBy"] == json!([])
+    })
+    .await;
+    assert_eq!(
+        status(PROVIDERS, "websearch")["usedBy"],
+        json!(["coder-me"])
+    );
+
+    // The service is deleted: the provider follows.
+    r.fake.delete(SERVICES, "team", "coder-me");
+    eventually("the provider to lose its user", || {
+        status(PROVIDERS, "websearch")["usedBy"] == json!([])
+    })
+    .await;
+    r.stop().await;
+}
+
+fn service_passes(r: &Running) -> u64 {
+    ["ok", "error"]
+        .iter()
+        .map(|result| {
+            r.metrics.get(
+                aap_controller::metric::RECONCILES,
+                &[("controller", "agentservice"), ("result", result)],
+            )
+        })
+        .sum()
+}
+
+/// K2: the operator writes a status on a shared object after every change of an agent that uses it. That moves the
+/// object's `resourceVersion` and not its `generation`, and must not reconcile every service that names it (one flip of
+/// `AgentsReady` under two hundred users would be two hundred passes).
+#[tokio::test]
+async fn a_status_write_on_a_shared_object_reconciles_no_service_and_a_spec_change_does() {
+    let r = start(None).await;
+    running_dashboard(&r, "team").await;
+    eventually("the statuses", || {
+        r.fake.get(ENDPOINTS, "team", "gateway").unwrap()["status"]["usedBy"] == json!(["coder-me"])
+            && r.fake.get(PROVIDERS, "team", "websearch").unwrap()["status"]["usedBy"]
+                == json!(["coder-me"])
+    })
+    .await;
+    // Let what the first statuses woke settle.
+    tokio::time::sleep(Duration::from_millis(500)).await;
+    let before = service_passes(&r);
+    for (plural, name) in [(ENDPOINTS, "gateway"), (PROVIDERS, "websearch")] {
+        let mut other = r.fake.get(plural, "team", name).unwrap()["status"].clone();
+        other["usedBy"] = json!(["someone-else"]);
+        r.fake.put_status(plural, "team", name, other);
+    }
+    tokio::time::sleep(Duration::from_millis(700)).await;
+    assert_eq!(
+        service_passes(&r),
+        before,
+        "a status-only change of a shared object reconciled a service"
+    );
+
+    // The control: the same watch does carry a change of the spec.
+    let mut endpoint = r.fake.get(ENDPOINTS, "team", "gateway").unwrap();
+    endpoint["spec"]["apiKeySecretRef"]["name"] = json!("rotated-models");
+    r.fake.put(ENDPOINTS, endpoint);
+    eventually("a pass for the spec change", || service_passes(&r) > before).await;
+    r.stop().await;
+}

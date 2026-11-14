@@ -242,6 +242,126 @@ pub fn validate_config(config: &AgentConfig) -> Result<(), Vec<ConfigIssue>> {
     if v.0.is_empty() { Ok(()) } else { Err(v.0) }
 }
 
+/// The address of a model: a URL, or the Secret key that holds one. Shared by an inline model and a `ModelEndpoint`.
+fn check_base_url(v: &mut Issues, base_at: &str, base: &aap_api::BaseUrl) {
+    match (&base.value, &base.secret_ref) {
+        (Some(url), None) => {
+            if let Err(why) = parse_http_url(url, false) {
+                v.add(
+                    format!("{base_at}.value"),
+                    format!("{:?}: {why}", shown_url(url)),
+                );
+            }
+        }
+        (None, Some(r)) => secret_ref(v, &format!("{base_at}.secretRef"), r),
+        _ => v.add(base_at, "exactly one of value and secretRef"),
+    }
+}
+
+/// The URL of an MCP server: http or https, no credentials in it. Whether it parsed. Shared by an inline server
+/// and a `ToolProvider`; the plain-http rule is the config's (`tools.allowInsecureHttp`) and stays there.
+fn check_mcp_url(v: &mut Issues, url_at: &str, url: &str) -> bool {
+    match parse_http_url(url, true) {
+        Err(why) => {
+            v.add(
+                url_at,
+                format!("{:?}: {why}. A URL is http or https with no user name, password or ${{VAR}} in it (a secret in a URL reaches the logs)", shown_url(url)),
+            );
+            false
+        }
+        Ok(_) => true,
+    }
+}
+
+/// One header of an MCP server: its name, its prefix and the Secret key of its value.
+fn check_header(v: &mut Issues, header_at: &str, name: &str, header: &aap_api::McpHeader) {
+    if !is_http_token(name) {
+        v.add(header_at, "not an HTTP header name");
+    }
+    if header.prefix.as_deref().is_some_and(|p| p.contains("${")) {
+        v.add(
+            format!("{header_at}.prefix"),
+            "plain text such as \"Bearer \": the secret is added from the Secret, never written",
+        );
+    }
+    secret_ref(v, &format!("{header_at}.secretRef"), &header.secret_ref);
+}
+
+/// Judge a `ModelEndpoint` on its own, by the rules an inline model's address and key meet inside an `AgentConfig`
+/// (K2, §60a): the address is an http(s) URL with no credentials in it, or the Secret key that holds one, and the
+/// key names a Secret and a key. The controller writes the result as the `Accepted` condition.
+///
+/// # Errors
+///
+/// Every issue found, each naming its field (`ModelEndpoint gateway spec.baseUrl.value`).
+pub fn validate_endpoint(endpoint: &aap_api::ModelEndpoint) -> Result<(), Vec<ConfigIssue>> {
+    let name = endpoint.metadata.name.as_deref().unwrap_or("(unnamed)");
+    let at = format!("ModelEndpoint {name} spec");
+    let spec = &endpoint.spec;
+    let mut v = Issues(Vec::new());
+    if spec.title.trim().is_empty() {
+        v.add(format!("{at}.title"), "the title is empty");
+    }
+    check_base_url(&mut v, &format!("{at}.baseUrl"), &spec.base_url);
+    secret_ref(
+        &mut v,
+        &format!("{at}.apiKeySecretRef"),
+        &spec.api_key_secret_ref,
+    );
+    if v.0.is_empty() { Ok(()) } else { Err(v.0) }
+}
+
+/// Judge a `ToolProvider` on its own, by the rules an inline MCP server meets inside an `AgentConfig` (K2, §60a): the
+/// URL, each header (its name, its prefix, its Secret key, which must be a variable name the operator does not set
+/// itself) and each tool of the allow-list.
+///
+/// **What only a config can say is left to it:** a plain `http://` URL to another machine needs the config's
+/// `tools.allowInsecureHttp`. A tool is named `<server>__<tool>` for the model (at most 64 characters), and the server's
+/// name is the *config's* own key for it, which the object cannot know: here the **object's own name** stands for it, so a
+/// provider whose name leaves no room for its tools is not accepted. An agent that names the provider under a shorter key
+/// is still told its own verdict by `validate`.
+///
+/// # Errors
+///
+/// Every issue found, each naming its field (`ToolProvider search spec.mcp.tools[1]`).
+pub fn validate_provider(provider: &aap_api::ToolProvider) -> Result<(), Vec<ConfigIssue>> {
+    let name = provider.metadata.name.as_deref().unwrap_or("(unnamed)");
+    let at = format!("ToolProvider {name} spec");
+    let (spec, mcp) = (&provider.spec, &provider.spec.mcp);
+    let mut v = Issues(Vec::new());
+    if spec.title.trim().is_empty() {
+        v.add(format!("{at}.title"), "the title is empty");
+    }
+    check_mcp_url(&mut v, &format!("{at}.mcp.url"), &mcp.url);
+    for (header, h) in &mcp.headers {
+        let header_at = format!("{at}.mcp.headers[{header}]");
+        check_header(&mut v, &header_at, header, h);
+        let key = h.secret_ref.key.as_str();
+        if !key.trim().is_empty() {
+            if !is_env_name(key) {
+                v.add(
+                    format!("{header_at}.secretRef.key"),
+                    "the variable that carries a header's secret is named by the Secret key, so the key must be a variable name ([A-Za-z_][A-Za-z0-9_]*)",
+                );
+            } else if env::OPERATOR_SET.contains(&key) {
+                v.add(
+                    format!("{header_at}.secretRef.key"),
+                    "this is a variable the operator sets for the agent itself: use another key in the Secret",
+                );
+            }
+        }
+    }
+    for (i, tool) in mcp.tools.iter().enumerate() {
+        if !is_adam_tool_name(name, tool) {
+            v.add(
+                format!("{at}.mcp.tools[{i}]"),
+                format!("{tool:?} cannot be named <server>__{tool} for the model: adam-rs takes letters, digits, `-` and `_`, not starting with `_`, and at most 64 characters with the server's name and `__`"),
+            );
+        }
+    }
+    if v.0.is_empty() { Ok(()) } else { Err(v.0) }
+}
+
 /// The issue for `name`, written in `field`, when it cannot be the name of an object: not a DNS-1123
 /// subdomain. A reference's name goes into the path of a request to the API server (`.../modelendpoints/<name>`),
 /// so a name with a space makes the request fail for good and one with a `?` adds a query to it: such a
@@ -475,18 +595,7 @@ fn check_config(v: &mut Issues, cfg: &AgentConfig, origins: &Origins) {
             "endpointRef is exclusive with baseUrl and apiKeySecretRef",
         ),
         (None, Some(base), Some(key)) => {
-            match (&base.value, &base.secret_ref) {
-                (Some(url), None) => {
-                    if let Err(why) = parse_http_url(url, false) {
-                        v.add(
-                            format!("{base_at}.value"),
-                            format!("{:?}: {why}", shown_url(url)),
-                        );
-                    }
-                }
-                (None, Some(r)) => secret_ref(v, &format!("{base_at}.secretRef"), r),
-                _ => v.add(&base_at, "exactly one of value and secretRef"),
-            }
+            check_base_url(v, &base_at, base);
             secret_ref(v, &key_at, key);
         }
         (None, _, _) => v.add(
@@ -904,34 +1013,19 @@ fn check_tools(v: &mut Issues, cfg: &AgentConfig, origins: &Origins) {
                 } else {
                     format!("{at}.url")
                 };
-                match parse_http_url(url, true) {
-                    Err(why) => v.add(
+                if check_mcp_url(v, &url_at, url)
+                    && is_plain_http_remote(url)
+                    && !tools.allow_insecure_http
+                {
+                    v.add(
                         &url_at,
-                        format!("{:?}: {why}. A URL is http or https with no user name, password or ${{VAR}} in it (a secret in a URL reaches the logs)", shown_url(url)),
-                    ),
-                    Ok(_) => {
-                        if is_plain_http_remote(url) && !tools.allow_insecure_http {
-                            v.add(
-                                &url_at,
-                                "a plain http:// URL to another machine: adam refuses such a server at startup unless tools.allowInsecureHttp of the AgentConfig is true (knowing that it covers every MCP server of the agent and the endpoints a sender announces, and that the bearer crosses the network in the clear); or use https",
-                            );
-                        }
-                    }
+                        "a plain http:// URL to another machine: adam refuses such a server at startup unless tools.allowInsecureHttp of the AgentConfig is true (knowing that it covers every MCP server of the agent and the endpoints a sender announces, and that the bearer crosses the network in the clear); or use https",
+                    );
                 }
             }
         }
         for (name, header) in &server.headers {
-            let header_at = format!("{content}.headers[{name}]");
-            if !is_http_token(name) {
-                v.add(&header_at, "not an HTTP header name");
-            }
-            if header.prefix.as_deref().is_some_and(|p| p.contains("${")) {
-                v.add(
-                    format!("{header_at}.prefix"),
-                    "plain text such as \"Bearer \": the secret is added from the Secret, never written",
-                );
-            }
-            secret_ref(v, &format!("{header_at}.secretRef"), &header.secret_ref);
+            check_header(v, &format!("{content}.headers[{name}]"), name, header);
         }
         // The allow-list of a provider (`mcp.tools`) becomes the server's `tools` in the file, and adam
         // refuses a file with an entry it cannot name for the model (exit 78): so is the entry.

@@ -116,7 +116,13 @@ impl SharedForm for ToolServerForm {
     }
 }
 
-fn detail<F: SharedForm>(stored: &Stored, used_by: Vec<String>) -> SharedDetail<F> {
+/// The answer for one object. A person who may not read agents is told how many use it and no name: not in `usedBy`,
+/// not in the operator's status, not in a condition's message (the same rule as the errors that name agents).
+fn detail<F: SharedForm>(
+    stored: &Stored,
+    used_by: Vec<String>,
+    names_allowed: bool,
+) -> SharedDetail<F> {
     let Loaded {
         managed_by,
         representation,
@@ -126,7 +132,15 @@ fn detail<F: SharedForm>(stored: &Stored, used_by: Vec<String>) -> SharedDetail<
         title: view::title_of(stored),
         managed_by,
         deleting: stored.deleting,
-        used_by,
+        used_by_count: used_by.len(),
+        used_by: if names_allowed { used_by } else { Vec::new() },
+        status: view::shared_status_of(stored).map(|status| {
+            if names_allowed {
+                status
+            } else {
+                view::without_agent_names(status)
+            }
+        }),
         representation,
     }
 }
@@ -152,7 +166,7 @@ where
     let mut users = view::users(&agents, F::KIND, &objects);
     let items: Vec<SharedDetail<F>> = objects
         .iter()
-        .map(|o| detail::<F>(o, users.remove(&o.name).unwrap_or_default()))
+        .map(|o| detail::<F>(o, users.remove(&o.name).unwrap_or_default(), true))
         .collect();
     Ok(json(StatusCode::OK, &json!({ F::LIST: items })))
 }
@@ -173,7 +187,7 @@ where
     let object = object.ok_or_else(|| Problem::not_found(F::WHAT, &name))?;
     let used_by = view::users_of(&agents, F::KIND, &name);
     Ok(with_etag(
-        json(StatusCode::OK, &detail::<F>(&object, used_by)),
+        json(StatusCode::OK, &detail::<F>(&object, used_by, true)),
         &object.etag(),
     ))
 }
@@ -276,7 +290,8 @@ where
         StatusCode::OK
     };
     let used_by = view::users_of(&agents, F::KIND, &name);
-    let response = with_etag(json(status, &detail::<F>(&stored, used_by)), &stored.etag());
+    let detail = detail::<F>(&stored, used_by, caller.sees_agents());
+    let response = with_etag(json(status, &detail), &stored.etag());
     Ok(if created {
         with_location(response, &format!("{}/{}", F::COLLECTION, stored.name))
     } else {

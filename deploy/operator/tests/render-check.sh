@@ -92,8 +92,16 @@ all_of() { b=$1; shift; for p in "$@"; do printf '%s\n' "$b" | grep -Eq -- "$p" 
 none_of() { b=$1; shift; for p in "$@"; do ! printf '%s\n' "$b" | grep -Eq -- "$p" || return 1; done; }
 # The operator reads the shared objects of the dashboard (AD-029) and never writes them.
 shared_kinds_are_read_only() {
-  shared=$(role_rules | grep -E 'modelendpoints|toolproviders') || return 1
+  # The kinds themselves, not their status subresources (shared_status_is_patched_only).
+  shared=$(role_rules | grep -E '\[(modelendpoints|toolproviders)[],]') || return 1
   ! printf '%s\n' "$shared" | grep -Eq 'patch|create|update|delete|\*'
+}
+# K2: the operator writes the status of the shared kinds and nothing else of them: exactly one rule names the two status
+# subresources, with the verb patch alone (no create, update, delete, get, or a wildcard).
+shared_status_is_patched_only() {
+  rule=$(role_rules | grep -E 'modelendpoints/status|toolproviders/status') || return 1
+  [ "$(printf '%s\n' "$rule" | wc -l)" -eq 1 ] \
+    && [ "$rule" = '[agents.vymalo.com] [modelendpoints/status, toolproviders/status] [patch]' ]
 }
 
 # ---- The three golden renders ---------------------------------------------------------------------------------------------
@@ -167,6 +175,7 @@ check "the pod gets a service account token (its way in)" dhas Deployment aap-op
 base_rules='[agents.vymalo.com] [agentservices, agentconfigs] [get, list, watch, patch]
 [agents.vymalo.com] [modelendpoints, toolproviders] [get, list, watch]
 [agents.vymalo.com] [agentservices/status, agentconfigs/status] [patch]
+[agents.vymalo.com] [modelendpoints/status, toolproviders/status] [patch]
 [events.k8s.io] [events] [create, patch]
 [apps] [statefulsets, deployments] [get, list, watch, patch, create, delete]
 [""] [services, configmaps, persistentvolumeclaims] [get, list, patch, create, delete]
@@ -181,6 +190,8 @@ check "the Role is in the release's namespace" dhas Role aap-operator "namespace
 check "and so is its binding" dhas RoleBinding aap-operator "namespace: $ns"
 check "the shared kinds are read and never written: a rule for modelendpoints and toolproviders, with no patch, create, update or delete" \
   shared_kinds_are_read_only
+check "K2: the status of the shared kinds is patched and nothing more: one rule, modelendpoints/status and toolproviders/status, the verb patch alone" \
+  shared_status_is_patched_only
 check "no right on Secrets, none on a wildcard, none on a CustomResourceDefinition, a node or a namespace" \
   dlacks Role aap-operator 'secrets' '\*' 'customresourcedefinitions' 'nodes' 'namespaces'
 check "the binding is to the operator's own service account" dhas RoleBinding aap-operator 'kind: ServiceAccount' 'name: aap-operator$'

@@ -1287,13 +1287,74 @@ spec:
             - baseUrl
             - title
             type: object
+          status:
+            description: |-
+              What the controller observed of a `ModelEndpoint` or a `ToolProvider` (§60a, K2): who uses it, whether it is valid and
+              whether the agents that use it are `Ready`. **No secret is ever in it**: no header value, no URL with credentials, no
+              token; the names are those of `AgentService`s of the object's own namespace.
+            nullable: true
+            properties:
+              conditions:
+                default: []
+                description: '`Accepted`, `InUse` and `AgentsReady`.'
+                items:
+                  description: Condition contains details for one aspect of the current state of this API Resource.
+                  properties:
+                    lastTransitionTime:
+                      description: lastTransitionTime is the last time the condition transitioned from one status to another. This should be when the underlying condition changed.  If that is not known, then using the time when the API field changed is acceptable.
+                      format: date-time
+                      type: string
+                    message:
+                      description: message is a human readable message indicating details about the transition. This may be an empty string.
+                      type: string
+                    observedGeneration:
+                      description: observedGeneration represents the .metadata.generation that the condition was set based upon. For instance, if .metadata.generation is currently 12, but the .status.conditions[x].observedGeneration is 9, the condition is out of date with respect to the current state of the instance.
+                      format: int64
+                      type: integer
+                    reason:
+                      description: reason contains a programmatic identifier indicating the reason for the condition's last transition. Producers of specific condition types may define expected values and meanings for this field, and whether the values are considered a guaranteed API. The value should be a CamelCase string. This field may not be empty.
+                      type: string
+                    status:
+                      description: status of the condition, one of True, False, Unknown.
+                      type: string
+                    type:
+                      description: type of condition in CamelCase or in foo.example.com/CamelCase.
+                      type: string
+                  required:
+                  - lastTransitionTime
+                  - message
+                  - reason
+                  - status
+                  - type
+                  type: object
+                type: array
+              observedGeneration:
+                description: The `metadata.generation` the controller last judged.
+                format: int64
+                nullable: true
+                type: integer
+              usedBy:
+                default: []
+                description: |-
+                  The `AgentService`s of the namespace that run a config naming this object, sorted, each once, **at most
+                  [`MAX_USED_BY`]** (the operator's bound: the schema has none, because only the operator writes it): the rest are counted
+                  in `usedByMore`.
+                items:
+                  type: string
+                type: array
+              usedByMore:
+                description: How many users are not in `usedBy` (absent when there are at most [`MAX_USED_BY`]).
+                format: int32
+                type: integer
+            type: object
         required:
         - spec
         title: ModelEndpoint
         type: object
     served: true
     storage: true
-    subresources: {}
+    subresources:
+      status: {}
 ---
 apiVersion: apiextensions.k8s.io/v1
 kind: CustomResourceDefinition
@@ -1395,10 +1456,71 @@ spec:
             - mcp
             - title
             type: object
+          status:
+            description: |-
+              What the controller observed of a `ModelEndpoint` or a `ToolProvider` (§60a, K2): who uses it, whether it is valid and
+              whether the agents that use it are `Ready`. **No secret is ever in it**: no header value, no URL with credentials, no
+              token; the names are those of `AgentService`s of the object's own namespace.
+            nullable: true
+            properties:
+              conditions:
+                default: []
+                description: '`Accepted`, `InUse` and `AgentsReady`.'
+                items:
+                  description: Condition contains details for one aspect of the current state of this API Resource.
+                  properties:
+                    lastTransitionTime:
+                      description: lastTransitionTime is the last time the condition transitioned from one status to another. This should be when the underlying condition changed.  If that is not known, then using the time when the API field changed is acceptable.
+                      format: date-time
+                      type: string
+                    message:
+                      description: message is a human readable message indicating details about the transition. This may be an empty string.
+                      type: string
+                    observedGeneration:
+                      description: observedGeneration represents the .metadata.generation that the condition was set based upon. For instance, if .metadata.generation is currently 12, but the .status.conditions[x].observedGeneration is 9, the condition is out of date with respect to the current state of the instance.
+                      format: int64
+                      type: integer
+                    reason:
+                      description: reason contains a programmatic identifier indicating the reason for the condition's last transition. Producers of specific condition types may define expected values and meanings for this field, and whether the values are considered a guaranteed API. The value should be a CamelCase string. This field may not be empty.
+                      type: string
+                    status:
+                      description: status of the condition, one of True, False, Unknown.
+                      type: string
+                    type:
+                      description: type of condition in CamelCase or in foo.example.com/CamelCase.
+                      type: string
+                  required:
+                  - lastTransitionTime
+                  - message
+                  - reason
+                  - status
+                  - type
+                  type: object
+                type: array
+              observedGeneration:
+                description: The `metadata.generation` the controller last judged.
+                format: int64
+                nullable: true
+                type: integer
+              usedBy:
+                default: []
+                description: |-
+                  The `AgentService`s of the namespace that run a config naming this object, sorted, each once, **at most
+                  [`MAX_USED_BY`]** (the operator's bound: the schema has none, because only the operator writes it): the rest are counted
+                  in `usedByMore`.
+                items:
+                  type: string
+                type: array
+              usedByMore:
+                description: How many users are not in `usedBy` (absent when there are at most [`MAX_USED_BY`]).
+                format: int32
+                type: integer
+            type: object
         required:
         - spec
         title: ToolProvider
         type: object
     served: true
     storage: true
-    subresources: {}
+    subresources:
+      status: {}

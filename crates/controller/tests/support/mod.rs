@@ -190,6 +190,21 @@ impl Fake {
         self.announce(kind, plural, &object);
     }
 
+    /// The operator's write of a `status`: the object has a new `resourceVersion` and the same `generation`.
+    pub fn put_status(&self, plural: &str, ns: &str, name: &str, status: Value) {
+        let mut s = lock(&self.state);
+        s.version += 1;
+        let version = s.version.to_string();
+        let Some(object) = s.objects.get_mut(&path(plural, ns, name)) else {
+            return;
+        };
+        object["status"] = status;
+        object["metadata"]["resourceVersion"] = json!(version);
+        let out = object.clone();
+        drop(s);
+        self.announce("MODIFIED", plural, &out);
+    }
+
     pub fn get(&self, plural: &str, ns: &str, name: &str) -> Option<Value> {
         lock(&self.state)
             .objects
@@ -327,7 +342,11 @@ impl Fake {
             [] => return failure(404, "no resource"),
         };
 
-        if s.absent.contains(plural) {
+        if s.absent.contains(plural)
+            || (tail.len() == 2
+                && tail[1] == "status"
+                && s.absent.contains(&format!("{plural}/status")))
+        {
             return not_served();
         }
         match (call.method.as_str(), tail) {

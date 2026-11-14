@@ -6,6 +6,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::common::SecretKeyRef;
 use crate::config::BaseUrl;
+use crate::status::SharedStatus;
 
 /// An OpenAI-compatible model endpoint and the Secret key of its API key. An `AgentConfig` names
 /// it with `spec.model.endpointRef`; the operator resolves the reference into the same variables
@@ -19,6 +20,7 @@ use crate::config::BaseUrl;
     kind = "ModelEndpoint",
     plural = "modelendpoints",
     namespaced,
+    status = "SharedStatus",
     derive = "PartialEq",
     doc = "An OpenAI-compatible model endpoint, set once and named by the AgentConfigs that use it (spec.model.endpointRef).",
     printcolumn(name = "Title", type_ = "string", json_path = ".spec.title"),

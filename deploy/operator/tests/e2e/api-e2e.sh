@@ -518,6 +518,7 @@ gone "modelendpoint/$model" || die "a refused write created the model"
 as modeler "platform:models.write,platform:secrets.pick" PUT "/v1/models/$model" -H 'If-None-Match: *' -H 'Content-Type: application/json' -d "$model_form"
 expect 201 "create the model"
 [ -n "$(header etag)" ] || die "the model was created with no ETag"
+model_created_etag=$(header etag)
 [ "$(jp "modelendpoint/$model" '{.metadata.labels.app\.kubernetes\.io/managed-by}')" = dashboard.agents.vymalo.com ] || die "the model has not the dashboard's label"
 [ "$(jp "modelendpoint/$model" '{.spec.apiKeySecretRef.name}/{.spec.apiKeySecretRef.key}')" = "$models_secret/GATEWAY_API_KEY" ] || die "the model does not name the Secret key"
 ok "the model endpoint is created (201, with an ETag), by reference to $models_secret/GATEWAY_API_KEY, and not without platform:secrets.pick"
@@ -602,6 +603,29 @@ done
 as reader platform:agents.read GET "/v1/models/$model"
 expect 200 "read the model"
 [ "$(jq -c .usedBy "$work/body")" = "[\"$agent\"]" ] || die "the model is used by $(jq -c .usedBy "$work/body"), not by the agent"
+# K2: the operator's own status of the shared object, written a moment after the agent is Ready (its controller sees the agent's
+# status change), read through the API from the object it already gets. Unverified until CI has run it: no kind exists where it was written.
+status_deadline=$(( $(date +%s) + 60 ))
+until [ "$(jq -c '.status.usedBy // empty' "$work/body")" = "[\"$agent\"]" ] \
+  && jq -e '.status.conditions | map(select(.type == "AgentsReady" and .status == "True")) | length == 1' "$work/body" >/dev/null 2>&1; do
+  [ "$(date +%s)" -lt "$status_deadline" ] || die "the model's status does not list the agent as its only user, Ready, after 60s: $(jq -c .status "$work/body")"
+  sleep 3
+  as reader platform:agents.read GET "/v1/models/$model"
+  expect 200 "read the model's status"
+done
+jq -e '.status.conditions | map(select(.type == "Accepted" and .status == "True" and .reason == "Valid")) | length == 1' "$work/body" >/dev/null \
+  || die "the model is not Accepted: $(jq -c .status "$work/body")"
+jq -e '.status.conditions | map(select(.type == "InUse" and .status == "True" and .reason == "Referenced")) | length == 1' "$work/body" >/dev/null \
+  || die "the model is not InUse: $(jq -c .status "$work/body")"
+[ "$(jp "modelendpoint/$model" '{.status.usedBy[0]}')" = "$agent" ] || die "the ModelEndpoint's status on the cluster does not list the agent"
+# A status holds names and reasons, never a value: not the Secret's, not a token.
+if grep -qF -- "$sentinel" "$work/body"; then die "the model's status holds the Secret's value"; fi
+ok "the model's status, written by the operator and read through GET /v1/models/$model, lists the agent as its only user (usedBy == [$agent]), is Accepted, InUse and AgentsReady, and holds no value"
+# The token read at the create is still the model's after the operator's status writes (its token is the generation and the uid,
+# not the resourceVersion): a replace with it, of what the model already says, is 200.
+as modeler "platform:models.write,platform:secrets.pick" PUT "/v1/models/$model" -H "If-Match: $model_created_etag" -H 'Content-Type: application/json' -d "$model_form"
+expect 200 "replace the model with the token read at its create, after the operator wrote its status"
+ok "a status write by the operator does not make the token of a shared object stale: the replace with the token of the create is 200"
 model_etag=$(header etag)
 as modeler "platform:models.write,platform:secrets.pick" DELETE "/v1/models/$model" -H "If-Match: $model_etag"
 expect_problem 409 referenced "a delete of the model the agent names"

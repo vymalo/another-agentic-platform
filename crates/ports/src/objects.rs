@@ -129,6 +129,24 @@ impl ETag {
         &self.0
     }
 
+    /// The token of a shared object: see [`Stored::etag`]. Length-prefixed and starting with `~`, which no token of
+    /// [`Self::of`] does (it starts with a kind), so the two never spell one another.
+    fn shared(o: &Stored) -> Self {
+        let owner = match o.owner() {
+            Owner::Dashboard => 'd',
+            Owner::GitOps => 'g',
+        };
+        Self(format!(
+            "~{}:{}:{}:{}:{}:g{}:{owner}",
+            o.kind,
+            o.name.len(),
+            o.name,
+            o.uid.len(),
+            o.uid,
+            o.generation,
+        ))
+    }
+
     /// Length-prefixed, so no unit can spell the token of another; an object that is not there is `-`, which
     /// no part with a kind is.
     fn of(parts: &[Option<&Stored>]) -> Self {
@@ -205,6 +223,10 @@ pub struct Stored {
     pub name: String,
     /// Its `resourceVersion`.
     pub version: ResourceVersion,
+    /// Its `metadata.uid`: what tells an object from one made again under the same name. An implementation
+    /// with none makes one per creation. Part of the token of a shared object ([`Stored::etag`]).
+    #[serde(default)]
+    pub uid: String,
     /// Its `metadata.generation`: ahead of `status.observedGeneration` while the operator has not seen the
     /// last change (the state *Saving* of §60a).
     pub generation: i64,
@@ -232,9 +254,22 @@ impl Stored {
         Owner::of(&self.labels, &self.annotations)
     }
 
-    /// The token of this object alone (a shared object's): its kind, name and version.
+    /// The token of this object alone.
+    ///
+    /// **A shared object's** (`ModelEndpoint`, `ToolProvider`) is made from its kind, name, `uid`, `generation` and
+    /// owner, **not its `resourceVersion`**: the operator writes the `status` of these kinds after every create and
+    /// every change of the spec (K2), which moves the version and not the generation (the CRDs have a status
+    /// subresource), and a token that moved with it would refuse the dashboard's next save for nothing. A change of
+    /// the spec (a new generation), a delete and make again (a new `uid`) and a change of who owns it still make an
+    /// old token stale. The labels and annotations are not in it: the dashboard applies the one label that makes it
+    /// the owner, and nothing else of the metadata.
+    ///
+    /// Any other kind's is its kind, name and version, as an agent's is ([`Agent::etag`]).
     pub fn etag(&self) -> ETag {
-        ETag::of(&[Some(self)])
+        match self.kind {
+            Kind::ModelEndpoint | Kind::ToolProvider => ETag::shared(self),
+            Kind::AgentService | Kind::AgentConfig => ETag::of(&[Some(self)]),
+        }
     }
 }
 

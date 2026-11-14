@@ -71,8 +71,9 @@ impl Live {
         let spec = object.data.get("spec").cloned().unwrap_or(Value::Null);
         let status = object.data.get("status").cloned();
         Self {
-            uid: meta.uid.unwrap_or_default(),
+            uid: meta.uid.clone().unwrap_or_default(),
             stored: Stored {
+                uid: meta.uid.unwrap_or_default(),
                 kind,
                 namespace: meta.namespace.unwrap_or_else(|| namespace.to_owned()),
                 name: meta.name.unwrap_or_default(),

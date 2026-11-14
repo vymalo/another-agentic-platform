@@ -265,6 +265,7 @@ pub fn stored(kind: Kind, name: &str, spec: Value, dashboard: bool) -> Stored {
         labels.insert(MANAGED_BY_LABEL.to_owned(), MANAGED_BY_DASHBOARD.to_owned());
     }
     Stored {
+        uid: "uid-1".into(),
         kind,
         namespace: NS.to_owned(),
         name: name.to_owned(),
