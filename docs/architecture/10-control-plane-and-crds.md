@@ -1205,7 +1205,7 @@ Both modes work in one cluster: they use different pod names, labels, and RBAC, 
 
 *(2026-11-14, slice K0. Documentation only: it writes the plan down. Each increment is its own slice and amends the section it changes.)*
 
-The owner asked what the platform lacks, next to a Kubernetes agent control plane such as kagent, to be one a cluster operator can run. Fifteen gaps were weighed against the code and the decisions on 2026-11-14. Some are **built**, some **planned** below, and some are **deliberately different** (*What it does not mean*). Nothing here changes the architecture: every increment is additive, off by default where it adds a right or a component, and held by a test.
+The owner asked what the platform lacks, next to a Kubernetes agent control plane such as kagent, to be one a cluster operator can run. Fifteen gaps were weighed against the code and the decisions on 2026-11-14; they became the sixteen rows below (K0 is this plan, K1b and K9b are the halves of K1 and K9). Some are **built**, some **planned** below, and some are **deliberately different** (*What it does not mean*). Nothing here changes the architecture: every increment is additive, off by default where it adds a right or a component, and held by a test.
 
 ### The increments
 
@@ -1213,11 +1213,11 @@ The owner asked what the platform lacks, next to a Kubernetes agent control plan
 |---|---|---|---|---|
 | K0 | This plan | none | `check-docs.mjs` | built (this section) |
 | K1 | The CRDs read what adam-rs's former operator accepted (`model.extraBody`, `echoReasoning`, `coder.maxAccessTier`, `environment.cache`); a cache allow-list and an access-tier ceiling that are the deployment's (AD-049 to AD-051; §59a *K1*) | none | the superset test against the vendored CRD, parity goldens | **built** |
-| K1b | Adoption of objects `adam-operator` made | the fork decision | none | **void**: adam-rs removed its copy from `main` by its pull request 143 (its ADR 0046), so there is one operator and nothing to adopt |
+| K1b | Adoption of objects `adam-operator` made | the fork decision | none | **void**: adam-rs removed its copy from `main` by its pull request 143 (its ADR 0046), *verified 2026-11-14* with the merge commit `e873fa5` of vymalo/another-adam-rs; there is one operator and nothing to adopt |
 | K2 | `status` on `ModelEndpoint` and `ToolProvider`: who uses it, whether it is valid, whether those agents are `Ready` (§60a, P-023) | none | the fake API server, the objects suite, `render-check.sh` | **built** |
 | K3 | A tool server's reachability and discovered tools in its status | K2; P-024 | a stub MCP server in tests; a step of `api-e2e.sh` | planned |
 | K4 | `ServiceMonitor`s for the operator and the Platform API; `aap_api_*` metrics (§59a *The operator chart*, §48) | none | `render-check.sh`, kubeconform on a vendored schema | **built** |
-| K5 | OpenTelemetry traces from the operator and the API, never with content in a span (AD-015, §48) | none; an agent's own traces need adam-rs | an in-process OTLP receiver in tests; `render-check.sh` for the egress rule | planned |
+| K5 | OpenTelemetry traces from the operator and the API (observability is mandatory, AD-015, §48). That **no span holds a prompt, a tool argument, a header or a secret** is this section's own constraint, to be decided with the slice and not a decision taken yet | none; an agent's own traces need adam-rs | an in-process OTLP receiver in tests; `render-check.sh` for the egress rule | planned |
 | K6 | Watching several namespaces, one `Role` per namespace and never a `ClusterRole` (P-026) | none | two namespaces reconciled independently; a duplicate registry id across namespaces not listed; a kind end-to-end | planned |
 | K7 | Leader election and two replicas with a `PodDisruptionBudget` (amends §59a *one replica, `Recreate`*) | K6 | a `LeaderElection` trait with its conformance macro (AD-020), on the `Memory` and fake-API-server implementations; kind: kill the leader | planned |
 | K8 | What the admin UI still needs of the Platform API: an OpenAPI document held equal to the table of routes, and the Kubernetes Events of an agent's objects (P-029) | K2 | a test that lists every route in the document; the new route in the permission matrix | planned |
@@ -1226,7 +1226,7 @@ The owner asked what the platform lacks, next to a Kubernetes agent control plan
 | K10 | A catalogue of example `ToolProvider`s (read-only Kubernetes, Prometheus, GitHub), pinned by digest (P-027) | K2; the owner's choice | a kind end-to-end: a folder agent on a scripted model calls a list-pods tool | planned |
 | K11 | A bring-your-own A2A image: `harness.type: a2a` with image, port, card path and secret variables by reference (P-025; would amend AD-022 and AD-024) | K1 | kind: the stub image as such an agent, `Ready` and listed | planned |
 | K12 | `requireApproval` per tool | an adam-rs decision and the system's | parity with adam's MCP file | planned; waits (the tiers of K1 cover the coder meanwhile) |
-| K13 | The dashboard and an agent on the owner's real cluster (D14) | K1 | the first real agent | **on hold**: the owner says (2026-11-14) the netcup cluster is down and home-os no longer carries it, so there is no cluster to prove it on; D14 stays *unverified* |
+| K13 | The dashboard and an agent on the owner's real cluster (D14) | K1 | the first real agent | **on hold**: that the netcup cluster is down and home-os no longer carries it is the owner's statement of 2026-11-14, *unverified* here; with no cluster to prove it on, D14 stays *unverified* |
 
 Parallel work: K4, K9, K0 and K8's OpenAPI document touch no shared file. K1 and K2 both regenerated `deploy/crds`, so they merged one after the other. K6 comes before K7 (both touch `operator.rs` and the `Role`), K3 and K10 after K2, and K9b after K8.
 
@@ -2212,7 +2212,7 @@ stateDiagram-v2
 
 **What it cannot tell** (the README's *Limits*): the CEL rules of the CRDs and the bounds of their schema are the API server's and are not re-implemented, so fifteen of `examples/invalid/` (the audience, the lengths and counts of the shared kinds, `extraBody`'s size, the number of MCP servers) are accepted offline; a referent that lives only in the cluster is missing; the types accept unknown fields, so `aapctl` finds them by writing an object back through its type (an issue: `unknown field`), which is weaker than the structural schema. The store (a CloudNativePG `Cluster`) is not rendered; the runtime's objects are.
 
-**Proof.** 14 tests of the built binary (`bin/cli/tests/cli.rs`), among them `render_matches_runtime_golden` (byte for byte against `crates/runtime-kubernetes/tests/golden/`, after the comment), `validate_accepts_every_example`, `validate_refuses_every_invalid_example` (every example `aap-domain` refuses is refused, and the fifteen it cannot are accepted, by name), `exit_codes`, `render_prints_no_secret_value`. No cluster is needed or run.
+**Proof.** 30 tests of the built binary (`bin/cli/tests/cli.rs` and `review.rs`), among them `render_matches_runtime_golden` (byte for byte against `crates/runtime-kubernetes/tests/golden/`, after the comment), `validate_accepts_every_example`, `validate_refuses_every_invalid_example` (every example `aap-domain` refuses is refused, and the fifteen it cannot are accepted, by name), `exit_codes`, the whole-document unknown fields, nulls, duplicate keys, directories, the shape of the issue line, namespaces, and that neither command prints a secret-looking value. No cluster is needed or run.
 
 ### Phase 2: over the Platform API (planned, K9b)
 
@@ -2220,7 +2220,7 @@ stateDiagram-v2
 
 ### Decisions of K9 for the owner to confirm (P-028)
 
-**(1)** A binary of this repository, `aapctl`, and not a subcommand of `operator` (an image that runs a controller should not carry a tool for people). **(2)** It ships **in no image and no chart** in this slice: CI builds it with the workspace and nothing publishes it. **(3)** The settings are flags alone and the environment is not read, so a render does not depend on the shell it runs in. **(4)** A field the CRD's types lack is an issue and not a warning, because an API server that prunes drops it without a word, and a typo (`wokers`) is then an agent that quietly runs with the default. **(5)** `render` takes a placeholder owner uid (`--owner-uid` overrides it): the owner reference of an object that is not applied cannot name a real service.
+**(1)** A binary of this repository, `aapctl`, and not a subcommand of `operator` (an image that runs a controller should not carry a tool for people). **(2)** It ships **in no image and no chart** in this slice: CI builds it with the workspace and nothing publishes it. **(3)** The settings are flags alone and the environment is not read, so a render does not depend on the shell it runs in. **(4)** A field the CRD's types lack is an issue and not a warning, because an API server that prunes drops it without a word, and a typo (`wokers`) is then an agent that quietly runs with the default. **(5)** `render` takes a placeholder owner uid (`--owner-uid` overrides it): the owner reference of an object that is not applied cannot name a real service, and an empty one is refused. **(6)** A directory skips the documents of other groups with one note per file (a `kustomization.yaml` beside the agents is common), while a file named with `-f` or standard input holds exactly what the person pointed at, so a foreign document there is exit 2 and says what it was; a document of our group with another version or kind is exit 2 everywhere. **(7)** One line shape, `<file>: <Kind>/<name>: <field>: <message>`, with the namespace in the object only when the documents hold several; serde gives a type error no path, so that line has none. A `null` is absent and a key given twice is exit 2, as an API server reads them (README, *What is read*).
 
 ---
 

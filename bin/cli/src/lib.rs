@@ -138,7 +138,20 @@ fn settings(d: &Deployment, owner_uid: &str) -> Result<Settings, String> {
             "--default-agent-image {image:?} has white space in it: an image reference such as repository:tag@sha256:… is expected"
         ));
     }
-    let run_pods = match &d.run_pods_file {
+    let owner_uid = owner_uid.trim();
+    if owner_uid.is_empty() {
+        return Err(
+            "--owner-uid is empty: an object that names no owner is one the operator never applies"
+                .to_owned(),
+        );
+    }
+    // A blank path is none, as the operator reads an empty `RUN_PODS_FILE`.
+    let run_pods_file = d
+        .run_pods_file
+        .as_deref()
+        .map(|p| PathBuf::from(p.to_string_lossy().trim()))
+        .filter(|p| !p.as_os_str().is_empty());
+    let run_pods = match &run_pods_file {
         None => None,
         Some(path) => {
             let text = std::fs::read_to_string(path)
@@ -202,20 +215,22 @@ where
             0
         }
         Command::Validate(a) => {
-            let (objects, settings) =
+            let (loaded, settings) =
                 match read(&a.input, &a.deployment, PLACEHOLDER_OWNER_UID, stdin) {
                     Ok(read) => read,
                     Err(message) => return fail(err, message),
                 };
-            let outcome = check(&objects, &settings, a.allow_missing_refs);
+            notes(&loaded, err);
+            let outcome = check(&loaded.objects, &settings, a.allow_missing_refs);
             report(&outcome, err)
         }
         Command::Render(a) => {
-            let (objects, settings) = match read(&a.input, &a.deployment, &a.owner_uid, stdin) {
+            let (loaded, settings) = match read(&a.input, &a.deployment, &a.owner_uid, stdin) {
                 Ok(read) => read,
                 Err(message) => return fail(err, message),
             };
-            let mut outcome = check(&objects, &settings, false);
+            notes(&loaded, err);
+            let mut outcome = check(&loaded.objects, &settings, false);
             let rendered = render_all(&mut outcome);
             let code = report(&outcome, err);
             if code == 0 {
@@ -231,10 +246,17 @@ fn read(
     deployment: &Deployment,
     owner_uid: &str,
     stdin: &mut dyn Read,
-) -> Result<(Vec<load::Object>, Settings), String> {
+) -> Result<(load::Loaded, Settings), String> {
     let settings = settings(deployment, owner_uid)?;
-    let objects = load::load(&input.files, stdin)?;
-    Ok((objects, settings))
+    let loaded = load::load(&input.files, stdin)?;
+    Ok((loaded, settings))
+}
+
+/// What was skipped, one line each.
+fn notes(loaded: &load::Loaded, err: &mut dyn Write) {
+    for note in &loaded.notes {
+        let _ = writeln!(err, "{note}");
+    }
 }
 
 /// The issues and warnings on `err`; 1 when there is an issue.
@@ -259,7 +281,7 @@ fn render_all(outcome: &mut Outcome) -> String {
             Err(e) => {
                 refused.push(check::Line {
                     file: object.file.clone(),
-                    object: object.label(),
+                    object: object.label.clone(),
                     text: format!("cannot be rendered: {e}"),
                 });
                 continue;

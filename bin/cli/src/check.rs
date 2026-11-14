@@ -65,42 +65,61 @@ fn key(namespace: Option<&String>, name: &str) -> Key {
     (namespace.cloned().unwrap_or_default(), name.to_owned())
 }
 
-/// The object as its type reads it, or the issue that it cannot be read. A field the type does not have (the CRDs' types accept
-/// one silently, as an API server that prunes does) is an issue too: what the type reads back lacks what the author wrote.
+/// A serde error says what is wrong and, for a value of the wrong type, **quotes the value** (`invalid type: string "…"`). A
+/// value may be a secret written where a reference belongs, so the quote is cut: what is wrong stays.
+fn redact(message: &str) -> String {
+    let (Some(start), Some(end)) = (message.find("string \""), message.rfind("\", expected "))
+    else {
+        return message.to_owned();
+    };
+    if end < start {
+        return message.to_owned();
+    }
+    format!("{}string \"…{}", &message[..start], &message[end..])
+}
+
+/// The object as its type reads it, or the issues that it cannot be read. A field the type does not have (the CRDs' types accept
+/// one silently, as an API server that prunes does) is an issue too: the object is written back through its type, and what the
+/// author wrote and the type did not keep is unknown, under `metadata` and `spec` and at the top of the document.
 fn typed<T: DeserializeOwned + serde::Serialize>(
     object: &Object,
     issues: &mut Vec<Line>,
 ) -> Option<T> {
     let line = |text: String| Line {
         file: object.file.clone(),
-        object: object.label(),
+        object: object.label.clone(),
         text,
     };
     let typed: T = match serde_json::from_value(object.doc.clone()) {
         Ok(t) => t,
         Err(e) => {
-            issues.push(line(format!("{} spec: cannot be read: {e}", object.kind)));
+            issues.push(line(format!("cannot be read: {}", redact(&e.to_string()))));
             return None;
         }
     };
-    if let Ok(kept) = serde_json::to_value(&typed) {
-        let mut lost = Vec::new();
-        lost_fields(&object.doc["spec"], &kept["spec"], "spec", &mut lost);
-        for path in &lost {
-            issues.push(line(format!(
-                "{} {path}: unknown field: the type of the CRD does not have it, and an API server would prune it or refuse it",
-                object.kind
-            )));
-        }
-        if !lost.is_empty() {
-            return None;
+    let mut lost = Vec::new();
+    if let Some(top) = object.doc.as_object() {
+        for key in top.keys() {
+            if !["apiVersion", "kind", "metadata", "spec"].contains(&key.as_str()) {
+                lost.push(key.clone());
+            }
         }
     }
-    Some(typed)
+    if let Ok(kept) = serde_json::to_value(&typed) {
+        for part in ["metadata", "spec"] {
+            lost_fields(&object.doc[part], &kept[part], part, &mut lost);
+        }
+    }
+    for path in &lost {
+        issues.push(line(format!(
+            "{path}: unknown field: the type of the CRD does not have it, and an API server would prune it"
+        )));
+    }
+    if lost.is_empty() { Some(typed) } else { None }
 }
 
-/// The keys of `input` that `kept` (what the type wrote back) does not have. Empty values do not count: a type may leave an
-/// empty map or list out.
+/// The keys of `input` that `kept` (what the type wrote back) does not have, in lists too. (The types leave out only an absent
+/// optional field, which is what a null was made into before this, so an empty map or list is kept and compared like any value.)
 fn lost_fields(input: &Value, kept: &Value, path: &str, out: &mut Vec<String>) {
     match (input, kept) {
         (Value::Object(a), Value::Object(b)) => {
@@ -108,7 +127,6 @@ fn lost_fields(input: &Value, kept: &Value, path: &str, out: &mut Vec<String>) {
                 let at = format!("{path}.{k}");
                 match b.get(k) {
                     Some(w) => lost_fields(v, w, &at, out),
-                    None if is_empty(v) => {}
                     None => out.push(at),
                 }
             }
@@ -122,13 +140,35 @@ fn lost_fields(input: &Value, kept: &Value, path: &str, out: &mut Vec<String>) {
     }
 }
 
-fn is_empty(v: &Value) -> bool {
-    match v {
-        Value::Null => true,
-        Value::Object(m) => m.is_empty(),
-        Value::Array(a) => a.is_empty(),
-        _ => false,
+/// The environment variables the operator's messages name, and the flag that is their place here.
+const ENV_FLAGS: [(&str, &str); 4] = [
+    ("DEFAULT_AGENT_IMAGE", "--default-agent-image"),
+    ("RUN_PODS_FILE", "--run-pods-file"),
+    ("CACHE_ALLOWED_CLAIMS", "--cache-allowed-claims"),
+    ("AGENT_MAX_ACCESS_TIER", "--max-access-tier"),
+];
+
+/// An issue of `aap-domain` as a line's text: `<field>: <message>`, the field the path inside the object (the domain writes
+/// `AgentConfig spec.x` and `ModelEndpoint name spec.x`; the object is the line's), and where the message tells the operator's
+/// person to set an environment variable, the flag of this command.
+fn text_of(issue: &ConfigIssue) -> String {
+    let mut field = issue.field.as_str();
+    for kind in crate::load::KINDS {
+        if let Some(rest) = field.strip_prefix(kind).and_then(|r| r.strip_prefix(' ')) {
+            field = rest;
+            if kind == "ModelEndpoint" || kind == "ToolProvider" {
+                field = rest.split_once(' ').map_or(rest, |(_, path)| path);
+            }
+            break;
+        }
     }
+    let mut message = issue.message.clone();
+    for (env, flag) in ENV_FLAGS {
+        if message.contains(env) {
+            message.push_str(&format!(" (aapctl: {flag})"));
+        }
+    }
+    format!("{field}: {message}")
 }
 
 /// A referent that is not among the documents: the sentence of `aap-domain` for a model endpoint or a tool provider.
@@ -209,7 +249,7 @@ pub fn check(objects: &[Object], settings: &Settings, allow_missing: bool) -> Ou
         let ck = key(namespace, wanted);
         let line = |object: &Object, text: String| Line {
             file: object.file.clone(),
-            object: object.label(),
+            object: object.label.clone(),
             text,
         };
         let Some(config) = configs.get(&ck) else {
@@ -218,7 +258,7 @@ pub fn check(objects: &[Object], settings: &Settings, allow_missing: bool) -> Ou
             }
             let ns = namespace.map_or("(none)", String::as_str);
             let text = format!(
-                "AgentService spec.configRef.name: the AgentConfig {wanted:?} does not exist in namespace {ns:?} (it is not among the documents given)"
+                "spec.configRef.name: the AgentConfig {wanted:?} does not exist in namespace {ns:?} (it is not among the documents given)"
             );
             if allow_missing {
                 out.warnings.push(line(&service.object, text));
@@ -278,7 +318,7 @@ pub fn check(objects: &[Object], settings: &Settings, allow_missing: bool) -> Ou
                             continue;
                         }
                         if allow_missing {
-                            let l = line(&config.object, issue.to_string());
+                            let l = line(&config.object, text_of(&issue));
                             out.warnings.push(l);
                             continue;
                         }
@@ -291,7 +331,7 @@ pub fn check(objects: &[Object], settings: &Settings, allow_missing: bool) -> Ou
                         &providers,
                         namespace,
                     );
-                    out.issues.push(line(who, issue.to_string()));
+                    out.issues.push(line(who, text_of(&issue)));
                 }
             }
         }
@@ -304,8 +344,8 @@ pub fn check(objects: &[Object], settings: &Settings, allow_missing: bool) -> Ou
         {
             out.issues.extend(found.iter().map(|i| Line {
                 file: c.object.file.clone(),
-                object: c.object.label(),
-                text: i.to_string(),
+                object: c.object.label.clone(),
+                text: text_of(i),
             }));
         }
     }
@@ -315,8 +355,8 @@ pub fn check(objects: &[Object], settings: &Settings, allow_missing: bool) -> Ou
         {
             out.issues.extend(found.iter().map(|i| Line {
                 file: e.object.file.clone(),
-                object: e.object.label(),
-                text: i.to_string(),
+                object: e.object.label.clone(),
+                text: text_of(i),
             }));
         }
     }
@@ -326,8 +366,8 @@ pub fn check(objects: &[Object], settings: &Settings, allow_missing: bool) -> Ou
         {
             out.issues.extend(found.iter().map(|i| Line {
                 file: p.object.file.clone(),
-                object: p.object.label(),
-                text: i.to_string(),
+                object: p.object.label.clone(),
+                text: text_of(i),
             }));
         }
     }
