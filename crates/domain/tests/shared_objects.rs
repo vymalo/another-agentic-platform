@@ -159,3 +159,52 @@ fn plain_http_is_left_to_the_config() {
     let p = provider(|p| p["spec"]["mcp"]["url"] = json!("http://search.example.com/mcp"));
     validate_provider(&p).unwrap();
 }
+
+/// A header's Secret key is the name of the variable that carries it in the pod, so a key the operator sets for the agent
+/// itself would overwrite one: it is an issue on that field.
+#[test]
+fn a_provider_header_key_the_operator_sets_is_invalid() {
+    for key in ["DATABASE_URL", "A2A_BEARER_TOKENS"] {
+        let p = provider(|p| {
+            p["spec"]["mcp"]["headers"]["Authorization"]["secretRef"]["key"] = json!(key);
+        });
+        let issues = validate_provider(&p).unwrap_err();
+        assert_issue(
+            &issues,
+            "ToolProvider websearch spec.mcp.headers[Authorization].secretRef.key",
+            "operator sets",
+        );
+        assert_eq!(issues.len(), 1, "{key}: {issues:?}");
+    }
+    // A key that is not one of those is fine.
+    validate_provider(&provider(|p| {
+        p["spec"]["mcp"]["headers"]["Authorization"]["secretRef"]["key"] = json!("SEARCH_TOKEN");
+    }))
+    .unwrap();
+}
+
+/// A tool is named `<server>__<tool>` for the model, at most 64 characters. The server's name in an agent is the config's
+/// own; the object's name is the nearest the object can say, and a name that cannot hold its tools is not "accepted".
+#[test]
+fn a_tool_is_judged_with_the_name_of_the_provider_as_its_server() {
+    let long = "s".repeat(40);
+    let named = |tool: String| {
+        provider(|p| {
+            p["metadata"]["name"] = json!(long);
+            p["spec"]["mcp"]["tools"] = json!([tool]);
+        })
+    };
+    // 40 + 2 + 22 = 64 fits; 23 does not.
+    validate_provider(&named("t".repeat(22))).unwrap();
+    let issues = validate_provider(&named("t".repeat(23))).unwrap_err();
+    assert_issue(
+        &issues,
+        &format!("ToolProvider {long} spec.mcp.tools[0]"),
+        "cannot be named",
+    );
+    // A short name leaves room for the same tool.
+    validate_provider(&provider(|p| {
+        p["spec"]["mcp"]["tools"] = json!(["t".repeat(23)]);
+    }))
+    .unwrap();
+}

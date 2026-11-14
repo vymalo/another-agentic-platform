@@ -25,6 +25,19 @@ pub enum Error {
     /// Adding or removing the finalizer failed, or the work it wraps did.
     #[error("finalizer: {0}")]
     Finalizer(#[source] Box<finalizer::Error<Error>>),
+    /// The API server answered 404 to the write of a shared object's `status`: it does not serve the subresource (the
+    /// operator was rolled out before the CRDs chart, `deploy/operator-crds`, which gives these kinds one), or the object
+    /// was deleted a moment ago. Its class is `Internal`, so the retries back off from 30 s to 10 minutes instead of
+    /// asking every 5 s as for an object that is gone, and each is a warning that says what to do.
+    #[error(
+        "the API server answered 404 to the write of the status of {kind} {name}: the CRDs chart (deploy/operator-crds) is older than the operator and does not give the kind a status subresource, or the object was just deleted; install the CRDs chart first"
+    )]
+    StatusNotServed {
+        /// The controller's name for the kind.
+        kind: &'static str,
+        /// The object's name.
+        name: String,
+    },
     /// The pass did not finish in [`Options::pass_timeout`](crate::Options::pass_timeout): a request to the
     /// API server or to a provider was never answered. The pass was dropped; the next one starts afresh.
     #[error(
@@ -63,7 +76,7 @@ impl Classify for Error {
             Self::Kube(e) => kube_class(e),
             Self::Runtime(e) => e.class(),
             Self::Store(e) => e.class(),
-            Self::Malformed(_) => ErrorClass::Internal,
+            Self::Malformed(_) | Self::StatusNotServed { .. } => ErrorClass::Internal,
             // Whatever was asked may well be answered next time, from another connection.
             Self::TimedOut(_) => ErrorClass::Transient,
             Self::Finalizer(f) => match &**f {

@@ -763,3 +763,51 @@ async fn a_shared_object_gets_its_status_and_follows_the_agents_that_use_it() {
     .await;
     r.stop().await;
 }
+
+fn service_passes(r: &Running) -> u64 {
+    ["ok", "error"]
+        .iter()
+        .map(|result| {
+            r.metrics.get(
+                aap_controller::metric::RECONCILES,
+                &[("controller", "agentservice"), ("result", result)],
+            )
+        })
+        .sum()
+}
+
+/// K2: the operator writes a status on a shared object after every change of an agent that uses it. That moves the
+/// object's `resourceVersion` and not its `generation`, and must not reconcile every service that names it (one flip of
+/// `AgentsReady` under two hundred users would be two hundred passes).
+#[tokio::test]
+async fn a_status_write_on_a_shared_object_reconciles_no_service_and_a_spec_change_does() {
+    let r = start(None).await;
+    running_dashboard(&r, "team").await;
+    eventually("the statuses", || {
+        r.fake.get(ENDPOINTS, "team", "gateway").unwrap()["status"]["usedBy"] == json!(["coder-me"])
+            && r.fake.get(PROVIDERS, "team", "websearch").unwrap()["status"]["usedBy"]
+                == json!(["coder-me"])
+    })
+    .await;
+    // Let what the first statuses woke settle.
+    tokio::time::sleep(Duration::from_millis(500)).await;
+    let before = service_passes(&r);
+    for (plural, name) in [(ENDPOINTS, "gateway"), (PROVIDERS, "websearch")] {
+        let mut other = r.fake.get(plural, "team", name).unwrap()["status"].clone();
+        other["usedBy"] = json!(["someone-else"]);
+        r.fake.put_status(plural, "team", name, other);
+    }
+    tokio::time::sleep(Duration::from_millis(700)).await;
+    assert_eq!(
+        service_passes(&r),
+        before,
+        "a status-only change of a shared object reconciled a service"
+    );
+
+    // The control: the same watch does carry a change of the spec.
+    let mut endpoint = r.fake.get(ENDPOINTS, "team", "gateway").unwrap();
+    endpoint["spec"]["apiKeySecretRef"]["name"] = json!("rotated-models");
+    r.fake.put(ENDPOINTS, endpoint);
+    eventually("a pass for the spec change", || service_passes(&r) > before).await;
+    r.stop().await;
+}

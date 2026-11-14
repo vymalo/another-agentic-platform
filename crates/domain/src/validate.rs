@@ -316,8 +316,10 @@ pub fn validate_endpoint(endpoint: &aap_api::ModelEndpoint) -> Result<(), Vec<Co
 /// itself) and each tool of the allow-list.
 ///
 /// **What only a config can say is left to it:** a plain `http://` URL to another machine needs the config's
-/// `tools.allowInsecureHttp`, and a tool's name is checked against the name the *config* gives the server
-/// (`<server>__<tool>` is at most 64 characters). Here a tool is checked as if the server were named with one character.
+/// `tools.allowInsecureHttp`. A tool is named `<server>__<tool>` for the model (at most 64 characters), and the server's
+/// name is the *config's* own key for it, which the object cannot know: here the **object's own name** stands for it, so a
+/// provider whose name leaves no room for its tools is not accepted. An agent that names the provider under a shorter key
+/// is still told its own verdict by `validate`.
 ///
 /// # Errors
 ///
@@ -350,7 +352,7 @@ pub fn validate_provider(provider: &aap_api::ToolProvider) -> Result<(), Vec<Con
         }
     }
     for (i, tool) in mcp.tools.iter().enumerate() {
-        if !is_adam_tool_name("s", tool) {
+        if !is_adam_tool_name(name, tool) {
             v.add(
                 format!("{at}.mcp.tools[{i}]"),
                 format!("{tool:?} cannot be named <server>__{tool} for the model: adam-rs takes letters, digits, `-` and `_`, not starting with `_`, and at most 64 characters with the server's name and `__`"),

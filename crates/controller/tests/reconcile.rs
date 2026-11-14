@@ -1726,3 +1726,166 @@ async fn more_than_64_users_are_counted_not_listed() {
         "{in_use}"
     );
 }
+
+/// A clock that is one second later each time it is read, so that a time written on a pass that changed nothing would
+/// show.
+fn advancing_clock() -> aap_controller::Clock {
+    let seconds = std::sync::atomic::AtomicU32::new(1);
+    Arc::new(move || {
+        let n = seconds.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        Time(format!("2026-11-14T10:00:{n:02}Z").parse().unwrap())
+    })
+}
+
+/// `shared_ctx` over a clock of the caller's.
+fn shared_ctx_with(
+    w: &World,
+    services: &[&str],
+    clock: aap_controller::Clock,
+) -> Arc<SharedContext> {
+    let (configs, mut cw) = reflector::store::<AgentConfig>();
+    cw.apply_watcher_event(&watcher::Event::Init);
+    cw.apply_watcher_event(&watcher::Event::InitApply(
+        serde_json::from_value(w.fake.get(CONFIGS, NS, &w.name).unwrap()).unwrap(),
+    ));
+    cw.apply_watcher_event(&watcher::Event::InitDone);
+    let (svcs, mut sw) = reflector::store::<AgentService>();
+    sw.apply_watcher_event(&watcher::Event::Init);
+    for name in services {
+        sw.apply_watcher_event(&watcher::Event::InitApply(
+            serde_json::from_value(w.fake.get(SERVICES, NS, name).unwrap()).unwrap(),
+        ));
+    }
+    sw.apply_watcher_event(&watcher::Event::InitDone);
+    Arc::new(
+        SharedContext::new(w.fake.client(), w.metrics.clone(), configs, svcs).with_clock(clock),
+    )
+}
+
+/// The `lastTransitionTime` of the condition `type_` of a status.
+fn since(status: &Value, type_: &str) -> String {
+    status["conditions"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|c| c["type"] == type_)
+        .unwrap()["lastTransitionTime"]
+        .as_str()
+        .unwrap()
+        .to_owned()
+}
+
+#[tokio::test]
+async fn transition_time_kept_when_truth_unchanged() {
+    let w = shared_world(&["second".to_owned()]);
+    w.settle().await; // coder-me is Ready; `second` has no status yet
+    let clock = advancing_clock();
+
+    // T1: the first status. Every condition is stamped with the time the pass read.
+    let ctx = shared_ctx_with(&w, &["coder-me", "second"], clock.clone());
+    provider_pass(&w, &ctx).await;
+    let first = provider_status(&w);
+    let t1 = since(&first, "Accepted");
+    is(&first, "AgentsReady", "False", "SomeNotReady");
+    assert_eq!(since(&first, "InUse"), t1);
+    assert_eq!(since(&first, "AgentsReady"), t1);
+
+    // T2: nothing changed. The pass writes nothing and no time moves, though the clock did.
+    w.fake.clear_calls();
+    let ctx = shared_ctx_with(&w, &["coder-me", "second"], clock.clone());
+    provider_pass(&w, &ctx).await;
+    assert!(w.fake.writes().is_empty(), "{:?}", w.fake.writes());
+    assert_eq!(provider_status(&w), first);
+
+    // T3: `second` becomes Ready. Only `AgentsReady` changed its truth, so only its time moves.
+    for _ in 0..2 {
+        let svc: AgentService =
+            serde_json::from_value(w.fake.get(SERVICES, NS, "second").unwrap()).unwrap();
+        reconcile_service(Arc::new(svc), w.ctx.clone())
+            .await
+            .unwrap();
+    }
+    let ctx = shared_ctx_with(&w, &["coder-me", "second"], clock.clone());
+    provider_pass(&w, &ctx).await;
+    let third = provider_status(&w);
+    is(&third, "AgentsReady", "True", "AllReady");
+    assert_eq!(since(&third, "Accepted"), t1, "valid all along");
+    assert_eq!(since(&third, "InUse"), t1, "in use all along");
+    assert_ne!(since(&third, "AgentsReady"), t1, "its truth changed");
+}
+
+#[tokio::test]
+async fn observed_generation_follows_the_spec() {
+    let w = shared_world(&[]);
+    let ctx = shared_ctx(&w, &["coder-me"], false);
+    let generation = |plural: &str, name: &str| {
+        w.fake.get(plural, NS, name).unwrap()["metadata"]["generation"]
+            .as_i64()
+            .unwrap()
+    };
+    let observed = |status: &Value| {
+        let mut all = vec![status["observedGeneration"].as_i64().unwrap()];
+        for c in status["conditions"].as_array().unwrap() {
+            all.push(c["observedGeneration"].as_i64().unwrap());
+        }
+        all
+    };
+    provider_pass(&w, &ctx).await;
+    let g1 = generation(PROVIDERS, "websearch");
+    assert_eq!(observed(&provider_status(&w)), vec![g1; 4]);
+
+    // A change of the spec is a new generation, and the status says it judged that one, in every condition.
+    w.edit_shared(PROVIDERS, "websearch", |p| {
+        p["spec"]["mcp"]["optional"] = json!(false);
+    });
+    let g2 = generation(PROVIDERS, "websearch");
+    assert!(g2 > g1);
+    let ctx = shared_ctx(&w, &["coder-me"], false);
+    provider_pass(&w, &ctx).await;
+    assert_eq!(observed(&provider_status(&w)), vec![g2; 4]);
+}
+
+/// Deleting a service is not instant (the operator releases its compute first), and until it is gone it still runs the
+/// config and holds the reference: it counts, as it does in the Platform API's own `usedBy`.
+#[tokio::test]
+async fn a_service_being_deleted_still_counts_as_a_user() {
+    let w = shared_world(&[]);
+    w.settle().await;
+    w.fake.delete(SERVICES, NS, "coder-me");
+    assert!(
+        w.fake.get(SERVICES, NS, "coder-me").unwrap()["metadata"]["deletionTimestamp"].is_string(),
+        "the service stays, with its finalizer"
+    );
+    let ctx = shared_ctx(&w, &["coder-me"], false);
+    provider_pass(&w, &ctx).await;
+    assert_eq!(provider_status(&w)["usedBy"], json!(["coder-me"]));
+}
+
+/// A status that cannot be written because the API server does not serve the subresource (the operator was upgraded before
+/// the CRDs chart) is a logged, backed-off failure: the error says what to do, its class is not the 5 s retry of an object
+/// that is simply gone, and the wait grows.
+#[tokio::test]
+async fn a_status_subresource_the_api_server_does_not_serve_is_backed_off_and_says_what_to_do() {
+    use aap_controller::{backoff, endpoint_error_policy};
+    use aap_ports::{Classify, ErrorClass};
+    let w = shared_world(&[]);
+    let ctx = shared_ctx(&w, &["coder-me"], false);
+    let o: ModelEndpoint =
+        serde_json::from_value(w.fake.get(ENDPOINTS, NS, "gateway").unwrap()).unwrap();
+    let o = Arc::new(o);
+    w.fake.absent(&["modelendpoints/status"]);
+    let error = reconcile_endpoint(o.clone(), ctx.clone())
+        .await
+        .unwrap_err();
+    assert_eq!(error.class(), ErrorClass::Internal, "{error}");
+    let text = error.to_string();
+    assert!(
+        text.contains("deploy/operator-crds") && text.contains("status"),
+        "{text}"
+    );
+    let first = requeue_after(&endpoint_error_policy(o.clone(), &error, ctx.clone()));
+    let second = requeue_after(&endpoint_error_policy(o.clone(), &error, ctx.clone()));
+    assert_eq!(first, backoff(ErrorClass::Internal, 1));
+    assert!(first >= Duration::from_secs(30), "{first:?}");
+    assert!(second > first, "{first:?} then {second:?}");
+}

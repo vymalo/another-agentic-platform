@@ -11,8 +11,9 @@
 //!
 //! The users of an object are the `AgentService`s of its own namespace that run a config that names it, by the same two hops
 //! as [`services_of_endpoint`](crate::services_of_endpoint). The caches are the controllers' **own reflectors** of
-//! `AgentConfig` and `AgentService` (`Operator::run` makes them), because a trigger mapped from a second watcher of the same kind could reach the pass
-//! before the cache it reads has the change, and the status would be one event behind until the next timer.
+//! `AgentConfig` and `AgentService`, one pair for both controllers (`Operator::run` makes them), because a trigger mapped from
+//! a second watcher of the same kind could reach the pass before the cache it reads has the change, and the status would
+//! be one event behind until the next timer. Their cost is those two watches and caches, beside the services controller's.
 //!
 //! # What triggers a pass
 //!
@@ -184,7 +185,7 @@ pub(crate) fn shared_status(
             condition_type::ACCEPTED,
             "True",
             reason::VALID,
-            "the object passed validation".to_owned(),
+            "valid on its own; an agent that names it is validated again".to_owned(),
             generation,
             now,
         ),
@@ -333,7 +334,14 @@ async fn pass<K: Shared>(object: &K, ctx: &SharedContext) -> Result<Action, Erro
             &PatchParams::apply(FIELD_MANAGER).force(),
             &Patch::Apply(&body),
         )
-        .await?;
+        .await
+        .map_err(|e| match e {
+            kube::Error::Api(status) if status.code == 404 => Error::StatusNotServed {
+                kind: K::CONTROLLER,
+                name: name_of.clone(),
+            },
+            other => Error::from(other),
+        })?;
         ctx.metrics
             .inc(name::STATUS_PATCHES, &[("controller", K::CONTROLLER)]);
     }
@@ -477,4 +485,144 @@ fn dedup<K: Shared>(refs: Vec<ObjectRef<K>>) -> Vec<ObjectRef<K>> {
     refs.into_iter()
         .filter(|r| seen.insert(r.clone()))
         .collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use kube::runtime::reflector;
+    use kube::runtime::watcher::Event;
+    use serde_json::Value;
+
+    use super::*;
+    use crate::watches::{endpoint_of_config, providers_of_config};
+
+    /// The four objects of the §60a example, as JSON, by kind.
+    fn example(kind: &str) -> Value {
+        serde_yaml::Deserializer::from_str(include_str!("../../../examples/coder-me.yaml"))
+            .map(|d| serde::Deserialize::deserialize(d).unwrap())
+            .find(|v: &Value| v["kind"] == kind)
+            .unwrap()
+    }
+
+    fn store<K>(objects: Vec<Value>) -> Store<K>
+    where
+        K: Resource<DynamicType = ()> + Clone + serde::de::DeserializeOwned + 'static,
+    {
+        let (store, mut writer) = reflector::store::<K>();
+        writer.apply_watcher_event(&Event::Init);
+        for o in objects {
+            writer.apply_watcher_event(&Event::InitApply(serde_json::from_value(o).unwrap()));
+        }
+        writer.apply_watcher_event(&Event::InitDone);
+        store
+    }
+
+    /// The endpoint, whose status already lists `coder-me` as its user.
+    fn listing_endpoint() -> Value {
+        let mut e = example("ModelEndpoint");
+        e["status"] = json!({ "usedBy": ["coder-me"] });
+        e
+    }
+
+    /// The config, with its model written inline: it no longer names the endpoint.
+    fn inline_config() -> Value {
+        let mut c = example("AgentConfig");
+        c["spec"]["model"] = json!({
+            "baseUrl": { "value": "https://models.example/v1" },
+            "apiKeySecretRef": { "name": "agent-models", "key": "GATEWAY_API_KEY" },
+            "model": "coding-model"
+        });
+        c
+    }
+
+    fn only(refs: Vec<ObjectRef<ModelEndpoint>>) -> Vec<String> {
+        refs.into_iter().map(|r| r.name).collect()
+    }
+
+    /// A config that stops naming an endpoint reaches the endpoint it left through the status that lists its service,
+    /// with no change of any service: the old `usedBy` is the only way back.
+    #[test]
+    fn touched_by_config_maps_a_config_edit_with_no_service_status_change() {
+        let services = store::<AgentService>(vec![example("AgentService")]);
+        let endpoints = store::<ModelEndpoint>(vec![listing_endpoint()]);
+        let edited: AgentConfig = serde_json::from_value(inline_config()).unwrap();
+        assert!(
+            endpoint_of_config(&edited).is_empty(),
+            "the edited config names no endpoint"
+        );
+        assert_eq!(
+            only(touched_by_config(
+                &edited,
+                &services,
+                &endpoints,
+                endpoint_of_config
+            )),
+            ["gateway"]
+        );
+
+        // The unedited config names it, and the same object is not asked for twice.
+        let named: AgentConfig = serde_json::from_value(example("AgentConfig")).unwrap();
+        assert_eq!(
+            only(touched_by_config(
+                &named,
+                &services,
+                &endpoints,
+                endpoint_of_config
+            )),
+            ["gateway"]
+        );
+
+        // Nothing lists the service (a fresh endpoint): an edit that names nothing reaches nobody.
+        let fresh = store::<ModelEndpoint>(vec![example("ModelEndpoint")]);
+        assert!(touched_by_config(&edited, &services, &fresh, endpoint_of_config).is_empty());
+
+        // A config of another name is not the service's.
+        let mut other = inline_config();
+        other["metadata"]["name"] = json!("someone-elses");
+        let other: AgentConfig = serde_json::from_value(other).unwrap();
+        assert!(touched_by_config(&other, &services, &endpoints, endpoint_of_config).is_empty());
+    }
+
+    /// A service that is deleted, or moves to a config that names nothing, reaches the object that lists it, with its
+    /// config gone from the cache.
+    #[test]
+    fn touched_by_service_reaches_the_object_that_lists_it() {
+        let endpoints = store::<ModelEndpoint>(vec![listing_endpoint()]);
+        let no_configs = store::<AgentConfig>(vec![]);
+        let service: AgentService = serde_json::from_value(example("AgentService")).unwrap();
+        assert_eq!(
+            only(touched_by_service(
+                &service,
+                &no_configs,
+                &endpoints,
+                endpoint_of_config
+            )),
+            ["gateway"]
+        );
+
+        // With its config in the cache the endpoint it names is touched too, once.
+        let configs = store::<AgentConfig>(vec![example("AgentConfig")]);
+        assert_eq!(
+            only(touched_by_service(
+                &service,
+                &configs,
+                &endpoints,
+                endpoint_of_config
+            )),
+            ["gateway"]
+        );
+
+        // A service the status does not list, whose config names nothing, reaches nothing; the providers answer alike.
+        let mut stranger = example("AgentService");
+        stranger["metadata"]["name"] = json!("stranger");
+        stranger["spec"]["configRef"]["name"] = json!("nothing");
+        let stranger: AgentService = serde_json::from_value(stranger).unwrap();
+        assert!(
+            touched_by_service(&stranger, &no_configs, &endpoints, endpoint_of_config).is_empty()
+        );
+        let providers = store::<ToolProvider>(vec![example("ToolProvider")]);
+        assert!(
+            touched_by_service(&stranger, &no_configs, &providers, providers_of_config).is_empty()
+        );
+    }
 }
