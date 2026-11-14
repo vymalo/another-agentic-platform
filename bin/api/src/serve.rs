@@ -1,14 +1,15 @@
-//! The two servers: the API on its port, and `/healthz` and `/readyz` on another.
+//! The three servers: the API on its port, `/healthz` and `/readyz` on another, and `/metrics` on a third.
 
 use std::future::Future;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
+use aap_platform_api::ApiMetrics;
 use anyhow::{Context, Result};
 use axum::Router;
 use axum::extract::State;
-use axum::http::StatusCode;
+use axum::http::{StatusCode, header};
 use axum::response::IntoResponse;
 use axum::routing::get;
 use futures::future::BoxFuture;
@@ -86,6 +87,25 @@ async fn ready(State(state): State<Arc<Shared>>) -> impl IntoResponse {
     }
 }
 
+/// `/metrics`: the counters of the API in the Prometheus text format. Its own port, so that a NetworkPolicy can open it to the
+/// scraper and keep it from everybody else; nothing here is the API's.
+pub fn metrics(metrics: Arc<ApiMetrics>) -> Router {
+    Router::new()
+        .route(
+            "/metrics",
+            get(|State(m): State<Arc<ApiMetrics>>| async move {
+                (
+                    [(
+                        header::CONTENT_TYPE,
+                        "text/plain; version=0.0.4; charset=utf-8",
+                    )],
+                    m.render(),
+                )
+            }),
+        )
+        .with_state(metrics)
+}
+
 /// Serve `router` on `listener` until `shutdown` resolves, then let the requests in flight finish.
 pub async fn serve(
     listener: tokio::net::TcpListener,
@@ -155,6 +175,27 @@ mod tests {
             get(router, "/v1/me").await.0,
             StatusCode::NOT_FOUND,
             "the API is not on this port"
+        );
+    }
+
+    #[tokio::test]
+    async fn metrics_are_prometheus_text_and_only_on_the_metrics_router() {
+        let m = Arc::new(ApiMetrics::new());
+        let router = metrics(m.clone());
+        let (status, body) = get(router.clone(), "/metrics").await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(body, "", "no request yet, no series");
+        assert_eq!(get(router.clone(), "/v1/me").await.0, StatusCode::NOT_FOUND);
+        assert_eq!(get(router, "/readyz").await.0, StatusCode::NOT_FOUND);
+        let res = metrics(m)
+            .oneshot(Request::get("/metrics").body(Body::empty()).unwrap())
+            .await
+            .unwrap();
+        assert!(
+            res.headers()[header::CONTENT_TYPE]
+                .to_str()
+                .unwrap()
+                .starts_with("text/plain; version=0.0.4")
         );
     }
 

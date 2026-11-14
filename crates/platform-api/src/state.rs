@@ -1,11 +1,13 @@
 //! What the handlers share: the two ports, and the deployment's configuration. No global.
 
+use std::sync::Arc;
 use std::sync::atomic::AtomicBool;
 
 use aap_forms::{Defaults, ImagePolicy};
 use aap_ports::{AgentObjects, Authenticator};
 
 use crate::cors::CorsOrigins;
+use crate::metrics::ApiMetrics;
 
 /// Why an [`ApiState`] could not be made.
 #[derive(Debug, thiserror::Error)]
@@ -25,6 +27,7 @@ pub struct ApiState<O, A> {
     pub(crate) images: ImagePolicy,
     pub(crate) cors: CorsOrigins,
     pub(crate) version: String,
+    pub(crate) metrics: Arc<ApiMetrics>,
     /// Whether the last request that needed the issuer's keys found them unavailable: the log says so when this changes,
     /// and not once per request while it lasts.
     pub(crate) keys_down: AtomicBool,
@@ -56,6 +59,7 @@ where
             images,
             cors: CorsOrigins::none(),
             version: env!("CARGO_PKG_VERSION").to_owned(),
+            metrics: Arc::new(ApiMetrics::new()),
             keys_down: AtomicBool::new(false),
         })
     }
@@ -65,6 +69,18 @@ where
     pub fn with_cors(mut self, origins: CorsOrigins) -> Self {
         self.cors = origins;
         self
+    }
+
+    /// Count into `metrics` (which the binary serves on its metrics port) instead of a private set.
+    #[must_use]
+    pub fn with_metrics(mut self, metrics: Arc<ApiMetrics>) -> Self {
+        self.metrics = metrics;
+        self
+    }
+
+    /// The counters of this state.
+    pub fn metrics(&self) -> &Arc<ApiMetrics> {
+        &self.metrics
     }
 
     /// The version `GET /v1/info` reports, when it is not this crate's (the binary's).

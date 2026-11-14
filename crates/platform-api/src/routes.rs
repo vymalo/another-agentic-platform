@@ -241,6 +241,12 @@ pub fn lookup(method: &Method, template: &str) -> Option<&'static Route> {
     ROUTES.iter().find(|r| r.verb == verb && r.path == template)
 }
 
+/// The template of the table that is spelt `template`, as the table's own `&'static str` (a metrics label never holds what a
+/// request said, only what the table says). `None` for a template the table does not have.
+pub fn template(template: &str) -> Option<&'static str> {
+    ROUTES.iter().find(|r| r.path == template).map(|r| r.path)
+}
+
 /// The `Allow` header of a template that is in the table: its methods, and `HEAD` after `GET`. `None` for a template the
 /// table does not have.
 pub fn allow(template: &str) -> Option<String> {

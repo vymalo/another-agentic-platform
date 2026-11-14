@@ -31,6 +31,7 @@ flowchart LR
 | `NetworkPolicy aap-operator` | Ingress only from who the values name; egress only to the API server's ports |
 | `ExternalSecret aap-operator-registry` | Only with `externalSecrets.enabled`: the registry token from AWS Secrets Manager |
 | `ConfigMap` `aap-operator-run-pods-settings`, `Role` `aap-operator-run-pods`, `PriorityClass`, `ValidatingAdmissionPolicy` and its binding | Only with `runPods.enabled`: [run pods](#run-pods). Nothing of them is rendered, or checked, while it is off, and the render is then byte for byte what it was before they existed |
+| `ServiceMonitor` `aap-operator` | Only with `metrics.serviceMonitor.enabled`: [metrics](#metrics-and-servicemonitors). Nothing of it is rendered, and the CRD need not exist, while it is off |
 | `Deployment`, `Service`, `ConfigMap`, `ServiceAccount`, `Role`, `RoleBinding`, `NetworkPolicy` `aap-operator-api` and an optional `Ingress` | Only with `api.enabled`: [the Platform API](#the-platform-api). Nothing of it is rendered, or checked, while it is off |
 
 ## Install
@@ -70,7 +71,8 @@ sequence them with the CRDs first (a sync wave, or their Application first).
 | `externalSecrets.enabled`, `.apiVersion`, `.refreshInterval`, `.secretStoreRef`, `.key`, `.properties.registryToken` | off, `external-secrets.io/v1`, `1h`, `ClusterSecretStore/ssegning-aws`, `prod/another-agentic/env`, `agent_registry_token` | The token from AWS Secrets Manager, as in the system chart: one ExternalSecret, one property. Not together with `registry.tokenSecret.name` |
 | `networkPolicy.enabled` | `true` | |
 | `networkPolicy.registry.allowFrom` | `[]` | NetworkPolicyPeers that may read the registry. **Required while there is a token and a policy**: an empty list would make the registry unreachable, which the chart refuses. A peer with only a `podSelector` means the pods of the watched namespace |
-| `networkPolicy.metrics.allowFrom` | `[]` | Who may scrape `/metrics`. Empty: nobody |
+| `networkPolicy.metrics.allowFrom` | `[]` | Who may scrape `/metrics`. Empty: nobody. **A peer with only a `podSelector` means pods of the operator's own namespace**: a Prometheus in another namespace needs a `namespaceSelector` |
+| `metrics.serviceMonitor.enabled`, `.interval`, `.labels` | off, `30s`, `{}` | A Prometheus Operator `ServiceMonitor` for the operator's `/metrics`: [below](#metrics-and-servicemonitors). On, the chart refuses an empty `networkPolicy.metrics.allowFrom` while the policy is enabled |
 | `networkPolicy.apiServer.ports`, `.cidrs` | `[443, 6443]`, `[]` | The API server as the pod reaches it (the Service is 443, most clusters' endpoint 6443). `cidrs`, from `kubectl get endpoints kubernetes`, narrows it to those addresses |
 | `logLevel` | `info` | `RUST_LOG` |
 | `tuning.concurrency`, `.resyncSecs`, `.resyncPendingSecs` | unset (the binary's 4, 300, 15) | `AAP_CONCURRENCY`, `AAP_RESYNC_SECS`, `AAP_RESYNC_PENDING_SECS`; another key is refused |
@@ -296,6 +298,7 @@ flowchart LR
 | `api.image.repository`, `.tag`, `.digest`, `.pullPolicy` | `ghcr.io/vymalo/another-agentic-platform/api`, `sha-0000000`, none, `IfNotPresent` | The tag is **written by CI only** (`bump-tag.sh <file> <tag> api`), in step with `image.tag` ([below](#the-image)); `sha-0000000` is a placeholder no image has. `latest` and a malformed digest are refused. `imagePullSecrets` (top level) apply to both images |
 | `api.replicas` | `1` | The API is stateless; two are fine. The operator has no `replicaCount`: this is the API's |
 | `api.port`, `api.healthPort` | `8080`, `8081` | The API, and `/healthz` and `/readyz`. The chart writes both into the file (`listen`, `healthListen`), so the probes, the Service and the file cannot disagree; they are not keys of `api.config` |
+| `api.metrics.port`, `.allowFrom`, `.serviceMonitor.enabled`, `.serviceMonitor.interval`, `.serviceMonitor.labels` | `9090`, `[]`, off, `30s`, `{}` | The API's `/metrics` and its `ServiceMonitor` (K4): [below](#metrics-and-servicemonitors). The chart writes `port` into the file (`metricsListen`) only while the port is exposed; it is not a key of `api.config` |
 | `api.config.oidc` | none | `issuer`, `audiences`, `rolesClaim` (required), `jwksUrl` (optional) |
 | `api.config.cors.allowedOrigins` | `[]` | Exact origins, `scheme://host[:port]`, lower case, no path, **no wildcard**, not the default port of the scheme (a browser leaves it out). Empty: no CORS. Refused here as the binary refuses it |
 | `api.config.defaults` | cnpg store (1 instance, 5Gi), `a2aBearer`, `allowFrom: []`, `allowedImageRegistries: []` | `aap_forms::Defaults` ([the crate](../../crates/forms/README.md#deployment-defaults-and-what-the-round-trip-does-with-them)); the rest of its keys (`coder`, `folder`, `security`, `offerLabel`) are as in [`bin/api/config.example.yaml`](../../bin/api/config.example.yaml). A map is merged with the default, a list replaces it; `store` holds exactly one of `cnpg` and `secretRef`, so to switch say `cnpg: null` beside the new one. **`defaults.namespace` is the chart's**: the namespace the operator watches, where the `Role` is. A different value is refused |
@@ -303,7 +306,7 @@ flowchart LR
 | `api.terminationGracePeriodSeconds`, `api.preStopSleepSeconds` | `40`, `5` | [Below](#a-pod-that-leaves) |
 | `api.ingress.enabled`, `.className`, `.host`, `.path`, `.pathType`, `.annotations`, `.tls.enabled`, `.tls.secretName` | off, none, none, `/v1`, `Prefix`, none, `true`, none | The edge's route (below). `host` is required when it is on |
 | `api.networkPolicy.enabled`, `.from`, `.apiServer`, `.dns`, `.issuer` | `true`, `[]`, `443, 6443`, `kube-dns:53`, `443` | [Below](#the-networkpolicy) |
-| `api.extraEnv`, `api.extraVolumes`, `api.extraVolumeMounts` | `[]` | The container's extra environment (a list of `EnvVar`), volumes (`Volume`) and mounts (`VolumeMount` of them): for an issuer behind a private CA or a proxy, [below](#an-issuer-behind-a-private-ca-or-a-proxy). Refused: the chart's own variables (`API_CONFIG_FILE`, `RUST_LOG`, `API_LISTEN_ADDR`, `HEALTH_ADDR`), a volume named `config`, a mount of a volume that is not in `extraVolumes`, and any mount at or under `/etc/aap-api`, where the configuration file is |
+| `api.extraEnv`, `api.extraVolumes`, `api.extraVolumeMounts` | `[]` | The container's extra environment (a list of `EnvVar`), volumes (`Volume`) and mounts (`VolumeMount` of them): for an issuer behind a private CA or a proxy, [below](#an-issuer-behind-a-private-ca-or-a-proxy). Refused: the chart's own variables (`API_CONFIG_FILE`, `RUST_LOG`, `API_LISTEN_ADDR`, `HEALTH_ADDR`, `METRICS_ADDR`), a volume named `config`, a mount of a volume that is not in `extraVolumes`, and any mount at or under `/etc/aap-api`, where the configuration file is |
 | `api.logLevel`, `api.resources`, `api.podAnnotations`, `api.podLabels`, `api.priorityClassName`, `api.nodeSelector`, `api.tolerations`, `api.affinity`, `api.topologySpreadConstraints` | `info`, 50m / 64Mi requested and 256Mi limit, empty | |
 
 `templates/_validate.tpl` refuses, with the value's name, what the chart can check at render time and the binary would refuse at start (the issuer
@@ -432,6 +435,26 @@ API does not implement a limiter (a bearer API is open to any script that holds 
   the edge can only add a first line. It is what makes a limit **per token or per person** mean something, and then the limit should be keyed by a claim of the
   verified token and not by the raw header. Whatever the edge does must pass `Authorization` through unchanged.
 * The origins that may call from a browser are `api.config.cors.allowedOrigins`, **in the API's file**, not the edge's.
+
+### Metrics and ServiceMonitors
+
+K4 (2026-11-14). Both are **off by default and then not a trace**: the four goldens that existed are byte for byte what they were, and the chart renders no
+`ServiceMonitor` (a cluster without the Prometheus Operator CRDs installs as before). The two components are alike:
+
+| | Operator | Platform API |
+|---|---|---|
+| The endpoint | `/metrics` on 9090, the `aap_*` counters of the controllers | `/metrics` on `api.metrics.port` (9090), `aap_api_requests_total{route,method,status}` and `aap_api_auth_failures_total{reason}` ([the crate](../../crates/platform-api/README.md#metrics)): no authentication, a listener of its own, never the API's port |
+| The Service | `<fullname>-metrics`, which always exists; it carries the label `aap.vymalo.com/scrape: metrics` only while the `ServiceMonitor` is on | `<fullname>-api-metrics`, made only while the port is exposed (a peer in `api.metrics.allowFrom`, or the `ServiceMonitor`), always with that label |
+| Who may scrape | `networkPolicy.metrics.allowFrom` (as before) | `api.metrics.allowFrom`: one more ingress rule of the API's policy, on the metrics port, for those peers and nobody else. Exposed, the container port `metrics` is opened, the file says `metricsListen: 0.0.0.0:<port>` and the Service exists: reachable by those peers while `api.networkPolicy` is enabled and **enforced by the cluster**, and by any pod that can reach the API's pod when it is off or not enforced. Not exposed, the file says nothing and the binary's default is the loopback (`127.0.0.1:9090`): reachable from inside the pod only |
+| The `ServiceMonitor` | `metrics.serviceMonitor.{enabled, interval, labels}`: selects the Service by its name labels and the scrape label, on the port `metrics`, in the release's namespace; `labels` is what the Prometheus selects ServiceMonitors by | `api.metrics.serviceMonitor.{enabled, interval, labels}`, the same |
+| Refused, by name | `metrics.serviceMonitor.enabled` with an empty `networkPolicy.metrics.allowFrom` while `networkPolicy.enabled` (the policy would drop the scrape) | `api.metrics.serviceMonitor.enabled` with an empty `api.metrics.allowFrom` while `api.networkPolicy.enabled` |
+
+`/metrics` has no authentication. A scraper learns route templates (never a path), status counts and the reasons of authentication failures, and no name, subject or token. Peers of `api.metrics.allowFrom` follow the same rule as the operator's: a `podSelector` alone means the pods of the API's own namespace, so a Prometheus elsewhere needs a `namespaceSelector`.
+
+Also refused: an interval that is not a duration (`30s`, `1m`), `api.metrics.port` that is not a port or equals `api.port` or `api.healthPort`, a peer with no selector, and
+`METRICS_ADDR` in `api.extraEnv` (it would win over `api.metrics.port` in the file, which the Service and the policy follow). `tests/metrics.values.yaml` sets every one of
+these values: CI validates its render with kubeconform against the vendored ServiceMonitor schema (`tests/schemas/monitoring.coreos.com/`) and feeds its file, which carries
+`metricsListen: 0.0.0.0:9191`, to the image's `api --check`. *Unverified*: a scrape by a real Prometheus (the renders and the schema are what is checked).
 
 ### The NetworkPolicy
 

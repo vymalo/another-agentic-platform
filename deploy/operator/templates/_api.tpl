@@ -21,6 +21,11 @@ app.kubernetes.io/part-of: another-agentic-platform
 helm.sh/chart: {{ printf "%s-%s" .Chart.Name .Chart.Version | replace "+" "_" | trunc 63 | trimSuffix "-" }}
 {{- end -}}
 
+{{/* "true" when the API's metrics port is exposed (a peer may scrape, or a ServiceMonitor does), else nothing. */}}
+{{- define "aap.api.metricsExposed" -}}
+{{- if or .Values.api.metrics.allowFrom .Values.api.metrics.serviceMonitor.enabled -}}true{{- end -}}
+{{- end -}}
+
 {{/* repository:tag, plus @digest when there is one. */}}
 {{- define "aap.api.image" -}}
 {{- $i := .Values.api.image -}}
@@ -58,6 +63,10 @@ api.port and api.healthPort, which the probes and the Service use) and `defaults
 {{- $_ := set $defaults "runPodSizeClasses" (keys .Values.runPodClasses | sortAlpha) -}}
 {{- end -}}
 {{- $cfg := dict "listen" (printf "0.0.0.0:%d" (int .Values.api.port)) "healthListen" (printf "0.0.0.0:%d" (int .Values.api.healthPort)) "oidc" $c.oidc "cors" (default (dict) $c.cors) "defaults" $defaults -}}
+{{- /* Only when the metrics port is exposed: otherwise the file is what it was and the binary's default (9090) stands. */ -}}
+{{- if include "aap.api.metricsExposed" . -}}
+{{- $_ := set $cfg "metricsListen" (printf "0.0.0.0:%d" (int .Values.api.metrics.port)) -}}
+{{- end -}}
 {{- toYaml $cfg -}}
 {{- end -}}
 

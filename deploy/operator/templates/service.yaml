@@ -1,3 +1,4 @@
+{{- include "aap.validate" . -}}
 {{- if include "aap.registrySecretName" . }}
 # The agent registry (agent-registry/v1), cluster-internal only: no Ingress, and a bearer token on every request.
 apiVersion: v1
@@ -23,6 +24,9 @@ metadata:
   name: {{ include "aap.fullname" . }}-metrics
   labels:
     {{- include "aap.labels" . | nindent 4 }}
+    {{- if .Values.metrics.serviceMonitor.enabled }}
+    aap.vymalo.com/scrape: metrics
+    {{- end }}
 spec:
   type: ClusterIP
   selector:

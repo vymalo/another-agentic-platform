@@ -1,11 +1,13 @@
 # CRD schemas for kubeconform
 
-The chart renders one custom resource, an `ExternalSecret` (the registry's token, with `externalSecrets.enabled`). The
+The chart renders two custom resources: an `ExternalSecret` (the registry's token, with `externalSecrets.enabled`) and, with the
+metrics values on (K4), a `ServiceMonitor`. The
 `operator-image` workflow validates the render with kubeconform against the JSON schema in this directory.
 
 | File | Resource |
 |---|---|
 | `external-secrets.io/externalsecret_v1.json` | `external-secrets.io/v1` `ExternalSecret` |
+| `monitoring.coreos.com/servicemonitor_v1.json` | `monitoring.coreos.com/v1` `ServiceMonitor` |
 
 The file is a byte-for-byte copy of the one in [vymalo/another-adam-rs](https://github.com/vymalo/another-adam-rs)
 `deploy/coder/tests/schemas` and in [vymalo/another-agentic-system](https://github.com/vymalo/another-agentic-system)
@@ -22,4 +24,12 @@ here, because kubeconform fails on a kind that has no schema.
 C=<catalog commit>
 curl -fsSL -o deploy/operator/tests/schemas/external-secrets.io/externalsecret_v1.json \
   "https://raw.githubusercontent.com/datreeio/CRDs-catalog/$C/external-secrets.io/externalsecret_v1.json"
+```
+
+`monitoring.coreos.com/servicemonitor_v1.json` is a copy from the same catalog at the same commit, fetched 2026-11-14 (sha256
+`8978f86e2a7cb281a9ca7bc30d857e0553666658dfe062078c51e99d3f20cd14`); it is not copied from the sibling repositories:
+
+```sh
+curl -fsSL -o deploy/operator/tests/schemas/monitoring.coreos.com/servicemonitor_v1.json \
+  "https://raw.githubusercontent.com/datreeio/CRDs-catalog/$C/monitoring.coreos.com/servicemonitor_v1.json"
 ```

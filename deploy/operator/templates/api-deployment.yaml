@@ -69,6 +69,11 @@ spec:
             - name: health
               containerPort: {{ $api.healthPort }}
               protocol: TCP
+            {{- if include "aap.api.metricsExposed" . }}
+            - name: metrics
+              containerPort: {{ $api.metrics.port }}
+              protocol: TCP
+            {{- end }}
           startupProbe:
             httpGet:
               path: /healthz

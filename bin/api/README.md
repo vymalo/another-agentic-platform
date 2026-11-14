@@ -17,6 +17,7 @@ ExternalSecrets that offer keys, and it takes people's tokens; the operator hold
 | `--config <file>` | `API_CONFIG_FILE` | The configuration file (required) |
 | `--listen <addr>` | `API_LISTEN_ADDR` | Where the API listens. **Wins over `listen` in the file** |
 | `--health-addr <addr>` | `HEALTH_ADDR` | Where `/healthz` and `/readyz` are served. **Wins over `healthListen` in the file** |
+| `--metrics-addr <addr>` | `METRICS_ADDR` | Where `/metrics` is served (K4). **Wins over `metricsListen` in the file** |
 | `--check` | | Read the file, say whether the API can work with it, exit `0` or `1` |
 
 `RUST_LOG` sets the log filter (default `info`). The cluster is `kube::Client::try_default`: the pod's ServiceAccount, or `KUBECONFIG`.
@@ -34,6 +35,7 @@ file that does not come back, with its path (`defaults.allowFrom[0].podSelectr`)
 |---|---|---|
 | `listen` | `0.0.0.0:8080` | Where the API listens |
 | `healthListen` | `0.0.0.0:8081` | Where the health endpoints are |
+| `metricsListen` | `127.0.0.1:9090` | Where `/metrics` is served (K4): the Prometheus text of [`ApiMetrics`](../../crates/platform-api/README.md#metrics), **no authentication, on a port of its own and never the API's**. **The default is the loopback: reachable from inside the pod only.** Say `0.0.0.0:<port>` to let a scraper in: then any pod that can reach this one can read it, unless a NetworkPolicy that the cluster enforces narrows it to the scraper. The chart writes it only while it exposes the port (`api.metrics`). A scraper learns route templates, status counts and failure reasons, and no name, subject or token. **`listen`, `healthListen` and `metricsListen` must be three different ports**: the file is refused otherwise, naming both keys (`--check` says it, and not "Address already in use" at start) |
 | `oidc` | required | [`aap_auth_oidc::OidcConfig`](../../crates/auth-oidc/README.md): `issuer` (an `http(s)` URL, no credentials), `audiences` (at least one, none blank), `rolesClaim` (no default), `jwksUrl` (optional). Validated at load |
 | `cors.allowedOrigins` | `[]` | Exact origins as a browser writes them, `scheme://host[:port]`. **A wildcard, `null`, anything else and the default port of the scheme (`https://host:443`) are refused**: a browser leaves that port out, so the entry would match nothing. Empty is no CORS |
 | `defaults` | required | [`aap_forms::Defaults`](../../crates/forms/README.md#deployment-defaults-and-what-the-round-trip-does-with-them): the store, the A2A bearer reference, `allowFrom`, `security`, what a coder and a folder agent get, `offerLabel`, `allowedImageRegistries`. **`defaults.namespace` is the one namespace the API reads and writes** (there is no second `namespace` to disagree with it). Checked at load with `Defaults::check`: what would make the operator refuse every agent stops the API |
@@ -54,7 +56,7 @@ sequenceDiagram
     M->>K: try_default (ServiceAccount or KUBECONFIG)
     M->>R: KubernetesObjects(client, defaults.namespace, offer label), OidcAuthenticator(oidc)
     R->>R: build_router(objects, auth, defaults, cors): ApiState::new, router
-    R->>S: both sockets bound, the API router, the health router, the readiness check
+    R->>S: three sockets bound (API, health, metrics), the API router, the health router, the readiness check, the counters the router counts into
     S-->>R: serving until SIGTERM or SIGINT, or a server ends by itself
 ```
 
@@ -96,9 +98,9 @@ given to stop after it, and 5 s of margin, so the chart refuses less than the sl
 
 | Where | What |
 |---|---|
-| `config` (14) | the example is a configuration the API can work with and holds no secret; the defaults of the addresses; **a key that does not exist is refused at the top and in every mapping below `defaults`, with its path** (the example is walked: `security`, `allowFrom[0]`, `store.cnpg`, `a2aBearer`, `coder.gitAuthor`, `githubMcp`, `workVolume.source.persistent`, `resources`, `folder`), a misspelt `podSelectr` among them, and every optional member may be said without being taken for a typo; **`allowedImageRegistries` is required, not empty and made of hosts**; empty or blank audiences, an issuer that is not a URL, a blank or missing roles claim; a wildcard origin, `null`, a trailing slash and the default port; defaults the operator would refuse; an address that is not one; a file that is not there |
-| `serve` (6) | `/healthz` and `/readyz` follow the check; **a burst of 50 probes asks the check once, and the answer is kept 5 s**; a failure and a timeout are kept; a draining pod is not ready at once and is alive; a check that never answers is not ready |
-| `run` (7) | **the router comes up on a real socket with the `Memory` ports and over a real issuer**, answers, and stops when told (the port is closed); a server that ends by itself ends the API with its reason; readiness needs the keys and the cluster; **the cluster probe asks for one `ModelEndpoint` of the namespace (a client that records the request) and fails when the server refuses**; the flags win over the file |
+| `config` (15) | **two listeners on one port are refused naming both keys**; the example is a configuration the API can work with and holds no secret; the defaults of the addresses; **a key that does not exist is refused at the top and in every mapping below `defaults`, with its path** (the example is walked: `security`, `allowFrom[0]`, `store.cnpg`, `a2aBearer`, `coder.gitAuthor`, `githubMcp`, `workVolume.source.persistent`, `resources`, `folder`), a misspelt `podSelectr` among them, and every optional member may be said without being taken for a typo; **`allowedImageRegistries` is required, not empty and made of hosts**; empty or blank audiences, an issuer that is not a URL, a blank or missing roles claim; a wildcard origin, `null`, a trailing slash and the default port; defaults the operator would refuse; an address that is not one; a file that is not there |
+| `serve` (7) | `/metrics` is Prometheus text (`text/plain; version=0.0.4`), empty before the first request, and nothing else is served on that router; `/healthz` and `/readyz` follow the check; **a burst of 50 probes asks the check once, and the answer is kept 5 s**; a failure and a timeout are kept; a draining pod is not ready at once and is alive; a check that never answers is not ready |
+| `run` (8) | **a server that has ended is reported and never polled again, whichever of the three ends first**; **the router comes up on a real socket with the `Memory` ports and over a real issuer**, answers, and stops when told (the port is closed); a server that ends by itself ends the API with its reason; readiness needs the keys and the cluster; **the cluster probe asks for one `ModelEndpoint` of the namespace (a client that records the request) and fails when the server refuses**; the flags win over the file (`--metrics-addr` too); **the counters are on the metrics port and only there** (`aap_api_requests_total` with the template, `aap_api_auth_failures_total{reason="missing"}`, no token in the text, `/metrics` is `404` on the API's and the health port) |
 
 Not a `cargo test`: the binary in a cluster is [`api-e2e.sh`](../../deploy/operator/tests/e2e/README.md#the-kind-end-to-end-of-the-platform-api-d7b2) (D7b2, CI job `api-e2e`): the
 chart's `api` component installed in kind with the image of the job, the issuer a program on the runner (`cargo build -p aap-auth-oidc --example test-issuer --features testkit`), and a

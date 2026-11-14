@@ -19,7 +19,7 @@ name: Operator and API images
 # api-image:   (D7b1) builds docker/api/Dockerfile and smoke-tests the image like the operator's (the user, the version, the usage, the
 #              example configuration accepted, a misspelt key refused, no cluster to reach said so, no shell), and runs `api --check`
 #              in the image on the configuration the chart renders for each shape of values it is tested in (deploy/operator/tests/
-#              api-shapes.sh: the golden one, a Secret per agent, the least a deployment must say, one that sets every value, and one with run pods). That
+#              api-shapes.sh: the golden one, a Secret per agent, the least a deployment must say, one that sets every value, one with run pods and one with the metrics on). That
 #              finds a shape the chart renders and the binary refuses; it does not prove there is none: the chart refuses what it can check
 #              at render time, and anything else the binary refuses at start, failing closed. It is kept as an artifact for the push, as
 #              the operator's is.
@@ -171,7 +171,8 @@ jobs:
           # The defaults (no registry), netcup (an ExternalSecret), tests/secret.values.yaml (an existing Secret, another watched
           # namespace, no CloudNativePG), the Platform API in its three shapes (tests/api.values.yaml: an Ingress and a policy;
           # tests/api-secretref.values.yaml: neither, an existing service account; tests/api-full.values.yaml: every value set), run pods
-          # on (tests/runpods.values.yaml: a PriorityClass, a ValidatingAdmissionPolicy and its binding, a Role), and the CRDs chart.
+          # on (tests/runpods.values.yaml: a PriorityClass, a ValidatingAdmissionPolicy and its binding, a Role), the two ServiceMonitors on
+          # (tests/metrics.values.yaml, against the vendored schema in tests/schemas/monitoring.coreos.com), and the CRDs chart.
           helm template aap-operator deploy/operator --namespace another-agentic-system > "$RUNNER_TEMP/rendered-default.yaml"
           helm template aap-operator deploy/operator --namespace another-agentic-system \
             -f deploy/operator/examples/netcup.values.yaml > "$RUNNER_TEMP/rendered-netcup.yaml"
@@ -185,6 +186,8 @@ jobs:
             -f deploy/operator/tests/api-full.values.yaml > "$RUNNER_TEMP/rendered-api-full.yaml"
           helm template aap-operator deploy/operator --namespace another-agentic-system \
             -f deploy/operator/tests/runpods.values.yaml > "$RUNNER_TEMP/rendered-runpods.yaml"
+          helm template aap-operator deploy/operator --namespace another-agentic-system \
+            -f deploy/operator/tests/metrics.values.yaml > "$RUNNER_TEMP/rendered-metrics.yaml"
           helm template aap-operator-crds deploy/operator-crds > "$RUNNER_TEMP/rendered-crds.yaml"
           for attempt in 1 2 3; do
             status=0
@@ -193,7 +196,7 @@ jobs:
                 -schema-location 'deploy/operator/tests/schemas/{{.Group}}/{{.ResourceKind}}_{{.ResourceAPIVersion}}.json' \
                 "$RUNNER_TEMP/rendered-default.yaml" "$RUNNER_TEMP/rendered-netcup.yaml" "$RUNNER_TEMP/rendered-secret.yaml" \
                 "$RUNNER_TEMP/rendered-api.yaml" "$RUNNER_TEMP/rendered-api-secretref.yaml" "$RUNNER_TEMP/rendered-api-full.yaml" \
-                "$RUNNER_TEMP/rendered-runpods.yaml" "$RUNNER_TEMP/rendered-crds.yaml" \
+                "$RUNNER_TEMP/rendered-runpods.yaml" "$RUNNER_TEMP/rendered-metrics.yaml" "$RUNNER_TEMP/rendered-crds.yaml" \
                 > "$RUNNER_TEMP/kubeconform.out" 2>&1 || status=$?
             cat "$RUNNER_TEMP/kubeconform.out"
             if [ "$status" -eq 0 ]; then exit 0; fi
@@ -399,6 +402,17 @@ jobs:
             out=$(docker run --rm -v "$dir:/cfg:ro" api:smoke --config "/cfg/$name.yaml" --check)
             echo "$out"
             grep -q ': ok$' <<<"$out" || { echo "::error::the image refuses the configuration the chart renders ($name): $out"; exit 1; }
+          done
+          # The shapes the chart renders and the image must refuse (two listeners on one port).
+          for f in "$dir"/refused/*.yaml; do
+            name=$(basename "$f" .yaml)
+            echo "--- refused/$name.yaml"
+            cat "$f"
+            if out=$(docker run --rm -v "$dir:/cfg:ro" api:smoke --config "/cfg/refused/$name.yaml" --check 2>&1); then
+              echo "$out"; echo "::error::the image accepts a configuration it must refuse (refused/$name): $out"; exit 1
+            fi
+            echo "$out"
+            grep -q 'both on port' <<<"$out" || { echo "::error::refused/$name was refused for another reason: $out"; exit 1; }
           done
       # The image that passed travels to the push as a file.
       - name: Save the image

@@ -1,0 +1,27 @@
+{{- include "aap.validate" . -}}
+{{- if and .Values.api.enabled .Values.api.metrics.serviceMonitor.enabled }}
+{{- $sm := .Values.api.metrics.serviceMonitor }}
+# The Platform API's /metrics for a Prometheus Operator (monitoring.coreos.com/v1): the Service `<fullname>-api-metrics` and its port
+# `metrics`. Rendered only with api.enabled and api.metrics.serviceMonitor.enabled.
+apiVersion: monitoring.coreos.com/v1
+kind: ServiceMonitor
+metadata:
+  name: {{ include "aap.api.fullname" . }}
+  labels:
+    {{- include "aap.api.labels" . | nindent 4 }}
+    {{- with $sm.labels }}
+    {{- toYaml . | nindent 4 }}
+    {{- end }}
+spec:
+  selector:
+    matchLabels:
+      {{- include "aap.api.selectorLabels" . | nindent 6 }}
+      aap.vymalo.com/scrape: metrics
+  namespaceSelector:
+    matchNames:
+      - {{ .Release.Namespace }}
+  endpoints:
+    - port: metrics
+      path: /metrics
+      interval: {{ $sm.interval }}
+{{- end }}

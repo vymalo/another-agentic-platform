@@ -5,10 +5,13 @@
 # issuer (public), and reaches the cluster with its ServiceAccount. A secret in an agent is a reference to a Secret key,
 # chosen among the keys the cluster offers (`defaults.offerLabel`).
 
-# Where the API listens, and where /healthz and /readyz are served. These are the defaults;
-# the flags --listen and --health-addr (API_LISTEN_ADDR, HEALTH_ADDR) win over the file.
+# Where the API listens, where /healthz and /readyz are served, and where /metrics is (Prometheus text, no authentication, never on
+# the API's port). The flags --listen, --health-addr and --metrics-addr (API_LISTEN_ADDR, HEALTH_ADDR, METRICS_ADDR) win over the
+# file. Three ports, all different (--check refuses a clash). /metrics is on the loopback by default, reachable from nothing else:
+# say 0.0.0.0:<port> to let a scraper in.
 listen: 0.0.0.0:8080
 healthListen: 0.0.0.0:8081
+metricsListen: 127.0.0.1:9090
 
 # Whose tokens are accepted (aap-auth-oidc). The values of the roles claim are the person's permissions; the API checks
 # the permissions of AD-032 one by one and never compares a role name, so no role is listed here.
