@@ -129,6 +129,13 @@ pub fn defaults() -> Defaults {
 }
 
 /// The size classes the sample deployment offers.
+pub const TIERS: [aap_api::AccessTierCap; 4] = [
+    aap_api::AccessTierCap::Plan,
+    aap_api::AccessTierCap::Edits,
+    aap_api::AccessTierCap::Auto,
+    aap_api::AccessTierCap::Bypass,
+];
+
 pub const RUN_POD_CLASSES: [&str; 2] = ["standard", "large"];
 
 // ---------------------------------------------------------------- the forms
@@ -158,6 +165,7 @@ pub fn coder_form(name: &str) -> AgentForm {
             workers: Some(2),
             pr_draft: Some(true),
             opencode_model: Some("coding-model".to_owned()),
+            max_access_tier: None,
             run_pod_size_class: None,
         }),
     }
@@ -424,6 +432,7 @@ fn arb_coder_settings() -> impl Strategy<Value = CoderSettings> {
         prop::option::of(1i32..=16),
         prop::option::of(any::<bool>()),
         prop::option::of(alias()),
+        prop::option::of(prop::sample::select(&TIERS[..])),
         prop::option::of(prop::sample::select(&RUN_POD_CLASSES[..]).prop_map(str::to_owned)),
     )
         .prop_map(
@@ -435,6 +444,7 @@ fn arb_coder_settings() -> impl Strategy<Value = CoderSettings> {
                 workers,
                 pr_draft,
                 opencode_model,
+                max_access_tier,
                 run_pod_size_class,
             )| {
                 let owners: Vec<String> = owners.into_iter().collect();
@@ -454,6 +464,7 @@ fn arb_coder_settings() -> impl Strategy<Value = CoderSettings> {
                     workers,
                     pr_draft,
                     opencode_model,
+                    max_access_tier,
                     run_pod_size_class,
                 }
             },

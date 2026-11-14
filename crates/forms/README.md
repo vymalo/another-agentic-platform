@@ -78,7 +78,7 @@ baseUrl: { "value": "https://…" } | { "secret": { secret, key } }, apiKey: { s
 headers: { "Authorization": { prefix, secret: { secret, key } } }, tools, optional }`.
 
 **A form mirrors the objects, including whether a field may be absent.** `description`, `audience`, `workers`, `prDraft`,
-`opencodeModel`, `runPodSizeClass` (D15a: a class of `GET /v1/info`'s `runPodSizeClasses`; absent means no run pods, and the wire form of a coder without them has no key, as it was before the field) and `image` are `Option`s because the objects' fields are: a form that wrote an absent field as an empty one would
+`opencodeModel`, `maxAccessTier` (K1: `plan`, `edits`, `auto` or `bypass`; absent on the wire when absent), `runPodSizeClass` (D15a: a class of `GET /v1/info`'s `runPodSizeClasses`; absent means no run pods, and the wire form of a coder without them has no key, as it was before the field) and `image` are `Option`s because the objects' fields are: a form that wrote an absent field as an empty one would
 change an object the person did not edit. The defaults of a *screen* (the audience `agent.use:<name>`, the OpenCode model "the same as
 the model", `optional` on for a tool server) are the client's to fill in. `toolServers` is a **set** (the objects keep them by name);
 its elements are named in errors by name, `toolServers[websearch]`, like `files[skills/x.md]` and `headers[Authorization]`.
@@ -142,7 +142,7 @@ know is a reason too, found on the raw JSON, since serde would drop it.
 What the forms do not carry, so that an object that sets it is YAML only: an inline model (`baseUrl`, `apiKeySecretRef`), an inline MCP server or a server's own
 `optional`, a GitHub token or a pinned installation instead of an App, a folder in a ConfigMap, `scaling` other than one combined worker, `interfaces` other than A2A at
 the default address, `deletionPolicy: Delete`, `extraEnv`, `terminationGracePeriodSeconds`, and the coder's tunables (`maxCheckCycles`, `checkTimeoutSecs`,
-`workspaceSweepSecs`, `workspacePlacement`). The coder's run-pod size class (`coder.runPods.sizeClass`, D15a) **is** a field of the form (`agent.runPodSizeClass`). `examples/coder.yaml` and
+`workspaceSweepSecs`, `workspacePlacement`), and, since K1, `model.extraBody`, `model.echoReasoning`, `model.contextWindow` and `environment.cache` (each says so as its reason). The coder's `maxAccessTier` **is** a field (`agent.maxAccessTier`). The coder's run-pod size class (`coder.runPods.sizeClass`, D15a) **is** a field of the form (`agent.runPodSizeClass`). `examples/coder.yaml` and
 `examples/chat.yaml` are YAML only today (inline model and servers; `coder.yaml` also has the tunables), and `examples/coder-me.yaml` is a form: `tests/representability.rs`.
 
 The laws, held by property tests over arbitrary forms and deployments: **`load_agent(to_resources(form, deployment))` is `(form, deployment)`**, and **an object is a form only
@@ -163,7 +163,7 @@ The mapping, from the words of the objects to the form (`FormTarget`, `from_obje
 | `AgentService metadata.name`, `spec.configRef` | `name` |
 | `AgentService spec.registry.title`, `.tags[i]`, `spec.access.audience[i]`, `spec.description`, `spec.suspend` | `title`, `tags[i]`, `audience[i]`, `description`, `suspend` |
 | `AgentConfig …coder.github.app.id`, `.owners`, `.privateKeySecretRef` | `agent.github.appId`, `agent.github.owners`, `agent.github.privateKey` |
-| `AgentConfig …coder.workers`, `.createRepoOwners[i]`, `.opencodeModel`, `.prDraft` | `agent.workers`, `agent.createRepoOwners[i]`, `agent.opencodeModel`, `agent.prDraft` |
+| `AgentConfig …coder.workers`, `.createRepoOwners[i]`, `.opencodeModel`, `.maxAccessTier`, `.prDraft` | `agent.workers`, `agent.createRepoOwners[i]`, `agent.opencodeModel`, `agent.maxAccessTier`, `agent.prDraft` |
 | `AgentConfig …agent.folder.files[path]` | `agent.files[path]` |
 | `AgentConfig spec.model.model`, `.endpointRef`; `ModelEndpoint <n> …` | `model.model`, `model.endpoint` (the message says which object) |
 | `AgentConfig spec.tools.mcpServers[n]…`; `ToolProvider <n> …` | `toolServers[n]`; `allowInsecureHttp` for the one rule that is about the agent (a plain `http://` server) |

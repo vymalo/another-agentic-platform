@@ -157,6 +157,26 @@ fn hint(kind: Kind, path: &str) -> Option<&'static str> {
         ),
         (
             Kind::AgentConfig,
+            "spec.model.extraBody",
+            "a body member merged into every request, in YAML only (K1)",
+        ),
+        (
+            Kind::AgentConfig,
+            "spec.model.echoReasoning",
+            "in YAML only (K1)",
+        ),
+        (
+            Kind::AgentConfig,
+            "spec.model.contextWindow",
+            "in YAML only (K1)",
+        ),
+        (
+            Kind::AgentConfig,
+            "spec.environment.cache",
+            "the shared package cache is a claim of the deployment, in YAML only (K1)",
+        ),
+        (
+            Kind::AgentConfig,
             "spec.extraEnv",
             "literal environment variables are not in a form",
         ),

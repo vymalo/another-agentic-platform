@@ -109,6 +109,10 @@ pub struct CoderSettings {
     /// same as the model").
     #[serde(default)]
     pub opencode_model: Option<String>,
+    /// The highest access tier a person may pick for a message (`coder.maxAccessTier`, `MAX_ACCESS_TIER`, K1): `plan`,
+    /// `edits`, `auto` or `bypass`. Absent: the coder's own default (`auto`), and absent on the wire when absent.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_access_tier: Option<aap_api::AccessTierCap>,
     /// The commands of a run in pods of their own (`coder.runPods.sizeClass`, slice D15): a size class of the
     /// operator's chart, offered by `GET /v1/info` (`runPodSizeClasses`). Absent: no run pods, and a GitHub App coder
     /// runs its commands next to the App's private key (the access tiers are no boundary against a command).

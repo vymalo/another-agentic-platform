@@ -411,6 +411,10 @@ fn config_field(form: &AgentForm, path: &str) -> String {
             "spec.harness.adam.coder.opencodeModel",
             "agent.opencodeModel",
         ),
+        (
+            "spec.harness.adam.coder.maxAccessTier",
+            "agent.maxAccessTier",
+        ),
         ("spec.harness.adam.coder.runPods", "agent.runPodSizeClass"),
         (
             "spec.harness.adam.coder.gitAuthor",
@@ -909,6 +913,7 @@ impl Defaults {
                 workers: None,
                 pr_draft: None,
                 opencode_model: None,
+                max_access_tier: None,
                 run_pod_size_class: None,
             })),
             sample(AgentKindForm::Folder(FolderSettings {
