@@ -90,9 +90,9 @@ use std::time::{Duration, Instant};
 
 use aap_api::{AgentConfig, AgentService, ModelEndpoint, ToolProvider};
 use aap_ports::{
-    Agent, AgentDraft, AgentEvent, AgentObjects, ETag, FieldError, Kind, MANAGED_BY_DASHBOARD,
-    MANAGED_BY_LABEL, OFFER_LABEL, ObjectsError, OfferedSecret, Precondition, SharedDraft,
-    SharedKind, Stored, config_name, config_references,
+    Agent, AgentDraft, AgentEvent, AgentEvents, AgentObjects, ETag, FieldError, Kind,
+    MANAGED_BY_DASHBOARD, MANAGED_BY_LABEL, OFFER_LABEL, ObjectsError, OfferedSecret, Precondition,
+    SharedDraft, SharedKind, Stored, config_name, config_references,
 };
 pub use external::EXTERNAL_SECRET_API_VERSION;
 use failure::{Failure, classify};
@@ -641,10 +641,9 @@ fn event_resource() -> ApiResource {
     ApiResource::from_gvk_with_plural(&GroupVersionKind::gvk("", "v1", "Event"), "events")
 }
 
-/// How many events one page of the list asks for, and how many pages are read at most: a namespace's events expire after an
-/// hour by default, so a namespace with more than the product is not a namespace of this API (what is left unread is the
-/// oldest the server happens to list last, and the answer is the newest 100 of what was read, so a very busy namespace shows
-/// fewer than 100 for one agent rather than a wrong one).
+/// How many events one page of the list asks for, and how many pages are read at most. Past the bound the answer is the newest
+/// 100 of what was read **and says `incomplete`**: a list is in key order, so what was not read is not "the oldest", and an
+/// event of the agent may be among it.
 const EVENT_PAGE: u32 = 500;
 const EVENT_PAGES: usize = 10;
 
@@ -1080,48 +1079,82 @@ impl AgentObjects for KubernetesObjects {
         Ok(offers.into_iter().collect())
     }
 
-    async fn agent_events(&self, name: &str) -> Result<Vec<AgentEvent>, ObjectsError> {
-        if self.get(Kind::AgentService, name).await?.is_none() {
+    async fn agent_events(&self, name: &str) -> Result<AgentEvents, ObjectsError> {
+        let Some(service) = self.get(Kind::AgentService, name).await? else {
             return Err(ObjectsError::NotFound {
                 kind: Kind::AgentService,
                 name: name.to_owned(),
             });
-        }
-        // An event is attributed to an agent only when no other agent could own it, so the other agents are needed.
+        };
+        // The uids of the agent's own objects, read now: an event that names another uid is about an object made again.
+        let agent = self.agent_of(service).await?;
         let agents: Vec<String> = self
             .list(Kind::AgentService)
             .await?
             .into_iter()
             .map(|live| live.stored.name)
             .collect();
+        let own = events::Own {
+            agent: name,
+            agents: &agents,
+            service_uid: &agent.service.uid,
+            config_uid: agent.config.as_ref().map(|c| c.uid.as_str()),
+        };
         let resource = event_resource();
         let api: Api<DynamicObject> =
             Api::namespaced_with(self.client.clone(), &self.namespace, &resource);
-        let mut params = ListParams::default().limit(EVENT_PAGE);
+        let first = || ListParams::default().limit(EVENT_PAGE);
+        let mut params = first();
         let mut mine: Vec<AgentEvent> = Vec::new();
-        for _ in 0..EVENT_PAGES {
-            let page = api
-                .list(&params)
-                .await
-                .map_err(|e| failed(&resource, classify(e)))?;
+        let (mut pages, mut incomplete, mut restarted) = (0usize, false, false);
+        loop {
+            let page = match api.list(&params).await {
+                Ok(page) => page,
+                // The continue token expired (the list took longer than the server keeps it): list again, once. A second
+                // expiry answers what was read, and says so.
+                Err(kube::Error::Api(status)) if status.code == 410 => {
+                    if restarted {
+                        incomplete = true;
+                        break;
+                    }
+                    restarted = true;
+                    mine.clear();
+                    pages = 0;
+                    params = first();
+                    continue;
+                }
+                Err(error) => return Err(failed(&resource, classify(error))),
+            };
+            pages += 1;
             for item in &page.items {
                 let Ok(event) = serde_json::to_value(item) else {
                     continue;
                 };
-                let Some((kind, object)) = events::involved(&event) else {
+                let Some((kind, object, uid)) = events::involved(&event) else {
                     continue;
                 };
-                if events::is_only_about(name, &agents, kind, object)
-                    && let Some(event) = events::read(&event)
+                if let Some(by) = own.attribute(kind, object, uid)
+                    && let Some(read) = events::read(&event)
                 {
-                    mine.push(event);
+                    mine.push(read.attributed(by));
                 }
             }
             match page.metadata.continue_.as_deref() {
-                Some(token) if !token.is_empty() => params = params.continue_token(token),
+                Some(token) if !token.is_empty() => {
+                    if pages >= EVENT_PAGES {
+                        // The namespace has more events than this reads: a list is in key order, not time order, so what
+                        // was not read is not "the oldest". The answer says it is cut.
+                        incomplete = true;
+                        break;
+                    }
+                    params = params.continue_token(token);
+                }
                 _ => break,
             }
         }
-        Ok(aap_ports::newest_first(mine))
+        Ok(AgentEvents {
+            events: aap_ports::newest_first(mine),
+            incomplete,
+        })
     }
 }

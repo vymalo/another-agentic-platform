@@ -8,9 +8,10 @@ use serde_json::Value;
 use super::lock;
 use crate::testkit::{EventSeed, Foreign, ObjectsUnderTest};
 use crate::{
-    ARGO_TRACKING_ANNOTATION, Agent, AgentDraft, AgentEvent, AgentObjects, ETag, EventType,
-    FieldError, Kind, MANAGED_BY_DASHBOARD, MANAGED_BY_LABEL, ObjectsError, OfferedSecret,
-    Precondition, ResourceVersion, SharedDraft, SharedKind, Stored, config_name, config_references,
+    ARGO_TRACKING_ANNOTATION, Agent, AgentDraft, AgentEvent, AgentEvents, AgentObjects,
+    Attribution, ETag, EventType, FieldError, Kind, MANAGED_BY_DASHBOARD, MANAGED_BY_LABEL,
+    ObjectsError, OfferedSecret, Precondition, ResourceVersion, SharedDraft, SharedKind, Stored,
+    config_name, config_references,
 };
 
 #[derive(Default)]
@@ -27,7 +28,7 @@ struct State {
     /// The services that have the operator's finalizer: a delete of one leaves it deleting.
     finalized: BTreeSet<String>,
     /// The events of each agent, in the order they were planted.
-    events: BTreeMap<String, Vec<AgentEvent>>,
+    events: BTreeMap<String, Vec<(AgentEvent, Option<String>)>>,
     unavailable: bool,
 }
 
@@ -340,14 +341,17 @@ impl MemoryObjects {
             .events
             .entry(agent.to_owned())
             .or_default()
-            .push(AgentEvent::new(
-                EventType::parse(&event.event_type),
-                &event.reason,
-                &event.message,
-                (&event.object_kind, &event.object_name),
-                event.count,
-                &event.first_seen,
-                &event.last_seen,
+            .push((
+                AgentEvent::new(
+                    EventType::parse(&event.event_type),
+                    &event.reason,
+                    &event.message,
+                    (&event.object_kind, &event.object_name),
+                    event.count,
+                    &event.first_seen,
+                    &event.last_seen,
+                ),
+                event.object_uid.clone(),
             ));
     }
 
@@ -614,18 +618,33 @@ impl AgentObjects for MemoryObjects {
         Ok(s.offered.iter().cloned().collect())
     }
 
-    async fn agent_events(&self, name: &str) -> Result<Vec<AgentEvent>, ObjectsError> {
+    async fn agent_events(&self, name: &str) -> Result<AgentEvents, ObjectsError> {
         let s = lock(&self.state);
         s.up()?;
-        if s.get(Kind::AgentService, name).is_none() {
+        let Some(agent) = s.agent(name) else {
             return Err(ObjectsError::NotFound {
                 kind: Kind::AgentService,
                 name: name.to_owned(),
             });
+        };
+        let mut events = Vec::new();
+        for (event, uid) in s.events.get(name).cloned().unwrap_or_default() {
+            let current = match event.object.kind.as_str() {
+                "AgentService" => Some(agent.service.uid.as_str()),
+                "AgentConfig" => agent.config.as_ref().map(|c| c.uid.as_str()),
+                _ => None,
+            };
+            match (uid, current) {
+                // The event is about an object made again under the name: it is not this agent's.
+                (Some(seen), Some(now)) if seen != now => {}
+                (Some(_), Some(_)) => events.push(event.attributed(Attribution::Uid)),
+                _ => events.push(event),
+            }
         }
-        Ok(crate::newest_first(
-            s.events.get(name).cloned().unwrap_or_default(),
-        ))
+        Ok(AgentEvents {
+            events: crate::newest_first(events),
+            incomplete: false,
+        })
     }
 }
 

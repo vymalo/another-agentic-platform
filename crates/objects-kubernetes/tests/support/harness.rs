@@ -201,7 +201,7 @@ impl Harness {
 static EVENTS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
 
 impl AgentObjects for Harness {
-    async fn agent_events(&self, name: &str) -> Result<Vec<aap_ports::AgentEvent>, ObjectsError> {
+    async fn agent_events(&self, name: &str) -> Result<aap_ports::AgentEvents, ObjectsError> {
         self.objects.agent_events(name).await
     }
 
@@ -404,6 +404,7 @@ impl ObjectsUnderTest for Harness {
             "metadata": { "name": name, "namespace": self.namespace },
             "involvedObject": {
                 "kind": event.object_kind, "name": event.object_name, "namespace": self.namespace,
+                "uid": event.object_uid,
             },
             "type": event.event_type, "reason": event.reason, "message": event.message,
             "count": event.count,

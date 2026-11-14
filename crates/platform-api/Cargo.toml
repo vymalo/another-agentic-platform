@@ -30,6 +30,7 @@ aap-auth-oidc = { workspace = true, features = ["testkit"] }
 aap-ports = { workspace = true, features = ["testkit"] }
 tokio = { workspace = true, features = ["macros", "rt", "rt-multi-thread", "net", "time"] }
 tower = { workspace = true, features = ["util"] }
+regex = "1"
 tracing-subscriber.workspace = true
 
 [lints]

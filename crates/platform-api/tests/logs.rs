@@ -41,6 +41,8 @@ const SENTINEL_VALUE: &str = "value-sentinel-e2f6";
 const SENTINEL_PATH: &str = "path-sentinel-91ac";
 const SENTINEL_TITLE: &str = "title-sentinel-4477";
 const SENTINEL_EVENT: &str = "event-message-sentinel-62d0";
+const SENTINEL_REASON: &str = "ReasonSentinel71aa";
+const SENTINEL_OBJECT: &str = "object-name-sentinel-3b9e";
 
 #[tokio::test]
 async fn nothing_the_api_logs_holds_a_token_a_body_a_path_or_a_secret_key() {
@@ -143,13 +145,14 @@ async fn nothing_the_api_logs_holds_a_token_a_body_a_path_or_a_secret_key() {
         "coder-me",
         &aap_ports::testkit::EventSeed {
             object_kind: "Deployment".into(),
-            object_name: "coder-me".into(),
+            object_name: SENTINEL_OBJECT.into(),
             event_type: "Warning".into(),
-            reason: "FailedCreate".into(),
+            reason: SENTINEL_REASON.into(),
             message: format!("error: {SENTINEL_EVENT}"),
             count: 1,
             first_seen: "2026-11-14T10:00:00Z".into(),
             last_seen: "2026-11-14T10:00:00Z".into(),
+            object_uid: None,
         },
     );
     let r = api
@@ -162,6 +165,7 @@ async fn nothing_the_api_logs_holds_a_token_a_body_a_path_or_a_secret_key() {
         r.text().contains(SENTINEL_EVENT),
         "the answer shows the message"
     );
+    assert!(r.text().contains(SENTINEL_REASON) && r.text().contains(SENTINEL_OBJECT));
     // 412 and 428 and a 503.
     let r = api
         .put("/v1/agents/coder-me")
@@ -210,6 +214,8 @@ async fn nothing_the_api_logs_holds_a_token_a_body_a_path_or_a_secret_key() {
         ("a name from the path", SENTINEL_PATH),
         ("a title from the body", SENTINEL_TITLE),
         ("an event's message", SENTINEL_EVENT),
+        ("an event's reason", SENTINEL_REASON),
+        ("an event's object name", SENTINEL_OBJECT),
     ] {
         assert!(!log.contains(sentinel), "{what} is in the log:\n{log}");
     }

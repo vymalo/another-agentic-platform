@@ -154,6 +154,8 @@ pub struct State {
     delete_hooks: Vec<Hook>,
     /// An apply of an object that fails once with this code, before anything is changed: `(plural, name, code)`.
     failing_applies: Vec<(String, String, u16)>,
+    /// How many lists that carry a `continue` token answer `410` before one is served.
+    gone_continues: u32,
 }
 
 /// The fake server. Clones share one state.
@@ -240,6 +242,11 @@ impl Fake {
                 entries: Vec::new(),
             },
         );
+    }
+
+    /// The next `n` lists that continue with a token answer `410 Expired`.
+    pub fn expire_continue_tokens(&self, n: u32) {
+        lock(&self.state).gone_continues = n;
     }
 
     /// Change an object as somebody else would, now.
@@ -671,7 +678,17 @@ impl State {
         v
     }
 
-    fn list(&self, plural: &str, call: &Call) -> (u16, Value) {
+    fn list(&mut self, plural: &str, call: &Call) -> (u16, Value) {
+        // A list that continues with a token the server no longer has: a 410, as the real one answers.
+        if call.query.contains_key("continue") && self.gone_continues > 0 {
+            self.gone_continues -= 1;
+            return status(
+                410,
+                "Expired",
+                "The provided continue parameter is too old to display a consistent list result",
+                json!({}),
+            );
+        }
         let selector: Vec<(String, String)> = call
             .query
             .get("labelSelector")
@@ -694,11 +711,29 @@ impl State {
             })
             .map(|(_, o)| self.answer(plural, o))
             .collect();
+        // Paging, as the API server does it: `limit` items in key order, and a `continue` token (here an offset) while there are more.
+        let total = items.len();
+        let start = call
+            .query
+            .get("continue")
+            .and_then(|c| c.parse::<usize>().ok())
+            .unwrap_or(0)
+            .min(total);
+        let end = call
+            .query
+            .get("limit")
+            .and_then(|l| l.parse::<usize>().ok())
+            .map_or(total, |l| (start + l).min(total));
+        let items: Vec<Value> = items[start..end].to_vec();
+        let mut metadata = json!({ "resourceVersion": self.next_version.to_string() });
+        if end < total {
+            metadata["continue"] = json!(end.to_string());
+        }
         let (api_version, kind) = kind_of(plural);
         (
             200,
             json!({ "apiVersion": api_version, "kind": format!("{kind}List"),
-                    "metadata": { "resourceVersion": self.next_version.to_string() }, "items": items }),
+                    "metadata": metadata, "items": items }),
         )
     }
 

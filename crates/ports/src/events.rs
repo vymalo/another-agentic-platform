@@ -37,6 +37,28 @@ impl EventType {
     }
 }
 
+/// How an event came to be attributed to an agent: by the `uid` of its `AgentService` or `AgentConfig` (the object is that very
+/// object, not one made again under the name), or **by the names the operator gives an agent's objects** (the event's object has the
+/// name and the shape an object of the agent has; an unrelated object of the namespace with the same shape could also match).
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum Attribution {
+    /// The event names the uid of the agent's own object.
+    Uid,
+    /// By name and shape alone.
+    Name,
+}
+
+/// The events of one agent, and whether the list is all of them.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AgentEvents {
+    /// Newest first, at most [`MAX_EVENTS`].
+    pub events: Vec<AgentEvent>,
+    /// The backend stopped reading before it had every event of the namespace (a bound, or a listing that expired twice): the
+    /// list is what was read, and an event that is not in it may exist.
+    pub incomplete: bool,
+}
+
 /// The object an event is about.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct EventObject {
@@ -65,13 +87,27 @@ pub struct AgentEvent {
     pub first_seen: String,
     /// When it last happened, in the same form.
     pub last_seen: String,
+    /// How it was attributed to the agent.
+    pub by: Attribution,
 }
 
-/// `text` without its control characters (each is a space, and runs of spaces are one), cut to `max` characters with a `…`.
+/// The format characters that hide or reorder text and are removed (not replaced) by [`shown`]: the zero-width characters and
+/// the left-to-right and right-to-left marks U+200B to U+200F, the bidirectional embeddings and overrides U+202A to U+202E, the
+/// word joiner U+2060, the bidirectional isolates U+2066 to U+2069 and the byte order mark U+FEFF.
+fn hides_text(c: char) -> bool {
+    matches!(c, '\u{200B}'..='\u{200F}' | '\u{202A}'..='\u{202E}' | '\u{2060}' | '\u{2066}'..='\u{2069}' | '\u{FEFF}')
+}
+
+/// `text` cleaned and cut: each control character (Unicode `Cc`, a newline and a tab included) is a space, the characters of
+/// [`hides_text`] are removed, runs of spaces become one and the ends are trimmed; then at most `max` **characters** (not bytes: up
+/// to `4 * max` bytes), a longer text cut to `max - 1` characters and a `…`.
 pub fn shown(text: &str, max: usize) -> String {
     let mut clean = String::with_capacity(text.len().min(4 * max));
     let mut space = true;
     for c in text.chars() {
+        if hides_text(c) {
+            continue;
+        }
         let c = if c.is_control() { ' ' } else { c };
         if c == ' ' {
             if space {
@@ -118,7 +154,15 @@ impl AgentEvent {
             count: count.max(1),
             first_seen: first_seen.to_owned(),
             last_seen: last_seen.to_owned(),
+            by: Attribution::Name,
         }
+    }
+
+    /// This event, attributed `by`.
+    #[must_use]
+    pub fn attributed(mut self, by: Attribution) -> Self {
+        self.by = by;
+        self
     }
 }
 
@@ -157,6 +201,31 @@ mod tests {
     }
 
     #[test]
+    fn text_is_cut_by_characters_and_cleaned_of_what_hides_it() {
+        let accented = "é".repeat(2000);
+        let cut = shown(&accented, MAX_MESSAGE_CHARS);
+        assert_eq!(cut.chars().count(), MAX_MESSAGE_CHARS);
+        assert!(cut.ends_with('…'));
+        let exact = "x".repeat(MAX_MESSAGE_CHARS + 1);
+        let cut = shown(&exact, MAX_MESSAGE_CHARS);
+        assert_eq!(cut.chars().count(), 1024);
+        assert_eq!(cut, format!("{}…", "x".repeat(1023)));
+        assert_eq!(
+            shown(&"r".repeat(300), MAX_LABEL_CHARS).chars().count(),
+            253
+        );
+        assert_eq!(
+            shown("a\u{202E}b\u{200B}c\u{2066}d\u{FEFF}e\u{2069}", 50),
+            "abcde"
+        );
+        assert_eq!(
+            shown("a\u{200E}\u{061C}b", 50),
+            "a\u{061C}b",
+            "only the listed characters go"
+        );
+    }
+
+    #[test]
     fn an_unknown_type_is_a_warning() {
         assert_eq!(EventType::parse("Normal"), EventType::Normal);
         assert_eq!(EventType::parse("Warning"), EventType::Warning);
@@ -191,7 +260,7 @@ mod tests {
             serde_json::json!({
                 "type": "Warning", "reason": "BackOff", "message": "Back-off pulling image",
                 "object": { "kind": "Pod", "name": "a-1" }, "count": 1,
-                "firstSeen": "2026-11-14T10:00:00Z", "lastSeen": "2026-11-14T10:01:00Z"
+                "firstSeen": "2026-11-14T10:00:00Z", "lastSeen": "2026-11-14T10:01:00Z", "by": "name"
             })
         );
     }

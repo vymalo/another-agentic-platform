@@ -601,17 +601,26 @@ done
 for lack in 'status:' 'managedFields' 'resourceVersion' "$sentinel"; do
   if grep -qF -- "$lack" "$work/body"; then die "the YAML holds '$lack'"; fi
 done
-# K8: the Events of the agent's objects, and the OpenAPI document. *Unverified until CI has run it*: no kind exists where it was
-# written, and the Event fixture of the crate's fake is hand-written. What is asserted holds whatever the cluster wrote: an object with an
-# `events` array (possibly empty), newest first, at most 100, each about an object whose name starts with the agent's, with a type, a count
-# and a message of at most 1 KiB with no control character; and the permission it needs is named when it is missing.
-as reader platform:agents.read GET "/v1/agents/$agent/events"
-expect 200 "the events of the agent"
-jq -e --arg a "$agent" '(.events | type == "array" and length <= 100)
-  and (.events | all(.[]; (.type == "Normal" or .type == "Warning") and (.object.name | startswith($a)) and .count >= 1
+# K8: the Events of the agent's objects, and the OpenAPI document. *Unverified until CI has run it* (it runs only there). A rollout always
+# leaves events (the Deployment's ScalingReplicaSet, the ReplicaSet's SuccessfulCreate), so the list must not be empty: it is read again for
+# at most 60 s, because the API server writes an Event a moment after the object changes. What is asserted holds whatever the cluster wrote:
+# an object with `incomplete` and an `events` array, newest first, at most 100, **every event about an object of this agent** (its name is
+# the agent's or starts with the agent's name and a dash: not `$agent` + anything), a type, a count, a message of at most 1 KiB with no
+# control character, a time in the API's form and an attribution; and **one event is about the agent's own object, by its exact name or by uid**.
+events_jq='(.events | type == "array" and length >= 1 and length <= 100) and (.incomplete | type == "boolean")
+  and (.events | all(.[]; (.type == "Normal" or .type == "Warning") and (.by == "uid" or .by == "name")
+       and (.object.name == $a or (.object.name | startswith($a + "-"))) and .count >= 1
        and (.message | length <= 1024 and (test("[[:cntrl:]]") | not)) and (.lastSeen | test("^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9:]{8}Z$"))))
-  and ([.events[].lastSeen] == ([.events[].lastSeen] | sort | reverse))' "$work/body" >/dev/null \
-  || die "the events are not an object with a newest-first array of events of this agent: $(head -c 1500 "$work/body")"
+  and (.events | any(.[]; .by == "uid" or .object.name == $a))
+  and ([.events[].lastSeen] == ([.events[].lastSeen] | sort | reverse))'
+events_deadline=$(( $(date +%s) + 60 ))
+while :; do
+  as reader platform:agents.read GET "/v1/agents/$agent/events"
+  expect 200 "the events of the agent"
+  if jq -e --arg a "$agent" "$events_jq" "$work/body" >/dev/null 2>&1; then break; fi
+  [ "$(date +%s)" -lt "$events_deadline" ] || die "the events are not an object with a newest-first, non-empty array of events of this agent after 60s: $(head -c 1500 "$work/body")"
+  sleep 3
+done
 as nobody "" GET "/v1/agents/$agent/events"
 expect_problem 403 forbidden "the events without platform:agents.read"
 [ "$(jq -r .permission "$work/body")" = platform:agents.read ] || die "the 403 does not name platform:agents.read: $(cat "$work/body")"

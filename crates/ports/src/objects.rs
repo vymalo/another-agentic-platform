@@ -731,6 +731,11 @@ pub trait AgentObjects: Send + Sync {
     /// [`AgentEvent::new`](crate::AgentEvent::new) makes it (cleaned and cut). An agent whose service is being deleted still
     /// has its events.
     ///
+    /// `incomplete` is true when the backend stopped before it had read every event it could have (the list is then what was read).
+    /// Each event says how it was attributed ([`Attribution`](crate::Attribution)): by the `uid` of the agent's own `AgentService`
+    /// or `AgentConfig`, or by name. **An event of the objects of another agent is never in the list; an unrelated object that has
+    /// the name of one of the agent's may be** (a backend has no other way to know which objects an agent's runtime made).
+    ///
     /// **Adding this method broke every implementer of the trait**, which must now have it (a required method, no default).
     ///
     /// # Errors
@@ -739,5 +744,5 @@ pub trait AgentObjects: Send + Sync {
     fn agent_events(
         &self,
         name: &str,
-    ) -> impl Future<Output = Result<Vec<crate::AgentEvent>, ObjectsError>> + Send;
+    ) -> impl Future<Output = Result<crate::AgentEvents, ObjectsError>> + Send;
 }

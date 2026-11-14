@@ -28,8 +28,8 @@ pub use auth::{AuthError, Authenticator, InvalidToken, Principal};
 pub use directory::{AgentDirectory, DirectoryEntry};
 pub use error::{BoxError, Classify, DirectoryError, ErrorClass, RuntimeError, StoreError};
 pub use events::{
-    AgentEvent, EventObject, EventType, MAX_EVENTS, MAX_LABEL_CHARS, MAX_MESSAGE_CHARS,
-    newest_first, shown,
+    AgentEvent, AgentEvents, Attribution, EventObject, EventType, MAX_EVENTS, MAX_LABEL_CHARS,
+    MAX_MESSAGE_CHARS, newest_first, shown,
 };
 pub use ids::{OwnerHandle, RuntimeId, SecretRef, StoreId};
 pub use objects::{

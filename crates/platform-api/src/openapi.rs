@@ -61,30 +61,121 @@ fn object(properties: Value, optional: &[&str]) -> Value {
 
 // ---------------------------------------------------------------------------------------------------------- the schemas
 
-const PROBLEM_SLUGS: [&str; 23] = [
-    "missing-token",
-    "invalid-token",
-    "keys-unavailable",
-    "invalid-request",
-    "invalid-body",
-    "no-such-route",
-    "method-not-allowed",
-    "payload-too-large",
-    "unsupported-media-type",
-    "forbidden",
-    "precondition-required",
-    "stale",
-    "validation",
-    "yaml-only",
-    "breaks-agents",
-    "not-found",
-    "already-exists",
-    "managed-by-gitops",
-    "referenced",
-    "deleting",
-    "conflict",
-    "unavailable",
-    "internal",
+/// Every problem the API answers: `type` slug, HTTP status, what it means. **The one table**: the `type` enum of `Problem`, the
+/// `x-problem-types` of each response, and the table in the document's description are made from it, and a test holds every
+/// real answer to it.
+const PROBLEMS: [(&str, u16, &str); 23] = [
+    (
+        "invalid-request",
+        400,
+        "A header or the path is not understood: two Authorization headers, a name that cannot be decoded, two If-Match headers.",
+    ),
+    (
+        "invalid-body",
+        400,
+        "The body is not JSON of the form of the route (an unknown member, a wrong type). The detail names a member and never quotes the body.",
+    ),
+    ("missing-token", 401, "No bearer token."),
+    (
+        "invalid-token",
+        401,
+        "A token that does not verify (expired, wrong issuer or audience, bad signature).",
+    ),
+    (
+        "forbidden",
+        403,
+        "The token lacks the permission the route needs; `permission` names it.",
+    ),
+    (
+        "not-found",
+        404,
+        "There is no such object (an agent, a model, a tool server).",
+    ),
+    (
+        "no-such-route",
+        404,
+        "The path is no route of the API. Answered before a token is asked for.",
+    ),
+    (
+        "method-not-allowed",
+        405,
+        "The path exists and not for this method; the `Allow` header lists the methods. Answered before a token is asked for.",
+    ),
+    (
+        "already-exists",
+        409,
+        "A create (`If-None-Match: *`) of a name that exists.",
+    ),
+    (
+        "managed-by-gitops",
+        409,
+        "The object is GitOps's: read-only here; its YAML can be read.",
+    ),
+    (
+        "referenced",
+        409,
+        "Agents still name the object; `agentCount`, and for a caller that holds `platform:agents.read`, `agents`.",
+    ),
+    (
+        "deleting",
+        409,
+        "The object is being deleted: the operator has not finished. Read again later.",
+    ),
+    (
+        "conflict",
+        409,
+        "Another manager owns a field of the object (a server-side apply conflict).",
+    ),
+    (
+        "yaml-only",
+        409,
+        "The object has fields no form says, so saving a form would lose them: change it as YAML; `reasons` lists them.",
+    ),
+    (
+        "breaks-agents",
+        409,
+        "The change would make the operator refuse agents that name the object; `agentCount`, and `agents` and `errors` for a caller that holds `platform:agents.read`.",
+    ),
+    (
+        "stale",
+        412,
+        "The If-Match tag is not the object's: somebody saved first, or the operator wrote its status. Read again.",
+    ),
+    (
+        "payload-too-large",
+        413,
+        "The body is larger than `limit` bytes.",
+    ),
+    (
+        "unsupported-media-type",
+        415,
+        "The body is not application/json.",
+    ),
+    (
+        "validation",
+        422,
+        "The form is read and is not valid; `errors` has every mistake with its form field.",
+    ),
+    (
+        "precondition-required",
+        428,
+        "A write or delete with no If-Match / If-None-Match.",
+    ),
+    (
+        "internal",
+        500,
+        "A bug of the API. The cause is logged, never answered.",
+    ),
+    (
+        "unavailable",
+        503,
+        "The cluster's API server cannot be reached or refused the call. Retry-After says when to try again.",
+    ),
+    (
+        "keys-unavailable",
+        503,
+        "The issuer's keys cannot be fetched, so the token could not be checked: it is not known to be bad. Retry-After.",
+    ),
 ];
 
 fn representation(form: &str, yaml_only: &str) -> Value {
@@ -129,7 +220,7 @@ fn shared_detail(form: &str) -> Value {
             "managedBy": schema("Owner"),
             "deleting": { "type": "boolean" },
             "usedBy": { "type": "array", "items": { "type": "string" },
-                        "description": "The agents that name it, in byte order, GitOps's included. Empty for a caller without platform:agents.read." },
+                        "description": "The agents that name it, in byte order, GitOps's included. Empty in the answer to a write by a caller who holds the write permission and not platform:agents.read (a read needs it): the count is in usedByCount." },
             "usedByCount": { "type": "integer", "minimum": 0,
                              "description": "How many agents name it: what a caller without platform:agents.read is told instead of their names." },
             "status": schema("SharedStatus"),
@@ -146,8 +237,14 @@ fn schemas() -> Value {
         "representation".into(),
         representation("AgentView", "yamlOnly"),
     );
-    agent_summary.insert("status".into(), nullable(&["object"]));
-    agent_summary.insert("configStatus".into(), nullable(&["object"]));
+    agent_summary.insert(
+        "status".into(),
+        json!({ "oneOf": [schema("ServiceStatus"), { "type": "null" }], "description": "`AgentService.status`, whole; null before the operator wrote one." }),
+    );
+    agent_summary.insert(
+        "configStatus".into(),
+        json!({ "oneOf": [schema("ConfigStatus"), { "type": "null" }], "description": "`AgentConfig.status`, whole; null when there is none or the config is missing." }),
+    );
     let detail = object(Value::Object(agent_summary), &[]);
 
     json!({
@@ -157,7 +254,7 @@ fn schemas() -> Value {
             "additionalProperties": false,
             "required": ["type", "title", "status", "detail"],
             "properties": {
-                "type": { "type": "string", "enum": PROBLEM_SLUGS.iter().map(|s| format!("urn:vymalo:agents:problem:{s}")).collect::<Vec<_>>() },
+                "type": { "type": "string", "enum": PROBLEMS.iter().map(|(s, _, _)| format!("urn:vymalo:agents:problem:{s}")).collect::<Vec<_>>() },
                 "title": { "type": "string" },
                 "status": { "type": "integer", "minimum": 400, "maximum": 599 },
                 "detail": { "type": "string", "description": "The sentence for this occurrence." },
@@ -169,7 +266,12 @@ fn schemas() -> Value {
                             "description": "The same, only for a caller that holds platform:agents.read: the agents that name the object, in byte order." },
                 "reasons": { "type": "array", "items": schema("Unrepresentable"), "description": "409 yaml-only: what a form cannot say." },
                 "limit": { "type": "integer", "description": "413 payload-too-large: the most a body may hold, in bytes." }
-            }
+            },
+            "allOf": [
+                { "if": { "required": ["status"], "properties": { "status": { "const": 422 } } }, "then": { "required": ["errors"] } },
+                { "if": { "required": ["status"], "properties": { "status": { "const": 403 } } }, "then": { "required": ["permission"] } },
+                { "if": { "required": ["status"], "properties": { "status": { "const": 413 } } }, "then": { "required": ["limit"] } }
+            ]
         },
         "FormError": object(json!({
             "field": { "type": "string", "description": "The form field as the client sent it (`name`, `tags[2]`, `model.endpoint`, `agent.github.owners[0]`); empty for the form as a whole." },
@@ -181,15 +283,37 @@ fn schemas() -> Value {
             "reason": { "type": "string" },
         }), &[]),
         "Condition": {
+            "description": "A Kubernetes condition as the operator writes it (`metav1.Condition`): exactly these members.",
             "type": "object",
+            "additionalProperties": false,
             "required": ["type", "status", "reason", "message", "lastTransitionTime"],
             "properties": {
-                "type": { "type": "string" },
+                "type": { "type": "string", "description": "AgentService: ConfigResolved, StoreReady, RuntimeReady, Listed, Ready. Model and tool server: Accepted, InUse, AgentsReady." },
                 "status": { "type": "string", "enum": ["True", "False", "Unknown"] },
                 "reason": { "type": "string" },
                 "message": { "type": "string" },
-                "lastTransitionTime": { "type": "string" },
+                "lastTransitionTime": { "type": "string", "format": "date-time" },
                 "observedGeneration": { "type": "integer" }
+            }
+        },
+        "ServiceStatus": {
+            "description": "`AgentService.status` as the operator wrote it, passed through: these members, each present only when the operator wrote it. Open on purpose: it is the custom resource's own status.",
+            "type": "object",
+            "properties": {
+                "observedGeneration": { "type": "integer" },
+                "state": { "type": "string", "enum": ["Ready", "Degraded", "Suspended", "Blocked"] },
+                "config": { "type": "object", "description": "The AgentConfig it was resolved from: name, observedGeneration, digest." },
+                "runtime": { "type": "object", "description": "The runtime as the provider reports it: provider, phase, replicas." },
+                "endpoints": { "type": "object", "description": "Where the agent can be reached: a2a, agentCard." },
+                "conditions": { "type": "array", "items": schema("Condition") }
+            }
+        },
+        "ConfigStatus": {
+            "description": "`AgentConfig.status` as the operator wrote it, passed through. Open on purpose: it is the custom resource's own status.",
+            "type": "object",
+            "properties": {
+                "observedGeneration": { "type": "integer" },
+                "conditions": { "type": "array", "items": schema("Condition") }
             }
         },
         "Owner": { "type": "string", "enum": ["dashboard", "gitops"],
@@ -202,10 +326,31 @@ fn schemas() -> Value {
             "version": { "type": "string" },
             "namespace": { "type": "string" },
             "offerLabel": { "type": "string" },
-            "defaults": { "type": "object", "description": "The deployment's defaults every agent gets apart from what its form sets (the API's configuration file, without a secret). Open: its members are the deployment's, not the contract's." },
+            "defaults": schema("Defaults"),
             "runPodSizeClasses": { "type": "array", "items": { "type": "string" },
                                    "description": "The size classes of run pods the operator has; empty: none, and a coder form that asks is refused." },
             "limits": object(json!({ "maxBodyBytes": { "type": "integer" } }), &[]),
+        }), &[]),
+        "Defaults": object(json!({
+            "namespace": { "type": "string" },
+            "offerLabel": { "type": "string" },
+            "store": { "type": "object", "description": "Exactly one of `cnpg` (a CloudNativePG cluster per agent: instances, storage) and `secretRef` (a Secret name pattern); their members are the operator's CRD members, not repeated here." },
+            "a2aBearer": object(json!({ "name": { "type": "string" }, "key": { "type": "string" } }), &[]),
+            "allowFrom": { "type": "array", "items": { "type": "object" }, "description": "Kubernetes NetworkPolicy peers, as in the CRD." },
+            "security": object(json!({ "runAsUser": { "type": ["integer", "null"] }, "runAsGroup": { "type": ["integer", "null"] }, "fsGroup": { "type": ["integer", "null"] } }), &["runAsUser", "runAsGroup", "fsGroup"]),
+            "coder": object(json!({
+                "gitAuthor": { "type": ["object", "null"], "description": "name and email of the commits." },
+                "allowedRepoHosts": { "type": "array", "items": { "type": "string" } },
+                "githubApiUrl": { "type": ["string", "null"] },
+                "githubMcp": { "type": ["object", "null"] },
+                "workVolume": { "type": ["object", "null"], "description": "A Kubernetes volume as the CRD says it." },
+                "resources": { "type": ["object", "null"], "description": "Kubernetes resource requirements." },
+            }), &["gitAuthor", "allowedRepoHosts", "githubApiUrl", "githubMcp", "workVolume", "resources"]),
+            "folder": object(json!({ "resources": { "type": ["object", "null"], "description": "Kubernetes resource requirements." } }), &["resources"]),
+            "allowedImageRegistries": { "type": ["array", "null"], "items": { "type": "string" },
+                                        "description": "The registries an agent's own image may come from (an image needs a tag or digest and one of these); null: none is configured, and a form that names an image is refused." },
+            "runPodSizeClasses": { "type": "array", "items": { "type": "string" } },
+            "maxAccessTier": { "type": "string", "enum": ["plan", "edits", "auto", "bypass"], "description": "The ceiling of the access tier a coder form may set." },
         }), &[]),
         "OfferedSecret": object(json!({
             "secret": { "type": "string" },
@@ -219,23 +364,41 @@ fn schemas() -> Value {
         "AgentSummary": summary,
         "AgentDetail": detail,
         "AgentList": object(json!({ "agents": array_of(schema("AgentSummary")) }), &[]),
+        "Deployment": object(json!({
+            "store": { "type": "object", "description": "AgentService.spec.store: `cnpg` or `secretRef`, as the CRD says." },
+            "a2aBearer": { "type": ["object", "null"], "description": "The Secret key that holds the A2A bearer tokens: name, key." },
+            "allowFrom": { "type": "array", "items": { "type": "object" }, "description": "NetworkPolicy peers." },
+            "security": object(json!({ "runAsUser": { "type": ["integer", "null"] }, "runAsGroup": { "type": ["integer", "null"] }, "fsGroup": { "type": ["integer", "null"] } }), &["runAsUser", "runAsGroup", "fsGroup"]),
+            "resources": { "type": ["object", "null"], "description": "Kubernetes resource requirements." },
+            "volumes": { "type": "array", "items": { "type": "object" }, "description": "Kubernetes volumes as the CRD says them." },
+            "githubMcp": { "type": ["object", "null"] },
+            "coder": object(json!({
+                "gitAuthor": { "type": ["object", "null"] },
+                "allowedRepoHosts": { "type": "array", "items": { "type": "string" } },
+                "githubApiUrl": { "type": ["string", "null"] },
+            }), &["gitAuthor", "allowedRepoHosts", "githubApiUrl"]),
+        }), &[]),
         "AgentView": object(json!({
             "form": schema("AgentForm"),
-            "deployment": { "type": "object", "description": "What no form edits: the deployment's part of the objects, read-only on the screen and written back unchanged by a save." },
+            "deployment": schema("Deployment"),
         }), &[]),
         "AgentEvent": object(json!({
             "type": { "type": "string", "enum": ["Normal", "Warning"] },
-            "reason": { "type": "string", "maxLength": 253 },
+            "reason": { "type": "string", "maxLength": 253, "description": "Cleaned and cut as message, at 253 characters (the Kubernetes name limit)." },
             "message": { "type": "string", "maxLength": 1024,
-                         "description": "As the cluster wrote it: untrusted text. Control characters are replaced by a space and a longer message is cut with `…`; nothing else is done to it." },
-            "object": object(json!({ "kind": { "type": "string" }, "name": { "type": "string" } }), &[]),
+                         "description": "The cluster's own text: untrusted, render it as text. Cleaned: each control character (Unicode category Cc, a newline and a tab included) is a space, the characters U+200B-U+200F, U+202A-U+202E, U+2060, U+2066-U+2069 and U+FEFF (zero-width and bidirectional controls) are removed, runs of spaces become one and the ends are trimmed; at most 1,024 characters (not bytes: up to 4 KiB), a longer message is cut to 1,023 characters and a `…`." },
+            "object": object(json!({ "kind": { "type": "string", "maxLength": 253 }, "name": { "type": "string", "maxLength": 253 } }), &[]),
             "count": { "type": "integer", "minimum": 1 },
-            "firstSeen": { "type": "string", "description": "UTC, whole seconds: YYYY-MM-DDTHH:MM:SSZ." },
-            "lastSeen": { "type": "string", "description": "As firstSeen." },
+            "firstSeen": { "type": "string", "format": "date-time", "pattern": "^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z$", "description": "UTC, whole seconds: YYYY-MM-DDTHH:MM:SSZ. 1970-01-01T00:00:00Z when the cluster wrote no readable time." },
+            "lastSeen": { "type": "string", "format": "date-time", "pattern": "^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z$", "description": "As firstSeen." },
+            "by": { "type": "string", "enum": ["uid", "name"],
+                    "description": "How the event was attributed to this agent. `uid`: the event names the uid of the agent's own AgentService or AgentConfig. `name`: its object has the name and the shape of one of the agent's objects (an unrelated object with such a name could be shown)." },
         }), &[]),
         "AgentEvents": object(json!({
             "events": { "type": "array", "maxItems": 100, "items": schema("AgentEvent"),
-                        "description": "Newest first (by lastSeen), at most 100." },
+                        "description": "Newest first (by lastSeen, then firstSeen, then kind, name, reason and message), at most 100. Empty does NOT mean healthy: Kubernetes keeps events for a limited time." },
+            "incomplete": { "type": "boolean",
+                            "description": "True when the API stopped reading the namespace's events before the end (a bound of 5,000 events, or a listing that expired twice): the list is what was read and an event of this agent may be missing. Tell the person the list may be incomplete." },
         }), &[]),
         "SecretPick": object(json!({
             "secret": { "type": "string", "description": "The Secret's name, as an offered ExternalSecret makes it." },
@@ -266,7 +429,7 @@ fn schemas() -> Value {
                        "description": "The folder inline: relative path to content. `instructions.md` is in it; no `mcp.json`; at most 1 MiB in all." },
         }), &[]),
         "AgentForm": object(json!({
-            "name": { "type": "string", "description": "`^[a-z][a-z0-9-]{0,38}[a-z0-9]$`; the name of both objects; fixed after the create." },
+            "name": { "type": "string", "pattern": "^[a-z][a-z0-9-]{0,38}[a-z0-9]$", "description": "The name of both objects; fixed after the create." },
             "title": { "type": "string", "minLength": 1, "maxLength": 80 },
             "description": { "type": ["string", "null"], "maxLength": 500 },
             "tags": { "type": "array", "maxItems": 16, "items": { "type": "string" } },
@@ -274,12 +437,13 @@ fn schemas() -> Value {
             "model": schema("ModelChoice"),
             "toolServers": { "type": "array", "items": { "type": "string" }, "description": "ToolProvider names, a set." },
             "allowInsecureHttp": { "type": "boolean" },
-            "image": nullable(&["string"]),
-            "audience": { "type": ["array", "null"], "items": { "type": "string" } },
+            "image": { "type": ["string", "null"], "description": "The agent's own image, under Advanced; null: the operator's default coder image. It needs a tag or a digest and a registry from `Info.defaults.allowedImageRegistries`, else 422 on the field `image`." },
+            "audience": { "type": ["array", "null"], "maxItems": 32, "items": { "type": "string", "pattern": "^[!-~]{1,64}$" },
+                          "description": "Who may use the agent: the values of a person's roles claim that admit them, by convention `agent.use:<name>`; `[\"*\"]` admits everyone and is only allowed alone. 1 to 64 visible ASCII characters each, at most 32. null and `[]` are the same: administrators only." },
             "agent": { "oneOf": [schema("CoderSettings"), schema("FolderSettings")], "description": "What is particular to the kind, discriminated by `kind`." },
         }), &["description", "tags", "suspend", "toolServers", "allowInsecureHttp", "image", "audience"]),
         "ModelEndpointForm": object(json!({
-            "name": { "type": "string", "description": "`^[a-z][a-z0-9-]{0,62}$`; fixed after the create." },
+            "name": { "type": "string", "pattern": "^[a-z][a-z0-9-]{0,62}$", "description": "Fixed after the create." },
             "title": { "type": "string", "minLength": 1, "maxLength": 128 },
             "baseUrl": { "oneOf": [
                 object(json!({ "value": { "type": "string", "description": "http or https, a host, no user name, password, query or fragment." } }), &[]),
@@ -293,10 +457,11 @@ fn schemas() -> Value {
             "secret": schema("SecretPick"),
         }), &["prefix"]),
         "ToolServerForm": object(json!({
-            "name": { "type": "string", "description": "`^[a-z][a-z0-9-]{0,30}$`; the prefix of its tools; fixed after the create." },
+            "name": { "type": "string", "pattern": "^[a-z][a-z0-9-]{0,30}$", "description": "The prefix of its tools; fixed after the create." },
             "title": { "type": "string", "minLength": 1, "maxLength": 128 },
             "url": { "type": "string" },
-            "headers": { "type": "object", "additionalProperties": schema("HeaderForm") },
+            "headers": { "type": "object", "additionalProperties": schema("HeaderForm"), "propertyNames": { "pattern": "^[!#$%&'*+.^_`|~0-9A-Za-z-]+$" }, "maxProperties": 32,
+                         "description": "Request headers by header name (an HTTP token), at most 32." },
             "tools": { "type": "array", "maxItems": 32, "items": { "type": "string" } },
             "optional": { "type": "boolean" },
         }), &["headers", "tools", "optional"]),
@@ -320,7 +485,7 @@ fn schemas() -> Value {
             "description": "This document.",
             "type": "object",
             "required": ["openapi", "info", "paths"],
-            "properties": { "openapi": { "type": "string" }, "info": { "type": "object" }, "paths": { "type": "object" } }
+            "properties": { "openapi": { "type": "string", "const": "3.1.0" }, "info": { "type": "object", "required": ["title", "version"], "properties": { "title": { "type": "string" }, "version": { "type": "string" } } }, "paths": { "type": "object", "additionalProperties": { "type": "object" } } }
         },
     })
 }
@@ -329,6 +494,32 @@ fn schemas() -> Value {
 
 /// `(status, name, description, headers, examples by slug)`.
 fn problem_responses() -> Value {
+    let mut all = problem_responses_raw();
+    if let Some(map) = all.as_object_mut() {
+        map.insert(
+            "Problem405".to_owned(),
+            json!({
+                "description": "The path exists and not for this method (no operation below has it). `Allow` lists the methods. Answered before a token is asked for.",
+                "headers": { "Allow": { "description": "`GET, HEAD, PUT, DELETE` or the methods the path serves.", "schema": { "type": "string" } } },
+                "content": { PROBLEM_JSON: { "schema": schema("Problem"), "examples": { "method-not-allowed": { "value": {
+                    "type": "urn:vymalo:agents:problem:method-not-allowed", "title": "Method not allowed", "status": 405,
+                    "detail": "this method is not served for this path" } } } } },
+            }),
+        );
+        for (name, response) in map.iter_mut() {
+            let status: u16 = name.trim_start_matches("Problem").parse().unwrap_or(0);
+            let slugs: Vec<&str> = PROBLEMS
+                .iter()
+                .filter(|(_, s, _)| *s == status)
+                .map(|(slug, _, _)| *slug)
+                .collect();
+            response["x-problem-types"] = json!(slugs);
+        }
+    }
+    all
+}
+
+fn problem_responses_raw() -> Value {
     fn problem(status: u16, slug: &str, title: &str, detail: &str, extra: &Value) -> Value {
         let mut body = json!({
             "type": format!("urn:vymalo:agents:problem:{slug}"),
@@ -496,7 +687,15 @@ fn example_agent_detail() -> Value {
     }
     let mut detail = example_summary();
     if let Some(d) = detail.as_object_mut() {
-        d.insert("representation".into(), json!({ "form": { "form": form, "deployment": { "store": { "cnpg": { "instances": 1, "storage": { "size": "5Gi" } } } } } }));
+        d.insert(
+            "representation".into(),
+            json!({ "form": { "form": form, "deployment": {
+            "store": { "cnpg": { "instances": 1, "storage": { "size": "5Gi" } } },
+            "a2aBearer": { "name": "agent-a2a", "key": "AGENT_TOKEN" }, "allowFrom": [],
+            "security": { "runAsUser": 10001, "runAsGroup": 10001, "fsGroup": 10001 },
+            "resources": null, "volumes": [], "githubMcp": null,
+            "coder": { "gitAuthor": null, "allowedRepoHosts": [], "githubApiUrl": null } } } }),
+        );
         d.insert("status".into(), json!({ "observedGeneration": 1, "state": "Ready", "conditions": example_conditions() }));
         d.insert("configStatus".into(), json!({ "observedGeneration": 1 }));
     }
@@ -531,13 +730,13 @@ fn example_shared_detail(form: Value, name: &str, title: &str) -> Value {
 }
 
 fn example_events() -> Value {
-    json!({ "events": [
+    json!({ "incomplete": false, "events": [
         { "type": "Warning", "reason": "BackOff", "message": "Back-off pulling image \"ghcr.io/example/coder:sha-0000000\"",
           "object": { "kind": "Pod", "name": "coder-7d9f8b6c5-x2x4q" }, "count": 12,
-          "firstSeen": "2026-11-14T10:00:05Z", "lastSeen": "2026-11-14T10:07:41Z" },
+          "firstSeen": "2026-11-14T10:00:05Z", "lastSeen": "2026-11-14T10:07:41Z", "by": "name" },
         { "type": "Normal", "reason": "ScalingReplicaSet", "message": "Scaled up replica set coder-7d9f8b6c5 to 1",
           "object": { "kind": "Deployment", "name": "coder" }, "count": 1,
-          "firstSeen": "2026-11-14T10:00:02Z", "lastSeen": "2026-11-14T10:00:02Z" },
+          "firstSeen": "2026-11-14T10:00:02Z", "lastSeen": "2026-11-14T10:00:02Z", "by": "name" },
     ] })
 }
 
@@ -578,7 +777,13 @@ fn describe(id: RouteId) -> Op {
                     "Info",
                     json!({
                 "version": "0.1.0", "namespace": "another-agentic-system", "offerLabel": "agents.vymalo.com/offer",
-                "defaults": { "namespace": "another-agentic-system" }, "runPodSizeClasses": [], "limits": { "maxBodyBytes": 2_097_152 } }),
+                "defaults": {
+                    "namespace": "another-agentic-system", "offerLabel": "agents.vymalo.com/offer",
+                    "store": { "cnpg": { "instances": 1, "storage": { "size": "5Gi" } } },
+                    "a2aBearer": { "name": "agent-a2a", "key": "AGENT_TOKEN" }, "allowFrom": [],
+                    "security": { "runAsUser": 10001, "runAsGroup": 10001, "fsGroup": 10001 },
+                    "coder": { "gitAuthor": null, "allowedRepoHosts": ["github.com"], "githubApiUrl": null, "githubMcp": null, "workVolume": null, "resources": null },
+                    "folder": { "resources": null }, "allowedImageRegistries": ["ghcr.io"], "runPodSizeClasses": [], "maxAccessTier": "auto" }, "runPodSizeClasses": [], "limits": { "maxBodyBytes": 2_097_152 } }),
                 ),
                 &[],
             )],
@@ -623,7 +828,7 @@ fn describe(id: RouteId) -> Op {
         RouteId::ListAgents => Op {
             id: "listAgents",
             summary: "The agents",
-            description: "A row per agent, ordered by name.",
+            description: "A row per agent, ordered by name. **Not paginated**: the whole namespace, in one answer.",
             name: false,
             request: None,
             ok: vec![ok(
@@ -673,7 +878,7 @@ fn describe(id: RouteId) -> Op {
         RouteId::DeleteAgent => Op {
             id: "deleteAgent",
             summary: "Delete an agent",
-            description: "`If-Match` is required. 204 once it is gone; 202 while the operator is still releasing what it ran (the agent is listed as `deleting` until it is gone: ask again).",
+            description: "`If-Match` is required. 204 once it is gone. 202 while the operator is still releasing what it ran: the answer is the row (`deleting: true`) and an `ETag`; **finish by polling `GET /v1/agents/{name}` until it answers 404** (about every 2 seconds). A repeated `DELETE` is accepted while the agent is being deleted and needs the fresh `ETag` (the operator's status writes move it: the one in the 202 is the latest at that moment). A `DELETE` of an agent that is not there is 404 `not-found`.",
             name: true,
             request: None,
             ok: vec![
@@ -689,7 +894,7 @@ fn describe(id: RouteId) -> Op {
                         }
                         s
                     }),
-                    &[],
+                    &["ETag"],
                 ),
             ],
             errors: REMOVE,
@@ -711,7 +916,7 @@ fn describe(id: RouteId) -> Op {
         RouteId::AgentEvents => Op {
             id: "listAgentEvents",
             summary: "The Events of an agent's objects",
-            description: "Why is it not `Ready`: the Kubernetes Events (core/v1) about the agent's `AgentService`, its `AgentConfig` and what the operator made for it (workloads, replica sets, pods, the egress proxy), **newest first, at most 100**. Never another agent's. An event whose object could belong to two agents is left out. **The messages are the cluster's words, shown as it wrote them** (control characters replaced, at most 1 KiB): they can quote an image name or a webhook's answer, and are never logged.",
+            description: "Why is it not `Ready`: the Kubernetes Events (core/v1) about the agent's `AgentService`, its `AgentConfig` and what the operator made for it, **newest first, at most 100**. **Attributed by the names the operator gives an agent's objects** (`by: name`; the agent's own `AgentService` and `AgentConfig` by uid, `by: uid`): the workloads `<agent>`, `<agent>-front` and `<agent>-egress`, their ReplicaSets and pods, and the store's `<agent>-db` cluster, pods, jobs and services. An event of another agent's object never appears, and one whose name could be two agents' is left out; **an unrelated object of the namespace whose name has the same shape can appear**. Not covered: volume claims and the pods a coder makes for its runs. A 404 `not-found` (the same body as `GET /v1/agents/{name}`) for an agent that is not there. **Kubernetes keeps events for a limited time** (the API server's `--event-ttl`, one hour by default: *unverified* here, not read from the source in this session), so an empty list does not mean healthy; `incomplete: true` says the list may be missing events (tell the person). **The messages are the cluster's words**: untrusted text, render it as text; cleaned of control and bidirectional characters and cut (see `AgentEvent.message`); never logged.",
             name: true,
             request: None,
             ok: vec![ok(
@@ -725,7 +930,7 @@ fn describe(id: RouteId) -> Op {
         RouteId::ListModels => Op {
             id: "listModels",
             summary: "The model endpoints",
-            description: "Each with the agents that use it (names only for a caller that holds `platform:agents.read`) and the status the operator wrote.",
+            description: "Each with the agents that use it (names only for a caller that holds `platform:agents.read`) and the status the operator wrote. **Not paginated**: the whole namespace, in one answer.",
             name: false,
             request: None,
             ok: vec![ok(
@@ -796,7 +1001,7 @@ fn describe(id: RouteId) -> Op {
         RouteId::ListToolServers => Op {
             id: "listToolServers",
             summary: "The tool servers",
-            description: "As `listModels`, for the MCP servers.",
+            description: "As `listModels`, for the MCP servers: not paginated, the whole namespace.",
             name: false,
             request: None,
             ok: vec![ok(
@@ -970,7 +1175,7 @@ fn components() -> Value {
         } },
         "parameters": {
             "name": { "name": "name", "in": "path", "required": true, "schema": { "type": "string", "minLength": 1 },
-                      "description": "The object's name: lower-case words and dashes (an agent's is at most 40 characters, a model's 63, a tool server's 32). A name no object has is a 404." },
+                      "description": "The object's name (an agent's is at most 40 characters of lower-case words and dashes, a model's 63, a tool server's 32: the forms' `name` patterns). A name no object has is a 404 `not-found`; a name that cannot be percent-decoded is a 400 `invalid-request`." },
             "IfMatch": { "name": "If-Match", "in": "header", "required": false, "schema": { "type": "string" },
                          "description": "Replace: the `ETag` read, quoted and strong. Exactly one of `If-Match` and `If-None-Match: *` is sent; neither is a 428; both, a weak tag or `*` here is a 400 or a 412." },
             "IfNoneMatch": { "name": "If-None-Match", "in": "header", "required": false, "schema": { "type": "string", "enum": ["*"] },
@@ -992,8 +1197,9 @@ fn info() -> Value {
         "title": "Platform API",
         "version": CONTRACT,
         "summary": "The API of the admin dashboard and of aapctl: agents, model endpoints, tool servers and the keys a form may name.",
-        "description": "Everything is under `/v1`. **The server enforces; a client only offers**: a permission, an ETag, a name and a form are all checked again here, whatever a screen showed.\n\nA write is conditional (`If-None-Match: *` creates, `If-Match` replaces or deletes; 428 otherwise) and every error is RFC 9457 problem details with the form field of every 422. Every answer is `Cache-Control: no-store`.\n\n**Deliberately absent:** cookies and sessions (the token is the only credential); CORS credentials (`Access-Control-Allow-Credentials` is never sent) and a wildcard origin (only the deployment's exact origins are allowed); an unconditional write or delete; a secret value anywhere (a form names a Secret key, and the API reads no Secret); DPoP.\n\nThis document is generated from the API's table of routes and held equal to the checked-in `docs/api/platform-api-v1.openapi.json` by a test.",
+        "description": "Everything is under `/v1`. **The server enforces; a client only offers**: a permission, an ETag, a name and a form are all checked again here, whatever a screen showed.\n\nA write is conditional (`If-None-Match: *` creates, `If-Match` replaces or deletes; 428 otherwise) and every error is RFC 9457 problem details with the form field of every 422. Every answer is `Cache-Control: no-store`.\n\n**Reading this document.** `x-permission` on an operation is the one permission the route needs (a value of the token's roles claim, e.g. `platform:agents.read`); `null` means any valid token. `x-secrets-pick` is present on a write whose body can name a Secret key: such a write needs that permission as well, and is a 403 naming it without it. **Problems** (`application/problem+json`): `type` is `urn:vymalo:agents:problem:<slug>` and the table `x-problem-table` of this `info` object lists every slug with its status and meaning; a path that is no route is 404 `no-such-route` and a method a path does not serve is 405 `method-not-allowed` with an `Allow` header, both answered before a token is asked for, on every path below. **Base URL:** the deployment's public address of this API (the chart's Ingress host), which a client is configured with; the paths here are under `/v1` and relative to it.\n\n**Deliberately absent:** cookies and sessions (the token is the only credential); CORS credentials (`Access-Control-Allow-Credentials` is never sent) and a wildcard origin (only the deployment's exact origins are allowed); an unconditional write or delete; a secret value anywhere (a form names a Secret key, and the API reads no Secret); DPoP.\n\nThis document is generated from the API's table of routes and held equal to the checked-in `docs/api/platform-api-v1.openapi.json` by a test.",
         "license": { "name": "Apache-2.0", "identifier": "Apache-2.0" },
+        "x-problem-table": PROBLEMS.iter().map(|(slug, status, meaning)| json!({ "type": format!("urn:vymalo:agents:problem:{slug}"), "status": status, "meaning": meaning })).collect::<Vec<_>>(),
         "x-absent": ["cookie authentication", "CORS credentials", "wildcard CORS origin", "unconditional write", "secret values", "DPoP"],
     })
 }
@@ -1013,6 +1219,11 @@ pub fn document() -> Value {
     json!({
         "openapi": "3.1.0",
         "info": info(),
+        "servers": [{
+            "url": "{base}",
+            "description": "The deployment's public address of the Platform API. It is configuration of the client (the chart's Ingress host); the API does not tell it.",
+            "variables": { "base": { "default": "https://platform-api.example.invalid", "description": "Scheme and host, no trailing slash." } }
+        }],
         "security": [{ "bearer": [] }],
         "tags": [
             { "name": "agents", "description": "An agent is an AgentService and the AgentConfig it runs, saved, read and deleted as one unit." },

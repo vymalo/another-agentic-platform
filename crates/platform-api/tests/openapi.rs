@@ -240,6 +240,29 @@ fn check(doc: &Value, schema: &Value, value: &Value, at: &str, errors: &mut Vec<
     {
         errors.push(format!("{at}: {value} is not {c}"));
     }
+    if let Some(text) = value.as_str() {
+        if let Some(pattern) = schema.get("pattern").and_then(Value::as_str)
+            && !regex::Regex::new(pattern).unwrap().is_match(text)
+        {
+            errors.push(format!("{at}: {text:?} does not match {pattern}"));
+        }
+        if schema.get("format").and_then(Value::as_str) == Some("date-time") {
+            let rfc3339 = regex::Regex::new(
+                r"^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}(\.[0-9]+)?(Z|[+-][0-9]{2}:[0-9]{2})$",
+            )
+            .unwrap();
+            if !rfc3339.is_match(text) {
+                errors.push(format!("{at}: {text:?} is not a date-time"));
+            }
+        }
+    }
+    if let (Some(condition), Some(then)) = (schema.get("if"), schema.get("then")) {
+        let mut held = Vec::new();
+        check(doc, condition, value, at, &mut held);
+        if held.is_empty() {
+            check(doc, then, value, at, errors);
+        }
+    }
     if let Some(s) = value.as_str() {
         let n = s.chars().count() as u64;
         if let Some(min) = schema.get("minLength").and_then(Value::as_u64)
@@ -284,6 +307,22 @@ fn check(doc: &Value, schema: &Value, value: &Value, at: &str, errors: &mut Vec<
         }
     }
     if let Some(map) = value.as_object() {
+        if let Some(max) = schema.get("maxProperties").and_then(Value::as_u64)
+            && map.len() as u64 > max
+        {
+            errors.push(format!("{at}: more than {max} members"));
+        }
+        if let Some(names) = schema.get("propertyNames") {
+            for key in map.keys() {
+                check(
+                    doc,
+                    names,
+                    &Value::String(key.clone()),
+                    &format!("{at}.<{key}>"),
+                    errors,
+                );
+            }
+        }
         let properties = schema.get("properties").and_then(Value::as_object);
         for required in schema
             .get("required")
@@ -364,7 +403,7 @@ fn the_validator_can_fail() {
     let doc = checked_in();
     let event = json!({
         "type": "Warning", "reason": "R", "message": "m", "object": { "kind": "Pod", "name": "p" },
-        "count": 1, "firstSeen": "2026-11-14T10:00:00Z", "lastSeen": "2026-11-14T10:00:00Z",
+        "count": 1, "firstSeen": "2026-11-14T10:00:00Z", "lastSeen": "2026-11-14T10:00:00Z", "by": "name",
     });
     let s = schema_named("AgentEvent");
     assert!(mistakes(&doc, &s, &event).is_empty());
@@ -566,6 +605,7 @@ async fn session() -> Vec<Seen> {
             count: 3,
             first_seen: "2026-11-14T10:00:00Z".into(),
             last_seen: "2026-11-14T10:05:00Z".into(),
+            object_uid: None,
         },
     );
     let r = api.get("/v1/agents/chat/events").token(&sees).send().await;
@@ -887,7 +927,11 @@ async fn session() -> Vec<Seen> {
         json!({ "configRef": { "name": "git" } }),
         Foreign::Unlabelled,
     );
-    let tag = api.get("/v1/agents/git").token(&admin).send().await.etag();
+    let r = api.get("/v1/agents/git").token(&admin).send().await;
+    let tag = r.etag();
+    rec.add("GET", "/v1/agents/{name}", r);
+    let r = api.get("/v1/agents").token(&admin).send().await;
+    rec.add("GET", "/v1/agents", r);
     let r = api
         .delete("/v1/agents/git")
         .token(&admin)
@@ -981,6 +1025,23 @@ async fn real_answers_validate_against_the_schemas() {
         }
         if s.reply.code() >= 400 {
             assert_eq!(media, Some("application/problem+json"), "{label}");
+            let body = s.reply.json();
+            assert_eq!(
+                body["status"],
+                s.reply.code(),
+                "{label}: the body says another status"
+            );
+            let documented: Vec<String> = response["x-problem-types"]
+                .as_array()
+                .unwrap_or_else(|| panic!("{label}: the response lists no problem types"))
+                .iter()
+                .map(|t| format!("urn:vymalo:agents:problem:{}", t.as_str().unwrap()))
+                .collect();
+            assert!(
+                documented.contains(&body["type"].as_str().unwrap().to_owned()),
+                "{label}: the type {} is not one documented for this status: {documented:?}",
+                body["type"]
+            );
         }
     }
     assert!(bodies > 100, "{bodies}");
@@ -1050,6 +1111,7 @@ async fn an_event_message_is_shown_clean_in_the_answer() {
             count: 1,
             first_seen: "2026-11-14T10:00:00Z".into(),
             last_seen: "2026-11-14T10:00:00Z".into(),
+            object_uid: None,
         },
     );
     let r = api.get("/v1/agents/chat/events").token(&admin).send().await;
@@ -1061,4 +1123,281 @@ async fn an_event_message_is_shown_clean_in_the_answer() {
     assert!(message.starts_with("a b [0m"), "{message}");
     assert!(message.chars().count() <= 1024);
     assert!(message.chars().all(|c| !c.is_control()));
+}
+
+// ------------------------------------------------------------------------------------------------------- the meta-tests
+
+/// `Schema/member` of every member of a closed object schema (`additionalProperties: false`) that is not required.
+fn optional_members(doc: &Value) -> BTreeSet<String> {
+    fn walk(path: &str, schema: &Value, out: &mut BTreeSet<String>) {
+        let Some(map) = schema.as_object() else {
+            return;
+        };
+        if map.get("additionalProperties") == Some(&Value::Bool(false))
+            && let Some(properties) = map.get("properties").and_then(Value::as_object)
+        {
+            let required: BTreeSet<&str> = map
+                .get("required")
+                .and_then(Value::as_array)
+                .into_iter()
+                .flatten()
+                .filter_map(Value::as_str)
+                .collect();
+            for key in properties.keys() {
+                if !required.contains(key.as_str()) {
+                    out.insert(format!("{path}/{key}"));
+                }
+            }
+        }
+        if let Some(properties) = map.get("properties").and_then(Value::as_object) {
+            for (key, sub) in properties {
+                walk(&format!("{path}/{key}"), sub, out);
+            }
+        }
+        for key in ["items", "additionalProperties", "then", "if"] {
+            if let Some(sub) = map.get(key) {
+                walk(&format!("{path}/{key}"), sub, out);
+            }
+        }
+        for key in ["oneOf", "anyOf", "allOf"] {
+            for (i, sub) in map
+                .get(key)
+                .and_then(Value::as_array)
+                .into_iter()
+                .flatten()
+                .enumerate()
+            {
+                walk(&format!("{path}/{key}{i}"), sub, out);
+            }
+        }
+    }
+    let mut out = BTreeSet::new();
+    for (name, schema) in doc["components"]["schemas"].as_object().unwrap() {
+        walk(name, schema, &mut out);
+    }
+    out
+}
+
+/// The members of a closed object that may be absent from an answer or a form, and why. **Anything else must be `required`**: a
+/// schema that does not require what the server always writes lets a mutation that drops it pass the answer tests.
+const MAY_BE_ABSENT: &[&str] = &[
+    // The members of a problem that belong to one kind of problem each: `errors` (422), `permission` (403), `agentCount` and `agents`
+    // (409 referenced, breaks-agents), `reasons` (409 yaml-only), `limit` (413). The `allOf` of the schema requires the ones a status
+    // must have.
+    "Problem/agentCount",
+    "Problem/agents",
+    "Problem/errors",
+    "Problem/limit",
+    "Problem/permission",
+    "Problem/reasons",
+    // The operator writes a status member only when it has something to say (`skip_serializing_if`).
+    "SharedStatus/observedGeneration",
+    "SharedStatus/usedByMore",
+    // A condition has no `observedGeneration` until the operator sets one.
+    "Condition/observedGeneration",
+    // A shared object has no status before the operator wrote one (`skip_serializing_if`).
+    "ModelDetail/status",
+    "ToolServerDetail/status",
+    // Forms: a member with a serde default may be left out of a request.
+    "AgentForm/description",
+    "AgentForm/tags",
+    "AgentForm/suspend",
+    "AgentForm/toolServers",
+    "AgentForm/allowInsecureHttp",
+    "AgentForm/image",
+    "AgentForm/audience",
+    "CoderSettings/createRepoOwners",
+    "CoderSettings/workers",
+    "CoderSettings/prDraft",
+    "CoderSettings/opencodeModel",
+    "CoderSettings/maxAccessTier",
+    "CoderSettings/runPodSizeClass",
+    "ModelEndpointForm/models",
+    "HeaderForm/prefix",
+    "ToolServerForm/headers",
+    "ToolServerForm/tools",
+    "ToolServerForm/optional",
+    // The deployment's own sections: a member with no value is `null` or may be left out by the configuration file.
+    "Defaults/security/runAsUser",
+    "Defaults/security/runAsGroup",
+    "Defaults/security/fsGroup",
+    "Defaults/coder/gitAuthor",
+    "Defaults/coder/allowedRepoHosts",
+    "Defaults/coder/githubApiUrl",
+    "Defaults/coder/githubMcp",
+    "Defaults/coder/workVolume",
+    "Defaults/coder/resources",
+    "Defaults/folder/resources",
+    "Deployment/security/runAsUser",
+    "Deployment/security/runAsGroup",
+    "Deployment/security/fsGroup",
+    "Deployment/coder/gitAuthor",
+    "Deployment/coder/allowedRepoHosts",
+    "Deployment/coder/githubApiUrl",
+];
+
+#[test]
+fn every_member_of_a_closed_object_is_required_unless_it_is_on_the_list_of_members_that_may_be_absent()
+ {
+    let found = optional_members(&checked_in());
+    let listed: BTreeSet<String> = MAY_BE_ABSENT.iter().map(|s| (*s).to_owned()).collect();
+    let unlisted: Vec<&String> = found.difference(&listed).collect();
+    let stale: Vec<&String> = listed.difference(&found).collect();
+    assert!(
+        unlisted.is_empty() && stale.is_empty(),
+        "optional members that are not on the list: {unlisted:#?}\nlisted and no longer optional or no longer there: {stale:#?}"
+    );
+}
+
+/// Component schemas that accept `{}` and `{"x":1}` **on purpose**: the custom resources' own statuses, passed through as the
+/// operator wrote them (it writes a member only when it has something to say).
+const OPEN_SCHEMAS: &[&str] = &["ConfigStatus", "ServiceStatus"];
+
+#[test]
+fn no_schema_accepts_anything_unless_it_is_on_the_list_of_open_schemas() {
+    let doc = checked_in();
+    let mut open = Vec::new();
+    for name in doc["components"]["schemas"].as_object().unwrap().keys() {
+        let schema = schema_named(name);
+        for sample in [json!({}), json!({ "x": 1 })] {
+            if mistakes(&doc, &schema, &sample).is_empty() {
+                open.push(name.clone());
+            }
+        }
+    }
+    open.sort();
+    open.dedup();
+    let expected: Vec<String> = OPEN_SCHEMAS.iter().map(|s| (*s).to_owned()).collect();
+    assert_eq!(
+        open, expected,
+        "the schemas that accept {{}} or {{\"x\":1}}"
+    );
+}
+
+#[test]
+fn the_validator_checks_patterns_formats_conditions_and_names() {
+    let doc = checked_in();
+    let event = |last: &str| {
+        json!({ "type": "Normal", "reason": "R", "message": "m", "object": { "kind": "Pod", "name": "p" },
+                "count": 1, "firstSeen": "2026-11-14T10:00:00Z", "lastSeen": last, "by": "name" })
+    };
+    assert!(
+        mistakes(
+            &doc,
+            &schema_named("AgentEvent"),
+            &event("2026-11-14T10:00:00Z")
+        )
+        .is_empty()
+    );
+    assert!(!mistakes(&doc, &schema_named("AgentEvent"), &event("yesterday")).is_empty());
+    let problem = |status: u16| json!({ "type": "urn:vymalo:agents:problem:validation", "title": "t", "status": status, "detail": "d" });
+    assert!(
+        !mistakes(&doc, &schema_named("Problem"), &problem(422)).is_empty(),
+        "a 422 without errors"
+    );
+    assert!(mistakes(&doc, &schema_named("Problem"), &problem(404)).is_empty());
+    let form = json!({ "name": "UPPER", "title": "t", "url": "https://x.example/mcp" });
+    assert!(
+        !mistakes(&doc, &schema_named("ToolServerForm"), &form).is_empty(),
+        "a name pattern"
+    );
+    let headers = json!({ "name": "ok", "title": "t", "url": "https://x.example/mcp",
+                          "headers": { "bad header": { "secret": { "secret": "s", "key": "k" } } } });
+    assert!(
+        !mistakes(&doc, &schema_named("ToolServerForm"), &headers).is_empty(),
+        "a header name"
+    );
+}
+
+// --------------------------------------------------------------------------------------------- events through the API
+
+fn seed_at(api: &Api, agent: &str, kind: &str, object: &str, n: u32, first: u32) {
+    let at = |s: u32| format!("2026-11-14T10:{:02}:{:02}Z", s / 60, s % 60);
+    api.objects.seed_event(
+        agent,
+        &EventSeed {
+            object_kind: kind.into(),
+            object_name: object.into(),
+            event_type: "Warning".into(),
+            reason: format!("Reason{n}"),
+            message: format!("message {n}"),
+            count: 1,
+            first_seen: at(first),
+            last_seen: at(n),
+            object_uid: None,
+        },
+    );
+}
+
+#[tokio::test]
+async fn a_hundred_and_one_events_are_a_hundred_newest_first_and_equal_times_break_the_same_way() {
+    let (api, admin) = Api::seeded().await;
+    api.put("/v1/agents/chat")
+        .token(&admin)
+        .create()
+        .json(&folder_body("chat"))
+        .send()
+        .await;
+    for n in 0..101 {
+        seed_at(&api, "chat", "Deployment", "chat", n, 0);
+    }
+    // Two events at the very same time: the order is fixed by the kind, so it is the same on every call.
+    seed_at(&api, "chat", "Service", "chat", 500, 0);
+    seed_at(&api, "chat", "AgentConfig", "chat", 500, 0);
+    let r = api.get("/v1/agents/chat/events").token(&admin).send().await;
+    assert_eq!(r.code(), 200);
+    let body = r.json();
+    let events = body["events"].as_array().unwrap();
+    assert_eq!(events.len(), 100);
+    assert_eq!(body["incomplete"], false);
+    assert_eq!(
+        events[0]["object"]["kind"], "AgentConfig",
+        "equal times: the kind decides"
+    );
+    assert_eq!(events[1]["object"]["kind"], "Service");
+    let times: Vec<&str> = events
+        .iter()
+        .map(|e| e["lastSeen"].as_str().unwrap())
+        .collect();
+    let mut sorted = times.clone();
+    sorted.sort_unstable_by(|a, b| b.cmp(a));
+    assert_eq!(times, sorted, "newest first");
+    let again = api
+        .get("/v1/agents/chat/events")
+        .token(&admin)
+        .send()
+        .await
+        .json();
+    assert_eq!(again, body, "the same answer twice");
+}
+
+#[tokio::test]
+async fn the_events_of_a_missing_agent_are_the_same_problem_as_its_detail() {
+    let (api, admin) = Api::seeded().await;
+    let detail = api.get("/v1/agents/nope").token(&admin).send().await;
+    let events = api.get("/v1/agents/nope/events").token(&admin).send().await;
+    assert_eq!(detail.code(), 404);
+    assert_eq!(events.code(), 404);
+    assert_eq!(detail.body, events.body, "byte for byte");
+    assert!(events.is_problem("not-found"));
+}
+
+#[tokio::test]
+async fn a_gitops_agent_with_no_title_is_listed_and_read() {
+    let (api, admin) = Api::seeded().await;
+    api.objects.seed_foreign(
+        aap_ports::Kind::AgentService,
+        "untitled",
+        json!({ "configRef": { "name": "untitled" } }),
+        Foreign::Unlabelled,
+    );
+    let doc = checked_in();
+    let list = api.get("/v1/agents").token(&admin).send().await;
+    let row = list.json()["agents"][0].clone();
+    assert!(row["title"].is_null() && row["description"].is_null());
+    let errors = mistakes(&doc, &schema_named("AgentList"), &list.json());
+    assert!(errors.is_empty(), "{errors:?}");
+    let one = api.get("/v1/agents/untitled").token(&admin).send().await;
+    let errors = mistakes(&doc, &schema_named("AgentDetail"), &one.json());
+    assert!(errors.is_empty(), "{errors:?}");
 }

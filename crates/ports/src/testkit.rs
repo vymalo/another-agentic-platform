@@ -133,6 +133,8 @@ pub struct EventSeed {
     pub first_seen: String,
     /// `YYYY-MM-DDTHH:MM:SSZ`.
     pub last_seen: String,
+    /// The `uid` the event names for its object (`involvedObject.uid`), or none.
+    pub object_uid: Option<String>,
 }
 
 /// An [`AgentObjects`](crate::AgentObjects) the suite can set up and inspect: what the cases need of

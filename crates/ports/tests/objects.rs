@@ -12,7 +12,7 @@ use aap_ports::testkit::{
     sample_agent_using, sample_shared,
 };
 use aap_ports::{
-    ARGO_TRACKING_ANNOTATION, Agent, AgentDraft, AgentEvent, AgentObjects, AuthError,
+    ARGO_TRACKING_ANNOTATION, Agent, AgentDraft, AgentEvent, AgentEvents, AgentObjects, AuthError,
     Authenticator, Classify, ETag, ErrorClass, EventType, FieldError, InvalidToken, Kind,
     MANAGED_BY_DASHBOARD, MANAGED_BY_LABEL, ObjectsError, OfferedSecret, Owner, Precondition,
     Principal, ResourceVersion, SharedDraft, SharedKind, Stored, config_name, config_references,
@@ -719,6 +719,8 @@ enum Fault {
     EventsUncleaned,
     /// The events of an agent that is not there are an empty list.
     EventsOfNobody,
+    /// An event of an object made again under the name is the agent's.
+    EventsIgnoreUid,
 }
 
 struct Faulty {
@@ -1049,7 +1051,7 @@ impl AgentObjects for Faulty {
         Ok(offered)
     }
 
-    async fn agent_events(&self, name: &str) -> Result<Vec<AgentEvent>, ObjectsError> {
+    async fn agent_events(&self, name: &str) -> Result<AgentEvents, ObjectsError> {
         let raw = self.raw_events.lock().unwrap().clone();
         let events = |keep: &dyn Fn(&testkit::EventSeed) -> bool| -> Vec<AgentEvent> {
             raw.iter()
@@ -1067,20 +1069,24 @@ impl AgentObjects for Faulty {
                 })
                 .collect()
         };
+        let whole = |events: Vec<AgentEvent>| AgentEvents {
+            events,
+            incomplete: false,
+        };
         match self.fault {
             Fault::EventsOfEveryAgent => {
                 self.inner.agent_events(name).await?;
-                Ok(aap_ports::newest_first(events(&|_| true)))
+                Ok(whole(aap_ports::newest_first(events(&|_| true))))
             }
             Fault::EventsUnbounded => {
                 self.inner.agent_events(name).await?;
                 let mut all = events(&|e| e.object_name == name);
                 all.sort_by(|a, b| b.last_seen.cmp(&a.last_seen));
-                Ok(all)
+                Ok(whole(all))
             }
             Fault::EventsOldestFirst => {
                 let mut got = self.inner.agent_events(name).await?;
-                got.reverse();
+                got.events.reverse();
                 Ok(got)
             }
             Fault::EventsUncleaned => {
@@ -1091,9 +1097,20 @@ impl AgentObjects for Faulty {
                         e.message.clone_from(&seed.message);
                     }
                 }
-                Ok(got)
+                Ok(whole(got))
             }
-            Fault::EventsOfNobody => Ok(self.inner.agent_events(name).await.unwrap_or_default()),
+            Fault::EventsIgnoreUid => {
+                self.inner.agent_events(name).await?;
+                Ok(whole(aap_ports::newest_first(events(&|e| {
+                    e.object_name == name
+                }))))
+            }
+            Fault::EventsOfNobody => {
+                Ok(self.inner.agent_events(name).await.unwrap_or(AgentEvents {
+                    events: Vec::new(),
+                    incomplete: false,
+                }))
+            }
             _ => self.inner.agent_events(name).await,
         }
     }
@@ -1312,6 +1329,9 @@ the_suite_fails! {
     the_suite_fails_a_store_whose_events_are_not_bounded:
         Fault::EventsUnbounded => the_events_of_an_agent_are_bounded_to_the_newest,
         "at most MAX_EVENTS";
+    the_suite_fails_a_store_whose_events_ignore_the_uid:
+        Fault::EventsIgnoreUid => an_event_of_an_object_made_again_is_not_the_agents,
+        "an event that names the uid of an object made again";
     the_suite_fails_a_store_whose_events_are_the_oldest_first:
         Fault::EventsOldestFirst => the_events_of_an_agent_are_its_own_and_newest_first,
         "the events of the agent, newest first";

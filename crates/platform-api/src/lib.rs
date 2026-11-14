@@ -14,6 +14,8 @@
 //! README: routes, permissions, status codes, and the diagrams.
 
 #![warn(missing_docs)]
+// The OpenAPI document is one large `json!` literal.
+#![recursion_limit = "1024"]
 #![cfg_attr(test, allow(clippy::unwrap_used, clippy::expect_used))]
 
 mod authz;
