@@ -78,7 +78,7 @@ baseUrl: { "value": "https://…" } | { "secret": { secret, key } }, apiKey: { s
 headers: { "Authorization": { prefix, secret: { secret, key } } }, tools, optional }`.
 
 **A form mirrors the objects, including whether a field may be absent.** `description`, `audience`, `workers`, `prDraft`,
-`opencodeModel`, `maxAccessTier` (K1: `plan`, `edits`, `auto` or `bypass`; absent on the wire when absent), `runPodSizeClass` (D15a: a class of `GET /v1/info`'s `runPodSizeClasses`; absent means no run pods, and the wire form of a coder without them has no key, as it was before the field) and `image` are `Option`s because the objects' fields are: a form that wrote an absent field as an empty one would
+`opencodeModel`, `maxAccessTier` (K1: `plan`, `edits`, `auto` or `bypass`, at most the deployment's `defaults.maxAccessTier`, which is `auto` when unset; absent on the wire when absent), `runPodSizeClass` (D15a: a class of `GET /v1/info`'s `runPodSizeClasses`; absent means no run pods, and the wire form of a coder without them has no key, as it was before the field) and `image` are `Option`s because the objects' fields are: a form that wrote an absent field as an empty one would
 change an object the person did not edit. The defaults of a *screen* (the audience `agent.use:<name>`, the OpenCode model "the same as
 the model", `optional` on for a tool server) are the client's to fill in. `toolServers` is a **set** (the objects keep them by name);
 its elements are named in errors by name, `toolServers[websearch]`, like `files[skills/x.md]` and `headers[Authorization]`.

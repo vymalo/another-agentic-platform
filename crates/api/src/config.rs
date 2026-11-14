@@ -234,7 +234,9 @@ pub struct RunPods {
 }
 
 /// The highest access tier a deployment lets a person pick (`access-tier/v1`).
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[derive(
+    Clone, Copy, Debug, Default, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize, JsonSchema,
+)]
 #[serde(rename_all = "lowercase")]
 pub enum AccessTierCap {
     /// Read and plan only.
@@ -242,6 +244,7 @@ pub enum AccessTierCap {
     /// Also change files, commit, push and open pull requests.
     Edits,
     /// Also merge pull requests and create repositories (the coder's default).
+    #[default]
     Auto,
     /// Also rename and delete repositories, with no consent form for a repository.
     Bypass,
@@ -375,6 +378,12 @@ pub struct Model {
 /// `adam_service::MAX_CONTEXT_WINDOW` accepts).
 pub const MAX_CONTEXT_WINDOW: u64 = (1 << 53) - 1;
 
+/// The most members of `model.extraBody` (a schema bound), and the most bytes of its canonical JSON (`validate`):
+/// one environment string is limited, and a config that passes must not be a pod that cannot start.
+pub const MAX_EXTRA_BODY_MEMBERS: u64 = 64;
+/// See [`MAX_EXTRA_BODY_MEMBERS`].
+pub const MAX_EXTRA_BODY_BYTES: usize = 16 * 1024;
+
 /// The member a model's earlier reasoning is sent back under.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "snake_case")]
@@ -398,7 +407,14 @@ impl EchoReasoning {
 
 /// An object whose members the schema does not describe.
 fn free_form_object(_: &mut schemars::SchemaGenerator) -> schemars::Schema {
-    schemars::json_schema!({ "type": "object", "x-kubernetes-preserve-unknown-fields": true })
+    // `nullable` as the sibling optional fields are; `maxProperties` is a bound on what a user can make the pod's
+    // environment carry (`validate` also caps the serialised size).
+    schemars::json_schema!({
+        "type": "object",
+        "nullable": true,
+        "maxProperties": MAX_EXTRA_BODY_MEMBERS,
+        "x-kubernetes-preserve-unknown-fields": true
+    })
 }
 
 /// The model endpoint: a plain value, or a Secret key when the deployment keeps it out of git.

@@ -71,6 +71,16 @@ spec:
             - name: DEFAULT_AGENT_IMAGE
               value: {{ . | quote }}
             {{- end }}
+            {{- if .Values.cacheAllowedClaims }}
+            # K1: the claims an AgentConfig may name as its package cache (environment.cache.existingClaim). Absent: none may.
+            - name: CACHE_ALLOWED_CLAIMS
+              value: {{ join "," .Values.cacheAllowedClaims | quote }}
+            {{- end }}
+            {{- if and .Values.maxAccessTier (ne (toString .Values.maxAccessTier) "auto") }}
+            # K1: the highest access tier an AgentConfig may ask for, and the one an agent that asks for none gets when it is below auto.
+            - name: AGENT_MAX_ACCESS_TIER
+              value: {{ .Values.maxAccessTier | quote }}
+            {{- end }}
             {{- with .Values.tuning.concurrency }}
             - name: AAP_CONCURRENCY
               value: {{ . | quote }}

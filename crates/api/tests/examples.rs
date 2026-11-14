@@ -469,6 +469,12 @@ const BOUND_EXAMPLES: &[(&str, &str, &str, &str)] = &[
     ),
     (
         "AgentConfig",
+        "spec.model.extraBody",
+        "maxProperties",
+        "extra-body-too-many",
+    ),
+    (
+        "AgentConfig",
         "spec.tools.mcpServers{}.providerRef.name",
         "minLength",
         "mcp-server-provider-ref-name-empty",

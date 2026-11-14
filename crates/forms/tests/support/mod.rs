@@ -125,6 +125,7 @@ pub fn defaults() -> Defaults {
         },
         allowed_image_registries: None,
         run_pod_size_classes: RUN_POD_CLASSES.iter().map(|c| (*c).to_owned()).collect(),
+        max_access_tier: aap_api::AccessTierCap::Auto,
     }
 }
 

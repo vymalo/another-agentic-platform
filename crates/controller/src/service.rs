@@ -165,6 +165,8 @@ async fn read_externals<R, S>(
     let mut externals = Externals {
         default_image: ctx.options.default_agent_image.clone(),
         run_pods: ctx.options.run_pods.clone(),
+        cache_claims: ctx.options.cache_claims.clone(),
+        max_access_tier: ctx.options.max_access_tier,
         ..Externals::default()
     };
     if let Some(name) = &wanted.model_endpoint {

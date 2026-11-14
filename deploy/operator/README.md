@@ -56,6 +56,8 @@ kind is not installed, until they are there. Never run an operator older than D1
 [`deploy/operator-crds`](../operator-crds/README.md#upgrading), with the reasons. The two Argo CD Applications sync apart:
 sequence them with the CRDs first (a sync wave, or their Application first).
 
+**K1, run pods:** the admission policy reads the parameter `claims` of each agent's `<service>-run-pods-policy` ConfigMap and falls back to `claim` when there is none, which is what an operator before K1 wrote: upgrade the chart and the operator's image together (one release). Between the new policy and the new operator's first pass over an agent its run pods are admitted for the work claim alone, not refused; the pass rewrites the ConfigMap, whatever the agent's digest.
+
 ## Values
 
 | Value | Default | What |
@@ -63,6 +65,8 @@ sequence them with the CRDs first (a sync wave, or their Application first).
 | `image.repository`, `image.tag`, `image.digest`, `image.pullPolicy` | `ghcr.io/vymalo/another-agentic-platform/operator`, `sha-0000000`, none, `IfNotPresent` | The tag is **written by CI only** (`bump-tag.sh`), never by hand. `latest` and a malformed digest are refused |
 | `imagePullSecrets` | `[]` | For a private package ([below](#the-image)) |
 | `watchNamespace` | the release's namespace | The one namespace watched; the `Role` and `RoleBinding` are made there. A name, never a list or a wildcard: **there is no value that gives the operator a `ClusterRole`** |
+| `cacheAllowedClaims` | `[]` | **K1:** the claims an `AgentConfig` may name as its package cache; `CACHE_ALLOWED_CLAIMS`. Empty: no agent may have a cache. Names the operator makes are refused whatever is listed (AD-049) |
+| `maxAccessTier` | `auto` | **K1:** the highest access tier a config or a dashboard form may ask for; `AGENT_MAX_ACCESS_TIER` and, with the API on, its `defaults.maxAccessTier`. `auto` renders nothing (AD-050) |
 | `defaultAgentImage` | `ghcr.io/vymalo/another-adam-rs/coder:sha-9a1fd4e@sha256:c3c178b7d73599f40d53f798616e510346abd3300a622b09b2bc233109f12b44` | The image of an agent whose `AgentConfig` names none (`DEFAULT_AGENT_IMAGE`, `operator run --default-agent-image`; AD-029): the coder image, **by tag and digest** (the chart refuses a value without both, and `latest`). Empty: no variable, no default, and such an agent is `ConfigInvalid`. **Not** moved by `bump-tag.sh`: [below](#the-default-agent-image) |
 | `runPods.enabled` and the rest of `runPods.*`, `runPodClasses.*` | off | The operator sets up run pods for a coder that asks for them (`coder.runPods.sizeClass`): [its own section](#run-pods) lists every value. On, the operator reads them from `RUN_PODS_FILE`, and the chart refuses what the operator would refuse at start |
 | `storeCnpg` | `true` | The right on CloudNativePG `Cluster`s (`get patch create delete`). The image is built with the `store-cnpg` feature; `false` is for a cluster that has no CloudNativePG |

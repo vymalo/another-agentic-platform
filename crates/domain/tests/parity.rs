@@ -544,7 +544,9 @@ fn run_pods_case(case: &str, change: Change) -> aap_domain::ResolvedAgent {
     );
     must_resolve_with(
         "coder",
-        &Externals::default().with_run_pods(settings),
+        &Externals::default()
+            .with_run_pods(settings)
+            .with_cache_claims(["package-cache"]),
         |service, config| {
             change(service, config);
             set(
@@ -591,7 +593,11 @@ fn tiers(_service: &mut Value, config: &mut Value) {
 
 #[test]
 fn a_coder_with_a_package_cache_renders_what_the_chart_renders() {
-    let r = must_resolve("coder", cache);
+    let r = must_resolve_with(
+        "coder",
+        &Externals::default().with_cache_claims(["package-cache"]),
+        cache,
+    );
     let mut applied = Applied::default();
     parity("coder-cache", &project(&r.runtime, "coder"), &mut applied);
 }

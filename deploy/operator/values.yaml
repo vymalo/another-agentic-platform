@@ -29,6 +29,19 @@ watchNamespace: ""
 # end-to-end of the coder runs (tests/e2e/coder.yaml), and `cargo test -p aap-operator` fails when the two differ.
 defaultAgentImage: ghcr.io/vymalo/another-adam-rs/coder:sha-9a1fd4e@sha256:c3c178b7d73599f40d53f798616e510346abd3300a622b09b2bc233109f12b44
 
+# K1: the package caches an agent may have. An AgentConfig's `environment.cache.existingClaim` names a claim of its namespace, which
+# the pod mounts read-write and which a run pod may mount too: any claim, another agent's data included, unless the deployment says which.
+# These are the claims made for the purpose (ReadWriteMany, writable by uid and gid 10001). Empty (the default): no agent may have a cache,
+# and a config that asks for one is ConfigInvalid, saying how a deployment allows it. Names an operator makes (`<volume>-<service>-<n>`,
+# `<service>-db-<n>`, ...) are refused whatever is listed here.
+cacheAllowedClaims: []
+
+# K1: the highest access tier (plan, edits, auto or bypass) an AgentConfig may ask for with `coder.maxAccessTier`, and the tier of an agent
+# that asks for none when this is below auto. `auto` is the coder's own default and renders nothing. `bypass` (renaming and deleting
+# repositories, no consent form for a repository) is the deployment's opt-in: raise this only for a deployment whose GitHub credentials
+# you are willing to see used so, by whoever may write an AgentConfig.
+maxAccessTier: auto
+
 serviceAccount:
   create: true
   # Empty: the fullname. Required when `create` is false.

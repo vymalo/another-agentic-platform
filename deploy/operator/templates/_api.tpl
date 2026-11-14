@@ -62,6 +62,10 @@ api.port and api.healthPort, which the probes and the Service use) and `defaults
 {{- if include "aap.runPods" . -}}
 {{- $_ := set $defaults "runPodSizeClasses" (keys .Values.runPodClasses | sortAlpha) -}}
 {{- end -}}
+{{- /* K1: the operator's ceiling of the access tier, so a form is refused what the operator would refuse. `auto` is the default: not written. */ -}}
+{{- if and .Values.maxAccessTier (ne (toString .Values.maxAccessTier) "auto") -}}
+{{- $_ := set $defaults "maxAccessTier" .Values.maxAccessTier -}}
+{{- end -}}
 {{- $cfg := dict "listen" (printf "0.0.0.0:%d" (int .Values.api.port)) "healthListen" (printf "0.0.0.0:%d" (int .Values.api.healthPort)) "oidc" $c.oidc "cors" (default (dict) $c.cors) "defaults" $defaults -}}
 {{- /* Only when the metrics port is exposed: otherwise the file is what it was and the binary's default (9090) stands. */ -}}
 {{- if include "aap.api.metricsExposed" . -}}

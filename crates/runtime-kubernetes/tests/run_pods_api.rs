@@ -940,3 +940,28 @@ async fn a_provider_that_is_not_looking_applies_run_pods_when_the_spec_has_them_
         (None, None)
     );
 }
+
+#[tokio::test]
+async fn a_pass_rewrites_the_guards_parameters_when_they_differ_though_the_digest_did_not_move() {
+    // An upgrade from before K1: the parameters the previous operator wrote have no `claims`. The agent's digest is the same
+    // (the digest is of what the pods read), and the next pass must still rewrite the ConfigMap, or the policy keeps reading
+    // parameters it cannot use.
+    let (fake, runtime) = setup();
+    let r = resolved_run_pods(|_, _| {});
+    runtime.ensure(&r.id, &r.runtime).await.unwrap();
+    let name = "coder-run-pods-policy";
+    // what the previous operator left on the server
+    let mut old = fake.get(K::ConfigMap, NS, name).unwrap();
+    old["data"].as_object_mut().unwrap().remove("claims");
+    fake.put(K::ConfigMap, NS, name, old);
+    assert!(
+        fake.get(K::ConfigMap, NS, name).unwrap()["data"]
+            .get("claims")
+            .is_none()
+    );
+    // the same spec, the same digest
+    runtime.ensure(&r.id, &r.runtime).await.unwrap();
+    let now = fake.get(K::ConfigMap, NS, name).unwrap();
+    assert_eq!(now["data"]["claims"], "work-coder-0", "{now}");
+    assert_eq!(now["data"]["claim"], "work-coder-0");
+}

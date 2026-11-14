@@ -75,6 +75,30 @@ pub struct RunArgs {
     /// that parses and passes the checks: the operator does not start. Read once, at start: a change is a new pod.
     #[arg(long, env = "RUN_PODS_FILE")]
     pub run_pods_file: Option<String>,
+
+    /// The claims the deployment allows as an agent's package cache (`environment.cache.existingClaim`, K1), comma
+    /// separated. **Empty (the default): no agent may have a cache**: the claim is any claim of the namespace to the
+    /// pod that mounts it, so a deployment lists the ones made for the purpose.
+    #[arg(long, env = "CACHE_ALLOWED_CLAIMS", value_delimiter = ',')]
+    pub cache_allowed_claims: Vec<String>,
+
+    /// The highest access tier an `AgentConfig` may ask for (`coder.maxAccessTier`, K1): `plan`, `edits`, `auto` or
+    /// `bypass`. `auto`, the coder's own default, when unset. A config above it is `ConfigInvalid`; one that names none
+    /// gets the ceiling when it is lower than `auto`.
+    #[arg(long, env = "AGENT_MAX_ACCESS_TIER", default_value = "auto", value_parser = parse_tier)]
+    pub max_access_tier: aap_api::AccessTierCap,
+}
+
+fn parse_tier(s: &str) -> Result<aap_api::AccessTierCap, String> {
+    match s.trim() {
+        "plan" => Ok(aap_api::AccessTierCap::Plan),
+        "edits" => Ok(aap_api::AccessTierCap::Edits),
+        "" | "auto" => Ok(aap_api::AccessTierCap::Auto),
+        "bypass" => Ok(aap_api::AccessTierCap::Bypass),
+        other => Err(format!(
+            "{other:?} is not an access tier: plan, edits, auto or bypass"
+        )),
+    }
 }
 
 // What `run` composes needs a runtime provider; without one the settings are parsed and unused.
@@ -178,6 +202,13 @@ impl RunArgs {
             instance: self.instance.clone().filter(|i| !i.is_empty()),
             default_agent_image,
             run_pods,
+            cache_claims: self
+                .cache_allowed_claims
+                .iter()
+                .map(|c| c.trim().to_owned())
+                .filter(|c| !c.is_empty())
+                .collect(),
+            max_access_tier: self.max_access_tier,
         }
     }
 }

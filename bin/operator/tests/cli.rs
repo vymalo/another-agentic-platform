@@ -344,3 +344,45 @@ fn settings_for_run_pods_that_are_not_valid_stop_the_operator_before_it_looks_fo
     );
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+/// `run` with a value for `AGENT_MAX_ACCESS_TIER` and no cluster to reach.
+#[cfg(feature = "runtime-kubernetes")]
+fn run_with_tier(value: &str) -> (bool, String) {
+    let mut command = operator();
+    command
+        .arg("run")
+        .env_remove("KUBERNETES_SERVICE_HOST")
+        .env_remove("DEFAULT_AGENT_IMAGE")
+        .env("AGENT_MAX_ACCESS_TIER", value)
+        .env("CACHE_ALLOWED_CLAIMS", "package-cache, other-cache")
+        .env("KUBECONFIG", "/nonexistent/kubeconfig")
+        .env("HOME", "/nonexistent")
+        .env("HEALTH_ADDR", "127.0.0.1:0")
+        .env("METRICS_ADDR", "127.0.0.1:0");
+    let out = command.output().expect("runs the operator");
+    (
+        out.status.success(),
+        String::from_utf8_lossy(&out.stderr).into_owned(),
+    )
+}
+
+#[cfg(feature = "runtime-kubernetes")]
+#[test]
+fn the_access_tier_ceiling_is_one_of_the_four_tiers_and_the_claims_a_list() {
+    // K1: a name that is no tier stops the operator at start, naming the four; the four go on to look for a cluster.
+    let (ok, stderr) = run_with_tier("root");
+    assert!(!ok);
+    assert!(
+        stderr.contains("plan, edits, auto or bypass")
+            && !stderr.contains("connecting to the cluster"),
+        "{stderr}"
+    );
+    for tier in ["plan", "edits", "auto", "bypass"] {
+        let (ok, stderr) = run_with_tier(tier);
+        assert!(!ok);
+        assert!(
+            stderr.contains("connecting to the cluster"),
+            "{tier}: {stderr}"
+        );
+    }
+}

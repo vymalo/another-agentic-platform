@@ -503,6 +503,8 @@ spec:
                       A JSON object merged into every chat-completions request (`MODEL_EXTRA_BODY`), to make a gateway
                       or a model emit its reasoning, for example `{reasoning_effort: medium}`. Not a secret: it shows in
                       the pod's environment. It may not set `model`, `messages`, `tools`, `tool_choice` or `stream`.
+                    maxProperties: 64
+                    nullable: true
                     type: object
                     x-kubernetes-preserve-unknown-fields: true
                   model:
@@ -919,10 +921,11 @@ spec:
                         - name
                         type: object
                       enabled:
-                        default: true
+                        default: false
                         description: |-
-                          Serve A2A. Without it the agent is not listed in the registry. A written `a2a` that omits it
-                          serves A2A, as in adam-rs's operator; an absent `a2a` (or `interfaces`) is the default object, off.
+                          Serve A2A. Without it the agent is not listed in the registry. Off when omitted, as before K1 (adam-rs's
+                          operator defaults it to on: a manifest that writes `a2a` with only a token reference must not turn a
+                          disabled agent on at the next apply, so this operator does not, and says so in the superset test).
                         type: boolean
                       publicUrl:
                         description: 'The URL clients reach the agent at (`PUBLIC_URL`). Empty: `http://<name>.<ns>.svc:8080/`.'

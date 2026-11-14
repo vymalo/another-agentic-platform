@@ -94,9 +94,10 @@ pub struct Interfaces {
 #[serde(rename_all = "camelCase")]
 #[x_kube(validation = Rule::new("(has(self.enabled) && !self.enabled) || has(self.bearerTokensSecretRef)").message("interfaces.a2a needs bearerTokensSecretRef: no token, no server"))]
 pub struct A2aInterface {
-    /// Serve A2A. Without it the agent is not listed in the registry. A written `a2a` that omits it
-    /// serves A2A, as in adam-rs's operator; an absent `a2a` (or `interfaces`) is the default object, off.
-    #[serde(default = "a2a_enabled")]
+    /// Serve A2A. Without it the agent is not listed in the registry. Off when omitted, as before K1 (adam-rs's
+    /// operator defaults it to on: a manifest that writes `a2a` with only a token reference must not turn a
+    /// disabled agent on at the next apply, so this operator does not, and says so in the superset test).
+    #[serde(default)]
     pub enabled: bool,
 
     /// The Secret key that holds the bearer tokens (`A2A_BEARER_TOKENS`). No token, no server:
@@ -107,10 +108,6 @@ pub struct A2aInterface {
     /// The URL clients reach the agent at (`PUBLIC_URL`). Empty: `http://<name>.<ns>.svc:8080/`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub public_url: Option<String>,
-}
-
-fn a2a_enabled() -> bool {
-    true
 }
 
 /// A surface the v0 operator does not serve.
