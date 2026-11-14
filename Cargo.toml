@@ -15,6 +15,7 @@ members = [
     "crates/platform-api",
     "bin/operator",
     "bin/api",
+    "bin/cli",
 ]
 
 [workspace.package]

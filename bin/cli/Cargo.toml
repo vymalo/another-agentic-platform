@@ -1,0 +1,31 @@
+[package]
+name = "aap-cli"
+description = "aapctl: the platform's command line. Phase 1 works offline: `validate` and `render` read AgentService, AgentConfig, ModelEndpoint and ToolProvider files and say what the operator would make of them, with no cluster and no network"
+readme = "README.md"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+publish.workspace = true
+
+[lib]
+name = "aap_cli"
+path = "src/lib.rs"
+
+[[bin]]
+name = "aapctl"
+path = "src/main.rs"
+
+[dependencies]
+aap-api.workspace = true
+aap-domain.workspace = true
+aap-runtime-kubernetes.workspace = true
+clap.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+serde_yaml.workspace = true
+
+[lints]
+workspace = true
