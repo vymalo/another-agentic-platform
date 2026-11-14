@@ -60,6 +60,19 @@ dependencies = [
 ]
 
 [[package]]
+name = "aap-cli"
+version = "0.1.0"
+dependencies = [
+ "aap-api",
+ "aap-domain",
+ "aap-runtime-kubernetes",
+ "clap",
+ "serde",
+ "serde_json",
+ "serde_yaml_ng",
+]
+
+[[package]]
 name = "aap-controller"
 version = "0.1.0"
 dependencies = [

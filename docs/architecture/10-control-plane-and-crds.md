@@ -2157,6 +2157,73 @@ After the operator slices they need (§59a, *Slices*): S5 (the controller), S7 (
 
 ---
 
+## 60b. CLI
+
+*(2026-11-14, slice K9; P-028; the implementer's, for the owner to confirm. Phase 1 is built, phase 2 is planned.)*
+
+People write `AgentService` and `AgentConfig` files and want to know, before an API server or a pull request sees them, whether the operator would accept them and what it would make. `aapctl` (`bin/cli`, package `aap-cli`; [README](../../bin/cli/README.md)) answers that offline. It is the increment K9 of [§59c](#59c-operator-increments-kagent-grade-minimum).
+
+### Phase 1: `validate` and `render`, offline (built)
+
+`aapctl validate -f <file|dir|->...` and `aapctl render -f ...` read documents of the four kinds of `agents.vymalo.com/v1alpha1` and judge each `AgentService` as the controller does: with the config its `configRef` names and the `ModelEndpoint` and `ToolProvider` objects that config names, taken from the documents given instead of from a cluster, by `aap_domain::resolve` and the deployment's settings (`--default-agent-image`, `--run-pods-file`, `--max-access-tier`, `--cache-allowed-claims`: the operator's own names and defaults, from flags alone). `render` then prints what `aap_runtime_kubernetes::render` makes of each resolved service: **the function the provider applies from and its goldens are made with**, so there is no second renderer to drift. Nothing reaches a cluster or a network and no Secret is read: an object names a Secret by reference (AD-024), and so does what is printed.
+
+```mermaid
+sequenceDiagram
+    actor P as Person or CI
+    participant C as aapctl
+    participant D as aap-domain
+    participant R as aap-runtime-kubernetes
+    P->>C: validate -f files, or render -f files
+    C->>C: read the documents (files, directories, stdin)
+    C->>C: write each object back through its type, find a field the type lacks
+    C->>D: resolve(service, its config, the shared objects among the documents, the settings)
+    D-->>C: a RuntimeSpec with its digest, or issues naming their fields
+    alt render, and nothing is invalid
+        C->>R: render(id, spec)
+        R-->>C: the objects, in the order they are applied
+        C-->>P: a YAML stream on stdout, a comment with the digest before each service
+    else any issue
+        C-->>P: one line per issue on stderr (file, Kind/name, field), exit 1
+    end
+```
+
+```mermaid
+stateDiagram-v2
+    [*] --> Read
+    Read --> UsageError: not YAML, unknown kind, no name, a duplicate, nothing to read
+    Read --> Typed: a document of each object
+    Typed --> Issue: a type cannot read it, or a field the type lacks
+    Typed --> Paired: a service finds its config
+    Paired --> Issue: a referent is not among the documents (a warning with --allow-missing-refs)
+    Paired --> Resolved: aap-domain accepts it
+    Paired --> Issue: aap-domain refuses it
+    Resolved --> Rendered: render
+    Rendered --> [*]: exit 0
+    Resolved --> [*]: validate, exit 0
+    Issue --> [*]: exit 1
+    UsageError --> [*]: exit 2
+```
+
+| Exit | Means |
+|---|---|
+| 0 | Valid; for `render`, the objects were printed |
+| 1 | An issue: one line each, naming the file, the object (`Kind/name`) and the field as `aap-domain` words it |
+| 2 | A usage or read error: no issue can be told because nothing could be read |
+
+**What it cannot tell** (the README's *Limits*): the CEL rules of the CRDs and the bounds of their schema are the API server's and are not re-implemented, so fifteen of `examples/invalid/` (the audience, the lengths and counts of the shared kinds, `extraBody`'s size, the number of MCP servers) are accepted offline; a referent that lives only in the cluster is missing; the types accept unknown fields, so `aapctl` finds them by writing an object back through its type (an issue: `unknown field`), which is weaker than the structural schema. The store (a CloudNativePG `Cluster`) is not rendered; the runtime's objects are.
+
+**Proof.** 14 tests of the built binary (`bin/cli/tests/cli.rs`), among them `render_matches_runtime_golden` (byte for byte against `crates/runtime-kubernetes/tests/golden/`, after the comment), `validate_accepts_every_example`, `validate_refuses_every_invalid_example` (every example `aap-domain` refuses is refused, and the fifteen it cannot are accepted, by name), `exit_codes`, `render_prints_no_secret_value`. No cluster is needed or run.
+
+### Phase 2: over the Platform API (planned, K9b)
+
+`aapctl login` (OIDC with PKCE and a loopback redirect, as the desktop app does, AD-044), `get`, `apply`, `delete` and `export` over the Platform API with its `ETag`s (§60a), so the CLI holds no right the API does not give the person and a stale write is `412`. It waits for K8 (the OpenAPI document). **Not built.**
+
+### Decisions of K9 for the owner to confirm (P-028)
+
+**(1)** A binary of this repository, `aapctl`, and not a subcommand of `operator` (an image that runs a controller should not carry a tool for people). **(2)** It ships **in no image and no chart** in this slice: CI builds it with the workspace and nothing publishes it. **(3)** The settings are flags alone and the environment is not read, so a render does not depend on the shell it runs in. **(4)** A field the CRD's types lack is an issue and not a warning, because an API server that prunes drops it without a word, and a typo (`wokers`) is then an agent that quietly runs with the default. **(5)** `render` takes a placeholder owner uid (`--owner-uid` overrides it): the owner reference of an object that is not applied cannot name a real service.
+
+---
+
 ## 61. Draft → Revision → Promotion UX
 
 Recommended workflow:
