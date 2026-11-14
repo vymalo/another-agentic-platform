@@ -37,11 +37,11 @@
   "source": {
     "chart": "deploy/coder",
     "generatedBy": "tools/adam-parity/regen.sh",
-    "helm": "v3.19.0+g3d8990f",
+    "helm": "v3.16.3+gcfd0749",
     "namespace": "another-agentic-system",
     "release": "coder",
     "repository": "https://github.com/vymalo/another-adam-rs",
-    "revision": "581aeed75e56f903b2a9f59217ea9dcd449c8466",
+    "revision": "4bc6742deca699a5e25fb07d892b5ce7d4a42e25",
     "values": "tools/adam-parity/cases/coder-split.yaml"
   },
   "workloads": {
