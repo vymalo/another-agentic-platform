@@ -410,7 +410,10 @@ api:
   # The API's /metrics (Prometheus text: `aap_api_requests_total{route,method,status}`, `aap_api_auth_failures_total{reason}`), on a port
   # of its own that is never the API's. Nothing is exposed until a peer is named or a ServiceMonitor is on: then the chart writes `port`
   # into the file (`metricsListen`), opens the container port, makes the Service `<fullname>-api-metrics` and opens the port in the
-  # NetworkPolicy to `allowFrom` and to nobody else. Off, the binary still listens on its default 9090 and nothing reaches it.
+  # NetworkPolicy to `allowFrom`. Not exposed: the file has no `metricsListen`, the binary's default is the loopback (127.0.0.1:9090),
+  # and /metrics is reachable from inside the pod only. Exposed: the port listens on every address of the pod, and it is reachable by the
+  # peers of `allowFrom` while `networkPolicy` is enabled AND the cluster enforces it, and by any pod that can reach this one when it is
+  # not. There is no authentication: a scraper learns route templates, status counts and failure reasons (no names, subjects or tokens).
   metrics:
     port: 9090
     # Who may scrape (NetworkPolicyPeers: namespaceSelector, podSelector, ipBlock), the Prometheus pods. Empty: nobody. REQUIRED for

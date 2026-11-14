@@ -403,6 +403,17 @@ jobs:
             echo "$out"
             grep -q ': ok$' <<<"$out" || { echo "::error::the image refuses the configuration the chart renders ($name): $out"; exit 1; }
           done
+          # The shapes the chart renders and the image must refuse (two listeners on one port).
+          for f in "$dir"/refused/*.yaml; do
+            name=$(basename "$f" .yaml)
+            echo "--- refused/$name.yaml"
+            cat "$f"
+            if out=$(docker run --rm -v "$dir:/cfg:ro" api:smoke --config "/cfg/refused/$name.yaml" --check 2>&1); then
+              echo "$out"; echo "::error::the image accepts a configuration it must refuse (refused/$name): $out"; exit 1
+            fi
+            echo "$out"
+            grep -q 'both on port' <<<"$out" || { echo "::error::refused/$name was refused for another reason: $out"; exit 1; }
+          done
       # The image that passed travels to the push as a file.
       - name: Save the image
         run: docker save api:smoke -o "$RUNNER_TEMP/api.tar"

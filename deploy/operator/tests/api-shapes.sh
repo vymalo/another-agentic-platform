@@ -31,3 +31,9 @@ sh "$here/api-config.sh" "$dir/minimal.yaml" \
 sh "$here/api-config.sh" "$dir/full.yaml" -f "$here/api-full.values.yaml"
 sh "$here/api-config.sh" "$dir/runpods.yaml" -f "$here/runpods.values.yaml"
 sh "$here/api-config.sh" "$dir/metrics.yaml" -f "$here/metrics.values.yaml"
+
+# Shapes the chart renders and the binary must REFUSE (`api --check` exits 1), in refused/: `clash` puts the API on 9090 with the metrics
+# port not exposed, so the file has no metricsListen and the binary's default for it (127.0.0.1:9090) is the API's own port. CI fails
+# when the image accepts one of these.
+mkdir -p "$dir/refused"
+sh "$here/api-config.sh" "$dir/refused/clash.yaml" -f "$here/api.values.yaml" --set api.port=9090 --set api.metrics.port=9191

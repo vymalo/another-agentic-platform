@@ -730,16 +730,17 @@ check "the secretref shape renders (a Secret per agent, no policy, no Ingress)" 
 api_shapes_are_written() {
   d=$(mktemp -d) || return 1
   sh "$here/api-shapes.sh" "$d" > /dev/null 2>&1 \
-    && [ "$(find "$d" -type f | wc -l)" -eq 6 ] && [ -s "$d/golden.yaml" ] && [ -s "$d/secretref.yaml" ] && [ -s "$d/minimal.yaml" ] && [ -s "$d/runpods.yaml" ] && [ -s "$d/metrics.yaml" ] \
+    && [ "$(find "$d" -type f | wc -l)" -eq 7 ] && [ -s "$d/golden.yaml" ] && [ -s "$d/secretref.yaml" ] && [ -s "$d/minimal.yaml" ] && [ -s "$d/runpods.yaml" ] && [ -s "$d/metrics.yaml" ] \
     && grep -q '^  - standard$' "$d/runpods.yaml" && ! grep -q 'runPodSizeClasses' "$d/golden.yaml" \
     && grep -q '^listen: 0.0.0.0:8443$' "$d/full.yaml" && grep -q '^healthListen: 0.0.0.0:9091$' "$d/full.yaml" \
     && grep -q '^listen: 0.0.0.0:8080$' "$d/minimal.yaml" \
-    && grep -q "^metricsListen: 0.0.0.0:9191$" "$d/metrics.yaml" && ! grep -q metricsListen "$d/golden.yaml"
+    && grep -q "^metricsListen: 0.0.0.0:9191$" "$d/metrics.yaml" && ! grep -q metricsListen "$d/golden.yaml" \
+    && grep -q "^listen: 0.0.0.0:9090$" "$d/refused/clash.yaml" && ! grep -q metricsListen "$d/refused/clash.yaml"
   r=$?
   rm -rf "$d"
   return "$r"
 }
-check "api: api-shapes.sh writes the file of six shapes (golden, secretref, minimal, full, runpods, metrics), the full one with the ports it sets, run pods alone with size classes, metrics alone with metricsListen" api_shapes_are_written
+check "api: api-shapes.sh writes the file of six shapes and one that must be refused (golden, secretref, minimal, full, runpods, metrics; refused/clash), the full one with the ports it sets, run pods alone with size classes, metrics alone with metricsListen" api_shapes_are_written
 check "api: the shape that sets every value (tests/api-full.values.yaml) renders" renders_ok -f "$here/api-full.values.yaml"
 
 # ---- The values of the kind end-to-end of the Platform API (D7b2) ------------------------------------------------------------
@@ -1214,6 +1215,18 @@ render -f "$here/api.values.yaml"
 check "K4 off (api on): the API's Service is the one it was, with no metrics Service beside it" \
   lacks 'aap-operator-api-metrics' && dlacks Service aap-operator-api 'name: metrics'
 
+# sm_selects_service <ServiceMonitor> <Service>: what the monitor's selector asks for is what the Service is: every key and value of
+# `selector.matchLabels` is one of the Service's labels, and every `endpoints[].port` is the name of one of its ports (a grep for
+# the label somewhere in the render would pass when the two disagree).
+sm_selects_service() {
+  sel=$(doc ServiceMonitor "$1" | awk '/^    matchLabels:$/ { f = 1; next } f && /^      [^ ]/ { sub(/^ +/, ""); print; next } f { exit }')
+  labels=$(doc Service "$2" | awk '/^  labels:$/ { f = 1; next } f && /^    [^ ]/ { sub(/^ +/, ""); print; next } f { exit }')
+  ports=$(doc ServiceMonitor "$1" | awk '/^  endpoints:$/ { f = 1; next } f && /^    - port: / { sub(/^    - port: /, ""); print }')
+  svc_ports=$(doc Service "$2" | awk '/^  ports:$/ { f = 1; next } f && /^    - name: / { sub(/^    - name: /, ""); print }')
+  [ -n "$sel" ] && [ -n "$labels" ] && [ -n "$ports" ] && [ -n "$svc_ports" ] || return 1
+  printf '%s\n' "$sel" | while IFS= read -r l; do printf '%s\n' "$labels" | grep -Fxq -- "$l" || exit 1; done || return 1
+  printf '%s\n' "$ports" | while IFS= read -r p; do printf '%s\n' "$svc_ports" | grep -Fxq -- "$p" || exit 1; done
+}
 # The operator's ServiceMonitor.
 operator_sm() {
   render --set metrics.serviceMonitor.enabled=true --set-json "networkPolicy.metrics.allowFrom=$prom" \
@@ -1221,6 +1234,7 @@ operator_sm() {
   dhas ServiceMonitor aap-operator 'apiVersion: monitoring.coreos.com/v1' 'release: prom' 'interval: 1m' 'port: metrics' 'path: /metrics' \
     'aap.vymalo.com/scrape: metrics' 'app.kubernetes.io/name: aap-operator' "- $ns" || return 1
   dcount ServiceMonitor aap-operator '^    - port: ' 1 || return 1
+  sm_selects_service aap-operator aap-operator-metrics || return 1
   # The Service it selects: the metrics Service (and not the registry's), with that label and a port of that name.
   dhas Service aap-operator-metrics 'aap.vymalo.com/scrape: metrics' 'name: metrics' 'port: 9090' || return 1
   render --set metrics.serviceMonitor.enabled=true --set-json "networkPolicy.metrics.allowFrom=$prom" || return 1
@@ -1263,6 +1277,7 @@ api_sm() {
   dhas ServiceMonitor aap-operator-api 'apiVersion: monitoring.coreos.com/v1' 'release: prom' 'interval: 15s' 'port: metrics' 'path: /metrics' \
     'aap.vymalo.com/scrape: metrics' 'app.kubernetes.io/component: api' "- $ns" || return 1
   dcount ServiceMonitor aap-operator-api '^    - port: ' 1 || return 1
+  sm_selects_service aap-operator-api aap-operator-api-metrics || return 1
   # What it selects is the metrics Service and not the API's own: the label is on that one alone.
   dlacks Service aap-operator-api 'aap.vymalo.com/scrape' || return 1
   dhas Service aap-operator-api-metrics 'aap.vymalo.com/scrape: metrics'
