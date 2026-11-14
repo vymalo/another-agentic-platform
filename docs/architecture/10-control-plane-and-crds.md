@@ -1201,6 +1201,68 @@ Both modes work in one cluster: they use different pod names, labels, and RBAC, 
 
 ---
 
+## 59c. Operator increments (kagent-grade minimum)
+
+*(2026-11-14, slice K0. Documentation only: it writes the plan down. Each increment is its own slice and amends the section it changes.)*
+
+The owner asked what the platform lacks, next to a Kubernetes agent control plane such as kagent, to be one a cluster operator can run. Fifteen gaps were weighed against the code and the decisions on 2026-11-14. Some are **built**, some **planned** below, and some are **deliberately different** (*What it does not mean*). Nothing here changes the architecture: every increment is additive, off by default where it adds a right or a component, and held by a test.
+
+### The increments
+
+| Slice | What a cluster operator gets | Depends on | The proof it needs | State |
+|---|---|---|---|---|
+| K0 | This plan | none | `check-docs.mjs` | built (this section) |
+| K1 | The CRDs read what adam-rs's former operator accepted (`model.extraBody`, `echoReasoning`, `coder.maxAccessTier`, `environment.cache`); a cache allow-list and an access-tier ceiling that are the deployment's (AD-049 to AD-051; §59a *K1*) | none | the superset test against the vendored CRD, parity goldens | **built** |
+| K1b | Adoption of objects `adam-operator` made | the fork decision | none | **void**: adam-rs removed its copy from `main` by its pull request 143 (its ADR 0046), so there is one operator and nothing to adopt |
+| K2 | `status` on `ModelEndpoint` and `ToolProvider`: who uses it, whether it is valid, whether those agents are `Ready` (§60a, P-023) | none | the fake API server, the objects suite, `render-check.sh` | **built** |
+| K3 | A tool server's reachability and discovered tools in its status | K2; P-024 | a stub MCP server in tests; a step of `api-e2e.sh` | planned |
+| K4 | `ServiceMonitor`s for the operator and the Platform API; `aap_api_*` metrics (§59a *The operator chart*, §48) | none | `render-check.sh`, kubeconform on a vendored schema | **built** |
+| K5 | OpenTelemetry traces from the operator and the API, never with content in a span (AD-015, §48) | none; an agent's own traces need adam-rs | an in-process OTLP receiver in tests; `render-check.sh` for the egress rule | planned |
+| K6 | Watching several namespaces, one `Role` per namespace and never a `ClusterRole` (P-026) | none | two namespaces reconciled independently; a duplicate registry id across namespaces not listed; a kind end-to-end | planned |
+| K7 | Leader election and two replicas with a `PodDisruptionBudget` (amends §59a *one replica, `Recreate`*) | K6 | a `LeaderElection` trait with its conformance macro (AD-020), on the `Memory` and fake-API-server implementations; kind: kill the leader | planned |
+| K8 | What the admin UI still needs of the Platform API: an OpenAPI document held equal to the table of routes, and the Kubernetes Events of an agent's objects (P-029) | K2 | a test that lists every route in the document; the new route in the permission matrix | planned |
+| K9 | `aapctl validate` and `render`, offline (§60b, P-028) | none | `render_matches_runtime_golden` | **built** (phase 1) |
+| K9b | `aapctl login`, `get`, `apply`, `delete` and `export` over the Platform API with ETags | K8 | tests on the `Memory` router; a step of `api-e2e.sh` | planned |
+| K10 | A catalogue of example `ToolProvider`s (read-only Kubernetes, Prometheus, GitHub), pinned by digest (P-027) | K2; the owner's choice | a kind end-to-end: a folder agent on a scripted model calls a list-pods tool | planned |
+| K11 | A bring-your-own A2A image: `harness.type: a2a` with image, port, card path and secret variables by reference (P-025; would amend AD-022 and AD-024) | K1 | kind: the stub image as such an agent, `Ready` and listed | planned |
+| K12 | `requireApproval` per tool | an adam-rs decision and the system's | parity with adam's MCP file | planned; waits (the tiers of K1 cover the coder meanwhile) |
+| K13 | The dashboard and an agent on the owner's real cluster (D14) | K1 | the first real agent | **on hold**: the owner says (2026-11-14) the netcup cluster is down and home-os no longer carries it, so there is no cluster to prove it on; D14 stays *unverified* |
+
+Parallel work: K4, K9, K0 and K8's OpenAPI document touch no shared file. K1 and K2 both regenerated `deploy/crds`, so they merged one after the other. K6 comes before K7 (both touch `operator.rs` and the `Role`), K3 and K10 after K2, and K9b after K8.
+
+### What it does not mean
+
+"Kagent-grade" is a floor of operability, not a feature list. Each line is a decision already taken.
+
+| The platform will not | Because |
+|---|---|
+| Ship a permit-all authorizer or an `insecure` mode | Permissions are checked by the API and it fails closed (AD-032; §60a D6, D7a) |
+| Link a model-provider SDK | Models are replaceable OpenAI-compatible endpoints (AD-018); the harness is adam-rs (AD-022) |
+| Keep sessions, runs or memory in a CRD | Runs and leases are application records (AD-016); memory is the agent's and the orchestrator's |
+| Put a sub-agent as a tool in the CRDs, or schedule runs in the operator | The operator reconciles infrastructure and no workflow (§59, AD-009) |
+| Run a Go, Python, Codex or Claude harness | adam-rs is the harness; OpenCode runs inside adam-coder (AD-022) |
+| Carry an admin UI in this repository | It is an area of the system's web (AD-026) |
+| Hold a Secret value in a custom resource, or give the operator RBAC on Secrets | A resource names a Secret by reference (AD-024); this is also why K3 cannot send a header's value |
+| Give the operator a `ClusterRole` by default | The cluster-scoped objects are the chart's and the administrator's (§59a *The operator chart*, P-020); K6 keeps it so |
+| Run an admission webhook | CEL and the reconciler cover it, and a webhook needs cert-manager (§59a *What v0 leaves out*) |
+| Load runtime plugins | Implementations are chosen at build time (AD-020) |
+| Inject credentials in an egress gateway | The credential broker is the design for that (AD-042, §39a) |
+
+### Decisions for the owner
+
+Six are open, each a `P-NNN` in [§92](11-decisions.md) (P-024 to P-029). Each is a recommendation that waits for the owner and blocks only the slice named.
+
+| P | The question | Blocks |
+|---|---|---|
+| P-024 | May the operator reach MCP servers to discover their tools? | K3 |
+| P-025 | Do we accept an agent image that is not adam-rs? | K11 |
+| P-026 | Several namespaces, with one `Role` in each? | K6, K7 |
+| P-027 | Which servers does a tool catalogue ship, and under which licences? | K10 |
+| P-028 | `aapctl` as a binary of this repository (phase 1 is built) | K9b |
+| P-029 | An OpenAPI document and an events route on the Platform API | K8, K9b |
+
+---
+
 ## 60. UI Architecture
 
 Administrators should not need to touch CRDs.
