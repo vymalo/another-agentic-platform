@@ -1,0 +1,8 @@
+adam-rs's copy of the operator's CRDs, vendored read-only for `crd_is_superset_of_adam_rs` (K1).
+
+repository: vymalo/another-adam-rs (on GitHub)
+revision:   4bc6742deca699a5e25fb07d892b5ce7d4a42e25 (4bc6742: the revision of the parity goldens; the file is the same as at bec3e32)
+file:       deploy/crds/agents.vymalo.com.yaml
+vendored:   2026-11-14
+
+Re-vendor it, do not edit it.

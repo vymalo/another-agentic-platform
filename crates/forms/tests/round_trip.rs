@@ -55,6 +55,7 @@ fn a_form_with_every_optional_field_set_round_trips() {
         c.workers = Some(16);
         c.pr_draft = Some(false);
         c.opencode_model = Some("another-model".to_owned());
+        c.max_access_tier = Some(aap_api::AccessTierCap::Edits);
         c.run_pod_size_class = Some("large".to_owned());
     }
     let deployment = defaults().deployment_for(AgentKind::Coder, "coder-max");

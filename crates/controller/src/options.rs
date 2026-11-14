@@ -77,6 +77,10 @@ pub struct Options {
     /// `ConfigInvalid`, saying so. Changing it is a new digest, and so a rollout, for exactly the agents that
     /// ask for run pods and read what changed.
     pub run_pods: Option<aap_domain::RunPodSettings>,
+    /// The claims the deployment allows as a package cache (`CACHE_ALLOWED_CLAIMS`, K1). Empty: none.
+    pub cache_claims: std::collections::BTreeSet<String>,
+    /// The ceiling of the access tier (`AGENT_MAX_ACCESS_TIER`, K1).
+    pub max_access_tier: aap_api::AccessTierCap,
 }
 
 impl Default for Options {
@@ -91,6 +95,8 @@ impl Default for Options {
             instance: None,
             default_agent_image: None,
             run_pods: None,
+            cache_claims: std::collections::BTreeSet::new(),
+            max_access_tier: aap_api::AccessTierCap::Auto,
         }
     }
 }

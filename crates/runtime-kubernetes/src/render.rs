@@ -473,6 +473,14 @@ impl Cx<'_> {
             ("runLabel".to_owned(), r.pods.run_label.clone()),
             ("images".to_owned(), r.guard.images.join("\n")),
             ("claim".to_owned(), r.guard.claim.clone()),
+            // Every claim a run pod may mount, one per line, the work volume's first: with the package cache (K1) a second.
+            (
+                "claims".to_owned(),
+                std::iter::once(r.guard.claim.as_str())
+                    .chain(r.guard.cache_claim.as_deref())
+                    .collect::<Vec<_>>()
+                    .join("\n"),
+            ),
             ("secretName".to_owned(), r.guard.secret.name.clone()),
             ("secretKey".to_owned(), r.guard.secret.key.clone()),
         ]);
@@ -1044,6 +1052,14 @@ impl Cx<'_> {
                     default_mode: Some(file_mode(*mode)?),
                     items: None,
                     optional: None,
+                });
+            }
+            VolumeSource::ExistingClaim { name } => {
+                // The user's claim, mounted as it is: no owner reference, so deleting the service
+                // never deletes it.
+                volume.persistent_volume_claim = Some(core::PersistentVolumeClaimVolumeSource {
+                    claim_name: name.clone(),
+                    read_only: None,
                 });
             }
             VolumeSource::Scratch(scratch) => {

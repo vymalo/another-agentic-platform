@@ -152,6 +152,9 @@ fn project(spec: &RuntimeSpec, svc: &str) -> Value {
                     "sizeLimit": scratch.size_limit,
                 })),
                 VolumeSource::AccountToken => volumes.push(account_token_volume(&v.name)),
+                // The user's own claim: mounted by name, and no claim of the service's is made for it.
+                VolumeSource::ExistingClaim { name } => volumes
+                    .push(json!({"name": v.name, "kind": "persistentVolumeClaim", "claim": name})),
             }
         }
         let stateful = w.stable_identity || !templates.is_empty();
@@ -541,7 +544,9 @@ fn run_pods_case(case: &str, change: Change) -> aap_domain::ResolvedAgent {
     );
     must_resolve_with(
         "coder",
-        &Externals::default().with_run_pods(settings),
+        &Externals::default()
+            .with_run_pods(settings)
+            .with_cache_claims(["package-cache"]),
         |service, config| {
             change(service, config);
             set(
@@ -557,11 +562,59 @@ fn run_pods_case(case: &str, change: Change) -> aap_domain::ResolvedAgent {
 /// A change a case makes to the example (the service, then the config) before it is resolved.
 type Change = fn(&mut Value, &mut Value);
 
-const RUN_POD_CASES: [(&str, Change); 4] = [
+/// `cases/coder-cache.yaml`, and the cache of `coder-run-pods-cache.yaml`: the user's claim at `/cache`.
+fn cache(_service: &mut Value, config: &mut Value) {
+    set(
+        config,
+        "/spec/environment/cache",
+        json!({ "existingClaim": "package-cache" }),
+    );
+}
+
+/// `cases/coder-tiers.yaml`: the model's three optional variables and the access tier cap.
+fn tiers(_service: &mut Value, config: &mut Value) {
+    set(
+        config,
+        "/spec/model/extraBody",
+        json!({ "reasoning_effort": "medium", "chat_template_kwargs": { "thinking": true } }),
+    );
+    set(
+        config,
+        "/spec/model/echoReasoning",
+        json!("reasoning_content"),
+    );
+    set(config, "/spec/model/contextWindow", json!(128_000));
+    set(
+        config,
+        "/spec/harness/adam/coder/maxAccessTier",
+        json!("edits"),
+    );
+}
+
+#[test]
+fn a_coder_with_a_package_cache_renders_what_the_chart_renders() {
+    let r = must_resolve_with(
+        "coder",
+        &Externals::default().with_cache_claims(["package-cache"]),
+        cache,
+    );
+    let mut applied = Applied::default();
+    parity("coder-cache", &project(&r.runtime, "coder"), &mut applied);
+}
+
+#[test]
+fn a_coder_with_the_models_optional_variables_and_a_tier_cap_renders_what_the_chart_renders() {
+    let r = must_resolve("coder", tiers);
+    let mut applied = Applied::default();
+    parity("coder-tiers", &project(&r.runtime, "coder"), &mut applied);
+}
+
+const RUN_POD_CASES: [(&str, Change); 5] = [
     ("coder-run-pods", |_, _| {}),
     ("coder-run-pods-shared", affinity_token),
     ("coder-run-pods-split", split_shared),
     ("coder-run-pods-tuned", |_, _| {}),
+    ("coder-run-pods-cache", cache),
 ];
 
 #[test]
@@ -877,11 +930,14 @@ fn the_goldens_say_where_they_came_from() {
         "coder-run-pods-shared",
         "coder-run-pods-split",
         "coder-run-pods-tuned",
+        "coder-run-pods-cache",
+        "coder-cache",
+        "coder-tiers",
     ] {
         let g = golden(case);
         let s = &g["source"];
         assert_eq!(s["repository"], "https://github.com/vymalo/another-adam-rs");
-        assert_eq!(s["revision"], "581aeed75e56f903b2a9f59217ea9dcd449c8466");
+        assert_eq!(s["revision"], "4bc6742deca699a5e25fb07d892b5ce7d4a42e25");
         assert_eq!(s["chart"], "deploy/coder");
         assert!(
             repo_root().join(s["values"].as_str().unwrap()).is_file(),
@@ -940,6 +996,8 @@ fn every_variable_of_the_contract_is_covered_by_a_golden_or_a_test() {
         "coder-split",
         "coder-affinity-token",
         "coder-run-pods",
+        "coder-cache",
+        "coder-tiers",
     ] {
         for w in golden(case)["workloads"].as_object().unwrap().values() {
             for e in w["agent"]["env"].as_array().unwrap() {

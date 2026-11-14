@@ -696,6 +696,7 @@ fn a_folder_agent_with_many_workers_needs_no_placement() {
 /// `ToolProvider` (an address, the Secret references, the exclusive forms, the URL) is asked of it.
 fn outside_validate(file_name: &str) -> bool {
     file_name.starts_with("audience-")
+        || file_name == "extra-body-too-many.yaml"
         || file_name == "mcp-servers-too-many.yaml"
         || [
             "model-endpoint-models-too-many.yaml",
@@ -808,6 +809,7 @@ fn the_shape_rules_of_the_crd_hold_without_an_api_server() {
             "audience-value-empty.yaml",
             "audience-value-too-long.yaml",
             "audience-value-with-space.yaml",
+            "extra-body-too-many.yaml",
             "mcp-servers-too-many.yaml",
             "model-endpoint-models-too-many.yaml",
             "model-endpoint-title-empty.yaml",

@@ -722,17 +722,18 @@ fn the_role_and_the_priority_class_of_the_charts_are_the_coder_charts() {
     }
 }
 
-/// `params.data.<name>` of an expression, replaced by the parameter's value as a CEL string (or a list of strings for the images).
+/// `params.data.<name>` of an expression, replaced by the parameter's value as a CEL string (or a list of strings for the images
+/// and the claims).
 fn substitute(expression: &str, params: &BTreeMap<String, String>) -> String {
-    let mut out = expression.to_owned();
-    let images: Vec<String> = params["images"]
-        .split('\n')
-        .map(|i| format!("'{i}'"))
-        .collect();
-    out = out.replace(
-        "params.data.images.split('\\n')",
-        &format!("[{}]", images.join(", ")),
-    );
+    // The upgrade fallback is read as the list of the parameter, which these parameters have.
+    let mut out = expression.replace(CLAIMS_LIST, "params.data.claims.split('\\n')");
+    for list in ["images", "claims"] {
+        let items: Vec<String> = params[list].split('\n').map(|i| format!("'{i}'")).collect();
+        out = out.replace(
+            &format!("params.data.{list}.split('\\n')"),
+            &format!("[{}]", items.join(", ")),
+        );
+    }
     for (key, value) in params {
         out = out.replace(&format!("params.data.{key}"), &format!("'{value}'"));
     }
@@ -764,10 +765,43 @@ fn without_the_coders_digest(text: &str) -> String {
     out
 }
 
+/// The message of the rule about claims (K1): one policy serves every agent, so it says "claim" or "claims" by how many the
+/// parameter lists. The coder chart renders the one wording or the other by whether the cache is on.
+const CLAIMS_MESSAGE: &str = "'a run pod mounts only emptyDir volumes and the ' + ((has(params.data.claims) ? params.data.claims.split('\\n') : [params.data.claim]).size() > 1 ? 'claims ' : 'claim ') + (has(params.data.claims) ? params.data.claims.split('\\n') : [params.data.claim]).join(' and ') + ': no hostPath, no Secret, no other claim'";
+
+/// The list of claims as the policy reads it: the parameter `claims`, and for parameters the operator before K1 wrote (which have
+/// none) the work claim alone, so that an upgrade does not refuse every run pod until each agent's parameters are rewritten.
+const CLAIMS_LIST: &str =
+    "(has(params.data.claims) ? params.data.claims.split('\\n') : [params.data.claim])";
+
+/// The chart's rule about claims says `claimName == 'x'` for one claim and `claimName in ['x', 'y']` for two; the operator's says
+/// `in` for any number, so the one is read in the other's form before they are compared.
+fn claims_in_list_form(expression: &str) -> String {
+    match expression.split_once("claimName == '") {
+        Some((before, rest)) => {
+            let (claim, after) = rest.split_once('\'').expect("a quoted claim");
+            format!("{before}claimName in ['{claim}']{after}")
+        }
+        None => expression.to_owned(),
+    }
+}
+
 /// A `messageExpression` that only joins strings, evaluated: `'a' + 'b'` is `'ab'`, and the quotes come off.
 fn message(rule: &Value, params: &BTreeMap<String, String>) -> String {
     if let Some(m) = rule["message"].as_str() {
         return m.to_owned();
+    }
+    if rule["messageExpression"]
+        .as_str()
+        .is_some_and(|m| m.contains("params.data.claims"))
+    {
+        assert_eq!(rule["messageExpression"], CLAIMS_MESSAGE);
+        let claims: Vec<&str> = params["claims"].split('\n').collect();
+        let word = if claims.len() > 1 { "claims" } else { "claim" };
+        return format!(
+            "a run pod mounts only emptyDir volumes and the {word} {}: no hostPath, no Secret, no other claim",
+            claims.join(" and ")
+        );
     }
     let joined = substitute(
         rule["messageExpression"].as_str().expect("a message"),
@@ -784,13 +818,36 @@ fn message(rule: &Value, params: &BTreeMap<String, String>) -> String {
 #[test]
 fn the_admission_policy_of_the_operators_chart_with_the_agents_parameters_is_the_coder_charts_policy()
  {
-    let adam = adam();
+    the_policy_with_the_parameters_is_the_coder_charts(adam(), operator());
+}
+
+/// K1: with the package cache the coder chart's policy admits a second claim, and the operator's parameters say so.
+#[test]
+fn with_a_package_cache_the_policy_admits_its_claim_as_the_coder_charts_does() {
+    let adam = adam_case("coder-run-pods-cache");
+    let r = resolved_run_pods(|_, c| {
+        common::set(
+            c,
+            "/spec/environment/cache",
+            json!({ "existingClaim": "package-cache" }),
+        );
+    });
+    let docs = render(&r.id, &r.runtime).unwrap().documents();
+    let params = &find(&docs, "ConfigMap", "coder-run-pods-policy")["data"];
+    assert_eq!(params["claims"], "work-coder-0\npackage-cache");
+    assert_eq!(
+        params["claim"], "work-coder-0",
+        "the work volume's claim alone"
+    );
+    the_policy_with_the_parameters_is_the_coder_charts(adam, docs);
+}
+
+fn the_policy_with_the_parameters_is_the_coder_charts(adam: Value, docs: Vec<Value>) {
     let chart = chart();
     let policy = of_kind(&chart, "ValidatingAdmissionPolicy");
     let binding = of_kind(&chart, "ValidatingAdmissionPolicyBinding");
 
     // The parameters the operator makes for this agent, as the chart's policy reads them.
-    let docs = operator();
     let params_object = find(&docs, "ConfigMap", "coder-run-pods-policy");
     let params: BTreeMap<String, String> =
         serde_json::from_value(params_object["data"].clone()).unwrap();
@@ -831,7 +888,7 @@ fn the_admission_policy_of_the_operators_chart_with_the_agents_parameters_is_the
     for (mine, chart_rule) in ours.iter().zip(theirs) {
         assert_eq!(
             without_the_coders_digest(&substitute(mine["expression"].as_str().unwrap(), &params)),
-            chart_rule["expression"].as_str().unwrap(),
+            claims_in_list_form(chart_rule["expression"].as_str().unwrap()),
             "the rule: {}",
             chart_rule["message"]
         );
@@ -895,4 +952,68 @@ fn what_differs_from_the_coder_chart_is_what_is_meant_to() {
         binding["spec"]["paramRef"]["parameterNotFoundAction"],
         "Allow"
     );
+}
+
+/// The claims rule of the operator chart's TEMPLATE (not the checked-in golden of its render), read from the file.
+fn claims_rule_of_the_template() -> String {
+    let path = repo_root().join("deploy/operator/templates/run-pods-admission.yaml");
+    let text = std::fs::read_to_string(&path).unwrap();
+    let line = text
+        .lines()
+        .find(|l| l.contains("claimName in "))
+        .expect("the claims rule is in the template");
+    let item: Vec<Value> =
+        serde_yaml::from_str(line.trim_start_matches(' ')).expect("one YAML list item");
+    item[0]["expression"].as_str().unwrap().to_owned()
+}
+
+/// The list the rule tests the claim name against, for parameters `params`, as the policy reads them: the parameter `claims`
+/// split at the newline, or, when the parameters have none (written by an operator before K1), the work claim alone. This reads
+/// the rule's text; **no API server evaluates it here** (`run-pods-admission.sh` asks one).
+fn claims_the_rule_admits(rule: &str, params: &BTreeMap<String, String>) -> Vec<String> {
+    assert!(
+        rule.contains(CLAIMS_LIST),
+        "the rule reads the claims as {CLAIMS_LIST}: {rule}"
+    );
+    // the rule admits a claim only by `claimName in <that list>`, and by nothing else
+    assert!(
+        rule.contains(&format!("claimName in {CLAIMS_LIST}")),
+        "{rule}"
+    );
+    assert_eq!(rule.matches("claimName").count(), 1, "{rule}");
+    match params.get("claims") {
+        Some(c) => c.split('\n').map(str::to_owned).collect(),
+        None => vec![params["claim"].clone()],
+    }
+}
+
+#[test]
+fn the_admission_rule_refuses_an_unlisted_claim() {
+    let rule = claims_rule_of_the_template();
+    // an agent with a cache the deployment listed: its work claim and the cache's, and no other
+    let r = resolved_run_pods(|_, c| {
+        common::set(
+            c,
+            "/spec/environment/cache",
+            json!({ "existingClaim": "package-cache" }),
+        );
+    });
+    let docs = render(&r.id, &r.runtime).unwrap().documents();
+    let data = &find(&docs, "ConfigMap", "coder-run-pods-policy")["data"];
+    let params: BTreeMap<String, String> = serde_json::from_value(data.clone()).unwrap();
+    let admitted = claims_the_rule_admits(&rule, &params);
+    assert_eq!(admitted, ["work-coder-0", "package-cache"]);
+    for unlisted in ["work-other-0", "other-db-1", "pictures", ""] {
+        assert!(!admitted.iter().any(|c| c == unlisted), "{unlisted}");
+    }
+    // an agent with no cache: the work claim alone
+    let r = resolved_run_pods(|_, _| {});
+    let docs = render(&r.id, &r.runtime).unwrap().documents();
+    let data = &find(&docs, "ConfigMap", "coder-run-pods-policy")["data"];
+    let params: BTreeMap<String, String> = serde_json::from_value(data.clone()).unwrap();
+    assert_eq!(claims_the_rule_admits(&rule, &params), ["work-coder-0"]);
+    // parameters written before K1 have no `claims`: the work claim alone, not an error that refuses every run pod
+    let mut old = params;
+    old.remove("claims");
+    assert_eq!(claims_the_rule_admits(&rule, &old), ["work-coder-0"]);
 }

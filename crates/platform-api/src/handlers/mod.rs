@@ -74,6 +74,8 @@ pub(crate) struct Surroundings {
     pub(crate) offered: aap_forms::OfferedKeys,
     /// The size classes of run pods the operator has (the API's configuration), which a coder form may pick.
     pub(crate) run_pod_size_classes: Vec<String>,
+    /// The ceiling of the access tier (the API's configuration, K1).
+    pub(crate) max_access_tier: aap_api::AccessTierCap,
 }
 
 impl Surroundings {
@@ -94,6 +96,7 @@ impl Surroundings {
             tool_servers,
             offered: aap_forms::OfferedKeys::from_offered(&state.defaults.offer_label, &offered),
             run_pod_size_classes: state.defaults.run_pod_size_classes.clone(),
+            max_access_tier: state.defaults.max_access_tier,
         })
     }
 
@@ -106,5 +109,6 @@ impl Surroundings {
             None,
             &self.run_pod_size_classes,
         )
+        .with_max_access_tier(self.max_access_tier)
     }
 }

@@ -1220,6 +1220,59 @@ fn a_form_that_is_logged_does_not_print_the_password_or_the_query_of_its_address
     assert!(matches!(&model.base_url, BaseUrlForm::Value(v) if v.contains(SENTINEL)));
 }
 
+// ------------------------------------------------------------------ the access tier ceiling (K1)
+
+#[test]
+fn a_form_above_the_deployments_access_tier_ceiling_is_refused_naming_the_field() {
+    use aap_api::AccessTierCap::{Auto, Bypass, Edits, Plan};
+    let check_under = |ceiling, tier| {
+        let mut form = coder_form("coder-me");
+        coder_settings(&mut form).max_access_tier = tier;
+        validate_agent(
+            &form,
+            &deployment(form.kind(), &form.name),
+            NS,
+            &externals().with_max_access_tier(ceiling),
+            &offered(),
+            &ImagePolicy::any_registry(),
+        )
+    };
+    // the default ceiling is auto: bypass is the deployment's opt-in
+    assert_eq!(
+        fields(check_under(Auto, Some(Bypass))),
+        ["agent.maxAccessTier"]
+    );
+    assert_eq!(
+        fields(check_under(Edits, Some(Auto))),
+        ["agent.maxAccessTier"]
+    );
+    assert_eq!(
+        fields(check_under(Plan, Some(Edits))),
+        ["agent.maxAccessTier"]
+    );
+    // at or below it, or none, is a form
+    for (ceiling, tier) in [
+        (Bypass, Some(Bypass)),
+        (Auto, Some(Auto)),
+        (Auto, Some(Plan)),
+        (Plan, Some(Plan)),
+        (Plan, None),
+    ] {
+        assert!(
+            check_under(ceiling, tier).is_ok(),
+            "{tier:?} under {ceiling:?}"
+        );
+    }
+    // and the API's own configuration carries the ceiling, `auto` when it says none
+    let defaults: aap_forms::Defaults = serde_json::from_value({
+        let mut v = serde_json::to_value(defaults()).unwrap();
+        v.as_object_mut().unwrap().remove("maxAccessTier");
+        v
+    })
+    .unwrap();
+    assert_eq!(defaults.max_access_tier, Auto);
+}
+
 // ------------------------------------------------------------------ the defaults
 
 #[test]

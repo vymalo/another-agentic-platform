@@ -72,18 +72,16 @@ pub fn resolved(name: &str, change: impl FnOnce(&mut Value, &mut Value)) -> Reso
         service.metadata.name.clone().unwrap(),
         "0b1f3c5e-1111-4222-8333-444455556666",
     );
-    aap_domain::resolve(&service, &config, &aap_domain::Externals::default(), owner).unwrap_or_else(
-        |issues| {
-            panic!(
-                "the example does not resolve: {}",
-                issues
-                    .iter()
-                    .map(ToString::to_string)
-                    .collect::<Vec<_>>()
-                    .join("; ")
-            )
-        },
-    )
+    aap_domain::resolve(&service, &config, &fixture_externals(), owner).unwrap_or_else(|issues| {
+        panic!(
+            "the example does not resolve: {}",
+            issues
+                .iter()
+                .map(ToString::to_string)
+                .collect::<Vec<_>>()
+                .join("; ")
+        )
+    })
 }
 
 // ------------------------------------------------------------------------------------ run pods
@@ -167,7 +165,7 @@ pub fn resolved_with(
         service.metadata.name.clone().unwrap(),
         "0b1f3c5e-1111-4222-8333-444455556666",
     );
-    let externals = aap_domain::Externals::default().with_run_pods(settings.clone());
+    let externals = fixture_externals().with_run_pods(settings.clone());
     aap_domain::resolve(&service, &config, &externals, owner).unwrap_or_else(|issues| {
         panic!(
             "the example does not resolve: {}",
@@ -248,4 +246,10 @@ pub fn run_pod_settings_of(case: &str) -> (aap_domain::RunPodSettings, String) {
     }
     helm_merge(&mut settings, &Value::Object(over));
     (run_pod_settings(settings), class)
+}
+
+/// The deployment's side of these tests: the one package cache claim the cases name is allowed (the operator allows none by
+/// default, K1), so what they prove is the provider's.
+pub fn fixture_externals() -> aap_domain::Externals {
+    aap_domain::Externals::default().with_cache_claims(["package-cache"])
 }

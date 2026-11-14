@@ -87,6 +87,11 @@ fn every_kind_is_namespaced_v1alpha1_of_the_platform_group() {
 
 /// The rules §59a, "Validation", lists for the CRD. `(rule, message)`.
 const SPEC_RULES: &[(&str, &str)] = &[
+    // K1, adam-rs's rule: an enabled A2A surface has a token (no token, no server)
+    (
+        "(has(self.enabled) && !self.enabled) || has(self.bearerTokensSecretRef)",
+        "interfaces.a2a needs bearerTokensSecretRef: no token, no server",
+    ),
     // interfaces.responses.enabled and interfaces.mcp.enabled must be false (one field type, used twice)
     (
         "self == false",
@@ -387,4 +392,18 @@ fn the_new_kinds_are_bounded_and_the_inline_forms_are_not_tightened() {
         let base_url = property(&config, &["spec", "model", "baseUrl", "value"]);
         assert!(base_url.get(bound).is_none(), "baseUrl.value {bound}");
     }
+}
+
+#[test]
+fn an_a2a_written_without_enabled_stays_disabled_and_the_default_agrees() {
+    // K1: adam-rs's operator reads it as enabled; here a manifest that writes `a2a` with a token alone must not turn a
+    // disabled agent on at the next apply, as before K1. The derived default and the serde default are one value.
+    let written: aap_api::A2aInterface = serde_json::from_value(serde_json::json!({
+        "bearerTokensSecretRef": { "name": "s", "key": "k" }
+    }))
+    .unwrap();
+    assert!(!written.enabled);
+    assert_eq!(written.enabled, aap_api::A2aInterface::default().enabled);
+    let empty: aap_api::A2aInterface = serde_json::from_value(serde_json::json!({})).unwrap();
+    assert!(!empty.enabled);
 }

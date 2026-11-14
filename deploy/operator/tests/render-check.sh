@@ -509,6 +509,18 @@ render_notes -f "$here/api.values.yaml" --set api.networkPolicy.enabled=false --
 check "NOTES (api on, the policy off): no warning about a policy that is not there" lacks 'NetworkPolicy lets it reach ANY address'
 render
 
+# ---- K1: what the deployment allows an AgentConfig --------------------------------------------------------------------------
+render
+check "K1: by default the operator is told no cache claim and no ceiling (the pod's environment is what it was)" lacks 'CACHE_ALLOWED_CLAIMS|AGENT_MAX_ACCESS_TIER'
+render --set 'cacheAllowedClaims={package-cache,other-cache}' --set maxAccessTier=edits
+check "K1: cacheAllowedClaims and maxAccessTier become the operator's CACHE_ALLOWED_CLAIMS and AGENT_MAX_ACCESS_TIER" \
+  has_all 'name: CACHE_ALLOWED_CLAIMS' 'value: "package-cache,other-cache"' 'name: AGENT_MAX_ACCESS_TIER' 'value: "edits"'
+render --set maxAccessTier=auto
+check "K1: a ceiling of auto renders nothing" lacks 'AGENT_MAX_ACCESS_TIER'
+check "K1: an access tier that is not one is refused" refused 'maxAccessTier must be plan, edits, auto or bypass' --set maxAccessTier=root
+check "K1: a cache claim that is not a claim name is refused" refused 'is not the name of a PersistentVolumeClaim' --set 'cacheAllowedClaims={Not A Name}'
+render
+
 # ---- What is refused -------------------------------------------------------------------------------------------------------
 check "a replica count is refused (no leader election in v0)" refused 'no leader election' --set replicaCount=2
 check "an empty image tag is refused" refused 'image.tag is required' --set image.tag=
@@ -1002,13 +1014,22 @@ check "run pods on: the policy asks for no Secret and the binding for no namespa
   dcount ValidatingAdmissionPolicyBinding aap-operator-agents-run-pods 'kubernetes.io/metadata.name' 1
 policy_rules_are_the_scripts() {
   # Every rule the admission test (run-pods-admission.sh) expects a message of is in the policy.
-  for frag in 'a run pod carries the labels' 'a run pod has the priority class' 'a run pod uses only the images' 'a run pod mounts only emptyDir volumes and the claim' \
+  for frag in 'a run pod carries the labels' 'a run pod has the priority class' 'a run pod uses only the images' 'a run pod mounts only emptyDir volumes and the ' \
     'a run pod references no Secret but the key' 'a run pod is not privileged' 'allowPrivilegeEscalation: false on every container' 'a run pod does not run as root' \
     'a run pod uses its own network, PID and IPC namespaces' 'a run pod sets automountServiceAccountToken: false'; do
     doc ValidatingAdmissionPolicy aap-operator-agents-run-pods | grep -qF -- "$frag" || { echo "no rule says: $frag" >&2; return 1; }
   done
 }
 check "run pods on: every message the admission test expects (tests/run-pods-admission.sh) is a message of the policy" policy_rules_are_the_scripts
+policy_claims_are_a_list() {
+  # K1: the claims rule reads one parameter, a list with the work volume's claim and, with a package cache, its claim (the coder chart's second claim).
+  doc ValidatingAdmissionPolicy aap-operator-agents-run-pods | grep -qF "claimName in (has(params.data.claims)" \
+    && doc ValidatingAdmissionPolicy aap-operator-agents-run-pods | grep -qF "'claims ' : 'claim '" \
+    && ! doc ValidatingAdmissionPolicy aap-operator-agents-run-pods | grep -qF "claimName == params.data.claim" \
+    && doc ValidatingAdmissionPolicy aap-operator-agents-run-pods | grep -qF "has(params.data.claims) ? params.data.claims.split(" \
+    && doc ValidatingAdmissionPolicy aap-operator-agents-run-pods | grep -qF ": [params.data.claim])"
+}
+check "run pods on: the claims rule admits the claims of the parameter 'claims' (the work volume's and the package cache's) and no other, and for parameters written before K1 (no 'claims') the work claim alone" policy_claims_are_a_list
 check "the admission test is a shell script sh can read" sh -n "$here/run-pods-admission.sh"
 
 # The Platform API is told the names of the classes, the keys of runPodClasses in order, and nothing else of them.

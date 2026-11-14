@@ -171,6 +171,8 @@ struct Cx<'a> {
     is_coder: bool,
     /// The run pods the config asks for, with the deployment's side of them (slice D15).
     run: Option<Run<'a>>,
+    /// The deployment's ceiling of the access tier (K1).
+    max_tier: aap_api::AccessTierCap,
 }
 
 /// What the config asks of run pods and the deployment gives: the settings, and the class chosen.
@@ -196,6 +198,7 @@ impl<'a> Cx<'a> {
             .as_deref()
             .filter(|u| !u.is_empty());
         Self {
+            max_tier: externals.max_access_tier,
             service,
             config,
             origins,
@@ -395,6 +398,11 @@ impl<'a> Cx<'a> {
             security: self.security(),
             mount_path: &work.mount_path,
             claim,
+            cache_claim: spec
+                .environment
+                .cache
+                .as_ref()
+                .map(|c| c.existing_claim.as_str()),
             beside_the_coder: per_replica,
             model_key,
         })
@@ -478,6 +486,20 @@ impl<'a> Cx<'a> {
                 mounts.push(Mount {
                     volume: v.name.clone(),
                     path: v.mount_path.clone(),
+                    read_only: false,
+                });
+            }
+            // The shared package cache: where the image keeps the caches of npm, pnpm and cargo.
+            if let Some(cache) = &spec.environment.cache {
+                volumes.push(VolumeSpec {
+                    name: contract::CACHE_VOLUME.to_owned(),
+                    source: VolumeSource::ExistingClaim {
+                        name: cache.existing_claim.clone(),
+                    },
+                });
+                mounts.push(Mount {
+                    volume: contract::CACHE_VOLUME.to_owned(),
+                    path: contract::CACHE_DIR.to_owned(),
                     read_only: false,
                 });
             }
@@ -712,6 +734,19 @@ impl<'a> Cx<'a> {
         if serves_a2a {
             e.push(lit(env::PUBLIC_URL, &self.public_url));
         }
+        // Every role reads the cap: the control plane declares the tiers up to it and refuses a
+        // higher one, a worker's tools check it again. Nothing is set for the default (`auto`).
+        // K1: the variable is the lower of the config's tier (or the default, `auto`) and the deployment's ceiling. `validate`
+        // refused a config above the ceiling, so the ceiling only matters when the config names none: then it is `auto`, which
+        // is the coder's own default and is not written, unless the ceiling is lower (the chart renders nothing for that, as it
+        // has no ceiling: the one intended difference of the parity goldens).
+        if self.is_coder {
+            let asked = self.coder.and_then(|c| c.max_access_tier);
+            let effective = asked.unwrap_or_default().min(self.max_tier);
+            if asked.is_some() || effective != aap_api::AccessTierCap::default() {
+                e.push(lit(env::MAX_ACCESS_TIER, effective.as_str()));
+            }
+        }
         if self.config.spec.harness.adam.agent.folder.is_some() {
             e.push(lit(env::ADAM_AGENT_DIR, contract::AGENT_DIR));
         }
@@ -740,6 +775,23 @@ impl<'a> Cx<'a> {
                 }
             }
             e.push(lit(env::MODEL, &spec.model.model));
+            if let Some(body) = &spec.model.extra_body
+                && !body.is_empty()
+            {
+                // The kubelet expands `$(VAR)` in a literal and turns `$$` into `$`: every `$` is doubled, so the process
+                // reads the JSON the config says (the chart does not, and a value with no `$` is the same in both).
+                e.push(lit(
+                    env::MODEL_EXTRA_BODY,
+                    crate::digest::canonical_json(&serde_json::Value::Object(body.clone()))
+                        .replace('$', "$$"),
+                ));
+            }
+            if let Some(echo) = spec.model.echo_reasoning {
+                e.push(lit(env::MODEL_ECHO_REASONING, echo.as_str()));
+            }
+            if let Some(window) = spec.model.context_window {
+                e.push(lit(env::MODEL_CONTEXT_WINDOW, window.to_string()));
+            }
             if let Some(c) = self.coder {
                 if let Some(m) = &c.opencode_model {
                     e.push(lit(env::OPENCODE_MODEL, m));

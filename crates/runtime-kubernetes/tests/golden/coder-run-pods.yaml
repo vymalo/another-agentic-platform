@@ -230,6 +230,7 @@ metadata:
 apiVersion: v1
 data:
   claim: work-coder-0
+  claims: work-coder-0
   images: |-
     ghcr.io/vymalo/another-agentic-images/workspace:1.98.1-e6a528f@sha256:d2aae762ecad2c13bb697332507d236a75d8233d061f38cc97dc9227192b0797
     ghcr.io/vymalo/another-adam-rs/coder:sha-0391809@sha256:814d8ee329a5e4d8634e8a82532c035999c4be27aac086508b742a635449ea40

@@ -5,6 +5,12 @@
 //! `bin/adam-agent/README.md`, `docker/coder/Dockerfile`, `deploy/coder/templates`). The parity
 //! goldens (`tests/golden/`) hold it equal to what the chart renders.
 
+/// The members of a chat request the runtime owns: `MODEL_EXTRA_BODY` may not set them (the process
+/// refuses it with exit 78, as the coder chart does at render time). Held equal to adam-rs's
+/// `MODEL_EXTRA_BODY_OWNED` (K1).
+pub const MODEL_EXTRA_BODY_OWNED: [&str; 5] =
+    ["model", "messages", "tools", "tool_choice", "stream"];
+
 /// Variable names.
 pub mod env {
     /// Where the process listens.
@@ -23,6 +29,12 @@ pub mod env {
     pub const MODEL_API_KEY: &str = "MODEL_API_KEY";
     /// The model alias.
     pub const MODEL: &str = "MODEL";
+    /// A JSON object merged into every chat request (not a secret).
+    pub const MODEL_EXTRA_BODY: &str = "MODEL_EXTRA_BODY";
+    /// `reasoning_content` or `reasoning`: send earlier reasoning back under that name.
+    pub const MODEL_ECHO_REASONING: &str = "MODEL_ECHO_REASONING";
+    /// The model's context window, in tokens: what each usage report says as its window.
+    pub const MODEL_CONTEXT_WINDOW: &str = "MODEL_CONTEXT_WINDOW";
     /// The alias OpenCode uses.
     pub const OPENCODE_MODEL: &str = "OPENCODE_MODEL";
     /// Runs advanced at once, per process.
@@ -55,6 +67,8 @@ pub mod env {
     pub const GITHUB_API_URL: &str = "GITHUB_API_URL";
     /// Owners `create_repository` may create for, comma-joined.
     pub const CREATE_REPO_OWNERS: &str = "CREATE_REPO_OWNERS";
+    /// The highest access tier a person may pick (`plan`, `edits`, `auto`, `bypass`).
+    pub const MAX_ACCESS_TIER: &str = "MAX_ACCESS_TIER";
     /// GitHub App mode: the App's id.
     pub const GITHUB_APP_ID: &str = "GITHUB_APP_ID";
     /// App mode: one pinned installation.
@@ -85,6 +99,9 @@ pub mod env {
         MODEL_BASE_URL,
         MODEL_API_KEY,
         MODEL,
+        MODEL_EXTRA_BODY,
+        MODEL_ECHO_REASONING,
+        MODEL_CONTEXT_WINDOW,
         OPENCODE_MODEL,
         WORKERS,
         MAX_CHECK_CYCLES,
@@ -101,6 +118,7 @@ pub mod env {
         ALLOWED_REPO_HOSTS,
         GITHUB_API_URL,
         CREATE_REPO_OWNERS,
+        MAX_ACCESS_TIER,
         GITHUB_APP_ID,
         GITHUB_APP_INSTALLATION_ID,
         GITHUB_APP_OWNERS,
@@ -157,6 +175,13 @@ pub const GITHUB_APP_VOLUME: &str = "github-app";
 
 /// The volume the coder's workspace is. `WORKSPACE_ROOT` is where it is mounted.
 pub const WORK_VOLUME: &str = "work";
+
+/// The volume of the shared package cache (`environment.cache`), and where it is mounted: the image keeps the
+/// caches of npm, pnpm and cargo under this path (adam-rs ADR 0040).
+pub const CACHE_VOLUME: &str = "cache";
+
+/// Where the package cache is mounted.
+pub const CACHE_DIR: &str = "/cache";
 
 /// Volume names the operator uses itself.
 pub const RESERVED_VOLUMES: &[&str] = &[AGENT_FOLDER_VOLUME, EXTRA_MCP_VOLUME, GITHUB_APP_VOLUME];

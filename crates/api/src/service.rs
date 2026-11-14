@@ -89,10 +89,14 @@ pub struct Interfaces {
 }
 
 /// The A2A surface of a service.
-#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize, JsonSchema)]
+// K1: the rule and the default of `enabled` are adam-rs's (its `A2aInterface`), so a document it accepts is read the same.
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize, KubeSchema)]
 #[serde(rename_all = "camelCase")]
+#[x_kube(validation = Rule::new("(has(self.enabled) && !self.enabled) || has(self.bearerTokensSecretRef)").message("interfaces.a2a needs bearerTokensSecretRef: no token, no server"))]
 pub struct A2aInterface {
-    /// Serve A2A. Without it the agent is not listed in the registry.
+    /// Serve A2A. Without it the agent is not listed in the registry. Off when omitted, as before K1 (adam-rs's
+    /// operator defaults it to on: a manifest that writes `a2a` with only a token reference must not turn a
+    /// disabled agent on at the next apply, so this operator does not, and says so in the superset test).
     #[serde(default)]
     pub enabled: bool,
 

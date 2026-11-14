@@ -1,6 +1,6 @@
 #!/bin/sh
-# VENDORED from vymalo/another-adam-rs, deploy/coder/tests/git-sandbox-vector.sh at 581aeed75e56f903b2a9f59217ea9dcd449c8466 (re-vendor it, do not edit it):
-#   https://github.com/vymalo/another-adam-rs/blob/581aeed75e56f903b2a9f59217ea9dcd449c8466/deploy/coder/tests/git-sandbox-vector.sh
+# VENDORED from vymalo/another-adam-rs, deploy/coder/tests/git-sandbox-vector.sh at 4bc6742deca699a5e25fb07d892b5ce7d4a42e25 (re-vendor it, do not edit it):
+#   https://github.com/vymalo/another-adam-rs/blob/4bc6742deca699a5e25fb07d892b5ce7d4a42e25/deploy/coder/tests/git-sandbox-vector.sh
 # Everything below this block is the upstream file from its second line on, byte for byte; its sha256 is 07bc8372c7b236c853d019c11f9ee9ef93bcfcc8a5e54f8aebe5b18a3a514408 (render-check.sh holds it).
 # A scratch project whose own configuration runs a program, the vector the git sandbox exists for (ADR 0041, open decision 6;
 # issue vymalo/another-adam-rs#118). tests/kind-run-pods.sh feeds this to `sh -s` in the coder container of a pod shaped like the

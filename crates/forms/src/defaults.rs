@@ -72,6 +72,12 @@ pub struct Defaults {
     /// for them is refused, saying so. A name the operator does not have is a form the operator would mark `ConfigInvalid`.
     #[serde(default)]
     pub run_pod_size_classes: Vec<String>,
+
+    /// The highest access tier a coder form may pick (`agent.maxAccessTier`, K1): the operator's `maxAccessTier`, which the
+    /// chart writes here, so the form refuses what the operator would mark `ConfigInvalid`. `auto`, the coder's own default,
+    /// when unset. (There is no cache list: `environment.cache` is no field of any form, so a form cannot name a claim.)
+    #[serde(default)]
+    pub max_access_tier: aap_api::AccessTierCap,
 }
 
 fn default_offer_label() -> String {

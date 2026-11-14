@@ -1,0 +1,23 @@
+# Refused: interfaces.a2a is enabled and names no bearerTokensSecretRef: no token, no server. (`enabled` left out is false here, as before K1:
+# adam-rs's operator reads it as true, and a manifest that writes `a2a` with a token alone must not turn an agent on.)
+# expect: interfaces.a2a needs bearerTokensSecretRef: no token, no server
+apiVersion: agents.vymalo.com/v1alpha1
+kind: AgentService
+metadata:
+  name: invalid-a2a-no-token
+  namespace: another-agentic-system
+spec:
+  configRef:
+    name: chat
+  interfaces:
+    a2a:
+      enabled: true
+      publicUrl: ""
+  scaling:
+    topology: combined
+    workers: 1
+  store:
+    postgres:
+      secretRef:
+        name: db
+        key: uri

@@ -129,6 +129,7 @@ pub fn to_resources(form: &AgentForm, deployment: &Deployment, namespace: &str) 
                 git_author: deployment.coder.git_author.clone(),
                 create_repo_owners: c.create_repo_owners.clone(),
                 opencode_model: c.opencode_model.clone(),
+                max_access_tier: c.max_access_tier,
                 run_pods: c.run_pod_size_class.as_ref().map(|size_class| RunPods {
                     size_class: size_class.clone(),
                 }),
@@ -172,6 +173,9 @@ pub fn to_resources(form: &AgentForm, deployment: &Deployment, namespace: &str) 
             }),
             base_url: None,
             api_key_secret_ref: None,
+            extra_body: None,
+            echo_reasoning: None,
+            context_window: None,
         },
         tools: Tools {
             github_mcp: deployment.github_mcp.clone(),
@@ -194,6 +198,7 @@ pub fn to_resources(form: &AgentForm, deployment: &Deployment, namespace: &str) 
         },
         environment: Environment {
             image: form.image.clone().map(|reference| Image { reference }),
+            cache: None,
             resources: deployment.resources.clone(),
             volumes: deployment.volumes.clone(),
             termination_grace_period_seconds: None,
@@ -311,6 +316,7 @@ fn extract(
                 workers: coder.and_then(|c| c.workers),
                 pr_draft: coder.and_then(|c| c.pr_draft),
                 opencode_model: coder.and_then(|c| c.opencode_model.clone()),
+                max_access_tier: coder.and_then(|c| c.max_access_tier),
                 run_pod_size_class: coder
                     .and_then(|c| c.run_pods.as_ref())
                     .map(|r| r.size_class.clone()),

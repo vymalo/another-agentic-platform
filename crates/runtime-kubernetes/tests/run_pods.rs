@@ -756,10 +756,14 @@ fn the_policys_parameters_are_what_the_guard_checks() {
     assert_eq!(params["managedBy"], "adam-coder");
     assert_eq!(params["runLabel"], "adam.vymalo.com/run");
     assert_eq!(params["claim"], "work-coder-0");
+    assert_eq!(
+        params["claims"], "work-coder-0",
+        "no cache: the work claim alone"
+    );
     assert_eq!(params["secretName"], "coder-secrets");
     assert_eq!(params["secretKey"], "MODEL_API_KEY");
     assert_eq!(params["images"], rp.guard.images.join("\n"));
-    assert_eq!(params.as_object().unwrap().len(), 8, "{params}");
+    assert_eq!(params.as_object().unwrap().len(), 9, "{params}");
 }
 
 // ---------------------------------------------------------------- they agree with the workloads

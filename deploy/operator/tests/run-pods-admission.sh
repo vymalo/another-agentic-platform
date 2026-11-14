@@ -36,12 +36,16 @@ account=$(params serviceAccount) || die "the parameters of the guard ($svc-run-p
 managed_by=$(params managedBy)
 run_label=$(params runLabel)
 claim=$(params claim)
+claims=$(params claims)
 secret=$(params secretName)
 key=$(params secretKey)
 class=$(params priorityClass)
-if [ -z "$account" ] || [ -z "$managed_by" ] || [ -z "$run_label" ] || [ -z "$claim" ] || [ -z "$secret" ] || [ -z "$key" ] || [ -z "$class" ]; then
+if [ -z "$account" ] || [ -z "$managed_by" ] || [ -z "$run_label" ] || [ -z "$claim" ] || [ -z "$claims" ] || [ -z "$secret" ] || [ -z "$key" ] || [ -z "$class" ]; then
   die "the parameters of the guard are incomplete: $(kubectl -n "$ns" get configmap "$svc-run-pods-policy" -o 'jsonpath={.data}')"
 fi
+
+# What the policy says of the claims: "the claim X", or with the package cache (K1) "the claims X and Y" (the work volume's first).
+claims_words=$(printf '%s' "$claims" | awk 'BEGIN{n=0} {a[n++]=$0} END{if(n>1){s="claims "; for(i=0;i<n;i++){s=s (i?" and ":"") a[i]}} else {s="claim " a[0]}; printf "%s", s}')
 
 # The pod the coder builds from the template: the name, the namespace, the labels and the annotations it fills in.
 printf '%s' "$template" | jq --arg ns "$ns" --arg svc "$svc" --arg by "$managed_by" --arg run "$run_label" '
@@ -77,11 +81,13 @@ try "another image in the run container" denied "a run pod uses only the images"
 try "another image in the init container" denied "a run pod uses only the images" '.spec.initContainers[0].image = "docker.io/library/busybox:latest"'
 try "an extra container" denied "a run pod uses only the images" '.spec.containers += [.spec.containers[0] | .name = "extra" | .image = "docker.io/library/busybox:latest"]'
 
-# What it mounts: empty directories and the one claim.
-try "a hostPath volume" denied "a run pod mounts only emptyDir volumes and the claim $claim" '.spec.volumes += [{name: "host", hostPath: {path: "/"}}]'
+# What it mounts: empty directories and the claim of the work volume (and, when the agent has a package cache, its claim, which the pod of the
+# template mounts: the control above is the proof that the policy admits it).
+try "a hostPath volume" denied "a run pod mounts only emptyDir volumes and the $claims_words" '.spec.volumes += [{name: "host", hostPath: {path: "/"}}]'
 try "a Secret volume" denied "a run pod mounts only emptyDir volumes" ".spec.volumes += [{name: \"s\", secret: {secretName: \"$secret\"}}]"
 try "a ConfigMap volume" denied "a run pod mounts only emptyDir volumes" '.spec.volumes += [{name: "c", configMap: {name: "kube-root-ca.crt"}}]'
 try "another claim" denied "a run pod mounts only emptyDir volumes" '.spec.volumes[0].persistentVolumeClaim.claimName = "another-claim"'
+try "a third claim beside the agent's" denied "a run pod mounts only emptyDir volumes" '.spec.volumes += [{name: "third", persistentVolumeClaim: {claimName: "another-claim"}}]'
 
 # Which Secret key it references: the model key, as one variable, and nothing else.
 try "envFrom a Secret" denied "a run pod references no Secret but the key $key of $secret" ".spec.containers[0].envFrom = [{secretRef: {name: \"$secret\"}}]"
@@ -103,7 +109,7 @@ try "the host IPC namespace" denied "a run pod uses its own network, PID and IPC
 # (every real one does, kind's included) before the policy, and it adds the token as a projected volume, so the volume rule says no
 # first; a bare API server without it reaches the token rule. The fragment is two lines: grep -F takes each as a pattern of its own.
 token_refused="a run pod sets automountServiceAccountToken: false
-a run pod mounts only emptyDir volumes and the claim $claim"
+a run pod mounts only emptyDir volumes and the $claims_words"
 try "the account's token" denied "$token_refused" '.spec.automountServiceAccountToken = true'
 try "no word on the token" denied "$token_refused" 'del(.spec.automountServiceAccountToken)'
 

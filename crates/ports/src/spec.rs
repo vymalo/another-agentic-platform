@@ -141,6 +141,14 @@ impl RuntimeSpec {
                             ));
                         }
                     }
+                    VolumeSource::ExistingClaim { name } => {
+                        if name.is_empty() {
+                            return bad(format!(
+                                "workload {}: volume {} names no claim",
+                                w.name, v.name
+                            ));
+                        }
+                    }
                     VolumeSource::Scratch(s) => {
                         if s.size_limit.as_deref().is_some_and(|l| l.trim().is_empty()) {
                             return bad(format!(
@@ -256,6 +264,9 @@ impl RuntimeSpec {
         empty("the label that marks a pod managed", &rp.pods.managed_by)?;
         empty("the label that carries the run", &rp.pods.run_label)?;
         empty("the work claim", &rp.guard.claim)?;
+        if let Some(cache) = &rp.guard.cache_claim {
+            empty("the cache claim", cache)?;
+        }
         empty("the name of the model key's Secret", &rp.guard.secret.name)?;
         empty("the key of the model key's Secret", &rp.guard.secret.key)?;
         if rp.quota.pods == 0 {
@@ -537,6 +548,12 @@ pub enum VolumeSource {
         /// The permission bits of the files.
         mode: u32,
     },
+    /// A claim someone else owns (on Kubernetes: a PersistentVolumeClaim the user made), mounted as it
+    /// is. The operator neither creates nor deletes it, whatever the deletion policy says.
+    ExistingClaim {
+        /// The claim's name.
+        name: String,
+    },
     /// One key of a Secret, mounted as one file: a private key is a file and never a variable.
     SecretFile {
         /// The Secret key.
@@ -810,6 +827,9 @@ pub struct RunPodGuard {
     pub images: Vec<String>,
     /// The one persistent claim a pod may mount (besides empty directories): the work volume.
     pub claim: String,
+    /// The package cache's claim (K1, [`VolumeSource::ExistingClaim`]), the second claim a pod may mount. Absent: none.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cache_claim: Option<String>,
     /// The one Secret key a pod may reference, as one variable: the model key.
     pub secret: SecretRef,
 }

@@ -38,6 +38,17 @@ Included from deployment.yaml, which every render has, so they always run.
 {{- fail (printf "watchNamespace must be one namespace name (a DNS label), got %q: the operator is namespaced and has no value that watches every namespace" (toString .Values.watchNamespace)) -}}
 {{- end -}}
 {{- /* The default agent image (AD-029): empty is none; a value is pinned by tag and digest, as the operator's own image is. */ -}}
+{{- if not (has (toString .Values.maxAccessTier) (list "plan" "edits" "auto" "bypass")) -}}
+{{- fail (printf "maxAccessTier must be plan, edits, auto or bypass, got %q" (toString .Values.maxAccessTier)) -}}
+{{- end -}}
+{{- if not (kindIs "slice" .Values.cacheAllowedClaims) -}}
+{{- fail "cacheAllowedClaims must be a list of claim names" -}}
+{{- end -}}
+{{- range .Values.cacheAllowedClaims -}}
+{{- if not (regexMatch "^[a-z0-9]([-a-z0-9]{0,61}[a-z0-9])?(\\.[a-z0-9]([-a-z0-9]{0,61}[a-z0-9])?)*$" (toString .)) -}}
+{{- fail (printf "cacheAllowedClaims: %q is not the name of a PersistentVolumeClaim" (toString .)) -}}
+{{- end -}}
+{{- end -}}
 {{- if .Values.defaultAgentImage -}}
 {{- $d := toString .Values.defaultAgentImage -}}
 {{- if not (regexMatch "^[^[:space:]]+:[A-Za-z0-9_][A-Za-z0-9._-]*@sha256:[0-9a-f]{64}$" $d) -}}

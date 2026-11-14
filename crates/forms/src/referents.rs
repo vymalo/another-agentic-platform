@@ -38,6 +38,15 @@ fn spec<T: DeserializeOwned>(s: &Stored) -> Option<T> {
     serde_json::from_value(s.spec.clone()).ok()
 }
 
+impl Referents {
+    /// The deployment's ceiling of the access tier (K1): a form above it is refused, as the operator would refuse it.
+    #[must_use]
+    pub fn with_max_access_tier(mut self, ceiling: aap_api::AccessTierCap) -> Self {
+        self.externals = self.externals.with_max_access_tier(ceiling);
+        self
+    }
+}
+
 /// The referents for a list of the store's shared objects, the operator's default image (`None`:
 /// [`DEFAULT_IMAGE_STANDIN`]) and the size classes of run pods the operator has (empty: it has no run pods, and
 /// an agent that asks for them is refused; otherwise [`RunPodSettings::offering`] stands for its settings, which

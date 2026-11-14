@@ -13,13 +13,16 @@ renders, projected onto the shape `tests/parity.rs` reads, so that `aap-domain` 
 | `coder-run-pods-shared.json` | `coder-affinity-token` with run pods on: two `affinity` workers on one shared ReadWriteMany volume (a run pod mounts the shared claim and may go anywhere), a GitHub token, a GitHub Enterprise sidecar host, a literal gateway URL, `extraEnv` | `cases/coder-run-pods-shared.yaml` (the egress proxy at **one replica**: no PodDisruptionBudget) |
 | `coder-run-pods-split.json` | `coder-split` with run pods on and the workers on one shared ReadWriteMany volume (the chart refuses run pods with several workers on per-replica volumes): the front makes no run pod and holds no token; the two workers do | `cases/coder-run-pods-split.yaml` |
 | `coder-run-pods-tuned.json` | run pods with every setting moved off its default (image, quota, times, node selector, tolerations, affinity, the network policy's ranges and an extra rule, a second class, and the egress proxy: three replicas, two ports, more hosts (one written in upper case and one already on the list), names that bypass it, other resources, and, D15d, a git sandbox with other resources, a larger `/tmp` and fewer commands at once) | `cases/coder-run-pods-tuned.yaml` |
+| `coder-cache.json` | **K1:** `coder` with `cache.existingClaim: package-cache`: the claim mounted at `/cache` of the pod that runs workers | `cases/coder-cache.yaml` |
+| `coder-tiers.json` | **K1:** `coder` with `accessTiers.max: edits`, `modelExtraBody`, `modelEchoReasoning` and `modelContextWindow` | `cases/coder-tiers.yaml` |
+| `coder-run-pods-cache.json` | **K1:** `coder-run-pods` with the cache: the run pod template mounts it and the admission policy admits its claim as the second one | `cases/coder-run-pods-cache.yaml` |
 | `chat-env.json` | `adam-agent` for `examples/chat.yaml`. **Written by hand, not rendered**: the chart renders `adam-coder` only. Derived from `bin/adam-agent/README.md` and `docker/coder/Dockerfile`; *verified 2026-10-05 by reading them, not by running the binary* | |
 
 Each rendered file records where it came from (`source`: repository, full revision, chart, values file,
-helm version). Revision: `581aeed75e56f903b2a9f59217ea9dcd449c8466` (`581aeed`, adam-rs `main` on 2026-10-27: the coder's local git runs
+helm version). Revision: `4bc6742deca699a5e25fb07d892b5ce7d4a42e25` (`4bc6742`, adam-rs `main` on 2026-11-14, the last commit of its history to touch `deploy/coder`, a bump of the image tag, after `3eca052`). The goldens were at `581aeed` (adam-rs `main` on 2026-10-27: the coder's local git runs
 in a sidecar with no secret, adam-rs [#136](https://github.com/vymalo/another-adam-rs/pull/136) (the binaries) and
-[#137](https://github.com/vymalo/another-adam-rs/pull/137) (the chart), its ADR 0041, open decision 6; `deploy/coder` did not change after it, and
-the commits that follow only bump `deploy/` tags). The goldens were at `7598255` (run pods reach the internet only through the egress proxy,
+[#137](https://github.com/vymalo/another-adam-rs/pull/137) (the chart), its ADR 0041, open decision 6; `deploy/coder` did not change after it until the revision above, K1's), and
+at `7598255` (run pods reach the internet only through the egress proxy,
 [#134](https://github.com/vymalo/another-adam-rs/pull/134) and [#135](https://github.com/vymalo/another-adam-rs/pull/135), its ADR 0042) in slice D15c, at
 `3f714d0` (the coder refuses to start with a GitHub App key file beside local commands unless it is accepted by name,
 [#131](https://github.com/vymalo/another-adam-rs/pull/131)) from slice D15a to slice D15c, and at `0391809` (the revision §59a cites) before.
@@ -31,6 +34,16 @@ is the revision, `GIT_SANDBOX_SOCKET` (after `RUN_POD_WAIT_SECS`), two mounts of
 alone). (Earlier, *verified 2026-10-27*: between `3f714d0` and `7598255` the three cases without run pods differed by the revision alone, and the four
 with them by the six proxy variables, the run pods' network policy and `runPods.egressProxy`; *verified 2026-10-26*: between `0391809` and `3f714d0` the
 three first cases differed by the two keys the projection gained (`serviceAccount`, `automountServiceAccountToken` of each pod) and the revision.)
+
+## K1: the cache and the tiers
+
+Slice K1 (2026-11-14) ported adam-rs's `model.extraBody`, `model.echoReasoning`, `model.contextWindow`, `coder.maxAccessTier` and
+`environment.cache.existingClaim`, and holds them by three cases rendered from the chart (*rendered 2026-11-14*, helm v3.16.3): `coder-cache` (the
+coder with `cache.existingClaim`), `coder-tiers` (`MAX_ACCESS_TIER` from `accessTiers.max`, and the model's three variables) and
+`coder-run-pods-cache` (run pods with the cache: the coder's mount and volume, the run pod template's, and the admission policy that admits a second claim).
+The chart's own `cache.create` (it makes a claim for the release) is **not** ported: an `AgentConfig` names a claim it does not own, and
+the operator makes none. *Verified 2026-11-14*: moving the revision from `581aeed` to `4bc6742` changed the seven existing goldens by the revision and the helm
+version alone (whatever else changed in `deploy/coder` since `581aeed` is what the three new cases show: nothing of the seven moved), so **the env contract of the seven cases did not move**.
 
 ## Regenerating them
 
@@ -87,7 +100,7 @@ And these are not compared, because they are structure or the chart's own busine
   it on the workers only. **`aap-domain` does not refuse an App coder with no run pods** (§60a, "D15a built": the image the
   chart pins, `9a1fd4e`, predates the refusal, and refusing would make every such service `ConfigInvalid` at the operator's next
   upgrade); an image that includes #131 exits 78 with it, and the remedy is `runPods` or that variable.
-* **Run pods (D15a).** `tests/parity.rs` compares the template of each of the four run pod cases (the Pod, its env, volumes, security,
+* **Run pods (D15a).** `tests/parity.rs` compares the template of each of the five run pod cases (the Pod, its env, volumes, security,
   affinity and the account of each workload) with the chart's. The rest of `runPods` in the goldens (quota, priority class, network policy,
   account, Role, binding, admission policy and its binding, and since D15c the six objects of the egress proxy) is compared in `aap-runtime-kubernetes` (`tests/run_pods_parity.rs`) and not here,
   because the operator makes them as objects and the chart's policy and Role are written once for every agent. What differs there, on purpose:
@@ -114,6 +127,7 @@ And these are not compared, because they are structure or the chart's own busine
   size 0 has no limit); (4) the sandbox is always on with run pods, in both charts (no switch); (5) the chart renders the sandbox with `imagePullPolicy` of the
   release, the operator with none for either container (as for the coder's). `automountServiceAccountToken` was `true` for the workers of a run pods case and
   is `false` now in the chart and in the operator.
+* **The access tier ceiling and `$` (K1).** The operator has a ceiling the chart does not (`maxAccessTier`, AD-050): with the default (`auto`) nothing differs, but with a ceiling below `auto` a config that names no tier gets `MAX_ACCESS_TIER` set to the ceiling and the chart renders nothing for it; no golden sets one (`tests/examples.rs`, `an_agent_that_asks_for_no_tier_gets_the_ceiling_when_it_is_below_auto`). And every `$` of `model.extraBody` is doubled in the variable, because the kubelet expands `$(VAR)` in a literal and turns `$$` into `$` (the chart renders the JSON as it is): a body with no `$` is the same in both, and no golden has one (`extra_body_reaches_the_process_as_the_json_the_config_says`).
 * **The coder container's resources with run pods on.** The coder chart replaces them with `runPods.coderResources` (a smaller container: the commands
   run elsewhere). The operator does not swap them: a config's `environment.resources` are the coder's, and **the four cases set the config's to the
   chart's `coderResources`** (`tests/parity.rs`, `run_pods_case`) so that the comparison is of the rest. A deployment that wants the smaller coder sets it in

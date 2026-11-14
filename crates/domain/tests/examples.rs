@@ -5,12 +5,14 @@
 
 mod common;
 
+use aap_api::AccessTierCap;
+use aap_domain::Externals;
 use aap_domain::contract::env::{self, OPERATOR_SET};
 use aap_ports::{
     DeletionPolicy, EnvValue, Role, RuntimeSpec, SecretRef, Sharing, StoreKind, VolumeSource,
     Workload,
 };
-use common::{must_resolve, remove, set};
+use common::{assert_issue, issues, issues_with, must_resolve, must_resolve_with, remove, set};
 use serde_json::{Value, json};
 
 fn env_of<'a>(w: &'a Workload, name: &str) -> Option<&'a EnvValue> {
@@ -853,5 +855,430 @@ fn nothing_outside_the_contract_is_set_unless_the_user_asked() {
                 assert!(known, "{name}: {} is not in the contract", e.name);
             }
         }
+    }
+}
+
+// ------------------------------------------------------------- K1: what adam-rs's operator accepts too
+
+#[test]
+fn extra_body_owned_member_is_config_invalid() {
+    for owned in ["model", "messages", "tools", "tool_choice", "stream"] {
+        let found = issues("coder", |_, c| {
+            set(
+                c,
+                "/spec/model/extraBody",
+                json!({ "reasoning_effort": "medium", owned: 1 }),
+            );
+        });
+        assert_issue(
+            &found,
+            &format!("spec.model.extraBody.{owned}"),
+            "the runtime owns this member",
+        );
+    }
+    // a member of its own is fine and is one canonical JSON text, sorted by key
+    let r = must_resolve("coder", |_, c| {
+        set(
+            c,
+            "/spec/model/extraBody",
+            json!({ "reasoning_effort": "medium", "chat_template_kwargs": { "thinking": true } }),
+        );
+    });
+    let w = workload(&r.runtime, "coder");
+    assert_eq!(
+        lit(w, env::MODEL_EXTRA_BODY),
+        r#"{"chat_template_kwargs":{"thinking":true},"reasoning_effort":"medium"}"#
+    );
+    // an empty object sets nothing
+    let r = must_resolve("coder", |_, c| set(c, "/spec/model/extraBody", json!({})));
+    unset(workload(&r.runtime, "coder"), env::MODEL_EXTRA_BODY);
+}
+
+#[test]
+fn echo_reasoning_and_context_window_are_variables_of_the_workers() {
+    let r = must_resolve("coder", |_, c| {
+        set(c, "/spec/model/echoReasoning", json!("reasoning_content"));
+        set(c, "/spec/model/contextWindow", json!(128_000));
+    });
+    let w = workload(&r.runtime, "coder");
+    assert_eq!(lit(w, env::MODEL_ECHO_REASONING), "reasoning_content");
+    assert_eq!(lit(w, env::MODEL_CONTEXT_WINDOW), "128000");
+    let r = must_resolve("coder", |_, c| {
+        set(c, "/spec/model/echoReasoning", json!("reasoning"))
+    });
+    assert_eq!(
+        lit(workload(&r.runtime, "coder"), env::MODEL_ECHO_REASONING),
+        "reasoning"
+    );
+    // none of the three on the pods of a plain coder
+    let r = must_resolve("coder", no_change);
+    let w = workload(&r.runtime, "coder");
+    for name in [
+        env::MODEL_EXTRA_BODY,
+        env::MODEL_ECHO_REASONING,
+        env::MODEL_CONTEXT_WINDOW,
+        env::MAX_ACCESS_TIER,
+    ] {
+        unset(w, name);
+    }
+    // the window is a number of tokens from 1 to 2^53 - 1
+    for bad in [0_i64, 9_007_199_254_740_992] {
+        let found = issues("coder", |_, c| {
+            set(c, "/spec/model/contextWindow", json!(bad))
+        });
+        assert_issue(&found, "spec.model.contextWindow", "a number of tokens");
+    }
+}
+
+fn ceiling(tier: AccessTierCap) -> Externals {
+    Externals::default().with_max_access_tier(tier)
+}
+
+fn cache_allowed() -> Externals {
+    Externals::default().with_cache_claims(["package-cache"])
+}
+
+fn the_cache(_: &mut Value, c: &mut Value) {
+    set(
+        c,
+        "/spec/environment/cache",
+        json!({ "existingClaim": "package-cache" }),
+    );
+}
+
+#[test]
+fn max_access_tier_is_on_every_role_of_a_coder_and_unset_by_default() {
+    for tier in ["plan", "edits", "auto", "bypass"] {
+        let r = must_resolve_with("coder", &ceiling(AccessTierCap::Bypass), |s, c| {
+            set(s, "/spec/scaling/topology", json!("split"));
+            set(c, "/spec/harness/adam/coder/maxAccessTier", json!(tier));
+        });
+        assert_eq!(r.runtime.workloads.len(), 2);
+        for w in &r.runtime.workloads {
+            assert_eq!(lit(w, env::MAX_ACCESS_TIER), tier, "{}", w.name);
+        }
+    }
+    let r = must_resolve("coder", no_change);
+    unset(workload(&r.runtime, "coder"), env::MAX_ACCESS_TIER);
+}
+
+#[test]
+fn a_tier_above_the_ceiling_is_config_invalid_naming_the_field() {
+    let order = [
+        AccessTierCap::Plan,
+        AccessTierCap::Edits,
+        AccessTierCap::Auto,
+        AccessTierCap::Bypass,
+    ];
+    for (i, ceiling_tier) in order.iter().enumerate() {
+        for (j, asked) in order.iter().enumerate() {
+            let externals = ceiling(*ceiling_tier);
+            let result = common::resolved_with("coder", &externals, |_, c| {
+                set(
+                    c,
+                    "/spec/harness/adam/coder/maxAccessTier",
+                    json!(asked.as_str()),
+                );
+            });
+            if j > i {
+                let found = result.expect_err("above the ceiling");
+                assert_issue(
+                    &found,
+                    "spec.harness.adam.coder.maxAccessTier",
+                    &format!(
+                        "above the ceiling of this operator, {:?}",
+                        ceiling_tier.as_str()
+                    ),
+                );
+            } else {
+                assert!(result.is_ok(), "{asked:?} under {ceiling_tier:?}");
+            }
+        }
+    }
+    // the default ceiling is `auto`: bypass needs the deployment's say-so
+    let found = issues("coder", |_, c| {
+        set(c, "/spec/harness/adam/coder/maxAccessTier", json!("bypass"))
+    });
+    assert_issue(&found, "maxAccessTier", "\"auto\"");
+}
+
+#[test]
+fn an_agent_that_asks_for_no_tier_gets_the_ceiling_when_it_is_below_auto() {
+    for (tier, want) in [
+        (AccessTierCap::Plan, Some("plan")),
+        (AccessTierCap::Edits, Some("edits")),
+        (AccessTierCap::Auto, None),
+        (AccessTierCap::Bypass, None),
+    ] {
+        let r = must_resolve_with("coder", &ceiling(tier), |_, _| {});
+        let w = workload(&r.runtime, "coder");
+        match want {
+            Some(t) => assert_eq!(lit(w, env::MAX_ACCESS_TIER), t),
+            None => unset(w, env::MAX_ACCESS_TIER),
+        }
+    }
+    // and every role of a split coder
+    let r = must_resolve_with("coder", &ceiling(AccessTierCap::Plan), |s, _| {
+        set(s, "/spec/scaling/topology", json!("split"))
+    });
+    for w in &r.runtime.workloads {
+        assert_eq!(lit(w, env::MAX_ACCESS_TIER), "plan", "{}", w.name);
+    }
+}
+
+#[test]
+fn cache_mounts_at_slash_cache() {
+    let r = must_resolve_with("coder", &cache_allowed(), the_cache);
+    let w = workload(&r.runtime, "coder");
+    let volume = w.volumes.iter().find(|v| v.name == "cache").unwrap();
+    assert_eq!(
+        volume.source,
+        VolumeSource::ExistingClaim {
+            name: "package-cache".to_owned()
+        }
+    );
+    let mount = w
+        .container
+        .mounts
+        .iter()
+        .find(|m| m.volume == "cache")
+        .unwrap();
+    assert_eq!((mount.path.as_str(), mount.read_only), ("/cache", false));
+    // the claim is the user's: no claim of the service's is made for it
+    assert!(!w.volumes.iter().any(
+        |v| matches!(&v.source, VolumeSource::Persistent(p) if p.sharing == Sharing::Shared)
+            && v.name == "cache"
+    ));
+    // a split front runs no toolchain and has no cache
+    let r = must_resolve_with("coder", &cache_allowed(), |s, c| {
+        set(s, "/spec/scaling/topology", json!("split"));
+        the_cache(s, c);
+    });
+    let front = workload(&r.runtime, "coder-front");
+    assert!(front.volumes.iter().all(|v| v.name != "cache"));
+    let worker = workload(&r.runtime, "coder");
+    assert!(worker.volumes.iter().any(|v| v.name == "cache"));
+}
+
+#[test]
+fn with_no_claim_listed_no_agent_may_have_a_cache_and_the_refusal_says_how_to_allow_one() {
+    let found = issues("coder", the_cache);
+    assert_issue(
+        &found,
+        "spec.environment.cache.existingClaim",
+        "this operator allows no package cache: its deployment lists the claims that may be one (the operator chart's `cache.allowedClaims`",
+    );
+    assert_issue(&found, "existingClaim", "ask whoever runs the operator");
+    // a config with no cache is what it always was
+    let r = must_resolve("coder", no_change);
+    assert!(
+        workload(&r.runtime, "coder")
+            .volumes
+            .iter()
+            .all(|v| v.name != "cache")
+    );
+}
+
+#[test]
+fn a_claim_that_is_not_listed_is_refused_naming_the_list() {
+    let externals = Externals::default().with_cache_claims(["package-cache", "other-cache"]);
+    let found = issues_with("coder", &externals, |_, c| {
+        set(
+            c,
+            "/spec/environment/cache",
+            json!({ "existingClaim": "pictures" }),
+        )
+    });
+    assert_issue(
+        &found,
+        "spec.environment.cache.existingClaim",
+        "is not a claim this operator allows as a package cache; it allows \"other-cache\", \"package-cache\"",
+    );
+    // a listed one is fine
+    must_resolve_with("coder", &externals, |_, c| {
+        set(
+            c,
+            "/spec/environment/cache",
+            json!({ "existingClaim": "other-cache" }),
+        )
+    });
+}
+
+#[test]
+fn an_operators_claim_is_never_a_package_cache_whatever_the_list_says() {
+    // The agent is `coder`, with the work volume `work`: its own claims, another agent's, and a database's.
+    let names = [
+        "work-coder-0",
+        "work-coder-1",
+        "coder-work",
+        "coder-db-1",
+        "coder-db-2-wal",
+        "coder-db",
+        "work-other-0",
+        "other-work",
+        "other-db-1",
+        "other-db",
+        "data-other-3",
+        "work-anything",
+    ];
+    let externals = Externals::default().with_cache_claims(names);
+    for name in names {
+        let found = issues_with("coder", &externals, |_, c| {
+            set(
+                c,
+                "/spec/environment/cache",
+                json!({ "existingClaim": name }),
+            )
+        });
+        assert_issue(&found, "spec.environment.cache.existingClaim", name);
+    }
+    // a name nobody makes is fine, listed
+    must_resolve_with(
+        "coder",
+        &Externals::default().with_cache_claims(["package-cache", "ci-cache"]),
+        |_, c| {
+            set(
+                c,
+                "/spec/environment/cache",
+                json!({ "existingClaim": "ci-cache" }),
+            )
+        },
+    );
+}
+
+#[test]
+fn the_cache_claim_is_a_name_and_its_volume_and_path_are_the_operators() {
+    let found = issues_with(
+        "coder",
+        &Externals::default().with_cache_claims(["Not A Name"]),
+        |_, c| {
+            set(
+                c,
+                "/spec/environment/cache",
+                json!({ "existingClaim": "Not A Name" }),
+            )
+        },
+    );
+    assert_issue(
+        &found,
+        "spec.environment.cache.existingClaim",
+        "PersistentVolumeClaim",
+    );
+    let found = issues_with("coder", &cache_allowed(), |s, c| {
+        the_cache(s, c);
+        set(
+            c,
+            "/spec/environment/volumes/1",
+            json!({ "name": "cache", "scope": "agent", "mountPath": "/data/cache", "source": { "persistent": { "size": "1Gi" } } }),
+        );
+    });
+    assert_issue(&found, "volumes[cache]", "uses this volume name itself");
+    // a volume at the cache's directory, or under it, is refused: whichever directory of the image's caches it is
+    for path in [
+        "/cache",
+        "/cache/cargo",
+        "/cache/npm",
+        "/cache/pnpm-store",
+        "/cache/a/b",
+    ] {
+        let found = issues_with("coder", &cache_allowed(), |s, c| {
+            the_cache(s, c);
+            set(
+                c,
+                "/spec/environment/volumes/1",
+                json!({ "name": "pkgs", "scope": "agent", "mountPath": path, "source": { "persistent": { "size": "1Gi" } } }),
+            );
+        });
+        assert_issue(&found, "volumes[pkgs].mountPath", "overlaps /cache");
+    }
+    // and one beside it is not
+    must_resolve_with("coder", &cache_allowed(), |s, c| {
+        the_cache(s, c);
+        set(
+            c,
+            "/spec/environment/volumes/1",
+            json!({ "name": "pkgs", "scope": "agent", "mountPath": "/cachet", "source": { "persistent": { "size": "1Gi" } } }),
+        );
+    });
+}
+
+// ---- the size of extraBody, and what the kubelet makes of it
+
+#[test]
+fn extra_body_is_at_most_16_kib_of_json() {
+    // 70 members would break the schema's bound: one big member does it for validate
+    let big = "x".repeat(16 * 1024);
+    let found = issues("coder", |_, c| {
+        set(c, "/spec/model/extraBody", json!({ "k": big }))
+    });
+    assert_issue(&found, "spec.model.extraBody", "at most 16384");
+    let ok = "x".repeat(16 * 1024 - 20);
+    must_resolve("coder", |_, c| {
+        set(c, "/spec/model/extraBody", json!({ "k": ok }))
+    });
+}
+
+/// What the kubelet makes of an environment value: `$$` is `$`, `$(NAME)` is the variable's value (here, none are defined, so
+/// the reference is left as it is, which is what the kubelet does for an undefined one), and any other `$` is itself.
+fn kubelet_expands(value: &str) -> String {
+    let b = value.as_bytes();
+    let mut out = Vec::new();
+    let mut i = 0;
+    while i < b.len() {
+        if b[i] == b'$' && i + 1 < b.len() && b[i + 1] == b'$' {
+            out.push(b'$');
+            i += 2;
+        } else {
+            out.push(b[i]);
+            i += 1;
+        }
+    }
+    String::from_utf8(out).unwrap()
+}
+
+#[test]
+fn extra_body_reaches_the_process_as_the_json_the_config_says() {
+    for body in [
+        json!({ "a": "$(HOME)" }),
+        json!({ "price": "$5", "x": "$$", "y": "$$$", "z": "$(MODEL_API_KEY)$" }),
+        json!({ "reasoning_effort": "medium" }),
+    ] {
+        let r = must_resolve("coder", |_, c| {
+            set(c, "/spec/model/extraBody", body.clone())
+        });
+        let written = lit(workload(&r.runtime, "coder"), env::MODEL_EXTRA_BODY);
+        let read: Value = serde_json::from_str(&kubelet_expands(&written)).unwrap();
+        assert_eq!(read, body, "{written}");
+    }
+    // a body with no `$` is the same text the chart renders
+    let r = must_resolve("coder", |_, c| {
+        set(
+            c,
+            "/spec/model/extraBody",
+            json!({ "reasoning_effort": "medium" }),
+        )
+    });
+    assert_eq!(
+        lit(workload(&r.runtime, "coder"), env::MODEL_EXTRA_BODY),
+        r#"{"reasoning_effort":"medium"}"#
+    );
+}
+
+#[test]
+fn extra_env_may_not_set_k1_variables() {
+    for name in [
+        "MAX_ACCESS_TIER",
+        "MODEL_EXTRA_BODY",
+        "MODEL_ECHO_REASONING",
+        "MODEL_CONTEXT_WINDOW",
+    ] {
+        let found = issues("coder", |_, c| {
+            set(c, &format!("/spec/extraEnv/{name}"), json!("x"))
+        });
+        assert_issue(
+            &found,
+            &format!("spec.extraEnv.{name}"),
+            "the operator sets this variable itself",
+        );
     }
 }

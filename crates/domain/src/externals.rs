@@ -7,7 +7,7 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 
-use aap_api::{AgentConfig, ModelEndpoint, ToolProvider};
+use aap_api::{AccessTierCap, AgentConfig, ModelEndpoint, ToolProvider};
 
 use crate::run_pods::RunPodSettings;
 use crate::syntax::is_dns_subdomain;
@@ -31,6 +31,13 @@ pub struct Externals {
     /// What the operator's deployment says about run pods (`RUN_PODS_FILE`, slice D15a). `None`: this operator
     /// has no run pods (the chart's `runPods.enabled` is false), and a config that asks for them is invalid.
     pub run_pods: Option<RunPodSettings>,
+    /// The claims the deployment allows as a package cache (`CACHE_ALLOWED_CLAIMS`, K1): an `environment.cache` names one of
+    /// these or is `ConfigInvalid`. **Empty (the default): no agent may have a cache**, because a claim of the namespace that
+    /// is not the cache's (another agent's data, this agent's own work volume) must not be mountable by whoever writes a config.
+    pub cache_claims: BTreeSet<String>,
+    /// The highest access tier a config may ask for (`AGENT_MAX_ACCESS_TIER`, K1), `auto` by default, which is the coder's own.
+    /// A config above it is `ConfigInvalid`; one that names none gets the ceiling when it is below `auto`.
+    pub max_access_tier: AccessTierCap,
 }
 
 impl Externals {
@@ -38,6 +45,24 @@ impl Externals {
     #[must_use]
     pub fn with_default_image(mut self, image: impl Into<String>) -> Self {
         self.default_image = Some(image.into());
+        self
+    }
+
+    /// The claims the deployment allows as a package cache.
+    #[must_use]
+    pub fn with_cache_claims<I, S>(mut self, claims: I) -> Self
+    where
+        I: IntoIterator<Item = S>,
+        S: Into<String>,
+    {
+        self.cache_claims = claims.into_iter().map(Into::into).collect();
+        self
+    }
+
+    /// The deployment's ceiling of the access tier.
+    #[must_use]
+    pub fn with_max_access_tier(mut self, ceiling: AccessTierCap) -> Self {
+        self.max_access_tier = ceiling;
         self
     }
 

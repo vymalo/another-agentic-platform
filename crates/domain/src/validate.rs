@@ -4,7 +4,10 @@
 use std::collections::BTreeSet;
 use std::fmt;
 
-use aap_api::{AgentConfig, AgentService, Binary, SecretKeyRef, Tools, Topology, VolumeScope};
+use aap_api::{
+    AgentConfig, AgentService, Binary, MAX_CONTEXT_WINDOW, SecretKeyRef, Tools, Topology,
+    VolumeScope,
+};
 
 use crate::contract::{self, env};
 use crate::externals::Externals;
@@ -84,7 +87,113 @@ pub(crate) fn check_all(
     v.0.extend(read.issues.iter().cloned());
     check_config(&mut v, &read.config, &read.origins);
     check_run_pods_offered(&mut v, &read.config, externals);
+    check_deployment_limits(&mut v, service, &read.config, externals);
     if v.0.is_empty() { Ok(()) } else { Err(v.0) }
+}
+
+/// Why a claim name is the operator's or an operator's dependency's, and so never a package cache, whatever the deployment
+/// lists: the claim a StatefulSet makes for a pod of an agent (`<volume>-<service>-<n>`, so any name ending in `-<n>`), the
+/// claims of a CloudNativePG cluster (`<service>-db-<n>`, `<service>-db-<n>-wal`), a shared claim (`<service>-<volume>`, which
+/// for the volume `work` is `<service>-work`) and the work volume's usual name. `service` and `volumes` are this agent's.
+pub(crate) fn operator_claim_reason(
+    claim: &str,
+    service: &str,
+    volumes: &[&str],
+) -> Option<&'static str> {
+    let ordinal = |s: &str| {
+        s.rsplit_once('-')
+            .is_some_and(|(_, n)| !n.is_empty() && n.bytes().all(|b| b.is_ascii_digit()))
+    };
+    if volumes
+        .iter()
+        .any(|v| claim == format!("{service}-{v}") || claim.starts_with(&format!("{v}-{service}-")))
+    {
+        return Some("a claim of this agent's own volumes");
+    }
+    if claim == format!("{service}-db") || claim.starts_with(&format!("{service}-db-")) {
+        return Some("a claim of this agent's own database");
+    }
+    if ordinal(claim) || claim.strip_suffix("-wal").is_some_and(ordinal) {
+        return Some(
+            "named like a claim a StatefulSet or a CloudNativePG cluster makes (`<name>-<n>`, `<name>-<n>-wal`): the data of an agent",
+        );
+    }
+    if claim.starts_with("work-")
+        || claim.ends_with("-work")
+        || claim.contains("-db-")
+        || claim.ends_with("-db")
+    {
+        return Some(
+            "named like a work volume or a database volume of an agent (`work-<x>-<n>`, `<x>-work`, `<x>-db-<n>`)",
+        );
+    }
+    None
+}
+
+/// The rules the deployment makes (K1, §59a): the package cache's claim is one the deployment lists, and the access tier is
+/// at most its ceiling.
+fn check_deployment_limits(
+    v: &mut Issues,
+    service: &AgentService,
+    cfg: &AgentConfig,
+    externals: &Externals,
+) {
+    let me = "AgentConfig";
+    if let Some(cache) = &cfg.spec.environment.cache {
+        let at = format!("{me} spec.environment.cache.existingClaim");
+        let claim = cache.existing_claim.as_str();
+        let name = service.metadata.name.as_deref().unwrap_or_default();
+        let volumes: Vec<&str> = cfg
+            .spec
+            .environment
+            .volumes
+            .iter()
+            .map(|v| v.name.as_str())
+            .collect();
+        if let Some(why) = operator_claim_reason(claim, name, &volumes) {
+            v.add(
+                &at,
+                format!("{claim:?} is {why}: a package cache is a claim of its own, which nothing else of the namespace uses"),
+            );
+        }
+        if externals.cache_claims.is_empty() {
+            v.add(
+                &at,
+                "this operator allows no package cache: its deployment lists the claims that may be one (the operator chart's `cache.allowedClaims`, `CACHE_ALLOWED_CLAIMS`); ask whoever runs the operator to list a claim made for it, or remove `environment.cache`",
+            );
+        } else if !externals.cache_claims.contains(claim) {
+            v.add(
+                &at,
+                format!(
+                    "{claim:?} is not a claim this operator allows as a package cache; it allows {}",
+                    externals
+                        .cache_claims
+                        .iter()
+                        .map(|c| format!("{c:?}"))
+                        .collect::<Vec<_>>()
+                        .join(", ")
+                ),
+            );
+        }
+    }
+    if let Some(asked) = cfg
+        .spec
+        .harness
+        .adam
+        .coder
+        .as_ref()
+        .and_then(|c| c.max_access_tier)
+        && asked > externals.max_access_tier
+    {
+        v.add(
+            format!("{me} spec.harness.adam.coder.maxAccessTier"),
+            format!(
+                "{:?} is above the ceiling of this operator, {:?} (its `maxAccessTier`, `AGENT_MAX_ACCESS_TIER`): ask for that tier or a lower one",
+                asked.as_str(),
+                externals.max_access_tier.as_str()
+            ),
+        );
+    }
 }
 
 /// What a config that asks for run pods needs of the deployment: settings, and the size class among them.
@@ -384,6 +493,35 @@ fn check_config(v: &mut Issues, cfg: &AgentConfig, origins: &Origins) {
             format!("{me} spec.model"),
             "needs an endpointRef, or both a baseUrl and an apiKeySecretRef",
         ),
+    }
+
+    if let Some(body) = &model.extra_body {
+        let size = crate::digest::canonical_json(&serde_json::Value::Object(body.clone())).len();
+        if size > aap_api::MAX_EXTRA_BODY_BYTES {
+            v.add(
+                format!("{me} spec.model.extraBody"),
+                format!(
+                    "{size} bytes of JSON: at most {} (it is one environment variable of the pod)",
+                    aap_api::MAX_EXTRA_BODY_BYTES
+                ),
+            );
+        }
+        for key in contract::MODEL_EXTRA_BODY_OWNED {
+            if body.contains_key(key) {
+                v.add(
+                    format!("{me} spec.model.extraBody.{key}"),
+                    "the runtime owns this member of every request: extraBody may not set it",
+                );
+            }
+        }
+    }
+    if let Some(window) = model.context_window
+        && !(1..=MAX_CONTEXT_WINDOW).contains(&window)
+    {
+        v.add(
+            format!("{me} spec.model.contextWindow"),
+            format!("{window}: a number of tokens from 1 to {MAX_CONTEXT_WINDOW} (adam exits 78 on anything else), or leave it out"),
+        );
     }
 
     check_tools(v, cfg, origins);
@@ -878,6 +1016,15 @@ fn check_environment(v: &mut Issues, cfg: &AgentConfig) {
         v.add(format!("{me} {field}"), message);
     }
 
+    if let Some(cache) = &e.cache
+        && !is_dns_subdomain(&cache.existing_claim)
+    {
+        v.add(
+            format!("{me} spec.environment.cache.existingClaim"),
+            "the name of a PersistentVolumeClaim: lower-case letters, digits, `-` and `.`, at most 253 characters",
+        );
+    }
+    let cache_on = e.cache.is_some();
     let mut names = BTreeSet::new();
     let mut mounts: Vec<&str> = Vec::new();
     for vol in &e.volumes {
@@ -887,7 +1034,9 @@ fn check_environment(v: &mut Issues, cfg: &AgentConfig) {
                 &at,
                 "a volume's name is a DNS label: a claim is named after it",
             );
-        } else if contract::RESERVED_VOLUMES.contains(&vol.name.as_str()) {
+        } else if contract::RESERVED_VOLUMES.contains(&vol.name.as_str())
+            || (cache_on && vol.name == contract::CACHE_VOLUME)
+        {
             v.add(&at, "the operator uses this volume name itself");
         }
         if !names.insert(vol.name.as_str()) {
@@ -905,7 +1054,8 @@ fn check_environment(v: &mut Issues, cfg: &AgentConfig) {
                 "an absolute path with no empty, `.` or `..` segment",
             );
         } else {
-            for reserved in contract::RESERVED_MOUNTS {
+            let cache_dir = cache_on.then_some(contract::CACHE_DIR);
+            for reserved in contract::RESERVED_MOUNTS.iter().copied().chain(cache_dir) {
                 if paths_overlap(&vol.mount_path, reserved) {
                     v.add(
                         format!("{at}.mountPath"),

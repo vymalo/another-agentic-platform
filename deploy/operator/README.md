@@ -56,6 +56,8 @@ kind is not installed, until they are there. Never run an operator older than D1
 [`deploy/operator-crds`](../operator-crds/README.md#upgrading), with the reasons. The two Argo CD Applications sync apart:
 sequence them with the CRDs first (a sync wave, or their Application first).
 
+**K1, run pods:** the admission policy reads the parameter `claims` of each agent's `<service>-run-pods-policy` ConfigMap and falls back to `claim` when there is none, which is what an operator before K1 wrote: upgrade the chart and the operator's image together (one release). Between the new policy and the new operator's first pass over an agent its run pods are admitted for the work claim alone, not refused; the pass rewrites the ConfigMap, whatever the agent's digest.
+
 ## Values
 
 | Value | Default | What |
@@ -63,6 +65,8 @@ sequence them with the CRDs first (a sync wave, or their Application first).
 | `image.repository`, `image.tag`, `image.digest`, `image.pullPolicy` | `ghcr.io/vymalo/another-agentic-platform/operator`, `sha-0000000`, none, `IfNotPresent` | The tag is **written by CI only** (`bump-tag.sh`), never by hand. `latest` and a malformed digest are refused |
 | `imagePullSecrets` | `[]` | For a private package ([below](#the-image)) |
 | `watchNamespace` | the release's namespace | The one namespace watched; the `Role` and `RoleBinding` are made there. A name, never a list or a wildcard: **there is no value that gives the operator a `ClusterRole`** |
+| `cacheAllowedClaims` | `[]` | **K1:** the claims an `AgentConfig` may name as its package cache; `CACHE_ALLOWED_CLAIMS`. Empty: no agent may have a cache. Names the operator makes are refused whatever is listed (AD-049) |
+| `maxAccessTier` | `auto` | **K1:** the highest access tier a config or a dashboard form may ask for; `AGENT_MAX_ACCESS_TIER` and, with the API on, its `defaults.maxAccessTier`. `auto` renders nothing (AD-050) |
 | `defaultAgentImage` | `ghcr.io/vymalo/another-adam-rs/coder:sha-9a1fd4e@sha256:c3c178b7d73599f40d53f798616e510346abd3300a622b09b2bc233109f12b44` | The image of an agent whose `AgentConfig` names none (`DEFAULT_AGENT_IMAGE`, `operator run --default-agent-image`; AD-029): the coder image, **by tag and digest** (the chart refuses a value without both, and `latest`). Empty: no variable, no default, and such an agent is `ConfigInvalid`. **Not** moved by `bump-tag.sh`: [below](#the-default-agent-image) |
 | `runPods.enabled` and the rest of `runPods.*`, `runPodClasses.*` | off | The operator sets up run pods for a coder that asks for them (`coder.runPods.sizeClass`): [its own section](#run-pods) lists every value. On, the operator reads them from `RUN_PODS_FILE`, and the chart refuses what the operator would refuse at start |
 | `storeCnpg` | `true` | The right on CloudNativePG `Cluster`s (`get patch create delete`). The image is built with the `store-cnpg` feature; `false` is for a cluster that has no CloudNativePG |
@@ -202,7 +206,7 @@ The chart writes the operator's settings (`runPods`, `runPodClasses`, and the na
 | Network policy | the operator | NetworkPolicy `<service>-run-pods` | Selects the run pods of the service by label: no ingress, egress to DNS and to the egress proxy's pods on 3128 (and `extraEgress`), nothing else |
 | Egress proxy | the operator | Deployment, Service, ServiceAccount, PodDisruptionBudget, NetworkPolicy `<service>-egress`, ConfigMap `<service>-egress-allow` | The one way out (D15c, adam-rs ADR 0042): `adam-egress` from the agent's own image accepts `CONNECT host:443` to the allow-listed hosts and nothing else, resolves the name itself and connects to public IPv4 addresses only. Its policy admits the run pods alone and reaches DNS and the internet on 443 except the blocked ranges. No token, a read-only root file system, uid 10001. Made before the policy that names it and before the right to make pods; removed before the run pods' policy |
 | Right to make pods | the operator | RoleBinding `<service>-run-pods` to the Role below | Made last, removed first |
-| Guard's parameters | the operator | ConfigMap `<service>-run-pods-policy`, labelled `agents.vymalo.com/run-pods-policy` | The account, the labels, the images, the claim, the Secret key; read by the policy |
+| Guard's parameters | the operator | ConfigMap `<service>-run-pods-policy`, labelled `agents.vymalo.com/run-pods-policy` | The account, the labels, the images, the claims (`claims`, one per line: the work volume's and, with a package cache (K1), the cache's; `claim` is the work volume's alone), the Secret key; read by the policy. **An upgrade from before K1:** until the operator has rewritten an agent's parameters (at its start) the policy cannot read `claims` and refuses that agent's run pods (it fails closed): they are made again at the next attempt |
 | Role | **the chart** | `<fullname>-run-pods` | `pods` create, delete, get, list, watch; `pods/exec` create, get. Nothing else |
 | PriorityClass | **the chart** | `<fullname>-<namespace>-run` | A quota cannot select pods by label, it can by priority class. Cluster-scoped |
 | Admission policy and binding | **the chart** | `<fullname>-<namespace>-run-pods` | One policy for every agent: the 9 rules of the coder chart's policy, with the values read from the parameters of the account that makes the pod. Cluster-scoped |

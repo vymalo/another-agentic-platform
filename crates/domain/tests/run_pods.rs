@@ -1402,3 +1402,55 @@ fn the_template_names_the_model_key_by_reference_and_holds_no_other_secret() {
     // The init container has none.
     assert!(pod["spec"]["initContainers"][0].get("env").is_none());
 }
+
+// ---------------------------------------------------------------- K1: the package cache and the guard
+
+#[test]
+fn the_guard_admits_the_cache_claim_only_when_the_deployment_lists_it_and_never_another() {
+    let cache = |_: &mut Value, c: &mut Value| {
+        on(&mut Value::Null, c);
+        set(
+            c,
+            "/spec/environment/cache",
+            json!({ "existingClaim": "package-cache" }),
+        );
+    };
+    // listed: the guard's second claim, and the template mounts it
+    let listed = externals().with_cache_claims(["package-cache"]);
+    let r = must_resolve_with("coder", &listed, cache);
+    let guard = &r.runtime.run_pods.as_ref().unwrap().guard;
+    assert_eq!(guard.claim, "work-coder-0");
+    assert_eq!(guard.cache_claim.as_deref(), Some("package-cache"));
+    // not listed (another claim listed, or none): the config is refused, so no spec has the claim in a guard
+    for other in [vec!["other-cache"], vec![]] {
+        let found = common::issues_with("coder", &externals().with_cache_claims(other), cache);
+        common::assert_issue(
+            &found,
+            "spec.environment.cache.existingClaim",
+            "package cache",
+        );
+    }
+    // no cache: no second claim, and the serialised spec says nothing of it
+    let r = resolved_on();
+    let guard = &r.runtime.run_pods.as_ref().unwrap().guard;
+    assert_eq!(guard.cache_claim, None);
+    assert!(
+        !serde_json::to_string(&r.runtime)
+            .unwrap()
+            .contains("cache_claim")
+    );
+    // a claim of the agent's own, even listed, is never the guard's second one
+    let found = common::issues_with(
+        "coder",
+        &externals().with_cache_claims(["work-coder-0"]),
+        |s, c| {
+            on(s, c);
+            set(
+                c,
+                "/spec/environment/cache",
+                json!({ "existingClaim": "work-coder-0" }),
+            );
+        },
+    );
+    common::assert_issue(&found, "existingClaim", "work-coder-0");
+}
