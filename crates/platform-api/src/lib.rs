@@ -22,6 +22,7 @@ mod cors;
 mod etag;
 mod handlers;
 mod metrics;
+pub mod openapi;
 mod problem;
 mod router;
 mod routes;

@@ -41,6 +41,16 @@ where
     )
 }
 
+/// `GET /v1/openapi.json`: the document generated from the table of routes (`crate::openapi`).
+pub(crate) async fn openapi() -> Response {
+    let mut response = axum::response::IntoResponse::into_response(crate::openapi::served());
+    response.headers_mut().insert(
+        axum::http::header::CONTENT_TYPE,
+        axum::http::HeaderValue::from_static("application/json"),
+    );
+    response
+}
+
 /// The Secret keys a form may name. Never a value.
 pub(crate) async fn secret_keys<O, A>(state: St<O, A>) -> Result<Response, Problem>
 where

@@ -81,6 +81,22 @@ where
     Ok(with_etag(response, &agent.etag()))
 }
 
+/// `GET /v1/agents/{name}/events`: the events about the agent's objects, newest first, at most 100 (K8). A member of an object,
+/// like every list answer; the texts are as the cluster wrote them, cleaned and cut by the port, and **never logged**.
+pub(crate) async fn events<O, A>(state: St<O, A>, Name(name): Name) -> Result<Response, Problem>
+where
+    O: AgentObjects + 'static,
+    A: Authenticator + 'static,
+{
+    let events = state
+        .0
+        .objects
+        .agent_events(&name)
+        .await
+        .map_err(|e| read_failed(&e))?;
+    Ok(json(StatusCode::OK, &json!({ "events": events })))
+}
+
 fn name_mismatch() -> Problem {
     Problem::validation(&[FormError {
         field: "name".to_owned(),

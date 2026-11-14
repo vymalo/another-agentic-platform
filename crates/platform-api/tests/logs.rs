@@ -40,6 +40,7 @@ const SENTINEL_KEY: &str = "key-sentinel-0b73";
 const SENTINEL_VALUE: &str = "value-sentinel-e2f6";
 const SENTINEL_PATH: &str = "path-sentinel-91ac";
 const SENTINEL_TITLE: &str = "title-sentinel-4477";
+const SENTINEL_EVENT: &str = "event-message-sentinel-62d0";
 
 #[tokio::test]
 async fn nothing_the_api_logs_holds_a_token_a_body_a_path_or_a_secret_key() {
@@ -136,6 +137,31 @@ async fn nothing_the_api_logs_holds_a_token_a_body_a_path_or_a_secret_key() {
             .code(),
         404
     );
+    // 200: the events of an agent. The answer holds a message the cluster wrote (a sentinel, which could be a secret), and
+    // the log holds none of it.
+    api.objects.seed_event(
+        "coder-me",
+        &aap_ports::testkit::EventSeed {
+            object_kind: "Deployment".into(),
+            object_name: "coder-me".into(),
+            event_type: "Warning".into(),
+            reason: "FailedCreate".into(),
+            message: format!("error: {SENTINEL_EVENT}"),
+            count: 1,
+            first_seen: "2026-11-14T10:00:00Z".into(),
+            last_seen: "2026-11-14T10:00:00Z".into(),
+        },
+    );
+    let r = api
+        .get("/v1/agents/coder-me/events")
+        .token(&admin)
+        .send()
+        .await;
+    assert_eq!(r.code(), 200, "{}", r.text());
+    assert!(
+        r.text().contains(SENTINEL_EVENT),
+        "the answer shows the message"
+    );
     // 412 and 428 and a 503.
     let r = api
         .put("/v1/agents/coder-me")
@@ -159,6 +185,7 @@ async fn nothing_the_api_logs_holds_a_token_a_body_a_path_or_a_secret_key() {
     // The log is not empty, and says what it should.
     assert!(log.contains("route=/v1/agents/{name}"), "{log}");
     assert!(log.contains("method=PUT"), "{log}");
+    assert!(log.contains("route=/v1/agents/{name}/events"), "{log}");
     assert!(
         log.contains("status=201") && log.contains("status=422") && log.contains("status=503"),
         "{log}"
@@ -182,6 +209,7 @@ async fn nothing_the_api_logs_holds_a_token_a_body_a_path_or_a_secret_key() {
         ("a secret's key", SENTINEL_KEY),
         ("a name from the path", SENTINEL_PATH),
         ("a title from the body", SENTINEL_TITLE),
+        ("an event's message", SENTINEL_EVENT),
     ] {
         assert!(!log.contains(sentinel), "{what} is in the log:\n{log}");
     }

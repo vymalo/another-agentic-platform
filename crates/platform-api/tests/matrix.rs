@@ -16,7 +16,7 @@ use axum::http::Method;
 use common::*;
 
 /// (method, template, the one permission it needs; `None`: any valid token).
-const EXPECTED: [(&str, &str, Option<&str>); 16] = [
+const EXPECTED: [(&str, &str, Option<&str>); 18] = [
     ("GET", "/v1/me", None),
     ("GET", "/v1/info", Some(AGENTS_READ)),
     ("GET", "/v1/agents", Some(AGENTS_READ)),
@@ -24,6 +24,8 @@ const EXPECTED: [(&str, &str, Option<&str>); 16] = [
     ("PUT", "/v1/agents/{name}", Some(AGENTS_WRITE)),
     ("DELETE", "/v1/agents/{name}", Some(AGENTS_WRITE)),
     ("GET", "/v1/agents/{name}/yaml", Some(AGENTS_READ)),
+    ("GET", "/v1/agents/{name}/events", Some(AGENTS_READ)),
+    ("GET", "/v1/openapi.json", Some(AGENTS_READ)),
     ("GET", "/v1/models", Some(AGENTS_READ)),
     ("GET", "/v1/models/{name}", Some(AGENTS_READ)),
     ("PUT", "/v1/models/{name}", Some(MODELS_WRITE)),
@@ -288,6 +290,8 @@ async fn a_method_the_path_does_not_serve_is_405_with_allow_and_asks_for_no_toke
         ("PATCH", "/v1/models/x", "GET, HEAD, PUT, DELETE"),
         ("DELETE", "/v1/me", "GET, HEAD"),
         ("DELETE", "/v1/agents/x/yaml", "GET, HEAD"),
+        ("PUT", "/v1/agents/x/events", "GET, HEAD"),
+        ("POST", "/v1/openapi.json", "GET, HEAD"),
         ("PUT", "/v1/secret-keys", "GET, HEAD"),
     ] {
         let r = api.request(method(verb), template).send().await;

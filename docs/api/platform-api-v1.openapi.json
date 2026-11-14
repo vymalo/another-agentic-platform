@@ -1,0 +1,3471 @@
+{
+  "components": {
+    "headers": {
+      "ETag": {
+        "description": "A strong entity-tag of the object (an agent's covers both its objects). Send it as `If-Match`. Opaque: only equality means anything.",
+        "schema": {
+          "type": "string"
+        }
+      },
+      "Location": {
+        "description": "The new object's path.",
+        "schema": {
+          "type": "string"
+        }
+      }
+    },
+    "parameters": {
+      "IfMatch": {
+        "description": "Replace: the `ETag` read, quoted and strong. Exactly one of `If-Match` and `If-None-Match: *` is sent; neither is a 428; both, a weak tag or `*` here is a 400 or a 412.",
+        "in": "header",
+        "name": "If-Match",
+        "required": false,
+        "schema": {
+          "type": "string"
+        }
+      },
+      "IfMatchRequired": {
+        "description": "The `ETag` read, quoted and strong. There is no unconditional delete: a client that holds none reads the object first. Absent, 428; stale, 412.",
+        "in": "header",
+        "name": "If-Match",
+        "required": true,
+        "schema": {
+          "type": "string"
+        }
+      },
+      "IfNoneMatch": {
+        "description": "Create: `*`. The object must not exist (409 `already-exists` if it does).",
+        "in": "header",
+        "name": "If-None-Match",
+        "required": false,
+        "schema": {
+          "enum": [
+            "*"
+          ],
+          "type": "string"
+        }
+      },
+      "name": {
+        "description": "The object's name: lower-case words and dashes (an agent's is at most 40 characters, a model's 63, a tool server's 32). A name no object has is a 404.",
+        "in": "path",
+        "name": "name",
+        "required": true,
+        "schema": {
+          "minLength": 1,
+          "type": "string"
+        }
+      }
+    },
+    "responses": {
+      "Problem400": {
+        "content": {
+          "application/problem+json": {
+            "examples": {
+              "invalid-body": {
+                "value": {
+                  "detail": "the body is not a JSON form of this route",
+                  "status": 400,
+                  "title": "The body is not a form",
+                  "type": "urn:vymalo:agents:problem:invalid-body"
+                }
+              },
+              "invalid-request": {
+                "value": {
+                  "detail": "send one Authorization header",
+                  "status": 400,
+                  "title": "The request is not understood",
+                  "type": "urn:vymalo:agents:problem:invalid-request"
+                }
+              }
+            },
+            "schema": {
+              "$ref": "#/components/schemas/Problem"
+            }
+          }
+        },
+        "description": "The request is not understood: more than one Authorization header, a header or a path that cannot be read, or a body that is not the form of the route. The detail never quotes the body.",
+        "headers": {
+          "WWW-Authenticate": {
+            "description": "Only for two Authorization headers: `Bearer error=\"invalid_request\"`.",
+            "schema": {
+              "type": "string"
+            }
+          }
+        }
+      },
+      "Problem401": {
+        "content": {
+          "application/problem+json": {
+            "examples": {
+              "invalid-token": {
+                "value": {
+                  "detail": "the bearer token is not valid: expired",
+                  "status": 401,
+                  "title": "Unauthorized",
+                  "type": "urn:vymalo:agents:problem:invalid-token"
+                }
+              },
+              "missing-token": {
+                "value": {
+                  "detail": "send the access token as Authorization: Bearer <token>",
+                  "status": 401,
+                  "title": "Unauthorized",
+                  "type": "urn:vymalo:agents:problem:missing-token"
+                }
+              }
+            },
+            "schema": {
+              "$ref": "#/components/schemas/Problem"
+            }
+          }
+        },
+        "description": "No token, or a token that does not verify. The detail never echoes the token.",
+        "headers": {
+          "WWW-Authenticate": {
+            "description": "`Bearer`, or `Bearer error=\"invalid_token\"` for a token that does not verify (RFC 6750).",
+            "schema": {
+              "type": "string"
+            }
+          }
+        }
+      },
+      "Problem403": {
+        "content": {
+          "application/problem+json": {
+            "examples": {
+              "forbidden": {
+                "value": {
+                  "detail": "this needs the permission platform:agents.write",
+                  "permission": "platform:agents.write",
+                  "status": 403,
+                  "title": "Forbidden",
+                  "type": "urn:vymalo:agents:problem:forbidden"
+                }
+              }
+            },
+            "schema": {
+              "$ref": "#/components/schemas/Problem"
+            }
+          }
+        },
+        "description": "The token verifies and lacks the permission the route needs. `permission` names that one permission and no other.",
+        "headers": {
+          "WWW-Authenticate": {
+            "description": "`Bearer error=\"insufficient_scope\", scope=\"<permission>\"`.",
+            "schema": {
+              "type": "string"
+            }
+          }
+        }
+      },
+      "Problem404": {
+        "content": {
+          "application/problem+json": {
+            "examples": {
+              "not-found": {
+                "value": {
+                  "detail": "there is no agent named x",
+                  "status": 404,
+                  "title": "Not found",
+                  "type": "urn:vymalo:agents:problem:not-found"
+                }
+              }
+            },
+            "schema": {
+              "$ref": "#/components/schemas/Problem"
+            }
+          }
+        },
+        "description": "There is no such object.",
+        "headers": {}
+      },
+      "Problem409": {
+        "content": {
+          "application/problem+json": {
+            "examples": {
+              "already-exists": {
+                "value": {
+                  "detail": "AgentService x already exists",
+                  "status": 409,
+                  "title": "Already exists",
+                  "type": "urn:vymalo:agents:problem:already-exists"
+                }
+              },
+              "referenced": {
+                "value": {
+                  "agentCount": 2,
+                  "agents": [
+                    "chat",
+                    "coder"
+                  ],
+                  "detail": "ModelEndpoint gateway is still used by 2 agents",
+                  "status": 409,
+                  "title": "Still in use",
+                  "type": "urn:vymalo:agents:problem:referenced"
+                }
+              },
+              "yaml-only": {
+                "value": {
+                  "detail": "this object has fields no form says, so saving a form would lose them: change it as YAML",
+                  "reasons": [
+                    {
+                      "object": "AgentConfig",
+                      "path": "spec.model.extraBody",
+                      "reason": "a form cannot say it"
+                    }
+                  ],
+                  "status": 409,
+                  "title": "No form can save this object",
+                  "type": "urn:vymalo:agents:problem:yaml-only"
+                }
+              }
+            },
+            "schema": {
+              "$ref": "#/components/schemas/Problem"
+            }
+          }
+        },
+        "description": "The object is there and the request cannot be applied to it: it exists (a create), it is GitOps's, it is being deleted, agents still name it, another manager owns a field, a form would lose fields it cannot say, or the change would break the agents that name it. Read again; the slug says which.",
+        "headers": {}
+      },
+      "Problem412": {
+        "content": {
+          "application/problem+json": {
+            "examples": {
+              "stale": {
+                "value": {
+                  "detail": "the object changed since you read it (somebody saved first, or the operator wrote its status): read it again",
+                  "status": 412,
+                  "title": "The object changed",
+                  "type": "urn:vymalo:agents:problem:stale"
+                }
+              }
+            },
+            "schema": {
+              "$ref": "#/components/schemas/Problem"
+            }
+          }
+        },
+        "description": "The `If-Match` token is not the object's: somebody saved first, or the operator wrote its status. Read it again.",
+        "headers": {}
+      },
+      "Problem413": {
+        "content": {
+          "application/problem+json": {
+            "examples": {
+              "payload-too-large": {
+                "value": {
+                  "detail": "a body is at most 2097152 bytes",
+                  "limit": 2097152,
+                  "status": 413,
+                  "title": "The body is too large",
+                  "type": "urn:vymalo:agents:problem:payload-too-large"
+                }
+              }
+            },
+            "schema": {
+              "$ref": "#/components/schemas/Problem"
+            }
+          }
+        },
+        "description": "The body is larger than `limit` bytes (2 MiB). Answered from Content-Length before a byte is read, and from the bytes read for a body with no length.",
+        "headers": {}
+      },
+      "Problem415": {
+        "content": {
+          "application/problem+json": {
+            "examples": {
+              "unsupported-media-type": {
+                "value": {
+                  "detail": "send the form as application/json",
+                  "status": 415,
+                  "title": "Unsupported media type",
+                  "type": "urn:vymalo:agents:problem:unsupported-media-type"
+                }
+              }
+            },
+            "schema": {
+              "$ref": "#/components/schemas/Problem"
+            }
+          }
+        },
+        "description": "The body is not `application/json` (charset utf-8 or none).",
+        "headers": {}
+      },
+      "Problem422": {
+        "content": {
+          "application/problem+json": {
+            "examples": {
+              "validation": {
+                "value": {
+                  "detail": "1 field is not valid",
+                  "errors": [
+                    {
+                      "field": "model.endpoint",
+                      "message": "no model endpoint named gateway"
+                    }
+                  ],
+                  "status": 422,
+                  "title": "The form is not valid",
+                  "type": "urn:vymalo:agents:problem:validation"
+                }
+              }
+            },
+            "schema": {
+              "$ref": "#/components/schemas/Problem"
+            }
+          }
+        },
+        "description": "The form is read and is not valid. `errors` has every mistake with its form field.",
+        "headers": {}
+      },
+      "Problem428": {
+        "content": {
+          "application/problem+json": {
+            "examples": {
+              "precondition-required": {
+                "value": {
+                  "detail": "send If-None-Match: * to create, or If-Match with the ETag you read to replace",
+                  "status": 428,
+                  "title": "A precondition is required",
+                  "type": "urn:vymalo:agents:problem:precondition-required"
+                }
+              }
+            },
+            "schema": {
+              "$ref": "#/components/schemas/Problem"
+            }
+          }
+        },
+        "description": "A write must be conditional: `If-None-Match: *` creates, `If-Match: \"<etag>\"` replaces or deletes.",
+        "headers": {}
+      },
+      "Problem500": {
+        "content": {
+          "application/problem+json": {
+            "examples": {
+              "internal": {
+                "value": {
+                  "detail": "the Platform API failed; it is not a mistake of the request",
+                  "status": 500,
+                  "title": "Internal error",
+                  "type": "urn:vymalo:agents:problem:internal"
+                }
+              }
+            },
+            "schema": {
+              "$ref": "#/components/schemas/Problem"
+            }
+          }
+        },
+        "description": "A bug of the API. The cause is logged, never answered.",
+        "headers": {}
+      },
+      "Problem503": {
+        "content": {
+          "application/problem+json": {
+            "examples": {
+              "unavailable": {
+                "value": {
+                  "detail": "the cluster's API server cannot be reached or refused the call: try again",
+                  "status": 503,
+                  "title": "Unavailable",
+                  "type": "urn:vymalo:agents:problem:unavailable"
+                }
+              }
+            },
+            "schema": {
+              "$ref": "#/components/schemas/Problem"
+            }
+          }
+        },
+        "description": "The cluster's API server cannot be reached or refused the call (`unavailable`), or the issuer's keys cannot be fetched so the token could not be checked (`keys-unavailable`: it is not known to be bad). Try again.",
+        "headers": {
+          "Retry-After": {
+            "description": "Seconds.",
+            "schema": {
+              "type": "string"
+            }
+          }
+        }
+      }
+    },
+    "schemas": {
+      "AgentDetail": {
+        "additionalProperties": false,
+        "properties": {
+          "audience": {
+            "description": "access.audience: absent is administrators only.",
+            "items": {
+              "type": "string"
+            },
+            "type": [
+              "array",
+              "null"
+            ]
+          },
+          "conditions": {
+            "description": "The conditions the operator wrote, as they are: the first false one is the reason to show.",
+            "items": {
+              "$ref": "#/components/schemas/Condition"
+            },
+            "type": "array"
+          },
+          "configDigest": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "configStatus": {
+            "type": [
+              "object",
+              "null"
+            ]
+          },
+          "deleting": {
+            "type": "boolean"
+          },
+          "description": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "kind": {
+            "description": "A coder or a folder agent; null when the config is missing or is neither.",
+            "enum": [
+              "coder",
+              "folder",
+              null
+            ],
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "managedBy": {
+            "$ref": "#/components/schemas/Owner"
+          },
+          "name": {
+            "type": "string"
+          },
+          "representation": {
+            "description": "A form, or the reasons there is none: an object with fields no form says is edited as YAML and a save from a form would lose them.",
+            "oneOf": [
+              {
+                "additionalProperties": false,
+                "properties": {
+                  "form": {
+                    "$ref": "#/components/schemas/AgentView"
+                  }
+                },
+                "required": [
+                  "form"
+                ],
+                "type": "object"
+              },
+              {
+                "additionalProperties": false,
+                "properties": {
+                  "yamlOnly": {
+                    "items": {
+                      "$ref": "#/components/schemas/Unrepresentable"
+                    },
+                    "minItems": 1,
+                    "type": "array"
+                  }
+                },
+                "required": [
+                  "yamlOnly"
+                ],
+                "type": "object"
+              }
+            ]
+          },
+          "state": {
+            "description": "Where the agent is in the lifecycle the Agents screen draws, read from the two objects (§60a, An agent's lifecycle).",
+            "enum": [
+              "saving",
+              "blocked",
+              "degraded",
+              "ready",
+              "suspended",
+              "deleting"
+            ],
+            "type": "string"
+          },
+          "status": {
+            "type": [
+              "object",
+              "null"
+            ]
+          },
+          "suspend": {
+            "type": "boolean"
+          },
+          "tags": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
+          "title": {
+            "type": [
+              "string",
+              "null"
+            ]
+          }
+        },
+        "required": [
+          "audience",
+          "conditions",
+          "configDigest",
+          "configStatus",
+          "deleting",
+          "description",
+          "kind",
+          "managedBy",
+          "name",
+          "representation",
+          "state",
+          "status",
+          "suspend",
+          "tags",
+          "title"
+        ],
+        "type": "object"
+      },
+      "AgentEvent": {
+        "additionalProperties": false,
+        "properties": {
+          "count": {
+            "minimum": 1,
+            "type": "integer"
+          },
+          "firstSeen": {
+            "description": "UTC, whole seconds: YYYY-MM-DDTHH:MM:SSZ.",
+            "type": "string"
+          },
+          "lastSeen": {
+            "description": "As firstSeen.",
+            "type": "string"
+          },
+          "message": {
+            "description": "As the cluster wrote it: untrusted text. Control characters are replaced by a space and a longer message is cut with `…`; nothing else is done to it.",
+            "maxLength": 1024,
+            "type": "string"
+          },
+          "object": {
+            "additionalProperties": false,
+            "properties": {
+              "kind": {
+                "type": "string"
+              },
+              "name": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "kind",
+              "name"
+            ],
+            "type": "object"
+          },
+          "reason": {
+            "maxLength": 253,
+            "type": "string"
+          },
+          "type": {
+            "enum": [
+              "Normal",
+              "Warning"
+            ],
+            "type": "string"
+          }
+        },
+        "required": [
+          "count",
+          "firstSeen",
+          "lastSeen",
+          "message",
+          "object",
+          "reason",
+          "type"
+        ],
+        "type": "object"
+      },
+      "AgentEvents": {
+        "additionalProperties": false,
+        "properties": {
+          "events": {
+            "description": "Newest first (by lastSeen), at most 100.",
+            "items": {
+              "$ref": "#/components/schemas/AgentEvent"
+            },
+            "maxItems": 100,
+            "type": "array"
+          }
+        },
+        "required": [
+          "events"
+        ],
+        "type": "object"
+      },
+      "AgentForm": {
+        "additionalProperties": false,
+        "properties": {
+          "agent": {
+            "description": "What is particular to the kind, discriminated by `kind`.",
+            "oneOf": [
+              {
+                "$ref": "#/components/schemas/CoderSettings"
+              },
+              {
+                "$ref": "#/components/schemas/FolderSettings"
+              }
+            ]
+          },
+          "allowInsecureHttp": {
+            "type": "boolean"
+          },
+          "audience": {
+            "items": {
+              "type": "string"
+            },
+            "type": [
+              "array",
+              "null"
+            ]
+          },
+          "description": {
+            "maxLength": 500,
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "image": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "model": {
+            "$ref": "#/components/schemas/ModelChoice"
+          },
+          "name": {
+            "description": "`^[a-z][a-z0-9-]{0,38}[a-z0-9]$`; the name of both objects; fixed after the create.",
+            "type": "string"
+          },
+          "suspend": {
+            "type": "boolean"
+          },
+          "tags": {
+            "items": {
+              "type": "string"
+            },
+            "maxItems": 16,
+            "type": "array"
+          },
+          "title": {
+            "maxLength": 80,
+            "minLength": 1,
+            "type": "string"
+          },
+          "toolServers": {
+            "description": "ToolProvider names, a set.",
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          }
+        },
+        "required": [
+          "agent",
+          "model",
+          "name",
+          "title"
+        ],
+        "type": "object"
+      },
+      "AgentList": {
+        "additionalProperties": false,
+        "properties": {
+          "agents": {
+            "items": {
+              "$ref": "#/components/schemas/AgentSummary"
+            },
+            "type": "array"
+          }
+        },
+        "required": [
+          "agents"
+        ],
+        "type": "object"
+      },
+      "AgentSummary": {
+        "additionalProperties": false,
+        "properties": {
+          "audience": {
+            "description": "access.audience: absent is administrators only.",
+            "items": {
+              "type": "string"
+            },
+            "type": [
+              "array",
+              "null"
+            ]
+          },
+          "conditions": {
+            "description": "The conditions the operator wrote, as they are: the first false one is the reason to show.",
+            "items": {
+              "$ref": "#/components/schemas/Condition"
+            },
+            "type": "array"
+          },
+          "configDigest": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "deleting": {
+            "type": "boolean"
+          },
+          "description": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "kind": {
+            "description": "A coder or a folder agent; null when the config is missing or is neither.",
+            "enum": [
+              "coder",
+              "folder",
+              null
+            ],
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "managedBy": {
+            "$ref": "#/components/schemas/Owner"
+          },
+          "name": {
+            "type": "string"
+          },
+          "state": {
+            "description": "Where the agent is in the lifecycle the Agents screen draws, read from the two objects (§60a, An agent's lifecycle).",
+            "enum": [
+              "saving",
+              "blocked",
+              "degraded",
+              "ready",
+              "suspended",
+              "deleting"
+            ],
+            "type": "string"
+          },
+          "suspend": {
+            "type": "boolean"
+          },
+          "tags": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
+          "title": {
+            "type": [
+              "string",
+              "null"
+            ]
+          }
+        },
+        "required": [
+          "audience",
+          "conditions",
+          "configDigest",
+          "deleting",
+          "description",
+          "kind",
+          "managedBy",
+          "name",
+          "state",
+          "suspend",
+          "tags",
+          "title"
+        ],
+        "type": "object"
+      },
+      "AgentView": {
+        "additionalProperties": false,
+        "properties": {
+          "deployment": {
+            "description": "What no form edits: the deployment's part of the objects, read-only on the screen and written back unchanged by a save.",
+            "type": "object"
+          },
+          "form": {
+            "$ref": "#/components/schemas/AgentForm"
+          }
+        },
+        "required": [
+          "deployment",
+          "form"
+        ],
+        "type": "object"
+      },
+      "CoderSettings": {
+        "additionalProperties": false,
+        "properties": {
+          "createRepoOwners": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
+          "github": {
+            "$ref": "#/components/schemas/GithubApp"
+          },
+          "kind": {
+            "const": "coder"
+          },
+          "maxAccessTier": {
+            "enum": [
+              "plan",
+              "edits",
+              "auto",
+              "bypass"
+            ],
+            "type": "string"
+          },
+          "opencodeModel": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "prDraft": {
+            "type": [
+              "boolean",
+              "null"
+            ]
+          },
+          "runPodSizeClass": {
+            "description": "One of Info.runPodSizeClasses.",
+            "type": "string"
+          },
+          "workers": {
+            "maximum": 16,
+            "minimum": 1,
+            "type": [
+              "integer",
+              "null"
+            ]
+          }
+        },
+        "required": [
+          "github",
+          "kind"
+        ],
+        "type": "object"
+      },
+      "Condition": {
+        "properties": {
+          "lastTransitionTime": {
+            "type": "string"
+          },
+          "message": {
+            "type": "string"
+          },
+          "observedGeneration": {
+            "type": "integer"
+          },
+          "reason": {
+            "type": "string"
+          },
+          "status": {
+            "enum": [
+              "True",
+              "False",
+              "Unknown"
+            ],
+            "type": "string"
+          },
+          "type": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "type",
+          "status",
+          "reason",
+          "message",
+          "lastTransitionTime"
+        ],
+        "type": "object"
+      },
+      "FolderSettings": {
+        "additionalProperties": false,
+        "properties": {
+          "files": {
+            "additionalProperties": {
+              "type": "string"
+            },
+            "description": "The folder inline: relative path to content. `instructions.md` is in it; no `mcp.json`; at most 1 MiB in all.",
+            "type": "object"
+          },
+          "kind": {
+            "const": "folder"
+          }
+        },
+        "required": [
+          "files",
+          "kind"
+        ],
+        "type": "object"
+      },
+      "FormError": {
+        "additionalProperties": false,
+        "properties": {
+          "field": {
+            "description": "The form field as the client sent it (`name`, `tags[2]`, `model.endpoint`, `agent.github.owners[0]`); empty for the form as a whole.",
+            "type": "string"
+          },
+          "message": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "field",
+          "message"
+        ],
+        "type": "object"
+      },
+      "GithubApp": {
+        "additionalProperties": false,
+        "properties": {
+          "appId": {
+            "type": "string"
+          },
+          "owners": {
+            "items": {
+              "type": "string"
+            },
+            "minItems": 1,
+            "type": "array"
+          },
+          "privateKey": {
+            "$ref": "#/components/schemas/SecretPick"
+          }
+        },
+        "required": [
+          "appId",
+          "owners",
+          "privateKey"
+        ],
+        "type": "object"
+      },
+      "HeaderForm": {
+        "additionalProperties": false,
+        "properties": {
+          "prefix": {
+            "description": "An authentication scheme and one space: `Bearer ` or `Basic `.",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "secret": {
+            "$ref": "#/components/schemas/SecretPick"
+          }
+        },
+        "required": [
+          "secret"
+        ],
+        "type": "object"
+      },
+      "Info": {
+        "additionalProperties": false,
+        "properties": {
+          "defaults": {
+            "description": "The deployment's defaults every agent gets apart from what its form sets (the API's configuration file, without a secret). Open: its members are the deployment's, not the contract's.",
+            "type": "object"
+          },
+          "limits": {
+            "additionalProperties": false,
+            "properties": {
+              "maxBodyBytes": {
+                "type": "integer"
+              }
+            },
+            "required": [
+              "maxBodyBytes"
+            ],
+            "type": "object"
+          },
+          "namespace": {
+            "type": "string"
+          },
+          "offerLabel": {
+            "type": "string"
+          },
+          "runPodSizeClasses": {
+            "description": "The size classes of run pods the operator has; empty: none, and a coder form that asks is refused.",
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
+          "version": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "defaults",
+          "limits",
+          "namespace",
+          "offerLabel",
+          "runPodSizeClasses",
+          "version"
+        ],
+        "type": "object"
+      },
+      "Me": {
+        "additionalProperties": false,
+        "properties": {
+          "permissions": {
+            "description": "The dashboard permissions the token holds (values of the roles claim that start with `platform:`). A hint for the screen, never a check: the server enforces.",
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          }
+        },
+        "required": [
+          "permissions"
+        ],
+        "type": "object"
+      },
+      "ModelChoice": {
+        "additionalProperties": false,
+        "properties": {
+          "endpoint": {
+            "description": "The ModelEndpoint's name.",
+            "type": "string"
+          },
+          "model": {
+            "description": "The alias.",
+            "type": "string"
+          }
+        },
+        "required": [
+          "endpoint",
+          "model"
+        ],
+        "type": "object"
+      },
+      "ModelDetail": {
+        "additionalProperties": false,
+        "properties": {
+          "deleting": {
+            "type": "boolean"
+          },
+          "managedBy": {
+            "$ref": "#/components/schemas/Owner"
+          },
+          "name": {
+            "type": "string"
+          },
+          "representation": {
+            "description": "A form, or the reasons there is none: an object with fields no form says is edited as YAML and a save from a form would lose them.",
+            "oneOf": [
+              {
+                "additionalProperties": false,
+                "properties": {
+                  "form": {
+                    "$ref": "#/components/schemas/ModelEndpointForm"
+                  }
+                },
+                "required": [
+                  "form"
+                ],
+                "type": "object"
+              },
+              {
+                "additionalProperties": false,
+                "properties": {
+                  "yamlOnly": {
+                    "items": {
+                      "$ref": "#/components/schemas/Unrepresentable"
+                    },
+                    "minItems": 1,
+                    "type": "array"
+                  }
+                },
+                "required": [
+                  "yamlOnly"
+                ],
+                "type": "object"
+              }
+            ]
+          },
+          "status": {
+            "$ref": "#/components/schemas/SharedStatus"
+          },
+          "title": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "usedBy": {
+            "description": "The agents that name it, in byte order, GitOps's included. Empty for a caller without platform:agents.read.",
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
+          "usedByCount": {
+            "description": "How many agents name it: what a caller without platform:agents.read is told instead of their names.",
+            "minimum": 0,
+            "type": "integer"
+          }
+        },
+        "required": [
+          "deleting",
+          "managedBy",
+          "name",
+          "representation",
+          "title",
+          "usedBy",
+          "usedByCount"
+        ],
+        "type": "object"
+      },
+      "ModelEndpointForm": {
+        "additionalProperties": false,
+        "properties": {
+          "apiKey": {
+            "$ref": "#/components/schemas/SecretPick"
+          },
+          "baseUrl": {
+            "oneOf": [
+              {
+                "additionalProperties": false,
+                "properties": {
+                  "value": {
+                    "description": "http or https, a host, no user name, password, query or fragment.",
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "value"
+                ],
+                "type": "object"
+              },
+              {
+                "additionalProperties": false,
+                "properties": {
+                  "secret": {
+                    "$ref": "#/components/schemas/SecretPick"
+                  }
+                },
+                "required": [
+                  "secret"
+                ],
+                "type": "object"
+              }
+            ]
+          },
+          "models": {
+            "items": {
+              "type": "string"
+            },
+            "maxItems": 32,
+            "type": "array"
+          },
+          "name": {
+            "description": "`^[a-z][a-z0-9-]{0,62}$`; fixed after the create.",
+            "type": "string"
+          },
+          "title": {
+            "maxLength": 128,
+            "minLength": 1,
+            "type": "string"
+          }
+        },
+        "required": [
+          "apiKey",
+          "baseUrl",
+          "name",
+          "title"
+        ],
+        "type": "object"
+      },
+      "ModelList": {
+        "additionalProperties": false,
+        "properties": {
+          "models": {
+            "items": {
+              "$ref": "#/components/schemas/ModelDetail"
+            },
+            "type": "array"
+          }
+        },
+        "required": [
+          "models"
+        ],
+        "type": "object"
+      },
+      "OfferedSecret": {
+        "additionalProperties": false,
+        "properties": {
+          "externalSecret": {
+            "type": "string"
+          },
+          "key": {
+            "description": "null: the Secret is made with `dataFrom`, and any key of valid syntax is accepted.",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "secret": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "externalSecret",
+          "key",
+          "secret"
+        ],
+        "type": "object"
+      },
+      "OpenApiDocument": {
+        "description": "This document.",
+        "properties": {
+          "info": {
+            "type": "object"
+          },
+          "openapi": {
+            "type": "string"
+          },
+          "paths": {
+            "type": "object"
+          }
+        },
+        "required": [
+          "openapi",
+          "info",
+          "paths"
+        ],
+        "type": "object"
+      },
+      "Owner": {
+        "description": "Who may write the object: the dashboard, or GitOps (read-only here, View YAML shows it).",
+        "enum": [
+          "dashboard",
+          "gitops"
+        ],
+        "type": "string"
+      },
+      "Problem": {
+        "additionalProperties": false,
+        "description": "An error, as RFC 9457 problem details (media type application/problem+json). `type` is a URN, not an address to fetch. No problem holds a token, a secret value or a quotation of the body.",
+        "properties": {
+          "agentCount": {
+            "description": "409 referenced and breaks-agents: how many agents name the object.",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "agents": {
+            "description": "The same, only for a caller that holds platform:agents.read: the agents that name the object, in byte order.",
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
+          "detail": {
+            "description": "The sentence for this occurrence.",
+            "type": "string"
+          },
+          "errors": {
+            "description": "422 validation: every mistake with its form field. 409 breaks-agents: for a caller that holds platform:agents.read.",
+            "items": {
+              "$ref": "#/components/schemas/FormError"
+            },
+            "type": "array"
+          },
+          "limit": {
+            "description": "413 payload-too-large: the most a body may hold, in bytes.",
+            "type": "integer"
+          },
+          "permission": {
+            "description": "403 forbidden: the one permission the request lacked.",
+            "type": "string"
+          },
+          "reasons": {
+            "description": "409 yaml-only: what a form cannot say.",
+            "items": {
+              "$ref": "#/components/schemas/Unrepresentable"
+            },
+            "type": "array"
+          },
+          "status": {
+            "maximum": 599,
+            "minimum": 400,
+            "type": "integer"
+          },
+          "title": {
+            "type": "string"
+          },
+          "type": {
+            "enum": [
+              "urn:vymalo:agents:problem:missing-token",
+              "urn:vymalo:agents:problem:invalid-token",
+              "urn:vymalo:agents:problem:keys-unavailable",
+              "urn:vymalo:agents:problem:invalid-request",
+              "urn:vymalo:agents:problem:invalid-body",
+              "urn:vymalo:agents:problem:no-such-route",
+              "urn:vymalo:agents:problem:method-not-allowed",
+              "urn:vymalo:agents:problem:payload-too-large",
+              "urn:vymalo:agents:problem:unsupported-media-type",
+              "urn:vymalo:agents:problem:forbidden",
+              "urn:vymalo:agents:problem:precondition-required",
+              "urn:vymalo:agents:problem:stale",
+              "urn:vymalo:agents:problem:validation",
+              "urn:vymalo:agents:problem:yaml-only",
+              "urn:vymalo:agents:problem:breaks-agents",
+              "urn:vymalo:agents:problem:not-found",
+              "urn:vymalo:agents:problem:already-exists",
+              "urn:vymalo:agents:problem:managed-by-gitops",
+              "urn:vymalo:agents:problem:referenced",
+              "urn:vymalo:agents:problem:deleting",
+              "urn:vymalo:agents:problem:conflict",
+              "urn:vymalo:agents:problem:unavailable",
+              "urn:vymalo:agents:problem:internal"
+            ],
+            "type": "string"
+          }
+        },
+        "required": [
+          "type",
+          "title",
+          "status",
+          "detail"
+        ],
+        "type": "object"
+      },
+      "SecretKeys": {
+        "additionalProperties": false,
+        "properties": {
+          "keys": {
+            "items": {
+              "$ref": "#/components/schemas/OfferedSecret"
+            },
+            "type": "array"
+          },
+          "offerLabel": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "keys",
+          "offerLabel"
+        ],
+        "type": "object"
+      },
+      "SecretPick": {
+        "additionalProperties": false,
+        "properties": {
+          "key": {
+            "type": "string"
+          },
+          "secret": {
+            "description": "The Secret's name, as an offered ExternalSecret makes it.",
+            "type": "string"
+          }
+        },
+        "required": [
+          "key",
+          "secret"
+        ],
+        "type": "object"
+      },
+      "SharedStatus": {
+        "additionalProperties": false,
+        "description": "What the operator observed of a model or a tool server (§60a, K2). Never a secret, a header value or a URL's credentials.",
+        "properties": {
+          "conditions": {
+            "description": "Accepted, InUse and AgentsReady.",
+            "items": {
+              "$ref": "#/components/schemas/Condition"
+            },
+            "type": "array"
+          },
+          "observedGeneration": {
+            "type": "integer"
+          },
+          "usedBy": {
+            "description": "At most 64 names, sorted. Emptied for a caller without platform:agents.read.",
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
+          "usedByMore": {
+            "description": "How many more there are; absent when there are none.",
+            "minimum": 1,
+            "type": "integer"
+          }
+        },
+        "required": [
+          "usedBy",
+          "conditions"
+        ],
+        "type": "object"
+      },
+      "ToolServerDetail": {
+        "additionalProperties": false,
+        "properties": {
+          "deleting": {
+            "type": "boolean"
+          },
+          "managedBy": {
+            "$ref": "#/components/schemas/Owner"
+          },
+          "name": {
+            "type": "string"
+          },
+          "representation": {
+            "description": "A form, or the reasons there is none: an object with fields no form says is edited as YAML and a save from a form would lose them.",
+            "oneOf": [
+              {
+                "additionalProperties": false,
+                "properties": {
+                  "form": {
+                    "$ref": "#/components/schemas/ToolServerForm"
+                  }
+                },
+                "required": [
+                  "form"
+                ],
+                "type": "object"
+              },
+              {
+                "additionalProperties": false,
+                "properties": {
+                  "yamlOnly": {
+                    "items": {
+                      "$ref": "#/components/schemas/Unrepresentable"
+                    },
+                    "minItems": 1,
+                    "type": "array"
+                  }
+                },
+                "required": [
+                  "yamlOnly"
+                ],
+                "type": "object"
+              }
+            ]
+          },
+          "status": {
+            "$ref": "#/components/schemas/SharedStatus"
+          },
+          "title": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "usedBy": {
+            "description": "The agents that name it, in byte order, GitOps's included. Empty for a caller without platform:agents.read.",
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
+          "usedByCount": {
+            "description": "How many agents name it: what a caller without platform:agents.read is told instead of their names.",
+            "minimum": 0,
+            "type": "integer"
+          }
+        },
+        "required": [
+          "deleting",
+          "managedBy",
+          "name",
+          "representation",
+          "title",
+          "usedBy",
+          "usedByCount"
+        ],
+        "type": "object"
+      },
+      "ToolServerForm": {
+        "additionalProperties": false,
+        "properties": {
+          "headers": {
+            "additionalProperties": {
+              "$ref": "#/components/schemas/HeaderForm"
+            },
+            "type": "object"
+          },
+          "name": {
+            "description": "`^[a-z][a-z0-9-]{0,30}$`; the prefix of its tools; fixed after the create.",
+            "type": "string"
+          },
+          "optional": {
+            "type": "boolean"
+          },
+          "title": {
+            "maxLength": 128,
+            "minLength": 1,
+            "type": "string"
+          },
+          "tools": {
+            "items": {
+              "type": "string"
+            },
+            "maxItems": 32,
+            "type": "array"
+          },
+          "url": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "name",
+          "title",
+          "url"
+        ],
+        "type": "object"
+      },
+      "ToolServerList": {
+        "additionalProperties": false,
+        "properties": {
+          "toolServers": {
+            "items": {
+              "$ref": "#/components/schemas/ToolServerDetail"
+            },
+            "type": "array"
+          }
+        },
+        "required": [
+          "toolServers"
+        ],
+        "type": "object"
+      },
+      "Unrepresentable": {
+        "additionalProperties": false,
+        "properties": {
+          "object": {
+            "enum": [
+              "AgentService",
+              "AgentConfig",
+              "ModelEndpoint",
+              "ToolProvider"
+            ],
+            "type": "string"
+          },
+          "path": {
+            "type": "string"
+          },
+          "reason": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "object",
+          "path",
+          "reason"
+        ],
+        "type": "object"
+      }
+    },
+    "securitySchemes": {
+      "bearer": {
+        "bearerFormat": "JWT",
+        "description": "The access token of an OIDC issuer, `Authorization: Bearer <token>`: RS256, RS384, ES256 or EdDSA; `iss` exactly, `aud` one of the configured audiences, `exp` required. The values of the configured roles claim are the permissions; the ones that start with `platform:` are this API's. There is no cookie, and no DPoP: a token that carries `cnf` is read as a plain bearer.",
+        "scheme": "bearer",
+        "type": "http"
+      }
+    }
+  },
+  "info": {
+    "description": "Everything is under `/v1`. **The server enforces; a client only offers**: a permission, an ETag, a name and a form are all checked again here, whatever a screen showed.\n\nA write is conditional (`If-None-Match: *` creates, `If-Match` replaces or deletes; 428 otherwise) and every error is RFC 9457 problem details with the form field of every 422. Every answer is `Cache-Control: no-store`.\n\n**Deliberately absent:** cookies and sessions (the token is the only credential); CORS credentials (`Access-Control-Allow-Credentials` is never sent) and a wildcard origin (only the deployment's exact origins are allowed); an unconditional write or delete; a secret value anywhere (a form names a Secret key, and the API reads no Secret); DPoP.\n\nThis document is generated from the API's table of routes and held equal to the checked-in `docs/api/platform-api-v1.openapi.json` by a test.",
+    "license": {
+      "identifier": "Apache-2.0",
+      "name": "Apache-2.0"
+    },
+    "summary": "The API of the admin dashboard and of aapctl: agents, model endpoints, tool servers and the keys a form may name.",
+    "title": "Platform API",
+    "version": "v1",
+    "x-absent": [
+      "cookie authentication",
+      "CORS credentials",
+      "wildcard CORS origin",
+      "unconditional write",
+      "secret values",
+      "DPoP"
+    ]
+  },
+  "openapi": "3.1.0",
+  "paths": {
+    "/v1/agents": {
+      "get": {
+        "description": "A row per agent, ordered by name.",
+        "operationId": "listAgents",
+        "parameters": [],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "example": {
+                  "agents": [
+                    {
+                      "audience": [
+                        "*"
+                      ],
+                      "conditions": [
+                        {
+                          "lastTransitionTime": "2026-11-14T10:00:00Z",
+                          "message": "the runtime is ready",
+                          "reason": "RuntimeReady",
+                          "status": "True",
+                          "type": "Ready"
+                        }
+                      ],
+                      "configDigest": "sha256:1b2c3d4e5f60718293a4b5c6d7e8f9011b2c3d4e5f60718293a4b5c6d7e8f901",
+                      "deleting": false,
+                      "description": null,
+                      "kind": "folder",
+                      "managedBy": "dashboard",
+                      "name": "chat",
+                      "state": "ready",
+                      "suspend": false,
+                      "tags": [
+                        "chat"
+                      ],
+                      "title": "Chat"
+                    }
+                  ]
+                },
+                "schema": {
+                  "$ref": "#/components/schemas/AgentList"
+                }
+              }
+            },
+            "description": "The agents."
+          },
+          "400": {
+            "$ref": "#/components/responses/Problem400"
+          },
+          "401": {
+            "$ref": "#/components/responses/Problem401"
+          },
+          "403": {
+            "$ref": "#/components/responses/Problem403"
+          },
+          "500": {
+            "$ref": "#/components/responses/Problem500"
+          },
+          "503": {
+            "$ref": "#/components/responses/Problem503"
+          }
+        },
+        "security": [
+          {
+            "bearer": []
+          }
+        ],
+        "summary": "The agents",
+        "tags": [
+          "agents"
+        ],
+        "x-permission": "platform:agents.read"
+      }
+    },
+    "/v1/agents/{name}": {
+      "delete": {
+        "description": "`If-Match` is required. 204 once it is gone; 202 while the operator is still releasing what it ran (the agent is listed as `deleting` until it is gone: ask again).",
+        "operationId": "deleteAgent",
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/name"
+          },
+          {
+            "$ref": "#/components/parameters/IfMatchRequired"
+          }
+        ],
+        "responses": {
+          "202": {
+            "content": {
+              "application/json": {
+                "example": {
+                  "audience": [
+                    "*"
+                  ],
+                  "conditions": [
+                    {
+                      "lastTransitionTime": "2026-11-14T10:00:00Z",
+                      "message": "the runtime is ready",
+                      "reason": "RuntimeReady",
+                      "status": "True",
+                      "type": "Ready"
+                    }
+                  ],
+                  "configDigest": "sha256:1b2c3d4e5f60718293a4b5c6d7e8f9011b2c3d4e5f60718293a4b5c6d7e8f901",
+                  "deleting": true,
+                  "description": null,
+                  "kind": "folder",
+                  "managedBy": "dashboard",
+                  "name": "chat",
+                  "state": "deleting",
+                  "suspend": false,
+                  "tags": [
+                    "chat"
+                  ],
+                  "title": "Chat"
+                },
+                "schema": {
+                  "$ref": "#/components/schemas/AgentSummary"
+                }
+              }
+            },
+            "description": "Being deleted: the row, with `deleting: true`."
+          },
+          "204": {
+            "description": "Gone."
+          },
+          "400": {
+            "$ref": "#/components/responses/Problem400"
+          },
+          "401": {
+            "$ref": "#/components/responses/Problem401"
+          },
+          "403": {
+            "$ref": "#/components/responses/Problem403"
+          },
+          "404": {
+            "$ref": "#/components/responses/Problem404"
+          },
+          "409": {
+            "$ref": "#/components/responses/Problem409"
+          },
+          "412": {
+            "$ref": "#/components/responses/Problem412"
+          },
+          "428": {
+            "$ref": "#/components/responses/Problem428"
+          },
+          "500": {
+            "$ref": "#/components/responses/Problem500"
+          },
+          "503": {
+            "$ref": "#/components/responses/Problem503"
+          }
+        },
+        "security": [
+          {
+            "bearer": []
+          }
+        ],
+        "summary": "Delete an agent",
+        "tags": [
+          "agents"
+        ],
+        "x-permission": "platform:agents.write"
+      },
+      "get": {
+        "description": "The row, the form (or why there is none), and the status the operator wrote. The `ETag` covers both objects: send it as `If-Match` to replace or delete.",
+        "operationId": "getAgent",
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/name"
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "example": {
+                  "audience": [
+                    "*"
+                  ],
+                  "conditions": [
+                    {
+                      "lastTransitionTime": "2026-11-14T10:00:00Z",
+                      "message": "the runtime is ready",
+                      "reason": "RuntimeReady",
+                      "status": "True",
+                      "type": "Ready"
+                    }
+                  ],
+                  "configDigest": "sha256:1b2c3d4e5f60718293a4b5c6d7e8f9011b2c3d4e5f60718293a4b5c6d7e8f901",
+                  "configStatus": {
+                    "observedGeneration": 1
+                  },
+                  "deleting": false,
+                  "description": null,
+                  "kind": "folder",
+                  "managedBy": "dashboard",
+                  "name": "chat",
+                  "representation": {
+                    "form": {
+                      "deployment": {
+                        "store": {
+                          "cnpg": {
+                            "instances": 1,
+                            "storage": {
+                              "size": "5Gi"
+                            }
+                          }
+                        }
+                      },
+                      "form": {
+                        "agent": {
+                          "files": {
+                            "instructions.md": "---\nname: chat\n---\nYour name is Chat.\n"
+                          },
+                          "kind": "folder"
+                        },
+                        "allowInsecureHttp": false,
+                        "audience": [
+                          "*"
+                        ],
+                        "description": null,
+                        "image": null,
+                        "model": {
+                          "endpoint": "gateway",
+                          "model": "chat-model"
+                        },
+                        "name": "chat",
+                        "suspend": false,
+                        "tags": [
+                          "chat"
+                        ],
+                        "title": "Chat",
+                        "toolServers": []
+                      }
+                    }
+                  },
+                  "state": "ready",
+                  "status": {
+                    "conditions": [
+                      {
+                        "lastTransitionTime": "2026-11-14T10:00:00Z",
+                        "message": "the runtime is ready",
+                        "reason": "RuntimeReady",
+                        "status": "True",
+                        "type": "Ready"
+                      }
+                    ],
+                    "observedGeneration": 1,
+                    "state": "Ready"
+                  },
+                  "suspend": false,
+                  "tags": [
+                    "chat"
+                  ],
+                  "title": "Chat"
+                },
+                "schema": {
+                  "$ref": "#/components/schemas/AgentDetail"
+                }
+              }
+            },
+            "description": "The agent.",
+            "headers": {
+              "ETag": {
+                "$ref": "#/components/headers/ETag"
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/Problem400"
+          },
+          "401": {
+            "$ref": "#/components/responses/Problem401"
+          },
+          "403": {
+            "$ref": "#/components/responses/Problem403"
+          },
+          "404": {
+            "$ref": "#/components/responses/Problem404"
+          },
+          "500": {
+            "$ref": "#/components/responses/Problem500"
+          },
+          "503": {
+            "$ref": "#/components/responses/Problem503"
+          }
+        },
+        "security": [
+          {
+            "bearer": []
+          }
+        ],
+        "summary": "One agent",
+        "tags": [
+          "agents"
+        ],
+        "x-permission": "platform:agents.read"
+      },
+      "put": {
+        "description": "`If-None-Match: *` creates (201); `If-Match: <ETag read>` replaces (200). Both objects are written, or neither. A body that names a secret key needs `platform:secrets.pick` as well.",
+        "operationId": "putAgent",
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/name"
+          },
+          {
+            "$ref": "#/components/parameters/IfMatch"
+          },
+          {
+            "$ref": "#/components/parameters/IfNoneMatch"
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "example": {
+                "agent": {
+                  "files": {
+                    "instructions.md": "---\nname: chat\n---\nYour name is Chat.\n"
+                  },
+                  "kind": "folder"
+                },
+                "audience": [
+                  "*"
+                ],
+                "model": {
+                  "endpoint": "gateway",
+                  "model": "chat-model"
+                },
+                "name": "chat",
+                "tags": [
+                  "chat"
+                ],
+                "title": "Chat"
+              },
+              "schema": {
+                "$ref": "#/components/schemas/AgentForm"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "example": {
+                  "audience": [
+                    "*"
+                  ],
+                  "conditions": [
+                    {
+                      "lastTransitionTime": "2026-11-14T10:00:00Z",
+                      "message": "the runtime is ready",
+                      "reason": "RuntimeReady",
+                      "status": "True",
+                      "type": "Ready"
+                    }
+                  ],
+                  "configDigest": "sha256:1b2c3d4e5f60718293a4b5c6d7e8f9011b2c3d4e5f60718293a4b5c6d7e8f901",
+                  "configStatus": {
+                    "observedGeneration": 1
+                  },
+                  "deleting": false,
+                  "description": null,
+                  "kind": "folder",
+                  "managedBy": "dashboard",
+                  "name": "chat",
+                  "representation": {
+                    "form": {
+                      "deployment": {
+                        "store": {
+                          "cnpg": {
+                            "instances": 1,
+                            "storage": {
+                              "size": "5Gi"
+                            }
+                          }
+                        }
+                      },
+                      "form": {
+                        "agent": {
+                          "files": {
+                            "instructions.md": "---\nname: chat\n---\nYour name is Chat.\n"
+                          },
+                          "kind": "folder"
+                        },
+                        "allowInsecureHttp": false,
+                        "audience": [
+                          "*"
+                        ],
+                        "description": null,
+                        "image": null,
+                        "model": {
+                          "endpoint": "gateway",
+                          "model": "chat-model"
+                        },
+                        "name": "chat",
+                        "suspend": false,
+                        "tags": [
+                          "chat"
+                        ],
+                        "title": "Chat",
+                        "toolServers": []
+                      }
+                    }
+                  },
+                  "state": "ready",
+                  "status": {
+                    "conditions": [
+                      {
+                        "lastTransitionTime": "2026-11-14T10:00:00Z",
+                        "message": "the runtime is ready",
+                        "reason": "RuntimeReady",
+                        "status": "True",
+                        "type": "Ready"
+                      }
+                    ],
+                    "observedGeneration": 1,
+                    "state": "Ready"
+                  },
+                  "suspend": false,
+                  "tags": [
+                    "chat"
+                  ],
+                  "title": "Chat"
+                },
+                "schema": {
+                  "$ref": "#/components/schemas/AgentDetail"
+                }
+              }
+            },
+            "description": "Replaced.",
+            "headers": {
+              "ETag": {
+                "$ref": "#/components/headers/ETag"
+              }
+            }
+          },
+          "201": {
+            "content": {
+              "application/json": {
+                "example": {
+                  "audience": [
+                    "*"
+                  ],
+                  "conditions": [
+                    {
+                      "lastTransitionTime": "2026-11-14T10:00:00Z",
+                      "message": "the runtime is ready",
+                      "reason": "RuntimeReady",
+                      "status": "True",
+                      "type": "Ready"
+                    }
+                  ],
+                  "configDigest": "sha256:1b2c3d4e5f60718293a4b5c6d7e8f9011b2c3d4e5f60718293a4b5c6d7e8f901",
+                  "configStatus": {
+                    "observedGeneration": 1
+                  },
+                  "deleting": false,
+                  "description": null,
+                  "kind": "folder",
+                  "managedBy": "dashboard",
+                  "name": "chat",
+                  "representation": {
+                    "form": {
+                      "deployment": {
+                        "store": {
+                          "cnpg": {
+                            "instances": 1,
+                            "storage": {
+                              "size": "5Gi"
+                            }
+                          }
+                        }
+                      },
+                      "form": {
+                        "agent": {
+                          "files": {
+                            "instructions.md": "---\nname: chat\n---\nYour name is Chat.\n"
+                          },
+                          "kind": "folder"
+                        },
+                        "allowInsecureHttp": false,
+                        "audience": [
+                          "*"
+                        ],
+                        "description": null,
+                        "image": null,
+                        "model": {
+                          "endpoint": "gateway",
+                          "model": "chat-model"
+                        },
+                        "name": "chat",
+                        "suspend": false,
+                        "tags": [
+                          "chat"
+                        ],
+                        "title": "Chat",
+                        "toolServers": []
+                      }
+                    }
+                  },
+                  "state": "ready",
+                  "status": {
+                    "conditions": [
+                      {
+                        "lastTransitionTime": "2026-11-14T10:00:00Z",
+                        "message": "the runtime is ready",
+                        "reason": "RuntimeReady",
+                        "status": "True",
+                        "type": "Ready"
+                      }
+                    ],
+                    "observedGeneration": 1,
+                    "state": "Ready"
+                  },
+                  "suspend": false,
+                  "tags": [
+                    "chat"
+                  ],
+                  "title": "Chat"
+                },
+                "schema": {
+                  "$ref": "#/components/schemas/AgentDetail"
+                }
+              }
+            },
+            "description": "Created.",
+            "headers": {
+              "ETag": {
+                "$ref": "#/components/headers/ETag"
+              },
+              "Location": {
+                "$ref": "#/components/headers/Location"
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/Problem400"
+          },
+          "401": {
+            "$ref": "#/components/responses/Problem401"
+          },
+          "403": {
+            "$ref": "#/components/responses/Problem403"
+          },
+          "404": {
+            "$ref": "#/components/responses/Problem404"
+          },
+          "409": {
+            "$ref": "#/components/responses/Problem409"
+          },
+          "412": {
+            "$ref": "#/components/responses/Problem412"
+          },
+          "413": {
+            "$ref": "#/components/responses/Problem413"
+          },
+          "415": {
+            "$ref": "#/components/responses/Problem415"
+          },
+          "422": {
+            "$ref": "#/components/responses/Problem422"
+          },
+          "428": {
+            "$ref": "#/components/responses/Problem428"
+          },
+          "500": {
+            "$ref": "#/components/responses/Problem500"
+          },
+          "503": {
+            "$ref": "#/components/responses/Problem503"
+          }
+        },
+        "security": [
+          {
+            "bearer": []
+          }
+        ],
+        "summary": "Create or replace an agent",
+        "tags": [
+          "agents"
+        ],
+        "x-permission": "platform:agents.write",
+        "x-secrets-pick": "platform:secrets.pick"
+      }
+    },
+    "/v1/agents/{name}/events": {
+      "get": {
+        "description": "Why is it not `Ready`: the Kubernetes Events (core/v1) about the agent's `AgentService`, its `AgentConfig` and what the operator made for it (workloads, replica sets, pods, the egress proxy), **newest first, at most 100**. Never another agent's. An event whose object could belong to two agents is left out. **The messages are the cluster's words, shown as it wrote them** (control characters replaced, at most 1 KiB): they can quote an image name or a webhook's answer, and are never logged.",
+        "operationId": "listAgentEvents",
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/name"
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "example": {
+                  "events": [
+                    {
+                      "count": 12,
+                      "firstSeen": "2026-11-14T10:00:05Z",
+                      "lastSeen": "2026-11-14T10:07:41Z",
+                      "message": "Back-off pulling image \"ghcr.io/example/coder:sha-0000000\"",
+                      "object": {
+                        "kind": "Pod",
+                        "name": "coder-7d9f8b6c5-x2x4q"
+                      },
+                      "reason": "BackOff",
+                      "type": "Warning"
+                    },
+                    {
+                      "count": 1,
+                      "firstSeen": "2026-11-14T10:00:02Z",
+                      "lastSeen": "2026-11-14T10:00:02Z",
+                      "message": "Scaled up replica set coder-7d9f8b6c5 to 1",
+                      "object": {
+                        "kind": "Deployment",
+                        "name": "coder"
+                      },
+                      "reason": "ScalingReplicaSet",
+                      "type": "Normal"
+                    }
+                  ]
+                },
+                "schema": {
+                  "$ref": "#/components/schemas/AgentEvents"
+                }
+              }
+            },
+            "description": "The events, possibly none."
+          },
+          "400": {
+            "$ref": "#/components/responses/Problem400"
+          },
+          "401": {
+            "$ref": "#/components/responses/Problem401"
+          },
+          "403": {
+            "$ref": "#/components/responses/Problem403"
+          },
+          "404": {
+            "$ref": "#/components/responses/Problem404"
+          },
+          "500": {
+            "$ref": "#/components/responses/Problem500"
+          },
+          "503": {
+            "$ref": "#/components/responses/Problem503"
+          }
+        },
+        "security": [
+          {
+            "bearer": []
+          }
+        ],
+        "summary": "The Events of an agent's objects",
+        "tags": [
+          "agents"
+        ],
+        "x-permission": "platform:agents.read"
+      }
+    },
+    "/v1/agents/{name}/yaml": {
+      "get": {
+        "description": "Both objects, as the GitOps repository would hold them (a whitelist of fields, no status).",
+        "operationId": "getAgentYaml",
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/name"
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/yaml": {
+                "example": "apiVersion: agents.vymalo.com/v1alpha1\nkind: AgentService\nmetadata:\n  name: chat\nspec:\n  configRef:\n    name: chat\n",
+                "schema": {
+                  "type": "string"
+                }
+              }
+            },
+            "description": "The YAML.",
+            "headers": {
+              "ETag": {
+                "$ref": "#/components/headers/ETag"
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/Problem400"
+          },
+          "401": {
+            "$ref": "#/components/responses/Problem401"
+          },
+          "403": {
+            "$ref": "#/components/responses/Problem403"
+          },
+          "404": {
+            "$ref": "#/components/responses/Problem404"
+          },
+          "500": {
+            "$ref": "#/components/responses/Problem500"
+          },
+          "503": {
+            "$ref": "#/components/responses/Problem503"
+          }
+        },
+        "security": [
+          {
+            "bearer": []
+          }
+        ],
+        "summary": "An agent as YAML",
+        "tags": [
+          "agents"
+        ],
+        "x-permission": "platform:agents.read"
+      }
+    },
+    "/v1/info": {
+      "get": {
+        "description": "The deployment's namespace, offer label, defaults, size classes of run pods and the body limit.",
+        "operationId": "getInfo",
+        "parameters": [],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "example": {
+                  "defaults": {
+                    "namespace": "another-agentic-system"
+                  },
+                  "limits": {
+                    "maxBodyBytes": 2097152
+                  },
+                  "namespace": "another-agentic-system",
+                  "offerLabel": "agents.vymalo.com/offer",
+                  "runPodSizeClasses": [],
+                  "version": "0.1.0"
+                },
+                "schema": {
+                  "$ref": "#/components/schemas/Info"
+                }
+              }
+            },
+            "description": "The capabilities."
+          },
+          "400": {
+            "$ref": "#/components/responses/Problem400"
+          },
+          "401": {
+            "$ref": "#/components/responses/Problem401"
+          },
+          "403": {
+            "$ref": "#/components/responses/Problem403"
+          },
+          "503": {
+            "$ref": "#/components/responses/Problem503"
+          }
+        },
+        "security": [
+          {
+            "bearer": []
+          }
+        ],
+        "summary": "The capability document",
+        "tags": [
+          "platform"
+        ],
+        "x-permission": "platform:agents.read"
+      }
+    },
+    "/v1/me": {
+      "get": {
+        "description": "The values of the roles claim that start with `platform:`. An empty list is a 200. The web draws `/admin` from it: a hint for the screen, never a check.",
+        "operationId": "getMe",
+        "parameters": [],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "example": {
+                  "permissions": [
+                    "platform:agents.read",
+                    "platform:agents.write"
+                  ]
+                },
+                "schema": {
+                  "$ref": "#/components/schemas/Me"
+                }
+              }
+            },
+            "description": "The permissions."
+          },
+          "400": {
+            "$ref": "#/components/responses/Problem400"
+          },
+          "401": {
+            "$ref": "#/components/responses/Problem401"
+          },
+          "503": {
+            "$ref": "#/components/responses/Problem503"
+          }
+        },
+        "security": [
+          {
+            "bearer": []
+          }
+        ],
+        "summary": "The dashboard permissions of the token",
+        "tags": [
+          "platform"
+        ],
+        "x-permission": null
+      }
+    },
+    "/v1/models": {
+      "get": {
+        "description": "Each with the agents that use it (names only for a caller that holds `platform:agents.read`) and the status the operator wrote.",
+        "operationId": "listModels",
+        "parameters": [],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "example": {
+                  "models": [
+                    {
+                      "deleting": false,
+                      "managedBy": "dashboard",
+                      "name": "gateway",
+                      "representation": {
+                        "form": {
+                          "apiKey": {
+                            "key": "GATEWAY_API_KEY",
+                            "secret": "agent-models"
+                          },
+                          "baseUrl": {
+                            "value": "https://gateway.example.com/v1"
+                          },
+                          "models": [
+                            "chat-model",
+                            "coding-model"
+                          ],
+                          "name": "gateway",
+                          "title": "Gateway"
+                        }
+                      },
+                      "status": {
+                        "conditions": [
+                          {
+                            "lastTransitionTime": "2026-11-14T10:00:00Z",
+                            "message": "the object is valid",
+                            "reason": "Valid",
+                            "status": "True",
+                            "type": "Accepted"
+                          }
+                        ],
+                        "observedGeneration": 1,
+                        "usedBy": [
+                          "chat"
+                        ]
+                      },
+                      "title": "Gateway",
+                      "usedBy": [
+                        "chat"
+                      ],
+                      "usedByCount": 1
+                    }
+                  ]
+                },
+                "schema": {
+                  "$ref": "#/components/schemas/ModelList"
+                }
+              }
+            },
+            "description": "The model endpoints."
+          },
+          "400": {
+            "$ref": "#/components/responses/Problem400"
+          },
+          "401": {
+            "$ref": "#/components/responses/Problem401"
+          },
+          "403": {
+            "$ref": "#/components/responses/Problem403"
+          },
+          "500": {
+            "$ref": "#/components/responses/Problem500"
+          },
+          "503": {
+            "$ref": "#/components/responses/Problem503"
+          }
+        },
+        "security": [
+          {
+            "bearer": []
+          }
+        ],
+        "summary": "The model endpoints",
+        "tags": [
+          "models"
+        ],
+        "x-permission": "platform:agents.read"
+      }
+    },
+    "/v1/models/{name}": {
+      "delete": {
+        "description": "`If-Match` is required. A 409 `referenced` while an agent names it.",
+        "operationId": "deleteModel",
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/name"
+          },
+          {
+            "$ref": "#/components/parameters/IfMatchRequired"
+          }
+        ],
+        "responses": {
+          "204": {
+            "description": "Gone."
+          },
+          "400": {
+            "$ref": "#/components/responses/Problem400"
+          },
+          "401": {
+            "$ref": "#/components/responses/Problem401"
+          },
+          "403": {
+            "$ref": "#/components/responses/Problem403"
+          },
+          "404": {
+            "$ref": "#/components/responses/Problem404"
+          },
+          "409": {
+            "$ref": "#/components/responses/Problem409"
+          },
+          "412": {
+            "$ref": "#/components/responses/Problem412"
+          },
+          "428": {
+            "$ref": "#/components/responses/Problem428"
+          },
+          "500": {
+            "$ref": "#/components/responses/Problem500"
+          },
+          "503": {
+            "$ref": "#/components/responses/Problem503"
+          }
+        },
+        "security": [
+          {
+            "bearer": []
+          }
+        ],
+        "summary": "Delete a model endpoint",
+        "tags": [
+          "models"
+        ],
+        "x-permission": "platform:models.write"
+      },
+      "get": {
+        "description": "The `ETag` is the object's kind, name, uid, generation and owner: the operator's status writes do not move it.",
+        "operationId": "getModel",
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/name"
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "example": {
+                  "deleting": false,
+                  "managedBy": "dashboard",
+                  "name": "gateway",
+                  "representation": {
+                    "form": {
+                      "apiKey": {
+                        "key": "GATEWAY_API_KEY",
+                        "secret": "agent-models"
+                      },
+                      "baseUrl": {
+                        "value": "https://gateway.example.com/v1"
+                      },
+                      "models": [
+                        "chat-model",
+                        "coding-model"
+                      ],
+                      "name": "gateway",
+                      "title": "Gateway"
+                    }
+                  },
+                  "status": {
+                    "conditions": [
+                      {
+                        "lastTransitionTime": "2026-11-14T10:00:00Z",
+                        "message": "the object is valid",
+                        "reason": "Valid",
+                        "status": "True",
+                        "type": "Accepted"
+                      }
+                    ],
+                    "observedGeneration": 1,
+                    "usedBy": [
+                      "chat"
+                    ]
+                  },
+                  "title": "Gateway",
+                  "usedBy": [
+                    "chat"
+                  ],
+                  "usedByCount": 1
+                },
+                "schema": {
+                  "$ref": "#/components/schemas/ModelDetail"
+                }
+              }
+            },
+            "description": "The model endpoint.",
+            "headers": {
+              "ETag": {
+                "$ref": "#/components/headers/ETag"
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/Problem400"
+          },
+          "401": {
+            "$ref": "#/components/responses/Problem401"
+          },
+          "403": {
+            "$ref": "#/components/responses/Problem403"
+          },
+          "404": {
+            "$ref": "#/components/responses/Problem404"
+          },
+          "500": {
+            "$ref": "#/components/responses/Problem500"
+          },
+          "503": {
+            "$ref": "#/components/responses/Problem503"
+          }
+        },
+        "security": [
+          {
+            "bearer": []
+          }
+        ],
+        "summary": "One model endpoint",
+        "tags": [
+          "models"
+        ],
+        "x-permission": "platform:agents.read"
+      },
+      "put": {
+        "description": "As `putAgent`. A change that would make the operator refuse an agent that names it is a 409.",
+        "operationId": "putModel",
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/name"
+          },
+          {
+            "$ref": "#/components/parameters/IfMatch"
+          },
+          {
+            "$ref": "#/components/parameters/IfNoneMatch"
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "example": {
+                "apiKey": {
+                  "key": "GATEWAY_API_KEY",
+                  "secret": "agent-models"
+                },
+                "baseUrl": {
+                  "value": "https://gateway.example.com/v1"
+                },
+                "models": [
+                  "chat-model",
+                  "coding-model"
+                ],
+                "name": "gateway",
+                "title": "Gateway"
+              },
+              "schema": {
+                "$ref": "#/components/schemas/ModelEndpointForm"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "example": {
+                  "deleting": false,
+                  "managedBy": "dashboard",
+                  "name": "gateway",
+                  "representation": {
+                    "form": {
+                      "apiKey": {
+                        "key": "GATEWAY_API_KEY",
+                        "secret": "agent-models"
+                      },
+                      "baseUrl": {
+                        "value": "https://gateway.example.com/v1"
+                      },
+                      "models": [
+                        "chat-model",
+                        "coding-model"
+                      ],
+                      "name": "gateway",
+                      "title": "Gateway"
+                    }
+                  },
+                  "status": {
+                    "conditions": [
+                      {
+                        "lastTransitionTime": "2026-11-14T10:00:00Z",
+                        "message": "the object is valid",
+                        "reason": "Valid",
+                        "status": "True",
+                        "type": "Accepted"
+                      }
+                    ],
+                    "observedGeneration": 1,
+                    "usedBy": [
+                      "chat"
+                    ]
+                  },
+                  "title": "Gateway",
+                  "usedBy": [
+                    "chat"
+                  ],
+                  "usedByCount": 1
+                },
+                "schema": {
+                  "$ref": "#/components/schemas/ModelDetail"
+                }
+              }
+            },
+            "description": "Replaced.",
+            "headers": {
+              "ETag": {
+                "$ref": "#/components/headers/ETag"
+              }
+            }
+          },
+          "201": {
+            "content": {
+              "application/json": {
+                "example": {
+                  "deleting": false,
+                  "managedBy": "dashboard",
+                  "name": "gateway",
+                  "representation": {
+                    "form": {
+                      "apiKey": {
+                        "key": "GATEWAY_API_KEY",
+                        "secret": "agent-models"
+                      },
+                      "baseUrl": {
+                        "value": "https://gateway.example.com/v1"
+                      },
+                      "models": [
+                        "chat-model",
+                        "coding-model"
+                      ],
+                      "name": "gateway",
+                      "title": "Gateway"
+                    }
+                  },
+                  "status": {
+                    "conditions": [
+                      {
+                        "lastTransitionTime": "2026-11-14T10:00:00Z",
+                        "message": "the object is valid",
+                        "reason": "Valid",
+                        "status": "True",
+                        "type": "Accepted"
+                      }
+                    ],
+                    "observedGeneration": 1,
+                    "usedBy": [
+                      "chat"
+                    ]
+                  },
+                  "title": "Gateway",
+                  "usedBy": [
+                    "chat"
+                  ],
+                  "usedByCount": 1
+                },
+                "schema": {
+                  "$ref": "#/components/schemas/ModelDetail"
+                }
+              }
+            },
+            "description": "Created.",
+            "headers": {
+              "ETag": {
+                "$ref": "#/components/headers/ETag"
+              },
+              "Location": {
+                "$ref": "#/components/headers/Location"
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/Problem400"
+          },
+          "401": {
+            "$ref": "#/components/responses/Problem401"
+          },
+          "403": {
+            "$ref": "#/components/responses/Problem403"
+          },
+          "404": {
+            "$ref": "#/components/responses/Problem404"
+          },
+          "409": {
+            "$ref": "#/components/responses/Problem409"
+          },
+          "412": {
+            "$ref": "#/components/responses/Problem412"
+          },
+          "413": {
+            "$ref": "#/components/responses/Problem413"
+          },
+          "415": {
+            "$ref": "#/components/responses/Problem415"
+          },
+          "422": {
+            "$ref": "#/components/responses/Problem422"
+          },
+          "428": {
+            "$ref": "#/components/responses/Problem428"
+          },
+          "500": {
+            "$ref": "#/components/responses/Problem500"
+          },
+          "503": {
+            "$ref": "#/components/responses/Problem503"
+          }
+        },
+        "security": [
+          {
+            "bearer": []
+          }
+        ],
+        "summary": "Create or replace a model endpoint",
+        "tags": [
+          "models"
+        ],
+        "x-permission": "platform:models.write",
+        "x-secrets-pick": "platform:secrets.pick"
+      }
+    },
+    "/v1/openapi.json": {
+      "get": {
+        "description": "The OpenAPI document of the API, generated from its table of routes. It needs `platform:agents.read`, as `GET /v1/info` does (the stricter of the two precedents: an unauthenticated caller is served nothing).",
+        "operationId": "getOpenApi",
+        "parameters": [],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "example": {
+                  "info": {
+                    "title": "Platform API",
+                    "version": "v1"
+                  },
+                  "openapi": "3.1.0",
+                  "paths": {}
+                },
+                "schema": {
+                  "$ref": "#/components/schemas/OpenApiDocument"
+                }
+              }
+            },
+            "description": "The document."
+          },
+          "400": {
+            "$ref": "#/components/responses/Problem400"
+          },
+          "401": {
+            "$ref": "#/components/responses/Problem401"
+          },
+          "403": {
+            "$ref": "#/components/responses/Problem403"
+          },
+          "503": {
+            "$ref": "#/components/responses/Problem503"
+          }
+        },
+        "security": [
+          {
+            "bearer": []
+          }
+        ],
+        "summary": "This document",
+        "tags": [
+          "platform"
+        ],
+        "x-permission": "platform:agents.read"
+      }
+    },
+    "/v1/secret-keys": {
+      "get": {
+        "description": "The keys of the ExternalSecrets that carry the offer label. **Never a value**: no Secret is read.",
+        "operationId": "listSecretKeys",
+        "parameters": [],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "example": {
+                  "keys": [
+                    {
+                      "externalSecret": "agent-models-es",
+                      "key": "GATEWAY_API_KEY",
+                      "secret": "agent-models"
+                    }
+                  ],
+                  "offerLabel": "agents.vymalo.com/offer"
+                },
+                "schema": {
+                  "$ref": "#/components/schemas/SecretKeys"
+                }
+              }
+            },
+            "description": "The offered keys."
+          },
+          "400": {
+            "$ref": "#/components/responses/Problem400"
+          },
+          "401": {
+            "$ref": "#/components/responses/Problem401"
+          },
+          "403": {
+            "$ref": "#/components/responses/Problem403"
+          },
+          "500": {
+            "$ref": "#/components/responses/Problem500"
+          },
+          "503": {
+            "$ref": "#/components/responses/Problem503"
+          }
+        },
+        "security": [
+          {
+            "bearer": []
+          }
+        ],
+        "summary": "The Secret keys a form may name",
+        "tags": [
+          "platform"
+        ],
+        "x-permission": "platform:secrets.pick"
+      }
+    },
+    "/v1/tool-servers": {
+      "get": {
+        "description": "As `listModels`, for the MCP servers.",
+        "operationId": "listToolServers",
+        "parameters": [],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "example": {
+                  "toolServers": [
+                    {
+                      "deleting": false,
+                      "managedBy": "dashboard",
+                      "name": "search",
+                      "representation": {
+                        "form": {
+                          "headers": {
+                            "Authorization": {
+                              "prefix": "Bearer ",
+                              "secret": {
+                                "key": "SEARCH_TOKEN",
+                                "secret": "agent-tools"
+                              }
+                            }
+                          },
+                          "name": "search",
+                          "optional": true,
+                          "title": "Web search",
+                          "tools": [],
+                          "url": "https://search.example.com/mcp"
+                        }
+                      },
+                      "status": {
+                        "conditions": [
+                          {
+                            "lastTransitionTime": "2026-11-14T10:00:00Z",
+                            "message": "the object is valid",
+                            "reason": "Valid",
+                            "status": "True",
+                            "type": "Accepted"
+                          }
+                        ],
+                        "observedGeneration": 1,
+                        "usedBy": [
+                          "chat"
+                        ]
+                      },
+                      "title": "Web search",
+                      "usedBy": [
+                        "chat"
+                      ],
+                      "usedByCount": 1
+                    }
+                  ]
+                },
+                "schema": {
+                  "$ref": "#/components/schemas/ToolServerList"
+                }
+              }
+            },
+            "description": "The tool servers."
+          },
+          "400": {
+            "$ref": "#/components/responses/Problem400"
+          },
+          "401": {
+            "$ref": "#/components/responses/Problem401"
+          },
+          "403": {
+            "$ref": "#/components/responses/Problem403"
+          },
+          "500": {
+            "$ref": "#/components/responses/Problem500"
+          },
+          "503": {
+            "$ref": "#/components/responses/Problem503"
+          }
+        },
+        "security": [
+          {
+            "bearer": []
+          }
+        ],
+        "summary": "The tool servers",
+        "tags": [
+          "tool-servers"
+        ],
+        "x-permission": "platform:agents.read"
+      }
+    },
+    "/v1/tool-servers/{name}": {
+      "delete": {
+        "description": "As `deleteModel`.",
+        "operationId": "deleteToolServer",
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/name"
+          },
+          {
+            "$ref": "#/components/parameters/IfMatchRequired"
+          }
+        ],
+        "responses": {
+          "204": {
+            "description": "Gone."
+          },
+          "400": {
+            "$ref": "#/components/responses/Problem400"
+          },
+          "401": {
+            "$ref": "#/components/responses/Problem401"
+          },
+          "403": {
+            "$ref": "#/components/responses/Problem403"
+          },
+          "404": {
+            "$ref": "#/components/responses/Problem404"
+          },
+          "409": {
+            "$ref": "#/components/responses/Problem409"
+          },
+          "412": {
+            "$ref": "#/components/responses/Problem412"
+          },
+          "428": {
+            "$ref": "#/components/responses/Problem428"
+          },
+          "500": {
+            "$ref": "#/components/responses/Problem500"
+          },
+          "503": {
+            "$ref": "#/components/responses/Problem503"
+          }
+        },
+        "security": [
+          {
+            "bearer": []
+          }
+        ],
+        "summary": "Delete a tool server",
+        "tags": [
+          "tool-servers"
+        ],
+        "x-permission": "platform:toolproviders.write"
+      },
+      "get": {
+        "description": "As `getModel`.",
+        "operationId": "getToolServer",
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/name"
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "example": {
+                  "deleting": false,
+                  "managedBy": "dashboard",
+                  "name": "search",
+                  "representation": {
+                    "form": {
+                      "headers": {
+                        "Authorization": {
+                          "prefix": "Bearer ",
+                          "secret": {
+                            "key": "SEARCH_TOKEN",
+                            "secret": "agent-tools"
+                          }
+                        }
+                      },
+                      "name": "search",
+                      "optional": true,
+                      "title": "Web search",
+                      "tools": [],
+                      "url": "https://search.example.com/mcp"
+                    }
+                  },
+                  "status": {
+                    "conditions": [
+                      {
+                        "lastTransitionTime": "2026-11-14T10:00:00Z",
+                        "message": "the object is valid",
+                        "reason": "Valid",
+                        "status": "True",
+                        "type": "Accepted"
+                      }
+                    ],
+                    "observedGeneration": 1,
+                    "usedBy": [
+                      "chat"
+                    ]
+                  },
+                  "title": "Web search",
+                  "usedBy": [
+                    "chat"
+                  ],
+                  "usedByCount": 1
+                },
+                "schema": {
+                  "$ref": "#/components/schemas/ToolServerDetail"
+                }
+              }
+            },
+            "description": "The tool server.",
+            "headers": {
+              "ETag": {
+                "$ref": "#/components/headers/ETag"
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/Problem400"
+          },
+          "401": {
+            "$ref": "#/components/responses/Problem401"
+          },
+          "403": {
+            "$ref": "#/components/responses/Problem403"
+          },
+          "404": {
+            "$ref": "#/components/responses/Problem404"
+          },
+          "500": {
+            "$ref": "#/components/responses/Problem500"
+          },
+          "503": {
+            "$ref": "#/components/responses/Problem503"
+          }
+        },
+        "security": [
+          {
+            "bearer": []
+          }
+        ],
+        "summary": "One tool server",
+        "tags": [
+          "tool-servers"
+        ],
+        "x-permission": "platform:agents.read"
+      },
+      "put": {
+        "description": "As `putModel`.",
+        "operationId": "putToolServer",
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/name"
+          },
+          {
+            "$ref": "#/components/parameters/IfMatch"
+          },
+          {
+            "$ref": "#/components/parameters/IfNoneMatch"
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "example": {
+                "headers": {
+                  "Authorization": {
+                    "prefix": "Bearer ",
+                    "secret": {
+                      "key": "SEARCH_TOKEN",
+                      "secret": "agent-tools"
+                    }
+                  }
+                },
+                "name": "search",
+                "optional": true,
+                "title": "Web search",
+                "tools": [],
+                "url": "https://search.example.com/mcp"
+              },
+              "schema": {
+                "$ref": "#/components/schemas/ToolServerForm"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "example": {
+                  "deleting": false,
+                  "managedBy": "dashboard",
+                  "name": "search",
+                  "representation": {
+                    "form": {
+                      "headers": {
+                        "Authorization": {
+                          "prefix": "Bearer ",
+                          "secret": {
+                            "key": "SEARCH_TOKEN",
+                            "secret": "agent-tools"
+                          }
+                        }
+                      },
+                      "name": "search",
+                      "optional": true,
+                      "title": "Web search",
+                      "tools": [],
+                      "url": "https://search.example.com/mcp"
+                    }
+                  },
+                  "status": {
+                    "conditions": [
+                      {
+                        "lastTransitionTime": "2026-11-14T10:00:00Z",
+                        "message": "the object is valid",
+                        "reason": "Valid",
+                        "status": "True",
+                        "type": "Accepted"
+                      }
+                    ],
+                    "observedGeneration": 1,
+                    "usedBy": [
+                      "chat"
+                    ]
+                  },
+                  "title": "Web search",
+                  "usedBy": [
+                    "chat"
+                  ],
+                  "usedByCount": 1
+                },
+                "schema": {
+                  "$ref": "#/components/schemas/ToolServerDetail"
+                }
+              }
+            },
+            "description": "Replaced.",
+            "headers": {
+              "ETag": {
+                "$ref": "#/components/headers/ETag"
+              }
+            }
+          },
+          "201": {
+            "content": {
+              "application/json": {
+                "example": {
+                  "deleting": false,
+                  "managedBy": "dashboard",
+                  "name": "search",
+                  "representation": {
+                    "form": {
+                      "headers": {
+                        "Authorization": {
+                          "prefix": "Bearer ",
+                          "secret": {
+                            "key": "SEARCH_TOKEN",
+                            "secret": "agent-tools"
+                          }
+                        }
+                      },
+                      "name": "search",
+                      "optional": true,
+                      "title": "Web search",
+                      "tools": [],
+                      "url": "https://search.example.com/mcp"
+                    }
+                  },
+                  "status": {
+                    "conditions": [
+                      {
+                        "lastTransitionTime": "2026-11-14T10:00:00Z",
+                        "message": "the object is valid",
+                        "reason": "Valid",
+                        "status": "True",
+                        "type": "Accepted"
+                      }
+                    ],
+                    "observedGeneration": 1,
+                    "usedBy": [
+                      "chat"
+                    ]
+                  },
+                  "title": "Web search",
+                  "usedBy": [
+                    "chat"
+                  ],
+                  "usedByCount": 1
+                },
+                "schema": {
+                  "$ref": "#/components/schemas/ToolServerDetail"
+                }
+              }
+            },
+            "description": "Created.",
+            "headers": {
+              "ETag": {
+                "$ref": "#/components/headers/ETag"
+              },
+              "Location": {
+                "$ref": "#/components/headers/Location"
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/Problem400"
+          },
+          "401": {
+            "$ref": "#/components/responses/Problem401"
+          },
+          "403": {
+            "$ref": "#/components/responses/Problem403"
+          },
+          "404": {
+            "$ref": "#/components/responses/Problem404"
+          },
+          "409": {
+            "$ref": "#/components/responses/Problem409"
+          },
+          "412": {
+            "$ref": "#/components/responses/Problem412"
+          },
+          "413": {
+            "$ref": "#/components/responses/Problem413"
+          },
+          "415": {
+            "$ref": "#/components/responses/Problem415"
+          },
+          "422": {
+            "$ref": "#/components/responses/Problem422"
+          },
+          "428": {
+            "$ref": "#/components/responses/Problem428"
+          },
+          "500": {
+            "$ref": "#/components/responses/Problem500"
+          },
+          "503": {
+            "$ref": "#/components/responses/Problem503"
+          }
+        },
+        "security": [
+          {
+            "bearer": []
+          }
+        ],
+        "summary": "Create or replace a tool server",
+        "tags": [
+          "tool-servers"
+        ],
+        "x-permission": "platform:toolproviders.write",
+        "x-secrets-pick": "platform:secrets.pick"
+      }
+    }
+  },
+  "security": [
+    {
+      "bearer": []
+    }
+  ],
+  "tags": [
+    {
+      "description": "An agent is an AgentService and the AgentConfig it runs, saved, read and deleted as one unit.",
+      "name": "agents"
+    },
+    {
+      "description": "Shared model endpoints that agents name.",
+      "name": "models"
+    },
+    {
+      "description": "Shared MCP tool servers that agents name.",
+      "name": "tool-servers"
+    },
+    {
+      "description": "The caller, the capabilities, the secret keys a form may name, and this document.",
+      "name": "platform"
+    }
+  ]
+}
