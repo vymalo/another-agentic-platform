@@ -42,6 +42,13 @@ file that does not come back, with its path (`defaults.allowFrom[0].podSelectr`)
 | `defaults.runPodSizeClasses` | optional, default none | The names of the classes of the operator's run pods (D15a): what `GET /v1/info` offers and what a coder form may pick. **The operator chart writes it** from `runPodClasses` while `runPods.enabled` (and refuses a hand-written list); written by hand it must be the classes the operator has, or the operator marks the agent `ConfigInvalid` naming the class. With classes, `defaults.coder.workVolume` is required (run pods mount it) and the binary checks at start that a coder asking for the first class is a valid one. See `config.example.yaml` |
 | `defaults.allowedImageRegistries` | **required, at least one** | The registries a folder agent may pin its own image from. **The binary does not start without it** (`aap-forms` alone reads "absent" as "any registry"): a person who holds `agents.write` and not `secrets.pick` can still name an agent's image, and that pod is handed the model endpoint's API key and the A2A bearer. An entry is a registry host (and port) and **does not bound repositories**: `ghcr.io` admits every image on `ghcr.io`, so name only registries whose images you trust. A tag or a digest is always required |
 
+## `api openapi`
+
+`api openapi` prints the OpenAPI 3.1 document of the API (`aap_platform_api::openapi::pretty()`) and exits; it needs no configuration, no cluster and no issuer (it is read before
+the arguments, so `--config` is not required), as the operator's `crdgen` is. It is how [`docs/api/platform-api-v1.openapi.json`](../../docs/api/platform-api-v1.openapi.json) is
+regenerated: `cargo run -q -p aap-api-server --bin api -- openapi > docs/api/platform-api-v1.openapi.json`; a test of `aap-platform-api` fails when the file is not what it prints.
+The same document is served by `GET /v1/openapi.json` to a caller that holds `platform:agents.read`.
+
 ## What it runs
 
 ```mermaid

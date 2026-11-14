@@ -265,6 +265,20 @@ deployment without the External Secrets Operator has nothing that could have opt
 deployment an outage and take `GET /v1/secret-keys` down with it. (The other choice is in `failure.rs`: `NotServed`.) A server that
 cannot be reached, or that refuses the list, is `Unavailable` as for the other calls.
 
+## The events of an agent (K8)
+
+`agent_events` reads **`core/v1` `Event`s** (`events`, group `""`: what `kubectl get events` reads and the kubelet and the controllers write; `events.k8s.io/v1` is the same store with
+`regarding` and `eventTime`, and reading both would double the right and the code). The API server cannot select by a prefix, so it `GET`s the service (`NotFound` if it is not there),
+`LIST`s the services (the other agents' names) and `LIST`s the namespace's Events, 500 a page and at most 10 pages (they expire after an hour by default), and **attributes each by the
+kind and name of its `involvedObject`** ([`src/events.rs`](src/events.rs)): `AgentService` and `AgentConfig` `<agent>`; `Deployment`, `StatefulSet`, `Service`, `PodDisruptionBudget`
+`<agent>`, `<agent>-front` or `<agent>-egress` (`aap-runtime-kubernetes`'s names); `ReplicaSet` `W-<hash>`; `Pod` `W-<ordinal>` or `W-<hash>-<suffix>`. **A name that fits two agents is
+attributed to neither** (`a` and `a-front`). Not selected: volume claims, and the pods a coder makes for its runs. The time of an event is `series.lastObservedTime`, `lastTimestamp`,
+`eventTime`, `firstTimestamp` or the creation time, to the second; the count is `series.count`, `count` or 1; an unknown `type` is a `Warning`. **No Secret is read.** A `403` is
+`Unavailable`, as everywhere in this crate: an API image newer than its `Role` answers `503` on this route alone.
+
+`tests/events.rs` runs it on the fake API server with `tests/fixtures/events/event-list.json`, **hand-written from the Kubernetes API reference and *unverified* against a real API server**
+(its README says so), and `tests/cluster.rs` writes real Events through the harness and asks the API server which verbs the identity has on `events` (`list` and nothing else).
+
 ## Rights
 
 The crate needs these verbs in its namespace, and the `Role` of D7b's chart must grant **exactly** these (`tests/rbac.yaml` is the Role the

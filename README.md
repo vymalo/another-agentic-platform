@@ -33,6 +33,7 @@ flowchart TB
 | [MVP](docs/mvp.md) | The v0 cut (scenarios A–C, plus D for free) and build order |
 | [Release-channels A2A extension](docs/extensions/release-channels-v1.md) | How any A2A client discovers and selects an agent's channels/revisions |
 | [Agent registry](docs/extensions/agent-registry-v1.md) | How any client lists the fleet's A2A agents: a linkset of agent cards |
+| [Platform API contract](docs/api/README.md) | The OpenAPI 3.1 document of the dashboard's API (`/v1`), generated from its table of routes and held equal to the router by tests, and a client recipe: authenticate, list, create with `If-None-Match: *`, replace and delete with `If-Match`, read status and Events, the error shape |
 
 ## Workspace
 

@@ -18,7 +18,8 @@
 #      image: no precondition is 428 and writes nothing, an image from a registry the deployment does not allow is 422 on the field
 #      `image`, the create is 201 with an ETag and the label of the dashboard, a second create is 409;
 #   5. the operator makes it `Ready`; the API lists it (kind folder, managedBy dashboard), reads it, exports it as YAML without a value or a
-#      status, and the model says the agent uses it and cannot be deleted under it (409);
+#      status, the Events of its objects (K8: an `events` array, newest first, each about this agent; 403 naming platform:agents.read without
+#      it) and the OpenAPI document are served, and the model says the agent uses it and cannot be deleted under it (409);
 #   6. a replace with the current ETag is 200, with the old one 412; a delete with no `If-Match` is 428 and with the old one 412; a delete with
 #      the current one is accepted (204; 202 when the operator's finalizer outlasts the API's 5 s wait, and then the AgentConfig stays behind as
 #      an orphan, which the script reports and removes), the operator's finalizer completes, the objects and the workload are gone, and then
@@ -600,6 +601,30 @@ done
 for lack in 'status:' 'managedFields' 'resourceVersion' "$sentinel"; do
   if grep -qF -- "$lack" "$work/body"; then die "the YAML holds '$lack'"; fi
 done
+# K8: the Events of the agent's objects, and the OpenAPI document. *Unverified until CI has run it*: no kind exists where it was
+# written, and the Event fixture of the crate's fake is hand-written. What is asserted holds whatever the cluster wrote: an object with an
+# `events` array (possibly empty), newest first, at most 100, each about an object whose name starts with the agent's, with a type, a count
+# and a message of at most 1 KiB with no control character; and the permission it needs is named when it is missing.
+as reader platform:agents.read GET "/v1/agents/$agent/events"
+expect 200 "the events of the agent"
+jq -e --arg a "$agent" '(.events | type == "array" and length <= 100)
+  and (.events | all(.[]; (.type == "Normal" or .type == "Warning") and (.object.name | startswith($a)) and .count >= 1
+       and (.message | length <= 1024 and (test("[[:cntrl:]]") | not)) and (.lastSeen | test("^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9:]{8}Z$"))))
+  and ([.events[].lastSeen] == ([.events[].lastSeen] | sort | reverse))' "$work/body" >/dev/null \
+  || die "the events are not an object with a newest-first array of events of this agent: $(head -c 1500 "$work/body")"
+as nobody "" GET "/v1/agents/$agent/events"
+expect_problem 403 forbidden "the events without platform:agents.read"
+[ "$(jq -r .permission "$work/body")" = platform:agents.read ] || die "the 403 does not name platform:agents.read: $(cat "$work/body")"
+as reader platform:agents.read GET "/v1/agents/no-such-agent-e2e/events"
+expect_problem 404 not-found "the events of an agent that is not there"
+as reader platform:agents.read GET /v1/openapi.json
+expect 200 "the OpenAPI document"
+jq -e '.openapi == "3.1.0" and (.paths | has("/v1/agents/{name}/events")) and (.paths["/v1/agents/{name}/events"].get["x-permission"] == "platform:agents.read")' "$work/body" >/dev/null \
+  || die "the OpenAPI document does not describe the events route: $(head -c 600 "$work/body")"
+as nobody "" GET /v1/openapi.json
+expect_problem 403 forbidden "the OpenAPI document without platform:agents.read"
+ok "the Events of the agent's objects (an array, newest first, each about this agent, 403 naming platform:agents.read without it, 404 for another name) and the OpenAPI document are served"
+
 as reader platform:agents.read GET "/v1/models/$model"
 expect 200 "read the model"
 [ "$(jq -c .usedBy "$work/body")" = "[\"$agent\"]" ] || die "the model is used by $(jq -c .usedBy "$work/body"), not by the agent"

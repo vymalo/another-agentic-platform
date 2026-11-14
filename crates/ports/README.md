@@ -62,6 +62,7 @@ trait AgentObjects: Send + Sync {                       // D4: the Platform API'
     async fn put_shared(&self, kind: SharedKind, draft: &SharedDraft, when: &Precondition) -> Result<Stored, ObjectsError>;
     async fn delete_shared(&self, kind: SharedKind, name: &str, when: &ETag) -> Result<(), ObjectsError>;
     async fn offered_secrets(&self) -> Result<Vec<OfferedSecret>, ObjectsError>;
+    async fn agent_events(&self, name: &str) -> Result<Vec<AgentEvent>, ObjectsError>;     // K8: the events about one agent's objects
 }
 trait Authenticator: Send + Sync {                      // D4: a bearer token to a person
     async fn authenticate(&self, token: Option<&str>) -> Result<Principal, AuthError>;
@@ -195,6 +196,14 @@ depending on `aap-api` and so on `kube`, would give every provider that depends 
 * **Secrets.** `offered_secrets` lists the `data[].secretKey` of every ExternalSecret that carries the offer label, under its
   `target.name`, and, for one that also has a `dataFrom`, the Secret with `key: None`; ordered by `(secret, key, external_secret)`, the `None` first. It reads no Secret and has no
   right to; the cases plant values in the backend and fail when one reaches an answer.
+* **Events (K8).** `agent_events(name)` is the events about **one agent's** objects (its `AgentService`, its `AgentConfig`, what the runtime made for it), **newest first by
+  `lastSeen` and at most `MAX_EVENTS` (100)**, as `AgentEvent { event_type: Normal | Warning, reason, message, object: { kind, name }, count, first_seen, last_seen }` (times
+  `YYYY-MM-DDTHH:MM:SSZ`). `newest_first` is the one place that orders and bounds, and `AgentEvent::new` the one that cleans (control characters become a space, a message is cut at
+  `MAX_MESSAGE_CHARS` (1024) with a `…`, a reason, a kind and a name at 253): **an event's words are third-party text**. Never another agent's events; an agent with no `AgentService`
+  is `NotFound`. **A new required method: every implementer of `AgentObjects` broke when it was added** (the Memory store, `aap-objects-kubernetes` and the test doubles of this
+  repository; an implementation outside it must add `agent_events`). `ObjectsUnderTest` gains `seed_event(agent, &EventSeed)`, and the suite four cases (one agent's events only and
+  newest first; the bound keeps the newest; a message cleaned and cut; no events, and an agent that is not there), each broken on purpose in `tests/objects.rs`. A backend decides
+  which of its events are which agent's (the cases use the agent's own name as the object's name, which every backend attributes).
 * **Ownership is read from two marks, nothing else.** `Owner::of` reads the dashboard's `app.kubernetes.io/managed-by` label and Argo CD's
   `argocd.argoproj.io/tracking-id` annotation. It does **not** detect Flux (`kustomize.toolkit.fluxcd.io/…` labels) or Argo CD set to label tracking
   (`app.kubernetes.io/instance`): an object that has the dashboard's label and that one of those now syncs is still read as the dashboard's, and a save would fight it. An object

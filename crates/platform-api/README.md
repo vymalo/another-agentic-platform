@@ -36,6 +36,8 @@ The table is [`routes.rs`](src/routes.rs) (`ROUTES`), which is §60a's table wri
 | `PUT /v1/agents/{name}` | `platform:agents.write` (+ `platform:secrets.pick` when the form names a secret key) | `201` + `Location` + `ETag` (create), `200` + `ETag` (replace) | The agent form (`aap-forms`), both objects |
 | `DELETE /v1/agents/{name}` | `platform:agents.write` | `204`, or `202` + the row while the operator is still releasing it | `If-Match` required |
 | `GET /v1/agents/{name}/yaml` | `platform:agents.read` | `200` + `ETag` | `application/yaml`: the `AgentConfig` then the `AgentService`, as `aap_forms::export_agent` writes them: never `status`, `managedFields` or a tool's annotation |
+| `GET /v1/agents/{name}/events` | `platform:agents.read` | `200` | **K8.** `{ "events": [{ "type": "Normal"\|"Warning", "reason", "message", "object": { "kind", "name" }, "count", "firstSeen", "lastSeen" }] }`, newest first, at most 100, never another agent's; `404` for an agent that is not there. The messages are the cluster's words (control characters replaced, at most 1 KiB) and are never logged: see [Events](#events-and-the-openapi-document-k8) |
+| `GET /v1/openapi.json` | `platform:agents.read` | `200` | **K8.** The OpenAPI 3.1 document of this API, generated from the table (below) |
 | `GET /v1/models`, `GET /v1/models/{name}` | `platform:agents.read` | `200` (+ `ETag`) | `{ "models": [...] }` / one: `name`, `title`, `managedBy`, `deleting`, `usedBy` (the agents that name it, the API's own count: a service being deleted still counts and one whose config is missing does not, as in the operator's status, which may lag it) and `usedByCount` (how many), `status` (K2: what the operator observed, `SharedStatus` as the type says it: its own `usedBy` and `usedByMore`, the conditions; absent before the operator wrote one; read from the object the answer already holds, so the API's `Role` is unchanged; **to a person without `platform:agents.read`, who can only see the answer to a `PUT`, no agent is named: `usedBy` is `[]`, the status's `usedBy` is `[]` with `usedByMore` 0, and the message of `AgentsReady` / `SomeNotReady` names nobody; `usedByCount` stays**), `representation`. **The `ETag` of a model or a tool server does not move with the operator's status** (`aap-ports`, K2) |
 | `PUT`, `DELETE /v1/models/{name}` | `platform:models.write` (+ `platform:secrets.pick`: a model always names its API key) | `201`/`200`, `204` | `ModelEndpointForm` |
 | `GET /v1/tool-servers`, `GET /v1/tool-servers/{name}` | `platform:agents.read` | `200` (+ `ETag`) | `{ "toolServers": [...] }` / one, as models |
@@ -44,6 +46,24 @@ The table is [`routes.rs`](src/routes.rs) (`ROUTES`), which is §60a's table wri
 
 `HEAD` is `GET`. A method a path does not serve is `405` with `Allow`; a path that is no route is `404`. Neither asks for a token. Bodies
 are objects, never bare lists, in camelCase.
+
+### Events and the OpenAPI document (K8)
+
+[`openapi.rs`](src/openapi.rs) builds the OpenAPI 3.1 document (`document()`; `pretty()` is the text of the checked-in
+[`docs/api/platform-api-v1.openapi.json`](../../docs/api/platform-api-v1.openapi.json), keys in byte order; `api openapi` prints it).
+**The paths, the methods and `x-permission` are the table's** (`x-permission: null` for a route that needs a token alone; `x-secrets-pick` on a write whose body can
+name a secret key). The description of a route is an exhaustive `match` on `RouteId`: a route added to the table without one does not compile. **The schemas are
+written once, by hand, in that file** (`aap-forms` and `aap-api` derive no schema for their wire types; adding a derive or `utoipa` would be a much larger change, and no
+dependency was added). `tests/openapi.rs` keeps them honest: the file equals what the code generates; every route of the table is documented and nothing else, with
+the table's permission; one session over the `Memory` ports answers every route every way a test can make it and **each answer, success and problem, is validated against the
+schema of its route and status** (with a small JSON Schema validator in the test, itself tested to fail); every documented status is answered and every answer is documented
+(but a `500`, which the memory ports cannot cause, and the `503` `keys-unavailable` of a route that reads no store); every example parses (a request example with the real form
+type). Regenerate it with `cargo run -q -p aap-api-server --bin api -- openapi > docs/api/platform-api-v1.openapi.json`; [`docs/api/README.md`](../../docs/api/README.md) is the client recipe.
+
+`GET /v1/agents/{name}/events` is `AgentObjects::agent_events`: the port orders (newest first by `lastSeen`) and bounds (100) and cleans the texts; this crate's handler is one
+call and `{ "events": [...] }`. **An Event's message is third-party text**: it is shown as the cluster wrote it but for control characters (a space) and a 1 KiB cut, and the log never holds
+one (`tests/logs.rs` plants a sentinel in a message). A client renders it as text, never as markup. The Kubernetes implementation's rule for which Event is which agent's is in
+[`aap-objects-kubernetes`](../objects-kubernetes/README.md#the-events-of-an-agent-k8).
 
 ### Authorization: one layer, applied last
 
@@ -232,6 +252,7 @@ entry would match nothing. Every answer of the router, a preflight and a refusal
 | File | What |
 |---|---|
 | `src/*` (unit, 18) | the table has no route twice, and gives the `Allow` of a template; the ETag header round trip for any token, and an escape that is a percent and two hexadecimal digits (`%+f` is none); `If-Match` in every form; a media type; a body error that quotes no value; origins, and the default port; the bearer scheme; **every kind of stray route (a handler, a service, a nested router and service, a merged router, a stray method, a fallback) is refused or `404`/`405`/`500` and never runs**; every `ObjectsError` has the status of the ports table and leaks no source |
+| `tests/openapi.rs` (10) | **K8**: the document equals what the code generates, lists every route and no other with the table's permission, resolves every `$ref`, says what is deliberately absent; `GET /v1/openapi.json` serves it (`401`, `403`, `200`); every real answer validates against its schema; every documented status is answered; every example parses (the form types) and validates; the validator can fail; an event message is clean in the answer |
 | `tests/matrix.rs` (12) | **the route-by-permission matrix**: a second, hand-written copy of §60a's table must equal `ROUTES`; every route and method with no token (`401` + challenge), a bad token, every permission but the needed one (`403` naming that one only), no permission, and the needed one; `HEAD`, `405`, `404`; the source has `.route(` once, in the loop over the table, and no other way to add a route |
 | `tests/agents.rs` (34) | create, read, list, YAML; the ETag round trip, `412`, `428`, a weak tag; `409` for exists, GitOps, referenced (the agents named only to a reader of agents), being deleted (a second `DELETE` is `202` again) and YAML only; `422` with form fields; `secrets.pick`; `400` (two `Content-Type`, `If-None-Match` on a `DELETE`), `415`, `413` (by length, by one chunk and **across chunks**, to the byte); `503` from the objects and from the keys, with `Retry-After`; a save never moves the deployment part |
 | `tests/lifecycle.rs` (15) | **each state of the lifecycle of §60a** (saving, blocked, degraded, ready, suspended, deleting) read from the two objects: a generation the operator has not observed, a config edited alone, no status, no state, a GitOps agent; **every member of a row and of a detail**, the order of the conditions, both statuses whole |
