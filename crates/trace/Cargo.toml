@@ -1,0 +1,28 @@
+[package]
+name = "aap-trace"
+description = "Traces of the operator and the Platform API (K5): a closed span API whose attributes are the variants of one enum, a bounded pipeline that never blocks and a SpanExporter seam with a conformance testkit"
+readme = "README.md"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+publish.workspace = true
+
+[features]
+# `MemoryExporter`, `Tracer::in_memory`, `exporter_conformance!` and `assert_clean`.
+testkit = []
+
+[dependencies]
+# Already in the lock file (0.2.17, `aapctl login` uses it): the ids of a trace and a span.
+getrandom.workspace = true
+tokio = { workspace = true, features = ["rt", "sync", "time", "macros"] }
+
+[dev-dependencies]
+# The tests use the testkit through the crate's own feature.
+aap-trace = { path = ".", features = ["testkit"] }
+tokio = { workspace = true, features = ["macros", "rt", "rt-multi-thread", "sync", "time", "test-util"] }
+
+[lints]
+workspace = true
