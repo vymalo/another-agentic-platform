@@ -1209,6 +1209,15 @@ The owner asked what the platform lacks, next to a Kubernetes agent control plan
 
 ### The increments
 
+**Progress on 2026-11-15: 6 of 15 increments are built** (K0, K1, K2, K4, K8 and K9 phase 1; K1b is void and not counted), **40 %** by count, not by effort. What is left, by what it waits for:
+
+| Waits for | Increments |
+|---|---|
+| Nothing: can start | K5 (traces), K9b (`aapctl` over the Platform API) |
+| A proposal the owner has not decided | K3 (P-024), K6 and K7 (P-026), K10 (P-027), K11 (P-025) |
+| Another repository | K12 (an adam-rs decision on approvals, and the system's) |
+| A cluster | K13, on hold |
+
 | Slice | What a cluster operator gets | Depends on | The proof it needs | State |
 |---|---|---|---|---|
 | K0 | This plan | none | `check-docs.mjs` | built (this section) |
