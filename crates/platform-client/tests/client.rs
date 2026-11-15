@@ -389,7 +389,8 @@ fn two_spellings_of_a_server_are_one_and_two_servers_are_two() {
 #[test]
 fn clean_replaces_controls_and_bidirectional_controls_and_json_escapes_them() {
     use aap_platform_client::{clean, has_terminal_hazard, json_for_terminal};
-    let hostile = "a\u{1b}[31mb\nc\u{202e}d\u{2066}e\u{200f}f\u{061c}g\u{85}h\u{7f}i";
+    let hostile =
+        "a\u{1b}[31mb\nc\u{202e}d\u{2066}e\u{200f}f\u{061c}g\u{85}h\u{7f}i\u{2028}j\u{2029}k";
     let cleaned = clean(hostile);
     assert!(
         !has_terminal_hazard(&cleaned) && !cleaned.contains('\n'),
@@ -408,7 +409,39 @@ fn clean_replaces_controls_and_bidirectional_controls_and_json_escapes_them() {
             .any(|c| c != '\n' && (c.is_control() || ('\u{202a}'..='\u{202e}').contains(&c))),
         "{printed:?}"
     );
-    assert!(!printed.contains('\u{2066}') && !printed.contains('\u{061c}'));
+    for c in ['\u{2066}', '\u{061c}', '\u{200f}', '\u{2028}', '\u{2029}'] {
+        assert!(!printed.contains(c), "{c:?} is raw in {printed:?}");
+    }
     // The same JSON value.
     assert_eq!(serde_json::from_str::<Value>(&printed).unwrap(), value);
+}
+
+#[test]
+fn the_marks_of_right_to_left_text_pass_a_file_and_the_joiners_are_never_touched() {
+    use aap_platform_client::{clean, clean_multiline, terminal_hazard_kind};
+    // LRM, RLM and ALM are ordinary in Arabic and Hebrew: a file holds them, and a YAML string keeps them.
+    let text = "\u{05e9}\u{05dc}\u{05d5}\u{05dd}\u{200f} \u{0627}\u{061c}\u{200e}x";
+    assert_eq!(terminal_hazard_kind(text), None);
+    assert_eq!(clean_multiline(text), text);
+    // They are still replaced where a line must be one clean line.
+    assert!(!clean(text).contains('\u{200f}'));
+    // ZWNJ and ZWJ (Persian, Indic scripts, emoji) are never touched.
+    let joiners = "a\u{200c}b\u{200d}c";
+    assert_eq!(terminal_hazard_kind(joiners), None);
+    assert_eq!(clean_multiline(joiners), joiners);
+    assert_eq!(clean(joiners), joiners);
+    // What a file refuses says its kind and never the text.
+    assert_eq!(
+        terminal_hazard_kind("a\u{1b}b"),
+        Some("a control character")
+    );
+    assert_eq!(
+        terminal_hazard_kind("a\u{202e}b"),
+        Some("a bidirectional embedding, override or isolate")
+    );
+    assert!(
+        terminal_hazard_kind("x\u{2028}y").is_none(),
+        "U+2028 is cleaned, not refused"
+    );
+    assert_eq!(clean_multiline("x\u{2028}y\u{2029}z"), "x y z");
 }

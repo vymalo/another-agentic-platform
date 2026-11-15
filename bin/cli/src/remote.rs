@@ -13,7 +13,7 @@ use std::time::{Duration, Instant};
 use aap_forms::{AgentView, Defaults, ModelEndpointForm, ToolServerForm};
 use aap_platform_client::{
     Client, ClientError, Collection, Condition, Options, Reply, Token, clean, clean_multiline,
-    has_terminal_hazard, json_for_terminal, normalize_server,
+    json_for_terminal, normalize_server, terminal_hazard_kind,
 };
 use base64::Engine as _;
 use clap::{Args, ValueEnum};
@@ -397,21 +397,29 @@ fn text_of(v: &Value, key: &str) -> String {
     }
 }
 
-/// Every string of `v`, keys included, cleaned of control and bidirectional control characters (line feeds and tabs stay: a YAML
-/// writer quotes them).
-fn clean_strings(v: &mut Value) {
+/// Every string of `v`, keys included, cleaned of control characters, bidirectional embeddings, overrides and isolates and line and
+/// paragraph separators (line feeds, tabs and the marks LRM, RLM and ALM stay: a YAML writer quotes them). `Err` when two keys of
+/// one object differ only by characters that were replaced: they would be one key, and a value would be lost.
+fn clean_strings(v: &mut Value) -> Result<(), ()> {
     match v {
         Value::String(s) => *s = clean_multiline(s),
-        Value::Array(items) => items.iter_mut().for_each(clean_strings),
+        Value::Array(items) => {
+            for item in items {
+                clean_strings(item)?;
+            }
+        }
         Value::Object(map) => {
             let entries = std::mem::take(map);
             for (k, mut val) in entries {
-                clean_strings(&mut val);
-                map.insert(clean_multiline(&k), val);
+                clean_strings(&mut val)?;
+                if map.insert(clean_multiline(&k), val).is_some() {
+                    return Err(());
+                }
             }
         }
         _ => {}
     }
+    Ok(())
 }
 
 fn table(header: &[&str], rows: &[Vec<String>]) -> String {
@@ -576,7 +584,12 @@ async fn get_command(net: &Net<'_>, a: &GetArgs) -> Result<(), Failure> {
         Output::Yaml => {
             let mut body = reply.json().map_err(|e| from_client("", e))?;
             // YAML cannot say a control character the way JSON can: the server's text is cleaned of them.
-            clean_strings(&mut body);
+            clean_strings(&mut body).map_err(|()| {
+                Failure::new(
+                    5,
+                    "the answer has two keys that differ only by characters that cannot be printed: use -o json, which escapes them",
+                )
+            })?;
             let text = serde_yaml::to_string(&body)
                 .map_err(|_| Failure::new(5, "the answer cannot be written as YAML"))?;
             net.raw(&text);
@@ -732,12 +745,13 @@ pub fn export(a: &ExportArgs, out: &mut dyn Write, err: &mut dyn Write) -> u8 {
             .await
             .map_err(|e| from_client(&format!("agent/{}", a.name), e))?;
         let text = reply.text().map_err(|e| from_client("", e))?;
-        if has_terminal_hazard(&text) {
+        if let Some(kind) = terminal_hazard_kind(&text) {
+            // The content is refused, as a title with an escape in it is: exit 1. The way out shows it with the characters escaped.
             return Err(Failure::new(
-                5,
+                1,
                 format!(
-                    "agent/{}: the answer holds control characters (or a bidirectional control) that a file of YAML does not: none of it is printed",
-                    clean(&a.name)
+                    "agent/{name}: the answer holds {kind}, which a file of YAML does not: none of it is printed; `aapctl get agent {name} -o json` shows it with every such character escaped",
+                    name = clean(&a.name)
                 ),
             ));
         }
@@ -1166,24 +1180,37 @@ async fn apply_all(net: &Net<'_>, a: &ApplyArgs, items: Vec<Item>) -> Result<(),
         }
         info = Some(i);
     }
-    let mut applied: Vec<String> = Vec::new();
+    let mut written: Vec<String> = Vec::new();
+    let mut unchanged: Vec<String> = Vec::new();
     for item in &items {
         match apply_item(net, item, a.if_match.as_deref(), &mut info).await {
             Ok(verb) => {
                 net.say(&format!("{} {}", item.label(), verb.word()));
-                applied.push(item.label());
+                match verb {
+                    Verb::Created | Verb::Configured => written.push(item.label()),
+                    Verb::Unchanged => unchanged.push(item.label()),
+                }
             }
             Err(failure) => {
-                // A refused object stops the apply: nothing after it is sent. What went before stays, and is said.
-                return Err(failure.also(if applied.is_empty() {
+                // A refused object stops the apply: nothing after it is sent. What went before stays, and is said: what was
+                // written, and apart from it what was only found as the file says.
+                let mut failure = failure.also(if written.is_empty() {
                     "nothing was applied before this".to_owned()
                 } else {
                     format!(
                         "applied before this ({}): {}",
-                        applied.len(),
-                        applied.join(", ")
+                        written.len(),
+                        written.join(", ")
                     )
-                }));
+                });
+                if !unchanged.is_empty() {
+                    failure = failure.also(format!(
+                        "found unchanged before this, nothing written ({}): {}",
+                        unchanged.len(),
+                        unchanged.join(", ")
+                    ));
+                }
+                return Err(failure);
             }
         }
     }

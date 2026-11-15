@@ -97,7 +97,7 @@ test holds `render` equal to them.
 | Code | When |
 |---|---|
 | 0 | Everything is valid (and, for `render`, the objects were printed); for the network commands, success (`unchanged` is one) |
-| 1 | An issue was found: invalid objects, a missing referent (without `--allow-missing-refs`), a document a type cannot read, a field its type does not have. For the network commands: the API or a local check refused the content (`422`, `409 yaml-only`, `breaks-agents`, `referenced`, an object no form says, metadata the API would drop), a `404`, and any other `4xx` |
+| 1 | An issue was found: invalid objects, a missing referent (without `--allow-missing-refs`), a document a type cannot read, a field its type does not have. For the network commands: the API or a local check refused the content (`422`, `409 yaml-only`, `breaks-agents`, `referenced`, an object no form says, a deployment part that differs, an export that holds a character a file of YAML must not print), a `404`, and any other `4xx` |
 | 2 | A usage or read error: a bad flag or none, a path that cannot be read, a file that is not YAML or has a key twice, a document that is not ours where it was named, a document of our group that is not `v1alpha1` or not one of the four kinds, an object with no name, two objects of one kind, namespace and name, nothing to read, a bad settings file or value. For the network commands also: a service with no config or two services for one, a label, an annotation or a namespace the API cannot keep, no server, a config file others can read (or a link, or not yours), a saved token for another server, a token that is empty, too long or has white space in it, an address that is not usable, `--if-match` with several objects |
 | 3 | Stale or conflict: `412`, `409 already-exists`, `managed-by-gitops`, `deleting`, `conflict`, or an object that changed since it was read |
 | 4 | Not allowed: no token, `401`, `403` (the message names the permission) |
@@ -130,17 +130,23 @@ does not use it (`login` and `logout` need it and still refuse one that leaks). 
 saved with**: `--server` naming another (compared by scheme, host, port and path, not by spelling) with the token coming from the
 file is exit 2, and says to sign in to that server or set `AAPCTL_TOKEN` (which is the person's own, and goes wherever they point
 it). `login --token-stdin` keeps the token exactly as it is (no line break), and refuses an empty one or one longer than 64 KiB
-(exit 2) instead of cutting it. No token is in any stdout, stderr, `--verbose` line or error: `--verbose` prints the method, the path, the
+(exit 2) instead of cutting it. **What the stricter read newly refuses** (each has the same way out: give `AAPCTL_TOKEN` and `--server`, which do not read the file at all): `sudo -E aapctl ...` (the effective user is root and the file is the person's: not owned by you); a `0600` file mounted into a container that runs as another uid (not owned by you); and a config file that is a symbolic link (a dotfile manager, a Kubernetes Secret mount), which `O_NOFOLLOW` refuses: give `--config` the real path. A FIFO or another file that is not a regular file is refused at once and never waited for (`O_NONBLOCK`). The check is not loosened. No token is in any stdout, stderr, `--verbose` line or error: `--verbose` prints the method, the path, the
 `If-Match` or `If-None-Match` and the status of each request and nothing that holds a credential, and a `reqwest` error is
 never printed (it can carry a URL). `--server` overrides the file's server; `http://` is accepted for a loopback address only,
 unless `--insecure-http`. The proxy of the environment (`HTTPS_PROXY`, `HTTP_PROXY`, `ALL_PROXY`, `NO_PROXY`) is honoured for
 every server **except a plain `http://` loopback one, which is never sent through a proxy** (the bearer token would be handed to
 a third party in the clear for a server on the same machine; P-031). **Only the network commands read the environment**:
 `validate` and `render` read none, open no connection and are tested with a proxy named in the environment (no connection is
-made). **What the server says is never printed as a control**: `-o json` prints the answer parsed and written back with every
-control and bidirectional control (C0, DEL, C1, U+061C, U+200E, U+200F, U+202A to U+202E, U+2066 to U+2069) as a `\uXXXX` escape
-(the same JSON value); the other outputs and every message replace them with a space; `export` is refused (exit 5, nothing
-printed) for a text that holds one other than a line feed or a tab.
+made). **What the server says is never printed as a control**: `-o json` prints the answer parsed and written back (**the same
+JSON value, not the server's bytes**: pretty-printed, key order and number formatting as `serde_json` writes them) with every
+control character (C0, DEL, C1), bidirectional embedding, override and isolate (U+202A to U+202E, U+2066 to U+2069), mark (U+061C,
+U+200E, U+200F) and line or paragraph separator (U+2028, U+2029) as a `\uXXXX` escape. U+200C and U+200D are never touched
+(Persian, Indic scripts and emoji need them). The other outputs and every one-line message replace those with a space, except that
+`-o yaml` strings keep line feeds, tabs and the three marks (Arabic and Hebrew text holds them); two keys of a YAML object that
+differ only by a replaced character are refused (exit 5, use `-o json`) and not merged. **`export` prints the API's text as it
+is** and refuses (**exit 1**, the content is refused; nothing printed; the message says which kind of character it found, never
+the text) a text that holds a control character other than a line feed and a tab, or a bidirectional embedding, override or isolate:
+`aapctl get agent <name> -o json` shows it with those escaped. The marks LRM, RLM and ALM pass through `export`.
 
 **What `apply` does.** The API takes **forms**, not custom resources: on a create it fills the deployment's part (the store,
 the security context, the network peers) from its own defaults and on a replace it keeps the object's. So `apply` reads each
@@ -152,8 +158,10 @@ document as the dashboard reads an object (`aap_forms::load_agent`, the model an
    and a namespace that is not `/v1/info`'s (every document, the service and its config alike, must say the API's namespace or
    none, and agree) are refused too, **exit 2**, naming the key and never its value, since the API would drop them without a
    word. Each `AgentService` is paired with the `AgentConfig` its `configRef` names (a missing half, or two services for one
-   config, is exit 2). `export` leaves out exactly what `apply` refuses (the labels the API did not write and every annotation;
-   it says which on stderr), so an export is read back as `unchanged`.
+   config, is exit 2). `export` leaves out the labels and annotations `apply` refuses (the labels the API did not write and every
+   annotation; it says which on stderr), so an export is read back as `unchanged`. `apply` also refuses `metadata` members other than
+   the name, the namespace and labels (`uid`, `resourceVersion`...), but **the API's export is a whitelist that holds only the
+   name, the namespace, labels and annotations**, so an export never holds one and there is nothing more to leave out.
 2. **Writes in the order models, tool servers, agents**, whatever the order of the files, so a referent exists before what
    names it, and **stops at the first object the API refuses** (nothing after it is sent; what came before stays written, each
    line says what it did, and the failure says how many were applied before it and names them).
@@ -165,7 +173,10 @@ document as the dashboard reads an object (`aap_forms::load_agent`, the model an
    `apply` is idempotent and causes no status churn); otherwise `PUT` with `If-Match` set to the tag just read. **Before it
    compares anything it checks that it reads the server's form whole**: the form is parsed into this binary's type, written
    back and compared with what the server sent (key order and `null` against absent aside). A member this release does not know,
-   or one an older server did not send, is **exit 5** naming the member (`representation.form.form.<member>`), "use the
+   or one an older server did not send, is **exit 5** naming the member as a dotted path from the answer's root (`the answer at representation.form.form.suspend is not what this
+   aapctl reads and writes back`; for a member of a type that refuses an unknown or a missing one, serde names the member and not
+   its place, so an unknown member is looked for in the answer and a missing one is put under the form that failed to read, such
+   as `representation.form.title`), "use the
    `aapctl` of the server's release", and nothing of that object is written (a write from it would reset a field it does not
    know, or compare against a default it made up). `/v1/info`'s `defaults` are checked the same way. A create that needs
    `/v1/info` and is refused it says which object cannot be created and why (it needs `platform:agents.read`).
@@ -227,8 +238,11 @@ namespaces, version skew, the token bound to its server, no proxy for plain-http
 counts its connections), annotations and labels and the export round trip, the terminal, two services for one config, the file
 and the token, a refused object that stops the apply, the bounded retry, a dry run that makes no request, `delete --wait`, the
 exit codes and the words. `config.rs` and `skew.rs` have unit tests (the safe read, the temporary file, the round trip).
-**Tests that depend on permissions mean something only as a user that is not root** (root reads any file and may give one
-away): run the built test binaries with `setpriv --reuid=65534 --regid=65534 --clear-groups`. `tests/remote.rs` (29 tests) runs
+**Which test runs under which user.** The mode refusal (`a_config_file_others_can_read_is_refused`,
+`a_config_file_that_leaks_does_not_stop_a_command_that_does_not_use_it`, the unit test of the safe read) is only a test as a user that
+is not root, because root reads any file: run the built test binaries with `setpriv --reuid=65534 --regid=65534 --clear-groups`.
+The test of "not owned by you" (`a_config_file_is_not_followed_through_a_link_and_must_be_ours`) is the reverse: it runs **only as
+root**, which is the only user that may give a file away, and does nothing otherwise. The link, FIFO and token tests run as either. `tests/remote.rs` (29 tests) runs
 the built binary against **the real router** (`aap_platform_api::router`) over the `Memory` ports on `127.0.0.1:0`, with the
 child's proxy variables removed and `NO_PROXY` set: `get_lists_and_reads`,
 `apply_creates_then_unchanged`, `apply_replaces`, `apply_stale_if_match`, `apply_retry_on_status_only_change` and

@@ -19,10 +19,12 @@ another.
 * **Every write is conditional.** `Condition::Create` sends `If-None-Match: *`, `Condition::Replace(tag)` sends `If-Match`. The
   client has no unconditional write. A second create of a name is `409 already-exists`; the client never turns it into a replace.
 * **Problems are read** into `Problem` (`status`, the end of the `type` URN as `slug`, `title`, `detail`, `errors`, `reasons`,
-  `permission`, `agentCount`, `agents`), every text cleaned of control characters **and of bidirectional controls** (U+061C, U+200E, U+200F, U+202A to U+202E, U+2066 to
-  U+2069) and cut at 500. `json_for_terminal` writes a value as pretty JSON with those and the rest of the controls as `\uXXXX`
-  escapes (the same value), `clean_multiline` cleans a document's strings and keeps its line feeds, and `has_terminal_hazard` says
-  whether a text holds one, for what is printed whole. The body of an answer that is not a
+  `permission`, `agentCount`, `agents`), every text cleaned of control characters, **bidirectional controls** (U+061C, U+200E, U+200F, U+202A to U+202E, U+2066 to
+  U+2069) and the line and paragraph separators (U+2028, U+2029), and cut at 500. U+200C and U+200D are never touched.
+  `json_for_terminal` writes a value as pretty JSON with those as `\uXXXX` escapes (the same value, not the server's bytes),
+  `clean_multiline` cleans a document's strings and keeps its line feeds, tabs and the three marks (Arabic and Hebrew text holds
+  them), and `terminal_hazard_kind` says which kind of character a file must not print (a control character, or an embedding,
+  override or isolate; the marks pass; never the text), for what is printed whole. The body of an answer that is not a
   problem of the API (a proxy's page) is never quoted.
 * **No redirect is followed**, a body is read up to 8 MiB, a call times out after 60 s (connecting, 10 s): `Options::request_timeout`
   and `Options::connect_timeout`, with those values as defaults (options of the builder, not an environment variable).

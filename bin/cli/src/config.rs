@@ -123,7 +123,13 @@ fn open_private(path: &Path) -> Result<std::fs::File, Refused> {
     let shown = path.display();
     let file = std::fs::OpenOptions::new()
         .read(true)
-        .custom_flags(rustix::fs::OFlags::NOFOLLOW.bits().cast_signed())
+        // `O_NONBLOCK`: `open(2)` of a FIFO with no writer blocks until there is one, before the descriptor can be checked. A regular
+        // file is read the same either way.
+        .custom_flags(
+            (rustix::fs::OFlags::NOFOLLOW | rustix::fs::OFlags::NONBLOCK)
+                .bits()
+                .cast_signed(),
+        )
         .open(path)
         .map_err(|e| match e.kind() {
             std::io::ErrorKind::NotFound => Refused::Missing,

@@ -84,24 +84,46 @@ struct WireReason {
     reason: String,
 }
 
-/// Whether `c` can change what a terminal shows, or the order a person reads it in: a control character (C0, DEL and C1) or a
-/// bidirectional control (U+061C, U+200E, U+200F, U+202A to U+202E, U+2066 to U+2069), which can make text read as something else.
+/// A control character (C0, DEL, C1) or a bidirectional embedding, override or isolate (U+202A to U+202E, U+2066 to U+2069): what
+/// can change what a terminal shows, or make text read as something else. **The marks LRM, RLM and ALM (U+200E, U+200F, U+061C)
+/// are not here**: ordinary Arabic and Hebrew text holds them.
+fn is_control_like(c: char) -> bool {
+    c.is_control() || matches!(c, '\u{202A}'..='\u{202E}' | '\u{2066}'..='\u{2069}')
+}
+
+/// What [`clean`] replaces and [`json_for_terminal`] escapes: the above, the three marks, and the line and paragraph separators
+/// (U+2028, U+2029), which break "one line". U+200C and U+200D are **not** here: Persian, Indic scripts and emoji need them.
 fn is_hazard(c: char) -> bool {
-    c.is_control()
+    is_control_like(c)
         || matches!(
             c,
-            '\u{061C}' | '\u{200E}' | '\u{200F}' | '\u{202A}'..='\u{202E}' | '\u{2066}'..='\u{2069}'
+            '\u{061C}' | '\u{200E}' | '\u{200F}' | '\u{2028}' | '\u{2029}'
         )
 }
 
-/// Whether `text` holds a character that [`clean`] would replace, other than a line feed and a tab (a text with those is a file;
-/// one with any other is an attack on the terminal that shows it).
-pub fn has_terminal_hazard(text: &str) -> bool {
-    text.chars().any(|c| is_hazard(c) && c != '\n' && c != '\t')
+/// What kind of character in `text` a file of YAML must not print, other than a line feed and a tab (a text with those is a file):
+/// `None` when there is none. The three marks pass. The answer never holds the text.
+pub fn terminal_hazard_kind(text: &str) -> Option<&'static str> {
+    text.chars()
+        .filter(|&c| is_control_like(c) && c != '\n' && c != '\t')
+        .map(|c| {
+            if c.is_control() {
+                "a control character"
+            } else {
+                "a bidirectional embedding, override or isolate"
+            }
+        })
+        .next()
 }
 
-/// `value` as pretty JSON that is safe to print: every control character (C0, DEL, C1) and bidirectional control is written as a
-/// `\uXXXX` escape, which is the same JSON value. `serde_json` already escapes C0 inside strings; the rest it leaves raw.
+/// Whether [`terminal_hazard_kind`] finds one.
+pub fn has_terminal_hazard(text: &str) -> bool {
+    terminal_hazard_kind(text).is_some()
+}
+
+/// `value` as pretty JSON that is safe to print: every control character (C0, DEL, C1), bidirectional control, mark and line or
+/// paragraph separator is written as a `\uXXXX` escape, which is the same JSON value. `serde_json` already escapes C0 inside
+/// strings; the rest it leaves raw.
 pub fn json_for_terminal(value: &Value) -> String {
     let text = serde_json::to_string_pretty(value).unwrap_or_default();
     let mut out = String::with_capacity(text.len());
@@ -118,12 +140,16 @@ pub fn json_for_terminal(value: &Value) -> String {
     out
 }
 
-/// `text` with every control character and bidirectional control replaced by a space, **except line feeds and tabs**, and not cut:
-/// for the strings of a document that is printed as a whole (a title may hold several lines).
+/// `text` with every control character, bidirectional embedding, override and isolate, and line and paragraph separator replaced by
+/// a space, **except line feeds and tabs**, and not cut: for the strings of a document that is printed as a whole (a title may hold
+/// several lines). The marks LRM, RLM and ALM are kept.
 pub fn clean_multiline(text: &str) -> String {
     text.chars()
         .map(|c| {
-            if is_hazard(c) && c != '\n' && c != '\t' {
+            if (is_control_like(c) || matches!(c, '\u{2028}' | '\u{2029}'))
+                && c != '\n'
+                && c != '\t'
+            {
                 ' '
             } else {
                 c

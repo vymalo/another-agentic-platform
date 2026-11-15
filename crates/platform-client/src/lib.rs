@@ -30,7 +30,7 @@ use url::{Host, Url};
 pub use op::{Collection, Op};
 pub use problem::{
     FieldProblem, Problem, YamlOnlyReason, clean, clean_multiline, has_terminal_hazard,
-    json_for_terminal,
+    json_for_terminal, terminal_hazard_kind,
 };
 pub use token::Token;
 

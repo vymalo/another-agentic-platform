@@ -1,4 +1,4 @@
-//! Version skew between this `aapctl` and the server it talks to (§60b, P-036).
+//! Version skew between this `aapctl` and the server it talks to (§60b, P-034).
 //!
 //! `apply` reads what the server holds, compares it with the file, and writes a form back. That is only sound when this binary
 //! reads *everything* the server's answer says: a member it does not know would be left out of the `PUT` and reset by it, and a
@@ -18,9 +18,14 @@ use serde_json::Value;
 /// The path of the first member at which `raw` does not read into `T` and write back as it came, or `None` when it does.
 pub fn first_difference<T: Serialize + DeserializeOwned>(raw: &Value, at: &str) -> Option<String> {
     match serde_json::from_value::<T>(raw.clone()) {
-        Err(error) => Some(
-            member_named(&error.to_string()).map_or_else(|| at.to_owned(), |m| format!("{at}.{m}")),
-        ),
+        // One style, a dotted path from the answer's root: serde names the member and not where it is, so an unknown member is
+        // looked for in the answer (the first object that holds a key of that name, keys in order); a member the type needs and
+        // the answer lacks has no place in the answer, and is put under `at`, the form that failed to read.
+        Err(error) => Some(match member_named(&error.to_string()) {
+            Some((Lead::Unknown, m)) => locate(raw, &m, at).unwrap_or_else(|| format!("{at}.{m}")),
+            Some((Lead::Missing, m)) => format!("{at}.{m}"),
+            None => at.to_owned(),
+        }),
         Ok(typed) => match serde_json::to_value(&typed) {
             Err(_) => Some(at.to_owned()),
             Ok(back) => differ(raw, &back, at),
@@ -34,14 +39,32 @@ pub fn written_back<T: Serialize + DeserializeOwned>(raw: &Value) -> Option<Valu
     serde_json::to_value(serde_json::from_value::<T>(raw.clone()).ok()?).ok()
 }
 
+enum Lead {
+    Unknown,
+    Missing,
+}
+
 /// A serde message names a member in two of its forms; any other says something about a value, which is never quoted.
-fn member_named(message: &str) -> Option<String> {
-    for lead in ["unknown field `", "missing field `"] {
-        if let Some(rest) = message.strip_prefix(lead) {
-            return rest.split('`').next().map(clean);
+fn member_named(message: &str) -> Option<(Lead, String)> {
+    for (text, lead) in [
+        ("unknown field `", Lead::Unknown),
+        ("missing field `", Lead::Missing),
+    ] {
+        if let Some(rest) = message.strip_prefix(text) {
+            return rest.split('`').next().map(|m| (lead, clean(m)));
         }
     }
     None
+}
+
+/// The path, from `at`, of the first object of `raw` (depth first, keys in order) that holds a key called `name`.
+fn locate(raw: &Value, name: &str, at: &str) -> Option<String> {
+    let map = raw.as_object()?;
+    if map.contains_key(name) {
+        return Some(format!("{at}.{name}"));
+    }
+    map.iter()
+        .find_map(|(k, v)| locate(v, name, &format!("{at}.{}", clean(k))))
 }
 
 fn differ(a: &Value, b: &Value, at: &str) -> Option<String> {
@@ -102,6 +125,24 @@ mod tests {
         assert_eq!(
             differ(&json!({ "a": null, "b": 1 }), &json!({ "b": 1 }), "x"),
             None
+        );
+    }
+
+    #[test]
+    fn the_path_of_a_member_is_dotted_from_the_answers_root_in_every_case() {
+        // An unknown member is found where it is, however deep.
+        let mut raw = model();
+        raw["apiKey"]["later"] = json!(1);
+        assert_eq!(
+            first_difference::<ModelEndpointForm>(&raw, "representation.form").as_deref(),
+            Some("representation.form.apiKey.later")
+        );
+        // One the type needs and the answer lacks is under the form that failed to read.
+        let mut lacking = model();
+        lacking.as_object_mut().unwrap().remove("title");
+        assert_eq!(
+            first_difference::<ModelEndpointForm>(&lacking, "representation.form").as_deref(),
+            Some("representation.form.title")
         );
     }
 

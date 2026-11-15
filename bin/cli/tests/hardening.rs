@@ -86,14 +86,17 @@ fn counting_listener() -> (String, Arc<AtomicUsize>) {
     (url, count)
 }
 
-const HOSTILE: &str = "red\u{1b}[31m evil\u{202e}gnp.exe\u{85}x\u{7f}y\u{2066}z";
+const HOSTILE: &str = "red\u{1b}[31m evil\u{202e}gnp.exe\u{85}x\u{7f}y\u{2066}z\u{2028}p\u{2029}q";
 
 fn has_hazard(text: &str) -> bool {
     text.chars().any(|c| {
         (c.is_control() && c != '\n' && c != '\t')
             || ('\u{202a}'..='\u{202e}').contains(&c)
             || ('\u{2066}'..='\u{2069}').contains(&c)
-            || matches!(c, '\u{200e}' | '\u{200f}' | '\u{061c}')
+            || matches!(
+                c,
+                '\u{200e}' | '\u{200f}' | '\u{061c}' | '\u{2028}' | '\u{2029}'
+            )
     })
 }
 
@@ -293,7 +296,9 @@ fn a_form_this_binary_does_not_read_whole_is_not_written_from() {
     let out = run(&newer);
     assert_eq!(out.code, 5, "{}", out.stderr);
     assert!(
-        out.stderr.contains("aMemberOfALaterRelease"),
+        out.stderr.contains(
+            "the answer at representation.form.form.aMemberOfALaterRelease is not what this aapctl reads and writes back"
+        ),
         "{}",
         out.stderr
     );
@@ -320,7 +325,11 @@ fn a_form_this_binary_does_not_read_whole_is_not_written_from() {
     });
     let out = run(&older);
     assert_eq!(out.code, 5, "{}", out.stderr);
-    assert!(out.stderr.contains("suspend"), "{}", out.stderr);
+    assert!(
+        out.stderr.contains("the answer at representation.form.form.suspend is not what this aapctl reads and writes back"),
+        "{}",
+        out.stderr
+    );
     assert_eq!(older.count("PUT"), 0, "{:?}", older.lines());
 
     // An optional member that is absent is not a difference: the file is the object, so nothing is written and nothing is refused.
@@ -773,12 +782,22 @@ fn an_export_that_holds_control_characters_is_refused_and_none_of_it_is_printed(
             None,
             &api.dir,
         );
-        assert_eq!(out.code, 5, "{:?}: {}", stub.lines(), out.stderr);
+        // The content is refused (exit 1), says which kind of character and never the text, and names the way out.
+        assert_eq!(out.code, 1, "{:?}: {}", stub.lines(), out.stderr);
         assert!(
-            out.stderr.contains("the answer holds control characters"),
+            out.stderr.contains("the answer holds a control character")
+                || out
+                    .stderr
+                    .contains("the answer holds a bidirectional embedding, override or isolate"),
             "{}",
             out.stderr
         );
+        assert!(
+            out.stderr.contains("`aapctl get agent chat -o json`"),
+            "{}",
+            out.stderr
+        );
+        assert!(!has_hazard(&out.stderr), "{:?}", out.stderr);
         assert!(out.stdout.is_empty(), "{:?}", out.stdout);
     }
     // Line feeds and tabs are a file.
@@ -1006,6 +1025,39 @@ fn a_refused_object_stops_the_apply_and_says_what_was_applied_before_it() {
     assert!(!out.stderr.contains("> PUT /v1/agents"), "{}", out.stderr);
     assert!(
         api.model("gateway").is_some() && api.tool("docs").is_none() && api.agent("chat").is_none()
+    );
+
+    // An object only found as the file says is not "applied": it is said apart, and the count is of what was written.
+    let again = Api::start("stops-unchanged");
+    seed_gateway(&again);
+    let token = again.token_with(&[
+        "platform:agents.read",
+        "platform:agents.write",
+        "platform:models.write",
+        "platform:secrets.pick",
+    ]);
+    let out = again.ctl(&["apply", "-f", path.to_str().unwrap()], Some(&token));
+    assert_eq!(out.code, 4, "{}", out.stderr);
+    assert!(
+        out.stdout.contains("model/gateway unchanged"),
+        "{}",
+        out.stdout
+    );
+    assert!(
+        out.stderr.contains("nothing was applied before this"),
+        "{}",
+        out.stderr
+    );
+    assert!(
+        out.stderr
+            .contains("found unchanged before this, nothing written (1): model/gateway"),
+        "{}",
+        out.stderr
+    );
+    assert!(
+        !out.stderr.contains("applied before this (1)"),
+        "{}",
+        out.stderr
     );
 
     // The first object refused: nothing was applied before it.
@@ -1396,7 +1448,7 @@ fn the_words_of_a_problem_are_one_clean_line() {
         &problem(
             409,
             "stale",
-            "bad\u{1b}[31m\nsecond line\u{202e}evil\u{2066}",
+            "bad\u{1b}[31m\nsecond line\u{202e}evil\u{2066}\u{2028}x\u{2029}y",
             "",
         ),
     );
@@ -1461,4 +1513,146 @@ fn validate_and_render_never_touch_a_proxy_or_the_token() {
         );
     }
     assert_eq!(connections.load(Ordering::SeqCst), 0);
+}
+
+// ------------------------------------------------------------------------------------------ the second review
+
+#[test]
+fn a_fifo_at_the_config_path_is_refused_and_does_not_hang() {
+    let api = Api::start("config-fifo");
+    let fifo = api.dir.join("fifo.yaml");
+    let made = std::process::Command::new("mkfifo")
+        .arg(&fifo)
+        .status()
+        .unwrap();
+    assert!(made.success(), "mkfifo");
+    // The server is not given, so the file is needed. `open(2)` of a FIFO with no writer would block for ever; the harness ends
+    // a child that outlasts a minute, which fails the test and does not hang the suite.
+    let started = std::time::Instant::now();
+    let out = run_binary(
+        &[
+            "whoami",
+            "--server",
+            &api.url,
+            "--config",
+            fifo.to_str().unwrap(),
+        ],
+        None,
+        None,
+        &api.dir,
+    );
+    assert_eq!(out.code, 2, "{}", out.stderr);
+    assert!(out.stderr.contains("not a regular file"), "{}", out.stderr);
+    assert!(
+        started.elapsed() < std::time::Duration::from_secs(10),
+        "took {:?}",
+        started.elapsed()
+    );
+}
+
+#[test]
+fn right_to_left_marks_are_exported_byte_for_byte_and_the_overrides_are_refused() {
+    let api = Api::start("export-rtl");
+    // Through the real router: a title with RLM and ALM, as Hebrew and Arabic text holds them.
+    let title = "\u{05e9}\u{05dc}\u{05d5}\u{05dd}\u{200f} \u{0627}\u{061c}\u{200e}x";
+    seed_gateway_and_chat(&api, title);
+    let served = api
+        .block(client(&api).agent_yaml("chat"))
+        .unwrap()
+        .text()
+        .unwrap();
+    assert!(served.contains('\u{200f}'), "{served}");
+    let out = api.ctl(&["export", "agent", "chat"], Some(TOKEN));
+    assert_eq!(out.code, 0, "{}", out.stderr);
+    assert_eq!(out.stdout, served);
+    // -o yaml keeps them too; -o json escapes them and is the same JSON value.
+    let yaml = api.ctl(&["get", "agent", "chat", "-o", "yaml"], Some(TOKEN));
+    assert!(yaml.stdout.contains('\u{200f}'), "{}", yaml.stdout);
+    let json = api.ctl(&["get", "agent", "chat", "-o", "json"], Some(TOKEN));
+    assert!(
+        !json.stdout.contains('\u{200f}') && json.stdout.contains("\\u200f"),
+        "{}",
+        json.stdout
+    );
+    assert_eq!(
+        serde_json::from_str::<Value>(&json.stdout).unwrap()["title"],
+        title
+    );
+
+    // An override is refused (exit 1) and none of it is printed; -o json shows it escaped, as the same JSON value.
+    let hostile = "evil\u{202e}gnp.exe";
+    let api = Api::start("export-override");
+    seed_gateway_and_chat(&api, hostile);
+    let out = api.ctl(&["export", "agent", "chat"], Some(TOKEN));
+    assert_eq!(out.code, 1, "{}", out.stderr);
+    assert!(out.stdout.is_empty(), "{:?}", out.stdout);
+    assert!(
+        out.stderr
+            .contains("the answer holds a bidirectional embedding, override or isolate"),
+        "{}",
+        out.stderr
+    );
+    assert!(!out.stderr.contains("gnp.exe"), "{}", out.stderr);
+    let json = api.ctl(&["get", "agent", "chat", "-o", "json"], Some(TOKEN));
+    assert!(
+        !json.stdout.contains('\u{202e}') && json.stdout.contains("\\u202e"),
+        "{}",
+        json.stdout
+    );
+    assert_eq!(
+        serde_json::from_str::<Value>(&json.stdout).unwrap()["title"],
+        hostile
+    );
+}
+
+#[test]
+fn two_yaml_keys_that_differ_only_by_a_replaced_character_are_refused_not_merged() {
+    let api = Api::start("yaml-keys");
+    let stub = Stub::answering(200, r#"{"k\u202e": 1, "k\u202d": 2}"#);
+    let run = |extra: &str| {
+        run_binary(
+            &[
+                "get",
+                "agents",
+                "-o",
+                "yaml",
+                extra,
+                "--server",
+                &stub.url,
+                "--config",
+                &cfg(&api),
+            ],
+            Some(TOKEN),
+            None,
+            &api.dir,
+        )
+    };
+    let out = run("--verbose");
+    assert_eq!(out.code, 5, "{}", out.stderr);
+    assert!(
+        out.stderr
+            .contains("two keys that differ only by characters"),
+        "{}",
+        out.stderr
+    );
+    assert!(out.stdout.is_empty(), "{:?}", out.stdout);
+    // One such key is cleaned and the value is kept.
+    let one = Stub::answering(200, r#"{"k\u202e": 1}"#);
+    let out = run_binary(
+        &[
+            "get",
+            "agents",
+            "-o",
+            "yaml",
+            "--server",
+            &one.url,
+            "--config",
+            &cfg(&api),
+        ],
+        Some(TOKEN),
+        None,
+        &api.dir,
+    );
+    assert_eq!(out.code, 0, "{}", out.stderr);
+    assert_eq!(out.stdout, "'k ': 1\n");
 }
