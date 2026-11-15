@@ -1205,18 +1205,18 @@ Both modes work in one cluster: they use different pod names, labels, and RBAC, 
 
 *(2026-11-14, slice K0. Documentation only: it writes the plan down. Each increment is its own slice and amends the section it changes.)*
 
-The owner asked what the platform lacks, next to a Kubernetes agent control plane such as kagent, to be one a cluster operator can run. Fifteen gaps were weighed against the code and the decisions on 2026-11-14; they became the sixteen rows below (K0 is this plan, K1b and K9b are the halves of K1 and K9). Some are **built**, some **planned** below, and some are **deliberately different** (*What it does not mean*). Nothing here changes the architecture: every increment is additive, off by default where it adds a right or a component, and held by a test.
+The owner asked what the platform lacks, next to a Kubernetes agent control plane such as kagent, to be one a cluster operator can run. Fifteen gaps were weighed against the code and the decisions on 2026-11-14; they became the sixteen rows below (K0 is this plan, K1b and K9b are the halves of K1 and K9). *Amended 2026-11-15:* the owner put gVisor back on the plan, and K14 is a seventeenth row (P-040). Some are **built**, some **planned** below, and some are **deliberately different** (*What it does not mean*). Nothing here changes the architecture: every increment is additive, off by default where it adds a right or a component, and held by a test.
 
 ### The increments
 
-**Progress on 2026-11-15: 8 of 15 increments are built** (K0, K1, K2, K4, K5, K8, K9 and K9b; K9b is both halves: K9b-1 over the Platform API and K9b-2, the browser sign-in and the refresh token; K1b is void and not counted), **53 %** by count, not by effort. What is left, by what it waits for:
+**Progress on 2026-11-15: 8 of 16 increments are built** (K0, K1, K2, K4, K5, K8, K9 and K9b; K9b is both halves: K9b-1 over the Platform API and K9b-2, the browser sign-in and the refresh token; K1b is void and not counted), **50 %** by count, not by effort. It was 8 of 15 (53 %) until the owner added K14 the same day: the count fell because the plan grew, not because anything was undone. What is left, by what it waits for:
 
 | Waits for | Increments |
 |---|---|
 | Nothing: can start | none (K5 was the last) |
-| A proposal the owner has not decided | K3 (P-024), K6 and K7 (P-026), K10 (P-027), K11 (P-025) |
+| A proposal the owner has not decided | K3 (P-024), K6 and K7 (P-026), K10 (P-027), K11 (P-025), K14 (P-040) |
 | Another repository | K12 (an adam-rs decision on approvals, and the system's) |
-| A cluster | K13, on hold |
+| A cluster | K13, on hold; K14's proof on real nodes (its render, admission and kind proofs need none) |
 
 | Slice | What a cluster operator gets | Depends on | The proof it needs | State |
 |---|---|---|---|---|
@@ -1236,6 +1236,7 @@ The owner asked what the platform lacks, next to a Kubernetes agent control plan
 | K11 | A bring-your-own A2A image: `harness.type: a2a` with image, port, card path and secret variables by reference (P-025; would amend AD-022 and AD-024) | K1 | kind: the stub image as such an agent, `Ready` and listed | planned |
 | K12 | `requireApproval` per tool | an adam-rs decision and the system's | parity with adam's MCP file | planned; waits (the tiers of K1 cover the coder meanwhile) |
 | K13 | The dashboard and an agent on the owner's real cluster (D14) | K1 | the first real agent | **on hold**: that the netcup cluster is down and home-os no longer carries it is the owner's statement of 2026-11-14, *unverified* here; with no cluster to prove it on, D14 stays *unverified* |
+| K14 | **A sandboxed runtime for run pods: gVisor.** A run pod, which runs the commands of a repository the agent did not write, starts under a `RuntimeClass` the deployment names (`runPods.runtimeClassName`; none by default, and then not a trace in any render), and the admission policy refuses a run pod of an agent's account that names another class or none (P-040; §59b; the design's `runtimeClass: gvisor` of §65) | D15 (built); P-040 | the template and the policy's parameters in the parity and render tests; the policy's refusals asked of a bare kube-apiserver; a kind end-to-end with `runsc` installed in the node (*unverified* that a hosted runner can); the owner's nodes with Talos's gVisor extension | planned; waits for P-040, and for a cluster for its last proof |
 
 Parallel work: K4, K5, K9, K0 and K8's OpenAPI document touch no shared file. K1 and K2 both regenerated `deploy/crds`, so they merged one after the other. K6 comes before K7 (both touch `operator.rs` and the `Role`), K3 and K10 after K2, and K9b after K8.
 
@@ -1259,7 +1260,7 @@ Parallel work: K4, K5, K9, K0 and K8's OpenAPI document touch no shared file. K1
 
 ### Decisions for the owner
 
-Sixteen are open, each a `P-NNN` in [§92](11-decisions.md) (P-024 to P-029, P-030 to P-036 of K9b and P-037 to P-039 of K5, which the slices already proceed on). Each is a recommendation that waits for the owner and blocks only the slice named.
+Seventeen are open, each a `P-NNN` in [§92](11-decisions.md) (P-024 to P-029, P-030 to P-036 of K9b and P-037 to P-039 of K5, which the slices already proceed on, and P-040 of K14, which no slice has started on). Each is a recommendation that waits for the owner and blocks only the slice named.
 
 | P | The question | Blocks |
 |---|---|---|
