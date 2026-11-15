@@ -3,6 +3,9 @@
 //! refused included. [`TestAuthenticator`] pairs one with an [`OidcAuthenticator`] and is what
 //! `aap_ports::authenticator_conformance!` is run against.
 //!
+//! Since K9b-2 it also serves the sign-in endpoints `aapctl login` is tried against (`login.rs`): they issue nothing until a test sets a
+//! login, so a pod that reaches the issuer's port cannot mint a token through them.
+//!
 //! The keys (RSA 2048, P-256, Ed25519, twice: one set the issuer publishes, one it does not until
 //! [`TestIdp::publish_unpublished_keys`]) are made once per process. Each [`TestIdp`] has its own port, its own
 //! publication state and its own counters, so tests run side by side. **The keys are throwaway test keys, made
@@ -11,6 +14,7 @@
 #![allow(clippy::unwrap_used, clippy::expect_used, missing_docs)]
 
 pub mod issuer_cli;
+mod login;
 
 use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, OnceLock};
@@ -199,6 +203,8 @@ struct Shared {
     discovery_down: AtomicBool,
     jwks_fetches: AtomicUsize,
     discovery_fetches: AtomicUsize,
+    /// The sign-in endpoints (`/authorize`, `/token`, `/revoke`) and what a test set for them.
+    login: login::Login,
 }
 
 async fn discovery(State(shared): State<Arc<Shared>>) -> Response {
@@ -206,8 +212,7 @@ async fn discovery(State(shared): State<Arc<Shared>>) -> Response {
     if shared.discovery_down.load(Ordering::SeqCst) {
         return StatusCode::SERVICE_UNAVAILABLE.into_response();
     }
-    axum::Json(json!({"issuer": shared.issuer, "jwks_uri": format!("{}/jwks", shared.issuer)}))
-        .into_response()
+    axum::Json(login::discovery_document(&shared)).into_response()
 }
 
 async fn jwks(State(shared): State<Arc<Shared>>) -> Response {
@@ -262,6 +267,9 @@ impl TestIdp {
         let router = Router::new()
             .route("/.well-known/openid-configuration", get(discovery))
             .route("/jwks", get(jwks))
+            .route("/authorize", get(login::authorize))
+            .route("/token", axum::routing::post(login::token))
+            .route("/revoke", axum::routing::post(login::revoke))
             .with_state(Arc::clone(&shared));
         let server = tokio::spawn(async move {
             axum::serve(listener, router).await.unwrap();
@@ -371,46 +379,7 @@ impl TestIdp {
 
     /// A token with exactly `claims`, signed as `signing` says.
     pub fn mint(&self, claims: &Map<String, Value>, signing: Signing) -> String {
-        let (published, unpublished) = generations();
-        let (header, signer): (Value, Signer<'_>) = match signing {
-            Signing::Published(alg) => (
-                json!({"alg": alg_name(alg), "typ": "JWT", "kid": published.kid(alg)}),
-                Box::new(move |m| published.sign(alg, m)),
-            ),
-            Signing::Unpublished(alg) => (
-                json!({"alg": alg_name(alg), "typ": "JWT", "kid": unpublished.kid(alg)}),
-                Box::new(move |m| unpublished.sign(alg, m)),
-            ),
-            Signing::UnpublishedUnderPublishedKid(alg) => (
-                json!({"alg": alg_name(alg), "typ": "JWT", "kid": published.kid(alg)}),
-                Box::new(move |m| unpublished.sign(alg, m)),
-            ),
-            Signing::PublishedWithoutKid(alg) => (
-                json!({"alg": alg_name(alg), "typ": "JWT"}),
-                Box::new(move |m| published.sign(alg, m)),
-            ),
-            Signing::NoneAlg => (
-                json!({"alg": "none", "typ": "JWT"}),
-                Box::new(|_| Vec::new()),
-            ),
-            Signing::Hs256WithPublicKey => {
-                let secret = published.rsa.public_key().as_ref().to_vec();
-                (
-                    json!({"alg": "HS256", "typ": "JWT", "kid": published.kid(Alg::Rs256)}),
-                    Box::new(move |m| {
-                        let key = aws_lc_rs::hmac::Key::new(aws_lc_rs::hmac::HMAC_SHA256, &secret);
-                        aws_lc_rs::hmac::sign(&key, m).as_ref().to_vec()
-                    }),
-                )
-            }
-        };
-        let signing_input = format!(
-            "{}.{}",
-            b64(serde_json::to_vec(&header).unwrap()),
-            b64(serde_json::to_vec(claims).unwrap())
-        );
-        let signature = signer(signing_input.as_bytes());
-        format!("{signing_input}.{}", b64(signature))
+        mint_token(claims, signing)
     }
 
     /// A token with exactly this `header` and these `claims` and this `signature` (raw bytes), signed by
@@ -424,6 +393,50 @@ impl TestIdp {
             b64(signature)
         )
     }
+}
+
+/// A token with exactly `claims`, signed as `signing` says.
+fn mint_token(claims: &Map<String, Value>, signing: Signing) -> String {
+    let (published, unpublished) = generations();
+    let (header, signer): (Value, Signer<'_>) = match signing {
+        Signing::Published(alg) => (
+            json!({"alg": alg_name(alg), "typ": "JWT", "kid": published.kid(alg)}),
+            Box::new(move |m| published.sign(alg, m)),
+        ),
+        Signing::Unpublished(alg) => (
+            json!({"alg": alg_name(alg), "typ": "JWT", "kid": unpublished.kid(alg)}),
+            Box::new(move |m| unpublished.sign(alg, m)),
+        ),
+        Signing::UnpublishedUnderPublishedKid(alg) => (
+            json!({"alg": alg_name(alg), "typ": "JWT", "kid": published.kid(alg)}),
+            Box::new(move |m| unpublished.sign(alg, m)),
+        ),
+        Signing::PublishedWithoutKid(alg) => (
+            json!({"alg": alg_name(alg), "typ": "JWT"}),
+            Box::new(move |m| published.sign(alg, m)),
+        ),
+        Signing::NoneAlg => (
+            json!({"alg": "none", "typ": "JWT"}),
+            Box::new(|_| Vec::new()),
+        ),
+        Signing::Hs256WithPublicKey => {
+            let secret = published.rsa.public_key().as_ref().to_vec();
+            (
+                json!({"alg": "HS256", "typ": "JWT", "kid": published.kid(Alg::Rs256)}),
+                Box::new(move |m| {
+                    let key = aws_lc_rs::hmac::Key::new(aws_lc_rs::hmac::HMAC_SHA256, &secret);
+                    aws_lc_rs::hmac::sign(&key, m).as_ref().to_vec()
+                }),
+            )
+        }
+    };
+    let signing_input = format!(
+        "{}.{}",
+        b64(serde_json::to_vec(&header).unwrap()),
+        b64(serde_json::to_vec(claims).unwrap())
+    );
+    let signature = signer(signing_input.as_bytes());
+    format!("{signing_input}.{}", b64(signature))
 }
 
 /// A [`TestIdp`] and an [`OidcAuthenticator`] configured for it ([`TEST_AUDIENCE`], [`TEST_ROLES_CLAIM`],

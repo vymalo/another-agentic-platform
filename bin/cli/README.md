@@ -1,10 +1,10 @@
 # aapctl
 
 The platform's command line. **Phase 1 is offline** (`validate`, `render`): it needs no cluster and no network, reads no
-environment and no Secret. **Phase 2 (K9b-1) talks to the Platform API** (`get`, `apply`, `delete`, `export`, `whoami`,
-`logout`, `login --token-stdin`) and holds no right the API does not give the person. **The browser sign-in is not built**
-(K9b-2). Design: [§60b](../../docs/architecture/10-control-plane-and-crds.md#60b-cli), decisions
-[P-028](../../docs/architecture/11-decisions.md) and P-030 to P-035. `aapctl` ships in no image.
+environment and no Secret. **Phase 2 (K9b) talks to the Platform API** (`get`, `apply`, `delete`, `export`, `whoami`,
+`logout`, and `login`, in a browser or with `--token-stdin`) and holds no right the API does not give the person. Design:
+[§60b](../../docs/architecture/10-control-plane-and-crds.md#60b-cli), decisions
+[P-028](../../docs/architecture/11-decisions.md) and P-030 to P-036. `aapctl` ships in no image.
 
 ```sh
 cargo run -q -p aap-cli -- validate -f examples/coder.yaml
@@ -107,10 +107,11 @@ A `401` also says that the token was refused or has expired and to sign in again
 `aapctl: <what>: <status> <problem type>: <detail>` (`agent/chat: 412 stale: …`), then one indented line per field of the
 problem's `errors` or `reasons`.
 
-## Phase 2: over the Platform API (K9b-1)
+## Phase 2: over the Platform API (K9b)
 
 ```sh
-printf '%s\n' "$TOKEN" | aapctl login --token-stdin --server https://api.example.com   # once; or set AAPCTL_TOKEN
+aapctl login --server https://api.example.com --issuer https://idp.example.com/realms/agents   # once, in a browser
+printf '%s\n' "$TOKEN" | aapctl login --token-stdin --server https://api.example.com   # or this, or set AAPCTL_TOKEN
 aapctl get agents
 aapctl export agent chat > chat.yaml
 aapctl apply -f chat.yaml                 # unchanged
@@ -118,7 +119,8 @@ aapctl delete agent chat --wait
 ```
 
 **The token.** From `AAPCTL_TOKEN`, else from the config file: `--config`, else `$XDG_CONFIG_HOME/aapctl/config.yaml`, else
-`$HOME/.config/aapctl/config.yaml` (`server`, `accessToken`, `expiresAt`). **The token is in a file of mode `0600` and in the
+`$HOME/.config/aapctl/config.yaml` (`server`, `accessToken`, `expiresAt`, and from a browser sign-in `issuer`, `clientId`,
+`scopes`, `refreshToken` and `tokenSource`). **The token is in a file of mode `0600` and in the
 environment, never in an argument** (there is no `--token` flag: `ps` shows arguments), and there is no keyring (none is in
 the lockfile; P-031). The file is written whole or not at all (a temporary file made with `create_new`, so a link left at its
 name is not followed, and mode `0600`, flushed, renamed over the old one; one that cannot be renamed is removed) in a directory
@@ -197,8 +199,79 @@ then reads every two seconds until `404` (`--timeout`, default 120 s; exit 5 whe
 each is cut to the time left, so the command ends within `--timeout` and a little over, and a read that fails for a reason
 waiting can change (unreachable, `5xx`) does not end it early (`401`, `403` and other `4xx` do).
 
-**Not built:** the browser sign-in (`login` without `--token-stdin`, a refresh token; K9b-2, P-030), `export` of models and tool
-servers (P-033: the API has no YAML route for them), a keyring, a device flow.
+**Not built:** `export` of models and tool servers (P-033: the API has no YAML route for them), a keyring, a device flow.
+
+## `login` in the browser, and the refresh token (K9b-2)
+
+```sh
+aapctl login --server https://api.example.com --issuer https://idp.example.com/realms/agents
+aapctl login ... --client-id aapctl --scope openid --scope offline_access --no-browser --timeout 120
+```
+
+OAuth 2.0 **authorization code with PKCE** (`S256`) for a **public client** (no secret) on a **loopback redirect**,
+`http://127.0.0.1:<port>/callback`, as RFC 8252 describes for a desktop app. It prints the URL on standard error, **always**, and
+opens the browser with `xdg-open`, `open` or `rundll32` unless `--no-browser`; nothing is typed in the terminal. What it needs
+of the realm: a **public client** named as `--client-id` (default `aapctl`) with the standard flow and PKCE `S256`, the redirect
+`http://127.0.0.1/*`, and **an audience mapper** that puts the Platform API's audience in its access tokens (P-030; without it the
+API answers `401` and the message says the audience is the likeliest cause, and nothing is kept).
+
+| Flag | Meaning |
+|---|---|
+| `--server` | The Platform API. Required the first time, then the file's |
+| `--issuer` | The OpenID Connect issuer, `https://host/realms/name`. Required the first time, then the file's. Its discovery document must name this **exact** issuer, name an `authorization_endpoint` and a `token_endpoint` that are `https` (or `http` on a loopback host), and, if it lists `code_challenge_methods_supported`, include `S256` |
+| `--client-id` | The public client. The file's, else `aapctl` |
+| `--scope` | Repeatable. The file's, else `openid`. **`offline_access` is not asked unless you pass it** (P-036): a refresh token that outlives the session is a larger credential, and it is yours to choose; without one, a sign-in lasts as long as the access token |
+| `--no-browser` | Do not try to open a browser |
+| `--timeout` | Seconds to wait for the browser, 1 to 3600, default 300. No sign-in in time is exit 4, and nothing is saved |
+
+**What it does.** Discovers the issuer (no redirect followed, answers capped, `https` unless loopback, **never a proxy for a plain
+`http` loopback host**); makes a verifier (32 bytes from the operating system, base64url, 43 characters), its S256 challenge and a
+`state` (32 random bytes, compared in constant time); binds **`127.0.0.1` on a free port before it builds the URL** (never
+`localhost`, never a wider address); waits for the browser. The listener answers only `GET /callback` with the right `state`;
+anything else is a `400` and does not end the wait; it reads at most 8 KiB of a head and no body, two seconds a connection, and
+**gives up after 64 requests (exit 4)**. The page is plain text ("Signed in. You can close this tab." or "Sign-in failed (`<code>`).
+Return to the terminal."), with `Cache-Control: no-store` and `Referrer-Policy: no-referrer`, and never holds the code, the state or
+a token; the `<code>` is the issuer's `error` cut to the characters RFC 6749 allows. It then `POST`s the code and the verifier to the
+token endpoint, and **asks the Platform API (`GET /v1/me`) whether the access token is good: one the API refuses is not kept**
+(exit 4). **The ID token is not read.** What is kept is in the file above; the refresh token is **bound to its issuer** and is sent to
+the token endpoint discovered from the saved `issuer` and nowhere else, and only after the check that the saved token is for the
+server.
+
+**Refresh.** Before a command that uses the file's token, if `expiresAt` is within 30 s of now (or past) and a refresh token is held,
+it is used once: a rotated refresh token replaces the old one, an answer without one keeps the old, `invalid_grant` forgets the
+refresh token and says to sign in again (exit 4), and an issuer that cannot be reached is exit 5 with the file **as it was**. A
+`401` on a file token whose refresh has not been tried in this command is answered with **one refresh and one retry** of that
+request (a `401` is refused before any handler, so it wrote nothing; a request that succeeded is never repeated), and never with a
+second refresh. `AAPCTL_TOKEN` is never refreshed and never written to the file. **Two `aapctl` processes refreshing at once:** the
+file is written only if it still holds what the process read, so the second to write does not destroy a newer token (the check and
+the rename are two steps: a write that lands between them is lost, and costs one sign-in). `login --token-stdin` has no refresh
+token and forgets that of an earlier sign-in.
+
+**`logout`** forgets both tokens (the server, issuer and client stay) and then, if the issuer lists a `revocation_endpoint`, asks
+it once to revoke the refresh token (5 s to connect, 10 s in all); a failure is a note on standard error and exit 0. **`whoami`**
+says how the token was obtained (`AAPCTL_TOKEN`, signed in with `aapctl login`, pasted with `--token-stdin`) and whether a refresh
+token is held, and never any part of one.
+
+**Nothing secret is printed**: not the code, the verifier, the access token or the refresh token, in any output, `--verbose` line,
+error or argument; the `state` appears only in the URL, which is the line that must hold it. `--verbose` prints the issuer's host
+and the status of each request, never a path, a query or a body.
+
+**Exit codes of the sign-in** (the table above): **4** when the person did not sign in (a timeout, the issuer's `error=`, too many
+requests on the port, a code the token endpoint refuses, a token the API refuses, a refresh token that is no longer good); **5**
+when the issuer cannot be reached, answers `5xx`, or answers what it should not (a discovery document for another issuer, no
+`S256`, an endpoint in the clear, a token type that is not `Bearer`, an `expires_in` out of range); **2** for an issuer, a scope or a
+client id that cannot be used, or no issuer or server.
+
+**This is not a device flow** (P-032): `--no-browser` prints the URL for a browser on the same machine (a container, or `ssh` with
+the port forwarded), because the redirect is a loopback address. A machine with no browser uses `--token-stdin` or `AAPCTL_TOKEN`
+and has no refresh token.
+
+**Tests** (`tests/signin.rs`, 32; the issuer is the testkit's `TestIdp` of `aap-auth-oidc`, the test is the browser): the URL and
+its parts, the file's mode and content, a bad state, a wrong verifier, the timeout, every refusal of discovery, a token the API
+refuses, the page and its headers with nothing reflected, the listener (loopback only, other methods and paths, a huge head, junk
+and silent connections, a flood), the proxy, the refresh in every case above, `logout`, and that nothing secret is on any stream.
+They run as a normal user too (`setpriv --reuid=65534 --regid=65534 --clear-groups` on test binaries copied to a 755 directory).
+**Unverified:** a real Keycloak and a real browser.
 
 ## How `render` shares the operator's code
 

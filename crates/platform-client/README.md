@@ -38,14 +38,37 @@ another.
   machine. `normalize_server` spells an address one way (scheme and host in lower case, default port left out, no trailing slash) so
   that two names for one server compare equal.
 
-No sign-in flow is here. A token comes from the caller; the browser's sign-in is K9b-2.
+## `oidc`: the sign-in (K9b-2)
+
+`aap_platform_client::oidc` is what `aapctl login` is made of, **concrete code and no OIDC crate** (the issuer is a protocol, not a
+swappable implementation), over the client's HTTP rules: no redirect followed, 10 s to connect and 30 s a request, an answer capped at
+1 MiB, `https` unless the host is a loopback address, **never a proxy for a plain-`http` loopback host** (`OidcOptions`), and **no
+error holds a URL, a header, a code, a token or the transport's own message** (`OidcError`, with the same fixed phrases as the API
+client's).
+
+| Function | What |
+|---|---|
+| `discover(issuer, options, trace)` | `GET {issuer}/.well-known/openid-configuration`. The document's `issuer` must equal the argument **exactly**; `authorization_endpoint` and `token_endpoint` are required, each `https` or loopback `http`, with no user name, password or fragment; `code_challenge_methods_supported`, if present, must list `S256`; a `revocation_endpoint` that cannot be used is none |
+| `Pkce::new()` | A verifier of 32 bytes of operating-system randomness (base64url, 43 characters), its challenge (`challenge_of`: base64url of SHA-256, `S256`, checked against RFC 7636 Appendix B) and a `state` of 32 random bytes; `state_matches` compares in constant time |
+| `authorization_url(...)` | The authorization endpoint with `response_type=code`, `client_id`, `redirect_uri`, `scope`, `state`, `code_challenge` and `code_challenge_method=S256`. **Never the verifier** |
+| `exchange_code(...)` | `POST` of `grant_type=authorization_code`, `code`, `redirect_uri`, `client_id` and `code_verifier`. A public client: no secret |
+| `refresh(...)` | `POST` of `grant_type=refresh_token`. **The token goes to the endpoint of the `Discovery` it is given and to no other**; the caller discovered it from the issuer the token was saved with |
+| `revoke(...)` | `POST` of `token` and `token_type_hint=refresh_token` to the `revocation_endpoint`, once; `Ok(false)` when there is none |
+
+An answer is read strictly: `access_token` must pass `Token::new`, `token_type` must be `Bearer` (any case), `expires_in` if present a
+whole number from 1 to a year, `refresh_token` if present visible ASCII. An OAuth error becomes `OidcError::Refused { code }` (the
+`error` member cut to `[A-Za-z0-9_.-]` and 64 characters; its description is never read) or, for a refresh, `InvalidGrant`; a `5xx`, a
+`429`, a redirect and a `404` are `Server { host, status }`. **The ID token is not read** and no `nonce` is sent. `Secret` holds a
+verifier, a code or a refresh token: no `Debug` of its text and no `Display`. `trace` gets `> POST host` and `< status` per request,
+never a path, a query or a body (`aapctl --verbose` prints it). The loopback listener and the browser are not here: they are
+`bin/cli/src/signin.rs`.
 
 ## Tests
 
 `tests/documented.rs` holds the table of calls to the OpenAPI document (every operation's own parameters: a `PUT` takes `If-Match` and
 `If-None-Match`, a `DELETE` takes `If-Match`; no count of calls is written there: `Op::all` is checked by an exhaustive `match` in
 `op.rs`, which does not compile when a variant is added without a line, and a unit test there holds that every call's path segments
-joined are its template). `tests/client.rs` runs the client against the real router
+joined are its template). `src/oidc.rs` has unit tests of the S256 challenge against the RFC's vector, the size and alphabet of the verifier, that nothing prints a secret, the characters of an error code, every refusal of a token answer and the endpoints a secret may go to; the flow itself is tried by `aap-cli`'s `tests/signin.rs` against the testkit's issuer. `tests/client.rs` runs the client against the real router
 (`aap_platform_api::router`) over the `Memory` ports on `127.0.0.1:0`: the preconditions on the wire, the problems read into their
 members, no token in an error or a trace, the addresses and names that are refused, a redirect that is not followed, a body
 that is not quoted, a server that accepts and never answers (the request timeout ends the call with a fixed phrase), the default

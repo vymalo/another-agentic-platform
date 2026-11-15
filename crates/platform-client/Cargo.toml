@@ -14,6 +14,11 @@ publish.workspace = true
 # reqwest 0.12 with rustls and ring, never 0.13: see `crates/auth-oidc/README.md` "Dependencies". The workspace's feature list has no
 # `json`, `gzip` or `blocking`: bodies are read and written here.
 reqwest.workspace = true
+# The sign-in (`oidc`): the S256 challenge, the verifier and the state from the OS, base64url, a constant-time comparison of the state.
+base64.workspace = true
+getrandom.workspace = true
+sha2.workspace = true
+subtle.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 thiserror.workspace = true

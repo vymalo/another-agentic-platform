@@ -59,7 +59,29 @@ pub struct Config {
     /// When the access token expires (seconds since the epoch), if it says.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub expires_at: Option<i64>,
+    /// The OpenID Connect issuer the browser sign-in used. **The refresh token is bound to it**: it is sent to the token endpoint
+    /// discovered from this issuer and to no other.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub issuer: Option<String>,
+    /// The public client the sign-in used.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub client_id: Option<String>,
+    /// The scopes the sign-in asked for.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub scopes: Vec<String>,
+    /// The refresh token, if the issuer gave one. A secret like the access token: the file is `0600` and it is printed nowhere.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub refresh_token: Option<String>,
+    /// How the access token was obtained: [`SIGNED_IN`] or [`PASTED`]. A file written before this field existed has none.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub token_source: Option<String>,
 }
+
+/// `tokenSource` of a token that `aapctl login` got from the issuer.
+pub const SIGNED_IN: &str = "signed-in";
+
+/// `tokenSource` of a token that was piped to `aapctl login --token-stdin`.
+pub const PASTED: &str = "pasted";
 
 /// Where the file is, when `--config` is not given. `None` when the environment names neither a config home nor a home.
 pub fn default_path(env: &Env) -> Option<PathBuf> {
@@ -101,7 +123,7 @@ pub fn load(path: &Path) -> Result<Config, String> {
     }
     serde_yaml::from_str(&text).map_err(|_| {
         format!(
-            "{} is not an aapctl configuration (a YAML mapping of server, accessToken and expiresAt)",
+            "{} is not an aapctl configuration (a YAML mapping: server, accessToken, expiresAt, issuer, clientId, scopes, refreshToken, tokenSource)",
             path.display()
         )
     })
@@ -168,6 +190,22 @@ fn open_private(path: &Path) -> Result<std::fs::File, Refused> {
         std::io::ErrorKind::NotFound => Refused::Missing,
         kind => Refused::Because(format!("{}: {kind}", path.display())),
     })
+}
+
+/// Write `new` only if the file still holds `expected`, the configuration this process read: **two `aapctl` processes that refresh at
+/// once must not destroy a newer token** (an issuer that rotates refresh tokens gives the second a token the first already used). `Ok(false)`:
+/// the file changed since it was read and was left as it is. The check and the rename are not one step, so a write that lands between
+/// them is still lost: the limit is documented (`bin/cli/README.md`), and the loss is a sign-in the person repeats.
+///
+/// # Errors
+///
+/// As [`load`] and [`save`].
+pub fn save_if_unchanged(path: &Path, expected: &Config, new: &Config) -> Result<bool, String> {
+    if load(path)? != *expected {
+        return Ok(false);
+    }
+    save(path, new)?;
+    Ok(true)
 }
 
 /// Write the file whole or not at all, with mode `0600`, in a directory that is `0700` if it had to be made.
@@ -305,6 +343,36 @@ mod tests {
         }
         // Gone: an empty configuration.
         assert_eq!(load(&d.join("nope.yaml")).unwrap(), Config::default());
+    }
+
+    #[test]
+    fn a_write_that_would_destroy_a_newer_token_is_not_made() {
+        let d = dir("compare");
+        let path = d.join("config.yaml");
+        let read = Config {
+            server: Some("https://x.example".into()),
+            access_token: Some("old".into()),
+            refresh_token: Some("r-old".into()),
+            ..Config::default()
+        };
+        save(&path, &read).unwrap();
+        let mine = Config {
+            access_token: Some("mine".into()),
+            refresh_token: Some("r-mine".into()),
+            ..read.clone()
+        };
+        // Another process wrote a newer token between this one's read and its write.
+        let theirs = Config {
+            access_token: Some("theirs".into()),
+            refresh_token: Some("r-theirs".into()),
+            ..read.clone()
+        };
+        save(&path, &theirs).unwrap();
+        assert!(!save_if_unchanged(&path, &read, &mine).unwrap());
+        assert_eq!(load(&path).unwrap(), theirs);
+        // Nobody wrote: the write is made.
+        assert!(save_if_unchanged(&path, &theirs, &mine).unwrap());
+        assert_eq!(load(&path).unwrap(), mine);
     }
 
     #[test]

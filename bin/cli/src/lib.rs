@@ -1,5 +1,5 @@
 //! `aapctl` (§60b). Phase 1: `validate` and `render`, offline. Phase 2 (K9b-1): `get`, `apply`, `delete`, `export`, `whoami`,
-//! `login --token-stdin` and `logout`, over the Platform API ([`remote`]).
+//! `login` (a browser sign-in, or `--token-stdin`) and `logout`, over the Platform API ([`remote`], [`signin`]).
 //!
 //! Both read `AgentService`, `AgentConfig`, `ModelEndpoint` and `ToolProvider` documents and judge them as the operator does,
 //! with `aap_domain::resolve` and the deployment's settings given as flags (the operator's own names and defaults). `render`
@@ -20,6 +20,7 @@ mod failure;
 mod forms;
 mod load;
 mod remote;
+mod signin;
 mod skew;
 
 use std::ffi::OsString;
@@ -76,9 +77,11 @@ enum Command {
     Export(remote::ExportArgs),
     /// Say which server and token are in use, what the token may do, and when it expires.
     Whoami(remote::Conn),
-    /// Keep an access token (`--token-stdin`) for the server. The browser sign-in is not built yet.
+    /// Sign in with a browser (OAuth 2.0 authorization code with PKCE on a loopback address), or keep a token piped on standard
+    /// input (`--token-stdin`). The access token is renewed with the refresh token when it is about to expire. Exit 4 when the
+    /// sign-in did not happen.
     Login(remote::LoginArgs),
-    /// Forget the kept token, and keep the server.
+    /// Forget the kept tokens (and revoke the refresh token at the issuer, once, if it says where), and keep the server.
     Logout(remote::Conn),
 }
 

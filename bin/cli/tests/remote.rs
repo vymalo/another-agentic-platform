@@ -860,11 +860,11 @@ fn export_apply_round_trip() {
 #[test]
 fn login_token_stdin_then_whoami_logout() {
     let api = Api::start("login");
-    // The plain login is the browser's, which is not built.
+    // The plain login is the browser's (K9b-2), and it needs an issuer to send the person to.
     let out = api.ctl(&["login"], None);
     assert_eq!(out.code, 2, "{}", out.stderr);
     assert!(
-        out.stderr.contains("not built yet") && out.stderr.contains("--token-stdin"),
+        out.stderr.contains("no issuer") && out.stderr.contains("--issuer"),
         "{}",
         out.stderr
     );

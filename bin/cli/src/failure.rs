@@ -8,11 +8,17 @@
 //! | 4 | Not allowed: no token, `401`, `403` |
 //! | 5 | Unreachable, `5xx`, an answer that is not the API's or that this release of `aapctl` does not read whole (version skew), or a wait that ran out |
 //!
+//! The sign-in follows the same table ([`from_oidc`]): an issuer that cannot be reached, answers `5xx` or answers something that is
+//! not what the specifications describe (a document that names another issuer, no S256, a token type that is not Bearer) is 5; an
+//! issuer that refuses (the person said no, a code that does not verify, a refresh token that is no longer good) and a sign-in that
+//! did not happen in time is 4; an issuer or a client id that cannot be used is 2.
+//!
 //! Every error is one line, `aapctl: <what>: <status> <problem type>: <detail>`, and one indented line per field of `errors` or
 //! `reasons`. **No line holds a token, a header or the text of a transport error.**
 
 use std::io::Write;
 
+use aap_platform_client::oidc::OidcError;
 use aap_platform_client::{ClientError, Problem};
 
 /// A failed command: the lines to print on standard error, and the exit code.
@@ -96,6 +102,21 @@ pub fn from_client(what: &str, error: ClientError) -> Failure {
     }
 }
 
+/// The failure of a step of the sign-in, about `what` (`the token endpoint`; empty for none).
+pub fn from_oidc(error: &OidcError) -> Failure {
+    match error {
+        OidcError::Config(message) => Failure::usage(message),
+        OidcError::Unreachable { .. } | OidcError::Server { .. } | OidcError::BadAnswer(_) => {
+            Failure::new(5, error.to_string())
+        }
+        OidcError::Refused { .. } => Failure::new(4, error.to_string()),
+        OidcError::InvalidGrant => Failure::new(
+            4,
+            "the issuer no longer accepts the saved refresh token: sign in again with `aapctl login`",
+        ),
+    }
+}
+
 fn from_problem(about: &str, p: &Problem) -> Failure {
     let kind = p.slug.as_deref().unwrap_or(match p.status {
         500.. => "server-error",
@@ -114,7 +135,7 @@ fn from_problem(about: &str, p: &Problem) -> Failure {
     let mut failure = Failure::new(code_of(p), format!("{about}{} {kind}: {words}", p.status));
     if p.status == 401 {
         failure = failure.also(
-            "the token was refused or has expired: sign in again (`aapctl login --token-stdin`) or set AAPCTL_TOKEN to a new one",
+            "the token was refused or has expired: sign in again (`aapctl login`, or `aapctl login --token-stdin`) or set AAPCTL_TOKEN to a new one",
         );
     }
     if let Some(permission) = &p.permission
