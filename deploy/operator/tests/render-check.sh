@@ -918,6 +918,7 @@ chain_collector() {
     && [ "$(grep -c '^    aap-e2e/made-by: chain-e2e$' "$manifest")" -eq 3 ] && ! grep -q '^  namespace:' "$manifest" \
     && grep -q '^  name: e2e-otel-collector-config$' "$manifest" || return 1
   script="$here/e2e/chain-e2e.sh"
+  # shellcheck disable=SC2016 # the patterns are the script's own text, `$work` and `$collector` and all
   grep -q '^collector=e2e-otel-collector$' "$script" \
     && [ "$(grep -c '"$work/otel.log" "$work/seen"' "$script")" -eq 2 ] && grep -q '^read_log "\$collector" otel.log ' "$script"
 }
