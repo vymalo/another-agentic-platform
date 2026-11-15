@@ -66,4 +66,14 @@ spec:
       to:
         {{- toYaml . | nindent 8 }}
       {{- end }}
+    {{- if .Values.api.otel.enabled }}
+    {{- /* Traces (slice K5): the collector's peers, which the chart requires, so this rule is never open egress. */}}
+    - ports:
+        {{- range .Values.api.otel.ports }}
+        - protocol: TCP
+          port: {{ . }}
+        {{- end }}
+      to:
+        {{- toYaml .Values.api.otel.to | nindent 8 }}
+    {{- end }}
 {{- end }}

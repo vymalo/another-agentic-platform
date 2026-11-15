@@ -1,0 +1,61 @@
+# K5: traces of the operator and of the Platform API both on, every otel value set, and a different one for each (another endpoint,
+# sampler, headers Secret, CA ConfigMap, collector peers and port), so a value that crossed from one block to the other shows. Rendered
+# to tests/golden/otel.yaml, read by kubeconform (operator-image.yml) and by `api --check` as the shape `otel` (api-shapes.sh).
+watchNamespace: agents
+otel:
+  enabled: true
+  endpoint: http://otel-collector.observability.svc:4318/v1/traces
+  sampler: traceidratio
+  samplerRatio: "0.25"
+  resourceAttributes:
+    deployment.environment.name: prod
+    k8s.cluster.name: netcup
+    service.namespace: another-agentic
+  headersSecret:
+    name: otel-operator-headers
+    key: headers
+  certificate:
+    configMap: otel-operator-ca
+    key: ca.pem
+  to:
+    - namespaceSelector:
+        matchLabels:
+          kubernetes.io/metadata.name: observability
+      podSelector:
+        matchLabels:
+          app.kubernetes.io/name: opentelemetry-collector
+  ports: [4318]
+api:
+  enabled: true
+  config:
+    oidc:
+      issuer: https://keycloak.example.com/realms/another-agentic
+      audiences: [another-agentic]
+      rolesClaim: agentic_roles
+    defaults:
+      allowedImageRegistries: [ghcr.io]
+  networkPolicy:
+    from:
+      - podSelector:
+          matchLabels:
+            app.kubernetes.io/name: traefik
+  otel:
+    enabled: true
+    endpoint: https://otel-gateway.observability.svc:4319/v1/traces
+    sampler: always_on
+    resourceAttributes:
+      deployment.environment.name: prod
+    headersSecret:
+      name: otel-api-headers
+      key: token
+    certificate:
+      configMap: otel-api-ca
+      key: bundle.pem
+    to:
+      - namespaceSelector:
+          matchLabels:
+            kubernetes.io/metadata.name: observability
+        podSelector:
+          matchLabels:
+            app.kubernetes.io/name: otel-gateway
+    ports: [4319]

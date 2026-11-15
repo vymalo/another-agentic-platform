@@ -48,6 +48,10 @@ spec:
         runAsNonRoot: true
         runAsUser: 65532
         runAsGroup: 65532
+        {{- if and $api.otel.enabled $api.otel.headersSecret.name }}
+        # So the mounted headers file (mode 0440) is readable by the non-root user.
+        fsGroup: 65532
+        {{- end }}
         seccompProfile:
           type: RuntimeDefault
       containers:
@@ -59,6 +63,10 @@ spec:
               value: /etc/aap-api/config.yaml
             - name: RUST_LOG
               value: {{ $api.logLevel | quote }}
+            {{- if $api.otel.enabled }}
+            # Traces (slice K5): the variables `api` reads. Absent, no span is made.
+            {{- include "aap.otel.env" (dict "block" $api.otel "pod" false) | nindent 12 }}
+            {{- end }}
             {{- with $api.extraEnv }}
             {{- toYaml . | nindent 12 }}
             {{- end }}
@@ -115,6 +123,9 @@ spec:
             - name: config
               mountPath: /etc/aap-api
               readOnly: true
+            {{- if $api.otel.enabled }}
+            {{- include "aap.otel.mounts" (dict "block" $api.otel) | nindent 12 }}
+            {{- end }}
             {{- with $api.extraVolumeMounts }}
             {{- toYaml . | nindent 12 }}
             {{- end }}
@@ -122,6 +133,9 @@ spec:
         - name: config
           configMap:
             name: {{ include "aap.api.fullname" . }}
+        {{- if $api.otel.enabled }}
+        {{- include "aap.otel.volumes" (dict "block" $api.otel) | nindent 8 }}
+        {{- end }}
         {{- with $api.extraVolumes }}
         {{- toYaml . | nindent 8 }}
         {{- end }}

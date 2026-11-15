@@ -40,6 +40,7 @@ on:
       - "examples/**"
       - "docs/extensions/agent-registry-v1.md"
       - ".github/workflows/operator.yml"
+      - "tools/check-dependencies.sh"
   push:
     branches: [main]
     paths:
@@ -51,6 +52,7 @@ on:
       - "examples/**"
       - "docs/extensions/agent-registry-v1.md"
       - ".github/workflows/operator.yml"
+      - "tools/check-dependencies.sh"
 
 permissions:
   contents: read
@@ -91,6 +93,27 @@ jobs:
         run: rustup toolchain install "$RUST_TOOLCHAIN" --profile minimal --no-self-update && rustup default "$RUST_TOOLCHAIN"
       - uses: Swatinem/rust-cache@v2
       - run: cargo test --workspace --locked
+
+  dependencies:
+    # K5: TLS stays rustls with ring and no second TLS stack or HTTP client enters the lock file (tools/check-dependencies.sh). A pull request
+    # that adds a package says so and names it in ALLOW_NEW_PACKAGES, which is the list of the packages its decision covers.
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+      - name: Install Rust
+        run: rustup toolchain install "$RUST_TOOLCHAIN" --profile minimal --no-self-update && rustup default "$RUST_TOOLCHAIN"
+      - uses: Swatinem/rust-cache@v2
+      - name: the dependency gates
+        if: github.event_name != 'pull_request'
+        run: sh tools/check-dependencies.sh
+      - name: the dependency gates, and the packages this pull request adds to the lock file
+        if: github.event_name == 'pull_request'
+        env:
+          ALLOW_NEW_PACKAGES: "aap-trace aap-trace-otlp"
+          BASE_REF: origin/${{ github.base_ref }}
+        run: sh tools/check-dependencies.sh
 
   crds-drift:
     # deploy/crds/agents.vymalo.com.yaml must be exactly what `crdgen` prints.

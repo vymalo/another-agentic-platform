@@ -48,4 +48,24 @@ spec:
             cidr: {{ . }}
         {{- end }}
       {{- end }}
+    {{- if include "aap.otel.on" . }}
+    {{- /* Traces (slice K5): DNS and the collector, each to peers the chart requires, so neither is open egress. */}}
+    {{- $o := .Values.otel }}
+    - ports:
+        {{- range $o.dns.ports }}
+        - protocol: UDP
+          port: {{ . }}
+        - protocol: TCP
+          port: {{ . }}
+        {{- end }}
+      to:
+        {{- toYaml $o.dns.to | nindent 8 }}
+    - ports:
+        {{- range $o.ports }}
+        - protocol: TCP
+          port: {{ . }}
+        {{- end }}
+      to:
+        {{- toYaml $o.to | nindent 8 }}
+    {{- end }}
 {{- end }}
