@@ -25,10 +25,11 @@ fail=0
 say() { echo "$1"; }
 bad() { echo "FAIL $1"; fail=1; }
 
-# The one place `flags` is expanded: a list of words, on purpose.
+# The one place `flags` is expanded: a list of words, on purpose. No colour: the text of cargo's error is compared, and
+# CI sets CARGO_TERM_COLOR=always (*seen 2026-11-15*: the escape codes around `error` made "absent" read as a failure).
 ct() {
   # shellcheck disable=SC2086
-  cargo tree $flags "$@"
+  CARGO_TERM_COLOR=never cargo tree $flags "$@"
 }
 
 err=$(mktemp)
