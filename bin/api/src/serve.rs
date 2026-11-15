@@ -89,21 +89,37 @@ async fn ready(State(state): State<Arc<Shared>>) -> impl IntoResponse {
 
 /// `/metrics`: the counters of the API in the Prometheus text format. Its own port, so that a NetworkPolicy can open it to the
 /// scraper and keep it from everybody else; nothing here is the API's.
+#[cfg(test)]
 pub fn metrics(metrics: Arc<ApiMetrics>) -> Router {
+    metrics_with_traces(metrics, None)
+}
+
+/// [`metrics`], and when tracing is on (K5) the two counters of the trace pipeline after the API's own: with tracing off the
+/// text is exactly what it was.
+pub fn metrics_with_traces(
+    metrics: Arc<ApiMetrics>,
+    traces: Option<Arc<aap_trace::Stats>>,
+) -> Router {
     Router::new()
         .route(
             "/metrics",
-            get(|State(m): State<Arc<ApiMetrics>>| async move {
-                (
-                    [(
-                        header::CONTENT_TYPE,
-                        "text/plain; version=0.0.4; charset=utf-8",
-                    )],
-                    m.render(),
-                )
-            }),
+            get(
+                |State((m, t)): State<(Arc<ApiMetrics>, Option<Arc<aap_trace::Stats>>)>| async move {
+                    let mut text = m.render();
+                    if let Some(t) = t {
+                        text.push_str(&t.render());
+                    }
+                    (
+                        [(
+                            header::CONTENT_TYPE,
+                            "text/plain; version=0.0.4; charset=utf-8",
+                        )],
+                        text,
+                    )
+                },
+            ),
         )
-        .with_state(metrics)
+        .with_state((metrics, traces))
 }
 
 /// Serve `router` on `listener` until `shutdown` resolves, then let the requests in flight finish.

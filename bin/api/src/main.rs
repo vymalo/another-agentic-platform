@@ -32,6 +32,9 @@ fn main() -> ExitCode {
 }
 
 fn real_main(args: run::Args) -> Result<()> {
+    // The tracing variables are read before anything else, `--check` included: a bad one stops the start and says which. `--check`
+    // reads none of the files they name.
+    aap_trace_otlp::check("aap-api").map_err(|e| anyhow::anyhow!("{e}"))?;
     if args.check {
         config::load(&args.config)?;
         println!("{}: ok", args.config.display());

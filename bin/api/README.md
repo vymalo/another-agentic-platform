@@ -99,6 +99,20 @@ that is going is *not ready* for as long as it takes. A Service takes a moment t
 (`lifecycle.preStop.sleep`) and gives it 40 s in all: the sleep counts against the grace period, which must also hold the drain, the 2 s the health port is
 given to stop after it, and 5 s of margin, so the chart refuses less than the sleep plus 32.
 
+## Traces (K5)
+
+Traces are **off** unless an endpoint is set (`OTEL_EXPORTER_OTLP_TRACES_ENDPOINT`, or `OTEL_EXPORTER_OTLP_ENDPOINT` with
+`/v1/traces` appended), and then no task, queue or series exists. The variables are a strict subset of the standard ones,
+read by `aap-trace-otlp` ([README](../../crates/trace-otlp/README.md)): `grpc`, `http/protobuf` and
+`OTEL_EXPORTER_OTLP_HEADERS` are refused, headers come from the file `AAP_OTEL_HEADERS_FILE` names, and
+`OTEL_EXPORTER_OTLP_CERTIFICATE` is the exporter's only trust. A bad variable stops the start and names the variable, never
+its value. `api --check` validates them with the file and reads none of
+the files they name. The tracing variables are not in the YAML file. `run` reads them before the cluster and the issuer; the
+flush (at most 3 s) comes **after** the 25 s drain of the API and runs at the same time as the 2 s stop of the health and
+metrics servers, so the chart's grace floor is not moved. When on, `/metrics` also has the two `aap_trace_*` series. The
+spans are the router's ([README](../../crates/platform-api/README.md)). `tests/trace_env.rs` runs the binary with a variable it
+refuses.
+
 ## Tests
 
 `cargo test -p aap-api-server` (the loopback only; no cluster).

@@ -299,8 +299,24 @@ fn kubernetes_runtime(
     }
 }
 
+/// How long the spans still queued have to reach the collector when the operator stops (K5), inside the 30 s of
+/// `terminationGracePeriodSeconds`.
+#[cfg(feature = "runtime-kubernetes")]
+const FLUSH: std::time::Duration = std::time::Duration::from_secs(3);
+
+/// `operator run`. The tracing variables are read first, before the cluster is asked anything, so that a bad one stops the
+/// start and says which; the spans still queued are flushed on **every** way out, an error included.
 #[cfg(feature = "runtime-kubernetes")]
 pub async fn run(args: RunArgs) -> Result<()> {
+    let tracer = aap_trace_otlp::tracer("aap-operator", env!("CARGO_PKG_VERSION"))
+        .map_err(|e| anyhow::anyhow!("{e}"))?;
+    let result = run_with(args, tracer.clone()).await;
+    tracer.shutdown(FLUSH).await;
+    result
+}
+
+#[cfg(feature = "runtime-kubernetes")]
+async fn run_with(args: RunArgs, tracer: aap_trace::Tracer) -> Result<()> {
     use std::sync::Arc;
 
     use aap_api::AgentService;
@@ -347,7 +363,8 @@ pub async fn run(args: RunArgs) -> Result<()> {
         )
     });
     let store = store(&client);
-    let operator = Operator::new(client, runtime, store, owner, options);
+    let operator =
+        Operator::new(client, runtime, store, owner, options).with_tracer(tracer.clone());
 
     #[cfg(feature = "registry")]
     let registry_server = token.map(|token| {
@@ -371,7 +388,7 @@ pub async fn run(args: RunArgs) -> Result<()> {
     ));
     let metrics = tokio::spawn(crate::serve::serve(
         args.metrics_addr,
-        crate::serve::metrics(operator.metrics()),
+        crate::serve::metrics_with_traces(operator.metrics(), tracer.stats()),
         signalled(stopped.clone()),
     ));
 

@@ -57,6 +57,21 @@ Each is a flag and an environment variable, which is how the chart sets them (S8
 §59a lists `runtime-kubernetes`, `store-cnpg` and `registry`, all three declared. The controller never names the store type: `run` picks `CnpgStore` or `SecretStore` by
 the feature, and the controller is generic over `StoreProvisioner` (AD-020).
 
+## Traces (K5)
+
+Traces are **off** unless an endpoint is set (`OTEL_EXPORTER_OTLP_TRACES_ENDPOINT`, or `OTEL_EXPORTER_OTLP_ENDPOINT` with
+`/v1/traces` appended), and then no task, queue or series exists. The variables are a strict subset of the standard ones,
+read by `aap-trace-otlp` ([README](../../crates/trace-otlp/README.md)): `grpc`, `http/protobuf` and
+`OTEL_EXPORTER_OTLP_HEADERS` are refused, headers come from the file `AAP_OTEL_HEADERS_FILE` names, and
+`OTEL_EXPORTER_OTLP_CERTIFICATE` is the exporter's only trust. A bad variable stops the start and names the variable, never
+its value. `run` reads them at its top, **before** it asks the
+cluster anything, and flushes the spans still queued (at most 3 s) on every way out, an error included, inside the 30 s of
+`terminationGracePeriodSeconds`. `POD_NAME` and `POD_NAMESPACE` (the chart sets them from the downward API when tracing is
+on) name the resource. When on, `/metrics` also has `aap_trace_spans_exported_total` and
+`aap_trace_spans_dropped_total{reason}` after the controllers' series; when off the text is what it was. The spans are
+the controllers' ([README](../../crates/controller/README.md)); §48a has the rest. `tests/trace_env.rs` runs the binary with
+a variable it refuses.
+
 ## Cluster rights
 
 Everything `run` does to the API, for the chart of S8 (a namespaced `Role`, §59a): the

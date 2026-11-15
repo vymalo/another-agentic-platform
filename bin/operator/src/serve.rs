@@ -33,21 +33,34 @@ async fn ready(State(readiness): State<Readiness>) -> impl IntoResponse {
 }
 
 /// `/metrics`: the counters of the controllers in the Prometheus text format.
+#[cfg(test)]
 pub fn metrics(metrics: Arc<Metrics>) -> Router {
+    metrics_with_traces(metrics, None)
+}
+
+/// [`metrics`], and when tracing is on (K5) the two counters of the trace pipeline after the controllers': with tracing off
+/// the text is exactly what it was.
+pub fn metrics_with_traces(metrics: Arc<Metrics>, traces: Option<Arc<aap_trace::Stats>>) -> Router {
     Router::new()
         .route(
             "/metrics",
-            get(|State(m): State<Arc<Metrics>>| async move {
-                (
-                    [(
-                        header::CONTENT_TYPE,
-                        "text/plain; version=0.0.4; charset=utf-8",
-                    )],
-                    m.render(),
-                )
-            }),
+            get(
+                |State((m, t)): State<(Arc<Metrics>, Option<Arc<aap_trace::Stats>>)>| async move {
+                    let mut text = m.render();
+                    if let Some(t) = t {
+                        text.push_str(&t.render());
+                    }
+                    (
+                        [(
+                            header::CONTENT_TYPE,
+                            "text/plain; version=0.0.4; charset=utf-8",
+                        )],
+                        text,
+                    )
+                },
+            ),
         )
-        .with_state(metrics)
+        .with_state((metrics, traces))
 }
 
 /// Serve `router` on `addr` until `shutdown` resolves.
@@ -124,5 +137,21 @@ mod tests {
                 .starts_with("text/plain; version=0.0.4")
         );
         assert!(body.contains("aap_runtime_signals_total 1"), "{body}");
+        assert!(
+            !body.contains("aap_trace_"),
+            "tracing is off: its series are not there: {body}"
+        );
+    }
+
+    #[tokio::test]
+    async fn the_trace_series_follow_the_controllers_when_tracing_is_on() {
+        let m = Arc::new(Metrics::new());
+        m.inc("aap_runtime_signals_total", &[]);
+        let stats = Arc::new(aap_trace::Stats::default());
+        let (_, body, _) = get(metrics_with_traces(m, Some(stats)), "/metrics").await;
+        let first = body.find("aap_runtime_signals_total 1").unwrap();
+        let trace = body.find("aap_trace_spans_exported_total 0").unwrap();
+        assert!(first < trace, "{body}");
+        assert!(body.contains("aap_trace_spans_dropped_total{reason=\"queue_full\"} 0"));
     }
 }
