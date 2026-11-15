@@ -1,9 +1,10 @@
 # aapctl
 
-The platform's command line. **Phase 1 is offline**: it needs no cluster and no network, and reads no Secret.
-Design: [§60b](../../docs/architecture/10-control-plane-and-crds.md#60b-cli), decision
-[P-028](../../docs/architecture/11-decisions.md). Phase 2 (`login`, `get`, `apply`, `delete`, `export` over the
-Platform API) is planned as K9b and **not built**. `aapctl` ships in no image.
+The platform's command line. **Phase 1 is offline** (`validate`, `render`): it needs no cluster and no network, reads no
+environment and no Secret. **Phase 2 (K9b-1) talks to the Platform API** (`get`, `apply`, `delete`, `export`, `whoami`,
+`logout`, `login --token-stdin`) and holds no right the API does not give the person. **The browser sign-in is not built**
+(K9b-2). Design: [§60b](../../docs/architecture/10-control-plane-and-crds.md#60b-cli), decisions
+[P-028](../../docs/architecture/11-decisions.md) and P-030 to P-035. `aapctl` ships in no image.
 
 ```sh
 cargo run -q -p aap-cli -- validate -f examples/coder.yaml
@@ -16,6 +17,13 @@ cargo run -q -p aap-cli -- render -f examples/ --default-agent-image ghcr.io/exa
 |---|---|
 | `aapctl validate -f <file\|dir\|->...` | Judge the documents as the operator does. One line per issue on stderr. Nothing on stdout |
 | `aapctl render -f <file\|dir\|->...` | Print the objects the operator would apply for each `AgentService`, as a YAML stream on stdout. Each service starts with a comment line that holds its digest. Prints nothing when anything is invalid |
+| `aapctl get agents\|models\|tool-servers [name]` | List, or read one: a table, or `-o json` (the API's body), `-o yaml`, `-o etag` (the tag of one object) |
+| `aapctl apply -f <file\|dir\|->...` | Create or replace through the API: models, then tool servers, then agents. See *Phase 2* |
+| `aapctl delete agent\|model\|tool-server <name>` | `If-Match` the tag just read. `--wait` polls until an agent is gone (`--timeout`, default 120 s) |
+| `aapctl export agent <name>` | What `GET /v1/agents/{name}/yaml` serves, unchanged: `apply` reads it back as `unchanged` |
+| `aapctl whoami` | The server, the permissions of the token (`GET /v1/me`) and when it expires |
+| `aapctl login --token-stdin` | Read an access token from standard input, ask the server, and keep it in the config file. Plain `login` (the browser) says it is not built and exits 2 |
+| `aapctl logout` | Forget the kept token, keep the server |
 | `aapctl version`, `aapctl --help` | |
 
 The documents are `AgentService`, `AgentConfig`, `ModelEndpoint` and `ToolProvider` of `agents.vymalo.com/v1alpha1`. A
@@ -88,11 +96,69 @@ test holds `render` equal to them.
 
 | Code | When |
 |---|---|
-| 0 | Everything is valid (and, for `render`, the objects were printed) |
-| 1 | An issue was found: invalid objects, a missing referent (without `--allow-missing-refs`), a document a type cannot read, a field its type does not have |
-| 2 | A usage or read error: a bad flag or none, a path that cannot be read, a file that is not YAML or has a key twice, a document that is not ours where it was named, a document of our group that is not `v1alpha1` or not one of the four kinds, an object with no name, two objects of one kind, namespace and name, nothing to read, a bad settings file or value |
+| 0 | Everything is valid (and, for `render`, the objects were printed); for the network commands, success (`unchanged` is one) |
+| 1 | An issue was found: invalid objects, a missing referent (without `--allow-missing-refs`), a document a type cannot read, a field its type does not have. For the network commands: the API or a local check refused the content (`422`, `409 yaml-only`, `breaks-agents`, `referenced`, an object no form says, metadata the API would drop), a `404`, and any other `4xx` |
+| 2 | A usage or read error: a bad flag or none, a path that cannot be read, a file that is not YAML or has a key twice, a document that is not ours where it was named, a document of our group that is not `v1alpha1` or not one of the four kinds, an object with no name, two objects of one kind, namespace and name, nothing to read, a bad settings file or value. For the network commands also: a service with no config, no server, a config file others can read, an address that is not usable, `--if-match` with several objects |
+| 3 | Stale or conflict: `412`, `409 already-exists`, `managed-by-gitops`, `deleting`, `conflict`, or an object that changed since it was read |
+| 4 | Not allowed: no token, `401`, `403` (the message names the permission) |
+| 5 | Unreachable, `5xx`, an answer that is not the API's, or a `--wait` that ran out |
 
-Everything else is on stderr, with no colour and no progress output.
+Everything else is on stderr, with no colour and no progress output. A network failure is one line,
+`aapctl: <what>: <status> <problem type>: <detail>` (`agent/chat: 412 stale: …`), then one indented line per field of the
+problem's `errors` or `reasons`.
+
+## Phase 2: over the Platform API (K9b-1)
+
+```sh
+printf '%s\n' "$TOKEN" | aapctl login --token-stdin --server https://api.example.com   # once; or set AAPCTL_TOKEN
+aapctl get agents
+aapctl export agent chat > chat.yaml
+aapctl apply -f chat.yaml                 # unchanged
+aapctl delete agent chat --wait
+```
+
+**The token.** From `AAPCTL_TOKEN`, else from the config file: `--config`, else `$XDG_CONFIG_HOME/aapctl/config.yaml`, else
+`$HOME/.config/aapctl/config.yaml` (`server`, `accessToken`, `expiresAt`). **The token is in a file of mode `0600` and in the
+environment, never in an argument** (there is no `--token` flag: `ps` shows arguments), and there is no keyring (none is in
+the lockfile; P-031). The file is written whole or not at all (a temporary file made with `create_new` and mode `0600`,
+flushed, renamed over the old one) in a directory that is `0700`, and **a file that group or others can read is refused**
+(exit 2). No token is in any stdout, stderr, `--verbose` line or error: `--verbose` prints the method, the path, the
+`If-Match` or `If-None-Match` and the status of each request and nothing that holds a credential, and a `reqwest` error is
+never printed (it can carry a URL). `--server` overrides the file's server; `http://` is accepted for a loopback address only,
+unless `--insecure-http`. The proxy of the environment (`HTTPS_PROXY`, `HTTP_PROXY`, `ALL_PROXY`, `NO_PROXY`) is honoured,
+and reqwest 0.12 uses it for a loopback address too unless `NO_PROXY` names it. **Only the network commands read the
+environment**: `validate` and `render` read none.
+
+**What `apply` does.** The API takes **forms**, not custom resources: on a create it fills the deployment's part (the store,
+the security context, the network peers) from its own defaults and on a replace it keeps the object's. So `apply` reads each
+document as the dashboard reads an object (`aap_forms::load_agent`, the model and tool server forms' `load`), and:
+
+1. **Judges the files whole before the first request.** An object no form says (`scaling`, an inline model, a token instead of
+   a GitHub App...) is **exit 1 with one line per field** (`AgentService spec.scaling.workers: …`), as the dashboard refuses
+   it; a label other than the dashboard's, an annotation that is not `agents.vymalo.com/…`, a `metadata` member the API does
+   not write and a namespace that is not `/v1/info`'s are refused too, since the API would drop them without a word. Each
+   `AgentService` is paired with the `AgentConfig` its `configRef` names (a missing half is exit 2).
+2. **Writes in the order models, tool servers, agents**, whatever the order of the files, so a referent exists before what
+   names it, and **stops at the first object the API refuses** (what came before stays written; each line says what it did).
+3. **Reads each object first.** `404`: a create. For an agent it first compares the file's deployment part with
+   `/v1/info`'s defaults for that name: a difference is **exit 1, naming the field** (the server would write its defaults, not
+   the file's); equal, it sends `PUT` with `If-None-Match: *`. A `409 already-exists` is **exit 3 and never turned into a
+   replace**. `200`: a GitOps-owned or deleting object is exit 3, one no form says is exit 1, and a **deployment part that
+   differs is exit 1** (a replace never moves it). A form equal to the file's is `unchanged` and **nothing is written** (so
+   `apply` is idempotent and causes no status churn); otherwise `PUT` with `If-Match` set to the tag just read.
+4. **Retries a `412` only when it was the operator.** An agent's tag moves whenever the operator writes its status, so a `412`
+   is not always a person's edit: `apply` reads again and, if the form and the deployment are what it read the first time,
+   writes again (at most three writes); otherwise exit 3, `changed on the server since it was read`.
+5. **`--if-match <etag>`** (one object) skips the read and the retry: a stale tag is a plain `412` (exit 3). **`--dry-run`**
+   reads the files, prints the forms as JSON and stops: no network, no token (it cannot compare the deployment part without
+   the server, and says so).
+
+A delete reads the object, deletes with the tag it read and retries a `412` the same way (the object's form must be what was
+read). `204` prints `deleted`, `202` `deleting (the operator is releasing what it ran)`; `--wait` then reads every two seconds
+until `404` (`--timeout`, default 120 s; exit 5 when it runs out).
+
+**Not built:** the browser sign-in (`login` without `--token-stdin`, a refresh token; K9b-2, P-030), `export` of models and tool
+servers (P-033: the API has no YAML route for them), a keyring, a device flow.
 
 ## How `render` shares the operator's code
 
@@ -126,6 +192,18 @@ with `store.postgres.cnpg` therefore renders no `Cluster`.
 
 ## Tests
 
+`tests/remote.rs` (29 tests) runs the built binary against **the real router** (`aap_platform_api::router`) over the `Memory`
+ports on `127.0.0.1:0`, with the child's proxy variables removed and `NO_PROXY` set: `get_lists_and_reads`,
+`apply_creates_then_unchanged`, `apply_replaces`, `apply_stale_if_match`, `apply_retry_on_status_only_change` and
+`apply_does_not_retry_when_the_object_changed` (a store that runs a closure between the client's read and its write),
+`apply_yaml_only_refused`, `apply_deployment_differs`, `apply_gitops_refused`, `create_race_already_exists`, `forbidden_named`,
+`secret_needs_pick`, `delete_if_match`, `delete_wait_*`, `export_apply_round_trip`, `dry_run_offline`, `login_*`,
+`no_token_anywhere` (every command's stdout, stderr and `--verbose` output holds no 16-character window of the token; the file is
+`0600`; a `0644` one is exit 2) and the rest. `client_calls_are_documented` is in `crates/platform-client`. Two rules were
+broken on purpose and a test failed each time: `409 already-exists` turned into a replace (`create_race_already_exists`) and
+the comparison of the deployment part removed (`apply_deployment_differs`). `deploy/operator/tests/e2e/api-e2e.sh` step 6b
+drives the deployed API with `aapctl`: **unverified until CI has run it**.
+
 `tests/cli.rs` and `tests/review.rs` run the built binary, with helpers in `tests/common/`. `render_matches_runtime_golden`
 holds `render` byte for byte (after the leading comment) to the provider's goldens for `coder`, `chat` and, with the operator
 chart's run-pod settings, `coder-run-pods` (the `coder-split` golden is a mutated example and is not asked). The rest: every
@@ -136,8 +214,11 @@ the change that changes a flag, an exit code or a limit.**
 
 ## Dependencies
 
-`aap-api`, `aap-domain` and `aap-runtime-kubernetes` (for `render`, and its `owner_handle`) of this workspace, and `clap`,
-`serde`, `serde_json` and `serde_yaml` (`serde_yaml_ng`) that the workspace already uses. The runtime crate brings `kube`
-with it; the binary never makes a client. `docker/operator/Dockerfile` and `docker/api/Dockerfile` copy `bin` whole, so the
-cook layer of **both images now also depends on `bin/cli/Cargo.toml`** (a change to it, or to the workspace's member list,
+`aap-api`, `aap-domain`, `aap-forms`, `aap-ports` and `aap-runtime-kubernetes` (for `render`, and its `owner_handle`) and
+`aap-platform-client` of this workspace, and `base64` (to read a token's `exp` for display), `clap`, `serde`, `serde_json`,
+`serde_yaml` (`serde_yaml_ng`) and `tokio` (`current_thread` and timers: each network command blocks on one runtime, so `run`
+stays synchronous) that the workspace already uses. The client brings `reqwest` 0.12 with rustls and ring: **no aws-lc-rs** is in
+`aapctl`'s tree (`cargo tree -p aap-cli -i aws-lc-rs`). The runtime crate brings `kube` with it; the binary never makes a client.
+`docker/operator/Dockerfile` and `docker/api/Dockerfile` copy `bin` and `crates` whole, so the cook layer of **both images also
+depends on `bin/cli/Cargo.toml` and `crates/platform-client/Cargo.toml`** (a change to them, or to the workspace's member list,
 invalidates the cached dependency layer of both); `aapctl` itself is built into neither.
