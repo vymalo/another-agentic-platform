@@ -39,6 +39,8 @@ pub(crate) async fn bounded<T>(
     tracer: &Tracer,
     pass: impl Future<Output = Result<T, Error>>,
 ) -> Result<T, Error> {
+    // On the heap before it is wrapped: see `aap_trace::Span::scope`.
+    let pass = Box::pin(pass);
     let started = Instant::now();
     tracing::debug!(controller, object = key, "pass started");
     let root = start_span(tracer, controller, key);

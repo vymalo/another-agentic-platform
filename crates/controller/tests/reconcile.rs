@@ -363,6 +363,35 @@ async fn a_new_service_gets_a_runtime_a_store_and_a_ready_status() {
     );
 }
 
+/// A pass runs on a worker of the runtime, whose stack is 2 MiB, and an unoptimised build copies every future a
+/// wrapper holds by value onto the stack at each level. Wrapped in spans that way a pass needed 1.6 MiB here
+/// and more than a worker has with the real providers (*seen 2026-11-15*: the operator of a test build aborted
+/// on its first apply against a real API server). Boxed (`aap_trace::Span::scope`, `aap_trace::step`,
+/// `pass::bounded`) it needs under half a mebibyte, so a whole life of a service in one mebibyte holds the
+/// boxes in place.
+#[test]
+fn a_whole_life_of_a_service_fits_in_a_mebibyte_of_stack() {
+    let life = std::thread::Builder::new()
+        .stack_size(1024 * 1024)
+        .spawn(|| {
+            tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .unwrap()
+                .block_on(async {
+                    let w = World::new("coder");
+                    w.settle().await;
+                    assert_eq!(w.status()["state"], "Ready");
+                    w.fake.delete(SERVICES, NS, "coder");
+                    w.pass().await.unwrap();
+                    assert!(w.fake.get(SERVICES, NS, "coder").is_none());
+                });
+        })
+        .unwrap();
+    life.join()
+        .expect("the passes of a service fit in the stack");
+}
+
 #[tokio::test]
 async fn a_pass_that_finds_nothing_new_writes_nothing() {
     let w = World::new("chat");

@@ -259,10 +259,18 @@ impl Span {
     /// Run `fut` with this span as the current one: [`current_set`], [`current_fail`] and [`step`] inside it
     /// find this span. Nothing inside is linked to it unless it runs in the same task (a `tokio::spawn` starts
     /// a task with no span).
-    pub async fn scope<F: Future>(&self, fut: F) -> F::Output {
-        match &self.0 {
-            Some(c) => CURRENT.scope(c.clone(), fut).await,
-            None => fut.await,
+    ///
+    /// `fut` is boxed before anything else, recording or not: a wrapper that holds a large future by value is
+    /// copied onto the stack at every level of an unoptimised build, and a reconcile pass wrapped that way
+    /// overflowed a worker's 2 MiB.
+    pub fn scope<F: Future>(&self, fut: F) -> impl Future<Output = F::Output> + use<F> {
+        let fut = Box::pin(fut);
+        let cell = self.0.clone();
+        async move {
+            match cell {
+                Some(c) => CURRENT.scope(c, fut).await,
+                None => fut.await,
+            }
         }
     }
 
@@ -323,18 +331,26 @@ pub fn child(name: &'static str) -> Span {
 
 /// Run `fut` as a child span of the current span named by `step`, with `aap.step` set. `class` reads the output: when
 /// it says `Some(class)` the span fails and carries `error.type = class`, and nothing else of the output.
-pub async fn step<T, F>(step: Step, fut: F, class: impl FnOnce(&T) -> Option<&'static str>) -> T
+pub fn step<T, F>(
+    step: Step,
+    fut: F,
+    class: impl FnOnce(&T) -> Option<&'static str>,
+) -> impl Future<Output = T>
 where
     F: Future<Output = T>,
 {
-    let span = current_child(SpanName::fixed(step.as_str()));
-    span.set(Attr::Step(step));
-    let out = span.scope(fut).await;
-    if let Some(class) = class(&out) {
-        span.set(Attr::ErrorType(class));
-        span.fail();
+    // Boxed here for the reason [`Span::scope`] gives: what this returns is a few words, whatever `fut` is.
+    let fut = Box::pin(fut);
+    async move {
+        let span = current_child(SpanName::fixed(step.as_str()));
+        span.set(Attr::Step(step));
+        let out = span.scope(fut).await;
+        if let Some(class) = class(&out) {
+            span.set(Attr::ErrorType(class));
+            span.fail();
+        }
+        out
     }
-    out
 }
 
 fn random_span_id() -> [u8; 8] {
