@@ -31,16 +31,30 @@ const SLOW_PASS: Duration = Duration::from_secs(10);
 ///
 /// At `debug`: the start and the end of every pass, with its duration. At `warn`: a pass that took
 /// [`SLOW_PASS`] or more, and (by the error policy, from the error this returns) one that was cut short.
-pub(crate) async fn bounded<T>(
+///
+/// This is a plain `fn`, not an `async fn`: the pass is boxed before the returned future exists, so that future never holds the
+/// pass by value (see `aap_trace::Span::scope`; `the_pass_is_not_held_by_value` holds it).
+pub(crate) fn bounded<'a, T: 'a>(
+    controller: &'static str,
+    key: &'a str,
+    limit: Duration,
+    metrics: &'a Metrics,
+    tracer: &'a Tracer,
+    pass: impl Future<Output = Result<T, Error>> + 'a,
+) -> impl Future<Output = Result<T, Error>> + 'a {
+    // On the heap before anything wraps it.
+    let pass = Box::pin(pass);
+    bounded_boxed(controller, key, limit, metrics, tracer, pass)
+}
+
+async fn bounded_boxed<T>(
     controller: &'static str,
     key: &str,
     limit: Duration,
     metrics: &Metrics,
     tracer: &Tracer,
-    pass: impl Future<Output = Result<T, Error>>,
+    pass: std::pin::Pin<Box<impl Future<Output = Result<T, Error>>>>,
 ) -> Result<T, Error> {
-    // On the heap before it is wrapped: see `aap_trace::Span::scope`.
-    let pass = Box::pin(pass);
     let started = Instant::now();
     tracing::debug!(controller, object = key, "pass started");
     let root = start_span(tracer, controller, key);
@@ -136,4 +150,35 @@ pub(crate) fn kube_class_of<T>(r: &Result<T, kube::Error>) -> Option<&'static st
     r.as_ref()
         .err()
         .map(|e| class_label(crate::error::kube_class(e)))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A pass that holds 64 KiB across an await.
+    async fn big() -> Result<(), Error> {
+        let a = [0u8; 65_536];
+        tokio::task::yield_now().await;
+        std::hint::black_box(&a);
+        Ok(())
+    }
+
+    /// The future `bounded` returns does not hold the pass by value: without the box it is at least 64 KiB, and an unoptimised
+    /// build copies it at every level of a worker's stack.
+    #[test]
+    fn the_pass_is_not_held_by_value() {
+        assert!(size_of_val(&big()) >= 65_536, "the control is large");
+        let (metrics, tracer) = (Metrics::new(), Tracer::off());
+        let fut = bounded(
+            "agentservice",
+            "ns/n",
+            Duration::from_secs(1),
+            &metrics,
+            &tracer,
+            big(),
+        );
+        let size = size_of_val(&fut);
+        assert!(size < 1024, "{size} bytes");
+    }
 }
