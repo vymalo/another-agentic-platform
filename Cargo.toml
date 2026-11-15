@@ -13,6 +13,7 @@ members = [
     "crates/registry",
     "crates/controller",
     "crates/platform-api",
+    "crates/platform-client",
     "bin/operator",
     "bin/api",
     "bin/cli",
@@ -40,6 +41,7 @@ aap-auth-oidc = { path = "crates/auth-oidc" }
 aap-registry = { path = "crates/registry" }
 aap-controller = { path = "crates/controller" }
 aap-platform-api = { path = "crates/platform-api" }
+aap-platform-client = { path = "crates/platform-client" }
 anyhow = "1"
 aws-lc-rs = "1.15"
 axum = { version = "0.8", default-features = false, features = ["http1", "tokio"] }
@@ -52,6 +54,8 @@ jsonwebtoken = { version = "11.1", default-features = false, features = ["aws_lc
 k8s-openapi = { version = "0.28.0", default-features = false, features = ["v1_32", "schemars"] }
 kube = { version = "4.0.0", default-features = false, features = ["derive"] }
 proptest = "1"
+# Only `aapctl`'s safe read of its 0600 file: `geteuid` and `O_NOFOLLOW` without `unsafe` (already in the lock file through tempfile).
+rustix = { version = "1", default-features = false, features = ["std", "fs", "process"] }
 reqwest = { version = "0.12", default-features = false, features = ["rustls-tls-native-roots"] }
 schemars = "1"
 serde = { version = "1", features = ["derive"] }

@@ -1,0 +1,31 @@
+[package]
+name = "aap-platform-client"
+description = "A client of the Platform API (§60b, K9b): the calls `aapctl` makes, with the bearer token kept out of every message, `If-Match` and `If-None-Match` on every write, problem details read into a type, and a table of calls that a test holds to the OpenAPI document"
+readme = "README.md"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+publish.workspace = true
+
+[dependencies]
+# reqwest 0.12 with rustls and ring, never 0.13: see `crates/auth-oidc/README.md` "Dependencies". The workspace's feature list has no
+# `json`, `gzip` or `blocking`: bodies are read and written here.
+reqwest.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+url.workspace = true
+
+[dev-dependencies]
+aap-api.workspace = true
+aap-forms.workspace = true
+aap-platform-api.workspace = true
+aap-ports = { workspace = true, features = ["testkit"] }
+axum.workspace = true
+tokio = { workspace = true, features = ["macros", "rt", "rt-multi-thread", "net", "time"] }
+
+[lints]
+workspace = true
