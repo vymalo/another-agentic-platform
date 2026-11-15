@@ -26,10 +26,12 @@
 #        carol  role `agent.use:e2e-coder` alone        403 no_access (a value of the audience is not a grant), and /api/me says she holds nothing
 #   6. the agent is deleted through the API and the operator's registry stops listing it: within the registry's cache the orchestrator lists
 #      nothing to alice or to the administrator;
-#   6b. TRACES (K5, unverified until CI has run it): a pinned OpenTelemetry Collector (otel-collector.yaml, the only place of its pin) receives the
+#   6b. TRACES (K5; passed in CI: run 43732918179, job `chain-e2e` 132871058839, at cd225d2, *verified 2026-11-15* in the job's log): a pinned OpenTelemetry Collector (otel-collector.yaml, the only place of its pin) receives the
 #      spans of the operator (`otel.*`) and of the Platform API (`api.otel.*`), both on in the values of step 2, each with egress to the collector's
 #      pods and nowhere else; the collector's log, written by its `debug` exporter, holds a span of each service (`service.name` of both, a
-#      `GET /v1/agents` and a `reconcile agentservice`). The exact text of that log is *unverified*: the script greps loosely and waits.
+#      `GET /v1/agents` and a `reconcile agentservice`), and a `DELETE /v1/agents/{name}` of step 6, named by its template. The layout of the `debug`
+#      exporter's log, as far as these greps read it, is *verified* by that run. The `DELETE` span and the subjects check of step 7 were added after that
+#      run; the pull request's own CI is their first run.
 #   7. no secret value (the two sentinels, the registry's token, the A2A bearer) and no token minted by the run is in an answer, in the
 #      Platform API's log, in the operator's, in the orchestrator's or in the collector's (which holds every span, so every attribute).
 #
@@ -143,6 +145,7 @@ ns_made=0       # the namespace (or a leftover of ours that is used again): the 
 objects_made=0  # step 3 began: the model and the agent may exist (and the operator's finalizer is on the agent)
 installed=0     # `helm upgrade --install` was started
 : > "$work/tokens"
+: > "$work/subjects"
 : > "$work/seen"
 printf '%s\n%s\n%s\n%s\n' "$model_sentinel" "$app_sentinel" "$registry_token" "$a2a_token" > "$work/secrets"
 
@@ -301,6 +304,8 @@ start_orch_forward() {
 tok() {
   t=$(curl -sSf --noproxy '*' -m 10 -G --data-urlencode "sub=$1" --data-urlencode "roles=$2" "$control/token") \
     || die "the test issuer's control port gave no token"
+  # The people this run mints tokens for (their `sub`): the collector's log must hold none of them (step 7). A file, because this runs in `$(...)`.
+  printf '%s\n' "$1" >> "$work/subjects"
   # What must never be found in an answer or a log: the token, and its payload and its signature on their own (a cut or a half-logged token).
   printf '%s\n' "$t" >> "$work/tokens"
   printf '%s\n' "$t" | awk -F. 'NF == 3 { if (length($2) >= 20) print $2; if (length($3) >= 20) print $3 }' >> "$work/tokens"
@@ -832,10 +837,10 @@ oas e2e-alice "user,$agent_role" GET "/agui/agents/$agent/capabilities"
 expect 404 "alice reads the capabilities of the deleted coder"
 ok "the orchestrator lists nothing to the administrator or to alice $(( $(date +%s) - start ))s after the coder was gone (the registry is ok), and its capabilities are 404"
 
-step "6b. traces: the collector's log holds a span of the operator and of the Platform API (K5; *unverified* until CI has run this)"
+step "6b. traces: the collector's log holds a span of the operator and of the Platform API (K5; passed in CI, run 43732918179, job 132871058839, *verified 2026-11-15*)"
 # `debug` at `detailed` writes, for each batch, `ResourceSpans #n`, the resource's attributes (`-> service.name: Str(aap-api)`), and each span (`Name : ...`,
-# `-> http.route: Str(/v1/agents)`). The exact layout is the collector's and *unverified* here, so the greps are loose and the wait is long: both
-# services flush every 5 s, and the spans of the steps above are already queued.
+# `-> http.route: Str(/v1/agents)`). That layout, as far as these greps read it, passed in CI (run 43732918179, job 132871058839, at cd225d2, *verified 2026-11-15*);
+# the greps stay loose and the wait long: both services flush every 5 s, and the spans of the steps above are already queued.
 collector_log() {
   kubectl -n "$ns" logs "deployment/$collector" --tail=-1 > "$work/otel.raw" 2> "$work/otel.err" || { printf 'kubectl logs failed: %s\n' "$(head -c 300 "$work/otel.err")"; return 1; }
   sed "s/$(printf '\033')\[[0-9;]*m//g" "$work/otel.raw" > "$work/otel.log"
@@ -845,13 +850,17 @@ collector_log() {
 collector_has_spans() {
   collector_log || return 1
   for pattern in 'service\.name: Str\(aap-api\)' 'service\.name: Str\(aap-operator\)' 'Name +: GET /v1/agents' 'Name +: reconcile agentservice' \
+    'Name +: DELETE /v1/agents/\{name\}' 'http\.route: Str\(/v1/agents/\{name\}\)' \
     'k8s\.namespace\.name: Str\('"$ns"'\)' 'http\.route: Str\(/v1/agents\)' 'aap\.controller: Str\(agentservice\)'; do
     grep -Eq -- "$pattern" "$work/otel.log" || { printf 'the collector has not received: %s\n' "$pattern"; return 1; }
   done
 }
 until_ok 90 "the collector to have received a span of each service" collector_has_spans
 # The spans the sampler kept are all there is to read: none of them may name a person, a token, a Secret or a path (the sentinels are looked for in step 7).
-grep -Eq 'Name +: GET /v1/agents/' "$work/otel.log" && { grep -Eq 'http\.route: Str\(/v1/agents/\{name\}\)' "$work/otel.log" || die "the span of a request for one agent is not named by its route template"; }
+# Step 6 deleted the coder through the API, so a request for ONE agent happened and its span must be there, named by the template and carrying it.
+# (The check used to be skipped when no such span existed; the wait above now requires one.)
+grep -Eq 'Name +: DELETE /v1/agents/\{name\}' "$work/otel.log" || die "no span of the delete of one agent is named by its route template (DELETE /v1/agents/{name})"
+grep -Eq 'http\.route: Str\(/v1/agents/\{name\}\)' "$work/otel.log" || die "the span of a request for one agent does not carry its route template"
 if grep -Eq 'Str\(/v1/agents/'"$agent"'\)' "$work/otel.log"; then die "a span holds the path of a request (the agent's name in a route), not a template"; fi
 # A span's NAME is on a `Name : ...` line of its own, not inside `Str(...)`, so the check above would pass a regression that put the path of a
 # request in a span name. Both are looked for, on the name lines alone and with the spacing loose: the agent's name anywhere in a name, and a
@@ -880,6 +889,13 @@ read_log "$orch" orch.log '"message":"database migrations applied"' "the line th
 read_log "$collector" otel.log 'ResourceSpans #0' "the header the collector's debug exporter writes for a batch of spans"
 # The orchestrator's log is JSON, one object per line (its default and the image's).
 grep -q '^{' "$work/orch.log" || die "the orchestrator's log is not JSON lines: $(redact < "$work/orch.log" | head -c 400)"
+# The people the run minted tokens for are in no span either (the Platform API's own log does name the subject, by design: it is not scanned for them).
+# No subject is equal by design to a string a span must hold: they are e2e-alice, e2e-bob, e2e-admin, e2e-carol, e2e-nowhere, nobody, modeler,
+# writer and reader, and the spans hold route templates, controller and object kinds, steps and a namespace.
+[ -s "$work/subjects" ] || die "no subject was recorded: the check of the collector's log would pass on nothing"
+if grep -qF -f "$work/subjects" "$work/otel.log"; then
+  die "a subject (the name of a person this run minted a token for) is in the collector's log: a span holds a person"
+fi
 if grep -qF -f "$work/secrets" "$work/api.log" "$work/operator.log" "$work/orch.log" "$work/otel.log" "$work/seen"; then
   die "a secret value (the model's key, the GitHub App's key, the registry's token or the A2A bearer) is in an answer, a header or a log"
 fi

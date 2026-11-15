@@ -923,6 +923,19 @@ chain_collector() {
     && [ "$(grep -c '"$work/otel.log" "$work/seen"' "$script")" -eq 2 ] && grep -q '^read_log "\$collector" otel.log ' "$script"
 }
 check "chain: the collector is pinned by tag and digest in otel-collector.yaml, on one line and in no other file of deploy/ or .github/; it receives OTLP/HTTP on 4318 and writes what it gets to its log, which step 7 scans for the secrets and the tokens" chain_collector
+# Step 6b requires the span of the delete (a request for one agent: named by the template, not skipped when absent) and step 7 requires that the
+# collector's log holds no subject of the people the run minted tokens for. The script's own text, as a check can read it without a cluster.
+chain_trace_checks() {
+  script="$here/e2e/chain-e2e.sh"
+  # shellcheck disable=SC2016 # the patterns are the script's own text, `$work` and all
+  grep -qF "'Name +: DELETE /v1/agents/\\{name\\}' 'http\\.route: Str\\(/v1/agents/\\{name\\}\\)'" "$script" \
+    && grep -qF 'die "no span of the delete of one agent is named by its route template' "$script" \
+    && ! grep -qF "grep -Eq 'Name +: GET /v1/agents/' \"\$work/otel.log\" &&" "$script" \
+    && grep -qF "printf '%s\\n' \"\$1\" >> \"\$work/subjects\"" "$script" \
+    && grep -qF 'if grep -qF -f "$work/subjects" "$work/otel.log"; then' "$script" \
+    && grep -qF '[ -s "$work/subjects" ] || die' "$script"
+}
+check "chain: step 6b requires a span named DELETE /v1/agents/{name} (it is no longer skipped when there is none) and step 7 fails if the collector's log holds the subject of a person the run minted a token for" chain_trace_checks
 # The aapctl step of the API's end-to-end (K9b-1, 6b): before the step that reads every answer and log for the tokens and the secret, the token
 # only in the environment of the command (never an argument: `ps` shows it), every byte it says read in that step, the binary built when
 # AAPCTL_BIN is not set, and the workflow's job builds it. The step itself passed in CI (run 43706119020 at 970afa0, verified 2026-11-15).
@@ -1466,6 +1479,20 @@ otel_no_volumes_without_files() {
   dlacks Deployment aap-operator 'otel-headers|otel-ca|AAP_OTEL_HEADERS_FILE|OTEL_EXPORTER_OTLP_CERTIFICATE|volumes:|OTEL_RESOURCE_ATTRIBUTES|OTEL_TRACES_SAMPLER_ARG'
 }
 check "otel: with no headers Secret and no CA ConfigMap there is neither volume nor variable for them" otel_no_volumes_without_files
+# A CA bundle and no headers Secret (a collector on a private CA that wants no token): the variable and the volume come together, or
+# the pod names a file that is not there. The operator has no other volume here (no registry token, no run pods).
+otel_certificate_alone() {
+  render --set otel.enabled=true --set otel.endpoint=https://c:4318/v1/traces --set-json 'otel.to=[{"podSelector":{"matchLabels":{"a":"b"}}}]' \
+    --set otel.certificate.configMap=only-ca --set otel.certificate.key=ca.pem || return 1
+  dhas Deployment aap-operator 'name: OTEL_EXPORTER_OTLP_CERTIFICATE' 'value: /etc/aap/otel/ca/ca.pem' '^      volumes:' 'name: otel-ca' 'name: only-ca' 'mountPath: /etc/aap/otel/ca' || return 1
+  dlacks Deployment aap-operator 'otel-headers|AAP_OTEL_HEADERS_FILE' || return 1
+  render -f "$here/api.values.yaml" --set api.otel.enabled=true --set api.otel.endpoint=https://c:4318/v1/traces \
+    --set-json 'api.otel.to=[{"podSelector":{"matchLabels":{"a":"b"}}}]' \
+    --set api.otel.certificate.configMap=only-api-ca --set api.otel.certificate.key=ca.pem || return 1
+  dhas Deployment aap-operator-api 'name: OTEL_EXPORTER_OTLP_CERTIFICATE' 'name: otel-ca' 'name: only-api-ca' 'mountPath: /etc/aap/otel/ca' || return 1
+  dlacks Deployment aap-operator-api 'otel-headers|AAP_OTEL_HEADERS_FILE'
+}
+check "otel: a CA bundle with no headers Secret still gets its volume and mount (operator and API), and no headers volume" otel_certificate_alone
 
 # Egress: the operator's policy has one rule (the API server); with otel on it has DNS and the collector, each with a `to`.
 otel_operator_policy() {

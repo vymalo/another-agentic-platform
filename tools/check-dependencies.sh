@@ -17,7 +17,15 @@
 # "package ID specification `<name>` did not match any packages" (verified 2026-11-15 on cargo 1.94 here: that is what it prints and
 # returns for a package that is not in the graph). Any other failure (a --locked refusal, a bad flag, a package the command cannot
 # find) is a failure of the gate, never a pass. The same message answers a misspelt name, so each "absent" gate also names a package
-# it must find (the positive controls below) to show the command works on this graph.
+# it must find (the positive controls below) to show the command works on this graph, and the function `absent` itself is run on
+# a package that IS in the graph (`ring`: it must answer "present") and on a name that is surely not (it must answer "absent"), so
+# that in this very run it is shown to detect both.
+#
+# What remains: the script cannot know that a name it asks about is spelt as crates.io spells it. A misspelt name in an "absent"
+# gate says "absent" for the right reason of the command and the wrong one of the gate. `aws-lc-rs` is spelt as Cargo.lock spells it
+# (gate 2 fails when the graph has none, so a misspelling there is caught); `native-tls` and `openssl-sys` are the names as the
+# author knows them and were NOT read from crates.io on 2026-11-15: *unverified*. A reviewer who moves or adds a name checks it
+# against crates.io (or `cargo search`, `cargo info`) by hand.
 set -eu
 
 flags=${CARGO_FLAGS:---locked}
@@ -59,6 +67,17 @@ absent() {
   return 2
 }
 
+# The function `absent` is shown, in this run, to see a package that is there (`ring`: rustls's provider, in every build of this
+# workspace) and one that is not.
+control_absent() {
+  rc=0
+  absent ring || rc=$?
+  if [ "$rc" -eq 1 ]; then say "ok   control: absent() says ring is present"; else bad "control: absent() answered $rc for ring, which is in the graph"; fi
+  rc=0
+  absent aap-surely-not-a-package-zz || rc=$?
+  if [ "$rc" -eq 0 ]; then say "ok   control: absent() says a name that is not there is absent"; else bad "control: absent() answered $rc for a made-up name ($(head -c 300 "$err"))"; fi
+}
+
 # The names this script asks about must be real: a package of the graph is found by the same command.
 control() {
   if run -i "$1" && [ -n "$out" ]; then say "ok   control: $1 is found in the graph"; else bad "control: $1 is not found ($(head -c 300 "$err"))"; fi
@@ -98,6 +117,7 @@ fi
 
 # 3
 control reqwest
+control_absent
 for p in native-tls openssl-sys; do
   if absent "$p"; then
     say "ok   no $p"
