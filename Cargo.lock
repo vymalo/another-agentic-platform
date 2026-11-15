@@ -65,11 +65,18 @@ version = "0.1.0"
 dependencies = [
  "aap-api",
  "aap-domain",
+ "aap-forms",
+ "aap-platform-api",
+ "aap-platform-client",
+ "aap-ports",
  "aap-runtime-kubernetes",
+ "axum",
+ "base64 0.22.1",
  "clap",
  "serde",
  "serde_json",
  "serde_yaml_ng",
+ "tokio",
 ]
 
 [[package]]

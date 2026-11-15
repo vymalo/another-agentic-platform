@@ -1,4 +1,5 @@
-//! `aapctl`, phase 1: `validate` and `render`, offline (§60b).
+//! `aapctl` (§60b). Phase 1: `validate` and `render`, offline. Phase 2 (K9b-1): `get`, `apply`, `delete`, `export`, `whoami`,
+//! `login --token-stdin` and `logout`, over the Platform API ([`remote`]).
 //!
 //! Both read `AgentService`, `AgentConfig`, `ModelEndpoint` and `ToolProvider` documents and judge them as the operator does,
 //! with `aap_domain::resolve` and the deployment's settings given as flags (the operator's own names and defaults). `render`
@@ -7,10 +8,18 @@
 //! Secret by reference, and so does what is printed.
 //!
 //! [`run`] is the whole program with its streams given, so tests can drive it; `main` only maps its answer to an exit code
-//! (0 everything is fine, 1 an issue was found, 2 a usage or read error).
+//! (0 everything is fine, 1 an issue was found, 2 a usage or read error; the network commands add 3 stale or conflict, 4 not
+//! allowed, 5 unreachable: [`failure`]).
+//!
+//! **`validate` and `render` read no environment and open no connection.** Only the network commands read `AAPCTL_TOKEN`,
+//! `XDG_CONFIG_HOME` and `HOME` ([`config::Env`]), and only for the server and the token.
 
 mod check;
+mod config;
+mod failure;
+mod forms;
 mod load;
+mod remote;
 
 use std::ffi::OsString;
 use std::io::{Read, Write};
@@ -52,6 +61,23 @@ enum Command {
     Render(RenderArgs),
     /// Print the version.
     Version,
+    /// List or read agents, models or tool servers through the Platform API. `-o json|yaml` prints the API's body, `-o etag` the
+    /// tag of one object. Exit 0, 4 not allowed, 5 unreachable.
+    Get(remote::GetArgs),
+    /// Create or replace what the files hold through the Platform API: models, then tool servers, then agents. Reads each object
+    /// first, writes nothing when it is unchanged, refuses an object no form says or a deployment part that differs, and retries
+    /// only when the operator's status write moved the tag. Exit 0, 1 refused, 3 stale or conflict, 4 not allowed.
+    Apply(remote::ApplyArgs),
+    /// Delete an agent, a model or a tool server through the Platform API (`--wait` until an agent is gone).
+    Delete(remote::DeleteArgs),
+    /// Print an agent's two objects as YAML, as the API serves them: what `apply` reads back unchanged.
+    Export(remote::ExportArgs),
+    /// Say which server and token are in use, what the token may do, and when it expires.
+    Whoami(remote::Conn),
+    /// Keep an access token (`--token-stdin`) for the server. The browser sign-in is not built yet.
+    Login(remote::LoginArgs),
+    /// Forget the kept token, and keep the server.
+    Logout(remote::Conn),
 }
 
 /// The settings the operator takes from its flags and environment (`bin/operator`'s `run` arguments), with its defaults. The
@@ -76,7 +102,7 @@ struct Deployment {
 
 /// Where the documents come from.
 #[derive(Debug, Args)]
-struct Input {
+pub(crate) struct Input {
     /// A file, a directory (its `*.yaml` and `*.yml` files) or `-` for standard input. Repeatable, and takes several values.
     #[arg(
         short = 'f',
@@ -86,7 +112,7 @@ struct Input {
         action = clap::ArgAction::Append,
         value_name = "FILE|DIR|-"
     )]
-    files: Vec<String>,
+    pub(crate) files: Vec<String>,
 }
 
 #[derive(Debug, Args)]
@@ -214,6 +240,13 @@ where
             let _ = writeln!(out, "aapctl {}", env!("CARGO_PKG_VERSION"));
             0
         }
+        Command::Get(a) => remote::get(&a, out, err),
+        Command::Apply(a) => remote::apply(&a, stdin, out, err),
+        Command::Delete(a) => remote::delete(&a, out, err),
+        Command::Export(a) => remote::export(&a, out, err),
+        Command::Whoami(c) => remote::whoami(&c, out, err),
+        Command::Login(a) => remote::login(&a, stdin, out, err),
+        Command::Logout(c) => remote::logout(&c, out, err),
         Command::Validate(a) => {
             let (loaded, settings) =
                 match read(&a.input, &a.deployment, PLACEHOLDER_OWNER_UID, stdin) {

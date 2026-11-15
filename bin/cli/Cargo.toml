@@ -21,11 +21,25 @@ path = "src/main.rs"
 [dependencies]
 aap-api.workspace = true
 aap-domain.workspace = true
+aap-forms.workspace = true
+aap-platform-client.workspace = true
+aap-ports.workspace = true
 aap-runtime-kubernetes.workspace = true
+base64.workspace = true
 clap.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 serde_yaml.workspace = true
+# Only `current_thread` and the timers: the network commands block on one runtime and phase 1's `run` stays synchronous.
+tokio = { workspace = true, features = ["rt", "time"] }
+
+[dev-dependencies]
+# The tests run the built binary against the real router of the Platform API over the `Memory` ports on a loopback socket.
+aap-forms.workspace = true
+aap-platform-api.workspace = true
+aap-ports = { workspace = true, features = ["testkit"] }
+axum.workspace = true
+tokio = { workspace = true, features = ["rt", "rt-multi-thread", "net", "time"] }
 
 [lints]
 workspace = true
