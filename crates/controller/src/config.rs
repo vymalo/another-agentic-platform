@@ -16,7 +16,8 @@ use serde_json::json;
 use crate::context::{ConfigContext, FIELD_MANAGER, failed};
 use crate::error::Error;
 use crate::metrics::name;
-use crate::pass::bounded;
+use crate::pass::{bounded, kube_class_of};
+use aap_trace::{Step, step};
 
 const CONTROLLER: &str = "agentconfig";
 
@@ -78,6 +79,7 @@ pub async fn reconcile_config(
         &key,
         ctx.pass_timeout,
         &ctx.metrics,
+        &ctx.tracer,
         write_status(&config, &ns, &name_of, &ctx),
     )
     .await
@@ -101,10 +103,14 @@ async fn write_status(
             "metadata": { "name": name_of },
             "status": status,
         });
-        api.patch_status(
-            name_of,
-            &PatchParams::apply(FIELD_MANAGER).force(),
-            &Patch::Apply(&body),
+        step(
+            Step::StatusPatch,
+            api.patch_status(
+                name_of,
+                &PatchParams::apply(FIELD_MANAGER).force(),
+                &Patch::Apply(&body),
+            ),
+            kube_class_of,
         )
         .await?;
         ctx.metrics

@@ -42,6 +42,7 @@ use crate::error::Error;
 use crate::metrics::{Metrics, name};
 use crate::pass::bounded;
 use crate::watches::{users_of_endpoint, users_of_provider};
+use aap_trace::{Step, step};
 
 /// How often an object is looked at with nothing having signalled.
 pub const RESYNC: Duration = Duration::from_secs(600);
@@ -58,6 +59,7 @@ pub struct SharedContext {
     pub(crate) pass_timeout: Duration,
     pub(crate) configs: Store<AgentConfig>,
     pub(crate) services: Store<AgentService>,
+    pub(crate) tracer: aap_trace::Tracer,
 }
 
 impl SharedContext {
@@ -76,7 +78,15 @@ impl SharedContext {
             pass_timeout: crate::options::PASS_TIMEOUT,
             configs,
             services,
+            tracer: aap_trace::Tracer::off(),
         }
+    }
+
+    /// Make a span of every pass with `tracer` (K5). Off by default.
+    #[must_use]
+    pub fn with_tracer(mut self, tracer: aap_trace::Tracer) -> Self {
+        self.tracer = tracer;
+        self
     }
 
     /// Cut a pass short after `limit`.
@@ -329,10 +339,14 @@ async fn pass<K: Shared>(object: &K, ctx: &SharedContext) -> Result<Action, Erro
             "metadata": { "name": name_of },
             "status": status,
         });
-        api.patch_status(
-            &name_of,
-            &PatchParams::apply(FIELD_MANAGER).force(),
-            &Patch::Apply(&body),
+        step(
+            Step::StatusPatch,
+            api.patch_status(
+                &name_of,
+                &PatchParams::apply(FIELD_MANAGER).force(),
+                &Patch::Apply(&body),
+            ),
+            crate::pass::kube_class_of,
         )
         .await
         .map_err(|e| match e {
@@ -364,6 +378,7 @@ async fn reconcile<K: Shared>(object: Arc<K>, ctx: Arc<SharedContext>) -> Result
         &key,
         ctx.pass_timeout,
         &ctx.metrics,
+        &ctx.tracer,
         pass(&*object, &ctx),
     )
     .await

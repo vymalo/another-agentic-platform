@@ -6,6 +6,7 @@ use std::time::Duration;
 
 use aap_api::AgentService;
 use aap_ports::{Classify, ErrorClass, OwnerHandle};
+use aap_trace::Tracer;
 use k8s_openapi::apimachinery::pkg::apis::meta::v1::Time;
 use kube::Client;
 use kube::runtime::controller::Action;
@@ -95,6 +96,7 @@ pub struct Context<R, S> {
     pub(crate) recorder: Recorder,
     pub(crate) clock: Clock,
     pub(crate) retries: Retries,
+    pub(crate) tracer: Tracer,
 }
 
 impl<R, S> Context<R, S> {
@@ -117,7 +119,15 @@ impl<R, S> Context<R, S> {
             recorder,
             clock: system_clock(),
             retries: Retries::default(),
+            tracer: Tracer::off(),
         }
+    }
+
+    /// Make a span of every pass with `tracer` (K5). Off by default.
+    #[must_use]
+    pub fn with_tracer(mut self, tracer: Tracer) -> Self {
+        self.tracer = tracer;
+        self
     }
 
     /// Count into `metrics` instead of a private set.
@@ -147,6 +157,7 @@ pub struct ConfigContext {
     pub(crate) clock: Clock,
     pub(crate) retries: Retries,
     pub(crate) pass_timeout: Duration,
+    pub(crate) tracer: Tracer,
 }
 
 impl ConfigContext {
@@ -158,7 +169,15 @@ impl ConfigContext {
             clock: system_clock(),
             retries: Retries::default(),
             pass_timeout: crate::options::PASS_TIMEOUT,
+            tracer: Tracer::off(),
         }
+    }
+
+    /// Make a span of every pass with `tracer` (K5). Off by default.
+    #[must_use]
+    pub fn with_tracer(mut self, tracer: Tracer) -> Self {
+        self.tracer = tracer;
+        self
     }
 
     /// Cut a pass short after `limit` ([`Options::pass_timeout`](crate::Options::pass_timeout) for the

@@ -90,6 +90,8 @@ dependencies = [
  "aap-api",
  "aap-domain",
  "aap-ports",
+ "aap-trace",
+ "aap-trace-otlp",
  "bytes",
  "futures",
  "http",

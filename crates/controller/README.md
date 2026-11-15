@@ -235,6 +235,18 @@ registry sorts and de-duplicates what it publishes, so this mapping interprets n
 `aap_reconcile_errors_total{controller,class}`, `aap_reconcile_timeouts_total{controller}`, `aap_status_patches_total{controller}`,
 `aap_service_state_changes_total{state}`, `aap_runtime_signals_total`, `aap_services_deleted_total`.
 
+## Traces (K5)
+
+`Context`, `ConfigContext`, `SharedContext` and `Operator` take an `aap_trace::Tracer` (`with_tracer`; off by default, and
+then a pass makes no span). `pass::bounded`, which every reconciler runs through, makes one **root span** per pass
+(`reconcile agentservice`, `reconcile agentconfig`, `reconcile modelendpoint`, `reconcile toolprovider`) and runs the pass in
+its task scope, so the steps are children without any argument: `config.read`, `store.ensure`, `runtime.status`,
+`runtime.ensure`, `runtime.endpoints`, `status.patch`, `runtime.delete`, `store.release` (`aap_trace::step`). The root carries
+the controller, the kind, the namespace and name of the object (Kubernetes names, as the log has them), `agent.service.name`
+for a service, `aap.reconcile.result` (`ok`, `error`, `timeout`), `aap.service.state` and, on failure, `error.type`: the
+class label (`transient`, `conflict`, ...) or `timeout`, never the error's text. No span is made in a spawned task, and no
+`traceparent` goes to the API server. The attribute list is `aap-trace`'s; §48a has the rest.
+
 ## Deviations from §59a
 
 | §59a, or the S5 brief | This crate | Why |
