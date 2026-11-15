@@ -1209,11 +1209,11 @@ The owner asked what the platform lacks, next to a Kubernetes agent control plan
 
 ### The increments
 
-**Progress on 2026-11-15: 6 of 15 increments are built** (K0, K1, K2, K4, K8 and K9 phase 1; K1b is void and not counted), **40 %** by count, not by effort. What is left, by what it waits for:
+**Progress on 2026-11-15: 6 of 15 increments are built, and K9b in part** (K0, K1, K2, K4, K8 and K9 phase 1; K9b is built without its browser sign-in and is not counted until K9b-2 is; K1b is void and not counted), **40 %** by count, not by effort. What is left, by what it waits for:
 
 | Waits for | Increments |
 |---|---|
-| Nothing: can start | K5 (traces), K9b (`aapctl` over the Platform API) |
+| Nothing: can start | K5 (traces), K9b-2 (the browser sign-in of `aapctl`; it needs P-030, the Keycloak client, to be tried against a real issuer) |
 | A proposal the owner has not decided | K3 (P-024), K6 and K7 (P-026), K10 (P-027), K11 (P-025) |
 | Another repository | K12 (an adam-rs decision on approvals, and the system's) |
 | A cluster | K13, on hold |
@@ -1231,7 +1231,7 @@ The owner asked what the platform lacks, next to a Kubernetes agent control plan
 | K7 | Leader election and two replicas with a `PodDisruptionBudget` (amends §59a *one replica, `Recreate`*) | K6 | a `LeaderElection` trait with its conformance macro (AD-020), on the `Memory` and fake-API-server implementations; kind: kill the leader | planned |
 | K8 | What the admin UI still needs of the Platform API: an OpenAPI document held equal to the table of routes, and the Kubernetes Events of an agent's objects (P-029; §60a *Events and the OpenAPI document*) | K2 | a test that lists every route in the document; the new route in the permission matrix | **built** (proven on the `Memory` ports and the fake API server; the real-cluster half is *unverified* until CI has run `api-e2e.sh`) |
 | K9 | `aapctl validate` and `render`, offline (§60b, P-028) | none | `render_matches_runtime_golden` | **built** (phase 1) |
-| K9b | `aapctl login`, `get`, `apply`, `delete` and `export` over the Platform API with ETags | K8 | tests on the `Memory` router; a step of `api-e2e.sh` | planned |
+| K9b | `aapctl get`, `apply`, `delete`, `export`, `whoami` and `login --token-stdin` over the Platform API with ETags (K9b-1); `login` with the browser (PKCE) and a refresh token (K9b-2; §60b, P-030 to P-035) | K8 | tests on the `Memory` router; a step of `api-e2e.sh` | **built without the browser sign-in** (K9b-1: proven by 29 tests of the binary on the real router over the `Memory` ports; the step of `api-e2e.sh` is *unverified* until CI has run it); **K9b-2 planned** |
 | K10 | A catalogue of example `ToolProvider`s (read-only Kubernetes, Prometheus, GitHub), pinned by digest (P-027) | K2; the owner's choice | a kind end-to-end: a folder agent on a scripted model calls a list-pods tool | planned |
 | K11 | A bring-your-own A2A image: `harness.type: a2a` with image, port, card path and secret variables by reference (P-025; would amend AD-022 and AD-024) | K1 | kind: the stub image as such an agent, `Ready` and listed | planned |
 | K12 | `requireApproval` per tool | an adam-rs decision and the system's | parity with adam's MCP file | planned; waits (the tiers of K1 cover the coder meanwhile) |
@@ -1259,7 +1259,7 @@ Parallel work: K4, K9, K0 and K8's OpenAPI document touch no shared file. K1 and
 
 ### Decisions for the owner
 
-Six are open, each a `P-NNN` in [§92](11-decisions.md) (P-024 to P-029). Each is a recommendation that waits for the owner and blocks only the slice named.
+Twelve are open, each a `P-NNN` in [§92](11-decisions.md) (P-024 to P-029, and P-030 to P-035 of K9b-1, which the slice already proceeds on). Each is a recommendation that waits for the owner and blocks only the slice named.
 
 | P | The question | Blocks |
 |---|---|---|
@@ -1269,6 +1269,12 @@ Six are open, each a `P-NNN` in [§92](11-decisions.md) (P-024 to P-029). Each i
 | P-027 | Which servers does a tool catalogue ship, and under which licences? | K10 |
 | P-028 | `aapctl` as a binary of this repository (phase 1 is built) | K9b |
 | P-029 | An OpenAPI document and an events route on the Platform API | K8, K9b |
+| P-030 | A Keycloak public client `aapctl` for the browser sign-in | K9b-2 |
+| P-031 | Where `aapctl` keeps the token: a `0600` file, no keyring (differs from AD-044) | none (built) |
+| P-032 | Headless sign-in is a token on stdin or in the environment, no device flow | none (built) |
+| P-033 | `aapctl export` is for agents only | none (built) |
+| P-034 | What `aapctl apply` means: read first, write nothing when unchanged, refuse a deployment part that differs | none (built) |
+| P-035 | The exit codes 3, 4 and 5 | none (built) |
 
 ---
 
@@ -2199,9 +2205,9 @@ After the operator slices they need (§59a, *Slices*): S5 (the controller), S7 (
 
 ## 60b. CLI
 
-*(2026-11-14, slice K9; P-028; the implementer's, for the owner to confirm. Phase 1 is built, phase 2 is planned.)*
+*(2026-11-14, slice K9; P-028; the implementer's, for the owner to confirm. Phase 1 is built. Phase 2 is built without the browser sign-in (K9b-1, 2026-11-15, P-030 to P-035); the browser sign-in is K9b-2, planned.)*
 
-People write `AgentService` and `AgentConfig` files and want to know, before an API server or a pull request sees them, whether the operator would accept them and what it would make. `aapctl` (`bin/cli`, package `aap-cli`; [README](../../bin/cli/README.md)) answers that offline. It is the increment K9 of [§59c](#59c-operator-increments-kagent-grade-minimum).
+People write `AgentService` and `AgentConfig` files and want to know, before an API server or a pull request sees them, whether the operator would accept them and what it would make. `aapctl` (`bin/cli`, package `aap-cli`; [README](../../bin/cli/README.md)) answers that offline, and, in phase 2, applies them through the Platform API. It is the increments K9 and K9b of [§59c](#59c-operator-increments-kagent-grade-minimum).
 
 ### Phase 1: `validate` and `render`, offline (built)
 
@@ -2254,13 +2260,88 @@ stateDiagram-v2
 
 **Proof.** 30 tests of the built binary (`bin/cli/tests/cli.rs` and `review.rs`), among them `render_matches_runtime_golden` (byte for byte against `crates/runtime-kubernetes/tests/golden/`, after the comment), `validate_accepts_every_example`, `validate_refuses_every_invalid_example` (every example `aap-domain` refuses is refused, and the fifteen it cannot are accepted, by name), `exit_codes`, the whole-document unknown fields, nulls, duplicate keys, directories, the shape of the issue line, namespaces, and that neither command prints a secret-looking value. No cluster is needed or run.
 
-### Phase 2: over the Platform API (planned, K9b)
+### Phase 2: over the Platform API (K9b-1 built, 2026-11-15; the browser sign-in is K9b-2, planned)
 
-`aapctl login` (OIDC with PKCE and a loopback redirect, as the desktop app does, AD-044), `get`, `apply`, `delete` and `export` over the Platform API with its `ETag`s (§60a), so the CLI holds no right the API does not give the person and a stale write is `412`. It waits for K8 (the OpenAPI document). **Not built.**
+**Built (K9b-1).** `aapctl get agents|models|tool-servers [name]` (`-o table|json|yaml|etag`), `apply -f`, `delete agent|model|tool-server <name>` (`--wait`), `export agent <name>`, `whoami`, `logout` and `login --token-stdin`, over the Platform API ([§60a](#60a-admin-dashboard-v0)) through a new crate, `aap-platform-client` (`crates/platform-client`): a concrete `reqwest` 0.12 client (rustls with ring, never 0.13: `crates/auth-oidc/README.md`), whose **table of calls is held to `docs/api/platform-api-v1.openapi.json`** by a test (`client_calls_are_documented`: every method and path is an operation of the document and every status the client acts on is listed for it, and it caught a `202` the client expected of a model's delete). The CLI holds **no right the API does not give the person**: the server enforces and the CLI only offers, so a `403` names the permission, a stale write is `412`, and a second create is `409`.
+
+**Not built.** The browser sign-in: `aapctl login` with no `--token-stdin` says so and exits 2 (K9b-2: OIDC with PKCE and a loopback redirect, as the desktop app does, AD-044, and a refresh token; it needs P-030 and the testkit issuer's `/authorize` and `/token`). Export of models and tool servers (P-033). A keyring (P-031). A device flow (P-032).
+
+**The token.** From `AAPCTL_TOKEN`, else from a file that `login --token-stdin` wrote: `$XDG_CONFIG_HOME/aapctl/config.yaml`, else `$HOME/.config/aapctl/config.yaml`, or `--config`. The file is written whole or not at all (a temporary file made with `create_new` and mode `0600`, flushed, then renamed over the old one) in a directory that is `0700`; **a file that group or others can read is refused** (exit 2), as `ssh` refuses a private key. **There is no `--token` flag**: an argument is shown by `ps`. **No token is in any stdout, stderr, `--verbose` line or error**: the client holds it in a `Token` whose `Debug` shows nothing, marks the header sensitive and makes no message from a transport error (a `reqwest` error can carry the URL it was sent to); `--verbose` prints the method, the path, the `If-Match` or `If-None-Match` and the status, never a header that holds a credential. The environment is read **by the network commands only**, and only for the token, the config home and the home: `validate` and `render` still read none (decision (3) of K9, which stands).
+
+```mermaid
+sequenceDiagram
+    actor P as Person or CI
+    participant C as aapctl
+    participant A as Platform API
+    P->>C: apply -f files
+    C->>C: read the documents, pair each service with its config, load each as a form
+    alt a file no form says, or metadata the API would drop
+        C-->>P: one line per field on stderr, exit 1, nothing sent
+    end
+    loop models, then tool servers, then agents
+        C->>A: GET the object
+        alt 404
+            C->>A: GET /v1/info for an agent, to compare the deployment part with the defaults
+            C->>A: PUT with If-None-Match *
+            A-->>C: 201, or 409 already-exists, which is exit 3 and never a replace
+        else 200 and the form is the file's
+            C-->>P: unchanged, nothing written
+        else 200 and the form differs
+            C->>A: PUT with If-Match, the tag just read
+            A-->>C: 200, or 412
+            Note over C,A: after a 412 it reads again and retries only if the form and the deployment are what it read, at most three writes
+        end
+    end
+```
+
+```mermaid
+stateDiagram-v2
+    [*] --> Local: the files, judged whole before any request
+    Local --> Refused: no form says an object, or metadata the API would drop (exit 1)
+    Local --> Read: models, then tool servers, then agents
+    Read --> Create: 404
+    Read --> Compare: 200
+    Read --> Failed: 401 or 403 (exit 4), 5xx or unreachable (exit 5)
+    Create --> Refused: the deployment part of the file is not the server's defaults (exit 1)
+    Create --> Created: 201
+    Create --> Conflict: 409 already-exists (exit 3)
+    Compare --> Refused: GitOps owns it (exit 3), it is deleting (exit 3), no form says it (exit 1), the deployment part differs (exit 1)
+    Compare --> Unchanged: the form is the file's, nothing is written
+    Compare --> Replace: the form differs
+    Replace --> Configured: 200
+    Replace --> Read: 412, and the form and deployment are what was read, at most three writes
+    Replace --> Stale: 412, and they are not (exit 3)
+    Created --> [*]
+    Configured --> [*]
+    Unchanged --> [*]
+    Refused --> [*]
+    Conflict --> [*]
+    Stale --> [*]
+    Failed --> [*]
+```
+
+**`apply` in words.** The API takes **forms**, not custom resources, and fills what no form says (the store, the security context, the network peers: the deployment's part) from its own defaults on a create and keeps what the object holds on a replace. So a file is read as the dashboard reads an object: each document becomes an `aap_ports::Stored`, and `aap_forms::load_agent` and the `load` of the model and tool server forms say whether a form holds all of it. An object a form cannot say is refused with one line per field (`AgentService spec.scaling.workers: …`), never sent; a label other than the dashboard's, an annotation that is not the platform's, a `metadata` member the API does not write, and a namespace that is not `/v1/info`'s are refused too, since the API would drop them without a word. **A file is judged whole before the first request**, so a bad object writes nothing, and the objects are written in the order that lets each referent exist first. Then, per object, it **reads first**: a `404` is a create (for an agent, after comparing the file's deployment part with `defaults.deployment_for(kind, name)` of `/v1/info`, because the server would write its defaults and not the file's), a `200` that is the file's form writes **nothing** (so `apply` is idempotent and causes no status churn), and one that differs is a replace with `If-Match` set to the tag just read, after refusing a GitOps-owned, deleting or YAML-only object and a deployment part that differs (a replace never moves it). An agent's tag **moves whenever the operator writes its status**, so a `412` is not a person's edit: it reads again, and **retries only if the form and the deployment are what it read** (at most three writes); otherwise exit 3, "changed on the server since it was read". `--if-match <etag>` (one object) skips the read and the retry: a stale tag is a plain `412`. `--dry-run` is offline: it prints the forms as JSON. `export agent <name>` prints what the API serves (`GET /v1/agents/{name}/yaml`), and `apply` reads it back as `unchanged`: the export is a whitelist that keeps the dashboard's label.
+
+| Exit | Means |
+|---|---|
+| 0 | Success (`unchanged` is a success) |
+| 1 | The API or a local check refused the content: `422`, `409 yaml-only`, `breaks-agents`, `referenced`, a file the forms cannot represent, and also a `404` (the name asked for is not there) and any other `4xx` |
+| 2 | Usage or read error (phase 1's meaning): a bad flag, a file that cannot be read, a service with no config, no server, a config file others can read, an address that is not usable |
+| 3 | Stale or conflict: `412`, `409 already-exists`, `managed-by-gitops`, `deleting`, `conflict` |
+| 4 | Not allowed: no token, `401`, `403` (the message names the permission) |
+| 5 | Unreachable, `5xx`, an answer that is not the API's, or a `--wait` that ran out |
+
+Every error is one line, `aapctl: <what>: <status> <problem type>: <detail>`, and one indented line per field of `errors` or `reasons`.
+
+**Proof.** `bin/cli/tests/remote.rs` runs **the built binary** against **the real router** (`aap_platform_api::router`) over the `Memory` ports on `127.0.0.1:0`, with the child's `HTTPS_PROXY`, `HTTP_PROXY` and `ALL_PROXY` removed and `NO_PROXY` set (the test `the_proxy_of_the_environment_is_used_unless_no_proxy_names_the_server` shows that reqwest 0.12 sends a loopback request through the environment's proxy unless `NO_PROXY` names the host): 29 tests, among them `get_lists_and_reads`, `apply_creates_then_unchanged` (the order of the writes, no `PUT` the second time), `apply_replaces`, `apply_stale_if_match`, `apply_retry_on_status_only_change` and `apply_does_not_retry_when_the_object_changed` (a store that runs a closure between the client's read and its write), `apply_yaml_only_refused`, `apply_deployment_differs`, `apply_gitops_refused`, `create_race_already_exists`, `forbidden_named`, `secret_needs_pick`, `delete_if_match`, `delete_wait_*`, `export_apply_round_trip`, `dry_run_offline` and `no_token_anywhere` (every command's stdout, stderr and `--verbose` output holds no 16-character window of the token; the file is `0600`, a `0644` one is exit 2). `crates/platform-client` has its own 10, `client_calls_are_documented` among them. Two rules a coder gets wrong most were **broken on purpose**: turning `409 already-exists` into a replace fails `create_race_already_exists`, and removing the comparison of the deployment part (so that the file's is silently replaced by the server's defaults) fails `apply_deployment_differs`. Phase 1's 30 tests pass untouched. **`api-e2e.sh` has a new step, 6b, that drives the deployed API with `aapctl`; it is *unverified* until CI has run it** (no container daemon and no kind exist where it was written; it was read with `sh -n` and its shell functions were walked under `dash` with a stand-in for the binary). Also unverified: a real Keycloak, and the browser sign-in, which is not built.
 
 ### Decisions of K9 for the owner to confirm (P-028)
 
 **(1)** A binary of this repository, `aapctl`, and not a subcommand of `operator` (an image that runs a controller should not carry a tool for people). **(2)** It ships **in no image and no chart** in this slice: CI builds it with the workspace and nothing publishes it. **(3)** The settings are flags alone and the environment is not read, so a render does not depend on the shell it runs in. **(4)** A field the CRD's types lack is an issue and not a warning, because an API server that prunes drops it without a word, and a typo (`wokers`) is then an agent that quietly runs with the default. **(5)** `render` takes a placeholder owner uid (`--owner-uid` overrides it): the owner reference of an object that is not applied cannot name a real service, and an empty one is refused. **(6)** A directory skips the documents of other groups with one note per file (a `kustomization.yaml` beside the agents is common), while a file named with `-f` or standard input holds exactly what the person pointed at, so a foreign document there is exit 2 and says what it was; a document of our group with another version or kind is exit 2 everywhere. **(7)** One line shape, `<file>: <Kind>/<name>: <field>: <message>`, with the namespace in the object only when the documents hold several; serde gives a type error no path, so that line has none. A `null` is absent and a key given twice is exit 2, as an API server reads them (README, *What is read*).
+
+### Decisions of K9b-1 for the owner to confirm (P-030 to P-035)
+
+**(1) The token is in `AAPCTL_TOKEN` or in a `0600` file, never in an argument (P-031).** There is no keyring (none is in the lockfile) and no `--token` flag. This differs from AD-044's "OS keychain" for the desktop app; *alternative:* a keyring crate when one without native libraries is found. **(2) `AAPCTL_TOKEN` is read by the network commands only**, which is not decision (3) of K9: that decision keeps a render independent of the shell, and a credential belongs in the environment or on stdin and nowhere else. **(3) Headless sign-in is `--token-stdin` or `AAPCTL_TOKEN` and no device flow (P-032)**; `login --token-stdin` asks the server (`GET /v1/me`) before it keeps the token, and a token the server refuses is not stored (exit 4). **(4) Only agents are exported (P-033)**, because the API has no YAML route for models and tool servers; *alternative:* `to_resource` on the client. **(5) `apply` means this (P-034):** read first, write nothing when unchanged, refuse a deployment part that differs (a create writes the server's defaults and a replace never moves the part), retry a `412` only when the form and the deployment are what was read, `--if-match` for the strict behaviour. A label or an annotation the API would drop is refused; **the annotations of the platform's own prefix (`agents.vymalo.com/`) pass**, because an export keeps them, although the API does not write them. **(6) The exit codes 3, 4 and 5 (P-035)**; the plan left two cases open and this slice chose: a `404` and every other `4xx` the API answers (`400`, `413`, `415`, `428`) are exit **1**, "the API refused the request". **(7) `http://` is accepted for a loopback address only**, unless `--insecure-http`: a token must not cross a network in the clear. This is not in the plan; *alternative:* accept any `http`. **(8) A file is judged whole before the first request**, and `apply` stops at the first object the API refuses, so what came before it stays written (the output says which); *alternative:* all or nothing, which the API cannot give across objects. **(9) The Keycloak client of the browser sign-in is recorded and not built (P-030).** **(10) No transport trait and no credential-store trait**: the Platform API is the platform's own contract and its conformance is the OpenAPI document (a test holds the client's table of calls to it), and there is one implementation of a token store; the seam appears when a second does.
 
 ---
 
