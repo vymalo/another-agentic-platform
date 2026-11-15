@@ -4,6 +4,11 @@
 //! **No test needs a browser**: the test is the browser. It reads the URL `aapctl` printed, asks the issuer for it without following
 //! the redirect, and then asks `aapctl`'s loopback listener for the `Location`. Nothing is waited for by sleeping: the child's
 //! standard error is read line by line as it comes, and a line is waited for by a channel with a deadline.
+//!
+//! **Which tests run under which user.** The listener serves only connections owned by the effective uid of `aapctl` (Linux), so the
+//! tests that stand for *another user of the machine* connect as uid 65534 (`setpriv --reuid=65534 ... curl`) and need root to do it:
+//! they print `skipped: ... needs root` and pass otherwise. Everything else, a normal sign-in with the uid check on among it, runs as
+//! whoever runs `cargo test`, root or not.
 #![allow(clippy::unwrap_used, clippy::expect_used)]
 
 #[path = "remote/api.rs"]
@@ -465,6 +470,28 @@ fn assert_no_secrets(rig: &Rig, out: &Out, url: Option<&Url>) {
                 "the state is on standard error outside the URL line:\n{stderr}"
             );
         }
+    }
+}
+
+/// The ticket of a `/start/<ticket>` link is on standard error only as the link line itself (and only where the link is printed), and
+/// is never on standard output.
+fn assert_no_ticket(out: &Out, link: &Url) {
+    let ticket = link
+        .path_segments()
+        .unwrap()
+        .next_back()
+        .unwrap()
+        .to_owned();
+    assert_eq!(ticket.len(), 43, "{link}");
+    assert!(
+        !out.stdout.contains(&ticket),
+        "the ticket is on standard output"
+    );
+    for line in out.stderr.lines().filter(|l| *l != link.as_str()) {
+        assert!(
+            !line.contains(&ticket),
+            "the ticket is in a line other than the link: {line}"
+        );
     }
 }
 
@@ -1819,15 +1846,17 @@ fn the_browser_is_given_a_ticket_link_and_never_the_authorization_url() {
     rig.idp().set_login("alice", &all_permissions());
     let (path, calls) = fake_opener(&rig);
     let mut live = rig.login_env(&[], &[("PATH", &path)]);
-    // The address printed (the first one on standard error) is the link, and it is what the opener was given.
-    let start = live.url();
+    // What the opener was given is the link.
+    let recorded = opener_calls(&calls, 1);
+    let start = Url::parse(&recorded[0]).unwrap();
     assert_eq!(start.host_str(), Some("127.0.0.1"));
     let segments: Vec<&str> = start.path_segments().unwrap().collect();
     assert_eq!(segments[0], "start", "{start}");
     assert_eq!(segments[1].len(), 43, "32 random bytes: {start}");
     assert!(start.query().is_none(), "{start}");
-    let recorded = opener_calls(&calls, 1);
-    assert_eq!(recorded, [start.to_string()], "the opener's argument");
+    // Where the uid check is on (Linux) the link is printed too, as the same address.
+    #[cfg(target_os = "linux")]
+    assert_eq!(live.url(), start);
 
     // The listener sends the browser on, and tells it to keep nothing of it.
     let first = get(&start);
@@ -1859,15 +1888,22 @@ fn the_browser_is_given_a_ticket_link_and_never_the_authorization_url() {
         "the opener ran once"
     );
     assert_no_secrets(&rig, &out, Some(&auth));
+    assert_no_ticket(&out, &start);
 }
 
 #[test]
-fn a_second_use_of_the_ticket_ends_the_sign_in_with_exit_4() {
+fn where_the_uid_check_is_off_a_second_use_of_the_ticket_ends_the_sign_in_with_exit_4() {
     let rig = Rig::start("ticket-twice");
     rig.idp().set_login("alice", &all_permissions());
-    let (path, _calls) = fake_opener(&rig);
-    let mut live = rig.login_env(&[], &[("PATH", &path)]);
-    let start = live.url();
+    let (path, calls) = fake_opener(&rig);
+    // `AAPCTL_PEER_CHECK=off` is test tooling: it makes the listener behave as on a system that cannot check who connects.
+    let mut live = rig.login_env(&[], &[("PATH", &path), ("AAPCTL_PEER_CHECK", "off")]);
+    let start = Url::parse(&opener_calls(&calls, 1)[0]).unwrap();
+    // The person is told the check is off and what to do, and the link is not printed: clicking it after the opener used it would be
+    // the second use.
+    let note = live.line_with("does not let aapctl check who connects");
+    assert!(note.contains("--no-browser"), "{note}");
+    live.line_with("Opening the browser. If no browser opens, run again with --no-browser");
     assert_eq!(get(&start).status, 302);
     // Whoever came first may hold the state: the second request for the right ticket ends it.
     let second = get(&start);
@@ -1880,8 +1916,57 @@ fn a_second_use_of_the_ticket_ends_the_sign_in_with_exit_4() {
         "{}",
         out.stderr
     );
+    assert!(
+        !out.stderr.contains("/start/"),
+        "the link was printed:\n{}",
+        out.stderr
+    );
+    assert_no_ticket(&out, &start);
     assert!(!rig.config().exists());
     assert!(rig.idp().token_grants().is_empty());
+}
+
+#[test]
+fn the_check_off_note_is_for_a_browser_and_not_for_no_browser() {
+    let rig = Rig::start("check-off-no-browser");
+    rig.idp().set_login("alice", &all_permissions());
+    let mut live = rig.login_env(&["--no-browser"], &[("AAPCTL_PEER_CHECK", "off")]);
+    let url = live.url();
+    assert_eq!(browse(&url).status, 200);
+    let out = live.finish();
+    assert_eq!(out.code, 0, "{}", out.stderr);
+    assert!(
+        !out.stderr.contains("does not let aapctl check"),
+        "{}",
+        out.stderr
+    );
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn with_the_uid_check_on_a_second_use_of_the_ticket_is_the_same_302_and_the_sign_in_goes_on() {
+    let rig = Rig::start("ticket-twice-on");
+    rig.idp().set_login("alice", &all_permissions());
+    let (path, _calls) = fake_opener(&rig);
+    let mut live = rig.login_env(&[], &[("PATH", &path)]);
+    let start = live.url();
+    let first = get(&start);
+    // A prefetch, a second click: the person's own processes, and harmless.
+    let second = get(&start);
+    assert_eq!(first.status, 302);
+    assert_eq!(second.status, 302);
+    assert_eq!(header(&first, "location"), header(&second, "location"));
+    let auth = Url::parse(header(&second, "location").unwrap()).unwrap();
+    assert_eq!(get(&callback_with_code(&auth)).status, 200);
+    let out = live.finish();
+    assert_eq!(out.code, 0, "{}", out.stderr);
+    assert!(
+        !out.stderr.contains("does not let aapctl check"),
+        "{}",
+        out.stderr
+    );
+    assert_no_secrets(&rig, &out, Some(&auth));
+    assert_no_ticket(&out, &start);
 }
 
 #[test]
@@ -2040,52 +2125,126 @@ fn a_token_over_16_kib_is_refused_wherever_it_comes_in() {
     assert!(out.stderr.contains("16 KiB"), "{}", out.stderr);
 }
 
-#[test]
-fn login_and_logout_replace_a_file_that_is_ours_but_unusable_and_refuse_one_that_is_not() {
-    // Too large: every command refuses it and says how to get out; logout removes it and says so.
-    let rig = Rig::start("replace-large");
-    rig.write_file(&"x".repeat(70_000), 0o600);
-    let who = rig.ctl(&["whoami"], None);
-    assert_eq!(who.code, 2, "{}", who.stderr);
-    assert!(who.stderr.contains("aapctl logout"), "{}", who.stderr);
-    let out = rig.ctl(&["logout"], None);
-    assert_eq!(out.code, 0, "{}", out.stderr);
-    assert!(out.stdout.contains("removed"), "{}", out.stdout);
-    assert!(!rig.config().exists());
+/// Everything in `dir` whose name starts with `config.yaml.unusable-`.
+fn moved_aside(dir: &Path) -> Vec<PathBuf> {
+    let mut found: Vec<PathBuf> = std::fs::read_dir(dir)
+        .unwrap()
+        .map(|e| e.unwrap().path())
+        .filter(|p| {
+            p.file_name()
+                .unwrap()
+                .to_string_lossy()
+                .starts_with("config.yaml.unusable-")
+        })
+        .collect();
+    found.sort();
+    found
+}
 
-    // Not a configuration: a login writes over it.
-    let rig = Rig::start("replace-garbage");
-    rig.write_file("[this: is not\n a mapping", 0o600);
-    let out = rig.sign_in();
-    assert_eq!(out.code, 0, "{}", out.stderr);
-    assert!(rig.saved().get("accessToken").is_some());
+fn token_stdin_login(rig: &Rig, extra: &[&str]) -> Out {
     let config = rig.config();
     let token = rig.good_token();
-    rig.write_file("- a\n- list\n", 0o600);
-    let out = api::run_binary(
-        &[
-            "login",
-            "--token-stdin",
-            "--server",
-            &rig.url,
-            "--config",
-            config.to_str().unwrap(),
-        ],
-        None,
-        Some(&token),
-        &rig.dir,
-    );
-    assert_eq!(out.code, 0, "{}", out.stderr);
-    assert!(rig.saved().get("accessToken").is_some());
+    let mut args = vec![
+        "login",
+        "--token-stdin",
+        "--server",
+        &rig.url,
+        "--config",
+        config.to_str().unwrap(),
+    ];
+    args.extend_from_slice(extra);
+    api::run_binary(&args, None, Some(&token), &rig.dir)
+}
 
-    // A file that fails the owner, mode, link or type checks is refused by both, and left as it is.
-    let rig = Rig::start("replace-refused");
-    rig.write_file(&"x".repeat(70_000), 0o644);
+#[test]
+fn a_file_that_is_not_aapctls_is_never_deleted_or_overwritten_and_force_moves_it_aside() {
+    // A private key-like file: regular, 0600, ours, and not a configuration. `logout` used to delete it.
+    let key = "-----BEGIN OPENSSH PRIVATE KEY-----\nb3BlbnNzaC1rZXktdjEAAAAABG5vbmUAAAAEbm9uZQ\n-----END OPENSSH PRIVATE KEY-----\n";
+    let rig = Rig::start("not-ours-logout");
+    rig.write_file(key, 0o600);
     let out = rig.ctl(&["logout"], None);
     assert_eq!(out.code, 2, "{}", out.stderr);
-    assert!(out.stderr.contains("readable by group or others"));
+    assert!(out.stderr.contains("--force"), "{}", out.stderr);
+    assert!(
+        !out.stderr.contains("PRIVATE KEY") && !out.stderr.contains("b3Blbn"),
+        "{}",
+        out.stderr
+    );
+    assert_eq!(std::fs::read_to_string(rig.config()).unwrap(), key);
+    assert!(moved_aside(&rig.dir).is_empty());
+    // Any other command names the way out and leaves it alone.
+    let who = rig.ctl(&["whoami"], None);
+    assert_eq!(who.code, 2, "{}", who.stderr);
+    assert!(
+        who.stderr.contains("aapctl logout --force"),
+        "{}",
+        who.stderr
+    );
+    assert_eq!(std::fs::read_to_string(rig.config()).unwrap(), key);
+    // With `--force` it is renamed, not unlinked: the original content is at the new name, with its mode.
+    let out = rig.ctl(&["logout", "--force"], None);
+    assert_eq!(out.code, 0, "{}", out.stderr);
+    assert!(
+        out.stdout.contains("moved aside") && out.stdout.contains("nothing was deleted"),
+        "{}",
+        out.stdout
+    );
+    let aside = moved_aside(&rig.dir);
+    assert_eq!(aside.len(), 1, "{aside:?}");
+    assert_eq!(std::fs::read_to_string(&aside[0]).unwrap(), key);
+    assert_eq!(
+        std::fs::metadata(&aside[0]).unwrap().permissions().mode() & 0o777,
+        0o600
+    );
+    assert!(!rig.config().exists());
+
+    // Too large and not UTF-8 are the same: refused, then moved.
+    let rig = Rig::start("not-ours-large");
+    rig.write_file(&"x".repeat(70_000), 0o600);
+    assert_eq!(rig.ctl(&["logout"], None).code, 2);
     assert_eq!(std::fs::read(rig.config()).unwrap().len(), 70_000);
-    let out = rig.login(&[]).finish();
+    assert_eq!(rig.ctl(&["logout", "--force"], None).code, 0);
+    assert_eq!(
+        std::fs::read(&moved_aside(&rig.dir)[0]).unwrap().len(),
+        70_000
+    );
+
+    // A name that is taken is not overwritten: nothing is moved.
+    let rig = Rig::start("not-ours-taken");
+    rig.write_file("- a\n- list\n", 0o600);
+    // The clock is read once by the binary; every second of the next minute is taken.
+    let from = i64::try_from(now()).unwrap();
+    for t in from - 5..from + 60 {
+        std::fs::write(rig.dir.join(format!("config.yaml.unusable-{t}")), "mine").unwrap();
+    }
+    let out = rig.ctl(&["logout", "--force"], None);
+    assert_eq!(out.code, 2, "{}", out.stderr);
+    assert!(out.stderr.contains("exists already"), "{}", out.stderr);
+    assert_eq!(
+        std::fs::read_to_string(rig.config()).unwrap(),
+        "- a\n- list\n"
+    );
+    for t in from - 5..from + 60 {
+        assert_eq!(
+            std::fs::read_to_string(rig.dir.join(format!("config.yaml.unusable-{t}"))).unwrap(),
+            "mine"
+        );
+    }
+
+    // A fault of check (the mode) is refused by both, and `--force` does not get past it.
+    let rig = Rig::start("not-ours-mode");
+    rig.write_file(&"x".repeat(70_000), 0o644);
+    for args in [&["logout", "--force"][..], &["whoami"][..]] {
+        let out = rig.ctl(args, None);
+        assert_eq!(out.code, 2, "{}", out.stderr);
+        assert!(
+            out.stderr.contains("readable by group or others"),
+            "{}",
+            out.stderr
+        );
+    }
+    assert_eq!(std::fs::read(rig.config()).unwrap().len(), 70_000);
+    let out = rig.login(&["--force"]).finish();
     assert_eq!(out.code, 2, "{}", out.stderr);
     let real = rig.dir.join("real.yaml");
     std::fs::write(&real, "x".repeat(70_000)).unwrap();
@@ -2093,13 +2252,109 @@ fn login_and_logout_replace_a_file_that_is_ours_but_unusable_and_refuse_one_that
     let link = rig.dir.join("link.yaml");
     std::os::unix::fs::symlink(&real, &link).unwrap();
     let out = api::run_binary(
-        &["logout", "--config", link.to_str().unwrap()],
+        &["logout", "--force", "--config", link.to_str().unwrap()],
         None,
         None,
         &rig.dir,
     );
     assert_eq!(out.code, 2, "{}", out.stderr);
     assert!(real.exists());
+}
+
+#[test]
+fn login_does_not_overwrite_a_file_that_is_not_its_own_without_force() {
+    // A kubeconfig is a YAML mapping, and it used to parse as an empty configuration and be written over.
+    let kubeconfig = "apiVersion: v1\nkind: Config\nclusters:\n- name: prod\n  cluster:\n    server: https://k8s.example\nusers:\n- name: me\n  user:\n    token: KUBE-SECRET-TOKEN\n";
+
+    // `--token-stdin`.
+    let rig = Rig::start("kube-stdin");
+    rig.write_file(kubeconfig, 0o600);
+    let out = token_stdin_login(&rig, &[]);
+    assert_eq!(out.code, 2, "{}", out.stderr);
+    assert!(out.stderr.contains("--force"), "{}", out.stderr);
+    assert!(!out.stderr.contains("KUBE-SECRET-TOKEN"), "{}", out.stderr);
+    assert_eq!(std::fs::read_to_string(rig.config()).unwrap(), kubeconfig);
+    let out = token_stdin_login(&rig, &["--force"]);
+    assert_eq!(out.code, 0, "{}", out.stderr);
+    assert!(rig.saved().get("accessToken").is_some());
+    let aside = moved_aside(&rig.dir);
+    assert_eq!(aside.len(), 1, "{aside:?}");
+    assert_eq!(std::fs::read_to_string(&aside[0]).unwrap(), kubeconfig);
+    assert!(out.stdout.contains("moved aside"), "{}", out.stdout);
+
+    // The browser sign-in refuses before anything is opened, and with `--force` moves the file after it succeeded.
+    let rig = Rig::start("kube-browser");
+    rig.write_file(kubeconfig, 0o600);
+    rig.idp().set_login("alice", &all_permissions());
+    let out = rig.login(&[]).finish();
+    assert_eq!(out.code, 2, "{}", out.stderr);
+    assert_eq!(rig.idp().authorize_requests(), 0);
+    assert_eq!(std::fs::read_to_string(rig.config()).unwrap(), kubeconfig);
+    let mut live = rig.login(&["--force"]);
+    let url = live.url();
+    assert_eq!(browse(&url).status, 200);
+    let out = live.finish();
+    assert_eq!(out.code, 0, "{}", out.stderr);
+    assert!(rig.saved().get("accessToken").is_some());
+    assert_eq!(
+        std::fs::read_to_string(&moved_aside(&rig.dir)[0]).unwrap(),
+        kubeconfig
+    );
+    assert_no_secrets(&rig, &out, Some(&url));
+
+    // A file of aapctl's own that is unusable only for a stray key is the same.
+    let rig = Rig::start("stray-key");
+    rig.write_file("server: https://x.example\nextra: 1\n", 0o600);
+    assert_eq!(rig.ctl(&["whoami"], None).code, 2);
+    assert_eq!(token_stdin_login(&rig, &[]).code, 2);
+}
+
+#[test]
+fn a_config_made_good_between_the_first_read_and_the_lock_is_signed_out_and_not_moved_aside() {
+    let rig = Rig::start("logout-reread");
+    rig.idp().enable_revocation(false);
+    rig.write_file("apiVersion: v1\nkind: Config\n", 0o600);
+    let held = hold_lock(&rig.config());
+    let mut logout = rig.ctl_live(&["logout", "--force"]);
+    // The lock file is opened after the first read of the configuration: the command has read the bad file and waits for the lock.
+    wait_until_open(logout.child.id(), &lock_file(&rig.config()));
+    let later = i64::try_from(now()).unwrap() + 3600;
+    rig.save_session(&rig.good_token(), later, Some("r-seed"));
+    drop(held);
+    let out = logout.finish();
+    assert_eq!(out.code, 0, "{}", out.stderr);
+    assert!(out.stdout.contains("signed out"), "{}", out.stdout);
+    assert!(
+        moved_aside(&rig.dir).is_empty(),
+        "the good file was moved aside"
+    );
+    // Its refresh token was forgotten and revoked, not left behind.
+    assert_eq!(rig.idp().revoked_tokens(), ["r-seed"]);
+    let saved = rig.saved();
+    for gone in ["accessToken", "refreshToken"] {
+        assert!(saved.get(gone).is_none(), "{gone}: {saved:?}");
+    }
+}
+
+/// Wait until the process has `path` open, as an observable sign that it got as far as taking a lock on it.
+fn wait_until_open(pid: u32, path: &Path) {
+    let want = path.canonicalize().unwrap();
+    let started = Instant::now();
+    loop {
+        for entry in std::fs::read_dir(format!("/proc/{pid}/fd"))
+            .unwrap()
+            .flatten()
+        {
+            if std::fs::read_link(entry.path()).is_ok_and(|to| to == want) {
+                return;
+            }
+        }
+        assert!(
+            started.elapsed() < Duration::from_secs(30),
+            "the process never opened {want:?}"
+        );
+        std::thread::sleep(Duration::from_millis(10));
+    }
 }
 
 // ----------------------------------------------------------------------------------------------------------- A3, A4: PKCE and iss
@@ -2363,17 +2618,22 @@ fn a_refresh_token_that_is_dropped_is_revoked_best_effort() {
         out.stderr
     );
 
-    // A second login over a saved refresh token revokes the old one, after the new state is saved.
+    // A second login over a saved refresh token does **not** revoke the old one: RFC 7009 section 2.1 lets a server end every token of
+    // the same grant, and a second sign-in may share the session at the issuer (unverified against Keycloak), so revoking could end
+    // the new one. The file holds the new token.
     let rig = Rig::start("revoke-replaced");
     rig.idp().enable_revocation(false);
     assert_eq!(rig.sign_in().code, 0);
     let first = rig.idp().issued_refresh_tokens()[0].clone();
     assert_eq!(rig.sign_in().code, 0);
-    assert_eq!(rig.idp().revoked_tokens(), std::slice::from_ref(&first));
+    assert!(
+        rig.idp().revoked_tokens().is_empty(),
+        "{:?}",
+        rig.idp().revoked_tokens()
+    );
     assert_ne!(rig.saved()["refreshToken"].as_str().unwrap(), first);
 
-    // And so does a pasted token.
-    let second = rig.idp().issued_refresh_tokens()[1].clone();
+    // Nor does a pasted token: its predecessor is forgotten in the file and left to expire.
     let config = rig.config();
     let out = api::run_binary(
         &[
@@ -2389,7 +2649,7 @@ fn a_refresh_token_that_is_dropped_is_revoked_best_effort() {
         &rig.dir,
     );
     assert_eq!(out.code, 0, "{}", out.stderr);
-    assert_eq!(rig.idp().revoked_tokens(), [first, second]);
+    assert!(rig.idp().revoked_tokens().is_empty());
     assert!(rig.saved().get("refreshToken").is_none());
 }
 
@@ -2534,24 +2794,55 @@ fn two_commands_with_an_expiring_token_refresh_once_between_them() {
 }
 
 #[test]
-fn a_logout_that_takes_the_lock_while_a_refresh_waits_leaves_no_token() {
+fn a_logout_while_a_refresh_holds_the_lock_gives_up_after_two_seconds_and_changes_nothing() {
+    // The refresh holds the lock while the issuer is asked (a rotating refresh token must be spent once), and the issuer is slow.
     let rig = Rig::start("logout-vs-refresh");
     rig.idp().enable_revocation(false);
     rig.save_session(&rig.expired_token(), rig.soon(), Some("r-seed"));
-    let held = hold_lock(&rig.config());
+    rig.idp().set_hold_refresh(true);
     let mut refresh = rig.ctl_live(&["whoami"]);
-    let mut logout = rig.ctl_live(&["logout"]);
-    std::thread::sleep(Duration::from_millis(300));
-    drop(held);
-    let (refresh, logout) = (refresh.finish(), logout.finish());
-    assert_eq!(logout.code, 0, "{}", logout.stderr);
-    // Whichever of them got the lock first, the file ends without a token: a refresh after the logout finds nothing to refresh, and a
-    // refresh before it is forgotten by it.
+    // An observable event, not a sleep: the issuer has the refresh request (and holds it).
+    wait_for(|| rig.idp().token_grants() == ["refresh_token"]);
+    let started = Instant::now();
+    let logout = rig.ctl(&["logout"], None);
+    assert!(
+        started.elapsed() >= Duration::from_millis(1500),
+        "{:?}",
+        started.elapsed()
+    );
+    assert_eq!(logout.code, 5, "{}", logout.stderr);
+    assert!(
+        logout.stderr.contains("lock") && logout.stderr.contains("try again"),
+        "{}",
+        logout.stderr
+    );
+    // Nothing was changed: the file still holds the session.
+    let saved = rig.saved();
+    assert_eq!(saved["refreshToken"].as_str(), Some("r-seed"), "{saved:?}");
+    assert!(saved.get("accessToken").is_some());
+    // The refresh finishes and keeps its tokens; then a logout gets the lock and leaves none.
+    rig.idp().set_hold_refresh(false);
+    let refreshed = refresh.finish();
+    assert_eq!(refreshed.code, 0, "{}", refreshed.stderr);
+    assert_ne!(rig.saved()["refreshToken"].as_str(), Some("r-seed"));
+    let again = rig.ctl(&["logout"], None);
+    assert_eq!(again.code, 0, "{}", again.stderr);
     let saved = rig.saved();
     for gone in ["accessToken", "refreshToken"] {
         assert!(saved.get(gone).is_none(), "{gone} is back: {saved:?}");
     }
-    assert!(refresh.code == 0 || refresh.code == 4, "{}", refresh.stderr);
+}
+
+/// Wait (up to 30 s) until `condition` holds, polled.
+fn wait_for(condition: impl Fn() -> bool) {
+    let started = Instant::now();
+    while !condition() {
+        assert!(
+            started.elapsed() < Duration::from_secs(30),
+            "the awaited event never happened"
+        );
+        std::thread::sleep(Duration::from_millis(10));
+    }
 }
 
 #[test]
@@ -2686,3 +2977,238 @@ fn a_silent_connection_is_closed_and_connections_that_never_sent_a_request_do_no
 }
 
 // ----------------------------------------------------------------------------------------------------------- A15 / A17 are above and in the testkit's tests.
+
+// ----------------------------------------------------------------------------------------------------------- second round of the review
+
+#[test]
+fn one_refresh_attempt_per_command_whatever_its_outcome() {
+    // The refresh before the call fails at the token endpoint (a 503: the issuer may have processed it and rotated the token), the saved
+    // token is used as it is, the API answers 401, and the old refresh token is not spent a second time.
+    let (down, count) = responder(
+        "HTTP/1.1 503 Service Unavailable\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"
+            .to_owned(),
+    );
+    let rig = Rig::start("one-attempt");
+    rig.save_session(&rig.expired_token(), rig.soon(), Some("r-seed"));
+    rig.idp()
+        .patch_discovery(&json!({"token_endpoint": format!("http://127.0.0.1:{down}/token")}));
+    let out = rig.ctl(&["get", "agents"], None);
+    assert_eq!(out.code, 4, "{}", out.stderr);
+    assert_eq!(
+        count.load(Ordering::SeqCst),
+        1,
+        "the refresh token was sent twice:\n{}",
+        out.stderr
+    );
+    assert!(rig.idp().token_grants().is_empty());
+    assert_eq!(rig.saved()["refreshToken"].as_str(), Some("r-seed"));
+}
+
+#[test]
+fn a_connection_that_finds_no_free_place_waits_for_one_and_is_not_dropped() {
+    let rig = Rig::start("listener-places");
+    rig.idp().set_login("alice", &all_permissions());
+    let mut live = rig.login(&["--timeout", "60"]);
+    let url = live.url();
+    let port = callback_of(&url).port().unwrap();
+    // Sixty-four connections that say nothing hold every place for two seconds each.
+    let held: Vec<TcpStream> = (0..64)
+        .map(|_| TcpStream::connect(("127.0.0.1", port)).unwrap())
+        .collect();
+    let started = Instant::now();
+    // The person's real callback is the 65th: it is waited for, not dropped.
+    let back = browse(&url);
+    assert_eq!(back.status, 200, "{}", back.body);
+    assert!(
+        started.elapsed() >= Duration::from_secs(1),
+        "{:?}",
+        started.elapsed()
+    );
+    drop(held);
+    let out = live.finish();
+    assert_eq!(out.code, 0, "{}", out.stderr);
+}
+
+// --- another user of this machine (Linux; the tests that connect as another uid need root)
+
+/// `true` when this process may become another user. Otherwise says so, and the test passes without its body.
+fn root_only(test: &str) -> bool {
+    if rustix::process::geteuid().is_root() {
+        return true;
+    }
+    eprintln!(
+        "skipped: {test} needs root to connect as another uid (65534); the other tests run as whoever runs them"
+    );
+    false
+}
+
+/// Requests made by **another user of the machine** (uid 65534, `curl` under `setpriv`): the status of each answer, in order.
+fn foreign_statuses(urls: &[&str]) -> Vec<u16> {
+    let mut command = Command::new("setpriv");
+    command.args([
+        "--reuid=65534",
+        "--regid=65534",
+        "--clear-groups",
+        "curl",
+        "-s",
+        "--noproxy",
+        "*",
+        "--max-time",
+        "20",
+        "-w",
+        "%{http_code}\n",
+    ]);
+    for url in urls {
+        command.args(["-o", "/dev/null", url]);
+    }
+    for var in [
+        "HTTPS_PROXY",
+        "https_proxy",
+        "HTTP_PROXY",
+        "http_proxy",
+        "ALL_PROXY",
+        "all_proxy",
+    ] {
+        command.env_remove(var);
+    }
+    let out = command
+        .output()
+        .expect("setpriv and curl are needed to connect as another user");
+    String::from_utf8(out.stdout)
+        .unwrap()
+        .lines()
+        .map(|l| l.parse().unwrap())
+        .collect()
+}
+
+/// One request by another user, and the answer's head and body.
+fn foreign(url: &Url) -> Resp {
+    let out = Command::new("setpriv")
+        .args([
+            "--reuid=65534",
+            "--regid=65534",
+            "--clear-groups",
+            "curl",
+            "-s",
+            "-i",
+            "--noproxy",
+            "*",
+            "--max-time",
+            "20",
+            url.as_str(),
+        ])
+        .env_remove("HTTP_PROXY")
+        .env_remove("http_proxy")
+        .output()
+        .expect("setpriv and curl are needed to connect as another user");
+    parse(&out.stdout)
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn another_user_can_neither_use_the_link_nor_inject_a_callback() {
+    if !root_only("another_user_can_neither_use_the_link_nor_inject_a_callback") {
+        return;
+    }
+    // The reviewer's attack: another local user reads the link from the process list, asks for it first (the 302 would give them the
+    // state and the challenge), signs in at the issuer in their own browser, and the redirect reaches the victim's listener with the
+    // right state before the victim's browser has started.
+    let rig = Rig::start("foreign-attack");
+    rig.idp().set_login("alice", &all_permissions());
+    let (path, _calls) = fake_opener(&rig);
+    let mut live = rig.login_env(&["--timeout", "60"], &[("PATH", &path)]);
+    let start = live.url();
+    let theirs = foreign(&start);
+    assert_eq!(theirs.status, 403, "{}\n{}", theirs.head, theirs.body);
+    assert!(header(&theirs, "location").is_none());
+    assert!(
+        theirs.body.contains("another user of this machine"),
+        "{}",
+        theirs.body
+    );
+    // The ticket was not used: the person's own browser gets its 302.
+    let mine = get(&start);
+    assert_eq!(mine.status, 302, "{}", mine.body);
+    let auth = Url::parse(header(&mine, "location").unwrap()).unwrap();
+    let state = param(&auth, "state");
+    // The attacker's sign-in at the issuer gives a real code; it is delivered with the right state.
+    let attackers_code = callback_with_code(&auth);
+    assert!(attackers_code.query().unwrap().contains("code="));
+    assert_eq!(foreign(&attackers_code).status, 403);
+    assert_eq!(
+        foreign(&with_query(
+            &callback_of(&auth),
+            &format!("code=made-up&state={state}")
+        ))
+        .status,
+        403
+    );
+    assert!(
+        rig.idp().token_grants().is_empty(),
+        "a code was exchanged: {:?}",
+        rig.idp().token_grants()
+    );
+    // The sign-in is still waiting, and the person's own callback completes it, as themselves.
+    let back = get(&callback_with_code(&auth));
+    assert_eq!(back.status, 200, "{}", back.body);
+    let out = live.finish();
+    assert_eq!(out.code, 0, "{}", out.stderr);
+    assert!(out.stdout.contains("as alice"), "{}", out.stdout);
+    assert_eq!(rig.idp().token_grants(), ["authorization_code"]);
+    // One note, once, and it names nobody.
+    assert_eq!(
+        out.stderr
+            .matches("a connection from another user of this machine was refused")
+            .count(),
+        1,
+        "{}",
+        out.stderr
+    );
+    assert_no_secrets(&rig, &out, Some(&auth));
+    assert_no_ticket(&out, &start);
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn what_another_user_sends_counts_for_nothing_and_every_route_is_refused() {
+    if !root_only("what_another_user_sends_counts_for_nothing_and_every_route_is_refused") {
+        return;
+    }
+    let rig = Rig::start("foreign-bound");
+    rig.idp().set_login("alice", &all_permissions());
+    let (path, _calls) = fake_opener(&rig);
+    let mut live = rig.login_env(&["--timeout", "60"], &[("PATH", &path)]);
+    let start = live.url();
+    let base = format!("http://127.0.0.1:{}", start.port().unwrap());
+    // Every route, wrong or right, and more of them than the bound: 403 each, and none of them counts.
+    let ticket_path = start.path().to_owned();
+    let mut urls: Vec<String> = vec![
+        format!("{base}{ticket_path}"),
+        format!("{base}/callback?code=c&state=x"),
+        format!("{base}/"),
+        format!("{base}/start/wrong"),
+    ];
+    for i in 0..70 {
+        urls.push(format!("{base}/other-{i}"));
+    }
+    let refs: Vec<&str> = urls.iter().map(String::as_str).collect();
+    let statuses = foreign_statuses(&refs);
+    assert_eq!(statuses.len(), urls.len());
+    assert!(statuses.iter().all(|s| *s == 403), "{statuses:?}");
+    // Still waiting, the ticket unused and the bound not spent: the person's own sign-in goes through.
+    let mine = get(&start);
+    assert_eq!(mine.status, 302);
+    let auth = Url::parse(header(&mine, "location").unwrap()).unwrap();
+    assert_eq!(get(&callback_with_code(&auth)).status, 200);
+    let out = live.finish();
+    assert_eq!(out.code, 0, "{}", out.stderr);
+    assert_eq!(
+        out.stderr
+            .matches("a connection from another user of this machine was refused")
+            .count(),
+        1,
+        "{}",
+        out.stderr
+    );
+    assert!(rig.idp().token_grants() == ["authorization_code"]);
+}

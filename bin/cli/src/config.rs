@@ -15,9 +15,12 @@
 //! * **No error here holds the file's text**: a parse error of a YAML library can quote a value, and the value is the token.
 //! * **What [`save`] accepts, [`load`] reads**: a file longer than [`MAX_FILE_BYTES`] is refused by `load`, so `save` refuses to write
 //!   one (and the tokens that go in are bounded: 16 KiB each, a few scopes, so a refresh cannot make a file the next command
-//!   refuses). A file that is ours (owner, mode, link and type pass) but too large or not a configuration is **replaceable**:
-//!   [`load_replaceable`] says so, and `login` writes over it and `logout` removes it; every other command still refuses it.
-//! * **One writer at a time**: [`lock`] is an advisory `flock` on `<file>.lock` (mode `0600`, never removed, opened without following
+//!   refuses).
+//! * **A file that is not ours to judge is never deleted and never overwritten.** A file that passes the owner, mode, link and type
+//!   checks but is too large, is not YAML or is a mapping with keys `aapctl` does not use (a kubeconfig, a private key that happens
+//!   to parse, someone's notes) is *unusable*: every command refuses it, and `login --force` and `logout --force` **move it aside**
+//!   to `<file>.unusable-<unix seconds>` (same directory, same mode, refused if that name exists) and go on. Nothing is unlinked.
+//! * **One writer at a time**: [`lock`] and [`lock_async`] take an advisory `flock` on `<file>.lock` (mode `0600`, never removed, opened without following
 //!   a link) around a read-compare-write, so a refresh that races a logout or another refresh finds what the other wrote.
 //! * There is no keyring: none is in the lockfile (P-031). The token is in this file and in `AAPCTL_TOKEN`, never in an argument.
 
@@ -54,7 +57,7 @@ impl Env {
 
 /// What the file holds.
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct Config {
     /// The Platform API's address.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -114,19 +117,21 @@ pub fn load(path: &Path) -> Result<Config, String> {
     read(path).map_err(|why| match why {
         Unreadable::Refused(why) => why,
         Unreadable::Unusable(why) => {
-            format!("{why}: `aapctl logout` removes it and `aapctl login` writes a new one")
+            format!(
+                "{why}: it is not used and not changed; `aapctl logout --force` moves it aside (nothing is deleted) and `aapctl login --force` moves it aside and writes a new one"
+            )
         }
     })
 }
 
-/// [`load`] for the two commands that may replace a file: `Ok((config, Some(why)))` for a file that is ours (the owner, the mode, the
-/// link and the type were checked) but is too large or is not a configuration, with an empty configuration in its place; the
-/// sentence says what was wrong with it. A file that fails a check is still an error.
+/// [`load`] for the two commands that may move a file aside (`--force`): `Ok((config, Some(why)))` for a file that is ours (the
+/// owner, the mode, the link and the type were checked) but is too large or is not a configuration, with an empty configuration in
+/// its place; the sentence says what is wrong with it, never what it holds. A file that fails a check is still an error.
 ///
 /// # Errors
 ///
 /// As [`load`], for everything but an unusable content.
-pub fn load_replaceable(path: &Path) -> Result<(Config, Option<String>), String> {
+pub fn load_lenient(path: &Path) -> Result<(Config, Option<String>), String> {
     match read(path) {
         Ok(config) => Ok((config, None)),
         Err(Unreadable::Unusable(why)) => Ok((Config::default(), Some(why))),
@@ -166,7 +171,7 @@ fn read(path: &Path) -> Result<Config, Unreadable> {
     }
     serde_yaml::from_str(&text).map_err(|_| {
         Unreadable::Unusable(format!(
-            "{} is not an aapctl configuration (a YAML mapping: server, accessToken, expiresAt, issuer, clientId, scopes, refreshToken, tokenSource)",
+            "{} is not an aapctl configuration (a YAML mapping with only the keys server, accessToken, expiresAt, issuer, clientId, scopes, refreshToken, tokenSource)",
             path.display()
         ))
     })
@@ -175,17 +180,29 @@ fn read(path: &Path) -> Result<Config, Unreadable> {
 /// The most a configuration file may hold, and so the most [`save`] writes.
 pub const MAX_FILE_BYTES: u64 = 64 * 1024;
 
-/// Remove a configuration file that [`load_replaceable`] found unusable. A missing file is not an error.
+/// Move an unusable configuration file aside, to `<file>.unusable-<unix seconds>` in the same directory (the mode goes with it). The
+/// file is renamed, never unlinked, and a name that exists is not taken. A missing file is not an error (`None`).
 ///
 /// # Errors
 ///
 /// A sentence for exit 2.
-pub fn remove(path: &Path) -> Result<(), String> {
-    match std::fs::remove_file(path) {
-        Ok(()) => Ok(()),
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
+pub fn move_aside(path: &Path, seconds: i64) -> Result<Option<PathBuf>, String> {
+    let mut name = path
+        .file_name()
+        .map_or_else(|| OsString::from("config"), OsString::from);
+    name.push(format!(".unusable-{seconds}"));
+    let target = path.with_file_name(name);
+    if target.symlink_metadata().is_ok() {
+        return Err(format!(
+            "{} exists already: the configuration file was not moved; remove or rename that one first",
+            target.display()
+        ));
+    }
+    match std::fs::rename(path, &target) {
+        Ok(()) => Ok(Some(target)),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
         Err(e) => Err(format!(
-            "{}: cannot remove it: {}",
+            "{}: cannot move it aside: {}",
             path.display(),
             e.kind()
         )),
@@ -373,6 +390,41 @@ pub fn lock(config: &Path) -> Result<Lock, LockError> {
 /// As [`lock`].
 #[cfg(unix)]
 pub fn lock_for(config: &Path, wait: std::time::Duration) -> Result<Lock, LockError> {
+    let file = open_lock(config)?;
+    let started = std::time::Instant::now();
+    loop {
+        if try_flock(&file, config)? {
+            return Ok(Lock { _file: Some(file) });
+        }
+        if started.elapsed() >= wait {
+            return Err(LockError::Busy);
+        }
+        std::thread::sleep(std::time::Duration::from_millis(20));
+    }
+}
+
+/// [`lock`] for code that runs on the runtime: the wait is an async sleep and holds no thread of it.
+///
+/// # Errors
+///
+/// As [`lock`].
+#[cfg(unix)]
+pub async fn lock_async(config: &Path) -> Result<Lock, LockError> {
+    let file = open_lock(config)?;
+    let started = tokio::time::Instant::now();
+    loop {
+        if try_flock(&file, config)? {
+            return Ok(Lock { _file: Some(file) });
+        }
+        if started.elapsed() >= LOCK_WAIT {
+            return Err(LockError::Busy);
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+    }
+}
+
+#[cfg(unix)]
+fn open_lock(config: &Path) -> Result<std::fs::File, LockError> {
     use std::os::unix::fs::{MetadataExt, OpenOptionsExt};
     let path = lock_path(config);
     let shown = path.display();
@@ -413,23 +465,20 @@ pub fn lock_for(config: &Path, wait: std::time::Duration) -> Result<Lock, LockEr
             "{shown} is not a regular file of yours: the lock is not taken on it"
         )));
     }
-    let started = std::time::Instant::now();
-    loop {
-        match rustix::fs::flock(&file, rustix::fs::FlockOperation::NonBlockingLockExclusive) {
-            Ok(()) => return Ok(Lock { _file: Some(file) }),
-            Err(e) if e == rustix::io::Errno::WOULDBLOCK || e == rustix::io::Errno::INTR => {
-                if started.elapsed() >= wait {
-                    return Err(LockError::Busy);
-                }
-                std::thread::sleep(std::time::Duration::from_millis(20));
-            }
-            Err(e) => {
-                return Err(LockError::Failed(format!(
-                    "{shown}: cannot lock it: {}",
-                    std::io::Error::from(e).kind()
-                )));
-            }
-        }
+    Ok(file)
+}
+
+/// One try at the lock: `Ok(true)` taken, `Ok(false)` held by another.
+#[cfg(unix)]
+fn try_flock(file: &std::fs::File, config: &Path) -> Result<bool, LockError> {
+    match rustix::fs::flock(file, rustix::fs::FlockOperation::NonBlockingLockExclusive) {
+        Ok(()) => Ok(true),
+        Err(e) if e == rustix::io::Errno::WOULDBLOCK || e == rustix::io::Errno::INTR => Ok(false),
+        Err(e) => Err(LockError::Failed(format!(
+            "{}: cannot lock it: {}",
+            lock_path(config).display(),
+            std::io::Error::from(e).kind()
+        ))),
     }
 }
 
@@ -440,6 +489,16 @@ pub fn lock_for(config: &Path, wait: std::time::Duration) -> Result<Lock, LockEr
 /// Never.
 #[cfg(not(unix))]
 pub fn lock_for(_config: &Path, _wait: std::time::Duration) -> Result<Lock, LockError> {
+    Ok(Lock { _file: None })
+}
+
+/// [`lock_async`] where there is no `flock`.
+///
+/// # Errors
+///
+/// Never.
+#[cfg(not(unix))]
+pub async fn lock_async(_config: &Path) -> Result<Lock, LockError> {
     Ok(Lock { _file: None })
 }
 
@@ -570,12 +629,12 @@ mod tests {
             "{error}"
         );
         // It is ours, so a login or a logout may replace it; one that fails a check is not.
-        let (config, why) = load_replaceable(&big).unwrap();
+        let (config, why) = load_lenient(&big).unwrap();
         assert_eq!(config, Config::default());
         assert!(why.unwrap().contains("far larger"));
         std::fs::set_permissions(&big, std::fs::Permissions::from_mode(0o644)).unwrap();
         assert!(
-            load_replaceable(&big)
+            load_lenient(&big)
                 .unwrap_err()
                 .contains("readable by group or others")
         );
@@ -584,16 +643,49 @@ mod tests {
         std::fs::write(&odd, "- a\n- b\n").unwrap();
         std::fs::set_permissions(&odd, std::fs::Permissions::from_mode(0o600)).unwrap();
         assert!(
-            load_replaceable(&odd)
+            load_lenient(&odd)
                 .unwrap()
                 .1
                 .unwrap()
                 .contains("not an aapctl configuration")
         );
         assert_eq!(
-            load_replaceable(&d.join("none.yaml")).unwrap(),
+            load_lenient(&d.join("none.yaml")).unwrap(),
             (Config::default(), None)
         );
+    }
+
+    #[test]
+    fn a_mapping_with_keys_that_are_not_ours_is_unusable_and_move_aside_never_unlinks() {
+        let d = dir("foreign-keys");
+        let path = d.join("config.yaml");
+        std::fs::write(&path, "apiVersion: v1\nkind: Config\n").unwrap();
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600)).unwrap();
+        let error = load(&path).unwrap_err();
+        assert!(error.contains("aapctl logout --force"), "{error}");
+        assert!(!error.contains("apiVersion"), "{error}");
+        let (config, why) = load_lenient(&path).unwrap();
+        assert_eq!(config, Config::default());
+        assert!(why.is_some());
+        // Moved, with its content and its mode, to a name made from the seconds; a name that exists is refused and nothing moves.
+        let taken = d.join("config.yaml.unusable-7");
+        std::fs::write(&taken, "mine").unwrap();
+        assert!(move_aside(&path, 7).unwrap_err().contains("exists already"));
+        assert!(path.exists());
+        assert_eq!(std::fs::read_to_string(&taken).unwrap(), "mine");
+        let to = move_aside(&path, 8).unwrap().unwrap();
+        assert_eq!(to, d.join("config.yaml.unusable-8"));
+        assert_eq!(
+            std::fs::read_to_string(&to).unwrap(),
+            "apiVersion: v1\nkind: Config\n"
+        );
+        assert_eq!(
+            std::fs::metadata(&to).unwrap().permissions().mode() & 0o777,
+            0o600
+        );
+        assert!(!path.exists());
+        // Nothing there: nothing moved, no error.
+        assert_eq!(move_aside(&path, 9).unwrap(), None);
     }
 
     #[test]

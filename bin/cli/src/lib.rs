@@ -19,6 +19,7 @@ mod config;
 mod failure;
 mod forms;
 mod load;
+mod peer;
 mod remote;
 mod signin;
 mod skew;
@@ -82,7 +83,7 @@ enum Command {
     /// sign-in did not happen.
     Login(remote::LoginArgs),
     /// Forget the kept tokens (and revoke the refresh token at the issuer, once, if it says where), and keep the server.
-    Logout(remote::Conn),
+    Logout(remote::LogoutArgs),
 }
 
 /// The settings the operator takes from its flags and environment (`bin/operator`'s `run` arguments), with its defaults. The
@@ -251,7 +252,7 @@ where
         Command::Export(a) => remote::export(&a, out, err),
         Command::Whoami(c) => remote::whoami(&c, out, err),
         Command::Login(a) => remote::login(&a, stdin, out, err),
-        Command::Logout(c) => remote::logout(&c, out, err),
+        Command::Logout(a) => remote::logout(&a, out, err),
         Command::Validate(a) => {
             let (loaded, settings) =
                 match read(&a.input, &a.deployment, PLACEHOLDER_OWNER_UID, stdin) {

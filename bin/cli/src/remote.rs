@@ -191,6 +191,21 @@ pub struct LoginArgs {
     /// How long to wait for the browser to come back, in seconds (1 to 3600).
     #[arg(long, value_name = "SECONDS", default_value_t = 300, value_parser = clap::value_parser!(u64).range(1..=3600))]
     timeout: u64,
+    /// If the configuration file is one aapctl cannot use (too large, not YAML, keys that are not its own: a kubeconfig, say), move it
+    /// aside to `<file>.unusable-<unix seconds>` and go on. Without this such a file is never changed. Nothing is deleted.
+    #[arg(long)]
+    force: bool,
+    #[command(flatten)]
+    conn: Conn,
+}
+
+/// `aapctl logout`.
+#[derive(Debug, Args)]
+pub struct LogoutArgs {
+    /// If the configuration file is one aapctl cannot use (too large, not YAML, keys that are not its own), move it aside to
+    /// `<file>.unusable-<unix seconds>`. Without this such a file is never changed. Nothing is deleted.
+    #[arg(long)]
+    force: bool,
     #[command(flatten)]
     conn: Conn,
 }
@@ -214,7 +229,8 @@ enum Origin {
 struct Refresher {
     path: PathBuf,
     config: RefCell<Config>,
-    /// A refresh is tried at most once in a command: before the call when the token was about to expire, or after a `401`.
+    /// A refresh is attempted at most once in a command, whatever its outcome: before the call when the token was about to expire, or
+    /// after a `401`.
     tried: Cell<bool>,
 }
 
@@ -294,11 +310,13 @@ fn open(conn: &Conn, env: &Env, err: &mut dyn Write) -> Result<Session, Failure>
             // About to expire: the refresh token is used before the call, once.
             let mut text = saved;
             if let (Some(p), true) = (&path, signin::needs_refresh(&config)) {
+                // One attempt per command, whatever comes of it: a refresh that timed out may have been processed (and the refresh token
+                // rotated), so a `401` later is the answer, not a reason to spend the old token a second time.
+                tried = true;
                 match block_on(signin::refresh_config(p, &config, conn.verbose, &mut *err))? {
                     Ok(new) => {
                         text = new.access_token.clone().unwrap_or(text);
                         config = new;
-                        tried = true;
                     }
                     // The sign-in is over, whatever the token says: that is never hidden.
                     Err(e) if e.grant_gone => return Err(e.failure),
@@ -639,8 +657,13 @@ fn token_claims(token: &str) -> Option<Value> {
 /// characters. The Platform API's `GET /v1/me` answers permissions only (the `Me` schema of `docs/api/platform-api-v1.openapi.json`
 /// has no subject), so the person is shown what the API has just accepted, as the token names it.
 pub(crate) fn token_subject(token: &str) -> String {
-    token_claims(token)
-        .and_then(|c| c.get("sub").and_then(Value::as_str).map(clean))
+    let Some(claims) = token_claims(token) else {
+        return "an unknown subject (the token is not a JWT)".to_owned();
+    };
+    claims
+        .get("sub")
+        .and_then(Value::as_str)
+        .map(clean)
         .filter(|s| !s.is_empty())
         .map_or_else(
             || "an unknown subject (the token has no sub claim)".to_owned(),
@@ -833,13 +856,37 @@ fn take_lock(path: &Path) -> Result<config::Lock, Failure> {
     })
 }
 
-/// A note that the file in the way is replaced, for a login over a file that is ours and no use.
-fn say_replaced(err: &mut dyn Write, unusable: Option<&str>) {
-    if let Some(why) = unusable {
+/// A file that is ours and no use is never changed unless the person said `--force`: `Err` (exit 2, and what the file looks like in one
+/// clause, never what it holds) without it.
+fn refuse_unusable(why: &str, force: bool) -> Result<(), Failure> {
+    if force {
+        return Ok(());
+    }
+    Err(Failure::usage(format!(
+        "{}: it was not changed; --force moves it aside to <file>.unusable-<time> (nothing is deleted) and goes on",
+        clean(why)
+    )))
+}
+
+/// Read the file again, under the lock, as what a write is about to replace: a good file as it is; an unusable one (and `--force`)
+/// moved aside, never unlinked, with the empty configuration in its place. `Err` for an unusable one without `--force`: it became
+/// one after the first read.
+fn load_under_lock(path: &Path, force: bool) -> Result<(Config, Option<PathBuf>), Failure> {
+    let (config, unusable) = config::load_lenient(path).map_err(Failure::usage)?;
+    let Some(why) = unusable else {
+        return Ok((config, None));
+    };
+    refuse_unusable(&why, force)?;
+    let moved = config::move_aside(path, now_seconds()).map_err(Failure::usage)?;
+    Ok((config, moved))
+}
+
+fn say_moved(out: &mut dyn Write, moved: Option<&Path>) {
+    if let Some(to) = moved {
         let _ = writeln!(
-            err,
-            "note: {}: it is replaced when this sign-in succeeds",
-            clean(why)
+            out,
+            "the configuration file was one aapctl cannot use: it was moved aside to {} (nothing was deleted)",
+            clean(&to.display().to_string())
         );
     }
 }
@@ -847,7 +894,7 @@ fn say_replaced(err: &mut dyn Write, unusable: Option<&str>) {
 /// `aapctl login`.
 pub fn login(a: &LoginArgs, stdin: &mut dyn Read, out: &mut dyn Write, err: &mut dyn Write) -> u8 {
     let result = if a.token_stdin {
-        login_token_stdin(a, stdin, out, err)
+        login_token_stdin(a, stdin, out)
     } else {
         login_browser(a, out, err)
     };
@@ -877,7 +924,6 @@ fn login_token_stdin(
     a: &LoginArgs,
     stdin: &mut dyn Read,
     out: &mut dyn Write,
-    err: &mut dyn Write,
 ) -> Result<(), Failure> {
     let mut text = String::new();
     stdin
@@ -894,7 +940,10 @@ fn login_token_stdin(
 
     let env = Env::process();
     let path = config_path(&a.conn, &env)?;
-    let (stored, unusable) = config::load_replaceable(&path).map_err(Failure::usage)?;
+    let (stored, unusable) = config::load_lenient(&path).map_err(Failure::usage)?;
+    if let Some(why) = &unusable {
+        refuse_unusable(why, a.force)?;
+    }
     let server = a
         .conn
         .server
@@ -911,12 +960,12 @@ fn login_token_stdin(
     let expires = token_expiry(token.expose());
     // The file is read again under the lock: what is replaced is what is there now.
     let lock = take_lock(&path)?;
-    let (mut stored, _) = config::load_replaceable(&path).map_err(Failure::usage)?;
-    let earlier = stored.clone();
+    let (mut stored, moved) = load_under_lock(&path, a.force)?;
     stored.server = Some(server.clone());
     stored.access_token = Some(token.expose().to_owned());
     stored.expires_at = expires;
-    // A pasted token has no refresh token: the one of an earlier sign-in belonged to another token.
+    // A pasted token has no refresh token: the one of an earlier sign-in belonged to another token. It is forgotten here and not
+    // revoked: RFC 7009 section 2.1 lets a server end every token of the same grant, and a session may be shared with the next sign-in.
     stored.refresh_token = None;
     stored.token_source = Some(PASTED.to_owned());
     config::save(&path, &stored).map_err(Failure::usage)?;
@@ -928,29 +977,8 @@ fn login_token_stdin(
         permissions_line(&permissions),
         expiry_text(expires)
     );
-    // The refresh token that was saved is not used again: the issuer is told, once, and a failure is a note.
-    revoke_replaced(&earlier, a.conn.verbose, out, err);
-    if let Some(why) = unusable {
-        let _ = writeln!(err, "note: {}: it was replaced", clean(&why));
-    }
+    say_moved(out, moved.as_deref());
     Ok(())
-}
-
-/// Revoke the refresh token a file held before a new sign-in replaced it, at the issuer it was bound to.
-fn revoke_replaced(earlier: &Config, verbose: bool, out: &mut dyn Write, err: &mut dyn Write) {
-    if earlier.refresh_token.is_none() {
-        return;
-    }
-    match block_on(signin::revoke_saved(earlier, verbose, &mut *err)) {
-        Ok(result) => signin::say_revocation(
-            "the refresh token of the earlier sign-in",
-            result,
-            false,
-            out,
-            err,
-        ),
-        Err(failure) => failure.print(err),
-    }
 }
 
 /// An address that is a value of the file: bounded, so what is written is what is read back.
@@ -967,8 +995,16 @@ fn check_address(flag: &str, value: &str) -> Result<(), Failure> {
 fn login_browser(a: &LoginArgs, out: &mut dyn Write, err: &mut dyn Write) -> Result<(), Failure> {
     let env = Env::process();
     let path = config_path(&a.conn, &env)?;
-    let (stored, unusable) = config::load_replaceable(&path).map_err(Failure::usage)?;
-    say_replaced(&mut *err, unusable.as_deref());
+    let (stored, unusable) = config::load_lenient(&path).map_err(Failure::usage)?;
+    // Before anything is opened: a file that will not be changed without `--force` is no reason to make the person sign in.
+    if let Some(why) = &unusable {
+        refuse_unusable(why, a.force)?;
+        let _ = writeln!(
+            err,
+            "note: {}: with --force it is moved aside when this sign-in succeeds",
+            clean(why)
+        );
+    }
     let server = a
         .conn
         .server
@@ -1061,11 +1097,11 @@ fn login_browser(a: &LoginArgs, out: &mut dyn Write, err: &mut dyn Write) -> Res
             return Err(failure);
         }
     };
-    let earlier = match config::load_replaceable(&path) {
-        Ok((earlier, _)) => earlier,
-        Err(why) => {
+    let moved = match load_under_lock(&path, a.force) {
+        Ok((_, moved)) => moved,
+        Err(failure) => {
             drop_refresh_token(&plan, &tokens, a.conn.verbose, out, err);
-            return Err(Failure::usage(why));
+            return Err(failure);
         }
     };
     let saved = Config {
@@ -1101,8 +1137,9 @@ fn login_browser(a: &LoginArgs, out: &mut dyn Write, err: &mut dyn Write) -> Res
             "no refresh token: sign in again when the access token expires (the issuer may give one for --scope offline_access)"
         }
     );
-    // The refresh token this one replaced is not used again.
-    revoke_replaced(&earlier, a.conn.verbose, out, err);
+    // The refresh token this one replaced is not revoked: RFC 7009 section 2.1 lets a server end every token of the same grant, and a
+    // second sign-in in a browser that still has its session may share it. It lives until it expires or the session ends.
+    say_moved(out, moved.as_deref());
     Ok(())
 }
 
@@ -1133,56 +1170,65 @@ fn drop_refresh_token(
 }
 
 /// `aapctl logout`.
-pub fn logout(conn: &Conn, out: &mut dyn Write, err: &mut dyn Write) -> u8 {
+pub fn logout(a: &LogoutArgs, out: &mut dyn Write, err: &mut dyn Write) -> u8 {
+    let conn = &a.conn;
     let result = (|| -> Result<(), Failure> {
         let env = Env::process();
         let Some(path) = conn.config.clone().or_else(|| config::default_path(&env)) else {
             let _ = writeln!(out, "not signed in: there is no configuration file");
             return Ok(());
         };
-        let (stored, unusable) = config::load_replaceable(&path).map_err(Failure::usage)?;
-        if let Some(why) = unusable {
-            // Ours (the owner, the mode, the link and the type were checked) and no use to anyone: it is removed, and the person is told.
-            let _lock = take_lock(&path)?;
-            config::remove(&path).map_err(Failure::usage)?;
-            let _ = writeln!(
-                out,
-                "removed the configuration file, which aapctl could not use ({})",
-                clean(&why)
-            );
-        } else if stored.access_token.is_none() && stored.refresh_token.is_none() {
+        let (first, unusable) = config::load_lenient(&path).map_err(Failure::usage)?;
+        if let Some(why) = &unusable {
+            // Not ours to judge: it is left as it is, and the person is told how to get it out of the way.
+            refuse_unusable(why, a.force)?;
+        }
+        if unusable.is_none() && first.access_token.is_none() && first.refresh_token.is_none() {
             let _ = writeln!(out, "not signed in: the configuration file holds no token");
         } else {
             let lock = take_lock(&path)?;
-            // What is forgotten is what is there now: another aapctl may have refreshed, or signed out, since the first read.
-            let mut stored = config::load(&path).map_err(Failure::usage)?;
-            let before = stored.clone();
-            if before.access_token.is_none() && before.refresh_token.is_none() {
-                let _ = writeln!(out, "not signed in: the configuration file holds no token");
-            } else {
-                stored.access_token = None;
-                stored.expires_at = None;
-                stored.refresh_token = None;
-                stored.token_source = None;
-                // Forgotten here first: a revocation that fails must not leave the token behind.
-                config::save(&path, &stored).map_err(Failure::usage)?;
+            // What is acted on is what is there now: another aapctl may have refreshed, signed out or signed in since the first read.
+            let (mut stored, now_unusable) = config::load_lenient(&path).map_err(Failure::usage)?;
+            if let Some(why) = now_unusable {
+                refuse_unusable(&why, a.force)?;
+                let moved = config::move_aside(&path, now_seconds()).map_err(Failure::usage)?;
                 drop(lock);
-                let _ = writeln!(
-                    out,
-                    "signed out of {}",
-                    stored
-                        .server
-                        .as_deref()
-                        .map_or_else(|| "the server".to_owned(), clean)
-                );
-                if before.refresh_token.is_some() {
-                    // Once, bounded, and only when the issuer says where. A failure is a note: the person is signed out here either
-                    // way. The access token stays valid until it expires: nothing revokes it.
-                    match block_on(signin::revoke_saved(&before, conn.verbose, &mut *err)) {
-                        Ok(result) => {
-                            signin::say_revocation("the refresh token", result, false, out, err);
+                say_moved(out, moved.as_deref());
+            } else {
+                let before = stored.clone();
+                if before.access_token.is_none() && before.refresh_token.is_none() {
+                    let _ = writeln!(out, "not signed in: the configuration file holds no token");
+                } else {
+                    stored.access_token = None;
+                    stored.expires_at = None;
+                    stored.refresh_token = None;
+                    stored.token_source = None;
+                    // Forgotten here first: a revocation that fails must not leave the token behind.
+                    config::save(&path, &stored).map_err(Failure::usage)?;
+                    drop(lock);
+                    let _ = writeln!(
+                        out,
+                        "signed out of {}",
+                        stored
+                            .server
+                            .as_deref()
+                            .map_or_else(|| "the server".to_owned(), clean)
+                    );
+                    if before.refresh_token.is_some() {
+                        // Once, bounded, and only when the issuer says where. A failure is a note: the person is signed out here either
+                        // way. The access token stays valid until it expires: nothing revokes it.
+                        match block_on(signin::revoke_saved(&before, conn.verbose, &mut *err)) {
+                            Ok(result) => {
+                                signin::say_revocation(
+                                    "the refresh token",
+                                    result,
+                                    false,
+                                    out,
+                                    err,
+                                );
+                            }
+                            Err(failure) => failure.print(err),
                         }
-                        Err(failure) => failure.print(err),
                     }
                 }
             }

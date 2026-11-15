@@ -429,3 +429,37 @@ async fn padding_makes_the_tokens_as_large_as_a_test_says() {
     assert!(answer["access_token"].as_str().unwrap().len() > 5_000);
     assert!(answer["refresh_token"].as_str().unwrap().len() > 3_000);
 }
+
+#[tokio::test]
+async fn a_held_refresh_is_counted_at_once_and_answered_when_the_test_lets_it_go() {
+    let idp = TestIdp::start().await;
+    idp.seed_refresh_token("r-seeded", "aapctl", "alice", &["user"]);
+    idp.set_hold_refresh(true);
+    let url = format!("{}/token", idp.issuer());
+    let pending = tokio::spawn(async move {
+        http()
+            .post(url)
+            .form(&[
+                ("grant_type", "refresh_token"),
+                ("refresh_token", "r-seeded"),
+                ("client_id", "aapctl"),
+            ])
+            .send()
+            .await
+            .unwrap()
+            .status()
+            .as_u16()
+    });
+    // The request is in, and counted, while it is held: an event a test can wait on.
+    while idp.token_grants().is_empty() {
+        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+    }
+    tokio::time::sleep(std::time::Duration::from_millis(150)).await;
+    assert!(
+        !pending.is_finished(),
+        "the refresh was answered while held"
+    );
+    idp.set_hold_refresh(false);
+    assert_eq!(pending.await.unwrap(), 200);
+    assert_eq!(idp.token_grants(), ["refresh_token"]);
+}

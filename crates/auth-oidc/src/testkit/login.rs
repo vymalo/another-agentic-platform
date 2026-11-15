@@ -58,6 +58,7 @@ struct State_ {
     challenge_override: Option<String>,
     revocation: bool,
     revoke_fails: bool,
+    hold_refresh: bool,
     patch: Option<Value>,
     pad_access: usize,
     pad_refresh: usize,
@@ -87,6 +88,7 @@ impl Default for State_ {
             challenge_override: None,
             revocation: false,
             revoke_fails: false,
+            hold_refresh: false,
             patch: None,
             pad_access: 0,
             pad_refresh: 0,
@@ -273,8 +275,18 @@ fn access_token(state: &mut State_, issuer: &str, sub: &str, roles: &[String]) -
 pub(super) async fn token(State(shared): State<Arc<Shared>>, body: Bytes) -> Response {
     let form: HashMap<String, String> = url::form_urlencoded::parse(&body).into_owned().collect();
     let get = |k: &str| form.get(k).map_or("", String::as_str).to_owned();
+    let held = {
+        let mut state = shared.login.lock();
+        state.grants.push(get("grant_type"));
+        state.hold_refresh && get("grant_type") == "refresh_token"
+    };
+    // A refresh request is held, after it was counted, until the test lets it go (`set_hold_refresh(false)`).
+    if held {
+        while shared.login.lock().hold_refresh {
+            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        }
+    }
     let mut state = shared.login.lock();
-    state.grants.push(get("grant_type"));
     let (sub, roles, scope) = match get("grant_type").as_str() {
         "authorization_code" => {
             state.seen_verifiers.push(get("code_verifier"));
@@ -437,6 +449,12 @@ impl TestIdp {
         let mut state = self.shared.login.lock();
         state.pad_access = access;
         state.pad_refresh = refresh;
+    }
+
+    /// Holds every refresh grant, once `token_grants` counts it, until this is called again with `false`: a slow issuer, and an observable
+    /// moment (the request is in) for a test that needs the client to be waiting on it.
+    pub fn set_hold_refresh(&self, hold: bool) {
+        self.shared.login.lock().hold_refresh = hold;
     }
 
     /// Advertises `revocation_endpoint` (and serves `/revoke`), and makes it answer `500` when `fails`.

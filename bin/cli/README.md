@@ -23,7 +23,7 @@ cargo run -q -p aap-cli -- render -f examples/ --default-agent-image ghcr.io/exa
 | `aapctl export agent <name>` | What `GET /v1/agents/{name}/yaml` serves, unchanged: `apply` reads it back as `unchanged` |
 | `aapctl whoami` | The server, the permissions of the token (`GET /v1/me`) and when it expires |
 | `aapctl login --token-stdin` | Read an access token from standard input (at most 16 KiB), ask the server, and keep it in the config file. Plain `login` is the browser sign-in below |
-| `aapctl logout` | Forget the kept token, keep the server |
+| `aapctl logout [--force]` | Forget the kept tokens, keep the server. A file that is not aapctl's is never deleted: `--force` moves it aside to `<file>.unusable-<time>` |
 | `aapctl version`, `aapctl --help` | |
 
 The documents are `AgentService`, `AgentConfig`, `ModelEndpoint` and `ToolProvider` of `agents.vymalo.com/v1alpha1`. A
@@ -212,16 +212,22 @@ OAuth 2.0 **authorization code with PKCE** (`S256`) for a **public client** (no 
 `http://127.0.0.1:<port>/callback`, as RFC 8252 describes for a desktop app. What it needs of the realm: a **public client** named
 as `--client-id` (default `aapctl`) with the standard flow, **PKCE `S256` required**, the redirect `http://127.0.0.1/*`, and **an
 audience mapper** that puts the Platform API's audience in its access tokens (P-030; without it the API answers `401` and the message
-says the audience is the likeliest cause, and nothing is kept). Requiring PKCE is what makes a leaked `state` harmless.
+says the audience is the likeliest cause, and nothing is kept). Requiring PKCE protects the code if it leaks on its way to the listener; **it does not stop the injection of a code bound to a leaked challenge** (see *What a local user and a web page can still do*).
 
 **What is printed, and what the browser is given.** With a browser (the default) the opener (`xdg-open`, `open` or `rundll32`) is
-given **`http://127.0.0.1:<port>/start/<ticket>`**, 32 random bytes, and **that link is what is printed on standard error**; the
-listener answers the first request for it with a `302` to the issuer. The authorization URL holds the `state` and the challenge, so
-it is **never an argument of a process** (`ps` shows arguments to every user of the machine: one who read the `state` could start a
-sign-in of their own and have the code come to your listener). The ticket is the one thing in an argument; a local user who reads
-it and uses it first makes the sign-in fail (a second use of the link is exit 4, "the sign-in link was opened twice", and you sign
-in again or use `--no-browser`) and cannot make it theirs. With **`--no-browser`** nothing is opened, there is no `/start` route and
-**the authorization URL is printed** on standard error: it is your terminal. Open it in a browser on the same machine.
+given **`http://127.0.0.1:<port>/start/<ticket>`**, 32 random bytes; the listener answers a request for it with a `302` to the
+issuer. The authorization URL holds the `state` and the challenge, so it is **never an argument of a process** (`ps` shows arguments
+to every user of the machine). **That is all the ticket does**: it keeps the URL out of the process list. On Linux the **listener
+serves only your own processes**: it reads `/proc/net/tcp` for the owner of each client socket and answers another user's with a
+`403` ("this sign-in belongs to another user of this machine") that counts for nothing (not toward the bound, not against the
+ticket); one note on standard error says it happened, once. So another user of the machine can neither use the link nor deliver a
+callback, and a second request for the link from your own processes (a prefetch, a second click) is answered like the first. **Where
+the listener cannot check** (not Linux, a restricted `/proc`) `login` says so ("this system does not let aapctl check who connects
+to the sign-in listener: on a machine shared with other users, use --no-browser"); the ticket is then the only protection, it only
+wins a race against your own browser, a second use of it ends the sign-in (exit 4, "the sign-in link was opened twice") and the link
+is **not printed** (you are told "Opening the browser. If no browser opens, run again with --no-browser"). With **`--no-browser`**
+nothing is opened, there is no `/start` route and **the authorization URL is printed** on standard error: it is your terminal. Open
+it in a browser on the same machine.
 
 | Flag | Meaning |
 |---|---|
@@ -230,6 +236,7 @@ in again or use `--no-browser`) and cannot make it theirs. With **`--no-browser`
 | `--client-id` | The public client. The file's, else `aapctl` |
 | `--scope` | Repeatable, at most 32. The file's, else `openid`. **`offline_access` is not asked unless you pass it** (P-036): a refresh token that outlives the session is a larger credential, and it is yours to choose; without one, a sign-in lasts as long as the access token |
 | `--no-browser` | Do not open a browser, and print the authorization URL |
+| `--force` | A configuration file that is not `aapctl`'s (too large, not YAML, keys of another tool) is moved aside to `<file>.unusable-<unix seconds>` and the sign-in goes on; without it such a file is never changed (exit 2). Nothing is deleted |
 | `--timeout` | Seconds to wait for the browser, 1 to 3600, default 300. No sign-in in time is exit 4, and nothing is saved |
 
 **What it does.** Discovers the issuer (no redirect followed, answers capped, `https` unless loopback, **never a proxy for a plain
@@ -238,8 +245,8 @@ in again or use `--no-browser`) and cannot make it theirs. With **`--no-browser`
 the URL** (never `localhost`, never a wider address); waits for the browser. The listener answers `GET /callback` with the right
 `state` (and, with a browser, `GET /start/<ticket>`); anything else is a `400` and does not end the wait. **What counts toward the
 bound of 64**: a request whose head was read (at most 8 KiB, no body, within two seconds); the 65th ends the sign-in (exit 4). A
-connection that sends nothing is closed after two seconds and counts for nothing (64 are served at once, the rest are dropped). The
-callback is refused when `state`, `code`, `error` or `iss` is given twice, when `iss` is not the discovered issuer (RFC 9207 §2.4),
+connection that sends nothing is closed after two seconds and counts for nothing (64 are served at once; the next waits for a free place, so the person's own callback is not dropped). The
+callback is refused when `state`, `code`, `error` or `iss` is given twice, when `iss` is not the discovered issuer (RFC 9207 §2.4 "Validating the Issuer Identifier", *verified 2026-11-15* at <https://www.rfc-editor.org/rfc/rfc9207.txt>),
 when the issuer said it sends `iss` and it is missing, and when the `code` has a space in it (a `+` the provider did not encode: a note
 says so). The listener is closed before the code is exchanged. The page is plain text ("Signed in. You can close this tab." or
 "Sign-in failed (`<code>`). Return to the terminal."), with `Cache-Control: no-store` and `Referrer-Policy: no-referrer`, and never
@@ -251,27 +258,32 @@ just accepted the token and `/v1/me` has no subject), so a swap of accounts is v
 the file above; the refresh token is **bound to its issuer** and is sent to the token endpoint discovered from the saved `issuer`
 (**discovery is fetched again on every refresh, so the issuer decides where the refresh token goes**), as the saved `clientId`, and
 only after the check that the saved token is for the server. A second `login`, or `login --token-stdin`, over a saved refresh token
-revokes the old one, after the new state is saved.
+does **not** revoke the old one: RFC 7009 §2.1 lets a server end every token of the same grant, and a second sign-in in a browser
+that still has its session at the issuer may share it, so revoking could end the new token (*unverified* against Keycloak). A replaced
+refresh token lives until it expires or the session ends; revocation stays on `logout` and for a token the API refused.
 
 **Refresh.** Before a command that uses the file's token, if `expiresAt` is within 30 s of now (or past) and a refresh token is held,
 the lock is taken, the file is read again under it, and the token is used once: a rotated refresh token replaces the old one, an
 answer without one keeps the old, `invalid_grant` forgets the refresh token and says to sign in again (exit 4). Any other failure
 leaves the file **as it was**; **a token that has not expired yet is used as it is** (a note says the refresh failed), one that has
 expired is exit 5. A `401` on a file token whose refresh has not been tried in this command (the one before the call counts) is
-answered with **one refresh and one retry** of that request (a `401` is refused before any handler, so it wrote nothing; a request
+answered with **one refresh and one retry** of that request (**one refresh attempt per command, whatever its outcome**: a refresh that timed out may have been processed, so a `401` after it is the answer and the old refresh token is not spent twice) (a `401` is refused before any handler, so it wrote nothing; a request
 that succeeded is never repeated), and never with a second refresh; **a `403` is never answered with a refresh**. `AAPCTL_TOKEN` is
 never refreshed and never written to the file. **The lock** is an advisory `flock` on `<config>.lock` (mode `0600`, never removed,
-opened without following a link) around every read-compare-write: a refresh, `logout` and both logins wait for it for 2 s. A second
+opened without following a link) around every read-compare-write: a refresh, `logout` and both logins wait for it for 2 s. **The refresh holds it while the issuer is asked, on purpose** (a rotating refresh token must be spent once): while one command refreshes against a slow issuer, `login` and `logout` in another terminal stop after 2 s with exit 5 and "try again", and change nothing. A second
 `aapctl` that finds the first one's refreshed token under the lock uses it, so a rotating refresh token is spent once. A refresh
 that cannot get the lock goes on with a token that has not expired; `login` and `logout` fail with exit 5 and change nothing. *Where
 there is no `flock` (not Unix) nothing is locked and the write is only made if the file still holds what the process read, a check
 and a rename that two processes can interleave: the loss is one sign-in.* `login --token-stdin` has no refresh token and forgets that
 of an earlier sign-in.
 
-**A file that is yours and no use** (too large, or not a configuration) makes every command but two exit 2 and say so; **`login`
-writes over it and `logout` removes it and says so**. What `aapctl` writes it reads back: a file over 64 KiB is never written, and a
-token is at most 16 KiB wherever it comes in (`AAPCTL_TOKEN`, `--token-stdin`, the issuer's answer). A file that fails the owner,
-mode, link or type checks is refused by every command, those two included.
+**A file that is yours and no use** (too large, not YAML, or **a mapping with keys that are not `aapctl`'s**: a kubeconfig, a
+private key that parses, notes) is **never deleted and never overwritten**: every command exits 2 and says what it looks like in one
+clause (never what it holds), and `login` and `logout` say that **`--force` moves it aside**. With `--force` they rename it to
+`<config>.unusable-<unix seconds>` (same directory, same mode; refused if that name exists) and go on; nothing is ever unlinked.
+`logout` reads the file again after it has the lock and acts on what it reads then. What `aapctl` writes it reads back: a file over
+64 KiB is never written, and a token is at most 16 KiB wherever it comes in (`AAPCTL_TOKEN`, `--token-stdin`, the issuer's answer). A
+file that fails the owner, mode, link or type checks is refused by every command, `--force` included.
 
 **`logout`** forgets both tokens (the server, issuer and client stay; a file with only a refresh token is signed out too) and then,
 if the issuer lists a usable `revocation_endpoint`, asks it once to revoke the refresh token (5 s to connect, 10 s in all); a failure
@@ -292,22 +304,33 @@ issuer, no `S256`, an endpoint that is not on its terms, a token type that is no
 over 16 KiB), or an expired token could not be refreshed; **2** for an issuer, a scope or a client id that cannot be used, or no
 issuer or server.
 
-**What a local user and a web page can still do.** Another user of the machine can read the ticket for the moment it is in the
-opener's arguments, and a page in your browser can send requests to `127.0.0.1:<port>`: either can end the sign-in (use the ticket
-first, or use up the bound of 64 requests). That is a denial, and you are told. They cannot make the sign-in theirs: the `state` is in
-no argument, and the code cannot be redeemed without the verifier, which never leaves the process (**provided the client requires
-PKCE**, above).
+**What a local user and a web page can still do.** On Linux, **another user of the machine can do nothing with the sign-in**: the
+listener answers only connections owned by your uid, so they can neither use the link nor deliver a callback of their own (the attack
+this closes: read the link from `ps`, request it first, sign in at the issuer in their own browser, and have the redirect reach your
+listener with the right `state` before your browser started; PKCE does not stop it, because the code is bound to the challenge they
+read, which is yours). **Where that check is off** (a note says so) the ticket only wins a race against your own browser, and a user
+who wins it makes the sign-in fail or, worse, succeed as them: **use `--no-browser` on a machine shared with other users**. Requiring
+PKCE `S256` at the Keycloak client is still asked for (it protects the code if it leaks), but **it does not stop the injection of a
+code bound to a leaked challenge**. **A process that runs as you is not defended against**: it can read the token file anyway. A page
+in your browser can send requests to `127.0.0.1:<port>`, as your uid: it can use up the bound of 64 requests (a denial, and you are
+told); it cannot learn the ticket. The uid check was proven on this kernel (Linux 6.18, a container); other kernels, containers with
+user namespaces (the table is per network namespace) and macOS and Windows are *unverified*.
 
 **This is not a device flow** (P-032): `--no-browser` prints the URL for a browser on the same machine (a container, or `ssh` with
 the port forwarded), because the redirect is a loopback address. A machine with no browser uses `--token-stdin` or `AAPCTL_TOKEN`
 and has no refresh token.
 
-**Tests** (`tests/signin.rs`, 60; the issuer is the testkit's `TestIdp` of `aap-auth-oidc`, the test is the browser, and a fake
+**Tests** (`tests/signin.rs`, 68; the issuer is the testkit's `TestIdp` of `aap-auth-oidc`, the test is the browser, and a fake
 `xdg-open` first on `PATH` records its argument): the link and the ticket, who the token is, sizes, PKCE and `iss`, endpoints and
 redirects, revocation, the refresh in every case above, the lock between two processes, the listener, the file's mode and content,
 the page and its headers with nothing reflected, the proxy, and that nothing secret is on any stream (`assert_no_secrets` also
-looks in the authorization URL for everything but the state). They run as a normal user too (`setpriv --reuid=65534 --regid=65534
---clear-groups` on test binaries copied to a 755 directory). **Unverified:** a real Keycloak, a real browser, and the opener of
+looks in the authorization URL for everything but the state; `assert_no_ticket` holds the ticket to the link line). **Which tests run under which
+user:** the two that stand for another user of the machine (`another_user_can_neither_use_the_link_nor_inject_a_callback`,
+`what_another_user_sends_counts_for_nothing_and_every_route_is_refused`) connect as uid 65534 (`setpriv --reuid=65534 --regid=65534
+--clear-groups curl`) and **need root**; as anyone else they print `skipped: ... needs root` and pass. Everything else, a normal sign-in with
+the uid check on among it, runs as either, and the whole file passes as uid 65534 on test binaries copied to a 755 directory.
+`AAPCTL_PEER_CHECK=off` (test tooling, read in every build, with the same notes as a system that cannot check) turns the check off for
+the tests of that mode. RFC 9207 §2.4 "Validating the Issuer Identifier" is *verified 2026-11-15* at <https://www.rfc-editor.org/rfc/rfc9207.txt>. **Unverified:** a real Keycloak, a real browser, and the opener of
 each OS (`open`, `rundll32`: only a fake `xdg-open` was run).
 
 ## How `render` shares the operator's code

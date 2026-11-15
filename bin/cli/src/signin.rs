@@ -20,21 +20,38 @@
 //!   Any other request is a `400` and does not end the wait. **What counts toward the bound**: a request whose head was read (a
 //!   head of at most 8 KiB, no body, within two seconds), whatever it asked and whatever it was answered; the 65th ends the sign-in
 //!   (exit 4) and nothing is answered after it. A connection that sent nothing, or closed before its head was complete, is closed
-//!   after the two seconds and counts for nothing, and at most 64 are served at once (the rest are dropped), so a local process can
-//!   end a sign-in but cannot make a token of it. The page it answers is plain text, built from fixed words and the cleaned error
-//!   *code*, with `Cache-Control: no-store` and `Referrer-Policy: no-referrer`; it never holds the code, the state or a token.
+//!   after the two seconds and counts for nothing; at most 64 are served at once and the next waits for a free place (a local
+//!   process can end a sign-in by flooding it, but cannot make a token of it). The page it answers is plain text, built from fixed
+//!   words and the cleaned error *code*, with `Cache-Control: no-store` and `Referrer-Policy: no-referrer`; it never holds the
+//!   code, the state or a token.
+//! * **Only the person's own processes are served (Linux).** A loopback connection has no `SO_PEERCRED`, so the listener reads
+//!   `/proc/net/tcp` ([`crate::peer`]) for the row of the client's socket and serves the connection only when its owner is the
+//!   effective uid of `aapctl`: another uid gets a `403` and the connection counts for nothing and touches nothing (not the ticket,
+//!   not the bound), and a row that is not found, after one more look 20 ms later, is refused too. **This is what keeps another user
+//!   of the machine from using the link or from delivering a callback of their own**: a callback with the right `state` and a code
+//!   from a sign-in they started at the issuer with the same challenge would be exchanged with our verifier and sign the person in
+//!   as them, and PKCE does not stop that, because the challenge they used is the one they read from the link. Where the table
+//!   cannot be read (not Linux, a restricted `/proc`) the check is off for the whole sign-in, decided once at the start, and `login`
+//!   says so. A process of the person's own uid is not defended against: it can read the token file anyway.
 //! * **The browser is given a ticket, not the authorization URL.** An argument of a process is readable by every user of the
-//!   machine, and the authorization URL holds the `state` and the challenge: anyone who read them could start a sign-in of their own
-//!   at the issuer and have the code delivered to this listener, and the person would be signed in as them. So the opener
+//!   machine, and the authorization URL holds the `state` and the challenge. So the opener
 //!   (`xdg-open`, `open` or `rundll32 url.dll,FileProtocolHandler`, never through a shell) is given
-//!   `http://127.0.0.1:<port>/start/<ticket>`, 32 random bytes, and the listener answers the first request for it with a `302` to the
-//!   authorization URL. **A second request for the right ticket ends the sign-in** (exit 4): whoever came first may hold the state.
-//!   With `--no-browser` there is no `/start` route and the authorization URL is printed on standard error, the person's own terminal.
+//!   `http://127.0.0.1:<port>/start/<ticket>`, 32 random bytes, and the listener answers a request for it with a `302` to the
+//!   authorization URL. The ticket keeps the URL and so the `state` out of the process list; **where the uid check is off it is also
+//!   the only protection, and it only wins a race against the person's own browser**: a second use of it then ends the sign-in
+//!   (exit 4), the link is not printed when a browser is opened, and `--no-browser` is the safe way on a machine shared with other
+//!   users. Where the check is on, a second request for the ticket comes from the person's own processes (a prefetch, a second click)
+//!   and is answered with the same `302`. With `--no-browser` there is no `/start` route and the authorization URL is printed on
+//!   standard error, the person's own terminal.
 //! * **Refresh**: [`needs_refresh`] before a command (within 30 s of `expiresAt`), once, and [`refresh_config`] again on a `401` that
-//!   nothing refreshed yet (`remote::Net`). The refresh token is sent to the token endpoint discovered from the saved `issuer`. The
-//!   read-compare-write is under [`config::lock`]: a second process re-reads the file under it and uses what the first saved.
+//!   nothing was attempted yet (`remote::Net`): **one refresh attempt per command, whatever its outcome**. The refresh token is sent
+//!   to the token endpoint discovered from the saved `issuer`. The read-compare-write is under [`config::lock_async`], **held while
+//!   the issuer is asked**, on purpose: a rotating refresh token must be spent once, so a second process waits for the first and then
+//!   uses what it saved. The cost is that while one command refreshes against a slow issuer, `login` and `logout` in another terminal
+//!   give up after two seconds (exit 5, "try again").
 
 use std::io::Write;
+use std::net::SocketAddr;
 use std::path::Path;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
@@ -52,6 +69,7 @@ use tokio::time::{Instant, sleep, timeout_at};
 
 use crate::config::{self, Config, LockError};
 use crate::failure::{Failure, from_oidc};
+use crate::peer::{self, Owner};
 use crate::remote::{now_seconds, token_expiry};
 
 /// Within this many seconds of `expiresAt` an access token is refreshed before it is used.
@@ -69,7 +87,7 @@ const HEAD_TIMEOUT: Duration = Duration::from_secs(2);
 /// How many requests (whose head was read) the listener answers before it gives up.
 const MAX_REQUESTS: usize = 64;
 
-/// How many connections the listener serves at once: the rest are dropped.
+/// How many connections the listener serves at once: the next waits for a free place.
 const MAX_CONNECTIONS: usize = 64;
 
 /// The most scopes a sign-in asks for, and so the file keeps.
@@ -125,7 +143,7 @@ enum Event {
 /// What the listener knows of this sign-in.
 struct Ctx {
     state: String,
-    /// The discovered issuer: an `iss` in the callback must be this, exactly (RFC 9207 section 2.4).
+    /// The discovered issuer: an `iss` in the callback must be this, exactly (RFC 9207 section 2.4, "Validating the Issuer Identifier": *verified 2026-11-15* at rfc-editor.org/rfc/rfc9207).
     issuer: String,
     /// The issuer said it sends `iss`: a callback without it is refused.
     iss_required: bool,
@@ -133,6 +151,10 @@ struct Ctx {
     start: Option<Start>,
     /// A note was sent already: one is enough.
     noted: AtomicBool,
+    /// `Some(uid)`: only connections owned by this uid are served ([`crate::peer`]). `None`: the check is off.
+    peers: Option<u32>,
+    /// The note about a connection of another user was sent already.
+    foreign_noted: AtomicBool,
 }
 
 struct Start {
@@ -228,8 +250,9 @@ fn judge(head: &[u8], ctx: &Ctx) -> Verdict {
         if !state_matches(&start.ticket, ticket) {
             return Verdict::reject(response("404 Not Found", "Not found.\n"));
         }
-        // The first request for the ticket is sent on; a second is somebody else: whoever came first may hold the state.
-        return if start.used.swap(true, Ordering::SeqCst) {
+        // With the uid check on, every request that gets here is the person's own (a prefetch, a second click): it is sent on again.
+        // With it off, the first request is sent on and a second is somebody else: whoever came first may hold the state.
+        return if start.used.swap(true, Ordering::SeqCst) && ctx.peers.is_none() {
             Verdict::end(
                 response("400 Bad Request", "This link was already used.\n"),
                 Callback::TicketReused,
@@ -263,7 +286,7 @@ fn judge_callback(query: &str, ctx: &Ctx) -> Verdict {
     if !first("state").is_some_and(|got| state_matches(&ctx.state, got)) {
         return Verdict::bad();
     }
-    // RFC 9207 section 2.4: an `iss` that is there must be the issuer discovery named, by simple string comparison, and one the
+    // RFC 9207 section 2.4 "Validating the Issuer Identifier" (verified 2026-11-15, rfc-editor.org/rfc/rfc9207): an `iss` that is there must be the issuer discovery named, by simple string comparison, and one the
     // issuer promised to send must be there. An error response is held to the same.
     match first("iss") {
         Some(iss) if iss != ctx.issuer => return Verdict::bad(),
@@ -305,6 +328,12 @@ async fn serve_one(
     requests: Arc<AtomicUsize>,
     done: mpsc::Sender<Event>,
 ) {
+    if let Some(own) = ctx.peers
+        && let Err(another_user) = check_peer(&stream, own).await
+    {
+        refuse_foreign(stream, &ctx, &done, another_user).await;
+        return;
+    }
     let head = tokio::time::timeout(HEAD_TIMEOUT, read_head(&mut stream)).await;
     let verdict = match head {
         Ok(Ok(Some(head))) => {
@@ -341,6 +370,49 @@ async fn serve_one(
     }
 }
 
+/// `Ok` when the connection's client socket is owned by `own`. `Err(true)` when it is another user's, `Err(false)` when the owner
+/// cannot be found (refused all the same: the check fails closed).
+async fn check_peer(stream: &TcpStream, own: u32) -> Result<(), bool> {
+    let (Ok(SocketAddr::V4(client)), Ok(SocketAddr::V4(listener))) =
+        (stream.peer_addr(), stream.local_addr())
+    else {
+        return Err(false);
+    };
+    match peer::owner_of(client, listener).await {
+        Owner::Uid(uid) if uid == own => Ok(()),
+        Owner::Uid(_) => Err(true),
+        Owner::Unknown => Err(false),
+    }
+}
+
+/// Answer a connection of another user with a `403`, once and without reading what it asked: it counts for nothing and touches no
+/// state. One note per sign-in says it happened (never who, never what).
+async fn refuse_foreign(
+    mut stream: TcpStream,
+    ctx: &Ctx,
+    done: &mpsc::Sender<Event>,
+    another_user: bool,
+) {
+    let _ = stream
+        .write_all(&response(
+            "403 Forbidden",
+            "This sign-in belongs to another user of this machine.\n",
+        ))
+        .await;
+    let _ = stream.shutdown().await;
+    // What the client sent is read and dropped for a moment, so that closing does not reset the connection before it read the page.
+    let mut sink = [0_u8; 1024];
+    let _ = tokio::time::timeout(Duration::from_millis(200), async {
+        while matches!(stream.read(&mut sink).await, Ok(n) if n > 0) {}
+    })
+    .await;
+    if another_user && !ctx.foreign_noted.swap(true, Ordering::SeqCst) {
+        let _ = done.try_send(Event::Note(
+            "a connection from another user of this machine was refused",
+        ));
+    }
+}
+
 /// How long to wait after a failed `accept`, given the last wait: 50 ms, doubling to one second.
 fn next_backoff(last: Option<Duration>) -> Duration {
     match last {
@@ -350,7 +422,7 @@ fn next_backoff(last: Option<Duration>) -> Duration {
 }
 
 /// Accept connections and answer each on a task of its own, so that a silent one holds up no other. At most [`MAX_REQUESTS`] requests
-/// are answered and [`MAX_CONNECTIONS`] connections served at once. An `accept` that fails (out of descriptors, say) is waited out with
+/// are answered and [`MAX_CONNECTIONS`] connections served at once (the next waits for a place). An `accept` that fails (out of descriptors, say) is waited out with
 /// a growing pause and not retried in a loop that uses the processor.
 async fn accept_loop(listener: TcpListener, ctx: Arc<Ctx>, done: mpsc::Sender<Event>) {
     let requests = Arc::new(AtomicUsize::new(0));
@@ -360,9 +432,10 @@ async fn accept_loop(listener: TcpListener, ctx: Arc<Ctx>, done: mpsc::Sender<Ev
         match listener.accept().await {
             Ok((stream, _)) => {
                 pause = None;
-                let Ok(permit) = permits.clone().try_acquire_owned() else {
-                    drop(stream);
-                    continue;
+                // A free place is waited for, not refused: the connection that finds none may be the person's own callback. The wait
+                // ends with the sign-in, which aborts this task.
+                let Ok(permit) = permits.clone().acquire_owned().await else {
+                    return;
                 };
                 let (ctx, requests, done) = (ctx.clone(), requests.clone(), done.clone());
                 tokio::spawn(async move {
@@ -461,6 +534,17 @@ pub async fn browser_flow(plan: &Plan, err: &mut dyn Write) -> Result<Tokens, Fa
         &pkce,
     );
 
+    // Decided once, here: whether the listener can tell who connects. `AAPCTL_PEER_CHECK=off` is test tooling (it makes the check
+    // behave as on a system that cannot do it, and `login` says so like there); it is read in every build and weakens nothing silently.
+    let peers = (peer::available()
+        && std::env::var_os("AAPCTL_PEER_CHECK").is_none_or(|v| v != "off"))
+    .then(peer::own_uid);
+    if peers.is_none() && !plan.no_browser {
+        let _ = writeln!(
+            err,
+            "note: this system does not let aapctl check who connects to the sign-in listener: on a machine shared with other users, use --no-browser"
+        );
+    }
     let ctx = Arc::new(Ctx {
         state: pkce.state().to_owned(),
         issuer: discovery.issuer.clone(),
@@ -471,6 +555,8 @@ pub async fn browser_flow(plan: &Plan, err: &mut dyn Write) -> Result<Tokens, Fa
             used: AtomicBool::new(false),
         }),
         noted: AtomicBool::new(false),
+        peers,
+        foreign_noted: AtomicBool::new(false),
     });
     let (tx, mut rx) = mpsc::channel::<Event>(16);
     let server = tokio::spawn(accept_loop(listener, ctx, tx));
@@ -480,14 +566,28 @@ pub async fn browser_flow(plan: &Plan, err: &mut dyn Write) -> Result<Tokens, Fa
         let _ = writeln!(err, "Open this URL in a browser to sign in:\n{url}");
     } else {
         let link = format!("http://127.0.0.1:{port}/start/{ticket}");
-        let _ = writeln!(
-            err,
-            "Open this link in a browser to sign in (it sends the browser on to the issuer, and works once):\n{link}"
-        );
-        if !open_browser(&link) {
+        if peers.is_some() {
+            // Only the person's own processes are served, so a link on the terminal is theirs, and a second use of it is harmless.
             let _ = writeln!(
                 err,
-                "note: no browser could be started: open the link yourself"
+                "Open this link in a browser to sign in (it sends the browser on to the issuer):\n{link}"
+            );
+            if !open_browser(&link) {
+                let _ = writeln!(
+                    err,
+                    "note: no browser could be started: open the link yourself"
+                );
+            }
+        } else if open_browser(&link) {
+            // Without the check the link works once, and clicking a printed one after the opener used it would be the second use.
+            let _ = writeln!(
+                err,
+                "Opening the browser. If no browser opens, run again with --no-browser"
+            );
+        } else {
+            let _ = writeln!(
+                err,
+                "note: no browser could be started: run again with --no-browser"
             );
         }
     }
@@ -622,7 +722,7 @@ pub async fn refresh_config(
     verbose: bool,
     err: &mut dyn Write,
 ) -> Result<Config, RefreshError> {
-    let _lock = match config::lock(path) {
+    let _lock = match config::lock_async(path).await {
         Ok(lock) => lock,
         Err(LockError::Busy) => {
             return Err(RefreshError::other(Failure::new(
@@ -777,6 +877,10 @@ mod tests {
     use super::*;
 
     fn ctx(start: bool) -> Ctx {
+        ctx_with(start, None)
+    }
+
+    fn ctx_with(start: bool, peers: Option<u32>) -> Ctx {
         Ctx {
             state: "S".to_owned(),
             issuer: "https://idp.example/realms/x".to_owned(),
@@ -787,6 +891,8 @@ mod tests {
                 used: AtomicBool::new(false),
             }),
             noted: AtomicBool::new(false),
+            peers,
+            foreign_noted: AtomicBool::new(false),
         }
     }
 
@@ -882,7 +988,8 @@ mod tests {
     }
 
     #[test]
-    fn the_ticket_sends_the_browser_on_once_and_a_second_use_ends_the_sign_in() {
+    fn without_the_uid_check_the_ticket_sends_the_browser_on_once_and_a_second_use_ends_the_sign_in()
+     {
         let c = ctx(true);
         let first = judge(&head("GET /start/TICKET"), &c);
         assert!(first.end.is_none());
@@ -908,6 +1015,18 @@ mod tests {
         let c = ctx(false);
         let v = judge(&head("GET /start/TICKET"), &c);
         assert!(text(&v).starts_with("HTTP/1.1 400") && v.end.is_none());
+    }
+
+    #[test]
+    fn with_the_uid_check_a_second_request_for_the_ticket_is_sent_on_again_and_ends_nothing() {
+        let c = ctx_with(true, Some(1000));
+        for _ in 0..3 {
+            let v = judge(&head("GET /start/TICKET"), &c);
+            assert!(v.end.is_none());
+            assert!(text(&v).starts_with("HTTP/1.1 302 Found\r\n"));
+        }
+        // A wrong ticket is still a 404.
+        assert!(text(&judge(&head("GET /start/TICKETx"), &c)).starts_with("HTTP/1.1 404"));
     }
 
     #[test]
