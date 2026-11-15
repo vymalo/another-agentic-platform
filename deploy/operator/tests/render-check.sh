@@ -890,7 +890,7 @@ chain_script() {
 check "chain: the script's namespace, label, audience and Secrets are the ones the values and the manifests name" chain_script
 # The aapctl step of the API's end-to-end (K9b-1, 6b): before the step that reads every answer and log for the tokens and the secret, the token
 # only in the environment of the command (never an argument: `ps` shows it), every byte it says read in that step, the binary built when
-# AAPCTL_BIN is not set, and the workflow's job builds it. The step itself is unverified until CI has run it.
+# AAPCTL_BIN is not set, and the workflow's job builds it. The step itself passed in CI (run 43706119020 at 970afa0, verified 2026-11-15).
 api_aapctl_step() {
   script="$here/e2e/api-e2e.sh"
   repo=$(cd "$here/../../.." && pwd)

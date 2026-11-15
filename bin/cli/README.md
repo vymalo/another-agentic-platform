@@ -253,7 +253,7 @@ child's proxy variables removed and `NO_PROXY` set: `get_lists_and_reads`,
 `0600`; a `0644` one is exit 2) and the rest. `client_calls_are_documented` is in `crates/platform-client`. Two rules were
 broken on purpose and a test failed each time: `409 already-exists` turned into a replace (`create_race_already_exists`) and
 the comparison of the deployment part removed (`apply_deployment_differs`). `deploy/operator/tests/e2e/api-e2e.sh` step 6b
-drives the deployed API with `aapctl`: **unverified until CI has run it**.
+drives the deployed API with `aapctl`: it passed in CI (run 43706119020, job `api-e2e` 132788532913, at `970afa0`, *verified 2026-11-15* in the job's log).
 
 `tests/cli.rs` and `tests/review.rs` run the built binary, with helpers in `tests/common/`. `render_matches_runtime_golden`
 holds `render` byte for byte (after the leading comment) to the provider's goldens for `coder`, `chat` and, with the operator

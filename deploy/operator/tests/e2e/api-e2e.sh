@@ -760,7 +760,7 @@ gone "modelendpoint/$model" || die "the model is still there"
 ok "no agent names the model any more: its delete is 204"
 
 step "6b. aapctl against the deployed API"
-# K9b-1. *Unverified until CI has run it*: no container daemon and no kind exist where it was written (it was read with `sh -n`, and the command
+# K9b-1. It passed in CI (run 43706119020 at 970afa0, verified 2026-11-15); no container daemon and no kind exist where it was written (the command
 # line it drives is held by bin/cli/tests/remote.rs against the same router over the Memory ports). The command line is a second client of the
 # API's contract: a model from a file (it names a Secret key, so the token holds platform:secrets.pick), an agent that the API made and `aapctl
 # export` printed, deleted with `--wait` and made again from that file by `aapctl apply` (the create compares the file's deployment part with the
