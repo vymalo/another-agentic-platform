@@ -87,6 +87,9 @@ api_rules_are() { [ "$(api_role_rules)" = "$1" ]; }
 # The n-th egress rule (from 1) of the API's NetworkPolicy, and the securityContext of the pod (six spaces: spec.template.spec) and of the
 # container (ten spaces) of its Deployment, each alone: a pattern that must hold for the pod is not satisfied by the container's block.
 api_egress_rule() { doc NetworkPolicy aap-operator-api | awk -v n="$1" '/^  egress:$/ { e = 1; next } e && /^    - / { i++ } e && i == n { print }'; }
+# The same for the operator's policy (K5: one rule off, three with tracing on).
+op_egress_rules() { doc NetworkPolicy aap-operator | awk '/^  egress:$/ { e = 1; next } e && /^    - / { n++ } END { print n + 0 }'; }
+op_egress_rule() { doc NetworkPolicy aap-operator | awk -v n="$1" '/^  egress:$/ { e = 1; next } e && /^    - / { i++ } e && i == n { print }'; }
 api_pod_security() { doc Deployment aap-operator-api | awk '/^      securityContext:$/ { s = 1; print; next } s && /^        / { print; next } s { exit }'; }
 api_container_security() { doc Deployment aap-operator-api | awk '/^          securityContext:$/ { s = 1; print; next } s && /^            / { print; next } s { exit }'; }
 all_of() { b=$1; shift; for p in "$@"; do printf '%s\n' "$b" | grep -Eq -- "$p" || return 1; done; }
@@ -824,7 +827,11 @@ chain_render() {
     --set api.config.oidc.issuer=http://172.18.0.1:40000 --set 'api.config.oidc.audiences[0]=aap-e2e-chain' --set api.config.oidc.rolesClaim=agentic_roles \
     --set api.config.defaults.a2aBearer.name=e2e-a2a-bearer --set api.config.defaults.a2aBearer.key=AGENT_REGISTRY_AGENT_TOKEN \
     --set-json "api.config.defaults.allowFrom=[{\"namespaceSelector\":{\"matchLabels\":{\"kubernetes.io/metadata.name\":\"$chain_ns\"}}}]" \
-    --set-json 'api.networkPolicy.issuer.to=[{"ipBlock":{"cidr":"172.18.0.1/32"}}]' --set-json 'api.networkPolicy.issuer.ports=[40000]' > "$out"
+    --set-json 'api.networkPolicy.issuer.to=[{"ipBlock":{"cidr":"172.18.0.1/32"}}]' --set-json 'api.networkPolicy.issuer.ports=[40000]' \
+    --set otel.enabled=true --set "otel.endpoint=http://e2e-otel-collector.$chain_ns.svc:4318/v1/traces" --set 'otel.resourceAttributes.deployment\.environment\.name=e2e' \
+    --set-json 'otel.to=[{"podSelector":{"matchLabels":{"app.kubernetes.io/name":"e2e-otel-collector"}}}]' \
+    --set api.otel.enabled=true --set "api.otel.endpoint=http://e2e-otel-collector.$chain_ns.svc:4318/v1/traces" --set 'api.otel.resourceAttributes.deployment\.environment\.name=e2e' \
+    --set-json 'api.otel.to=[{"podSelector":{"matchLabels":{"app.kubernetes.io/name":"e2e-otel-collector"}}}]' > "$out"
 }
 if ! chain_render 2> "$err"; then echo "FAIL chain: the values of the whole-chain end-to-end do not render: $(head -c 400 "$err")"; fail=1; fi
 check "chain: the values of the whole-chain end-to-end render, with the API on" has_all 'kind: Deployment' 'name: aap-operator-api'
@@ -889,6 +896,32 @@ chain_script() {
     && grep -q '^models_secret=e2e-agent-models$' "$script" && grep -q '^registry_secret=e2e-registry-token$' "$script" && grep -q '^bearer_secret=e2e-a2a-bearer$' "$script"
 }
 check "chain: the script's namespace, label, audience and Secrets are the ones the values and the manifests name" chain_script
+# K5: the traces step of the whole-chain end-to-end. The values it installs (both otel blocks, the collector's pods as the peers) render what the script reads
+# back; the collector's manifest is pinned by tag and digest on one line, in one file, and is the collector the script's steps 6b and 7 read; and the
+# collector's log is in the scan for the secrets and the tokens in step 7.
+chain_otel_values() {
+  dhas Deployment aap-operator 'value: "http://e2e-otel-collector\.aap-e2e-chain\.svc:4318/v1/traces"' 'deployment.environment.name=e2e' \
+    && dhas Deployment aap-operator-api 'value: "http://e2e-otel-collector\.aap-e2e-chain\.svc:4318/v1/traces"' 'deployment.environment.name=e2e' \
+    && all_of "$(op_egress_rule 3)" 'port: 4318' 'app.kubernetes.io/name: e2e-otel-collector' \
+    && all_of "$(api_egress_rule 4)" 'port: 4318' 'app.kubernetes.io/name: e2e-otel-collector'
+}
+check "chain: both services are told to send their traces to e2e-otel-collector (otel.* and api.otel.*), and each policy has an egress rule to its pods on 4318" chain_otel_values
+chain_collector() {
+  manifest="$here/e2e/otel-collector.yaml"
+  [ "$(grep -Ec '^ +image: ghcr\.io/open-telemetry/opentelemetry-collector-releases/opentelemetry-collector:' "$manifest")" -eq 1 ] || return 1
+  grep -Eq '^ +image: ghcr\.io/open-telemetry/opentelemetry-collector-releases/opentelemetry-collector:[0-9]+\.[0-9]+\.[0-9]+@sha256:[0-9a-f]{64}$' "$manifest" || return 1
+  pin_digest=$(sed -n 's/^ *image: ghcr\.io\/open-telemetry\/opentelemetry-collector-releases\/opentelemetry-collector:[^@]*@\(sha256:[0-9a-f]*\)$/\1/p' "$manifest")
+  [ -n "$pin_digest" ] && [ "$(grep -cF "$pin_digest" "$manifest")" -eq 1 ] || return 1
+  [ "$(grep -rlF "$pin_digest" "$chart/.." "$chart/../../.github" | wc -l)" -eq 1 ] || return 1
+  # An OTLP/HTTP receiver on 4318 and the debug exporter in detail: what the script reads. No namespace; the script's label on every object.
+  grep -q '^            endpoint: 0.0.0.0:4318$' "$manifest" && grep -q '^        verbosity: detailed$' "$manifest" \
+    && [ "$(grep -c '^    aap-e2e/made-by: chain-e2e$' "$manifest")" -eq 3 ] && ! grep -q '^  namespace:' "$manifest" \
+    && grep -q '^  name: e2e-otel-collector-config$' "$manifest" || return 1
+  script="$here/e2e/chain-e2e.sh"
+  grep -q '^collector=e2e-otel-collector$' "$script" \
+    && [ "$(grep -c '"$work/otel.log" "$work/seen"' "$script")" -eq 2 ] && grep -q '^read_log "\$collector" otel.log ' "$script"
+}
+check "chain: the collector is pinned by tag and digest in otel-collector.yaml, on one line and in no other file of deploy/ or .github/; it receives OTLP/HTTP on 4318 and writes what it gets to its log, which step 7 scans for the secrets and the tokens" chain_collector
 # The aapctl step of the API's end-to-end (K9b-1, 6b): before the step that reads every answer and log for the tokens and the secret, the token
 # only in the environment of the command (never an argument: `ps` shows it), every byte it says read in that step, the binary built when
 # AAPCTL_BIN is not set, and the workflow's job builds it. The step itself passed in CI (run 43706119020 at 970afa0, verified 2026-11-15).
@@ -1434,8 +1467,6 @@ otel_no_volumes_without_files() {
 check "otel: with no headers Secret and no CA ConfigMap there is neither volume nor variable for them" otel_no_volumes_without_files
 
 # Egress: the operator's policy has one rule (the API server); with otel on it has DNS and the collector, each with a `to`.
-op_egress_rules() { doc NetworkPolicy aap-operator | awk '/^  egress:$/ { e = 1; next } e && /^    - / { n++ } END { print n + 0 }'; }
-op_egress_rule() { doc NetworkPolicy aap-operator | awk -v n="$1" '/^  egress:$/ { e = 1; next } e && /^    - / { i++ } e && i == n { print }'; }
 otel_operator_policy() {
   render || return 1
   [ "$(op_egress_rules)" -eq 1 ] || return 1
