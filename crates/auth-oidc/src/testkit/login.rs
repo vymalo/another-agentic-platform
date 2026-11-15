@@ -4,8 +4,8 @@
 //! **A test issuer that a pod can reach must not hand out tokens to whoever asks.** These endpoints are on the issuer's public port
 //! (a browser reaches them), so `/authorize` **does nothing until a test has set a login**, through [`TestIdp::set_login`], a
 //! method of the process that owns the issuer: nothing on the network sets one. The `test-issuer` example of the kind end-to-end
-//! has no route that sets one, so there `/authorize` answers `403` for ever, and `/token` has no code to exchange. Even with a
-//! login set, it redirects only to `http://127.0.0.1:<port>/…`, an address no pod reaches as the machine's.
+//! does not mount these routes at all (`TestIdp::try_start_without_login`): they are `404` there and its discovery names none.
+//! Even with a login set, `/authorize` redirects only to `http://127.0.0.1:<port>/…`, an address no pod reaches as the machine's.
 //!
 //! What it checks of the client, as a real server does: the code is used once; `redirect_uri` and `client_id` are those of the
 //! authorization request; `S256(code_verifier)` is the request's challenge (or the one a test says to expect instead); a refresh
@@ -59,6 +59,8 @@ struct State_ {
     revocation: bool,
     revoke_fails: bool,
     patch: Option<Value>,
+    pad_access: usize,
+    pad_refresh: usize,
     authorize_requests: usize,
     grants: Vec<String>,
     issued_codes: Vec<String>,
@@ -86,6 +88,8 @@ impl Default for State_ {
             revocation: false,
             revoke_fails: false,
             patch: None,
+            pad_access: 0,
+            pad_refresh: 0,
             authorize_requests: 0,
             grants: Vec::new(),
             issued_codes: Vec::new(),
@@ -124,6 +128,9 @@ fn s256(verifier: &str) -> String {
 
 pub(super) fn discovery_document(shared: &Shared) -> Value {
     let issuer = &shared.issuer;
+    if shared.without_login {
+        return json!({"issuer": issuer, "jwks_uri": format!("{issuer}/jwks")});
+    }
     let state = shared.login.lock();
     let mut doc = json!({
         "issuer": issuer,
@@ -255,6 +262,9 @@ fn access_token(state: &mut State_, issuer: &str, sub: &str, roles: &[String]) -
     .unwrap()
     .clone();
     set_path(&mut claims, TEST_ROLES_CLAIM, json!(roles));
+    if state.pad_access > 0 {
+        claims.insert("pad".into(), json!("x".repeat(state.pad_access)));
+    }
     let token = mint_token(&claims, Signing::Published(Alg::Rs256));
     state.issued_access.push(token.clone());
     token
@@ -319,7 +329,8 @@ pub(super) async fn token(State(shared): State<Arc<Shared>>, body: Bytes) -> Res
     let is_refresh = get("grant_type") == "refresh_token";
     // A code exchange gives a refresh token when told to; a refresh gives a new one only when it rotates.
     if state.give_refresh && (!is_refresh || state.rotate) {
-        let refresh = random();
+        let mut refresh = random();
+        refresh.push_str(&"x".repeat(state.pad_refresh));
         state.issued_refresh.push(refresh.clone());
         state.refresh.insert(
             refresh.clone(),
@@ -418,6 +429,14 @@ impl TestIdp {
                 roles: roles.iter().map(|r| (*r).to_owned()).collect(),
             },
         );
+    }
+
+    /// Pads what `/token` mints: the access token gets a claim of `access` characters and the refresh token `refresh` more
+    /// characters, for a test of what a client does with an answer that is far too large to keep.
+    pub fn set_padding(&self, access: usize, refresh: usize) {
+        let mut state = self.shared.login.lock();
+        state.pad_access = access;
+        state.pad_refresh = refresh;
     }
 
     /// Advertises `revocation_endpoint` (and serves `/revoke`), and makes it answer `500` when `fails`.

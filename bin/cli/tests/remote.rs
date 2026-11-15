@@ -1131,12 +1131,14 @@ fn the_config_file_is_written_whole_or_not_at_all() {
         .mode()
         & 0o777;
     assert_eq!(dir_mode, 0o700);
-    // No temporary file is left beside it.
-    let left: Vec<_> = std::fs::read_dir(nested.parent().unwrap())
+    // No temporary file is left beside it. (Changed with the second review of K9b-2: the advisory lock's file, `config.yaml.lock`,
+    // is there too, by design: it is never removed.)
+    let mut left: Vec<_> = std::fs::read_dir(nested.parent().unwrap())
         .unwrap()
         .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
         .collect();
-    assert_eq!(left, ["config.yaml"]);
+    left.sort();
+    assert_eq!(left, ["config.yaml", "config.yaml.lock"]);
 }
 
 // ------------------------------------------------------------------------------------------ phase 1 is untouched

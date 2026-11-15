@@ -135,8 +135,28 @@ pub struct Discovery {
     pub authorization_endpoint: Url,
     /// Where the code and the refresh token are exchanged.
     pub token_endpoint: Url,
-    /// Where a refresh token is revoked, if the issuer says (a document that names one that cannot be used names none).
+    /// Where a refresh token is revoked, if the issuer says **and the endpoint can be used** (see [`revocation_unusable`]).
+    ///
+    /// [`revocation_unusable`]: Discovery::revocation_unusable
     pub revocation_endpoint: Option<Url>,
+    /// The document names a `revocation_endpoint` that the rules for an endpoint refuse: it is not used, and the caller says so.
+    pub revocation_unusable: bool,
+    /// The document lists `code_challenge_methods_supported` (and `S256` is in it). `false`: the issuer did not say, and the sign-in
+    /// goes on protected by PKCE only if the issuer honours it.
+    pub pkce_advertised: bool,
+    /// The document says `authorization_response_iss_parameter_supported: true` (RFC 9207): a callback without `iss` is refused.
+    pub iss_parameter_supported: bool,
+}
+
+/// What [`revoke`] did.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Revocation {
+    /// The issuer revoked the token.
+    Revoked,
+    /// The issuer names no revocation endpoint: nothing was asked.
+    NoEndpoint,
+    /// The issuer names one that cannot be used (see [`Discovery::revocation_unusable`]): nothing was sent to it.
+    EndpointUnusable,
 }
 
 /// The tokens an exchange gave.
@@ -148,6 +168,18 @@ pub struct Tokens {
     pub expires_in: Option<u64>,
     /// A refresh token, if the issuer gave one (a rotated one replaces the old).
     pub refresh_token: Option<Secret>,
+}
+
+/// An endpoint of an issuer that a secret may be sent to: it is [`usable_endpoint`], and **it follows the issuer's scheme**: the
+/// document of an `https` issuer may not name an `http` endpoint (not even a loopback one: a document is not the machine's), and the
+/// endpoints of a loopback `http` issuer must be on a loopback host, so a document cannot send a code or a token somewhere else.
+fn endpoint_allowed(issuer: &Url, endpoint: &Url) -> bool {
+    usable_endpoint(endpoint)
+        && if issuer.scheme() == "https" {
+            endpoint.scheme() == "https"
+        } else {
+            is_loopback(endpoint)
+        }
 }
 
 /// An endpoint the caller may send a secret to: `https`, or `http` for a loopback host only (a test issuer, a port-forward); no user
@@ -267,26 +299,33 @@ pub async fn discover(
     let doc: Value = serde_json::from_slice(&body)
         .map_err(|_| OidcError::BadAnswer("the discovery document is not JSON".to_owned()))?;
     let text = |key: &str| doc.get(key).and_then(Value::as_str);
+    // Exactly: OpenID Connect Discovery 1.0 section 4.3 compares the strings, so a parent, a child and a trailing slash are all another
+    // issuer.
     if text("issuer") != Some(issuer) {
-        return Err(OidcError::BadAnswer(
-            "the discovery document names another issuer than the one asked for, so it is not that issuer's".to_owned(),
-        ));
+        let slash_only = text("issuer")
+            .is_some_and(|named| named.trim_end_matches('/') == issuer.trim_end_matches('/'));
+        return Err(OidcError::BadAnswer(if slash_only {
+            "the discovery document names the issuer with or without a trailing slash where the one asked for has the other: write --issuer exactly as the document does, which is how the issuer is compared".to_owned()
+        } else {
+            "the discovery document names another issuer than the one asked for, so it is not that issuer's".to_owned()
+        }));
     }
     let endpoint = |key: &str| -> Result<Url, OidcError> {
         let value = text(key)
             .ok_or_else(|| OidcError::BadAnswer(format!("the discovery document has no {key}")))?;
         let url = Url::parse(value)
             .map_err(|_| OidcError::BadAnswer(format!("{key} is not an address")))?;
-        if usable_endpoint(&url) {
+        if endpoint_allowed(&base, &url) {
             Ok(url)
         } else {
             Err(OidcError::BadAnswer(format!(
-                "{key} is not an https address (or a loopback http one) without a user name or fragment: no code or token is sent to it"
+                "{key} is not an address on the issuer's own terms (https for an https issuer, a loopback address for a loopback http one, no user name or fragment): no code or token is sent to it"
             )))
         }
     };
     let authorization_endpoint = endpoint("authorization_endpoint")?;
     let token_endpoint = endpoint("token_endpoint")?;
+    let mut pkce_advertised = false;
     if let Some(methods) = doc.get("code_challenge_methods_supported") {
         let has_s256 = methods
             .as_array()
@@ -297,13 +336,27 @@ pub async fn discover(
                     .to_owned(),
             ));
         }
+        pkce_advertised = true;
     }
-    let revocation_endpoint = endpoint("revocation_endpoint").ok();
+    let (revocation_endpoint, revocation_unusable) = if text("revocation_endpoint").is_some() {
+        match endpoint("revocation_endpoint") {
+            Ok(url) => (Some(url), false),
+            Err(_) => (None, true),
+        }
+    } else {
+        (None, false)
+    };
     Ok(Discovery {
         issuer: issuer.to_owned(),
         authorization_endpoint,
         token_endpoint,
         revocation_endpoint,
+        revocation_unusable,
+        pkce_advertised,
+        iss_parameter_supported: doc
+            .get("authorization_response_iss_parameter_supported")
+            .and_then(Value::as_bool)
+            == Some(true),
     })
 }
 
@@ -325,7 +378,13 @@ pub fn challenge_of(verifier: &str) -> String {
     URL_SAFE_NO_PAD.encode(Sha256::digest(verifier.as_bytes()))
 }
 
-fn random_token() -> Result<String, OidcError> {
+/// 32 bytes of the operating system's randomness as base64url without padding (43 characters): the verifier, the `state` and the
+/// ticket of the link the browser is opened with.
+///
+/// # Errors
+///
+/// [`OidcError::Config`] when the system has no randomness.
+pub fn random_token() -> Result<String, OidcError> {
     let mut bytes = [0_u8; 32];
     getrandom::getrandom(&mut bytes).map_err(|_| {
         OidcError::Config("the system has no source of randomness to sign in with".to_owned())
@@ -560,7 +619,8 @@ pub async fn refresh(
     .await
 }
 
-/// Revoke a refresh token (RFC 7009) at the issuer's `revocation_endpoint`, once. `Ok(false)` when the issuer names none.
+/// Revoke a refresh token (RFC 7009) at the issuer's `revocation_endpoint`, once. [`Revocation::NoEndpoint`] when the issuer names none
+/// and [`Revocation::EndpointUnusable`] when it names one that the rules for an endpoint refuse (nothing is sent to it).
 ///
 /// # Errors
 ///
@@ -571,9 +631,12 @@ pub async fn revoke(
     client_id: &str,
     refresh_token: &Secret,
     trace: &mut Vec<String>,
-) -> Result<bool, OidcError> {
+) -> Result<Revocation, OidcError> {
+    if discovery.revocation_unusable {
+        return Ok(Revocation::EndpointUnusable);
+    }
     let Some(endpoint) = &discovery.revocation_endpoint else {
-        return Ok(false);
+        return Ok(Revocation::NoEndpoint);
     };
     let (status, body) = request(
         reqwest::Method::POST,
@@ -588,7 +651,7 @@ pub async fn revoke(
     )
     .await?;
     match status {
-        200 => Ok(true),
+        200 => Ok(Revocation::Revoked),
         400 | 401 => {
             let parsed: Option<Value> = serde_json::from_slice(&body).ok();
             Err(OidcError::Refused {
@@ -610,6 +673,8 @@ pub async fn revoke(
 #[cfg(test)]
 mod tests {
     #![allow(clippy::unwrap_used, clippy::expect_used)]
+    use serde_json::json;
+
     use super::*;
 
     #[test]
@@ -706,6 +771,233 @@ mod tests {
         assert!(matches!(
             read_token_answer("h", 404, b"{}"),
             Err(OidcError::Server { status: 404, .. })
+        ));
+    }
+
+    // ------------------------------------------------------------------------------------------------ the second review
+
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+    /// A server that answers every request with the discovery document `make(issuer_without_path)` returns, and the issuer the
+    /// document should be asked for at `path`.
+    async fn serving(path: &str, make: impl FnOnce(&str) -> Value) -> String {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let origin = format!("http://127.0.0.1:{}", listener.local_addr().unwrap().port());
+        let body = make(&origin).to_string();
+        tokio::spawn(async move {
+            loop {
+                let Ok((mut stream, _)) = listener.accept().await else {
+                    return;
+                };
+                let mut buffer = [0_u8; 2048];
+                let _ = stream.read(&mut buffer).await;
+                let answer = format!(
+                    "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                    body.len()
+                );
+                let _ = stream.write_all(answer.as_bytes()).await;
+            }
+        });
+        format!("{origin}{path}")
+    }
+
+    fn document(issuer: &str) -> Value {
+        json!({
+            "issuer": issuer,
+            "authorization_endpoint": format!("{issuer}/authorize"),
+            "token_endpoint": format!("{issuer}/token"),
+            "code_challenge_methods_supported": ["S256"],
+        })
+    }
+
+    async fn discovered(issuer: &str) -> Result<Discovery, OidcError> {
+        discover(issuer, &OidcOptions::default(), &mut Vec::new()).await
+    }
+
+    #[tokio::test]
+    async fn the_issuer_is_compared_exactly_and_a_trailing_slash_is_told() {
+        // The document names a parent of the issuer asked for, a child, and the same with a slash: none of them is that issuer.
+        let issuer = serving("/realms/x", document).await;
+        let error = discovered(&issuer).await.unwrap_err();
+        assert!(
+            matches!(&error, OidcError::BadAnswer(m) if m.contains("another issuer") && !m.contains("trailing slash")),
+            "{error}"
+        );
+        let issuer = serving("", |origin| document(&format!("{origin}/child"))).await;
+        assert!(matches!(
+            discovered(&issuer).await,
+            Err(OidcError::BadAnswer(m)) if m.contains("another issuer")
+        ));
+        let issuer = serving("/", document).await;
+        let error = discovered(&issuer).await.unwrap_err();
+        assert!(
+            matches!(&error, OidcError::BadAnswer(m) if m.contains("trailing slash")),
+            "{error}"
+        );
+        // And the exact one is taken.
+        let issuer = serving("", document).await;
+        assert!(discovered(&issuer).await.is_ok());
+    }
+
+    #[tokio::test]
+    async fn an_issuer_with_a_query_or_a_fragment_is_not_asked() {
+        for issuer in [
+            "http://127.0.0.1:1/?a=b",
+            "http://127.0.0.1:1#f",
+            "http://127.0.0.1:1?x",
+        ] {
+            assert!(
+                matches!(discovered(issuer).await, Err(OidcError::Config(_))),
+                "{issuer}"
+            );
+        }
+    }
+
+    #[test]
+    fn an_endpoint_follows_the_issuers_scheme() {
+        let allowed = |issuer: &str, endpoint: &str| {
+            endpoint_allowed(&Url::parse(issuer).unwrap(), &Url::parse(endpoint).unwrap())
+        };
+        // An https issuer: https endpoints only, loopback or not.
+        assert!(allowed(
+            "https://idp.example.com/r",
+            "https://idp.example.com/token"
+        ));
+        assert!(allowed(
+            "https://idp.example.com/r",
+            "https://other.example/token"
+        ));
+        assert!(!allowed(
+            "https://idp.example.com/r",
+            "http://127.0.0.1:8080/token"
+        ));
+        assert!(!allowed(
+            "https://idp.example.com/r",
+            "http://idp.example.com/token"
+        ));
+        // A loopback http issuer: loopback endpoints only.
+        assert!(allowed("http://127.0.0.1:9", "http://127.0.0.1:9/token"));
+        assert!(allowed("http://127.0.0.1:9", "https://localhost/token"));
+        assert!(!allowed(
+            "http://127.0.0.1:9",
+            "https://idp.example.com/token"
+        ));
+        assert!(!allowed(
+            "http://127.0.0.1:9",
+            "http://idp.example.com/token"
+        ));
+        // And whatever the issuer, no user name or fragment.
+        assert!(!allowed("https://a.example", "https://u:p@a.example/token"));
+        assert!(!allowed("https://a.example", "https://a.example/token#f"));
+    }
+
+    #[tokio::test]
+    async fn discovery_reads_the_pkce_and_iss_and_revocation_members() {
+        let issuer = serving("", document).await;
+        let d = discovered(&issuer).await.unwrap();
+        assert!(d.pkce_advertised && !d.iss_parameter_supported && !d.revocation_unusable);
+        assert!(d.revocation_endpoint.is_none());
+
+        let issuer = serving("", |origin| {
+            let mut doc = document(origin);
+            doc.as_object_mut()
+                .unwrap()
+                .remove("code_challenge_methods_supported");
+            doc["authorization_response_iss_parameter_supported"] = json!(true);
+            doc["revocation_endpoint"] = json!(format!("{origin}/revoke"));
+            doc
+        })
+        .await;
+        let d = discovered(&issuer).await.unwrap();
+        assert!(!d.pkce_advertised, "no list is not a list with S256");
+        assert!(d.iss_parameter_supported);
+        assert!(d.revocation_endpoint.is_some() && !d.revocation_unusable);
+
+        // `plain` alone is a refusal; a list that has S256 is taken.
+        let issuer = serving("", |origin| {
+            let mut doc = document(origin);
+            doc["code_challenge_methods_supported"] = json!(["plain"]);
+            doc
+        })
+        .await;
+        assert!(matches!(
+            discovered(&issuer).await,
+            Err(OidcError::BadAnswer(_))
+        ));
+        let issuer = serving("", |origin| {
+            let mut doc = document(origin);
+            doc["code_challenge_methods_supported"] = json!(["plain", "S256"]);
+            doc
+        })
+        .await;
+        assert!(discovered(&issuer).await.unwrap().pkce_advertised);
+
+        // A revocation endpoint that cannot be used is not used, and is remembered as such.
+        let issuer = serving("", |origin| {
+            let mut doc = document(origin);
+            doc["revocation_endpoint"] = json!("https://idp.example.com/revoke");
+            doc
+        })
+        .await;
+        let d = discovered(&issuer).await.unwrap();
+        assert!(d.revocation_endpoint.is_none() && d.revocation_unusable);
+        let secret = Secret::new("r-1").unwrap();
+        let outcome = revoke(
+            &d,
+            &OidcOptions::default(),
+            "aapctl",
+            &secret,
+            &mut Vec::new(),
+        )
+        .await;
+        assert!(
+            matches!(outcome, Ok(Revocation::EndpointUnusable)),
+            "{outcome:?}"
+        );
+    }
+
+    #[test]
+    fn a_token_answer_is_bounded_and_never_quotes_what_it_was_sent() {
+        // An access token and a refresh token over 16 KiB are not kept.
+        let long = "a".repeat(MAX_SECRET_BYTES + 1);
+        let access = format!(r#"{{"access_token":"{long}","token_type":"Bearer"}}"#);
+        assert!(matches!(
+            read_token_answer("h", 200, access.as_bytes()),
+            Err(OidcError::BadAnswer(_))
+        ));
+        let refresh =
+            format!(r#"{{"access_token":"abc","token_type":"Bearer","refresh_token":"{long}"}}"#);
+        assert!(matches!(
+            read_token_answer("h", 200, refresh.as_bytes()),
+            Err(OidcError::BadAnswer(_))
+        ));
+        // What a person may read of a failure never holds the body, whatever it was.
+        for body in [
+            &br#"SECRETWORDS not json"#[..],
+            br#"{"access_token":"SECRETWORDS x","token_type":"Bearer"}"#,
+            br#"{"access_token":"abc","token_type":"SECRETWORDS"}"#,
+            br#"{"access_token":"abc","token_type":"Bearer","refresh_token":"SECRETWORDS y"}"#,
+        ] {
+            let error = read_token_answer("h", 200, body).unwrap_err();
+            assert!(!error.to_string().contains("SECRETWORDS"), "{error}");
+        }
+        // An OAuth error with status 401 (a client the issuer does not know) is a refusal, not a server error.
+        assert!(matches!(
+            read_token_answer("h", 401, br#"{"error":"invalid_client"}"#),
+            Err(OidcError::Refused { code }) if code == "invalid_client"
+        ));
+        // Its code is cleaned of control characters and markup.
+        match read_token_answer("h", 400, "{\"error\":\"a\\u001b[31m<b>x\"}".as_bytes()) {
+            Err(OidcError::Refused { code }) => {
+                assert_eq!(code, "a31mbx");
+                assert!(!code.contains('\u{1b}') && !code.contains('<'));
+            }
+            other => panic!("{other:?}"),
+        }
+        // A 401 with no OAuth error in it is the server's.
+        assert!(matches!(
+            read_token_answer("h", 401, b"nope"),
+            Err(OidcError::Server { status: 401, .. })
         ));
     }
 

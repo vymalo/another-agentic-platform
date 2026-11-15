@@ -38,6 +38,12 @@ impl Failure {
         }
     }
 
+    /// The first line, without the `aapctl: ` it starts with: what a note says in its own words.
+    pub fn summary(&self) -> String {
+        let first = self.lines.first().map_or("", String::as_str);
+        first.strip_prefix("aapctl: ").unwrap_or(first).to_owned()
+    }
+
     /// Exit 2: a usage or read error.
     pub fn usage(first: impl AsRef<str>) -> Self {
         Self::new(2, first)

@@ -8,7 +8,9 @@
 //!
 //! * The **issuer** listens on `--bind` and names itself `http://<--public-host>:<the port it got>`: that is the `iss` of its tokens
 //!   and the `issuer` of its discovery document, so the API pod, which reaches it at the host's address on the cluster's network,
-//!   sees the name it was configured with. It serves `/.well-known/openid-configuration` and `/jwks`, nothing else.
+//!   sees the name it was configured with. It serves `/.well-known/openid-configuration` and `/jwks`, nothing else: **no sign-in
+//!   route (`/authorize`, `/token`, `/revoke`) is mounted** and discovery names none (`TestIdp::try_start_without_login`), so
+//!   what a pod can reach mints nothing and keeps no list that grows with what it is asked.
 //! * The **control** listener is `--control` (`127.0.0.1:0`): `GET /token?sub=<subject>&roles=<a,b,c>` answers a signed token for
 //!   `--audience`, with the roles at `--roles-claim` (a dotted path is nested, as Keycloak's `resource_access.<client>.roles`).
 //!   **It is bound to a loopback address and refuses any other**: minting must not be reachable from the cluster.
@@ -110,7 +112,7 @@ async fn serve(options: IssuerArgs) -> Result<(), Box<dyn Error>> {
         audience,
         roles_claim,
     } = options;
-    let idp = TestIdp::try_start_at(&bind.to_string(), &public_host)
+    let idp = TestIdp::try_start_without_login(&bind.to_string(), &public_host)
         .await
         .map_err(|e| format!("cannot listen on {bind}: {e}"))?;
     let issuer = idp.issuer();

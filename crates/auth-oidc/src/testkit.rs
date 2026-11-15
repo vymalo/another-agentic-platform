@@ -205,6 +205,8 @@ struct Shared {
     discovery_fetches: AtomicUsize,
     /// The sign-in endpoints (`/authorize`, `/token`, `/revoke`) and what a test set for them.
     login: login::Login,
+    /// The issuer serves discovery and the JWKS only: no sign-in route is mounted and discovery names none.
+    without_login: bool,
 }
 
 async fn discovery(State(shared): State<Arc<Shared>>) -> Response {
@@ -256,21 +258,40 @@ impl TestIdp {
 
     /// [`TestIdp::start_at`] that reports an address it cannot listen on (in use, not this machine's, not allowed) instead of panicking.
     pub async fn try_start_at(bind: &str, public_host: &str) -> std::io::Result<Self> {
+        Self::try_start(bind, public_host, false).await
+    }
+
+    /// [`TestIdp::try_start_at`] for an issuer that **mounts no sign-in route at all**: `/authorize`, `/token` and `/revoke` are
+    /// `404`, and its discovery document names none of them. This is what a process that a pod can reach runs
+    /// (`examples/test-issuer.rs`): nothing it serves can mint a token, and no list of what it was asked grows without a bound.
+    pub async fn try_start_without_login(bind: &str, public_host: &str) -> std::io::Result<Self> {
+        Self::try_start(bind, public_host, true).await
+    }
+
+    async fn try_start(
+        bind: &str,
+        public_host: &str,
+        without_login: bool,
+    ) -> std::io::Result<Self> {
         // The keys are made before the first request needs them.
         let _ = generations();
         let listener = tokio::net::TcpListener::bind(bind).await?;
         let issuer = format!("http://{public_host}:{}", listener.local_addr()?.port());
         let shared = Arc::new(Shared {
             issuer,
+            without_login,
             ..Shared::default()
         });
-        let router = Router::new()
+        let mut router = Router::new()
             .route("/.well-known/openid-configuration", get(discovery))
-            .route("/jwks", get(jwks))
-            .route("/authorize", get(login::authorize))
-            .route("/token", axum::routing::post(login::token))
-            .route("/revoke", axum::routing::post(login::revoke))
-            .with_state(Arc::clone(&shared));
+            .route("/jwks", get(jwks));
+        if !without_login {
+            router = router
+                .route("/authorize", get(login::authorize))
+                .route("/token", axum::routing::post(login::token))
+                .route("/revoke", axum::routing::post(login::revoke));
+        }
+        let router = router.with_state(Arc::clone(&shared));
         let server = tokio::spawn(async move {
             axum::serve(listener, router).await.unwrap();
         });

@@ -48,15 +48,16 @@ client's).
 
 | Function | What |
 |---|---|
-| `discover(issuer, options, trace)` | `GET {issuer}/.well-known/openid-configuration`. The document's `issuer` must equal the argument **exactly**; `authorization_endpoint` and `token_endpoint` are required, each `https` or loopback `http`, with no user name, password or fragment; `code_challenge_methods_supported`, if present, must list `S256`; a `revocation_endpoint` that cannot be used is none |
+| `discover(issuer, options, trace)` | `GET {issuer}/.well-known/openid-configuration`; an issuer with a query or a fragment is `Config`. The document's `issuer` must equal the argument **exactly** (a parent, a child and a trailing slash are other issuers; the message says when the slash is all that differs); `authorization_endpoint` and `token_endpoint` are required and **follow the issuer's scheme**: `https` for an `https` issuer (never `http`, loopback or not), a loopback host for a loopback `http` one, never a user name, password or fragment; `code_challenge_methods_supported`, if present, must list `S256` (`Discovery::pkce_advertised` says whether it was there); `authorization_response_iss_parameter_supported` is `Discovery::iss_parameter_supported` (RFC 9207); a `revocation_endpoint` that fails the endpoint rules is none, and `Discovery::revocation_unusable` says it was named |
 | `Pkce::new()` | A verifier of 32 bytes of operating-system randomness (base64url, 43 characters), its challenge (`challenge_of`: base64url of SHA-256, `S256`, checked against RFC 7636 Appendix B) and a `state` of 32 random bytes; `state_matches` compares in constant time |
 | `authorization_url(...)` | The authorization endpoint with `response_type=code`, `client_id`, `redirect_uri`, `scope`, `state`, `code_challenge` and `code_challenge_method=S256`. **Never the verifier** |
 | `exchange_code(...)` | `POST` of `grant_type=authorization_code`, `code`, `redirect_uri`, `client_id` and `code_verifier`. A public client: no secret |
 | `refresh(...)` | `POST` of `grant_type=refresh_token`. **The token goes to the endpoint of the `Discovery` it is given and to no other**; the caller discovered it from the issuer the token was saved with |
-| `revoke(...)` | `POST` of `token` and `token_type_hint=refresh_token` to the `revocation_endpoint`, once; `Ok(false)` when there is none |
+| `revoke(...)` | `POST` of `token` and `token_type_hint=refresh_token` to the `revocation_endpoint`, once; `Revocation::NoEndpoint` when there is none and `Revocation::EndpointUnusable` (nothing sent) when the issuer named one the endpoint rules refuse |
+| `random_token()` | 32 bytes of operating-system randomness, base64url (43 characters): the verifier, the `state`, and the ticket `aapctl` opens the browser with |
 
-An answer is read strictly: `access_token` must pass `Token::new`, `token_type` must be `Bearer` (any case), `expires_in` if present a
-whole number from 1 to a year, `refresh_token` if present visible ASCII. An OAuth error becomes `OidcError::Refused { code }` (the
+An answer is read strictly: `access_token` must pass `Token::new` (visible ASCII, **at most 16 KiB**, `MAX_TOKEN_BYTES`, the authenticator's own limit), `token_type` must be `Bearer` (any case), `expires_in` if present a
+whole number from 1 to a year, `refresh_token` if present visible ASCII and at most 16 KiB. Nothing quotes the body: a `BadAnswer` is a fixed phrase. An OAuth error with status `400` or `401` becomes `OidcError::Refused { code }` (the
 `error` member cut to `[A-Za-z0-9_.-]` and 64 characters; its description is never read) or, for a refresh, `InvalidGrant`; a `5xx`, a
 `429`, a redirect and a `404` are `Server { host, status }`. **The ID token is not read** and no `nonce` is sent. `Secret` holds a
 verifier, a code or a refresh token: no `Debug` of its text and no `Display`. `trace` gets `> POST host` and `< status` per request,

@@ -30,7 +30,7 @@ aap-forms.workspace = true
 aap-platform-api.workspace = true
 aap-ports = { workspace = true, features = ["testkit"] }
 axum.workspace = true
-tokio = { workspace = true, features = ["macros", "rt", "rt-multi-thread", "net", "time"] }
+tokio = { workspace = true, features = ["macros", "rt", "rt-multi-thread", "net", "time", "io-util"] }
 
 [lints]
 workspace = true

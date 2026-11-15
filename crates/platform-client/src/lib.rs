@@ -34,7 +34,7 @@ pub use problem::{
     FieldProblem, Problem, YamlOnlyReason, clean, clean_multiline, has_terminal_hazard,
     json_for_terminal, terminal_hazard_kind,
 };
-pub use token::Token;
+pub use token::{MAX_TOKEN_BYTES, Token};
 
 /// The most an answer may hold: the API's own bodies are far smaller, so a larger one is not the API.
 const MAX_ANSWER_BYTES: usize = 8 << 20;

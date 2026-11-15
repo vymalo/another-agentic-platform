@@ -431,30 +431,50 @@ fn assert_no_secrets(rig: &Rig, out: &Out, url: Option<&Url>) {
         secrets.push(("refresh token", r));
     }
     let mut stderr = out.stderr.clone();
+    let mut state = None;
     if let Some(url) = url {
-        // The line that is the URL, once.
+        // The state may be in the line that is the URL and nowhere else; the line is taken out before the rest is searched for it. **The
+        // URL line is not exempt from the rest**: no code, verifier or token is in the address, whatever window of it is looked at.
         stderr = stderr
             .lines()
             .filter(|l| *l != url.as_str())
             .collect::<Vec<_>>()
             .join("\n");
-        secrets.push(("state", param(url, "state")));
+        state = Some(param(url, "state"));
     }
-    for (what, secret) in secrets {
-        // Any 16 characters of it are a leak.
-        let chars: Vec<char> = secret.chars().collect();
-        let windows: Vec<String> = if chars.len() <= 16 {
-            vec![secret.clone()]
-        } else {
-            chars.windows(16).map(|w| w.iter().collect()).collect()
-        };
-        for w in windows {
+    for (what, secret) in &secrets {
+        for w in windows_of(secret) {
             assert!(!out.stdout.contains(&w), "the {what} is on standard output");
             assert!(
                 !stderr.contains(&w),
                 "the {what} is on standard error:\n{stderr}"
             );
+            if let Some(url) = url {
+                assert!(
+                    !url.as_str().contains(&w),
+                    "the {what} is in the authorization URL: {url}"
+                );
+            }
         }
+    }
+    if let Some(state) = state {
+        for w in windows_of(&state) {
+            assert!(!out.stdout.contains(&w), "the state is on standard output");
+            assert!(
+                !stderr.contains(&w),
+                "the state is on standard error outside the URL line:\n{stderr}"
+            );
+        }
+    }
+}
+
+/// Any 16 characters of a secret are a leak: the windows to look for.
+fn windows_of(secret: &str) -> Vec<String> {
+    let chars: Vec<char> = secret.chars().collect();
+    if chars.len() <= 16 {
+        vec![secret.to_owned()]
+    } else {
+        chars.windows(16).map(|w| w.iter().collect()).collect()
     }
 }
 
@@ -581,21 +601,33 @@ fn a_callback_with_another_state_is_a_400_and_the_wait_goes_on_until_the_timeout
     let mut live = rig.login(&["--timeout", "2"]);
     let url = live.url();
     let callback = callback_of(&url);
+    // The window is two seconds and a loaded runner may use it up: the first answer is required (the listener was there), the
+    // others are asserted as far as they were made while it was still waiting, and the outcome is what the test is about.
+    let mut answered = 0;
     for query in [
         "code=c1&state=not-the-state",
         "code=c1",
         "state=x",
         "error=access_denied&state=not-the-state",
+        "code=c2&state=still-not",
     ] {
-        let r = get(&with_query(&callback, query));
-        assert_eq!(r.status, 400, "{query}");
-        assert_eq!(r.body, "Bad request.\n");
+        let target = with_query(&callback, query);
+        let message = format!(
+            "GET {}?{} HTTP/1.1\r\nHost: x\r\nConnection: close\r\n\r\n",
+            target.path(),
+            target.query().unwrap()
+        );
+        match exchange("127.0.0.1", target.port().unwrap(), message.as_bytes()) {
+            Ok(answer) if !answer.is_empty() => {
+                let r = parse(&answer);
+                assert_eq!(r.status, 400, "{query}");
+                assert_eq!(r.body, "Bad request.\n");
+                answered += 1;
+            }
+            _ => break,
+        }
     }
-    // Still listening: it answers the next one too.
-    assert_eq!(
-        get(&with_query(&callback, "code=c2&state=still-not")).status,
-        400
-    );
+    assert!(answered >= 1, "the listener never answered");
     let out = live.finish();
     assert_eq!(out.code, 4, "{}", out.stderr);
     assert!(
@@ -637,9 +669,16 @@ fn a_wrong_verifier_is_refused_by_the_issuer_and_nothing_is_kept() {
 #[test]
 fn a_sign_in_nobody_completes_times_out_with_exit_4_and_no_file() {
     let rig = Rig::start("timeout");
+    let started = Instant::now();
     let mut live = rig.login(&["--timeout", "1"]);
     let _ = live.url();
     let out = live.finish();
+    // A lower bound only: a loaded runner may take longer, and none may take less than the time the person was promised.
+    assert!(
+        started.elapsed() >= Duration::from_millis(900),
+        "{:?}",
+        started.elapsed()
+    );
     assert_eq!(out.code, 4, "{}", out.stderr);
     assert!(
         out.stderr.contains("no sign-in within 1 s"),
@@ -1237,7 +1276,9 @@ fn invalid_grant_forgets_the_refresh_token_and_asks_for_a_new_sign_in() {
 #[test]
 fn an_unreachable_issuer_is_exit_5_and_the_file_is_left_byte_for_byte() {
     let rig = Rig::start("issuer-down");
-    let soon = i64::try_from(now()).unwrap() + 5;
+    // Changed from `+ 5` with the second review (item 8): a token that is only about to expire is used as it is when the refresh
+    // fails, so the exit 5 of an issuer that is down is for a token whose `expiresAt` is already past.
+    let soon = i64::try_from(now()).unwrap() - 10;
     rig.save_session(&rig.expired_token(), soon, Some("r-seed"));
     let before = std::fs::read(rig.config()).unwrap();
 
@@ -1331,6 +1372,12 @@ fn the_refresh_token_goes_only_to_the_saved_issuers_token_endpoint() {
     assert!(other.token_grants().is_empty());
     assert_eq!(other.authorize_requests(), 0);
 }
+
+// The three tests below are about **the retry logic of `aapctl`**: one refresh and one repeat of the call after a `401`, never a second
+// refresh in a command, and a write repeated only after a `401` that refused it. What they **assume** about the API is what the API
+// does: it answers `401` before any handler runs, in the layer that wraps every route (`guard` in
+// `crates/platform-api/src/authz.rs`, applied in `router.rs`), so a request that got one changed nothing and sending it again is
+// safe. `refuse_writes` of the rig plays that layer for a `PUT`; a test of the API itself says it in `crates/platform-api`.
 
 #[test]
 fn a_401_is_retried_once_after_one_refresh_and_never_a_second_time() {
@@ -1623,3 +1670,1019 @@ fn verbose_prints_the_host_and_the_status_of_the_issuer_and_no_secret() {
     assert!(who.stderr.contains("> POST"), "{}", who.stderr);
     assert_no_secrets(&rig, &who, None);
 }
+
+// =========================================================================================================== review of 54199b1
+//
+// What follows is the second review's list (A1 to A17 of the fix brief). The rig above is unchanged.
+
+use std::os::fd::AsFd;
+
+impl Rig {
+    /// `login` with this rig's server and issuer and `extra` flags, **without** `--no-browser` unless `extra` has it, with `env` set.
+    fn login_env(&self, extra: &[&str], env: &[(&str, &str)]) -> Live {
+        let issuer = self.idp().issuer();
+        let config = self.config();
+        let mut args = vec![
+            "login",
+            "--server",
+            &self.url,
+            "--issuer",
+            &issuer,
+            "--config",
+            config.to_str().unwrap(),
+        ];
+        args.extend_from_slice(extra);
+        Live::spawn(&args, env, &self.dir)
+    }
+
+    /// A command that is not the login, as a process that keeps running (to run two at once).
+    fn ctl_live(&self, args: &[&str]) -> Live {
+        let config = self.config();
+        let mut full: Vec<&str> = args.to_vec();
+        full.extend(["--server", &self.url, "--config", config.to_str().unwrap()]);
+        Live::spawn(&full, &[], &self.dir)
+    }
+
+    /// The saved file as a person's editor would have it, with `text` as it is.
+    fn write_file(&self, text: &str, mode: u32) {
+        std::fs::write(self.config(), text).unwrap();
+        std::fs::set_permissions(self.config(), std::fs::Permissions::from_mode(mode)).unwrap();
+    }
+
+    /// `save_session` for another client id.
+    fn save_session_as(&self, client: &str, access: &str, expires_at: i64, refresh: &str) {
+        self.idp()
+            .seed_refresh_token(refresh, client, "alice", &all_permissions());
+        self.write_file(
+            &format!(
+                "server: {}\nissuer: {}\nclientId: {client}\nscopes:\n- openid\naccessToken: {access}\nexpiresAt: {expires_at}\ntokenSource: signed-in\nrefreshToken: {refresh}\n",
+                self.url,
+                self.idp().issuer()
+            ),
+            0o600,
+        );
+    }
+
+    fn soon(&self) -> i64 {
+        i64::try_from(now()).unwrap() + 5
+    }
+}
+
+/// A directory with an `xdg-open` that records its first argument, one line per call, and the `PATH` that finds it first.
+fn fake_opener(rig: &Rig) -> (String, PathBuf) {
+    let bin = rig.dir.join("bin");
+    std::fs::create_dir_all(&bin).unwrap();
+    let calls = rig.dir.join("opener-calls");
+    let program = bin.join("xdg-open");
+    std::fs::write(
+        &program,
+        format!(
+            "#!/bin/sh\nprintf '%s\\n' \"$1\" >> '{}'\n",
+            calls.display()
+        ),
+    )
+    .unwrap();
+    std::fs::set_permissions(&program, std::fs::Permissions::from_mode(0o755)).unwrap();
+    let path = format!(
+        "{}:{}",
+        bin.display(),
+        std::env::var("PATH").unwrap_or_default()
+    );
+    (path, calls)
+}
+
+/// The lines the fake opener recorded, waited for until there are `n` of them (it runs after `aapctl` spawned it).
+fn opener_calls(calls: &Path, n: usize) -> Vec<String> {
+    let started = Instant::now();
+    loop {
+        let lines: Vec<String> = std::fs::read_to_string(calls)
+            .unwrap_or_default()
+            .lines()
+            .map(str::to_owned)
+            .collect();
+        if lines.len() >= n || started.elapsed() > Duration::from_secs(10) {
+            return lines;
+        }
+        std::thread::sleep(Duration::from_millis(20));
+    }
+}
+
+/// What the issuer answers a browser that follows the authorization URL: the callback address with the code and the state.
+fn callback_with_code(auth_url: &Url) -> Url {
+    let at_issuer = get(auth_url);
+    assert_eq!(at_issuer.status, 302, "{}", at_issuer.body);
+    Url::parse(header(&at_issuer, "location").unwrap()).unwrap()
+}
+
+/// A listener that answers every request with `reply`, counting the connections it got.
+fn responder(reply: String) -> (u16, Arc<AtomicUsize>) {
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let port = listener.local_addr().unwrap().port();
+    let count = Arc::new(AtomicUsize::new(0));
+    let seen = count.clone();
+    std::thread::spawn(move || {
+        for stream in listener.incoming() {
+            let Ok(mut stream) = stream else { continue };
+            seen.fetch_add(1, Ordering::SeqCst);
+            let _ = stream.set_read_timeout(Some(Duration::from_secs(2)));
+            let mut buffer = [0_u8; 4096];
+            let _ = stream.read(&mut buffer);
+            let _ = stream.write_all(reply.as_bytes());
+        }
+    });
+    (port, count)
+}
+
+fn lock_file(config: &Path) -> PathBuf {
+    let mut name = config.file_name().unwrap().to_os_string();
+    name.push(".lock");
+    config.with_file_name(name)
+}
+
+/// Hold the advisory lock `aapctl` takes around its read-compare-write, as another process of it would.
+fn hold_lock(config: &Path) -> std::fs::File {
+    let file = std::fs::OpenOptions::new()
+        .create(true)
+        .truncate(false)
+        .write(true)
+        .open(lock_file(config))
+        .unwrap();
+    rustix::fs::flock(file.as_fd(), rustix::fs::FlockOperation::LockExclusive).unwrap();
+    file
+}
+
+// ----------------------------------------------------------------------------------------------------------- A1: the ticket
+
+#[test]
+fn the_browser_is_given_a_ticket_link_and_never_the_authorization_url() {
+    let rig = Rig::start("ticket");
+    rig.idp().set_login("alice", &all_permissions());
+    let (path, calls) = fake_opener(&rig);
+    let mut live = rig.login_env(&[], &[("PATH", &path)]);
+    // The address printed (the first one on standard error) is the link, and it is what the opener was given.
+    let start = live.url();
+    assert_eq!(start.host_str(), Some("127.0.0.1"));
+    let segments: Vec<&str> = start.path_segments().unwrap().collect();
+    assert_eq!(segments[0], "start", "{start}");
+    assert_eq!(segments[1].len(), 43, "32 random bytes: {start}");
+    assert!(start.query().is_none(), "{start}");
+    let recorded = opener_calls(&calls, 1);
+    assert_eq!(recorded, [start.to_string()], "the opener's argument");
+
+    // The listener sends the browser on, and tells it to keep nothing of it.
+    let first = get(&start);
+    assert_eq!(first.status, 302, "{}", first.body);
+    assert_eq!(header(&first, "cache-control"), Some("no-store"));
+    assert_eq!(header(&first, "referrer-policy"), Some("no-referrer"));
+    let auth = Url::parse(header(&first, "location").unwrap()).unwrap();
+    assert_eq!(auth.path(), "/authorize");
+    let state = param(&auth, "state");
+    let back = get(&callback_with_code(&auth));
+    assert_eq!(back.status, 200, "{}", back.body);
+    let out = live.finish();
+    assert_eq!(out.code, 0, "{}", out.stderr);
+    // Neither the opener's argument nor anything printed names the state, the challenge or the authorization endpoint.
+    for needle in [state.as_str(), "code_challenge", "/authorize"] {
+        assert!(
+            !recorded[0].contains(needle),
+            "the opener got {needle}: {recorded:?}"
+        );
+        assert!(
+            !out.stderr.contains(needle),
+            "{needle} was printed:\n{}",
+            out.stderr
+        );
+    }
+    assert_eq!(
+        std::fs::read_to_string(&calls).unwrap().lines().count(),
+        1,
+        "the opener ran once"
+    );
+    assert_no_secrets(&rig, &out, Some(&auth));
+}
+
+#[test]
+fn a_second_use_of_the_ticket_ends_the_sign_in_with_exit_4() {
+    let rig = Rig::start("ticket-twice");
+    rig.idp().set_login("alice", &all_permissions());
+    let (path, _calls) = fake_opener(&rig);
+    let mut live = rig.login_env(&[], &[("PATH", &path)]);
+    let start = live.url();
+    assert_eq!(get(&start).status, 302);
+    // Whoever came first may hold the state: the second request for the right ticket ends it.
+    let second = get(&start);
+    assert_ne!(second.status, 302, "the link was served twice");
+    let out = live.finish();
+    assert_eq!(out.code, 4, "{}", out.stderr);
+    assert!(
+        out.stderr.contains("the sign-in link was opened twice")
+            && out.stderr.contains("--no-browser"),
+        "{}",
+        out.stderr
+    );
+    assert!(!rig.config().exists());
+    assert!(rig.idp().token_grants().is_empty());
+}
+
+#[test]
+fn a_wrong_ticket_is_a_404_that_counts_toward_the_bound() {
+    let rig = Rig::start("ticket-wrong");
+    rig.idp().set_login("alice", &all_permissions());
+    let (path, _calls) = fake_opener(&rig);
+    let mut live = rig.login_env(&["--timeout", "60"], &[("PATH", &path)]);
+    let start = live.url();
+    let mut wrong = start.clone();
+    wrong.set_path(&format!("/start/{}", "A".repeat(43)));
+    assert_eq!(get(&wrong).status, 404);
+    // One that is the right ticket plus a character, and a prefix of it.
+    for tail in [format!("{}x", start.path()), start.path()[..20].to_owned()] {
+        let mut url = start.clone();
+        url.set_path(&tail);
+        assert_eq!(get(&url).status, 404, "{tail}");
+    }
+    // The real one still works, and then the flood of wrong ones ends the sign-in at 64 requests.
+    assert_eq!(get(&start).status, 302);
+    for _ in 0..80 {
+        if exchange(
+            "127.0.0.1",
+            start.port().unwrap(),
+            format!("GET /start/{} HTTP/1.1\r\n\r\n", "B".repeat(43)).as_bytes(),
+        )
+        .is_err()
+        {
+            break;
+        }
+    }
+    let out = live.finish();
+    assert_eq!(out.code, 4, "{}", out.stderr);
+    assert!(
+        out.stderr.contains("more than 64 requests"),
+        "{}",
+        out.stderr
+    );
+}
+
+#[test]
+fn with_no_browser_nothing_is_opened_and_there_is_no_start_route() {
+    let rig = Rig::start("no-browser");
+    rig.idp().set_login("alice", &all_permissions());
+    let (path, calls) = fake_opener(&rig);
+    let mut live = rig.login_env(&["--no-browser"], &[("PATH", &path)]);
+    // The terminal is the person's: the authorization URL is printed as it was.
+    let url = live.url();
+    assert_eq!(url.path(), "/authorize");
+    let callback = callback_of(&url);
+    let mut start = callback.clone();
+    start.set_path("/start/anything");
+    assert_eq!(get(&start).status, 400, "there is no /start route");
+    assert_eq!(browse(&url).status, 200);
+    let out = live.finish();
+    assert_eq!(out.code, 0, "{}", out.stderr);
+    // The opener would have run before the listener answered anything; a moment more is a wait for something that must not come.
+    std::thread::sleep(Duration::from_millis(500));
+    assert!(
+        !calls.exists(),
+        "a browser was opened under --no-browser: {:?}",
+        std::fs::read_to_string(&calls)
+    );
+    assert_no_secrets(&rig, &out, Some(&url));
+}
+
+#[test]
+fn login_and_whoami_say_who_the_token_is() {
+    let rig = Rig::start("who");
+    rig.idp().set_login("alice", &all_permissions());
+    let out = rig.sign_in();
+    assert_eq!(out.code, 0, "{}", out.stderr);
+    assert!(
+        out.stdout
+            .contains(&format!("Signed in to {} as alice", rig.url)),
+        "{}",
+        out.stdout
+    );
+    let who = rig.ctl(&["whoami"], None);
+    assert!(who.stdout.contains("subject: alice"), "{}", who.stdout);
+
+    // A pasted token says it too.
+    let rig = Rig::start("who-pasted");
+    let token = rig.auth.token_for("bob", &all_permissions());
+    let config = rig.config();
+    let out = api::run_binary(
+        &[
+            "login",
+            "--token-stdin",
+            "--server",
+            &rig.url,
+            "--config",
+            config.to_str().unwrap(),
+        ],
+        None,
+        Some(&token),
+        &rig.dir,
+    );
+    assert_eq!(out.code, 0, "{}", out.stderr);
+    assert!(
+        out.stdout
+            .contains(&format!("Signed in to {} as bob;", rig.url)),
+        "{}",
+        out.stdout
+    );
+}
+
+// ----------------------------------------------------------------------------------------------------------- A2: sizes
+
+#[test]
+fn a_refresh_that_answers_with_a_token_too_large_to_keep_leaves_the_file_and_the_next_command_works()
+ {
+    for (access, refresh, what) in [(70_000, 0, "access"), (0, 20_000, "refresh")] {
+        let rig = Rig::start(&format!("huge-{what}"));
+        // Past its end for the file too, so a failed refresh is the command's failure and no second refresh is tried.
+        let past = i64::try_from(now()).unwrap() - 10;
+        rig.save_session(&rig.expired_token(), past, Some("r-seed"));
+        let before = std::fs::read(rig.config()).unwrap();
+        rig.idp().set_padding(access, refresh);
+        let out = rig.ctl(&["whoami"], None);
+        assert_eq!(out.code, 5, "{what}: {}", out.stderr);
+        assert_eq!(std::fs::read(rig.config()).unwrap(), before, "{what}");
+        // Not a lockout: the issuer answers sanely again (its rotation spent the old token, so it is given back) and the same file
+        // works.
+        rig.idp().set_padding(0, 0);
+        rig.idp()
+            .seed_refresh_token("r-seed", "aapctl", "alice", &all_permissions());
+        let again = rig.ctl(&["whoami"], None);
+        assert_eq!(again.code, 0, "{what}: {}", again.stderr);
+    }
+}
+
+#[test]
+fn a_token_over_16_kib_is_refused_wherever_it_comes_in() {
+    let rig = Rig::start("big-token");
+    let big = "a".repeat(17_000);
+    let config = rig.config();
+    let out = api::run_binary(
+        &[
+            "login",
+            "--token-stdin",
+            "--server",
+            &rig.url,
+            "--config",
+            config.to_str().unwrap(),
+        ],
+        None,
+        Some(&big),
+        &rig.dir,
+    );
+    assert_eq!(out.code, 2, "{}", out.stderr);
+    assert!(out.stderr.contains("16 KiB"), "{}", out.stderr);
+    assert!(!rig.config().exists());
+    let out = rig.ctl(&["whoami"], Some(&big));
+    assert_eq!(out.code, 2, "{}", out.stderr);
+    assert!(out.stderr.contains("16 KiB"), "{}", out.stderr);
+}
+
+#[test]
+fn login_and_logout_replace_a_file_that_is_ours_but_unusable_and_refuse_one_that_is_not() {
+    // Too large: every command refuses it and says how to get out; logout removes it and says so.
+    let rig = Rig::start("replace-large");
+    rig.write_file(&"x".repeat(70_000), 0o600);
+    let who = rig.ctl(&["whoami"], None);
+    assert_eq!(who.code, 2, "{}", who.stderr);
+    assert!(who.stderr.contains("aapctl logout"), "{}", who.stderr);
+    let out = rig.ctl(&["logout"], None);
+    assert_eq!(out.code, 0, "{}", out.stderr);
+    assert!(out.stdout.contains("removed"), "{}", out.stdout);
+    assert!(!rig.config().exists());
+
+    // Not a configuration: a login writes over it.
+    let rig = Rig::start("replace-garbage");
+    rig.write_file("[this: is not\n a mapping", 0o600);
+    let out = rig.sign_in();
+    assert_eq!(out.code, 0, "{}", out.stderr);
+    assert!(rig.saved().get("accessToken").is_some());
+    let config = rig.config();
+    let token = rig.good_token();
+    rig.write_file("- a\n- list\n", 0o600);
+    let out = api::run_binary(
+        &[
+            "login",
+            "--token-stdin",
+            "--server",
+            &rig.url,
+            "--config",
+            config.to_str().unwrap(),
+        ],
+        None,
+        Some(&token),
+        &rig.dir,
+    );
+    assert_eq!(out.code, 0, "{}", out.stderr);
+    assert!(rig.saved().get("accessToken").is_some());
+
+    // A file that fails the owner, mode, link or type checks is refused by both, and left as it is.
+    let rig = Rig::start("replace-refused");
+    rig.write_file(&"x".repeat(70_000), 0o644);
+    let out = rig.ctl(&["logout"], None);
+    assert_eq!(out.code, 2, "{}", out.stderr);
+    assert!(out.stderr.contains("readable by group or others"));
+    assert_eq!(std::fs::read(rig.config()).unwrap().len(), 70_000);
+    let out = rig.login(&[]).finish();
+    assert_eq!(out.code, 2, "{}", out.stderr);
+    let real = rig.dir.join("real.yaml");
+    std::fs::write(&real, "x".repeat(70_000)).unwrap();
+    std::fs::set_permissions(&real, std::fs::Permissions::from_mode(0o600)).unwrap();
+    let link = rig.dir.join("link.yaml");
+    std::os::unix::fs::symlink(&real, &link).unwrap();
+    let out = api::run_binary(
+        &["logout", "--config", link.to_str().unwrap()],
+        None,
+        None,
+        &rig.dir,
+    );
+    assert_eq!(out.code, 2, "{}", out.stderr);
+    assert!(real.exists());
+}
+
+// ----------------------------------------------------------------------------------------------------------- A3, A4: PKCE and iss
+
+#[test]
+fn an_issuer_that_does_not_say_it_supports_pkce_gets_a_note_and_one_that_lists_s256_none() {
+    let rig = Rig::start("pkce-note");
+    rig.idp().set_login("alice", &all_permissions());
+    rig.idp()
+        .patch_discovery(&json!({"code_challenge_methods_supported": null}));
+    let mut live = rig.login(&[]);
+    let url = live.url();
+    assert_eq!(browse(&url).status, 200);
+    let out = live.finish();
+    assert_eq!(out.code, 0, "{}", out.stderr);
+    assert!(
+        out.stderr
+            .contains("the issuer does not say it supports PKCE (S256); the sign-in goes on, protected only if it does"),
+        "{}",
+        out.stderr
+    );
+    assert_eq!(
+        out.stderr.matches("does not say it supports PKCE").count(),
+        1
+    );
+
+    let rig = Rig::start("pkce-no-note");
+    assert_eq!(rig.sign_in().stderr.matches("PKCE").count(), 0);
+}
+
+#[test]
+fn iss_in_the_callback_must_be_the_issuer_and_is_required_when_the_issuer_says_so() {
+    // RFC 9207 section 2.4: an `iss` that is present must be the discovered issuer, by simple string comparison.
+    let rig = Rig::start("iss");
+    rig.idp().set_login("alice", &all_permissions());
+    let mut live = rig.login(&["--timeout", "60"]);
+    let url = live.url();
+    let back = callback_with_code(&url);
+    for iss in [
+        "https://evil.example",
+        "http://127.0.0.1",
+        &format!("{}/", rig.idp().issuer()),
+        "",
+    ] {
+        let mut with = back.clone();
+        with.query_pairs_mut().append_pair("iss", iss);
+        let r = get(&with);
+        assert_eq!(r.status, 400, "iss={iss:?}");
+    }
+    let mut ok = back.clone();
+    ok.query_pairs_mut().append_pair("iss", &rig.idp().issuer());
+    assert_eq!(get(&ok).status, 200);
+    let out = live.finish();
+    assert_eq!(out.code, 0, "{}", out.stderr);
+
+    // The issuer says it sends `iss`: a callback without it is refused, one with it is taken.
+    let rig = Rig::start("iss-required");
+    rig.idp().set_login("alice", &all_permissions());
+    rig.idp()
+        .patch_discovery(&json!({"authorization_response_iss_parameter_supported": true}));
+    let mut live = rig.login(&["--timeout", "60"]);
+    let url = live.url();
+    let back = callback_with_code(&url);
+    assert_eq!(get(&back).status, 400);
+    let mut ok = back.clone();
+    ok.query_pairs_mut().append_pair("iss", &rig.idp().issuer());
+    assert_eq!(get(&ok).status, 200);
+    assert_eq!(live.finish().code, 0);
+}
+
+// ----------------------------------------------------------------------------------------------------------- A5: endpoints
+
+#[test]
+fn a_loopback_http_issuer_may_not_name_an_endpoint_anywhere_else() {
+    for member in [
+        "authorization_endpoint",
+        "token_endpoint",
+        "revocation_endpoint",
+    ] {
+        let rig = Rig::start("endpoint-elsewhere");
+        rig.idp()
+            .patch_discovery(&json!({ member: "https://idp.example.com/endpoint" }));
+        let mut live = rig.login(&["--timeout", "5"]);
+        let out = live.finish();
+        if member == "revocation_endpoint" {
+            // Not used, which is not the end of a sign-in: it only matters at logout.
+            assert!(out.code == 4, "{member}: {}", out.stderr);
+        } else {
+            assert_eq!(out.code, 5, "{member}: {}", out.stderr);
+            assert!(out.stderr.contains(member), "{}", out.stderr);
+        }
+        assert!(!rig.config().exists());
+    }
+}
+
+#[test]
+fn the_issuer_is_never_followed_through_a_redirect() {
+    let rig = Rig::start("no-redirect");
+    rig.idp().set_login("alice", &all_permissions());
+    let (second_port, second) =
+        responder("HTTP/1.1 200 OK\r\nContent-Length: 2\r\nConnection: close\r\n\r\n{}".to_owned());
+    let (first_port, first) = responder(format!(
+        "HTTP/1.1 307 Temporary Redirect\r\nLocation: http://127.0.0.1:{second_port}/token\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"
+    ));
+    rig.idp().patch_discovery(
+        &json!({"token_endpoint": format!("http://127.0.0.1:{first_port}/token")}),
+    );
+    let mut live = rig.login(&[]);
+    let url = live.url();
+    assert_eq!(browse(&url).status, 200);
+    let out = live.finish();
+    assert_eq!(out.code, 5, "{}", out.stderr);
+    assert!(out.stderr.contains("307"), "{}", out.stderr);
+    assert_eq!(first.load(Ordering::SeqCst), 1);
+    assert_eq!(
+        second.load(Ordering::SeqCst),
+        0,
+        "the redirect was followed"
+    );
+    assert!(!rig.config().exists());
+}
+
+#[test]
+fn an_issuer_with_a_query_or_a_fragment_is_a_usage_error_and_a_trailing_slash_gets_a_hint() {
+    let rig = Rig::start("issuer-shapes");
+    let config = rig.config();
+    for issuer in [
+        "http://127.0.0.1:1/?a=b",
+        "http://127.0.0.1:1/#frag",
+        "http://127.0.0.1:1?x",
+    ] {
+        let out = api::run_binary(
+            &[
+                "login",
+                "--server",
+                &rig.url,
+                "--issuer",
+                issuer,
+                "--config",
+                config.to_str().unwrap(),
+                "--no-browser",
+            ],
+            None,
+            None,
+            &rig.dir,
+        );
+        assert_eq!(out.code, 2, "{issuer}: {}", out.stderr);
+    }
+    // The document names the issuer without the slash: it is not that issuer, and the message says what differs.
+    let with_slash = format!("{}/", rig.idp().issuer());
+    let out = api::run_binary(
+        &[
+            "login",
+            "--server",
+            &rig.url,
+            "--issuer",
+            &with_slash,
+            "--config",
+            config.to_str().unwrap(),
+            "--no-browser",
+        ],
+        None,
+        None,
+        &rig.dir,
+    );
+    assert_eq!(out.code, 5, "{}", out.stderr);
+    assert!(out.stderr.contains("trailing slash"), "{}", out.stderr);
+}
+
+#[test]
+fn the_issuer_flag_wins_over_the_one_in_the_file() {
+    let rig = Rig::start("issuer-flag");
+    rig.idp().set_login("alice", &all_permissions());
+    rig.write_file(
+        &format!("server: {}\nissuer: http://127.0.0.1:1\n", rig.url),
+        0o600,
+    );
+    let out = {
+        let mut live = rig.login(&[]);
+        let url = live.url();
+        assert_eq!(browse(&url).status, 200);
+        live.finish()
+    };
+    assert_eq!(out.code, 0, "{}", out.stderr);
+    assert_eq!(rig.saved()["issuer"], rig.idp().issuer().as_str());
+}
+
+// ----------------------------------------------------------------------------------------------------------- A6, A7: revocation
+
+#[test]
+fn logout_says_when_the_revocation_endpoint_cannot_be_used_and_revokes_a_file_with_only_a_refresh_token()
+ {
+    let rig = Rig::start("revoke-unusable");
+    assert_eq!(rig.sign_in().code, 0);
+    rig.idp()
+        .patch_discovery(&json!({"revocation_endpoint": "https://idp.example.com/revoke"}));
+    let out = rig.ctl(&["logout"], None);
+    assert_eq!(out.code, 0, "{}", out.stderr);
+    assert!(
+        out.stderr
+            .contains("not revoked: the issuer's revocation endpoint cannot be used"),
+        "{}",
+        out.stderr
+    );
+    assert!(rig.idp().revoked_tokens().is_empty());
+    assert!(rig.saved().get("refreshToken").is_none());
+
+    // Only a refresh token in the file: it is forgotten and revoked.
+    let rig = Rig::start("revoke-refresh-only");
+    rig.idp().enable_revocation(false);
+    rig.idp()
+        .seed_refresh_token("r-only", "aapctl", "alice", &all_permissions());
+    rig.write_file(
+        &format!(
+            "server: {}\nissuer: {}\nrefreshToken: r-only\n",
+            rig.url,
+            rig.idp().issuer()
+        ),
+        0o600,
+    );
+    let out = rig.ctl(&["logout"], None);
+    assert_eq!(out.code, 0, "{}", out.stderr);
+    assert!(out.stdout.contains("signed out of"), "{}", out.stdout);
+    assert_eq!(rig.idp().revoked_tokens(), ["r-only"]);
+    assert!(rig.saved().get("refreshToken").is_none());
+}
+
+#[test]
+fn a_refresh_token_that_is_dropped_is_revoked_best_effort() {
+    // The API refuses the access token: nothing is kept, and the refresh token the issuer just gave is revoked.
+    let rig = Rig::start("revoke-dropped");
+    rig.idp().enable_revocation(false);
+    rig.idp().set_login("alice", &all_permissions());
+    rig.idp().set_audience("not-the-api");
+    let mut live = rig.login(&[]);
+    let url = live.url();
+    assert_eq!(browse(&url).status, 200);
+    let out = live.finish();
+    assert_eq!(out.code, 4, "{}", out.stderr);
+    assert!(!rig.config().exists());
+    assert_eq!(rig.idp().issued_refresh_tokens().len(), 1);
+    assert_eq!(
+        rig.idp().revoked_tokens(),
+        rig.idp().issued_refresh_tokens()
+    );
+    assert_no_secrets(&rig, &out, Some(&url));
+
+    // When that revocation fails too, it is a note.
+    let rig = Rig::start("revoke-dropped-fails");
+    rig.idp().enable_revocation(true);
+    rig.idp().set_login("alice", &all_permissions());
+    rig.idp().set_audience("not-the-api");
+    let mut live = rig.login(&[]);
+    let url = live.url();
+    assert_eq!(browse(&url).status, 200);
+    let out = live.finish();
+    assert_eq!(out.code, 4, "{}", out.stderr);
+    assert!(
+        out.stderr.contains("could not be revoked at the issuer"),
+        "{}",
+        out.stderr
+    );
+
+    // A second login over a saved refresh token revokes the old one, after the new state is saved.
+    let rig = Rig::start("revoke-replaced");
+    rig.idp().enable_revocation(false);
+    assert_eq!(rig.sign_in().code, 0);
+    let first = rig.idp().issued_refresh_tokens()[0].clone();
+    assert_eq!(rig.sign_in().code, 0);
+    assert_eq!(rig.idp().revoked_tokens(), std::slice::from_ref(&first));
+    assert_ne!(rig.saved()["refreshToken"].as_str().unwrap(), first);
+
+    // And so does a pasted token.
+    let second = rig.idp().issued_refresh_tokens()[1].clone();
+    let config = rig.config();
+    let out = api::run_binary(
+        &[
+            "login",
+            "--token-stdin",
+            "--server",
+            &rig.url,
+            "--config",
+            config.to_str().unwrap(),
+        ],
+        None,
+        Some(&rig.good_token()),
+        &rig.dir,
+    );
+    assert_eq!(out.code, 0, "{}", out.stderr);
+    assert_eq!(rig.idp().revoked_tokens(), [first, second]);
+    assert!(rig.saved().get("refreshToken").is_none());
+}
+
+// ----------------------------------------------------------------------------------------------------------- A8 to A10, A14: refresh rules
+
+#[test]
+fn a_refresh_that_fails_does_not_kill_a_command_whose_token_is_still_good() {
+    // About to expire and still good: the failure is a note, and the saved token is used.
+    let rig = Rig::start("soft-refresh");
+    rig.save_session(&rig.good_token(), rig.soon(), Some("r-seed"));
+    let before = std::fs::read(rig.config()).unwrap();
+    // The API has the issuer's keys already (it reads them through the same issuer), so only the refresh fails.
+    assert_eq!(rig.ctl(&["whoami"], Some(&rig.good_token())).code, 0);
+    rig.idp().set_discovery_down(true);
+    let out = rig.ctl(&["whoami"], None);
+    assert_eq!(out.code, 0, "{}", out.stderr);
+    assert!(
+        out.stderr.contains("could not be refreshed"),
+        "{}",
+        out.stderr
+    );
+    assert_eq!(std::fs::read(rig.config()).unwrap(), before);
+    assert_no_secrets(&rig, &out, None);
+
+    // Already past its end, as far as the file says: exit 5, and the file is as it was.
+    let rig = Rig::start("hard-refresh");
+    let past = i64::try_from(now()).unwrap() - 10;
+    rig.save_session(&rig.good_token(), past, Some("r-seed"));
+    let before = std::fs::read(rig.config()).unwrap();
+    rig.idp().set_discovery_down(true);
+    let out = rig.ctl(&["whoami"], None);
+    assert_eq!(out.code, 5, "{}", out.stderr);
+    assert_eq!(std::fs::read(rig.config()).unwrap(), before);
+
+    // A token endpoint that fails (not only discovery) leaves the file byte for byte: unreachable, and a 503.
+    let (down, _) = responder(
+        "HTTP/1.1 503 Service Unavailable\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"
+            .to_owned(),
+    );
+    for endpoint in [
+        "http://127.0.0.1:1/token".to_owned(),
+        format!("http://127.0.0.1:{down}/token"),
+    ] {
+        let rig = Rig::start("token-endpoint-fails");
+        rig.save_session(&rig.expired_token(), past, Some("r-seed"));
+        let before = std::fs::read(rig.config()).unwrap();
+        rig.idp()
+            .patch_discovery(&json!({"token_endpoint": endpoint}));
+        let out = rig.ctl(&["whoami"], None);
+        assert_eq!(out.code, 5, "{endpoint}: {}", out.stderr);
+        assert_eq!(std::fs::read(rig.config()).unwrap(), before, "{endpoint}");
+    }
+
+    // But a refresh token the issuer refuses is never hidden: that is the sign-in being over, token good or not.
+    let rig = Rig::start("grant-gone");
+    rig.save_session(&rig.good_token(), rig.soon(), Some("r-seed"));
+    rig.idp().set_refresh_invalid(true);
+    let out = rig.ctl(&["whoami"], None);
+    assert_eq!(out.code, 4, "{}", out.stderr);
+    assert!(rig.saved().get("refreshToken").is_none());
+}
+
+#[test]
+fn a_refresh_before_the_call_counts_as_the_commands_one_refresh() {
+    // The refreshed token is refused too (another audience): one grant in all, not one more after the 401.
+    let rig = Rig::start("tried-after-pre-refresh");
+    rig.save_session(&rig.expired_token(), rig.soon(), Some("r-seed"));
+    rig.idp().set_audience("not-the-api");
+    let out = rig.ctl(&["get", "agents"], None);
+    assert_eq!(out.code, 4, "{}", out.stderr);
+    assert_eq!(rig.idp().token_grants(), ["refresh_token"]);
+}
+
+#[test]
+fn aapctl_token_is_not_refreshed_with_no_server_flag_either() {
+    let rig = Rig::start("env-token-no-server");
+    rig.save_session(&rig.good_token(), rig.soon(), Some("r-seed"));
+    let before = std::fs::read(rig.config()).unwrap();
+    let config = rig.config();
+    let out = api::run_binary_env(
+        &["whoami", "--config", config.to_str().unwrap()],
+        Some(&rig.expired_token()),
+        None,
+        &rig.dir,
+        &[],
+    );
+    assert_eq!(out.code, 4, "{}", out.stderr);
+    assert!(rig.idp().token_grants().is_empty());
+    assert_eq!(std::fs::read(rig.config()).unwrap(), before);
+}
+
+#[test]
+fn a_refresh_uses_the_client_id_the_session_was_saved_with() {
+    let rig = Rig::start("saved-client");
+    rig.save_session_as("my-client", &rig.expired_token(), rig.soon(), "r-mine");
+    let out = rig.ctl(&["whoami"], None);
+    assert_eq!(out.code, 0, "{}", out.stderr);
+    assert_eq!(rig.saved()["clientId"], "my-client");
+    assert_eq!(rig.idp().token_grants(), ["refresh_token"]);
+    // A 401 after it is the same client again.
+    let rig = Rig::start("saved-client-401");
+    let later = i64::try_from(now()).unwrap() + 3600;
+    rig.save_session_as("my-client", &rig.expired_token(), later, "r-mine");
+    assert_eq!(rig.ctl(&["get", "agents"], None).code, 0);
+}
+
+#[test]
+fn a_403_is_not_answered_with_a_refresh() {
+    let rig = Rig::start("no-refresh-for-403");
+    let later = i64::try_from(now()).unwrap() + 3600;
+    // Signed in, with no permission at all: the API says 403, and a new token would say it again.
+    let nobody = rig.auth.token_for("alice", &[]);
+    rig.save_session(&nobody, later, Some("r-seed"));
+    let out = rig.ctl(&["get", "agents"], None);
+    assert_eq!(out.code, 4, "{}", out.stderr);
+    assert!(out.stderr.contains("403"), "{}", out.stderr);
+    assert!(rig.idp().token_grants().is_empty());
+    assert_eq!(rig.api_calls().len(), 1);
+}
+
+// ----------------------------------------------------------------------------------------------------------- A11: the lock
+
+#[test]
+fn two_commands_with_an_expiring_token_refresh_once_between_them() {
+    // An issuer that rotates and refuses a used token: the second process must find the first one's token, not spend the old one.
+    let rig = Rig::start("two-refreshes");
+    rig.save_session(&rig.expired_token(), rig.soon(), Some("r-seed"));
+    let mut a = rig.ctl_live(&["whoami"]);
+    let mut b = rig.ctl_live(&["whoami"]);
+    let (a, b) = (a.finish(), b.finish());
+    assert_eq!(a.code, 0, "{}", a.stderr);
+    assert_eq!(b.code, 0, "{}", b.stderr);
+    assert_eq!(
+        rig.idp().token_grants(),
+        ["refresh_token"],
+        "the rotating token was spent twice"
+    );
+    assert_eq!(
+        rig.saved()["refreshToken"].as_str().unwrap(),
+        rig.idp().issued_refresh_tokens()[0]
+    );
+}
+
+#[test]
+fn a_logout_that_takes_the_lock_while_a_refresh_waits_leaves_no_token() {
+    let rig = Rig::start("logout-vs-refresh");
+    rig.idp().enable_revocation(false);
+    rig.save_session(&rig.expired_token(), rig.soon(), Some("r-seed"));
+    let held = hold_lock(&rig.config());
+    let mut refresh = rig.ctl_live(&["whoami"]);
+    let mut logout = rig.ctl_live(&["logout"]);
+    std::thread::sleep(Duration::from_millis(300));
+    drop(held);
+    let (refresh, logout) = (refresh.finish(), logout.finish());
+    assert_eq!(logout.code, 0, "{}", logout.stderr);
+    // Whichever of them got the lock first, the file ends without a token: a refresh after the logout finds nothing to refresh, and a
+    // refresh before it is forgotten by it.
+    let saved = rig.saved();
+    for gone in ["accessToken", "refreshToken"] {
+        assert!(saved.get(gone).is_none(), "{gone} is back: {saved:?}");
+    }
+    assert!(refresh.code == 0 || refresh.code == 4, "{}", refresh.stderr);
+}
+
+#[test]
+fn a_lock_that_is_not_released_in_two_seconds_is_not_waited_for() {
+    // A refresh: the saved token is still good, so it is used and the file is not written.
+    let rig = Rig::start("lock-timeout-refresh");
+    rig.save_session(&rig.good_token(), rig.soon(), Some("r-seed"));
+    let before = std::fs::read(rig.config()).unwrap();
+    let held = hold_lock(&rig.config());
+    let started = Instant::now();
+    let out = rig.ctl(&["whoami"], None);
+    assert!(started.elapsed() >= Duration::from_millis(1500));
+    assert_eq!(out.code, 0, "{}", out.stderr);
+    assert!(out.stderr.contains("lock"), "{}", out.stderr);
+    assert!(rig.idp().token_grants().is_empty());
+    assert_eq!(std::fs::read(rig.config()).unwrap(), before);
+
+    // A logout and a login would not do what they say without the write: they fail, and the file is as it was.
+    let out = rig.ctl(&["logout"], None);
+    assert_eq!(out.code, 5, "{}", out.stderr);
+    assert!(out.stderr.contains("lock"), "{}", out.stderr);
+    assert_eq!(std::fs::read(rig.config()).unwrap(), before);
+    drop(held);
+    assert_eq!(rig.ctl(&["logout"], None).code, 0);
+}
+
+#[test]
+fn the_lock_file_is_private_and_a_link_in_its_place_is_not_followed() {
+    let rig = Rig::start("lock-file");
+    assert_eq!(rig.sign_in().code, 0);
+    let lock = lock_file(&rig.config());
+    let mode = std::fs::metadata(&lock).unwrap().permissions().mode() & 0o777;
+    assert_eq!(mode, 0o600);
+    std::fs::remove_file(&lock).unwrap();
+    let victim = rig.dir.join("victim");
+    std::fs::write(&victim, "precious").unwrap();
+    std::os::unix::fs::symlink(&victim, &lock).unwrap();
+    let out = rig.ctl(&["logout"], None);
+    assert_eq!(out.code, 2, "{}", out.stderr);
+    assert_eq!(std::fs::read_to_string(&victim).unwrap(), "precious");
+    assert!(rig.saved().get("accessToken").is_some());
+}
+
+// ----------------------------------------------------------------------------------------------------------- A12: the listener
+
+#[test]
+fn the_state_is_compared_whole_and_a_parameter_given_twice_is_a_400() {
+    let rig = Rig::start("listener-state");
+    rig.idp().set_login("alice", &all_permissions());
+    let mut live = rig.login(&["--timeout", "60"]);
+    let url = live.url();
+    let callback = callback_of(&url);
+    let state = param(&url, "state");
+    for query in [
+        "code=c&state=".to_owned(),
+        format!("code=c&state={}", &state[..10]),
+        format!("code=c&state={state}x"),
+        format!("code=c&state={}", &state[1..]),
+        // A parameter that is given twice is not read as either of them.
+        format!("code=c&code=d&state={state}"),
+        format!("code=c&state={state}&state={state}"),
+        format!("error=a&error=b&state={state}"),
+    ] {
+        assert_eq!(get(&with_query(&callback, &query)).status, 400, "{query}");
+    }
+    assert!(rig.idp().token_grants().is_empty());
+    assert_eq!(browse(&url).status, 200);
+    assert_eq!(live.finish().code, 0);
+}
+
+#[test]
+fn an_error_wins_over_a_code_and_a_plus_in_a_code_gets_a_hint() {
+    let rig = Rig::start("listener-error");
+    rig.idp().set_login("alice", &all_permissions());
+    let mut live = rig.login(&[]);
+    let url = live.url();
+    let state = param(&url, "state");
+    let r = get(&with_query(
+        &callback_of(&url),
+        &format!("code=c&error=access_denied&state={state}"),
+    ));
+    assert_eq!(r.status, 400);
+    let out = live.finish();
+    assert_eq!(out.code, 4, "{}", out.stderr);
+    assert!(out.stderr.contains("access_denied"), "{}", out.stderr);
+    assert!(rig.idp().token_grants().is_empty());
+
+    // `+` in a form-encoded query is a space: a code that holds one is refused, and the person is told why it may have happened.
+    let rig = Rig::start("listener-plus");
+    rig.idp().set_login("alice", &all_permissions());
+    let mut live = rig.login(&["--timeout", "60"]);
+    let url = live.url();
+    let state = param(&url, "state");
+    let r = get(&with_query(
+        &callback_of(&url),
+        &format!("code=ab+cd&state={state}"),
+    ));
+    assert_eq!(r.status, 400);
+    let line = live.line_with("unencoded +");
+    assert!(!line.contains("ab"), "{line}");
+    assert_eq!(browse(&url).status, 200);
+    assert_eq!(live.finish().code, 0);
+}
+
+#[test]
+fn a_silent_connection_is_closed_and_connections_that_never_sent_a_request_do_not_count() {
+    let rig = Rig::start("listener-silent");
+    rig.idp().set_login("alice", &all_permissions());
+    let mut live = rig.login(&["--timeout", "60"]);
+    let url = live.url();
+    let port = callback_of(&url).port().unwrap();
+    let started = Instant::now();
+    let mut quiet = TcpStream::connect(("127.0.0.1", port)).unwrap();
+    quiet
+        .set_read_timeout(Some(Duration::from_secs(10)))
+        .unwrap();
+    let mut buffer = [0_u8; 16];
+    let closed = quiet.read(&mut buffer);
+    assert!(matches!(closed, Ok(0)) || closed.is_err(), "{closed:?}");
+    let waited = started.elapsed();
+    assert!(
+        waited >= Duration::from_millis(1500) && waited < Duration::from_secs(8),
+        "{waited:?}"
+    );
+    // Seventy connections that say nothing: none of them is a request that was read, so none counts toward the 64.
+    for _ in 0..70 {
+        drop(TcpStream::connect(("127.0.0.1", port)).unwrap());
+    }
+    assert_eq!(browse(&url).status, 200);
+    let out = live.finish();
+    assert_eq!(out.code, 0, "{}", out.stderr);
+}
+
+// ----------------------------------------------------------------------------------------------------------- A15 / A17 are above and in the testkit's tests.

@@ -373,3 +373,59 @@ async fn revoke_forgets_the_token_and_can_be_made_to_fail() {
     idp.enable_revocation(true);
     assert_eq!(post(&idp, "/revoke", &[("token", "x")]).await.0, 500);
 }
+
+#[tokio::test]
+async fn an_issuer_started_without_login_mounts_no_sign_in_route_and_names_none() {
+    // What a pod can reach (`examples/test-issuer.rs`): discovery and the JWKS, and nothing that mints a token or keeps a list.
+    let idp = TestIdp::try_start_without_login("127.0.0.1:0", "127.0.0.1")
+        .await
+        .unwrap();
+    // Even a login set by the owner of the issuer opens nothing: there is no route to open.
+    idp.set_login("alice", &["platform:agents.read"]);
+    let discovery: Value = serde_json::from_str(
+        &http()
+            .get(format!("{}/.well-known/openid-configuration", idp.issuer()))
+            .send()
+            .await
+            .unwrap()
+            .text()
+            .await
+            .unwrap(),
+    )
+    .unwrap();
+    assert_eq!(discovery["issuer"], idp.issuer());
+    assert!(discovery["jwks_uri"].is_string());
+    for member in [
+        "authorization_endpoint",
+        "token_endpoint",
+        "revocation_endpoint",
+    ] {
+        assert!(discovery.get(member).is_none(), "{member} is advertised");
+    }
+    assert_eq!(
+        authorize(&idp, REDIRECT, "aapctl", CHALLENGE)
+            .await
+            .status(),
+        404
+    );
+    for path in ["/token", "/revoke"] {
+        let (status, _) = post(&idp, path, &[("grant_type", "refresh_token")]).await;
+        assert_eq!(status, 404, "{path}");
+    }
+    assert_eq!(idp.authorize_requests(), 0);
+    assert!(idp.token_grants().is_empty());
+    let jwks = http().get(idp.jwks_url()).send().await.unwrap().status();
+    assert_eq!(jwks, 200);
+}
+
+#[tokio::test]
+async fn padding_makes_the_tokens_as_large_as_a_test_says() {
+    let idp = TestIdp::start().await;
+    idp.set_login("alice", &["platform:agents.read"]);
+    idp.set_padding(5_000, 3_000);
+    let code = code_for(&idp).await;
+    let (status, answer) = post(&idp, "/token", &exchange(&code, VERIFIER)).await;
+    assert_eq!(status, 200);
+    assert!(answer["access_token"].as_str().unwrap().len() > 5_000);
+    assert!(answer["refresh_token"].as_str().unwrap().len() > 3_000);
+}

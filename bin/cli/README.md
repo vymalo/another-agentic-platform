@@ -22,7 +22,7 @@ cargo run -q -p aap-cli -- render -f examples/ --default-agent-image ghcr.io/exa
 | `aapctl delete agent\|model\|tool-server <name>` | `If-Match` the tag just read. `--wait` polls until an agent is gone (`--timeout`, default 120 s) |
 | `aapctl export agent <name>` | What `GET /v1/agents/{name}/yaml` serves, unchanged: `apply` reads it back as `unchanged` |
 | `aapctl whoami` | The server, the permissions of the token (`GET /v1/me`) and when it expires |
-| `aapctl login --token-stdin` | Read an access token from standard input, ask the server, and keep it in the config file. Plain `login` (the browser) says it is not built and exits 2 |
+| `aapctl login --token-stdin` | Read an access token from standard input (at most 16 KiB), ask the server, and keep it in the config file. Plain `login` is the browser sign-in below |
 | `aapctl logout` | Forget the kept token, keep the server |
 | `aapctl version`, `aapctl --help` | |
 
@@ -100,8 +100,8 @@ test holds `render` equal to them.
 | 1 | An issue was found: invalid objects, a missing referent (without `--allow-missing-refs`), a document a type cannot read, a field its type does not have. For the network commands: the API or a local check refused the content (`422`, `409 yaml-only`, `breaks-agents`, `referenced`, an object no form says, a deployment part that differs, an export that holds a character a file of YAML must not print), a `404`, and any other `4xx` |
 | 2 | A usage or read error: a bad flag or none, a path that cannot be read, a file that is not YAML or has a key twice, a document that is not ours where it was named, a document of our group that is not `v1alpha1` or not one of the four kinds, an object with no name, two objects of one kind, namespace and name, nothing to read, a bad settings file or value. For the network commands also: a service with no config or two services for one, a label, an annotation or a namespace the API cannot keep, no server, a config file others can read (or a link, or not yours), a saved token for another server, a token that is empty, too long or has white space in it, an address that is not usable, `--if-match` with several objects |
 | 3 | Stale or conflict: `412`, `409 already-exists`, `managed-by-gitops`, `deleting`, `conflict`, or an object that changed since it was read |
-| 4 | Not allowed: no token, `401`, `403` (the message names the permission) |
-| 5 | Unreachable, `5xx`, an answer that is not the API's or that this release of `aapctl` does not read whole (**version skew**: the message names the member, never its value, and says to use the `aapctl` of the server's release), or a `--wait` that ran out |
+| 4 | Not allowed: no token, `401`, `403` (the message names the permission). The sign-in: the person did not sign in (a timeout, the issuer's `error=`, more than 64 requests on the port, **the sign-in link opened twice**), a refused code, a token the API refuses, a refresh token that is no longer good |
+| 5 | Unreachable, `5xx`, an answer that is not the API's or that this release of `aapctl` does not read whole (**version skew**: the message names the member, never its value, and says to use the `aapctl` of the server's release), or a `--wait` that ran out; a saved token that has expired and could not be refreshed; `login` or `logout` that could not take the file's lock in 2 s |
 
 A `401` also says that the token was refused or has expired and to sign in again. Everything else is on stderr, with no colour and no progress output. A network failure is one line,
 `aapctl: <what>: <status> <problem type>: <detail>` (`agent/chat: 412 stale: …`), then one indented line per field of the
@@ -209,69 +209,106 @@ aapctl login ... --client-id aapctl --scope openid --scope offline_access --no-b
 ```
 
 OAuth 2.0 **authorization code with PKCE** (`S256`) for a **public client** (no secret) on a **loopback redirect**,
-`http://127.0.0.1:<port>/callback`, as RFC 8252 describes for a desktop app. It prints the URL on standard error, **always**, and
-opens the browser with `xdg-open`, `open` or `rundll32` unless `--no-browser`; nothing is typed in the terminal. What it needs
-of the realm: a **public client** named as `--client-id` (default `aapctl`) with the standard flow and PKCE `S256`, the redirect
-`http://127.0.0.1/*`, and **an audience mapper** that puts the Platform API's audience in its access tokens (P-030; without it the
-API answers `401` and the message says the audience is the likeliest cause, and nothing is kept).
+`http://127.0.0.1:<port>/callback`, as RFC 8252 describes for a desktop app. What it needs of the realm: a **public client** named
+as `--client-id` (default `aapctl`) with the standard flow, **PKCE `S256` required**, the redirect `http://127.0.0.1/*`, and **an
+audience mapper** that puts the Platform API's audience in its access tokens (P-030; without it the API answers `401` and the message
+says the audience is the likeliest cause, and nothing is kept). Requiring PKCE is what makes a leaked `state` harmless.
+
+**What is printed, and what the browser is given.** With a browser (the default) the opener (`xdg-open`, `open` or `rundll32`) is
+given **`http://127.0.0.1:<port>/start/<ticket>`**, 32 random bytes, and **that link is what is printed on standard error**; the
+listener answers the first request for it with a `302` to the issuer. The authorization URL holds the `state` and the challenge, so
+it is **never an argument of a process** (`ps` shows arguments to every user of the machine: one who read the `state` could start a
+sign-in of their own and have the code come to your listener). The ticket is the one thing in an argument; a local user who reads
+it and uses it first makes the sign-in fail (a second use of the link is exit 4, "the sign-in link was opened twice", and you sign
+in again or use `--no-browser`) and cannot make it theirs. With **`--no-browser`** nothing is opened, there is no `/start` route and
+**the authorization URL is printed** on standard error: it is your terminal. Open it in a browser on the same machine.
 
 | Flag | Meaning |
 |---|---|
 | `--server` | The Platform API. Required the first time, then the file's |
-| `--issuer` | The OpenID Connect issuer, `https://host/realms/name`. Required the first time, then the file's. Its discovery document must name this **exact** issuer, name an `authorization_endpoint` and a `token_endpoint` that are `https` (or `http` on a loopback host), and, if it lists `code_challenge_methods_supported`, include `S256` |
+| `--issuer` | The OpenID Connect issuer, `https://host/realms/name` (no query or fragment). Required the first time, then the file's; **the flag wins over the file**. Its discovery document must name this **exact** issuer (a trailing slash is a different one, and the message says so), name an `authorization_endpoint` and a `token_endpoint` on the issuer's own terms (`https` for an `https` issuer, a loopback address for a loopback `http` one) and, if it lists `code_challenge_methods_supported`, include `S256` (a document with no list gets a note: the sign-in goes on, protected only if the issuer honours PKCE) |
 | `--client-id` | The public client. The file's, else `aapctl` |
-| `--scope` | Repeatable. The file's, else `openid`. **`offline_access` is not asked unless you pass it** (P-036): a refresh token that outlives the session is a larger credential, and it is yours to choose; without one, a sign-in lasts as long as the access token |
-| `--no-browser` | Do not try to open a browser |
+| `--scope` | Repeatable, at most 32. The file's, else `openid`. **`offline_access` is not asked unless you pass it** (P-036): a refresh token that outlives the session is a larger credential, and it is yours to choose; without one, a sign-in lasts as long as the access token |
+| `--no-browser` | Do not open a browser, and print the authorization URL |
 | `--timeout` | Seconds to wait for the browser, 1 to 3600, default 300. No sign-in in time is exit 4, and nothing is saved |
 
 **What it does.** Discovers the issuer (no redirect followed, answers capped, `https` unless loopback, **never a proxy for a plain
-`http` loopback host**); makes a verifier (32 bytes from the operating system, base64url, 43 characters), its S256 challenge and a
-`state` (32 random bytes, compared in constant time); binds **`127.0.0.1` on a free port before it builds the URL** (never
-`localhost`, never a wider address); waits for the browser. The listener answers only `GET /callback` with the right `state`;
-anything else is a `400` and does not end the wait; it reads at most 8 KiB of a head and no body, two seconds a connection, and
-**gives up after 64 requests (exit 4)**. The page is plain text ("Signed in. You can close this tab." or "Sign-in failed (`<code>`).
-Return to the terminal."), with `Cache-Control: no-store` and `Referrer-Policy: no-referrer`, and never holds the code, the state or
-a token; the `<code>` is the issuer's `error` cut to the characters RFC 6749 allows. It then `POST`s the code and the verifier to the
-token endpoint, and **asks the Platform API (`GET /v1/me`) whether the access token is good: one the API refuses is not kept**
-(exit 4). **The ID token is not read.** What is kept is in the file above; the refresh token is **bound to its issuer** and is sent to
-the token endpoint discovered from the saved `issuer` and nowhere else, and only after the check that the saved token is for the
-server.
+`http` loopback host**); makes a verifier (32 bytes from the operating system, base64url, 43 characters), its S256 challenge, a
+`state` (32 random bytes, compared whole and in constant time) and the ticket; binds **`127.0.0.1` on a free port before it builds
+the URL** (never `localhost`, never a wider address); waits for the browser. The listener answers `GET /callback` with the right
+`state` (and, with a browser, `GET /start/<ticket>`); anything else is a `400` and does not end the wait. **What counts toward the
+bound of 64**: a request whose head was read (at most 8 KiB, no body, within two seconds); the 65th ends the sign-in (exit 4). A
+connection that sends nothing is closed after two seconds and counts for nothing (64 are served at once, the rest are dropped). The
+callback is refused when `state`, `code`, `error` or `iss` is given twice, when `iss` is not the discovered issuer (RFC 9207 §2.4),
+when the issuer said it sends `iss` and it is missing, and when the `code` has a space in it (a `+` the provider did not encode: a note
+says so). The listener is closed before the code is exchanged. The page is plain text ("Signed in. You can close this tab." or
+"Sign-in failed (`<code>`). Return to the terminal."), with `Cache-Control: no-store` and `Referrer-Policy: no-referrer`, and never
+holds the code, the state or a token. It then `POST`s the code and the verifier to the token endpoint (a token over 16 KiB is
+refused), and **asks the Platform API (`GET /v1/me`) whether the access token is good: one the API refuses is not kept, and the
+refresh token that came with it is revoked, once** (exit 4). **The ID token is not read.** It prints
+`Signed in to <server> as <subject>; permissions: …`, where the subject is the token's `sub` claim (read, not checked: the API has
+just accepted the token and `/v1/me` has no subject), so a swap of accounts is visible; `whoami` prints it too. What is kept is in
+the file above; the refresh token is **bound to its issuer** and is sent to the token endpoint discovered from the saved `issuer`
+(**discovery is fetched again on every refresh, so the issuer decides where the refresh token goes**), as the saved `clientId`, and
+only after the check that the saved token is for the server. A second `login`, or `login --token-stdin`, over a saved refresh token
+revokes the old one, after the new state is saved.
 
 **Refresh.** Before a command that uses the file's token, if `expiresAt` is within 30 s of now (or past) and a refresh token is held,
-it is used once: a rotated refresh token replaces the old one, an answer without one keeps the old, `invalid_grant` forgets the
-refresh token and says to sign in again (exit 4), and an issuer that cannot be reached is exit 5 with the file **as it was**. A
-`401` on a file token whose refresh has not been tried in this command is answered with **one refresh and one retry** of that
-request (a `401` is refused before any handler, so it wrote nothing; a request that succeeded is never repeated), and never with a
-second refresh. `AAPCTL_TOKEN` is never refreshed and never written to the file. **Two `aapctl` processes refreshing at once:** the
-file is written only if it still holds what the process read, so the second to write does not destroy a newer token (the check and
-the rename are two steps: a write that lands between them is lost, and costs one sign-in). `login --token-stdin` has no refresh
-token and forgets that of an earlier sign-in.
+the lock is taken, the file is read again under it, and the token is used once: a rotated refresh token replaces the old one, an
+answer without one keeps the old, `invalid_grant` forgets the refresh token and says to sign in again (exit 4). Any other failure
+leaves the file **as it was**; **a token that has not expired yet is used as it is** (a note says the refresh failed), one that has
+expired is exit 5. A `401` on a file token whose refresh has not been tried in this command (the one before the call counts) is
+answered with **one refresh and one retry** of that request (a `401` is refused before any handler, so it wrote nothing; a request
+that succeeded is never repeated), and never with a second refresh; **a `403` is never answered with a refresh**. `AAPCTL_TOKEN` is
+never refreshed and never written to the file. **The lock** is an advisory `flock` on `<config>.lock` (mode `0600`, never removed,
+opened without following a link) around every read-compare-write: a refresh, `logout` and both logins wait for it for 2 s. A second
+`aapctl` that finds the first one's refreshed token under the lock uses it, so a rotating refresh token is spent once. A refresh
+that cannot get the lock goes on with a token that has not expired; `login` and `logout` fail with exit 5 and change nothing. *Where
+there is no `flock` (not Unix) nothing is locked and the write is only made if the file still holds what the process read, a check
+and a rename that two processes can interleave: the loss is one sign-in.* `login --token-stdin` has no refresh token and forgets that
+of an earlier sign-in.
 
-**`logout`** forgets both tokens (the server, issuer and client stay) and then, if the issuer lists a `revocation_endpoint`, asks
-it once to revoke the refresh token (5 s to connect, 10 s in all); a failure is a note on standard error and exit 0. **`whoami`**
-says how the token was obtained (`AAPCTL_TOKEN`, signed in with `aapctl login`, pasted with `--token-stdin`) and whether a refresh
-token is held, and never any part of one.
+**A file that is yours and no use** (too large, or not a configuration) makes every command but two exit 2 and say so; **`login`
+writes over it and `logout` removes it and says so**. What `aapctl` writes it reads back: a file over 64 KiB is never written, and a
+token is at most 16 KiB wherever it comes in (`AAPCTL_TOKEN`, `--token-stdin`, the issuer's answer). A file that fails the owner,
+mode, link or type checks is refused by every command, those two included.
+
+**`logout`** forgets both tokens (the server, issuer and client stay; a file with only a refresh token is signed out too) and then,
+if the issuer lists a usable `revocation_endpoint`, asks it once to revoke the refresh token (5 s to connect, 10 s in all); a failure
+is a note on standard error and exit 0, and an endpoint that fails the rules above is the note "not revoked: the issuer's revocation
+endpoint cannot be used". **The access token is not revoked: it stays valid until it expires.** A `aapctl` of K9b-1 that reads a
+file written by this one forgets the refresh token on `logout` without revoking it. **`whoami`** says who the token is, how it was
+obtained (`AAPCTL_TOKEN`, signed in with `aapctl login`, pasted with `--token-stdin`) and whether a refresh token is held, and never
+any part of one.
 
 **Nothing secret is printed**: not the code, the verifier, the access token or the refresh token, in any output, `--verbose` line,
-error or argument; the `state` appears only in the URL, which is the line that must hold it. `--verbose` prints the issuer's host
-and the status of each request, never a path, a query or a body.
+error or argument; the `state` is in the authorization URL printed under `--no-browser` and nowhere else, and the one thing in an
+argument is the ticket. `--verbose` prints the issuer's host and the status of each request, never a path, a query or a body.
 
 **Exit codes of the sign-in** (the table above): **4** when the person did not sign in (a timeout, the issuer's `error=`, too many
-requests on the port, a code the token endpoint refuses, a token the API refuses, a refresh token that is no longer good); **5**
-when the issuer cannot be reached, answers `5xx`, or answers what it should not (a discovery document for another issuer, no
-`S256`, an endpoint in the clear, a token type that is not `Bearer`, an `expires_in` out of range); **2** for an issuer, a scope or a
-client id that cannot be used, or no issuer or server.
+requests on the port, the link opened twice, a code the token endpoint refuses, a token the API refuses, a refresh token that is no
+longer good); **5** when the issuer cannot be reached, answers `5xx`, or answers what it should not (a discovery document for another
+issuer, no `S256`, an endpoint that is not on its terms, a token type that is not `Bearer`, an `expires_in` out of range, a token
+over 16 KiB), or an expired token could not be refreshed; **2** for an issuer, a scope or a client id that cannot be used, or no
+issuer or server.
+
+**What a local user and a web page can still do.** Another user of the machine can read the ticket for the moment it is in the
+opener's arguments, and a page in your browser can send requests to `127.0.0.1:<port>`: either can end the sign-in (use the ticket
+first, or use up the bound of 64 requests). That is a denial, and you are told. They cannot make the sign-in theirs: the `state` is in
+no argument, and the code cannot be redeemed without the verifier, which never leaves the process (**provided the client requires
+PKCE**, above).
 
 **This is not a device flow** (P-032): `--no-browser` prints the URL for a browser on the same machine (a container, or `ssh` with
 the port forwarded), because the redirect is a loopback address. A machine with no browser uses `--token-stdin` or `AAPCTL_TOKEN`
 and has no refresh token.
 
-**Tests** (`tests/signin.rs`, 32; the issuer is the testkit's `TestIdp` of `aap-auth-oidc`, the test is the browser): the URL and
-its parts, the file's mode and content, a bad state, a wrong verifier, the timeout, every refusal of discovery, a token the API
-refuses, the page and its headers with nothing reflected, the listener (loopback only, other methods and paths, a huge head, junk
-and silent connections, a flood), the proxy, the refresh in every case above, `logout`, and that nothing secret is on any stream.
-They run as a normal user too (`setpriv --reuid=65534 --regid=65534 --clear-groups` on test binaries copied to a 755 directory).
-**Unverified:** a real Keycloak and a real browser.
+**Tests** (`tests/signin.rs`, 60; the issuer is the testkit's `TestIdp` of `aap-auth-oidc`, the test is the browser, and a fake
+`xdg-open` first on `PATH` records its argument): the link and the ticket, who the token is, sizes, PKCE and `iss`, endpoints and
+redirects, revocation, the refresh in every case above, the lock between two processes, the listener, the file's mode and content,
+the page and its headers with nothing reflected, the proxy, and that nothing secret is on any stream (`assert_no_secrets` also
+looks in the authorization URL for everything but the state). They run as a normal user too (`setpriv --reuid=65534 --regid=65534
+--clear-groups` on test binaries copied to a 755 directory). **Unverified:** a real Keycloak, a real browser, and the opener of
+each OS (`open`, `rundll32`: only a fake `xdg-open` was run).
 
 ## How `render` shares the operator's code
 
