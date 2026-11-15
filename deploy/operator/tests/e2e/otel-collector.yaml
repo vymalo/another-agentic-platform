@@ -11,8 +11,9 @@
 # linux/amd64 (sha256:500abf4d..., the platform of kind on the runners), arm64 and five more; the amd64 image's config says user 10001:10001,
 # entrypoint `/otelcol`, cmd `--config /etc/otelcol/config.yaml`, ports 4317, 4318 and 55679, and the labels `org.opencontainers.image.version` 0.165.0 and
 # `org.opencontainers.image.revision` b9425f263115f328bc3bd4e65b825101b499f144, created 2026-11-07. The package is public (no credential was used).
-# *Unverified* until CI has run it: that the kubelet of a kind cluster pulls it, that this configuration starts it, and the exact text of the
-# `debug` exporter's output (the script greps loosely, and waits).
+# Verified in CI (run 43732918179, job `chain-e2e` 132871058839, at cd225d2, *verified 2026-11-15* in the job's log): that the kubelet of a kind cluster pulls it,
+# that this configuration starts it, that the spans of both services reach it through the egress rules, and the text of the `debug` exporter's output as far
+# as the script's greps read it (they stay loose, and wait). Unverified: a TLS receiver, headers, and any backend other than this Collector.
 apiVersion: v1
 kind: ConfigMap
 metadata:

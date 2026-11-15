@@ -41,7 +41,7 @@ the attribute is then not set. The names are never an input: a `SpanName` is a `
 
 Never in a span: a token or a header value, a body or a form value, a secret's or a Secret's name, a URL, an agent's
 instructions, a tool's name or argument, the raw path, the subject (not even hashed). `testkit::assert_clean` fails a
-test that finds a key outside the list, a value that holds a sentinel or looks like a credential.
+test that finds a key outside a list written out by hand in the testkit (not read from `Attr::ALL_KEYS`, so it can fire), a name or a value that holds a sentinel or looks like a credential. The cap of 16 attributes (`MAX_ATTRS`) is a defence that cannot be reached today: there are 15 keys and a key set twice is replaced.
 
 ## API
 
@@ -71,7 +71,7 @@ delivers), `assert_clean(spans, sentinels)`.
 ## Tests
 
 `cargo test -p aap-trace`: the pipeline in paused time (bounded queue, back-off 1, 2, 4 s up to the cap, flush, bounded
-shutdown, the two new reasons, the once-per-episode notice), the sampler, the scope, the restricted alphabets, the README table, the compile-fail doctest of `Span::set`.
+shutdown, the two new reasons, the once-per-episode notice, the back-off reset after a success, the final flush that stops at a failed batch and counts what is left, a stop that cuts the back-off short, the defaults of `Limits` as §48a states them, one counter per drop reason on `/metrics`), the sampler, the scope, the size of the future of `Span::scope` and of `step` (each under 1 KiB for a future that holds 64 KiB, so that each box holds on its own), the restricted alphabets, the README table, the compile-fail doctest of `Span::set`.
 
 ## Dependencies
 

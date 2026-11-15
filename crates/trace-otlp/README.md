@@ -52,4 +52,4 @@ example (`check_shape`), and can be set to accept, answer a status, reject spans
 `cargo test -p aap-trace-otlp`: settings table, headers file, encoding against the vendored example, the conformance suite
 of `aap-trace` against the collector, a collector that is down, hangs, answers 503 or 404, redirects or rejects spans.
 A TLS collector is not tested (no certificate library is in the lock file): the certificate setting is tested for what it
-reads and refuses, and its use against a real private CA is *unverified*.
+reads and refuses, and its use against a real private CA is *unverified*. **No test holds that the CA bundle is the exporter's only trust** (`tls_built_in_root_certs(false)` can be removed and every test passes): it needs a TLS fixture. `tests/no_proxy.rs` holds that no proxy is read (it re-runs itself as a child with `HTTP_PROXY`, `HTTPS_PROXY` and `ALL_PROXY` set, and a plain client is the control). Also held: a user name alone in a URL is refused, every sampler word reads as itself, the warning holds the host and never the URL, an empty batch is not posted, a failed span's status is a code alone, ids are lower-case hex.
