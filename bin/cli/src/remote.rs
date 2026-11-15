@@ -1,13 +1,13 @@
-//! `aapctl` over the Platform API (§60b, phase 2): `get`, `apply`, `delete`, `export`, `whoami`, `login --token-stdin` and `logout`.
+//! `aapctl` over the Platform API (§60b, phase 2): `get`, `apply`, `delete`, `export`, `whoami`, `login` and `logout`.
 //!
 //! Every command here calls the API through [`aap_platform_client`] with a token from `AAPCTL_TOKEN` or from the 0600 file
 //! ([`crate::config`]); `validate` and `render` (phase 1) read neither. The commands block on one `current_thread` runtime each, so
 //! [`crate::run`] stays synchronous. A failure is a [`Failure`]: lines for standard error and an exit code from 1 to 5.
 
-use std::cell::RefCell;
+use std::cell::{Cell, RefCell};
 use std::future::Future;
 use std::io::{Read, Write};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
 use aap_forms::{AgentView, Defaults, ModelEndpointForm, ToolServerForm};
@@ -19,9 +19,10 @@ use base64::Engine as _;
 use clap::{Args, ValueEnum};
 use serde_json::Value;
 
-use crate::config::{self, Config, Env};
+use crate::config::{self, Config, Env, LockError, PASTED, SIGNED_IN};
 use crate::failure::{Failure, from_client};
 use crate::forms::{Item, Resource, differing_paths, prepare, strip_what_apply_refuses};
+use crate::signin;
 use crate::skew::{first_difference, written_back};
 use crate::{Input, load};
 
@@ -166,28 +167,89 @@ pub struct ExportArgs {
 /// `aapctl login`.
 #[derive(Debug, Args)]
 pub struct LoginArgs {
-    /// Read an access token from standard input and keep it. The browser sign-in is not built yet.
-    #[arg(long)]
+    /// Read an access token from standard input and keep it, instead of signing in with a browser. For a machine with no browser.
+    /// The token has no refresh token: when it expires, pipe another.
+    #[arg(
+        long,
+        conflicts_with_all = ["issuer", "client_id", "scope", "no_browser"]
+    )]
     token_stdin: bool,
+    /// The OpenID Connect issuer the Platform API trusts, `https://host/realms/name`. Required the first time; then the file's is used.
+    /// Its discovery document must name this very issuer.
+    #[arg(long, value_name = "URL")]
+    issuer: Option<String>,
+    /// The public client registered at the issuer for `aapctl` (no secret). Default: the file's, else `aapctl`.
+    #[arg(long, value_name = "ID")]
+    client_id: Option<String>,
+    /// A scope to ask for, repeatable. Default: the file's, else `openid`. **`offline_access` is not asked unless you pass it**: an
+    /// issuer gives a refresh token for it (Keycloak does), and without one the sign-in lasts as long as the access token.
+    #[arg(long, value_name = "SCOPE")]
+    scope: Vec<String>,
+    /// Print the URL and wait; do not try to open a browser.
+    #[arg(long)]
+    no_browser: bool,
+    /// How long to wait for the browser to come back, in seconds (1 to 3600).
+    #[arg(long, value_name = "SECONDS", default_value_t = 300, value_parser = clap::value_parser!(u64).range(1..=3600))]
+    timeout: u64,
+    /// If the configuration file is one aapctl cannot use (too large, not YAML, keys that are not its own: a kubeconfig, say), move it
+    /// aside to `<file>.unusable-<unix seconds>` and go on. Without this such a file is never changed. Nothing is deleted.
+    #[arg(long)]
+    force: bool,
+    #[command(flatten)]
+    conn: Conn,
+}
+
+/// `aapctl logout`.
+#[derive(Debug, Args)]
+pub struct LogoutArgs {
+    /// If the configuration file is one aapctl cannot use (too large, not YAML, keys that are not its own), move it aside to
+    /// `<file>.unusable-<unix seconds>`. Without this such a file is never changed. Nothing is deleted.
+    #[arg(long)]
+    force: bool,
     #[command(flatten)]
     conn: Conn,
 }
 
 // ----------------------------------------------------------------------------------------------------------- the session
 
+/// Where the token of a command came from.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Origin {
+    /// `AAPCTL_TOKEN`: never refreshed and never written to the file.
+    Environment,
+    /// The file, from `aapctl login`.
+    SignedIn,
+    /// The file, from `aapctl login --token-stdin`.
+    Pasted,
+    /// The file, from a version of `aapctl` that did not say.
+    Saved,
+}
+
+/// What a `401` may be answered with: the file, and whether a refresh was tried.
+struct Refresher {
+    path: PathBuf,
+    config: RefCell<Config>,
+    /// A refresh is attempted at most once in a command, whatever its outcome: before the call when the token was about to expire, or
+    /// after a `401`.
+    tried: Cell<bool>,
+}
+
 /// A client with its token, and where they came from.
 struct Session {
     client: Client,
     server: String,
-    token_text: String,
+    origin: Origin,
+    /// Whether a refresh token was held when the command started.
+    refresh_held: bool,
+    refresher: Option<Refresher>,
 }
 
-fn open(conn: &Conn, env: &Env) -> Result<Session, Failure> {
+fn open(conn: &Conn, env: &Env, err: &mut dyn Write) -> Result<Session, Failure> {
     let path = conn.config.clone().or_else(|| config::default_path(env));
     // The file is read only when something needs it: a person who gives both the server and a token leaves nothing in it, and a
     // file that is too open must not stop a command that does not use it.
     let needs_file = !(env.token.is_some() && conn.server.is_some());
-    let config = match &path {
+    let mut config = match &path {
         Some(p) if needs_file => config::load(p).map_err(Failure::usage)?,
         _ => Config::default(),
     };
@@ -198,20 +260,22 @@ fn open(conn: &Conn, env: &Env) -> Result<Session, Failure> {
         .map(|s| s.trim().to_owned())
         .ok_or_else(|| {
             Failure::usage(
-                "no server: give --server <url>, or sign in once with `aapctl login --token-stdin --server <url>`",
+                "no server: give --server <url>, or sign in once with `aapctl login --server <url> --issuer <url>`",
             )
         })?;
-    let token_text = match env.token.clone() {
+    let mut tried = false;
+    let (token_text, origin) = match env.token.clone() {
         // The person's own choice, for whichever server they name.
-        Some(token) => token,
+        Some(token) => (token, Origin::Environment),
         None => {
             let saved = config.access_token.clone().ok_or_else(|| {
                 Failure::new(
                     4,
-                    "not signed in: set AAPCTL_TOKEN, or pipe a token to `aapctl login --token-stdin`",
+                    "not signed in: run `aapctl login`, pipe a token to `aapctl login --token-stdin`, or set AAPCTL_TOKEN",
                 )
             })?;
-            // The saved token is for the server it was saved with, and goes nowhere else.
+            // The saved token is for the server it was saved with, and goes nowhere else. **This is before any refresh**: a
+            // refresh token goes to its issuer, and only for the server it was saved with.
             if conn.server.is_some() {
                 let shown = |address: &str| {
                     normalize_server(address)
@@ -227,26 +291,73 @@ fn open(conn: &Conn, env: &Env) -> Result<Session, Failure> {
                 if !same {
                     return Err(Failure::usage(match config.server.as_deref() {
                         Some(saved_for) => format!(
-                            "the token saved in the configuration file is for {}, not for {}: sign in to that server with `aapctl login --token-stdin --server <url>`, or set AAPCTL_TOKEN",
+                            "the token saved in the configuration file is for {}, not for {}: sign in to that server with `aapctl login --server <url>`, or set AAPCTL_TOKEN",
                             shown(saved_for),
                             shown(&server)
                         ),
                         None => format!(
-                            "the token saved in the configuration file has no server recorded, so it is not sent to {}: sign in with `aapctl login --token-stdin --server <url>`, or set AAPCTL_TOKEN",
+                            "the token saved in the configuration file has no server recorded, so it is not sent to {}: sign in with `aapctl login --server <url>`, or set AAPCTL_TOKEN",
                             shown(&server)
                         ),
                     }));
                 }
             }
-            saved
+            let origin = match config.token_source.as_deref() {
+                Some(SIGNED_IN) => Origin::SignedIn,
+                Some(PASTED) => Origin::Pasted,
+                _ => Origin::Saved,
+            };
+            // About to expire: the refresh token is used before the call, once.
+            let mut text = saved;
+            if let (Some(p), true) = (&path, signin::needs_refresh(&config)) {
+                // One attempt per command, whatever comes of it: a refresh that timed out may have been processed (and the refresh token
+                // rotated), so a `401` later is the answer, not a reason to spend the old token a second time.
+                tried = true;
+                match block_on(signin::refresh_config(p, &config, conn.verbose, &mut *err))? {
+                    Ok(new) => {
+                        text = new.access_token.clone().unwrap_or(text);
+                        config = new;
+                    }
+                    // The sign-in is over, whatever the token says: that is never hidden.
+                    Err(e) if e.grant_gone => return Err(e.failure),
+                    // Anything else leaves the file alone, and a token that has time left is still a token: the command goes on with
+                    // it, and a `401` is what the API says if it was not.
+                    Err(e) => {
+                        if config.expires_at.is_some_and(|at| at > now_seconds()) {
+                            let _ = writeln!(
+                                err,
+                                "note: the saved token is about to expire and could not be refreshed ({}): it is used as it is",
+                                e.failure.summary()
+                            );
+                        } else {
+                            return Err(e.failure);
+                        }
+                    }
+                }
+            }
+            (text, origin)
         }
     };
     let token = Token::new(&token_text).map_err(|e| from_client("", e))?;
     let client = client_for(&server, token, conn)?;
+    let refresh_held = origin != Origin::Environment && config.refresh_token.is_some();
+    let refresher = match (
+        &path,
+        origin != Origin::Environment && signin::refreshable(&config),
+    ) {
+        (Some(p), true) => Some(Refresher {
+            path: p.clone(),
+            config: RefCell::new(config),
+            tried: Cell::new(tried),
+        }),
+        _ => None,
+    };
     Ok(Session {
         client,
         server,
-        token_text,
+        origin,
+        refresh_held,
+        refresher,
     })
 }
 
@@ -266,6 +377,7 @@ fn client_for(server: &str, token: Token, conn: &Conn) -> Result<Client, Failure
 struct Net<'a> {
     client: &'a Client,
     verbose: bool,
+    refresher: Option<&'a Refresher>,
     out: RefCell<&'a mut dyn Write>,
     err: RefCell<&'a mut dyn Write>,
 }
@@ -293,28 +405,76 @@ impl Net<'_> {
         }
     }
 
-    async fn me(&self) -> Result<Reply, ClientError> {
-        let r = self.client.me().await;
+    /// Run a call; if the API answers `401` and the token came from a sign-in whose refresh has not been tried in this command, use the
+    /// refresh token **once** and make the same call again **once**.
+    ///
+    /// A request that wrote is never repeated: a `401` is the API refusing to know who is asking, which it does in the layer that
+    /// wraps every route and before a handler runs, so the request that got one **changed nothing**, a `PUT` and a `DELETE` among
+    /// them (`tests/signin.rs`, `a_401_is_retried_once_and_never_after_a_write`). A second `401` is the answer.
+    async fn guarded<T, Fut>(&self, call: impl Fn() -> Fut) -> Result<T, ClientError>
+    where
+        Fut: Future<Output = Result<T, ClientError>>,
+    {
+        let first = call().await;
         self.flush();
-        r
+        if matches!(&first, Err(e) if problem_status(e) == Some(401)) && self.try_refresh().await {
+            let second = call().await;
+            self.flush();
+            return second;
+        }
+        first
+    }
+
+    /// Refresh the saved token after a `401`. `true` when there is a new token to try. Why not, when it did not work, is a note: the
+    /// `401` is still what the command reports.
+    async fn try_refresh(&self) -> bool {
+        let Some(refresher) = self.refresher else {
+            return false;
+        };
+        if refresher.tried.replace(true) {
+            return false;
+        }
+        let saved = refresher.config.borrow().clone();
+        let mut sink: Vec<u8> = Vec::new();
+        let outcome = signin::refresh_config(&refresher.path, &saved, false, &mut sink).await;
+        match outcome {
+            Ok(new) => {
+                let Some(Ok(token)) = new.access_token.as_deref().map(Token::new) else {
+                    return false;
+                };
+                self.client.replace_token(token);
+                *refresher.config.borrow_mut() = new;
+                true
+            }
+            Err(e) => {
+                let mut shown = Vec::new();
+                e.failure.print(&mut shown);
+                for line in String::from_utf8_lossy(&shown).lines() {
+                    self.note(&line.replacen(
+                        "aapctl: ",
+                        "aapctl: the token was refused and could not be refreshed: ",
+                        1,
+                    ));
+                }
+                false
+            }
+        }
+    }
+
+    async fn me(&self) -> Result<Reply, ClientError> {
+        self.guarded(|| self.client.me()).await
     }
 
     async fn info(&self) -> Result<Reply, ClientError> {
-        let r = self.client.info().await;
-        self.flush();
-        r
+        self.guarded(|| self.client.info()).await
     }
 
     async fn list(&self, c: Collection) -> Result<Reply, ClientError> {
-        let r = self.client.list(c).await;
-        self.flush();
-        r
+        self.guarded(|| self.client.list(c)).await
     }
 
     async fn get(&self, c: Collection, name: &str) -> Result<Reply, ClientError> {
-        let r = self.client.get(c, name).await;
-        self.flush();
-        r
+        self.guarded(|| self.client.get(c, name)).await
     }
 
     async fn put(
@@ -324,21 +484,15 @@ impl Net<'_> {
         form: &Value,
         when: &Condition,
     ) -> Result<Reply, ClientError> {
-        let r = self.client.put(c, name, form, when).await;
-        self.flush();
-        r
+        self.guarded(|| self.client.put(c, name, form, when)).await
     }
 
     async fn delete(&self, c: Collection, name: &str, etag: &str) -> Result<Reply, ClientError> {
-        let r = self.client.delete(c, name, etag).await;
-        self.flush();
-        r
+        self.guarded(|| self.client.delete(c, name, etag)).await
     }
 
     async fn yaml(&self, name: &str) -> Result<Reply, ClientError> {
-        let r = self.client.agent_yaml(name).await;
-        self.flush();
-        r
+        self.guarded(|| self.client.agent_yaml(name)).await
     }
 }
 
@@ -364,12 +518,13 @@ fn finish(result: Result<(), Failure>, err: &mut dyn Write) -> u8 {
 /// A macro and not a function: the future borrows the session and the net, which live only for this expression.
 macro_rules! with_net {
     ($conn:expr, $out:ident, $err:ident, |$session:ident, $net:ident| $body:expr) => {{
-        match open($conn, &Env::process()) {
+        match open($conn, &Env::process(), &mut *$err) {
             Err(failure) => Err(failure),
             Ok($session) => {
                 let $net = Net {
                     client: &$session.client,
                     verbose: $conn.verbose,
+                    refresher: $session.refresher.as_ref(),
                     out: RefCell::new(&mut *$out),
                     err: RefCell::new(&mut *$err),
                 };
@@ -482,20 +637,44 @@ fn members_of(resource: Resource) -> &'static str {
     }
 }
 
-fn now_seconds() -> i64 {
+pub(crate) fn now_seconds() -> i64 {
     std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map_or(0, |d| i64::try_from(d.as_secs()).unwrap_or(i64::MAX))
 }
 
-/// The `exp` claim of a token that is a JWT, **read and not checked**: for a person to see when to sign in again. The API checks the
-/// token; nothing here depends on this number.
-fn token_expiry(token: &str) -> Option<i64> {
+/// The claims of a token that is a JWT, **read and not checked**: what a person is shown (when to sign in again, who the token is).
+/// The API checks the token; nothing here depends on what this returns.
+fn token_claims(token: &str) -> Option<Value> {
     let payload = token.split('.').nth(1)?;
     let bytes = base64::engine::general_purpose::URL_SAFE_NO_PAD
         .decode(payload.trim_end_matches('='))
         .ok()?;
-    let claims: Value = serde_json::from_slice(&bytes).ok()?;
+    serde_json::from_slice(&bytes).ok()
+}
+
+/// Who a token says it is: its `sub` claim, **read and not checked**, cleaned of what a terminal would act on and cut at 128
+/// characters. The Platform API's `GET /v1/me` answers permissions only (the `Me` schema of `docs/api/platform-api-v1.openapi.json`
+/// has no subject), so the person is shown what the API has just accepted, as the token names it.
+pub(crate) fn token_subject(token: &str) -> String {
+    let Some(claims) = token_claims(token) else {
+        return "an unknown subject (the token is not a JWT)".to_owned();
+    };
+    claims
+        .get("sub")
+        .and_then(Value::as_str)
+        .map(clean)
+        .filter(|s| !s.is_empty())
+        .map_or_else(
+            || "an unknown subject (the token has no sub claim)".to_owned(),
+            |s| s.chars().take(128).collect(),
+        )
+}
+
+/// The `exp` claim of a token that is a JWT, **read and not checked**: for a person to see when to sign in again. The API checks the
+/// token; nothing here depends on this number.
+pub(crate) fn token_expiry(token: &str) -> Option<i64> {
+    let claims = token_claims(token)?;
     let exp = claims.get("exp")?;
     exp.as_i64().or_else(|| {
         // Truncating a fractional timestamp is what is wanted here.
@@ -622,28 +801,130 @@ pub fn whoami(conn: &Conn, out: &mut dyn Write, err: &mut dyn Write) -> u8 {
         let reply = net.me().await.map_err(|e| from_client("", e))?;
         let permissions = permissions_of(&reply)?;
         net.say(&format!("server: {}", session.server));
+        net.say(&format!(
+            "subject: {}",
+            token_subject(session.client.current_token().expose())
+        ));
         net.say(&format!("permissions: {}", permissions_line(&permissions)));
         net.say(&format!(
             "expires: {}",
-            expiry_text(token_expiry(&session.token_text))
+            expiry_text(token_expiry(session.client.current_token().expose()))
+        ));
+        net.say(&format!(
+            "token: {}",
+            match session.origin {
+                Origin::Environment =>
+                    "from AAPCTL_TOKEN (never refreshed, never written to the file)",
+                Origin::SignedIn => "signed in with `aapctl login`",
+                Origin::Pasted => "pasted with `aapctl login --token-stdin`",
+                Origin::Saved =>
+                    "saved in the configuration file (how it was obtained is not recorded)",
+            }
+        ));
+        net.say(&format!(
+            "refresh token: {}",
+            if session.refresh_held {
+                "held (it is used when the access token is about to expire)"
+            } else {
+                "none"
+            }
         ));
         Ok(())
     });
     finish(result, err)
 }
 
+/// Where the file is: `--config`, else the environment's. Exit 2 when there is none.
+fn config_path(conn: &Conn, env: &Env) -> Result<PathBuf, Failure> {
+    conn.config
+        .clone()
+        .or_else(|| config::default_path(env))
+        .ok_or_else(|| {
+            Failure::usage("nowhere to keep the token: neither XDG_CONFIG_HOME nor HOME is set; give --config <file>")
+        })
+}
+
+/// The lock around a read-compare-write of the file, for a command that cannot do what it says without writing: one that cannot get it
+/// in two seconds changes nothing and says so (exit 5), and a lock file that cannot be used is exit 2.
+fn take_lock(path: &Path) -> Result<config::Lock, Failure> {
+    config::lock(path).map_err(|e| match e {
+        LockError::Busy => Failure::new(
+            5,
+            "another aapctl holds the lock on the configuration file (waited 2 s): nothing was changed; try again",
+        ),
+        LockError::Failed(why) => Failure::usage(why),
+    })
+}
+
+/// A file that is ours and no use is never changed unless the person said `--force`: `Err` (exit 2, and what the file looks like in one
+/// clause, never what it holds) without it.
+fn refuse_unusable(why: &str, force: bool) -> Result<(), Failure> {
+    if force {
+        return Ok(());
+    }
+    Err(Failure::usage(format!(
+        "{}: it was not changed; --force moves it aside to <file>.unusable-<time> (nothing is deleted) and goes on",
+        clean(why)
+    )))
+}
+
+/// Read the file again, under the lock, as what a write is about to replace: a good file as it is; an unusable one (and `--force`)
+/// moved aside, never unlinked, with the empty configuration in its place. `Err` for an unusable one without `--force`: it became
+/// one after the first read.
+fn load_under_lock(path: &Path, force: bool) -> Result<(Config, Option<PathBuf>), Failure> {
+    let (config, unusable) = config::load_lenient(path).map_err(Failure::usage)?;
+    let Some(why) = unusable else {
+        return Ok((config, None));
+    };
+    refuse_unusable(&why, force)?;
+    let moved = config::move_aside(path, now_seconds()).map_err(Failure::usage)?;
+    Ok((config, moved))
+}
+
+fn say_moved(out: &mut dyn Write, moved: Option<&Path>) {
+    if let Some(to) = moved {
+        let _ = writeln!(
+            out,
+            "the configuration file was one aapctl cannot use: it was moved aside to {} (nothing was deleted)",
+            clean(&to.display().to_string())
+        );
+    }
+}
+
 /// `aapctl login`.
 pub fn login(a: &LoginArgs, stdin: &mut dyn Read, out: &mut dyn Write, err: &mut dyn Write) -> u8 {
-    let result = login_command(a, stdin, out);
+    let result = if a.token_stdin {
+        login_token_stdin(a, stdin, out)
+    } else {
+        login_browser(a, out, err)
+    };
     finish(result, err)
 }
 
-fn login_command(a: &LoginArgs, stdin: &mut dyn Read, out: &mut dyn Write) -> Result<(), Failure> {
-    if !a.token_stdin {
-        return Err(Failure::usage(
-            "the browser sign-in is not built yet (K9b-2): to sign in now, pipe an access token, `aapctl login --token-stdin --server <url> < token-file`, or set AAPCTL_TOKEN for one command",
-        ));
-    }
+/// Ask the API who the token is, with a client that refreshes nothing: a token the API refuses is not kept.
+fn check_with_api(
+    client: &Client,
+    verbose: bool,
+    out: &mut dyn Write,
+    err: &mut dyn Write,
+) -> Result<Vec<String>, Failure> {
+    let net = Net {
+        client,
+        verbose,
+        refresher: None,
+        out: RefCell::new(out),
+        err: RefCell::new(err),
+    };
+    block_on(async { net.me().await })?
+        .map_err(|e| from_client("", e))
+        .and_then(|r| permissions_of(&r))
+}
+
+fn login_token_stdin(
+    a: &LoginArgs,
+    stdin: &mut dyn Read,
+    out: &mut dyn Write,
+) -> Result<(), Failure> {
     let mut text = String::new();
     stdin
         .take(MAX_TOKEN_BYTES + 1)
@@ -658,15 +939,11 @@ fn login_command(a: &LoginArgs, stdin: &mut dyn Read, out: &mut dyn Write) -> Re
     let token = Token::new(&text).map_err(|e| from_client("", e))?;
 
     let env = Env::process();
-    let path = a
-        .conn
-        .config
-        .clone()
-        .or_else(|| config::default_path(&env))
-        .ok_or_else(|| {
-            Failure::usage("nowhere to keep the token: neither XDG_CONFIG_HOME nor HOME is set; give --config <file>")
-        })?;
-    let mut stored = config::load(&path).map_err(Failure::usage)?;
+    let path = config_path(&a.conn, &env)?;
+    let (stored, unusable) = config::load_lenient(&path).map_err(Failure::usage)?;
+    if let Some(why) = &unusable {
+        refuse_unusable(why, a.force)?;
+    }
     let server = a
         .conn
         .server
@@ -674,55 +951,287 @@ fn login_command(a: &LoginArgs, stdin: &mut dyn Read, out: &mut dyn Write) -> Re
         .or(stored.server.clone())
         .map(|s| s.trim().to_owned())
         .ok_or_else(|| Failure::usage("no server: give --server <url>"))?;
+    check_address("--server", &server)?;
     let client = client_for(&server, token.clone(), &a.conn)?;
 
     // The server decides whether the token is good: one that it refuses is not kept.
     let mut sink = std::io::sink();
-    let net = Net {
-        client: &client,
-        verbose: false,
-        out: RefCell::new(out),
-        err: RefCell::new(&mut sink as &mut dyn Write),
-    };
-    let permissions = block_on(async { net.me().await })?
-        .map_err(|e| from_client("", e))
-        .and_then(|r| permissions_of(&r))?;
+    let permissions = check_with_api(&client, false, &mut *out, &mut sink)?;
     let expires = token_expiry(token.expose());
+    // The file is read again under the lock: what is replaced is what is there now.
+    let lock = take_lock(&path)?;
+    let (mut stored, moved) = load_under_lock(&path, a.force)?;
     stored.server = Some(server.clone());
     stored.access_token = Some(token.expose().to_owned());
     stored.expires_at = expires;
+    // A pasted token has no refresh token: the one of an earlier sign-in belonged to another token. It is forgotten here and not
+    // revoked: RFC 7009 section 2.1 lets a server end every token of the same grant, and a session may be shared with the next sign-in.
+    stored.refresh_token = None;
+    stored.token_source = Some(PASTED.to_owned());
     config::save(&path, &stored).map_err(Failure::usage)?;
-    net.say(&format!(
-        "Signed in to {server}; permissions: {}; expires {}",
+    drop(lock);
+    let _ = writeln!(
+        out,
+        "Signed in to {server} as {}; permissions: {}; expires {}",
+        token_subject(token.expose()),
         permissions_line(&permissions),
         expiry_text(expires)
-    ));
+    );
+    say_moved(out, moved.as_deref());
     Ok(())
 }
 
+/// An address that is a value of the file: bounded, so what is written is what is read back.
+fn check_address(flag: &str, value: &str) -> Result<(), Failure> {
+    if value.len() > signin::MAX_ADDRESS_BYTES {
+        return Err(Failure::usage(format!(
+            "{flag} is longer than {} bytes",
+            signin::MAX_ADDRESS_BYTES
+        )));
+    }
+    Ok(())
+}
+
+fn login_browser(a: &LoginArgs, out: &mut dyn Write, err: &mut dyn Write) -> Result<(), Failure> {
+    let env = Env::process();
+    let path = config_path(&a.conn, &env)?;
+    let (stored, unusable) = config::load_lenient(&path).map_err(Failure::usage)?;
+    // Before anything is opened: a file that will not be changed without `--force` is no reason to make the person sign in.
+    if let Some(why) = &unusable {
+        refuse_unusable(why, a.force)?;
+        let _ = writeln!(
+            err,
+            "note: {}: with --force it is moved aside when this sign-in succeeds",
+            clean(why)
+        );
+    }
+    let server = a
+        .conn
+        .server
+        .clone()
+        .or(stored.server.clone())
+        .map(|s| s.trim().to_owned())
+        .ok_or_else(|| Failure::usage("no server: give --server <url>"))?;
+    check_address("--server", &server)?;
+    let issuer = a
+        .issuer
+        .clone()
+        .or(stored.issuer.clone())
+        .map(|s| s.trim().to_owned())
+        .ok_or_else(|| {
+            Failure::usage(
+                "no issuer: give --issuer <url>, the OpenID Connect issuer the Platform API trusts (the realm's address)",
+            )
+        })?;
+    let client_id = a
+        .client_id
+        .clone()
+        .or(stored.client_id.clone())
+        .unwrap_or_else(|| signin::DEFAULT_CLIENT_ID.to_owned());
+    let scopes = if !a.scope.is_empty() {
+        a.scope.clone()
+    } else if !stored.scopes.is_empty() {
+        stored.scopes.clone()
+    } else {
+        vec!["openid".to_owned()]
+    };
+    check_address("--issuer", &issuer)?;
+    if scopes.len() > signin::MAX_SCOPES {
+        return Err(Failure::usage(format!(
+            "more than {} scopes: that is not a sign-in",
+            signin::MAX_SCOPES
+        )));
+    }
+    if !signin::valid_token_word(&client_id) {
+        return Err(Failure::usage(
+            "--client-id is not a client id: visible ASCII with no white space or quote",
+        ));
+    }
+    if let Some(bad) = scopes.iter().find(|s| !signin::valid_token_word(s)) {
+        return Err(Failure::usage(format!(
+            "--scope {:?} is not a scope: visible ASCII with no white space or quote",
+            clean(bad)
+        )));
+    }
+    // The server is checked before anything is opened: a sign-in for an address that cannot be used would be for nothing.
+    client_for(
+        &server,
+        Token::new("placeholder").map_err(|e| from_client("", e))?,
+        &a.conn,
+    )?;
+    let plan = signin::Plan {
+        issuer: issuer.clone(),
+        client_id: client_id.clone(),
+        scopes: scopes.clone(),
+        no_browser: a.no_browser,
+        timeout: Duration::from_secs(a.timeout),
+        verbose: a.conn.verbose,
+    };
+    let tokens = block_on(signin::browser_flow(&plan, &mut *err)).and_then(|r| r)?;
+
+    // The Platform API decides whether the token is good: one it refuses is not kept, and neither is the refresh token that came with
+    // it: it is revoked, once, best effort.
+    let client = client_for(&server, tokens.access_token.clone(), &a.conn)?;
+    let checked = check_with_api(&client, a.conn.verbose, &mut *out, &mut *err).map_err(|f| {
+        if f.code == 4 {
+            f.also("the Platform API refused the access token the issuer gave, and nothing was kept: most likely its audience is not one the API accepts; the client needs an audience mapper (P-030)")
+        } else {
+            f
+        }
+    });
+    let permissions = match checked {
+        Ok(p) => p,
+        Err(failure) => {
+            drop_refresh_token(&plan, &tokens, a.conn.verbose, out, err);
+            return Err(failure);
+        }
+    };
+    let expires = signin::expiry_of(&tokens);
+    let held = tokens.refresh_token.is_some();
+    let subject = token_subject(tokens.access_token.expose());
+    // The file is read again under the lock: what is replaced, and what is revoked after it, is what is there now.
+    let lock = match take_lock(&path) {
+        Ok(lock) => lock,
+        Err(failure) => {
+            drop_refresh_token(&plan, &tokens, a.conn.verbose, out, err);
+            return Err(failure);
+        }
+    };
+    let moved = match load_under_lock(&path, a.force) {
+        Ok((_, moved)) => moved,
+        Err(failure) => {
+            drop_refresh_token(&plan, &tokens, a.conn.verbose, out, err);
+            return Err(failure);
+        }
+    };
+    let saved = Config {
+        server: Some(server.clone()),
+        issuer: Some(issuer),
+        client_id: Some(client_id),
+        scopes: scopes.clone(),
+        access_token: Some(tokens.access_token.expose().to_owned()),
+        expires_at: expires,
+        refresh_token: tokens.refresh_token.as_ref().map(|r| r.expose().to_owned()),
+        token_source: Some(SIGNED_IN.to_owned()),
+    };
+    if let Err(why) = config::save(&path, &saved) {
+        drop(lock);
+        drop_refresh_token(&plan, &tokens, a.conn.verbose, out, err);
+        return Err(Failure::usage(why));
+    }
+    drop(lock);
+    let _ = writeln!(
+        out,
+        "Signed in to {server} as {subject}; permissions: {}; expires {}",
+        permissions_line(&permissions),
+        expiry_text(expires)
+    );
+    let _ = writeln!(
+        out,
+        "{}",
+        if held {
+            "a refresh token was kept: the access token is renewed when it is about to expire"
+        } else if scopes.iter().any(|s| s == "offline_access") {
+            "the issuer gave no refresh token: sign in again when the access token expires"
+        } else {
+            "no refresh token: sign in again when the access token expires (the issuer may give one for --scope offline_access)"
+        }
+    );
+    // The refresh token this one replaced is not revoked: RFC 7009 section 2.1 lets a server end every token of the same grant, and a
+    // second sign-in in a browser that still has its session may share it. It lives until it expires or the session ends.
+    say_moved(out, moved.as_deref());
+    Ok(())
+}
+
+/// The sign-in ended without keeping what the issuer gave: the refresh token that came with it is revoked, once, bounded. A failure is
+/// a note.
+fn drop_refresh_token(
+    plan: &signin::Plan,
+    tokens: &aap_platform_client::oidc::Tokens,
+    verbose: bool,
+    out: &mut dyn Write,
+    err: &mut dyn Write,
+) {
+    let Some(refresh) = &tokens.refresh_token else {
+        return;
+    };
+    match block_on(signin::revoke_token(
+        &plan.issuer,
+        Some(&plan.client_id),
+        refresh.expose(),
+        verbose,
+        &mut *err,
+    )) {
+        Ok(result) => {
+            signin::say_revocation("the refresh token of this sign-in", result, true, out, err)
+        }
+        Err(failure) => failure.print(err),
+    }
+}
+
 /// `aapctl logout`.
-pub fn logout(conn: &Conn, out: &mut dyn Write, err: &mut dyn Write) -> u8 {
+pub fn logout(a: &LogoutArgs, out: &mut dyn Write, err: &mut dyn Write) -> u8 {
+    let conn = &a.conn;
     let result = (|| -> Result<(), Failure> {
         let env = Env::process();
         let Some(path) = conn.config.clone().or_else(|| config::default_path(&env)) else {
             let _ = writeln!(out, "not signed in: there is no configuration file");
             return Ok(());
         };
-        let mut stored = config::load(&path).map_err(Failure::usage)?;
-        if stored.access_token.is_none() {
+        let (first, unusable) = config::load_lenient(&path).map_err(Failure::usage)?;
+        if let Some(why) = &unusable {
+            // Not ours to judge: it is left as it is, and the person is told how to get it out of the way.
+            refuse_unusable(why, a.force)?;
+        }
+        if unusable.is_none() && first.access_token.is_none() && first.refresh_token.is_none() {
             let _ = writeln!(out, "not signed in: the configuration file holds no token");
         } else {
-            stored.access_token = None;
-            stored.expires_at = None;
-            config::save(&path, &stored).map_err(Failure::usage)?;
-            let _ = writeln!(
-                out,
-                "signed out of {}",
-                stored
-                    .server
-                    .as_deref()
-                    .map_or_else(|| "the server".to_owned(), clean)
-            );
+            let lock = take_lock(&path)?;
+            // What is acted on is what is there now: another aapctl may have refreshed, signed out or signed in since the first read.
+            let (mut stored, now_unusable) = config::load_lenient(&path).map_err(Failure::usage)?;
+            if let Some(why) = now_unusable {
+                refuse_unusable(&why, a.force)?;
+                let moved = config::move_aside(&path, now_seconds()).map_err(Failure::usage)?;
+                drop(lock);
+                say_moved(out, moved.as_deref());
+            } else {
+                let before = stored.clone();
+                if before.access_token.is_none() && before.refresh_token.is_none() {
+                    let _ = writeln!(out, "not signed in: the configuration file holds no token");
+                } else {
+                    stored.access_token = None;
+                    stored.expires_at = None;
+                    stored.refresh_token = None;
+                    stored.token_source = None;
+                    // Forgotten here first: a revocation that fails must not leave the token behind.
+                    config::save(&path, &stored).map_err(Failure::usage)?;
+                    drop(lock);
+                    let _ = writeln!(
+                        out,
+                        "signed out of {}",
+                        stored
+                            .server
+                            .as_deref()
+                            .map_or_else(|| "the server".to_owned(), clean)
+                    );
+                    if before.refresh_token.is_some() {
+                        // Once, bounded, and only when the issuer says where. A failure is a note: the person is signed out here either
+                        // way. The access token stays valid until it expires: nothing revokes it.
+                        match block_on(signin::revoke_saved(&before, conn.verbose, &mut *err)) {
+                            Ok(result) => {
+                                signin::say_revocation(
+                                    "the refresh token",
+                                    result,
+                                    false,
+                                    out,
+                                    err,
+                                );
+                            }
+                            Err(failure) => failure.print(err),
+                        }
+                    }
+                }
+            }
         }
         if env.token.is_some() {
             let _ = writeln!(
@@ -1337,5 +1846,49 @@ async fn wait_gone(net: &Net<'_>, a: &DeleteArgs, label: &str) -> Result<(), Fai
         }
         let left = deadline.saturating_duration_since(Instant::now());
         tokio::time::sleep(Duration::from_millis(a.poll_ms).min(left)).await;
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    #![allow(clippy::unwrap_used, clippy::expect_used)]
+    use super::*;
+
+    fn jwt(claims: &Value) -> String {
+        let engine = base64::engine::general_purpose::URL_SAFE_NO_PAD;
+        format!("h.{}.s", engine.encode(claims.to_string()))
+    }
+
+    #[test]
+    fn the_subject_is_the_sub_claim_cleaned_and_cut_and_never_a_failure() {
+        assert_eq!(
+            token_subject(&jwt(&serde_json::json!({"sub": "alice"}))),
+            "alice"
+        );
+        // What a terminal would act on is not printed, and a long one is cut.
+        let dirty = token_subject(&jwt(&serde_json::json!({"sub": "bob\u{1b}[31m\u{202e}x"})));
+        assert!(
+            !dirty.contains('\u{1b}') && !dirty.contains('\u{202e}'),
+            "{dirty:?}"
+        );
+        assert!(dirty.starts_with("bob"));
+        assert_eq!(
+            token_subject(&jwt(&serde_json::json!({"sub": "s".repeat(500)})))
+                .chars()
+                .count(),
+            128
+        );
+        // A token that is not a JWT, or has no `sub`, is still a token: the person is told it says nothing.
+        for odd in [
+            "opaque-token",
+            &jwt(&serde_json::json!({"exp": 1})),
+            &jwt(&serde_json::json!({"sub": ""})),
+            "a.!!!.c",
+        ] {
+            assert!(
+                token_subject(odd).starts_with("an unknown subject"),
+                "{odd}"
+            );
+        }
     }
 }

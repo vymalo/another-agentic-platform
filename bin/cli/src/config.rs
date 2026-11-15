@@ -13,6 +13,15 @@
 //! * **The token and the server go together**: the token in the file belongs to the server in the file, and is never sent to
 //!   another one ([`crate::remote`] checks it).
 //! * **No error here holds the file's text**: a parse error of a YAML library can quote a value, and the value is the token.
+//! * **What [`save`] accepts, [`load`] reads**: a file longer than [`MAX_FILE_BYTES`] is refused by `load`, so `save` refuses to write
+//!   one (and the tokens that go in are bounded: 16 KiB each, a few scopes, so a refresh cannot make a file the next command
+//!   refuses).
+//! * **A file that is not ours to judge is never deleted and never overwritten.** A file that passes the owner, mode, link and type
+//!   checks but is too large, is not YAML or is a mapping with keys `aapctl` does not use (a kubeconfig, a private key that happens
+//!   to parse, someone's notes) is *unusable*: every command refuses it, and `login --force` and `logout --force` **move it aside**
+//!   to `<file>.unusable-<unix seconds>` (same directory, same mode, refused if that name exists) and go on. Nothing is unlinked.
+//! * **One writer at a time**: [`lock`] and [`lock_async`] take an advisory `flock` on `<file>.lock` (mode `0600`, never removed, opened without following
+//!   a link) around a read-compare-write, so a refresh that races a logout or another refresh finds what the other wrote.
 //! * There is no keyring: none is in the lockfile (P-031). The token is in this file and in `AAPCTL_TOKEN`, never in an argument.
 
 use std::ffi::OsString;
@@ -48,7 +57,7 @@ impl Env {
 
 /// What the file holds.
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct Config {
     /// The Platform API's address.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -59,7 +68,29 @@ pub struct Config {
     /// When the access token expires (seconds since the epoch), if it says.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub expires_at: Option<i64>,
+    /// The OpenID Connect issuer the browser sign-in used. **The refresh token is bound to it**: it is sent to the token endpoint
+    /// discovered from this issuer and to no other.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub issuer: Option<String>,
+    /// The public client the sign-in used.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub client_id: Option<String>,
+    /// The scopes the sign-in asked for.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub scopes: Vec<String>,
+    /// The refresh token, if the issuer gave one. A secret like the access token: the file is `0600` and it is printed nowhere.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub refresh_token: Option<String>,
+    /// How the access token was obtained: [`SIGNED_IN`] or [`PASTED`]. A file written before this field existed has none.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub token_source: Option<String>,
 }
+
+/// `tokenSource` of a token that `aapctl login` got from the issuer.
+pub const SIGNED_IN: &str = "signed-in";
+
+/// `tokenSource` of a token that was piped to `aapctl login --token-stdin`.
+pub const PASTED: &str = "pasted";
 
 /// Where the file is, when `--config` is not given. `None` when the environment names neither a config home nor a home.
 pub fn default_path(env: &Env) -> Option<PathBuf> {
@@ -83,32 +114,100 @@ pub fn default_path(env: &Env) -> Option<PathBuf> {
 /// A sentence for exit 2: the file cannot be read, is readable by group or others, or is not a configuration. It never holds the
 /// file's text.
 pub fn load(path: &Path) -> Result<Config, String> {
+    read(path).map_err(|why| match why {
+        Unreadable::Refused(why) => why,
+        Unreadable::Unusable(why) => {
+            format!(
+                "{why}: it is not used and not changed; `aapctl logout --force` moves it aside (nothing is deleted) and `aapctl login --force` moves it aside and writes a new one"
+            )
+        }
+    })
+}
+
+/// [`load`] for the two commands that may move a file aside (`--force`): `Ok((config, Some(why)))` for a file that is ours (the
+/// owner, the mode, the link and the type were checked) but is too large or is not a configuration, with an empty configuration in
+/// its place; the sentence says what is wrong with it, never what it holds. A file that fails a check is still an error.
+///
+/// # Errors
+///
+/// As [`load`], for everything but an unusable content.
+pub fn load_lenient(path: &Path) -> Result<(Config, Option<String>), String> {
+    match read(path) {
+        Ok(config) => Ok((config, None)),
+        Err(Unreadable::Unusable(why)) => Ok((Config::default(), Some(why))),
+        Err(Unreadable::Refused(why)) => Err(why),
+    }
+}
+
+/// Why a file was not read: a check failed (the file is not ours to touch), or it is ours and its content is no use.
+enum Unreadable {
+    Refused(String),
+    Unusable(String),
+}
+
+fn read(path: &Path) -> Result<Config, Unreadable> {
     let mut file = match open_private(path) {
         Ok(f) => f,
         Err(Refused::Missing) => return Ok(Config::default()),
-        Err(Refused::Because(why)) => return Err(why),
+        Err(Refused::Because(why)) => return Err(Unreadable::Refused(why)),
     };
     // The whole file is a few hundred bytes: one that is far larger is not ours.
     let mut text = String::new();
     Read::take(&mut file, MAX_FILE_BYTES + 1)
         .read_to_string(&mut text)
-        .map_err(|e| format!("{}: {}", path.display(), e.kind()))?;
+        .map_err(|e| {
+            // A file that is not UTF-8 is not a configuration; any other failure is the disk's.
+            if e.kind() == std::io::ErrorKind::InvalidData {
+                Unreadable::Unusable(format!("{} is not an aapctl configuration", path.display()))
+            } else {
+                Unreadable::Refused(format!("{}: {}", path.display(), e.kind()))
+            }
+        })?;
     if text.len() as u64 > MAX_FILE_BYTES {
-        return Err(format!(
+        return Err(Unreadable::Unusable(format!(
             "{} is far larger than an aapctl configuration",
             path.display()
-        ));
+        )));
     }
     serde_yaml::from_str(&text).map_err(|_| {
-        format!(
-            "{} is not an aapctl configuration (a YAML mapping of server, accessToken and expiresAt)",
+        Unreadable::Unusable(format!(
+            "{} is not an aapctl configuration (a YAML mapping with only the keys server, accessToken, expiresAt, issuer, clientId, scopes, refreshToken, tokenSource)",
             path.display()
-        )
+        ))
     })
 }
 
-/// The most a configuration file may hold.
-const MAX_FILE_BYTES: u64 = 64 * 1024;
+/// The most a configuration file may hold, and so the most [`save`] writes.
+pub const MAX_FILE_BYTES: u64 = 64 * 1024;
+
+/// Move an unusable configuration file aside, to `<file>.unusable-<unix seconds>` in the same directory (the mode goes with it). The
+/// file is renamed, never unlinked, and a name that exists is not taken. A missing file is not an error (`None`).
+///
+/// # Errors
+///
+/// A sentence for exit 2.
+pub fn move_aside(path: &Path, seconds: i64) -> Result<Option<PathBuf>, String> {
+    let mut name = path
+        .file_name()
+        .map_or_else(|| OsString::from("config"), OsString::from);
+    name.push(format!(".unusable-{seconds}"));
+    let target = path.with_file_name(name);
+    if target.symlink_metadata().is_ok() {
+        return Err(format!(
+            "{} exists already: the configuration file was not moved; remove or rename that one first",
+            target.display()
+        ));
+    }
+    match std::fs::rename(path, &target) {
+        Ok(()) => Ok(Some(target)),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
+        Err(e) => Err(format!(
+            "{}: cannot move it aside: {}",
+            path.display(),
+            e.kind()
+        )),
+    }
+}
 
 enum Refused {
     Missing,
@@ -170,6 +269,22 @@ fn open_private(path: &Path) -> Result<std::fs::File, Refused> {
     })
 }
 
+/// Write `new` only if the file still holds `expected`, the configuration this process read: **two `aapctl` processes that refresh at
+/// once must not destroy a newer token** (an issuer that rotates refresh tokens gives the second a token the first already used). `Ok(false)`:
+/// the file changed since it was read and was left as it is. The check and the rename are not one step, so a write that lands between
+/// them is still lost: the limit is documented (`bin/cli/README.md`), and the loss is a sign-in the person repeats.
+///
+/// # Errors
+///
+/// As [`load`] and [`save`].
+pub fn save_if_unchanged(path: &Path, expected: &Config, new: &Config) -> Result<bool, String> {
+    if load(path)? != *expected {
+        return Ok(false);
+    }
+    save(path, new)?;
+    Ok(true)
+}
+
 /// Write the file whole or not at all, with mode `0600`, in a directory that is `0700` if it had to be made.
 ///
 /// # Errors
@@ -186,6 +301,13 @@ pub fn save(path: &Path, config: &Config) -> Result<(), String> {
     }
     let text = serde_yaml::to_string(config)
         .map_err(|_| "the configuration cannot be written".to_owned())?;
+    // What is written must be what `load` reads: a file it would refuse is a lockout until it is deleted by hand.
+    if text.len() as u64 > MAX_FILE_BYTES {
+        return Err(format!(
+            "{}: the configuration would be larger than {MAX_FILE_BYTES} bytes, which aapctl does not read back: nothing was written",
+            path.display()
+        ));
+    }
     let stamp = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map_or(0, |d| d.as_nanos());
@@ -220,6 +342,164 @@ fn write_through(path: &Path, temporary: &Path, bytes: &[u8]) -> std::io::Result
         let _ = std::fs::remove_file(temporary);
     }
     result
+}
+
+/// How long [`lock`] waits for another `aapctl` to finish.
+pub const LOCK_WAIT: std::time::Duration = std::time::Duration::from_secs(2);
+
+/// Why the lock was not taken.
+#[derive(Debug)]
+pub enum LockError {
+    /// Another process held it for the whole wait.
+    Busy,
+    /// The lock file cannot be used (a link, not ours, not writable): a sentence for exit 2.
+    Failed(String),
+}
+
+/// The lock on a configuration file: held until it is dropped. On a platform with no `flock` it holds nothing.
+#[derive(Debug)]
+pub struct Lock {
+    _file: Option<std::fs::File>,
+}
+
+/// The lock file of a configuration file: `<file>.lock`, in the same directory.
+pub fn lock_path(config: &Path) -> PathBuf {
+    let mut name = config
+        .file_name()
+        .map_or_else(|| OsString::from("config"), OsString::from);
+    name.push(".lock");
+    config.with_file_name(name)
+}
+
+/// Take the advisory lock around a read-compare-write of `config`, waiting at most [`LOCK_WAIT`]. The lock file is `<config>.lock`,
+/// mode `0600`, opened without following a symbolic link at its last component and checked on the open descriptor (a regular file,
+/// ours), and **never removed** (removing it would let two processes lock two files). Not a security boundary: any process of the
+/// same user can lock it too, and the only harm is a wait.
+///
+/// # Errors
+///
+/// [`LockError::Busy`] after the wait; [`LockError::Failed`] for a lock file that cannot be used.
+pub fn lock(config: &Path) -> Result<Lock, LockError> {
+    lock_for(config, LOCK_WAIT)
+}
+
+/// [`lock`] with its own wait.
+///
+/// # Errors
+///
+/// As [`lock`].
+#[cfg(unix)]
+pub fn lock_for(config: &Path, wait: std::time::Duration) -> Result<Lock, LockError> {
+    let file = open_lock(config)?;
+    let started = std::time::Instant::now();
+    loop {
+        if try_flock(&file, config)? {
+            return Ok(Lock { _file: Some(file) });
+        }
+        if started.elapsed() >= wait {
+            return Err(LockError::Busy);
+        }
+        std::thread::sleep(std::time::Duration::from_millis(20));
+    }
+}
+
+/// [`lock`] for code that runs on the runtime: the wait is an async sleep and holds no thread of it.
+///
+/// # Errors
+///
+/// As [`lock`].
+#[cfg(unix)]
+pub async fn lock_async(config: &Path) -> Result<Lock, LockError> {
+    let file = open_lock(config)?;
+    let started = tokio::time::Instant::now();
+    loop {
+        if try_flock(&file, config)? {
+            return Ok(Lock { _file: Some(file) });
+        }
+        if started.elapsed() >= LOCK_WAIT {
+            return Err(LockError::Busy);
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+    }
+}
+
+#[cfg(unix)]
+fn open_lock(config: &Path) -> Result<std::fs::File, LockError> {
+    use std::os::unix::fs::{MetadataExt, OpenOptionsExt};
+    let path = lock_path(config);
+    let shown = path.display();
+    let dir = path
+        .parent()
+        .filter(|d| !d.as_os_str().is_empty())
+        .unwrap_or_else(|| Path::new("."));
+    if !dir.exists() {
+        make_private_dir(dir).map_err(|e| {
+            LockError::Failed(format!(
+                "{}: cannot make the directory: {}",
+                dir.display(),
+                e.kind()
+            ))
+        })?;
+    }
+    let file = std::fs::OpenOptions::new()
+        .create(true)
+        .truncate(false)
+        .write(true)
+        .mode(0o600)
+        .custom_flags(rustix::fs::OFlags::NOFOLLOW.bits().cast_signed())
+        .open(&path)
+        .map_err(|e| {
+            if e.raw_os_error() == Some(rustix::io::Errno::LOOP.raw_os_error()) {
+                LockError::Failed(format!(
+                    "{shown} is a symbolic link, which the lock is not taken through: remove it"
+                ))
+            } else {
+                LockError::Failed(format!("{shown}: {}", e.kind()))
+            }
+        })?;
+    let meta = file
+        .metadata()
+        .map_err(|e| LockError::Failed(format!("{shown}: {}", e.kind())))?;
+    if !meta.is_file() || meta.uid() != rustix::process::geteuid().as_raw() {
+        return Err(LockError::Failed(format!(
+            "{shown} is not a regular file of yours: the lock is not taken on it"
+        )));
+    }
+    Ok(file)
+}
+
+/// One try at the lock: `Ok(true)` taken, `Ok(false)` held by another.
+#[cfg(unix)]
+fn try_flock(file: &std::fs::File, config: &Path) -> Result<bool, LockError> {
+    match rustix::fs::flock(file, rustix::fs::FlockOperation::NonBlockingLockExclusive) {
+        Ok(()) => Ok(true),
+        Err(e) if e == rustix::io::Errno::WOULDBLOCK || e == rustix::io::Errno::INTR => Ok(false),
+        Err(e) => Err(LockError::Failed(format!(
+            "{}: cannot lock it: {}",
+            lock_path(config).display(),
+            std::io::Error::from(e).kind()
+        ))),
+    }
+}
+
+/// [`lock`] where there is no `flock`: nothing is held, and [`save_if_unchanged`] alone keeps a newer token from being destroyed.
+///
+/// # Errors
+///
+/// Never.
+#[cfg(not(unix))]
+pub fn lock_for(_config: &Path, _wait: std::time::Duration) -> Result<Lock, LockError> {
+    Ok(Lock { _file: None })
+}
+
+/// [`lock_async`] where there is no `flock`.
+///
+/// # Errors
+///
+/// Never.
+#[cfg(not(unix))]
+pub async fn lock_async(_config: &Path) -> Result<Lock, LockError> {
+    Ok(Lock { _file: None })
 }
 
 fn make_private_dir(dir: &Path) -> std::io::Result<()> {
@@ -308,11 +588,179 @@ mod tests {
     }
 
     #[test]
+    fn a_write_that_would_destroy_a_newer_token_is_not_made() {
+        let d = dir("compare");
+        let path = d.join("config.yaml");
+        let read = Config {
+            server: Some("https://x.example".into()),
+            access_token: Some("old".into()),
+            refresh_token: Some("r-old".into()),
+            ..Config::default()
+        };
+        save(&path, &read).unwrap();
+        let mine = Config {
+            access_token: Some("mine".into()),
+            refresh_token: Some("r-mine".into()),
+            ..read.clone()
+        };
+        // Another process wrote a newer token between this one's read and its write.
+        let theirs = Config {
+            access_token: Some("theirs".into()),
+            refresh_token: Some("r-theirs".into()),
+            ..read.clone()
+        };
+        save(&path, &theirs).unwrap();
+        assert!(!save_if_unchanged(&path, &read, &mine).unwrap());
+        assert_eq!(load(&path).unwrap(), theirs);
+        // Nobody wrote: the write is made.
+        assert!(save_if_unchanged(&path, &theirs, &mine).unwrap());
+        assert_eq!(load(&path).unwrap(), mine);
+    }
+
+    #[test]
     fn a_file_larger_than_a_configuration_is_refused() {
         let d = dir("big");
         let big = d.join("big.yaml");
         std::fs::write(&big, "x".repeat(70_000)).unwrap();
         std::fs::set_permissions(&big, std::fs::Permissions::from_mode(0o600)).unwrap();
-        assert!(load(&big).unwrap_err().contains("far larger"));
+        let error = load(&big).unwrap_err();
+        assert!(
+            error.contains("far larger") && error.contains("aapctl logout"),
+            "{error}"
+        );
+        // It is ours, so a login or a logout may replace it; one that fails a check is not.
+        let (config, why) = load_lenient(&big).unwrap();
+        assert_eq!(config, Config::default());
+        assert!(why.unwrap().contains("far larger"));
+        std::fs::set_permissions(&big, std::fs::Permissions::from_mode(0o644)).unwrap();
+        assert!(
+            load_lenient(&big)
+                .unwrap_err()
+                .contains("readable by group or others")
+        );
+        // Not a mapping: also replaceable. A good file and a missing one are not "unusable".
+        let odd = d.join("odd.yaml");
+        std::fs::write(&odd, "- a\n- b\n").unwrap();
+        std::fs::set_permissions(&odd, std::fs::Permissions::from_mode(0o600)).unwrap();
+        assert!(
+            load_lenient(&odd)
+                .unwrap()
+                .1
+                .unwrap()
+                .contains("not an aapctl configuration")
+        );
+        assert_eq!(
+            load_lenient(&d.join("none.yaml")).unwrap(),
+            (Config::default(), None)
+        );
+    }
+
+    #[test]
+    fn a_mapping_with_keys_that_are_not_ours_is_unusable_and_move_aside_never_unlinks() {
+        let d = dir("foreign-keys");
+        let path = d.join("config.yaml");
+        std::fs::write(&path, "apiVersion: v1\nkind: Config\n").unwrap();
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600)).unwrap();
+        let error = load(&path).unwrap_err();
+        assert!(error.contains("aapctl logout --force"), "{error}");
+        assert!(!error.contains("apiVersion"), "{error}");
+        let (config, why) = load_lenient(&path).unwrap();
+        assert_eq!(config, Config::default());
+        assert!(why.is_some());
+        // Moved, with its content and its mode, to a name made from the seconds; a name that exists is refused and nothing moves.
+        let taken = d.join("config.yaml.unusable-7");
+        std::fs::write(&taken, "mine").unwrap();
+        assert!(move_aside(&path, 7).unwrap_err().contains("exists already"));
+        assert!(path.exists());
+        assert_eq!(std::fs::read_to_string(&taken).unwrap(), "mine");
+        let to = move_aside(&path, 8).unwrap().unwrap();
+        assert_eq!(to, d.join("config.yaml.unusable-8"));
+        assert_eq!(
+            std::fs::read_to_string(&to).unwrap(),
+            "apiVersion: v1\nkind: Config\n"
+        );
+        assert_eq!(
+            std::fs::metadata(&to).unwrap().permissions().mode() & 0o777,
+            0o600
+        );
+        assert!(!path.exists());
+        // Nothing there: nothing moved, no error.
+        assert_eq!(move_aside(&path, 9).unwrap(), None);
+    }
+
+    #[test]
+    fn whatever_save_accepts_load_reads() {
+        let d = dir("invariant");
+        let path = d.join("config.yaml");
+        // The most the inputs allow: two tokens of 16 KiB, 32 scopes of 256 characters, long addresses.
+        let largest = Config {
+            server: Some(format!("https://{}", "s".repeat(2000))),
+            access_token: Some("a".repeat(16 * 1024)),
+            expires_at: Some(i64::MAX),
+            issuer: Some(format!("https://{}", "i".repeat(2000))),
+            client_id: Some("c".repeat(256)),
+            scopes: (0..32).map(|i| format!("{i:0>256}")).collect(),
+            refresh_token: Some("r".repeat(16 * 1024)),
+            token_source: Some(SIGNED_IN.to_owned()),
+        };
+        save(&path, &largest).unwrap();
+        assert_eq!(load(&path).unwrap(), largest);
+        // One that load would refuse is not written, and the file that was there is untouched.
+        let too_large = Config {
+            access_token: Some("a".repeat(70_000)),
+            ..largest.clone()
+        };
+        let error = save(&path, &too_large).unwrap_err();
+        assert!(error.contains("nothing was written"), "{error}");
+        assert_eq!(load(&path).unwrap(), largest);
+        // The boundary itself: exactly the limit is read back, one more is not written.
+        let mut at_limit = Config {
+            access_token: Some("a".to_owned()),
+            ..Config::default()
+        };
+        // One character of token is in the text already.
+        let base = serde_yaml::to_string(&at_limit).unwrap().len() as u64 - 1;
+        at_limit.access_token = Some("a".repeat((MAX_FILE_BYTES - base) as usize));
+        assert_eq!(
+            serde_yaml::to_string(&at_limit).unwrap().len() as u64,
+            MAX_FILE_BYTES
+        );
+        save(&path, &at_limit).unwrap();
+        assert_eq!(load(&path).unwrap(), at_limit);
+        at_limit.access_token = Some("a".repeat((MAX_FILE_BYTES - base) as usize + 1));
+        assert!(save(&path, &at_limit).is_err());
+    }
+
+    #[test]
+    fn the_lock_is_exclusive_private_and_released_when_dropped() {
+        let d = dir("lock");
+        let path = d.join("config.yaml");
+        let first = lock_for(&path, std::time::Duration::from_millis(100)).unwrap();
+        let mode = std::fs::metadata(lock_path(&path))
+            .unwrap()
+            .permissions()
+            .mode()
+            & 0o777;
+        assert_eq!(mode, 0o600);
+        let started = std::time::Instant::now();
+        assert!(matches!(
+            lock_for(&path, std::time::Duration::from_millis(150)),
+            Err(LockError::Busy)
+        ));
+        assert!(started.elapsed() >= std::time::Duration::from_millis(100));
+        drop(first);
+        assert!(lock_for(&path, std::time::Duration::from_millis(100)).is_ok());
+        // The lock file stays.
+        assert!(lock_path(&path).exists());
+        // A link in its place is not followed.
+        let victim = d.join("victim");
+        std::fs::write(&victim, "precious").unwrap();
+        std::fs::remove_file(lock_path(&path)).unwrap();
+        symlink(&victim, lock_path(&path)).unwrap();
+        assert!(matches!(
+            lock_for(&path, std::time::Duration::from_millis(50)),
+            Err(LockError::Failed(_))
+        ));
+        assert_eq!(std::fs::read_to_string(&victim).unwrap(), "precious");
     }
 }

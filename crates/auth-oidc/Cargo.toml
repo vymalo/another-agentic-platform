@@ -57,6 +57,8 @@ axum = { workspace = true, features = ["json"] }
 # (D7 does): the library cannot choose between two, and panics on first use unless one is installed. The tests of
 # this crate run with both linked, which is what tests/provider.rs is about.
 jsonwebtoken = { workspace = true, features = ["rust_crypto"] }
+# The RFC 7636 vector of tests/login_endpoints.rs.
+sha2.workspace = true
 serde_yaml.workspace = true
 tokio = { workspace = true, features = ["macros", "rt", "rt-multi-thread", "net", "time", "sync"] }
 tracing-subscriber.workspace = true

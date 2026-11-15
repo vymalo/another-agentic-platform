@@ -31,10 +31,14 @@ rustix.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 serde_yaml.workspace = true
-# Only `current_thread` and the timers: the network commands block on one runtime and phase 1's `run` stays synchronous.
-tokio = { workspace = true, features = ["rt", "time"] }
+# `current_thread`, the timers and the loopback listener of `login`: the network commands block on one runtime and phase 1's `run` stays synchronous.
+tokio = { workspace = true, features = ["rt", "time", "net", "io-util", "sync"] }
+url.workspace = true
 
 [dev-dependencies]
+# The issuer the sign-in is tried against (`TestIdp`: discovery, JWKS, `/authorize`, `/token`, `/revoke`) and the authenticator that reads its
+# tokens, as the Platform API's own router tests use them. Test builds only: `aapctl` itself has no JWS library.
+aap-auth-oidc = { workspace = true, features = ["testkit"] }
 # The tests run the built binary against the real router of the Platform API over the `Memory` ports on a loopback socket.
 aap-platform-api.workspace = true
 aap-ports = { workspace = true, features = ["testkit"] }

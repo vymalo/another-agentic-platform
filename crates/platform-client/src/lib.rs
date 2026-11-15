@@ -11,16 +11,18 @@
 //!   the server is [`ClientError::Unreachable`]. What a person is told, and the exit code, are the caller's.
 //! * **reqwest 0.12 with rustls and ring**, as `aap-auth-oidc`: `crates/auth-oidc/README.md` says why never 0.13.
 //!
-//! No sign-in flow is here: a token comes from the caller (K9b-2 adds the browser's).
+//! The sign-in (OAuth 2.0 authorization code with PKCE, and the refresh grant) is [`oidc`]: concrete code over the same HTTP rules.
+//! A token comes from the caller, from `AAPCTL_TOKEN`, from a pasted token or from that sign-in.
 
 #![warn(missing_docs)]
 #![cfg_attr(test, allow(clippy::unwrap_used, clippy::expect_used))]
 
+pub mod oidc;
 mod op;
 mod problem;
 mod token;
 
-use std::sync::Mutex;
+use std::sync::{Mutex, PoisonError};
 use std::time::Duration;
 
 use reqwest::header::{AUTHORIZATION, CONTENT_TYPE, ETAG, HeaderValue};
@@ -32,7 +34,7 @@ pub use problem::{
     FieldProblem, Problem, YamlOnlyReason, clean, clean_multiline, has_terminal_hazard,
     json_for_terminal, terminal_hazard_kind,
 };
-pub use token::Token;
+pub use token::{MAX_TOKEN_BYTES, Token};
 
 /// The most an answer may hold: the API's own bodies are far smaller, so a larger one is not the API.
 const MAX_ANSWER_BYTES: usize = 8 << 20;
@@ -143,7 +145,8 @@ pub fn normalize_server(address: &str) -> Option<String> {
 pub struct Client {
     http: reqwest::Client,
     base: Url,
-    token: Token,
+    /// Replaced when a refresh gave a new one ([`Client::replace_token`]).
+    token: Mutex<Token>,
     trace: Mutex<Vec<String>>,
 }
 
@@ -151,7 +154,7 @@ impl std::fmt::Debug for Client {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("Client")
             .field("server", &self.origin())
-            .field("token", &self.token)
+            .field("token", &"Token(…)")
             .finish_non_exhaustive()
     }
 }
@@ -226,9 +229,22 @@ impl Client {
         Ok(Self {
             http,
             base,
-            token,
+            token: Mutex::new(token),
             trace: Mutex::new(Vec::new()),
         })
+    }
+
+    /// Use another token from now on: what a refresh gave. The server it is for does not change.
+    pub fn replace_token(&self, token: Token) {
+        *self.token.lock().unwrap_or_else(PoisonError::into_inner) = token;
+    }
+
+    /// The token the next call sends (a refresh may have replaced the one the client was made with).
+    pub fn current_token(&self) -> Token {
+        self.token
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .clone()
     }
 
     /// The server's origin: scheme, host and port.
@@ -288,7 +304,13 @@ impl Client {
         let method = reqwest::Method::from_bytes(op.method().as_bytes())
             .map_err(|_| ClientError::Config("not a method".to_owned()))?;
         let mut request = self.http.request(method, url);
-        let mut auth = HeaderValue::from_str(&format!("Bearer {}", self.token.expose()))
+        let text = self
+            .token
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .expose()
+            .to_owned();
+        let mut auth = HeaderValue::from_str(&format!("Bearer {text}"))
             .map_err(|_| ClientError::Config("the token cannot be sent as a header".to_owned()))?;
         auth.set_sensitive(true);
         request = request.header(AUTHORIZATION, auth);
@@ -323,7 +345,7 @@ impl Client {
             .get(ETAG)
             .and_then(|v| v.to_str().ok())
             .map(str::to_owned);
-        let body = read_capped(response)
+        let body = read_capped(response, MAX_ANSWER_BYTES)
             .await
             .map_err(|e| self.unreachable(&e))?;
         let Some(body) = body else {
@@ -338,26 +360,9 @@ impl Client {
     }
 
     fn unreachable(&self, error: &reqwest::Error) -> ClientError {
-        // The class is read from the error and never printed from it: its text can hold the URL.
-        let mut chain = String::new();
-        let mut source: Option<&dyn std::error::Error> = Some(error);
-        while let Some(e) = source {
-            chain.push_str(&e.to_string().to_ascii_lowercase());
-            chain.push('\n');
-            source = e.source();
-        }
-        let class = if chain.contains("certificate") || chain.contains("tls") {
-            "the TLS handshake failed or the certificate was not accepted"
-        } else if error.is_timeout() {
-            "the server did not answer in time"
-        } else if error.is_connect() {
-            "the connection failed"
-        } else {
-            "the request failed"
-        };
         ClientError::Unreachable {
             origin: self.origin(),
-            class,
+            class: classify(error),
         }
     }
 
@@ -445,11 +450,35 @@ impl Client {
     }
 }
 
-/// The body of an answer, up to [`MAX_ANSWER_BYTES`]; `None` when there is more.
-async fn read_capped(mut response: reqwest::Response) -> Result<Option<Vec<u8>>, reqwest::Error> {
+/// What went wrong with a request, as a phrase from a fixed set: **read from the error and never printed from it**, because its text can
+/// hold the URL (a query with a code in it, a host).
+fn classify(error: &reqwest::Error) -> &'static str {
+    let mut chain = String::new();
+    let mut source: Option<&dyn std::error::Error> = Some(error);
+    while let Some(e) = source {
+        chain.push_str(&e.to_string().to_ascii_lowercase());
+        chain.push('\n');
+        source = e.source();
+    }
+    if chain.contains("certificate") || chain.contains("tls") {
+        "the TLS handshake failed or the certificate was not accepted"
+    } else if error.is_timeout() {
+        "the server did not answer in time"
+    } else if error.is_connect() {
+        "the connection failed"
+    } else {
+        "the request failed"
+    }
+}
+
+/// The body of an answer, up to `limit` bytes; `None` when there is more.
+async fn read_capped(
+    mut response: reqwest::Response,
+    limit: usize,
+) -> Result<Option<Vec<u8>>, reqwest::Error> {
     let mut body = Vec::new();
     while let Some(chunk) = response.chunk().await? {
-        if body.len() + chunk.len() > MAX_ANSWER_BYTES {
+        if body.len() + chunk.len() > limit {
             return Ok(None);
         }
         body.extend_from_slice(&chunk);

@@ -47,6 +47,8 @@ aws-lc-rs = "1.15"
 axum = { version = "0.8", default-features = false, features = ["http1", "tokio"] }
 base64 = "0.22"
 clap = { version = "4", features = ["derive", "env"] }
+# Only `aapctl login`: 32 bytes of OS randomness for the PKCE verifier and the state (already in the lock file, 0.2.17).
+getrandom = "0.2"
 futures = { version = "0.3", default-features = false, features = ["std", "async-await"] }
 # One crypto library for JWS, `aws-lc-rs`, as the system's orchestrator has (jsonwebtoken has no `ring` backend);
 # TLS stays rustls with ring (kube), which is why reqwest is 0.12: 0.13's `rustls` feature is aws-lc-rs.
