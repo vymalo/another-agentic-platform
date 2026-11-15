@@ -768,8 +768,9 @@ step "6b. aapctl against the deployed API"
 # without platform:agents.write that is exit 4 naming it, a token kept in a file of mode 0600, and the deletes. Every token comes from the
 # issuer and is in $work/tokens; every byte aapctl says, `--verbose` trace included, is in $work/seen, which step 7 reads for them and for the secret.
 # aapctl_run <AAPCTL_TOKEN (may be empty)> <args...>: the status is in $ctl_code, stdout in $work/ctl.out and stderr in $work/ctl.err. The server is the
-# port-forward, the configuration file is this run's own, the proxy variables are dropped (the runner may set one, and reqwest uses it for a loopback address
-# unless NO_PROXY names it) and standard input is the caller's.
+# port-forward, the configuration file is this run's own, the proxy variables are dropped (the runner may set one; aapctl never sends a plain-http
+# loopback request, which the port-forward is, through a proxy, since the review of K9b-1, and dropping them keeps this step from depending on that rule)
+# and standard input is the caller's.
 aapctl_run() {
   art=$1; shift
   ctl_code=0
