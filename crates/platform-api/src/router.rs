@@ -82,6 +82,7 @@ where
 {
     let cors = state.cors.layer();
     let metrics = state.metrics.clone();
+    let tracer = state.tracer.clone();
     let state: S<O, A> = Arc::new(state);
     // From the inside out: the guard; CORS (which answers a preflight itself, before the guard asks for a token); the log;
     // and the headers of every answer, outside all of them, so that a preflight, a 404 and a 405 carry them too.
@@ -92,6 +93,7 @@ where
     };
     router
         .layer(from_fn_with_state(metrics, trace::count))
+        .layer(from_fn_with_state(tracer, trace::span))
         .layer(from_fn(trace::request))
         .layer(from_fn(trace::harden))
         .with_state(state)

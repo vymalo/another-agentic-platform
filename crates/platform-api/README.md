@@ -234,6 +234,19 @@ and paths clients send; `method` is `GET`, `PUT`, `DELETE`, `POST`, `HEAD`, `OPT
 matched, so a new reason does not compile until it has a word) or `unavailable` (the keys could not be fetched). **No token, header, body, path, user id or
 secret key name is a label or a value.** Two `Authorization` headers are a `400` of the request and not an authentication failure: counted as a request only.
 
+## Traces (K5)
+
+`ApiState::with_tracer(Tracer)` (off by default: then no span is made and no answer changes) puts a SERVER span on every
+request, outside the metrics and the guard: named `{METHOD} {template}` (the table's own template), `{METHOD}` for a request
+that matched nothing and `HTTP` for a method outside the closed set. **The raw path is never read.** It carries
+`http.request.method`, `http.route`, `http.response.status_code`, `aap.auth.result`, `aap.problem.type` (the slug of a
+problem answer, read from a response extension) and, on a `403`, `aap.permission.missing` (set by `Problem::forbidden`);
+a `5xx` fails the span. The ports are decorated inside the crate, so no handler changed: `authenticate` and
+`objects.<method>` (eleven) are children, with `error.type` a slug of the closed error and never its text. No subject, no
+agent name, no body, header, query or token is in any span (a test asks every route with sentinels in each and reads
+`assert_clean`), and no inbound `traceparent` is read: every request is a root. The attribute list is
+[`aap-trace`](../trace/README.md)'s; §48a has the rest.
+
 ## CORS
 
 `CorsOrigins::new` takes **exact origins** as a browser writes them (`scheme://host[:port]`, lower case, no path, no trailing slash) and refuses `*`,

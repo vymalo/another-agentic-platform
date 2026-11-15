@@ -32,6 +32,11 @@ const TYPE_PREFIX: &str = "urn:vymalo:agents:problem:";
 /// What a `503` tells a client to wait, in seconds: the keys and the cluster come back in seconds or not at all.
 const RETRY_AFTER_SECONDS: &str = "5";
 
+/// The slug of a problem answer, put on the response so that the span of the request can say it (K5): a `&'static str`
+/// the program wrote, never a word of the request.
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct ProblemSlug(pub(crate) &'static str);
+
 /// An error of the API, as a response.
 #[derive(Debug)]
 pub struct Problem {
@@ -207,6 +212,8 @@ impl Problem {
 
     /// `403`, naming the one permission the person lacks (RFC 6750 §3.1 `insufficient_scope`).
     pub fn forbidden(permission: &'static str) -> Self {
+        // The span of the request, if there is one, says which permission was missing.
+        aap_trace::current_set(aap_trace::Attr::PermissionMissing(permission));
         Self::new(
             StatusCode::FORBIDDEN,
             "forbidden",
@@ -471,6 +478,7 @@ impl IntoResponse for Problem {
         for (name, value) in self.headers {
             response.headers_mut().append(name, value);
         }
+        response.extensions_mut().insert(ProblemSlug(self.slug));
         response
     }
 }

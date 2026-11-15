@@ -15,7 +15,10 @@ use axum::middleware::Next;
 use axum::response::Response;
 use tracing::Instrument;
 
+use aap_trace::{Attr, Method, SpanKind, SpanName, Tracer};
+
 use crate::metrics::ApiMetrics;
+use crate::problem::ProblemSlug;
 
 const NOSNIFF: HeaderName = HeaderName::from_static("x-content-type-options");
 
@@ -75,5 +78,43 @@ pub(crate) async fn harden(request: Request, next: Next) -> Response {
     let headers = response.headers_mut();
     headers.insert(CACHE_CONTROL, HeaderValue::from_static("no-store"));
     headers.insert(NOSNIFF, HeaderValue::from_static("nosniff"));
+    response
+}
+
+/// The span of a request (K5): kind SERVER, named `{METHOD} {template}`, or `{METHOD}` when nothing matched. **The raw path
+/// is never read**, so a path a person typed is in no name and no attribute; the template is the table's own
+/// `&'static str`. The status, the slug of a problem answer and (from the guard and the ports) the auth result, the missing
+/// permission and the children are added while it runs. A request is always a root: no inbound `traceparent` is read.
+pub(crate) async fn span(State(tracer): State<Tracer>, request: Request, next: Next) -> Response {
+    if !tracer.enabled() {
+        return next.run(request).await;
+    }
+    let method = Method::from_http(request.method().as_str());
+    let template = request
+        .extensions()
+        .get::<MatchedPath>()
+        .and_then(|m| crate::routes::template(m.as_str()));
+    let name = match template {
+        Some(t) => SpanName::route(method, t),
+        None => SpanName::method(method),
+    };
+    let span = tracer.root(name, SpanKind::Server);
+    span.set(Attr::HttpMethod(method));
+    if let Some(t) = template {
+        span.set(Attr::HttpRoute(t));
+    }
+    let response = span.scope(next.run(request)).await;
+    let status = response.status().as_u16();
+    span.set(Attr::HttpStatus(status));
+    if let Some(ProblemSlug(slug)) = response.extensions().get::<ProblemSlug>().copied() {
+        span.set(Attr::ProblemType(slug));
+        if status >= 500 {
+            span.set(Attr::ErrorType(slug));
+        }
+    }
+    if status >= 500 {
+        span.fail();
+    }
+    span.end();
     response
 }

@@ -30,6 +30,7 @@ mod router;
 mod routes;
 mod state;
 mod trace;
+mod traced;
 mod view;
 
 pub use body::MAX_BODY_BYTES;
