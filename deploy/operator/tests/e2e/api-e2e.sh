@@ -888,8 +888,11 @@ grep -q 'platform:agents.write' "$work/ctl.err" || die "the refusal does not nam
 ok "a stale --if-match is exit 3 (412 stale) and writes nothing, apply with no tag puts the file back (configured), a reader is exit 4 naming platform:agents.write"
 
 # A token kept in a file: written by `login --token-stdin` (the server has to accept it), 0600, used by the next commands, forgotten by `logout`.
+# The token is read from a file and not from a pipe: a pipeline would run aapctl_run in a subshell, and $ctl_code would stay the last command's.
 ltk=$(tok aapctl-login platform:agents.read)
-printf '%s\n' "$ltk" | aapctl_run ""  login --token-stdin
+(umask 077 && printf '%s\n' "$ltk" > "$work/aapctl-login.token")
+aapctl_run "" login --token-stdin < "$work/aapctl-login.token"
+rm -f "$work/aapctl-login.token"
 expect_ctl 0 "login --token-stdin"
 [ -f "$work/aapctl.yaml" ] || die "login wrote no configuration file"
 [ "$(stat -c %a "$work/aapctl.yaml" 2>/dev/null || stat -f %Lp "$work/aapctl.yaml")" = 600 ] || die "the configuration file is not mode 0600"
