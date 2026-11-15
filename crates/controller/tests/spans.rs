@@ -183,7 +183,7 @@ async fn a_failed_pass_carries_the_class_only() {
     let new = &spans[before..];
     let root = roots(new)[0];
     assert!(root.error);
-    assert!(root.attrs.contains(&Attr::ErrorType("transient")));
+    assert!(root.attrs.contains(&Attr::error_type("transient").unwrap()));
     assert!(
         root.attrs
             .contains(&Attr::ReconcileResult(aap_trace::Outcome::Error))
@@ -195,7 +195,7 @@ async fn a_failed_pass_carries_the_class_only() {
     assert!(!failed.is_empty());
     for s in failed {
         assert!(
-            s.attrs.contains(&Attr::ErrorType("transient")),
+            s.attrs.contains(&Attr::error_type("transient").unwrap()),
             "{:?}",
             s.name
         );

@@ -471,7 +471,7 @@ costs nothing: [§48a](../../docs/architecture/09-operations.md), [`aap-trace`](
 | Value (`otel.`, and `api.otel.` for the API) | Default | What |
 |---|---|---|
 | `enabled` | `false` | |
-| `endpoint` | none | **Required when on.** The full URL of the collector's traces endpoint (`http://otel-collector.observability.svc:4318/v1/traces`), written as `OTEL_EXPORTER_OTLP_TRACES_ENDPOINT` and used as written. An http(s) URL with no user name, password, query or fragment |
+| `endpoint` | none | **Required when on.** The full URL of the collector's traces endpoint (`http://otel-collector.observability.svc:4318/v1/traces`), written as `OTEL_EXPORTER_OTLP_TRACES_ENDPOINT` and used as written. An http(s) URL with no user name, password, query or fragment; **`https` when `headersSecret` is set** (a token is never sent in clear) |
 | `sampler`, `samplerRatio` | `always_on`, `"1"` | `always_on`, `always_off` or `traceidratio` with a ratio from 0 to 1 |
 | `resourceAttributes` | `{}` | Only `deployment.environment.name`, `k8s.cluster.name`, `service.namespace`; values `[A-Za-z0-9._-]{1,128}` |
 | `headersSecret.name`, `.key` | none | An **existing Secret** whose key holds `name=value,name2=value2` (at most 4 KiB): the headers the collector wants. Mounted read-only at `/var/run/secrets/aap/otel` (mode `0440`; the API pod gets `fsGroup: 65532` for it, only then) and named by `AAP_OTEL_HEADERS_FILE`. **Headers are never an environment variable** (`OTEL_EXPORTER_OTLP_HEADERS` is refused by the binaries), and the chart renders no Secret. Both keys, or neither |
@@ -484,10 +484,12 @@ wants protobuf or gRPC does that), a proxy is not used (`HTTPS_PROXY` is not rea
 (and `POD_NAME`, which the operator already had) for `k8s.namespace.name`, `k8s.pod.name` and `service.instance.id`. The operator's `Role` is what it was: the kubelet resolves the Secret and the ConfigMap.
 
 Refused, by name: a block that is not a map or has a key that is not a setting (`dns` is the operator's); on with no usable endpoint; no `to` while the policy is on; a `to` that is every address; no or bad ports; a bad
-sampler or ratio; a resource attribute outside the list; half of `headersSecret` or `certificate`; and, in `api.extraEnv`, any `OTEL_*` or `AAP_OTEL_*` name (and `POD_NAME`, `POD_NAMESPACE` while `api.otel` is on), a volume
+sampler or ratio; a `headersSecret` with a plain `http` endpoint; a resource attribute outside the list; half of `headersSecret` or `certificate`; and, in `api.extraEnv`, any `OTEL_*` or `AAP_OTEL_*` name (and `POD_NAME`, `POD_NAMESPACE` while `api.otel` is on), a volume
 named `otel-headers` or `otel-ca` and a mount under `/etc/aap/otel` or `/var/run/secrets/aap/otel`. With `api.enabled` off, `api.otel` is neither rendered nor checked. `tests/otel.values.yaml` sets every
 value, a different one for each block, and renders to `tests/golden/otel.yaml`; CI validates it with kubeconform and hands the environment the chart renders for the API (`tests/otel-env.sh`) to the image's
-`api --check`, which must accept it and must refuse `grpc` by name; the operator image must refuse `grpc` by name before it asks the cluster anything. *Unverified*: a real collector receiving them
+`api --check`, which must accept it and must refuse `grpc` by name; the operator image, given `grpc` (and BuildKit's variables), **warns once by name and goes on to the cluster**: a tracing setting never stops a process (§48a, P-039). The Dockerfiles' smoke steps run under `env -i`, because BuildKit injects `OTEL_*` variables into `RUN` steps.
+
+The API's spans are made before the guard, so a request that is refused for want of a token is a root span too: a flood of them can push good spans out of the 2048-span queue (bounded, and counted under `queue_full`). **For an API that faces the internet set `api.otel.sampler: traceidratio` with a small `samplerRatio`.** *Unverified*: a real collector receiving them
 through the egress rule under an enforcing CNI (the end-to-end step is `chain-e2e.sh`, unverified until CI has run it), a backend other than the OpenTelemetry Collector, a private CA.
 
 ### The NetworkPolicy

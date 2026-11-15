@@ -6,7 +6,8 @@ use std::time::Duration;
 
 use aap_trace::testkit::{Harness, assert_clean, sample_spans};
 use aap_trace::{
-    ExportError, Limits, Pipeline, Resource, ResourceKey, Sampler, SpanExporter, SpanKind, SpanName,
+    Controller, ExportError, Limits, Method, Pipeline, Resource, ResourceKey, Sampler,
+    SpanExporter, SpanKind, SpanName, Step,
 };
 use aap_trace_otlp::testkit::{Behaviour, TestCollector};
 use aap_trace_otlp::{OtlpJson, TraceSettings};
@@ -25,6 +26,14 @@ fn settings(endpoint: &str, extra: &[(&str, &str)]) -> TraceSettings {
     })
     .unwrap()
     .unwrap()
+}
+
+/// Settings for a plain-http test collector with a headers file: `from_env` refuses that pair (headers are never sent in
+/// clear), so the file is set on the value, which is what the exporter reads.
+fn settings_with_headers_file(endpoint: &str, file: &str) -> TraceSettings {
+    let mut s = settings(endpoint, &[]);
+    s.headers_file = Some(file.into());
+    s
 }
 
 fn resource() -> Resource {
@@ -92,10 +101,10 @@ async fn spans_made_through_the_pipeline_reach_the_collector() {
     let exporter = OtlpJson::new(&settings(&collector.endpoint(), &[])).unwrap();
     let tracer = Pipeline::start(exporter, Limits::default(), resource(), Sampler::AlwaysOn);
     let root = tracer.root(
-        SpanName::fixed("reconcile agentservice"),
+        SpanName::reconcile(Controller::AgentService),
         SpanKind::Internal,
     );
-    root.child(SpanName::fixed("store.ensure"), SpanKind::Internal)
+    root.child(SpanName::step(Step::StoreEnsure), SpanKind::Internal)
         .end();
     root.fail();
     root.end();
@@ -164,7 +173,9 @@ async fn a_failing_collector_makes_the_pipeline_count_drops() {
     let exporter = OtlpJson::new(&settings(&collector.endpoint(), &[])).unwrap();
     let tracer = Pipeline::start(exporter, Limits::default(), resource(), Sampler::AlwaysOn);
     for _ in 0..4 {
-        tracer.root(SpanName::fixed("x"), SpanKind::Internal).end();
+        tracer
+            .root(SpanName::method(Method::Get), SpanKind::Internal)
+            .end();
     }
     let stats = tracer.shutdown(Duration::from_secs(5)).await;
     assert_eq!(stats.exported, 0);
@@ -178,7 +189,9 @@ async fn a_partial_success_counts_the_rejected_spans() {
     let exporter = OtlpJson::new(&settings(&collector.endpoint(), &[])).unwrap();
     let tracer = Pipeline::start(exporter, Limits::default(), resource(), Sampler::AlwaysOn);
     for _ in 0..5 {
-        tracer.root(SpanName::fixed("x"), SpanKind::Internal).end();
+        tracer
+            .root(SpanName::method(Method::Get), SpanKind::Internal)
+            .end();
     }
     let stats = tracer.shutdown(Duration::from_secs(5)).await;
     assert_eq!(stats.dropped_rejected, 2);
@@ -203,9 +216,9 @@ async fn headers_come_from_the_file_and_the_exporter_owns_its_own() {
     let file = dir.join("headers");
     std::fs::write(&file, "authorization=Bearer file-token-1,x-team=blue\n").unwrap();
     let collector = TestCollector::start().await;
-    let exporter = OtlpJson::new(&settings(
+    let exporter = OtlpJson::new(&settings_with_headers_file(
         &collector.endpoint(),
-        &[("AAP_OTEL_HEADERS_FILE", file.to_str().unwrap())],
+        file.to_str().unwrap(),
     ))
     .unwrap();
     exporter.export(&resource(), sample_spans(1)).await.unwrap();
@@ -228,9 +241,9 @@ fn a_bad_headers_file_stops_the_start_and_names_only_the_variable() {
         (forbidden, "sets itself"),
         (dir.join("missing"), "cannot be read"),
     ] {
-        let e = OtlpJson::new(&settings(
+        let e = OtlpJson::new(&settings_with_headers_file(
             "http://127.0.0.1:1/v1/traces",
-            &[("AAP_OTEL_HEADERS_FILE", path.to_str().unwrap())],
+            path.to_str().unwrap(),
         ))
         .unwrap_err();
         assert_eq!(e.variable, "AAP_OTEL_HEADERS_FILE");

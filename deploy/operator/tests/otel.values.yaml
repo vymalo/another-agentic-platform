@@ -4,7 +4,7 @@
 watchNamespace: agents
 otel:
   enabled: true
-  endpoint: http://otel-collector.observability.svc:4318/v1/traces
+  endpoint: https://otel-collector.observability.svc:4318/v1/traces
   sampler: traceidratio
   samplerRatio: "0.25"
   resourceAttributes:

@@ -5,13 +5,23 @@ use reqwest::header::{HeaderMap, HeaderName, HeaderValue};
 /// The largest file `AAP_OTEL_HEADERS_FILE` may name.
 pub const MAX_HEADERS_FILE: usize = 4096;
 
-/// Headers the file may not set: the exporter owns them.
-const FORBIDDEN: [&str; 5] = [
+/// Headers the file may not set: the exporter owns them (the body's, the connection's), or they are hop-by-hop or carry a
+/// credential of someone else's (a cookie, a proxy's), which a collector token never is.
+const FORBIDDEN: [&str; 14] = [
     "host",
     "content-type",
     "content-length",
     "traceparent",
     "content-encoding",
+    "connection",
+    "transfer-encoding",
+    "te",
+    "upgrade",
+    "proxy-authorization",
+    "cookie",
+    "user-agent",
+    "accept-encoding",
+    "expect",
 ];
 
 /// Parsed headers. There is no `Display`, and `Debug` says how many, never what.
@@ -89,6 +99,15 @@ mod tests {
             ("host=evil", "sets itself"),
             ("Content-Type=text/plain", "sets itself"),
             ("traceparent=00-x", "sets itself"),
+            ("Connection=close", "sets itself"),
+            ("transfer-encoding=chunked", "sets itself"),
+            ("te=trailers", "sets itself"),
+            ("upgrade=h2c", "sets itself"),
+            ("Proxy-Authorization=Basic x", "sets itself"),
+            ("cookie=a=b", "sets itself"),
+            ("user-agent=x", "sets itself"),
+            ("accept-encoding=gzip", "sets itself"),
+            ("expect=100-continue", "sets itself"),
             ("no-equals", "no `=`"),
             ("bad name=1", "token"),
             ("a=b\u{1}c", "not valid"),

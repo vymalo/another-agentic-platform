@@ -17,5 +17,7 @@ pub mod testkit;
 pub use encode::{encode, span_count};
 pub use exporter::OtlpJson;
 pub use headers::{Headers, MAX_HEADERS_FILE};
-pub use process::{check, tracer, tracer_with};
-pub use settings::{DEFAULT_TIMEOUT, MAX_TIMEOUT, SettingsError, TraceSettings};
+pub use process::{Started, check, start, start_with, tracer, tracer_with};
+pub use settings::{
+    DEFAULT_TIMEOUT, MAX_TIMEOUT, SettingsError, TraceSettings, VARIABLES, any_set,
+};

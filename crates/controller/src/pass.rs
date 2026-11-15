@@ -57,10 +57,14 @@ pub(crate) async fn bounded<T>(
             root.fail();
             if matches!(e, Error::TimedOut(_)) {
                 root.set(Attr::ReconcileResult(Outcome::Timeout));
-                root.set(Attr::ErrorType("timeout"));
+                if let Some(a) = Attr::error_type("timeout") {
+                    root.set(a);
+                }
             } else {
                 root.set(Attr::ReconcileResult(Outcome::Error));
-                root.set(Attr::ErrorType(class_label(e.class())));
+                if let Some(a) = Attr::error_type(class_label(e.class())) {
+                    root.set(a);
+                }
             }
         }
     }
@@ -88,9 +92,9 @@ pub(crate) async fn bounded<T>(
 
 fn start_span(tracer: &Tracer, controller: &str, key: &str) -> aap_trace::Span {
     let Some(which) = Controller::from_name(controller) else {
-        return tracer.root(SpanName::fixed("reconcile"), SpanKind::Internal);
+        return tracer.root(SpanName::RECONCILE, SpanKind::Internal);
     };
-    let root = tracer.root(SpanName::fixed(which.span_name()), SpanKind::Internal);
+    let root = tracer.root(SpanName::reconcile(which), SpanKind::Internal);
     if !root.is_recording() {
         return root;
     }

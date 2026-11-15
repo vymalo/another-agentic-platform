@@ -578,7 +578,7 @@ spec:
               value: "ghcr.io/vymalo/another-adam-rs/coder:sha-9a1fd4e@sha256:c3c178b7d73599f40d53f798616e510346abd3300a622b09b2bc233109f12b44"
             # Traces (slice K5): the variables `operator run` reads. Absent, no span is made.
             - name: OTEL_EXPORTER_OTLP_TRACES_ENDPOINT
-              value: "http://otel-collector.observability.svc:4318/v1/traces"
+              value: "https://otel-collector.observability.svc:4318/v1/traces"
             - name: OTEL_EXPORTER_OTLP_PROTOCOL
               value: http/json
             - name: OTEL_TRACES_SAMPLER

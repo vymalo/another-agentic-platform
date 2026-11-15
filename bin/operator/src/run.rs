@@ -304,12 +304,15 @@ fn kubernetes_runtime(
 #[cfg(feature = "runtime-kubernetes")]
 const FLUSH: std::time::Duration = std::time::Duration::from_secs(3);
 
-/// `operator run`. The tracing variables are read first, before the cluster is asked anything, so that a bad one stops the
-/// start and says which; the spans still queued are flushed on **every** way out, an error included.
+/// `operator run`. The tracing variables are read first, before the cluster is asked anything. A setting that is refused never
+/// stops the operator (tracing is not a security control, and platforms inject OTEL_* variables of their own): one warning, by
+/// variable, and tracing is off. The spans still queued are flushed on every way out that returns, an error included (not when
+/// the main future panics).
 #[cfg(feature = "runtime-kubernetes")]
 pub async fn run(args: RunArgs) -> Result<()> {
-    let tracer = aap_trace_otlp::tracer("aap-operator", env!("CARGO_PKG_VERSION"))
-        .map_err(|e| anyhow::anyhow!("{e}"))?;
+    let started = aap_trace_otlp::start("aap-operator", env!("CARGO_PKG_VERSION"));
+    started.warn();
+    let tracer = started.tracer;
     let result = run_with(args, tracer.clone()).await;
     tracer.shutdown(FLUSH).await;
     result
@@ -388,7 +391,7 @@ async fn run_with(args: RunArgs, tracer: aap_trace::Tracer) -> Result<()> {
     ));
     let metrics = tokio::spawn(crate::serve::serve(
         args.metrics_addr,
-        crate::serve::metrics_with_traces(operator.metrics(), tracer.stats()),
+        crate::serve::metrics_with_traces(operator.metrics(), aap_trace::TraceMetrics::of(&tracer)),
         signalled(stopped.clone()),
     ));
 

@@ -16,10 +16,13 @@ mod stats;
 #[cfg(feature = "testkit")]
 pub mod testkit;
 
-pub use attr::{Attr, Controller, K8sName, Method, ObjectKind, Outcome, ServiceState, Step, Value};
+pub use attr::{
+    Attr, Controller, K8sName, Label, Method, ObjectKind, Outcome, RouteTemplate, ServiceState,
+    Step, Value,
+};
 pub use pipeline::{ExportError, Limits, Pipeline, Resource, ResourceKey, SpanExporter};
 pub use span::{
     FinishedSpan, MAX_ATTRS, Sampler, Span, SpanKind, SpanName, Tracer, child, current_fail,
     current_set, step,
 };
-pub use stats::{Stats, StatsSnapshot};
+pub use stats::{Stats, StatsSnapshot, TraceMetrics};

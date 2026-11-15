@@ -21,6 +21,8 @@ aap-trace.workspace = true
 reqwest.workspace = true
 serde_json.workspace = true
 thiserror.workspace = true
+# Already in the lock file (the binaries log with it): the one line the exporter says when exports start failing. No bridge.
+tracing.workspace = true
 tokio = { workspace = true, features = ["rt", "sync", "time"] }
 url.workspace = true
 axum = { workspace = true, optional = true }

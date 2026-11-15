@@ -213,7 +213,9 @@ impl Problem {
     /// `403`, naming the one permission the person lacks (RFC 6750 §3.1 `insufficient_scope`).
     pub fn forbidden(permission: &'static str) -> Self {
         // The span of the request, if there is one, says which permission was missing.
-        aap_trace::current_set(aap_trace::Attr::PermissionMissing(permission));
+        if let Some(a) = aap_trace::Attr::permission_missing(permission) {
+            aap_trace::current_set(a);
+        }
         Self::new(
             StatusCode::FORBIDDEN,
             "forbidden",

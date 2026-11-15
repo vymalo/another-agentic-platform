@@ -32,10 +32,12 @@ fn main() -> ExitCode {
 }
 
 fn real_main(args: run::Args) -> Result<()> {
-    // The tracing variables are read before anything else, `--check` included: a bad one stops the start and says which. `--check`
-    // reads none of the files they name.
-    aap_trace_otlp::check("aap-api").map_err(|e| anyhow::anyhow!("{e}"))?;
+    // `--check` validates the tracing variables with the configuration, so that what a deployment renders is checked in CI: a bad
+    // one is an error and says which. It reads none of the files they name. A running API never stops for one: it warns once and
+    // runs with tracing off (`run::run`), because tracing is not a security control and platforms inject OTEL_* variables of their
+    // own (BuildKit does, into every RUN step).
     if args.check {
+        aap_trace_otlp::check("aap-api").map_err(|e| anyhow::anyhow!("{e}"))?;
         config::load(&args.config)?;
         println!("{}: ok", args.config.display());
         return Ok(());

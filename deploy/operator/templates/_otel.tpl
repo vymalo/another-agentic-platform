@@ -159,6 +159,9 @@ the component is on, `.dns` whether the block has a DNS rule of its own (the ope
 {{- fail (printf "%s.%s: %q and %q must be names" $what (index $pair 0) (toString $a) (toString $b)) -}}
 {{- end -}}
 {{- end -}}
+{{- if and $o.headersSecret (kindIs "map" $o.headersSecret) $o.headersSecret.name (not (hasPrefix "https://" $o.endpoint)) -}}
+{{- fail (printf "%s.headersSecret needs an https endpoint: the headers (a token) would be sent in clear to %s.endpoint, and the binaries refuse that pair too (AAP_OTEL_HEADERS_FILE)" $what $what) -}}
+{{- end -}}
 {{- if not (and (kindIs "slice" $o.ports) $o.ports) -}}
 {{- fail (printf "%s.ports must name at least one port: the collector is reached on nothing else" $what) -}}
 {{- end -}}

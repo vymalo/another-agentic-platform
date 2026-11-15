@@ -1562,6 +1562,8 @@ check "otel.samplerRatio must be from 0 to 1" refused_otel 'otel.samplerRatio mu
 check "otel.resourceAttributes keys are a closed list" refused_otel 'otel.resourceAttributes.user.email is not allowed' --set 'otel.resourceAttributes.user\.email=a'
 check "otel.resourceAttributes values are names" refused_otel 'otel.resourceAttributes.k8s.cluster.name must match' --set 'otel.resourceAttributes.k8s\.cluster\.name=a b'
 check "otel.headersSecret needs both name and key" refused_otel 'otel.headersSecret needs both name and key, or neither' --set otel.headersSecret.name=h
+check "otel.headersSecret with a plain http endpoint is refused (a token would go out in clear)" refused_otel 'otel.headersSecret needs an https endpoint' --set otel.headersSecret.name=h --set otel.headersSecret.key=k
+check "otel.headersSecret with an https endpoint renders" renders_ok --set otel.enabled=true --set otel.endpoint=https://c:4318/v1/traces --set otel.headersSecret.name=h --set otel.headersSecret.key=k --set-json "otel.to=$otel_to"
 check "otel.certificate needs both configMap and key" refused_otel 'otel.certificate needs both configMap and key, or neither' --set otel.certificate.key=ca.pem
 check "otel.headersSecret.name must be a name" refused_otel 'must be names' --set 'otel.headersSecret.name=a/b' --set otel.headersSecret.key=k
 check "otel.dns.to is required with the policy on (the operator's policy has no DNS rule)" refused_otel 'otel.dns.to is required' --set-json 'otel.dns.to=[]'
@@ -1576,6 +1578,7 @@ check "api.otel: a userinfo in the endpoint is refused" refused_api 'api.otel.en
   --set api.otel.enabled=true --set api.otel.endpoint=http://u:p@c/v1/traces --set-json "api.otel.to=$otel_to"
 check "api.otel: a bad sampler is refused" refused_api_otel 'api.otel.sampler must be' --set api.otel.sampler=nope
 check "api.otel: headersSecret with only a name is refused" refused_api_otel 'api.otel.headersSecret needs both' --set api.otel.headersSecret.name=h
+check "api.otel.headersSecret with a plain http endpoint is refused (a token would go out in clear)" refused_api_otel 'api.otel.headersSecret needs an https endpoint' --set api.otel.headersSecret.name=h --set api.otel.headersSecret.key=k
 check "api.extraEnv may not set an OTEL_ name" refused_api 'api.extraEnv: OTEL_SDK_DISABLED is the chart' --set-json 'api.extraEnv=[{"name":"OTEL_SDK_DISABLED","value":"true"}]'
 check "api.extraEnv may not set an AAP_OTEL_ name" refused_api 'api.extraEnv: AAP_OTEL_HEADERS_FILE is the chart' --set-json 'api.extraEnv=[{"name":"AAP_OTEL_HEADERS_FILE","value":"/x"}]'
 check "api.extraEnv may not set POD_NAME while api.otel is on" refused_api_otel 'api.extraEnv: POD_NAME is the chart' --set-json 'api.extraEnv=[{"name":"POD_NAME","value":"x"}]'

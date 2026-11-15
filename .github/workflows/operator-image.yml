@@ -308,10 +308,16 @@ jobs:
           # `run` with no cluster to reach fails, and says so (never a panic, never a hang).
           out=$(docker run --rm -e KUBECONFIG=/nonexistent operator:smoke run 2>&1) && { echo "::error::run succeeded with no cluster"; exit 1; } || true
           grep -q 'connecting to the cluster' <<<"$out" || { echo "::error::run did not say it was connecting: $out"; exit 1; }
-          # A tracing variable the exporter does not speak stops the start at once, by name, before the cluster is asked anything (K5).
-          out=$(docker run --rm -e KUBECONFIG=/nonexistent -e OTEL_EXPORTER_OTLP_ENDPOINT=http://collector.invalid:4318 -e OTEL_EXPORTER_OTLP_PROTOCOL=grpc operator:smoke run 2>&1) && { echo "::error::run accepted grpc"; exit 1; } || true
-          grep -q 'OTEL_EXPORTER_OTLP_PROTOCOL' <<<"$out" || { echo "::error::the refusal did not name the variable: $out"; exit 1; }
-          if grep -q 'connecting to the cluster' <<<"$out"; then echo "::error::the tracing variable was read after the cluster: $out"; exit 1; fi
+          # A tracing variable the exporter does not speak never stops the operator (K5, §48a: a tracing setting never stops the process):
+          # it warns once, by variable name, and goes on with tracing off, so the run goes on to the cluster and fails there, as above.
+          # `docker run` passes nothing of the runner's environment: what the container sees is what is written here.
+          out=$(docker run --rm -e KUBECONFIG=/nonexistent -e OTEL_EXPORTER_OTLP_ENDPOINT=http://collector.invalid:4318 -e OTEL_EXPORTER_OTLP_PROTOCOL=grpc operator:smoke run 2>&1) && { echo "::error::run succeeded with no cluster"; exit 1; } || true
+          grep -q 'OTEL_EXPORTER_OTLP_PROTOCOL' <<<"$out" || { echo "::error::the warning did not name the variable: $out"; exit 1; }
+          [ "$(grep -c 'tracing is off' <<<"$out")" = 1 ] || { echo "::error::expected exactly one tracing warning: $out"; exit 1; }
+          grep -q 'connecting to the cluster' <<<"$out" || { echo "::error::the tracing variable stopped the start: $out"; exit 1; }
+          # BuildKit's own shape (what it injects into RUN steps): the same, a warning and a start.
+          out=$(docker run --rm -e KUBECONFIG=/nonexistent -e OTEL_TRACES_EXPORTER=otlp -e OTEL_EXPORTER_OTLP_TRACES_PROTOCOL=grpc -e OTEL_EXPORTER_OTLP_TRACES_ENDPOINT=unix:///dev/otel-grpc.sock operator:smoke run 2>&1) && { echo "::error::run succeeded with no cluster"; exit 1; } || true
+          grep -q 'connecting to the cluster' <<<"$out" || { echo "::error::BuildKit's variables stopped the start: $out"; exit 1; }
           # Only the operator: no shell, no package manager in the image (a read of the whole file system).
           cid=$(docker create operator:smoke)
           files=$(docker export "$cid" | tar -t)
@@ -400,6 +406,8 @@ jobs:
       - name: The configuration the chart renders is one the image accepts
         run: |
           set -euo pipefail
+          # Nothing of the runner's own OTEL_* variables reaches the scripts below (`docker run` passes none of the host's).
+          for v in $(compgen -e | grep -E '^(AAP_)?OTEL_' || true); do unset "$v"; done
           dir="$RUNNER_TEMP/api-config"
           sh deploy/operator/tests/api-shapes.sh "$dir"
           for f in "$dir"/*.yaml; do
@@ -426,14 +434,20 @@ jobs:
       - name: The tracing environment the chart renders is one the image accepts
         run: |
           set -euo pipefail
+          for v in $(compgen -e | grep -E '^(AAP_)?OTEL_' || true); do unset "$v"; done
           args=()
           while IFS= read -r line; do args+=(-e "$line"); done < <(sh deploy/operator/tests/otel-env.sh api)
           [ "${#args[@]}" -ge 10 ] || { echo "::error::the chart rendered no tracing environment for the API"; exit 1; }
           out=$(docker run --rm "${args[@]}" -v "$PWD/bin/api:/cfg:ro" api:smoke --config /cfg/config.example.yaml --check)
           grep -q ': ok$' <<<"$out" || { echo "::error::the image refuses the tracing environment the chart renders: $out"; exit 1; }
+          # `--check` still refuses what the running binary only warns about, by name: a rendered configuration is validated here.
           out=$(docker run --rm -e OTEL_EXPORTER_OTLP_ENDPOINT=http://collector.invalid:4318 -e OTEL_EXPORTER_OTLP_PROTOCOL=grpc -v "$PWD/bin/api:/cfg:ro" api:smoke --config /cfg/config.example.yaml --check 2>&1) \
             && { echo "::error::--check accepted grpc"; exit 1; } || true
           grep -q 'OTEL_EXPORTER_OTLP_PROTOCOL' <<<"$out" || { echo "::error::the refusal did not name the variable: $out"; exit 1; }
+          # BuildKit's shape: the running API only warns (no cluster here, so it stops at the cluster, not at tracing).
+          out=$(docker run --rm -e KUBECONFIG=/nonexistent -e OTEL_EXPORTER_OTLP_TRACES_PROTOCOL=grpc -e OTEL_EXPORTER_OTLP_TRACES_ENDPOINT=unix:///dev/otel-grpc.sock -v "$PWD/bin/api:/cfg:ro" api:smoke --config /cfg/config.example.yaml 2>&1) \
+            && { echo "::error::the API served with no cluster"; exit 1; } || true
+          grep -q 'tracing is off' <<<"$out" || { echo "::error::no tracing warning: $out"; exit 1; }
       # The image that passed travels to the push as a file.
       - name: Save the image
         run: docker save api:smoke -o "$RUNNER_TEMP/api.tar"

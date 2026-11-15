@@ -6,7 +6,7 @@
 //! export, so a collector that is down costs a bounded queue and one request in flight.
 
 use std::future::Future;
-use std::sync::atomic::Ordering;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, PoisonError};
 use std::time::Duration;
 
@@ -102,6 +102,10 @@ pub trait SpanExporter: Send + Sync + 'static {
         resource: &Resource,
         batch: Vec<FinishedSpan>,
     ) -> impl Future<Output = Result<(), ExportError>> + Send;
+
+    /// Called once when exports start failing after a success (or from the start): the first failure of an episode, not
+    /// each one. An exporter may log one line here (a fixed reason and a host, nothing from an answer). Never panic.
+    fn export_failing(&self) {}
 }
 
 /// The sizes of the pipeline.
@@ -149,6 +153,8 @@ pub(crate) struct Shared {
     pub(crate) sink: Sink,
     pub(crate) sampler: Sampler,
     pub(crate) stats: Arc<Stats>,
+    /// Set when the shutdown begins: a span that ends after it is counted and dropped.
+    pub(crate) stopping: AtomicBool,
     pub(crate) control: Mutex<Option<Control>>,
 }
 
@@ -167,15 +173,19 @@ impl Pipeline {
         let (stop_tx, stop_rx) = watch::channel(false);
         let stats = Arc::new(Stats::default());
         let handle = tokio::spawn(run(exporter, resource, limits, rx, stop_rx, stats.clone()));
-        Tracer(Some(Arc::new(Shared {
-            sink: Sink::Queue(tx),
-            sampler,
-            stats,
-            control: Mutex::new(Some(Control {
-                stop: stop_tx,
-                handle,
+        Tracer(
+            Some(Arc::new(Shared {
+                sink: Sink::Queue(tx),
+                sampler,
+                stats,
+                stopping: AtomicBool::new(false),
+                control: Mutex::new(Some(Control {
+                    stop: stop_tx,
+                    handle,
+                })),
             })),
-        })))
+            true,
+        )
     }
 }
 
@@ -186,6 +196,7 @@ impl Tracer {
         let Some(shared) = &self.0 else {
             return StatsSnapshot::default();
         };
+        shared.stopping.store(true, Ordering::Release);
         let control = shared
             .control
             .lock()
@@ -195,6 +206,14 @@ impl Tracer {
             let _ = stop.send(true);
             if timeout(deadline, &mut handle).await.is_err() {
                 handle.abort();
+                // What the queue took and no export accounted for (exported, failed, rejected) was in the worker's hands
+                // or still queued: it is lost at the deadline, and counted.
+                let s = &shared.stats;
+                let done = s.exported.load(Ordering::Relaxed)
+                    + s.rejected.load(Ordering::Relaxed)
+                    + s.export_failed.load(Ordering::Relaxed);
+                let lost = s.accepted.load(Ordering::Relaxed).saturating_sub(done);
+                s.flush_deadline.fetch_add(lost, Ordering::Relaxed);
             }
         }
         shared.stats.snapshot()
@@ -239,6 +258,9 @@ impl<E: SpanExporter> Worker<E> {
             }
             Ok(Err(ExportError::Failed)) | Err(_) => {
                 self.stats.export_failed.fetch_add(n64, Ordering::Relaxed);
+                if self.backoff.is_none() {
+                    self.exporter.export_failing();
+                }
                 false
             }
         }

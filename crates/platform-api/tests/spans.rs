@@ -62,7 +62,7 @@ async fn every_route_is_a_clean_span_named_by_its_template() {
     for route in &ROUTES {
         let name = format!("{} {}", route.verb.as_str(), route.path);
         let span = root(&spans, &name);
-        assert!(has(span, &Attr::HttpRoute(route.path)), "{name}");
+        assert!(has(span, &Attr::http_route(route.path).unwrap()), "{name}");
         assert!(
             span.attrs
                 .iter()
@@ -118,15 +118,15 @@ async fn a_403_names_the_missing_permission_and_the_problem_slug() {
     let span = root(&spans, "PUT /v1/models/{name}");
     assert!(has(
         span,
-        &Attr::PermissionMissing(aap_api::permission::MODELS_WRITE)
+        &Attr::permission_missing(aap_api::permission::MODELS_WRITE).unwrap()
     ));
-    assert!(has(span, &Attr::ProblemType("forbidden")));
+    assert!(has(span, &Attr::problem_type("forbidden").unwrap()));
     assert!(has(span, &Attr::HttpStatus(403)));
     assert!(
         !span.error,
         "a 403 is an answer, not a failure of the server"
     );
-    assert!(has(span, &Attr::AuthResult("ok")));
+    assert!(has(span, &Attr::auth_result("ok").unwrap()));
 }
 
 #[tokio::test]
@@ -138,9 +138,9 @@ async fn a_request_without_a_token_says_why_and_never_which_token() {
     assert_eq!(r.code(), 401);
     let spans = memory.spans();
     let roots: Vec<_> = spans.iter().filter(|s| s.parent_id.is_none()).collect();
-    assert!(has(roots[0], &Attr::AuthResult("missing")));
-    assert!(has(roots[0], &Attr::ProblemType("missing-token")));
-    assert!(has(roots[1], &Attr::ProblemType("invalid-token")));
+    assert!(has(roots[0], &Attr::auth_result("missing").unwrap()));
+    assert!(has(roots[0], &Attr::problem_type("missing-token").unwrap()));
+    assert!(has(roots[1], &Attr::problem_type("invalid-token").unwrap()));
     assert_clean(&spans, &SENTINELS);
 }
 

@@ -185,7 +185,7 @@ async fn serve_both(
     let (metrics_listener, counters) = metrics;
     let metrics_server = tokio::spawn(serve::serve(
         metrics_listener,
-        serve::metrics_with_traces(counters, tracer.stats()),
+        serve::metrics_with_traces(counters, aap_trace::TraceMetrics::of(&tracer)),
         signalled(metrics_stopped),
     ));
 
@@ -279,9 +279,11 @@ pub async fn run(args: Args) -> Result<()> {
         cors,
         defaults,
     } = config::load(&args.config)?;
-    // Before the cluster and the issuer: a bad tracing variable is found at once, and says which.
-    let tracer = aap_trace_otlp::tracer("aap-api", env!("CARGO_PKG_VERSION"))
-        .map_err(|e| anyhow::anyhow!("{e}"))?;
+    // Before the cluster and the issuer. A tracing setting that is refused never stops the API (tracing is not a security
+    // control, and platforms inject OTEL_* variables of their own): one warning, by variable, and tracing is off.
+    let started = aap_trace_otlp::start("aap-api", env!("CARGO_PKG_VERSION"));
+    started.warn();
+    let tracer = started.tracer;
     let listen = args.listen.unwrap_or(listen);
     let health_listen = args.health_addr.unwrap_or(health_listen);
     let metrics_listen = args.metrics_addr.unwrap_or(metrics_listen);
@@ -566,7 +568,7 @@ mod tests {
 
     fn root_span(tracer: &Tracer, name: &'static str) -> aap_trace::Span {
         tracer.root(
-            aap_trace::SpanName::fixed(name),
+            aap_trace::SpanName::fixed(name).unwrap(),
             aap_trace::SpanKind::Server,
         )
     }

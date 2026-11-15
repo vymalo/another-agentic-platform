@@ -3,7 +3,7 @@
 use aap_trace::{K8sName, Limits, Pipeline, Resource, Tracer};
 
 use crate::exporter::OtlpJson;
-use crate::settings::{SettingsError, TraceSettings};
+use crate::settings::{SettingsError, TraceSettings, any_set};
 
 /// The variables, from the process's environment (`std::env::var`: a value that is not text is unset).
 fn from_process(name: &str) -> Option<String> {
@@ -18,6 +18,68 @@ fn from_process(name: &str) -> Option<String> {
 /// As [`TraceSettings::from_env`].
 pub fn check(default_service: &str) -> Result<(), SettingsError> {
     TraceSettings::from_env(default_service, from_process).map(|_| ())
+}
+
+/// What starting tracing came to. Tracing is not a security control, so **a setting that is refused never stops the process**:
+/// the tracer is off and the reason is here for the caller to log once ([`Started::warn`]).
+#[derive(Debug)]
+pub struct Started {
+    /// The tracer to use: off when nothing was asked, or when what was asked was refused (then it is
+    /// [`asked`](Tracer::asked), which is what puts `aap_trace_enabled 0` on `/metrics`).
+    pub tracer: Tracer,
+    /// The refused setting: a variable name and a fixed reason, never a value.
+    pub refused: Option<SettingsError>,
+}
+
+impl Started {
+    /// Log the refusal, once, as one `warn` line naming the variable and the fixed reason. Nothing else is logged.
+    pub fn warn(&self) {
+        if let Some(e) = &self.refused {
+            tracing::warn!(
+                variable = e.variable,
+                reason = e.reason,
+                "tracing is off: a tracing setting was refused"
+            );
+        }
+    }
+}
+
+/// [`tracer`] for a process that must run whatever the settings say: an error becomes [`Started::refused`] and a tracer that
+/// is off. Call it inside a Tokio runtime, after the log is set up, then [`Started::warn`].
+#[must_use]
+pub fn start(default_service: &str, version: &str) -> Started {
+    start_with(default_service, version, from_process)
+}
+
+/// [`start`] over another source of variables.
+#[must_use]
+pub fn start_with(
+    default_service: &str,
+    version: &str,
+    lookup: impl Fn(&str) -> Option<String>,
+) -> Started {
+    let configured = any_set(&lookup);
+    let off = || {
+        if configured {
+            Tracer::off_but_asked()
+        } else {
+            Tracer::off()
+        }
+    };
+    match tracer_with(default_service, version, &lookup) {
+        Ok(tracer) if tracer.enabled() => Started {
+            tracer,
+            refused: None,
+        },
+        Ok(_) => Started {
+            tracer: off(),
+            refused: None,
+        },
+        Err(e) => Started {
+            tracer: off(),
+            refused: Some(e),
+        },
+    }
 }
 
 /// The tracer these variables ask for: [`Tracer::off`] when they ask for none. Call it inside a Tokio runtime (the pipeline is
@@ -78,6 +140,40 @@ mod tests {
         let t = tracer_with("aap-api", "0", lookup(&[])).unwrap();
         assert!(!t.enabled());
         assert!(t.stats().is_none());
+    }
+
+    #[tokio::test]
+    async fn start_runs_with_tracing_off_when_a_setting_is_refused_and_says_which() {
+        // BuildKit's shape: a traces protocol of grpc and an endpoint on a unix socket.
+        let s = start_with(
+            "aap-api",
+            "0",
+            lookup(&[
+                ("OTEL_EXPORTER_OTLP_TRACES_PROTOCOL", "grpc"),
+                (
+                    "OTEL_EXPORTER_OTLP_TRACES_ENDPOINT",
+                    "unix:///dev/otel-grpc.sock",
+                ),
+                ("OTEL_TRACES_EXPORTER", "otlp"),
+            ]),
+        );
+        assert!(!s.tracer.enabled());
+        assert!(s.tracer.asked());
+        let e = s.refused.unwrap();
+        assert_eq!(e.variable, "OTEL_EXPORTER_OTLP_TRACES_PROTOCOL");
+        assert!(!format!("{e}").contains("unix"));
+    }
+
+    #[tokio::test]
+    async fn start_with_no_variable_is_off_and_not_configured() {
+        let s = start_with("aap-api", "0", lookup(&[]));
+        assert!(!s.tracer.enabled() && !s.tracer.asked() && s.refused.is_none());
+        // An empty value is an unset one.
+        let s = start_with("aap-api", "0", lookup(&[("OTEL_SERVICE_NAME", "")]));
+        assert!(!s.tracer.asked());
+        // A variable that is set and ignored (no endpoint) is still "configured but off".
+        let s = start_with("aap-api", "0", lookup(&[("OTEL_SERVICE_NAME", "x")]));
+        assert!(s.tracer.asked() && !s.tracer.enabled() && s.refused.is_none());
     }
 
     #[tokio::test]

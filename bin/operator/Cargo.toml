@@ -45,6 +45,7 @@ tracing-subscriber.workspace = true
 
 [dev-dependencies]
 aap-ports.workspace = true
+aap-trace = { workspace = true, features = ["testkit"] }
 http = "1"
 k8s-openapi.workspace = true
 serde.workspace = true

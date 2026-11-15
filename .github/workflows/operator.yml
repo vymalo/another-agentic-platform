@@ -95,8 +95,8 @@ jobs:
       - run: cargo test --workspace --locked
 
   dependencies:
-    # K5: TLS stays rustls with ring and no second TLS stack or HTTP client enters the lock file (tools/check-dependencies.sh). A pull request
-    # that adds a package says so and names it in ALLOW_NEW_PACKAGES, which is the list of the packages its decision covers.
+    # K5: TLS stays rustls with ring and no second TLS stack or HTTP client enters the lock file (tools/check-dependencies.sh, gates 1 to 4).
+    # There is no gate on the packages a pull request adds: that is review's, and the script's opt-in gate 5 is for local use.
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
@@ -106,13 +106,6 @@ jobs:
         run: rustup toolchain install "$RUST_TOOLCHAIN" --profile minimal --no-self-update && rustup default "$RUST_TOOLCHAIN"
       - uses: Swatinem/rust-cache@v2
       - name: the dependency gates
-        if: github.event_name != 'pull_request'
-        run: sh tools/check-dependencies.sh
-      - name: the dependency gates, and the packages this pull request adds to the lock file
-        if: github.event_name == 'pull_request'
-        env:
-          ALLOW_NEW_PACKAGES: "aap-trace aap-trace-otlp"
-          BASE_REF: origin/${{ github.base_ref }}
         run: sh tools/check-dependencies.sh
 
   crds-drift:

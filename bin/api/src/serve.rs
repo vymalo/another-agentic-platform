@@ -91,24 +91,19 @@ async fn ready(State(state): State<Arc<Shared>>) -> impl IntoResponse {
 /// scraper and keep it from everybody else; nothing here is the API's.
 #[cfg(test)]
 pub fn metrics(metrics: Arc<ApiMetrics>) -> Router {
-    metrics_with_traces(metrics, None)
+    metrics_with_traces(metrics, aap_trace::TraceMetrics::none())
 }
 
 /// [`metrics`], and when tracing is on (K5) the two counters of the trace pipeline after the API's own: with tracing off the
 /// text is exactly what it was.
-pub fn metrics_with_traces(
-    metrics: Arc<ApiMetrics>,
-    traces: Option<Arc<aap_trace::Stats>>,
-) -> Router {
+pub fn metrics_with_traces(metrics: Arc<ApiMetrics>, traces: aap_trace::TraceMetrics) -> Router {
     Router::new()
         .route(
             "/metrics",
             get(
-                |State((m, t)): State<(Arc<ApiMetrics>, Option<Arc<aap_trace::Stats>>)>| async move {
+                |State((m, t)): State<(Arc<ApiMetrics>, aap_trace::TraceMetrics)>| async move {
                     let mut text = m.render();
-                    if let Some(t) = t {
-                        text.push_str(&t.render());
-                    }
+                    text.push_str(&t.render());
                     (
                         [(
                             header::CONTENT_TYPE,
@@ -192,6 +187,24 @@ mod tests {
             StatusCode::NOT_FOUND,
             "the API is not on this port"
         );
+    }
+
+    #[tokio::test]
+    async fn a_tracing_setting_that_was_given_and_is_off_says_so_with_one_gauge() {
+        let m = Arc::new(ApiMetrics::new());
+        let plain = get(metrics(m.clone()), "/metrics").await.1;
+        assert!(
+            !plain.contains("aap_trace_"),
+            "no tracing variable, no tracing text: {plain}"
+        );
+        let off = aap_trace::TraceMetrics::of(&aap_trace::Tracer::off_but_asked());
+        let (_, body) = get(metrics_with_traces(m, off), "/metrics").await;
+        assert!(
+            body.starts_with(&plain),
+            "the API's own text is first and unchanged: {body}"
+        );
+        assert!(body.contains("aap_trace_enabled 0\n"), "{body}");
+        assert!(!body.contains("aap_trace_spans"), "{body}");
     }
 
     #[tokio::test]

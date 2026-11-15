@@ -853,6 +853,11 @@ until_ok 90 "the collector to have received a span of each service" collector_ha
 # The spans the sampler kept are all there is to read: none of them may name a person, a token, a Secret or a path (the sentinels are looked for in step 7).
 grep -Eq 'Name +: GET /v1/agents/' "$work/otel.log" && { grep -Eq 'http\.route: Str\(/v1/agents/\{name\}\)' "$work/otel.log" || die "the span of a request for one agent is not named by its route template"; }
 if grep -Eq 'Str\(/v1/agents/'"$agent"'\)' "$work/otel.log"; then die "a span holds the path of a request (the agent's name in a route), not a template"; fi
+# A span's NAME is on a `Name : ...` line of its own, not inside `Str(...)`, so the check above would pass a regression that put the path of a
+# request in a span name. Both are looked for, on the name lines alone and with the spacing loose: the agent's name anywhere in a name, and a
+# name with anything after /v1/agents/ but the template.
+if grep -Eq "Name +: .*$agent" "$work/otel.log"; then die "a span is NAMED with the agent's name (the path of a request), not a template"; fi
+if grep -E 'Name +: .*/v1/agents/' "$work/otel.log" | grep -vqF '/v1/agents/{name}'; then die "a span is named with something after /v1/agents/ that is not the template {name}"; fi
 ok "the collector received spans of the operator (reconcile agentservice, k8s.namespace.name $ns) and of the Platform API (GET /v1/agents by its template /v1/agents), through the egress rule of each policy"
 
 step "7. nothing secret anywhere"

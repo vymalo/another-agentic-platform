@@ -15,7 +15,7 @@ use axum::middleware::Next;
 use axum::response::Response;
 use tracing::Instrument;
 
-use aap_trace::{Attr, Method, SpanKind, SpanName, Tracer};
+use aap_trace::{Attr, Method, RouteTemplate, SpanKind, SpanName, Tracer};
 
 use crate::metrics::ApiMetrics;
 use crate::problem::ProblemSlug;
@@ -93,7 +93,8 @@ pub(crate) async fn span(State(tracer): State<Tracer>, request: Request, next: N
     let template = request
         .extensions()
         .get::<MatchedPath>()
-        .and_then(|m| crate::routes::template(m.as_str()));
+        .and_then(|m| crate::routes::template(m.as_str()))
+        .and_then(RouteTemplate::new);
     let name = match template {
         Some(t) => SpanName::route(method, t),
         None => SpanName::method(method),
@@ -107,9 +108,13 @@ pub(crate) async fn span(State(tracer): State<Tracer>, request: Request, next: N
     let status = response.status().as_u16();
     span.set(Attr::HttpStatus(status));
     if let Some(ProblemSlug(slug)) = response.extensions().get::<ProblemSlug>().copied() {
-        span.set(Attr::ProblemType(slug));
-        if status >= 500 {
-            span.set(Attr::ErrorType(slug));
+        if let Some(a) = Attr::problem_type(slug) {
+            span.set(a);
+        }
+        if status >= 500
+            && let Some(a) = Attr::error_type(slug)
+        {
+            span.set(a);
         }
     }
     if status >= 500 {

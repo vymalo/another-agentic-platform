@@ -5,8 +5,8 @@ use std::time::Duration;
 
 use aap_trace::testkit::{Harness, MemoryExporter, Mode, assert_clean};
 use aap_trace::{
-    Attr, Limits, Method, Pipeline, Resource, Sampler, SpanKind, SpanName, Step, Tracer,
-    current_set, step,
+    Attr, Limits, Method, Pipeline, Resource, RouteTemplate, Sampler, SpanKind, SpanName, Step,
+    Tracer, current_set, step,
 };
 use tokio::time::Instant;
 
@@ -15,7 +15,7 @@ fn resource() -> Resource {
 }
 
 fn name() -> SpanName {
-    SpanName::fixed("t")
+    SpanName::fixed("t").unwrap()
 }
 
 async fn make() -> Harness<MemoryExporter> {
@@ -86,6 +86,8 @@ async fn export_failure_drops_and_backs_off() {
     let stats = tracer.stats().unwrap().snapshot();
     assert_eq!(stats.dropped_export_failed, 5);
     assert_eq!(stats.exported, 0);
+    // Five failed exports are one episode: the exporter was told once.
+    assert_eq!(exporter.failing_episodes(), 1);
     // A success resets the wait.
     exporter.set_mode(Mode::Keep);
     tokio::time::sleep(Duration::from_secs(60)).await;
@@ -153,7 +155,10 @@ fn trace_id_ratio_keeps_none_all_or_some() {
 #[tokio::test]
 async fn children_follow_the_scope_and_carry_their_class() {
     let (tracer, memory) = Tracer::in_memory(Sampler::AlwaysOn);
-    let root = tracer.root(SpanName::route(Method::Get, "/v1/agents"), SpanKind::Server);
+    let root = tracer.root(
+        SpanName::route(Method::Get, RouteTemplate::new("/v1/agents").unwrap()),
+        SpanKind::Server,
+    );
     root.scope(async {
         current_set(Attr::HttpStatus(200));
         let ok: Result<u8, &str> = step(Step::StoreEnsure, async { Ok(1) }, |r| {
@@ -183,7 +188,11 @@ async fn children_follow_the_scope_and_carry_their_class() {
     }
     let failed = memory.named("runtime.ensure").unwrap();
     assert!(failed.error);
-    assert!(failed.attrs.contains(&Attr::ErrorType("transient")));
+    assert!(
+        failed
+            .attrs
+            .contains(&Attr::error_type("transient").unwrap())
+    );
     assert!(!memory.named("store.ensure").unwrap().error);
     assert_clean(&spans, &["must not appear"]);
 }
@@ -216,4 +225,96 @@ fn the_keys_are_the_readme_table() {
         .filter(|k| k.contains('.'))
         .collect();
     assert_eq!(keys, Attr::ALL_KEYS);
+}
+
+#[test]
+fn a_span_name_refuses_free_text() {
+    for ok in ["reconcile agentservice", "store.ensure", "t", "a-b_c:d.e 1"] {
+        assert!(SpanName::fixed(ok).is_some(), "{ok}");
+    }
+    for bad in [
+        "",
+        " leading",
+        "Upper",
+        "a@b",
+        "a?b",
+        "a=b",
+        "a/b",
+        "GET /v1/agents/my-agent",
+        "tab\there",
+    ] {
+        assert!(SpanName::fixed(bad).is_none(), "{bad:?}");
+    }
+    let long: &'static str = "a".repeat(65).leak();
+    assert!(SpanName::fixed(long).is_none());
+}
+
+#[tokio::test]
+async fn a_step_dropped_before_it_finishes_ends_as_a_timeout() {
+    let (tracer, memory) = Tracer::in_memory(Sampler::AlwaysOn);
+    let root = tracer.root(name(), SpanKind::Internal);
+    root.scope(async {
+        // The pass is cut by its time limit: the step's future is dropped while it waits.
+        let cut = tokio::time::timeout(
+            Duration::from_millis(20),
+            step(Step::RuntimeEnsure, std::future::pending::<u8>(), |_| None),
+        )
+        .await;
+        assert!(cut.is_err());
+        // A step that finishes is not touched by the guard.
+        let ok = step(Step::StoreEnsure, async { 1u8 }, |_| None).await;
+        assert_eq!(ok, 1);
+    })
+    .await;
+    root.end();
+    let cut = memory.named("runtime.ensure").unwrap();
+    assert!(cut.error);
+    assert!(cut.attrs.contains(&Attr::error_type("timeout").unwrap()));
+    let ok = memory.named("store.ensure").unwrap();
+    assert!(!ok.error);
+    assert!(!ok.attrs.iter().any(|a| a.key() == "error.type"));
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_span_that_ends_after_the_shutdown_began_is_counted_under_its_own_reason() {
+    let tracer = Pipeline::start(
+        MemoryExporter::default(),
+        Limits::default(),
+        resource(),
+        Sampler::AlwaysOn,
+    );
+    let late = tracer.root(name(), SpanKind::Internal);
+    let stats = tracer.shutdown(Duration::from_secs(3)).await;
+    assert_eq!(stats.dropped_shutdown, 0);
+    late.end();
+    assert_eq!(tracer.stats().unwrap().snapshot().dropped_shutdown, 1);
+    assert_eq!(tracer.stats().unwrap().snapshot().dropped_queue_full, 0);
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_batch_lost_at_the_flush_deadline_is_counted() {
+    let tracer = Pipeline::start(
+        MemoryExporter::new(Mode::Hang),
+        Limits::default(),
+        resource(),
+        Sampler::AlwaysOn,
+    );
+    for _ in 0..3 {
+        tracer.root(name(), SpanKind::Internal).end();
+    }
+    let stats = tracer.shutdown(Duration::from_secs(3)).await;
+    assert_eq!(stats.dropped_flush_deadline, 3);
+    assert_eq!(stats.exported, 0);
+}
+
+#[test]
+fn a_sampler_that_drops_everything_makes_no_span_at_all() {
+    for sampler in [Sampler::AlwaysOff, Sampler::TraceIdRatio(0.0)] {
+        let (tracer, memory) = Tracer::in_memory(sampler);
+        let span = tracer.root(name(), SpanKind::Internal);
+        assert!(!span.is_recording());
+        assert!(span.ids().is_none());
+        span.end();
+        assert!(memory.spans().is_empty());
+    }
 }

@@ -9,18 +9,25 @@ The OTLP/HTTP **JSON** exporter of the traces of the operator and the Platform A
 `TraceSettings::from_env(default_service, lookup)` reads the standard variables, a strict subset. `Ok(None)` is off (no
 endpoint, or `OTEL_SDK_DISABLED=true`). An error names the variable and a fixed reason, never a value.
 
+**A refused setting never stops a process.** `start(service, version)` returns a `Started`: the tracer (off when a setting was
+refused, and then `Tracer::asked()`), and the refusal, which `Started::warn()` logs as one `warn` line (`tracing is off`, the
+variable and the fixed reason). `check(service)` is what `api --check` calls and it is an `Err` for the same refusal, without
+reading a file. `tracer(..)` keeps returning the `Err`. `any_set` and `VARIABLES` say whether a tracing variable was set. The
+exporter says once per episode of failed exports, in one `warn` (the collector's host and a fixed reason), that spans are being
+dropped.
+
 | Variable | Rule |
 |---|---|
 | `OTEL_EXPORTER_OTLP_TRACES_ENDPOINT` | the full URL, used as written |
 | `OTEL_EXPORTER_OTLP_ENDPOINT` | a base URL; `/v1/traces` is appended |
 | (both) | `http` or `https`, a host, no user name, password, query or fragment |
-| `OTEL_EXPORTER_OTLP_PROTOCOL` | unset or `http/json`; `grpc` and `http/protobuf` are refused (the standard's default is `http/protobuf`: a collector converts) |
+| `OTEL_EXPORTER_OTLP_PROTOCOL` | unset or `http/json`; `grpc` and `http/protobuf` are refused (the standard's default is `http/protobuf`: a collector converts); BuildKit injects `grpc` into its `RUN` steps |
 | `OTEL_EXPORTER_OTLP_TIMEOUT` | milliseconds, 10000 by default, at most 60000 |
 | `OTEL_SERVICE_NAME` | `[a-z0-9-]{1,63}`; the binary's name by default |
 | `OTEL_RESOURCE_ATTRIBUTES` | only `deployment.environment.name`, `k8s.cluster.name`, `service.namespace`, values `[A-Za-z0-9._-]{1,128}` |
 | `OTEL_TRACES_SAMPLER`, `_ARG` | `always_on` (default), `always_off`, `traceidratio` with a ratio from 0 to 1; `parentbased_*` is its base (no parent is ever read) |
 | `OTEL_EXPORTER_OTLP_HEADERS` | **refused**: headers come from a file |
-| `AAP_OTEL_HEADERS_FILE` | ours: a file of `k=v,k2=v2`, at most 4 KiB; `host`, `content-type`, `content-length`, `content-encoding`, `traceparent` are refused; the values are marked sensitive and no type prints them |
+| `AAP_OTEL_HEADERS_FILE` | ours: a file of `k=v,k2=v2`, at most 4 KiB, **only with an `https` endpoint** (a token is never sent in clear); `host`, `content-type`, `content-length`, `content-encoding`, `traceparent`, `connection`, `transfer-encoding`, `te`, `upgrade`, `proxy-authorization`, `cookie`, `user-agent`, `accept-encoding`, `expect` are refused; the values are marked sensitive and no type prints them |
 | `OTEL_EXPORTER_OTLP_CERTIFICATE` | a PEM bundle that is the exporter's **only** trust (not `SSL_CERT_FILE`) |
 
 `OtlpJson::new(&settings)` reads the two files and builds the client: no redirect followed, no proxy (`HTTPS_PROXY` is not

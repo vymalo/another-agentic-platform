@@ -27,9 +27,16 @@ fn slug(error: &ObjectsError) -> &'static str {
     }
 }
 
+/// Set an attribute that was built from a label; one that was refused is simply not set.
+fn set(span: &Span, attr: Option<Attr>) {
+    if let Some(attr) = attr {
+        span.set(attr);
+    }
+}
+
 fn done<T>(span: &Span, out: &Result<T, ObjectsError>) {
     if let Err(e) = out {
-        span.set(Attr::ErrorType(slug(e)));
+        set(span, Attr::error_type(slug(e)));
         // A refusal the caller caused is an answer; only the store failing is the span's failure.
         if matches!(slug(e), "unavailable" | "internal") {
             span.fail();
@@ -159,9 +166,9 @@ impl<A: Authenticator> Authenticator for TracedAuth<A> {
         let span = child("authenticate");
         let out = self.0.authenticate(token).await;
         match &out {
-            Ok(_) => span.set(Attr::AuthResult("ok")),
+            Ok(_) => set(&span, Attr::auth_result("ok")),
             Err(e) => {
-                span.set(Attr::AuthResult(reason_label(e)));
+                set(&span, Attr::auth_result(reason_label(e)));
                 if matches!(e, AuthError::Unavailable(_)) {
                     span.fail();
                 }

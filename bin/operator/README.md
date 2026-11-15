@@ -63,14 +63,15 @@ Traces are **off** unless an endpoint is set (`OTEL_EXPORTER_OTLP_TRACES_ENDPOIN
 `/v1/traces` appended), and then no task, queue or series exists. The variables are a strict subset of the standard ones,
 read by `aap-trace-otlp` ([README](../../crates/trace-otlp/README.md)): `grpc`, `http/protobuf` and
 `OTEL_EXPORTER_OTLP_HEADERS` are refused, headers come from the file `AAP_OTEL_HEADERS_FILE` names, and
-`OTEL_EXPORTER_OTLP_CERTIFICATE` is the exporter's only trust. A bad variable stops the start and names the variable, never
-its value. `run` reads them at its top, **before** it asks the
-cluster anything, and flushes the spans still queued (at most 3 s) on every way out, an error included, inside the 30 s of
+`OTEL_EXPORTER_OTLP_CERTIFICATE` is the exporter's only trust. **A tracing setting never stops the operator:** a bad one
+makes `run` log one `warn` line (`tracing is off`, the variable's name and a fixed reason, never the value) and run with
+tracing off (platforms inject `OTEL_*` variables of their own; BuildKit does, into every `RUN` step). `run` reads them at its top, **before** it asks the
+cluster anything, and flushes the spans still queued (at most 3 s) on every way out that returns, an error included (not when the main future panics), inside the 30 s of
 `terminationGracePeriodSeconds`. `POD_NAME` and `POD_NAMESPACE` (the chart sets them from the downward API when tracing is
 on) name the resource. When on, `/metrics` also has `aap_trace_spans_exported_total` and
-`aap_trace_spans_dropped_total{reason}` after the controllers' series; when off the text is what it was. The spans are
-the controllers' ([README](../../crates/controller/README.md)); §48a has the rest. `tests/trace_env.rs` runs the binary with
-a variable it refuses.
+`aap_trace_spans_dropped_total{reason}` after the controllers' series, with `aap_trace_enabled 1`; with a tracing variable set and tracing off it has `aap_trace_enabled 0` alone; with none the text is what it was. The spans are
+the controllers' ([README](../../crates/controller/README.md)); §48a has the rest. `tests/trace_env.rs` runs the built binary with BuildKit's variables and with others it refuses: it warns once, never prints
+the value, and goes on to the cluster.
 
 ## Cluster rights
 

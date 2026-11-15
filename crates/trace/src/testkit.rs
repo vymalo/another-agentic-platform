@@ -1,7 +1,7 @@
 //! The testkit (feature `testkit`): an exporter in memory, the conformance suite every `SpanExporter` must pass, and
 //! `assert_clean`, which fails a test when a span holds what no span may hold.
 
-use std::sync::atomic::{AtomicU8, Ordering};
+use std::sync::atomic::{AtomicU8, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, PoisonError};
 
 use tokio::time::Instant;
@@ -55,6 +55,7 @@ pub struct MemoryExporter {
     kept: Memory,
     calls: Arc<Mutex<Vec<Instant>>>,
     mode: Arc<AtomicU8>,
+    episodes: Arc<AtomicUsize>,
 }
 
 impl Default for MemoryExporter {
@@ -71,6 +72,7 @@ impl MemoryExporter {
             kept: Memory::default(),
             calls: Arc::default(),
             mode: Arc::new(AtomicU8::new(0)),
+            episodes: Arc::default(),
         };
         e.set_mode(mode);
         e
@@ -92,6 +94,12 @@ impl MemoryExporter {
     #[must_use]
     pub fn spans(&self) -> Vec<FinishedSpan> {
         self.kept.spans()
+    }
+
+    /// How many times the pipeline said that exports started failing ([`SpanExporter::export_failing`]).
+    #[must_use]
+    pub fn failing_episodes(&self) -> usize {
+        self.episodes.load(Ordering::SeqCst)
     }
 
     /// When each export was asked for.
@@ -125,6 +133,10 @@ impl SpanExporter for MemoryExporter {
             _ => std::future::pending().await,
         }
     }
+
+    fn export_failing(&self) {
+        self.episodes.fetch_add(1, Ordering::SeqCst);
+    }
 }
 
 /// `n` made-up spans, with ids that tell them apart and one attribute each.
@@ -138,7 +150,7 @@ pub fn sample_spans(n: usize) -> Vec<FinishedSpan> {
                 trace_id: [7; 16],
                 span_id: id,
                 parent_id: None,
-                name: SpanName::fixed("sample"),
+                name: SpanName::method(Method::Get),
                 kind: SpanKind::Internal,
                 start_unix_nanos: 1_000 + i as u64,
                 end_unix_nanos: 2_000 + i as u64,
@@ -213,7 +225,7 @@ macro_rules! exporter_conformance {
             for _ in 0..10 {
                 tracer
                     .root(
-                        $crate::SpanName::fixed("flushed"),
+                        $crate::SpanName::method($crate::Method::Get),
                         $crate::SpanKind::Internal,
                     )
                     .end();
@@ -328,8 +340,10 @@ mod tests {
     #[should_panic(expected = "is not clean")]
     fn assert_clean_catches_a_sentinel() {
         let mut spans = sample_spans(1);
-        spans[0].attrs.push(Attr::ErrorType("SENTINEL-value"));
-        assert_clean(&spans, &["SENTINEL"]);
+        spans[0]
+            .attrs
+            .push(Attr::error_type("sentinel-value").unwrap());
+        assert_clean(&spans, &["sentinel"]);
     }
 
     #[test]
@@ -350,6 +364,6 @@ mod tests {
 
     #[test]
     fn a_clean_span_passes() {
-        assert_clean(&sample_spans(3), &["SENTINEL"]);
+        assert_clean(&sample_spans(3), &["sentinel"]);
     }
 }

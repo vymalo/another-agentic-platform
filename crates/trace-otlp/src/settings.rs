@@ -28,6 +28,32 @@ pub const DEFAULT_TIMEOUT: Duration = Duration::from_millis(10_000);
 /// The longest time an export may be given.
 pub const MAX_TIMEOUT: Duration = Duration::from_millis(60_000);
 
+/// Every variable this reader looks at.
+pub const VARIABLES: [&str; 14] = [
+    "OTEL_SDK_DISABLED",
+    "OTEL_EXPORTER_OTLP_ENDPOINT",
+    "OTEL_EXPORTER_OTLP_TRACES_ENDPOINT",
+    "OTEL_EXPORTER_OTLP_PROTOCOL",
+    "OTEL_EXPORTER_OTLP_TRACES_PROTOCOL",
+    "OTEL_EXPORTER_OTLP_HEADERS",
+    "OTEL_EXPORTER_OTLP_TRACES_HEADERS",
+    "OTEL_EXPORTER_OTLP_TIMEOUT",
+    "OTEL_EXPORTER_OTLP_CERTIFICATE",
+    "OTEL_SERVICE_NAME",
+    "OTEL_RESOURCE_ATTRIBUTES",
+    "OTEL_TRACES_SAMPLER",
+    "OTEL_TRACES_SAMPLER_ARG",
+    "AAP_OTEL_HEADERS_FILE",
+];
+
+/// Whether at least one tracing variable is set (not empty): the process was asked something about tracing, so `/metrics`
+/// says whether it is on.
+pub fn any_set(lookup: impl Fn(&str) -> Option<String>) -> bool {
+    VARIABLES
+        .iter()
+        .any(|name| lookup(name).is_some_and(|v| !v.is_empty()))
+}
+
 /// What the variables say, when tracing is on.
 #[derive(Clone, Debug, PartialEq)]
 pub struct TraceSettings {
@@ -156,6 +182,13 @@ impl TraceSettings {
         let Some(endpoint) = endpoint else {
             return Ok(None);
         };
+        // A token that goes out in clear is a token given away: headers need a TLS endpoint.
+        if headers_file.is_some() && endpoint.scheme() != "https" {
+            return Err(bad(
+                "AAP_OTEL_HEADERS_FILE",
+                "the headers would be sent in clear: the endpoint must be https",
+            ));
+        }
         Ok(Some(Self {
             endpoint,
             timeout,
@@ -361,7 +394,11 @@ mod tests {
     #[test]
     fn accepted_values() {
         let s = read(&[
-            EP,
+            // https, because a headers file is set (headers are never sent in clear).
+            (
+                "OTEL_EXPORTER_OTLP_TRACES_ENDPOINT",
+                "https://c:4318/v1/traces",
+            ),
             ("OTEL_EXPORTER_OTLP_PROTOCOL", "http/json"),
             ("OTEL_EXPORTER_OTLP_TIMEOUT", "250"),
             ("OTEL_SERVICE_NAME", "my-api"),
@@ -382,5 +419,38 @@ mod tests {
         assert_eq!(s.sampler, Sampler::TraceIdRatio(0.25));
         assert_eq!(s.headers_file, Some(PathBuf::from("/etc/otel/headers")));
         assert_eq!(s.certificate, Some(PathBuf::from("/etc/otel/ca.pem")));
+    }
+
+    #[test]
+    fn headers_over_plain_http_are_refused_by_name_and_https_or_no_headers_pass() {
+        let e = read(&[EP, ("AAP_OTEL_HEADERS_FILE", "/etc/otel/headers")]).unwrap_err();
+        assert_eq!(e.variable, "AAP_OTEL_HEADERS_FILE");
+        assert!(e.reason.contains("clear"), "{e}");
+        assert!(!e.to_string().contains("c:4318"));
+        assert!(
+            read(&[
+                ("OTEL_EXPORTER_OTLP_ENDPOINT", "https://c:4318"),
+                ("AAP_OTEL_HEADERS_FILE", "/etc/otel/headers"),
+            ])
+            .unwrap()
+            .is_some()
+        );
+        assert!(read(&[EP]).unwrap().is_some());
+        // No endpoint: tracing is off and there is nothing to send in clear.
+        assert!(
+            read(&[("AAP_OTEL_HEADERS_FILE", "/etc/otel/headers")])
+                .unwrap()
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn any_set_sees_the_variables_this_reader_knows_and_ignores_empty_ones() {
+        assert!(!any_set(env(&[])));
+        assert!(!any_set(env(&[("OTEL_TRACES_SAMPLER", "")])));
+        assert!(!any_set(env(&[("OTEL_TRACES_EXPORTER", "otlp")])));
+        for name in VARIABLES {
+            assert!(any_set(env(&[(name, "x")])), "{name}");
+        }
     }
 }

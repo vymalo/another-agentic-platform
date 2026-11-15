@@ -23,6 +23,9 @@ fn bad(variable: &'static str, reason: &'static str) -> SettingsError {
 pub struct OtlpJson {
     client: Client,
     url: String,
+    /// The collector's host name, for the one line that says exports fail. It is the host of the URL the operator wrote in
+    /// the settings (which refuse a user name, a password, a query and a fragment), never an answer.
+    host: String,
     headers: Headers,
 }
 
@@ -83,6 +86,7 @@ impl OtlpJson {
         Ok(Self {
             client,
             url: settings.endpoint.as_str().to_owned(),
+            host: settings.endpoint.host_str().unwrap_or("-").to_owned(),
             headers,
         })
     }
@@ -105,6 +109,14 @@ fn rejected(body: &[u8]) -> usize {
 }
 
 impl SpanExporter for OtlpJson {
+    fn export_failing(&self) {
+        // Once per episode of failures (the pipeline decides), never per batch: a fixed reason and the host, nothing of an answer.
+        tracing::warn!(
+            host = %self.host,
+            "trace spans are not reaching the collector: batches are dropped and counted in aap_trace_spans_dropped_total, and the export backs off"
+        );
+    }
+
     async fn export(
         &self,
         resource: &Resource,
