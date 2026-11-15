@@ -894,7 +894,7 @@ grep -q '^{' "$work/orch.log" || die "the orchestrator's log is not JSON lines: 
 # writer and reader, and the spans hold route templates, controller and object kinds, steps and a namespace.
 [ -s "$work/subjects" ] || die "no subject was recorded: the check of the collector's log would pass on nothing"
 if grep -qF -f "$work/subjects" "$work/otel.log"; then
-  die "a subject (the name of a person this run minted a token for) is in the collector's log: a span holds a person"
+  die "a subject (the name of a person this run minted a token for) is in the collector's log: a span holds a person. The first such line: $(grep -F -f "$work/subjects" "$work/otel.log" | redact | head -c 300)"
 fi
 if grep -qF -f "$work/secrets" "$work/api.log" "$work/operator.log" "$work/orch.log" "$work/otel.log" "$work/seen"; then
   die "a secret value (the model's key, the GitHub App's key, the registry's token or the A2A bearer) is in an answer, a header or a log"
