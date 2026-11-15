@@ -117,6 +117,12 @@ where
         self
     }
 
+    /// The tracer the controllers will make their spans with.
+    #[must_use]
+    pub fn tracer(&self) -> &aap_trace::Tracer {
+        &self.tracer
+    }
+
     /// The counters, for `/metrics`.
     pub fn metrics(&self) -> Arc<Metrics> {
         self.metrics.clone()

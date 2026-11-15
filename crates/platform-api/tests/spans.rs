@@ -16,11 +16,15 @@ use axum::http::Method;
 use common::*;
 use serde_json::json;
 
-const SENTINELS: [&str; 5] = [
+/// A name in the path, in lower case: an upper-case one is no Kubernetes name, so a span that tried to carry it would not.
+const NAME_SENTINEL: &str = "sentinel-path-name";
+
+const SENTINELS: [&str; 6] = [
     "SENTINEL-BODY",
     "SENTINEL-HEADER",
     "SENTINEL-QUERY",
     "SENTINEL-PATH",
+    NAME_SENTINEL,
     TOKEN_SENTINEL,
 ];
 
@@ -50,7 +54,7 @@ async fn every_route_is_a_clean_span_named_by_its_template() {
     let token = api.token(TOKEN_SENTINEL, &every_permission());
     for route in &ROUTES {
         let method = Method::from_bytes(route.verb.as_str().as_bytes()).unwrap();
-        let path = route.path.replace("{name}", "x");
+        let path = route.path.replace("{name}", NAME_SENTINEL);
         let call = api
             .request(method, &format!("{path}?q=SENTINEL-QUERY"))
             .token(&token)
@@ -263,4 +267,136 @@ async fn the_spans_reach_a_collector_with_the_apis_service_name() {
     tracer.shutdown(Duration::from_secs(5)).await;
     assert_eq!(collector.service_names(), ["aap-api"]);
     assert!(collector.spans().iter().any(|s| s["name"] == "GET /v1/me"));
+}
+
+/// An agent that is made, read, replaced, asked about and deleted under a name of the test's: the name is in the path of every
+/// call and in the body of the writes, and in no span (not in `aap.object.name`, not in `agent.service.name`, not in an
+/// `error.type`). The last calls are a delete and a read of an agent that is not there, whose `NotFound` names it.
+#[tokio::test]
+async fn an_agent_name_is_in_no_span_not_even_when_the_store_says_it_is_missing() {
+    const AGENT: &str = "sentinel-agent-name";
+    let (tracer, memory) = Tracer::in_memory(Sampler::AlwaysOn);
+    let api = Api::traced(tracer);
+    offer_everything(&api.objects);
+    let token = api.admin();
+    let made = api
+        .put("/v1/models/gateway")
+        .token(&token)
+        .create()
+        .json(&model_body("gateway"))
+        .send()
+        .await;
+    assert_eq!(made.code(), 201, "{}", made.text());
+    let created = api
+        .put(&format!("/v1/agents/{AGENT}"))
+        .token(&token)
+        .create()
+        .json(&folder_body(AGENT))
+        .send()
+        .await;
+    assert_eq!(created.code(), 201, "{}", created.text());
+    let read = api
+        .get(&format!("/v1/agents/{AGENT}"))
+        .token(&token)
+        .send()
+        .await;
+    assert_eq!(read.code(), 200);
+    let replaced = api
+        .put(&format!("/v1/agents/{AGENT}"))
+        .token(&token)
+        .replace(&read.etag())
+        .json(&folder_body(AGENT))
+        .send()
+        .await;
+    assert_eq!(replaced.code(), 200, "{}", replaced.text());
+    let events = api
+        .get(&format!("/v1/agents/{AGENT}/events"))
+        .token(&token)
+        .send()
+        .await;
+    assert_eq!(events.code(), 200);
+    let deleted = api
+        .delete(&format!("/v1/agents/{AGENT}"))
+        .token(&token)
+        .replace(&replaced.etag())
+        .send()
+        .await;
+    assert!(matches!(deleted.code(), 202 | 204), "{}", deleted.text());
+    // The agent is gone: a delete with a tag finds nothing, and the store's `NotFound` names it.
+    let again = api
+        .delete(&format!("/v1/agents/{AGENT}"))
+        .token(&token)
+        .replace(&replaced.etag())
+        .send()
+        .await;
+    assert_eq!(again.code(), 404, "{}", again.text());
+    let spans = memory.spans();
+    let not_found = spans
+        .iter()
+        .find(|s| {
+            s.name.as_str() == "objects.delete_agent"
+                && has(s, &Attr::error_type("not_found").unwrap())
+        })
+        .map(|_| ());
+    assert!(
+        not_found.is_some(),
+        "the NotFound was not driven through the port: {:?}",
+        names(&spans)
+    );
+    assert_clean(&spans, &[AGENT, "sentinel-agent"]);
+}
+
+/// A store that is down is a failed span, on the root and on the port's call, with the class and nothing else; an
+/// authenticator that is down is a failed `authenticate`, whose result is the closed reason.
+#[tokio::test]
+async fn a_store_or_an_issuer_that_is_down_fails_the_spans_with_a_class() {
+    let (tracer, memory) = Tracer::in_memory(Sampler::AlwaysOn);
+    let api = Api::traced(tracer);
+    let token = api.admin();
+    api.objects.set_unavailable(true);
+    let r = api.get("/v1/agents").token(&token).send().await;
+    assert_eq!(r.code(), 503);
+    let spans = memory.spans();
+    let top = root(&spans, "GET /v1/agents");
+    assert!(top.error, "a 5xx is a failed span");
+    assert!(has(top, &Attr::HttpStatus(503)));
+    assert!(
+        top.attrs.iter().any(|a| a.key() == "error.type"),
+        "{:?}",
+        top.attrs
+    );
+    let call = spans
+        .iter()
+        .find(|s| s.name.as_str() == "objects.list_agents")
+        .unwrap();
+    assert!(call.error);
+    assert!(has(call, &Attr::error_type("unavailable").unwrap()));
+    api.objects.set_unavailable(false);
+
+    api.auth.set_unavailable(true);
+    let r = api.get("/v1/agents").token(&token).send().await;
+    assert!(r.code() >= 500, "{}", r.code());
+    let spans = memory.spans();
+    let auth = spans
+        .iter()
+        .rfind(|s| s.name.as_str() == "authenticate")
+        .unwrap();
+    assert!(auth.error);
+    assert!(has(auth, &Attr::auth_result("unavailable").unwrap()));
+}
+
+/// The child of a good call says how it ended: `aap.auth.result=ok` on `authenticate`, and a 404 or a 409 of the store is an
+/// answer, not a failure.
+#[tokio::test]
+async fn the_authenticate_child_says_ok() {
+    let (api, memory) = traced();
+    let token = api.admin();
+    assert_eq!(api.get("/v1/me").token(&token).send().await.code(), 200);
+    let spans = memory.spans();
+    let auth = spans
+        .iter()
+        .find(|s| s.name.as_str() == "authenticate")
+        .unwrap();
+    assert!(has(auth, &Attr::auth_result("ok").unwrap()));
+    assert!(!auth.error);
 }

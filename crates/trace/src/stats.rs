@@ -152,6 +152,39 @@ mod tests {
     }
 
     #[test]
+    fn every_reason_is_rendered_with_its_own_counter() {
+        let s = Stats::default();
+        for (i, c) in [
+            &s.exported,
+            &s.queue_full,
+            &s.export_failed,
+            &s.rejected,
+            &s.shutdown,
+            &s.flush_deadline,
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            c.store(10 + i as u64, Ordering::Relaxed);
+        }
+        let text = s.render();
+        assert!(
+            text.contains("aap_trace_spans_exported_total 10\n"),
+            "{text}"
+        );
+        for (reason, n) in [
+            ("queue_full", 11),
+            ("export_failed", 12),
+            ("rejected", 13),
+            ("shutdown", 14),
+            ("flush_deadline", 15),
+        ] {
+            let line = format!("aap_trace_spans_dropped_total{{reason=\"{reason}\"}} {n}\n");
+            assert!(text.contains(&line), "{line} in {text}");
+        }
+    }
+
+    #[test]
     fn the_gauge_is_there_only_when_a_setting_was_given() {
         assert_eq!(TraceMetrics::none().render(), "");
         let off = TraceMetrics::of(&Tracer::off());

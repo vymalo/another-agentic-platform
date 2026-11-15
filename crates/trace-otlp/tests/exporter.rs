@@ -278,3 +278,62 @@ fn tempdir(tag: &str) -> std::path::PathBuf {
     std::fs::create_dir_all(&dir).unwrap();
     dir
 }
+
+#[tokio::test]
+async fn an_empty_batch_is_not_posted() {
+    let collector = TestCollector::start().await;
+    let exporter = OtlpJson::new(&settings(&collector.endpoint(), &[])).unwrap();
+    exporter.export(&resource(), Vec::new()).await.unwrap();
+    // A batch of spans whose ids are all zeros encodes to none either.
+    let mut spans = sample_spans(1);
+    spans[0].span_id = [0; 8];
+    exporter.export(&resource(), spans).await.unwrap();
+    assert!(collector.requests().is_empty());
+}
+
+mod capture {
+    use std::io::Write;
+    use std::sync::{Arc, Mutex};
+    use tracing_subscriber::fmt::MakeWriter;
+
+    #[derive(Clone, Default)]
+    pub struct Capture(pub Arc<Mutex<Vec<u8>>>);
+
+    impl Write for Capture {
+        fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+            self.0.lock().unwrap().extend_from_slice(buf);
+            Ok(buf.len())
+        }
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+
+    impl<'a> MakeWriter<'a> for Capture {
+        type Writer = Capture;
+        fn make_writer(&'a self) -> Capture {
+            self.clone()
+        }
+    }
+}
+
+/// In a test of its own file's tail: `with_default` is per thread and the call is synchronous, so no other test is read.
+#[test]
+fn the_warning_holds_the_host_and_never_the_url() {
+    let capture = capture::Capture::default();
+    let subscriber = tracing_subscriber::fmt()
+        .with_writer(capture.clone())
+        .with_ansi(false)
+        .finish();
+    let exporter = OtlpJson::new(&settings(
+        "http://collector-host.test:4318/v1/private-path",
+        &[],
+    ))
+    .unwrap();
+    tracing::subscriber::with_default(subscriber, || exporter.export_failing());
+    let text = String::from_utf8(capture.0.lock().unwrap().clone()).unwrap();
+    assert!(text.contains("collector-host.test"), "{text}");
+    assert!(!text.contains("private-path"), "{text}");
+    assert!(!text.contains("4318"), "{text}");
+    assert!(!text.contains("http://"), "{text}");
+}

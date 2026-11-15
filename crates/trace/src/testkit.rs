@@ -261,7 +261,27 @@ pub fn looks_like_secret(s: &str) -> bool {
         })
 }
 
-/// Fail the test when a span holds what no span may hold: a key outside [`Attr::ALL_KEYS`], more than 16 attributes,
+/// The keys a span may hold, written out by hand and not read from [`Attr::ALL_KEYS`], so that `assert_clean` compares
+/// the code with something the code does not make. A new attribute is a row here as well as in the README's table.
+const KEYS_WRITTEN_BY_HAND: [&str; 15] = [
+    "http.request.method",
+    "http.route",
+    "http.response.status_code",
+    "error.type",
+    "aap.problem.type",
+    "aap.auth.result",
+    "aap.permission.missing",
+    "aap.controller",
+    "aap.object.kind",
+    "aap.step",
+    "aap.service.state",
+    "k8s.namespace.name",
+    "aap.object.name",
+    "agent.service.name",
+    "aap.reconcile.result",
+];
+
+/// Fail the test when a span holds what no span may hold: a key outside the list written out in this file, more than 16 attributes,
 /// a key twice, a value or a name that contains one of `sentinels` or looks like a credential.
 ///
 /// # Panics
@@ -284,7 +304,7 @@ pub fn assert_clean(spans: &[FinishedSpan], sentinels: &[&str]) {
         let mut seen = std::collections::HashSet::new();
         for a in &span.attrs {
             assert!(
-                Attr::ALL_KEYS.contains(&a.key()),
+                KEYS_WRITTEN_BY_HAND.contains(&a.key()),
                 "{}: key outside the list",
                 span.name.as_str()
             );
@@ -360,6 +380,19 @@ mod tests {
         let mut spans = sample_spans(1);
         spans[0].attrs = (0..17).map(|_| Attr::HttpStatus(200)).collect();
         assert_clean(&spans, &[]);
+    }
+
+    #[test]
+    #[should_panic(expected = "span name of")]
+    fn assert_clean_catches_a_dirty_span_name() {
+        let mut spans = sample_spans(1);
+        spans[0].name = SpanName::fixed("sentinel-name").unwrap();
+        assert_clean(&spans, &["sentinel"]);
+    }
+
+    #[test]
+    fn the_hand_written_keys_are_the_keys_of_the_enum() {
+        assert_eq!(KEYS_WRITTEN_BY_HAND, Attr::ALL_KEYS);
     }
 
     #[test]

@@ -99,6 +99,8 @@ mod tests {
             ("host=evil", "sets itself"),
             ("Content-Type=text/plain", "sets itself"),
             ("traceparent=00-x", "sets itself"),
+            ("content-length=5", "sets itself"),
+            ("Content-Encoding=gzip", "sets itself"),
             ("Connection=close", "sets itself"),
             ("transfer-encoding=chunked", "sets itself"),
             ("te=trailers", "sets itself"),

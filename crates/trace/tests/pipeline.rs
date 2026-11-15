@@ -205,9 +205,11 @@ async fn outside_a_scope_there_is_no_span() {
 }
 
 #[test]
-fn an_attribute_is_replaced_and_the_seventeenth_dropped() {
+fn a_second_set_of_a_key_replaces_the_first() {
     let (tracer, memory) = Tracer::in_memory(Sampler::AlwaysOn);
     let span = tracer.root(name(), SpanKind::Internal);
+    // The cap of `MAX_ATTRS` (16) is a defence that cannot be reached today: there are 15 keys, and a key set twice is
+    // replaced, so no span can hold a seventeenth. A test cannot drive it; adding a 17th key would need one.
     span.set(Attr::HttpStatus(200));
     span.set(Attr::HttpStatus(404));
     span.end();
@@ -317,4 +319,111 @@ fn a_sampler_that_drops_everything_makes_no_span_at_all() {
         span.end();
         assert!(memory.spans().is_empty());
     }
+}
+
+/// A future that holds 64 KiB across an await.
+async fn big() -> u8 {
+    let a = [0u8; 65_536];
+    tokio::task::yield_now().await;
+    std::hint::black_box(&a);
+    1
+}
+
+#[test]
+fn a_scope_does_not_hold_its_future_by_value() {
+    assert!(size_of_val(&big()) >= 65_536, "the control is large");
+    for tracer in [Tracer::off(), Tracer::in_memory(Sampler::AlwaysOn).0] {
+        let span = tracer.root(name(), SpanKind::Internal);
+        let size = size_of_val(&span.scope(big()));
+        assert!(size < 1024, "{size} bytes");
+    }
+}
+
+#[test]
+fn a_step_does_not_hold_its_future_by_value() {
+    let fut = step(Step::StoreEnsure, big(), |_| None);
+    let size = size_of_val(&fut);
+    assert!(size < 1024, "{size} bytes");
+}
+
+#[test]
+fn the_defaults_are_the_numbers_of_the_operations_section() {
+    assert_eq!(
+        Limits::default(),
+        Limits {
+            queue: 2048,
+            batch: 512,
+            interval: Duration::from_secs(5),
+            backoff_min: Duration::from_secs(1),
+            backoff_max: Duration::from_secs(60),
+            export_timeout: Duration::from_secs(30),
+        }
+    );
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_success_resets_the_backoff_and_the_episode() {
+    let exporter = MemoryExporter::new(Mode::Fail);
+    let limits = Limits {
+        batch: 1,
+        ..Limits::default()
+    };
+    let tracer = Pipeline::start(exporter.clone(), limits, resource(), Sampler::AlwaysOn);
+    tracer.root(name(), SpanKind::Internal).end();
+    tokio::time::sleep(Duration::from_millis(10)).await;
+    exporter.set_mode(Mode::Keep);
+    tracer.root(name(), SpanKind::Internal).end();
+    tokio::time::sleep(Duration::from_secs(2)).await;
+    assert_eq!(exporter.spans().len(), 1, "the success after the back-off");
+    exporter.set_mode(Mode::Fail);
+    tracer.root(name(), SpanKind::Internal).end();
+    tokio::time::sleep(Duration::from_millis(10)).await;
+    tracer.root(name(), SpanKind::Internal).end();
+    tokio::time::sleep(Duration::from_secs(3)).await;
+    let calls = exporter.call_times();
+    assert_eq!(calls.len(), 4);
+    // The wait after the second episode's first failure is the first wait again, not the doubled one.
+    assert_eq!(calls[3] - calls[2], Duration::from_secs(1));
+    // Two episodes: the exporter was told twice.
+    assert_eq!(exporter.failing_episodes(), 2);
+}
+
+#[tokio::test(start_paused = true)]
+async fn the_final_flush_stops_at_a_failed_batch_and_counts_what_is_left() {
+    let exporter = MemoryExporter::new(Mode::Fail);
+    let limits = Limits {
+        batch: 2,
+        ..Limits::default()
+    };
+    let tracer = Pipeline::start(exporter.clone(), limits, resource(), Sampler::AlwaysOn);
+    for _ in 0..5 {
+        tracer.root(name(), SpanKind::Internal).end();
+    }
+    let stats = tracer.shutdown(Duration::from_secs(3)).await;
+    // One batch of 2 failed; the flush did not go on, and the 3 left are counted, not lost.
+    assert_eq!(exporter.call_times().len(), 1);
+    assert_eq!(stats.dropped_export_failed, 5);
+    assert_eq!(stats.exported, 0);
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_stop_cuts_the_backoff_short() {
+    let exporter = MemoryExporter::new(Mode::Fail);
+    let limits = Limits {
+        batch: 1,
+        backoff_min: Duration::from_secs(100),
+        backoff_max: Duration::from_secs(100),
+        ..Limits::default()
+    };
+    let tracer = Pipeline::start(exporter, limits, resource(), Sampler::AlwaysOn);
+    tracer.root(name(), SpanKind::Internal).end();
+    tokio::time::sleep(Duration::from_millis(10)).await;
+    let started = Instant::now();
+    let stats = tracer.shutdown(Duration::from_secs(3)).await;
+    assert!(
+        started.elapsed() < Duration::from_secs(1),
+        "{:?}",
+        started.elapsed()
+    );
+    assert_eq!(stats.dropped_flush_deadline, 0);
 }

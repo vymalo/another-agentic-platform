@@ -338,6 +338,11 @@ mod tests {
                 "OTEL_EXPORTER_OTLP_ENDPOINT",
                 format!("http://{secret}:4318"),
             )],
+            // A credential as the user name alone.
+            vec![(
+                "OTEL_EXPORTER_OTLP_ENDPOINT",
+                "http://hunter2@c:4318".into(),
+            )],
             vec![(
                 "OTEL_EXPORTER_OTLP_ENDPOINT",
                 "http://c:4318?token=hunter2pass".into(),
@@ -445,11 +450,58 @@ mod tests {
     }
 
     #[test]
+    fn every_sampler_word_reads_as_itself() {
+        let sampler = |name: &str, arg: Option<&str>| {
+            let mut pairs = vec![EP, ("OTEL_TRACES_SAMPLER", name)];
+            if let Some(a) = arg {
+                pairs.push(("OTEL_TRACES_SAMPLER_ARG", a));
+            }
+            read(&pairs).unwrap().unwrap().sampler
+        };
+        assert_eq!(sampler("always_on", None), Sampler::AlwaysOn);
+        assert_eq!(sampler("always_off", None), Sampler::AlwaysOff);
+        assert_eq!(sampler("parentbased_always_off", None), Sampler::AlwaysOff);
+        assert_eq!(sampler("ALWAYS_OFF", None), Sampler::AlwaysOff);
+        assert_eq!(
+            sampler("traceidratio", Some("0.5")),
+            Sampler::TraceIdRatio(0.5)
+        );
+        // No argument is the whole of the traces.
+        assert_eq!(sampler("traceidratio", None), Sampler::TraceIdRatio(1.0));
+    }
+
+    #[test]
+    fn a_service_name_is_at_most_63_characters() {
+        let name = |n: usize| "a".repeat(n);
+        let with = |n: String| read(&[EP, ("OTEL_SERVICE_NAME", n.as_str())]);
+        assert_eq!(with(name(63)).unwrap().unwrap().service_name, name(63));
+        assert!(with(name(64)).is_err());
+    }
+
+    #[test]
     fn any_set_sees_the_variables_this_reader_knows_and_ignores_empty_ones() {
         assert!(!any_set(env(&[])));
         assert!(!any_set(env(&[("OTEL_TRACES_SAMPLER", "")])));
         assert!(!any_set(env(&[("OTEL_TRACES_EXPORTER", "otlp")])));
-        for name in VARIABLES {
+        // The list is written out here too: a variable dropped from `VARIABLES` is no longer "asked".
+        let by_hand = [
+            "OTEL_SDK_DISABLED",
+            "OTEL_EXPORTER_OTLP_ENDPOINT",
+            "OTEL_EXPORTER_OTLP_TRACES_ENDPOINT",
+            "OTEL_EXPORTER_OTLP_PROTOCOL",
+            "OTEL_EXPORTER_OTLP_TRACES_PROTOCOL",
+            "OTEL_EXPORTER_OTLP_HEADERS",
+            "OTEL_EXPORTER_OTLP_TRACES_HEADERS",
+            "OTEL_EXPORTER_OTLP_TIMEOUT",
+            "OTEL_EXPORTER_OTLP_CERTIFICATE",
+            "OTEL_SERVICE_NAME",
+            "OTEL_RESOURCE_ATTRIBUTES",
+            "OTEL_TRACES_SAMPLER",
+            "OTEL_TRACES_SAMPLER_ARG",
+            "AAP_OTEL_HEADERS_FILE",
+        ];
+        assert_eq!(VARIABLES, by_hand);
+        for name in by_hand {
             assert!(any_set(env(&[(name, "x")])), "{name}");
         }
     }

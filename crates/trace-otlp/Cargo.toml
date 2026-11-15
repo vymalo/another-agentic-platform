@@ -31,6 +31,8 @@ axum = { workspace = true, optional = true }
 aap-trace = { workspace = true, features = ["testkit"] }
 aap-trace-otlp = { path = ".", features = ["testkit"] }
 tokio = { workspace = true, features = ["macros", "rt", "rt-multi-thread", "net", "time", "sync", "test-util"] }
+# Already in the lock file (the binaries and four other crates' tests use it): to read the one line the exporter logs.
+tracing-subscriber.workspace = true
 
 [lints]
 workspace = true

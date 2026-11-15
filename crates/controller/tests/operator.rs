@@ -811,3 +811,53 @@ async fn a_status_write_on_a_shared_object_reconciles_no_service_and_a_spec_chan
     eventually("a pass for the spec change", || service_passes(&r) > before).await;
     r.stop().await;
 }
+
+/// The tracer reaches the passes of both controllers when the operator is composed as `bin/operator` composes it
+/// (`Operator::new(..).with_tracer(..)`, then `run`): a service and its config that appear are a root span each.
+#[tokio::test]
+async fn the_tracer_given_to_the_operator_reaches_the_passes_of_both_controllers() {
+    let fake = Fake::new();
+    let (tracer, memory) = aap_trace::Tracer::in_memory(aap_trace::Sampler::AlwaysOn);
+    let owner: OwnerOf = Arc::new(|_| OwnerHandle::none());
+    let options = Options {
+        watch_namespace: Some("team".to_owned()),
+        resync: Resync {
+            settled: Duration::from_secs(3600),
+            pending: Duration::from_secs(3600),
+            not_installed: Duration::from_secs(3600),
+        },
+        default_agent_image: Some(DEFAULT_IMAGE.to_owned()),
+        ..Options::default()
+    };
+    let operator = Operator::new(
+        fake.client(),
+        Scripted::new(),
+        MemoryStore::new(),
+        owner,
+        options,
+    )
+    .with_tracer(tracer);
+    let readiness = operator.readiness();
+    let (stop, stopped) = oneshot::channel::<()>();
+    let done = tokio::spawn(operator.run(async move {
+        let _ = stopped.await;
+    }));
+    eventually("the watches", || {
+        fake.watchers(SERVICES) >= 1 && fake.watchers(CONFIGS) >= 2
+    })
+    .await;
+    eventually("the caches to sync", || readiness.is_ready()).await;
+    let (service, config) = example("chat", "team");
+    fake.put(CONFIGS, config);
+    fake.put(SERVICES, service);
+    eventually("a root span of each controller", || {
+        memory.named("reconcile agentservice").is_some()
+            && memory.named("reconcile agentconfig").is_some()
+    })
+    .await;
+    let _ = stop.send(());
+    tokio::time::timeout(Duration::from_secs(10), done)
+        .await
+        .expect("the operator stops when told to")
+        .unwrap();
+}

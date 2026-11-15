@@ -59,6 +59,14 @@ struct World {
 
 impl World {
     fn new(tracer: Tracer, edit: impl FnOnce(&mut Value, &mut Value)) -> Self {
+        Self::with_options(tracer, Options::default(), edit)
+    }
+
+    fn with_options(
+        tracer: Tracer,
+        options: Options,
+        edit: impl FnOnce(&mut Value, &mut Value),
+    ) -> Self {
         let (mut service, mut config) = example("chat");
         edit(&mut service, &mut config);
         let fake = Fake::new();
@@ -72,7 +80,7 @@ impl World {
                 Scripted::wrapping(runtime.clone()),
                 MemoryStore::new(),
                 owner(),
-                Options::default(),
+                options,
             )
             .with_clock(Arc::new(|| Time("2026-10-05T10:00:00Z".parse().unwrap())))
             .with_tracer(tracer),
@@ -165,6 +173,18 @@ async fn a_reconcile_of_an_agentservice_is_one_span_with_its_steps() {
         );
         assert!(child.attrs.iter().any(|a| a.key() == "aap.step"));
     }
+    // Every step of a pass, as a set: one that was dropped or renamed is a hole in the trace.
+    let set: std::collections::BTreeSet<&str> = steps.iter().copied().collect();
+    let all: std::collections::BTreeSet<&str> = [
+        "config.read",
+        "store.ensure",
+        "runtime.ensure",
+        "runtime.endpoints",
+        "status.patch",
+    ]
+    .into_iter()
+    .collect();
+    assert_eq!(set, all, "{steps:?}");
     // The first pass only added the finalizer and wrote a status; its root has no `store.ensure`.
     assert!(!names_under(&spans, roots[0]).contains(&"store.ensure"));
     assert_clean(&spans, &[]);
@@ -317,4 +337,54 @@ async fn a_collector_that_hangs_changes_nothing_a_pass_does() {
     assert!(started.elapsed() < Duration::from_secs(5));
     assert_eq!(on.service()["status"], off.service()["status"]);
     tracer.shutdown(Duration::from_millis(500)).await;
+}
+
+/// A request that is never answered ends the pass at its limit: its root says `timeout`, in the result and in `error.type`,
+/// and is a failed span.
+#[tokio::test(start_paused = true)]
+async fn a_pass_that_times_out_says_timeout() {
+    let (tracer, mem) = memory();
+    let w = World::with_options(
+        tracer,
+        Options {
+            pass_timeout: Duration::from_secs(30),
+            ..Options::default()
+        },
+        |_, _| {},
+    );
+    w.fake.stall_next("PATCH", "/agentservices/chat", 1);
+    let outcome = tokio::time::timeout(Duration::from_secs(300), w.pass())
+        .await
+        .expect("the pass was cut short");
+    assert!(outcome.is_err());
+    let spans = mem.spans();
+    let root = roots(&spans)[0];
+    assert!(root.error);
+    assert!(
+        root.attrs
+            .contains(&Attr::ReconcileResult(aap_trace::Outcome::Timeout)),
+        "{:?}",
+        root.attrs
+    );
+    assert!(root.attrs.contains(&Attr::error_type("timeout").unwrap()));
+    assert_clean(&spans, &[]);
+}
+
+/// A service whose config is not valid asks the runtime what runs, and says so as a step.
+#[tokio::test]
+async fn a_blocked_pass_reads_the_runtime_status_as_a_step() {
+    let (tracer, mem) = memory();
+    // A folder with no instructions: the schema accepts it, the domain's validation does not, and nothing is ensured.
+    let w = World::new(tracer, |_, config| {
+        config["spec"]["harness"]["adam"]["agent"]["folder"]["files"] =
+            serde_json::json!({"README.md": "no instructions"});
+    });
+    w.pass().await.unwrap();
+    w.pass().await.unwrap();
+    let spans = mem.spans();
+    let second = roots(&spans)[1];
+    let steps = names_under(&spans, second);
+    assert!(steps.contains(&"runtime.status"), "{steps:?}");
+    assert!(!steps.contains(&"runtime.ensure"), "{steps:?}");
+    assert_clean(&spans, &[]);
 }

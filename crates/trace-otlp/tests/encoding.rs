@@ -99,3 +99,19 @@ fn the_shape_check_refuses_what_the_spec_does_not_say() {
         assert!(check_shape(&v).is_err());
     }
 }
+
+#[test]
+fn a_failed_span_has_a_status_of_a_code_alone_and_ids_are_lower_case_hex() {
+    let mut spans = sample_spans(1);
+    spans[0].error = true;
+    spans[0].trace_id = [0xab; 16];
+    spans[0].span_id = [0xcd; 8];
+    spans[0].parent_id = Some([0xef; 8]);
+    let body = encode(&Resource::new("x", "0"), &spans);
+    let span = &body["resourceSpans"][0]["scopeSpans"][0]["spans"][0];
+    assert_eq!(keys(&span["status"]), BTreeSet::from(["code".to_owned()]));
+    assert_eq!(span["status"]["code"], 2);
+    assert_eq!(span["traceId"], "ab".repeat(16));
+    assert_eq!(span["spanId"], "cd".repeat(8));
+    assert_eq!(span["parentSpanId"], "ef".repeat(8));
+}

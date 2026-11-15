@@ -488,6 +488,7 @@ mod tests {
             "Upper",
             "a/b",
             "a b",
+            "a_b",
             "u:p@h",
             "-a",
             "a-",

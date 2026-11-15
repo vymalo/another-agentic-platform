@@ -61,6 +61,12 @@ pub fn metrics_with_traces(metrics: Arc<Metrics>, traces: aap_trace::TraceMetric
         .with_state((metrics, traces))
 }
 
+/// The `/metrics` router of a process whose tracer is `tracer`: the controllers' counters, then the pipeline's.
+#[cfg(feature = "runtime-kubernetes")]
+pub fn metrics_for(metrics: Arc<Metrics>, tracer: &aap_trace::Tracer) -> Router {
+    metrics_with_traces(metrics, aap_trace::TraceMetrics::of(tracer))
+}
+
 /// Serve `router` on `addr` until `shutdown` resolves.
 pub async fn serve(
     addr: SocketAddr,
@@ -152,6 +158,20 @@ mod tests {
         let trace = body.find("aap_trace_spans_exported_total 0").unwrap();
         assert!(first < trace, "{body}");
         assert!(body.contains("aap_trace_spans_dropped_total{reason=\"queue_full\"} 0"));
+    }
+
+    #[tokio::test]
+    async fn the_operators_metrics_carry_the_trace_series_of_its_tracer() {
+        let (tracer, _) = aap_trace::Tracer::in_memory(aap_trace::Sampler::AlwaysOn);
+        let (_, body, _) = get(metrics_for(Arc::new(Metrics::new()), &tracer), "/metrics").await;
+        assert!(body.contains("aap_trace_enabled 1\n"), "{body}");
+        assert!(body.contains("aap_trace_spans_exported_total 0"), "{body}");
+        let (_, off, _) = get(
+            metrics_for(Arc::new(Metrics::new()), &aap_trace::Tracer::off()),
+            "/metrics",
+        )
+        .await;
+        assert!(!off.contains("aap_trace_"), "{off}");
     }
 
     #[tokio::test]

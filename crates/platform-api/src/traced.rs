@@ -177,3 +177,151 @@ impl<A: Authenticator> Authenticator for TracedAuth<A> {
         out
     }
 }
+
+#[cfg(test)]
+mod tests {
+    #![allow(clippy::unwrap_used)]
+
+    use aap_ports::Kind;
+    use aap_trace::testkit::assert_clean;
+    use aap_trace::{Sampler, SpanKind, SpanName, Tracer};
+
+    use super::*;
+
+    /// A store that fails every call with the error `make` builds: the errors the in-memory store never makes (a `Conflict`
+    /// holds free text) are driven through the decorator here.
+    struct Failing(Make);
+
+    macro_rules! fail {
+        ($self:ident) => {
+            Err(($self.0)())
+        };
+    }
+
+    impl AgentObjects for Failing {
+        async fn list_agents(&self) -> Result<Vec<Agent>, ObjectsError> {
+            fail!(self)
+        }
+        async fn get_agent(&self, _: &str) -> Result<Option<Agent>, ObjectsError> {
+            fail!(self)
+        }
+        async fn put_agent(&self, _: &AgentDraft, _: &Precondition) -> Result<Agent, ObjectsError> {
+            fail!(self)
+        }
+        async fn delete_agent(&self, _: &str, _: &ETag) -> Result<(), ObjectsError> {
+            fail!(self)
+        }
+        async fn list_orphans(&self) -> Result<Vec<Stored>, ObjectsError> {
+            fail!(self)
+        }
+        async fn list_shared(&self, _: SharedKind) -> Result<Vec<Stored>, ObjectsError> {
+            fail!(self)
+        }
+        async fn get_shared(&self, _: SharedKind, _: &str) -> Result<Option<Stored>, ObjectsError> {
+            fail!(self)
+        }
+        async fn put_shared(
+            &self,
+            _: SharedKind,
+            _: &SharedDraft,
+            _: &Precondition,
+        ) -> Result<Stored, ObjectsError> {
+            fail!(self)
+        }
+        async fn delete_shared(
+            &self,
+            _: SharedKind,
+            _: &str,
+            _: &ETag,
+        ) -> Result<(), ObjectsError> {
+            fail!(self)
+        }
+        async fn offered_secrets(&self) -> Result<Vec<OfferedSecret>, ObjectsError> {
+            fail!(self)
+        }
+        async fn agent_events(&self, _: &str) -> Result<AgentEvents, ObjectsError> {
+            fail!(self)
+        }
+    }
+
+    const TEXT: &str = "sentinel-conflict-text";
+    const NAME: &str = "sentinel-object-name";
+
+    type Make = fn() -> ObjectsError;
+
+    fn each_error() -> Vec<(Make, &'static str)> {
+        vec![
+            (
+                || ObjectsError::NotFound {
+                    kind: Kind::AgentService,
+                    name: NAME.into(),
+                },
+                "not_found",
+            ),
+            (|| ObjectsError::Conflict(TEXT.into()), "conflict"),
+            (
+                || ObjectsError::AlreadyExists {
+                    kind: Kind::AgentService,
+                    name: NAME.into(),
+                },
+                "already_exists",
+            ),
+            (
+                || ObjectsError::NotOwned {
+                    kind: Kind::AgentService,
+                    name: NAME.into(),
+                },
+                "not_owned",
+            ),
+            (
+                || ObjectsError::Referenced {
+                    kind: Kind::ModelEndpoint,
+                    name: NAME.into(),
+                    by: vec![NAME.into()],
+                },
+                "referenced",
+            ),
+            (
+                || ObjectsError::Deleting {
+                    kind: Kind::AgentService,
+                    name: NAME.into(),
+                },
+                "deleting",
+            ),
+            (|| ObjectsError::PreconditionFailed, "precondition_failed"),
+            (|| ObjectsError::Invalid(Vec::new()), "invalid"),
+            (|| ObjectsError::Unavailable(TEXT.into()), "unavailable"),
+            (|| ObjectsError::Internal(TEXT.into()), "internal"),
+        ]
+    }
+
+    #[tokio::test]
+    async fn an_error_is_a_slug_and_no_span_holds_what_the_error_says() {
+        for (make, slug_expected) in each_error() {
+            let (tracer, memory) = Tracer::in_memory(Sampler::AlwaysOn);
+            let root = tracer.root(SpanName::fixed("t").unwrap(), SpanKind::Server);
+            let traced = TracedObjects(Failing(make));
+            root.scope(async {
+                let _ = traced.delete_agent(NAME, &ETag::new("t")).await;
+                let _ = traced.get_agent(NAME).await;
+            })
+            .await;
+            root.end();
+            let spans = memory.spans();
+            let call = memory.named("objects.delete_agent").unwrap();
+            assert!(
+                call.attrs
+                    .contains(&Attr::error_type(slug_expected).unwrap()),
+                "{slug_expected}: {:?}",
+                call.attrs
+            );
+            // Only the store failing is the span's failure; a refusal is an answer.
+            assert_eq!(
+                call.error,
+                matches!(slug_expected, "unavailable" | "internal"),
+                "{slug_expected}"
+            );
+            assert_clean(&spans, &[TEXT, NAME]);
+        }
+    }
+}
