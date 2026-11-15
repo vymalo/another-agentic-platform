@@ -23,7 +23,7 @@ async fn make() -> Harness<MemoryExporter> {
     let (reader, failer) = (e.clone(), e.clone());
     Harness {
         exporter: e,
-        delivered: Box::new(move || reader.spans()),
+        delivered: Box::new(move || reader.spans().iter().map(|s| s.span_id).collect()),
         fail: Box::new(move || failer.set_mode(Mode::Fail)),
     }
 }

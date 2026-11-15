@@ -153,8 +153,8 @@ pub fn sample_spans(n: usize) -> Vec<FinishedSpan> {
 pub struct Harness<E> {
     /// The exporter, ready to deliver.
     pub exporter: E,
-    /// Everything it delivered so far, in order, as the other end saw it.
-    pub delivered: Box<dyn Fn() -> Vec<FinishedSpan> + Send + Sync>,
+    /// The span ids of everything it delivered so far, in order, as the other end saw them.
+    pub delivered: Box<dyn Fn() -> Vec<[u8; 8]> + Send + Sync>,
     /// Make its next exports fail (the collector is down).
     pub fail: Box<dyn Fn() + Send + Sync>,
 }
@@ -181,7 +181,7 @@ macro_rules! exporter_conformance {
             $crate::SpanExporter::export(&h.exporter, &resource, second.clone())
                 .await
                 .unwrap();
-            let want: Vec<_> = first.into_iter().chain(second).collect();
+            let want: Vec<[u8; 8]> = first.into_iter().chain(second).map(|s| s.span_id).collect();
             assert_eq!((h.delivered)(), want);
         }
 
