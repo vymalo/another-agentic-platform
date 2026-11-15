@@ -119,7 +119,116 @@ chosen by the API from a closed set (a template of its table of routes or `unmat
 body, a path, a user or a secret key name is a label or a value. The chart's `ServiceMonitor`s for both are in §59a, *The operator chart*. No tracing or OpenTelemetry
 signal is added by this note.
 
+*Amended 2026-11-15 (K5), traces:* the operator and the Platform API emit OpenTelemetry **traces**, off by default: [§48a](#48a-traces-of-the-operator-and-the-platform-api-k5). The attributes listed above are the target of §48 as a whole; §48a's closed list is what these two components emit: `agent.service.name` is there, and `agent.tenant.id`, `agent.project.id`, `agent.revision.id`, `agent.run.id` and `agent.execution.id` are **not**, because v0 has no tenant or project, an AgentService has no revisions yet, and runs and executions belong to adam-rs. Metrics (the K4 note) and logs (`tracing`) are unchanged, and `tracing` is not bridged to traces.
+
 ---
+
+## 48a. Traces of the operator and the Platform API (K5)
+
+*(2026-11-15, slice K5. Proven on the fake API server, the `Memory` ports, a collector in the tests and renders; **unverified** until CI has run the end-to-end step: [Proof](#48a-proof). Decisions for the owner: P-037 to P-039.)*
+
+The operator and the Platform API can send **traces** to an OpenTelemetry Collector (AD-015, §48). They are two crates and two blocks of chart values, **off by default**:
+
+| | |
+|---|---|
+| [`aap-trace`](../../crates/trace/README.md) | the closed span API, the bounded pipeline, the `SpanExporter` seam (AD-020) and its testkit (`MemoryExporter`, `exporter_conformance!`, `assert_clean`); no HTTP, no OpenTelemetry library |
+| [`aap-trace-otlp`](../../crates/trace-otlp/README.md) | the OTLP/HTTP **JSON** exporter on the workspace's reqwest 0.12 (rustls with ring), the `OTEL_*` settings, a `TestCollector` |
+| `otel.*`, `api.otel.*` | the chart: off, and then not a trace in any render (the five goldens that existed are what they were) |
+
+There is **no OpenTelemetry SDK, no tonic and no `tracing` bridge**, and `Cargo.lock` gains no third-party package (`tools/check-dependencies.sh` is the gate, in CI). The reason is in P-037; the cost is that a backend that accepts only protobuf or gRPC needs a Collector in front of it, which is the usual deployment.
+
+### What a span is
+
+```mermaid
+sequenceDiagram
+  participant C as Client
+  participant R as API router
+  participant A as TracedAuth
+  participant O as TracedObjects
+  participant Q as Queue of 2048
+  participant E as Exporter task
+  participant K as Collector
+  C->>R: request (a traceparent is not read)
+  R->>R: root span GET /v1/agents, kind SERVER
+  R->>A: authenticate, a child span
+  A-->>R: a person, or a closed reason
+  R->>O: list_agents, a child span
+  O-->>R: the objects, or a slug
+  R-->>C: answer
+  R->>Q: end is a try_send and never waits
+  E->>Q: up to 512 spans, or every 5 s
+  E->>K: POST /v1/traces, OTLP JSON
+  K-->>E: 200, or a failure (the batch is dropped and counted)
+```
+
+```mermaid
+sequenceDiagram
+  participant Ctl as kube Controller
+  participant B as pass bounded
+  participant S as the steps of the pass
+  participant Q as Queue of 2048
+  Ctl->>B: reconcile an AgentService
+  B->>B: root span reconcile agentservice, in a task scope
+  B->>S: config.read, store.ensure, runtime.ensure, runtime.endpoints, status.patch
+  S-->>B: the result, or the class of the error
+  B->>Q: end is a try_send and never waits
+  B-->>Ctl: the action
+```
+
+* **Operator.** One root span per pass, made in `pass::bounded` (`crates/controller/src/pass.rs`), through which all four reconcilers run: `reconcile agentservice`, `reconcile agentconfig`, `reconcile modelendpoint`, `reconcile toolprovider`. The pass runs in a `tokio::task_local` scope, so a step is a child span without an argument: `config.read`, `store.ensure`, `store.release`, `runtime.ensure`, `runtime.status`, `runtime.endpoints`, `runtime.delete`, `status.patch` (the closed enum `Step`). A span made in a `tokio::spawn` is not linked: none is made. Nothing is propagated to the API server.
+* **API.** One SERVER span per request, outside the metrics and the guard (`crates/platform-api/src/trace.rs`), named `{METHOD} {template}` with the table's own template, `{METHOD}` for a request that matched nothing and `HTTP` for a method outside the closed set. **The raw path is never read.** The two ports are decorated inside the crate (`TracedAuth`, `TracedObjects`), so no handler changed: `authenticate` and `objects.<method>` (eleven) are children. A request is always a root: no inbound `traceparent` is read, because the API faces the internet (P-038).
+
+### The attributes: a closed list, enforced by types
+
+An attribute is a variant of the enum `Attr`. `Span::set` takes an `Attr` and nothing else: there is no string key, **no span event, no link and no status message** (a span is ok or failed, and a failure carries a class), and at most 16 attributes. The list is the table of [`crates/trace/README.md`](../../crates/trace/README.md), which a test holds equal to `Attr::ALL_KEYS`:
+
+| Key | Holds |
+|---|---|
+| `http.request.method`, `http.route`, `http.response.status_code` | the method (a closed set), the table's template, the status |
+| `error.type`, `aap.problem.type` | the class label of an error (`transient`, `conflict`, `invalid`, `not_found`, `unsupported`, `internal`, `timeout`) or a slug of a problem answer or of an objects error: never the error's text |
+| `aap.auth.result`, `aap.permission.missing` | `ok` or the closed reason of a refusal; the one permission a `403` named |
+| `aap.controller`, `aap.object.kind`, `aap.step`, `aap.service.state`, `aap.reconcile.result` | closed enums |
+| `k8s.namespace.name`, `aap.object.name`, `agent.service.name` | an RFC 1123 name (`K8sName`): the operator's spans carry the names of the objects, as its log does; the API's carry none |
+
+Resource attributes, set once: `service.name`, `service.version`, `service.instance.id` and `k8s.pod.name` (`POD_NAME`), `k8s.namespace.name` (`POD_NAMESPACE`), `telemetry.sdk.*`, and the three keys a deployment may add (`deployment.environment.name`, `k8s.cluster.name`, `service.namespace`).
+
+**Never in any span:** a token or a header value; a request or response body or a form field's value; a secret key's name or a Secret's; a model's URL; an agent's instructions, a tool's name or argument; `url.path`, `url.query`, `url.full`, `user_agent.original`, `client.address`; **the subject or e-mail, not even hashed** (a hash of `sub` is a stable pseudonym, a weak `sub` can be brute-forced, and traces go to a backend with other retention than the logs); and, in the API, an agent's name. `tracing` is **not bridged** (a bridge would make every field of every dependency's spans an attribute, and the API's own log span records the subject): it stays the log. The tests: a `compile_fail` doctest (`span.set("user.email", ..)` does not compile), the README table, `assert_clean` (a key outside the list, a sentinel, a value that looks like a credential: the pattern of `render-check.sh`) over every route of the API with sentinels in the body, a header, the query, the path and the token, and over the controller's passes with sentinels in the config's instructions, a model's URL and a Secret's name.
+
+### Configuration
+
+The standard `OTEL_*` variables, a strict subset, read by one pure function (`TraceSettings::from_env`, `crates/trace-otlp/src/settings.rs`) that both binaries call **before** they connect to anything; the API's `--check` validates them too and reads none of the files they name. Tracing is not in the API's YAML file. The table is in [`aap-trace-otlp`'s README](../../crates/trace-otlp/README.md): `OTEL_EXPORTER_OTLP_TRACES_ENDPOINT` (as written) or `OTEL_EXPORTER_OTLP_ENDPOINT` (`/v1/traces` appended), no user name, password, query or fragment; **`OTEL_EXPORTER_OTLP_PROTOCOL` is `http/json` and `grpc` and `http/protobuf` are refused** (the standard's default is `http/protobuf`); the sampler is `always_on`, `always_off` or `traceidratio`, and a parent-based sampler is its root sampler because no parent is ever read; **`OTEL_EXPORTER_OTLP_HEADERS` is refused**, and the headers come from the file `AAP_OTEL_HEADERS_FILE` names (at most 4 KiB, values marked sensitive, no type prints them); `OTEL_EXPORTER_OTLP_CERTIFICATE` is the exporter's only trust. An error names the variable and a fixed reason, never the value. The exporter follows no redirect and uses no proxy.
+
+### When the collector is down, and when the process stops
+
+```mermaid
+stateDiagram-v2
+  [*] --> Off
+  Off --> Exporting: an endpoint is set
+  Exporting --> BackingOff: an export fails or times out
+  BackingOff --> Exporting: the wait is over
+  Exporting --> Flushing: shutdown
+  BackingOff --> Flushing: shutdown
+  Flushing --> Stopped: the queue is sent or the deadline is reached
+  Off --> Stopped
+  Stopped --> [*]
+```
+
+`Span::end` is a `try_send` on a queue of 2048 spans: a full queue drops the span and counts it, and nothing blocks. One task exports batches of up to 512 spans, or every 5 s. A failed export (a refused connection, a timeout, a status that is not a success, a redirect) **drops its batch and counts it; there is no retry**, and the wait before the next export doubles from 1 s to 60 s while exports keep failing (the queue drops meanwhile); a success resets it. An export that takes 30 s is a failed one, and the exporter's own timeout (10 s by default) is shorter. `partialSuccess.rejectedSpans` is counted as dropped, and its `errorMessage` is read by nobody. Memory is bounded by the queue and one batch. With tracing on, each binary's `/metrics` also has `aap_trace_spans_exported_total` and `aap_trace_spans_dropped_total{reason="queue_full"|"export_failed"|"rejected"}`; off, the text is what it was.
+
+**Shutdown:** the API flushes for at most 3 s **after** its 25 s drain, at the same time as the 2 s stop of its health and metrics servers, so the chart's floor for the grace period (the preStop sleep plus 32 s) does not move. The operator flushes after its controllers have stopped, **on every way out**, an error included, inside `terminationGracePeriodSeconds: 30`. A flush that does not finish is given up on at its deadline.
+
+### The chart
+
+`otel` (the operator) and `api.otel` (the API), the same shape (`deploy/operator/README.md`, *Traces (K5)*): `endpoint` (required when on), `sampler`, `samplerRatio`, `resourceAttributes`, `headersSecret` (an existing Secret: a read-only volume at mode `0440`, never a variable, never a Secret the chart makes), `certificate` (an existing ConfigMap), `to` and `ports`. With the component's NetworkPolicy enabled, `to` is **required** and its policy gains egress to those peers on those ports and to nothing else: the operator's, which had one rule, gains DNS and the collector; the API's gains a fourth. **No rule is ever rendered with ports and no `to`**, and `0.0.0.0/0` and `::/0` are refused. The operator's `Role` gains nothing (the kubelet resolves the Secret and the ConfigMap). `_validate.tpl` refuses what the binaries refuse; `render-check.sh` holds all of it, each check broken on purpose in a copy of the tree.
+
+<a id="48a-proof"></a>
+
+### Proof, and what is not proven
+
+Proven by `cargo test` (the pipeline in paused time; the exporter and the settings against a collector in the tests that checks the shape of the vendored `examples/trace.json` of opentelemetry-proto; the controller on the fake API server; the router on the `Memory` ports; both binaries on a socket and as processes with a variable they must refuse), by `render-check.sh`, and by `tools/check-dependencies.sh`. **Unverified until CI has run it:** the end-to-end step (`deploy/operator/tests/e2e/chain-e2e.sh`, step 6b: a pinned OpenTelemetry Collector receives the spans of both services through the egress rule of each policy, and step 7 scans its log for the secrets and the tokens; no container daemon existed where it was written); any backend other than the Collector; a private CA (a TLS collector is not in the tests: no certificate library is in the lock file); `HTTPS_PROXY` is deliberately not read; the exact text of the Collector's log, which the step greps loosely. The exporter follows no inbound `traceparent` and sends none to the API server or to an agent: an agent's own traces need adam-rs.
+
+---
+
 
 ## 49. End-to-End Trace
 
