@@ -30,7 +30,6 @@ fn defaults() -> Defaults {
 
 struct Server {
     url: String,
-    objects: MemoryObjects,
 }
 
 async fn serve(permissions: &[&str]) -> Server {
@@ -44,7 +43,7 @@ async fn serve(permissions: &[&str]) -> Server {
     tokio::spawn(async move {
         axum::serve(listener, router(state)).await.unwrap();
     });
-    Server { url, objects }
+    Server { url }
 }
 
 fn client(url: &str) -> Client {

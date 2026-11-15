@@ -88,7 +88,7 @@ impl Op {
     }
 
     /// The path segments after the root, for a call on `name`.
-    pub(crate) fn segments<'a>(self, name: Option<&'a str>) -> Vec<&'a str> {
+    pub(crate) fn segments(self, name: Option<&str>) -> Vec<&str> {
         let mut parts = vec!["v1"];
         match self {
             Self::Me => parts.push("me"),

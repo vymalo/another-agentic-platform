@@ -35,7 +35,6 @@ tokio = { workspace = true, features = ["rt", "time"] }
 
 [dev-dependencies]
 # The tests run the built binary against the real router of the Platform API over the `Memory` ports on a loopback socket.
-aap-forms.workspace = true
 aap-platform-api.workspace = true
 aap-ports = { workspace = true, features = ["testkit"] }
 axum.workspace = true

@@ -937,7 +937,7 @@ fn a_config_file_others_can_read_is_refused() {
     assert_eq!(out.code, 0, "{}", out.stderr);
     std::fs::set_permissions(api.config(), std::fs::Permissions::from_mode(0o644)).unwrap();
     for args in [&["whoami"][..], &["get", "agents"][..]] {
-        let out = api.ctl(&args, None);
+        let out = api.ctl(args, None);
         assert_eq!(out.code, 2, "{args:?}: {}", out.stderr);
         assert!(
             out.stderr.contains("readable by group or others"),
