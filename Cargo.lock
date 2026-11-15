@@ -196,6 +196,23 @@ dependencies = [
 ]
 
 [[package]]
+name = "aap-platform-client"
+version = "0.1.0"
+dependencies = [
+ "aap-api",
+ "aap-forms",
+ "aap-platform-api",
+ "aap-ports",
+ "axum",
+ "reqwest",
+ "serde",
+ "serde_json",
+ "thiserror 2.0.21",
+ "tokio",
+ "url",
+]
+
+[[package]]
 name = "aap-ports"
 version = "0.1.0"
 dependencies = [
