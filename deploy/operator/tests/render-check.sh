@@ -896,6 +896,7 @@ api_aapctl_step() {
   repo=$(cd "$here/../../.." && pwd)
   six_b=$(grep -n '^step "6b\. ' "$script" | head -n 1 | cut -d: -f1)
   seven=$(grep -n '^step "7\. ' "$script" | head -n 1 | cut -d: -f1)
+  # shellcheck disable=SC2016 # the patterns are the script's own text, `$art` and `$work` and all
   [ -n "$six_b" ] && [ -n "$seven" ] && [ "$six_b" -lt "$seven" ] \
     && grep -q 'AAPCTL_TOKEN="\$art"' "$script" \
     && ! grep -Eq -- '--token( |=)' "$script" \
