@@ -2,11 +2,11 @@
 //!
 //! | Code | Meaning |
 //! |---|---|
-//! | 1 | The API or a local check refused the content (`422`, `409 yaml-only`, `breaks-agents`, `referenced`, a file the forms cannot represent), or an object that was named is not there (`404`) |
-//! | 2 | Usage or read error (phase 1's meaning) |
+//! | 1 | The API or a local check refused the content (`422`, `409 yaml-only`, `breaks-agents`, `referenced`, a file the forms cannot represent, a deployment part that differs), or an object that was named is not there (`404`) |
+//! | 2 | Usage or read error (phase 1's meaning); also a file that says what the API cannot keep (a label, an annotation, a namespace that is not the API's), a saved token for another server |
 //! | 3 | Stale or conflict (`412`, `409 already-exists`, `managed-by-gitops`, `deleting`, `conflict`) |
 //! | 4 | Not allowed: no token, `401`, `403` |
-//! | 5 | Unreachable, `5xx`, an answer that is not the API's, or a wait that ran out |
+//! | 5 | Unreachable, `5xx`, an answer that is not the API's or that this release of `aapctl` does not read whole (version skew), or a wait that ran out |
 //!
 //! Every error is one line, `aapctl: <what>: <status> <problem type>: <detail>`, and one indented line per field of `errors` or
 //! `reasons`. **No line holds a token, a header or the text of a transport error.**
@@ -112,6 +112,11 @@ fn from_problem(about: &str, p: &Problem) -> Failure {
             _ => "the server refused the request".to_owned(),
         });
     let mut failure = Failure::new(code_of(p), format!("{about}{} {kind}: {words}", p.status));
+    if p.status == 401 {
+        failure = failure.also(
+            "the token was refused or has expired: sign in again (`aapctl login --token-stdin`) or set AAPCTL_TOKEN to a new one",
+        );
+    }
     if let Some(permission) = &p.permission
         && !words.contains(permission.as_str())
     {

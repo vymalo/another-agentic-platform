@@ -84,11 +84,60 @@ struct WireReason {
     reason: String,
 }
 
-/// `text` without control characters (a terminal escape in a message is an attack on the person reading it) and cut.
+/// Whether `c` can change what a terminal shows, or the order a person reads it in: a control character (C0, DEL and C1) or a
+/// bidirectional control (U+061C, U+200E, U+200F, U+202A to U+202E, U+2066 to U+2069), which can make text read as something else.
+fn is_hazard(c: char) -> bool {
+    c.is_control()
+        || matches!(
+            c,
+            '\u{061C}' | '\u{200E}' | '\u{200F}' | '\u{202A}'..='\u{202E}' | '\u{2066}'..='\u{2069}'
+        )
+}
+
+/// Whether `text` holds a character that [`clean`] would replace, other than a line feed and a tab (a text with those is a file;
+/// one with any other is an attack on the terminal that shows it).
+pub fn has_terminal_hazard(text: &str) -> bool {
+    text.chars().any(|c| is_hazard(c) && c != '\n' && c != '\t')
+}
+
+/// `value` as pretty JSON that is safe to print: every control character (C0, DEL, C1) and bidirectional control is written as a
+/// `\uXXXX` escape, which is the same JSON value. `serde_json` already escapes C0 inside strings; the rest it leaves raw.
+pub fn json_for_terminal(value: &Value) -> String {
+    let text = serde_json::to_string_pretty(value).unwrap_or_default();
+    let mut out = String::with_capacity(text.len());
+    for c in text.chars() {
+        if is_hazard(c) && c != '\n' {
+            let mut units = [0u16; 2];
+            for unit in c.encode_utf16(&mut units) {
+                out.push_str(&format!("\\u{unit:04x}"));
+            }
+        } else {
+            out.push(c);
+        }
+    }
+    out
+}
+
+/// `text` with every control character and bidirectional control replaced by a space, **except line feeds and tabs**, and not cut:
+/// for the strings of a document that is printed as a whole (a title may hold several lines).
+pub fn clean_multiline(text: &str) -> String {
+    text.chars()
+        .map(|c| {
+            if is_hazard(c) && c != '\n' && c != '\t' {
+                ' '
+            } else {
+                c
+            }
+        })
+        .collect()
+}
+
+/// `text` without control characters or bidirectional controls (a terminal escape in a message is an attack on the person reading
+/// it) and cut.
 pub fn clean(text: &str) -> String {
     let mut out: String = text
         .chars()
-        .map(|c| if c.is_control() { ' ' } else { c })
+        .map(|c| if is_hazard(c) { ' ' } else { c })
         .take(MAX_TEXT + 1)
         .collect();
     if out.chars().count() > MAX_TEXT {

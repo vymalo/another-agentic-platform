@@ -9,6 +9,7 @@ use std::collections::BTreeMap;
 use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
@@ -62,6 +63,15 @@ pub fn all_permissions() -> Vec<&'static str> {
 // ----------------------------------------------------------------------- a store that can be made to move
 
 type Hook = Box<dyn FnOnce(&MemoryObjects) + Send>;
+type EveryHook = Box<dyn FnMut(&MemoryObjects) + Send>;
+
+/// Labels and annotations the store's answers carry that the API never wrote (a person's own label, a tool's annotation), as a
+/// cluster can hold them: `MemoryObjects` has no way to plant one.
+#[derive(Clone, Default)]
+pub struct Extra {
+    pub labels: BTreeMap<String, String>,
+    pub annotations: BTreeMap<String, String>,
+}
 
 /// `MemoryObjects` that runs one armed closure right after the next read of an agent or a shared object has been answered to the
 /// API, and before the API answers the client: the moment a second writer, or the operator's status write, can get in between a
@@ -70,6 +80,8 @@ type Hook = Box<dyn FnOnce(&MemoryObjects) + Send>;
 pub struct Moving {
     inner: MemoryObjects,
     hook: Arc<Mutex<Option<Hook>>>,
+    every: Arc<Mutex<Option<EveryHook>>>,
+    extra: Arc<Mutex<Extra>>,
 }
 
 impl Moving {
@@ -78,15 +90,32 @@ impl Moving {
         if let Some(hook) = hook {
             hook(&self.inner);
         }
+        if let Some(every) = self.every.lock().unwrap().as_mut() {
+            every(&self.inner);
+        }
+    }
+
+    fn dressed(&self, mut agent: Agent) -> Agent {
+        let extra = self.extra.lock().unwrap().clone();
+        for stored in std::iter::once(&mut agent.service).chain(agent.config.as_mut()) {
+            stored.labels.extend(extra.labels.clone());
+            stored.annotations.extend(extra.annotations.clone());
+        }
+        agent
     }
 }
 
 impl AgentObjects for Moving {
     async fn list_agents(&self) -> Result<Vec<Agent>, ObjectsError> {
-        self.inner.list_agents().await
+        let all = self.inner.list_agents().await?;
+        Ok(all.into_iter().map(|a| self.dressed(a)).collect())
     }
     async fn get_agent(&self, name: &str) -> Result<Option<Agent>, ObjectsError> {
-        let answer = self.inner.get_agent(name).await;
+        let answer = self
+            .inner
+            .get_agent(name)
+            .await
+            .map(|a| a.map(|a| self.dressed(a)));
         self.fire();
         answer
     }
@@ -147,6 +176,10 @@ pub struct Api {
     pub objects: MemoryObjects,
     pub auth: MemoryAuthenticator,
     hook: Arc<Mutex<Option<Hook>>>,
+    every: Arc<Mutex<Option<EveryHook>>>,
+    extra: Arc<Mutex<Extra>>,
+    /// How many requests the router has been asked, of anything.
+    pub requests: Arc<AtomicUsize>,
     pub dir: PathBuf,
 }
 
@@ -165,17 +198,32 @@ impl Api {
         let auth = MemoryAuthenticator::new();
         auth.grant(TOKEN, "tester", all_permissions());
         let hook = Arc::new(Mutex::new(None));
+        let every = Arc::new(Mutex::new(None));
+        let extra = Arc::new(Mutex::new(Extra::default()));
         let moving = Moving {
             inner: objects.clone(),
             hook: hook.clone(),
+            every: every.clone(),
+            extra: extra.clone(),
         };
+        let requests = Arc::new(AtomicUsize::new(0));
+        let counter = requests.clone();
         let state = ApiState::new(moving, auth.clone(), defaults()).unwrap();
+        let app = router(state).layer(axum::middleware::from_fn(
+            move |request: axum::extract::Request, next: axum::middleware::Next| {
+                let counter = counter.clone();
+                async move {
+                    counter.fetch_add(1, Ordering::SeqCst);
+                    next.run(request).await
+                }
+            },
+        ));
         let listener = rt
             .block_on(tokio::net::TcpListener::bind("127.0.0.1:0"))
             .unwrap();
         let url = format!("http://{}", listener.local_addr().unwrap());
         rt.spawn(async move {
-            axum::serve(listener, router(state)).await.unwrap();
+            axum::serve(listener, app).await.unwrap();
         });
         Self {
             rt,
@@ -183,8 +231,29 @@ impl Api {
             objects,
             auth,
             hook,
+            every,
+            extra,
+            requests,
             dir,
         }
+    }
+
+    /// Run `f` after **every** read the API makes of an agent or a shared object, until the test ends.
+    pub fn after_every_read(&self, f: impl FnMut(&MemoryObjects) + Send + 'static) {
+        *self.every.lock().unwrap() = Some(Box::new(f));
+    }
+
+    /// From now on every agent the store answers carries this label on both objects, and this annotation.
+    pub fn dress_agents(&self, label: (&str, &str), annotation: (&str, &str)) {
+        let mut extra = self.extra.lock().unwrap();
+        extra.labels.insert(label.0.to_owned(), label.1.to_owned());
+        extra
+            .annotations
+            .insert(annotation.0.to_owned(), annotation.1.to_owned());
+    }
+
+    pub fn request_count(&self) -> usize {
+        self.requests.load(Ordering::SeqCst)
     }
 
     /// Run `f` once, after the next read the API makes of an agent or a shared object.
@@ -239,6 +308,18 @@ impl Api {
 /// Run the built `aapctl` with the proxy variables removed and `NO_PROXY` set to the loopback, a home and a config home of the test's
 /// own, and a limit of one minute.
 pub fn run_binary(args: &[&str], token: Option<&str>, stdin: Option<&str>, home: &Path) -> Out {
+    run_binary_env(args, token, stdin, home, &[])
+}
+
+/// [`run_binary`] with more variables set in the child, after the defaults (so `("NO_PROXY", "")` takes the loopback out of the
+/// proxy's exceptions, and `("HTTP_PROXY", ...)` names one).
+pub fn run_binary_env(
+    args: &[&str],
+    token: Option<&str>,
+    stdin: Option<&str>,
+    home: &Path,
+    env: &[(&str, &str)],
+) -> Out {
     let mut command = Command::new(env!("CARGO_BIN_EXE_aapctl"));
     command.args(args);
     for var in [
@@ -260,6 +341,9 @@ pub fn run_binary(args: &[&str], token: Option<&str>, stdin: Option<&str>, home:
     if let Some(token) = token {
         command.env("AAPCTL_TOKEN", token);
     }
+    for (k, v) in env {
+        command.env(k, v);
+    }
     let mut child = command
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
@@ -269,7 +353,8 @@ pub fn run_binary(args: &[&str], token: Option<&str>, stdin: Option<&str>, home:
     {
         let mut input = child.stdin.take().unwrap();
         if let Some(text) = stdin {
-            input.write_all(text.as_bytes()).unwrap();
+            // A command that refuses before it reads its input has closed the pipe: that is its answer, not a fault of the test.
+            let _ = input.write_all(text.as_bytes());
         }
     }
     let mut stdout = child.stdout.take().unwrap();

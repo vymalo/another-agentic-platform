@@ -28,7 +28,10 @@ use serde_json::Value;
 use url::{Host, Url};
 
 pub use op::{Collection, Op};
-pub use problem::{FieldProblem, Problem, YamlOnlyReason, clean};
+pub use problem::{
+    FieldProblem, Problem, YamlOnlyReason, clean, clean_multiline, has_terminal_hazard,
+    json_for_terminal,
+};
 pub use token::Token;
 
 /// The most an answer may hold: the API's own bodies are far smaller, so a larger one is not the API.
@@ -105,7 +108,13 @@ pub struct Options {
     /// Allow `http://` for a host that is not a loopback address. Off: the token would cross the network in the clear.
     pub allow_insecure_http: bool,
     /// Use the proxy the environment names (`HTTPS_PROXY`, `HTTP_PROXY`, `ALL_PROXY`, `NO_PROXY`). Off in the crate's own tests.
+    /// **Never used for an `http://` loopback address, whatever this says**: a proxy would be handed the bearer token in the clear
+    /// for a server on the same machine (P-031).
     pub system_proxy: bool,
+    /// How long to wait for the connection to be made.
+    pub connect_timeout: Duration,
+    /// How long a whole request may take, from the first byte sent to the last received.
+    pub request_timeout: Duration,
 }
 
 impl Default for Options {
@@ -113,8 +122,21 @@ impl Default for Options {
         Self {
             allow_insecure_http: false,
             system_proxy: true,
+            connect_timeout: Duration::from_secs(10),
+            request_timeout: Duration::from_secs(60),
         }
     }
+}
+
+/// An address of a server in one spelling, for telling whether two names are the same server: the scheme and the host in lower
+/// case, the default port left out, no trailing slash. `None` when it is not an address `http` or `https` can use.
+pub fn normalize_server(address: &str) -> Option<String> {
+    let url = Url::parse(address.trim()).ok()?;
+    if !matches!(url.scheme(), "http" | "https") || url.host().is_none() {
+        return None;
+    }
+    let path = url.path().trim_end_matches('/');
+    Some(format!("{}{path}", url.origin().ascii_serialization()))
 }
 
 /// A client of one Platform API, with one token.
@@ -190,10 +212,12 @@ impl Client {
         let mut builder = reqwest::Client::builder()
             // A redirect would carry the request, and the person's trust, somewhere the person did not name.
             .redirect(reqwest::redirect::Policy::none())
-            .connect_timeout(Duration::from_secs(10))
-            .timeout(Duration::from_secs(60))
+            .connect_timeout(options.connect_timeout)
+            .timeout(options.request_timeout)
             .user_agent(concat!("aapctl/", env!("CARGO_PKG_VERSION")));
-        if !options.system_proxy {
+        // A proxy named by the environment is a third party: it would see the bearer token of a request that never leaves the
+        // machine. So an `http://` loopback address is never sent through one.
+        if !options.system_proxy || (base.scheme() == "http" && is_loopback(&base)) {
             builder = builder.no_proxy();
         }
         let http = builder

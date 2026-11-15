@@ -10,9 +10,10 @@ use std::io::{Read, Write};
 use std::path::PathBuf;
 use std::time::{Duration, Instant};
 
-use aap_forms::Defaults;
+use aap_forms::{AgentView, Defaults, ModelEndpointForm, ToolServerForm};
 use aap_platform_client::{
-    Client, ClientError, Collection, Condition, Options, Reply, Token, clean,
+    Client, ClientError, Collection, Condition, Options, Reply, Token, clean, clean_multiline,
+    has_terminal_hazard, json_for_terminal, normalize_server,
 };
 use base64::Engine as _;
 use clap::{Args, ValueEnum};
@@ -20,8 +21,12 @@ use serde_json::Value;
 
 use crate::config::{self, Config, Env};
 use crate::failure::{Failure, from_client};
-use crate::forms::{Item, Resource, differing_paths, prepare};
+use crate::forms::{Item, Resource, differing_paths, prepare, strip_what_apply_refuses};
+use crate::skew::{first_difference, written_back};
 use crate::{Input, load};
+
+/// The most a token read from standard input may be.
+const MAX_TOKEN_BYTES: u64 = 64 * 1024;
 
 /// How many times a write that finds the object moved under it reads it again before it gives up.
 const ATTEMPTS: usize = 3;
@@ -111,8 +116,10 @@ pub struct GetArgs {
 pub struct ApplyArgs {
     #[command(flatten)]
     input: Input,
-    /// Write only if the object still has this `ETag` (one object), reading nothing first: a stale tag is a plain `412` (exit 3) and
-    /// is never retried. An agent's tag also moves when the operator writes its status, so a tag read a while ago is often stale.
+    /// Write only if the object still has this `ETag` (one object): the object is still read, and every check of a plain apply is
+    /// still made (what no form says, the deployment part, "unchanged writes nothing"); only the tag the write carries is yours. A
+    /// stale tag is a plain `412` (exit 3) and is never retried. An agent's tag also moves when the operator writes its status, so
+    /// a tag read a while ago is often stale.
     #[arg(long, value_name = "ETAG")]
     if_match: Option<String>,
     /// Read the files and print the forms that would be sent, as JSON, and stop: no network, no token. The deployment part is
@@ -177,9 +184,12 @@ struct Session {
 
 fn open(conn: &Conn, env: &Env) -> Result<Session, Failure> {
     let path = conn.config.clone().or_else(|| config::default_path(env));
+    // The file is read only when something needs it: a person who gives both the server and a token leaves nothing in it, and a
+    // file that is too open must not stop a command that does not use it.
+    let needs_file = !(env.token.is_some() && conn.server.is_some());
     let config = match &path {
-        Some(p) => config::load(p).map_err(Failure::usage)?,
-        None => Config::default(),
+        Some(p) if needs_file => config::load(p).map_err(Failure::usage)?,
+        _ => Config::default(),
     };
     let server = conn
         .server
@@ -191,12 +201,46 @@ fn open(conn: &Conn, env: &Env) -> Result<Session, Failure> {
                 "no server: give --server <url>, or sign in once with `aapctl login --token-stdin --server <url>`",
             )
         })?;
-    let token_text = env.token.clone().or(config.access_token).ok_or_else(|| {
-        Failure::new(
-            4,
-            "not signed in: set AAPCTL_TOKEN, or pipe a token to `aapctl login --token-stdin`",
-        )
-    })?;
+    let token_text = match env.token.clone() {
+        // The person's own choice, for whichever server they name.
+        Some(token) => token,
+        None => {
+            let saved = config.access_token.clone().ok_or_else(|| {
+                Failure::new(
+                    4,
+                    "not signed in: set AAPCTL_TOKEN, or pipe a token to `aapctl login --token-stdin`",
+                )
+            })?;
+            // The saved token is for the server it was saved with, and goes nowhere else.
+            if conn.server.is_some() {
+                let shown = |address: &str| {
+                    normalize_server(address)
+                        .unwrap_or_else(|| "an address that is not http or https".to_owned())
+                };
+                let same = match (
+                    normalize_server(&server),
+                    config.server.as_deref().and_then(normalize_server),
+                ) {
+                    (Some(a), Some(b)) => a == b,
+                    _ => false,
+                };
+                if !same {
+                    return Err(Failure::usage(match config.server.as_deref() {
+                        Some(saved_for) => format!(
+                            "the token saved in the configuration file is for {}, not for {}: sign in to that server with `aapctl login --token-stdin --server <url>`, or set AAPCTL_TOKEN",
+                            shown(saved_for),
+                            shown(&server)
+                        ),
+                        None => format!(
+                            "the token saved in the configuration file has no server recorded, so it is not sent to {}: sign in with `aapctl login --token-stdin --server <url>`, or set AAPCTL_TOKEN",
+                            shown(&server)
+                        ),
+                    }));
+                }
+            }
+            saved
+        }
+    };
     let token = Token::new(&token_text).map_err(|e| from_client("", e))?;
     let client = client_for(&server, token, conn)?;
     Ok(Session {
@@ -212,7 +256,7 @@ fn client_for(server: &str, token: Token, conn: &Conn) -> Result<Client, Failure
         token,
         Options {
             allow_insecure_http: conn.insecure_http,
-            system_proxy: true,
+            ..Options::default()
         },
     )
     .map_err(|e| from_client("", e))
@@ -350,6 +394,23 @@ fn text_of(v: &Value, key: &str) -> String {
         Some(Value::Number(n)) => n.to_string(),
         Some(Value::Bool(b)) => b.to_string(),
         _ => "-".to_owned(),
+    }
+}
+
+/// Every string of `v`, keys included, cleaned of control and bidirectional control characters (line feeds and tabs stay: a YAML
+/// writer quotes them).
+fn clean_strings(v: &mut Value) {
+    match v {
+        Value::String(s) => *s = clean_multiline(s),
+        Value::Array(items) => items.iter_mut().for_each(clean_strings),
+        Value::Object(map) => {
+            let entries = std::mem::take(map);
+            for (k, mut val) in entries {
+                clean_strings(&mut val);
+                map.insert(clean_multiline(&k), val);
+            }
+        }
+        _ => {}
     }
 }
 
@@ -507,14 +568,15 @@ async fn get_command(net: &Net<'_>, a: &GetArgs) -> Result<(), Failure> {
             net.say(&clean(tag));
         }
         Output::Json => {
-            let text = reply.text().map_err(|e| from_client("", e))?;
-            net.raw(&text);
-            if !text.ends_with('\n') {
-                net.raw("\n");
-            }
+            // The same JSON value, with every control and bidirectional control escaped: a title with an escape sequence in it
+            // must not reach a terminal as one.
+            let body = reply.json().map_err(|e| from_client("", e))?;
+            net.say(&json_for_terminal(&body));
         }
         Output::Yaml => {
-            let body = reply.json().map_err(|e| from_client("", e))?;
+            let mut body = reply.json().map_err(|e| from_client("", e))?;
+            // YAML cannot say a control character the way JSON can: the server's text is cleaned of them.
+            clean_strings(&mut body);
             let text = serde_yaml::to_string(&body)
                 .map_err(|_| Failure::new(5, "the answer cannot be written as YAML"))?;
             net.raw(&text);
@@ -571,9 +633,15 @@ fn login_command(a: &LoginArgs, stdin: &mut dyn Read, out: &mut dyn Write) -> Re
     }
     let mut text = String::new();
     stdin
-        .take(64 * 1024)
+        .take(MAX_TOKEN_BYTES + 1)
         .read_to_string(&mut text)
         .map_err(|_| Failure::usage("the token cannot be read from standard input"))?;
+    if text.len() as u64 > MAX_TOKEN_BYTES {
+        // Cut, it would be another token: refuse.
+        return Err(Failure::usage(format!(
+            "standard input holds more than {MAX_TOKEN_BYTES} bytes, which is not an access token: nothing was kept"
+        )));
+    }
     let token = Token::new(&text).map_err(|e| from_client("", e))?;
 
     let env = Env::process();
@@ -664,10 +732,54 @@ pub fn export(a: &ExportArgs, out: &mut dyn Write, err: &mut dyn Write) -> u8 {
             .await
             .map_err(|e| from_client(&format!("agent/{}", a.name), e))?;
         let text = reply.text().map_err(|e| from_client("", e))?;
+        if has_terminal_hazard(&text) {
+            return Err(Failure::new(
+                5,
+                format!(
+                    "agent/{}: the answer holds control characters (or a bidirectional control) that a file of YAML does not: none of it is printed",
+                    clean(&a.name)
+                ),
+            ));
+        }
+        let (text, left_out) = without_what_apply_refuses(&text);
+        if !left_out.is_empty() {
+            net.note(&format!(
+                "left out of the export, because `aapctl apply` refuses it and the API writes none of it: {}",
+                left_out.join(", ")
+            ));
+        }
         net.raw(&text);
         Ok(())
     });
     finish(result, err)
+}
+
+/// The export as the API serves it, less the labels and annotations `apply` would refuse (the API serves a person's own labels
+/// and the platform's, and writes the dashboard's label alone), so that **an export is read back unchanged**. A text with nothing to
+/// leave out is returned as it came, byte for byte; one that is not YAML is not touched (`apply` will say so).
+fn without_what_apply_refuses(text: &str) -> (String, Vec<String>) {
+    use serde::Deserialize as _;
+    let mut docs = Vec::new();
+    for d in serde_yaml::Deserializer::from_str(text) {
+        match Value::deserialize(d) {
+            Ok(v) => docs.push(v),
+            Err(_) => return (text.to_owned(), Vec::new()),
+        }
+    }
+    let mut left_out = Vec::new();
+    for d in &mut docs {
+        left_out.extend(strip_what_apply_refuses(d));
+    }
+    if left_out.is_empty() {
+        return (text.to_owned(), left_out);
+    }
+    let rewritten = docs
+        .iter()
+        .filter(|d| !d.is_null())
+        .map(|d| serde_yaml::to_string(d).unwrap_or_default())
+        .collect::<Vec<_>>()
+        .join("---\n");
+    (rewritten, left_out)
 }
 
 // ----------------------------------------------------------------------------------------------------------- apply
@@ -679,8 +791,24 @@ struct Info {
     defaults: Defaults,
 }
 
-async fn fetch_info(net: &Net<'_>) -> Result<Info, Failure> {
-    let reply = net.info().await.map_err(|e| from_client("", e))?;
+/// The failure of a server whose answer this `aapctl` does not read as the server sends it (exit 5): never a value, only the member.
+fn skewed(about: &str, path: &str, server_version: Option<&str>) -> Failure {
+    let release = server_version.map_or_else(String::new, |v| format!(" (server version {v})"));
+    Failure::new(
+        5,
+        format!(
+            "{about}the server's release{release} and this aapctl ({}) differ: the answer at {path} is not what this aapctl reads and writes back, so writing from it could reset a field it does not know or compare against a default it invents: use the aapctl of the server's release",
+            env!("CARGO_PKG_VERSION")
+        ),
+    )
+}
+
+/// `/v1/info`. `about` is the sentence the failure starts with when the call is refused (`agent/chat: cannot be created: ...: `).
+async fn fetch_info(net: &Net<'_>, about: &str) -> Result<Info, Failure> {
+    let reply = net
+        .info()
+        .await
+        .map_err(|e| from_client(about.trim_end_matches(": "), e))?;
     let body = reply.json().map_err(|e| from_client("", e))?;
     let version = body
         .get("version")
@@ -691,16 +819,12 @@ async fn fetch_info(net: &Net<'_>) -> Result<Info, Failure> {
         .and_then(Value::as_str)
         .map(clean)
         .ok_or_else(|| Failure::new(5, "the server's /v1/info names no namespace"))?;
-    let defaults: Defaults = serde_json::from_value(body.get("defaults").cloned().unwrap_or(Value::Null))
-        .map_err(|_| {
-            Failure::new(
-                5,
-                format!(
-                    "the server's /v1/info (server version {version}) does not read as the deployment's defaults this aapctl ({}) expects: use the aapctl of the server's release",
-                    env!("CARGO_PKG_VERSION")
-                ),
-            )
-        })?;
+    let raw = body.get("defaults").cloned().unwrap_or(Value::Null);
+    if let Some(path) = first_difference::<Defaults>(&raw, "defaults") {
+        return Err(skewed("", &path, Some(&version)));
+    }
+    let defaults: Defaults =
+        serde_json::from_value(raw).map_err(|_| skewed("", "defaults", Some(&version)))?;
     Ok(Info {
         namespace,
         version,
@@ -715,6 +839,8 @@ struct Current {
     form: Option<Value>,
     deployment: Option<Value>,
     yaml_only: Vec<String>,
+    /// The first member at which the server's form is not what this binary reads and writes back ([`crate::skew`]).
+    skew: Option<String>,
 }
 
 fn current_of(resource: Resource, body: &Value) -> Current {
@@ -724,6 +850,25 @@ fn current_of(resource: Resource, body: &Value) -> Current {
         (Resource::Agent, Some(f)) => (f.get("form").cloned(), f.get("deployment").cloned()),
         (_, Some(f)) => (Some(f.clone()), None),
         _ => (None, None),
+    };
+    let skew = form_part.and_then(|f| match resource {
+        Resource::Agent => first_difference::<AgentView>(f, "representation.form"),
+        Resource::Model => first_difference::<ModelEndpointForm>(f, "representation.form"),
+        Resource::ToolServer => first_difference::<ToolServerForm>(f, "representation.form"),
+    });
+    // What the server holds, as this binary writes it (a form that reads whole): what the file's form is compared with.
+    let (form, deployment) = match (skew.is_none(), resource, form_part) {
+        (true, Resource::Agent, Some(f)) => match written_back::<AgentView>(f) {
+            Some(view) => (view.get("form").cloned(), view.get("deployment").cloned()),
+            None => (form, deployment),
+        },
+        (true, Resource::Model, Some(f)) => {
+            (written_back::<ModelEndpointForm>(f).or(form), deployment)
+        }
+        (true, Resource::ToolServer, Some(f)) => {
+            (written_back::<ToolServerForm>(f).or(form), deployment)
+        }
+        _ => (form, deployment),
     };
     let yaml_only = representation
         .get("yamlOnly")
@@ -750,6 +895,7 @@ fn current_of(resource: Resource, body: &Value) -> Current {
         form,
         deployment,
         yaml_only,
+        skew,
     }
 }
 
@@ -829,6 +975,8 @@ fn deployment_refusal(label: &str, item: &Item, server: &Value, why: &str) -> Op
     Some(failure.also("remove the difference from the file (an export of the agent has the server's), or change the server's defaults"))
 }
 
+/// Create, replace or leave alone the object of `item`. `if_match` is the tag a replace carries when the person gave one: the object
+/// is read all the same, and every check is made, and it is never retried.
 async fn apply_item(
     net: &Net<'_>,
     item: &Item,
@@ -839,18 +987,6 @@ async fn apply_item(
     let collection = item.resource.collection();
     let fail = |e: ClientError| from_client(&label, e);
 
-    if let Some(tag) = if_match {
-        net.put(
-            collection,
-            &item.name,
-            &item.form,
-            &Condition::Replace(tag.to_owned()),
-        )
-        .await
-        .map_err(fail)?;
-        return Ok(Verb::Configured);
-    }
-
     let mut baseline: Option<(Option<Value>, Option<Value>)> = None;
     for _ in 0..ATTEMPTS {
         match net.get(collection, &item.name).await {
@@ -858,10 +994,22 @@ async fn apply_item(
                 if baseline.is_some() {
                     return Err(stale(&label));
                 }
+                // A replace of a tag names an object that is there.
+                if if_match.is_some() {
+                    return Err(fail(e));
+                }
                 // A create writes the server's defaults: say so rather than write something other than the file.
                 if let (Some(kind), true) = (item.agent_kind, item.deployment.is_some()) {
                     if info.is_none() {
-                        *info = Some(fetch_info(net).await?);
+                        *info = Some(
+                            fetch_info(
+                                net,
+                                &format!(
+                                    "{label}: cannot be created: its deployment part is compared with the server's defaults, read from /v1/info, which needs platform:agents.read: "
+                                ),
+                            )
+                            .await?,
+                        );
                     }
                     if let Some(i) = info.as_ref() {
                         let server =
@@ -893,6 +1041,11 @@ async fn apply_item(
                 })?;
                 let current = current_of(item.resource, &body);
                 refuse_unwritable(&label, &current)?;
+                // Before anything is compared: a form this binary does not read whole cannot be compared, and a write from it
+                // could reset what it does not know.
+                if let Some(path) = &current.skew {
+                    return Err(skewed(&format!("{label}: "), path, None));
+                }
                 let seen = (current.form.clone(), current.deployment.clone());
                 match &baseline {
                     Some(first) if *first != seen => return Err(stale(&label)),
@@ -912,13 +1065,21 @@ async fn apply_item(
                 if current.form.as_ref() == Some(&item.form) {
                     return Ok(Verb::Unchanged);
                 }
+                // The person's tag, when they gave one, is the tag the write carries; otherwise the one just read.
+                let carried = if_match.map_or(tag, str::to_owned);
                 match net
-                    .put(collection, &item.name, &item.form, &Condition::Replace(tag))
+                    .put(
+                        collection,
+                        &item.name,
+                        &item.form,
+                        &Condition::Replace(carried),
+                    )
                     .await
                 {
                     Ok(_) => return Ok(Verb::Configured),
-                    // Only the tag moved if the next read holds what this one did: the operator writes status.
-                    Err(e) if problem_status(&e) == Some(412) => {}
+                    // Only the tag moved if the next read holds what this one did: the operator writes status. A tag the
+                    // person gave is never retried.
+                    Err(e) if problem_status(&e) == Some(412) && if_match.is_none() => {}
                     Err(e) => return Err(fail(e)),
                 }
             }
@@ -977,25 +1138,27 @@ pub fn apply(a: &ApplyArgs, stdin: &mut dyn Read, out: &mut dyn Write, err: &mut
 
 async fn apply_all(net: &Net<'_>, a: &ApplyArgs, items: Vec<Item>) -> Result<(), Failure> {
     let mut info: Option<Info> = None;
-    if items.iter().any(|i| i.namespace.is_some()) {
-        let i = fetch_info(net).await?;
+    if items.iter().any(|i| !i.namespaces.is_empty()) {
+        let i = fetch_info(
+            net,
+            "the namespace of the documents is checked against the server's, read from /v1/info, which needs platform:agents.read: ",
+        )
+        .await?;
+        // Every document says the API's namespace or none: the API writes into its own, and a document that names another would
+        // be written somewhere the file does not say.
         let wrong: Vec<Failure> = items
             .iter()
-            .filter_map(|item| {
-                let ns = item.namespace.as_deref()?;
-                (ns != i.namespace).then(|| {
-                    Failure::new(
-                        1,
-                        format!(
-                            "{}: metadata.namespace {:?} is not the API's namespace {:?} (server version {}): remove it or change it ({})",
-                            item.label(),
-                            clean(ns),
-                            i.namespace,
-                            i.version,
-                            item.file
-                        ),
-                    )
-                })
+            .flat_map(|item| item.namespaces.iter())
+            .filter(|doc| doc.namespace != i.namespace)
+            .map(|doc| {
+                Failure::usage(format!(
+                    "{}: metadata.namespace {:?} is not the API's namespace {:?} (server version {}): remove it or change it ({})",
+                    doc.document,
+                    clean(&doc.namespace),
+                    i.namespace,
+                    i.version,
+                    doc.file
+                ))
             })
             .collect();
         if let Some(all) = Failure::all(wrong) {
@@ -1003,9 +1166,26 @@ async fn apply_all(net: &Net<'_>, a: &ApplyArgs, items: Vec<Item>) -> Result<(),
         }
         info = Some(i);
     }
+    let mut applied: Vec<String> = Vec::new();
     for item in &items {
-        let verb = apply_item(net, item, a.if_match.as_deref(), &mut info).await?;
-        net.say(&format!("{} {}", item.label(), verb.word()));
+        match apply_item(net, item, a.if_match.as_deref(), &mut info).await {
+            Ok(verb) => {
+                net.say(&format!("{} {}", item.label(), verb.word()));
+                applied.push(item.label());
+            }
+            Err(failure) => {
+                // A refused object stops the apply: nothing after it is sent. What went before stays, and is said.
+                return Err(failure.also(if applied.is_empty() {
+                    "nothing was applied before this".to_owned()
+                } else {
+                    format!(
+                        "applied before this ({}): {}",
+                        applied.len(),
+                        applied.join(", ")
+                    )
+                }));
+            }
+        }
     }
     Ok(())
 }
@@ -1017,6 +1197,11 @@ pub fn delete(a: &DeleteArgs, out: &mut dyn Write, err: &mut dyn Write) -> u8 {
     let result = with_net!(&a.conn, out, err, |_session, net| delete_command(&net, a));
     finish(result, err)
 }
+
+/// What a `202` leaves to know: the API deletes an agent's `AgentConfig` only after the operator's finalizer let the service go, and
+/// waits for that at most 5 s (`crates/objects-kubernetes/README.md`, "delete_agent"; §60a). A config that is left is an *orphan*:
+/// the next create of the name takes it over, and the Platform API has no route that lists or deletes one.
+const ORPHAN_NOTE: &str = "note: the API deletes the AgentConfig only when the operator has let the service go, and waits 5 s for that; when the operator takes longer the AgentConfig stays behind as an orphan. The next create of the name takes it over; the Platform API has no route to list or delete one";
 
 async fn delete_command(net: &Net<'_>, a: &DeleteArgs) -> Result<(), Failure> {
     let resource = a.noun.resource();
@@ -1052,10 +1237,12 @@ async fn delete_command(net: &Net<'_>, a: &DeleteArgs) -> Result<(), Failure> {
         match net.delete(collection, &a.name, &tag).await {
             Ok(reply) if reply.status == 202 => {
                 net.say(&format!(
-                    "{label} deleting (the operator is releasing what it ran)"
+                    "{label} deleting: the operator is still releasing what it ran"
                 ));
                 if a.wait {
                     wait_gone(net, a, &label).await?;
+                } else {
+                    net.say(ORPHAN_NOTE);
                 }
                 return Ok(());
             }
@@ -1075,28 +1262,53 @@ async fn delete_command(net: &Net<'_>, a: &DeleteArgs) -> Result<(), Failure> {
     ))
 }
 
+/// Whether a failed read is one to try again: the server cannot be reached, answers something that is not the API's, or fails
+/// (`5xx`). Anything else (`401`, `403`, another `4xx`) will not change by waiting.
+fn transient(error: &ClientError) -> bool {
+    match error {
+        ClientError::Unreachable { .. } | ClientError::BadAnswer(_) => true,
+        ClientError::Problem(p) => p.status >= 500,
+        ClientError::Config(_) => false,
+    }
+}
+
 async fn wait_gone(net: &Net<'_>, a: &DeleteArgs, label: &str) -> Result<(), Failure> {
     let resource = a.noun.resource();
     let deadline = Instant::now() + Duration::from_secs(a.timeout);
+    let mut last_failure: Option<String>;
     loop {
-        match net.get(resource.collection(), &a.name).await {
-            Err(e) if problem_status(&e) == Some(404) => {
+        // No read may outlast the wait: each gets the time that is left, and a little over so that the last one can answer.
+        let left = deadline.saturating_duration_since(Instant::now());
+        let read = tokio::time::timeout(
+            left + Duration::from_millis(500),
+            net.get(resource.collection(), &a.name),
+        )
+        .await;
+        match read {
+            Ok(Err(e)) if problem_status(&e) == Some(404) => {
                 net.say(&format!("{label} gone"));
-                net.say("note: an AgentConfig a delete leaves behind is taken over by the next create of the name");
+                net.say(ORPHAN_NOTE);
                 return Ok(());
             }
-            Err(e) => return Err(from_client(label, e)),
-            Ok(_) => {}
+            Ok(Err(e)) if transient(&e) => last_failure = Some(e.to_string()),
+            Ok(Err(e)) => return Err(from_client(label, e)),
+            Ok(Ok(_)) => last_failure = None,
+            Err(_elapsed) => last_failure = Some("the server did not answer in time".to_owned()),
         }
         if Instant::now() >= deadline {
-            return Err(Failure::new(
+            let failure = Failure::new(
                 5,
                 format!(
                     "{label}: still being deleted after {} s: the operator has not finished with it; run `aapctl get agent {}` later",
                     a.timeout, a.name
                 ),
-            ));
+            );
+            return Err(match last_failure {
+                Some(why) => failure.also(format!("the last read failed: {}", clean(&why))),
+                None => failure,
+            });
         }
-        tokio::time::sleep(Duration::from_millis(a.poll_ms)).await;
+        let left = deadline.saturating_duration_since(Instant::now());
+        tokio::time::sleep(Duration::from_millis(a.poll_ms).min(left)).await;
     }
 }

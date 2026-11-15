@@ -53,6 +53,7 @@ fn client(url: &str) -> Client {
         Options {
             allow_insecure_http: false,
             system_proxy: false,
+            ..Options::default()
         },
     )
     .unwrap()
@@ -243,6 +244,7 @@ async fn a_server_address_that_would_leak_or_cheat_is_refused() {
         Options {
             allow_insecure_http: true,
             system_proxy: false,
+            ..Options::default()
         },
     )
     .unwrap();
@@ -311,4 +313,102 @@ fn a_token_with_white_space_or_a_line_break_is_refused() {
         assert!(!error.contains("X-Evil"), "{error}");
     }
     assert_eq!(Token::new("  abc\n").unwrap().expose(), "abc");
+}
+
+/// A server that accepts the connection and never answers: the timeouts are what ends the call.
+async fn silent_server() -> String {
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let url = format!("http://{}", listener.local_addr().unwrap());
+    tokio::spawn(async move {
+        let mut held = Vec::new();
+        while let Ok((stream, _)) = listener.accept().await {
+            held.push(stream);
+        }
+    });
+    url
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_server_that_never_answers_ends_at_the_request_timeout() {
+    let url = silent_server().await;
+    let c = Client::new(
+        &url,
+        Token::new(SECRET).unwrap(),
+        Options {
+            system_proxy: false,
+            request_timeout: std::time::Duration::from_millis(300),
+            ..Options::default()
+        },
+    )
+    .unwrap();
+    let started = std::time::Instant::now();
+    let error = c.me().await.unwrap_err();
+    assert!(
+        started.elapsed() < std::time::Duration::from_secs(5),
+        "{:?}",
+        started.elapsed()
+    );
+    match error {
+        ClientError::Unreachable { class, .. } => {
+            assert_eq!(class, "the server did not answer in time");
+        }
+        other => panic!("{other}"),
+    }
+}
+
+#[test]
+fn the_default_timeouts_are_ten_and_sixty_seconds() {
+    let o = Options::default();
+    assert_eq!(o.connect_timeout, std::time::Duration::from_secs(10));
+    assert_eq!(o.request_timeout, std::time::Duration::from_secs(60));
+    assert!(!o.allow_insecure_http && o.system_proxy);
+}
+
+#[test]
+fn two_spellings_of_a_server_are_one_and_two_servers_are_two() {
+    use aap_platform_client::normalize_server as n;
+    assert_eq!(
+        n("https://API.Example.com:443/"),
+        n("https://api.example.com")
+    );
+    assert_eq!(n("HTTP://127.0.0.1:80"), n("http://127.0.0.1/"));
+    assert_ne!(n("https://api.example.com"), n("https://other.example.com"));
+    assert_ne!(n("https://api.example.com"), n("http://api.example.com"));
+    assert_ne!(
+        n("https://api.example.com"),
+        n("https://api.example.com:8443")
+    );
+    assert_ne!(
+        n("https://api.example.com/a"),
+        n("https://api.example.com/b")
+    );
+    assert_eq!(n("ftp://x"), None);
+    assert_eq!(n("not an address"), None);
+}
+
+#[test]
+fn clean_replaces_controls_and_bidirectional_controls_and_json_escapes_them() {
+    use aap_platform_client::{clean, has_terminal_hazard, json_for_terminal};
+    let hostile = "a\u{1b}[31mb\nc\u{202e}d\u{2066}e\u{200f}f\u{061c}g\u{85}h\u{7f}i";
+    let cleaned = clean(hostile);
+    assert!(
+        !has_terminal_hazard(&cleaned) && !cleaned.contains('\n'),
+        "{cleaned:?}"
+    );
+    assert_eq!(cleaned.chars().count(), hostile.chars().count());
+    assert!(has_terminal_hazard(hostile));
+    assert!(!has_terminal_hazard("two lines\nand\ta tab"));
+    assert!(has_terminal_hazard("cr\r"));
+
+    let value = json!({ "title": hostile, "list": [hostile], hostile: 1 });
+    let printed = json_for_terminal(&value);
+    assert!(
+        !printed
+            .chars()
+            .any(|c| c != '\n' && (c.is_control() || ('\u{202a}'..='\u{202e}').contains(&c))),
+        "{printed:?}"
+    );
+    assert!(!printed.contains('\u{2066}') && !printed.contains('\u{061c}'));
+    // The same JSON value.
+    assert_eq!(serde_json::from_str::<Value>(&printed).unwrap(), value);
 }

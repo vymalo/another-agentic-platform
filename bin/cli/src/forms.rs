@@ -6,13 +6,14 @@
 //! `load` of the model and tool server forms say whether a form holds all of it. **An object a form cannot say is refused with one
 //! line per field**, as the dashboard refuses it (`yaml-only`), never sent: sending its form would drop the rest.
 //!
-//! What the API would drop silently is refused too: a label other than the dashboard's, an annotation that is not the platform's,
-//! a member of `metadata` the API does not write.
+//! What the API would drop silently is refused too: a label other than the dashboard's, **any** annotation (the API writes none),
+//! a member of `metadata` the API does not write. `aapctl export` leaves out exactly what `apply` refuses ([`strip_what_apply_refuses`]),
+//! so that an export is read back unchanged.
 
 use std::collections::BTreeMap;
 
 use aap_forms::{AgentKind, ModelEndpointForm, Representation, ToolServerForm, load_agent};
-use aap_platform_client::Collection;
+use aap_platform_client::{Collection, clean};
 use aap_ports::{
     Agent, Kind, MANAGED_BY_DASHBOARD, MANAGED_BY_LABEL, ResourceVersion, Stored, config_name,
 };
@@ -21,8 +22,38 @@ use serde_json::Value;
 use crate::failure::Failure;
 use crate::load::Object;
 
-/// The prefix of the annotations the platform itself writes: the one kind of annotation a file may carry (an export keeps them).
-const PLATFORM_PREFIX: &str = "agents.vymalo.com/";
+/// Whether the API writes this label: the dashboard's own, and no other. What it does not write it would drop from the object.
+fn label_is_written(key: &str, value: Option<&str>) -> bool {
+    key == MANAGED_BY_LABEL && value == Some(MANAGED_BY_DASHBOARD)
+}
+
+/// The labels and annotations a document of an export holds that `apply` would refuse (the API writes the dashboard's label and no
+/// annotation), taken out of it; their keys, never their values, are returned. For `export`.
+pub fn strip_what_apply_refuses(doc: &mut Value) -> Vec<String> {
+    let mut removed = Vec::new();
+    let Some(meta) = doc.get_mut("metadata").and_then(Value::as_object_mut) else {
+        return removed;
+    };
+    if let Some(labels) = meta.get_mut("labels").and_then(Value::as_object_mut) {
+        let drop: Vec<String> = labels
+            .iter()
+            .filter(|(k, v)| !label_is_written(k, v.as_str()))
+            .map(|(k, _)| k.clone())
+            .collect();
+        for key in drop {
+            labels.remove(&key);
+            removed.push(format!("label {key}"));
+        }
+        if labels.is_empty() {
+            meta.remove("labels");
+        }
+    }
+    if let Some(annotations) = meta.get("annotations").and_then(Value::as_object) {
+        removed.extend(annotations.keys().map(|k| format!("annotation {k}")));
+        meta.remove("annotations");
+    }
+    removed
+}
 
 /// What `apply` writes, in the order it writes: what is named comes before what names it.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
@@ -64,6 +95,17 @@ impl Resource {
     }
 }
 
+/// The namespace one document of a file says.
+#[derive(Clone, Debug)]
+pub struct DocNamespace {
+    /// `AgentConfig/chat`.
+    pub document: String,
+    /// `metadata.namespace`.
+    pub namespace: String,
+    /// The file it came from.
+    pub file: String,
+}
+
 /// One thing to apply: a form, and for an agent the deployment's part its objects hold.
 #[derive(Clone, Debug)]
 pub struct Item {
@@ -71,10 +113,8 @@ pub struct Item {
     pub resource: Resource,
     /// Its name.
     pub name: String,
-    /// The file it came from.
-    pub file: String,
-    /// `metadata.namespace`, if the file says.
-    pub namespace: Option<String>,
+    /// The `metadata.namespace` of each document that says one (an agent has two documents). Each must be the API's.
+    pub namespaces: Vec<DocNamespace>,
     /// The form, as the API's body.
     pub form: Value,
     /// An agent's deployment part, as the API's detail says it. `None` for a model or a tool server.
@@ -129,25 +169,25 @@ fn dropped_metadata(object: &Object) -> Vec<String> {
             "name" | "namespace" => {}
             "labels" => {
                 for (label, v) in value.as_object().into_iter().flatten() {
-                    let dashboard = label == MANAGED_BY_LABEL && v.as_str() == Some(MANAGED_BY_DASHBOARD);
-                    if !dashboard {
+                    if !label_is_written(label, v.as_str()) {
                         found.push(format!(
-                            "metadata.labels: label {label} would be dropped: the API writes only {MANAGED_BY_LABEL}: {MANAGED_BY_DASHBOARD}; remove it"
+                            "metadata.labels: label {} would be dropped: the API writes only {MANAGED_BY_LABEL}: {MANAGED_BY_DASHBOARD}; remove it",
+                            clean(label)
                         ));
                     }
                 }
             }
             "annotations" => {
                 for (annotation, _) in value.as_object().into_iter().flatten() {
-                    if !annotation.starts_with(PLATFORM_PREFIX) {
-                        found.push(format!(
-                            "metadata.annotations: annotation {annotation} would be dropped: the API writes none; remove it"
-                        ));
-                    }
+                    found.push(format!(
+                        "metadata.annotations: annotation {} would be dropped: the API writes none; remove it",
+                        clean(annotation)
+                    ));
                 }
             }
             other => found.push(format!(
-                "metadata.{other}: would be dropped: the API writes only the name, the namespace and its own label; remove it"
+                "metadata.{}: would be dropped: the API writes only the name, the namespace and its own label; remove it",
+                clean(other)
             )),
         }
     }
@@ -178,7 +218,8 @@ pub fn prepare(objects: &[Object]) -> Result<Vec<Item>, Failure> {
     let mut refusals: Vec<Failure> = Vec::new();
 
     let configs: Vec<&Object> = objects.iter().filter(|o| o.kind == "AgentConfig").collect();
-    let mut used = vec![false; configs.len()];
+    // The service that named each config: a config is one agent's.
+    let mut used: Vec<Option<String>> = vec![None; configs.len()];
 
     for object in objects {
         let (resource, kind) = match object.kind {
@@ -191,6 +232,7 @@ pub fn prepare(objects: &[Object]) -> Result<Vec<Item>, Failure> {
         let mut here: Vec<String> = dropped_metadata(object);
         let service = stored(object, kind);
 
+        let mut paired: Option<&Object> = None;
         let (form, deployment, agent_kind) = match resource {
             Resource::Model | Resource::ToolServer => {
                 let (representation, reasons) = if resource == Resource::Model {
@@ -221,23 +263,51 @@ pub fn prepare(objects: &[Object]) -> Result<Vec<Item>, Failure> {
             }
             Resource::Agent => {
                 let wanted = config_name(&service.spec).map(str::to_owned);
-                let found = wanted.as_deref().and_then(|w| {
-                    configs.iter().enumerate().find(|(_, c)| {
-                        c.name == w
-                            && (c.namespace == object.namespace
-                                || c.namespace.is_none()
-                                || object.namespace.is_none())
+                let named: Vec<(usize, &&Object)> = wanted
+                    .as_deref()
+                    .map(|w| {
+                        configs
+                            .iter()
+                            .enumerate()
+                            .filter(|(_, c)| c.name == w)
+                            .collect()
                     })
-                });
-                let Some((index, config)) = found else {
+                    .unwrap_or_default();
+                // The same namespace first; a document that says none is in the API's, and is checked against it later.
+                let found = named
+                    .iter()
+                    .find(|(_, c)| c.namespace == object.namespace)
+                    .or_else(|| {
+                        named
+                            .iter()
+                            .find(|(_, c)| c.namespace.is_none() || object.namespace.is_none())
+                    });
+                let Some(&(index, config)) = found else {
+                    if let Some((_, other)) = named.first() {
+                        return Err(Failure::usage(format!(
+                            "{label}: its AgentService is in the namespace {:?} and its AgentConfig {:?} in {:?}: an agent's two objects are in one namespace ({})",
+                            object.namespace.as_deref().map(clean).unwrap_or_default(),
+                            clean(&other.name),
+                            other.namespace.as_deref().map(clean).unwrap_or_default(),
+                            object.file
+                        )));
+                    }
                     return Err(Failure::usage(format!(
                         "{label}: names the AgentConfig {:?}, which is not among the documents ({})",
                         wanted.unwrap_or_default(),
                         object.file
                     )));
                 };
-                used[index] = true;
+                if let Some(first) = &used[index] {
+                    return Err(Failure::usage(format!(
+                        "{label} and {first} both name the AgentConfig {:?}: a config is one agent's ({})",
+                        clean(&config.name),
+                        object.file
+                    )));
+                }
+                used[index] = Some(label.clone());
                 here.extend(dropped_metadata(config));
+                paired = Some(*config);
                 let agent = Agent {
                     service: service.clone(),
                     config: Some(stored(config, Kind::AgentConfig)),
@@ -259,21 +329,36 @@ pub fn prepare(objects: &[Object]) -> Result<Vec<Item>, Failure> {
             }
         };
         if !here.is_empty() {
-            let mut failure = Failure::new(
-                1,
-                format!("{label}: metadata the API would drop ({})", object.file),
-            );
+            // A usage error, not a refusal of content: the file says something the API has no place for.
+            let mut failure = Failure::usage(format!(
+                "{label}: metadata the API would drop ({})",
+                object.file
+            ));
             for line in here {
                 failure = failure.also(line);
             }
             refusals.push(failure);
         }
         if let Some(form) = form {
+            let mut namespaces = Vec::new();
+            if let Some(namespace) = &object.namespace {
+                namespaces.push(DocNamespace {
+                    document: format!("{}/{}", object.kind, object.name),
+                    namespace: namespace.clone(),
+                    file: object.file.clone(),
+                });
+            }
+            if let Some(config) = paired.filter(|c| c.namespace.is_some()) {
+                namespaces.push(DocNamespace {
+                    document: format!("AgentConfig/{}", config.name),
+                    namespace: config.namespace.clone().unwrap_or_default(),
+                    file: config.file.clone(),
+                });
+            }
             items.push(Item {
                 resource,
                 name: object.name.clone(),
-                file: object.file.clone(),
-                namespace: object.namespace.clone(),
+                namespaces,
                 form,
                 deployment,
                 agent_kind,
@@ -281,7 +366,7 @@ pub fn prepare(objects: &[Object]) -> Result<Vec<Item>, Failure> {
         }
     }
     for (config, used) in configs.iter().zip(&used) {
-        if !used {
+        if used.is_none() {
             return Err(Failure::usage(format!(
                 "AgentConfig/{}: no AgentService among the documents names it ({}); an agent is a service and its config",
                 config.name, config.file

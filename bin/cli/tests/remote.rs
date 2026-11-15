@@ -24,8 +24,8 @@ fn client(api: &Api) -> Client {
         &api.url,
         Token::new(TOKEN).unwrap(),
         Options {
-            allow_insecure_http: false,
             system_proxy: false,
+            ..Options::default()
         },
     )
     .unwrap()
@@ -572,7 +572,8 @@ fn apply_refuses_what_the_api_would_drop_and_what_is_not_paired() {
         &["apply", "-f", path.to_str().unwrap(), "--verbose"],
         Some(TOKEN),
     );
-    assert_eq!(out.code, 1, "{}", out.stderr);
+    // A file that says what the API cannot keep is a usage error (exit 2), not a refusal of content.
+    assert_eq!(out.code, 2, "{}", out.stderr);
     assert!(out.stderr.contains("label team"), "{}", out.stderr);
     assert!(!out.stderr.contains("> "), "{}", out.stderr);
 
@@ -585,7 +586,7 @@ fn apply_refuses_what_the_api_would_drop_and_what_is_not_paired() {
     );
     let path = file(&api.dir, "annotation.yaml", &[model]);
     let out = api.ctl(&["apply", "-f", path.to_str().unwrap()], Some(TOKEN));
-    assert_eq!(out.code, 1, "{}", out.stderr);
+    assert_eq!(out.code, 2, "{}", out.stderr);
     assert!(out.stderr.contains("annotation"), "{}", out.stderr);
 
     let mut model = model_doc("gateway");
@@ -596,7 +597,7 @@ fn apply_refuses_what_the_api_would_drop_and_what_is_not_paired() {
     );
     let path = file(&api.dir, "namespace.yaml", &[model]);
     let out = api.ctl(&["apply", "-f", path.to_str().unwrap()], Some(TOKEN));
-    assert_eq!(out.code, 1, "{}", out.stderr);
+    assert_eq!(out.code, 2, "{}", out.stderr);
     assert!(
         out.stderr.contains("another-namespace") && out.stderr.contains(api::NS),
         "{}",
@@ -946,9 +947,10 @@ fn a_config_file_others_can_read_is_refused() {
         );
         assert!(!out.stderr.contains(TOKEN));
     }
-    // Even with a token in the environment: a file that leaks is refused, not skipped.
+    // With a token in the environment **and** the server on the command line (as `ctl` gives it) the file is not read at all, so it
+    // does not stop the command (`hardening.rs` holds this and the case where the file is needed).
     let out = api.ctl(&["whoami"], Some(TOKEN));
-    assert_eq!(out.code, 2, "{}", out.stderr);
+    assert_eq!(out.code, 0, "{}", out.stderr);
 }
 
 #[test]
@@ -1139,10 +1141,13 @@ fn the_config_file_is_written_whole_or_not_at_all() {
 
 // ------------------------------------------------------------------------------------------ phase 1 is untouched
 
-/// The environment's proxy is honoured, and `NO_PROXY` is how a loopback server is kept out of it: the harness removes the proxy
-/// variables from every child for that reason (a machine that sets `HTTPS_PROXY` must not route the test's own server through it).
+/// The environment's proxy is honoured for a server that is not a plain-http loopback one (the harness removes the proxy variables
+/// from every child so that a machine that sets `HTTPS_PROXY` does not route the test's own server through it), and **never for an
+/// `http://` loopback server**, whatever `NO_PROXY` says: a proxy would be handed the bearer token in the clear for a server on the
+/// same machine (P-031). `hardening.rs` counts the connections a proxy sees; this test shows the request still succeeds with
+/// nothing listening at the proxy it names.
 #[test]
-fn the_proxy_of_the_environment_is_used_unless_no_proxy_names_the_server() {
+fn a_loopback_server_is_reached_even_when_the_proxy_the_environment_names_is_down() {
     let api = Api::start("proxy");
     let run = |no_proxy: Option<&str>| {
         let mut c = std::process::Command::new(env!("CARGO_BIN_EXE_aapctl"));
@@ -1178,14 +1183,10 @@ fn the_proxy_of_the_environment_is_used_unless_no_proxy_names_the_server() {
             String::from_utf8(o.stderr).unwrap(),
         )
     };
-    let (code, err) = run(Some("127.0.0.1"));
-    assert_eq!(code, 0, "{err}");
-    let (code, err) = run(None);
-    assert_eq!(
-        code, 5,
-        "reqwest did not use the proxy for a loopback address: {err}"
-    );
-    assert!(err.contains("cannot reach"), "{err}");
+    for no_proxy in [Some("127.0.0.1"), None] {
+        let (code, err) = run(no_proxy);
+        assert_eq!(code, 0, "{no_proxy:?}: {err}");
+    }
 }
 
 #[test]

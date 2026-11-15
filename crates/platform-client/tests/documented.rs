@@ -11,13 +11,30 @@ fn document() -> Value {
     .unwrap()
 }
 
+/// The headers the document says an operation takes, each parameter resolved (`$ref` into `components.parameters`).
+fn header_parameters(doc: &Value, operation: &Value) -> Vec<String> {
+    operation["parameters"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter_map(|p| {
+            let resolved = match p.get("$ref").and_then(Value::as_str) {
+                Some(r) => {
+                    let name = r.strip_prefix("#/components/parameters/").unwrap();
+                    &doc["components"]["parameters"][name]
+                }
+                None => p,
+            };
+            (resolved["in"] == "header")
+                .then(|| resolved["name"].as_str().unwrap().to_ascii_lowercase())
+        })
+        .collect()
+}
+
 #[test]
 fn client_calls_are_documented() {
     let doc = document();
-    let ops = Op::all();
-    // Three collections of four calls, and the three that stand alone.
-    assert_eq!(ops.len(), 15, "a call was added to Op without a line here");
-    for op in ops {
+    for op in Op::all() {
         let template = op.template();
         let operation = &doc["paths"][template.as_str()][op.method().to_ascii_lowercase()];
         assert!(
@@ -34,14 +51,20 @@ fn client_calls_are_documented() {
                 responses.keys().collect::<Vec<_>>()
             );
         }
-        // A write is conditional: the client branches on 412 and 428 and sends the headers, so the document says it takes them.
-        if op.method() != "GET" {
-            let params = operation["parameters"].to_string();
-            assert!(
-                params.contains("IfMatch") || params.contains("IfNoneMatch"),
-                "{} {template} does not say it takes a precondition",
-                op.method()
-            );
+        // A write is conditional: the client sends these headers and branches on 412 and 428, so the document must say **this
+        // operation** takes them (a `put` both, a `delete` the one that replaces).
+        let headers = header_parameters(&doc, operation);
+        let takes = |h: &str| headers.iter().any(|x| x == h);
+        match op.method() {
+            "PUT" => assert!(
+                takes("if-match") && takes("if-none-match"),
+                "PUT {template} takes {headers:?}: a create sends If-None-Match and a replace If-Match"
+            ),
+            "DELETE" => assert!(
+                takes("if-match"),
+                "DELETE {template} takes {headers:?}, not If-Match"
+            ),
+            _ => {}
         }
     }
 }

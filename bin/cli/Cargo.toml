@@ -27,6 +27,7 @@ aap-ports.workspace = true
 aap-runtime-kubernetes.workspace = true
 base64.workspace = true
 clap.workspace = true
+rustix.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 serde_yaml.workspace = true

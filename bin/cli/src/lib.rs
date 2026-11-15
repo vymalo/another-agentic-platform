@@ -20,6 +20,7 @@ mod failure;
 mod forms;
 mod load;
 mod remote;
+mod skew;
 
 use std::ffi::OsString;
 use std::io::{Read, Write};
@@ -65,8 +66,9 @@ enum Command {
     /// tag of one object. Exit 0, 4 not allowed, 5 unreachable.
     Get(remote::GetArgs),
     /// Create or replace what the files hold through the Platform API: models, then tool servers, then agents. Reads each object
-    /// first, writes nothing when it is unchanged, refuses an object no form says or a deployment part that differs, and retries
-    /// only when the operator's status write moved the tag. Exit 0, 1 refused, 3 stale or conflict, 4 not allowed.
+    /// first, writes nothing when it is unchanged, refuses an object no form says, a deployment part that differs, a label or an
+    /// annotation the API would not write and a namespace that is not the API's, and retries only when the operator's status write
+    /// moved the tag. The first refusal stops it. Exit 0, 1 refused, 2 the files, 3 stale or conflict, 4 not allowed, 5 the server.
     Apply(remote::ApplyArgs),
     /// Delete an agent, a model or a tool server through the Platform API (`--wait` until an agent is gone).
     Delete(remote::DeleteArgs),
