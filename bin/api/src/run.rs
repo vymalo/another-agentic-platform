@@ -14,6 +14,7 @@ use aap_forms::Defaults;
 use aap_objects_kubernetes::KubernetesObjects;
 use aap_platform_api::{ApiMetrics, ApiState, CorsOrigins, router};
 use aap_ports::{AgentObjects, AuthError, Authenticator};
+use aap_trace::Tracer;
 use anyhow::{Context, Result};
 use axum::Router;
 use clap::Parser;
@@ -56,6 +57,11 @@ pub struct Args {
 /// How long the requests in flight have to finish after a stop is asked for, kept under Kubernetes' 30 seconds.
 const DRAIN: Duration = Duration::from_secs(25);
 
+/// How long the spans still queued have to reach the collector once the API has drained (K5). It runs at the same time as the
+/// 2 s stop of the health and metrics servers, so the whole stop is at most `DRAIN` plus this: the chart's floor for the grace
+/// period (the preStop sleep plus 32 s) is not moved.
+const FLUSH: Duration = Duration::from_secs(3);
+
 /// The router over any two ports, counting into `metrics`: the configuration of the deployment, and nothing of how the ports
 /// are made.
 ///
@@ -68,6 +74,7 @@ pub fn build_router<O, A>(
     defaults: Defaults,
     cors: CorsOrigins,
     metrics: Arc<ApiMetrics>,
+    tracer: Tracer,
 ) -> Result<Router>
 where
     O: AgentObjects + 'static,
@@ -77,6 +84,7 @@ where
         .context("the deployment's defaults")?
         .with_cors(cors)
         .with_metrics(metrics)
+        .with_tracer(tracer)
         .with_version(env!("CARGO_PKG_VERSION"));
     Ok(router(state))
 }
@@ -157,6 +165,7 @@ async fn serve_both(
     health: tokio::net::TcpListener,
     check: Check,
     metrics: (tokio::net::TcpListener, Arc<ApiMetrics>),
+    tracer: Tracer,
     stop: impl Future<Output = ()>,
 ) -> Result<()> {
     let draining = Arc::new(AtomicBool::new(false));
@@ -176,7 +185,7 @@ async fn serve_both(
     let (metrics_listener, counters) = metrics;
     let metrics_server = tokio::spawn(serve::serve(
         metrics_listener,
-        serve::metrics(counters),
+        serve::metrics_with_traces(counters, aap_trace::TraceMetrics::of(&tracer)),
         signalled(metrics_stopped),
     ));
 
@@ -189,6 +198,7 @@ async fn serve_both(
             stop_api,
             stop_health,
             stop_metrics,
+            tracer,
         },
         stop,
     )
@@ -206,6 +216,7 @@ struct Running {
     stop_api: watch::Sender<bool>,
     stop_health: watch::Sender<bool>,
     stop_metrics: watch::Sender<bool>,
+    tracer: Tracer,
 }
 
 /// Wait for the stop or for a server to end, then drain. **A handle that has completed is never polled again** (a second poll
@@ -229,10 +240,23 @@ async fn supervise(mut s: Running, stop: impl Future<Output = ()>) -> Result<()>
     }
     let _ = s.stop_health.send(true);
     let _ = s.stop_metrics.send(true);
-    for server in [&mut s.health, &mut s.metrics] {
-        if !server.is_finished() {
-            let _ = tokio::time::timeout(Duration::from_secs(2), server).await;
+    // After the drain, so the spans of the last requests are in the queue; at the same time as the stop of the two small
+    // servers. A flush that does not finish is given up on at its deadline, never waited for.
+    let stopping = async {
+        for server in [&mut s.health, &mut s.metrics] {
+            if !server.is_finished() {
+                let _ = tokio::time::timeout(Duration::from_secs(2), server).await;
+            }
         }
+    };
+    let (_, spans) = tokio::join!(stopping, s.tracer.shutdown(FLUSH));
+    if s.tracer.enabled() {
+        tracing::info!(
+            exported = spans.exported,
+            dropped =
+                spans.dropped_queue_full + spans.dropped_export_failed + spans.dropped_rejected,
+            "trace spans flushed"
+        );
     }
     outcome
 }
@@ -255,6 +279,11 @@ pub async fn run(args: Args) -> Result<()> {
         cors,
         defaults,
     } = config::load(&args.config)?;
+    // Before the cluster and the issuer. A tracing setting that is refused never stops the API (tracing is not a security
+    // control, and platforms inject OTEL_* variables of their own): one warning, by variable, and tracing is off.
+    let started = aap_trace_otlp::start("aap-api", env!("CARGO_PKG_VERSION"));
+    started.warn();
+    let tracer = started.tracer;
     let listen = args.listen.unwrap_or(listen);
     let health_listen = args.health_addr.unwrap_or(health_listen);
     let metrics_listen = args.metrics_addr.unwrap_or(metrics_listen);
@@ -280,7 +309,14 @@ pub async fn run(args: Args) -> Result<()> {
         })
     };
     let counters = Arc::new(ApiMetrics::new());
-    let router = build_router(objects, auth, defaults, cors, counters.clone())?;
+    let router = build_router(
+        objects,
+        auth,
+        defaults,
+        cors,
+        counters.clone(),
+        tracer.clone(),
+    )?;
 
     // Bound before anything is served: a port in use is found at once.
     let api = tokio::net::TcpListener::bind(listen)
@@ -298,6 +334,7 @@ pub async fn run(args: Args) -> Result<()> {
         health,
         check,
         (metrics, counters),
+        tracer,
         termination(),
     )
     .await
@@ -352,8 +389,15 @@ mod tests {
         let objects = MemoryObjects::in_namespace(&s.defaults.namespace);
         let auth = MemoryAuthenticator::new().with_token("t", "alice", ["platform:agents.read"]);
         let counters = Arc::new(ApiMetrics::new());
-        let router =
-            build_router(objects.clone(), auth, s.defaults, s.cors, counters.clone()).unwrap();
+        let router = build_router(
+            objects.clone(),
+            auth,
+            s.defaults,
+            s.cors,
+            counters.clone(),
+            Tracer::off(),
+        )
+        .unwrap();
         let check = readiness(
             || async { Ok::<(), std::convert::Infallible>(()) },
             || async { Ok(()) },
@@ -369,6 +413,7 @@ mod tests {
             health,
             check,
             (metrics, counters),
+            Tracer::off(),
             signalled(stopped),
         ));
 
@@ -396,6 +441,10 @@ mod tests {
             "{text}"
         );
         assert!(!text.contains("\"t\""), "no token: {text}");
+        assert!(
+            !text.contains("aap_trace_"),
+            "tracing is off: its series are not there: {text}"
+        );
         assert_eq!(http(api_addr, "/metrics", None).await.0, 404);
         assert_eq!(http(health_addr, "/metrics", None).await.0, 404);
         assert_eq!(http(health_addr, "/healthz", None).await.0, 200);
@@ -427,6 +476,7 @@ mod tests {
             s.defaults,
             s.cors,
             counters.clone(),
+            Tracer::off(),
         )
         .unwrap();
         let (api, api_addr) = bound().await;
@@ -440,6 +490,7 @@ mod tests {
             health,
             check,
             (metrics, counters),
+            Tracer::off(),
             signalled(stopped),
         ));
         assert_eq!(http(api_addr, "/v1/me", Some(&token)).await.0, 200);
@@ -471,6 +522,7 @@ mod tests {
             stop_api: watch::channel(false).0,
             stop_health: watch::channel(false).0,
             stop_metrics: watch::channel(false).0,
+            tracer: Tracer::off(),
         }
     }
 
@@ -498,6 +550,136 @@ mod tests {
                 "{text}"
             );
         }
+    }
+
+    /// A tracer that keeps its spans in a `MemoryExporter`, and the exporter.
+    fn memory_tracer(
+        mode: aap_trace::testkit::Mode,
+    ) -> (Tracer, aap_trace::testkit::MemoryExporter) {
+        let exporter = aap_trace::testkit::MemoryExporter::new(mode);
+        let tracer = aap_trace::Pipeline::start(
+            exporter.clone(),
+            aap_trace::Limits::default(),
+            aap_trace::Resource::new("aap-api", "0"),
+            aap_trace::Sampler::AlwaysOn,
+        );
+        (tracer, exporter)
+    }
+
+    fn root_span(tracer: &Tracer, name: &'static str) -> aap_trace::Span {
+        tracer.root(
+            aap_trace::SpanName::fixed(name).unwrap(),
+            aap_trace::SpanKind::Server,
+        )
+    }
+
+    /// The spans of the last requests are flushed **after** the API has drained, so a span made while it drains is exported.
+    #[tokio::test(start_paused = true)]
+    async fn the_flush_comes_after_the_drain() {
+        let (tracer, exporter) = memory_tracer(aap_trace::testkit::Mode::Keep);
+        root_span(&tracer, "before the stop").end();
+        let (stop_api, mut api_stopped) = watch::channel(false);
+        let in_flight = tracer.clone();
+        let api = tokio::spawn(async move {
+            let _ = api_stopped.wait_for(|stop| *stop).await;
+            // The request that was in flight when the stop came ends during the drain.
+            tokio::time::sleep(Duration::from_secs(10)).await;
+            root_span(&in_flight, "during the drain").end();
+            Ok(())
+        });
+        let pending = || tokio::spawn(std::future::pending::<Result<()>>());
+        let mut s = running(api, pending(), pending());
+        s.stop_api = stop_api;
+        s.tracer = tracer;
+        supervise(s, async {}).await.unwrap();
+        let names: Vec<String> = exporter
+            .spans()
+            .iter()
+            .map(|s| s.name.as_str().to_owned())
+            .collect();
+        assert_eq!(names, ["before the stop", "during the drain"]);
+    }
+
+    /// A collector that never answers does not hold the stop for more than the flush's deadline.
+    #[tokio::test(start_paused = true)]
+    async fn a_flush_that_hangs_is_given_up_on_at_its_deadline() {
+        let (tracer, _exporter) = memory_tracer(aap_trace::testkit::Mode::Hang);
+        root_span(&tracer, "never delivered").end();
+        // Servers that stop when they are told to, as the real ones do: only the flush is slow.
+        let stoppable = || {
+            let (tx, mut rx) = watch::channel(false);
+            let server = tokio::spawn(async move {
+                let _ = rx.wait_for(|stop| *stop).await;
+                Ok(())
+            });
+            (tx, server)
+        };
+        let ((stop_api, api), (stop_health, health), (stop_metrics, metrics)) =
+            (stoppable(), stoppable(), stoppable());
+        let mut s = running(api, health, metrics);
+        s.stop_api = stop_api;
+        s.stop_health = stop_health;
+        s.stop_metrics = stop_metrics;
+        s.tracer = tracer;
+        let started = tokio::time::Instant::now();
+        supervise(s, async {}).await.unwrap();
+        let took = started.elapsed();
+        assert!(
+            took >= FLUSH && took < FLUSH + Duration::from_secs(1),
+            "{took:?}"
+        );
+    }
+
+    /// The API on a socket with tracing on: a request is a span at the collector with the API's service name, and the two
+    /// series of the pipeline are on `/metrics`.
+    #[tokio::test]
+    async fn the_api_on_a_socket_sends_its_spans_to_a_collector() {
+        let collector = aap_trace_otlp::testkit::TestCollector::start().await;
+        let endpoint = collector.endpoint();
+        let tracer = aap_trace_otlp::tracer_with("aap-api", "0.1.0", move |k| {
+            (k == "OTEL_EXPORTER_OTLP_TRACES_ENDPOINT").then(|| endpoint.clone())
+        })
+        .unwrap();
+        let s = settings();
+        let objects = MemoryObjects::in_namespace(&s.defaults.namespace);
+        let auth = MemoryAuthenticator::new().with_token("t", "alice", ["platform:agents.read"]);
+        let counters = Arc::new(ApiMetrics::new());
+        let router = build_router(
+            objects,
+            auth,
+            s.defaults,
+            s.cors,
+            counters.clone(),
+            tracer.clone(),
+        )
+        .unwrap();
+        let (api, api_addr) = bound().await;
+        let (health, _) = bound().await;
+        let (metrics, metrics_addr) = bound().await;
+        let (stop, stopped) = watch::channel(false);
+        let check: Check = Arc::new(|| Box::pin(async { Ok(()) }));
+        let running = tokio::spawn(serve_both(
+            api,
+            router,
+            health,
+            check,
+            (metrics, counters),
+            tracer,
+            signalled(stopped),
+        ));
+        assert_eq!(http(api_addr, "/v1/me", Some("t")).await.0, 200);
+        let (_, text) = http(metrics_addr, "/metrics", None).await;
+        assert!(
+            text.contains("aap_trace_spans_exported_total"),
+            "the pipeline's series are there when tracing is on: {text}"
+        );
+        stop.send(true).unwrap();
+        running.await.unwrap().unwrap();
+        assert!(collector.service_names().iter().all(|n| n == "aap-api"));
+        assert!(
+            collector.spans().iter().any(|s| s["name"] == "GET /v1/me"),
+            "the span of the request reached the collector at the flush"
+        );
     }
 
     #[derive(Debug)]

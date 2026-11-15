@@ -234,6 +234,19 @@ and paths clients send; `method` is `GET`, `PUT`, `DELETE`, `POST`, `HEAD`, `OPT
 matched, so a new reason does not compile until it has a word) or `unavailable` (the keys could not be fetched). **No token, header, body, path, user id or
 secret key name is a label or a value.** Two `Authorization` headers are a `400` of the request and not an authentication failure: counted as a request only.
 
+## Traces (K5)
+
+`ApiState::with_tracer(Tracer)` (off by default: then no span is made and no answer changes) puts a SERVER span on every
+request, outside the metrics and the guard: named `{METHOD} {template}` (the table's own template), `{METHOD}` for a request
+that matched nothing and `HTTP` for a method outside the closed set. **The raw path is never read.** It carries
+`http.request.method`, `http.route`, `http.response.status_code`, `aap.auth.result`, `aap.problem.type` (the slug of a
+problem answer, read from a response extension) and, on a `403`, `aap.permission.missing` (set by `Problem::forbidden`);
+a `5xx` fails the span. The ports are decorated inside the crate, so no handler changed: `authenticate` and
+`objects.<method>` (eleven) are children, with `error.type` a slug of the closed error and never its text. No subject, no
+agent name, no body, header, query or token is in any span (a test asks every route with sentinels in each and reads
+`assert_clean`), and no inbound `traceparent` is read: every request is a root. The attribute list is
+[`aap-trace`](../trace/README.md)'s; §48a has the rest.
+
 ## CORS
 
 `CorsOrigins::new` takes **exact origins** as a browser writes them (`scheme://host[:port]`, lower case, no path, no trailing slash) and refuses `*`,
@@ -251,6 +264,7 @@ entry would match nothing. Every answer of the router, a preflight and a refusal
 | File | What |
 |---|---|
 | `src/*` (unit, 18) | the table has no route twice, and gives the `Allow` of a template; the ETag header round trip for any token, and an escape that is a percent and two hexadecimal digits (`%+f` is none); `If-Match` in every form; a media type; a body error that quotes no value; origins, and the default port; the bearer scheme; **every kind of stray route (a handler, a service, a nested router and service, a merged router, a stray method, a fallback) is refused or `404`/`405`/`500` and never runs**; every `ObjectsError` has the status of the ports table and leaks no source |
+| `tests/spans.rs` (K5) | every route is a clean span named by its template (a sentinel name in `{name}`); an agent written, read, replaced, asked about and deleted under a sentinel name is in no span, nor is the `NotFound` of a second delete; a store or an issuer that is down fails the root and the child with a class; `authenticate` says `ok`; `src/traced.rs` drives every `ObjectsError` (a `Conflict`'s text, a name) through the decorator and reads no span for it |
 | `tests/openapi.rs` (10) | **K8**: the document equals what the code generates, lists every route and no other with the table's permission, resolves every `$ref`, says what is deliberately absent; `GET /v1/openapi.json` serves it (`401`, `403`, `200`); every real answer validates against its schema; every documented status is answered; every example parses (the form types) and validates; the validator can fail; an event message is clean in the answer |
 | `tests/matrix.rs` (12) | **the route-by-permission matrix**: a second, hand-written copy of §60a's table must equal `ROUTES`; every route and method with no token (`401` + challenge), a bad token, every permission but the needed one (`403` naming that one only), no permission, and the needed one; `HEAD`, `405`, `404`; the source has `.route(` once, in the loop over the table, and no other way to add a route |
 | `tests/agents.rs` (34) | create, read, list, YAML; the ETag round trip, `412`, `428`, a weak tag; `409` for exists, GitOps, referenced (the agents named only to a reader of agents), being deleted (a second `DELETE` is `202` again) and YAML only; `422` with form fields; `secrets.pick`; `400` (two `Content-Type`, `If-None-Match` on a `DELETE`), `415`, `413` (by length, by one chunk and **across chunks**, to the byte); `503` from the objects and from the keys, with `Retry-After`; a save never moves the deployment part |

@@ -14,6 +14,8 @@ members = [
     "crates/controller",
     "crates/platform-api",
     "crates/platform-client",
+    "crates/trace",
+    "crates/trace-otlp",
     "bin/operator",
     "bin/api",
     "bin/cli",
@@ -42,6 +44,8 @@ aap-registry = { path = "crates/registry" }
 aap-controller = { path = "crates/controller" }
 aap-platform-api = { path = "crates/platform-api" }
 aap-platform-client = { path = "crates/platform-client" }
+aap-trace = { path = "crates/trace" }
+aap-trace-otlp = { path = "crates/trace-otlp" }
 anyhow = "1"
 aws-lc-rs = "1.15"
 axum = { version = "0.8", default-features = false, features = ["http1", "tokio"] }

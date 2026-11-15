@@ -5,9 +5,10 @@
 #   sh deploy/operator/tests/render-check.sh                    (from the repository root)
 #   UPDATE_GOLDEN=1 sh deploy/operator/tests/render-check.sh    rewrites tests/golden/*.yaml, for a deliberate change
 #
-# Five renders are golden: the values of the Application on netcup (examples/netcup.values.yaml), the other shape those
-# values do not make (tests/secret.values.yaml), the defaults, the Platform API component on (tests/api.values.yaml) and run pods on
-# (tests/runpods.values.yaml; the first four have both off, and the first three are equal to what they were before either existed).
+# Six renders are golden: the values of the Application on netcup (examples/netcup.values.yaml), the other shape those
+# values do not make (tests/secret.values.yaml), the defaults, the Platform API component on (tests/api.values.yaml), run pods on
+# (tests/runpods.values.yaml) and traces of both on (tests/otel.values.yaml; the others have all three off, and the first three are
+# equal to what they were before any existed).
 # Also checked: deploy/operator-crds against deploy/crds, and the API's Role against crates/objects-kubernetes/tests/rbac.yaml, the
 # Role that crate is tested under.
 set -eu
@@ -86,6 +87,9 @@ api_rules_are() { [ "$(api_role_rules)" = "$1" ]; }
 # The n-th egress rule (from 1) of the API's NetworkPolicy, and the securityContext of the pod (six spaces: spec.template.spec) and of the
 # container (ten spaces) of its Deployment, each alone: a pattern that must hold for the pod is not satisfied by the container's block.
 api_egress_rule() { doc NetworkPolicy aap-operator-api | awk -v n="$1" '/^  egress:$/ { e = 1; next } e && /^    - / { i++ } e && i == n { print }'; }
+# The same for the operator's policy (K5: one rule off, three with tracing on).
+op_egress_rules() { doc NetworkPolicy aap-operator | awk '/^  egress:$/ { e = 1; next } e && /^    - / { n++ } END { print n + 0 }'; }
+op_egress_rule() { doc NetworkPolicy aap-operator | awk -v n="$1" '/^  egress:$/ { e = 1; next } e && /^    - / { i++ } e && i == n { print }'; }
 api_pod_security() { doc Deployment aap-operator-api | awk '/^      securityContext:$/ { s = 1; print; next } s && /^        / { print; next } s { exit }'; }
 api_container_security() { doc Deployment aap-operator-api | awk '/^          securityContext:$/ { s = 1; print; next } s && /^            / { print; next } s { exit }'; }
 all_of() { b=$1; shift; for p in "$@"; do printf '%s\n' "$b" | grep -Eq -- "$p" || return 1; done; }
@@ -754,7 +758,7 @@ check "the secretref shape renders (a Secret per agent, no policy, no Ingress)" 
 api_shapes_are_written() {
   d=$(mktemp -d) || return 1
   sh "$here/api-shapes.sh" "$d" > /dev/null 2>&1 \
-    && [ "$(find "$d" -type f | wc -l)" -eq 7 ] && [ -s "$d/golden.yaml" ] && [ -s "$d/secretref.yaml" ] && [ -s "$d/minimal.yaml" ] && [ -s "$d/runpods.yaml" ] && [ -s "$d/metrics.yaml" ] \
+    && [ "$(find "$d" -type f | wc -l)" -eq 8 ] && [ -s "$d/golden.yaml" ] && [ -s "$d/secretref.yaml" ] && [ -s "$d/minimal.yaml" ] && [ -s "$d/runpods.yaml" ] && [ -s "$d/metrics.yaml" ] && [ -s "$d/otel.yaml" ] \
     && grep -q '^  - standard$' "$d/runpods.yaml" && ! grep -q 'runPodSizeClasses' "$d/golden.yaml" \
     && grep -q '^listen: 0.0.0.0:8443$' "$d/full.yaml" && grep -q '^healthListen: 0.0.0.0:9091$' "$d/full.yaml" \
     && grep -q '^listen: 0.0.0.0:8080$' "$d/minimal.yaml" \
@@ -764,7 +768,7 @@ api_shapes_are_written() {
   rm -rf "$d"
   return "$r"
 }
-check "api: api-shapes.sh writes the file of six shapes and one that must be refused (golden, secretref, minimal, full, runpods, metrics; refused/clash), the full one with the ports it sets, run pods alone with size classes, metrics alone with metricsListen" api_shapes_are_written
+check "api: api-shapes.sh writes the file of seven shapes and one that must be refused (golden, secretref, minimal, full, runpods, metrics, otel; refused/clash), the full one with the ports it sets, run pods alone with size classes, metrics alone with metricsListen" api_shapes_are_written
 check "api: the shape that sets every value (tests/api-full.values.yaml) renders" renders_ok -f "$here/api-full.values.yaml"
 
 # ---- The values of the kind end-to-end of the Platform API (D7b2) ------------------------------------------------------------
@@ -823,7 +827,11 @@ chain_render() {
     --set api.config.oidc.issuer=http://172.18.0.1:40000 --set 'api.config.oidc.audiences[0]=aap-e2e-chain' --set api.config.oidc.rolesClaim=agentic_roles \
     --set api.config.defaults.a2aBearer.name=e2e-a2a-bearer --set api.config.defaults.a2aBearer.key=AGENT_REGISTRY_AGENT_TOKEN \
     --set-json "api.config.defaults.allowFrom=[{\"namespaceSelector\":{\"matchLabels\":{\"kubernetes.io/metadata.name\":\"$chain_ns\"}}}]" \
-    --set-json 'api.networkPolicy.issuer.to=[{"ipBlock":{"cidr":"172.18.0.1/32"}}]' --set-json 'api.networkPolicy.issuer.ports=[40000]' > "$out"
+    --set-json 'api.networkPolicy.issuer.to=[{"ipBlock":{"cidr":"172.18.0.1/32"}}]' --set-json 'api.networkPolicy.issuer.ports=[40000]' \
+    --set otel.enabled=true --set "otel.endpoint=http://e2e-otel-collector.$chain_ns.svc:4318/v1/traces" --set 'otel.resourceAttributes.deployment\.environment\.name=e2e' \
+    --set-json 'otel.to=[{"podSelector":{"matchLabels":{"app.kubernetes.io/name":"e2e-otel-collector"}}}]' \
+    --set api.otel.enabled=true --set "api.otel.endpoint=http://e2e-otel-collector.$chain_ns.svc:4318/v1/traces" --set 'api.otel.resourceAttributes.deployment\.environment\.name=e2e' \
+    --set-json 'api.otel.to=[{"podSelector":{"matchLabels":{"app.kubernetes.io/name":"e2e-otel-collector"}}}]' > "$out"
 }
 if ! chain_render 2> "$err"; then echo "FAIL chain: the values of the whole-chain end-to-end do not render: $(head -c 400 "$err")"; fail=1; fi
 check "chain: the values of the whole-chain end-to-end render, with the API on" has_all 'kind: Deployment' 'name: aap-operator-api'
@@ -888,6 +896,46 @@ chain_script() {
     && grep -q '^models_secret=e2e-agent-models$' "$script" && grep -q '^registry_secret=e2e-registry-token$' "$script" && grep -q '^bearer_secret=e2e-a2a-bearer$' "$script"
 }
 check "chain: the script's namespace, label, audience and Secrets are the ones the values and the manifests name" chain_script
+# K5: the traces step of the whole-chain end-to-end. The values it installs (both otel blocks, the collector's pods as the peers) render what the script reads
+# back; the collector's manifest is pinned by tag and digest on one line, in one file, and is the collector the script's steps 6b and 7 read; and the
+# collector's log is in the scan for the secrets and the tokens in step 7.
+chain_otel_values() {
+  dhas Deployment aap-operator 'value: "http://e2e-otel-collector\.aap-e2e-chain\.svc:4318/v1/traces"' 'deployment.environment.name=e2e' \
+    && dhas Deployment aap-operator-api 'value: "http://e2e-otel-collector\.aap-e2e-chain\.svc:4318/v1/traces"' 'deployment.environment.name=e2e' \
+    && all_of "$(op_egress_rule 3)" 'port: 4318' 'app.kubernetes.io/name: e2e-otel-collector' \
+    && all_of "$(api_egress_rule 4)" 'port: 4318' 'app.kubernetes.io/name: e2e-otel-collector'
+}
+check "chain: both services are told to send their traces to e2e-otel-collector (otel.* and api.otel.*), and each policy has an egress rule to its pods on 4318" chain_otel_values
+chain_collector() {
+  manifest="$here/e2e/otel-collector.yaml"
+  [ "$(grep -Ec '^ +image: ghcr\.io/open-telemetry/opentelemetry-collector-releases/opentelemetry-collector:' "$manifest")" -eq 1 ] || return 1
+  grep -Eq '^ +image: ghcr\.io/open-telemetry/opentelemetry-collector-releases/opentelemetry-collector:[0-9]+\.[0-9]+\.[0-9]+@sha256:[0-9a-f]{64}$' "$manifest" || return 1
+  pin_digest=$(sed -n 's/^ *image: ghcr\.io\/open-telemetry\/opentelemetry-collector-releases\/opentelemetry-collector:[^@]*@\(sha256:[0-9a-f]*\)$/\1/p' "$manifest")
+  [ -n "$pin_digest" ] && [ "$(grep -cF "$pin_digest" "$manifest")" -eq 1 ] || return 1
+  [ "$(grep -rlF "$pin_digest" "$chart/.." "$chart/../../.github" | wc -l)" -eq 1 ] || return 1
+  # An OTLP/HTTP receiver on 4318 and the debug exporter in detail: what the script reads. No namespace; the script's label on every object.
+  grep -q '^            endpoint: 0.0.0.0:4318$' "$manifest" && grep -q '^        verbosity: detailed$' "$manifest" \
+    && [ "$(grep -c '^    aap-e2e/made-by: chain-e2e$' "$manifest")" -eq 3 ] && ! grep -q '^  namespace:' "$manifest" \
+    && grep -q '^  name: e2e-otel-collector-config$' "$manifest" || return 1
+  script="$here/e2e/chain-e2e.sh"
+  # shellcheck disable=SC2016 # the patterns are the script's own text, `$work` and `$collector` and all
+  grep -q '^collector=e2e-otel-collector$' "$script" \
+    && [ "$(grep -c '"$work/otel.log" "$work/seen"' "$script")" -eq 2 ] && grep -q '^read_log "\$collector" otel.log ' "$script"
+}
+check "chain: the collector is pinned by tag and digest in otel-collector.yaml, on one line and in no other file of deploy/ or .github/; it receives OTLP/HTTP on 4318 and writes what it gets to its log, which step 7 scans for the secrets and the tokens" chain_collector
+# Step 6b requires the span of the delete (a request for one agent: named by the template, not skipped when absent) and step 7 requires that the
+# collector's log holds no subject of the people the run minted tokens for. The script's own text, as a check can read it without a cluster.
+chain_trace_checks() {
+  script="$here/e2e/chain-e2e.sh"
+  # shellcheck disable=SC2016 # the patterns are the script's own text, `$work` and all
+  grep -qF "'Name +: DELETE /v1/agents/\\{name\\}' 'http\\.route: Str\\(/v1/agents/\\{name\\}\\)'" "$script" \
+    && grep -qF 'die "no span of the delete of one agent is named by its route template' "$script" \
+    && ! grep -qF "grep -Eq 'Name +: GET /v1/agents/' \"\$work/otel.log\" &&" "$script" \
+    && grep -qF "printf '%s\\n' \"\$1\" >> \"\$work/subjects\"" "$script" \
+    && grep -qF 'if grep -qF -f "$work/subjects" "$work/otel.log"; then' "$script" \
+    && grep -qF '[ -s "$work/subjects" ] || die' "$script"
+}
+check "chain: step 6b requires a span named DELETE /v1/agents/{name} (it is no longer skipped when there is none) and step 7 fails if the collector's log holds the subject of a person the run minted a token for" chain_trace_checks
 # The aapctl step of the API's end-to-end (K9b-1, 6b): before the step that reads every answer and log for the tokens and the secret, the token
 # only in the environment of the command (never an argument: `ps` shows it), every byte it says read in that step, the binary built when
 # AAPCTL_BIN is not set, and the workflow's job builds it. The step itself passed in CI (run 43706119020 at 970afa0, verified 2026-11-15).
@@ -1358,6 +1406,213 @@ metrics_values() {
     && dhas ConfigMap aap-operator-api 'metricsListen: 0.0.0.0:9191' && [ -s "$here/schemas/monitoring.coreos.com/servicemonitor_v1.json" ]
 }
 check "tests/metrics.values.yaml (both ServiceMonitors, every metrics value set, the schema vendored for kubeconform) renders what CI validates" metrics_values
+
+# ---- Traces (slice K5) ----------------------------------------------------------------------------------------------------------
+# `otel` (operator) and `api.otel` (API): off by default, and then not a trace of them in any render; on, the OTEL_* variables, a headers
+# file from a Secret volume (never a variable), a CA bundle from a ConfigMap, and egress to the named collector peers and nowhere else.
+otel_gone='OTEL_|AAP_OTEL_|otel-headers|otel-ca|POD_NAMESPACE|port: 4318|/aap/otel'
+otel_off_everywhere() {
+  render || return 1
+  lacks "$otel_gone" || return 1
+  render -f "$chart/examples/netcup.values.yaml" || return 1
+  lacks "$otel_gone" || return 1
+  render -f "$here/secret.values.yaml" || return 1
+  lacks "$otel_gone" || return 1
+  render -f "$here/api.values.yaml" || return 1
+  lacks "$otel_gone" || return 1
+  render -f "$here/runpods.values.yaml" || return 1
+  lacks "$otel_gone"
+}
+check "otel off (the default): not a trace of it in the default, netcup, secret, api and run pods renders (no variable, volume, mount, POD_NAMESPACE or rule on 4318)" otel_off_everywhere
+check "the otel render (tests/otel.values.yaml) equals tests/golden/otel.yaml" golden otel -f "$here/otel.values.yaml"
+
+op_env() { doc Deployment aap-operator; }
+otel_blocks_are_not_crossed() {
+  render -f "$here/otel.values.yaml" || return 1
+  # The operator reads otel.*, the API reads api.otel.*, and neither the other's.
+  dhas Deployment aap-operator 'otel-collector\.observability\.svc:4318/v1/traces' 'OTEL_TRACES_SAMPLER_ARG' '"0.25"' \
+    'deployment.environment.name=prod,k8s.cluster.name=netcup,service.namespace=another-agentic' || return 1
+  dlacks Deployment aap-operator 'otel-gateway|otel-api-|bundle\.pem' || return 1
+  dhas Deployment aap-operator-api 'otel-gateway\.observability\.svc:4319/v1/traces' 'value: "always_on"' 'otel-api-headers' 'otel-api-ca' || return 1
+  dlacks Deployment aap-operator-api 'otel-collector|otel-operator-|OTEL_TRACES_SAMPLER_ARG|k8s.cluster.name' || return 1
+  # Each variable once per pod, and the protocol is the one the exporter speaks.
+  [ "$(op_env | grep -c 'name: OTEL_EXPORTER_OTLP_TRACES_ENDPOINT')" -eq 1 ] && dhas Deployment aap-operator 'OTEL_EXPORTER_OTLP_PROTOCOL' 'value: http/json' \
+    && dhas Deployment aap-operator-api 'value: http/json' || return 1
+  # The operator already had POD_NAME: it is not written twice; the API had none.
+  [ "$(op_env | grep -c 'name: POD_NAME$')" -eq 1 ] && [ "$(doc Deployment aap-operator-api | grep -c 'name: POD_NAME$')" -eq 1 ] \
+    && dhas Deployment aap-operator 'name: POD_NAMESPACE' 'fieldPath: metadata.namespace' \
+    && dhas Deployment aap-operator-api 'name: POD_NAMESPACE' 'fieldPath: metadata.namespace'
+}
+check "otel: the operator's variables are otel.* and the API's are api.otel.*, not crossed; POD_NAME once, POD_NAMESPACE from the downward API" otel_blocks_are_not_crossed
+otel_headers() {
+  render -f "$here/otel.values.yaml" || return 1
+  # A Secret volume at mode 0440, mounted read-only, named by AAP_OTEL_HEADERS_FILE: the headers are a file and never a variable.
+  dhas Deployment aap-operator 'name: AAP_OTEL_HEADERS_FILE' 'value: /var/run/secrets/aap/otel/headers' 'secretName: otel-operator-headers' 'defaultMode: 288' \
+    'key: headers' 'path: headers' 'mountPath: /var/run/secrets/aap/otel' || return 1
+  dhas Deployment aap-operator-api 'secretName: otel-api-headers' 'defaultMode: 288' 'key: token' 'mountPath: /var/run/secrets/aap/otel' || return 1
+  lacks 'OTEL_EXPORTER_OTLP_HEADERS' || return 1
+  lacks 'secretKeyRef' || return 1
+  lacks '^kind: Secret$' || return 1
+  # The mount is read-only.
+  [ "$(op_env | awk '/name: otel-headers/ { s = 1 } s && /readOnly: true/ { n++; exit } END { print n + 0 }')" -eq 1 ]
+}
+check "otel: the headers are a Secret volume (0440, read-only) named by AAP_OTEL_HEADERS_FILE; no OTEL_EXPORTER_OTLP_HEADERS, no secretKeyRef, no Secret rendered" otel_headers
+otel_fsgroup() {
+  render -f "$here/otel.values.yaml" || return 1
+  [ "$(doc Deployment aap-operator-api | awk '/^      securityContext:$/ { s = 1; next } s && /^        / { print; next } s { exit }' | grep -c 'fsGroup: 65532')" -eq 1 ] || return 1
+  # Without a headers Secret the API pod is what it was: no fsGroup (the file is the only reason for one).
+  render -f "$here/otel.values.yaml" --set api.otel.headersSecret.name= --set api.otel.headersSecret.key= || return 1
+  dlacks Deployment aap-operator-api 'fsGroup'
+}
+check "otel: the API pod gets an fsGroup only to read its headers file" otel_fsgroup
+otel_certificate() {
+  render -f "$here/otel.values.yaml" || return 1
+  dhas Deployment aap-operator 'name: OTEL_EXPORTER_OTLP_CERTIFICATE' 'value: /etc/aap/otel/ca/ca.pem' 'name: otel-operator-ca' 'key: ca.pem' 'path: ca.pem' \
+    'mountPath: /etc/aap/otel/ca' || return 1
+  dhas Deployment aap-operator-api 'name: otel-api-ca' 'key: bundle.pem' 'mountPath: /etc/aap/otel/ca' || return 1
+  [ "$(op_env | awk '/name: otel-ca/ { s = 1 } s && /readOnly: true/ { n++; exit } END { print n + 0 }')" -eq 1 ]
+}
+check "otel: the CA bundle is a read-only ConfigMap mount and the variable names its path" otel_certificate
+otel_no_volumes_without_files() {
+  render --set otel.enabled=true --set otel.endpoint=http://c:4318/v1/traces --set-json 'otel.to=[{"podSelector":{"matchLabels":{"a":"b"}}}]' || return 1
+  dhas Deployment aap-operator 'OTEL_EXPORTER_OTLP_TRACES_ENDPOINT' || return 1
+  dlacks Deployment aap-operator 'otel-headers|otel-ca|AAP_OTEL_HEADERS_FILE|OTEL_EXPORTER_OTLP_CERTIFICATE|volumes:|OTEL_RESOURCE_ATTRIBUTES|OTEL_TRACES_SAMPLER_ARG'
+}
+check "otel: with no headers Secret and no CA ConfigMap there is neither volume nor variable for them" otel_no_volumes_without_files
+# A CA bundle and no headers Secret (a collector on a private CA that wants no token): the variable and the volume come together, or
+# the pod names a file that is not there. The operator has no other volume here (no registry token, no run pods).
+otel_certificate_alone() {
+  render --set otel.enabled=true --set otel.endpoint=https://c:4318/v1/traces --set-json 'otel.to=[{"podSelector":{"matchLabels":{"a":"b"}}}]' \
+    --set otel.certificate.configMap=only-ca --set otel.certificate.key=ca.pem || return 1
+  dhas Deployment aap-operator 'name: OTEL_EXPORTER_OTLP_CERTIFICATE' 'value: /etc/aap/otel/ca/ca.pem' '^      volumes:' 'name: otel-ca' 'name: only-ca' 'mountPath: /etc/aap/otel/ca' || return 1
+  dlacks Deployment aap-operator 'otel-headers|AAP_OTEL_HEADERS_FILE' || return 1
+  render -f "$here/api.values.yaml" --set api.otel.enabled=true --set api.otel.endpoint=https://c:4318/v1/traces \
+    --set-json 'api.otel.to=[{"podSelector":{"matchLabels":{"a":"b"}}}]' \
+    --set api.otel.certificate.configMap=only-api-ca --set api.otel.certificate.key=ca.pem || return 1
+  dhas Deployment aap-operator-api 'name: OTEL_EXPORTER_OTLP_CERTIFICATE' 'name: otel-ca' 'name: only-api-ca' 'mountPath: /etc/aap/otel/ca' || return 1
+  dlacks Deployment aap-operator-api 'otel-headers|AAP_OTEL_HEADERS_FILE'
+}
+check "otel: a CA bundle with no headers Secret still gets its volume and mount (operator and API), and no headers volume" otel_certificate_alone
+
+# Egress: the operator's policy has one rule (the API server); with otel on it has DNS and the collector, each with a `to`.
+otel_operator_policy() {
+  render || return 1
+  [ "$(op_egress_rules)" -eq 1 ] || return 1
+  render -f "$here/otel.values.yaml" || return 1
+  [ "$(op_egress_rules)" -eq 3 ] || return 1
+  all_of "$(op_egress_rule 1)" 'port: 443' 'port: 6443' || return 1
+  none_of "$(op_egress_rule 1)" '^      to:' || return 1
+  all_of "$(op_egress_rule 2)" 'port: 53' 'protocol: UDP' 'protocol: TCP' '^      to:' 'k8s-app: kube-dns' || return 1
+  all_of "$(op_egress_rule 3)" 'port: 4318' '^      to:' 'observability' 'opentelemetry-collector' || return 1
+  none_of "$(op_egress_rule 3)" 'port: 53|port: 443|ipBlock'
+}
+check "otel: the operator's NetworkPolicy has one egress rule off and three on (API server, DNS, the collector), the DNS and collector rules each with a to, the collector's on its port alone" otel_operator_policy
+otel_api_policy() {
+  render -f "$here/api.values.yaml" || return 1
+  [ "$(doc NetworkPolicy aap-operator-api | awk '/^  egress:$/ { e = 1; next } e && /^    - / { n++ } END { print n + 0 }')" -eq 3 ] || return 1
+  render -f "$here/otel.values.yaml" || return 1
+  [ "$(doc NetworkPolicy aap-operator-api | awk '/^  egress:$/ { e = 1; next } e && /^    - / { n++ } END { print n + 0 }')" -eq 4 ] || return 1
+  all_of "$(api_egress_rule 4)" 'port: 4319' '^      to:' 'otel-gateway' || return 1
+  none_of "$(api_egress_rule 4)" 'port: 4318|opentelemetry-collector|port: 443|port: 53'
+}
+check "otel: the API's NetworkPolicy has three egress rules off and four on, the fourth to api.otel.to on api.otel.ports (and not the operator's)" otel_api_policy
+otel_no_open_rule() {
+  # In every rendered policy, a rule that names a port of the collector or of DNS has a `to`: none is open egress.
+  render -f "$here/otel.values.yaml" || return 1
+  for n in aap-operator aap-operator-api; do
+    doc NetworkPolicy "$n" | awk '
+      /^  egress:$/ { e = 1; next }
+      e && /^    - / { if (seen && ported && !targeted) bad = 1; seen = 1; ported = 0; targeted = 0 }
+      e && /port: (4318|4319|53)$/ { ported = 1 }
+      e && /^      to:/ { targeted = 1 }
+      END { if (seen && ported && !targeted) bad = 1; exit bad }' || return 1
+  done
+}
+check "otel: no egress rule of the collector, the DNS or the API's collector is without a to" otel_no_open_rule
+check "otel on, the NetworkPolicy off: renders with no policy and no peer needed" \
+  renders_ok --set otel.enabled=true --set otel.endpoint=http://c:4318/v1/traces --set networkPolicy.enabled=false
+check "api.otel on, the API's NetworkPolicy off: renders with no peer needed" \
+  renders_ok -f "$here/api.values.yaml" --set api.otel.enabled=true --set api.otel.endpoint=http://c:4318/v1/traces --set api.networkPolicy.enabled=false
+otel_api_off_is_not_rendered() {
+  render --set api.otel.enabled=true --set api.otel.endpoint=http://c:4318/v1/traces || return 1
+  lacks "$otel_gone" && lacks 'aap-operator-api'
+}
+check "api off: api.otel is neither rendered nor checked (a bad endpoint renders)" otel_api_off_is_not_rendered
+check "api off: api.otel is not checked" renders_ok --set api.otel.enabled=true --set api.otel.endpoint=nonsense
+otel_config_file_is_untouched() {
+  a=$(mktemp) || return 1
+  b=$(mktemp) || return 1
+  sh "$here/api-config.sh" "$a" -f "$here/otel.values.yaml" || return 1
+  sh "$here/api-config.sh" "$b" -f "$here/otel.values.yaml" --set api.otel.enabled=false --set otel.enabled=false || return 1
+  cmp -s "$a" "$b"
+  r=$?
+  rm -f "$a" "$b"
+  return "$r"
+}
+check "otel: the API's configuration file is the same with tracing on and off (tracing is not in the file)" otel_config_file_is_untouched
+otel_no_secret() {
+  render -f "$here/otel.values.yaml" || return 1
+  lacks '^kind: Secret$' && lacks '(ghp_|github_pat_|gho_|sk-[A-Za-z0-9]{8}|-----BEGIN|AKIA[0-9A-Z]{16}|xox[bp]-|eyJ[A-Za-z0-9_-]{20})'
+}
+check "otel: no Secret object and no token-looking value in the otel render" otel_no_secret
+otel_role_is_the_same() {
+  render || return 1
+  before=$(role_rules)
+  render -f "$here/otel.values.yaml" || return 1
+  [ "$(role_rules)" = "$before" ] && ! role_rules | grep -Eqi 'secrets'
+}
+check "otel: the operator's Role is what it was (the kubelet resolves the Secret and the ConfigMap) and still names no Secret" otel_role_is_the_same
+
+otel_to='[{"podSelector":{"matchLabels":{"a":"b"}}}]'
+refused_otel() { frag=$1; shift; refused "$frag" --set otel.enabled=true --set otel.endpoint=http://c:4318/v1/traces --set-json "otel.to=$otel_to" "$@"; }
+refused_api_otel() {
+  frag=$1; shift
+  refused "$frag" -f "$here/api.values.yaml" --set api.otel.enabled=true --set api.otel.endpoint=http://c:4318/v1/traces --set-json "api.otel.to=$otel_to" "$@"
+}
+check "otel must be a map" refused 'otel must be a map' --set otel=null
+check "otel: a key that is not a setting is refused" refused_otel 'otel.foo is not a setting' --set otel.foo=1
+check "otel.enabled must be a boolean" refused 'otel.enabled must be true or false' --set otel.enabled=yes
+check "otel on with no endpoint is refused" refused 'otel.endpoint is required when otel.enabled is true' --set otel.enabled=true --set-json "otel.to=$otel_to"
+for bad in 'http://user:pw@c:4318/v1/traces' 'http://c:4318/v1/traces?token=x' 'http://c:4318/v1/traces#frag' 'ftp://c/v1/traces' 'c:4318'; do
+  check "otel.endpoint $bad is refused (no user name, password, query, fragment or other scheme)" \
+    refused 'otel.endpoint is required when otel.enabled is true' --set otel.enabled=true --set "otel.endpoint=$bad" --set-json "otel.to=$otel_to"
+done
+check "otel on with the NetworkPolicy on and no peers is refused (a rule with ports and no to is open egress)" \
+  refused 'otel.to is required while otel.enabled is true' --set otel.enabled=true --set otel.endpoint=http://c:4318/v1/traces
+check "an ipBlock of 0.0.0.0/0 as the collector is refused" refused_otel 'is every address' --set-json 'otel.to=[{"ipBlock":{"cidr":"0.0.0.0/0"}}]'
+check "an ipBlock of ::/0 as the collector is refused" refused_otel 'is every address' --set-json 'otel.to=[{"ipBlock":{"cidr":"::/0"}}]'
+check "a peer of otel.to must say who" refused_otel 'otel.to: a peer needs' --set-json 'otel.to=[{"x":1}]'
+check "otel.ports must name a port" refused_otel 'otel.ports must name at least one port' --set-json 'otel.ports=[]'
+check "otel.ports must be port numbers" refused_otel 'otel.ports: 70000 is not a port number' --set-json 'otel.ports=[70000]'
+check "otel.sampler must be one the exporter has" refused_otel 'otel.sampler must be always_on, always_off or traceidratio' --set otel.sampler=jaeger_remote
+check "otel.samplerRatio must be from 0 to 1" refused_otel 'otel.samplerRatio must be a number from 0 to 1' --set otel.samplerRatio=1.5
+check "otel.resourceAttributes keys are a closed list" refused_otel 'otel.resourceAttributes.user.email is not allowed' --set 'otel.resourceAttributes.user\.email=a'
+check "otel.resourceAttributes values are names" refused_otel 'otel.resourceAttributes.k8s.cluster.name must match' --set 'otel.resourceAttributes.k8s\.cluster\.name=a b'
+check "otel.headersSecret needs both name and key" refused_otel 'otel.headersSecret needs both name and key, or neither' --set otel.headersSecret.name=h
+check "otel.headersSecret with a plain http endpoint is refused (a token would go out in clear)" refused_otel 'otel.headersSecret needs an https endpoint' --set otel.headersSecret.name=h --set otel.headersSecret.key=k
+check "otel.headersSecret with an https endpoint renders" renders_ok --set otel.enabled=true --set otel.endpoint=https://c:4318/v1/traces --set otel.headersSecret.name=h --set otel.headersSecret.key=k --set-json "otel.to=$otel_to"
+check "otel.certificate needs both configMap and key" refused_otel 'otel.certificate needs both configMap and key, or neither' --set otel.certificate.key=ca.pem
+check "otel.headersSecret.name must be a name" refused_otel 'must be names' --set 'otel.headersSecret.name=a/b' --set otel.headersSecret.key=k
+check "otel.dns.to is required with the policy on (the operator's policy has no DNS rule)" refused_otel 'otel.dns.to is required' --set-json 'otel.dns.to=[]'
+check "otel.dns.ports must name a port" refused_otel 'otel.dns.ports must name at least one port' --set-json 'otel.dns.ports=[]'
+check "api.otel must be a map" refused_api 'api.otel must be a map' --set api.otel=null
+check "api.otel: a key that is not a setting is refused (dns is the operator's)" refused_api_otel 'api.otel.dns is not a setting' --set-json 'api.otel.dns={}'
+check "api.otel on with no endpoint is refused" refused_api 'api.otel.endpoint is required when api.otel.enabled is true' --set api.otel.enabled=true --set-json "api.otel.to=$otel_to"
+check "api.otel on with the policy on and no peers is refused" refused_api 'api.otel.to is required while api.otel.enabled is true' \
+  --set api.otel.enabled=true --set api.otel.endpoint=http://c:4318/v1/traces
+check "api.otel: an ipBlock of 0.0.0.0/0 is refused" refused_api_otel 'is every address' --set-json 'api.otel.to=[{"ipBlock":{"cidr":"0.0.0.0/0"}}]'
+check "api.otel: a userinfo in the endpoint is refused" refused_api 'api.otel.endpoint is required' \
+  --set api.otel.enabled=true --set api.otel.endpoint=http://u:p@c/v1/traces --set-json "api.otel.to=$otel_to"
+check "api.otel: a bad sampler is refused" refused_api_otel 'api.otel.sampler must be' --set api.otel.sampler=nope
+check "api.otel: headersSecret with only a name is refused" refused_api_otel 'api.otel.headersSecret needs both' --set api.otel.headersSecret.name=h
+check "api.otel.headersSecret with a plain http endpoint is refused (a token would go out in clear)" refused_api_otel 'api.otel.headersSecret needs an https endpoint' --set api.otel.headersSecret.name=h --set api.otel.headersSecret.key=k
+check "api.extraEnv may not set an OTEL_ name" refused_api 'api.extraEnv: OTEL_SDK_DISABLED is the chart' --set-json 'api.extraEnv=[{"name":"OTEL_SDK_DISABLED","value":"true"}]'
+check "api.extraEnv may not set an AAP_OTEL_ name" refused_api 'api.extraEnv: AAP_OTEL_HEADERS_FILE is the chart' --set-json 'api.extraEnv=[{"name":"AAP_OTEL_HEADERS_FILE","value":"/x"}]'
+check "api.extraEnv may not set POD_NAME while api.otel is on" refused_api_otel 'api.extraEnv: POD_NAME is the chart' --set-json 'api.extraEnv=[{"name":"POD_NAME","value":"x"}]'
+check "api.extraVolumes may not take the name of the chart's otel volume while api.otel is on" refused_api_otel 'volume of api.otel: name yours otherwise' \
+  --set-json 'api.extraVolumes=[{"name":"otel-ca","emptyDir":{}}]'
+check "api.extraVolumeMounts may not mount under the chart's otel paths while api.otel is on" refused_api_otel 'where api.otel mounts its headers and CA bundle' \
+  --set-json 'api.extraVolumes=[{"name":"x","emptyDir":{}}]' --set-json 'api.extraVolumeMounts=[{"name":"x","mountPath":"/etc/aap/otel/more"}]'
 
 # ---- The CRDs chart: one source ------------------------------------------------------------------------------------------
 check "deploy/operator-crds/files is a copy of deploy/crds (cp deploy/crds/agents.vymalo.com.yaml deploy/operator-crds/files/)" \

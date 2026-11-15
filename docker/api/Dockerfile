@@ -45,16 +45,21 @@ RUN cargo build --release --locked --package aap-api-server --bin api
 # Smoke test of what was built, in the build stage because the final image has no shell: the binary starts and says its version,
 # prints its usage, accepts the example configuration (`--check` needs no cluster and no issuer), and refuses a file that is not one.
 # (CI runs the same commands on the final image, and `--check` on the configuration the chart renders.)
+# Every command runs under `env -i`: BuildKit injects its own OTEL_* variables into RUN steps (seen 2026-11-15 in the log of this
+# repository's pull request 52, run 43729018865, under docker/build-push-action: OTEL_EXPORTER_OTLP_TRACES_PROTOCOL=grpc and an
+# endpoint on a unix socket, for BuildKit's own tracing), and `api --check` reads them as the API's tracing settings and refuses
+# a protocol it does not speak. A smoke test must not depend on what a builder puts in the environment.
 RUN set -eu; \
     api=/src/target/release/api; \
-    "$api" --version > /tmp/version; \
+    clean="env -i PATH=$PATH"; \
+    $clean "$api" --version > /tmp/version; \
     grep -q '^api ' /tmp/version; \
-    "$api" --help > /tmp/help; \
+    $clean "$api" --help > /tmp/help; \
     grep -q -e '--check' /tmp/help; \
-    "$api" --config /src/bin/api/config.example.yaml --check > /dev/null; \
+    $clean "$api" --config /src/bin/api/config.example.yaml --check > /dev/null; \
     cp /src/bin/api/config.example.yaml /tmp/bad.yaml; \
     printf '\nlistn: 0.0.0.0:8080\n' >> /tmp/bad.yaml; \
-    if "$api" --config /tmp/bad.yaml --check 2> /tmp/bad.err; then echo "a misspelt key was accepted" >&2; exit 1; fi; \
+    if $clean "$api" --config /tmp/bad.yaml --check 2> /tmp/bad.err; then echo "a misspelt key was accepted" >&2; exit 1; fi; \
     grep -q listn /tmp/bad.err
 
 FROM gcr.io/distroless/cc-debian13:nonroot@sha256:e792ab3d241a468a4fd7519ddbbebe66b49b5f365771716ea688ad40b6c6f1c2

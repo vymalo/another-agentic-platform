@@ -77,6 +77,7 @@ sequence them with the CRDs first (a sync wave, or their Application first). **K
 | `networkPolicy.registry.allowFrom` | `[]` | NetworkPolicyPeers that may read the registry. **Required while there is a token and a policy**: an empty list would make the registry unreachable, which the chart refuses. A peer with only a `podSelector` means the pods of the watched namespace |
 | `networkPolicy.metrics.allowFrom` | `[]` | Who may scrape `/metrics`. Empty: nobody. **A peer with only a `podSelector` means pods of the operator's own namespace**: a Prometheus in another namespace needs a `namespaceSelector` |
 | `metrics.serviceMonitor.enabled`, `.interval`, `.labels` | off, `30s`, `{}` | A Prometheus Operator `ServiceMonitor` for the operator's `/metrics`: [below](#metrics-and-servicemonitors). On, the chart refuses an empty `networkPolicy.metrics.allowFrom` while the policy is enabled |
+| `otel.*`, `api.otel.*` | off | **K5:** traces of the operator and of the API, OTLP/HTTP JSON to a collector: [below](#traces-k5). Off, not a trace of them in any render |
 | `networkPolicy.apiServer.ports`, `.cidrs` | `[443, 6443]`, `[]` | The API server as the pod reaches it (the Service is 443, most clusters' endpoint 6443). `cidrs`, from `kubectl get endpoints kubernetes`, narrows it to those addresses |
 | `logLevel` | `info` | `RUST_LOG` |
 | `tuning.concurrency`, `.resyncSecs`, `.resyncPendingSecs` | unset (the binary's 4, 300, 15) | `AAP_CONCURRENCY`, `AAP_RESYNC_SECS`, `AAP_RESYNC_PENDING_SECS`; another key is refused |
@@ -461,6 +462,35 @@ Also refused: an interval that is not a duration (`30s`, `1m`), `api.metrics.por
 these values: CI validates its render with kubeconform against the vendored ServiceMonitor schema (`tests/schemas/monitoring.coreos.com/`) and feeds its file, which carries
 `metricsListen: 0.0.0.0:9191`, to the image's `api --check`. *Unverified*: a scrape by a real Prometheus (the renders and the schema are what is checked).
 
+### Traces (K5)
+
+K5 (2026-11-15). The operator (`otel.*`) and the Platform API (`api.otel.*`) can send **traces** as OTLP/HTTP JSON to a collector. Two blocks of the same shape, **off by default and then not a trace**: the five goldens that existed are
+byte for byte what they were (no variable, volume, mount, `POD_NAMESPACE` or rule on a collector port). What a span is, what it may and may not hold, and how a collector that is down
+costs nothing: [§48a](../../docs/architecture/09-operations.md), [`aap-trace`](../../crates/trace/README.md), [`aap-trace-otlp`](../../crates/trace-otlp/README.md).
+
+| Value (`otel.`, and `api.otel.` for the API) | Default | What |
+|---|---|---|
+| `enabled` | `false` | |
+| `endpoint` | none | **Required when on.** The full URL of the collector's traces endpoint (`http://otel-collector.observability.svc:4318/v1/traces`), written as `OTEL_EXPORTER_OTLP_TRACES_ENDPOINT` and used as written. An http(s) URL with no user name, password, query or fragment; **`https` when `headersSecret` is set** (a token is never sent in clear) |
+| `sampler`, `samplerRatio` | `always_on`, `"1"` | `always_on`, `always_off` or `traceidratio` with a ratio from 0 to 1 |
+| `resourceAttributes` | `{}` | Only `deployment.environment.name`, `k8s.cluster.name`, `service.namespace`; values `[A-Za-z0-9._-]{1,128}` |
+| `headersSecret.name`, `.key` | none | An **existing Secret** whose key holds `name=value,name2=value2` (at most 4 KiB): the headers the collector wants. Mounted read-only at `/var/run/secrets/aap/otel` (mode `0440`; the API pod gets `fsGroup: 65532` for it, only then) and named by `AAP_OTEL_HEADERS_FILE`. **Headers are never an environment variable** (`OTEL_EXPORTER_OTLP_HEADERS` is refused by the binaries), and the chart renders no Secret. Both keys, or neither |
+| `certificate.configMap`, `.key` | none | An existing ConfigMap whose key holds a PEM bundle that is the exporter's **only** trust (a private CA): mounted at `/etc/aap/otel/ca/ca.pem`, `OTEL_EXPORTER_OTLP_CERTIFICATE`. Both, or neither |
+| `to`, `ports` | `[]`, `[4318]` | The collector's peers (NetworkPolicyPeers) and port. **Required while the component's NetworkPolicy is enabled**: its policy gets one egress rule to these peers on these ports, and **there is never a rule with ports and no `to`**. An `ipBlock` of `0.0.0.0/0` or `::/0` is refused |
+| `dns.to`, `dns.ports` (the operator's only) | kube-dns, `[53]` | The operator's policy has no DNS rule (it reaches the API server by address), so with tracing on it gets one. The API's policy has its own |
+
+The binaries read the standard `OTEL_*` variables, a strict subset: **`OTEL_EXPORTER_OTLP_PROTOCOL` is `http/json` and nothing else** (the standard's default is `http/protobuf`; a collector in front of a backend that
+wants protobuf or gRPC does that), a proxy is not used (`HTTPS_PROXY` is not read: the collector is in the cluster), a redirect is not followed. The chart also sets `POD_NAMESPACE` from the downward API
+(and `POD_NAME`, which the operator already had) for `k8s.namespace.name`, `k8s.pod.name` and `service.instance.id`. The operator's `Role` is what it was: the kubelet resolves the Secret and the ConfigMap.
+
+Refused, by name: a block that is not a map or has a key that is not a setting (`dns` is the operator's); on with no usable endpoint; no `to` while the policy is on; a `to` that is every address; no or bad ports; a bad
+sampler or ratio; a `headersSecret` with a plain `http` endpoint; a resource attribute outside the list; half of `headersSecret` or `certificate`; and, in `api.extraEnv`, any `OTEL_*` or `AAP_OTEL_*` name (and `POD_NAME`, `POD_NAMESPACE` while `api.otel` is on), a volume
+named `otel-headers` or `otel-ca` and a mount under `/etc/aap/otel` or `/var/run/secrets/aap/otel`. With `api.enabled` off, `api.otel` is neither rendered nor checked. `tests/otel.values.yaml` sets every
+value, a different one for each block, and renders to `tests/golden/otel.yaml`; CI validates it with kubeconform and hands the environment the chart renders for the API (`tests/otel-env.sh`) to the image's
+`api --check`, which must accept it and must refuse `grpc` by name; the operator image, given `grpc` (and BuildKit's variables), **warns once by name and goes on to the cluster**: a tracing setting never stops a process (§48a, P-039). The Dockerfiles' smoke steps run under `env -i`, because BuildKit injects `OTEL_*` variables into `RUN` steps.
+
+The API's spans are made before the guard, so a request that is refused for want of a token is a root span too: a flood of them can push good spans out of the 2048-span queue (bounded, and counted under `queue_full`). **For an API that faces the internet set `api.otel.sampler: traceidratio` with a small `samplerRatio`.** Step 6b of `chain-e2e.sh` passed in CI (run 43732918179, job `chain-e2e` 132871058839, at `cd225d2`, *verified 2026-11-15* in the job's log): a pinned OpenTelemetry Collector, started by a kind kubelet with this configuration, received the spans of the operator and of the Platform API through the egress rule of each policy, and the `debug` exporter's layout read as far as the greps read it; the `DELETE /v1/agents/{name}` span it now requires and the check that no subject is in the collector's log were added after that run; the pull request's own CI is their first run. The operator of a test build overflowed its stack on its first apply against a real API server (job `operator-e2e`, run 43729018894, at `e1311b7`), fixed by boxing the traced futures (`cf3c794`), and `operator-e2e` passed at `cd225d2` (run 43732918096, job 132869222804, *verified 2026-11-15*). *Unverified*: a backend other than the OpenTelemetry Collector, a private CA (TLS to the collector).
+
 ### The NetworkPolicy
 
 The operator's policy lets the API server in and nothing else out (it reaches the API server by its address and calls no other service). The API's is
@@ -586,10 +616,11 @@ sh deploy/operator/tests/api-shapes.sh /tmp/api-config && for f in /tmp/api-conf
 | `tests/bump-tag-test.sh` | `bump-tag.sh` edits only `image.tag` (a `defaultAgentImage` line beside it is left alone) or, with `api`, only `api.image.tag` (each leaves the other, and keys that only look like it, alone), is idempotent, refuses a malformed tag and an unknown component (the test of adam-rs's `deploy/coder`, with this chart's values) |
 | `tests/runpods.values.yaml`, `tests/golden/runpods.yaml`, `tests/run-pods-admission.sh` | run pods on beside the Platform API (two classes, a cluster CIDR, one extra egress rule, a toleration), its golden render, which `aap-domain` reads as the operator would (`RunPodSettings`, validated) and `aap-runtime-kubernetes` compares with the coder chart's policy and Role, and the admission test for a real cluster ([above](#checking-a-cluster)) |
 | `tests/api.values.yaml`, `tests/api-secretref.values.yaml`, `tests/api-full.values.yaml`, `tests/api-shapes.sh`, `tests/api-config.sh` | the shapes of the API component: the golden one, a Secret per agent, and **one that sets every value the chart exposes** (ports, `apiServer.cidrs`, `issuer.to`, every key of `defaults`, the Ingress, the scheduling), and the scripts that render a shape and write the ConfigMap's `config.yaml` to a file (`api-shapes.sh` writes `golden`, `secretref`, `minimal` and `full`), which CI hands to the image's `api --check` |
+| `tests/otel.values.yaml`, `tests/golden/otel.yaml`, `tests/otel-env.sh` | K5: traces of both on (every value, a different one for each block), its golden render, and the script that prints the tracing environment the chart renders for a component, which CI hands to the images |
 | `tests/schemas/` | the `ExternalSecret` schema for kubeconform ([its README](tests/schemas/README.md)) |
 | `tests/e2e/` | the kind end-to-ends: of the coder (S9, `coder-e2e.sh`), of the Platform API (D7b2, `api-e2e.sh` with `api.values.yaml` and `api-offer.yaml`), of the whole chain (D13, `chain-e2e.sh` with `chain.values.yaml`, `chain-orchestrator.yaml`, which holds the pin of the system's orchestrator image, and `chain-offer.yaml`) and of run pods (D15b, `run-pods-e2e.sh` with `run-pods.yaml`, which holds the pin of the coder it runs, `run-pods.values.yaml`, `run-pods-support.yaml` and the scripted model `run-pods-model.js`); `render-check.sh` renders the values they install and asserts what the scripts depend on: [`tests/e2e/README.md`](tests/e2e/README.md) |
 
-CI also runs kubeconform in strict mode over eight renders (the defaults, netcup, `secret.values.yaml`, the three API shapes, run pods on, and the CRDs chart with the
+CI also runs kubeconform in strict mode over ten renders (the defaults, netcup, `secret.values.yaml`, the three API shapes, run pods on, the metrics, the traces, and the CRDs chart with the
 `CustomResourceDefinition` kind skipped, because the schema set has none: the `kind` job of `operator.yml` applies them to a real API server).
 
 ## Known limitations

@@ -93,6 +93,10 @@ spec:
             - name: AAP_RESYNC_PENDING_SECS
               value: {{ . | quote }}
             {{- end }}
+            {{- if include "aap.otel.on" . }}
+            # Traces (slice K5): the variables `operator run` reads. Absent, no span is made.
+            {{- include "aap.otel.env" (dict "block" .Values.otel "pod" true) | nindent 12 }}
+            {{- end }}
             {{- if include "aap.runPods" . }}
             # Run pods (slice D15a): present, the operator has them, with the size classes, image and quota this file says. Absent, it has none
             # and an AgentConfig that asks for them is ConfigInvalid.
@@ -148,7 +152,7 @@ spec:
             runAsNonRoot: true
             capabilities:
               drop: [ALL]
-          {{- if or (include "aap.registrySecretName" .) (include "aap.runPods" .) }}
+          {{- if or (include "aap.registrySecretName" .) (include "aap.runPods" .) (and (include "aap.otel.on" .) (include "aap.otel.hasVolumes" (dict "block" .Values.otel))) }}
           volumeMounts:
             {{- if include "aap.registrySecretName" . }}
             - name: registry-token
@@ -160,8 +164,11 @@ spec:
               mountPath: /etc/aap/run-pods
               readOnly: true
             {{- end }}
+            {{- if include "aap.otel.on" . }}
+            {{- include "aap.otel.mounts" (dict "block" .Values.otel) | nindent 12 }}
+            {{- end }}
           {{- end }}
-      {{- if or (include "aap.registrySecretName" .) (include "aap.runPods" .) }}
+      {{- if or (include "aap.registrySecretName" .) (include "aap.runPods" .) (and (include "aap.otel.on" .) (include "aap.otel.hasVolumes" (dict "block" .Values.otel))) }}
       volumes:
         {{- if include "aap.registrySecretName" . }}
         - name: registry-token
@@ -177,6 +184,9 @@ spec:
           configMap:
             name: {{ include "aap.runPodsSettings" . }}
             defaultMode: 288 # 0440
+        {{- end }}
+        {{- if include "aap.otel.on" . }}
+        {{- include "aap.otel.volumes" (dict "block" .Values.otel) | nindent 8 }}
         {{- end }}
       {{- end }}
       {{- with .Values.nodeSelector }}

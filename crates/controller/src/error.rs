@@ -52,7 +52,7 @@ impl From<kube::Error> for Error {
     }
 }
 
-fn kube_class(e: &kube::Error) -> ErrorClass {
+pub(crate) fn kube_class(e: &kube::Error) -> ErrorClass {
     match e {
         kube::Error::Api(status) => match status.code {
             404 => ErrorClass::NotFound,

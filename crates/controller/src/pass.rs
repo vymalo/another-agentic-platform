@@ -11,9 +11,13 @@
 use std::future::Future;
 use std::time::Duration;
 
+use aap_ports::Classify;
+use aap_trace::{
+    Attr, Controller, K8sName, Outcome, ServiceState, SpanKind, SpanName, Tracer, current_set,
+};
 use tokio::time::Instant;
 
-use crate::error::Error;
+use crate::error::{Error, class_label};
 use crate::metrics::{Metrics, name};
 
 /// A pass that took this long is worth a warning even when it succeeded.
@@ -21,24 +25,64 @@ const SLOW_PASS: Duration = Duration::from_secs(10);
 
 /// Run `pass` for at most `limit`. `controller` and `key` (`namespace/name`) say whose pass it is.
 ///
+/// The pass is one root span (K5): its name is the controller's, its attributes the controller, the kind, the namespace
+/// and the name of the object (Kubernetes names, as the log has them), how it ended and the class of the error, never the
+/// error. The steps inside it are children, found through the task's scope.
+///
 /// At `debug`: the start and the end of every pass, with its duration. At `warn`: a pass that took
 /// [`SLOW_PASS`] or more, and (by the error policy, from the error this returns) one that was cut short.
-pub(crate) async fn bounded<T>(
+///
+/// This is a plain `fn`, not an `async fn`: the pass is boxed before the returned future exists, so that future never holds the
+/// pass by value (see `aap_trace::Span::scope`; `the_pass_is_not_held_by_value` holds it).
+pub(crate) fn bounded<'a, T: 'a>(
+    controller: &'static str,
+    key: &'a str,
+    limit: Duration,
+    metrics: &'a Metrics,
+    tracer: &'a Tracer,
+    pass: impl Future<Output = Result<T, Error>> + 'a,
+) -> impl Future<Output = Result<T, Error>> + 'a {
+    // On the heap before anything wraps it.
+    let pass = Box::pin(pass);
+    bounded_boxed(controller, key, limit, metrics, tracer, pass)
+}
+
+async fn bounded_boxed<T>(
     controller: &'static str,
     key: &str,
     limit: Duration,
     metrics: &Metrics,
-    pass: impl Future<Output = Result<T, Error>>,
+    tracer: &Tracer,
+    pass: std::pin::Pin<Box<impl Future<Output = Result<T, Error>>>>,
 ) -> Result<T, Error> {
     let started = Instant::now();
     tracing::debug!(controller, object = key, "pass started");
-    let result = match tokio::time::timeout(limit, pass).await {
+    let root = start_span(tracer, controller, key);
+    let result = match root.scope(tokio::time::timeout(limit, pass)).await {
         Ok(result) => result,
         Err(_elapsed) => {
             metrics.inc(name::PASS_TIMEOUTS, &[("controller", controller)]);
             Err(Error::TimedOut(limit))
         }
     };
+    match &result {
+        Ok(_) => root.set(Attr::ReconcileResult(Outcome::Ok)),
+        Err(e) => {
+            root.fail();
+            if matches!(e, Error::TimedOut(_)) {
+                root.set(Attr::ReconcileResult(Outcome::Timeout));
+                if let Some(a) = Attr::error_type("timeout") {
+                    root.set(a);
+                }
+            } else {
+                root.set(Attr::ReconcileResult(Outcome::Error));
+                if let Some(a) = Attr::error_type(class_label(e.class())) {
+                    root.set(a);
+                }
+            }
+        }
+    }
+    root.end();
     let elapsed = started.elapsed();
     if elapsed >= SLOW_PASS {
         tracing::warn!(
@@ -58,4 +102,83 @@ pub(crate) async fn bounded<T>(
         );
     }
     result
+}
+
+fn start_span(tracer: &Tracer, controller: &str, key: &str) -> aap_trace::Span {
+    let Some(which) = Controller::from_name(controller) else {
+        return tracer.root(SpanName::RECONCILE, SpanKind::Internal);
+    };
+    let root = tracer.root(SpanName::reconcile(which), SpanKind::Internal);
+    if !root.is_recording() {
+        return root;
+    }
+    root.set(Attr::Controller(which));
+    root.set(Attr::ObjectKind(which.kind()));
+    if let Some((ns, name)) = key.split_once('/') {
+        if let Some(ns) = K8sName::new(ns) {
+            root.set(Attr::Namespace(ns));
+        }
+        if let Some(n) = K8sName::new(name) {
+            if which == Controller::AgentService {
+                root.set(Attr::AgentServiceName(n.clone()));
+            }
+            root.set(Attr::ObjectName(n));
+        }
+    }
+    root
+}
+
+/// The state a service ended the pass in, on the pass's span.
+pub(crate) fn record_state(state: Option<aap_api::ServiceState>) {
+    let state = match state {
+        Some(aap_api::ServiceState::Ready) => ServiceState::Ready,
+        Some(aap_api::ServiceState::Degraded) => ServiceState::Degraded,
+        Some(aap_api::ServiceState::Suspended) => ServiceState::Suspended,
+        Some(aap_api::ServiceState::Blocked) => ServiceState::Blocked,
+        None => return,
+    };
+    current_set(Attr::ServiceState(state));
+}
+
+/// The class of the error of a step, for [`aap_trace::step`]: a label, never the error.
+pub(crate) fn class_of<T, E: Classify>(r: &Result<T, E>) -> Option<&'static str> {
+    r.as_ref().err().map(|e| class_label(e.class()))
+}
+
+/// The same for a call to the API server.
+pub(crate) fn kube_class_of<T>(r: &Result<T, kube::Error>) -> Option<&'static str> {
+    r.as_ref()
+        .err()
+        .map(|e| class_label(crate::error::kube_class(e)))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A pass that holds 64 KiB across an await.
+    async fn big() -> Result<(), Error> {
+        let a = [0u8; 65_536];
+        tokio::task::yield_now().await;
+        std::hint::black_box(&a);
+        Ok(())
+    }
+
+    /// The future `bounded` returns does not hold the pass by value: without the box it is at least 64 KiB, and an unoptimised
+    /// build copies it at every level of a worker's stack.
+    #[test]
+    fn the_pass_is_not_held_by_value() {
+        assert!(size_of_val(&big()) >= 65_536, "the control is large");
+        let (metrics, tracer) = (Metrics::new(), Tracer::off());
+        let fut = bounded(
+            "agentservice",
+            "ns/n",
+            Duration::from_secs(1),
+            &metrics,
+            &tracer,
+            big(),
+        );
+        let size = size_of_val(&fut);
+        assert!(size < 1024, "{size} bytes");
+    }
 }

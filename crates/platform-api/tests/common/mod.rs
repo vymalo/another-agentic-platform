@@ -77,6 +77,20 @@ impl Api {
         )
     }
 
+    /// The same router with `tracer` making a span of every request (K5).
+    pub fn traced(tracer: aap_trace::Tracer) -> Self {
+        let objects = MemoryObjects::in_namespace(NS);
+        let auth = MemoryAuthenticator::new();
+        let state = ApiState::new(objects.clone(), auth.clone(), defaults())
+            .unwrap()
+            .with_tracer(tracer);
+        Self {
+            router: router(state),
+            objects,
+            auth,
+        }
+    }
+
     /// A router built elsewhere (over another authenticator); `auth` is then a table nobody consults.
     pub fn from_router(router: Router, objects: MemoryObjects) -> Self {
         Self {

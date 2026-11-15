@@ -26,8 +26,14 @@
 #        carol  role `agent.use:e2e-coder` alone        403 no_access (a value of the audience is not a grant), and /api/me says she holds nothing
 #   6. the agent is deleted through the API and the operator's registry stops listing it: within the registry's cache the orchestrator lists
 #      nothing to alice or to the administrator;
+#   6b. TRACES (K5; passed in CI: run 43732918179, job `chain-e2e` 132871058839, at cd225d2, *verified 2026-11-15* in the job's log): a pinned OpenTelemetry Collector (otel-collector.yaml, the only place of its pin) receives the
+#      spans of the operator (`otel.*`) and of the Platform API (`api.otel.*`), both on in the values of step 2, each with egress to the collector's
+#      pods and nowhere else; the collector's log, written by its `debug` exporter, holds a span of each service (`service.name` of both, a
+#      `GET /v1/agents` and a `reconcile agentservice`), and a `DELETE /v1/agents/{name}` of step 6, named by its template. The layout of the `debug`
+#      exporter's log, as far as these greps read it, is *verified* by that run. The `DELETE` span and the subjects check of step 7 were added after that
+#      run; the pull request's own CI is their first run.
 #   7. no secret value (the two sentinels, the registry's token, the A2A bearer) and no token minted by the run is in an answer, in the
-#      Platform API's log, in the operator's or in the orchestrator's.
+#      Platform API's log, in the operator's, in the orchestrator's or in the collector's (which holds every span, so every attribute).
 #
 # THE ADMINISTRATOR. The assertion about `admin` is what the PINNED system does: its ADR 0045, decision 1.4, shows a role that holds `admin`
 # every platform agent, whatever its audience, and the contract of the registry (docs/extensions/agent-registry-v1.md, the consumer's rule 4)
@@ -115,6 +121,7 @@ offer=e2e-chain-models-es
 orch=e2e-orchestrator
 orch_config=e2e-orchestrator-config
 orch_postgres=e2e-orch-postgres
+collector=e2e-otel-collector
 # The label on the namespace and on everything the script makes in it: what it may overwrite and delete.
 made_by_key=aap-e2e/made-by
 made_by=chain-e2e
@@ -138,6 +145,7 @@ ns_made=0       # the namespace (or a leftover of ours that is used again): the 
 objects_made=0  # step 3 began: the model and the agent may exist (and the operator's finalizer is on the agent)
 installed=0     # `helm upgrade --install` was started
 : > "$work/tokens"
+: > "$work/subjects"
 : > "$work/seen"
 printf '%s\n%s\n%s\n%s\n' "$model_sentinel" "$app_sentinel" "$registry_token" "$a2a_token" > "$work/secrets"
 
@@ -159,6 +167,9 @@ diagnostics() {
   kubectl -n "$ns" describe pod -l "app.kubernetes.io/name=$orch" 2>&1 | redact | tail -n 60 || true
   kubectl -n "$ns" logs "deployment/$orch" --tail=200 2>&1 | redact || true
   kubectl -n "$ns" logs "deployment/$orch_postgres" --tail=40 2>&1 | redact || true
+  echo "::endgroup::"
+  echo "::group::the collector (its log is what the traces step reads)"
+  kubectl -n "$ns" logs "deployment/$collector" --tail=120 2>&1 | redact || true
   echo "::endgroup::"
   echo "::group::the API's log"
   kubectl -n "$ns" logs "deployment/$api_name" --tail=200 2>&1 | redact || true
@@ -293,6 +304,8 @@ start_orch_forward() {
 tok() {
   t=$(curl -sSf --noproxy '*' -m 10 -G --data-urlencode "sub=$1" --data-urlencode "roles=$2" "$control/token") \
     || die "the test issuer's control port gave no token"
+  # The people this run mints tokens for (their `sub`): the collector's log must hold none of them (step 7). A file, because this runs in `$(...)`.
+  printf '%s\n' "$1" >> "$work/subjects"
   # What must never be found in an answer or a log: the token, and its payload and its signature on their own (a cut or a half-logged token).
   printf '%s\n' "$t" >> "$work/tokens"
   printf '%s\n' "$t" | awk -F. 'NF == 3 { if (length($2) >= 20) print $2; if (length($3) >= 20) print $3 }' >> "$work/tokens"
@@ -495,12 +508,42 @@ until_ok 60 "the API server to accept an ExternalSecret" kubectl -n "$ns" apply 
 [ "$(jp "externalsecret/$offer" '{.spec.data[*].secretKey}')" = 'GATEWAY_API_KEY GITHUB_APP_PRIVATE_KEY' ] \
   || die "chain-offer.yaml does not offer the two keys the forms name"
 ok "the Secrets exist, and the ExternalSecret $offer offers GATEWAY_API_KEY and GITHUB_APP_PRIVATE_KEY of $models_secret (neither value is in a file of the repository)"
+# The collector of the traces step (K5): its image is read from its manifest, so that the script and the manifest cannot name two, and it has to be a tag
+# AND a digest. It runs before the operator and the API, so that they find it when they start sending.
+collector_pin=$(sed -n 's/^ *image: \(ghcr\.io\/open-telemetry\/opentelemetry-collector-releases\/opentelemetry-collector:[^ ]*\)$/\1/p' "$here/otel-collector.yaml")
+{ [ -n "$collector_pin" ] && [ "$(printf '%s\n' "$collector_pin" | wc -l)" -eq 1 ]; } || die "otel-collector.yaml names no collector image, or more than one"
+printf '%s' "$collector_pin" | grep -Eq '^ghcr\.io/open-telemetry/opentelemetry-collector-releases/opentelemetry-collector:[0-9]+\.[0-9]+\.[0-9]+@sha256:[0-9a-f]{64}$' \
+  || die "the collector's image in otel-collector.yaml is not <version>@sha256:<64 hex>: $collector_pin"
+for r in "configmap/e2e-otel-collector-config" "deployment/$collector" "service/$collector"; do not_foreign "$r"; done
+kubectl -n "$ns" apply -f "$here/otel-collector.yaml" >/dev/null
+kubectl -n "$ns" rollout status "deployment/$collector" --timeout="${rollout_timeout}s"
+[ "$(jp "deployment/$collector" '{.spec.template.spec.containers[0].image}')" = "$collector_pin" ] || die "the collector's deployment runs another image than the pin $collector_pin"
+ok "the OpenTelemetry Collector is running ($collector_pin), with an OTLP/HTTP receiver on 4318 and the debug exporter"
 cat > "$work/e2e.values.yaml" <<EOF
 image:
   repository: $operator_image_repository
   tag: $operator_image_tag
   pullPolicy: $operator_pull_policy
+# Traces of both (K5): to the collector above, with egress to its pods alone (the chart refuses a rule without peers).
+otel:
+  enabled: true
+  endpoint: http://$collector.$ns.svc:4318/v1/traces
+  resourceAttributes:
+    deployment.environment.name: e2e
+  to:
+    - podSelector:
+        matchLabels:
+          app.kubernetes.io/name: $collector
 api:
+  otel:
+    enabled: true
+    endpoint: http://$collector.$ns.svc:4318/v1/traces
+    resourceAttributes:
+      deployment.environment.name: e2e
+    to:
+      - podSelector:
+          matchLabels:
+            app.kubernetes.io/name: $collector
   image:
     repository: $api_image_repository
     tag: $api_image_tag
@@ -536,6 +579,11 @@ ok "the operator and the API are Ready (the API's /readyz: the issuer's keys fet
 [ "$(jp deployment/aap-operator '{.spec.template.spec.volumes[*].secret.secretName}')" = "$registry_secret" ] \
   || die "the operator does not mount the registry's token from $registry_secret: $(jp deployment/aap-operator '{.spec.template.spec.volumes[*].secret.secretName}')"
 ok "the operator serves its registry (Service aap-operator-registry on 8080) with the token of $registry_secret"
+[ "$(jp deployment/aap-operator '{.spec.template.spec.containers[0].env[?(@.name=="OTEL_EXPORTER_OTLP_TRACES_ENDPOINT")].value}')" = "http://$collector.$ns.svc:4318/v1/traces" ] \
+  || die "the operator does not send its traces to the collector"
+[ "$(jp "deployment/$api_name" '{.spec.template.spec.containers[0].env[?(@.name=="OTEL_EXPORTER_OTLP_TRACES_ENDPOINT")].value}')" = "http://$collector.$ns.svc:4318/v1/traces" ] \
+  || die "the API does not send its traces to the collector"
+ok "the operator and the API are told to send their traces to the collector (otel.* and api.otel.*)"
 
 # The orchestrator's configuration, rendered here because the issuer's address is known only now. It names the operator's registry as its
 # one source of agents (`agents.file` is not needed when a registry is), reads both tokens as files, and has two roles that may read and use
@@ -789,6 +837,38 @@ oas e2e-alice "user,$agent_role" GET "/agui/agents/$agent/capabilities"
 expect 404 "alice reads the capabilities of the deleted coder"
 ok "the orchestrator lists nothing to the administrator or to alice $(( $(date +%s) - start ))s after the coder was gone (the registry is ok), and its capabilities are 404"
 
+step "6b. traces: the collector's log holds a span of the operator and of the Platform API (K5; passed in CI, run 43732918179, job 132871058839, *verified 2026-11-15*)"
+# `debug` at `detailed` writes, for each batch, `ResourceSpans #n`, the resource's attributes (`-> service.name: Str(aap-api)`), and each span (`Name : ...`,
+# `-> http.route: Str(/v1/agents)`). That layout, as far as these greps read it, passed in CI (run 43732918179, job 132871058839, at cd225d2, *verified 2026-11-15*);
+# the greps stay loose and the wait long: both services flush every 5 s, and the spans of the steps above are already queued.
+collector_log() {
+  kubectl -n "$ns" logs "deployment/$collector" --tail=-1 > "$work/otel.raw" 2> "$work/otel.err" || { printf 'kubectl logs failed: %s\n' "$(head -c 300 "$work/otel.err")"; return 1; }
+  sed "s/$(printf '\033')\[[0-9;]*m//g" "$work/otel.raw" > "$work/otel.log"
+  [ -s "$work/otel.log" ] || { printf 'the collector log is empty\n'; return 1; }
+  grep -q 'ResourceSpans #0' "$work/otel.log" || { printf 'no batch of spans yet\n'; return 1; }
+}
+collector_has_spans() {
+  collector_log || return 1
+  for pattern in 'service\.name: Str\(aap-api\)' 'service\.name: Str\(aap-operator\)' 'Name +: GET /v1/agents' 'Name +: reconcile agentservice' \
+    'Name +: DELETE /v1/agents/\{name\}' 'http\.route: Str\(/v1/agents/\{name\}\)' \
+    'k8s\.namespace\.name: Str\('"$ns"'\)' 'http\.route: Str\(/v1/agents\)' 'aap\.controller: Str\(agentservice\)'; do
+    grep -Eq -- "$pattern" "$work/otel.log" || { printf 'the collector has not received: %s\n' "$pattern"; return 1; }
+  done
+}
+until_ok 90 "the collector to have received a span of each service" collector_has_spans
+# The spans the sampler kept are all there is to read: none of them may name a person, a token, a Secret or a path (the sentinels are looked for in step 7).
+# Step 6 deleted the coder through the API, so a request for ONE agent happened and its span must be there, named by the template and carrying it.
+# (The check used to be skipped when no such span existed; the wait above now requires one.)
+grep -Eq 'Name +: DELETE /v1/agents/\{name\}' "$work/otel.log" || die "no span of the delete of one agent is named by its route template (DELETE /v1/agents/{name})"
+grep -Eq 'http\.route: Str\(/v1/agents/\{name\}\)' "$work/otel.log" || die "the span of a request for one agent does not carry its route template"
+if grep -Eq 'Str\(/v1/agents/'"$agent"'\)' "$work/otel.log"; then die "a span holds the path of a request (the agent's name in a route), not a template"; fi
+# A span's NAME is on a `Name : ...` line of its own, not inside `Str(...)`, so the check above would pass a regression that put the path of a
+# request in a span name. Both are looked for, on the name lines alone and with the spacing loose: the agent's name anywhere in a name, and a
+# name with anything after /v1/agents/ but the template.
+if grep -Eq "Name +: .*$agent" "$work/otel.log"; then die "a span is NAMED with the agent's name (the path of a request), not a template"; fi
+if grep -E 'Name +: .*/v1/agents/' "$work/otel.log" | grep -vqF '/v1/agents/{name}'; then die "a span is named with something after /v1/agents/ that is not the template {name}"; fi
+ok "the collector received spans of the operator (reconcile agentservice, k8s.namespace.name $ns) and of the Platform API (GET /v1/agents by its template /v1/agents), through the egress rule of each policy"
+
 step "7. nothing secret anywhere"
 # The logs, as plain text: the Platform API's and the operator's tracing-subscriber writes colour codes unless it is told not to, and a pod is not a terminal.
 # A log counts only if `kubectl logs` SUCCEEDED, it is not empty, and it holds a line that only a real log of that component has: a log that could not be
@@ -806,16 +886,24 @@ read_log() {
 read_log "$api_name" api.log 'route=/v1/agents' "a request line for /v1/agents"
 read_log aap-operator operator.log 'the caches are synced' "the line the operator logs when its caches have listed the cluster"
 read_log "$orch" orch.log '"message":"database migrations applied"' "the line the orchestrator logs when its migrations have run"
+read_log "$collector" otel.log 'ResourceSpans #0' "the header the collector's debug exporter writes for a batch of spans"
 # The orchestrator's log is JSON, one object per line (its default and the image's).
 grep -q '^{' "$work/orch.log" || die "the orchestrator's log is not JSON lines: $(redact < "$work/orch.log" | head -c 400)"
-if grep -qF -f "$work/secrets" "$work/api.log" "$work/operator.log" "$work/orch.log" "$work/seen"; then
+# The people the run minted tokens for are in no span either (the Platform API's own log does name the subject, by design: it is not scanned for them).
+# No subject is equal by design to a string a span must hold: they are e2e-alice, e2e-bob, e2e-admin, e2e-carol, e2e-nowhere, nobody, modeler,
+# writer and reader, and the spans hold route templates, controller and object kinds, steps and a namespace.
+[ -s "$work/subjects" ] || die "no subject was recorded: the check of the collector's log would pass on nothing"
+if grep -qF -f "$work/subjects" "$work/otel.log"; then
+  die "a subject (the name of a person this run minted a token for) is in the collector's log: a span holds a person. The first such line: $(grep -F -f "$work/subjects" "$work/otel.log" | redact | head -c 300)"
+fi
+if grep -qF -f "$work/secrets" "$work/api.log" "$work/operator.log" "$work/orch.log" "$work/otel.log" "$work/seen"; then
   die "a secret value (the model's key, the GitHub App's key, the registry's token or the A2A bearer) is in an answer, a header or a log"
 fi
-if [ -s "$work/tokens" ] && grep -qF -f "$work/tokens" "$work/api.log" "$work/operator.log" "$work/orch.log" "$work/seen"; then
-  die "a token the issuer minted (or its payload or its signature) is in the API's, the operator's or the orchestrator's log or in an answer"
+if [ -s "$work/tokens" ] && grep -qF -f "$work/tokens" "$work/api.log" "$work/operator.log" "$work/orch.log" "$work/otel.log" "$work/seen"; then
+  die "a token the issuer minted (or its payload or its signature) is in the API's, the operator's, the orchestrator's or the collector's log or in an answer"
 fi
 # The Rust panic message, and not the words: a third party's log (a dependency's, a library's) may say "panic" or "backtrace" in a harmless sentence.
 if grep -q 'panicked at' "$work/api.log" "$work/orch.log"; then die "the API's or the orchestrator's log holds a panic ('panicked at')"; fi
-ok "none of the four secret values and no token minted by this run is in an answer, a header or a log ($(wc -c < "$work/seen") bytes of answers read; the API's, the operator's and the orchestrator's logs, each read by a kubectl logs that succeeded and holds a line of its own component), and the API's and the orchestrator's logs hold no panic"
+ok "none of the four secret values and no token minted by this run is in an answer, a header or a log ($(wc -c < "$work/seen") bytes of answers read; the API's, the operator's, the orchestrator's and the collector's logs (every span and attribute the two services sent), each read by a kubectl logs that succeeded and holds a line of its own component), and the API's and the orchestrator's logs hold no panic"
 
 printf '\nWhole-chain end-to-end passed\n'

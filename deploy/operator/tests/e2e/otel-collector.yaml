@@ -1,0 +1,110 @@
+# The OpenTelemetry Collector the kind end-to-end of the whole chain (chain-e2e.sh, step 2b and 6b) sends the traces of the operator and of the
+# Platform API to (K5, §48a): an OTLP/HTTP receiver on 4318 and the `debug` exporter at `detailed` verbosity, so that what it received is in its
+# log, which the script reads. The manifests carry no namespace: the script applies them in its own (aap-e2e-chain). Everything here carries the label
+# aap-e2e/made-by=chain-e2e: the script applies over nothing that lacks it. It is NOT in the job that gates the image push (chain-e2e does not).
+#
+# THE PIN OF THE COLLECTOR IS HERE AND NOWHERE ELSE: a third party's image, so a bump is a deliberate change of this line, with the digest read again
+# from ghcr.io. `0.165.0` is the newest release tag of the CORE distribution (the contrib one is another package) when this was written.
+# *Verified 2026-11-15* by anonymous requests to ghcr.io (the registry's token endpoint for the scope `repository:open-telemetry/
+# opentelemetry-collector-releases/opentelemetry-collector:pull`, the tags list followed by its Link header to its end, then the manifest of the tag): the
+# tag is a Docker manifest list whose digest is the one on the `image:` line below and in no other line of this file (render-check.sh counts it), with
+# linux/amd64 (sha256:500abf4d..., the platform of kind on the runners), arm64 and five more; the amd64 image's config says user 10001:10001,
+# entrypoint `/otelcol`, cmd `--config /etc/otelcol/config.yaml`, ports 4317, 4318 and 55679, and the labels `org.opencontainers.image.version` 0.165.0 and
+# `org.opencontainers.image.revision` b9425f263115f328bc3bd4e65b825101b499f144, created 2026-11-07. The package is public (no credential was used).
+# Verified in CI (run 43732918179, job `chain-e2e` 132871058839, at cd225d2, *verified 2026-11-15* in the job's log): that the kubelet of a kind cluster pulls it,
+# that this configuration starts it, that the spans of both services reach it through the egress rules, and the text of the `debug` exporter's output as far
+# as the script's greps read it (they stay loose, and wait). Unverified: a TLS receiver, headers, and any backend other than this Collector.
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: e2e-otel-collector-config
+  labels:
+    aap-e2e/made-by: chain-e2e
+    aap-e2e/part: otel-collector
+data:
+  config.yaml: |
+    receivers:
+      otlp:
+        protocols:
+          http:
+            endpoint: 0.0.0.0:4318
+    exporters:
+      debug:
+        verbosity: detailed
+    service:
+      pipelines:
+        traces:
+          receivers: [otlp]
+          exporters: [debug]
+      telemetry:
+        metrics:
+          level: none
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: e2e-otel-collector
+  labels:
+    aap-e2e/made-by: chain-e2e
+    aap-e2e/part: otel-collector
+spec:
+  replicas: 1
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: e2e-otel-collector
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: e2e-otel-collector
+        aap-e2e/made-by: chain-e2e
+    spec:
+      containers:
+        - name: collector
+          image: ghcr.io/open-telemetry/opentelemetry-collector-releases/opentelemetry-collector:0.165.0@sha256:34b24b740c3c88d3467740e8642a397c13898ef76d7295c5425164c482ed1b73
+          args: ["--config=/etc/otelcol/config.yaml"]
+          ports:
+            - name: otlp-http
+              containerPort: 4318
+          # The image has no shell: a TCP check is what a probe can do.
+          readinessProbe:
+            tcpSocket:
+              port: otlp-http
+            periodSeconds: 2
+            failureThreshold: 30
+          resources:
+            requests:
+              cpu: 50m
+              memory: 64Mi
+            limits:
+              memory: 256Mi
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            runAsNonRoot: true
+            capabilities:
+              drop: [ALL]
+          volumeMounts:
+            - name: config
+              mountPath: /etc/otelcol
+              readOnly: true
+      volumes:
+        - name: config
+          configMap:
+            name: e2e-otel-collector-config
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: e2e-otel-collector
+  labels:
+    aap-e2e/made-by: chain-e2e
+    aap-e2e/part: otel-collector
+spec:
+  selector:
+    app.kubernetes.io/name: e2e-otel-collector
+  ports:
+    - name: otlp-http
+      port: 4318
+      targetPort: otlp-http

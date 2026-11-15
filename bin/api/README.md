@@ -99,6 +99,23 @@ that is going is *not ready* for as long as it takes. A Service takes a moment t
 (`lifecycle.preStop.sleep`) and gives it 40 s in all: the sleep counts against the grace period, which must also hold the drain, the 2 s the health port is
 given to stop after it, and 5 s of margin, so the chart refuses less than the sleep plus 32.
 
+## Traces (K5)
+
+Traces are **off** unless an endpoint is set (`OTEL_EXPORTER_OTLP_TRACES_ENDPOINT`, or `OTEL_EXPORTER_OTLP_ENDPOINT` with
+`/v1/traces` appended), and then no task, queue or series exists. The variables are a strict subset of the standard ones,
+read by `aap-trace-otlp` ([README](../../crates/trace-otlp/README.md)): `grpc`, `http/protobuf` and
+`OTEL_EXPORTER_OTLP_HEADERS` are refused, headers come from the file `AAP_OTEL_HEADERS_FILE` names, and
+`OTEL_EXPORTER_OTLP_CERTIFICATE` is the exporter's only trust. **A tracing setting never stops the API:** `run` logs one
+`warn` line (`tracing is off`, the variable's name and a fixed reason, never the value) and runs with tracing off (platforms
+inject `OTEL_*` variables of their own; BuildKit does, into every `RUN` step), and `/metrics` carries `aap_trace_enabled 0`
+while any tracing variable is set and tracing is off. `api --check` still refuses the setting and names the variable (it exits
+1), so a rendered configuration is validated in CI, and reads none of the files they name. The tracing variables are not in the YAML file. `run` reads them before the cluster and the issuer; the
+flush (at most 3 s) comes **after** the 25 s drain of the API and runs at the same time as the 2 s stop of the health and
+metrics servers, so the chart's grace floor is not moved. When on, `/metrics` also has `aap_trace_enabled 1` and the two `aap_trace_*` series. The
+spans are the router's ([README](../../crates/platform-api/README.md)). `tests/trace_env.rs` runs the built binary with BuildKit's variables (`run` starts, warns once without the value and serves
+`aap_trace_enabled 0`; `--check` exits 1 naming the variable) and with the others it refuses, with every `OTEL_*` of the
+developer's shell removed.
+
 ## Tests
 
 `cargo test -p aap-api-server` (the loopback only; no cluster).

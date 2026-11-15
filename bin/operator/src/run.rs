@@ -299,12 +299,58 @@ fn kubernetes_runtime(
     }
 }
 
+/// How long the spans still queued have to reach the collector when the operator stops (K5), inside the 30 s of
+/// `terminationGracePeriodSeconds`.
+#[cfg(feature = "runtime-kubernetes")]
+const FLUSH: std::time::Duration = std::time::Duration::from_secs(3);
+
+/// `operator run`. The tracing variables are read first, before the cluster is asked anything. A setting that is refused never
+/// stops the operator (tracing is not a security control, and platforms inject OTEL_* variables of their own): one warning, by
+/// variable, and tracing is off. The spans still queued are flushed on every way out that returns, an error included (not when
+/// the main future panics).
 #[cfg(feature = "runtime-kubernetes")]
 pub async fn run(args: RunArgs) -> Result<()> {
+    let started = aap_trace_otlp::start("aap-operator", env!("CARGO_PKG_VERSION"));
+    started.warn();
+    let tracer = started.tracer;
+    flushed(&tracer, run_with(args, tracer.clone())).await
+}
+
+/// Run `body`, then flush the spans still queued: on `Ok` and on `Err` alike.
+#[cfg(feature = "runtime-kubernetes")]
+async fn flushed<T>(
+    tracer: &aap_trace::Tracer,
+    body: impl std::future::Future<Output = Result<T>>,
+) -> Result<T> {
+    let result = body.await;
+    tracer.shutdown(FLUSH).await;
+    result
+}
+
+/// The controllers, composed: the one place that hands the tracer to the operator, so a test can ask that it did.
+#[cfg(feature = "runtime-kubernetes")]
+fn compose<R, S>(
+    client: kube::Client,
+    runtime: R,
+    store: S,
+    owner: aap_controller::OwnerOf,
+    options: aap_controller::Options,
+    tracer: &aap_trace::Tracer,
+) -> aap_controller::Operator<R, S>
+where
+    R: aap_ports::RuntimeProvider + 'static,
+    S: aap_ports::StoreProvisioner + 'static,
+{
+    aap_controller::Operator::new(client, runtime, store, owner, options)
+        .with_tracer(tracer.clone())
+}
+
+#[cfg(feature = "runtime-kubernetes")]
+async fn run_with(args: RunArgs, tracer: aap_trace::Tracer) -> Result<()> {
     use std::sync::Arc;
 
     use aap_api::AgentService;
-    use aap_controller::{Operator, OwnerOf};
+    use aap_controller::OwnerOf;
     use aap_runtime_kubernetes::owner_handle;
     use anyhow::Context;
     use kube::{Resource, ResourceExt};
@@ -347,7 +393,7 @@ pub async fn run(args: RunArgs) -> Result<()> {
         )
     });
     let store = store(&client);
-    let operator = Operator::new(client, runtime, store, owner, options);
+    let operator = compose(client, runtime, store, owner, options, &tracer);
 
     #[cfg(feature = "registry")]
     let registry_server = token.map(|token| {
@@ -371,7 +417,7 @@ pub async fn run(args: RunArgs) -> Result<()> {
     ));
     let metrics = tokio::spawn(crate::serve::serve(
         args.metrics_addr,
-        crate::serve::metrics(operator.metrics()),
+        crate::serve::metrics_for(operator.metrics(), &tracer),
         signalled(stopped.clone()),
     ));
 
@@ -449,6 +495,51 @@ mod tests {
     fn client() -> kube::Client {
         let config = kube::Config::new("http://127.0.0.1:9".parse().expect("a URL"));
         kube::Client::try_from(config).expect("a client")
+    }
+
+    /// What a pass needs of the operator is the tracer it was composed with: an operator composed with none makes no span.
+    #[tokio::test]
+    async fn the_operator_is_composed_with_the_tracer() {
+        let compose_with = |tracer: &aap_trace::Tracer| {
+            compose(
+                client(),
+                aap_ports::memory::MemoryRuntime::new(),
+                aap_ports::memory::MemoryStore::new(),
+                std::sync::Arc::new(|_| aap_ports::OwnerHandle::none()),
+                aap_controller::Options::default(),
+                tracer,
+            )
+        };
+        let (on, _) = aap_trace::Tracer::in_memory(aap_trace::Sampler::AlwaysOn);
+        assert!(compose_with(&on).tracer().enabled());
+        assert!(!compose_with(&aap_trace::Tracer::off()).tracer().enabled());
+    }
+
+    /// The operator flushes the spans still queued when it ends, whether it ended well or not.
+    #[tokio::test]
+    async fn the_operator_flushes_its_spans_on_the_way_out() {
+        for outcome in [Ok(()), Err(anyhow::anyhow!("the operator failed"))] {
+            let exporter = aap_trace::testkit::MemoryExporter::default();
+            let tracer = aap_trace::Pipeline::start(
+                exporter.clone(),
+                aap_trace::Limits::default(),
+                aap_trace::Resource::new("test", "0"),
+                aap_trace::Sampler::AlwaysOn,
+            );
+            let failed = outcome.is_err();
+            let result = flushed(&tracer, async {
+                tracer
+                    .root(
+                        aap_trace::SpanName::fixed("t").expect("a name"),
+                        aap_trace::SpanKind::Internal,
+                    )
+                    .end();
+                outcome
+            })
+            .await;
+            assert_eq!(result.is_err(), failed);
+            assert_eq!(exporter.spans().len(), 1, "the span reached the exporter");
+        }
     }
 
     #[tokio::test]

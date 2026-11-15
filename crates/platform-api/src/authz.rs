@@ -116,6 +116,9 @@ where
     };
     let principal = match state.auth.authenticate(token).await {
         Ok(principal) => {
+            if let Some(a) = aap_trace::Attr::auth_result("ok") {
+                aap_trace::current_set(a);
+            }
             if state.keys_down.swap(false, Ordering::Relaxed) {
                 tracing::info!("the issuer's keys are available again");
             }
@@ -123,6 +126,9 @@ where
         }
         Err(error) => {
             state.metrics.auth_failure(&error);
+            if let Some(a) = aap_trace::Attr::auth_result(crate::metrics::reason_label(&error)) {
+                aap_trace::current_set(a);
+            }
             // Said when it starts, not once per request while it lasts: every request of every person is a line otherwise.
             if let AuthError::Unavailable(source) = &error
                 && !state.keys_down.swap(true, Ordering::Relaxed)

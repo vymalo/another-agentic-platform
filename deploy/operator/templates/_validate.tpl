@@ -16,6 +16,8 @@ Included from deployment.yaml, which every render has, so they always run.
 {{- fail "metrics.serviceMonitor.labels must be a map of label names to values" -}}
 {{- end -}}
 {{- end -}}
+{{- /* The operator's traces (slice K5): off by default, and then the block is only checked to be a block. */ -}}
+{{- include "aap.otel.validate" (dict "what" "otel" "block" .Values.otel "policy" .Values.networkPolicy.enabled "dns" true) -}}
 {{- /* One replica and no leader election in v0 (§59a): a second reconciler would only race the first. */ -}}
 {{- if or (hasKey .Values "replicaCount") (hasKey .Values "replicas") -}}
 {{- fail "the operator has no leader election in v0 and runs one replica: there is no replicaCount (§59a, \"The operator chart\")" -}}
@@ -431,6 +433,8 @@ for each tested shape (tests/api-shapes.sh) to find such a value before it is de
 {{- if eq (int $api.port) (int $api.healthPort) -}}
 {{- fail "api.port and api.healthPort must differ: the API and its health endpoints are two listeners" -}}
 {{- end -}}
+{{- /* The API's traces (slice K5). */ -}}
+{{- include "aap.otel.validate" (dict "what" "api.otel" "block" $api.otel "policy" $api.networkPolicy.enabled "dns" false) -}}
 {{- /* The metrics port: a port of its own, and a ServiceMonitor only where the NetworkPolicy lets the scrape in. */ -}}
 {{- $m := $api.metrics -}}
 {{- if not (kindIs "map" $m.serviceMonitor) -}}
@@ -698,6 +702,9 @@ extraVolumes, and a name is used once.
 {{- if has $e.name (list "API_CONFIG_FILE" "RUST_LOG" "API_LISTEN_ADDR" "HEALTH_ADDR" "METRICS_ADDR") -}}
 {{- fail (printf "api.extraEnv: %s is the chart's: API_CONFIG_FILE is the mounted file, RUST_LOG is api.logLevel, and API_LISTEN_ADDR, HEALTH_ADDR and METRICS_ADDR would win over api.port, api.healthPort and api.metrics.port in the file, which the probes and the Service follow" $e.name) -}}
 {{- end -}}
+{{- if or (hasPrefix "OTEL_" $e.name) (hasPrefix "AAP_OTEL_" $e.name) (and $api.otel.enabled (has $e.name (list "POD_NAME" "POD_NAMESPACE"))) -}}
+{{- fail (printf "api.extraEnv: %s is the chart's: the tracing variables are api.otel (OTEL_*, AAP_OTEL_*, and POD_NAME and POD_NAMESPACE while api.otel.enabled)" $e.name) -}}
+{{- end -}}
 {{- if hasKey $seen $e.name -}}
 {{- fail (printf "api.extraEnv: %s is set twice" $e.name) -}}
 {{- end -}}
@@ -705,6 +712,9 @@ extraVolumes, and a name is used once.
 {{- end -}}
 {{- $volumes := dict -}}
 {{- range $v := (default (list) $api.extraVolumes) -}}
+{{- if and $api.otel.enabled (has $v.name (list "otel-headers" "otel-ca")) -}}
+{{- fail (printf "api.extraVolumes: %s is the chart's volume of api.otel: name yours otherwise" $v.name) -}}
+{{- end -}}
 {{- if eq $v.name "config" -}}
 {{- fail "api.extraVolumes: `config` is the chart's volume (the configuration file): name yours otherwise" -}}
 {{- end -}}
@@ -722,6 +732,9 @@ extraVolumes, and a name is used once.
 {{- end -}}
 {{- /* The configuration file is /etc/aap-api/config.yaml: a mount there, over it or under it, would hide it or change it. */ -}}
 {{- $path := trimSuffix "/" $m.mountPath -}}
+{{- if and $api.otel.enabled (or (eq $path "/etc/aap/otel") (hasPrefix "/etc/aap/otel/" $path) (eq $path "/var/run/secrets/aap/otel") (hasPrefix "/var/run/secrets/aap/otel/" $path)) -}}
+{{- fail (printf "api.extraVolumeMounts: %s is mounted at %s, which is where api.otel mounts its headers and CA bundle (/var/run/secrets/aap/otel, /etc/aap/otel): mount it elsewhere" $m.name $m.mountPath) -}}
+{{- end -}}
 {{- if or (eq $path "/etc/aap-api") (hasPrefix "/etc/aap-api/" $path) -}}
 {{- fail (printf "api.extraVolumeMounts: %s is mounted at %s, which is the configuration file's directory (/etc/aap-api): mount it elsewhere, for example /etc/aap-api-ca" $m.name $m.mountPath) -}}
 {{- end -}}

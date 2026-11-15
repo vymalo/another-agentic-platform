@@ -1,0 +1,3 @@
+trace.json is examples/trace.json of https://github.com/open-telemetry/opentelemetry-proto
+at commit 94f2f2d5f39c5139141dc7e564daa84aa2826531 (refs/heads/main as `git ls-remote` read it on 2026-11-15).
+Re-vendor it, do not edit it. tests/encoding.rs holds our encoding to its shape.

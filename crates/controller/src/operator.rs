@@ -81,6 +81,7 @@ pub struct Operator<R, S> {
     options: Options,
     metrics: Arc<Metrics>,
     readiness: Readiness,
+    tracer: aap_trace::Tracer,
     services: Option<Controller<AgentService>>,
 }
 
@@ -104,8 +105,22 @@ where
             options,
             metrics: Arc::new(Metrics::new()),
             readiness: Readiness::default(),
+            tracer: aap_trace::Tracer::off(),
             services: Some(services),
         }
+    }
+
+    /// Make a span of every pass with `tracer` (K5, §48a). Off by default.
+    #[must_use]
+    pub fn with_tracer(mut self, tracer: aap_trace::Tracer) -> Self {
+        self.tracer = tracer;
+        self
+    }
+
+    /// The tracer the controllers will make their spans with.
+    #[must_use]
+    pub fn tracer(&self) -> &aap_trace::Tracer {
+        &self.tracer
     }
 
     /// The counters, for `/metrics`.
@@ -171,7 +186,8 @@ where
                 self.owner,
                 self.options.clone(),
             )
-            .with_metrics(metrics.clone()),
+            .with_metrics(metrics.clone())
+            .with_tracer(self.tracer.clone()),
         );
         let signals = {
             let metrics = metrics.clone();
@@ -214,7 +230,8 @@ where
         // The configs.
         let config_ctx = Arc::new(
             ConfigContext::new(self.client.clone(), metrics.clone())
-                .with_pass_timeout(self.options.pass_timeout),
+                .with_pass_timeout(self.options.pass_timeout)
+                .with_tracer(self.tracer.clone()),
         );
         let configs = configs_controller
             .run(reconcile_config, config_error_policy, config_ctx)
@@ -252,7 +269,8 @@ where
                     shared_configs.clone(),
                     shared_services.clone(),
                 )
-                .with_pass_timeout(self.options.pass_timeout),
+                .with_pass_timeout(self.options.pass_timeout)
+                .with_tracer(self.tracer.clone()),
             );
             let (own_c, services_c, configs_s) =
                 (own.clone(), shared_services.clone(), shared_configs.clone());
@@ -279,7 +297,8 @@ where
                     shared_configs.clone(),
                     shared_services.clone(),
                 )
-                .with_pass_timeout(self.options.pass_timeout),
+                .with_pass_timeout(self.options.pass_timeout)
+                .with_tracer(self.tracer.clone()),
             );
             let (own_c, services_c, configs_s) =
                 (own.clone(), shared_services.clone(), shared_configs.clone());

@@ -19,7 +19,7 @@ name: Operator and API images
 # api-image:   (D7b1) builds docker/api/Dockerfile and smoke-tests the image like the operator's (the user, the version, the usage, the
 #              example configuration accepted, a misspelt key refused, no cluster to reach said so, no shell), and runs `api --check`
 #              in the image on the configuration the chart renders for each shape of values it is tested in (deploy/operator/tests/
-#              api-shapes.sh: the golden one, a Secret per agent, the least a deployment must say, one that sets every value, one with run pods and one with the metrics on). That
+#              api-shapes.sh: the golden one, a Secret per agent, the least a deployment must say, one that sets every value, one with run pods, one with the metrics on and one with traces on, whose tracing environment the same job also hands to `api --check`). That
 #              finds a shape the chart renders and the binary refuses; it does not prove there is none: the chart refuses what it can check
 #              at render time, and anything else the binary refuses at start, failing closed. It is kept as an artifact for the push, as
 #              the operator's is.
@@ -173,7 +173,7 @@ jobs:
           # namespace, no CloudNativePG), the Platform API in its three shapes (tests/api.values.yaml: an Ingress and a policy;
           # tests/api-secretref.values.yaml: neither, an existing service account; tests/api-full.values.yaml: every value set), run pods
           # on (tests/runpods.values.yaml: a PriorityClass, a ValidatingAdmissionPolicy and its binding, a Role), the two ServiceMonitors on
-          # (tests/metrics.values.yaml, against the vendored schema in tests/schemas/monitoring.coreos.com), and the CRDs chart.
+          # (tests/metrics.values.yaml, against the vendored schema in tests/schemas/monitoring.coreos.com), traces of both on (tests/otel.values.yaml), and the CRDs chart.
           helm template aap-operator deploy/operator --namespace another-agentic-system > "$RUNNER_TEMP/rendered-default.yaml"
           helm template aap-operator deploy/operator --namespace another-agentic-system \
             -f deploy/operator/examples/netcup.values.yaml > "$RUNNER_TEMP/rendered-netcup.yaml"
@@ -189,6 +189,8 @@ jobs:
             -f deploy/operator/tests/runpods.values.yaml > "$RUNNER_TEMP/rendered-runpods.yaml"
           helm template aap-operator deploy/operator --namespace another-agentic-system \
             -f deploy/operator/tests/metrics.values.yaml > "$RUNNER_TEMP/rendered-metrics.yaml"
+          helm template aap-operator deploy/operator --namespace another-agentic-system \
+            -f deploy/operator/tests/otel.values.yaml > "$RUNNER_TEMP/rendered-otel.yaml"
           helm template aap-operator-crds deploy/operator-crds > "$RUNNER_TEMP/rendered-crds.yaml"
           for attempt in 1 2 3; do
             status=0
@@ -197,7 +199,7 @@ jobs:
                 -schema-location 'deploy/operator/tests/schemas/{{.Group}}/{{.ResourceKind}}_{{.ResourceAPIVersion}}.json' \
                 "$RUNNER_TEMP/rendered-default.yaml" "$RUNNER_TEMP/rendered-netcup.yaml" "$RUNNER_TEMP/rendered-secret.yaml" \
                 "$RUNNER_TEMP/rendered-api.yaml" "$RUNNER_TEMP/rendered-api-secretref.yaml" "$RUNNER_TEMP/rendered-api-full.yaml" \
-                "$RUNNER_TEMP/rendered-runpods.yaml" "$RUNNER_TEMP/rendered-metrics.yaml" "$RUNNER_TEMP/rendered-crds.yaml" \
+                "$RUNNER_TEMP/rendered-runpods.yaml" "$RUNNER_TEMP/rendered-metrics.yaml" "$RUNNER_TEMP/rendered-otel.yaml" "$RUNNER_TEMP/rendered-crds.yaml" \
                 > "$RUNNER_TEMP/kubeconform.out" 2>&1 || status=$?
             cat "$RUNNER_TEMP/kubeconform.out"
             if [ "$status" -eq 0 ]; then exit 0; fi
@@ -306,6 +308,16 @@ jobs:
           # `run` with no cluster to reach fails, and says so (never a panic, never a hang).
           out=$(docker run --rm -e KUBECONFIG=/nonexistent operator:smoke run 2>&1) && { echo "::error::run succeeded with no cluster"; exit 1; } || true
           grep -q 'connecting to the cluster' <<<"$out" || { echo "::error::run did not say it was connecting: $out"; exit 1; }
+          # A tracing variable the exporter does not speak never stops the operator (K5, §48a: a tracing setting never stops the process):
+          # it warns once, by variable name, and goes on with tracing off, so the run goes on to the cluster and fails there, as above.
+          # `docker run` passes nothing of the runner's environment: what the container sees is what is written here.
+          out=$(docker run --rm -e KUBECONFIG=/nonexistent -e OTEL_EXPORTER_OTLP_ENDPOINT=http://collector.invalid:4318 -e OTEL_EXPORTER_OTLP_PROTOCOL=grpc operator:smoke run 2>&1) && { echo "::error::run succeeded with no cluster"; exit 1; } || true
+          grep -q 'OTEL_EXPORTER_OTLP_PROTOCOL' <<<"$out" || { echo "::error::the warning did not name the variable: $out"; exit 1; }
+          [ "$(grep -c 'tracing is off' <<<"$out")" = 1 ] || { echo "::error::expected exactly one tracing warning: $out"; exit 1; }
+          grep -q 'connecting to the cluster' <<<"$out" || { echo "::error::the tracing variable stopped the start: $out"; exit 1; }
+          # BuildKit's own shape (what it injects into RUN steps): the same, a warning and a start.
+          out=$(docker run --rm -e KUBECONFIG=/nonexistent -e OTEL_TRACES_EXPORTER=otlp -e OTEL_EXPORTER_OTLP_TRACES_PROTOCOL=grpc -e OTEL_EXPORTER_OTLP_TRACES_ENDPOINT=unix:///dev/otel-grpc.sock operator:smoke run 2>&1) && { echo "::error::run succeeded with no cluster"; exit 1; } || true
+          grep -q 'connecting to the cluster' <<<"$out" || { echo "::error::BuildKit's variables stopped the start: $out"; exit 1; }
           # Only the operator: no shell, no package manager in the image (a read of the whole file system).
           cid=$(docker create operator:smoke)
           files=$(docker export "$cid" | tar -t)
@@ -394,6 +406,8 @@ jobs:
       - name: The configuration the chart renders is one the image accepts
         run: |
           set -euo pipefail
+          # Nothing of the runner's own OTEL_* variables reaches the scripts below (`docker run` passes none of the host's).
+          for v in $(compgen -e | grep -E '^(AAP_)?OTEL_' || true); do unset "$v"; done
           dir="$RUNNER_TEMP/api-config"
           sh deploy/operator/tests/api-shapes.sh "$dir"
           for f in "$dir"/*.yaml; do
@@ -415,6 +429,25 @@ jobs:
             echo "$out"
             grep -q 'both on port' <<<"$out" || { echo "::error::refused/$name was refused for another reason: $out"; exit 1; }
           done
+      # K5: the tracing environment the chart renders for the API (tests/otel.values.yaml) is one the image accepts, `--check` reads none of the files
+      # the variables name, and a protocol the exporter does not speak is refused by name.
+      - name: The tracing environment the chart renders is one the image accepts
+        run: |
+          set -euo pipefail
+          for v in $(compgen -e | grep -E '^(AAP_)?OTEL_' || true); do unset "$v"; done
+          args=()
+          while IFS= read -r line; do args+=(-e "$line"); done < <(sh deploy/operator/tests/otel-env.sh api)
+          [ "${#args[@]}" -ge 10 ] || { echo "::error::the chart rendered no tracing environment for the API"; exit 1; }
+          out=$(docker run --rm "${args[@]}" -v "$PWD/bin/api:/cfg:ro" api:smoke --config /cfg/config.example.yaml --check)
+          grep -q ': ok$' <<<"$out" || { echo "::error::the image refuses the tracing environment the chart renders: $out"; exit 1; }
+          # `--check` still refuses what the running binary only warns about, by name: a rendered configuration is validated here.
+          out=$(docker run --rm -e OTEL_EXPORTER_OTLP_ENDPOINT=http://collector.invalid:4318 -e OTEL_EXPORTER_OTLP_PROTOCOL=grpc -v "$PWD/bin/api:/cfg:ro" api:smoke --config /cfg/config.example.yaml --check 2>&1) \
+            && { echo "::error::--check accepted grpc"; exit 1; } || true
+          grep -q 'OTEL_EXPORTER_OTLP_PROTOCOL' <<<"$out" || { echo "::error::the refusal did not name the variable: $out"; exit 1; }
+          # BuildKit's shape: the running API only warns (no cluster here, so it stops at the cluster, not at tracing).
+          out=$(docker run --rm -e KUBECONFIG=/nonexistent -e OTEL_EXPORTER_OTLP_TRACES_PROTOCOL=grpc -e OTEL_EXPORTER_OTLP_TRACES_ENDPOINT=unix:///dev/otel-grpc.sock -v "$PWD/bin/api:/cfg:ro" api:smoke --config /cfg/config.example.yaml 2>&1) \
+            && { echo "::error::the API served with no cluster"; exit 1; } || true
+          grep -q 'tracing is off' <<<"$out" || { echo "::error::no tracing warning: $out"; exit 1; }
       # The image that passed travels to the push as a file.
       - name: Save the image
         run: docker save api:smoke -o "$RUNNER_TEMP/api.tar"

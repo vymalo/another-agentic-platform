@@ -40,8 +40,12 @@ COPY bin bin
 RUN cargo build --release --locked --package aap-operator --bin operator
 # Smoke test of what was built, in the build stage because the final image has no shell: the binary starts,
 # prints its usage, and `crdgen` prints the four CRDs. (CI runs the same two commands on the final image.)
-RUN /src/target/release/operator --help > /dev/null \
- && /src/target/release/operator crdgen > /tmp/crds.yaml \
+# Every command runs under `env -i`: BuildKit injects its own OTEL_* variables into RUN steps (seen 2026-11-15 in the log of this
+# repository's pull request 52, run 43729018865, under docker/build-push-action: a traces protocol of `grpc` and an endpoint on a
+# unix socket, for BuildKit's own tracing). A smoke test must not depend on what a builder puts in the environment.
+RUN clean="env -i PATH=$PATH" \
+ && $clean /src/target/release/operator --help > /dev/null \
+ && $clean /src/target/release/operator crdgen > /tmp/crds.yaml \
  && test "$(grep -c '^kind: CustomResourceDefinition$' /tmp/crds.yaml)" = 4
 
 FROM gcr.io/distroless/cc-debian13:nonroot@sha256:e792ab3d241a468a4fd7519ddbbebe66b49b5f365771716ea688ad40b6c6f1c2

@@ -35,7 +35,8 @@ use crate::context::{Context, FIELD_MANAGER, FINALIZER, failed};
 use crate::derive::{ConfigOutcome, Observed, StoreOutcome, derive, ready_summary};
 use crate::error::Error;
 use crate::metrics::name;
-use crate::pass::bounded;
+use crate::pass::{bounded, class_of, kube_class_of, record_state};
+use aap_trace::{Step, step};
 
 const CONTROLLER: &str = "agentservice";
 
@@ -71,6 +72,7 @@ where
         &key,
         ctx.options.pass_timeout,
         &ctx.metrics,
+        &ctx.tracer,
         async {
             finalizer(&api, FINALIZER, svc, |event| async {
                 match event {
@@ -301,18 +303,25 @@ where
     };
 
     // 2. The config.
-    let (agent, config) = match fetch_and_resolve(svc, ctx).await? {
-        Resolution::Blocked(outcome) => {
-            obs.config = outcome;
-            obs.runtime = Some(ctx.runtime.status(&id).await?);
-            return finish(svc, ctx, &previous, obs).await;
-        }
-        Resolution::Resolved { agent, config } => (agent, config),
-    };
+    let (agent, config) =
+        match step(Step::ConfigRead, fetch_and_resolve(svc, ctx), class_of).await? {
+            Resolution::Blocked(outcome) => {
+                obs.config = outcome;
+                obs.runtime = Some(status_of(ctx, &id).await?);
+                return finish(svc, ctx, &previous, obs).await;
+            }
+            Resolution::Resolved { agent, config } => (agent, config),
+        };
 
     // 3. The store. A store that is not ready blocks the service: the agent would only crash-loop
     // with exit code 69, and what runs is left as it is.
-    match ctx.store.ensure(&agent.store_id, &agent.store).await {
+    match step(
+        Step::StoreEnsure,
+        ctx.store.ensure(&agent.store_id, &agent.store),
+        class_of,
+    )
+    .await
+    {
         Ok(status) => obs.store = StoreOutcome::Answered(status.state),
         Err(StoreError::NotInstalled { what }) => {
             obs.store = StoreOutcome::NotInstalled {
@@ -336,12 +345,18 @@ where
         StoreOutcome::Answered(StoreState::SecretReferenced | StoreState::ClusterReady)
     );
     if !store_ready || obs.config != ConfigOutcome::Resolved {
-        obs.runtime = Some(ctx.runtime.status(&id).await?);
+        obs.runtime = Some(status_of(ctx, &id).await?);
         return finish(svc, ctx, &previous, obs).await;
     }
 
     // 4. The runtime.
-    match ctx.runtime.ensure(&id, &agent.runtime).await {
+    match step(
+        Step::RuntimeEnsure,
+        ctx.runtime.ensure(&id, &agent.runtime),
+        class_of,
+    )
+    .await
+    {
         Ok(status) => {
             obs.config_status = Some(config);
             obs.runtime = Some(status);
@@ -356,7 +371,7 @@ where
                     ctx.runtime.name()
                 ),
             };
-            obs.runtime = Some(ctx.runtime.status(&id).await?);
+            obs.runtime = Some(status_of(ctx, &id).await?);
         }
         Err(e) => return Err(e.into()),
     }
@@ -366,9 +381,16 @@ where
         && rt.phase != Phase::Absent
         && !rt.is_name_conflict()
     {
-        obs.endpoints = Some(endpoints(ctx, &id).await?);
+        obs.endpoints = Some(step(Step::RuntimeEndpoints, endpoints(ctx, &id), class_of).await?);
     }
     finish(svc, ctx, &previous, obs).await
+}
+
+async fn status_of<R: RuntimeProvider, S>(
+    ctx: &Context<R, S>,
+    id: &RuntimeId,
+) -> Result<aap_ports::RuntimeStatus, RuntimeError> {
+    step(Step::RuntimeStatus, ctx.runtime.status(id), class_of).await
 }
 
 async fn endpoints<R: RuntimeProvider, S>(
@@ -410,15 +432,20 @@ async fn finish<R, S>(
             "metadata": { "name": name },
             "status": status,
         });
-        api.patch_status(
-            &name,
-            &PatchParams::apply(FIELD_MANAGER).force(),
-            &Patch::Apply(&body),
+        step(
+            Step::StatusPatch,
+            api.patch_status(
+                &name,
+                &PatchParams::apply(FIELD_MANAGER).force(),
+                &Patch::Apply(&body),
+            ),
+            kube_class_of,
         )
         .await?;
         ctx.metrics
             .inc(name::STATUS_PATCHES, &[("controller", CONTROLLER)]);
     }
+    record_state(status.state);
 
     announce(svc, ctx, previous, &status).await;
     Ok(Action::requeue(period(ctx, &status, &obs)))
@@ -509,14 +536,27 @@ where
     // deletes in one breath has not had a pass in between, and Delete -> Retain must not lose data:
     // so when something exists and the objects still resolve, apply them once more. Anything that
     // does not resolve, or that a provider refuses, is left: the remembered policy stands.
-    if ctx.runtime.status(&id).await?.phase != Phase::Absent
-        && let Resolution::Resolved { agent, .. } = fetch_and_resolve(svc, ctx).await?
+    if status_of(ctx, &id).await?.phase != Phase::Absent
+        && let Resolution::Resolved { agent, .. } =
+            step(Step::ConfigRead, fetch_and_resolve(svc, ctx), class_of).await?
     {
-        match ctx.runtime.ensure(&id, &agent.runtime).await {
+        match step(
+            Step::RuntimeEnsure,
+            ctx.runtime.ensure(&id, &agent.runtime),
+            class_of,
+        )
+        .await
+        {
             Ok(_) | Err(RuntimeError::InvalidSpec(_) | RuntimeError::Unsupported(_)) => {}
             Err(e) => return Err(e.into()),
         }
-        match ctx.store.ensure(&agent.store_id, &agent.store).await {
+        match step(
+            Step::StoreEnsure,
+            ctx.store.ensure(&agent.store_id, &agent.store),
+            class_of,
+        )
+        .await
+        {
             Ok(_)
             | Err(
                 StoreError::InvalidSpec(_)
@@ -527,8 +567,8 @@ where
         }
     }
 
-    let deleted = ctx.runtime.delete(&id).await?;
-    let released = ctx.store.release(&store_id).await?;
+    let deleted = step(Step::RuntimeDelete, ctx.runtime.delete(&id), class_of).await?;
+    let released = step(Step::StoreRelease, ctx.store.release(&store_id), class_of).await?;
     ctx.metrics.inc(name::SERVICES_DELETED, &[]);
 
     let mut note = if deleted.existed {

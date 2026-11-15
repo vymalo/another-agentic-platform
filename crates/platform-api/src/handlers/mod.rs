@@ -6,7 +6,7 @@ pub(crate) mod shared;
 
 use std::sync::Arc;
 
-use aap_ports::ETag;
+use aap_ports::{AgentObjects, ETag};
 use axum::extract::{FromRequestParts, Path};
 use axum::http::header::{CONTENT_TYPE, LOCATION};
 use axum::http::request::Parts;

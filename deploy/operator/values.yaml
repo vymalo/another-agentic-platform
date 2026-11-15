@@ -255,6 +255,48 @@ networkPolicy:
     # Optional: only these addresses (`kubectl get endpoints kubernetes`). Empty: any address on those ports.
     cidrs: []
 
+# Traces of the operator (slice K5, §48a): one span per reconcile pass with its steps as children, sent as OTLP/HTTP JSON to a collector
+# (crates/trace-otlp/README.md). OFF by default, and then nothing of it is rendered: no variable, volume or egress rule. On, the chart writes the
+# OTEL_* variables the binary reads, a headers file from an existing Secret (never an environment variable) and a CA bundle from an existing
+# ConfigMap, and opens egress to the collector's peers and to nothing else. A span holds the controller, the kind, the namespace and the
+# name of the object, the step and the CLASS of an error, never the error, and never a token, a Secret, a URL or an object's content (the
+# attribute list is crates/trace/README.md). The exporter speaks OTLP/HTTP JSON only: a backend that wants protobuf or gRPC is behind a
+# Collector. The operator's Role gains nothing: the kubelet resolves the Secret and the ConfigMap.
+otel:
+  enabled: false
+  # REQUIRED when on: the full URL of the collector's traces endpoint (OTEL_EXPORTER_OTLP_TRACES_ENDPOINT, used as written): http(s), no user
+  # name, password, query or fragment.
+  endpoint: ""
+  # always_on, always_off or traceidratio (then samplerRatio, 0 to 1).
+  sampler: always_on
+  samplerRatio: "1"
+  # Only deployment.environment.name, k8s.cluster.name and service.namespace, values [A-Za-z0-9._-]{1,128}.
+  resourceAttributes: {}
+  # An existing Secret (this namespace) whose key holds `name=value,name2=value2`, at most 4 KiB: the headers the collector wants (a token).
+  # Mounted read-only at /var/run/secrets/aap/otel (mode 0440) and named by AAP_OTEL_HEADERS_FILE. Both `name` and `key`, or neither.
+  headersSecret:
+    name: ""
+    key: ""
+  # An existing ConfigMap whose key holds a PEM bundle that is the exporter's ONLY trust (a private CA), for an https collector. Both, or neither.
+  certificate:
+    configMap: ""
+    key: ""
+  # REQUIRED when on while networkPolicy is enabled: the collector's pods (NetworkPolicyPeers: namespaceSelector, podSelector, ipBlock). The
+  # operator's policy then gets a rule to these peers on `ports`; there is never a rule with ports and no peer, and a 0.0.0.0/0 is refused.
+  to: []
+  ports: [4318]
+  # The operator's policy has no DNS rule (it reaches the API server by address): with the collector, it needs one. Required while
+  # networkPolicy is enabled and otel is on.
+  dns:
+    to:
+      - namespaceSelector:
+          matchLabels:
+            kubernetes.io/metadata.name: kube-system
+        podSelector:
+          matchLabels:
+            k8s-app: kube-dns
+    ports: [53]
+
 # A Prometheus Operator `ServiceMonitor` (monitoring.coreos.com/v1) for the operator's /metrics (9090), through the Service
 # `<fullname>-metrics`. Off: nothing is rendered, and the CRD need not be installed. On, it needs `networkPolicy.metrics.allowFrom`
 # (the Prometheus pods) while the operator's NetworkPolicy is enabled, or the policy would drop the scrape: the chart refuses less.
@@ -436,6 +478,26 @@ api:
       enabled: false
       interval: 30s
       labels: {}
+
+  # Traces of the API (slice K5, §48a): one SERVER span per request named by its route template (never the path), the two ports as children.
+  # The same shape and rules as the operator's `otel` above, without `dns` (the API's policy has its own DNS rule); OFF by default, and then
+  # nothing of it is rendered. No subject, no agent name, no body, header, query or token is in any span, and no inbound `traceparent` is read.
+  # `api.extraEnv` may not set OTEL_* or AAP_OTEL_* names (they are these values).
+  otel:
+    enabled: false
+    endpoint: ""
+    sampler: always_on
+    samplerRatio: "1"
+    resourceAttributes: {}
+    headersSecret:
+      name: ""
+      key: ""
+    certificate:
+      configMap: ""
+      key: ""
+    # REQUIRED when on while api.networkPolicy is enabled: the API's policy gets a fourth egress rule to these peers on `ports`.
+    to: []
+    ports: [4318]
 
   # Environment, volumes and mounts of the API's container beyond the chart's own, for an issuer behind a private CA or a proxy: `extraEnv`
   # is a list of EnvVar (`HTTPS_PROXY`, `NO_PROXY`, `SSL_CERT_FILE`), `extraVolumes` a list of Volume (a ConfigMap that holds a CA bundle) and

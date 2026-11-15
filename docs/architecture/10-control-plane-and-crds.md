@@ -1209,11 +1209,11 @@ The owner asked what the platform lacks, next to a Kubernetes agent control plan
 
 ### The increments
 
-**Progress on 2026-11-15: 7 of 15 increments are built** (K0, K1, K2, K4, K8, K9 and K9b; K9b is both halves: K9b-1 over the Platform API and K9b-2, the browser sign-in and the refresh token; K1b is void and not counted), **47 %** by count, not by effort. What is left, by what it waits for:
+**Progress on 2026-11-15: 8 of 15 increments are built** (K0, K1, K2, K4, K5, K8, K9 and K9b; K9b is both halves: K9b-1 over the Platform API and K9b-2, the browser sign-in and the refresh token; K1b is void and not counted), **53 %** by count, not by effort. What is left, by what it waits for:
 
 | Waits for | Increments |
 |---|---|
-| Nothing: can start | K5 (traces) |
+| Nothing: can start | none (K5 was the last) |
 | A proposal the owner has not decided | K3 (P-024), K6 and K7 (P-026), K10 (P-027), K11 (P-025) |
 | Another repository | K12 (an adam-rs decision on approvals, and the system's) |
 | A cluster | K13, on hold |
@@ -1226,7 +1226,7 @@ The owner asked what the platform lacks, next to a Kubernetes agent control plan
 | K2 | `status` on `ModelEndpoint` and `ToolProvider`: who uses it, whether it is valid, whether those agents are `Ready` (§60a, P-023) | none | the fake API server, the objects suite, `render-check.sh` | **built** |
 | K3 | A tool server's reachability and discovered tools in its status | K2; P-024 | a stub MCP server in tests; a step of `api-e2e.sh` | planned |
 | K4 | `ServiceMonitor`s for the operator and the Platform API; `aap_api_*` metrics (§59a *The operator chart*, §48) | none | `render-check.sh`, kubeconform on a vendored schema | **built** |
-| K5 | OpenTelemetry traces from the operator and the API (observability is mandatory, AD-015, §48). That **no span holds a prompt, a tool argument, a header or a secret** is this section's own constraint, to be decided with the slice and not a decision taken yet | none; an agent's own traces need adam-rs | an in-process OTLP receiver in tests; `render-check.sh` for the egress rule | planned |
+| K5 | OpenTelemetry traces from the operator and the API (observability is mandatory, AD-015, §48a). **No span holds a prompt, a tool argument, a header, a secret or the subject**: a closed enum of attributes, enforced by types and read by `assert_clean` (P-037 to P-039) | none; an agent's own traces need adam-rs | a collector in the tests (`TestCollector`) and the fake API server; `render-check.sh` for the egress rules; the dependency gates | **built** (proven by `cargo test`, `render-check.sh` with each check broken on purpose, and `tools/check-dependencies.sh`; the traces step of `chain-e2e.sh` against a real, pinned OpenTelemetry Collector passed in CI, run 43732918179, job `chain-e2e` 132871058839, at `cd225d2`, *verified 2026-11-15* in the job's log; the `DELETE` span and subjects checks added after that run are **unverified** until the pull request's own CI has run them, as are any other backend and a private CA) |
 | K6 | Watching several namespaces, one `Role` per namespace and never a `ClusterRole` (P-026) | none | two namespaces reconciled independently; a duplicate registry id across namespaces not listed; a kind end-to-end | planned |
 | K7 | Leader election and two replicas with a `PodDisruptionBudget` (amends §59a *one replica, `Recreate`*) | K6 | a `LeaderElection` trait with its conformance macro (AD-020), on the `Memory` and fake-API-server implementations; kind: kill the leader | planned |
 | K8 | What the admin UI still needs of the Platform API: an OpenAPI document held equal to the table of routes, and the Kubernetes Events of an agent's objects (P-029; §60a *Events and the OpenAPI document*) | K2 | a test that lists every route in the document; the new route in the permission matrix | **built** (proven on the `Memory` ports and the fake API server; the real-cluster half is *unverified* until CI has run `api-e2e.sh`) |
@@ -1237,7 +1237,7 @@ The owner asked what the platform lacks, next to a Kubernetes agent control plan
 | K12 | `requireApproval` per tool | an adam-rs decision and the system's | parity with adam's MCP file | planned; waits (the tiers of K1 cover the coder meanwhile) |
 | K13 | The dashboard and an agent on the owner's real cluster (D14) | K1 | the first real agent | **on hold**: that the netcup cluster is down and home-os no longer carries it is the owner's statement of 2026-11-14, *unverified* here; with no cluster to prove it on, D14 stays *unverified* |
 
-Parallel work: K4, K9, K0 and K8's OpenAPI document touch no shared file. K1 and K2 both regenerated `deploy/crds`, so they merged one after the other. K6 comes before K7 (both touch `operator.rs` and the `Role`), K3 and K10 after K2, and K9b after K8.
+Parallel work: K4, K5, K9, K0 and K8's OpenAPI document touch no shared file. K1 and K2 both regenerated `deploy/crds`, so they merged one after the other. K6 comes before K7 (both touch `operator.rs` and the `Role`), K3 and K10 after K2, and K9b after K8.
 
 ### What it does not mean
 
@@ -1259,7 +1259,7 @@ Parallel work: K4, K9, K0 and K8's OpenAPI document touch no shared file. K1 and
 
 ### Decisions for the owner
 
-Thirteen are open, each a `P-NNN` in [§92](11-decisions.md) (P-024 to P-029, and P-030 to P-036 of K9b, which the slices already proceed on). Each is a recommendation that waits for the owner and blocks only the slice named.
+Sixteen are open, each a `P-NNN` in [§92](11-decisions.md) (P-024 to P-029, P-030 to P-036 of K9b and P-037 to P-039 of K5, which the slices already proceed on). Each is a recommendation that waits for the owner and blocks only the slice named.
 
 | P | The question | Blocks |
 |---|---|---|
@@ -1276,6 +1276,9 @@ Thirteen are open, each a `P-NNN` in [§92](11-decisions.md) (P-024 to P-029, an
 | P-034 | What `aapctl apply` means: read first, write nothing when unchanged, refuse a deployment part that differs | none (built) |
 | P-035 | The exit codes 3, 4 and 5 | none (built) |
 | P-036 | What the sign-in asks for and does: no `offline_access` by default, a refresh on a `401`, a revocation on `logout`, no ID token read | none (built) |
+| P-037 | A hand-written OTLP/HTTP JSON exporter, explicit spans, no `tracing` bridge, always compiled | none (built) |
+| P-038 | What a span may hold: no content, no subject, no agent name in the API, no inbound `traceparent` | none (built) |
+| P-039 | The chart: off by default, egress only to named peers, headers from a file, `otel` and `api.otel` | none (built) |
 
 ---
 

@@ -40,6 +40,7 @@ on:
       - "examples/**"
       - "docs/extensions/agent-registry-v1.md"
       - ".github/workflows/operator.yml"
+      - "tools/check-dependencies.sh"
   push:
     branches: [main]
     paths:
@@ -51,6 +52,7 @@ on:
       - "examples/**"
       - "docs/extensions/agent-registry-v1.md"
       - ".github/workflows/operator.yml"
+      - "tools/check-dependencies.sh"
 
 permissions:
   contents: read
@@ -91,6 +93,20 @@ jobs:
         run: rustup toolchain install "$RUST_TOOLCHAIN" --profile minimal --no-self-update && rustup default "$RUST_TOOLCHAIN"
       - uses: Swatinem/rust-cache@v2
       - run: cargo test --workspace --locked
+
+  dependencies:
+    # K5: TLS stays rustls with ring and no second TLS stack or HTTP client enters the lock file (tools/check-dependencies.sh, gates 1 to 4).
+    # There is no gate on the packages a pull request adds: that is review's, and the script's opt-in gate 5 is for local use.
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+      - name: Install Rust
+        run: rustup toolchain install "$RUST_TOOLCHAIN" --profile minimal --no-self-update && rustup default "$RUST_TOOLCHAIN"
+      - uses: Swatinem/rust-cache@v2
+      - name: the dependency gates
+        run: sh tools/check-dependencies.sh
 
   crds-drift:
     # deploy/crds/agents.vymalo.com.yaml must be exactly what `crdgen` prints.

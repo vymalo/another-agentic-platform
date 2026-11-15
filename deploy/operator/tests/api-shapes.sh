@@ -9,7 +9,9 @@
 # `minimal` (the least a deployment must say, nothing else), `full` (tests/api-full.values.yaml: every value the chart exposes, none left
 # to its default, so a value the chart writes into the file is read by the binary) and `runpods` (tests/runpods.values.yaml: run pods on, so
 # the file lists the size classes and a work volume, and the binary checks that a coder asking for the first class is a valid one) and
-# `metrics` (tests/metrics.values.yaml: the file carries `metricsListen`, on a port that is not the binary's default).
+# `metrics` (tests/metrics.values.yaml: the file carries `metricsListen`, on a port that is not the binary's default) and `otel`
+# (tests/otel.values.yaml: tracing on; the file is the golden's, because tracing is not in the file, and what CI checks with it is the
+# environment the chart renders for the API, read from the render by the workflow).
 # Needs `helm` and `awk` (api-config.sh).
 set -eu
 
@@ -31,6 +33,7 @@ sh "$here/api-config.sh" "$dir/minimal.yaml" \
 sh "$here/api-config.sh" "$dir/full.yaml" -f "$here/api-full.values.yaml"
 sh "$here/api-config.sh" "$dir/runpods.yaml" -f "$here/runpods.values.yaml"
 sh "$here/api-config.sh" "$dir/metrics.yaml" -f "$here/metrics.values.yaml"
+sh "$here/api-config.sh" "$dir/otel.yaml" -f "$here/otel.values.yaml"
 
 # Shapes the chart renders and the binary must REFUSE (`api --check` exits 1), in refused/: `clash` puts the API on 9090 with the metrics
 # port not exposed, so the file has no metricsListen and the binary's default for it (127.0.0.1:9090) is the API's own port. CI fails

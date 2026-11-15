@@ -8,6 +8,8 @@ use aap_ports::{AgentObjects, Authenticator};
 
 use crate::cors::CorsOrigins;
 use crate::metrics::ApiMetrics;
+use crate::traced::{TracedAuth, TracedObjects};
+use aap_trace::Tracer;
 
 /// Why an [`ApiState`] could not be made.
 #[derive(Debug, thiserror::Error)]
@@ -21,13 +23,14 @@ pub enum StateError {
 /// The state of the router: generic over the two ports (AD-020), so that no implementation type is in a public
 /// signature of this crate.
 pub struct ApiState<O, A> {
-    pub(crate) objects: O,
-    pub(crate) auth: A,
+    pub(crate) objects: TracedObjects<O>,
+    pub(crate) auth: TracedAuth<A>,
     pub(crate) defaults: Defaults,
     pub(crate) images: ImagePolicy,
     pub(crate) cors: CorsOrigins,
     pub(crate) version: String,
     pub(crate) metrics: Arc<ApiMetrics>,
+    pub(crate) tracer: Tracer,
     /// Whether the last request that needed the issuer's keys found them unavailable: the log says so when this changes,
     /// and not once per request while it lasts.
     pub(crate) keys_down: AtomicBool,
@@ -53,13 +56,14 @@ where
         }
         let images = defaults.image_policy();
         Ok(Self {
-            objects,
-            auth,
+            objects: TracedObjects(objects),
+            auth: TracedAuth(auth),
             defaults,
             images,
             cors: CorsOrigins::none(),
             version: env!("CARGO_PKG_VERSION").to_owned(),
             metrics: Arc::new(ApiMetrics::new()),
+            tracer: Tracer::off(),
             keys_down: AtomicBool::new(false),
         })
     }
@@ -75,6 +79,14 @@ where
     #[must_use]
     pub fn with_metrics(mut self, metrics: Arc<ApiMetrics>) -> Self {
         self.metrics = metrics;
+        self
+    }
+
+    /// Make a span of every request (and of every call to the two ports) with `tracer` (K5, §48a). Off by default: then
+    /// no span is made and nothing is allocated for one.
+    #[must_use]
+    pub fn with_tracer(mut self, tracer: Tracer) -> Self {
+        self.tracer = tracer;
         self
     }
 
@@ -97,11 +109,11 @@ where
 
     /// The authenticator, for a readiness probe.
     pub fn authenticator(&self) -> &A {
-        &self.auth
+        self.auth.inner()
     }
 
     /// The objects port, for a readiness probe.
     pub fn objects(&self) -> &O {
-        &self.objects
+        self.objects.inner()
     }
 }

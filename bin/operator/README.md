@@ -57,6 +57,22 @@ Each is a flag and an environment variable, which is how the chart sets them (S8
 §59a lists `runtime-kubernetes`, `store-cnpg` and `registry`, all three declared. The controller never names the store type: `run` picks `CnpgStore` or `SecretStore` by
 the feature, and the controller is generic over `StoreProvisioner` (AD-020).
 
+## Traces (K5)
+
+Traces are **off** unless an endpoint is set (`OTEL_EXPORTER_OTLP_TRACES_ENDPOINT`, or `OTEL_EXPORTER_OTLP_ENDPOINT` with
+`/v1/traces` appended), and then no task, queue or series exists. The variables are a strict subset of the standard ones,
+read by `aap-trace-otlp` ([README](../../crates/trace-otlp/README.md)): `grpc`, `http/protobuf` and
+`OTEL_EXPORTER_OTLP_HEADERS` are refused, headers come from the file `AAP_OTEL_HEADERS_FILE` names, and
+`OTEL_EXPORTER_OTLP_CERTIFICATE` is the exporter's only trust. **A tracing setting never stops the operator:** a bad one
+makes `run` log one `warn` line (`tracing is off`, the variable's name and a fixed reason, never the value) and run with
+tracing off (platforms inject `OTEL_*` variables of their own; BuildKit does, into every `RUN` step). `run` reads them at its top, **before** it asks the
+cluster anything, and flushes the spans still queued (at most 3 s) on every way out that returns, an error included (not when the main future panics), inside the 30 s of
+`terminationGracePeriodSeconds`. `POD_NAME` and `POD_NAMESPACE` (the chart sets them from the downward API when tracing is
+on) name the resource. When on, `/metrics` also has `aap_trace_spans_exported_total` and
+`aap_trace_spans_dropped_total{reason}` after the controllers' series, with `aap_trace_enabled 1`; with a tracing variable set and tracing off it has `aap_trace_enabled 0` alone; with none the text is what it was. The spans are
+the controllers' ([README](../../crates/controller/README.md)); §48a has the rest. `tests/trace_env.rs` runs the built binary with BuildKit's variables and with others it refuses: it warns once, never prints
+the value, and goes on to the cluster.
+
 ## Cluster rights
 
 Everything `run` does to the API, for the chart of S8 (a namespaced `Role`, §59a): the
@@ -81,6 +97,7 @@ AAP_TEST_KUBECONFIG=$HOME/.kube/config AAP_TEST_STUB_IMAGE=aap-stub:ci cargo tes
 | File | What |
 |---|---|
 | `src/run.rs` unit test | the provider is told to look for run pod objects to clear only with settings for run pods (without them the operator has no right to read an account, a quota or a binding, and looking would fail every reconcile) |
+| `src/run.rs` unit tests (K5) | the operator is composed with the tracer it was given (`compose`), and the spans still queued are flushed on the way out, on `Ok` and on `Err` (`flushed`) |
 | `src/serve.rs` unit tests | `/healthz` is up at once, `/readyz` answers 503 until the readiness handle is marked, `/metrics` is Prometheus text |
 | `tests/cli.rs` | runs the built binary (`RUN_PODS_FILE`: an absent file, junk, an unknown key, a file from before the egress proxy, the switch of the network policy that is gone, and settings that fail their checks each stop it before it looks for a cluster, naming the variable and the mistake): `crdgen` equals the checked-in file and prints one document per kind; `run` without a cluster fails and says it was connecting; `run --help` lists every variable above; a default image with white space stops `run` before it looks for a cluster, and an empty one or a reference does not |
 | `tests/e2e_fixture.rs` | the fixtures of the chart's kind end-to-end resolve; **the chart's `defaultAgentImage` is the image `tests/e2e/coder.yaml` runs**, and the fixture with its image removed, on an operator given that default, is the same agent, digest included |
