@@ -888,6 +888,23 @@ chain_script() {
     && grep -q '^models_secret=e2e-agent-models$' "$script" && grep -q '^registry_secret=e2e-registry-token$' "$script" && grep -q '^bearer_secret=e2e-a2a-bearer$' "$script"
 }
 check "chain: the script's namespace, label, audience and Secrets are the ones the values and the manifests name" chain_script
+# The aapctl step of the API's end-to-end (K9b-1, 6b): before the step that reads every answer and log for the tokens and the secret, the token
+# only in the environment of the command (never an argument: `ps` shows it), every byte it says read in that step, the binary built when
+# AAPCTL_BIN is not set, and the workflow's job builds it. The step itself is unverified until CI has run it.
+api_aapctl_step() {
+  script="$here/e2e/api-e2e.sh"
+  repo=$(cd "$here/../../.." && pwd)
+  six_b=$(grep -n '^step "6b\. ' "$script" | head -n 1 | cut -d: -f1)
+  seven=$(grep -n '^step "7\. ' "$script" | head -n 1 | cut -d: -f1)
+  [ -n "$six_b" ] && [ -n "$seven" ] && [ "$six_b" -lt "$seven" ] \
+    && grep -q 'AAPCTL_TOKEN="\$art"' "$script" \
+    && ! grep -Eq -- '--token( |=)' "$script" \
+    && grep -q 'cat "\$work/ctl.out" "\$work/ctl.err" >> "\$work/seen"' "$script" \
+    && grep -q 'cargo build --locked -p aap-cli' "$script" \
+    && grep -q 'cargo build --locked -p aap-cli' "$repo/.github/workflows/operator-image.yml" \
+    && grep -q 'AAPCTL_BIN: ' "$repo/.github/workflows/operator-image.yml"
+}
+check "api-e2e: step 6b (aapctl) is before step 7, passes its token in the environment and never as an argument, and its output is read in step 7" api_aapctl_step
 
 # ---- Run pods (slice D15a): off by default, and then not a trace; on, exactly these rights and this guard ---------------------------
 # What a render with run pods off must not contain, anywhere: an object, a variable, a right, a mount, a key of the API's file.

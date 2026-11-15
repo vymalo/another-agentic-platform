@@ -24,6 +24,10 @@
 #      the current one is accepted (204; 202 when the operator's finalizer outlasts the API's 5 s wait, and then the AgentConfig stays behind as
 #      an orphan, which the script reports and removes), the operator's finalizer completes, the objects and the workload are gone, and then
 #      the model can go;
+#   6b. aapctl (K9b-1, built here when AAPCTL_BIN is not set) drives the same API: a model from a file (created, then unchanged with no PUT), an
+#      agent the API made and `aapctl export` printed, deleted with `--wait` and made again with `aapctl apply` (Ready; applied again, nothing
+#      written), a stale `--if-match` that is exit 3, a reader that is exit 4 naming platform:agents.write, a token kept by `login --token-stdin`
+#      in a file of mode 0600 and forgotten by `logout`, and the deletes. Its tokens and every byte it says are read by step 7 like the rest.
 #   7. from a pod the NetworkPolicy of the API names the API answers; from one it does not name, which reaches the issuer, it is refused (kind's
 #      network plugin, kindnet, enforces NetworkPolicies: anything but a dropped connection is a failure; AAP_E2E_CNI_MAY_IGNORE_POLICIES=1,
 #      for a cluster whose plugin does not, turns that into a warning); no token and no secret value is in any answer or log (a log counts
@@ -353,6 +357,13 @@ if [ -z "$issuer_bin" ]; then
   issuer_bin="${CARGO_TARGET_DIR:-$repo/target}/debug/examples/test-issuer"
 fi
 [ -x "$issuer_bin" ] || die "the test issuer is not there: $issuer_bin"
+# aapctl (K9b-1), the command line of the platform: step 6b drives the deployed API with it. Built here when AAPCTL_BIN is not set, as the issuer is.
+aapctl_bin=${AAPCTL_BIN:-}
+if [ -z "$aapctl_bin" ]; then
+  (cd "$repo" && cargo build --locked -p aap-cli)
+  aapctl_bin="${CARGO_TARGET_DIR:-$repo/target}/debug/aapctl"
+fi
+[ -x "$aapctl_bin" ] || die "aapctl is not there: $aapctl_bin"
 ensure_namespace
 ok "the namespace $ns is this script's (label $made_by_key=$made_by)"
 
@@ -747,6 +758,163 @@ as modeler "platform:models.write,platform:secrets.pick" DELETE "/v1/models/$mod
 expect 204 "delete the model, now that no agent names it"
 gone "modelendpoint/$model" || die "the model is still there"
 ok "no agent names the model any more: its delete is 204"
+
+step "6b. aapctl against the deployed API"
+# K9b-1. *Unverified until CI has run it*: no container daemon and no kind exist where it was written (it was read with `sh -n`, and the command
+# line it drives is held by bin/cli/tests/remote.rs against the same router over the Memory ports). The command line is a second client of the
+# API's contract: a model from a file (it names a Secret key, so the token holds platform:secrets.pick), an agent that the API made and `aapctl
+# export` printed, deleted with `--wait` and made again from that file by `aapctl apply` (the create compares the file's deployment part with the
+# server's defaults, which are the ones that made it), Ready, applied again with nothing to write, a stale `--if-match` that is exit 3, a token
+# without platform:agents.write that is exit 4 naming it, a token kept in a file of mode 0600, and the deletes. Every token comes from the
+# issuer and is in $work/tokens; every byte aapctl says, `--verbose` trace included, is in $work/seen, which step 7 reads for them and for the secret.
+# aapctl_run <AAPCTL_TOKEN (may be empty)> <args...>: the status is in $ctl_code, stdout in $work/ctl.out and stderr in $work/ctl.err. The server is the
+# port-forward, the configuration file is this run's own, the proxy variables are dropped (the runner may set one, and reqwest uses it for a loopback address
+# unless NO_PROXY names it) and standard input is the caller's.
+aapctl_run() {
+  art=$1; shift
+  ctl_code=0
+  env -u HTTPS_PROXY -u https_proxy -u HTTP_PROXY -u http_proxy -u ALL_PROXY -u all_proxy NO_PROXY=127.0.0.1,localhost AAPCTL_TOKEN="$art" \
+    "$aapctl_bin" "$@" --server "$base" --config "$work/aapctl.yaml" --verbose > "$work/ctl.out" 2> "$work/ctl.err" || ctl_code=$?
+  cat "$work/ctl.out" "$work/ctl.err" >> "$work/seen"
+}
+ctl() { aapctl_run "$@" < /dev/null; }
+# ctl_as <subject> <permission,...> <args...>: a fresh token for that person (they last five minutes, and a wait is longer).
+ctl_as() {
+  cwho=$1; cperms=$2; shift 2
+  ctk=$(tok "$cwho" "$cperms")
+  ctl "$ctk" "$@"
+}
+expect_ctl() { # expect_ctl <exit code> <what>
+  [ "$ctl_code" = "$1" ] || die "$2: wanted exit $1, got $ctl_code: $(redact < "$work/ctl.err" | head -c 800)"
+}
+expect_ctl_out() { # expect_ctl_out <the one line of stdout> <what>
+  [ "$(cat "$work/ctl.out")" = "$1" ] || die "$2: wanted '$1', got '$(head -c 300 "$work/ctl.out")'"
+}
+ctl_everything=platform:agents.read,platform:agents.write,platform:models.write,platform:secrets.pick
+
+# The model, from a file: a create, and then nothing to write.
+cat > "$work/aapctl-model.yaml" <<EOF
+apiVersion: agents.vymalo.com/v1alpha1
+kind: ModelEndpoint
+metadata:
+  name: $model
+  namespace: $ns
+spec:
+  title: E2E gateway
+  baseUrl:
+    value: http://model.invalid/v1
+  apiKeySecretRef:
+    name: $models_secret
+    key: GATEWAY_API_KEY
+  models:
+    - e2e-model
+EOF
+ctl_as aapctl-writer "$ctl_everything" apply -f "$work/aapctl-model.yaml"
+expect_ctl 0 "apply the model"
+expect_ctl_out "model/$model created" "apply the model"
+[ "$(jp "modelendpoint/$model" '{.metadata.labels.app\.kubernetes\.io/managed-by}')" = dashboard.agents.vymalo.com ] || die "aapctl's model has not the dashboard's label"
+ctl_as aapctl-writer "$ctl_everything" apply -f "$work/aapctl-model.yaml"
+expect_ctl 0 "apply the model again"
+expect_ctl_out "model/$model unchanged" "apply the model again"
+if grep -q '^> PUT' "$work/ctl.err"; then die "applying an unchanged model sent a PUT: $(redact < "$work/ctl.err" | head -c 600)"; fi
+ctl_as aapctl-reader platform:agents.read get models -o json
+expect_ctl 0 "list the models"
+jq -e --arg m "$model" '.models | map(.name) | index($m) != null' "$work/ctl.out" >/dev/null || die "aapctl does not list the model: $(head -c 600 "$work/ctl.out")"
+ok "aapctl applies the model from a file (created, then unchanged with no PUT) and lists it"
+
+# The agent: the API makes it, `export` prints it, `delete --wait` takes it away, `apply` makes it again from the file.
+as writer "$all_agents" PUT "/v1/agents/$agent" -H 'If-None-Match: *' -H 'Content-Type: application/json' -d "$(agent_form 'E2E aapctl chat')"
+expect 201 "create the agent for aapctl to export"
+ctl_as aapctl-reader platform:agents.read export agent "$agent"
+expect_ctl 0 "export the agent"
+cp "$work/ctl.out" "$work/aapctl-agent.yaml"
+for want in 'kind: AgentConfig' 'kind: AgentService' "$model" 'E2E aapctl chat'; do
+  grep -qF -- "$want" "$work/aapctl-agent.yaml" || die "the export does not hold '$want'"
+done
+ctl_as aapctl-writer "$ctl_everything" delete agent "$agent" --wait --timeout "$gone_timeout"
+expect_ctl 0 "delete the agent with --wait"
+gone "agentservice/$agent" || die "aapctl delete --wait returned and the AgentService is still there"
+until_ok 120 "the agent's Deployment and Service to be gone" gone "deployment/$agent" "service/$agent"
+ctl_as aapctl-writer "$ctl_everything" apply -f "$work/aapctl-agent.yaml"
+expect_ctl 0 "apply the exported agent"
+expect_ctl_out "agent/$agent created" "apply the exported agent"
+[ "$(jp "agentservice/$agent" '{.metadata.labels.app\.kubernetes\.io/managed-by}')" = dashboard.agents.vymalo.com ] || die "the agent aapctl made has not the dashboard's label"
+start=$(date +%s)
+deadline=$((start + ready_timeout))
+while :; do
+  ctl_as aapctl-reader platform:agents.read get agent "$agent" -o json
+  expect_ctl 0 "read the agent"
+  state=$(jq -r .state "$work/ctl.out")
+  [ "$state" != ready ] || break
+  [ "$(date +%s)" -lt "$deadline" ] || die "the agent aapctl made is not ready after ${ready_timeout}s (state: $state)"
+  printf '%s\n' "     $(( $(date +%s) - start ))s: $state"
+  sleep 5
+done
+ctl_as aapctl-writer "$ctl_everything" apply -f "$work/aapctl-agent.yaml"
+expect_ctl 0 "apply the agent again"
+expect_ctl_out "agent/$agent unchanged" "apply the agent again"
+if grep -q '^> PUT' "$work/ctl.err"; then die "applying an unchanged agent sent a PUT: $(redact < "$work/ctl.err" | head -c 600)"; fi
+ok "the agent the API made, aapctl exported, deleted with --wait and made again from that file is ready, and applying it again writes nothing"
+
+# A tag that is stale is exit 3 and never a write; a person without platform:agents.write is exit 4 and the 403 names it.
+ctl_as aapctl-reader platform:agents.read get agent "$agent" -o etag
+expect_ctl 0 "the agent's tag"
+old_tag=$(cat "$work/ctl.out")
+[ -n "$old_tag" ] || die "aapctl printed no tag"
+moved=0
+for attempt in 1 2 3 4 5; do
+  fresh_etag
+  as writer "$all_agents" PUT "/v1/agents/$agent" -H "If-Match: $etag" -H 'Content-Type: application/json' -d "$(agent_form 'E2E aapctl chat, moved')"
+  if [ "$code" = 200 ]; then moved=1; break; fi
+  [ "$code" = 412 ] || die "moving the agent: wanted 200 or 412, got $code: $(head -c 600 "$work/body")"
+  printf '%s\n' "     (412 on attempt $attempt: the operator wrote its status; reading again)"
+  sleep 1
+done
+[ "$moved" = 1 ] || die "five replaces in a row were 412"
+ctl_as aapctl-writer "$ctl_everything" apply -f "$work/aapctl-agent.yaml" --if-match "$old_tag"
+expect_ctl 3 "apply with the tag of before the change"
+grep -q '412 stale' "$work/ctl.err" || die "the stale apply does not say 412 stale: $(redact < "$work/ctl.err" | head -c 600)"
+[ "$(jp "agentservice/$agent" '{.spec.registry.title}')" = 'E2E aapctl chat, moved' ] || die "a stale apply changed the agent"
+ctl_as aapctl-writer "$ctl_everything" apply -f "$work/aapctl-agent.yaml"
+expect_ctl 0 "apply without a tag"
+expect_ctl_out "agent/$agent configured" "apply without a tag"
+[ "$(jp "agentservice/$agent" '{.spec.registry.title}')" = 'E2E aapctl chat' ] || die "apply did not put the file's title back"
+sed 's/E2E aapctl chat/E2E aapctl edited/' "$work/aapctl-agent.yaml" > "$work/aapctl-agent-edited.yaml"
+grep -qF 'E2E aapctl edited' "$work/aapctl-agent-edited.yaml" || die "the edited copy of the file has no new title"
+ctl_as aapctl-reader platform:agents.read apply -f "$work/aapctl-agent-edited.yaml"
+expect_ctl 4 "apply by a reader"
+grep -q 'platform:agents.write' "$work/ctl.err" || die "the refusal does not name platform:agents.write: $(redact < "$work/ctl.err" | head -c 600)"
+[ "$(jp "agentservice/$agent" '{.spec.registry.title}')" = 'E2E aapctl chat' ] || die "a refused apply changed the agent"
+ok "a stale --if-match is exit 3 (412 stale) and writes nothing, apply with no tag puts the file back (configured), a reader is exit 4 naming platform:agents.write"
+
+# A token kept in a file: written by `login --token-stdin` (the server has to accept it), 0600, used by the next commands, forgotten by `logout`.
+ltk=$(tok aapctl-login platform:agents.read)
+printf '%s\n' "$ltk" | aapctl_run ""  login --token-stdin
+expect_ctl 0 "login --token-stdin"
+[ -f "$work/aapctl.yaml" ] || die "login wrote no configuration file"
+[ "$(stat -c %a "$work/aapctl.yaml" 2>/dev/null || stat -f %Lp "$work/aapctl.yaml")" = 600 ] || die "the configuration file is not mode 0600"
+ctl "" whoami
+expect_ctl 0 "whoami with the kept token"
+grep -qF 'platform:agents.read' "$work/ctl.out" || die "whoami does not list the permission: $(head -c 400 "$work/ctl.out")"
+ctl "" logout
+expect_ctl 0 "logout"
+ctl "" whoami
+expect_ctl 4 "whoami after logout"
+ok "login --token-stdin keeps the token in a file of mode 0600, whoami uses it and logout forgets it (exit 4 after)"
+
+# The deletes, with aapctl: the agent (waited for), then the model it named.
+ctl_as aapctl-writer "$ctl_everything" delete agent "$agent" --wait --timeout "$gone_timeout"
+expect_ctl 0 "delete the agent"
+until_ok "$gone_timeout" "the AgentService, its Deployment and Service to be gone" gone "agentservice/$agent" "deployment/$agent" "service/$agent"
+until_ok 120 "the pod of the agent to be gone" no_agent_pod
+if ! gone "agentconfig/$agent"; then
+  # The delete was 202 and the config stays behind as an orphan (D5), as in step 6: removed here so that the model can go and the run ends clean.
+  kubectl -n "$ns" delete "agentconfig/$agent" --ignore-not-found --wait=true --timeout=60s
+fi
+ctl_as aapctl-writer "$ctl_everything" delete model "$model"
+expect_ctl 0 "delete the model"
+gone "modelendpoint/$model" || die "aapctl delete model returned and the model is still there"
+ok "aapctl deletes the agent (waiting for the operator's finalizer) and then the model"
 
 step "7. the NetworkPolicy, and nothing secret anywhere"
 as_pod() { # as_pod <pod> <token>: GET /v1/me from a pod, through the Service

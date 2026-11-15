@@ -33,8 +33,9 @@ name: Operator and API images
 #              (crates/auth-oidc/examples/test-issuer.rs, built in the job) running on the runner, where the API pod fetches its keys and
 #              the script gets tokens. The script drives the DEPLOYED API through a port-forward: 401/403, a model by reference to an
 #              offered Secret key, a folder agent created with the preconditions (428, 422, 201, 409), the operator making it Ready, the
-#              listing, the detail, the YAML, a replace and a delete with their ETags (200, 412), the finalizer completing; and no
-#              secret value in any answer or log. It lives HERE and not in operator.yml because both images are artifacts of this
+#              listing, the detail, the YAML, a replace and a delete with their ETags (200, 412), the finalizer completing; `aapctl`
+#              (built in the job, K9b-1) then does the same through the same API in step 6b (apply, export, delete --wait, a stale
+#              --if-match, a refused token, a kept token); and no secret value in any answer or log. It lives HERE and not in operator.yml because both images are artifacts of this
 #              workflow already (the push uses them), and `push` needs it: no API image is pushed that failed its end-to-end, and no
 #              second workflow races the one bump. deploy/operator/tests/e2e/README.md says what it proves and what it does not.
 # chain-e2e (D13): the whole chain in a kind cluster of its own. The CRDs chart and the operator chart installed with the operator AND the
@@ -507,6 +508,9 @@ jobs:
       # Test tooling: the testkit's issuer as a program. Nothing ships it (an example of the crate), and it is not in either image.
       - name: Build the test issuer
         run: cargo build --locked -p aap-auth-oidc --example test-issuer --features testkit
+      # The command line of the platform (K9b-1): step 6b of the script drives the deployed API with it. Nothing ships it either.
+      - name: Build aapctl
+        run: cargo build --locked -p aap-cli
       - name: The API creates an agent, the operator makes it Ready
         env:
           OPERATOR_IMAGE_REPOSITORY: operator
@@ -517,6 +521,7 @@ jobs:
           API_PULL_POLICY: Never
           AGENT_IMAGE: aap-stub:ci
           TEST_ISSUER_BIN: ${{ github.workspace }}/target/debug/examples/test-issuer
+          AAPCTL_BIN: ${{ github.workspace }}/target/debug/aapctl
         run: |
           # The issuer runs on this machine, which the pods of kind reach at the IPv4 gateway of the docker network `kind`.
           AAP_TEST_HOST_ADDR="$(docker network inspect kind --format '{{range .IPAM.Config}}{{println .Gateway}}{{end}}' | grep -E '^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$' | head -1)"
