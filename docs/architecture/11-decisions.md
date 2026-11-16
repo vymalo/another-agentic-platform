@@ -444,6 +444,23 @@ records.** §39a.
 *(2026-11-16, an owner decision on P-040; slice K14, planned, not built.)* The owner accepted P-040 as proposed, with one change: **the agent's own pod runs under the sandboxed runtime too**, not only its run pods. So: (1) the operator chart names the class for run pods (`runPods.runtimeClassName`) and for the agents' pods (`agent.runtimeClassName`), each **empty by default and then not a trace in any render**; (2) once a class is named for run pods, the admission policy **requires** it: a run pod of an agent's account that names another class, or none, is refused; (3) the image-build modes (`Build`, `Engine`) are refused together with a class until they are proven under it; (4) the `RuntimeClass` object is the administrator's, never the operator's; (5) the default handler is `runsc`, not `runsc-kvm`. **What the owner's change adds to prove before it is on:** the coder's pod under the class with its `git-sandbox` sidecar (a process namespace of its own, a Unix socket on an `emptyDir`), the egress proxy's pod, the projected account token, and the store's connections; the agent's class is a setting of its own so that run pods can be sandboxed before the agents are. *Unverified:* everything about gVisor beyond the Talos extension's README cited in P-040; that a hosted CI runner can install `runsc` in a kind node.
 
 
+
+#### AD-053 — The operator may reach listed MCP servers to discover their tools
+
+*(2026-11-16, an owner decision on P-024; slice K3, planned, not built.)* The owner accepted P-024 as proposed. The operator may probe a `ToolProvider`'s URL (MCP `initialize` and `tools/list`) and write its reachability and tool names into its status. It is **off by default**, reaches only the hosts the operator chart lists (`toolProbe.to`, which also opens the operator's `NetworkPolicy` egress to exactly those), and a server that needs a header is reported `Unknown`: the operator still reads no Secret (AD-024).
+
+#### AD-054 — A bring-your-own A2A image is a harness type of its own
+
+*(2026-11-16, an owner decision on P-025; slice K11, planned, not built.)* The owner accepted P-025 as proposed. `AgentConfig.spec.harness.type: a2a` names an image, a port, the card's path and environment variables that are each a plain value or a `secretKeyRef`. The operator runs it with the pod hardening, store and registry entry of an adam-rs agent and invents no variable. **This amends AD-022** (adam-rs stays the default harness; this is the second, opt-in) **and AD-024** (a value is still never in the resource; the list of references is the only way a secret reaches such a pod).
+
+#### AD-055 — One operator may watch several namespaces, with one `Role` in each
+
+*(2026-11-16, an owner decision on P-026; slices K6 and K7, planned, not built.)* The owner accepted P-026 as proposed. A `watchNamespaces` list in the operator chart makes one `Role` and `RoleBinding` per namespace, with today's verbs; the operator watches each; a registry id that two namespaces share is listed for neither. **Never a `ClusterRole`** (§59a stands).
+
+#### AD-056 — A catalogue of read-only tool servers, each licence accepted by the owner first
+
+*(2026-11-16, an owner decision on P-027; slice K10, planned, not built.)* The owner accepted P-027: `examples/toolproviders/` will hold example `ToolProvider`s and the manifests of the servers they name (a read-only Kubernetes server and a Prometheus server, then GitHub), each image pinned by tag and digest. **Nothing is added before the owner has accepted that server's licence**: the implementer lists each candidate with its licence, *verified* at its source with the date, and the owner answers per server. Accepted licences go into `third-party-notices.md`.
+
 ---
 
 ## 92. Proposed Decisions
@@ -610,17 +627,25 @@ Under `storage.mode: PodVolume` (AD-045) the coder cannot mount the run pod's vo
 
 ### P-024 — The operator may reach MCP servers to discover their tools, where the deployment lists them
 
+**Decided 2026-11-16: accepted by the owner as [AD-053](#ad-053--the-operator-may-reach-listed-mcp-servers-to-discover-their-tools).** The proposal below is kept as it was written.
+
 *(2026-11-14, slice K0; the implementer's, for the owner to confirm.)* **Proposal (K3):** the operator probes a `ToolProvider`'s URL (MCP `initialize` and `tools/list`) and writes the reachability and the tool names into its status (P-023). It is **off by default** and reaches only the hosts of a `toolProbe.to` list of the operator chart, which also opens the operator's `NetworkPolicy` egress to them; a server that needs a header is reported `Unknown`, because the operator reads no Secret (AD-024). **Alternative:** no probe; the tools a provider lists are the ones its author wrote (`mcp.tools`), and the dashboard cannot say whether a server is up. **Blocks:** K3.
 
 ### P-025 — A bring-your-own A2A image is a harness type of its own, with secret variables only by reference
+
+**Decided 2026-11-16: accepted by the owner as [AD-054](#ad-054--a-bring-your-own-a2a-image-is-a-harness-type-of-its-own).** The proposal below is kept as it was written.
 
 *(2026-11-14, slice K0; the implementer's, for the owner to confirm.)* **Proposal (K11):** `AgentConfig.spec.harness.type: a2a` names an image, a port, the card's path and a list of environment variables that are each a `secretKeyRef` or a plain value. The operator runs it with the same pod hardening, store and registry entry as an adam-rs agent and invents no variable. It **amends AD-022** (adam-rs is the harness; this is the second, opt-in) **and AD-024** (a variable's value is never in the resource; the list of references is the only way a secret reaches a bring-your-own pod). **Alternative:** adam-rs stays the only harness, and another agent is reached by its card URL from the system, outside the operator. **Blocks:** K11.
 
 ### P-026 — The operator may watch several namespaces, with one `Role` in each and never a `ClusterRole`
 
+**Decided 2026-11-16: accepted by the owner as [AD-055](#ad-055--one-operator-may-watch-several-namespaces-with-one-role-in-each).** The proposal below is kept as it was written.
+
 *(2026-11-14, slice K0; the implementer's, for the owner to confirm.)* **Proposal (K6):** a `watchNamespaces` list in the operator chart makes one `Role` and `RoleBinding` per namespace (the same verbs as today); the operator watches each; a registry id that two namespaces share is listed for neither. **Alternative:** one operator per namespace (today), which costs a pod and a registry per namespace; or a `ClusterRole`, which §59a refuses. **Blocks:** K6 and K7.
 
 ### P-027 — A tool catalogue ships read-only servers pinned by digest, and the owner accepts their licences
+
+**Decided 2026-11-16: accepted by the owner as [AD-056](#ad-056--a-catalogue-of-read-only-tool-servers-each-licence-accepted-by-the-owner-first), who reviews each licence before a server is added.** The proposal below is kept as it was written.
 
 *(2026-11-14, slice K0; the implementer's, for the owner to confirm.)* **Proposal (K10):** `examples/toolproviders/` holds example `ToolProvider`s (and the manifests of the servers they name) for a read-only Kubernetes server and a Prometheus server, then GitHub; each image is pinned by tag and digest and its licence is in `third-party-notices.md`. **The owner picks the servers and accepts the licences before anything is added.** **Alternative:** no catalogue; the examples stay a `ToolProvider` for a server the owner runs. **Blocks:** K10.
 
