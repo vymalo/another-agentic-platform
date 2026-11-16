@@ -1214,7 +1214,7 @@ The owner asked what the platform lacks, next to a Kubernetes agent control plan
 | Waits for | Increments |
 |---|---|
 | Nothing: can start | none (K5 was the last) |
-| A proposal the owner has not decided | K3 (P-024), K6 and K7 (P-026), K10 (P-027), K11 (P-025) |
+| A proposal the owner has not decided | none: P-024 to P-027 were accepted on 2026-11-16 (AD-053 to AD-056), so K3, K6, K7, K10 and K11 can start; K10 adds a server only after the owner accepted its licence |
 | Another repository | K12 (an adam-rs decision on approvals, and the system's) |
 | A cluster | K13, on hold; K14's proof on real nodes (its render, admission and kind proofs need none) |
 
@@ -1224,16 +1224,16 @@ The owner asked what the platform lacks, next to a Kubernetes agent control plan
 | K1 | The CRDs read what adam-rs's former operator accepted (`model.extraBody`, `echoReasoning`, `coder.maxAccessTier`, `environment.cache`); a cache allow-list and an access-tier ceiling that are the deployment's (AD-049 to AD-051; §59a *K1*) | none | the superset test against the vendored CRD, parity goldens | **built** |
 | K1b | Adoption of objects `adam-operator` made | the fork decision | none | **void**: adam-rs removed its copy from `main` by its pull request 143 (its ADR 0046), *verified 2026-11-14* with the merge commit `e873fa5` of vymalo/another-adam-rs; there is one operator and nothing to adopt |
 | K2 | `status` on `ModelEndpoint` and `ToolProvider`: who uses it, whether it is valid, whether those agents are `Ready` (§60a, P-023) | none | the fake API server, the objects suite, `render-check.sh` | **built** |
-| K3 | A tool server's reachability and discovered tools in its status | K2; P-024 | a stub MCP server in tests; a step of `api-e2e.sh` | planned |
+| K3 | A tool server's reachability and discovered tools in its status | K2; AD-053 (was P-024) | a stub MCP server in tests; a step of `api-e2e.sh` | planned |
 | K4 | `ServiceMonitor`s for the operator and the Platform API; `aap_api_*` metrics (§59a *The operator chart*, §48) | none | `render-check.sh`, kubeconform on a vendored schema | **built** |
 | K5 | OpenTelemetry traces from the operator and the API (observability is mandatory, AD-015, §48a). **No span holds a prompt, a tool argument, a header, a secret or the subject**: a closed enum of attributes, enforced by types and read by `assert_clean` (P-037 to P-039) | none; an agent's own traces need adam-rs | a collector in the tests (`TestCollector`) and the fake API server; `render-check.sh` for the egress rules; the dependency gates | **built** (proven by `cargo test`, `render-check.sh` with each check broken on purpose, and `tools/check-dependencies.sh`; the traces step of `chain-e2e.sh` against a real, pinned OpenTelemetry Collector passed in CI, run 43732918179, job `chain-e2e` 132871058839, at `cd225d2`, *verified 2026-11-15* in the job's log; the `DELETE` span and subjects checks added after that run are **unverified** until the pull request's own CI has run them, as are any other backend and a private CA) |
-| K6 | Watching several namespaces, one `Role` per namespace and never a `ClusterRole` (P-026) | none | two namespaces reconciled independently; a duplicate registry id across namespaces not listed; a kind end-to-end | planned |
+| K6 | Watching several namespaces, one `Role` per namespace and never a `ClusterRole` (AD-055, was P-026) | none | two namespaces reconciled independently; a duplicate registry id across namespaces not listed; a kind end-to-end | planned |
 | K7 | Leader election and two replicas with a `PodDisruptionBudget` (amends §59a *one replica, `Recreate`*) | K6 | a `LeaderElection` trait with its conformance macro (AD-020), on the `Memory` and fake-API-server implementations; kind: kill the leader | planned |
 | K8 | What the admin UI still needs of the Platform API: an OpenAPI document held equal to the table of routes, and the Kubernetes Events of an agent's objects (P-029; §60a *Events and the OpenAPI document*) | K2 | a test that lists every route in the document; the new route in the permission matrix | **built** (proven on the `Memory` ports and the fake API server; the real-cluster half is *unverified* until CI has run `api-e2e.sh`) |
 | K9 | `aapctl validate` and `render`, offline (§60b, P-028) | none | `render_matches_runtime_golden` | **built** (phase 1) |
 | K9b | `aapctl get`, `apply`, `delete`, `export`, `whoami` and `login --token-stdin` over the Platform API with ETags (K9b-1); `login` with the browser (OAuth 2.0 authorization code with PKCE on a loopback redirect) and a refresh token (K9b-2; §60b, P-030 to P-036) | K8 | tests on the `Memory` router; a step of `api-e2e.sh` | **built**, both halves. K9b-1: 29 tests of the binary on the real router over the `Memory` ports, and the step of `api-e2e.sh`, which passed in CI. K9b-2: 32 tests of the binary against the testkit's issuer (`bin/cli/tests/signin.rs`) and 11 of the issuer's own endpoints; **a real Keycloak and a real browser are *unverified***, and `api-e2e.sh` gains nothing (a headless runner has no browser) |
-| K10 | A catalogue of example `ToolProvider`s (read-only Kubernetes, Prometheus, GitHub), pinned by digest (P-027) | K2; the owner's choice | a kind end-to-end: a folder agent on a scripted model calls a list-pods tool | planned |
-| K11 | A bring-your-own A2A image: `harness.type: a2a` with image, port, card path and secret variables by reference (P-025; would amend AD-022 and AD-024) | K1 | kind: the stub image as such an agent, `Ready` and listed | planned |
+| K10 | A catalogue of example `ToolProvider`s (read-only Kubernetes, Prometheus, GitHub), pinned by digest (AD-056, was P-027) | K2; the owner's choice | a kind end-to-end: a folder agent on a scripted model calls a list-pods tool | planned |
+| K11 | A bring-your-own A2A image: `harness.type: a2a` with image, port, card path and secret variables by reference (AD-054, was P-025; amends AD-022 and AD-024) | K1 | kind: the stub image as such an agent, `Ready` and listed | planned |
 | K12 | `requireApproval` per tool | an adam-rs decision and the system's | parity with adam's MCP file | planned; waits (the tiers of K1 cover the coder meanwhile) |
 | K13 | The dashboard and an agent on the owner's real cluster (D14) | K1 | the first real agent | **on hold**: that the netcup cluster is down and home-os no longer carries it is the owner's statement of 2026-11-14, *unverified* here; with no cluster to prove it on, D14 stays *unverified* |
 | K14 | **A sandboxed runtime for run pods and for the agents' own pods: gVisor** (AD-052, the owner's decision of 2026-11-16 on P-040). A run pod, which runs the commands of a repository the agent did not write, starts under a `RuntimeClass` the deployment names (`runPods.runtimeClassName`; none by default, and then not a trace in any render), and the admission policy refuses a run pod of an agent's account that names another class or none (P-040; §59b; the design's `runtimeClass: gvisor` of §65) | D15 (built); P-040 | the template and the policy's parameters in the parity and render tests; the policy's refusals asked of a bare kube-apiserver; a kind end-to-end with `runsc` installed in the node (*unverified* that a hosted runner can); the owner's nodes with Talos's gVisor extension | planned; decided (AD-052); the agents' own pods under the class (`agent.runtimeClassName`) are proven after run pods; waits for a cluster for its last proof |
@@ -1260,14 +1260,14 @@ Parallel work: K4, K5, K9, K0 and K8's OpenAPI document touch no shared file. K1
 
 ### Decisions for the owner
 
-Sixteen are open, each a `P-NNN` in [§92](11-decisions.md) (P-024 to P-029, P-030 to P-036 of K9b and P-037 to P-039 of K5, which the slices already proceed on). P-040 of K14 was decided on 2026-11-16 (AD-052). Each is a recommendation that waits for the owner and blocks only the slice named.
+Twelve are open, each a `P-NNN` in [§92](11-decisions.md) (P-028 and P-029, P-030 to P-036 of K9b and P-037 to P-039 of K5, which the slices already proceed on). P-024 to P-027 were accepted by the owner on 2026-11-16 (AD-053 to AD-056), and P-040 of K14 the same day (AD-052). Each is a recommendation that waits for the owner and blocks only the slice named.
 
 | P | The question | Blocks |
 |---|---|---|
-| P-024 | May the operator reach MCP servers to discover their tools? | K3 |
-| P-025 | Do we accept an agent image that is not adam-rs? | K11 |
-| P-026 | Several namespaces, with one `Role` in each? | K6, K7 |
-| P-027 | Which servers does a tool catalogue ship, and under which licences? | K10 |
+| ~~P-024~~ | ~~May the operator reach MCP servers to discover their tools?~~ Accepted 2026-11-16 (AD-053) | K3 |
+| ~~P-025~~ | ~~Do we accept an agent image that is not adam-rs?~~ Accepted 2026-11-16 (AD-054) | K11 |
+| ~~P-026~~ | ~~Several namespaces, with one `Role` in each?~~ Accepted 2026-11-16 (AD-055) | K6, K7 |
+| ~~P-027~~ | ~~Which servers does a tool catalogue ship, and under which licences?~~ Accepted 2026-11-16 (AD-056) | K10 |
 | P-028 | `aapctl` as a binary of this repository (phase 1 is built) | K9b |
 | P-029 | An OpenAPI document and an events route on the Platform API | K8, K9b |
 | P-030 | A Keycloak public client `aapctl` for the browser sign-in | none (built as recommended; the realm's client is the owner's to make) |
