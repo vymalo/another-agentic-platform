@@ -1214,7 +1214,7 @@ The owner asked what the platform lacks, next to a Kubernetes agent control plan
 | Waits for | Increments |
 |---|---|
 | Nothing: can start | none (K5 was the last) |
-| A proposal the owner has not decided | K3 (P-024), K6 and K7 (P-026), K10 (P-027), K11 (P-025), K14 (P-040) |
+| A proposal the owner has not decided | K3 (P-024), K6 and K7 (P-026), K10 (P-027), K11 (P-025) |
 | Another repository | K12 (an adam-rs decision on approvals, and the system's) |
 | A cluster | K13, on hold; K14's proof on real nodes (its render, admission and kind proofs need none) |
 
@@ -1236,7 +1236,7 @@ The owner asked what the platform lacks, next to a Kubernetes agent control plan
 | K11 | A bring-your-own A2A image: `harness.type: a2a` with image, port, card path and secret variables by reference (P-025; would amend AD-022 and AD-024) | K1 | kind: the stub image as such an agent, `Ready` and listed | planned |
 | K12 | `requireApproval` per tool | an adam-rs decision and the system's | parity with adam's MCP file | planned; waits (the tiers of K1 cover the coder meanwhile) |
 | K13 | The dashboard and an agent on the owner's real cluster (D14) | K1 | the first real agent | **on hold**: that the netcup cluster is down and home-os no longer carries it is the owner's statement of 2026-11-14, *unverified* here; with no cluster to prove it on, D14 stays *unverified* |
-| K14 | **A sandboxed runtime for run pods: gVisor.** A run pod, which runs the commands of a repository the agent did not write, starts under a `RuntimeClass` the deployment names (`runPods.runtimeClassName`; none by default, and then not a trace in any render), and the admission policy refuses a run pod of an agent's account that names another class or none (P-040; §59b; the design's `runtimeClass: gvisor` of §65) | D15 (built); P-040 | the template and the policy's parameters in the parity and render tests; the policy's refusals asked of a bare kube-apiserver; a kind end-to-end with `runsc` installed in the node (*unverified* that a hosted runner can); the owner's nodes with Talos's gVisor extension | planned; waits for P-040, and for a cluster for its last proof |
+| K14 | **A sandboxed runtime for run pods and for the agents' own pods: gVisor** (AD-052, the owner's decision of 2026-11-16 on P-040). A run pod, which runs the commands of a repository the agent did not write, starts under a `RuntimeClass` the deployment names (`runPods.runtimeClassName`; none by default, and then not a trace in any render), and the admission policy refuses a run pod of an agent's account that names another class or none (P-040; §59b; the design's `runtimeClass: gvisor` of §65) | D15 (built); P-040 | the template and the policy's parameters in the parity and render tests; the policy's refusals asked of a bare kube-apiserver; a kind end-to-end with `runsc` installed in the node (*unverified* that a hosted runner can); the owner's nodes with Talos's gVisor extension | planned; decided (AD-052); the agents' own pods under the class (`agent.runtimeClassName`) are proven after run pods; waits for a cluster for its last proof |
 
 Parallel work: K4, K5, K9, K0 and K8's OpenAPI document touch no shared file. K1 and K2 both regenerated `deploy/crds`, so they merged one after the other. K6 comes before K7 (both touch `operator.rs` and the `Role`), K3 and K10 after K2, and K9b after K8.
 
@@ -1260,7 +1260,7 @@ Parallel work: K4, K5, K9, K0 and K8's OpenAPI document touch no shared file. K1
 
 ### Decisions for the owner
 
-Seventeen are open, each a `P-NNN` in [§92](11-decisions.md) (P-024 to P-029, P-030 to P-036 of K9b and P-037 to P-039 of K5, which the slices already proceed on, and P-040 of K14, which no slice has started on). Each is a recommendation that waits for the owner and blocks only the slice named.
+Sixteen are open, each a `P-NNN` in [§92](11-decisions.md) (P-024 to P-029, P-030 to P-036 of K9b and P-037 to P-039 of K5, which the slices already proceed on). P-040 of K14 was decided on 2026-11-16 (AD-052). Each is a recommendation that waits for the owner and blocks only the slice named.
 
 | P | The question | Blocks |
 |---|---|---|
