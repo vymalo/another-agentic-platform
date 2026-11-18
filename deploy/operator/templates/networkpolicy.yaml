@@ -68,4 +68,24 @@ spec:
       to:
         {{- toYaml $o.to | nindent 8 }}
     {{- end }}
+    {{- if .Values.toolProbe.to }}
+    {{- /* The tool probe (slice K3a, AD-053): DNS to resolve a provider's URL, and exactly the peers and ports the deployment listed. */}}
+    {{- $t := .Values.toolProbe }}
+    - ports:
+        {{- range $t.dns.ports }}
+        - protocol: UDP
+          port: {{ . }}
+        - protocol: TCP
+          port: {{ . }}
+        {{- end }}
+      to:
+        {{- toYaml $t.dns.to | nindent 8 }}
+    - ports:
+        {{- range $t.ports }}
+        - protocol: TCP
+          port: {{ . }}
+        {{- end }}
+      to:
+        {{- toYaml $t.to | nindent 8 }}
+    {{- end }}
 {{- end }}

@@ -238,7 +238,8 @@ externalSecrets:
     # (the system's orchestrator) reads the same property as AGENT_REGISTRY_TOKEN, so the two sides cannot differ.
     registryToken: agent_registry_token
 
-# What may reach the operator, and what it may reach. Ingress is closed except what is listed; egress goes to the API server only.
+# What may reach the operator, and what it may reach. Ingress is closed except what is listed; egress goes to the API server and, when
+# the deployment asks for them, the traces collector and the tool probe's peers.
 networkPolicy:
   enabled: true
   registry:
@@ -254,6 +255,32 @@ networkPolicy:
     ports: [443, 6443]
     # Optional: only these addresses (`kubectl get endpoints kubernetes`). Empty: any address on those ports.
     cidrs: []
+
+# K3 (AD-053): the operator may probe the MCP server of a ToolProvider (`initialize` and `tools/list`) and write its reachability and
+# tool names into the provider's status. OFF by default: `to` empty, and then not a rule of it is rendered. On, `to` lists the peers the
+# operator may reach (NetworkPolicyPeers: namespaceSelector, podSelector, ipBlock). A NetworkPolicy names peers and never host names, so
+# the policy is what bounds a probe: the chart opens the operator's egress to exactly these peers on `ports`, plus DNS, and a probe to a
+# server that is not covered has no route. The operator still reads no Secret (AD-024). A rule always has a `to`: an ipBlock
+# whose CIDR has a `/0` prefix, or that has no cidr, is refused (for `to` and for `dns.to`). NOTE: the API server's own egress rule is separate and, with `networkPolicy.apiServer.cidrs` empty,
+# already allows any address on 443 and 6443; an https probe on 443 is therefore bounded by `toolProbe.to` only once that list names the API
+# server's addresses. Narrow it in a deployment that probes https servers.
+toolProbe:
+  # Who the operator may reach. Empty: no probe, and not a trace of it in any render. The peers of an in-cluster MCP server (a
+  # namespaceSelector or a podSelector) or its addresses (an ipBlock).
+  to: []
+  # The ports a probe may use, as the provider's URL names them: 443 for an https server, 80 or the port of an in-cluster server.
+  ports: [80, 443]
+  # How the operator resolves the server's name. REQUIRED while `to` is set and networkPolicy is enabled: without it the operator's
+  # policy has no DNS rule, and a rule with ports and no `to` would be port 53 to anywhere. The cluster's DNS, as for traces.
+  dns:
+    to:
+      - namespaceSelector:
+          matchLabels:
+            kubernetes.io/metadata.name: kube-system
+        podSelector:
+          matchLabels:
+            k8s-app: kube-dns
+    ports: [53]
 
 # Traces of the operator (slice K5, §48a): one span per reconcile pass with its steps as children, sent as OTLP/HTTP JSON to a collector
 # (crates/trace-otlp/README.md). OFF by default, and then nothing of it is rendered: no variable, volume or egress rule. On, the chart writes the
