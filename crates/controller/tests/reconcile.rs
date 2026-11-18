@@ -1525,6 +1525,21 @@ fn shared_world(others: &[String]) -> World {
 /// The caches the shared reconcilers read, as the fake has the objects now: every service in `services`, and the config
 /// unless `without_config`.
 fn shared_ctx(w: &World, services: &[&str], without_config: bool) -> Arc<SharedContext> {
+    shared_ctx_probing(
+        w,
+        services,
+        without_config,
+        aap_controller::Probe::default(),
+    )
+}
+
+/// The same context with the MCP probe as the caller sets it (K3b).
+fn shared_ctx_probing(
+    w: &World,
+    services: &[&str],
+    without_config: bool,
+    probe: aap_controller::Probe,
+) -> Arc<SharedContext> {
     let (configs, mut cw) = reflector::store::<AgentConfig>();
     cw.apply_watcher_event(&watcher::Event::Init);
     if let Some(c) = w.fake.get(CONFIGS, NS, &w.name).filter(|_| !without_config) {
@@ -1544,7 +1559,9 @@ fn shared_ctx(w: &World, services: &[&str], without_config: bool) -> Arc<SharedC
     }
     sw.apply_watcher_event(&watcher::Event::InitDone);
     Arc::new(
-        SharedContext::new(w.fake.client(), w.metrics.clone(), configs, svcs).with_clock(clock()),
+        SharedContext::new(w.fake.client(), w.metrics.clone(), configs, svcs)
+            .with_clock(clock())
+            .with_probe(probe),
     )
 }
 
@@ -1888,6 +1905,200 @@ async fn a_service_being_deleted_still_counts_as_a_user() {
     let ctx = shared_ctx(&w, &["coder-me"], false);
     provider_pass(&w, &ctx).await;
     assert_eq!(provider_status(&w)["usedBy"], json!(["coder-me"]));
+}
+
+// ------------------------------------------- the MCP probe (K3b)
+
+use aap_tool_probe::testkit::{StubConfig, StubMcp};
+
+/// A provider whose server is the stub: no header (so it is probed) and the stub's URL.
+fn probed_provider(w: &World, url: &str) {
+    w.edit_shared(PROVIDERS, "websearch", |p| {
+        p["spec"]["mcp"]["url"] = json!(url);
+        p["spec"]["mcp"]["headers"] = json!({});
+    });
+}
+
+fn probe_on(timeout: Duration) -> aap_controller::Probe {
+    aap_controller::Probe {
+        enabled: true,
+        timeout,
+    }
+}
+
+#[tokio::test]
+async fn a_probe_writes_reachable_and_the_tools_sorted() {
+    let w = shared_world(&[]);
+    let stub = StubMcp::start(StubConfig {
+        tools: vec!["zeta".to_owned(), "alpha".to_owned()],
+        ..StubConfig::default()
+    })
+    .await;
+    probed_provider(&w, stub.url());
+    let ctx = shared_ctx_probing(&w, &["coder-me"], false, probe_on(Duration::from_secs(2)));
+    provider_pass(&w, &ctx).await;
+    let status = provider_status(&w);
+    is(&status, "Reachable", "True", "Probed");
+    assert_eq!(status["probe"]["tools"], json!(["alpha", "zeta"]));
+    assert!(status["probe"].get("toolsMore").is_none(), "{status}");
+    assert_eq!(message_of(&status, "Reachable"), "2 tools");
+    // The endpoint has no MCP server: no `Reachable` condition and no `probe`, even with the probe on.
+    endpoint_pass(&w, &ctx).await;
+    let endpoint = endpoint_status(&w);
+    assert!(
+        endpoint["conditions"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|c| c["type"] != "Reachable"),
+        "{endpoint}"
+    );
+    assert!(endpoint.get("probe").is_none(), "{endpoint}");
+}
+
+#[tokio::test]
+async fn a_provider_with_a_header_is_unknown_and_is_not_probed() {
+    let w = shared_world(&[]);
+    let stub = StubMcp::start(StubConfig {
+        tools: vec!["x".to_owned()],
+        ..StubConfig::default()
+    })
+    .await;
+    probed_provider(&w, stub.url());
+    w.edit_shared(PROVIDERS, "websearch", |p| {
+        p["spec"]["mcp"]["headers"] = json!({
+            "Authorization": {
+                "prefix": "Bearer ",
+                "secretRef": { "name": "agent-tools", "key": "SEARCH_MCP_TOKEN" }
+            }
+        });
+    });
+    let ctx = shared_ctx_probing(&w, &["coder-me"], false, probe_on(Duration::from_secs(2)));
+    provider_pass(&w, &ctx).await;
+    let status = provider_status(&w);
+    is(&status, "Accepted", "True", "Valid");
+    is(&status, "Reachable", "Unknown", "NeedsHeader");
+    assert!(status.get("probe").is_none(), "{status}");
+    assert!(stub.requests().is_empty(), "the server was not called");
+    // The message says why, and holds no header name or value.
+    let message = message_of(&status, "Reachable");
+    assert!(
+        !message.contains("Authorization") && !message.contains("SEARCH_MCP_TOKEN"),
+        "{message}"
+    );
+}
+
+#[tokio::test]
+async fn probing_off_writes_no_reachable_and_no_probe() {
+    let w = shared_world(&[]);
+    let stub = StubMcp::start(StubConfig::default()).await;
+    probed_provider(&w, stub.url());
+    let ctx = shared_ctx(&w, &["coder-me"], false);
+    provider_pass(&w, &ctx).await;
+    let status = provider_status(&w);
+    assert!(
+        status["conditions"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|c| c["type"] != "Reachable"),
+        "{status}"
+    );
+    assert!(status.get("probe").is_none(), "{status}");
+    assert!(stub.requests().is_empty(), "off means no request");
+}
+
+#[tokio::test]
+async fn an_invalid_provider_is_unknown_and_is_not_probed() {
+    let w = shared_world(&[]);
+    let stub = StubMcp::start(StubConfig::default()).await;
+    probed_provider(&w, stub.url());
+    w.edit_shared(PROVIDERS, "websearch", |p| {
+        p["spec"]["mcp"]["url"] = json!("https://user:hunter2@search.example/mcp");
+    });
+    let ctx = shared_ctx_probing(&w, &["coder-me"], false, probe_on(Duration::from_secs(2)));
+    provider_pass(&w, &ctx).await;
+    let status = provider_status(&w);
+    is(&status, "Accepted", "False", "Invalid");
+    is(&status, "Reachable", "Unknown", "Invalid");
+    assert!(status.get("probe").is_none(), "{status}");
+    assert!(
+        stub.requests().is_empty(),
+        "an invalid object is not probed"
+    );
+}
+
+#[tokio::test]
+async fn an_unreachable_server_is_false() {
+    let w = shared_world(&[]);
+    // Port 1 of the loopback: nothing listens there.
+    probed_provider(&w, "http://127.0.0.1:1/mcp");
+    let ctx = shared_ctx_probing(&w, &["coder-me"], false, probe_on(Duration::from_secs(1)));
+    provider_pass(&w, &ctx).await;
+    let status = provider_status(&w);
+    is(&status, "Reachable", "False", "Unreachable");
+    assert!(status.get("probe").is_none(), "{status}");
+}
+
+#[tokio::test]
+async fn a_server_that_does_not_answer_in_time_is_false() {
+    let w = shared_world(&[]);
+    let stub = StubMcp::start(StubConfig {
+        delay: Some(Duration::from_secs(5)),
+        ..StubConfig::default()
+    })
+    .await;
+    probed_provider(&w, stub.url());
+    let ctx = shared_ctx_probing(
+        &w,
+        &["coder-me"],
+        false,
+        probe_on(Duration::from_millis(100)),
+    );
+    provider_pass(&w, &ctx).await;
+    is(&provider_status(&w), "Reachable", "False", "Timeout");
+}
+
+#[tokio::test]
+async fn a_server_that_lists_more_than_64_tools_is_counted() {
+    let w = shared_world(&[]);
+    let tools: Vec<String> = (0..70).map(|i| format!("tool_{i:03}")).collect();
+    let stub = StubMcp::start(StubConfig {
+        tools,
+        ..StubConfig::default()
+    })
+    .await;
+    probed_provider(&w, stub.url());
+    let ctx = shared_ctx_probing(&w, &["coder-me"], false, probe_on(Duration::from_secs(2)));
+    provider_pass(&w, &ctx).await;
+    let status = provider_status(&w);
+    is(&status, "Reachable", "True", "Probed");
+    assert_eq!(status["probe"]["tools"].as_array().unwrap().len(), 64);
+    assert_eq!(status["probe"]["toolsMore"], 6);
+    assert_eq!(message_of(&status, "Reachable"), "70 tools");
+}
+
+#[tokio::test]
+async fn a_probe_that_changes_nothing_is_not_written_again() {
+    let w = shared_world(&[]);
+    let stub = StubMcp::start(StubConfig {
+        tools: vec!["one".to_owned()],
+        ..StubConfig::default()
+    })
+    .await;
+    probed_provider(&w, stub.url());
+    let ctx = shared_ctx_probing(&w, &["coder-me"], false, probe_on(Duration::from_secs(2)));
+    provider_pass(&w, &ctx).await;
+    assert_eq!(w.fake.writes().len(), 1);
+    w.fake.clear_calls();
+    provider_pass(&w, &ctx).await;
+    assert!(
+        w.fake.writes().is_empty(),
+        "the same probe result writes nothing: {:?}",
+        w.fake.writes()
+    );
+    // It did probe again (a server's answer may change without a spec change): three requests more.
+    assert_eq!(stub.requests().len(), 6);
 }
 
 /// A status that cannot be written because the API server does not serve the subresource (the operator was upgraded before

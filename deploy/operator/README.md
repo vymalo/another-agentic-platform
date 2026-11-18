@@ -515,14 +515,16 @@ are what makes it work on any cluster, not a restriction. A policy that is wide 
 The DNS rule is narrow by default (`kube-dns` in `kube-system`, port 53) and wide only if you empty `dns.to`. `helm install` prints a reminder while either
 list is empty (`templates/NOTES.txt`).
 
-### The tool probe (K3a)
+### The tool probe (K3a, K3b)
 
-K3a (2026-11-18; AD-053). The operator may probe a `ToolProvider`'s MCP server (`initialize` and `tools/list`) and write what it finds into the
-provider's status (K3b). **Off by default**: `toolProbe.to` empty, and then not a rule of it is rendered and the six goldens are byte for byte what
-they were. On, `to` lists the peers the operator may reach (NetworkPolicyPeers: `namespaceSelector`, `podSelector`, `ipBlock`) and `ports` the ports a
-probe may use; the chart adds **one egress rule to exactly those peers on those ports and one DNS rule**, so the policy is what bounds a probe. A
-NetworkPolicy names peers and never host names: a probe to a server that is not covered has no route, and the operator still reads no
-Secret (AD-024).
+K3a and K3b (2026-11-18; AD-053). With `toolProbe.to` non-empty the operator probes each `ToolProvider`'s MCP server (`initialize` and
+`tools/list`, [`aap-tool-probe`](../../crates/tool-probe/README.md)) and writes `Reachable` and the tool names into its status; a provider
+that names a header is `Reachable: Unknown`, reason `NeedsHeader`, because the operator reads no Secret (AD-024). **Off by default**:
+`to` empty, and then not a rule or a variable of it is rendered and the six goldens are byte for byte what they were. On, `to` lists the
+peers the operator may reach (NetworkPolicyPeers: `namespaceSelector`, `podSelector`, `ipBlock`), `ports` the ports a probe may use and
+`timeoutSecs` its deadline; the chart adds **one egress rule to exactly those peers on those ports and one DNS rule**, turns the probe on
+(`TOOL_PROBE_ENABLED`) and passes the deadline (`TOOL_PROBE_TIMEOUT_SECS`). A NetworkPolicy names peers and never host names: a probe to a
+server that is not covered has no route.
 
 **The API server's own egress rule is separate.** With `networkPolicy.apiServer.cidrs` empty (the default) it already allows any address on
 443 and 6443, so an https probe on 443 is bounded by `toolProbe.to` only once `apiServer.cidrs` names the API server's addresses. Narrow it
@@ -532,11 +534,15 @@ in a deployment that probes https servers; the chart cannot know the addresses.
 |---|---|---|
 | `toolProbe.to` | `[]` | The peers the operator may reach. Empty: no probe, and not a trace of it in any render. A peer needs a `namespaceSelector`, a `podSelector` or an `ipBlock`; an `ipBlock` without a `cidr`, or whose CIDR has a `/0` prefix (`0.0.0.0/0`, `::/0`, `0::/0`), is refused |
 | `toolProbe.ports` | `[80, 443]` | The ports a probe may use, as the provider's URL names them: 443 for an https server, 80 or the port of an in-cluster server. At least one while `to` is set |
+| `toolProbe.timeoutSecs` | `5` | How long one probe may take, 1 to 60 s. A server that does not answer by then is `Reachable: False`, reason `Timeout` |
 | `toolProbe.dns.to`, `dns.ports` | kube-dns, `[53]` | The operator's policy has no DNS rule, so with a probe it gets one. `dns.to` is required while `to` is set and `networkPolicy.enabled`; the same `ipBlock` rule applies |
 
-The probe itself (the status, the stub MCP server) is K3b. `render-check.sh` holds that the default render has one egress rule and no port 80, that
-the probe render has DNS and exactly the listed peers and ports (a pod selector and 8080 when those are what is listed), that the Deployment and the
-`Role` do not move, that traces and the probe stack (five rules, the traces ones where they were), and every refusal by name.
+The status is the K2 `SharedStatus` with `probe.tools` (at most 64 names, sorted, each once, and `toolsMore` for the rest) and the
+`Reachable` condition (`Probed`, `NeedsHeader`, `Invalid`, `Unreachable`, `NotMcp` or `Timeout`; its message holds no URL and no header
+name or value). `render-check.sh` holds that the default render has one egress rule, no port 80 and no probe variable, that the probe render
+has DNS and exactly the listed peers and ports, the two variables, the `Role` unmoved, that traces and the probe stack (five rules), and
+every refusal by name; `api-e2e.sh` step 6a makes a provider through the deployed API, probes a stub MCP server on the runner through this
+egress, and reads `Reachable: True` and the tools back; a second provider that names a header is `Unknown`, `NeedsHeader`.
 
 ### The rights
 

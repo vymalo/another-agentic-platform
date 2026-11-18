@@ -133,9 +133,30 @@ pub struct SharedStatus {
     #[serde(default, skip_serializing_if = "is_zero")]
     pub used_by_more: i32,
 
-    /// `Accepted`, `InUse` and `AgentsReady`.
+    /// `Accepted`, `InUse` and `AgentsReady`; on a `ToolProvider` the deployment probes, also `Reachable` (K3b).
     #[serde(default)]
     pub conditions: Vec<Condition>,
+
+    /// The MCP server's tools, on a `ToolProvider` the deployment probes (K3b, AD-053). Absent when probing is off, or
+    /// when the object was not probed (invalid, a header is needed, or the server is unreachable). The reachability is the
+    /// `Reachable` condition; **no tool description, schema or URL is here**.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub probe: Option<ProbeStatus>,
+}
+
+/// What the operator observed of a `ToolProvider`'s MCP server (K3b): the tool names it listed, at most
+/// [`MAX_PROBED_TOOLS`]. The reachability is the `Reachable` condition of the [`SharedStatus`].
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct ProbeStatus {
+    /// The tool names the server listed, sorted, each once, **at most [`MAX_PROBED_TOOLS`]** (the operator's bound: the
+    /// schema has none, because only the operator writes it): the rest are counted in `toolsMore`.
+    #[serde(default)]
+    pub tools: Vec<String>,
+
+    /// How many tool names are not in `tools` (absent when there are at most [`MAX_PROBED_TOOLS`]).
+    #[serde(default, skip_serializing_if = "is_zero")]
+    pub tools_more: i32,
 }
 
 fn is_zero(n: &i32) -> bool {
@@ -145,6 +166,10 @@ fn is_zero(n: &i32) -> bool {
 /// The most users a [`SharedStatus`] lists by name. The status of an object that a whole fleet names must stay
 /// a bounded size (every change of it is sent to every watcher).
 pub const MAX_USED_BY: usize = 64;
+
+/// The most tool names a [`ProbeStatus`] lists. The status of a server that lists hundreds must stay a bounded size
+/// (every change of it is sent to every watcher); the rest are counted.
+pub const MAX_PROBED_TOOLS: usize = 64;
 
 /// Condition types (§59a, "Status").
 pub mod condition_type {
@@ -166,6 +191,8 @@ pub mod condition_type {
     pub const IN_USE: &str = "InUse";
     /// ModelEndpoint, ToolProvider: whether the agents that name it are `Ready` (K2). Informs, gates nothing.
     pub const AGENTS_READY: &str = "AgentsReady";
+    /// ToolProvider: the MCP server answered the probe (K3b, AD-053). Absent when probing is off.
+    pub const REACHABLE: &str = "Reachable";
 }
 
 /// Condition reasons (§59a, "Status").
@@ -228,4 +255,14 @@ pub mod reason {
     pub const SOME_NOT_READY: &str = "SomeNotReady";
     /// `AgentsReady` unknown: no agent names it, so there is nothing to be ready.
     pub const NO_AGENTS: &str = "NoAgents";
+    /// `Reachable` true: `initialize` and `tools/list` answered.
+    pub const PROBED: &str = "Probed";
+    /// `Reachable` unknown: the server names a header, which the operator does not read (AD-024).
+    pub const NEEDS_HEADER: &str = "NeedsHeader";
+    /// `Reachable` false: the server did not answer.
+    pub const UNREACHABLE: &str = "Unreachable";
+    /// `Reachable` false: the answer is not MCP.
+    pub const NOT_MCP: &str = "NotMcp";
+    /// `Reachable` false: the server did not answer within the deployment's deadline.
+    pub const TIMEOUT: &str = "Timeout";
 }

@@ -788,7 +788,13 @@ async fn tool_server_detail_carries_status() {
     api.objects.set_status(
         Kind::ToolProvider,
         "search",
-        json!({ "usedBy": ["alpha"], "conditions": [] }),
+        json!({
+            "usedBy": ["alpha"],
+            "conditions": [
+                { "type": "Reachable", "status": "True", "reason": "Probed", "message": "2 tools", "lastTransitionTime": "2026-11-18T00:00:00Z" }
+            ],
+            "probe": { "tools": ["get_pod", "list_pods"] }
+        }),
     );
     let body = api
         .get("/v1/tool-servers/search")
@@ -797,6 +803,13 @@ async fn tool_server_detail_carries_status() {
         .await
         .json();
     assert_eq!(body["status"]["usedBy"], json!(["alpha"]), "{body}");
+    // K3b: the probe's tools and the `Reachable` condition go out as the type names them, and nothing else.
+    assert_eq!(
+        body["status"]["probe"]["tools"],
+        json!(["get_pod", "list_pods"]),
+        "{body}"
+    );
+    assert_eq!(body["status"]["conditions"][0]["type"], "Reachable");
 }
 
 /// K2: a status names agents. A person who writes tool servers and may not read agents is answered a replace with

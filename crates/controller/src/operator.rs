@@ -270,7 +270,8 @@ where
                     shared_services.clone(),
                 )
                 .with_pass_timeout(self.options.pass_timeout)
-                .with_tracer(self.tracer.clone()),
+                .with_tracer(self.tracer.clone())
+                .with_probe(self.options.probe),
             );
             let (own_c, services_c, configs_s) =
                 (own.clone(), shared_services.clone(), shared_configs.clone());
@@ -298,7 +299,8 @@ where
                     shared_services.clone(),
                 )
                 .with_pass_timeout(self.options.pass_timeout)
-                .with_tracer(self.tracer.clone()),
+                .with_tracer(self.tracer.clone())
+                .with_probe(self.options.probe),
             );
             let (own_c, services_c, configs_s) =
                 (own.clone(), shared_services.clone(), shared_configs.clone());

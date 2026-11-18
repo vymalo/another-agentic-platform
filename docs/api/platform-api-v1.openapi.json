@@ -1904,7 +1904,7 @@
         "description": "What the operator observed of a model or a tool server (§60a, K2). Never a secret, a header value or a URL's credentials.",
         "properties": {
           "conditions": {
-            "description": "Accepted, InUse and AgentsReady.",
+            "description": "Accepted, InUse and AgentsReady; on a ToolProvider the deployment probes, also Reachable (K3b).",
             "items": {
               "$ref": "#/components/schemas/Condition"
             },
@@ -1912,6 +1912,28 @@
           },
           "observedGeneration": {
             "type": "integer"
+          },
+          "probe": {
+            "additionalProperties": false,
+            "description": "The MCP server's tools, on a ToolProvider the deployment probes (K3b, AD-053): at most 64 names, sorted, and a count of the rest. Absent when probing is off or the object was not probed; the reachability is the Reachable condition.",
+            "properties": {
+              "tools": {
+                "description": "At most 64 names, sorted.",
+                "items": {
+                  "type": "string"
+                },
+                "type": "array"
+              },
+              "toolsMore": {
+                "description": "How many more there are; absent when there are none.",
+                "minimum": 1,
+                "type": "integer"
+              }
+            },
+            "required": [
+              "tools"
+            ],
+            "type": "object"
           },
           "usedBy": {
             "description": "At most 64 names, sorted. Emptied for a caller without platform:agents.read.",

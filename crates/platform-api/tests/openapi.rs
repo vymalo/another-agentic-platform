@@ -1193,6 +1193,10 @@ const MAY_BE_ABSENT: &[&str] = &[
     // The operator writes a status member only when it has something to say (`skip_serializing_if`).
     "SharedStatus/observedGeneration",
     "SharedStatus/usedByMore",
+    // The probe's tools are written only when the server answered (K3b); a `ToolProvider` the deployment does not probe has
+    // neither.
+    "SharedStatus/probe",
+    "SharedStatus/probe/toolsMore",
     // A condition has no `observedGeneration` until the operator sets one.
     "Condition/observedGeneration",
     // A shared object has no status before the operator wrote one (`skip_serializing_if`).
