@@ -65,6 +65,16 @@ value that is not a list is left to aap.validate to refuse by name. */}}
 {{- end -}}
 {{- end -}}
 
+{{/* A namespace name as a YAML scalar: quoted when YAML 1.1 would read it as a boolean, a null or a number (on, no, 2024, 0x1f),
+plain otherwise. A DNS label may be any of those, and `namespace: on` is the boolean true to the API server, not a name. */}}
+{{- define "aap.namespaceScalar" -}}
+{{- if regexMatch "^(?i:y|yes|n|no|true|false|on|off|null|~|[0-9]+|0x[0-9a-f]+|0o[0-7]+|0b[01]+)$" . -}}
+{{- . | quote -}}
+{{- else -}}
+{{- . -}}
+{{- end -}}
+{{- end -}}
+
 {{- define "aap.serviceAccountName" -}}
 {{- if .Values.serviceAccount.create -}}
 {{- default (include "aap.fullname" .) .Values.serviceAccount.name -}}

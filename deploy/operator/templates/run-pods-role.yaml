@@ -15,7 +15,7 @@ apiVersion: rbac.authorization.k8s.io/v1
 kind: Role
 metadata:
   name: {{ include "aap.runPodsRole" $ }}
-  namespace: {{ $ns }}
+  namespace: {{ include "aap.namespaceScalar" $ns }}
   labels:
     {{- include "aap.labels" $ | nindent 4 }}
 rules:

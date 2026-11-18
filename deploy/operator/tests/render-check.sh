@@ -271,6 +271,7 @@ k6a_runpods_two() {
   dcount Role aap-operator-run-pods '^  namespace: team-a$' 1 && dcount Role aap-operator-run-pods '^  namespace: team-b$' 1 \
     && dhas ValidatingAdmissionPolicyBinding aap-operator-team-a-run-pods '- team-a' '- team-b' \
     && [ "$(binding_namespace_selector aap-operator-team-a-run-pods | grep -c 'matchLabels')" -eq 0 ] \
+    && [ -n "$(doc Role aap-operator)" ] \
     && [ "$(doc Role aap-operator | awk '/^  namespace: / { print $2 }' | sort)" = "$(binding_namespace_selector aap-operator-team-a-run-pods | awk '/^            - / { print $2 }' | sort)" ] \
     && dhas ConfigMap aap-operator-run-pods-settings '^  namespace: another-agentic-system$' \
     && dhas PriorityClass aap-operator-team-a-run 'kind: PriorityClass'
@@ -282,8 +283,24 @@ check "watchNamespaces that is a map is refused by name even with run pods on (n
 check "watchNamespaces: a bad name is refused" refused 'watchNamespaces: "Bad_Name" is not a namespace name' --set-json 'watchNamespaces=["Bad_Name"]'
 check "watchNamespaces: a value that is not a string is refused (a number is not a namespace)" refused 'watchNamespaces: "1" is not a namespace name' --set-json 'watchNamespaces=[1]'
 check "watchNamespaces: a namespace twice is refused" refused 'watchNamespaces names a namespace twice' --set-json 'watchNamespaces=["one","one"]'
+check "watchNamespace: 0 is a value, not an absent one" refused 'watchNamespace must be one namespace name' --set watchNamespace=0
+check "watchNamespaces: 0 is a value, not an absent one" refused 'watchNamespaces must be a list of namespace names' --set watchNamespaces=0
+watch_namespaces_too_long() {
+  long=$(printf '%064d' 0 | tr '0' 'a')
+  refused 'is not a namespace name' --set-json "watchNamespaces=[\"$long\"]"
+}
+check "watchNamespaces: a name longer than 63 characters is refused" watch_namespaces_too_long
 render --set watchNamespaces=null
 check "watchNamespaces: null is no list, the release's namespace" dhas Role aap-operator '^  namespace: another-agentic-system$'
+yaml_ambiguous_names() {
+  helm template aap-operator "$chart" --namespace on --set-json 'watchNamespaces=["on","2024","agents"]' > "$out" || return 1
+  dcount Role aap-operator '^  namespace: "on"$' 1 \
+    && dcount Role aap-operator '^  namespace: "2024"$' 1 \
+    && dcount Role aap-operator '^  namespace: agents$' 1 \
+    && dhas RoleBinding aap-operator '^    namespace: "on"$' \
+    && dlacks Role aap-operator '^  namespace: on$'
+}
+check "namespaces that YAML would read as a boolean or a number are quoted (on, 2024), and a plain one is not" yaml_ambiguous_names
 
 # ---- The ExternalSecret --------------------------------------------------------------------------------------------------
 render -f "$chart/examples/netcup.values.yaml"
@@ -675,7 +692,7 @@ check "an allowedImageRegistries entry that is not a registry host is refused" r
 check "a store with both cnpg and secretRef is refused" refused_api 'exactly one of cnpg and secretRef' --set api.config.defaults.store.secretRef.name=x --set api.config.defaults.store.secretRef.key=k
 check "a store with neither is refused" refused_api 'exactly one of cnpg and secretRef' --set api.config.defaults.store.cnpg=null
 check "no a2aBearer is refused" refused_api 'api.config.defaults.a2aBearer.name and .key are required' --set api.config.defaults.a2aBearer=null
-check "a defaults.namespace that is not the operator's is refused (watchNamespace sets both)" refused_api 'but the operator watches' --set api.config.defaults.namespace=elsewhere
+check "a defaults.namespace that is not the operator's is refused (watchNamespace/watchNamespaces set both)" refused_api 'but the operator watches' --set api.config.defaults.namespace=elsewhere
 check "an image tag that is empty is refused" refused_api 'api.image.tag is required' --set api.image.tag=
 check "an image tag latest is refused" refused_api 'api.image.tag must not be latest' --set api.image.tag=latest
 check "a malformed image digest is refused" refused_api 'api.image.digest must be sha256' --set api.image.digest=abc

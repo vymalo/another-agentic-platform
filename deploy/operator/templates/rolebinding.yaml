@@ -7,7 +7,7 @@ apiVersion: rbac.authorization.k8s.io/v1
 kind: RoleBinding
 metadata:
   name: {{ include "aap.fullname" $ }}
-  namespace: {{ $ns }}
+  namespace: {{ include "aap.namespaceScalar" $ns }}
   labels:
     {{- include "aap.labels" $ | nindent 4 }}
 roleRef:
@@ -17,5 +17,5 @@ roleRef:
 subjects:
   - kind: ServiceAccount
     name: {{ include "aap.serviceAccountName" $ }}
-    namespace: {{ $.Release.Namespace }}
+    namespace: {{ include "aap.namespaceScalar" $.Release.Namespace }}
 {{- end }}
