@@ -484,7 +484,7 @@ api:
             cidr: $host_addr/32
       ports: [$issuer_port]
 # K3b: the operator probes the stub MCP server on this machine, at the host's address, through exactly this peer and port. The
-# chart turns the probe on with a non-empty `to` (TOOL_PROBE_ENABLED) and keeps its DNS rule from values.yaml.
+# chart turns the probe on with a non-empty toolProbe.to (TOOL_PROBE_ENABLED) and keeps its DNS rule from values.yaml.
 toolProbe:
   to:
     - ipBlock:
