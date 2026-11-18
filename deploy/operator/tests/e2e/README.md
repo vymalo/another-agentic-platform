@@ -1,11 +1,13 @@
-# The kind end-to-ends of the operator: the coder (S9), the Platform API (D7b2), the whole chain (D13) and run pods (D15b)
+# The kind end-to-ends of the operator: the coder (S9), the Platform API (D7b2), the whole chain (D13), run pods (D15b) and several watched namespaces (K6b)
 
-Four scripts, four jobs of [`operator-image.yml`](../../../../.github/workflows/operator-image.yml), one kind cluster each: [`coder-e2e.sh`](coder-e2e.sh)
+Five scripts, five jobs of [`operator-image.yml`](../../../../.github/workflows/operator-image.yml), one kind cluster each: [`coder-e2e.sh`](coder-e2e.sh)
 (the operator runs the real coder, [below](#the-kind-end-to-end-of-the-coder-s9)), [`api-e2e.sh`](api-e2e.sh) (the Platform API creates an agent the
 operator makes Ready, [further down](#the-kind-end-to-end-of-the-platform-api-d7b2)) and [`chain-e2e.sh`](chain-e2e.sh) (the API makes a coder with an
 audience, the operator runs it and lists it, and a pinned image of the system's orchestrator lists it for the person who holds the role and for nobody
-else, [further down](#the-kind-end-to-end-of-the-whole-chain-d13)) and [`run-pods-e2e.sh`](run-pods-e2e.sh) (a coder runs the commands of its runs in pods of their own, the operator having
-set them up, [at the end](#the-kind-end-to-end-of-run-pods-d15b)).
+else, [further down](#the-kind-end-to-end-of-the-whole-chain-d13)), [`run-pods-e2e.sh`](run-pods-e2e.sh) (a coder runs the commands of its runs in pods of their own, the operator having
+set them up, [further down](#the-kind-end-to-end-of-run-pods-d15b)) and [`namespaces-e2e.sh`](namespaces-e2e.sh) (one operator watches two
+namespaces, with one Role and RoleBinding in each, and lists a service id the two share for neither of them,
+[at the end](#the-kind-end-to-end-of-several-watched-namespaces-k6b)).
 
 ## The kind end-to-end of the coder (S9)
 
@@ -536,4 +538,158 @@ All eleven steps passed (44 `ok` lines, exit 0), with the real answers of the AP
 **D15d (2026-10-27), the git sandbox.** Step 4 loses the automounted token (the coder's pod mounts the account's credentials as a volume of the coder container alone) and the new **step 4b** is adam-rs's sandbox checks at `581aeed`, applied to the pod the operator made (above); steps 2, 8, 9 and 11 gain a few lines; `git-sandbox-vector.sh` is vendored; and the pin moves to `sha-581aeed` (*verified 2026-10-27* by anonymous requests to `ghcr.io`: a Docker v2 image manifest, not an index, digest `sha256:5e851765…`, 14 layers, 3.0 GB, `linux/amd64`, user `10001`, entrypoint `tini -- adam-coder`, label `org.opencontainers.image.revision` the full hash of `581aeed`, and a layer in its history that copies `adam-coder`, `adam-agent`, `adam-kube-exec`, `adam-egress`, `adam-git-sandbox` and `adam-git` into `/usr/local/bin`; the image's content was not unpacked here; adam-rs's `values.yaml` named `sha-05cda7f`, which has the same layer, when this was read). Adam-rs's script passed in its CI on its first run (run 40507897870, job 122201831517, *verified 2026-10-27* in the commit message of `581aeed`). **Run where it was written:** `shellcheck` 0.9.0, `dash -n`, `actionlint`; **the jq programs of step 4b against a pod and a StatefulSet made from the operator's golden render**, passing, and failing under seventeen of seventeen mutations of the pod (a shared process namespace, an automounted token, an injected token volume, a writable root, a variable from a Secret, an `envFrom`, the token, the App's key or the template mounted in the sandbox, the GitHub server holding the token, the coder container without it or with it writable, a socket that is not the sandbox's, a sandbox not ready, restarted, not a native sidecar or of another image), and under three of four of the StatefulSet's (the fourth, the automounted token, is step 4's own line); `render-check.sh` and the Rust tests that hold the fixtures and the vendored file's hash. **Run green in CI (run 40520862547, job `run-pods-e2e` 122249371008, at `b8290bf`, *verified 2026-10-27* in its log): all of step 4b** (that a kubelet starts the sidecar and then the coder container, the controls and the emptiness as above, `awk`, `find`, `stat` and `curl` in the coder's image where the script runs them, the vector's marker, the shape of the sandbox's log lines) **and that the coder's own git for a run goes through the sandbox** (the `worktree` line of step 8, and that runs A, B and C, whose git now runs in another container, still behave as before). No container daemon and no kind exist where it was written.
 
 **D15c (2026-10-27), the egress proxy.** Step 4 gains the proxy's objects and their rollout, step 7 is rewritten (above), step 9 and 10 gain the proxy's six objects and pods, step 11 the proxy's log; the pin moves to `sha-7598255` (*verified 2026-10-27* by an anonymous request to `ghcr.io`: a Docker v2 image manifest, not an index, 14 layers, 3.0 GB, user `10001`, entrypoint `tini -- adam-coder`, label `org.opencontainers.image.revision` the full hash of `7598255`, and a layer in its history that copies `adam-egress` next to `adam-coder`; the image's content was not unpacked here). The new checks are adam-rs's `deploy/coder/tests/kind-run-pods.sh` at that revision, ported to the operator's objects (that script passed in adam-rs's CI, run 40471872938, *verified 2026-10-27* in adam-rs's commit message of `7598255`). **Run where it was written:** `shellcheck` 0.9.0, `dash -n`, `actionlint`; the jq programs against objects shaped like the operator's golden render; `render-check.sh` and the Rust tests that hold the fixtures. **Unverified until the job has run: all of the new step 7** (the controls, the refusals and their 60 s retry on kindnet, `npm` and `curl` through the proxy from the `workspace` image (it has `curl`, which step 7 of D15b ran, and `npm`, which its smoke test asks for: `npm config get cache`), the proxy's log lines and the absence of what the requests carried), the proxy's rollout in a cluster whose kubelet pulls the pin, and the cleanup of the six objects by the owner reference. No container daemon and no kind exist where it was written.
+
+## The kind end-to-end of several watched namespaces (K6b)
+
+**One operator, two watched namespaces.** The chart is installed with `watchNamespaces: [aap-e2e-ns-a, aap-e2e-ns-b]`; a third namespace,
+`aap-e2e-ns-ops`, is the Helm release's and is deliberately **not** watched. The operator reconciles an agent in each of the two, with **one
+Role and one RoleBinding in each and no ClusterRole anywhere**; the registry lists both, each with the card URL of its own namespace; and a
+service id that **both** namespaces share is listed for **neither** (a client that asks for `chat` would be given a coin flip otherwise), then
+listed again from the survivor when one of the two is deleted. This is the job `namespaces-e2e` of
+[`operator-image.yml`](../../../../.github/workflows/operator-image.yml) (it needs the job `image`, whose operator image it runs, and **`push`
+needs it**: unlike `chain-e2e` and `run-pods-e2e` it pins nothing outside this repository except the curl image `api-e2e` already pulls, like `api-e2e`). The script
+[`namespaces-e2e.sh`](namespaces-e2e.sh) is all of it and runs against any kind cluster that has the operator image and the stand-in:
+
+```sh
+kind create cluster --name aap-namespaces
+docker build -t operator:smoke -f docker/operator/Dockerfile . && docker build -t aap-stub:ci bin/operator/tests/stub
+kind load docker-image operator:smoke aap-stub:ci --name aap-namespaces
+sh deploy/operator/tests/e2e/namespaces-e2e.sh    # kubectl on that cluster; needs helm, jq and openssl
+```
+
+The cluster pulls one image the repository does not build: `docker.io/curlimages/curl`, pinned by digest, which the one curl pod runs (the same
+pin as the other scripts'). `OPERATOR_IMAGE_REPOSITORY`/`_TAG`/`_PULL_POLICY` (default `operator:smoke`, `Never`) and `AGENT_IMAGE` (default
+`aap-stub:ci`) say what the chart and the agents run; `READY_TIMEOUT_SECS` (300, an agent to become Ready) and `GONE_TIMEOUT_SECS` (180, a
+deleted agent's workload to be gone) bound the waits, and `AAP_E2E_ALLOW_ANY_CONTEXT=1` is the escape for a cluster that is not kind's.
+`AAP_E2E_NAMESPACE` moves **the release's** namespace only: the two watched ones are `aap-e2e-ns-a` and `aap-e2e-ns-b`, because the script
+asserts that the operator is given exactly those.
+
+**It runs only on a throwaway cluster and touches only what it made**, as the other scripts do: a context that is not `kind-*` is refused before
+anything is made (and the cleanup is not yet armed); each of the three namespaces is made with the label `aap-e2e/made-by=namespaces-e2e` and a
+namespace of one of those names **without** the label is never used; every object it makes carries the label and one that exists without it is
+never overwritten; the cleanup deletes the agents of the namespaces this run made (with the operator still there to run their finalizers), then
+the Helm release, then those namespaces, and nothing else. A run that stops before the first namespace exists deletes and uninstalls nothing.
+`INT`, `TERM` and `HUP` run it. The CRDs stay.
+
+```mermaid
+sequenceDiagram
+    participant J as namespaces-e2e.sh
+    participant K as kind (API server, kubelet)
+    participant O as the operator (one pod, in aap-e2e-ns-ops)
+
+    J->>K: refuse a context that is not kind-*, make aap-e2e-ns-ops, -a and -b (labelled), the CRDs
+    J->>K: the registry's token, the agents' Secrets in a and b (a sentinel for the model's key), the curl pod
+    J->>K: helm upgrade --install with watchNamespaces=[aap-e2e-ns-a, aap-e2e-ns-b]
+    K-->>J: the operator pod Ready, WATCH_NAMESPACES="aap-e2e-ns-a,aap-e2e-ns-b", WATCH_NAMESPACE="aap-e2e-ns-a"
+    K-->>J: one Role and one RoleBinding in a and in b (the release's account), none in the release's namespace, no ClusterRole
+    K-->>J: auth can-i: agentservices and pods in a and in b, nothing in the release's namespace, in kube-system or --all-namespaces
+    J->>K: alpha in a, beta in b (folder agents on the stand-in)
+    O->>K: a Deployment, a Service and a pod in each of a and b, and nothing in the other namespace
+    J->>O: the registry from the curl pod: 401 with no token, then alpha and beta with their own namespaces' card URLs
+    J->>K: chat in BOTH a and b
+    O-->>J: the document lists chat nowhere, and the log says aap-e2e-ns-a/chat and aap-e2e-ns-b/chat are not in the registry
+    J->>K: delete b/chat
+    O-->>J: the document lists chat again, with the card URL of aap-e2e-ns-a/chat
+    J->>K: delete alpha
+    O-->>J: the document keeps beta (and chat), and beta is still Ready
+    J->>K: no secret value and no token in any answer or log, then undo what was made
+```
+
+```mermaid
+stateDiagram-v2
+    [*] --> Made: three namespaces (labelled), the CRDs, the Secrets, the curl pod
+    Made --> Installed: the chart with watchNamespaces
+    Installed --> Rights: one Role and RoleBinding in each watched namespace, no ClusterRole, can-i
+    Rights --> BothReady: alpha in a, beta in b, each in its own namespace
+    BothReady --> Listed: the registry lists both, each with its own card URL
+    Listed --> Shared: chat in both, listed for neither (the log names both)
+    Shared --> Survivor: b/chat deleted, chat listed from a
+    Survivor --> Checked: alpha deleted, beta kept
+    Checked --> [*]: no secret, no token, no panic
+    Made --> [*]: a missing tool, a refused context or namespace: the script prints what the cluster says and undoes only what it made
+```
+
+### Files
+
+| File | What |
+|---|---|
+| [`namespaces-e2e.sh`](namespaces-e2e.sh) | the script: steps 1 to 14, every wait bounded, every assertion named, the cluster's state printed on a failure (without any line that holds a secret of the run) |
+| [`namespaces.values.yaml`](namespaces.values.yaml) | the chart's values for it: the registry on with a Secret of the script's own for its token, only the pods labelled `aap-e2e/registry-reader` admitted to it, a pending service looked at every 5 s. The script adds the image in a second file and the two watched namespaces with `--set-json`, because it also asserts them |
+| `../../../../deploy/crds/agents.vymalo.com.yaml` | the four CRDs, applied server-side (the chart does not carry them) |
+| `../../../../bin/operator/tests/stub/Dockerfile` | the agents' image, the stand-in for the adam image that the other jobs run: it answers `/healthz` on 8080 and serves a card at `/.well-known/agent-card.json`, which is the URL the registry lists |
+
+### What it proves
+
+* **The chart's RBAC is one Role and one RoleBinding per WATCHED namespace, and nothing cluster-scoped.** In `aap-e2e-ns-a` and in
+  `aap-e2e-ns-b`: a Role and a RoleBinding named for the release, the RoleBinding giving `system:serviceaccount:aap-e2e-ns-ops:aap-operator`
+  that Role, the two Roles the same rules, and no rule on `secrets`. In the release's namespace: **no** Role and **no** RoleBinding (it is not
+  watched), and the ServiceAccount there and nowhere else. And no ClusterRole or ClusterRoleBinding of the release, **by name and by its
+  `app.kubernetes.io/instance` label**, which is the stronger of the two: the chart makes no cluster-scoped right for a namespaced operator.
+* **The rights, under the real RBAC of a real API server** (`kubectl auth can-i --as`, which is the only place these verbs are asked of a
+  cluster that authorises: a bare API server run with `AlwaysAllow` authorises everything): `list agentservices`, `patch agentservices`,
+  `create deployments.apps` and `list pods` in `aap-e2e-ns-a` and in `aap-e2e-ns-b`; and **not** `list agentservices` in
+  `aap-e2e-ns-ops`, in `kube-system`, or with `--all-namespaces`, not `list pods` with `--all-namespaces`, and no `get secrets` in either
+  watched namespace.
+* **One operator reconciles two namespaces independently.** The operator's pod is Ready and did not restart, and is given
+  `WATCH_NAMESPACES="aap-e2e-ns-a,aap-e2e-ns-b"` and `WATCH_NAMESPACE="aap-e2e-ns-a"` (the primary). `alpha` in `aap-e2e-ns-a` and `beta` in
+  `aap-e2e-ns-b` are both `Ready` with their four conditions True; each has its Deployment, its Service on 8080 and one Running, Ready pod
+  **in its own namespace**, and the other namespace and the release's have none of those objects and no pod of that agent. The release's
+  namespace is the control that a namespace the operator does not watch is left alone: it holds the operator's own objects and not one of an
+  agent's.
+* **The registry lists both, each from its own namespace.** Asked from the curl pod the chart's NetworkPolicy admits: `401` with no token;
+  with the token, `alpha` and `beta` with their titles and **each with its own namespace's card URL**
+  (`http://alpha.aap-e2e-ns-a.svc:8080/.well-known/agent-card.json`), which is what shows that one document was fed from both namespaces and
+  that each entry names the agent it means.
+* **A service id two namespaces share is listed for neither, and for the survivor once one goes.** `chat` is made in both namespaces and is
+  Ready in both; the document lists `alpha` and `beta` only, and the operator's log says that **both** `aap-e2e-ns-a/chat` and
+  `aap-e2e-ns-b/chat` are not in the registry (the positive evidence: "the document does not list chat" is also true of a registry that never
+  saw either of them). Deleting `aap-e2e-ns-b/chat` makes `chat` appear, with the card URL of `aap-e2e-ns-a`; deleting `alpha` leaves
+  `chat` and `beta`, with `beta`'s own card URL and `beta` still Ready, so one namespace's deletion does not disturb the other's agent.
+* **No secret value and no token.** The model's key is a sentinel (and the script checks that it really is the value of the Secret in each
+  watched namespace, so the scan is not over a pattern nothing holds), the A2A bearer and the registry's token are random, and the ledger's URI
+  is a value no pod opens: none of the four is in any answer the registry gave or in the operator's log. The log counts only if its
+  `kubectl logs` succeeded, it is not empty and it holds a line only the operator logs (`the caches are synced`), and it holds no panic
+  (`panicked at`).
+
+### What it does not prove
+
+* **A real agent.** Every pod is the stand-in: it answers `/healthz` and a card and reads no variable, so no model is called, no task is run and
+  no store is opened. That the operator's variables make the real binaries *work* is `operator-coder-e2e`'s and the parity goldens' claim.
+* **A third namespace, or one added or removed while the operator runs.** The chart's Role and RoleBinding are rendered at install, and the
+  operator reads its list at start: a namespace added to `watchNamespaces` after the install is a new install (and its Role with it), and the
+  script does not exercise that.
+* **The registry's NetworkPolicy.** The curl pod is the one peer the chart's `networkPolicy.registry.allowFrom` names, and it reaches the
+  registry; that a pod the policy does **not** name is refused is `coder-e2e.sh`'s check, not this one's.
+* **The Platform API** (`api.enabled` is off: no form, no token, no ETag), the system's orchestrator (`chain-e2e`'s), run pods (D15b's), a
+  CloudNativePG store, a real Keycloak and the edge.
+* **What the status of a skipped service says.** The script asserts the registry's document and the operator's log; the `Listed` condition of
+  an `AgentService` whose id two namespaces share is the operator's, and this script does not claim what it reads.
+* **The per-shard filter of the runtime signals.** Each shard filters the provider's signals to its own namespace, but a signal for
+  another namespace would be dropped as `ObjectNotFound` even without the filter, so this script cannot show the filter is there (the
+  controller's tests hold the shards; the filter is defensive).
+* **More than one operator replica** (v0 runs one), and `watchNamespaces` naming one namespace twice (the chart refuses it, and
+  `render-check.sh` holds that refusal).
+
+### What ran, and what is unverified
+
+*Run where it was written, with no container daemon and no kind*: `sh -n`, `bash -n` and `dash -n` on the script; `helm lint` and `helm template`
+of the chart with `namespaces.values.yaml` and `--set-json 'watchNamespaces=["aap-e2e-ns-a","aap-e2e-ns-b"]'`, which renders the Role and the
+RoleBinding in the two watched namespaces and **none** in the release's, and the operator's `WATCH_NAMESPACES` and `WATCH_NAMESPACE`; the
+workflow parsed as YAML; `node tools/docs-check/check-docs.mjs` (the diagrams of this section parse); and the agent fixture the script generates,
+read by the built `aapctl validate -f` (the domain's own `validate`, which the operator runs) and `aapctl render -f` (which makes
+`deployment/alpha`, `service/alpha` on 8080, the pod on `aap-stub:ci` and the NetworkPolicy the script asserts). The jq filters of steps 6, 8, 9,
+10 and 11 were run against that render and against registry documents of the three shapes the run produces, and against an empty fleet, which they
+reject: the assertions can fail. `shellcheck` and `actionlint` are not installed where it was written: the script keeps the other scripts' style
+(quoted variables, `printf` for anything that can hold a body, no backtick in an unquoted heredoc) instead.
+
+**Unverified until the job has run**: everything that needs a kubelet and a real API server — that the stand-in's pod starts in each namespace
+and becomes Ready, that the operator's one process reads both namespaces (the `WATCH_NAMESPACES` it is given is the chart's; that the binary
+honours it is K6b's code), the registry's answers from a pod, kindnet admitting the curl pod, the two log lines of the skipped `chat`, and the
+timings on a runner.
+
+**One assumption this script makes about K6b's code**: step 10 reads the operator's log for a line that holds `<namespace>/<name> is not in the
+registry` for **both** entries of a shared id, which is the message `crates/registry/src/server.rs` writes for an entry the document skips. The
+rule that a shared id is skipped for both (and not for the second only) is the change in `crates/registry/src/document.rs` that K6b makes; this
+script proves it and does not implement it, and a change to that message's wording fails this step rather than passing it silently.
+
 

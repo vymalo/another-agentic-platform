@@ -1,4 +1,4 @@
-//! The two controllers, wired to their triggers (§59a, "Reconciliation").
+//! The two controllers, wired to their triggers (§59a, "Reconciliation"), one set per namespace watched (K6b).
 //!
 //! The `AgentService` controller is triggered by
 //!
@@ -24,6 +24,21 @@
 //! Not a trigger: a change of a referenced Secret. The operator has no right on Secrets (AD-024), so
 //! it cannot watch them; the kubelet's word about a pod is how a missing one is learned, and that
 //! arrives through the runtime's watch.
+//!
+//! # One shard per namespace (K6b)
+//!
+//! An operator that watches a list of namespaces ([`Options::watch_namespaces`]) holds **one [`Shard`] per namespace**:
+//! its own controllers, its own caches, and its own `Api::namespaced`. Never `Api::all` and never a `ClusterRole`, so a
+//! namespaced `Role` in each namespace is all the rights it needs (AD-055).
+//!
+//! The shards must not share a cache: kube 4.0.0's `reflektor` **swaps its store** (*verified 2026-11-18*, `kube-runtime-4.0.0/src/reflector/store.rs`) when the listing that precedes a watch
+//! is done (`InitDone`), so two watches writing into one store would have the second listing replace the first's objects.
+//! The directory is the union of the shards' caches ([`ReflectorDirectory::from_stores`]), the counters are one set, and
+//! `/readyz` turns true only when **every** shard's caches have listed what they watch: an operator whose second
+//! namespace is not readable is not ready, and the namespace that is still reconciles.
+//!
+//! [`RuntimeProvider::watch`] is called **once** and its ids are fanned out ([`fan_out`]): each call is a set of watches
+//! of the API server, so one per shard would be one set too many. Each shard keeps the ids of the namespaces it watches.
 
 use std::collections::HashMap;
 use std::future::Future;
@@ -33,8 +48,9 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
 use aap_api::{AgentConfig, AgentService, ModelEndpoint, ToolProvider};
-use aap_ports::{RuntimeProvider, StoreProvisioner};
-use futures::{Stream, StreamExt};
+use aap_ports::{RuntimeId, RuntimeProvider, StoreProvisioner};
+use futures::stream::BoxStream;
+use futures::{FutureExt, Stream, StreamExt};
 use kube::runtime::controller::Config as ControllerConfig;
 use kube::runtime::reflector::{self, ObjectRef, Store};
 use kube::runtime::{Controller, WatchStreamExt, watcher};
@@ -60,15 +76,30 @@ use crate::watches::{
 pub struct Readiness(Arc<AtomicBool>);
 
 impl Readiness {
-    /// Both reflectors have synced.
+    /// Every cache of every namespace has synced.
     pub fn is_ready(&self) -> bool {
         self.0.load(Ordering::Acquire)
     }
 
-    /// Say it is. [`Operator::run`] does when both caches have synced; a test of something that
+    /// Say it is. [`Operator::run`] does when every cache has synced; a test of something that
     /// reads the handle can do it by hand.
     pub fn mark_ready(&self) {
         self.0.store(true, Ordering::Release);
+    }
+}
+
+/// The controllers of one namespace the operator watches (K6b): its own cache of the services, and the
+/// namespaced `Api`s every kind of that shard is read and watched through.
+struct Shard {
+    /// `None`: every namespace (one `Api::all`, for an administrator).
+    namespace: Option<String>,
+    services: Controller<AgentService>,
+}
+
+impl Shard {
+    /// The namespace, for a log line: the name, or `(all)`.
+    fn name(&self) -> &str {
+        self.namespace.as_deref().unwrap_or("(all)")
     }
 }
 
@@ -82,21 +113,29 @@ pub struct Operator<R, S> {
     metrics: Arc<Metrics>,
     readiness: Readiness,
     tracer: aap_trace::Tracer,
-    services: Option<Controller<AgentService>>,
+    /// One per namespace watched, in the order of [`Options::watch_namespaces`]; empty once [`run`](Self::run)
+    /// has taken them.
+    shards: Vec<Shard>,
 }
 
 impl<R, S> Operator<R, S>
 where
-    R: RuntimeProvider + 'static,
-    S: StoreProvisioner + 'static,
+    R: RuntimeProvider + Clone + 'static,
+    S: StoreProvisioner + Clone + 'static,
 {
     /// Compose the controllers. Nothing runs, and nothing is asked of the cluster, until
     /// [`run`](Self::run).
     pub fn new(client: Client, runtime: R, store: S, owner: OwnerOf, options: Options) -> Self {
-        let services = Controller::new(
-            api::<AgentService>(&client, &options),
-            watcher::Config::default(),
-        );
+        let shards = watched_namespaces(&options)
+            .into_iter()
+            .map(|namespace| Shard {
+                services: Controller::new(
+                    api_in::<AgentService>(&client, namespace.as_deref()),
+                    watcher::Config::default(),
+                ),
+                namespace,
+            })
+            .collect();
         Self {
             client,
             runtime,
@@ -106,7 +145,7 @@ where
             metrics: Arc::new(Metrics::new()),
             readiness: Readiness::default(),
             tracer: aap_trace::Tracer::off(),
-            services: Some(services),
+            shards,
         }
     }
 
@@ -133,21 +172,14 @@ where
         self.readiness.clone()
     }
 
-    /// The agents of the cluster as the services controller's cache has them: the
-    /// [`AgentDirectory`](aap_ports::AgentDirectory) of the registry (S7).
+    /// The agents of the cluster as the services controllers' caches have them: the
+    /// [`AgentDirectory`](aap_ports::AgentDirectory) of the registry (S7). One cache per namespace watched, and
+    /// the directory is their union.
     pub fn directory(&self) -> ReflectorDirectory {
-        ReflectorDirectory::new(self.reader())
+        ReflectorDirectory::from_stores(self.shards.iter().map(|s| s.services.store()).collect())
     }
 
-    fn reader(&self) -> Store<AgentService> {
-        // `services` is only taken by `run`, which consumes `self`.
-        self.services
-            .as_ref()
-            .map(Controller::store)
-            .unwrap_or_else(|| kube::runtime::reflector::store().0)
-    }
-
-    /// Run both controllers until `shutdown` resolves, then let the passes in flight finish.
+    /// Run every shard's controllers until `shutdown` resolves, then let the passes in flight finish.
     pub async fn run(mut self, shutdown: impl Future<Output = ()> + Send + 'static) {
         let (stop, stopped) = watch::channel(false);
         tokio::spawn(async move {
@@ -161,173 +193,338 @@ where
         };
 
         let metrics = self.metrics.clone();
-        let namespace = self.options.watch_namespace.clone();
         let cfg = ControllerConfig::default().concurrency(self.options.concurrency);
+        let shards = std::mem::take(&mut self.shards);
 
-        // The configs come first: the services' watches of the shared objects map through their cache.
-        let configs_controller = Controller::new(
-            api::<AgentConfig>(&self.client, &self.options),
-            watcher::Config::default(),
-        )
-        .with_config(cfg.clone())
-        .graceful_shutdown_on(signal(stopped.clone()));
-        let config_reader = configs_controller.store();
+        // One watch of the provider for every shard: a call is a set of watches of the API server, and one
+        // per shard would be one set too many. Every signal is counted once, whatever its namespace.
+        let (feed_signals, signals): (Pin<Box<dyn Future<Output = ()> + Send>>, Vec<_>) =
+            if shards.is_empty() {
+                // No shard: ask the provider for nothing at all (its empty list means every namespace), and wait for
+                // the stop. The readiness below stays false.
+                (Box::pin(futures::future::pending()), Vec::new())
+            } else {
+                let counted = self.runtime.watch().map({
+                    let metrics = metrics.clone();
+                    move |id| {
+                        metrics.inc(name::RUNTIME_SIGNALS, &[]);
+                        id
+                    }
+                });
+                let (feed, signals) = fan_out(counted, shards.len());
+                (Box::pin(feed), signals)
+            };
 
-        // The services.
-        let Some(services) = self.services.take() else {
-            return;
-        };
-        let reader = services.store();
-        let ctx = Arc::new(
-            Context::new(
-                self.client.clone(),
-                self.runtime,
-                self.store,
-                self.owner,
-                self.options.clone(),
-            )
-            .with_metrics(metrics.clone())
-            .with_tracer(self.tracer.clone()),
-        );
-        let signals = {
-            let metrics = metrics.clone();
-            let namespace = namespace.clone();
-            ctx.runtime
-                .watch()
-                .filter(move |id| {
-                    metrics.inc(name::RUNTIME_SIGNALS, &[]);
-                    futures::future::ready(namespace.as_deref().is_none_or(|ns| ns == id.scope()))
-                })
-                .map(|id| ObjectRef::<AgentService>::new(id.name()).within(id.scope()))
-        };
-        let mapper_reader = reader.clone();
-        let (endpoint_services, endpoint_configs) = (reader.clone(), config_reader.clone());
-        let (provider_services, provider_configs) = (reader.clone(), config_reader.clone());
-        let services = services
-            .with_config(cfg.clone())
-            .graceful_shutdown_on(signal(stopped.clone()))
-            .watches(
-                api::<AgentConfig>(&self.client, &self.options),
+        let mut running: Vec<Pin<Box<dyn Future<Output = ()> + Send>>> = Vec::new();
+        let mut service_caches: Vec<Store<AgentService>> = Vec::new();
+        let mut config_caches: Vec<Store<AgentConfig>> = Vec::new();
+        let mut names: Vec<String> = Vec::new();
+        for (shard, signals) in shards.into_iter().zip(signals) {
+            names.push(shard.name().to_owned());
+            // The configs come first: the services' watches of the shared objects map through their cache.
+            let configs_controller = Controller::new(
+                api_in::<AgentConfig>(&self.client, shard.namespace.as_deref()),
                 watcher::Config::default(),
-                move |config| services_of(&mapper_reader, &config),
             )
-            .watches_stream(
-                isolated(api::<ModelEndpoint>(&self.client, &self.options)),
-                move |endpoint| {
-                    services_of_endpoint(&endpoint_services, &endpoint_configs, &endpoint)
-                },
-            )
-            .watches_stream(
-                isolated(api::<ToolProvider>(&self.client, &self.options)),
-                move |provider| {
-                    services_of_provider(&provider_services, &provider_configs, &provider)
-                },
-            )
-            .reconcile_on(signals)
-            .run(reconcile_service, service_error_policy, ctx)
-            .for_each(|result| async move { log_plumbing("agentservice", result) });
-
-        // The configs.
-        let config_ctx = Arc::new(
-            ConfigContext::new(self.client.clone(), metrics.clone())
-                .with_pass_timeout(self.options.pass_timeout)
+            .with_config(cfg.clone())
+            .graceful_shutdown_on(signal(stopped.clone()));
+            service_caches.push(shard.services.store());
+            config_caches.push(configs_controller.store());
+            let ctx = Arc::new(
+                Context::new(
+                    self.client.clone(),
+                    self.runtime.clone(),
+                    self.store.clone(),
+                    self.owner.clone(),
+                    self.options.clone(),
+                )
+                .with_metrics(metrics.clone())
                 .with_tracer(self.tracer.clone()),
-        );
-        let configs = configs_controller
-            .run(reconcile_config, config_error_policy, config_ctx)
-            .for_each(|result| async move { log_plumbing("agentconfig", result) });
-
-        // The status of the shared kinds (K2). One cache of the configs and one of the services for both controllers, each
-        // fed by one watch whose changes go to the two controllers after the cache has them.
-        let (shared_configs, config_events) =
-            reflected(api::<AgentConfig>(&self.client, &self.options));
-        let (shared_services, service_events) =
-            reflected(api::<AgentService>(&self.client, &self.options));
-        let (feed_configs, [endpoint_config_events, provider_config_events]) = tee(config_events);
-        let (feed_services, [endpoint_service_events, provider_service_events]) =
-            tee(service_events);
-        let feeds = until_stopped(
-            "the shared kinds' watches",
-            GRACE,
-            async {
-                futures::join!(feed_configs, feed_services);
-            },
-            signal(stopped.clone()),
-        );
-
-        let endpoints = {
-            // The object's own watch is isolated too: a kind whose CRD is absent must not keep the controller from
-            // stopping (its own failing watch would hold the shutdown until the process is killed).
-            let (own, own_events) = reflected(api::<ModelEndpoint>(&self.client, &self.options));
-            let controller = Controller::for_stream(own_events, own.clone())
-                .with_config(cfg.clone())
-                .graceful_shutdown_on(signal(stopped.clone()));
-            let ctx = Arc::new(
-                SharedContext::new(
-                    self.client.clone(),
-                    metrics.clone(),
-                    shared_configs.clone(),
-                    shared_services.clone(),
-                )
-                .with_pass_timeout(self.options.pass_timeout)
-                .with_tracer(self.tracer.clone())
-                .with_probe(self.options.probe),
             );
-            let (own_c, services_c, configs_s) =
-                (own.clone(), shared_services.clone(), shared_configs.clone());
-            let run = controller
-                .watches_stream(endpoint_config_events, move |config| {
-                    touched_by_config(&config, &services_c, &own_c, endpoint_of_config)
-                })
-                .watches_stream(endpoint_service_events, move |service| {
-                    touched_by_service(&service, &configs_s, &own, endpoint_of_config)
-                })
-                .run(reconcile_endpoint, endpoint_error_policy, ctx)
-                .for_each(|result| async move { log_plumbing("modelendpoint", result) });
-            until_stopped("modelendpoint", GRACE, run, signal(stopped.clone()))
-        };
-        let providers = {
-            let (own, own_events) = reflected(api::<ToolProvider>(&self.client, &self.options));
-            let controller = Controller::for_stream(own_events, own.clone())
-                .with_config(cfg.clone())
-                .graceful_shutdown_on(signal(stopped.clone()));
-            let ctx = Arc::new(
-                SharedContext::new(
-                    self.client.clone(),
-                    metrics.clone(),
-                    shared_configs.clone(),
-                    shared_services.clone(),
-                )
-                .with_pass_timeout(self.options.pass_timeout)
-                .with_tracer(self.tracer.clone())
-                .with_probe(self.options.probe),
+            let config_ctx = Arc::new(
+                ConfigContext::new(self.client.clone(), metrics.clone())
+                    .with_pass_timeout(self.options.pass_timeout)
+                    .with_tracer(self.tracer.clone()),
             );
-            let (own_c, services_c, configs_s) =
-                (own.clone(), shared_services.clone(), shared_configs.clone());
-            let run = controller
-                .watches_stream(provider_config_events, move |config| {
-                    touched_by_config(&config, &services_c, &own_c, providers_of_config)
-                })
-                .watches_stream(provider_service_events, move |service| {
-                    touched_by_service(&service, &configs_s, &own, providers_of_config)
-                })
-                .run(reconcile_provider, provider_error_policy, ctx)
-                .for_each(|result| async move { log_plumbing("toolprovider", result) });
-            until_stopped("toolprovider", GRACE, run, signal(stopped.clone()))
-        };
-
-        // Ready once both caches have listed the cluster.
-        let ready = self.readiness.clone();
-        let synced = async move {
-            if reader.wait_until_ready().await.is_ok()
-                && config_reader.wait_until_ready().await.is_ok()
-            {
-                ready.mark_ready();
-                tracing::info!("the caches are synced");
+            running.push(Box::pin(run_shard(
+                shard,
+                configs_controller,
+                ctx,
+                config_ctx,
+                signals,
+                metrics.clone(),
+                self.tracer.clone(),
+                stopped.clone(),
+                cfg.clone(),
+            )));
+        }
+        // The provider's watch has no end of its own: it ends when the operator is told to stop, and its readers with
+        // it (a controller's `reconcile_on` stream ending stops nothing by itself: the graceful shutdown does).
+        let feed = {
+            let stopped = stopped.clone();
+            async move {
+                let stop = signal(stopped);
+                let _ = futures::future::select(std::pin::pin!(feed_signals), std::pin::pin!(stop))
+                    .await;
             }
         };
-        futures::join!(services, configs, endpoints, providers, feeds, synced);
+        running.push(Box::pin(feed));
+
+        // Ready once **every** shard's caches have listed what they watch: an operator whose second namespace
+        // cannot be read is not ready, and the namespace that can still reconciles. A cache that never lists (a
+        // namespace the `Role` does not allow, a namespace that does not exist) leaves this waiting: the shutdown
+        // is what ends it, not a cache. Every 30 s the namespaces still waiting are named, because otherwise the
+        // only symptom is a failing readiness probe.
+        let ready = self.readiness.clone();
+        let synced = {
+            let stopped = stopped.clone();
+            async move {
+                let all = async {
+                    if service_caches.is_empty() || config_caches.is_empty() {
+                        tracing::warn!(
+                            "no namespace to watch: the operator reconciles nothing and is never ready"
+                        );
+                        return;
+                    }
+                    for reader in &service_caches {
+                        if reader.wait_until_ready().await.is_err() {
+                            return;
+                        }
+                    }
+                    for reader in &config_caches {
+                        if reader.wait_until_ready().await.is_err() {
+                            return;
+                        }
+                    }
+                    ready.mark_ready();
+                    tracing::info!(namespaces = names.join(","), "the caches are synced");
+                };
+                tokio::pin!(all);
+                let mut tick = tokio::time::interval(Duration::from_secs(30));
+                tick.tick().await;
+                loop {
+                    tokio::select! {
+                        () = &mut all => break,
+                        () = signal(stopped.clone()) => break,
+                        _ = tick.tick() => {
+                            let mut missing: Vec<&str> = Vec::new();
+                            for (i, store) in service_caches.iter().enumerate() {
+                                if store.wait_until_ready().now_or_never().is_none() {
+                                    missing.push(names[i].as_str());
+                                }
+                            }
+                            for (i, store) in config_caches.iter().enumerate() {
+                                if store.wait_until_ready().now_or_never().is_none() {
+                                    missing.push(names[i].as_str());
+                                }
+                            }
+                            missing.sort_unstable();
+                            missing.dedup();
+                            if !missing.is_empty() {
+                                tracing::warn!(
+                                    namespaces = missing.join(","),
+                                    "these namespaces' caches have not listed: /readyz stays false, and the registry is unready for every namespace"
+                                );
+                            }
+                        }
+                    }
+                }
+            }
+        };
+        running.push(Box::pin(synced));
+        futures::future::join_all(running).await;
     }
+}
+
+/// Whether the shard watching `namespace` (or every namespace, `None`) takes the runtime signal `id` (K6b): a shard
+/// takes the ids of the namespaces it watches and no others, so one change of the provider's watch is one pass in
+/// the shard that owns it, not one pass in every shard.
+fn signal_in(namespace: Option<&str>, id: &RuntimeId) -> bool {
+    namespace.is_none_or(|ns| ns == id.scope())
+}
+
+/// The namespaces to watch: one per name of [`Options::watch_namespaces`], or one for every namespace.
+fn watched_namespaces(options: &Options) -> Vec<Option<String>> {
+    match &options.watch_namespaces {
+        // An empty list is no shard at all: it reconciles nothing and `/readyz` never turns true. It must not fall
+        // back to `None` (every namespace, which is `Api::all` and a `ClusterRole` the chart does not make): that
+        // would turn a caller's mistake into a cluster-wide operator. The composition root refuses one.
+        Some(list) => {
+            // A duplicate is one namespace, not two shards (which would make two entries of one id, and the registry
+            // lists neither). The composition root refuses one; a library caller is deduped here.
+            let mut seen = std::collections::BTreeSet::new();
+            list.iter()
+                .filter(|name| seen.insert(name.as_str()))
+                .cloned()
+                .map(Some)
+                .collect()
+        }
+        None => vec![None],
+    }
+}
+
+/// Everything one namespace runs: the services, the configs, the two status controllers of the shared kinds,
+/// and the feeds their caches are read from.
+#[allow(clippy::too_many_arguments)]
+async fn run_shard<R, S>(
+    shard: Shard,
+    configs_controller: Controller<AgentConfig>,
+    ctx: Arc<Context<R, S>>,
+    config_ctx: Arc<ConfigContext>,
+    signals: BoxStream<'static, RuntimeId>,
+    metrics: Arc<Metrics>,
+    tracer: aap_trace::Tracer,
+    stopped: watch::Receiver<bool>,
+    cfg: ControllerConfig,
+) where
+    R: RuntimeProvider + 'static,
+    S: StoreProvisioner + 'static,
+{
+    let signal = |mut rx: watch::Receiver<bool>| async move {
+        // A closed channel is a stopped one.
+        let _ = rx.wait_for(|stop| *stop).await;
+    };
+    let scope = shard.name().to_owned();
+    let namespace = shard.namespace.clone();
+    let client = ctx.client.clone();
+    let config_reader = configs_controller.store();
+    // What the status controllers of the shared kinds need of the settings, taken before the services' controller
+    // takes the context.
+    let (pass_timeout, probe) = (ctx.options.pass_timeout, ctx.options.probe);
+
+    // The services.
+    let services = shard.services;
+    let reader = services.store();
+    let signals = signals
+        .filter({
+            let namespace = namespace.clone();
+            move |id| futures::future::ready(signal_in(namespace.as_deref(), id))
+        })
+        .map(|id| ObjectRef::<AgentService>::new(id.name()).within(id.scope()));
+    let mapper_reader = reader.clone();
+    let (endpoint_services, endpoint_configs) = (reader.clone(), config_reader.clone());
+    let (provider_services, provider_configs) = (reader.clone(), config_reader.clone());
+    let services = services
+        .with_config(cfg.clone())
+        .graceful_shutdown_on(signal(stopped.clone()))
+        .watches(
+            api_in::<AgentConfig>(&client, namespace.as_deref()),
+            watcher::Config::default(),
+            move |config| services_of(&mapper_reader, &config),
+        )
+        .watches_stream(
+            isolated(api_in::<ModelEndpoint>(&client, namespace.as_deref())),
+            move |endpoint| services_of_endpoint(&endpoint_services, &endpoint_configs, &endpoint),
+        )
+        .watches_stream(
+            isolated(api_in::<ToolProvider>(&client, namespace.as_deref())),
+            move |provider| services_of_provider(&provider_services, &provider_configs, &provider),
+        )
+        .reconcile_on(signals)
+        .run(reconcile_service, service_error_policy, ctx)
+        .for_each(|result| async move { log_plumbing("agentservice", result) });
+    // A controller whose cache never lists — a namespace the `Role` does not allow — may not reach its shutdown trigger;
+    // the grace bounds it either way, with a warning that names it and the namespace.
+    let services = until_stopped(
+        "agentservice",
+        &scope,
+        GRACE,
+        services,
+        signal(stopped.clone()),
+    );
+
+    // The configs.
+    let configs = configs_controller
+        .run(reconcile_config, config_error_policy, config_ctx)
+        .for_each(|result| async move { log_plumbing("agentconfig", result) });
+    let configs = until_stopped(
+        "agentconfig",
+        &scope,
+        GRACE,
+        configs,
+        signal(stopped.clone()),
+    );
+
+    // The status of the shared kinds (K2). One cache of the configs and one of the services for both controllers, each
+    // fed by one watch whose changes go to the two controllers after the cache has them.
+    let (shared_configs, config_events) =
+        reflected(api_in::<AgentConfig>(&client, namespace.as_deref()));
+    let (shared_services, service_events) =
+        reflected(api_in::<AgentService>(&client, namespace.as_deref()));
+    let (feed_configs, [endpoint_config_events, provider_config_events]) = tee(config_events);
+    let (feed_services, [endpoint_service_events, provider_service_events]) = tee(service_events);
+    let feeds = until_stopped(
+        "the shared kinds' watches",
+        &scope,
+        GRACE,
+        async {
+            futures::join!(feed_configs, feed_services);
+        },
+        signal(stopped.clone()),
+    );
+
+    let endpoints = {
+        // The object's own watch is isolated too: a kind whose CRD is absent must not keep the controller from
+        // stopping (its own failing watch would hold the shutdown until the process is killed).
+        let (own, own_events) = reflected(api_in::<ModelEndpoint>(&client, namespace.as_deref()));
+        let controller = Controller::for_stream(own_events, own.clone())
+            .with_config(cfg.clone())
+            .graceful_shutdown_on(signal(stopped.clone()));
+        let ctx = Arc::new(
+            SharedContext::new(
+                client.clone(),
+                metrics.clone(),
+                shared_configs.clone(),
+                shared_services.clone(),
+            )
+            .with_pass_timeout(pass_timeout)
+            .with_tracer(tracer.clone())
+            .with_probe(probe),
+        );
+        let (own_c, services_c, configs_s) =
+            (own.clone(), shared_services.clone(), shared_configs.clone());
+        let run = controller
+            .watches_stream(endpoint_config_events, move |config| {
+                touched_by_config(&config, &services_c, &own_c, endpoint_of_config)
+            })
+            .watches_stream(endpoint_service_events, move |service| {
+                touched_by_service(&service, &configs_s, &own, endpoint_of_config)
+            })
+            .run(reconcile_endpoint, endpoint_error_policy, ctx)
+            .for_each(|result| async move { log_plumbing("modelendpoint", result) });
+        until_stopped("modelendpoint", &scope, GRACE, run, signal(stopped.clone()))
+    };
+    let providers = {
+        let (own, own_events) = reflected(api_in::<ToolProvider>(&client, namespace.as_deref()));
+        let controller = Controller::for_stream(own_events, own.clone())
+            .with_config(cfg.clone())
+            .graceful_shutdown_on(signal(stopped.clone()));
+        let ctx = Arc::new(
+            SharedContext::new(
+                client.clone(),
+                metrics.clone(),
+                shared_configs.clone(),
+                shared_services.clone(),
+            )
+            .with_pass_timeout(pass_timeout)
+            .with_tracer(tracer.clone())
+            .with_probe(probe),
+        );
+        let (own_c, services_c, configs_s) =
+            (own.clone(), shared_services.clone(), shared_configs.clone());
+        let run = controller
+            .watches_stream(provider_config_events, move |config| {
+                touched_by_config(&config, &services_c, &own_c, providers_of_config)
+            })
+            .watches_stream(provider_service_events, move |service| {
+                touched_by_service(&service, &configs_s, &own, providers_of_config)
+            })
+            .run(reconcile_provider, provider_error_policy, ctx)
+            .for_each(|result| async move { log_plumbing("toolprovider", result) });
+        until_stopped("toolprovider", &scope, GRACE, run, signal(stopped.clone()))
+    };
+
+    futures::join!(services, configs, endpoints, providers, feeds);
 }
 
 /// How long a shared controller may take to stop once it has been told to.
@@ -335,14 +532,15 @@ const GRACE: Duration = Duration::from_secs(5);
 
 /// `run` until it ends, or until `stopped` has resolved and `grace` more has passed.
 ///
-/// kube's `Controller::run` does not look at its shutdown trigger until the cache of its own kind has listed the
+/// kube's `Controller::run` may not look at its shutdown trigger until the cache of its own kind has listed the
 /// cluster, so a controller of a kind whose CRD is not installed would hold the shutdown for ever (*seen 2026-11-14
 /// in `kinds_whose_crds_are_not_installed_stall_no_service`*). The status passes of the shared kinds (K2) are
 /// idempotent and gate nothing, so after the grace one that is still running is dropped. **That is all it covers**: it
 /// also hides any other reason why a controller did not stop (a pass that hangs, a stuck stream), which is why the
-/// expiry of the grace is a warning that names the controller, never a silent end.
+/// expiry of the grace is a warning that names the controller and the namespace, never a silent end.
 async fn until_stopped(
     controller: &str,
+    namespace: &str,
     grace: Duration,
     run: impl Future<Output = ()>,
     stopped: impl Future<Output = ()>,
@@ -355,6 +553,7 @@ async fn until_stopped(
     if tokio::time::timeout(grace, run).await.is_err() {
         tracing::warn!(
             controller,
+            namespace,
             grace_seconds = grace.as_secs(),
             "the controller did not stop within its grace after the shutdown and was dropped: either its kind's CRD is not installed (its cache never listed the cluster) or something in it hangs"
         );
@@ -384,6 +583,33 @@ where
     (feed, [receiving(a), receiving(b)])
 }
 
+/// One stream's items, to every one of `count` readers, in order: the runtime provider's signals, once per
+/// namespace (K6b). The returned future drives the stream and must be polled; it ends when the stream does.
+fn fan_out<T>(
+    items: impl Stream<Item = T> + Send + 'static,
+    count: usize,
+) -> (impl Future<Output = ()>, Vec<BoxStream<'static, T>>)
+where
+    T: Clone + Send + 'static,
+{
+    let (senders, streams): (Vec<_>, Vec<_>) = (0..count)
+        .map(|_| {
+            let (tx, rx) = mpsc::unbounded_channel();
+            (tx, received(rx))
+        })
+        .unzip();
+    let feed = async move {
+        let mut items = std::pin::pin!(items);
+        while let Some(item) = items.next().await {
+            // A reader that has stopped has dropped its end: nothing is lost by that.
+            for tx in &senders {
+                let _ = tx.send(item.clone());
+            }
+        }
+    };
+    (feed, streams)
+}
+
 /// A stream of the changes a [`tee`] passes on.
 type Trigger<K> = Pin<Box<dyn Stream<Item = Result<K, watcher::Error>> + Send>>;
 
@@ -391,6 +617,14 @@ fn receiving<K: Send + 'static>(rx: mpsc::UnboundedReceiver<K>) -> Trigger<K> {
     Box::pin(futures::stream::unfold(rx, |mut rx| async move {
         rx.recv().await.map(|object| (Ok(object), rx))
     }))
+}
+
+/// A stream of the items a [`fan_out`] passes on.
+fn received<T: Send + 'static>(rx: mpsc::UnboundedReceiver<T>) -> BoxStream<'static, T> {
+    futures::stream::unfold(rx, |mut rx| async move {
+        rx.recv().await.map(|item| (item, rx))
+    })
+    .boxed()
 }
 
 /// A watch's events with the **changes that are only a status** left out: an object whose `generation` is the one this
@@ -528,14 +762,14 @@ where
         })
 }
 
-fn api<K>(client: &Client, options: &Options) -> Api<K>
+fn api_in<K>(client: &Client, namespace: Option<&str>) -> Api<K>
 where
     K: kube::Resource<Scope = kube::core::NamespaceResourceScope, DynamicType = ()>
         + Clone
         + serde::de::DeserializeOwned
         + std::fmt::Debug,
 {
-    match &options.watch_namespace {
+    match namespace {
         Some(ns) => Api::namespaced(client.clone(), ns),
         None => Api::all(client.clone()),
     }
@@ -606,6 +840,7 @@ mod tests {
         let _guard = tracing::subscriber::set_default(warnings.clone());
         until_stopped(
             "modelendpoint",
+            "team",
             Duration::from_secs(5),
             futures::future::pending::<()>(),
             futures::future::ready(()),
@@ -614,6 +849,7 @@ mod tests {
         let seen = warnings.0.lock().unwrap().clone();
         assert_eq!(seen.len(), 1, "{seen:?}");
         assert!(seen[0].contains("controller=\"modelendpoint\""), "{seen:?}");
+        assert!(seen[0].contains("namespace=\"team\""), "{seen:?}");
     }
 
     #[tokio::test(start_paused = true)]
@@ -623,6 +859,7 @@ mod tests {
         // It ends one second after the shutdown.
         until_stopped(
             "toolprovider",
+            "(all)",
             Duration::from_secs(5),
             async { tokio::time::sleep(Duration::from_secs(1)).await },
             futures::future::ready(()),
@@ -631,11 +868,55 @@ mod tests {
         // It ends before the shutdown is asked for.
         until_stopped(
             "toolprovider",
+            "(all)",
             Duration::from_secs(5),
             futures::future::ready(()),
             futures::future::pending::<()>(),
         )
         .await;
         assert!(warnings.0.lock().unwrap().is_empty());
+    }
+
+    /// K6b: a shard takes the runtime signals of the namespaces it watches, and one that watches every namespace
+    /// takes them all: without it every signal would be a pass in every shard.
+    #[test]
+    fn a_shard_takes_the_runtime_signals_of_the_namespaces_it_watches_only() {
+        assert!(signal_in(Some("team"), &RuntimeId::new("team", "chat")));
+        assert!(
+            !signal_in(Some("team"), &RuntimeId::new("other", "chat")),
+            "another namespace's change is not this shard's"
+        );
+        assert!(signal_in(None, &RuntimeId::new("other", "chat")));
+    }
+
+    /// K6b: the namespaces of the settings, as the shards are built from them.
+    #[test]
+    fn one_shard_per_namespace_and_one_for_every_namespace_without_a_list() {
+        assert_eq!(watched_namespaces(&Options::default()), [None]);
+        let empty = Options {
+            watch_namespaces: Some(Vec::new()),
+            ..Options::default()
+        };
+        assert!(
+            watched_namespaces(&empty).is_empty(),
+            "an empty list is no shard, never every namespace"
+        );
+        let twice = Options {
+            watch_namespaces: Some(vec!["a".to_owned(), "a".to_owned()]),
+            ..Options::default()
+        };
+        assert_eq!(
+            watched_namespaces(&twice),
+            [Some("a".to_owned())],
+            "a duplicate is one namespace, not two shards"
+        );
+        let options = Options {
+            watch_namespaces: Some(vec!["a".to_owned(), "b".to_owned()]),
+            ..Options::default()
+        };
+        assert_eq!(
+            watched_namespaces(&options),
+            [Some("a".to_owned()), Some("b".to_owned())]
+        );
     }
 }

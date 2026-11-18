@@ -535,6 +535,106 @@ async fn the_audience_travels_from_the_service_to_its_entry_as_the_service_state
     assert_eq!(entry.audience, ["agent.use:absent"]);
 }
 
+/// K6b: a directory over several caches (one per namespace watched) is synced only when **every** one of them has
+/// listed, and it lists their union in one order.
+#[tokio::test]
+async fn a_directory_over_several_caches_needs_every_one_and_lists_their_union_in_order() {
+    // No cache at all has listed nothing, so it is not synced: never an empty list that looks true.
+    assert!(!ReflectorDirectory::from_stores(Vec::new()).is_synced());
+
+    let (first, mut first_writer) = reflector::store::<AgentService>();
+    let (second, mut second_writer) = reflector::store::<AgentService>();
+    let directory = ReflectorDirectory::from_stores(vec![first, second]);
+    assert!(!directory.is_synced());
+
+    first_writer.apply_watcher_event(&watcher::Event::Init);
+    first_writer.apply_watcher_event(&watcher::Event::InitApply(service(
+        "a",
+        "zed",
+        ready("http://zed/card"),
+    )));
+    first_writer.apply_watcher_event(&watcher::Event::InitDone);
+    assert!(!directory.is_synced(), "the second cache has not listed");
+    assert!(
+        matches!(directory.list().await, Err(DirectoryError::NotReady)),
+        "one cache that has not listed is the whole directory not ready"
+    );
+
+    second_writer.apply_watcher_event(&watcher::Event::Init);
+    second_writer.apply_watcher_event(&watcher::Event::InitApply(service(
+        "b",
+        "alpha",
+        ready("http://alpha/card"),
+    )));
+    second_writer.apply_watcher_event(&watcher::Event::InitDone);
+    assert!(directory.is_synced());
+    let names: Vec<_> = directory
+        .list()
+        .await
+        .unwrap()
+        .iter()
+        .map(|e| format!("{}/{}", e.scope, e.name))
+        .collect();
+    assert_eq!(names, ["a/zed", "b/alpha"], "the union, by scope and name");
+    assert!(directory.get("b", "alpha").await.unwrap().is_some());
+    assert!(
+        directory.get("a", "alpha").await.unwrap().is_none(),
+        "an entry of one cache is not found in the other"
+    );
+
+    // An entry that is going — a deletion timestamp, its finalizer still running — is listed by no cache: the filter
+    // is the directory's, whichever cache the entry came from.
+    second_writer.apply_watcher_event(&watcher::Event::Apply(service(
+        "b",
+        "going",
+        json!({
+            "metadata": {
+                "name": "going",
+                "namespace": "b",
+                "deletionTimestamp": "2026-11-18T00:00:00Z",
+            },
+            "status": {"state": "Ready", "endpoints": {"agentCard": "http://going/card"}, "conditions": []},
+        }),
+    )));
+    let names: Vec<_> = directory
+        .list()
+        .await
+        .unwrap()
+        .iter()
+        .map(|e| format!("{}/{}", e.scope, e.name))
+        .collect();
+    assert_eq!(
+        names,
+        ["a/zed", "b/alpha"],
+        "an entry being deleted is not listed, from whichever cache it came"
+    );
+    // And the same in the other cache: the filter is the union's, not one store's.
+    first_writer.apply_watcher_event(&watcher::Event::Apply(service(
+        "a",
+        "going",
+        json!({
+            "metadata": {
+                "name": "going",
+                "namespace": "a",
+                "deletionTimestamp": "2026-11-18T00:00:00Z",
+            },
+            "status": {"state": "Ready", "endpoints": {"agentCard": "http://going/card"}, "conditions": []},
+        }),
+    )));
+    let names: Vec<_> = directory
+        .list()
+        .await
+        .unwrap()
+        .iter()
+        .map(|e| format!("{}/{}", e.scope, e.name))
+        .collect();
+    assert_eq!(
+        names,
+        ["a/zed", "b/alpha"],
+        "an entry being deleted in the first cache is not listed either"
+    );
+}
+
 #[tokio::test]
 async fn the_directory_follows_the_cache() {
     let (reader, mut writer) = reflector::store::<AgentService>();

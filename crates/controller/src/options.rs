@@ -64,8 +64,11 @@ impl Default for Probe {
 /// The settings of [`Operator`](crate::Operator).
 #[derive(Clone, Debug)]
 pub struct Options {
-    /// Watch one namespace (the namespaced operator of §93) or, `None`, every namespace.
-    pub watch_namespace: Option<String>,
+    /// The namespaces to watch (K6b): `Some(list)` is exactly those, each reconciled by controllers and caches of
+    /// its own, and `None` is every namespace (one `Api::all`, for an administrator). **`Some(empty)` is no shard
+    /// at all**: it reconciles nothing and `/readyz` never turns true — it is *not* `None` (the composition root
+    /// refuses one, and a duplicate). Every name is a DNS label (the composition root checks).
+    pub watch_namespaces: Option<Vec<String>>,
     /// Whether a registry is served.
     pub registry: RegistryMode,
     /// Set by the registry while it refuses to list because its document would pass a limit of the
@@ -106,7 +109,7 @@ pub struct Options {
 impl Default for Options {
     fn default() -> Self {
         Self {
-            watch_namespace: None,
+            watch_namespaces: None,
             registry: RegistryMode::Disabled,
             registry_full: Arc::new(AtomicBool::new(false)),
             resync: Resync::default(),

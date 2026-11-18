@@ -66,6 +66,15 @@ name: Operator and API images
 #              here, and its waits are for pods and a quota, so a flake or a bad pin would block the operator's release for a reason that is not the operator's;
 #              run pods are off by default, so a red run of it does not put a broken default into the image. That is a decision for the owner (§60a, D15b): to make
 #              it gate, add it to the `needs` of `push` below. deploy/operator/tests/e2e/README.md says what it proves and what it does not.
+# namespaces-e2e (K6b): a kind cluster of its own. The operator's chart installed with THAT image and `watchNamespaces` naming two namespaces
+#              it watches (a third is the Helm release's and is NOT watched), and the stand-in for the adam image (bin/operator/tests/stub) as
+#              the agents' image: ONE Role and ONE RoleBinding, named for the release, in each watched namespace and nothing cluster-scoped (by
+#              name and by the release's label), the rights of the account asked of a real API server in each namespace and refused in the
+#              release's, in kube-system and --all-namespaces, an agent Ready in each namespace with its Deployment, Service and pod in its
+#              own and in no other, the registry listing both with each one's own card URL, a service id that BOTH namespaces share listed
+#              for neither (the operator's log says so for both) and listed again from the surviving namespace once the other is deleted,
+#              and no secret value or token in any answer or log. deploy/operator/tests/e2e/README.md says what it proves and what it does
+#              not.
 # push:        main only, after every job above but chain-e2e and run-pods-e2e: `sha-<7>` and `latest` of both images (the same tag). One red job of either
 #              image (the API's included) means no image is pushed and no tag bumped: a decision for the owner (deploy/operator/README.md,
 #              "The image").
@@ -671,13 +680,52 @@ jobs:
           OPERATOR_PULL_POLICY: Never
         run: sh deploy/operator/tests/e2e/run-pods-e2e.sh
 
+  namespaces-e2e:
+    name: namespaces-e2e
+    needs: image
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v7
+      - uses: azure/setup-helm@v4
+        with:
+          version: ${{ env.HELM_VERSION }}
+      - name: Create a kind cluster
+        uses: helm/kind-action@v1
+        with:
+          version: v0.33.0
+          # The same node image as the other jobs: Kubernetes v1.35.8, the digest of the index of the tag.
+          node_image: kindest/node:v1.35.8@sha256:07b2536e30b803ed61d1677a79df6115f798ce64c80f9e22f6ed45afd09323c0
+          cluster_name: aap-namespaces
+          wait: 120s
+      # The image that passed the smoke test, loaded into the cluster: the chart runs it with pullPolicy Never. The agent's image is the
+      # stand-in of operator.yml's operator-e2e (busybox pinned by digest that answers /healthz on 8080 as adam-agent would).
+      - uses: actions/download-artifact@v8
+        with:
+          name: operator-image
+          path: ${{ runner.temp }}
+      - name: Load the images into kind
+        run: |
+          docker load -i "$RUNNER_TEMP/operator.tar"
+          docker build -t aap-stub:ci bin/operator/tests/stub
+          kind load docker-image operator:smoke aap-stub:ci --name aap-namespaces
+      - name: The operator watches two namespaces, with one Role and RoleBinding in each
+        env:
+          OPERATOR_IMAGE_REPOSITORY: operator
+          OPERATOR_IMAGE_TAG: smoke
+          OPERATOR_PULL_POLICY: Never
+          AGENT_IMAGE: aap-stub:ci
+        run: sh deploy/operator/tests/e2e/namespaces-e2e.sh
+
   push:
     name: push the images that passed
-    # Main only, and only after everything above: the chart, the Dockerfiles, the scripts, both images' own smoke tests, the coder, and the API's
-    # end-to-end (no API image is pushed that failed to start in a cluster and serve its first agent). NOT chain-e2e and NOT run-pods-e2e: they run
-    # other repositories' images, pinned here, and a red run of either is a reason to look, not to withhold the operator's release (owner decisions,
-    # §60a D13 and D15b; to flip one, add it to this list).
-    needs: [chart, dockerfile, dockerfile-api, scripts, image, api-image, operator-coder-e2e, api-e2e]
+    # Main only, and only after everything above: the chart, the Dockerfiles, the scripts, both images' own smoke tests, the coder, the API's
+    # end-to-end (no API image is pushed that failed to start in a cluster and serve its first agent) and the end-to-end of several watched
+    # namespaces (K6b: one Role and RoleBinding in each, no ClusterRole, an agent of each reconciled, and a shared service id listed for
+    # neither). NOT chain-e2e and NOT run-pods-e2e: they run other repositories' images, pinned here, and a red run of either is a reason to
+    # look, not to withhold the operator's release (owner decisions, §60a D13 and D15b; to flip one, add it to this list). The new
+    # namespaces-e2e pulls only the curl image api-e2e already pulls, and nothing else outside this repository.
+    needs: [chart, dockerfile, dockerfile-api, scripts, image, api-image, operator-coder-e2e, api-e2e, namespaces-e2e]
     if: github.event_name == 'push' && github.ref == 'refs/heads/main'
     runs-on: ubuntu-latest
     # One push at a time, so the check below and the push of `latest` are not interleaved with another run's.
