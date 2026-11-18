@@ -523,6 +523,11 @@ notes_about_the_issuer_alone() { has 'ANY address on 443 \(the issuer.s ports\)'
 check "NOTES (only the API server's addresses set): the warning is about the issuer alone" notes_about_the_issuer_alone
 render_notes -f "$here/api.values.yaml" --set api.networkPolicy.enabled=false --set api.networkPolicy.from=null
 check "NOTES (api on, the policy off): no warning about a policy that is not there" lacks 'NetworkPolicy lets it reach ANY address'
+render_notes --set-json 'toolProbe.to=[{"podSelector":{"matchLabels":{"a":"b"}}}]'
+check "NOTES (toolProbe on, no apiServer.cidrs): it says the operator's rule reaches ANY address on 443 and 6443, and what to set" \
+  has_all 'The operator.s NetworkPolicy lets it reach ANY address on 443, 6443 \(the API server.s ports\)' 'networkPolicy.apiServer.cidrs is set'
+render_notes --set-json 'toolProbe.to=[{"podSelector":{"matchLabels":{"a":"b"}}}]' --set 'networkPolicy.apiServer.cidrs[0]=10.96.0.1/32'
+check "NOTES (toolProbe on, the API server's addresses set): no warning about the probe" lacks 'The operator.s NetworkPolicy lets it reach ANY address'
 render
 
 # ---- K1: what the deployment allows an AgentConfig --------------------------------------------------------------------------
@@ -1669,8 +1674,15 @@ tool_probe_timeout() {
   dhas Deployment aap-operator 'name: TOOL_PROBE_TIMEOUT_SECS' 'value: "9"'
 }
 check "toolProbe.timeoutSecs is the deadline the operator reads" tool_probe_timeout
+tool_probe_default_timeout() {
+  render --set toolProbe.timeoutSecs=null --set-json 'toolProbe.to=[{"podSelector":{"matchLabels":{"a":"b"}}}]' || return 1
+  dhas Deployment aap-operator 'name: TOOL_PROBE_TIMEOUT_SECS' 'value: "5"'
+}
+check "toolProbe.timeoutSecs left out is the default 5 (the chart renders a number, never an empty value)" tool_probe_default_timeout
 check "toolProbe.timeoutSecs below 1 is refused" refused 'toolProbe.timeoutSecs must be a whole number of seconds from 1 to 60' --set toolProbe.timeoutSecs=0
 check "toolProbe.timeoutSecs above 60 is refused" refused 'toolProbe.timeoutSecs must be a whole number of seconds from 1 to 60' --set toolProbe.timeoutSecs=61
+check "toolProbe.timeoutSecs 5.5 is refused (a whole number of seconds)" refused 'toolProbe.timeoutSecs must be a whole number of seconds from 1 to 60' --set-json 'toolProbe={"timeoutSecs":5.5}'
+check "toolProbe.ports 80.5 is refused (a whole number)" refused 'toolProbe.ports: 80.5 is not a port number' --set-json 'toolProbe.ports=[80.5]'
 tool_probe_with_otel() {
   render -f "$here/otel.values.yaml" --set-json "toolProbe.to=$tool_peer" || return 1
   [ "$(op_egress_rules)" -eq 5 ] || return 1

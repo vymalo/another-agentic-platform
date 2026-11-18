@@ -24,7 +24,7 @@
 
 mod client;
 
-pub use client::{MAX_TOOLS, PROTOCOL_VERSION, ProbeOutcome, ProbeReason, probe};
+pub use client::{MAX_TOOL_NAME, MAX_TOOLS, PROTOCOL_VERSION, ProbeOutcome, ProbeReason, probe};
 
 #[cfg(feature = "testkit")]
 pub mod testkit;

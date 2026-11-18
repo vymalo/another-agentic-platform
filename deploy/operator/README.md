@@ -534,10 +534,10 @@ in a deployment that probes https servers; the chart cannot know the addresses.
 |---|---|---|
 | `toolProbe.to` | `[]` | The peers the operator may reach. Empty: no probe, and not a trace of it in any render. A peer needs a `namespaceSelector`, a `podSelector` or an `ipBlock`; an `ipBlock` without a `cidr`, or whose CIDR has a `/0` prefix (`0.0.0.0/0`, `::/0`, `0::/0`), is refused |
 | `toolProbe.ports` | `[80, 443]` | The ports a probe may use, as the provider's URL names them: 443 for an https server, 80 or the port of an in-cluster server. At least one while `to` is set |
-| `toolProbe.timeoutSecs` | `5` | How long one probe may take, 1 to 60 s. A server that does not answer by then is `Reachable: False`, reason `Timeout` |
+| `toolProbe.timeoutSecs` | `5` | How long one probe may take, 1 to 60 s. A server that does not answer by then is `Reachable: False`, reason `Timeout`; the operator cuts it to five seconds under the pass's own deadline, so the pass is never dropped with no status |
 | `toolProbe.dns.to`, `dns.ports` | kube-dns, `[53]` | The operator's policy has no DNS rule, so with a probe it gets one. `dns.to` is required while `to` is set and `networkPolicy.enabled`; the same `ipBlock` rule applies |
 
-The status is the K2 `SharedStatus` with `probe.tools` (at most 64 names, sorted, each once, and `toolsMore` for the rest) and the
+The status is the K2 `SharedStatus` with `probe.tools` (at most 64 names, sorted, each once, `toolsMore` for the rest, and `incomplete` when the server still named a cursor after five pages) and the
 `Reachable` condition (`Probed`, `NeedsHeader`, `Invalid`, `Unreachable`, `NotMcp` or `Timeout`; its message holds no URL and no header
 name or value). `render-check.sh` holds that the default render has one egress rule, no port 80 and no probe variable, that the probe render
 has DNS and exactly the listed peers and ports, the two variables, the `Role` unmoved, that traces and the probe stack (five rules), and

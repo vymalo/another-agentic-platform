@@ -62,8 +62,9 @@ spec:
 ---
 # Source: aap-operator/templates/networkpolicy.yaml
 # Ingress is closed except what is listed: the registry to the peers of networkPolicy.registry.allowFrom, /metrics to those of
-# networkPolicy.metrics.allowFrom. Probes come from the node, which a NetworkPolicy never blocks. Egress goes to the API server
-# and nothing else: the operator reads and writes the API and calls no other service.
+# networkPolicy.metrics.allowFrom. Probes come from the node, which a NetworkPolicy never blocks. Egress goes to the API server and,
+# when the deployment asks for them, the traces collector and the tool probe's peers, and nothing else: the operator reads and writes
+# the API and calls no other service.
 apiVersion: networking.k8s.io/v1
 kind: NetworkPolicy
 metadata:

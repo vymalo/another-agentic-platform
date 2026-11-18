@@ -86,7 +86,7 @@ spec:
             - name: TOOL_PROBE_ENABLED
               value: "true"
             - name: TOOL_PROBE_TIMEOUT_SECS
-              value: {{ .Values.toolProbe.timeoutSecs | quote }}
+              value: {{ .Values.toolProbe.timeoutSecs | default 5 | quote }}
             {{- end }}
             {{- with .Values.tuning.concurrency }}
             - name: AAP_CONCURRENCY

@@ -144,19 +144,28 @@ pub struct SharedStatus {
     pub probe: Option<ProbeStatus>,
 }
 
-/// What the operator observed of a `ToolProvider`'s MCP server (K3b): the tool names it listed, at most
-/// [`MAX_PROBED_TOOLS`]. The reachability is the `Reachable` condition of the [`SharedStatus`].
+/// What the operator observed of a `ToolProvider`'s MCP server (K3b): the tool names it listed, at most 64. The reachability
+/// is the `Reachable` condition of the [`SharedStatus`].
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct ProbeStatus {
-    /// The tool names the server listed, sorted, each once, **at most [`MAX_PROBED_TOOLS`]** (the operator's bound: the
-    /// schema has none, because only the operator writes it): the rest are counted in `toolsMore`.
+    /// The tool names the server listed, sorted, each once, **at most 64** (the operator's bound: the schema has none,
+    /// because only the operator writes it): the rest are counted in `toolsMore`.
     #[serde(default)]
     pub tools: Vec<String>,
 
-    /// How many tool names are not in `tools` (absent when there are at most [`MAX_PROBED_TOOLS`]).
+    /// How many tool names are not in `tools` (absent when there are at most 64).
     #[serde(default, skip_serializing_if = "is_zero")]
     pub tools_more: i32,
+
+    /// The server still named a `nextCursor` after the operator read its five pages: there may be more tools than those
+    /// listed, so the count is a lower bound (absent when false).
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub incomplete: bool,
+}
+
+fn is_false(b: &bool) -> bool {
+    !*b
 }
 
 fn is_zero(n: &i32) -> bool {
@@ -243,7 +252,8 @@ pub mod reason {
     pub const RECONCILED: &str = "Reconciled";
     /// `Valid` true, and `Accepted` true.
     pub const VALID: &str = "Valid";
-    /// `Accepted` false: the object fails the validation of `aap-domain`; the message names each field.
+    /// `Accepted` false, and `Reachable` unknown for an invalid `ToolProvider`: the object fails the validation of
+    /// `aap-domain`; the message names each field.
     pub const INVALID: &str = "Invalid";
     /// `InUse` true.
     pub const REFERENCED: &str = "Referenced";

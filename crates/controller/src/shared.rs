@@ -174,7 +174,14 @@ impl Shared for ToolProvider {
         if !self.spec.mcp.headers.is_empty() {
             return Some(ProbeOutcome::new(ProbeReason::NeedsHeader));
         }
-        Some(aap_tool_probe::probe(&self.spec.mcp.url, ctx.probe.timeout).await)
+        // A probe must not outlive the pass: the pass's own deadline would cut it, and the status would never say
+        // `Timeout`. Leave five seconds of the pass for the status write, and at least one for the probe.
+        let timeout = ctx
+            .probe
+            .timeout
+            .min(ctx.pass_timeout.saturating_sub(Duration::from_secs(5)))
+            .max(Duration::from_secs(1));
+        Some(aap_tool_probe::probe(&self.spec.mcp.url, timeout).await)
     }
 }
 
@@ -339,10 +346,14 @@ pub(crate) fn shared_status(
         let (status, why, message) = match outcome.reason {
             ProbeReason::Probed => {
                 let total = outcome.tools.len() + outcome.tools_more;
-                let message = match total {
-                    0 => "no tools".to_owned(),
-                    1 => "1 tool".to_owned(),
-                    n => format!("{n} tools"),
+                let message = if outcome.incomplete {
+                    format!("at least {total} tool{}", if total == 1 { "" } else { "s" })
+                } else {
+                    match total {
+                        0 => "no tools".to_owned(),
+                        1 => "1 tool".to_owned(),
+                        n => format!("{n} tools"),
+                    }
                 };
                 ("True", reason::PROBED, message)
             }
@@ -381,6 +392,7 @@ pub(crate) fn shared_status(
             probe_status = Some(ProbeStatus {
                 tools: outcome.tools.clone(),
                 tools_more: i32::try_from(outcome.tools_more).unwrap_or(i32::MAX),
+                incomplete: outcome.incomplete,
             });
         }
     }

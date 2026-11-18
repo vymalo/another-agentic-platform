@@ -793,7 +793,7 @@ async fn tool_server_detail_carries_status() {
             "conditions": [
                 { "type": "Reachable", "status": "True", "reason": "Probed", "message": "2 tools", "lastTransitionTime": "2026-11-18T00:00:00Z" }
             ],
-            "probe": { "tools": ["get_pod", "list_pods"] }
+            "probe": { "tools": ["get_pod", "list_pods"], "incomplete": true }
         }),
     );
     let body = api
@@ -809,6 +809,7 @@ async fn tool_server_detail_carries_status() {
         json!(["get_pod", "list_pods"]),
         "{body}"
     );
+    assert_eq!(body["status"]["probe"]["incomplete"], true, "{body}");
     assert_eq!(body["status"]["conditions"][0]["type"], "Reachable");
 }
 

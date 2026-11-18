@@ -118,6 +118,10 @@ fn run_lists_its_settings_and_the_environment_variables_that_set_them() {
         "--default-agent-image",
         "RUN_PODS_FILE",
         "--run-pods-file",
+        "TOOL_PROBE_ENABLED",
+        "--tool-probe-enabled",
+        "TOOL_PROBE_TIMEOUT_SECS",
+        "--tool-probe-timeout-secs",
     ] {
         assert!(help.contains(variable), "{variable} is not in:\n{help}");
     }

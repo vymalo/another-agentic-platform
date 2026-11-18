@@ -1540,6 +1540,17 @@ fn shared_ctx_probing(
     without_config: bool,
     probe: aap_controller::Probe,
 ) -> Arc<SharedContext> {
+    shared_ctx_full(w, services, without_config, probe, Duration::from_secs(60))
+}
+
+/// The same context with the probe and the pass budget as the caller sets them.
+fn shared_ctx_full(
+    w: &World,
+    services: &[&str],
+    without_config: bool,
+    probe: aap_controller::Probe,
+    pass_timeout: Duration,
+) -> Arc<SharedContext> {
     let (configs, mut cw) = reflector::store::<AgentConfig>();
     cw.apply_watcher_event(&watcher::Event::Init);
     if let Some(c) = w.fake.get(CONFIGS, NS, &w.name).filter(|_| !without_config) {
@@ -1561,7 +1572,8 @@ fn shared_ctx_probing(
     Arc::new(
         SharedContext::new(w.fake.client(), w.metrics.clone(), configs, svcs)
             .with_clock(clock())
-            .with_probe(probe),
+            .with_probe(probe)
+            .with_pass_timeout(pass_timeout),
     )
 }
 
@@ -1941,6 +1953,7 @@ async fn a_probe_writes_reachable_and_the_tools_sorted() {
     is(&status, "Reachable", "True", "Probed");
     assert_eq!(status["probe"]["tools"], json!(["alpha", "zeta"]));
     assert!(status["probe"].get("toolsMore").is_none(), "{status}");
+    assert!(status["probe"].get("incomplete").is_none(), "{status}");
     assert_eq!(message_of(&status, "Reachable"), "2 tools");
     // The endpoint has no MCP server: no `Reachable` condition and no `probe`, even with the probe on.
     endpoint_pass(&w, &ctx).await;
@@ -2099,6 +2112,53 @@ async fn a_probe_that_changes_nothing_is_not_written_again() {
     );
     // It did probe again (a server's answer may change without a spec change): three requests more.
     assert_eq!(stub.requests().len(), 6);
+}
+
+#[tokio::test]
+async fn a_probe_that_hits_the_page_bound_says_at_least() {
+    let w = shared_world(&[]);
+    let tools: Vec<String> = (0..100).map(|i| format!("tool_{i:03}")).collect();
+    let stub = StubMcp::start(StubConfig {
+        tools,
+        page_size: Some(1),
+        ..StubConfig::default()
+    })
+    .await;
+    probed_provider(&w, stub.url());
+    let ctx = shared_ctx_probing(&w, &["coder-me"], false, probe_on(Duration::from_secs(2)));
+    provider_pass(&w, &ctx).await;
+    let status = provider_status(&w);
+    is(&status, "Reachable", "True", "Probed");
+    assert_eq!(status["probe"]["tools"].as_array().unwrap().len(), 5);
+    assert_eq!(status["probe"]["incomplete"], true, "{status}");
+    assert_eq!(message_of(&status, "Reachable"), "at least 5 tools");
+}
+
+#[tokio::test]
+async fn a_probe_does_not_outlive_the_pass_budget() {
+    let w = shared_world(&[]);
+    let stub = StubMcp::start(StubConfig {
+        delay: Some(Duration::from_secs(5)),
+        ..StubConfig::default()
+    })
+    .await;
+    probed_provider(&w, stub.url());
+    // The probe's own deadline is 60 s; the pass has 2 s, so the probe is cut at 1 s (five seconds of the pass are kept
+    // for the status write) and the status says `Timeout`, rather than the pass being dropped with no status at all.
+    let ctx = shared_ctx_full(
+        &w,
+        &["coder-me"],
+        false,
+        probe_on(Duration::from_secs(60)),
+        Duration::from_secs(2),
+    );
+    provider_pass(&w, &ctx).await;
+    is(&provider_status(&w), "Reachable", "False", "Timeout");
+}
+
+#[test]
+fn the_probe_and_the_status_agree_on_the_tool_bound() {
+    assert_eq!(aap_api::MAX_PROBED_TOOLS, aap_tool_probe::MAX_TOOLS);
 }
 
 /// A status that cannot be written because the API server does not serve the subresource (the operator was upgraded before

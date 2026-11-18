@@ -3,7 +3,7 @@
 use std::time::Duration;
 
 use aap_tool_probe::testkit::{StubConfig, StubMcp};
-use aap_tool_probe::{MAX_TOOLS, ProbeReason, probe};
+use aap_tool_probe::{MAX_TOOL_NAME, MAX_TOOLS, ProbeReason, probe};
 
 const DEADLINE: Duration = Duration::from_secs(2);
 
@@ -22,6 +22,7 @@ async fn a_server_that_answers_lists_its_tools_sorted_and_once() {
     assert_eq!(out.reason, ProbeReason::Probed);
     assert_eq!(out.tools, vec!["alpha", "zeta"]);
     assert_eq!(out.tools_more, 0);
+    assert!(!out.incomplete);
     assert!(out.reachable());
     assert_eq!(
         stub.requests(),
@@ -215,6 +216,8 @@ async fn a_server_that_keeps_a_cursor_is_read_at_most_five_pages() {
     );
     assert_eq!(out.tools.len(), 5);
     assert_eq!(out.tools_more, 0);
+    // The server still named a cursor: the count is a lower bound, and the outcome says so.
+    assert!(out.incomplete);
 }
 
 #[tokio::test]
@@ -244,4 +247,113 @@ async fn no_outcome_holds_the_url() {
         !text.contains("127.0.0.1") && !text.contains(&url),
         "{text}"
     );
+}
+
+#[tokio::test]
+async fn a_server_that_answers_with_another_requests_id_is_not_mcp() {
+    let stub = StubMcp::start(StubConfig {
+        tools: vec!["x".to_owned()],
+        wrong_id: true,
+        ..StubConfig::default()
+    })
+    .await;
+    assert_eq!(
+        probe(stub.url(), DEADLINE).await.reason,
+        ProbeReason::NotMcp
+    );
+}
+
+#[tokio::test]
+async fn a_string_id_is_the_same_request() {
+    let stub = StubMcp::start(StubConfig {
+        tools: vec!["s".to_owned()],
+        string_id: true,
+        ..StubConfig::default()
+    })
+    .await;
+    let out = probe(stub.url(), DEADLINE).await;
+    assert_eq!(out.reason, ProbeReason::Probed);
+    assert_eq!(out.tools, vec!["s"]);
+}
+
+#[tokio::test]
+async fn a_202_to_a_request_is_not_mcp() {
+    let stub = StubMcp::start(StubConfig {
+        fail_status: Some(202),
+        ..StubConfig::default()
+    })
+    .await;
+    assert_eq!(
+        probe(stub.url(), DEADLINE).await.reason,
+        ProbeReason::NotMcp
+    );
+}
+
+#[tokio::test]
+async fn a_session_is_named_and_ended() {
+    let stub = StubMcp::start(StubConfig {
+        tools: vec!["one".to_owned()],
+        session: true,
+        ..StubConfig::default()
+    })
+    .await;
+    let out = probe(stub.url(), DEADLINE).await;
+    assert_eq!(out.reason, ProbeReason::Probed);
+    assert_eq!(out.tools, vec!["one"]);
+    // The `DELETE` runs on a task of its own: give it a moment.
+    let mut ended = false;
+    for _ in 0..100 {
+        if stub.requests().iter().any(|m| m == "delete") {
+            ended = true;
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    assert!(ended, "the session was not ended: {:?}", stub.requests());
+}
+
+#[tokio::test]
+async fn a_held_open_sse_stream_is_read() {
+    // The server writes the answer and keeps the stream open (a proxy that holds the connection does): the probe answers
+    // as soon as the event is complete, not when the stream ends.
+    let stub = StubMcp::start(StubConfig {
+        tools: vec!["held".to_owned()],
+        sse: true,
+        sse_hold: true,
+        ..StubConfig::default()
+    })
+    .await;
+    let out = probe(stub.url(), Duration::from_secs(2)).await;
+    assert_eq!(out.reason, ProbeReason::Probed);
+    assert_eq!(out.tools, vec!["held"]);
+}
+
+#[tokio::test]
+async fn an_sse_event_with_another_id_is_not_mcp() {
+    let stub = StubMcp::start(StubConfig {
+        tools: vec!["x".to_owned()],
+        sse: true,
+        wrong_id: true,
+        ..StubConfig::default()
+    })
+    .await;
+    assert_eq!(
+        probe(stub.url(), DEADLINE).await.reason,
+        ProbeReason::NotMcp
+    );
+}
+
+#[tokio::test]
+async fn a_name_longer_than_the_bound_or_with_a_control_character_is_not_listed() {
+    let long = "x".repeat(MAX_TOOL_NAME + 1);
+    let stub = StubMcp::start(StubConfig {
+        tools: vec![long, "bad\nname".to_owned(), "ok".to_owned()],
+        ..StubConfig::default()
+    })
+    .await;
+    let out = probe(stub.url(), DEADLINE).await;
+    assert_eq!(out.reason, ProbeReason::Probed);
+    assert_eq!(out.tools, vec!["ok"]);
+    assert_eq!(out.tools_more, 0);
+    assert!(!out.incomplete);
 }

@@ -1917,6 +1917,10 @@
             "additionalProperties": false,
             "description": "The MCP server's tools, on a ToolProvider the deployment probes (K3b, AD-053): at most 64 names, sorted, and a count of the rest. Absent when probing is off or the object was not probed; the reachability is the Reachable condition.",
             "properties": {
+              "incomplete": {
+                "description": "The server still named a nextCursor after five pages: the count is a lower bound. Absent when false.",
+                "type": "boolean"
+              },
               "tools": {
                 "description": "At most 64 names, sorted.",
                 "items": {

@@ -1197,6 +1197,7 @@ const MAY_BE_ABSENT: &[&str] = &[
     // neither.
     "SharedStatus/probe",
     "SharedStatus/probe/toolsMore",
+    "SharedStatus/probe/incomplete",
     // A condition has no `observedGeneration` until the operator sets one.
     "Condition/observedGeneration",
     // A shared object has no status before the operator wrote one (`skip_serializing_if`).

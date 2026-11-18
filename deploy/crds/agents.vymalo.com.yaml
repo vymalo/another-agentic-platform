@@ -1340,16 +1340,21 @@ spec:
                   `Reachable` condition; **no tool description, schema or URL is here**.
                 nullable: true
                 properties:
+                  incomplete:
+                    description: |-
+                      The server still named a `nextCursor` after the operator read its five pages: there may be more tools than those
+                      listed, so the count is a lower bound (absent when false).
+                    type: boolean
                   tools:
                     default: []
                     description: |-
-                      The tool names the server listed, sorted, each once, **at most [`MAX_PROBED_TOOLS`]** (the operator's bound: the
-                      schema has none, because only the operator writes it): the rest are counted in `toolsMore`.
+                      The tool names the server listed, sorted, each once, **at most 64** (the operator's bound: the schema has none,
+                      because only the operator writes it): the rest are counted in `toolsMore`.
                     items:
                       type: string
                     type: array
                   toolsMore:
-                    description: How many tool names are not in `tools` (absent when there are at most [`MAX_PROBED_TOOLS`]).
+                    description: How many tool names are not in `tools` (absent when there are at most 64).
                     format: int32
                     type: integer
                 type: object
@@ -1529,16 +1534,21 @@ spec:
                   `Reachable` condition; **no tool description, schema or URL is here**.
                 nullable: true
                 properties:
+                  incomplete:
+                    description: |-
+                      The server still named a `nextCursor` after the operator read its five pages: there may be more tools than those
+                      listed, so the count is a lower bound (absent when false).
+                    type: boolean
                   tools:
                     default: []
                     description: |-
-                      The tool names the server listed, sorted, each once, **at most [`MAX_PROBED_TOOLS`]** (the operator's bound: the
-                      schema has none, because only the operator writes it): the rest are counted in `toolsMore`.
+                      The tool names the server listed, sorted, each once, **at most 64** (the operator's bound: the schema has none,
+                      because only the operator writes it): the rest are counted in `toolsMore`.
                     items:
                       type: string
                     type: array
                   toolsMore:
-                    description: How many tool names are not in `tools` (absent when there are at most [`MAX_PROBED_TOOLS`]).
+                    description: How many tool names are not in `tools` (absent when there are at most 64).
                     format: int32
                     type: integer
                 type: object

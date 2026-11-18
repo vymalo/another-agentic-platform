@@ -12,7 +12,7 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use axum::extract::State;
-use axum::http::{HeaderMap, StatusCode, header};
+use axum::http::{HeaderMap, HeaderName, HeaderValue, StatusCode, header};
 use axum::response::{IntoResponse, Response};
 use axum::routing::post;
 use axum::{Json, Router};
@@ -33,6 +33,8 @@ pub struct StubConfig {
     pub delay: Option<Duration>,
     /// Answer as `text/event-stream` instead of `application/json`.
     pub sse: bool,
+    /// Answer the SSE event and keep the stream open (5 s), as a proxy that holds the connection does.
+    pub sse_hold: bool,
     /// Answer a body over 1 MiB.
     pub huge: bool,
     /// Answer a `302` to `redirect_to` (a URL that answers MCP, so a probe that follows it would be `Probed`).
@@ -41,6 +43,13 @@ pub struct StubConfig {
     pub garbage: bool,
     /// Answer a JSON-RPC `error` instead of a `result`.
     pub jsonrpc_error: bool,
+    /// Answer with the id `99` instead of the request's.
+    pub wrong_id: bool,
+    /// Answer with the request's id as a string (`"1"`), as some servers echo it.
+    pub string_id: bool,
+    /// Name a session (`Mcp-Session-Id: stub-session`) on `initialize` and require it, and the protocol version, on every
+    /// later request.
+    pub session: bool,
     /// `tools/list` answers an empty list (a reachable server with no tools).
     pub no_tools: bool,
 }
@@ -80,7 +89,7 @@ impl StubMcp {
             requests: Arc::new(Mutex::new(Vec::new())),
         };
         let app = Router::new()
-            .route("/mcp", post(mcp).get(mcp_get))
+            .route("/mcp", post(mcp).get(mcp_get).delete(mcp_delete))
             .with_state(stub.clone());
         let listener = tokio::net::TcpListener::bind(addr)
             .await
@@ -153,6 +162,16 @@ async fn mcp(State(stub): State<Stub>, headers: HeaderMap, Json(body): Json<Valu
     if let Ok(mut requests) = stub.requests.lock() {
         requests.push(method.clone());
     }
+    if stub.config.session
+        && method != "initialize"
+        && (headers.get("mcp-session-id").and_then(|v| v.to_str().ok()) != Some("stub-session")
+            || headers
+                .get("mcp-protocol-version")
+                .and_then(|v| v.to_str().ok())
+                != Some("2025-06-18"))
+    {
+        return StatusCode::UNAUTHORIZED.into_response();
+    }
     if let Some((name, value)) = &stub.config.require_header
         && headers.get(name.as_str()).and_then(|v| v.to_str().ok()) != Some(value.as_str())
     {
@@ -177,7 +196,13 @@ async fn mcp(State(stub): State<Stub>, headers: HeaderMap, Json(body): Json<Valu
         )
             .into_response();
     }
-    let id = body.get("id").cloned().unwrap_or(Value::Null);
+    let id = if stub.config.wrong_id {
+        json!(99)
+    } else if stub.config.string_id {
+        json!(body["id"].as_u64().unwrap_or(0).to_string())
+    } else {
+        body.get("id").cloned().unwrap_or(Value::Null)
+    };
     if stub.config.jsonrpc_error && method != "notifications/initialized" {
         return Json(json!({
             "jsonrpc": "2.0",
@@ -243,6 +268,9 @@ async fn mcp(State(stub): State<Stub>, headers: HeaderMap, Json(body): Json<Valu
     }
     if stub.config.sse {
         let body = format!("event: message\ndata: {answer}\n\n");
+        if stub.config.sse_hold {
+            return held_stream(body);
+        }
         return (
             StatusCode::OK,
             [(header::CONTENT_TYPE, "text/event-stream")],
@@ -250,5 +278,47 @@ async fn mcp(State(stub): State<Stub>, headers: HeaderMap, Json(body): Json<Valu
         )
             .into_response();
     }
-    Json(answer).into_response()
+    let mut response = Json(answer).into_response();
+    if stub.config.session && method == "initialize" {
+        response.headers_mut().insert(
+            HeaderName::from_static("mcp-session-id"),
+            HeaderValue::from_static("stub-session"),
+        );
+    }
+    response
+}
+
+/// The end of a session: the probe's `DELETE`, recorded as `delete`.
+async fn mcp_delete(State(stub): State<Stub>, headers: HeaderMap) -> Response {
+    if let Ok(mut requests) = stub.requests.lock() {
+        requests.push("delete".to_owned());
+    }
+    if stub.config.session
+        && headers.get("mcp-session-id").and_then(|v| v.to_str().ok()) != Some("stub-session")
+    {
+        return StatusCode::UNAUTHORIZED.into_response();
+    }
+    StatusCode::NO_CONTENT.into_response()
+}
+
+/// An SSE answer that keeps the stream open after it (as a proxy that holds the connection does).
+fn held_stream(body: String) -> Response {
+    let stream = futures::stream::unfold((Some(body), false), |(body, held)| async move {
+        match (body, held) {
+            (Some(body), false) => Some((
+                Ok::<_, std::io::Error>(bytes::Bytes::from(body)),
+                (None, true),
+            )),
+            (None, true) => {
+                tokio::time::sleep(Duration::from_secs(5)).await;
+                None
+            }
+            _ => None,
+        }
+    });
+    Response::builder()
+        .status(StatusCode::OK)
+        .header(header::CONTENT_TYPE, "text/event-stream")
+        .body(axum::body::Body::from_stream(stream))
+        .unwrap_or_else(|_| StatusCode::INTERNAL_SERVER_ERROR.into_response())
 }

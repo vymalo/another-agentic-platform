@@ -424,7 +424,10 @@ mcp_line=$(sed -n 's/^listening on //p' "$work/mcp.log" | head -n 1)
 mcp_port=${mcp_line##*:}
 mcp_port=${mcp_port%%/*}
 case $mcp_port in '' | *[!0-9]*) die "no port in the stub MCP server's line: $(cat "$work/mcp.log")" ;; esac
-[ "$mcp_line" = "http://0.0.0.0:$mcp_port/mcp" ] || die "the stub MCP server names itself '$mcp_line', not http://0.0.0.0:$mcp_port/mcp"
+case $mcp_line in
+  "http://0.0.0.0:$mcp_port/mcp" | "http://127.0.0.1:$mcp_port/mcp") ;;
+  *) die "the stub MCP server names itself '$mcp_line', not http://0.0.0.0:$mcp_port/mcp or http://127.0.0.1:$mcp_port/mcp" ;;
+esac
 mcp_server_url="http://$host_addr:$mcp_port/mcp"
 ok "the stub MCP server is at $mcp_server_url (three tools); the operator will reach it through toolProbe"
 

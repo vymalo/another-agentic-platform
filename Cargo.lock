@@ -319,12 +319,12 @@ version = "0.1.0"
 dependencies = [
  "aap-tool-probe",
  "axum",
+ "bytes",
+ "futures",
  "reqwest",
- "serde",
  "serde_json",
  "tokio",
  "tower",
- "tracing",
 ]
 
 [[package]]

@@ -482,7 +482,8 @@ fn schemas() -> Value {
                     "required": ["tools"],
                     "properties": {
                         "tools": { "type": "array", "items": { "type": "string" }, "description": "At most 64 names, sorted." },
-                        "toolsMore": { "type": "integer", "minimum": 1, "description": "How many more there are; absent when there are none." }
+                        "toolsMore": { "type": "integer", "minimum": 1, "description": "How many more there are; absent when there are none." },
+                        "incomplete": { "type": "boolean", "description": "The server still named a nextCursor after five pages: the count is a lower bound. Absent when false." }
                     }
                 }
             }

@@ -1,4 +1,5 @@
-//! The Streamable HTTP probe: one `initialize`, the initialized notification, `tools/list` (paginated, bounded).
+//! The Streamable HTTP probe: one `initialize`, the initialized notification, `tools/list` (paginated, bounded), and the
+//! session's end.
 
 use std::time::Duration;
 
@@ -8,11 +9,16 @@ use serde_json::{Value, json};
 /// (every change of it is sent to every watcher); the rest are counted in `tools_more`.
 pub const MAX_TOOLS: usize = 64;
 
+/// The longest tool name a [`ProbeOutcome`] lists, in characters. A longer one (or one with a control character) is not a
+/// name a model can call, and is left out rather than written into a status that must stay small.
+pub const MAX_TOOL_NAME: usize = 256;
+
 /// The MCP protocol version the probe speaks. A server that speaks another one answers with its own in `initialize` and
 /// the probe goes on with it (the version is a negotiation, and the probe only reads what the server lists).
 pub const PROTOCOL_VERSION: &str = "2025-06-18";
 
-/// The most `tools/list` pages the probe reads, so that a server that keeps answering with a cursor cannot hold it.
+/// The most `tools/list` pages the probe reads, so that a server that keeps answering with a cursor cannot hold it. When
+/// the last page still names a cursor, the outcome says it is `incomplete`.
 const MAX_PAGES: usize = 5;
 
 /// The most of an answer the probe reads (a body over it is `NotMcp`).
@@ -32,7 +38,7 @@ pub enum ProbeReason {
     /// The server did not answer, answered a 401/403 or a 5xx, or the TLS or the connection failed.
     Unreachable,
     /// The server answered, but not as an MCP Streamable HTTP endpoint: a 4xx other than 401/403, a redirect, a body
-    /// that is not JSON-RPC, a JSON-RPC error, or a body over 1 MiB.
+    /// that is not JSON-RPC, a JSON-RPC error, an answer with another request's id, or a body over 1 MiB.
     NotMcp,
     /// The server did not answer within the deployment's deadline.
     Timeout,
@@ -53,8 +59,8 @@ impl ProbeReason {
     }
 }
 
-/// What a probe found: a reason, the tool names the server listed (sorted, each once, at most [`MAX_TOOLS`]) and how
-/// many more there were.
+/// What a probe found: a reason, the tool names the server listed (sorted, each once, at most [`MAX_TOOLS`]), how many
+/// more there were, and whether the list was cut by the page bound.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ProbeOutcome {
     /// Why the probe ended as it did.
@@ -63,6 +69,9 @@ pub struct ProbeOutcome {
     pub tools: Vec<String>,
     /// How many tool names are not in [`tools`](Self::tools).
     pub tools_more: usize,
+    /// The server still named a `nextCursor` after [`MAX_PAGES`] pages: there may be more tools than those read, so the
+    /// count is a lower bound.
+    pub incomplete: bool,
 }
 
 impl ProbeOutcome {
@@ -73,6 +82,7 @@ impl ProbeOutcome {
             reason,
             tools: Vec::new(),
             tools_more: 0,
+            incomplete: false,
         }
     }
 
@@ -91,7 +101,7 @@ pub async fn probe(url: &str, timeout: Duration) -> ProbeOutcome {
     match tokio::time::timeout(timeout, discover(url)).await {
         Err(_) => ProbeOutcome::new(ProbeReason::Timeout),
         Ok(Err(reason)) => ProbeOutcome::new(reason),
-        Ok(Ok(mut tools)) => {
+        Ok(Ok((mut tools, incomplete))) => {
             tools.sort();
             tools.dedup();
             let more = tools.len().saturating_sub(MAX_TOOLS);
@@ -100,13 +110,14 @@ pub async fn probe(url: &str, timeout: Duration) -> ProbeOutcome {
                 reason: ProbeReason::Probed,
                 tools,
                 tools_more: more,
+                incomplete,
             }
         }
     }
 }
 
-/// `initialize`, the notification, then every `tools/list` page (bounded).
-async fn discover(url: &str) -> Result<Vec<String>, ProbeReason> {
+/// `initialize`, the notification, then every `tools/list` page (bounded), then the session's end.
+async fn discover(url: &str) -> Result<(Vec<String>, bool), ProbeReason> {
     let client = reqwest::Client::builder()
         // A redirect would leave the host the deployment named: never follow one.
         .redirect(reqwest::redirect::Policy::none())
@@ -136,7 +147,8 @@ async fn discover(url: &str) -> Result<Vec<String>, ProbeReason> {
 
     let mut tools = Vec::new();
     let mut cursor: Option<String> = None;
-    for _ in 0..MAX_PAGES {
+    let mut incomplete = false;
+    for page in 0..MAX_PAGES {
         let body = match &cursor {
             Some(c) => json!({
                 "jsonrpc": "2.0",
@@ -154,7 +166,7 @@ async fn discover(url: &str) -> Result<Vec<String>, ProbeReason> {
             .ok_or(ProbeReason::NotMcp)?;
         for tool in list {
             if let Some(name) = tool.get("name").and_then(Value::as_str)
-                && !name.is_empty()
+                && is_listable(name)
             {
                 tools.push(name.to_owned());
             }
@@ -165,10 +177,23 @@ async fn discover(url: &str) -> Result<Vec<String>, ProbeReason> {
             .filter(|c| !c.is_empty())
             .map(str::to_owned);
         if cursor.is_none() {
-            return Ok(tools);
+            break;
+        }
+        if page + 1 == MAX_PAGES {
+            incomplete = true;
         }
     }
-    Ok(tools)
+    // The session's end, best effort and on a task of its own: it must not delay the answer, and a server that does not
+    // implement it (or holds the request) must not turn a `Probed` into a `Timeout`.
+    if let Some(session) = session {
+        terminate(client, url.to_owned(), session);
+    }
+    Ok((tools, incomplete))
+}
+
+/// Whether a name is one a status lists: 1 to [`MAX_TOOL_NAME`] characters, none of them a control character.
+fn is_listable(name: &str) -> bool {
+    !name.is_empty() && name.chars().count() <= MAX_TOOL_NAME && !name.chars().any(char::is_control)
 }
 
 /// One JSON-RPC request and its answer (a JSON body or an SSE event with the request's id).
@@ -212,13 +237,16 @@ async fn post(
         .get(reqwest::header::CONTENT_TYPE)
         .and_then(|v| v.to_str().ok())
         .is_some_and(|v| v.contains("text/event-stream"));
-    let bytes = read_body(response).await?;
     let answer = if sse {
-        sse_answer(&bytes, id)?
+        read_sse(response, id).await?
     } else {
+        let bytes = read_body(response).await?;
         serde_json::from_slice(&bytes).map_err(|_| ProbeReason::NotMcp)?
     };
-    if answer.get("error").is_some() || answer.get("result").is_none() {
+    if answer.get("error").is_some()
+        || answer.get("result").is_none()
+        || !answer_matches(&answer, id)
+    {
         return Err(ProbeReason::NotMcp);
     }
     Ok((session, answer))
@@ -252,6 +280,26 @@ async fn notify(
     }
 }
 
+/// End the session on a task of its own, best effort (MCP Streamable HTTP's `DELETE`).
+fn terminate(client: reqwest::Client, url: String, session: String) {
+    tokio::spawn(async move {
+        let _ = client
+            .delete(&url)
+            .header("mcp-session-id", &session)
+            .send()
+            .await;
+    });
+}
+
+/// Whether `answer` carries the id of the request `id` (a number, or the string form some servers echo).
+fn answer_matches(answer: &Value, id: u64) -> bool {
+    match answer.get("id") {
+        Some(Value::Number(number)) => number.as_u64() == Some(id),
+        Some(Value::String(text)) => text == &id.to_string(),
+        _ => false,
+    }
+}
+
 /// At most [`MAX_BODY`] bytes of a body, read as it arrives.
 async fn read_body(mut response: reqwest::Response) -> Result<Vec<u8>, ProbeReason> {
     if response
@@ -274,24 +322,63 @@ async fn read_body(mut response: reqwest::Response) -> Result<Vec<u8>, ProbeReas
     Ok(out)
 }
 
-/// The SSE event whose `data` is the JSON-RPC answer with `id`.
-fn sse_answer(bytes: &[u8], id: u64) -> Result<Value, ProbeReason> {
-    let text = std::str::from_utf8(bytes).map_err(|_| ProbeReason::NotMcp)?;
-    for event in text.replace("\r\n", "\n").split("\n\n") {
-        let data = event
-            .lines()
-            .filter_map(|line| line.strip_prefix("data:"))
-            .map(str::trim_start)
-            .collect::<Vec<_>>()
-            .join("\n");
-        if data.is_empty() {
-            continue;
+/// The SSE event whose `data` is the JSON-RPC answer with `id`, read **as it arrives**: a server that writes the answer
+/// and keeps the stream open is answered, not timed out.
+async fn read_sse(mut response: reqwest::Response, id: u64) -> Result<Value, ProbeReason> {
+    let mut buffer: Vec<u8> = Vec::new();
+    while let Some(chunk) = response
+        .chunk()
+        .await
+        .map_err(|_| ProbeReason::Unreachable)?
+    {
+        if buffer.len() + chunk.len() > MAX_BODY {
+            return Err(ProbeReason::NotMcp);
         }
-        if let Ok(value) = serde_json::from_str::<Value>(&data)
-            && value.get("id").and_then(Value::as_u64) == Some(id)
-        {
-            return Ok(value);
+        buffer.extend_from_slice(&chunk);
+        while let Some(end) = event_end(&buffer) {
+            let event: Vec<u8> = buffer.drain(..end).collect();
+            if let Some(value) = sse_event(&event, id)? {
+                return Ok(value);
+            }
         }
     }
     Err(ProbeReason::NotMcp)
+}
+
+/// The end of the first complete SSE event in `bytes`, after its blank line (`\n\n` or `\r\n\r\n`).
+fn event_end(bytes: &[u8]) -> Option<usize> {
+    let mut i = 0;
+    while i < bytes.len() {
+        if bytes[i] == b'\n' && bytes.get(i + 1) == Some(&b'\n') {
+            return Some(i + 2);
+        }
+        if bytes[i] == b'\r' && bytes.get(i + 1) == Some(&b'\n') {
+            if bytes.get(i + 2) == Some(&b'\n') {
+                return Some(i + 3);
+            }
+            if bytes.get(i + 2) == Some(&b'\r') && bytes.get(i + 3) == Some(&b'\n') {
+                return Some(i + 4);
+            }
+        }
+        i += 1;
+    }
+    None
+}
+
+/// The JSON-RPC answer in one SSE event, if its `data` is one and it carries `id`.
+fn sse_event(event: &[u8], id: u64) -> Result<Option<Value>, ProbeReason> {
+    let text = std::str::from_utf8(event).map_err(|_| ProbeReason::NotMcp)?;
+    let data = text
+        .lines()
+        .filter_map(|line| line.strip_prefix("data:"))
+        .map(str::trim_start)
+        .collect::<Vec<_>>()
+        .join("\n");
+    if data.is_empty() {
+        return Ok(None);
+    }
+    let Ok(value) = serde_json::from_str::<Value>(&data) else {
+        return Ok(None);
+    };
+    Ok(answer_matches(&value, id).then_some(value))
 }

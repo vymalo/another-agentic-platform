@@ -74,7 +74,12 @@ api.port and api.healthPort, which the probes and the Service use) and `defaults
 {{- toYaml $cfg -}}
 {{- end -}}
 
+{{/* "true" when the value is a whole number (no fraction), else nothing. */}}
+{{- define "aap.isWholeNumber" -}}
+{{- if and (or (kindIs "float64" .) (kindIs "int" .) (kindIs "int64" .)) (eq (float64 .) (float64 (int .))) -}}true{{- end -}}
+{{- end -}}
+
 {{/* "true" when the value is a whole number from 1 to 65535, else nothing. */}}
 {{- define "aap.isPort" -}}
-{{- if and (or (kindIs "float64" .) (kindIs "int" .) (kindIs "int64" .)) (ge (int .) 1) (le (int .) 65535) -}}true{{- end -}}
+{{- if and (include "aap.isWholeNumber" .) (ge (int .) 1) (le (int .) 65535) -}}true{{- end -}}
 {{- end -}}
