@@ -514,6 +514,29 @@ are what makes it work on any cluster, not a restriction. A policy that is wide 
 The DNS rule is narrow by default (`kube-dns` in `kube-system`, port 53) and wide only if you empty `dns.to`. `helm install` prints a reminder while either
 list is empty (`templates/NOTES.txt`).
 
+### The tool probe (K3a)
+
+K3a (2026-11-18; AD-053). The operator may probe a `ToolProvider`'s MCP server (`initialize` and `tools/list`) and write what it finds into the
+provider's status (K3b). **Off by default**: `toolProbe.to` empty, and then not a rule of it is rendered and the six goldens are byte for byte what
+they were. On, `to` lists the peers the operator may reach (NetworkPolicyPeers: `namespaceSelector`, `podSelector`, `ipBlock`) and `ports` the ports a
+probe may use; the chart adds **one egress rule to exactly those peers on those ports and one DNS rule**, so the policy is what bounds a probe. A
+NetworkPolicy names peers and never host names: a probe to a server that is not covered has no route, and the operator still reads no
+Secret (AD-024).
+
+**The API server's own egress rule is separate.** With `networkPolicy.apiServer.cidrs` empty (the default) it already allows any address on
+443 and 6443, so an https probe on 443 is bounded by `toolProbe.to` only once that list names the API server's addresses (or `toolProbe.ports`
+leaves 443 out). Narrow `apiServer.cidrs` in a deployment that probes https servers; the chart cannot know the addresses.
+
+| Value | Default | What |
+|---|---|---|
+| `toolProbe.to` | `[]` | The peers the operator may reach. Empty: no probe, and not a trace of it in any render. A peer needs a `namespaceSelector`, a `podSelector` or an `ipBlock`; an `ipBlock` of `0.0.0.0/0` or `::/0` is refused |
+| `toolProbe.ports` | `[80, 443]` | The ports a probe may use, as the provider's URL names them: 443 for an https server, 80 or the port of an in-cluster server. At least one while `to` is set |
+| `toolProbe.dns.to`, `dns.ports` | kube-dns, `[53]` | The operator's policy has no DNS rule, so with a probe it gets one. `dns.to` is required while `to` is set and `networkPolicy.enabled` |
+
+The probe itself (the status, the stub MCP server) is K3b. `render-check.sh` holds that the default render has one egress rule and no port 80, that
+the probe render has DNS and exactly the listed peers and ports (a pod selector and 8080 when those are what is listed), that the Deployment and the
+`Role` do not move, that traces and the probe stack (five rules, the traces ones where they were), and every refusal by name.
+
 ### The rights
 
 The `Role` `aap-operator-api` (in the watched namespace; its `RoleBinding` is to the API's own service account) is **exactly** the one

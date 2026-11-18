@@ -7,8 +7,8 @@
 #
 # Six renders are golden: the values of the Application on netcup (examples/netcup.values.yaml), the other shape those
 # values do not make (tests/secret.values.yaml), the defaults, the Platform API component on (tests/api.values.yaml), run pods on
-# (tests/runpods.values.yaml) and traces of both on (tests/otel.values.yaml; the others have all three off, and the first three are
-# equal to what they were before any existed).
+# (tests/runpods.values.yaml) and traces of both on (tests/otel.values.yaml; the others have the API, run pods, traces and the tool
+# probe off, and the first three are equal to what they were before any existed).
 # Also checked: deploy/operator-crds against deploy/crds, and the API's Role against crates/objects-kubernetes/tests/rbac.yaml, the
 # Role that crate is tested under.
 set -eu
@@ -1613,6 +1613,62 @@ check "api.extraVolumes may not take the name of the chart's otel volume while a
   --set-json 'api.extraVolumes=[{"name":"otel-ca","emptyDir":{}}]'
 check "api.extraVolumeMounts may not mount under the chart's otel paths while api.otel is on" refused_api_otel 'where api.otel mounts its headers and CA bundle' \
   --set-json 'api.extraVolumes=[{"name":"x","emptyDir":{}}]' --set-json 'api.extraVolumeMounts=[{"name":"x","mountPath":"/etc/aap/otel/more"}]'
+
+# ---- Tool probe (slice K3a, AD-053) ---------------------------------------------------------------------------------------
+# `toolProbe.to` is the deployment's list of the peers the operator may reach to probe a ToolProvider's MCP server (a NetworkPolicy
+# names peers, never host names: the policy is what bounds the probe). Empty (the default): off, and then not a rule of it is rendered.
+# On: DNS and exactly those peers on the probe ports, and nothing else of the operator moves.
+tool_peer='[{"namespaceSelector":{"matchLabels":{"kubernetes.io/metadata.name":"tools"}}}]'
+tool_probe_off() {
+  render || return 1
+  [ "$(op_egress_rules)" -eq 1 ] && lacks 'port: 80$' || return 1
+  render -f "$here/otel.values.yaml" || return 1
+  [ "$(op_egress_rules)" -eq 3 ] && lacks 'port: 80$'
+}
+check "toolProbe off (the default): no rule of it in the default or the traces render (one egress rule, three with traces), and no port 80" tool_probe_off
+tool_probe_on() {
+  render --set-json "toolProbe.to=$tool_peer" || return 1
+  [ "$(op_egress_rules)" -eq 3 ] || return 1
+  all_of "$(op_egress_rule 2)" 'port: 53' 'protocol: UDP' 'protocol: TCP' '^      to:' 'k8s-app: kube-dns' || return 1
+  all_of "$(op_egress_rule 3)" 'port: 80' 'port: 443' '^      to:' 'kubernetes.io/metadata.name: tools' || return 1
+  none_of "$(op_egress_rule 3)" 'port: 53|ipBlock|0\.0\.0\.0/0'
+}
+check "toolProbe on: the operator's policy gains a DNS rule and the probe's peers on its ports, each with a to, and nothing else (three rules)" tool_probe_on
+tool_probe_peers_are_exact() {
+  render --set-json 'toolProbe.to=[{"podSelector":{"matchLabels":{"app":"mcp"}}}]' --set-json 'toolProbe.ports=[8080]' || return 1
+  all_of "$(op_egress_rule 3)" 'app: mcp' 'port: 8080' || return 1
+  none_of "$(op_egress_rule 3)" 'port: 80$|port: 443$|kubernetes.io/metadata.name: tools'
+}
+check "toolProbe: the rule is exactly the peers and ports listed (a pod selector and 8080, not the defaults)" tool_probe_peers_are_exact
+tool_probe_only_the_policy() {
+  render || return 1
+  a_deploy=$(doc Deployment aap-operator) || return 1
+  a_role=$(doc Role aap-operator) || return 1
+  render --set-json "toolProbe.to=$tool_peer" || return 1
+  [ "$(doc Deployment aap-operator)" = "$a_deploy" ] && [ "$(doc Role aap-operator)" = "$a_role" ]
+}
+check "toolProbe on: the Deployment and the Role are what they were (the probe is egress and no right)" tool_probe_only_the_policy
+tool_probe_with_otel() {
+  render -f "$here/otel.values.yaml" --set-json "toolProbe.to=$tool_peer" || return 1
+  [ "$(op_egress_rules)" -eq 5 ] || return 1
+  all_of "$(op_egress_rule 3)" 'port: 4318' 'opentelemetry-collector' || return 1
+  all_of "$(op_egress_rule 4)" 'port: 53' 'k8s-app: kube-dns' || return 1
+  all_of "$(op_egress_rule 5)" 'port: 80' 'kubernetes.io/metadata.name: tools'
+}
+check "toolProbe and traces on: five rules, the traces ones where they were and the probe's after them" tool_probe_with_otel
+check "toolProbe on with the NetworkPolicy off: renders with no policy and no dns.to needed" \
+  renders_ok --set-json "toolProbe.to=$tool_peer" --set networkPolicy.enabled=false
+refused_tool() { frag=$1; shift; refused "$frag" --set-json "toolProbe.to=$tool_peer" "$@"; }
+check "toolProbe must be a map" refused 'toolProbe must be a map' --set toolProbe=null
+check "toolProbe: a key that is not a setting is refused" refused 'toolProbe.foo is not a setting' --set toolProbe.foo=1
+check "a peer of toolProbe.to must say who" refused_tool 'toolProbe.to: a peer needs' --set-json 'toolProbe.to=[{"x":1}]'
+check "an ipBlock of 0.0.0.0/0 as a probe peer is refused" refused_tool 'is every address' --set-json 'toolProbe.to=[{"ipBlock":{"cidr":"0.0.0.0/0"}}]'
+check "an ipBlock of ::/0 as a probe peer is refused" refused_tool 'is every address' --set-json 'toolProbe.to=[{"ipBlock":{"cidr":"::/0"}}]'
+check "toolProbe.ports must name a port while toolProbe.to is set" refused_tool 'toolProbe.ports must name at least one port' --set-json 'toolProbe.ports=[]'
+check "toolProbe.ports must be port numbers" refused 'toolProbe.ports: 70000 is not a port number' --set-json 'toolProbe.ports=[70000]'
+check "toolProbe.dns must be a map" refused 'toolProbe.dns must be a map' --set toolProbe.dns=null
+check "toolProbe.dns.to is required with the policy on" refused_tool 'toolProbe.dns.to is required' --set-json 'toolProbe.dns.to=[]'
+check "toolProbe.dns.ports must name a port" refused 'toolProbe.dns.ports must name at least one port' --set-json 'toolProbe.dns.ports=[]'
 
 # ---- The CRDs chart: one source ------------------------------------------------------------------------------------------
 check "deploy/operator-crds/files is a copy of deploy/crds (cp deploy/crds/agents.vymalo.com.yaml deploy/operator-crds/files/)" \

@@ -447,7 +447,7 @@ records.** §39a.
 
 #### AD-053 — The operator may reach listed MCP servers to discover their tools
 
-*(2026-11-16, an owner decision on P-024; slice K3, planned, not built.)* The owner accepted P-024 as proposed. The operator may probe a `ToolProvider`'s URL (MCP `initialize` and `tools/list`) and write its reachability and tool names into its status. It is **off by default**, reaches only the hosts the operator chart lists (`toolProbe.to`, which also opens the operator's `NetworkPolicy` egress to exactly those), and a server that needs a header is reported `Unknown`: the operator still reads no Secret (AD-024).
+*(2026-11-16, an owner decision on P-024; slices K3a and K3b.)* The owner accepted P-024 as proposed. The operator may probe a `ToolProvider`'s URL (MCP `initialize` and `tools/list`) and write its reachability and tool names into its status. It is **off by default**, reaches only the hosts the operator chart lists (`toolProbe.to`, which also opens the operator's `NetworkPolicy` egress to exactly those), and a server that needs a header is reported `Unknown`: the operator still reads no Secret (AD-024). **K3a built (2026-11-18):** the chart's `toolProbe.to` (NetworkPolicyPeers), `toolProbe.ports` and `toolProbe.dns`, and the operator's egress to exactly those peers on those ports, plus DNS; empty, the default, and not a rule of it is rendered, the six goldens byte for byte what they were. `render-check.sh` holds it, each check broken on purpose. **K3b** (the probe, the status and the stub MCP server) is next.
 
 #### AD-054 — A bring-your-own A2A image is a harness type of its own
 
