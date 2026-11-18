@@ -43,6 +43,24 @@ impl Default for Resync {
 /// a handful of requests that an API server answers in milliseconds; a minute is long for any of them.
 pub(crate) const PASS_TIMEOUT: Duration = Duration::from_secs(60);
 
+/// Whether the operator probes a `ToolProvider`'s MCP server, and the deadline of one probe (K3b, AD-053).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Probe {
+    /// Off (the default): no request is made and the status has no `Reachable` condition.
+    pub enabled: bool,
+    /// How long one probe may take before it is `Reachable: False`, reason `Timeout`.
+    pub timeout: Duration,
+}
+
+impl Default for Probe {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            timeout: Duration::from_secs(5),
+        }
+    }
+}
+
 /// The settings of [`Operator`](crate::Operator).
 #[derive(Clone, Debug)]
 pub struct Options {
@@ -81,6 +99,8 @@ pub struct Options {
     pub cache_claims: std::collections::BTreeSet<String>,
     /// The ceiling of the access tier (`AGENT_MAX_ACCESS_TIER`, K1).
     pub max_access_tier: aap_api::AccessTierCap,
+    /// The MCP probe of a `ToolProvider` (K3b): off by default.
+    pub probe: Probe,
 }
 
 impl Default for Options {
@@ -97,6 +117,7 @@ impl Default for Options {
             run_pods: None,
             cache_claims: std::collections::BTreeSet::new(),
             max_access_tier: aap_api::AccessTierCap::Auto,
+            probe: Probe::default(),
         }
     }
 }

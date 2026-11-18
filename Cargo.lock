@@ -92,6 +92,7 @@ dependencies = [
  "aap-api",
  "aap-domain",
  "aap-ports",
+ "aap-tool-probe",
  "aap-trace",
  "aap-trace-otlp",
  "bytes",
@@ -310,6 +311,20 @@ dependencies = [
  "aap-ports",
  "aap-store-secret",
  "tokio",
+]
+
+[[package]]
+name = "aap-tool-probe"
+version = "0.1.0"
+dependencies = [
+ "aap-tool-probe",
+ "axum",
+ "bytes",
+ "futures",
+ "reqwest",
+ "serde_json",
+ "tokio",
+ "tower",
 ]
 
 [[package]]

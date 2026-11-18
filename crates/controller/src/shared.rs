@@ -26,10 +26,11 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use aap_api::{
-    AgentConfig, AgentService, MAX_USED_BY, ModelEndpoint, ServiceState, SharedStatus,
+    AgentConfig, AgentService, MAX_USED_BY, ModelEndpoint, ProbeStatus, ServiceState, SharedStatus,
     ToolProvider, condition_type, reason,
 };
 use aap_domain::{ConfigIssue, validate_endpoint, validate_provider};
+use aap_tool_probe::{ProbeOutcome, ProbeReason};
 use k8s_openapi::apimachinery::pkg::apis::meta::v1::{Condition, Time};
 use kube::api::{Patch, PatchParams};
 use kube::runtime::controller::Action;
@@ -40,6 +41,7 @@ use serde_json::json;
 use crate::context::{Clock, FIELD_MANAGER, Retries, failed, system_clock};
 use crate::error::Error;
 use crate::metrics::{Metrics, name};
+use crate::options::Probe;
 use crate::pass::bounded;
 use crate::watches::{users_of_endpoint, users_of_provider};
 use aap_trace::{Step, step};
@@ -60,6 +62,7 @@ pub struct SharedContext {
     pub(crate) configs: Store<AgentConfig>,
     pub(crate) services: Store<AgentService>,
     pub(crate) tracer: aap_trace::Tracer,
+    pub(crate) probe: Probe,
 }
 
 impl SharedContext {
@@ -79,7 +82,16 @@ impl SharedContext {
             configs,
             services,
             tracer: aap_trace::Tracer::off(),
+            probe: Probe::default(),
         }
+    }
+
+    /// Probe the MCP servers of `ToolProvider`s with `probe` (K3b, AD-053). Off by default: no request is made and the
+    /// status has no `Reachable` condition.
+    #[must_use]
+    pub fn with_probe(mut self, probe: Probe) -> Self {
+        self.probe = probe;
+        self
     }
 
     /// Make a span of every pass with `tracer` (K5). Off by default.
@@ -119,6 +131,9 @@ pub(crate) trait Shared:
     fn judge(&self) -> Result<(), Vec<ConfigIssue>>;
     fn users(&self, ctx: &SharedContext) -> Vec<Arc<AgentService>>;
     fn current(&self) -> Option<&SharedStatus>;
+    /// Probe the object's MCP server, if it has one and the deployment probes (K3b, AD-053). `accepted` is the verdict of
+    /// [`judge`](Self::judge): an invalid object is not probed.
+    async fn probe(&self, ctx: &SharedContext, accepted: bool) -> Option<ProbeOutcome>;
 }
 
 impl Shared for ModelEndpoint {
@@ -132,6 +147,9 @@ impl Shared for ModelEndpoint {
     fn current(&self) -> Option<&SharedStatus> {
         self.status.as_ref()
     }
+    async fn probe(&self, _ctx: &SharedContext, _accepted: bool) -> Option<ProbeOutcome> {
+        None
+    }
 }
 
 impl Shared for ToolProvider {
@@ -144,6 +162,26 @@ impl Shared for ToolProvider {
     }
     fn current(&self) -> Option<&SharedStatus> {
         self.status.as_ref()
+    }
+    async fn probe(&self, ctx: &SharedContext, accepted: bool) -> Option<ProbeOutcome> {
+        if !ctx.probe.enabled {
+            return None;
+        }
+        if !accepted {
+            return Some(ProbeOutcome::new(ProbeReason::Invalid));
+        }
+        // A header's value is a Secret the operator does not read (AD-024): the server is `Unknown`, not probed.
+        if !self.spec.mcp.headers.is_empty() {
+            return Some(ProbeOutcome::new(ProbeReason::NeedsHeader));
+        }
+        // A probe must not outlive the pass: the pass's own deadline would cut it, and the status would never say
+        // `Timeout`. Leave five seconds of the pass for the status write, and at least one for the probe.
+        let timeout = ctx
+            .probe
+            .timeout
+            .min(ctx.pass_timeout.saturating_sub(Duration::from_secs(5)))
+            .max(Duration::from_secs(1));
+        Some(aap_tool_probe::probe(&self.spec.mcp.url, timeout).await)
     }
 }
 
@@ -182,6 +220,7 @@ pub(crate) fn shared_status(
     users: &[Arc<AgentService>],
     previous: &[Condition],
     now: &Time,
+    probe: Option<&ProbeOutcome>,
 ) -> SharedStatus {
     let mut names: Vec<String> = users.iter().map(|s| s.name_any()).collect();
     names.sort();
@@ -301,11 +340,69 @@ pub(crate) fn shared_status(
         )
     };
 
+    let mut conditions = vec![accepted, in_use, agents_ready];
+    let mut probe_status = None;
+    if let Some(outcome) = probe {
+        let (status, why, message) = match outcome.reason {
+            ProbeReason::Probed => {
+                let total = outcome.tools.len() + outcome.tools_more;
+                let message = if outcome.incomplete {
+                    format!("at least {total} tool{}", if total == 1 { "" } else { "s" })
+                } else {
+                    match total {
+                        0 => "no tools".to_owned(),
+                        1 => "1 tool".to_owned(),
+                        n => format!("{n} tools"),
+                    }
+                };
+                ("True", reason::PROBED, message)
+            }
+            ProbeReason::NeedsHeader => (
+                "Unknown",
+                reason::NEEDS_HEADER,
+                "the server names a header, which the operator does not read (AD-024)".to_owned(),
+            ),
+            ProbeReason::Invalid => (
+                "Unknown",
+                reason::INVALID,
+                "the object is invalid; nothing was probed".to_owned(),
+            ),
+            ProbeReason::Unreachable => (
+                "False",
+                reason::UNREACHABLE,
+                "the server did not answer".to_owned(),
+            ),
+            ProbeReason::NotMcp => ("False", reason::NOT_MCP, "the answer is not MCP".to_owned()),
+            ProbeReason::Timeout => (
+                "False",
+                reason::TIMEOUT,
+                "the server did not answer within the deployment's deadline".to_owned(),
+            ),
+        };
+        conditions.push(condition(
+            previous,
+            condition_type::REACHABLE,
+            status,
+            why,
+            message,
+            generation,
+            now,
+        ));
+        if outcome.reason == ProbeReason::Probed {
+            probe_status = Some(ProbeStatus {
+                tools: outcome.tools.clone(),
+                tools_more: i32::try_from(outcome.tools_more).unwrap_or(i32::MAX),
+                incomplete: outcome.incomplete,
+            });
+        }
+    }
+
     SharedStatus {
         observed_generation: generation,
         used_by: names,
         used_by_more: i32::try_from(more).unwrap_or(i32::MAX),
-        conditions: vec![accepted, in_use, agents_ready],
+        conditions,
+        probe: probe_status,
     }
 }
 
@@ -324,12 +421,15 @@ async fn pass<K: Shared>(object: &K, ctx: &SharedContext) -> Result<Action, Erro
         ));
     }
     let previous = object.current().cloned().unwrap_or_default();
+    let verdict = object.judge();
+    let probe = object.probe(ctx, verdict.is_ok()).await;
     let status = shared_status(
-        &object.judge(),
+        &verdict,
         object.meta().generation,
         &object.users(ctx),
         &previous.conditions,
         &(ctx.clock)(),
+        probe.as_ref(),
     );
     if object.current() != Some(&status) {
         let api: Api<K> = Api::namespaced(ctx.client.clone(), &ns);

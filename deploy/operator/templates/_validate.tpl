@@ -115,8 +115,13 @@ policy on, as the traces' is. */ -}}
 {{- end -}}
 {{- $tp := .Values.toolProbe -}}
 {{- range $k, $_ := $tp -}}
-{{- if not (has $k (list "to" "ports" "dns")) -}}
-{{- fail (printf "toolProbe.%s is not a setting: to, ports or dns" $k) -}}
+{{- if not (has $k (list "to" "ports" "dns" "timeoutSecs")) -}}
+{{- fail (printf "toolProbe.%s is not a setting: to, ports, dns or timeoutSecs" $k) -}}
+{{- end -}}
+{{- end -}}
+{{- if hasKey $tp "timeoutSecs" -}}
+{{- if not (and (include "aap.isWholeNumber" $tp.timeoutSecs) (ge (int $tp.timeoutSecs) 1) (le (int $tp.timeoutSecs) 60)) -}}
+{{- fail (printf "toolProbe.timeoutSecs must be a whole number of seconds from 1 to 60, got %v" $tp.timeoutSecs) -}}
 {{- end -}}
 {{- end -}}
 {{- if not (kindIs "slice" (default (list) $tp.to)) -}}

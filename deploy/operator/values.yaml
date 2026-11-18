@@ -270,6 +270,9 @@ toolProbe:
   to: []
   # The ports a probe may use, as the provider's URL names them: 443 for an https server, 80 or the port of an in-cluster server.
   ports: [80, 443]
+  # How long one probe may take, in seconds (1 to 60). A server that does not answer by then is `Reachable: False`, reason
+  # `Timeout`.
+  timeoutSecs: 5
   # How the operator resolves the server's name. REQUIRED while `to` is set and networkPolicy is enabled: without it the operator's
   # policy has no DNS rule, and a rule with ports and no `to` would be port 53 to anywhere. The cluster's DNS, as for traces.
   dns:

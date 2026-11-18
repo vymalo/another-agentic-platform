@@ -611,6 +611,22 @@ async fn session() -> Vec<Seen> {
     let r = api.get("/v1/agents/chat/events").token(&sees).send().await;
     rec.add("GET", "/v1/agents/{name}/events", r);
 
+    // K3b: a tool server's status carries the probe's tools and `Reachable`; the answer must validate against the schema.
+    api.objects.set_status(
+        Kind::ToolProvider,
+        "docs",
+        json!({
+            "usedBy": [],
+            "conditions": [{
+                "type": "Reachable",
+                "status": "True",
+                "reason": "Probed",
+                "message": "1 tool",
+                "lastTransitionTime": "2026-11-18T00:00:00Z"
+            }],
+            "probe": { "tools": ["list_pods"], "toolsMore": 1, "incomplete": true }
+        }),
+    );
     for (listing, one, put_template, form) in [
         (
             "/v1/models",
@@ -1193,6 +1209,11 @@ const MAY_BE_ABSENT: &[&str] = &[
     // The operator writes a status member only when it has something to say (`skip_serializing_if`).
     "SharedStatus/observedGeneration",
     "SharedStatus/usedByMore",
+    // The probe's tools are written only when the server answered (K3b); a `ToolProvider` the deployment does not probe has
+    // neither.
+    "SharedStatus/probe",
+    "SharedStatus/probe/toolsMore",
+    "SharedStatus/probe/incomplete",
     // A condition has no `observedGeneration` until the operator sets one.
     "Condition/observedGeneration",
     // A shared object has no status before the operator wrote one (`skip_serializing_if`).

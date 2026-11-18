@@ -523,6 +523,11 @@ notes_about_the_issuer_alone() { has 'ANY address on 443 \(the issuer.s ports\)'
 check "NOTES (only the API server's addresses set): the warning is about the issuer alone" notes_about_the_issuer_alone
 render_notes -f "$here/api.values.yaml" --set api.networkPolicy.enabled=false --set api.networkPolicy.from=null
 check "NOTES (api on, the policy off): no warning about a policy that is not there" lacks 'NetworkPolicy lets it reach ANY address'
+render_notes --set-json 'toolProbe.to=[{"podSelector":{"matchLabels":{"a":"b"}}}]'
+check "NOTES (toolProbe on, no apiServer.cidrs): it says the operator's rule reaches ANY address on 443 and 6443, and what to set" \
+  has_all 'The operator.s NetworkPolicy lets it reach ANY address on 443, 6443 \(the API server.s ports\)' 'networkPolicy.apiServer.cidrs is set'
+render_notes --set-json 'toolProbe.to=[{"podSelector":{"matchLabels":{"a":"b"}}}]' --set 'networkPolicy.apiServer.cidrs[0]=10.96.0.1/32'
+check "NOTES (toolProbe on, the API server's addresses set): no warning about the probe" lacks 'The operator.s NetworkPolicy lets it reach ANY address'
 render
 
 # ---- K1: what the deployment allows an AgentConfig --------------------------------------------------------------------------
@@ -784,7 +789,8 @@ e2e_render() {
     --set api.config.oidc.issuer=http://172.18.0.1:40000 --set 'api.config.oidc.audiences[0]=aap-e2e-api' --set api.config.oidc.rolesClaim=agentic_roles \
     --set api.config.defaults.a2aBearer.name=e2e-a2a-bearer --set api.config.defaults.a2aBearer.key=AGENT_REGISTRY_AGENT_TOKEN \
     --set-json "api.config.defaults.allowFrom=[{\"namespaceSelector\":{\"matchLabels\":{\"kubernetes.io/metadata.name\":\"$e2e_ns\"}}}]" \
-    --set-json 'api.networkPolicy.issuer.to=[{"ipBlock":{"cidr":"172.18.0.1/32"}}]' --set-json 'api.networkPolicy.issuer.ports=[40000]' > "$out"
+    --set-json 'api.networkPolicy.issuer.to=[{"ipBlock":{"cidr":"172.18.0.1/32"}}]' --set-json 'api.networkPolicy.issuer.ports=[40000]' \
+    --set-json 'toolProbe.to=[{"ipBlock":{"cidr":"172.18.0.1/32"}}]' --set-json 'toolProbe.ports=[40123]' > "$out"
 }
 e2e_render
 check "e2e: the values of the API end-to-end render" has 'kind: Deployment'
@@ -803,6 +809,18 @@ e2e_issuer() {
     && all_of "$(api_egress_rule 3)" 'cidr: 172.18.0.1/32' 'port: 40000$'
 }
 check "e2e: the issuer is the runner's address, and the policy's third egress rule reaches exactly it" e2e_issuer
+e2e_probe() {
+  dhas Deployment aap-operator 'name: TOOL_PROBE_ENABLED' 'value: "true"' 'name: TOOL_PROBE_TIMEOUT_SECS' 'value: "5"' \
+    && all_of "$(op_egress_rule 3)" 'cidr: 172.18.0.1/32' 'port: 40123$' '^      to:'
+}
+check "e2e: the operator probes the stub MCP server on the runner (K3b): the chart turns it on and its policy reaches exactly that address and port" e2e_probe
+e2e_probe_values_in_script() {
+  awk '/^toolProbe:$/ { t = 1 } t && /cidr: \$host_addr\/32/ { c = 1 } t && /ports: \[\$mcp_port\]/ { p = 1 } t && /^EOF$/ { exit } END { exit !(c && p) }' "$here/e2e/api-e2e.sh" || return 1
+  grep -q 'aap-tool-probe --example test-mcp' "$here/e2e/api-e2e.sh" \
+    && grep -q 'tool-servers/e2e-mcp' "$here/e2e/api-e2e.sh" \
+    && grep -q 'tool-servers/e2e-mcp-header' "$here/e2e/api-e2e.sh"
+}
+check "e2e: step 6a builds and starts the stub MCP server, gives toolProbe the host's /32 and the stub's port, and makes the two providers" e2e_probe_values_in_script
 check "e2e: the policy admits the pods labelled aap-e2e/client and no other" \
   dhas NetworkPolicy aap-operator-api 'aap-e2e/client: "true"'
 check "e2e: no registry, no ExternalSecret and no Ingress are rendered" lacks 'aap-operator-registry|^kind: (ExternalSecret|Ingress)$'
@@ -1623,11 +1641,11 @@ check "api.extraVolumeMounts may not mount under the chart's otel paths while ap
 tool_peer='[{"namespaceSelector":{"matchLabels":{"kubernetes.io/metadata.name":"tools"}}}]'
 tool_probe_off() {
   render || return 1
-  [ "$(op_egress_rules)" -eq 1 ] && lacks 'port: 80$' || return 1
+  [ "$(op_egress_rules)" -eq 1 ] && lacks 'port: 80$' && lacks 'TOOL_PROBE' || return 1
   render -f "$here/otel.values.yaml" || return 1
-  [ "$(op_egress_rules)" -eq 3 ] && lacks 'port: 80$'
+  [ "$(op_egress_rules)" -eq 3 ] && lacks 'port: 80$' && lacks 'TOOL_PROBE'
 }
-check "toolProbe off (the default): no rule of it in the default or the traces render (one egress rule, three with traces), and no port 80" tool_probe_off
+check "toolProbe off (the default): no rule and no variable of it in the default or the traces render (one egress rule, three with traces), and no port 80" tool_probe_off
 tool_probe_on() {
   render --set-json "toolProbe.to=$tool_peer" || return 1
   [ "$(op_egress_rules)" -eq 3 ] || return 1
@@ -1642,14 +1660,29 @@ tool_probe_peers_are_exact() {
   none_of "$(op_egress_rule 3)" 'port: 80$|port: 443$|kubernetes.io/metadata.name: tools'
 }
 check "toolProbe: the rule is exactly the peers and ports listed (a pod selector and 8080, not the defaults)" tool_probe_peers_are_exact
-tool_probe_only_the_policy() {
+tool_probe_on_the_deployment() {
   render || return 1
-  a_deploy=$(doc Deployment aap-operator) || return 1
   a_role=$(doc Role aap-operator) || return 1
+  dlacks Deployment aap-operator 'TOOL_PROBE' || return 1
   render --set-json "toolProbe.to=$tool_peer" || return 1
-  [ "$(doc Deployment aap-operator)" = "$a_deploy" ] && [ "$(doc Role aap-operator)" = "$a_role" ]
+  dhas Deployment aap-operator 'name: TOOL_PROBE_ENABLED' 'value: "true"' 'name: TOOL_PROBE_TIMEOUT_SECS' 'value: "5"' || return 1
+  [ "$(doc Role aap-operator)" = "$a_role" ]
 }
-check "toolProbe on: the Deployment and the Role are what they were (the probe is egress and no right)" tool_probe_only_the_policy
+check "toolProbe on: the Deployment gains the probe's two variables and nothing else; the Role is what it was (egress, no right)" tool_probe_on_the_deployment
+tool_probe_timeout() {
+  render --set-json "toolProbe.to=$tool_peer" --set toolProbe.timeoutSecs=9 || return 1
+  dhas Deployment aap-operator 'name: TOOL_PROBE_TIMEOUT_SECS' 'value: "9"'
+}
+check "toolProbe.timeoutSecs is the deadline the operator reads" tool_probe_timeout
+tool_probe_default_timeout() {
+  render --set toolProbe.timeoutSecs=null --set-json 'toolProbe.to=[{"podSelector":{"matchLabels":{"a":"b"}}}]' || return 1
+  dhas Deployment aap-operator 'name: TOOL_PROBE_TIMEOUT_SECS' 'value: "5"'
+}
+check "toolProbe.timeoutSecs left out is the default 5 (the chart renders a number, never an empty value)" tool_probe_default_timeout
+check "toolProbe.timeoutSecs below 1 is refused" refused 'toolProbe.timeoutSecs must be a whole number of seconds from 1 to 60' --set toolProbe.timeoutSecs=0
+check "toolProbe.timeoutSecs above 60 is refused" refused 'toolProbe.timeoutSecs must be a whole number of seconds from 1 to 60' --set toolProbe.timeoutSecs=61
+check "toolProbe.timeoutSecs 5.5 is refused (a whole number of seconds)" refused 'toolProbe.timeoutSecs must be a whole number of seconds from 1 to 60' --set-json 'toolProbe={"timeoutSecs":5.5}'
+check "toolProbe.ports 80.5 is refused (a whole number)" refused 'toolProbe.ports: 80.5 is not a port number' --set-json 'toolProbe.ports=[80.5]'
 tool_probe_with_otel() {
   render -f "$here/otel.values.yaml" --set-json "toolProbe.to=$tool_peer" || return 1
   [ "$(op_egress_rules)" -eq 5 ] || return 1

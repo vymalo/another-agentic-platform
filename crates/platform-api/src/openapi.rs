@@ -474,7 +474,18 @@ fn schemas() -> Value {
                 "observedGeneration": { "type": "integer" },
                 "usedBy": { "type": "array", "items": { "type": "string" }, "description": "At most 64 names, sorted. Emptied for a caller without platform:agents.read." },
                 "usedByMore": { "type": "integer", "minimum": 1, "description": "How many more there are; absent when there are none." },
-                "conditions": { "type": "array", "items": schema("Condition"), "description": "Accepted, InUse and AgentsReady." }
+                "conditions": { "type": "array", "items": schema("Condition"), "description": "Accepted, InUse and AgentsReady; on a ToolProvider the deployment probes, also Reachable (K3b)." },
+                "probe": {
+                    "description": "The MCP server's tools, on a ToolProvider the deployment probes (K3b, AD-053): at most 64 names, sorted, and a count of the rest. Absent when probing is off or the object was not probed; the reachability is the Reachable condition.",
+                    "type": "object",
+                    "additionalProperties": false,
+                    "required": ["tools"],
+                    "properties": {
+                        "tools": { "type": "array", "items": { "type": "string" }, "description": "At most 64 names, sorted." },
+                        "toolsMore": { "type": "integer", "minimum": 1, "description": "How many more there are; absent when there are none." },
+                        "incomplete": { "type": "boolean", "description": "The server still named a nextCursor after five pages: the count is a lower bound. Absent when false." }
+                    }
+                }
             }
         },
         "ModelDetail": shared_detail("ModelEndpointForm"),

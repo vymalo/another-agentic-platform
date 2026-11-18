@@ -40,7 +40,7 @@ pub use directory::ReflectorDirectory;
 pub use error::Error;
 pub use metrics::{Metrics, name as metric};
 pub use operator::{Operator, Readiness};
-pub use options::{Options, RegistryMode, Resync};
+pub use options::{Options, Probe, RegistryMode, Resync};
 pub use service::{reconcile_service, service_error_policy};
 pub use shared::{
     RESYNC, SharedContext, endpoint_error_policy, provider_error_policy, reconcile_endpoint,

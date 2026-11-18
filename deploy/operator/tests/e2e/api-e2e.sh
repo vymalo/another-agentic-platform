@@ -24,6 +24,9 @@
 #      the current one is accepted (204; 202 when the operator's finalizer outlasts the API's 5 s wait, and then the AgentConfig stays behind as
 #      an orphan, which the script reports and removes), the operator's finalizer completes, the objects and the workload are gone, and then
 #      the model can go;
+#   6a. a ToolProvider made through the API and probed by the operator (K3b): the stub MCP server on this machine lists three tools, the operator
+#      reaches it through the chart's `toolProbe` egress, and the provider's status is `Reachable: True` with those names; a second provider that
+#      names a header is `Reachable: Unknown`, reason `NeedsHeader`, and the operator reads no Secret;
 #   6b. aapctl (K9b-1, built here when AAPCTL_BIN is not set) drives the same API: a model from a file (created, then unchanged with no PUT), an
 #      agent the API made and `aapctl export` printed, deleted with `--wait` and made again with `aapctl apply` (Ready; applied again, nothing
 #      written), a stale `--if-match` that is exit 3, a reader that is exit 4 naming platform:agents.write, a token kept by `login --token-stdin`
@@ -109,6 +112,7 @@ curl_image='docker.io/curlimages/curl:8.22.0@sha256:58adaa4e8dca9c988bae2aba4ab3
 # hold this.
 sentinel="e2e-secret-$(openssl rand -hex 16)"
 issuer_pid=''
+mcp_pid=''
 fwd_pid=''
 # The two pods that ask the API from inside the cluster, named for this run: a name that a pod of an earlier run, still terminating, holds
 # would fail `kubectl run`.
@@ -174,6 +178,7 @@ cleanup() {
   if [ "$installed" = 1 ]; then helm uninstall aap-operator --namespace "$ns" --timeout 120s >/dev/null 2>&1 || true; fi
   if [ "$ns_made" = 1 ]; then kubectl delete namespace "$ns" --ignore-not-found --wait=false >/dev/null 2>&1 || true; fi
   if [ -n "$issuer_pid" ]; then kill "$issuer_pid" 2>/dev/null || true; fi
+  if [ -n "$mcp_pid" ]; then kill "$mcp_pid" 2>/dev/null || true; fi
   rm -rf "$work"
   exit "$status"
 }
@@ -398,6 +403,33 @@ kubectl -n "$ns" wait "pod/$client_pod" "pod/$stranger_pod" --for=condition=Read
 ok "a pod reaches the issuer's discovery document at $issuer"
 [ "$(req "$client_pod" "http://$host_addr:$control_port/token?sub=x")" = 000 ] || die "a pod reached the control port that mints tokens"
 ok "a pod does not reach the control port that mints tokens ($control is on the loopback)"
+# The stub MCP server of K3b, on this machine at the host's address, as the issuer is: the operator probes it through the chart's
+# `toolProbe` egress, and the provider's status names the tools it lists.
+mcp_bin=${TEST_MCP_BIN:-}
+if [ -z "$mcp_bin" ]; then
+  (cd "$repo" && cargo build --locked -p aap-tool-probe --example test-mcp --features testkit)
+  mcp_bin="${CARGO_TARGET_DIR:-$repo/target}/debug/examples/test-mcp"
+fi
+[ -x "$mcp_bin" ] || die "the stub MCP server is not there: $mcp_bin"
+"$mcp_bin" --listen 0.0.0.0:0 --tools list_pods,get_pod,list_namespaces > "$work/mcp.log" 2>&1 &
+mcp_pid=$!
+n=0
+until grep -q '^listening on ' "$work/mcp.log" 2>/dev/null; do
+  n=$((n + 1))
+  kill -0 "$mcp_pid" 2>/dev/null || die "the stub MCP server stopped: $(cat "$work/mcp.log")"
+  [ "$n" -le 30 ] || die "the stub MCP server did not start: $(cat "$work/mcp.log")"
+  sleep 1
+done
+mcp_line=$(sed -n 's/^listening on //p' "$work/mcp.log" | head -n 1)
+mcp_port=${mcp_line##*:}
+mcp_port=${mcp_port%%/*}
+case $mcp_port in '' | *[!0-9]*) die "no port in the stub MCP server's line: $(cat "$work/mcp.log")" ;; esac
+case $mcp_line in
+  "http://0.0.0.0:$mcp_port/mcp" | "http://127.0.0.1:$mcp_port/mcp") ;;
+  *) die "the stub MCP server names itself '$mcp_line', not http://0.0.0.0:$mcp_port/mcp or http://127.0.0.1:$mcp_port/mcp" ;;
+esac
+mcp_server_url="http://$host_addr:$mcp_port/mcp"
+ok "the stub MCP server is at $mcp_server_url (three tools); the operator will reach it through toolProbe"
 
 step "2. the Secrets, the offer, and the chart with the API on"
 # secret <name> <kubectl create secret generic args...>: a Secret of this script, with the label. One that exists and is not this script's is
@@ -451,6 +483,13 @@ api:
         - ipBlock:
             cidr: $host_addr/32
       ports: [$issuer_port]
+# K3b: the operator probes the stub MCP server on this machine, at the host's address, through exactly this peer and port. The
+# chart turns the probe on with a non-empty toolProbe.to (TOOL_PROBE_ENABLED) and keeps its DNS rule from values.yaml.
+toolProbe:
+  to:
+    - ipBlock:
+        cidr: $host_addr/32
+  ports: [$mcp_port]
 EOF
 installed=1
 helm upgrade --install aap-operator "$repo/deploy/operator" --namespace "$ns" -f "$here/api.values.yaml" -f "$work/e2e.values.yaml" \
@@ -758,6 +797,70 @@ as modeler "platform:models.write,platform:secrets.pick" DELETE "/v1/models/$mod
 expect 204 "delete the model, now that no agent names it"
 gone "modelendpoint/$model" || die "the model is still there"
 ok "no agent names the model any more: its delete is 204"
+
+step "6a. a ToolProvider, probed by the operator (K3b)"
+# The provider form: the stub MCP server's URL and no header, so the operator probes it. The API passes the status through, so the
+# tools the stub lists and the `Reachable` condition are read here, through the deployed API.
+tool_form=$(jq -n --arg name e2e-mcp --arg url "$mcp_server_url" '{
+  name: $name, title: "E2E MCP", url: $url, headers: {}, tools: [], optional: false
+}')
+tooler_tk=$(tok tooler "platform:toolproviders.write,platform:agents.read,platform:secrets.pick")
+api "$tooler_tk" PUT "/v1/tool-servers/e2e-mcp" -H 'If-None-Match: *' -H 'Content-Type: application/json' -d "$tool_form"
+expect 201 "create the tool provider"
+[ -n "$(header etag)" ] || die "the tool provider was created with no ETag"
+probed=0
+n=0
+while [ "$n" -lt 60 ]; do
+  api "$tooler_tk" GET "/v1/tool-servers/e2e-mcp"
+  expect 200 "read the tool provider"
+  if [ "$(jq -r '.status.conditions[]? | select(.type == "Reachable") | .status' "$work/body" 2>/dev/null)" = True ]; then
+    probed=1
+    break
+  fi
+  n=$((n + 1))
+  sleep 2
+done
+[ "$probed" = 1 ] || die "the operator did not probe e2e-mcp: $(head -c 600 "$work/body")"
+[ "$(jq -r '.status.conditions[]? | select(.type == "Reachable") | .reason' "$work/body")" = Probed ] \
+  || die "Reachable is not Probed: $(head -c 600 "$work/body")"
+[ "$(jq -c '.status.probe.tools' "$work/body")" = '["get_pod","list_namespaces","list_pods"]' ] \
+  || die "the tools are not the stub's: $(head -c 600 "$work/body")"
+ok "the operator probed the stub MCP server through toolProbe: Reachable True, Probed, tools get_pod, list_namespaces, list_pods"
+
+# A provider that names a header: the operator reads no Secret, so it is `Unknown`, `NeedsHeader`, and it is not probed.
+header_form=$(jq -n --arg name e2e-mcp-header --arg url "$mcp_server_url" --arg secret "$models_secret" '{
+  name: $name, title: "E2E MCP with a header", url: $url,
+  headers: {Authorization: {prefix: "Bearer ", secret: {secret: $secret, key: "GATEWAY_API_KEY"}}},
+  tools: [], optional: false
+}')
+api "$tooler_tk" PUT "/v1/tool-servers/e2e-mcp-header" -H 'If-None-Match: *' -H 'Content-Type: application/json' -d "$header_form"
+expect 201 "create the tool provider that names a header"
+unknown=0
+n=0
+while [ "$n" -lt 60 ]; do
+  api "$tooler_tk" GET "/v1/tool-servers/e2e-mcp-header"
+  expect 200 "read the tool provider that names a header"
+  if [ "$(jq -r '.status.conditions[]? | select(.type == "Reachable") | .status' "$work/body" 2>/dev/null)" = Unknown ]; then
+    unknown=1
+    break
+  fi
+  n=$((n + 1))
+  sleep 2
+done
+[ "$unknown" = 1 ] || die "the header provider was not reported Unknown: $(head -c 600 "$work/body")"
+[ "$(jq -r '.status.conditions[]? | select(.type == "Reachable") | .reason' "$work/body")" = NeedsHeader ] \
+  || die "the reason is not NeedsHeader: $(head -c 600 "$work/body")"
+[ "$(jq -r '.status.probe // "none"' "$work/body")" = none ] \
+  || die "a provider that needs a header has probe tools: $(head -c 600 "$work/body")"
+ok "a provider that names a header is Reachable Unknown, reason NeedsHeader, with no probe tools (the operator read no Secret)"
+for name in e2e-mcp e2e-mcp-header; do
+  api "$tooler_tk" GET "/v1/tool-servers/$name"
+  expect 200 "read $name"
+  etag=$(header etag)
+  api "$tooler_tk" DELETE "/v1/tool-servers/$name" -H "If-Match: $etag"
+  expect 204 "delete $name"
+done
+ok "both tool providers are deleted with their ETags"
 
 step "6b. aapctl against the deployed API"
 # K9b-1. It passed in CI (run 43706119020 at 970afa0, verified 2026-11-15); no container daemon and no kind exist where it was written (the command

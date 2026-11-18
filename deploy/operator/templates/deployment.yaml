@@ -81,6 +81,13 @@ spec:
             - name: AGENT_MAX_ACCESS_TIER
               value: {{ .Values.maxAccessTier | quote }}
             {{- end }}
+            {{- if .Values.toolProbe.to }}
+            # K3b: probe a ToolProvider's MCP server. The chart turns it on with the peers above; the timeout is the deployment's.
+            - name: TOOL_PROBE_ENABLED
+              value: "true"
+            - name: TOOL_PROBE_TIMEOUT_SECS
+              value: {{ .Values.toolProbe.timeoutSecs | default 5 | quote }}
+            {{- end }}
             {{- with .Values.tuning.concurrency }}
             - name: AAP_CONCURRENCY
               value: {{ . | quote }}

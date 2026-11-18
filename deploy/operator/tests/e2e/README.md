@@ -132,7 +132,7 @@ missing tool, would have run `helm uninstall aap-operator` and deleted `agent-a2
 * Its Secrets and its ExternalSecret have names of their own, set in the chart's values it writes and in [`api-offer.yaml`](api-offer.yaml): `e2e-agent-models` (the model's key, the sentinel), `e2e-a2a-bearer`,
   `e2e-chat-db-app` and `e2e-agent-models-es`. Each carries the label, and **one that exists without it is never overwritten**. The two curl pods are named for the run.
 * The cleanup undoes what each step recorded when it happened, in the order that lets the operator, which is still there, run the finalizer of the agent: the agent and the model if step 4 began,
-  the Helm release if the install began, the namespace (and with it the Secrets, the offer and the pods) if the script made it, then the issuer. **A run that stops before any of that** (a missing tool, a failed
+  the Helm release if the install began, the namespace (and with it the Secrets, the offer and the pods) if the script made it, then the issuer and the stub MCP server. **A run that stops before any of that** (a missing tool, a failed
   build, a refused context or namespace) **uninstalls and deletes nothing**. `INT`, `TERM` and `HUP` run it too (dash does not run an `EXIT` trap for a signal by itself). The CRDs stay.
 
 | Variable | Default | Says |
@@ -141,6 +141,7 @@ missing tool, would have run `helm uninstall aap-operator` and deleted `agent-a2
 | `AAP_E2E_ALLOW_ANY_CONTEXT` | unset | `1`: the current context may be a cluster that is not a kind cluster's, and is a throwaway one |
 | `AAP_E2E_CNI_MAY_IGNORE_POLICIES` | unset | `1`: the cluster's network plugin has no NetworkPolicy support; a pod the API's policy does not name that reaches the API is then a warning and not a failure |
 | `AAPCTL_BIN` | built by the script | the `aapctl` binary that step 6b runs (`cargo build --locked -p aap-cli`, as `TEST_ISSUER_BIN` is the issuer) |
+| `TEST_MCP_BIN` | built by the script | the stub MCP server that step 6a has the operator probe (`cargo build --locked -p aap-tool-probe --example test-mcp --features testkit`) |
 
 **The token issuer is a program on the runner.** The API checks a bearer JWT against the keys of an OIDC issuer, so the pod has to fetch an issuer's
 discovery document and keys, and the script has to get tokens for people who hold chosen permissions. [`test-issuer`](../../../../crates/auth-oidc/README.md#test-tooling-the-issuer-as-a-program)
@@ -238,6 +239,16 @@ stateDiagram-v2
   is refused: its connection is dropped (status `000`). Anything else, a `200`, a `401` or a `5xx`, fails the job: the request got through. Kind's network plugin enforces NetworkPolicies (below), so there is no
   tolerance by default; `AAP_E2E_CNI_MAY_IGNORE_POLICIES=1` is for a cluster whose plugin does not, and then a pod that got through is a warning. Either way the API's pod was Ready with the policy installed.
 
+* **The MCP probe (step 6a, K3b).** A `ToolProvider` made through the API names the stub MCP server that runs on the runner
+  ([`aap-tool-probe`](../../../../crates/tool-probe/README.md)'s `test-mcp`, at the host's address on the docker network, like the issuer), and the operator reaches it
+  through the chart's `toolProbe` egress (the values give `toolProbe.to` the host's `/32` and `toolProbe.ports` the stub's port). The provider's status, read back
+  through the API, is `Reachable: True`, reason `Probed`, with the stub's three tools sorted; a second provider that names a header of the offered Secret is
+  `Reachable: Unknown`, reason `NeedsHeader`, with no `probe` tools — the operator read no Secret. Both are deleted with their ETags. The stub is built in the job
+  (`cargo build -p aap-tool-probe --example test-mcp --features testkit`), as the issuer is; it is in no image. **Verified 2026-11-18** in CI (run
+  44325222462, job `api-e2e` 134879022830, at `56fc23e`): the stub was at `http://172.18.0.1:33655/mcp`, the operator pod reached the host's address on
+  the probe's port under kindnet, and the log holds `ok the operator probed the stub MCP server through toolProbe: Reachable True, Probed, tools
+  get_pod, list_namespaces, list_pods` and `ok a provider that names a header is Reachable Unknown, reason NeedsHeader, with no probe tools`.
+
 * **`aapctl` is a second client of the same API (step 6b, K9b-1; it passed in CI (run 43706119020, job `api-e2e` 132788532913, at `970afa0`, *verified 2026-11-15* in the job's log)).** The command line, built in the job (`AAPCTL_BIN`; the script builds it with `cargo build --locked -p aap-cli` when the variable is not set, as it builds the issuer), drives the deployed API through the port-forward with tokens of the issuer: a model **from a file** (it names a Secret key, so the token holds `platform:secrets.pick`) is `created`, then `unchanged` with no `PUT` sent; an agent that the API made and `aapctl export` printed is deleted with **`delete --wait`** (the command returns when the API answers `404`) and made again with **`aapctl apply`** from that file (the create compares the file's deployment part with the server's defaults, which are the ones that made it) and becomes `ready`; applied again it is `unchanged` and nothing is written; **`--if-match` with the tag of before a change is exit 3** (`412 stale`) and changes nothing; apply with no tag puts the file's title back (`configured`); **a token without `platform:agents.write` is exit 4** and the refusal names it; **`login --token-stdin`** keeps a token in a file of mode `0600` (stat), `whoami` uses it and `logout` forgets it (exit 4 after); the agent and then the model are deleted with `aapctl`. Every token is minted by the issuer and written to `$work/tokens`, and **every byte `aapctl` says, its `--verbose` trace included, is appended to `$work/seen`**, which step 7 reads for the sentinel and for each token (and each token's payload and signature): none may be in it. The proxy variables are dropped from its environment (the runner may set one; `aapctl` never sends a plain-http loopback request, which the port-forward is, through a proxy since the review of K9b-1, and dropping them keeps the step independent of that rule). `render-check.sh` holds that the step is before step 7, that the token reaches the binary in its environment and never as an argument, that its output goes to `seen`, and that the job builds the binary.
 
 ### What it does not prove
@@ -248,8 +259,10 @@ stateDiagram-v2
 * **NetworkPolicy enforcement is kind's, not proven by this script alone.** kind's default network plugin, kindnet, **enforced** a NetworkPolicy in the coder end-to-end (*verified 2026-10-16*, `operator-coder-e2e` of run 38892472909 on `main` (kind v0.33.0, node v1.35.8): `ok   a pod the registry's NetworkPolicy does not name cannot read it (status 000)`; its ClusterRole may list and watch NetworkPolicies, pods and namespaces: `pkg/build/nodeimage/const_cni.go` of kind v0.33.0), so this job runs under enforcement, and the API's pod being Ready then shows that its ingress rule (the health port is not in it: the kubelet's probes come from the node) and its three egress rules were enough. **The script requires the refusal** (it accepted either outcome before the review of 2026-10-16, which let the check pass without proving anything); what only a run of the job can show is that kindnet does refuse this pod on this policy. `apiServer.cidrs` is empty in these values (any address on 443 and 6443), so the rule that is narrow is the issuer's, a /32.
 * **`preStop.sleep` and a rolling update.** The pod has the hook (the script checks the pod spec) and Kubernetes 1.35 has the feature on; that a request in flight survives a
   rollout, and what the sleep does for a client, is not measured.
-* **A real agent image, CloudNativePG, a coder, a tool server, a suspend.** The agent is a folder agent on the stand-in (it answers `/healthz` and a card), its ledger is a
-  Secret nobody opens. A coder form (which needs a GitHub App key) and the tool-server routes are the crate's tests'.
+* **A real agent image, CloudNativePG, a coder, a suspend.** The agent is a folder agent on the stand-in (it answers `/healthz` and a card), its ledger is a
+  Secret nobody opens. A coder form (which needs a GitHub App key) is the crate's tests'.
+* **An MCP server over https, or one that needs a session or a header.** Step 6a's stub is `http` on the runner; the operator image's CA roots (rustls
+  with native roots) and a real server's TLS are *unverified*. A server that names a header is `NeedsHeader` by design (the operator reads no Secret).
 * **Two replicas, an upgrade of the API in place, a restart of the issuer** (the key cache's grace period is `aap-auth-oidc`'s tests').
 * **The log's colour.** The binary's `tracing-subscriber` writes ANSI colour codes into the pod's log (`fmt()` with no `with_ansi`: `bin/api/src/main.rs`; *observed 2026-10-16* with stderr redirected to a file in the walk described below); the script strips them before it
   looks for a request line. The operator's log is set up the same way (`bin/operator/src/main.rs`). *Not changed here* (a decision for the owner, §60a).

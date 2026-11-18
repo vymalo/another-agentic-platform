@@ -16,6 +16,7 @@ members = [
     "crates/platform-client",
     "crates/trace",
     "crates/trace-otlp",
+    "crates/tool-probe",
     "bin/operator",
     "bin/api",
     "bin/cli",
@@ -46,6 +47,7 @@ aap-platform-api = { path = "crates/platform-api" }
 aap-platform-client = { path = "crates/platform-client" }
 aap-trace = { path = "crates/trace" }
 aap-trace-otlp = { path = "crates/trace-otlp" }
+aap-tool-probe = { path = "crates/tool-probe" }
 anyhow = "1"
 aws-lc-rs = "1.15"
 axum = { version = "0.8", default-features = false, features = ["http1", "tokio"] }

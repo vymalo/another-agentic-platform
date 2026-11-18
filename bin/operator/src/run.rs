@@ -87,6 +87,22 @@ pub struct RunArgs {
     /// gets the ceiling when it is lower than `auto`.
     #[arg(long, env = "AGENT_MAX_ACCESS_TIER", default_value = "auto", value_parser = parse_tier)]
     pub max_access_tier: aap_api::AccessTierCap,
+
+    /// Probe the MCP servers of `ToolProvider`s (K3b, AD-053): `initialize` and `tools/list`, and the reachability and
+    /// tool names in the provider's status. **Off by default**: no request is made and the status has no `Reachable`
+    /// condition. The chart sets it when `toolProbe.to` lists the peers the operator may reach.
+    #[arg(long, env = "TOOL_PROBE_ENABLED")]
+    pub tool_probe_enabled: bool,
+
+    /// How long one probe may take, in seconds (1 to 60). A server that does not answer by then is `Reachable: False`,
+    /// reason `Timeout`.
+    #[arg(
+        long,
+        env = "TOOL_PROBE_TIMEOUT_SECS",
+        default_value_t = 5,
+        value_parser = clap::value_parser!(u64).range(1..=60)
+    )]
+    pub tool_probe_timeout_secs: u64,
 }
 
 fn parse_tier(s: &str) -> Result<aap_api::AccessTierCap, String> {
@@ -209,6 +225,10 @@ impl RunArgs {
                 .filter(|c| !c.is_empty())
                 .collect(),
             max_access_tier: self.max_access_tier,
+            probe: aap_controller::Probe {
+                enabled: self.tool_probe_enabled,
+                timeout: std::time::Duration::from_secs(self.tool_probe_timeout_secs),
+            },
         }
     }
 }
@@ -373,6 +393,7 @@ async fn run_with(args: RunArgs, tracer: aap_trace::Tracer) -> Result<()> {
             .run_pods
             .as_ref()
             .map_or_else(|| "(no run pods)".to_owned(), |s| s.class_names().join(",")),
+        tool_probe = options.probe.enabled,
         "starting the operator {}",
         env!("CARGO_PKG_VERSION")
     );
