@@ -611,6 +611,22 @@ async fn session() -> Vec<Seen> {
     let r = api.get("/v1/agents/chat/events").token(&sees).send().await;
     rec.add("GET", "/v1/agents/{name}/events", r);
 
+    // K3b: a tool server's status carries the probe's tools and `Reachable`; the answer must validate against the schema.
+    api.objects.set_status(
+        Kind::ToolProvider,
+        "docs",
+        json!({
+            "usedBy": [],
+            "conditions": [{
+                "type": "Reachable",
+                "status": "True",
+                "reason": "Probed",
+                "message": "1 tool",
+                "lastTransitionTime": "2026-11-18T00:00:00Z"
+            }],
+            "probe": { "tools": ["list_pods"], "toolsMore": 1, "incomplete": true }
+        }),
+    );
     for (listing, one, put_template, form) in [
         (
             "/v1/models",
