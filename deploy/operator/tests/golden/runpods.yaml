@@ -198,7 +198,7 @@ apiVersion: v1
 kind: ConfigMap
 metadata:
   name: aap-operator-run-pods-settings
-  namespace: agents
+  namespace: another-agentic-system
   labels:
     app.kubernetes.io/name: aap-operator
     app.kubernetes.io/instance: aap-operator
@@ -409,9 +409,10 @@ rules:
 # runPods.enabled: what an agent's account may do with pods: make, find, watch and delete them, and exec in them. Nothing else: no
 # Secret, no ConfigMap, no other kind. `get` on pods/exec as well as `create`: kube's exec is a WebSocket, which the API server
 # authorizes as a GET (and, from Kubernetes 1.35, as a create too; *unverified*). It is the coder chart's Role (adam-rs
-# `run-pods-rbac.yaml`), once for the namespace: the operator makes a RoleBinding of it for each agent that asks for run pods, and
-# holds the right to bind this Role and no right of its own to make a pod or exec. A Role cannot name the pods it may exec in, so an
-# account bound to it may exec in ANY pod of this namespace (the coder chart's Role has the same reach): README "Run pods".
+# `run-pods-rbac.yaml`), once for each namespace the operator watches (K6a): the operator makes a RoleBinding of it for each agent that
+# asks for run pods, and holds the right to bind this Role and no right of its own to make a pod or exec. A Role cannot name the pods it
+# may exec in, so an account bound to it may exec in ANY pod of this namespace (the coder chart's Role has the same reach): README
+# "Run pods".
 apiVersion: rbac.authorization.k8s.io/v1
 kind: Role
 metadata:
@@ -666,7 +667,7 @@ spec:
         app.kubernetes.io/instance: aap-operator
       annotations:
         # The settings for run pods are read once, at start: a changed file is a new pod.
-        checksum/run-pods: b5e9bbbbe09e34ecb2bbfba0983232bb19689388b15d8b5ed8045e8549733360
+        checksum/run-pods: 4d545796cd39911c092af409ec87d95b3bbac90dc2ef214db49fc0edf09d4b93
     spec:
       serviceAccountName: aap-operator
       # The API token is the operator's way in.
@@ -834,5 +835,8 @@ spec:
     parameterNotFoundAction: Allow
   matchResources:
     namespaceSelector:
-      matchLabels:
-        kubernetes.io/metadata.name: agents
+      matchExpressions:
+        - key: kubernetes.io/metadata.name
+          operator: In
+          values:
+            - agents

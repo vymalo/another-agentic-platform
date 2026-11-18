@@ -1,15 +1,21 @@
 {{- /*
 The rights of `operator run`, namespaced: what the READMEs of the crates list, nothing more (bin/operator/README.md,
 "Cluster rights"). No right on Secrets, no ClusterRole, no wildcard. `patch` and `create` both, where the provider applies
-an object that may not be there yet (server-side apply is authorised by both).
+an object that may not be there yet (server-side apply is authorised by both). K6a: one Role in each namespace the operator
+watches (watchNamespaces, else watchNamespace, else the release's), and never a ClusterRole.
 */ -}}
+{{- $namespaces := include "aap.watchNamespaces" . | fromJsonArray -}}
+{{- range $i, $ns := $namespaces }}
+{{- if $i }}
+---
+{{- end }}
 apiVersion: rbac.authorization.k8s.io/v1
 kind: Role
 metadata:
-  name: {{ include "aap.fullname" . }}
-  namespace: {{ include "aap.watchNamespace" . }}
+  name: {{ include "aap.fullname" $ }}
+  namespace: {{ $ns }}
   labels:
-    {{- include "aap.labels" . | nindent 4 }}
+    {{- include "aap.labels" $ | nindent 4 }}
 rules:
   # aap-controller: the two kinds (patch also writes metadata.finalizers), their status, and Events.
   - apiGroups: [agents.vymalo.com]
@@ -46,7 +52,7 @@ rules:
   - apiGroups: [""]
     resources: [pods]
     verbs: [list, watch]
-  {{- if include "aap.runPods" . }}
+  {{- if include "aap.runPods" $ }}
   # aap-runtime-kubernetes, run pods (slice D15a): the account an agent's workers run as, what its run pods may use, and the binding of
   # the account to the Role made for run pods (run-pods-role.yaml). The operator makes no Role: it holds the right to BIND that one, by
   # name, and no right of its own to make a pod or exec, which Kubernetes would require of it to make a Role with those verbs itself
@@ -61,14 +67,15 @@ rules:
   - apiGroups: [rbac.authorization.k8s.io]
     resources: [roles]
     verbs: [bind]
-    resourceNames: [{{ include "aap.runPodsRole" . }}]
+    resourceNames: [{{ include "aap.runPodsRole" $ }}]
   - apiGroups: [""]
     resources: [pods]
     verbs: [delete]
   {{- end }}
-  {{- if .Values.storeCnpg }}
+  {{- if $.Values.storeCnpg }}
   # aap-store-cnpg: the Cluster of a service that asks for one. None on databases, poolers or clusters/status.
   - apiGroups: [postgresql.cnpg.io]
     resources: [clusters]
     verbs: [get, patch, create, delete]
   {{- end }}
+{{- end }}

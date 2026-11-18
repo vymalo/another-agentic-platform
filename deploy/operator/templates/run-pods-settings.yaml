@@ -10,7 +10,7 @@ apiVersion: v1
 kind: ConfigMap
 metadata:
   name: {{ include "aap.runPodsSettings" . }}
-  namespace: {{ include "aap.watchNamespace" . }}
+  namespace: {{ .Release.Namespace }}
   labels:
     {{- include "aap.labels" . | nindent 4 }}
 data:

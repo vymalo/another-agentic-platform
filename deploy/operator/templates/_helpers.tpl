@@ -40,9 +40,29 @@ helm.sh/chart: {{ printf "%s-%s" .Chart.Name .Chart.Version | replace "+" "_" | 
 {{- end -}}
 {{- end -}}
 
-{{/* The namespace the operator watches, and where its Role is: watchNamespace, else the release's. */}}
+{{/* The primary namespace the operator watches: watchNamespace, else the first of watchNamespaces, else the release's. It is where the
+run-pods settings ConfigMap, the cluster-scoped policy and the PriorityClass are named from, and what the API's defaults.namespace must
+be. A watchNamespaces that is not a list is left to aap.validate to refuse by name: `index` on a map would fail here first with a raw
+reflect error, before the template that runs the checks. */}}
 {{- define "aap.watchNamespace" -}}
-{{- default .Release.Namespace .Values.watchNamespace -}}
+{{- if .Values.watchNamespace -}}
+{{- .Values.watchNamespace -}}
+{{- else if and .Values.watchNamespaces (kindIs "slice" .Values.watchNamespaces) -}}
+{{- index .Values.watchNamespaces 0 -}}
+{{- else -}}
+{{- .Release.Namespace -}}
+{{- end -}}
+{{- end -}}
+
+{{/* Every namespace the operator watches, as a JSON list: watchNamespaces, else the one of aap.watchNamespace. The Role and
+RoleBinding, and the run pods' Role, are rendered in each. Helm's fromJsonArray turns a JSON error into a one-element list, so a
+value that is not a list is left to aap.validate to refuse by name. */}}
+{{- define "aap.watchNamespaces" -}}
+{{- if and .Values.watchNamespaces (kindIs "slice" .Values.watchNamespaces) -}}
+{{- toJson .Values.watchNamespaces -}}
+{{- else -}}
+{{- toJson (list (include "aap.watchNamespace" .)) -}}
+{{- end -}}
 {{- end -}}
 
 {{- define "aap.serviceAccountName" -}}

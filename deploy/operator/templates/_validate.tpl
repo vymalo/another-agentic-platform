@@ -35,9 +35,24 @@ Included from deployment.yaml, which every render has, so they always run.
 {{- if and .Values.image.digest (not (regexMatch "^sha256:[0-9a-f]{64}$" (toString .Values.image.digest))) -}}
 {{- fail (printf "image.digest must be sha256: and 64 hex digits, got %q" (toString .Values.image.digest)) -}}
 {{- end -}}
-{{- /* The namespace it watches: one, named. */ -}}
-{{- if and .Values.watchNamespace (not (regexMatch "^[a-z0-9]([-a-z0-9]*[a-z0-9])?$" (toString .Values.watchNamespace))) -}}
+{{- /* The namespace it watches: one, named, and a string (a number that reads as a DNS label is still a number in YAML). */ -}}
+{{- if and .Values.watchNamespace (or (not (kindIs "string" .Values.watchNamespace)) (not (regexMatch "^[a-z0-9]([-a-z0-9]*[a-z0-9])?$" (toString .Values.watchNamespace)))) -}}
 {{- fail (printf "watchNamespace must be one namespace name (a DNS label), got %q: the operator is namespaced and has no value that watches every namespace" (toString .Values.watchNamespace)) -}}
+{{- end -}}
+{{- /* K6a: several namespaces, each a name, once, and not with the one-namespace shorthand. */ -}}
+{{- if and .Values.watchNamespace .Values.watchNamespaces -}}
+{{- fail "watchNamespace and watchNamespaces are both set: use one (watchNamespaces for several, watchNamespace for one)" -}}
+{{- end -}}
+{{- if and .Values.watchNamespaces (not (kindIs "slice" .Values.watchNamespaces)) -}}
+{{- fail "watchNamespaces must be a list of namespace names (an empty list is the release's namespace)" -}}
+{{- end -}}
+{{- range $ns := .Values.watchNamespaces -}}
+{{- if or (not (kindIs "string" $ns)) (not (regexMatch "^[a-z0-9]([-a-z0-9]*[a-z0-9])?$" (toString $ns))) -}}
+{{- fail (printf "watchNamespaces: %q is not a namespace name (a DNS label)" (toString $ns)) -}}
+{{- end -}}
+{{- end -}}
+{{- if and .Values.watchNamespaces (kindIs "slice" .Values.watchNamespaces) (ne (len .Values.watchNamespaces) (len (uniq .Values.watchNamespaces))) -}}
+{{- fail "watchNamespaces names a namespace twice" -}}
 {{- end -}}
 {{- /* The default agent image (AD-029): empty is none; a value is pinned by tag and digest, as the operator's own image is. */ -}}
 {{- if not (has (toString .Values.maxAccessTier) (list "plan" "edits" "auto" "bypass")) -}}
@@ -592,7 +607,7 @@ for each tested shape (tests/api-shapes.sh) to find such a value before it is de
 {{- /* The deployment's defaults: the namespace is the chart's, one store, the images an agent may pin. */ -}}
 {{- $d := default (dict) $c.defaults -}}
 {{- if and (hasKey $d "namespace") (ne (toString $d.namespace) (include "aap.api.namespace" .)) -}}
-{{- fail (printf "api.config.defaults.namespace is %q but the operator watches %q: the API writes the objects the operator reconciles, so it is the same namespace (leave the key out; watchNamespace sets both)" (toString $d.namespace) (include "aap.api.namespace" .)) -}}
+{{- fail (printf "api.config.defaults.namespace is %q but the operator watches %q: the API writes the objects the operator reconciles, so it is the same namespace (leave the key out; watchNamespace/watchNamespaces set both)" (toString $d.namespace) (include "aap.api.namespace" .)) -}}
 {{- end -}}
 {{- /* The keys of aap_forms::Defaults. The types below them are the CRDs' own and the binary refuses an unknown key there; the chart checks no deeper than this level, the peers and the store. */ -}}
 {{- /* Run pods mount the coder's work volume, whole: the API refuses to start when its defaults offer run pods and a coder could not have them. */ -}}

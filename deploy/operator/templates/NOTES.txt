@@ -1,6 +1,9 @@
 {{- /* The values are checked first, so that a value that is not what the notes read below is a named refusal and not a nil pointer here. */ -}}
 {{- include "aap.validate" . -}}
-The operator watches the namespace {{ include "aap.watchNamespace" . }} and reconciles AgentService and AgentConfig there.
+The operator watches the namespace {{ include "aap.watchNamespace" . }} (the primary) and reconciles AgentService and AgentConfig there.
+{{- if and .Values.watchNamespaces (gt (len .Values.watchNamespaces) 1) }}
+The chart makes the Role and RoleBinding in each namespace of watchNamespaces ({{ join ", " .Values.watchNamespaces }}); the operator watches the primary until K6b.
+{{- end }}
 {{- if include "aap.registrySecretName" . }}
 The agent registry is served at http://{{ include "aap.fullname" . }}-registry.{{ .Release.Namespace }}.svc:8080/registry/v1/agents (bearer token from the Secret {{ include "aap.registrySecretName" . }}).
 {{- else }}

@@ -1,4 +1,5 @@
 {{- if include "aap.runPods" . }}
+{{- $namespaces := include "aap.watchNamespaces" . | fromJsonArray -}}
 # runPods.enabled: the guard that lets an agent's account make pods without being able to read the namespace's other Secrets, mount
 # the host or run anything privileged. It is the coder chart's policy (adam-rs `run-pods-admission.yaml`) with what differs per agent
 # read from a parameter: a ConfigMap of the agent's, labelled {{ include "aap.runPodsPolicyLabel" . }}, which the operator makes for each agent
@@ -70,6 +71,9 @@ spec:
     parameterNotFoundAction: Allow
   matchResources:
     namespaceSelector:
-      matchLabels:
-        kubernetes.io/metadata.name: {{ include "aap.watchNamespace" . }}
+      matchExpressions:
+        - key: kubernetes.io/metadata.name
+          operator: In
+          values:
+            {{- toYaml $namespaces | nindent 12 }}
 {{- end }}

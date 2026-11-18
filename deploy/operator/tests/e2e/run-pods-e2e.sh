@@ -634,7 +634,7 @@ kubectl get validatingadmissionpolicybinding "$policy" -o json > "$work/vapb.jso
 jqok "$work/vapb.json" "the binding of the admission policy does not Deny, or does not Allow a missing parameter, or names another policy" \
   --arg p "$policy" '.spec.policyName == $p and .spec.validationActions == ["Deny"] and .spec.paramRef.parameterNotFoundAction == "Allow"'
 jqok "$work/vapb.json" "the binding of the admission policy does not select this namespace" --arg ns "$ns" \
-  '.spec.matchResources.namespaceSelector.matchLabels["kubernetes.io/metadata.name"] == $ns'
+  '.spec.matchResources.namespaceSelector.matchExpressions == [{"key": "kubernetes.io/metadata.name", "operator": "In", "values": [$ns]}]'
 # The API server type-checks the policy's CEL after it is made, and says what it found in the status: a warning is a mistake of the chart. Until it
 # has looked (status.observedGeneration) an empty answer means nothing; if it does not look in a minute, say so and go on.
 n=0
