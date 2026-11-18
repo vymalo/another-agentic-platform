@@ -1,6 +1,6 @@
 apiVersion: v2
 name: aap-operator
-description: "The another-agentic-platform operator (§59a): one replica that reconciles AgentService and AgentConfig in the first namespace of watchNamespaces (the chart makes the Role and RoleBinding in each; K6b watches them all), and serves the agent registry; off by default, the Platform API (api.enabled), the dashboard's REST API, as a Deployment of its own. The CRDs are the chart deploy/operator-crds; the agents are custom resources, not part of this chart."
+description: "The another-agentic-platform operator (§59a): one replica that reconciles AgentService and AgentConfig in every namespace of watchNamespaces (the first is the primary), and serves the agent registry; off by default, the Platform API (api.enabled), the dashboard's REST API, as a Deployment of its own. The CRDs are the chart deploy/operator-crds; the agents are custom resources, not part of this chart."
 type: application
 version: 0.1.0
 appVersion: "0.1.0"

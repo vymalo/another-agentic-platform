@@ -163,6 +163,65 @@ fn secrets_of(name: &str) -> [(String, Vec<&'static str>); 2] {
     ]
 }
 
+/// A namespace of a case's own, made the way `kubectl apply` would.
+async fn make_namespace(client: &Client, name: &str) {
+    let namespaces: Api<Namespace> = Api::all(client.clone());
+    let namespace: Namespace = serde_json::from_value(json!({
+        "apiVersion": "v1", "kind": "Namespace", "metadata": {"name": name}
+    }))
+    .unwrap();
+    namespaces
+        .patch(
+            name,
+            &PatchParams::apply("aap-e2e"),
+            &Patch::Apply(&namespace),
+        )
+        .await
+        .unwrap_or_else(|e| panic!("namespace {name}: {e}"));
+}
+
+/// Apply an object in `namespace` the way `kubectl apply --server-side` does.
+async fn apply_in<K>(client: &Client, namespace: &str, object: &Value)
+where
+    K: kube::Resource<Scope = kube::core::NamespaceResourceScope, DynamicType = ()>
+        + Clone
+        + serde::de::DeserializeOwned
+        + std::fmt::Debug,
+{
+    let name = object["metadata"]["name"].as_str().unwrap();
+    Api::<K>::namespaced(client.clone(), namespace)
+        .patch(
+            name,
+            &PatchParams::apply("aap-e2e").force(),
+            &Patch::Apply(object),
+        )
+        .await
+        .unwrap_or_else(|e| panic!("applying {name} in {namespace}: {e}"));
+}
+
+/// The Secrets a pod of `name` reads, with a dummy value (the harness plays the deployment).
+async fn apply_secrets(client: &Client, namespace: &str, name: &str) {
+    for (secret, keys) in secrets_of(name) {
+        let data: serde_json::Map<String, Value> = keys
+            .iter()
+            .map(|k| ((*k).to_owned(), json!("dummy")))
+            .collect();
+        let s: Secret = serde_json::from_value(json!({
+            "apiVersion": "v1", "kind": "Secret",
+            "metadata": {"name": secret}, "stringData": data,
+        }))
+        .unwrap();
+        Api::<Secret>::namespaced(client.clone(), namespace)
+            .patch(
+                &secret,
+                &PatchParams::apply("aap-e2e").force(),
+                &Patch::Apply(&s),
+            )
+            .await
+            .unwrap_or_else(|e| panic!("secret {secret} in {namespace}: {e}"));
+    }
+}
+
 /// The manifests above are valid, and resolve: run without a cluster, so a broken fixture is not found by CI
 /// minutes into a kind job.
 #[test]
@@ -320,7 +379,10 @@ fn free_port() -> u16 {
 impl OperatorProc {
     /// `registry_token`: the token the registry demands, written to a file the operator reads. `None`: no
     /// `REGISTRY_TOKEN_FILE`, so no registry (fail closed), which is what most cases run with.
-    fn spawn(cluster: &Cluster, namespace: &str, registry_token: Option<&str>) -> Self {
+    ///
+    /// `namespaces`: the ones it watches (`WATCH_NAMESPACES`, K6b); the first is the primary (`WATCH_NAMESPACE`).
+    fn spawn(cluster: &Cluster, namespaces: &[&str], registry_token: Option<&str>) -> Self {
+        let namespace = namespaces.first().copied().unwrap_or_default();
         let log = std::env::temp_dir().join(format!("aap-e2e-{namespace}-{}.log", free_port()));
         let (health, metrics, registry) = (free_port(), free_port(), free_port());
         let mut command = Command::new(env!("CARGO_BIN_EXE_operator"));
@@ -333,6 +395,7 @@ impl OperatorProc {
         let child = command
             .arg("run")
             .env("KUBECONFIG", &cluster.kubeconfig)
+            .env("WATCH_NAMESPACES", namespaces.join(","))
             .env("WATCH_NAMESPACE", namespace)
             .env("HEALTH_ADDR", format!("127.0.0.1:{health}"))
             .env("METRICS_ADDR", format!("127.0.0.1:{metrics}"))
@@ -419,24 +482,12 @@ impl<'a> Case<'a> {
             .unwrap()
             .as_nanos();
         let ns = format!("aap-e2e-{prefix}-{:x}", nanos & 0xff_ffff);
-        let namespaces: Api<Namespace> = Api::all(cluster.client.clone());
-        let namespace: Namespace = serde_json::from_value(json!({
-            "apiVersion": "v1", "kind": "Namespace", "metadata": {"name": ns}
-        }))
-        .unwrap();
-        namespaces
-            .patch(
-                &ns,
-                &PatchParams::apply("aap-e2e"),
-                &Patch::Apply(&namespace),
-            )
-            .await
-            .unwrap_or_else(|e| panic!("namespace {ns}: {e}"));
+        make_namespace(&cluster.client, &ns).await;
 
         let emulator = cluster
             .no_workloads
             .then(|| tokio::spawn(emulate_workloads(cluster.client.clone(), ns.clone())));
-        let operator = Some(OperatorProc::spawn(cluster, &ns, registry_token));
+        let operator = Some(OperatorProc::spawn(cluster, &[ns.as_str()], registry_token));
         Case {
             cluster,
             ns,
@@ -463,38 +514,12 @@ impl<'a> Case<'a> {
             + serde::de::DeserializeOwned
             + std::fmt::Debug,
     {
-        let name = object["metadata"]["name"].as_str().unwrap();
-        self.api::<K>()
-            .patch(
-                name,
-                &PatchParams::apply("aap-e2e").force(),
-                &Patch::Apply(object),
-            )
-            .await
-            .unwrap_or_else(|e| panic!("applying {name}: {e}"));
+        apply_in::<K>(&self.cluster.client, &self.ns, object).await;
     }
 
     /// The Secrets a pod of `name` reads, with a dummy value (the harness plays the deployment).
     async fn secrets(&self, name: &str) {
-        for (secret, keys) in secrets_of(name) {
-            let data: serde_json::Map<String, Value> = keys
-                .iter()
-                .map(|k| ((*k).to_owned(), json!("dummy")))
-                .collect();
-            let s: Secret = serde_json::from_value(json!({
-                "apiVersion": "v1", "kind": "Secret",
-                "metadata": {"name": secret}, "stringData": data,
-            }))
-            .unwrap();
-            self.api::<Secret>()
-                .patch(
-                    &secret,
-                    &PatchParams::apply("aap-e2e").force(),
-                    &Patch::Apply(&s),
-                )
-                .await
-                .unwrap_or_else(|e| panic!("secret {secret}: {e}"));
-        }
+        apply_secrets(&self.cluster.client, &self.ns, name).await;
     }
 
     async fn service(&self, name: &str) -> Option<Value> {
@@ -1151,7 +1176,7 @@ async fn a_deletion_that_happens_while_the_operator_is_down_completes_when_it_re
         "nothing has run the delete yet"
     );
 
-    case.operator = Some(OperatorProc::spawn(&cluster, &case.ns, None));
+    case.operator = Some(OperatorProc::spawn(&cluster, &[case.ns.as_str()], None));
     case.gone::<AgentService>("chat", 120).await;
     case.gone::<Deployment>("chat", 60).await;
     case.finish().await;
@@ -1532,8 +1557,117 @@ async fn without_a_token_no_registry_is_served_and_nothing_is_listed() {
     case.finish().await;
 }
 
-// ------------------------------------------------- the shared objects of the dashboard (D2)
+/// K6b: one operator over **two namespaces**, one set of controllers and caches each (`WATCH_NAMESPACES`), and a
+/// service id both of them use. Both agents are made and `Ready`; the registry lists **neither** of the two (the
+/// registry's rule: "the first" would be the directory's order, not a decision of the platform's); and when one goes,
+/// the survivor is listed. The two services' own `Listed` conditions still say `True`, which is the gap the K6b
+/// report names: the controller does not build the document, so it cannot know.
+#[tokio::test]
+async fn an_operator_over_two_namespaces_lists_neither_of_a_shared_id_until_one_goes() {
+    let Some(cluster) = connect().await else {
+        return;
+    };
+    const TOKEN: &str = "e2e-two-namespaces-token-9a41";
+    let nanos = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_nanos();
+    let namespaces: Vec<String> = ["a", "b"]
+        .map(|suffix| format!("aap-e2e-two-{suffix}-{:x}", nanos & 0xff_ffff))
+        .into();
+    for ns in &namespaces {
+        make_namespace(&cluster.client, ns).await;
+    }
+    let mut operator = OperatorProc::spawn(
+        &cluster,
+        &namespaces.iter().map(String::as_str).collect::<Vec<_>>(),
+        Some(TOKEN),
+    );
+    let port = operator.registry;
 
+    // The same service and config in both namespaces: a name is unique only within one.
+    for ns in &namespaces {
+        apply_secrets(&cluster.client, ns, "chat").await;
+        let (svc, cfg) = chat("chat", &cluster.image);
+        apply_in::<aap_api::AgentConfig>(&cluster.client, ns, &cfg).await;
+        apply_in::<AgentService>(&cluster.client, ns, &svc).await;
+    }
+    for ns in &namespaces {
+        let ready = poll(
+            &format!("the service of {ns} to be Ready and Listed"),
+            240,
+            || async {
+                let svc = Api::<AgentService>::namespaced(cluster.client.clone(), ns)
+                    .get_opt("chat")
+                    .await
+                    .ok()??;
+                let status = serde_json::to_value(svc.status?).ok()?;
+                (state(&status) == "Ready" && is(&status, "Listed", "True", "Listed"))
+                    .then_some(status)
+            },
+        )
+        .await;
+        assert!(is(&ready, "Ready", "True", "Reconciled"), "{ready:#}");
+    }
+
+    // The document lists neither, and says nothing of an item at all.
+    let auth = format!("Bearer {TOKEN}");
+    let (code, _, body) = poll("the registry to answer", 60, || async {
+        http_request(
+            port,
+            "GET",
+            "/registry/v1/agents",
+            &[("Authorization", &auth)],
+        )
+        .await
+    })
+    .await;
+    assert_eq!(code, 200, "{body}");
+    assert!(!body.contains(r#""service":["chat"]"#), "{body}");
+    assert!(!body.contains(r#""item""#), "{body}");
+    assert!(!body.contains(TOKEN), "{body}");
+
+    // One goes: the survivor is listed at once, and only it.
+    Api::<AgentService>::namespaced(cluster.client.clone(), &namespaces[1])
+        .delete("chat", &DeleteParams::default())
+        .await
+        .unwrap();
+    poll("the survivor to be listed", 120, || async {
+        let (code, _, body) = http_request(
+            port,
+            "GET",
+            "/registry/v1/agents",
+            &[("Authorization", &auth)],
+        )
+        .await?;
+        (code == 200 && body.contains(r#""service":["chat"]"#)).then_some(())
+    })
+    .await;
+    let (_, _, body) = http_request(
+        port,
+        "GET",
+        "/registry/v1/agents",
+        &[("Authorization", &auth)],
+    )
+    .await
+    .unwrap();
+    let card = format!(
+        "http://chat.{}.svc:8080/.well-known/agent-card.json",
+        namespaces[0]
+    );
+    assert!(body.contains(&card), "{body}");
+
+    // Undo what this case made: the operator first (its watches would recreate nothing, but they hold), then the
+    // namespaces, best effort, as every case does.
+    operator.stop();
+    for ns in &namespaces {
+        let _ = Api::<Namespace>::all(cluster.client.clone())
+            .delete(ns, &DeleteParams::default())
+            .await;
+    }
+}
+
+// ------------------------------------------------- the shared objects of the dashboard (D2)
 /// The manifests of the case below: a `ModelEndpoint`, a `ToolProvider`, and a folder agent that references both
 /// and names no image.
 fn shared_fixtures(image: &str) -> (Value, Value, Value, Value) {

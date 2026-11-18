@@ -198,3 +198,57 @@ pub trait RuntimeProvider: Send + Sync {
     /// timer and reads [`status`](Self::status).
     fn watch(&self) -> BoxStream<'static, RuntimeId>;
 }
+
+/// An `Arc` of a provider is a provider: every call is the one it wraps. It is how a composition root hands the
+/// same provider to several controllers (the operator holds one shard per namespace, K6b) when the provider is not
+/// `Clone` itself, and it changes nothing of what a call does.
+impl<T: RuntimeProvider + ?Sized> RuntimeProvider for std::sync::Arc<T> {
+    fn name(&self) -> &'static str {
+        (**self).name()
+    }
+
+    fn capabilities(&self) -> Capabilities {
+        (**self).capabilities()
+    }
+
+    fn ensure(
+        &self,
+        id: &RuntimeId,
+        spec: &RuntimeSpec,
+    ) -> impl Future<Output = Result<RuntimeStatus, RuntimeError>> + Send {
+        (**self).ensure(id, spec)
+    }
+
+    fn suspend(
+        &self,
+        id: &RuntimeId,
+    ) -> impl Future<Output = Result<RuntimeStatus, RuntimeError>> + Send {
+        (**self).suspend(id)
+    }
+
+    fn delete(
+        &self,
+        id: &RuntimeId,
+    ) -> impl Future<Output = Result<DeleteOutcome, RuntimeError>> + Send {
+        (**self).delete(id)
+    }
+
+    fn status(
+        &self,
+        id: &RuntimeId,
+    ) -> impl Future<Output = Result<RuntimeStatus, RuntimeError>> + Send {
+        (**self).status(id)
+    }
+
+    fn endpoint(
+        &self,
+        id: &RuntimeId,
+        surface: Surface,
+    ) -> impl Future<Output = Result<Endpoint, RuntimeError>> + Send {
+        (**self).endpoint(id, surface)
+    }
+
+    fn watch(&self) -> BoxStream<'static, RuntimeId> {
+        (**self).watch()
+    }
+}

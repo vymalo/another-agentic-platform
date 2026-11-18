@@ -165,6 +165,7 @@ check "the image is a sha-<7 hex> tag of the operator package" \
   dhas Deployment aap-operator 'image: "ghcr.io/vymalo/another-agentic-platform/operator:sha-[0-9a-f]{7}"'
 check "the container runs \`run\`" dhas Deployment aap-operator '^          args: \[run\]$'
 check "WATCH_NAMESPACE is the release's namespace" dhas Deployment aap-operator "value: \"$ns\""
+check "WATCH_NAMESPACES is the one namespace the chart watches by default" dhas Deployment aap-operator "name: WATCH_NAMESPACES" "value: \"$ns\""
 check "POD_NAME is the pod's name (the reporting instance of Events)" dhas Deployment aap-operator 'fieldPath: metadata.name'
 check "probes: /healthz twice (startup, liveness) and /readyz once, on the health port 8081" \
   dcount Deployment aap-operator 'path: /healthz' 2
@@ -225,6 +226,7 @@ check "the token is never an environment variable" lacks 'REGISTRY_TOKEN$'
 check "registry.publicUrl is REGISTRY_PUBLIC_URL" dhas Deployment aap-operator 'https://registry.example.com/registry/v1/agents'
 subject_in_release_ns() { doc RoleBinding aap-operator | grep -A3 'kind: ServiceAccount' | grep -q "namespace: $ns"; }
 check "WATCH_NAMESPACE follows watchNamespace" dhas Deployment aap-operator 'value: "agents"'
+check "WATCH_NAMESPACES follows the one namespace too" dhas Deployment aap-operator 'name: WATCH_NAMESPACES' 'value: "agents"'
 check "the Role and the binding are in the watched namespace" dhas Role aap-operator 'namespace: agents'
 check "the binding too" dhas RoleBinding aap-operator 'namespace: agents'
 check "the subject stays the release's service account" subject_in_release_ns
@@ -252,6 +254,7 @@ k6a_two() {
     && dcount RoleBinding aap-operator '^  namespace: team-a$' 1 && dcount RoleBinding aap-operator '^  namespace: team-b$' 1 \
     && dhas RoleBinding aap-operator 'namespace: another-agentic-system' \
     && dhas Deployment aap-operator 'value: "team-a"' \
+    && dhas Deployment aap-operator 'name: WATCH_NAMESPACES' 'value: "team-a,team-b"' \
     && lacks '^kind: ClusterRole$' && lacks '^kind: ClusterRoleBinding$'
 }
 check "watchNamespaces: one Role and one RoleBinding per namespace, the same rules, the binding to the release's service account, and no ClusterRole" k6a_two
@@ -292,15 +295,46 @@ watch_namespaces_too_long() {
 check "watchNamespaces: a name longer than 63 characters is refused" watch_namespaces_too_long
 render --set watchNamespaces=null
 check "watchNamespaces: null is no list, the release's namespace" dhas Role aap-operator '^  namespace: another-agentic-system$'
+# The value of the operator's WATCH_NAMESPACES variable alone: a pattern on the whole Deployment cannot tell it from
+# WATCH_NAMESPACE, which is the same string when one namespace is watched.
+watch_namespaces_value() {
+  awk '/- name: WATCH_NAMESPACES$/{getline; sub(/^[[:space:]]*value: /, ""); print}' "$out"
+}
 yaml_ambiguous_names() {
   helm template aap-operator "$chart" --namespace on --set-json 'watchNamespaces=["on","2024","agents"]' > "$out" || return 1
   dcount Role aap-operator '^  namespace: "on"$' 1 \
     && dcount Role aap-operator '^  namespace: "2024"$' 1 \
     && dcount Role aap-operator '^  namespace: agents$' 1 \
     && dhas RoleBinding aap-operator '^    namespace: "on"$' \
-    && dlacks Role aap-operator '^  namespace: on$'
+    && dlacks Role aap-operator '^  namespace: on$' \
+    && [ "$(watch_namespaces_value)" = '"on,2024,agents"' ] || return 1
+  # One ambiguous namespace alone: the whole value is `on` to YAML 1.1 unless it is quoted, and an environment value
+  # that is a boolean is refused by the API server (the same reason the Role's namespace is quoted above).
+  helm template aap-operator "$chart" --namespace on --set-json 'watchNamespaces=["on"]' > "$out" || return 1
+  [ "$(watch_namespaces_value)" = '"on"' ]
 }
 check "namespaces that YAML would read as a boolean or a number are quoted (on, 2024), and a plain one is not" yaml_ambiguous_names
+
+# ---- K6b: the operator watches the list; the kind end-to-end's values -------------------------------------------------------
+k6b_namespaces() {
+  helm template aap-operator "$chart" --namespace aap-e2e-ns-ops -f "$here/e2e/namespaces.values.yaml" \
+    --set-json 'watchNamespaces=["aap-e2e-ns-a","aap-e2e-ns-b"]' > "$out" || return 1
+  dhas Deployment aap-operator 'name: WATCH_NAMESPACES' 'value: "aap-e2e-ns-a,aap-e2e-ns-b"' \
+    && dhas Deployment aap-operator 'name: WATCH_NAMESPACE' 'value: "aap-e2e-ns-a"' \
+    && dcount Role aap-operator '^  namespace: aap-e2e-ns-a$' 1 \
+    && dcount Role aap-operator '^  namespace: aap-e2e-ns-b$' 1 \
+    && dlacks Role aap-operator '^  namespace: aap-e2e-ns-ops$' \
+    && dhas RoleBinding aap-operator 'namespace: aap-e2e-ns-ops' \
+    && dhas NetworkPolicy aap-operator 'aap-e2e/registry-reader: "true"' \
+    && dhas Deployment aap-operator 'secretName: e2e-registry-token' 'key: token'
+}
+check "K6b: the end-to-end's values watch both namespaces, make the Role and RoleBinding in each and none in the release's, and mount the token Secret" k6b_namespaces
+
+# The end-to-end scripts pull one curl image, by digest: a copy that drifts is a pin moved in one file only.
+one_curl_pin() {
+  [ "$(grep -h '^curl_image=' "$here"/e2e/*.sh | sort -u | wc -l)" -eq 1 ]
+}
+check "the end-to-end scripts pull one curl image, by digest" one_curl_pin
 
 # ---- The ExternalSecret --------------------------------------------------------------------------------------------------
 render -f "$chart/examples/netcup.values.yaml"
@@ -1315,11 +1349,11 @@ check "run pods e2e: the quota is two pods (the script fills it, is refused a th
 check "run pods e2e: no registry, no Platform API, no Ingress and no ExternalSecret are rendered: this end-to-end is about the operator and the coder" \
   lacks 'aap-operator-registry|aap-operator-api|^kind: (Ingress|ExternalSecret)$|REGISTRY_TOKEN_FILE'
 check "run pods e2e: the operator watches the namespace of the release, runs the image of the job and never pulls it" \
-  dhas Deployment aap-operator 'name: WATCH_NAMESPACE' 'value: "aap-e2e-runpods"' 'image: "operator:smoke"' 'imagePullPolicy: Never' 'name: RUN_PODS_FILE'
+  dhas Deployment aap-operator 'name: WATCH_NAMESPACES' 'value: "aap-e2e-runpods"' 'name: WATCH_NAMESPACE' 'value: "aap-e2e-runpods"' 'image: "operator:smoke"' 'imagePullPolicy: Never' 'name: RUN_PODS_FILE'
 rp_one_flag_apart() {
   # The script installs twice with one values file: with run pods off, nothing of them is rendered, and the keys they leave behind (the quota, the idle time)
   # are not checked; with the flag removed, they are all there.
-  rp_render --set runPods.enabled=false && lacks "$run_pods_traces" && dhas Deployment aap-operator 'name: WATCH_NAMESPACE' \
+  rp_render --set runPods.enabled=false && lacks "$run_pods_traces" && dhas Deployment aap-operator 'name: WATCH_NAMESPACES' 'value: "aap-e2e-runpods"' 'name: WATCH_NAMESPACE' \
     && rp_render && has_all 'kind: PriorityClass' 'kind: ValidatingAdmissionPolicy$' 'name: RUN_PODS_FILE'
 }
 check "run pods e2e: the same values file renders no trace of run pods with runPods.enabled=false (the first install) and all of them without the flag (the upgrade)" rp_one_flag_apart

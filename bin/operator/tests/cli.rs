@@ -107,6 +107,8 @@ fn run_lists_its_settings_and_the_environment_variables_that_set_them() {
     let help = String::from_utf8_lossy(&out.stdout);
     for variable in [
         "WATCH_NAMESPACE",
+        "WATCH_NAMESPACES",
+        "--watch-namespaces",
         "HEALTH_ADDR",
         "METRICS_ADDR",
         "POD_NAME",
@@ -184,6 +186,73 @@ fn a_default_image_that_is_empty_or_a_reference_goes_on_to_look_for_a_cluster() 
         assert!(
             stderr.contains("connecting to the cluster"),
             "{value:?}: {stderr}"
+        );
+    }
+}
+
+/// `run` with `WATCH_NAMESPACE` and/or `WATCH_NAMESPACES` and no cluster to reach (K6b). `None` is the variable
+/// unset, which is not the same as set and empty.
+#[cfg(feature = "runtime-kubernetes")]
+fn run_with_namespaces(one: Option<&str>, list: Option<&str>) -> (bool, String) {
+    let mut command = operator();
+    command
+        .arg("run")
+        .env_remove("KUBERNETES_SERVICE_HOST")
+        .env_remove("WATCH_NAMESPACE")
+        .env_remove("WATCH_NAMESPACES")
+        .env("KUBECONFIG", "/nonexistent/kubeconfig")
+        .env("HOME", "/nonexistent")
+        .env("HEALTH_ADDR", "127.0.0.1:0")
+        .env("METRICS_ADDR", "127.0.0.1:0");
+    if let Some(one) = one {
+        command.env("WATCH_NAMESPACE", one);
+    }
+    if let Some(list) = list {
+        command.env("WATCH_NAMESPACES", list);
+    }
+    let out = command.output().expect("runs the operator");
+    (
+        out.status.success(),
+        String::from_utf8_lossy(&out.stderr).into_owned(),
+    )
+}
+
+/// K6b: a list the operator cannot watch stops it at start, naming the variable and what is wrong, and never after it
+/// has looked for a cluster; a list it accepts goes on to look for one.
+#[cfg(feature = "runtime-kubernetes")]
+#[test]
+fn a_watch_namespaces_that_is_refused_stops_the_operator_before_it_looks_for_a_cluster() {
+    for (one, list) in [
+        (None, Some("")),
+        (None, Some(",")),
+        (None, Some("team,,other")),
+        (None, Some("Team")),
+        (None, Some("a,b,a")),
+        (Some("c"), Some("a,b")),
+    ] {
+        let (ok, stderr) = run_with_namespaces(one, list);
+        assert!(!ok, "{one:?} {list:?} was accepted");
+        assert!(
+            stderr.contains("WATCH_NAMESPACE"),
+            "{one:?} {list:?}: {stderr}"
+        );
+        assert!(
+            !stderr.contains("connecting to the cluster"),
+            "{one:?} {list:?}: it got as far as the cluster: {stderr}"
+        );
+    }
+    for (one, list) in [
+        (None, None),
+        (Some(""), None),
+        (Some("team"), None),
+        (None, Some("team,other")),
+        (Some("team"), Some("team,other")),
+    ] {
+        let (ok, stderr) = run_with_namespaces(one, list);
+        assert!(!ok);
+        assert!(
+            stderr.contains("connecting to the cluster"),
+            "{one:?} {list:?}: {stderr}"
         );
     }
 }

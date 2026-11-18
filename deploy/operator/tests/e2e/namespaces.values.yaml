@@ -1,0 +1,33 @@
+# The values the kind end-to-end of several watched namespaces (K6b, namespaces-e2e.sh) installs the operator chart with. The namespaces
+# themselves are the script's, and so is the list: it passes `--set-json 'watchNamespaces=[...]'` because the three names have a run of
+# their own (`aap-e2e-ns-ops`, `-a` and `-b`) and the chart must render the RBAC in the two watched ones only. The release's namespace is
+# NOT watched here: the operator pod, its ServiceAccount, the registry's Service and its token Secret live in `aap-e2e-ns-ops`, and a
+# Role there would hide the fact that the chart makes one per WATCHED namespace.
+#
+# The registry is on (a bearer token, an existing Secret the script makes with a random value) and only the pods labelled
+# `aap-e2e/registry-reader: "true"` may read it: that label is the script's own, on the one curl pod of the release's namespace, so the
+# chart's NetworkPolicy admits these and nothing else. The Platform API, run pods and traces are off (their defaults): this end-to-end is
+# about which namespaces the operator reconciles and what it may do in each.
+#
+# Nothing here is a secret. The cluster is a throwaway one; no value below is advice for a deployment (deploy/operator/README.md, the
+# watchNamespaces row, is).
+
+tuning:
+  # A pending service is looked at again every 5 s instead of 15: the job waits for pods, not for a timer.
+  resyncPendingSecs: 5
+
+registry:
+  # The operator serves the registry only with a bearer token (no token, no registry). The Secret is the script's own, in the release's
+  # namespace, with a random token.
+  tokenSecret:
+    name: e2e-registry-token
+    key: token
+
+networkPolicy:
+  registry:
+    # Who may read the registry: the pods labelled `aap-e2e/registry-reader: "true"` of the release's namespace, which is the script's
+    # curl pod and nothing else.
+    allowFrom:
+      - podSelector:
+          matchLabels:
+            aap-e2e/registry-reader: "true"

@@ -22,7 +22,8 @@ Each is a flag and an environment variable, which is how the chart sets them (S8
 
 | Variable | Flag | Default | Meaning |
 |---|---|---|---|
-| `WATCH_NAMESPACE` | `--watch-namespace` | none: every namespace | Watch one namespace (the namespaced operator of §93). Empty is the same as unset |
+| `WATCH_NAMESPACE` | `--watch-namespace` | none: every namespace | Watch one namespace (the namespaced operator of §93), and **the primary** when `WATCH_NAMESPACES` lists several (it names the cluster-scoped objects of run pods and the API's `defaults.namespace`). Empty is the same as unset |
+| `WATCH_NAMESPACES` | `--watch-namespaces` | none: `WATCH_NAMESPACE`, else every namespace | **K6b:** the namespaces to watch, comma separated. One set of controllers and caches per namespace, and one namespaced `Role` in each (never a `ClusterRole`). The primary must be one of them. A name that is not a DNS label, a name given twice, and a list that is set and holds no name (`""`, `","`) stop the operator at start, naming the variable and the value: an operator that started with part of the fleet would leave the rest unwatched without saying so |
 | `HEALTH_ADDR` | `--health-addr` | `0.0.0.0:8081` | `/healthz`, `/readyz` |
 | `METRICS_ADDR` | `--metrics-addr` | `0.0.0.0:9090` | `/metrics` |
 | `POD_NAME` | `--instance` | none | The `reportingInstance` of Events |
@@ -99,6 +100,7 @@ AAP_TEST_KUBECONFIG=$HOME/.kube/config AAP_TEST_STUB_IMAGE=aap-stub:ci cargo tes
 | File | What |
 |---|---|
 | `src/run.rs` unit test | the provider is told to look for run pod objects to clear only with settings for run pods (without them the operator has no right to read an account, a quota or a binding, and looking would fail every reconcile) |
+| `src/run.rs` unit tests (K6b) | `WATCH_NAMESPACES` and `WATCH_NAMESPACE`: neither is every namespace, the shorthand is one, the list is exactly those in the order given, the primary must be in the list, and a name that is not a DNS label, a duplicate or a list with no name is refused; the runtime provider is given the list, and an empty one is every namespace |
 | `src/run.rs` unit tests (K5) | the operator is composed with the tracer it was given (`compose`), and the spans still queued are flushed on the way out, on `Ok` and on `Err` (`flushed`) |
 | `src/serve.rs` unit tests | `/healthz` is up at once, `/readyz` answers 503 until the readiness handle is marked, `/metrics` is Prometheus text |
 | `tests/cli.rs` | runs the built binary (`RUN_PODS_FILE`: an absent file, junk, an unknown key, a file from before the egress proxy, the switch of the network policy that is gone, and settings that fail their checks each stop it before it looks for a cluster, naming the variable and the mistake): `crdgen` equals the checked-in file and prints one document per kind; `run` without a cluster fails and says it was connecting; `run --help` lists every variable above; a default image with white space stops `run` before it looks for a cluster, and an empty one or a reference does not |
@@ -108,7 +110,8 @@ AAP_TEST_KUBECONFIG=$HOME/.kube/config AAP_TEST_STUB_IMAGE=aap-stub:ci cargo tes
 ### The end-to-end, `tests/cluster.rs`
 
 Every case starts `operator run` (the binary Cargo built, `CARGO_BIN_EXE_operator`) against the cluster of
-`AAP_TEST_KUBECONFIG`, with `WATCH_NAMESPACE` set to a namespace of its own, free ports, and its log in
+`AAP_TEST_KUBECONFIG`, with `WATCH_NAMESPACE` set to a namespace of its own (or `WATCH_NAMESPACES` to two, for the case
+that watches two), free ports, and its log in
 `$TMPDIR/aap-e2e-*.log` (printed when a case fails). The CRDs are installed first by server-side apply (what `crdgen`
 prints, and the `operator-e2e` job also applies the checked-in file with `kubectl`). **Everything a case creates has a name
 of its own** (the namespace, the Secrets, the objects): the cases run in parallel in one cluster, the lesson of S4's

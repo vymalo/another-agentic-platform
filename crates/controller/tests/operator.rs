@@ -95,17 +95,38 @@ struct Running {
     metrics: Arc<aap_controller::Metrics>,
 }
 
-async fn start(namespace: Option<&str>) -> Running {
-    start_on(Fake::new(), namespace, true).await
+async fn start(namespaces: &[&str]) -> Running {
+    start_on(Fake::new(), namespaces, true).await
 }
 
-/// The operator on `fake`. With `shared` false it does not wait for the watches of the two shared kinds,
-/// because those are not there to open (`Fake::absent`).
-async fn start_on(fake: Fake, namespace: Option<&str>, shared: bool) -> Running {
-    let runtime = Scripted::new();
-    let owner: OwnerOf = Arc::new(|_| OwnerHandle::none());
+/// The operator on `fake`, watching `namespaces` (empty: every namespace). With `shared` false it does not wait
+/// for the watches of the two shared kinds, because those are not there to open (`Fake::absent`).
+async fn start_on(fake: Fake, namespaces: &[&str], shared: bool) -> Running {
+    let watched = namespaces
+        .iter()
+        .map(|ns| (*ns).to_owned())
+        .collect::<Vec<_>>();
+    start_where(fake, namespaces, move |fake| {
+        // The watches are open, one per namespace (or one of the whole cluster), so nothing below races the
+        // list that precedes them.
+        let kinds = if watched.is_empty() {
+            fake.watchers(SERVICES) >= 1 && fake.watchers(CONFIGS) >= 2
+        } else {
+            watched
+                .iter()
+                .all(|ns| fake.watchers_in(SERVICES, ns) >= 1 && fake.watchers_in(CONFIGS, ns) >= 2)
+        };
+        kinds && (!shared || (fake.watchers(ENDPOINTS) >= 1 && fake.watchers(PROVIDERS) >= 1))
+    })
+    .await
+}
+
+/// The operator on `fake`, started when `ready` says its watches are where the case needs them: a namespace that
+/// the fake refuses never opens one, and the case that checks that says so.
+async fn start_where(fake: Fake, namespaces: &[&str], ready: impl Fn(&Fake) -> bool) -> Running {
     let options = Options {
-        watch_namespace: namespace.map(str::to_owned),
+        watch_namespaces: (!namespaces.is_empty())
+            .then(|| namespaces.iter().map(|ns| (*ns).to_owned()).collect()),
         // Far-away timers: what is asserted here arrives by a trigger or not at all, and a timer
         // that fired in the time we wait would hide a missing trigger.
         resync: Resync {
@@ -118,6 +139,14 @@ async fn start_on(fake: Fake, namespace: Option<&str>, shared: bool) -> Running 
         pass_timeout: Duration::from_secs(30),
         ..Options::default()
     };
+    start_options(fake, options, ready).await
+}
+
+/// The operator on `fake` with `options`, started when `ready` says its watches are where the case needs them: the
+/// cases that are about the settings themselves (no namespace at all) compose their own.
+async fn start_options(fake: Fake, options: Options, ready: impl Fn(&Fake) -> bool) -> Running {
+    let runtime = Scripted::new();
+    let owner: OwnerOf = Arc::new(|_| OwnerHandle::none());
     let operator = Operator::new(
         fake.client(),
         runtime.clone(),
@@ -132,13 +161,7 @@ async fn start_on(fake: Fake, namespace: Option<&str>, shared: bool) -> Running 
     let operator_done = tokio::spawn(operator.run(async move {
         let _ = stopped.await;
     }));
-    // The watches are open: nothing below races the list that precedes them.
-    eventually("the controllers' watches", || {
-        fake.watchers(SERVICES) >= 1
-            && fake.watchers(CONFIGS) >= 2
-            && (!shared || (fake.watchers(ENDPOINTS) >= 1 && fake.watchers(PROVIDERS) >= 1))
-    })
-    .await;
+    eventually("the controllers' watches", || ready(&fake)).await;
     Running {
         fake,
         runtime,
@@ -170,7 +193,7 @@ impl Running {
 
 #[tokio::test]
 async fn a_service_that_appears_is_reconciled_and_listed_in_the_directory() {
-    let r = start(Some("team")).await;
+    let r = start(&["team"]).await;
     eventually("the caches to sync", || r.readiness.is_ready()).await;
     assert!(r.directory.list().await.unwrap().is_empty());
 
@@ -226,7 +249,7 @@ async fn a_service_that_appears_is_reconciled_and_listed_in_the_directory() {
 
 #[tokio::test]
 async fn a_changed_config_reconciles_the_services_that_name_it() {
-    let r = start(None).await;
+    let r = start(&[]).await;
     let (service, config) = example("chat", "team");
     r.fake.put(CONFIGS, config);
     r.fake.put(SERVICES, service);
@@ -291,7 +314,7 @@ async fn running_dashboard(r: &Running, ns: &str) {
 
 #[tokio::test]
 async fn a_changed_model_endpoint_reconciles_the_services_that_use_it() {
-    let r = start(None).await;
+    let r = start(&[]).await;
     running_dashboard(&r, "team").await;
     let before = r.digest("team", "coder-me");
 
@@ -326,7 +349,7 @@ async fn a_changed_model_endpoint_reconciles_the_services_that_use_it() {
 
 #[tokio::test]
 async fn a_changed_tool_provider_reconciles_the_services_that_use_it() {
-    let r = start(None).await;
+    let r = start(&[]).await;
     running_dashboard(&r, "team").await;
     let before = r.digest("team", "coder-me");
 
@@ -342,7 +365,7 @@ async fn a_changed_tool_provider_reconciles_the_services_that_use_it() {
 
 #[tokio::test]
 async fn a_deleted_referent_blocks_the_services_that_use_it_and_a_new_one_unblocks_them() {
-    let r = start(None).await;
+    let r = start(&[]).await;
     running_dashboard(&r, "team").await;
     let running = r.digest("team", "coder-me");
 
@@ -372,7 +395,7 @@ async fn a_deleted_referent_blocks_the_services_that_use_it_and_a_new_one_unbloc
 
 #[tokio::test]
 async fn a_referent_created_after_the_service_unblocks_it() {
-    let r = start(None).await;
+    let r = start(&[]).await;
     let (service, config, endpoint, provider) = dashboard("team");
     r.fake.put(CONFIGS, config);
     r.fake.put(SERVICES, service);
@@ -396,7 +419,7 @@ async fn a_referent_created_after_the_service_unblocks_it() {
 
 #[tokio::test]
 async fn a_referent_nobody_references_leaves_every_service_alone() {
-    let r = start(None).await;
+    let r = start(&[]).await;
     running_dashboard(&r, "team").await;
     let (service, config) = example("chat", "team");
     r.fake.put(CONFIGS, config);
@@ -435,7 +458,7 @@ async fn a_referent_nobody_references_leaves_every_service_alone() {
 
 #[tokio::test]
 async fn the_runtime_providers_signal_reconciles_its_service() {
-    let r = start(Some("team")).await;
+    let r = start(&["team"]).await;
     let (service, config) = example("chat", "team");
     r.fake.put(CONFIGS, config);
     r.fake.put(SERVICES, service);
@@ -482,7 +505,7 @@ async fn the_runtime_providers_signal_reconciles_its_service() {
 
 #[tokio::test]
 async fn a_namespaced_operator_leaves_other_namespaces_alone() {
-    let r = start(Some("team")).await;
+    let r = start(&["team"]).await;
     let (service, config) = example("chat", "elsewhere");
     r.fake.put(CONFIGS, config);
     r.fake.put(SERVICES, service);
@@ -511,9 +534,174 @@ async fn a_namespaced_operator_leaves_other_namespaces_alone() {
     r.stop().await;
 }
 
+/// K6b: one set of controllers and caches per namespace, reconciled independently, and never a request of the whole
+/// cluster: what an operator with a `Role` in each namespace may do.
+#[tokio::test]
+async fn two_namespaces_are_reconciled_independently_and_nothing_is_asked_of_the_whole_cluster() {
+    let r = start(&["team", "other"]).await;
+    eventually("every cache to sync", || r.readiness.is_ready()).await;
+
+    // One watch of each kind per namespace, and no watch of the whole cluster.
+    for ns in ["team", "other"] {
+        assert!(
+            r.fake.watchers_in(SERVICES, ns) >= 1,
+            "the services of {ns}"
+        );
+        assert!(r.fake.watchers_in(CONFIGS, ns) >= 2, "the configs of {ns}");
+    }
+    assert_eq!(
+        r.fake.watchers(SERVICES),
+        r.fake.watchers_in(SERVICES, "team") + r.fake.watchers_in(SERVICES, "other"),
+        "a watch of every namespace"
+    );
+
+    let (service, config) = example("chat", "team");
+    r.fake.put(CONFIGS, config);
+    r.fake.put(SERVICES, service);
+    let (service, config) = example("coder", "other");
+    r.fake.put(CONFIGS, config);
+    r.fake.put(SERVICES, service);
+    eventually("both namespaces Ready", || {
+        r.state("team", "chat").as_deref() == Some("Ready")
+            && r.state("other", "coder").as_deref() == Some("Ready")
+    })
+    .await;
+
+    // The directory is the union of the shards' caches, in one order: by scope, then name.
+    for _ in 0..1000 {
+        if r.directory.list().await.unwrap().len() == 2 {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    let names: Vec<String> = r
+        .directory
+        .list()
+        .await
+        .unwrap()
+        .iter()
+        .map(|e| format!("{}/{}", e.scope, e.name))
+        .collect();
+    assert_eq!(names, ["other/coder", "team/chat"]);
+
+    // Every request of the group was namespaced: a namespaced `Role` is all this operator needs (AD-055).
+    for call in r.fake.calls() {
+        let Some(rest) = call.path.strip_prefix("/apis/agents.vymalo.com/v1alpha1") else {
+            continue;
+        };
+        assert!(
+            rest.starts_with("/namespaces/team/") || rest.starts_with("/namespaces/other/"),
+            "a request of the whole cluster: {} {}",
+            call.method,
+            call.path
+        );
+    }
+    r.stop().await;
+}
+
+/// K6b: a namespace the operator may not read (a `Role` that is not there, a namespace that is gone) fails its own
+/// caches and nothing else: the other namespace still reconciles, and `/readyz` is false, because an operator that
+/// cannot see a namespace it was told to watch is not ready.
+#[tokio::test(start_paused = true)]
+async fn a_forbidden_namespace_leaves_the_other_reconciling_and_readiness_false() {
+    let fake = Fake::new();
+    fake.fail_path(None, "/namespaces/blocked/", 403);
+    let r = start_where(fake, &["team", "blocked"], |fake| {
+        fake.watchers_in(SERVICES, "team") >= 1 && fake.watchers_in(CONFIGS, "team") >= 2
+    })
+    .await;
+    let (service, config) = example("chat", "team");
+    r.fake.put(CONFIGS, config);
+    r.fake.put(SERVICES, service);
+    within(
+        Duration::from_secs(30),
+        "the namespace the operator may read to be Ready",
+        || r.state("team", "chat").as_deref() == Some("Ready"),
+    )
+    .await;
+
+    // The refused namespace never opened a watch, and no cache of it ever listed.
+    tokio::time::sleep(Duration::from_secs(300)).await;
+    assert_eq!(r.fake.watchers_in(SERVICES, "blocked"), 0);
+    assert!(
+        !r.readiness.is_ready(),
+        "a namespace whose caches never synced is not ready"
+    );
+
+    // And the other one still reconciles a change: its shard is not held back by the failing one.
+    let before = r.digest("team", "chat");
+    let mut config = r.fake.get(CONFIGS, "team", "chat").unwrap();
+    config["spec"]["harness"]["adam"]["agent"]["folder"]["files"]["instructions.md"] =
+        json!("---\nname: chat\n---\nChanged while the other namespace was refused.");
+    r.fake.put(CONFIGS, config);
+    within(
+        Duration::from_secs(30),
+        "the readable namespace to follow its config",
+        || r.digest("team", "chat") != before,
+    )
+    .await;
+    r.stop().await;
+}
+
+/// K6b: readiness waits for the **config** caches too. A namespace whose `Role` lists the services but not the
+/// configs would reconcile every agent of it against an empty config cache (each one `Blocked`, or worse, a stale
+/// config read from nowhere) while `/readyz` said the operator was ready: the services' own caches listing is not
+/// enough to know the operator can see the fleet.
+#[tokio::test(start_paused = true)]
+async fn a_namespace_whose_config_caches_have_not_listed_keeps_the_operator_unready() {
+    let fake = Fake::new();
+    fake.fail_path(None, "/namespaces/blocked/agentconfigs", 403);
+    let r = start_where(fake, &["team", "blocked"], |fake| {
+        fake.watchers_in(SERVICES, "team") >= 1 && fake.watchers_in(CONFIGS, "team") >= 2
+    })
+    .await;
+    // The readable namespace is fully reconciled — which needs its service cache *and* its config cache to have
+    // listed — so the only cache that never lists is the refused namespace's.
+    let (service, config) = example("chat", "team");
+    r.fake.put(CONFIGS, config);
+    r.fake.put(SERVICES, service);
+    within(
+        Duration::from_secs(30),
+        "the readable namespace to be Ready",
+        || r.state("team", "chat").as_deref() == Some("Ready"),
+    )
+    .await;
+    tokio::time::sleep(Duration::from_secs(300)).await;
+    assert!(
+        !r.readiness.is_ready(),
+        "a namespace whose config cache never listed is not ready, whatever its services' cache did"
+    );
+    r.stop().await;
+}
+
+/// K6b: `Options::watch_namespaces = Some([])` is **no shard at all**, never every namespace: an operator composed
+/// that way asks the cluster nothing, reconciles nothing, and never says it is ready. The composition root refuses
+/// such a list; this is the library's own promise, and the fallback it must not have (every namespace is `Api::all`,
+/// which the chart's namespaced `Role` cannot allow).
+#[tokio::test(start_paused = true)]
+async fn an_operator_with_no_namespace_is_never_ready_and_asks_the_cluster_nothing() {
+    let fake = Fake::new();
+    let options = Options {
+        watch_namespaces: Some(Vec::new()),
+        ..Options::default()
+    };
+    let r = start_options(fake, options, |_| true).await;
+    tokio::time::sleep(Duration::from_secs(300)).await;
+    assert!(
+        !r.readiness.is_ready(),
+        "no shard listed anything, so the operator is not ready"
+    );
+    assert!(
+        r.fake.calls().is_empty(),
+        "an operator with no namespace watches nothing, and asks nothing: {:?}",
+        r.fake.calls()
+    );
+    r.stop().await;
+}
+
 #[tokio::test]
 async fn deleting_a_running_service_runs_the_finalizer_through_the_controller() {
-    let r = start(None).await;
+    let r = start(&[]).await;
     let (service, config) = example("coder", "team");
     r.fake.put(CONFIGS, config);
     r.fake.put(SERVICES, service);
@@ -533,7 +721,7 @@ async fn deleting_a_running_service_runs_the_finalizer_through_the_controller() 
 
 #[tokio::test]
 async fn the_operator_stops_when_told_to_even_with_nothing_to_do() {
-    let r = start(None).await;
+    let r = start(&[]).await;
     r.stop().await;
 }
 
@@ -567,7 +755,7 @@ async fn kinds_whose_crds_are_not_installed_stall_no_service() {
     let (service, config) = example("chat", "team");
     fake.put(CONFIGS, config);
     fake.put(SERVICES, service);
-    let r = start_on(fake, None, false).await;
+    let r = start_on(fake, &[], false).await;
 
     let promptly = Duration::from_secs(2);
     within(
@@ -642,7 +830,7 @@ async fn a_watch_that_failed_finds_its_kind_when_the_crds_are_installed() {
     let (service, config, endpoint, provider) = dashboard("team");
     fake.put(CONFIGS, config);
     fake.put(SERVICES, service);
-    let r = start_on(fake, None, false).await;
+    let r = start_on(fake, &[], false).await;
     within(Duration::from_secs(2), "Blocked", || {
         r.state("team", "coder-me").as_deref() == Some("Blocked")
     })
@@ -690,7 +878,7 @@ async fn a_watch_that_failed_finds_its_kind_when_the_crds_are_installed() {
 async fn a_request_that_is_never_answered_does_not_leave_a_new_service_without_a_status() {
     let fake = Fake::new();
     fake.stall_next("PATCH", "/agentservices/chat", 1);
-    let r = start_on(fake, Some("team"), true).await;
+    let r = start_on(fake, &["team"], true).await;
 
     let (service, config) = example("chat", "team");
     r.fake.put(CONFIGS, config);
@@ -720,7 +908,7 @@ async fn a_request_that_is_never_answered_does_not_leave_a_new_service_without_a
 /// does not name it), a service that goes.
 #[tokio::test]
 async fn a_shared_object_gets_its_status_and_follows_the_agents_that_use_it() {
-    let r = start(None).await;
+    let r = start(&[]).await;
     running_dashboard(&r, "team").await;
     let status =
         |plural: &str, name: &str| r.fake.get(plural, "team", name).unwrap()["status"].clone();
@@ -781,7 +969,7 @@ fn service_passes(r: &Running) -> u64 {
 /// `AgentsReady` under two hundred users would be two hundred passes).
 #[tokio::test]
 async fn a_status_write_on_a_shared_object_reconciles_no_service_and_a_spec_change_does() {
-    let r = start(None).await;
+    let r = start(&[]).await;
     running_dashboard(&r, "team").await;
     eventually("the statuses", || {
         r.fake.get(ENDPOINTS, "team", "gateway").unwrap()["status"]["usedBy"] == json!(["coder-me"])
@@ -820,7 +1008,7 @@ async fn the_tracer_given_to_the_operator_reaches_the_passes_of_both_controllers
     let (tracer, memory) = aap_trace::Tracer::in_memory(aap_trace::Sampler::AlwaysOn);
     let owner: OwnerOf = Arc::new(|_| OwnerHandle::none());
     let options = Options {
-        watch_namespace: Some("team".to_owned()),
+        watch_namespaces: Some(vec!["team".to_owned()]),
         resync: Resync {
             settled: Duration::from_secs(3600),
             pending: Duration::from_secs(3600),

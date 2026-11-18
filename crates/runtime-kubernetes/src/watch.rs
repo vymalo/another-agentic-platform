@@ -43,24 +43,38 @@ where
         .boxed()
 }
 
-/// Changes of the workloads and of their pods (a crash loop changes a pod and not its set), in
-/// every namespace or in one.
-pub fn changes(client: Client, namespace: Option<String>) -> BoxStream<'static, RuntimeId> {
-    fn api<K>(client: &Client, namespace: Option<&str>) -> Api<K>
-    where
-        K: Resource<Scope = k8s_openapi::NamespaceResourceScope> + Clone + DeserializeOwned + Debug,
-        K::DynamicType: Default,
-    {
-        match namespace {
-            Some(ns) => Api::namespaced(client.clone(), ns),
-            None => Api::all(client.clone()),
-        }
+fn api<K>(client: &Client, namespace: Option<&str>) -> Api<K>
+where
+    K: Resource<Scope = k8s_openapi::NamespaceResourceScope> + Clone + DeserializeOwned + Debug,
+    K::DynamicType: Default,
+{
+    match namespace {
+        Some(ns) => Api::namespaced(client.clone(), ns),
+        None => Api::all(client.clone()),
     }
-    let ns = namespace.as_deref();
-    select_all([
-        of_kind(api::<StatefulSet>(&client, ns)),
-        of_kind(api::<Deployment>(&client, ns)),
-        of_kind(api::<Pod>(&client, ns)),
-    ])
-    .boxed()
+}
+
+/// The three kinds of one namespace.
+fn of_namespace(client: &Client, namespace: Option<&str>) -> [BoxStream<'static, RuntimeId>; 3] {
+    [
+        of_kind(api::<StatefulSet>(client, namespace)),
+        of_kind(api::<Deployment>(client, namespace)),
+        of_kind(api::<Pod>(client, namespace)),
+    ]
+}
+
+/// Changes of the workloads and of their pods (a crash loop changes a pod and not its set), in every
+/// namespace (`namespaces` empty) or in exactly those named (K6b: one namespaced watch per kind per
+/// namespace, and never a cluster-wide one). A change of a namespace that is not watched is not
+/// reported.
+pub fn changes(client: Client, namespaces: Vec<String>) -> BoxStream<'static, RuntimeId> {
+    let streams: Vec<BoxStream<'static, RuntimeId>> = if namespaces.is_empty() {
+        of_namespace(&client, None).into()
+    } else {
+        namespaces
+            .iter()
+            .flat_map(|ns| of_namespace(&client, Some(ns.as_str())))
+            .collect()
+    };
+    select_all(streams).boxed()
 }

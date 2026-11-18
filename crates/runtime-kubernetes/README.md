@@ -17,7 +17,7 @@ else: the provider has no right on Secrets, never reads one, and copies no kubel
 
 | Item | What |
 |---|---|
-| `KubernetesRuntime` | the provider. `new(client)`, `try_default()`, `watching_namespace(ns)`, `clearing_run_pods(bool)` (D15a, [below](#run-pods-d15a)) |
+| `KubernetesRuntime` | the provider. `new(client)`, `try_default()`, `watching_namespaces(ns…)` (and `watching_namespace(ns)` for one), `clearing_run_pods(bool)` (D15a, [below](#run-pods-d15a)) |
 | `render(id, spec) -> Rendered` | the objects of a spec, pure; `Rendered::documents()` is what the golden files hold |
 | `status::compute`, `pod_issues` | workloads and pods into `RuntimeStatus`, pure |
 | `owner_handle(api_version, kind, name, uid)` | the encoding of the opaque `OwnerHandle` this provider understands |
@@ -213,10 +213,13 @@ loses the policy (it lived on the workloads), and a retry then keeps the data: t
 ## `watch()`
 
 Watches (reflectors, from `kube::runtime::watcher` with a back-off) on StatefulSets, Deployments and **Pods** filtered by
-`app.kubernetes.io/managed-by=aap-operator`, in every namespace or in one (`watching_namespace`). A pod is watched
-because a crash loop changes a pod and not its set. Each event yields `RuntimeId(namespace, instance)`. The stream is lazy:
-it lists on its first poll and reports what it lists too, so a stream that is polled after a change still hears of it. It
-is a hint, as the trait says: duplicates and other services' ids are normal, and the controller reads `status`.
+`app.kubernetes.io/managed-by=aap-operator`, in every namespace (no name given) or in exactly those named
+(`watching_namespaces`, K6b: one namespaced watch of each kind per namespace, merged with `select_all`, and **never an
+`Api::all`**; `watching_namespace` is the one-namespace shorthand, and `watched_namespaces` reads them back). A pod is
+watched because a crash loop changes a pod and not its set. Each event yields `RuntimeId(namespace, instance)`. The
+stream is lazy: it lists on its first poll and reports what it lists too, so a stream that is polled after a change still
+hears of it. It is a hint, as the trait says: duplicates and other services' ids are normal, and the controller reads
+`status`.
 
 ## Cluster rights
 
@@ -250,6 +253,7 @@ AAP_TEST_KUBECONFIG=$HOME/.kube/config cargo test -p aap-runtime-kubernetes --te
 | `tests/render.rs` | golden YAML of `examples/coder.yaml` (combined and split) and `examples/chat.yaml`, and each rule stated: labels, digest, owner (compute has one, data has none), the chart's pod template, the policy, the budget, shared claims, suspend, no Secret name in plain text, what is refused |
 | `tests/run_pods.rs`, `tests/run_pods_api.rs`, `tests/run_pods_parity.rs` | run pods (D15a, D15c, D15d): the objects and their golden; the git sandbox and the account's credentials as the coder chart renders them; the requests, their order and the removals against the fake API server (the egress proxy applied before the policy that names it, cleared before the run pods' policy, never taken for stale, a foreign object of its names blocking); parity with the coder chart's quota, network policy, binding, account, Role, `PriorityClass`, admission policy and egress proxy |
 | `tests/api.rs` | the provider against a **fake API server** (`tests/support`): the real requests of a real `kube::Client` against an in-memory store. The order of calls (reads before writes), `fieldManager` and `force`, the guard (no write at all), stale objects, `suspend`, both deletion policies and their order, status from seeded pods, endpoints, failures by class. It is not an API server: no controllers, no validation, no garbage collection |
+| `tests/watch.rs` (K6b) | `watch()` against the same fake, on its list requests: one namespaced watch of each kind per namespace given and **no list of the whole cluster** (the `Api::all` a namespaced `Role` cannot allow), and no namespace named is one list per kind with no namespace in its path |
 | `tests/cluster.rs` | against a real API server: `runtime_provider_conformance!` (14 cases) and the cases only a cluster shows (below), among them a service that stops asking for run pods (the workload names the account by neither of its names before the account goes: run on a bare kube-apiserver v1.35.8 on 2026-10-27, and it fails on the code before the fix) |
 
 | Variable | Meaning |

@@ -58,6 +58,11 @@ spec:
           imagePullPolicy: {{ .Values.image.pullPolicy }}
           args: [run]
           env:
+            # K6b: every namespace the operator watches, comma separated (the chart makes the Role and RoleBinding in each).
+            # WATCH_NAMESPACE below is the primary, which must be one of them: it names the cluster-scoped objects and the
+            # API's defaults.namespace.
+            - name: WATCH_NAMESPACES
+              value: {{ include "aap.watchNamespaces" . | fromJsonArray | join "," | quote }}
             - name: WATCH_NAMESPACE
               value: {{ include "aap.watchNamespace" . | quote }}
             - name: POD_NAME

@@ -66,11 +66,21 @@ struct State {
     events: Vec<Value>,
     version: u64,
     fail_with: Option<u16>,
-    watchers: BTreeMap<String, usize>,
+    /// The watches open, by kind and by namespace (`None`: the whole cluster).
+    watchers: BTreeMap<(String, Option<String>), usize>,
     /// The kinds (by plural) whose CRD is not installed.
     absent: BTreeSet<String>,
     /// Requests that are received and never answered, while `remaining` lasts.
     stalls: Vec<Stall>,
+    /// Requests of a path that fails, with the code they are answered.
+    failures: Vec<Failing>,
+}
+
+/// A path that fails, as a `Role` that does not allow a namespace, or a kind the API server refuses there.
+struct Failing {
+    method: Option<String>,
+    path_contains: String,
+    code: u16,
 }
 
 /// A request the fake takes and never answers.
@@ -121,6 +131,7 @@ impl Fake {
                 watchers: BTreeMap::new(),
                 absent: BTreeSet::new(),
                 stalls: Vec::new(),
+                failures: Vec::new(),
             })),
             changes: broadcast::channel(1024).0,
         }
@@ -260,6 +271,17 @@ impl Fake {
         lock(&self.state).fail_with = code;
     }
 
+    /// Answer the requests whose path contains `path_contains` (and whose method is `method`, or any method when it
+    /// is `None`) with this status, and everything else as usual: a `Role` that does not allow one namespace answers
+    /// `403` for it and for nothing else.
+    pub fn fail_path(&self, method: Option<&str>, path_contains: &str, code: u16) {
+        lock(&self.state).failures.push(Failing {
+            method: method.map(str::to_owned),
+            path_contains: path_contains.to_owned(),
+            code,
+        });
+    }
+
     /// The kinds (by plural, `modelendpoints`) whose CRD is not installed: every request for them is the
     /// 404 an API server answers for a resource it does not serve. Replaces the earlier set; an empty
     /// one is the CRDs being installed.
@@ -278,9 +300,24 @@ impl Fake {
         });
     }
 
-    /// How many watches of this kind are open.
+    /// How many watches of this kind are open, in every namespace (a watch of the whole cluster counts).
     pub fn watchers(&self, plural: &str) -> usize {
-        lock(&self.state).watchers.get(plural).copied().unwrap_or(0)
+        lock(&self.state)
+            .watchers
+            .iter()
+            .filter(|((p, _), _)| p == plural)
+            .map(|(_, n)| *n)
+            .sum()
+    }
+
+    /// How many watches of this kind are open in `namespace` (K6b: one set per namespace, and never one of the
+    /// whole cluster).
+    pub fn watchers_in(&self, plural: &str, namespace: &str) -> usize {
+        lock(&self.state)
+            .watchers
+            .get(&(plural.to_owned(), Some(namespace.to_owned())))
+            .copied()
+            .unwrap_or(0)
     }
 
     /// Whether `call` is one to leave unanswered (and, then, record it and use one of the stall's turns).
@@ -316,6 +353,17 @@ impl Fake {
         }
         let mut s = lock(&self.state);
         s.calls.push(call.clone());
+        if let Some(code) = s
+            .failures
+            .iter()
+            .find(|f| {
+                f.method.as_deref().is_none_or(|m| m == call.method)
+                    && call.path.contains(&f.path_contains)
+            })
+            .map(|f| f.code)
+        {
+            return failure(code, "the fake fails this path on purpose");
+        }
         if let Some(code) = s.fail_with {
             return failure(code, "the fake is failing on purpose");
         }
@@ -353,7 +401,9 @@ impl Fake {
             ("GET", []) => {
                 let watching = call.query.split('&').any(|p| p == "watch=true");
                 if watching {
-                    *s.watchers.entry(plural.to_owned()).or_insert(0) += 1;
+                    *s.watchers
+                        .entry((plural.to_owned(), ns.map(str::to_owned)))
+                        .or_insert(0) += 1;
                     drop(s);
                     return self.watch(plural, ns);
                 }

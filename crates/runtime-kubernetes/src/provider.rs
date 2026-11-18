@@ -118,17 +118,17 @@ impl PodTemplated for Deployment {
 #[derive(Clone)]
 pub struct KubernetesRuntime {
     client: Client,
-    watch_namespace: Option<String>,
+    watch_namespaces: Vec<String>,
     clear_run_pods: bool,
 }
 
 impl KubernetesRuntime {
     /// A provider on this client. [`watch`](RuntimeProvider::watch) covers every namespace; see
-    /// [`watching_namespace`](Self::watching_namespace).
+    /// [`watching_namespaces`](Self::watching_namespaces).
     pub fn new(client: Client) -> Self {
         Self {
             client,
-            watch_namespace: None,
+            watch_namespaces: Vec::new(),
             clear_run_pods: false,
         }
     }
@@ -167,11 +167,26 @@ impl KubernetesRuntime {
         Ok(Self::new(client))
     }
 
-    /// Watch one namespace only, for a deployment whose operator has a namespaced `Role`.
+    /// Watch these namespaces only, for a deployment whose operator has a namespaced `Role` in each (K6b). The
+    /// order carries nothing; an empty list watches every namespace.
+    #[must_use]
+    pub fn watching_namespaces(mut self, namespaces: impl IntoIterator<Item = String>) -> Self {
+        self.watch_namespaces = namespaces.into_iter().collect();
+        self
+    }
+
+    /// Watch one namespace only: [`watching_namespaces`](Self::watching_namespaces) with one name.
     #[must_use]
     pub fn watching_namespace(mut self, namespace: impl Into<String>) -> Self {
-        self.watch_namespace = Some(namespace.into());
+        self.watch_namespaces = vec![namespace.into()];
         self
+    }
+
+    /// The namespaces [`watch`](RuntimeProvider::watch) watches, in the order they were given; empty is every
+    /// namespace.
+    #[must_use]
+    pub fn watched_namespaces(&self) -> &[String] {
+        &self.watch_namespaces
     }
 
     fn api<K: Kind>(&self, namespace: &str) -> Api<K> {
@@ -1051,7 +1066,7 @@ impl RuntimeProvider for KubernetesRuntime {
     }
 
     fn watch(&self) -> BoxStream<'static, RuntimeId> {
-        crate::watch::changes(self.client.clone(), self.watch_namespace.clone())
+        crate::watch::changes(self.client.clone(), self.watch_namespaces.clone())
     }
 }
 

@@ -49,8 +49,15 @@ fn the_fleet() -> Vec<DirectoryEntry> {
         blocked,
         off,
         no_card,
-        // The same name in another namespace: the second is not listed.
-        titled("zz-other", "chat", "Another chat", &[]),
+    ]
+}
+
+/// The same service id in two namespaces: a name is unique only within one (K6b).
+fn two_namespaces_sharing_an_id() -> Vec<DirectoryEntry> {
+    vec![
+        titled("first", "chat", "First chat", &["one"]),
+        titled("second", "chat", "Second chat", &["two"]),
+        entry("first", "other"),
     ]
 }
 
@@ -98,10 +105,127 @@ fn it_lists_what_the_directory_lists_in_scope_and_name_order() {
 }
 
 #[test]
-fn what_the_directory_does_not_list_is_not_an_omission_and_a_second_namespace_is() {
+fn what_the_directory_does_not_list_is_not_an_omission() {
+    // A blocked service, one whose A2A interface is off and one with no card are not items, and none of them is
+    // `skipped`: nothing that would have been listed was left out.
     let built = build(&the_fleet(), None).unwrap();
-    assert_eq!(built.skipped.len(), 1, "{:?}", built.skipped);
-    assert_eq!(built.skipped[0].entry, "zz-other/chat");
+    assert_eq!(built.listed, ["chat", "coder", "researcher"]);
+    assert!(built.skipped.is_empty(), "{:?}", built.skipped);
+}
+
+/// K6b: an id two namespaces share is listed for **neither**. A reader that met two would keep the first, and the
+/// first is the directory's order, not a decision the platform made.
+#[test]
+fn an_id_two_namespaces_share_is_listed_for_neither() {
+    let built = build(&two_namespaces_sharing_an_id(), None).unwrap();
+    assert_eq!(built.listed, ["other"]);
+    assert!(
+        !items_of(&built.body)
+            .iter()
+            .any(|i| i["service"] == json!(["chat"])),
+        "neither namesake is in the document"
+    );
+    assert_eq!(built.skipped.len(), 2, "{:?}", built.skipped);
+    for entry in ["first/chat", "second/chat"] {
+        let skipped = built
+            .skipped
+            .iter()
+            .find(|s| s.entry == entry)
+            .unwrap_or_else(|| panic!("{entry} is not in {:?}", built.skipped));
+        assert_eq!(
+            skipped.reason,
+            "the same id is used in another namespace, so neither is listed"
+        );
+    }
+}
+
+/// The pre-pass counts what the **directory lists**, and nothing else (K6b): a namesake that is blocked, whose A2A
+/// interface is off, or that has no card yet is not a second claimant of the id, so the one that is listed stays in
+/// the document. Counting every entry would hide a healthy agent for a namesake no reader could have been offered.
+#[test]
+fn a_namesake_the_directory_does_not_list_keeps_no_one_out() {
+    for unlisted in ["blocked", "a2a off", "no card"] {
+        let mut namesake = titled("second", "chat", "Second chat", &[]);
+        match unlisted {
+            "blocked" => namesake.blocked = true,
+            "a2a off" => namesake.a2a_enabled = false,
+            _ => namesake.agent_card = None,
+        }
+        let fleet = vec![
+            titled("first", "chat", "First chat", &["one"]),
+            namesake,
+            entry("first", "other"),
+        ];
+        let built = build(&fleet, None).unwrap();
+        assert_eq!(built.listed, ["chat", "other"], "{unlisted}");
+        assert!(
+            built.skipped.is_empty(),
+            "{unlisted}: an entry the directory does not list is no omission: {:?}",
+            built.skipped
+        );
+        assert!(
+            items_of(&built.body)
+                .iter()
+                .any(|i| i["service"] == json!(["chat"]) && i["title"] == json!("First chat")),
+            "{unlisted}: the listed one is in the document, with its own title"
+        );
+    }
+}
+
+/// But a namesake the directory lists whose own card the document refuses still counts: the id names two services a
+/// reader could be offered, and which one is "first" would be the directory's order, so neither is listed. The
+/// pre-pass runs over the entries the directory lists, before a card is judged.
+#[test]
+fn a_namesake_whose_card_is_refused_still_keeps_the_other_out() {
+    let mut refused = titled("second", "chat", "Second chat", &[]);
+    refused.agent_card = Some("not a URL".to_owned());
+    let fleet = vec![
+        titled("first", "chat", "First chat", &[]),
+        refused,
+        entry("first", "other"),
+    ];
+    let built = build(&fleet, None).unwrap();
+    assert_eq!(built.listed, ["other"]);
+    assert!(
+        !items_of(&built.body)
+            .iter()
+            .any(|i| i["service"] == json!(["chat"])),
+        "neither namesake is in the document"
+    );
+    assert_eq!(built.skipped.len(), 2, "{:?}", built.skipped);
+}
+
+/// The same fleet in another order is the same document, the same `ETag` and the same notes: "which one is first"
+/// changes nothing, which is the point of listing neither.
+#[test]
+fn a_shared_id_is_the_same_document_whatever_the_order() {
+    let mut reversed = two_namespaces_sharing_an_id();
+    reversed.reverse();
+    let (a, b) = (
+        build(&two_namespaces_sharing_an_id(), None).unwrap(),
+        build(&reversed, None).unwrap(),
+    );
+    assert_eq!(a.body, b.body);
+    assert_eq!(a.etag, b.etag);
+    assert_eq!(a.skipped, b.skipped);
+}
+
+/// And when one of the two goes, the survivor is listed at once: the skip is the pair, not the name.
+#[test]
+fn the_survivor_of_a_shared_id_is_listed_when_the_other_is_gone() {
+    let survivor: Vec<DirectoryEntry> = two_namespaces_sharing_an_id()
+        .into_iter()
+        .filter(|e| e.scope != "second")
+        .collect();
+    let built = build(&survivor, None).unwrap();
+    assert_eq!(built.listed, ["chat", "other"]);
+    assert!(built.skipped.is_empty(), "{:?}", built.skipped);
+    assert!(
+        items_of(&built.body)
+            .iter()
+            .any(|i| i["service"] == json!(["chat"]) && i["title"] == json!("First chat")),
+        "the one that is left, with its own title"
+    );
 }
 
 #[test]

@@ -10,9 +10,16 @@ use clap::Args;
 /// Settings of `run`. Every one is also an environment variable, which is how the chart sets them.
 #[derive(Debug, Args)]
 pub struct RunArgs {
-    /// Watch one namespace (the namespaced operator of §93). Empty or unset: every namespace.
+    /// Watch one namespace (the namespaced operator of §93), and the primary one when `WATCH_NAMESPACES` lists
+    /// several. Empty or unset: every namespace, unless `WATCH_NAMESPACES` lists some.
     #[arg(long, env = "WATCH_NAMESPACE")]
     pub watch_namespace: Option<String>,
+
+    /// Watch this list of namespaces, comma separated (K6b): one set of controllers and caches each, and one
+    /// namespaced Role in each. **The primary** (`WATCH_NAMESPACE`) must be one of them; `WATCH_NAMESPACE` alone is
+    /// the same as a list of one. Unset: `WATCH_NAMESPACE`, else every namespace.
+    #[arg(long, env = "WATCH_NAMESPACES")]
+    pub watch_namespaces: Option<String>,
 
     /// Where `/healthz` and `/readyz` are served.
     #[arg(long, env = "HEALTH_ADDR", default_value = "0.0.0.0:8081")]
@@ -117,6 +124,30 @@ fn parse_tier(s: &str) -> Result<aap_api::AccessTierCap, String> {
     }
 }
 
+/// Whether `name` is a namespace name: a DNS label, `^[a-z0-9]([-a-z0-9]{0,61}[a-z0-9])?$`, which is the rule the
+/// chart's `_validate.tpl` holds its values to.
+#[cfg(feature = "runtime-kubernetes")]
+fn is_dns_label(name: &str) -> bool {
+    !name.is_empty()
+        && name.len() <= 63
+        && !name.starts_with('-')
+        && !name.ends_with('-')
+        && name
+            .bytes()
+            .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'-')
+}
+
+/// Refuse a name that is no namespace, naming the variable that gave it.
+#[cfg(feature = "runtime-kubernetes")]
+fn check_label(variable: &str, name: &str) -> Result<()> {
+    if is_dns_label(name) {
+        return Ok(());
+    }
+    anyhow::bail!(
+        "{variable} {name:?} is not a namespace: a namespace is a DNS label (lowercase letters, digits and '-', starting and ending with a letter or a digit, at most 63 characters)"
+    );
+}
+
 // What `run` composes needs a runtime provider; without one the settings are parsed and unused.
 #[cfg(feature = "runtime-kubernetes")]
 impl RunArgs {
@@ -186,22 +217,68 @@ impl RunArgs {
         Ok(Some(settings))
     }
 
-    /// An empty `WATCH_NAMESPACE` (a chart value left blank) means no namespace.
-    fn namespace(&self) -> Option<String> {
-        self.watch_namespace
-            .clone()
-            .filter(|n| !n.trim().is_empty())
+    /// The namespaces to watch (K6b), from `WATCH_NAMESPACES` (a comma-separated list) and `WATCH_NAMESPACE` (the
+    /// one-namespace shorthand and the primary):
+    ///
+    /// * neither, or both empty: every namespace (`None`);
+    /// * `WATCH_NAMESPACE` alone: that one;
+    /// * `WATCH_NAMESPACES` alone: exactly those, in the order given;
+    /// * both: the list, and `WATCH_NAMESPACE` must be one of it — it is the primary, which names the cluster-scoped
+    ///   objects of run pods and the API's `defaults.namespace`, so a primary nobody watches is a deployment mistake.
+    ///
+    /// A name is a DNS label (the same rule as the chart's `_validate.tpl`), and a list holds each name once: an
+    /// operator that could not watch one of them would be as good as not running, so this refuses rather than
+    /// starting with part of the fleet.
+    ///
+    /// # Errors
+    ///
+    /// A name that is not a DNS label, a name given twice, a list that is set and holds no name, or a primary that
+    /// the list does not hold.
+    pub fn namespaces(&self) -> Result<Option<Vec<String>>> {
+        let primary = self
+            .watch_namespace
+            .as_deref()
+            .map(str::trim)
+            .filter(|n| !n.is_empty());
+        let Some(text) = self.watch_namespaces.as_deref() else {
+            return match primary {
+                None => Ok(None),
+                Some(name) => {
+                    check_label("WATCH_NAMESPACE (--watch-namespace)", name)?;
+                    Ok(Some(vec![name.to_owned()]))
+                }
+            };
+        };
+        let mut names: Vec<String> = Vec::new();
+        for name in text.split(',').map(str::trim) {
+            check_label("WATCH_NAMESPACES (--watch-namespaces)", name)?;
+            if names.iter().any(|n| n == name) {
+                anyhow::bail!(
+                    "WATCH_NAMESPACES (--watch-namespaces) {text:?} gives {name:?} twice: a namespace is watched once, by one set of controllers"
+                );
+            }
+            names.push(name.to_owned());
+        }
+        if let Some(name) = primary
+            && !names.iter().any(|n| n == name)
+        {
+            anyhow::bail!(
+                "WATCH_NAMESPACE (--watch-namespace) {name:?} is not one of WATCH_NAMESPACES (--watch-namespaces) {text:?}: it is the primary, so it must be watched too"
+            );
+        }
+        Ok(Some(names))
     }
 
     fn options(
         &self,
+        watch_namespaces: Option<Vec<String>>,
         registry: bool,
         registry_full: std::sync::Arc<std::sync::atomic::AtomicBool>,
         default_agent_image: Option<String>,
         run_pods: Option<aap_domain::RunPodSettings>,
     ) -> aap_controller::Options {
         aap_controller::Options {
-            watch_namespace: self.namespace(),
+            watch_namespaces,
             registry: if registry {
                 aap_controller::RegistryMode::Enabled
             } else {
@@ -313,9 +390,13 @@ fn kubernetes_runtime(
 ) -> aap_runtime_kubernetes::KubernetesRuntime {
     let runtime = aap_runtime_kubernetes::KubernetesRuntime::new(client)
         .clearing_run_pods(options.run_pods.is_some());
-    match &options.watch_namespace {
-        Some(ns) => runtime.watching_namespace(ns),
-        None => runtime,
+    match &options.watch_namespaces {
+        Some(namespaces) if !namespaces.is_empty() => {
+            runtime.watching_namespaces(namespaces.clone())
+        }
+        // An empty list is no namespace at all: the operator asks the provider for nothing (see `Operator::run`), so
+        // the provider is left as it is and its watch is never called.
+        _ => runtime,
     }
 }
 
@@ -358,8 +439,8 @@ fn compose<R, S>(
     tracer: &aap_trace::Tracer,
 ) -> aap_controller::Operator<R, S>
 where
-    R: aap_ports::RuntimeProvider + 'static,
-    S: aap_ports::StoreProvisioner + 'static,
+    R: aap_ports::RuntimeProvider + Clone + 'static,
+    S: aap_ports::StoreProvisioner + Clone + 'static,
 {
     aap_controller::Operator::new(client, runtime, store, owner, options)
         .with_tracer(tracer.clone())
@@ -378,16 +459,26 @@ async fn run_with(args: RunArgs, tracer: aap_trace::Tracer) -> Result<()> {
 
     let default_image = args.default_image()?;
     let run_pods = args.run_pod_settings()?;
+    let watch_namespaces = args.namespaces()?;
     let registry_full = Arc::new(std::sync::atomic::AtomicBool::new(false));
     let token = registry_token(&args);
     let options = args.options(
+        watch_namespaces,
         token.is_some(),
         registry_full.clone(),
         default_image,
         run_pods,
     );
+    if options.watch_namespaces.is_none() {
+        tracing::warn!(
+            "WATCH_NAMESPACE and WATCH_NAMESPACES name no namespace: the operator watches every namespace, which needs a ClusterRole this chart does not make"
+        );
+    }
     tracing::info!(
-        namespace = options.watch_namespace.as_deref().unwrap_or("(all)"),
+        namespaces = options
+            .watch_namespaces
+            .as_ref()
+            .map_or_else(|| "(all)".to_owned(), |n| n.join(",")),
         default_agent_image = options.default_agent_image.as_deref().unwrap_or("(none)"),
         run_pod_size_classes = options
             .run_pods
@@ -413,7 +504,7 @@ async fn run_with(args: RunArgs, tracer: aap_trace::Tracer) -> Result<()> {
             svc.metadata.uid.clone().unwrap_or_default(),
         )
     });
-    let store = store(&client);
+    let store = Arc::new(store(&client));
     let operator = compose(client, runtime, store, owner, options, &tracer);
 
     #[cfg(feature = "registry")]
@@ -572,10 +663,123 @@ mod tests {
         );
         options.run_pods = Some(aap_domain::RunPodSettings::offering(["standard"]));
         assert!(kubernetes_runtime(client(), &options).is_clearing_run_pods());
-        options.watch_namespace = Some("agents".to_owned());
+        options.watch_namespaces = Some(vec!["agents".to_owned()]);
         assert!(
             kubernetes_runtime(client(), &options).is_clearing_run_pods(),
             "and watching one namespace changes nothing of it"
         );
+    }
+
+    /// The namespaces the runtime provider watches are the ones the operator was given (K6b), and an empty list
+    /// (no `WATCH_NAMESPACES` and no `WATCH_NAMESPACE`) is every namespace.
+    #[tokio::test]
+    async fn the_runtime_provider_watches_the_namespaces_the_operator_was_given() {
+        let mut options = aap_controller::Options::default();
+        assert!(
+            kubernetes_runtime(client(), &options)
+                .watched_namespaces()
+                .is_empty()
+        );
+        options.watch_namespaces = Some(vec!["agents".to_owned(), "other".to_owned()]);
+        assert_eq!(
+            kubernetes_runtime(client(), &options).watched_namespaces(),
+            ["agents", "other"]
+        );
+    }
+
+    /// The settings of `run` as the environment would give them: the two namespace variables, and nothing else set.
+    fn args(one: Option<&str>, list: Option<&str>) -> RunArgs {
+        RunArgs {
+            watch_namespace: one.map(str::to_owned),
+            watch_namespaces: list.map(str::to_owned),
+            health_addr: "127.0.0.1:0".parse().expect("an address"),
+            metrics_addr: "127.0.0.1:0".parse().expect("an address"),
+            instance: None,
+            concurrency: 4,
+            reconcile_timeout_secs: 60,
+            registry_addr: "127.0.0.1:0".parse().expect("an address"),
+            registry_token_file: None,
+            registry_public_url: None,
+            resync_secs: 300,
+            resync_pending_secs: 15,
+            default_agent_image: None,
+            run_pods_file: None,
+            cache_allowed_claims: Vec::new(),
+            max_access_tier: aap_api::AccessTierCap::Auto,
+            tool_probe_enabled: false,
+            tool_probe_timeout_secs: 5,
+        }
+    }
+
+    /// `WATCH_NAMESPACES` and `WATCH_NAMESPACE`, as the chart sets them: the list, the one-namespace shorthand, and the
+    /// primary that must be one of the list.
+    #[test]
+    fn the_namespaces_are_the_list_and_the_alias_is_the_primary() {
+        // Neither, or a blank one (a chart value left empty): every namespace.
+        assert_eq!(args(None, None).namespaces().expect("none"), None);
+        assert_eq!(args(Some(""), None).namespaces().expect("blank"), None);
+        assert_eq!(args(Some("  "), None).namespaces().expect("blank"), None);
+        // The shorthand alone: that one, and it is checked like a name of the list.
+        assert_eq!(
+            args(Some("agents"), None).namespaces().expect("one"),
+            Some(vec!["agents".to_owned()])
+        );
+        // The list alone: exactly those, in the order given (which is the order of the shards).
+        assert_eq!(
+            args(None, Some("b,a")).namespaces().expect("a list"),
+            Some(vec!["b".to_owned(), "a".to_owned()])
+        );
+        // Both: the list, and the alias must be one of it.
+        assert_eq!(
+            args(Some("a"), Some("a, b")).namespaces().expect("both"),
+            Some(vec!["a".to_owned(), "b".to_owned()])
+        );
+        let err = args(Some("c"), Some("a,b"))
+            .namespaces()
+            .expect_err("a primary nobody watches");
+        assert!(
+            format!("{err:#}").contains("\"c\"") && format!("{err:#}").contains("primary"),
+            "{err:#}"
+        );
+    }
+
+    /// A list the operator cannot watch is refused at start, naming what is wrong: an operator that started with part
+    /// of the fleet would leave the rest of its namespaces unwatched without saying so.
+    #[test]
+    fn a_namespace_that_is_not_a_dns_label_a_duplicate_or_an_empty_list_is_refused() {
+        // A list that is set and holds no name: a blank one, and a comma or a trailing one.
+        for list in ["", " ", ","] {
+            let err = args(None, Some(list)).namespaces().expect_err(list);
+            assert!(
+                format!("{err:#}").contains("not a namespace"),
+                "{list}: {err:#}"
+            );
+        }
+        // A name that is not a DNS label, in the list and as the shorthand.
+        for name in [
+            "Agents",
+            "agents_1",
+            "-agents",
+            "agents-",
+            "a.b",
+            &"a".repeat(64),
+        ] {
+            let err = args(None, Some(name)).namespaces().expect_err(name);
+            assert!(format!("{err:#}").contains("DNS label"), "{name}: {err:#}");
+            assert!(args(Some(name), None).namespaces().is_err(), "{name}");
+        }
+        // A name given twice.
+        let err = args(None, Some("a,b,a"))
+            .namespaces()
+            .expect_err("a duplicate");
+        assert!(format!("{err:#}").contains("twice"), "{err:#}");
+        // And the rule itself, at its edges.
+        assert!(is_dns_label("a"));
+        assert!(is_dns_label("a-b-c"));
+        assert!(is_dns_label("a1"));
+        assert!(is_dns_label(&"a".repeat(63)));
+        assert!(!is_dns_label(""));
+        assert!(!is_dns_label(&"a".repeat(64)));
+        assert!(!is_dns_label("-a") && !is_dns_label("a-"));
     }
 }

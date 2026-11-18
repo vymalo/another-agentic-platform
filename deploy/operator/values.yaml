@@ -1,4 +1,4 @@
-# The operator of §59a, for the namespaces of watchNamespaces (the first is the primary; K6b watches them all). Nothing here is a
+# The operator of §59a, for the namespaces of watchNamespaces (the first is the primary). Nothing here is a
 # secret: the registry's bearer token is an existing Secret
 # (registry.tokenSecret) or a property of an AWS Secrets Manager secret read by External Secrets (externalSecrets).
 # The CRDs are NOT in this chart (§93: a separate Argo CD app): install and upgrade deploy/operator-crds first (README "Upgrading").
@@ -19,9 +19,8 @@ image:
   pullPolicy: IfNotPresent
 imagePullSecrets: []
 
-# The namespaces the operator watches, and where its Role and RoleBinding are made (K6a, AD-055): one of each per namespace, and
-# never a ClusterRole. Empty: the one of watchNamespace below, else the release's namespace. The operator binary watches the first of
-# them until K6b teaches it the whole list; the chart renders the rights for every one now.
+# The namespaces the operator watches, and where its Role and RoleBinding are made (K6a/K6b, AD-055): one of each per namespace,
+# and never a ClusterRole. Empty: the one of watchNamespace below, else the release's namespace. The operator watches every one (K6b).
 watchNamespaces: []
 
 # One namespace, the shorthand, and the primary one: the API's defaults.namespace, the run pods' cluster-scoped names (the policy and
@@ -348,7 +347,7 @@ metrics:
 # Settings of `operator run` that have a default (bin/operator/README.md, "run: settings"); a key left out keeps the default.
 logLevel: info
 tuning: {}
-  # concurrency: 4          # AAP_CONCURRENCY: services reconciled at once
+  # concurrency: 4          # AAP_CONCURRENCY: services reconciled at once, per controller and per watched namespace
   # resyncSecs: 300         # AAP_RESYNC_SECS: timer of a service that is Ready or Suspended
   # resyncPendingSecs: 15   # AAP_RESYNC_PENDING_SECS: timer of one that is rolling out, unwell or held by a foreign object
 

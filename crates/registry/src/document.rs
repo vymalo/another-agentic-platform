@@ -8,8 +8,10 @@
 //!   `Blocked`, with a card URL), **in the directory's order** (scope, then name), which is the
 //!   display order and is stable between reads;
 //! * its `href` is an absolute `http` or `https` URL with a host and no credentials, its `service` is
-//!   an agent id (`^[a-z0-9][a-z0-9-]{0,62}$`), and **a service id is never listed twice**: a name used
-//!   in two namespaces is listed once, the first in order, and the others are in [`Built::skipped`];
+//!   an agent id (`^[a-z0-9][a-z0-9-]{0,62}$`), and **a service id is never listed twice**: an id that
+//!   two entries share (a name is not unique across namespaces) is listed for **neither**, and both are
+//!   in [`Built::skipped`]. Which one a reader would keep is otherwise the directory's order, and that
+//!   is not a decision this builder makes for it;
 //! * `title` is the service's title, trimmed and cut at 200 characters, and absent when there is none (a
 //!   reader defaults it to the service id); `tags` keep the valid tags (non-empty, at most 64 characters,
 //!   at most 16, no repeats) and are absent when none is left;
@@ -25,7 +27,7 @@
 //!
 //! The `ETag` is a strong validator: the first 128 bits of the SHA-256 of the body.
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 
 use aap_ports::DirectoryEntry;
 use serde_json::{Value, json};
@@ -170,6 +172,11 @@ fn audience_of(audience: &[String]) -> Result<Option<Vec<&str>>, &'static str> {
 /// Build the document of `entries`. `anchor` is the URL of the document itself, which the contract asks a
 /// server to send and a reader ignores: `None` leaves it out.
 ///
+/// An id that more than one listable entry shares is **listed for none of them**, and each is in
+/// [`Built::skipped`]: a name is unique only within a namespace, and "the first" would be the directory's
+/// order rather than a decision of the platform's. What a service's own `Listed` condition says of that is
+/// the controller's to say, and it does not know the document (see `aap-controller`'s `ReflectorDirectory`).
+///
 /// # Errors
 ///
 /// [`Overflow`] when the document would exceed [`MAX_ITEMS`] items or [`MAX_BODY_BYTES`] bytes.
@@ -177,11 +184,19 @@ pub fn build(entries: &[DirectoryEntry], anchor: Option<&str>) -> Result<Built, 
     let mut ordered: Vec<&DirectoryEntry> = entries.iter().filter(|e| e.listed()).collect();
     ordered.sort_by(|a, b| (&a.scope, &a.name).cmp(&(&b.scope, &b.name)));
 
+    // A service id is the agent's name, and a name is unique only within a namespace. Two entries that share one
+    // are both left out: a reader that met two would keep the first, and "the first" would be the order of the
+    // directory (which namespace came first), not anything the platform decided. The pre-pass counts every
+    // listable entry, so an entry whose card is unusable still keeps its namesake out.
+    let mut shared: BTreeMap<&str, usize> = BTreeMap::new();
+    for e in &ordered {
+        *shared.entry(e.name.as_str()).or_default() += 1;
+    }
+
     let mut items: Vec<Value> = Vec::new();
     let mut listed: Vec<String> = Vec::new();
     let mut skipped = Vec::new();
     let mut audience_withheld = Vec::new();
-    let mut seen = BTreeSet::new();
     for e in ordered {
         let who = format!("{}/{}", e.scope, e.name);
         let skip = |reason| Skipped {
@@ -201,9 +216,9 @@ pub fn build(entries: &[DirectoryEntry], anchor: Option<&str>) -> Result<Built, 
             // `listed()` needs a card, so this does not happen; it is not an item if it does.
             None => continue,
         };
-        if !seen.insert(e.name.as_str()) {
+        if shared.get(e.name.as_str()).copied().unwrap_or(0) > 1 {
             skipped.push(skip(
-                "another namespace has a service of this name, listed first",
+                "the same id is used in another namespace, so neither is listed",
             ));
             continue;
         }

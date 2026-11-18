@@ -142,3 +142,27 @@ pub trait StoreProvisioner: Send + Sync {
         id: &StoreId,
     ) -> impl Future<Output = Result<ReleaseOutcome, StoreError>> + Send;
 }
+
+/// An `Arc` of a provisioner is a provisioner: every call is the one it wraps. It is how a composition root hands
+/// the same provisioner to several controllers (the operator holds one shard per namespace, K6b) when the
+/// provisioner is not `Clone` itself, and it changes nothing of what a call does.
+impl<T: StoreProvisioner + ?Sized> StoreProvisioner for std::sync::Arc<T> {
+    fn capabilities(&self) -> StoreCapabilities {
+        (**self).capabilities()
+    }
+
+    fn ensure(
+        &self,
+        id: &StoreId,
+        spec: &StoreSpec,
+    ) -> impl Future<Output = Result<StoreStatus, StoreError>> + Send {
+        (**self).ensure(id, spec)
+    }
+
+    fn release(
+        &self,
+        id: &StoreId,
+    ) -> impl Future<Output = Result<ReleaseOutcome, StoreError>> + Send {
+        (**self).release(id)
+    }
+}
