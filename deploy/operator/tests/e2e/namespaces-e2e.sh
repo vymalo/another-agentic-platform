@@ -1,4 +1,5 @@
 #!/bin/sh
+# shellcheck disable=SC2016  # the jq programs given to jqok are single-quoted on purpose: $name in them is jq's variable, not the shell's
 # The kind end-to-end of several watched namespaces (K6b): ONE operator, installed from its chart with
 # `watchNamespaces: [aap-e2e-ns-a, aap-e2e-ns-b]`, reconciles the agents of TWO namespaces, with ONE Role and ONE RoleBinding in each
 # and no ClusterRole anywhere, lists the agents of both in its registry, and lists a service id that both namespaces share for
