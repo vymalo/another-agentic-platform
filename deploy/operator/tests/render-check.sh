@@ -1581,6 +1581,8 @@ check "otel on with the NetworkPolicy on and no peers is refused (a rule with po
   refused 'otel.to is required while otel.enabled is true' --set otel.enabled=true --set otel.endpoint=http://c:4318/v1/traces
 check "an ipBlock of 0.0.0.0/0 as the collector is refused" refused_otel 'is every address' --set-json 'otel.to=[{"ipBlock":{"cidr":"0.0.0.0/0"}}]'
 check "an ipBlock of ::/0 as the collector is refused" refused_otel 'is every address' --set-json 'otel.to=[{"ipBlock":{"cidr":"::/0"}}]'
+check "otel.dns.to: an ipBlock of 0.0.0.0/0 is refused (the DNS rule is never open either)" refused_otel 'otel.dns.to: an ipBlock of 0.0.0.0/0 is every address' --set-json 'otel.dns.to=[{"ipBlock":{"cidr":"0.0.0.0/0"}}]'
+check "otel: an ipBlock without a cidr is refused" refused_otel 'an ipBlock needs a cidr' --set-json 'otel.to=[{"ipBlock":{"except":["10.0.0.0/8"]}}]'
 check "a peer of otel.to must say who" refused_otel 'otel.to: a peer needs' --set-json 'otel.to=[{"x":1}]'
 check "otel.ports must name a port" refused_otel 'otel.ports must name at least one port' --set-json 'otel.ports=[]'
 check "otel.ports must be port numbers" refused_otel 'otel.ports: 70000 is not a port number' --set-json 'otel.ports=[70000]'
@@ -1630,7 +1632,7 @@ tool_probe_on() {
   render --set-json "toolProbe.to=$tool_peer" || return 1
   [ "$(op_egress_rules)" -eq 3 ] || return 1
   all_of "$(op_egress_rule 2)" 'port: 53' 'protocol: UDP' 'protocol: TCP' '^      to:' 'k8s-app: kube-dns' || return 1
-  all_of "$(op_egress_rule 3)" 'port: 80' 'port: 443' '^      to:' 'kubernetes.io/metadata.name: tools' || return 1
+  all_of "$(op_egress_rule 3)" 'port: 80$' 'port: 443$' '^      to:' 'kubernetes.io/metadata.name: tools' || return 1
   none_of "$(op_egress_rule 3)" 'port: 53|ipBlock|0\.0\.0\.0/0'
 }
 check "toolProbe on: the operator's policy gains a DNS rule and the probe's peers on its ports, each with a to, and nothing else (three rules)" tool_probe_on
@@ -1658,15 +1660,28 @@ tool_probe_with_otel() {
 check "toolProbe and traces on: five rules, the traces ones where they were and the probe's after them" tool_probe_with_otel
 check "toolProbe on with the NetworkPolicy off: renders with no policy and no dns.to needed" \
   renders_ok --set-json "toolProbe.to=$tool_peer" --set networkPolicy.enabled=false
+tool_probe_empty() {
+  render --set-json 'toolProbe={}' || return 1
+  [ "$(op_egress_rules)" -eq 1 ] && lacks 'port: 80$'
+}
+check "toolProbe: {} renders off and no rule" tool_probe_empty
 refused_tool() { frag=$1; shift; refused "$frag" --set-json "toolProbe.to=$tool_peer" "$@"; }
 check "toolProbe must be a map" refused 'toolProbe must be a map' --set toolProbe=null
 check "toolProbe: a key that is not a setting is refused" refused 'toolProbe.foo is not a setting' --set toolProbe.foo=1
+check "toolProbe.to must be a list" refused 'toolProbe.to must be a list of NetworkPolicy peers' --set toolProbe.to=x
 check "a peer of toolProbe.to must say who" refused_tool 'toolProbe.to: a peer needs' --set-json 'toolProbe.to=[{"x":1}]'
 check "an ipBlock of 0.0.0.0/0 as a probe peer is refused" refused_tool 'is every address' --set-json 'toolProbe.to=[{"ipBlock":{"cidr":"0.0.0.0/0"}}]'
 check "an ipBlock of ::/0 as a probe peer is refused" refused_tool 'is every address' --set-json 'toolProbe.to=[{"ipBlock":{"cidr":"::/0"}}]'
+check "an ipBlock of 0::/0 is every address and is refused" refused_tool 'is every address' --set-json 'toolProbe.to=[{"ipBlock":{"cidr":"0::/0"}}]'
+check "an ipBlock of 0.0.0.0/00 is every address and is refused" refused_tool 'is every address' --set-json 'toolProbe.to=[{"ipBlock":{"cidr":"0.0.0.0/00"}}]'
+check "an ipBlock without a cidr is refused" refused_tool 'an ipBlock needs a cidr' --set-json 'toolProbe.to=[{"ipBlock":{"except":["10.0.0.0/8"]}}]'
+check "an ipBlock that is not a map is refused" refused_tool 'an ipBlock must be a map with a cidr' --set-json 'toolProbe.to=[{"ipBlock":"0.0.0.0/0"}]'
+check "toolProbe.dns.to: an ipBlock of 0.0.0.0/0 is refused (the DNS rule is never open either)" \
+  refused_tool 'toolProbe.dns.to: an ipBlock of 0.0.0.0/0 is every address' --set-json 'toolProbe.dns.to=[{"ipBlock":{"cidr":"0.0.0.0/0"}}]'
 check "toolProbe.ports must name a port while toolProbe.to is set" refused_tool 'toolProbe.ports must name at least one port' --set-json 'toolProbe.ports=[]'
 check "toolProbe.ports must be port numbers" refused 'toolProbe.ports: 70000 is not a port number' --set-json 'toolProbe.ports=[70000]'
-check "toolProbe.dns must be a map" refused 'toolProbe.dns must be a map' --set toolProbe.dns=null
+check "toolProbe.dns must be a map" refused_tool 'toolProbe.dns must be a map' --set toolProbe.dns=x
+check "toolProbe.dns is required with the policy on" refused_tool 'toolProbe.dns is required' --set toolProbe.dns=null
 check "toolProbe.dns.to is required with the policy on" refused_tool 'toolProbe.dns.to is required' --set-json 'toolProbe.dns.to=[]'
 check "toolProbe.dns.ports must name a port" refused 'toolProbe.dns.ports must name at least one port' --set-json 'toolProbe.dns.ports=[]'
 

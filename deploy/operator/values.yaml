@@ -238,7 +238,8 @@ externalSecrets:
     # (the system's orchestrator) reads the same property as AGENT_REGISTRY_TOKEN, so the two sides cannot differ.
     registryToken: agent_registry_token
 
-# What may reach the operator, and what it may reach. Ingress is closed except what is listed; egress goes to the API server only.
+# What may reach the operator, and what it may reach. Ingress is closed except what is listed; egress goes to the API server and, when
+# the deployment asks for them, the traces collector and the tool probe's peers.
 networkPolicy:
   enabled: true
   registry:
@@ -260,9 +261,9 @@ networkPolicy:
 # operator may reach (NetworkPolicyPeers: namespaceSelector, podSelector, ipBlock). A NetworkPolicy names peers and never host names, so
 # the policy is what bounds a probe: the chart opens the operator's egress to exactly these peers on `ports`, plus DNS, and a probe to a
 # server that is not covered has no route. The operator still reads no Secret (AD-024). A rule always has a `to`: an ipBlock
-# of 0.0.0.0/0 or ::/0 is refused. NOTE: the API server's own egress rule is separate and, with `networkPolicy.apiServer.cidrs` empty,
-# already allows any address on 443 and 6443; an https probe on 443 is therefore bounded by `to` only once that list names the API
-# server's addresses (or `ports` leaves 443 out). Narrow it in a deployment that probes https servers.
+# whose CIDR has a `/0` prefix, or that has no cidr, is refused (for `to` and for `dns.to`). NOTE: the API server's own egress rule is separate and, with `networkPolicy.apiServer.cidrs` empty,
+# already allows any address on 443 and 6443; an https probe on 443 is therefore bounded by `toolProbe.to` only once that list names the API
+# server's addresses. Narrow it in a deployment that probes https servers.
 toolProbe:
   # Who the operator may reach. Empty: no probe, and not a trace of it in any render. The peers of an in-cluster MCP server (a
   # namespaceSelector or a podSelector) or its addresses (an ipBlock).

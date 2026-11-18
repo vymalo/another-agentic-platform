@@ -79,6 +79,7 @@ sequence them with the CRDs first (a sync wave, or their Application first). **K
 | `metrics.serviceMonitor.enabled`, `.interval`, `.labels` | off, `30s`, `{}` | A Prometheus Operator `ServiceMonitor` for the operator's `/metrics`: [below](#metrics-and-servicemonitors). On, the chart refuses an empty `networkPolicy.metrics.allowFrom` while the policy is enabled |
 | `otel.*`, `api.otel.*` | off | **K5:** traces of the operator and of the API, OTLP/HTTP JSON to a collector: [below](#traces-k5). Off, not a trace of them in any render |
 | `networkPolicy.apiServer.ports`, `.cidrs` | `[443, 6443]`, `[]` | The API server as the pod reaches it (the Service is 443, most clusters' endpoint 6443). `cidrs`, from `kubectl get endpoints kubernetes`, narrows it to those addresses |
+| `toolProbe.to`, `.ports`, `.dns` | `[]`, `[80, 443]`, kube-dns and `[53]` | **K3a:** the MCP servers the operator may reach to probe a `ToolProvider`: [below](#the-tool-probe-k3a). Empty `to`: off, and not a rule of it in any render |
 | `logLevel` | `info` | `RUST_LOG` |
 | `tuning.concurrency`, `.resyncSecs`, `.resyncPendingSecs` | unset (the binary's 4, 300, 15) | `AAP_CONCURRENCY`, `AAP_RESYNC_SECS`, `AAP_RESYNC_PENDING_SECS`; another key is refused |
 | `resources` | 50m / 64Mi requested, 256Mi limit | |
@@ -476,7 +477,7 @@ costs nothing: [§48a](../../docs/architecture/09-operations.md), [`aap-trace`](
 | `resourceAttributes` | `{}` | Only `deployment.environment.name`, `k8s.cluster.name`, `service.namespace`; values `[A-Za-z0-9._-]{1,128}` |
 | `headersSecret.name`, `.key` | none | An **existing Secret** whose key holds `name=value,name2=value2` (at most 4 KiB): the headers the collector wants. Mounted read-only at `/var/run/secrets/aap/otel` (mode `0440`; the API pod gets `fsGroup: 65532` for it, only then) and named by `AAP_OTEL_HEADERS_FILE`. **Headers are never an environment variable** (`OTEL_EXPORTER_OTLP_HEADERS` is refused by the binaries), and the chart renders no Secret. Both keys, or neither |
 | `certificate.configMap`, `.key` | none | An existing ConfigMap whose key holds a PEM bundle that is the exporter's **only** trust (a private CA): mounted at `/etc/aap/otel/ca/ca.pem`, `OTEL_EXPORTER_OTLP_CERTIFICATE`. Both, or neither |
-| `to`, `ports` | `[]`, `[4318]` | The collector's peers (NetworkPolicyPeers) and port. **Required while the component's NetworkPolicy is enabled**: its policy gets one egress rule to these peers on these ports, and **there is never a rule with ports and no `to`**. An `ipBlock` of `0.0.0.0/0` or `::/0` is refused |
+| `to`, `ports` | `[]`, `[4318]` | The collector's peers (NetworkPolicyPeers) and port. **Required while the component's NetworkPolicy is enabled**: its policy gets one egress rule to these peers on these ports, and **there is never a rule with ports and no `to`**. An `ipBlock` without a `cidr`, or whose CIDR has a `/0` prefix, is refused (for `to` and, on the operator's block, `dns.to`) |
 | `dns.to`, `dns.ports` (the operator's only) | kube-dns, `[53]` | The operator's policy has no DNS rule (it reaches the API server by address), so with tracing on it gets one. The API's policy has its own |
 
 The binaries read the standard `OTEL_*` variables, a strict subset: **`OTEL_EXPORTER_OTLP_PROTOCOL` is `http/json` and nothing else** (the standard's default is `http/protobuf`; a collector in front of a backend that
@@ -524,14 +525,14 @@ NetworkPolicy names peers and never host names: a probe to a server that is not 
 Secret (AD-024).
 
 **The API server's own egress rule is separate.** With `networkPolicy.apiServer.cidrs` empty (the default) it already allows any address on
-443 and 6443, so an https probe on 443 is bounded by `toolProbe.to` only once that list names the API server's addresses (or `toolProbe.ports`
-leaves 443 out). Narrow `apiServer.cidrs` in a deployment that probes https servers; the chart cannot know the addresses.
+443 and 6443, so an https probe on 443 is bounded by `toolProbe.to` only once `apiServer.cidrs` names the API server's addresses. Narrow it
+in a deployment that probes https servers; the chart cannot know the addresses.
 
 | Value | Default | What |
 |---|---|---|
-| `toolProbe.to` | `[]` | The peers the operator may reach. Empty: no probe, and not a trace of it in any render. A peer needs a `namespaceSelector`, a `podSelector` or an `ipBlock`; an `ipBlock` of `0.0.0.0/0` or `::/0` is refused |
+| `toolProbe.to` | `[]` | The peers the operator may reach. Empty: no probe, and not a trace of it in any render. A peer needs a `namespaceSelector`, a `podSelector` or an `ipBlock`; an `ipBlock` without a `cidr`, or whose CIDR has a `/0` prefix (`0.0.0.0/0`, `::/0`, `0::/0`), is refused |
 | `toolProbe.ports` | `[80, 443]` | The ports a probe may use, as the provider's URL names them: 443 for an https server, 80 or the port of an in-cluster server. At least one while `to` is set |
-| `toolProbe.dns.to`, `dns.ports` | kube-dns, `[53]` | The operator's policy has no DNS rule, so with a probe it gets one. `dns.to` is required while `to` is set and `networkPolicy.enabled` |
+| `toolProbe.dns.to`, `dns.ports` | kube-dns, `[53]` | The operator's policy has no DNS rule, so with a probe it gets one. `dns.to` is required while `to` is set and `networkPolicy.enabled`; the same `ipBlock` rule applies |
 
 The probe itself (the status, the stub MCP server) is K3b. `render-check.sh` holds that the default render has one egress rule and no port 80, that
 the probe render has DNS and exactly the listed peers and ports (a pod selector and 8080 when those are what is listed), that the Deployment and the

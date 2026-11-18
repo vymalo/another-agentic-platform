@@ -171,11 +171,7 @@ the component is on, `.dns` whether the block has a DNS rule of its own (the ope
 {{- end -}}
 {{- end -}}
 {{- include "aap.checkPeers" (dict "what" (printf "%s.to" $what) "peers" (default (list) $o.to)) -}}
-{{- range $peer := (default (list) $o.to) -}}
-{{- if and (hasKey $peer "ipBlock") (has (toString (get $peer.ipBlock "cidr")) (list "0.0.0.0/0" "::/0")) -}}
-{{- fail (printf "%s.to: an ipBlock of %s is every address: name the collector's peers" $what (toString (get $peer.ipBlock "cidr"))) -}}
-{{- end -}}
-{{- end -}}
+{{- include "aap.checkIpBlocks" (dict "what" (printf "%s.to" $what) "peers" (default (list) $o.to)) -}}
 {{- if and .policy (not $o.to) -}}
 {{- fail (printf "%s.to is required while %s.enabled is true and the NetworkPolicy is enabled: the peers of the collector (a rule with ports and no `to` would let the pod reach any address on them), or disable the NetworkPolicy" $what $what) -}}
 {{- end -}}
@@ -192,6 +188,7 @@ the component is on, `.dns` whether the block has a DNS rule of its own (the ope
 {{- end -}}
 {{- end -}}
 {{- include "aap.checkPeers" (dict "what" (printf "%s.dns.to" $what) "peers" (default (list) $o.dns.to)) -}}
+{{- include "aap.checkIpBlocks" (dict "what" (printf "%s.dns.to" $what) "peers" (default (list) $o.dns.to)) -}}
 {{- if and .policy (not $o.dns.to) -}}
 {{- fail (printf "%s.dns.to is required while %s.enabled is true and the NetworkPolicy is enabled: the operator's policy has no DNS rule otherwise, and a rule with ports and no `to` is port 53 to anywhere" $what $what) -}}
 {{- end -}}

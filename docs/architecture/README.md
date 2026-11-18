@@ -165,7 +165,7 @@ Cross-references in the text use the original section numbers (`§N`).
 | 59 | [Operator Design](10-control-plane-and-crds.md) | `10-control-plane-and-crds.md` |
 | 59a | [Operator v0: adam-rs agents](10-control-plane-and-crds.md) (K1: the CRDs read adam-rs's, the cache allow-list, the tier ceiling: AD-049 to AD-051; K2: P-023) | `10-control-plane-and-crds.md` |
 | 59b | [The run pool: pods where work runs](10-control-plane-and-crds.md) | `10-control-plane-and-crds.md` |
-| 59c | [Operator increments (kagent-grade minimum)](10-control-plane-and-crds.md) (K0: the plan; P-024 to P-039; K5 built; K8 built; K9b built, both halves; 8 of 15) | `10-control-plane-and-crds.md` |
+| 59c | [Operator increments (kagent-grade minimum)](10-control-plane-and-crds.md) (K0: the plan; P-024 to P-039; K5 built; K8 built; K9b built, both halves; K3a built; 8 of 16) | `10-control-plane-and-crds.md` |
 | 60 | [UI Architecture](10-control-plane-and-crds.md) | `10-control-plane-and-crds.md` |
 | 60a | [Admin dashboard v0](10-control-plane-and-crds.md) (K2: status of the shared kinds, P-023; K8: the OpenAPI document and the Events of an agent, P-029) | `10-control-plane-and-crds.md` |
 | 60b | [CLI](10-control-plane-and-crds.md) (K9: `aapctl validate` and `render`, offline; K9b-1: `get`, `apply`, `delete`, `export`, `whoami`, `login --token-stdin` over the Platform API; K9b-2: `login` in the browser (PKCE) and the refresh token; P-028, P-030 to P-036) | `10-control-plane-and-crds.md` |

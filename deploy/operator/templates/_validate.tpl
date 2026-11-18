@@ -119,12 +119,11 @@ policy on, as the traces' is. */ -}}
 {{- fail (printf "toolProbe.%s is not a setting: to, ports or dns" $k) -}}
 {{- end -}}
 {{- end -}}
+{{- if not (kindIs "slice" (default (list) $tp.to)) -}}
+{{- fail "toolProbe.to must be a list of NetworkPolicy peers" -}}
+{{- end -}}
 {{- include "aap.checkPeers" (dict "what" "toolProbe.to" "peers" (default (list) $tp.to)) -}}
-{{- range $peer := (default (list) $tp.to) -}}
-{{- if and (hasKey $peer "ipBlock") (has (toString (get $peer.ipBlock "cidr")) (list "0.0.0.0/0" "::/0")) -}}
-{{- fail (printf "toolProbe.to: an ipBlock of %s is every address: name the MCP servers' peers" (toString (get $peer.ipBlock "cidr"))) -}}
-{{- end -}}
-{{- end -}}
+{{- include "aap.checkIpBlocks" (dict "what" "toolProbe.to" "peers" (default (list) $tp.to)) -}}
 {{- if not (kindIs "slice" (default (list) $tp.ports)) -}}
 {{- fail "toolProbe.ports must be a list of port numbers" -}}
 {{- end -}}
@@ -136,6 +135,7 @@ policy on, as the traces' is. */ -}}
 {{- if and $tp.to (not $tp.ports) -}}
 {{- fail "toolProbe.ports must name at least one port: the MCP servers are reached on nothing else" -}}
 {{- end -}}
+{{- if $tp.dns -}}
 {{- if not (kindIs "map" $tp.dns) -}}
 {{- fail "toolProbe.dns must be a map with to and ports" -}}
 {{- end -}}
@@ -148,6 +148,10 @@ policy on, as the traces' is. */ -}}
 {{- end -}}
 {{- end -}}
 {{- include "aap.checkPeers" (dict "what" "toolProbe.dns.to" "peers" (default (list) $tp.dns.to)) -}}
+{{- include "aap.checkIpBlocks" (dict "what" "toolProbe.dns.to" "peers" (default (list) $tp.dns.to)) -}}
+{{- else if and $tp.to .Values.networkPolicy.enabled -}}
+{{- fail "toolProbe.dns is required while toolProbe.to is set and the NetworkPolicy is enabled: the probe's DNS rule needs its peers and ports" -}}
+{{- end -}}
 {{- if and $tp.to .Values.networkPolicy.enabled (not $tp.dns.to) -}}
 {{- fail "toolProbe.dns.to is required while toolProbe.to is set and the NetworkPolicy is enabled: the operator's policy has no DNS rule otherwise, and a rule with ports and no `to` is port 53 to anywhere" -}}
 {{- end -}}
@@ -700,6 +704,28 @@ for each tested shape (tests/api-shapes.sh) to find such a value before it is de
 {{- range $peer := .peers -}}
 {{- if not (and (kindIs "map" $peer) (or (hasKey $peer "namespaceSelector") (hasKey $peer "podSelector") (hasKey $peer "ipBlock"))) -}}
 {{- fail (printf "%s: a peer needs a namespaceSelector, a podSelector or an ipBlock, got %s" $what (toJson $peer)) -}}
+{{- end -}}
+{{- end -}}
+{{- end -}}
+
+{{/*
+An ipBlock names a CIDR and never every address: .what (the value's name) and .peers. A CIDR whose prefix is zero (/0, /00, ::/0,
+0::/0) is every address, and an ipBlock without a cidr, or that is not a map, is refused here rather than by the API server.
+*/}}
+{{- define "aap.checkIpBlocks" -}}
+{{- $what := .what -}}
+{{- range $peer := .peers -}}
+{{- if hasKey $peer "ipBlock" -}}
+{{- $block := $peer.ipBlock -}}
+{{- if not (kindIs "map" $block) -}}
+{{- fail (printf "%s: an ipBlock must be a map with a cidr, got %s" $what (toJson $peer)) -}}
+{{- end -}}
+{{- if not (and (kindIs "string" $block.cidr) $block.cidr) -}}
+{{- fail (printf "%s: an ipBlock needs a cidr, got %s" $what (toJson $peer)) -}}
+{{- end -}}
+{{- if regexMatch "/0+$" $block.cidr -}}
+{{- fail (printf "%s: an ipBlock of %s is every address: name the peers" $what $block.cidr) -}}
+{{- end -}}
 {{- end -}}
 {{- end -}}
 {{- end -}}
