@@ -71,6 +71,11 @@ dlacks() {
   for p in "$@"; do ! printf '%s\n' "$d" | grep -Eq -- "$p" || return 1; done
 }
 dcount() { [ "$(doc "$1" "$2" | grep -Ec -- "$3")" -eq "$4" ]; }
+# The namespaceSelector block of an admission policy binding, alone: the parameter's own selector is a matchLabels block too, so a
+# pattern on the whole document cannot say which one it matched.
+binding_namespace_selector() {
+  doc ValidatingAdmissionPolicyBinding "$1" | awk '/^    namespaceSelector:$/ { s = 1; print; next } s && /^    [^ ]/ { exit } s { print }'
+}
 # The rules of a Role (on the standard input), one line each: `<groups> <resources> <verbs>`, as the READMEs of the crates list them.
 rules_from() {
   awk '
@@ -236,6 +241,66 @@ check "egress, by default, is 443 and 6443, to any address" dhas NetworkPolicy a
 check "and no ipBlock" dlacks NetworkPolicy aap-operator 'ipBlock'
 render --set registry.tokenSecret.name=t --set networkPolicy.enabled=false
 check "networkPolicy.enabled=false: no NetworkPolicy, and then a registry needs no allowFrom" lacks '^kind: NetworkPolicy$'
+
+# ---- K6a: several namespaces, one Role and one RoleBinding in each, never a ClusterRole ---------------------------------------
+k6a_two() {
+  render --set-json 'watchNamespaces=["team-a","team-b"]' || return 1
+  [ "$(doc Role aap-operator | grep -c '^kind: Role$')" -eq 2 ] || return 1
+  [ "$(doc RoleBinding aap-operator | grep -c '^kind: RoleBinding$')" -eq 2 ] || return 1
+  [ "$(doc Role aap-operator | grep -c 'resources: \[agentservices, agentconfigs\]')" -eq 2 ] || return 1
+  dcount Role aap-operator '^  namespace: team-a$' 1 && dcount Role aap-operator '^  namespace: team-b$' 1 \
+    && dcount RoleBinding aap-operator '^  namespace: team-a$' 1 && dcount RoleBinding aap-operator '^  namespace: team-b$' 1 \
+    && dhas RoleBinding aap-operator 'namespace: another-agentic-system' \
+    && dhas Deployment aap-operator 'value: "team-a"' \
+    && lacks '^kind: ClusterRole$' && lacks '^kind: ClusterRoleBinding$'
+}
+check "watchNamespaces: one Role and one RoleBinding per namespace, the same rules, the binding to the release's service account, and no ClusterRole" k6a_two
+k6a_api_primary() {
+  render -f "$here/api.values.yaml" --set watchNamespace=null --set-json 'watchNamespaces=["team-a","team-b"]' || return 1
+  [ "$(doc Role aap-operator-api | grep -c '^kind: Role$')" -eq 1 ] || return 1
+  [ "$(doc RoleBinding aap-operator-api | grep -c '^kind: RoleBinding$')" -eq 1 ] || return 1
+  dhas Role aap-operator-api '^  namespace: team-a$' && dhas RoleBinding aap-operator-api '^  namespace: team-a$' \
+    && dhas ConfigMap aap-operator-api '^      namespace: team-a$' && dlacks Role aap-operator-api '^  namespace: team-b$'
+}
+check "watchNamespaces with the API on: the API keeps its one namespace (the first) for its Role, its binding and defaults.namespace" k6a_api_primary
+k6a_runpods_two() {
+  render --set runPods.enabled=true --set-json 'watchNamespaces=["team-a","team-b"]' || return 1
+  [ "$(doc Role aap-operator-run-pods | grep -c '^kind: Role$')" -eq 2 ] || return 1
+  [ "$(doc Role aap-operator | grep -c 'resourceNames: \[aap-operator-run-pods\]')" -eq 2 ] || return 1
+  [ "$(doc ConfigMap aap-operator-run-pods-settings | grep -c '^kind: ConfigMap$')" -eq 1 ] || return 1
+  dcount Role aap-operator-run-pods '^  namespace: team-a$' 1 && dcount Role aap-operator-run-pods '^  namespace: team-b$' 1 \
+    && dhas ValidatingAdmissionPolicyBinding aap-operator-team-a-run-pods '- team-a' '- team-b' \
+    && [ "$(binding_namespace_selector aap-operator-team-a-run-pods | grep -c 'matchLabels')" -eq 0 ] \
+    && [ -n "$(doc Role aap-operator)" ] \
+    && [ "$(doc Role aap-operator | awk '/^  namespace: / { print $2 }' | sort)" = "$(binding_namespace_selector aap-operator-team-a-run-pods | awk '/^            - / { print $2 }' | sort)" ] \
+    && dhas ConfigMap aap-operator-run-pods-settings '^  namespace: another-agentic-system$' \
+    && dhas PriorityClass aap-operator-team-a-run 'kind: PriorityClass'
+}
+check "watchNamespaces with run pods on: the Role of run pods in each namespace, the operator's bind in each, the binding over both, and the settings once in the release" k6a_runpods_two
+check "watchNamespaces and watchNamespace are refused together" refused 'watchNamespace and watchNamespaces are both set' --set watchNamespace=one --set-json 'watchNamespaces=["two"]'
+check "watchNamespaces must be a list" refused 'watchNamespaces must be a list of namespace names' --set watchNamespaces=one
+check "watchNamespaces that is a map is refused by name even with run pods on (not a raw index error)" refused 'watchNamespaces must be a list of namespace names' --set runPods.enabled=true --set watchNamespaces.foo=bar
+check "watchNamespaces: a bad name is refused" refused 'watchNamespaces: "Bad_Name" is not a namespace name' --set-json 'watchNamespaces=["Bad_Name"]'
+check "watchNamespaces: a value that is not a string is refused (a number is not a namespace)" refused 'watchNamespaces: "1" is not a namespace name' --set-json 'watchNamespaces=[1]'
+check "watchNamespaces: a namespace twice is refused" refused 'watchNamespaces names a namespace twice' --set-json 'watchNamespaces=["one","one"]'
+check "watchNamespace: 0 is a value, not an absent one" refused 'watchNamespace must be one namespace name' --set watchNamespace=0
+check "watchNamespaces: 0 is a value, not an absent one" refused 'watchNamespaces must be a list of namespace names' --set watchNamespaces=0
+watch_namespaces_too_long() {
+  long=$(printf '%064d' 0 | tr '0' 'a')
+  refused 'is not a namespace name' --set-json "watchNamespaces=[\"$long\"]"
+}
+check "watchNamespaces: a name longer than 63 characters is refused" watch_namespaces_too_long
+render --set watchNamespaces=null
+check "watchNamespaces: null is no list, the release's namespace" dhas Role aap-operator '^  namespace: another-agentic-system$'
+yaml_ambiguous_names() {
+  helm template aap-operator "$chart" --namespace on --set-json 'watchNamespaces=["on","2024","agents"]' > "$out" || return 1
+  dcount Role aap-operator '^  namespace: "on"$' 1 \
+    && dcount Role aap-operator '^  namespace: "2024"$' 1 \
+    && dcount Role aap-operator '^  namespace: agents$' 1 \
+    && dhas RoleBinding aap-operator '^    namespace: "on"$' \
+    && dlacks Role aap-operator '^  namespace: on$'
+}
+check "namespaces that YAML would read as a boolean or a number are quoted (on, 2024), and a plain one is not" yaml_ambiguous_names
 
 # ---- The ExternalSecret --------------------------------------------------------------------------------------------------
 render -f "$chart/examples/netcup.values.yaml"
@@ -627,7 +692,7 @@ check "an allowedImageRegistries entry that is not a registry host is refused" r
 check "a store with both cnpg and secretRef is refused" refused_api 'exactly one of cnpg and secretRef' --set api.config.defaults.store.secretRef.name=x --set api.config.defaults.store.secretRef.key=k
 check "a store with neither is refused" refused_api 'exactly one of cnpg and secretRef' --set api.config.defaults.store.cnpg=null
 check "no a2aBearer is refused" refused_api 'api.config.defaults.a2aBearer.name and .key are required' --set api.config.defaults.a2aBearer=null
-check "a defaults.namespace that is not the operator's is refused (watchNamespace sets both)" refused_api 'but the operator watches' --set api.config.defaults.namespace=elsewhere
+check "a defaults.namespace that is not the operator's is refused (watchNamespace/watchNamespaces set both)" refused_api 'but the operator watches' --set api.config.defaults.namespace=elsewhere
 check "an image tag that is empty is refused" refused_api 'api.image.tag is required' --set api.image.tag=
 check "an image tag latest is refused" refused_api 'api.image.tag must not be latest' --set api.image.tag=latest
 check "a malformed image digest is refused" refused_api 'api.image.digest must be sha256' --set api.image.digest=abc
@@ -989,7 +1054,7 @@ check "run pods off: their values are not checked and not rendered, whatever the
 
 render -f "$here/runpods.values.yaml"
 run_pods_objects() {
-  dhas ConfigMap aap-operator-run-pods-settings 'namespace: agents' 'settings.yaml' \
+  dhas ConfigMap aap-operator-run-pods-settings 'namespace: another-agentic-system' 'settings.yaml' \
     && dhas Role aap-operator-run-pods 'namespace: agents' \
     && dhas PriorityClass aap-operator-agents-run 'kind: PriorityClass' \
     && dhas ValidatingAdmissionPolicy aap-operator-agents-run-pods 'kind: ValidatingAdmissionPolicy' \
@@ -1102,10 +1167,19 @@ run_pods_policy() {
 check "run pods on: the policy fails closed, takes a ConfigMap of parameters, judges the pods CREATED by the account its parameters name, and has nine rules" run_pods_policy
 run_pods_binding() {
   dhas ValidatingAdmissionPolicyBinding aap-operator-agents-run-pods 'policyName: aap-operator-agents-run-pods' 'validationActions: \["Deny"\]' \
-    'agents.vymalo.com/run-pods-policy: "true"' 'parameterNotFoundAction: Allow' 'kubernetes.io/metadata.name: agents' \
+    'agents.vymalo.com/run-pods-policy: "true"' 'parameterNotFoundAction: Allow' 'key: kubernetes.io/metadata.name' 'operator: In' '- agents' \
     && dlacks ValidatingAdmissionPolicyBinding aap-operator-agents-run-pods 'Audit|Warn' 'parameterNotFoundAction: Deny'
 }
 check "run pods on: the binding denies, selects the parameters by their label, lets a namespace without parameters alone, and covers the watched namespace only" run_pods_binding
+run_pods_binding_selector() {
+  block=$(binding_namespace_selector aap-operator-agents-run-pods)
+  printf '%s\n' "$block" | grep -Eq '^      matchExpressions:$' \
+    && printf '%s\n' "$block" | grep -Eq '^        - key: kubernetes.io/metadata.name$' \
+    && printf '%s\n' "$block" | grep -Eq '^          operator: In$' \
+    && printf '%s\n' "$block" | grep -Eq '^          values:$' \
+    && ! printf '%s\n' "$block" | grep -q 'matchLabels'
+}
+check "run pods on: the binding's namespaceSelector is a matchExpressions list on the name label and has no matchLabels beside it (the two would be ANDed)" run_pods_binding_selector
 check "run pods on: the policy asks for no Secret and the binding for no namespace but the watched one" \
   dcount ValidatingAdmissionPolicyBinding aap-operator-agents-run-pods 'kubernetes.io/metadata.name' 1
 policy_rules_are_the_scripts() {
@@ -1228,7 +1302,7 @@ if ! rp_render 2> "$err"; then echo "FAIL run pods e2e: the values of the run po
 rp_objects() {
   dhas PriorityClass aap-operator-aap-e2e-runpods-run 'value: 0' 'preemptionPolicy: Never' \
     && dhas ValidatingAdmissionPolicy aap-operator-aap-e2e-runpods-run-pods 'kind: ValidatingAdmissionPolicy' \
-    && dhas ValidatingAdmissionPolicyBinding aap-operator-aap-e2e-runpods-run-pods 'validationActions:' 'parameterNotFoundAction: Allow' 'kubernetes.io/metadata.name: aap-e2e-runpods' \
+    && dhas ValidatingAdmissionPolicyBinding aap-operator-aap-e2e-runpods-run-pods 'validationActions:' 'parameterNotFoundAction: Allow' 'key: kubernetes.io/metadata.name' 'operator: In' '- aap-e2e-runpods' \
     && dhas Role aap-operator-run-pods 'namespace: aap-e2e-runpods' 'resources: \["pods/exec"\]' \
     && dhas ConfigMap aap-operator-run-pods-settings 'namespace: aap-e2e-runpods' 'priorityClass: aap-operator-aap-e2e-runpods-run' 'role: aap-operator-run-pods'
 }

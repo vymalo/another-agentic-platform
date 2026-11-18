@@ -9,7 +9,7 @@ apiVersion: rbac.authorization.k8s.io/v1
 kind: Role
 metadata:
   name: {{ include "aap.api.fullname" . }}
-  namespace: {{ include "aap.api.namespace" . }}
+  namespace: {{ include "aap.namespaceScalar" (include "aap.api.namespace" .) }}
   labels:
     {{- include "aap.api.labels" . | nindent 4 }}
 rules:

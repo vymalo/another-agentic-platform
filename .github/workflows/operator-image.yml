@@ -172,7 +172,9 @@ jobs:
           # The defaults (no registry), netcup (an ExternalSecret), tests/secret.values.yaml (an existing Secret, another watched
           # namespace, no CloudNativePG), the Platform API in its three shapes (tests/api.values.yaml: an Ingress and a policy;
           # tests/api-secretref.values.yaml: neither, an existing service account; tests/api-full.values.yaml: every value set), run pods
-          # on (tests/runpods.values.yaml: a PriorityClass, a ValidatingAdmissionPolicy and its binding, a Role), the two ServiceMonitors on
+          # on (tests/runpods.values.yaml: a PriorityClass, a ValidatingAdmissionPolicy and its binding, a Role), run pods on with
+          # several namespaces (K6a: one Role and RoleBinding per namespace, the run pods' Role in each, the binding over both),
+          # the two ServiceMonitors on
           # (tests/metrics.values.yaml, against the vendored schema in tests/schemas/monitoring.coreos.com), traces of both on (tests/otel.values.yaml), and the CRDs chart.
           helm template aap-operator deploy/operator --namespace another-agentic-system > "$RUNNER_TEMP/rendered-default.yaml"
           helm template aap-operator deploy/operator --namespace another-agentic-system \
@@ -188,6 +190,9 @@ jobs:
           helm template aap-operator deploy/operator --namespace another-agentic-system \
             -f deploy/operator/tests/runpods.values.yaml > "$RUNNER_TEMP/rendered-runpods.yaml"
           helm template aap-operator deploy/operator --namespace another-agentic-system \
+            -f deploy/operator/tests/runpods.values.yaml --set watchNamespace=null \
+            --set-json 'watchNamespaces=["agents","team-b"]' > "$RUNNER_TEMP/rendered-runpods-two.yaml"
+          helm template aap-operator deploy/operator --namespace another-agentic-system \
             -f deploy/operator/tests/metrics.values.yaml > "$RUNNER_TEMP/rendered-metrics.yaml"
           helm template aap-operator deploy/operator --namespace another-agentic-system \
             -f deploy/operator/tests/otel.values.yaml > "$RUNNER_TEMP/rendered-otel.yaml"
@@ -199,7 +204,7 @@ jobs:
                 -schema-location 'deploy/operator/tests/schemas/{{.Group}}/{{.ResourceKind}}_{{.ResourceAPIVersion}}.json' \
                 "$RUNNER_TEMP/rendered-default.yaml" "$RUNNER_TEMP/rendered-netcup.yaml" "$RUNNER_TEMP/rendered-secret.yaml" \
                 "$RUNNER_TEMP/rendered-api.yaml" "$RUNNER_TEMP/rendered-api-secretref.yaml" "$RUNNER_TEMP/rendered-api-full.yaml" \
-                "$RUNNER_TEMP/rendered-runpods.yaml" "$RUNNER_TEMP/rendered-metrics.yaml" "$RUNNER_TEMP/rendered-otel.yaml" "$RUNNER_TEMP/rendered-crds.yaml" \
+                "$RUNNER_TEMP/rendered-runpods.yaml" "$RUNNER_TEMP/rendered-runpods-two.yaml" "$RUNNER_TEMP/rendered-metrics.yaml" "$RUNNER_TEMP/rendered-otel.yaml" "$RUNNER_TEMP/rendered-crds.yaml" \
                 > "$RUNNER_TEMP/kubeconform.out" 2>&1 || status=$?
             cat "$RUNNER_TEMP/kubeconform.out"
             if [ "$status" -eq 0 ]; then exit 0; fi

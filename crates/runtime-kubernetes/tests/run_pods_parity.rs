@@ -898,22 +898,64 @@ fn the_policy_with_the_parameters_is_the_coder_charts(adam: Value, docs: Vec<Val
         );
     }
 
-    // The binding: it denies, and covers one namespace by its name label.
+    // The binding: it denies, and covers the watched namespaces by their name label. The coder chart names its one with
+    // `matchLabels`; the operator's chart names the list of `watchNamespaces` with `matchExpressions` (K6a), so what is
+    // compared is the label they select on, and the operator's list is held to the namespaces its Role is made in.
     assert_eq!(
         binding["spec"]["validationActions"],
         adam["admissionBinding"]["validationActions"]
     );
-    assert_eq!(
-        binding["spec"]["matchResources"]["namespaceSelector"]["matchLabels"]
-            .as_object()
-            .unwrap()
-            .keys()
-            .collect::<Vec<_>>(),
+    let theirs: Vec<&str> =
         adam["admissionBinding"]["matchResources"]["namespaceSelector"]["matchLabels"]
             .as_object()
-            .unwrap()
+            .expect("the coder chart names its namespace with matchLabels")
             .keys()
-            .collect::<Vec<_>>()
+            .map(String::as_str)
+            .collect();
+    assert_eq!(theirs, vec!["kubernetes.io/metadata.name"]);
+    let expressions = binding["spec"]["matchResources"]["namespaceSelector"]["matchExpressions"]
+        .as_array()
+        .expect("K6a: the binding selects the watched namespaces with a matchExpressions list");
+    assert_eq!(
+        expressions.len(),
+        1,
+        "one expression, on the namespace's name"
+    );
+    assert_eq!(expressions[0]["key"], "kubernetes.io/metadata.name");
+    assert_eq!(expressions[0]["operator"], "In");
+    let mut ours: Vec<&str> = expressions[0]["values"]
+        .as_array()
+        .expect("the namespaces of watchNamespaces")
+        .iter()
+        .map(|ns| ns.as_str().expect("a namespace name"))
+        .collect();
+    let mut watched: Vec<&str> = chart
+        .iter()
+        .filter(|d| d["kind"] == "Role" && d["metadata"]["name"] == "aap-operator")
+        .map(|d| {
+            d["metadata"]["namespace"]
+                .as_str()
+                .expect("the Role's namespace")
+        })
+        .collect();
+    ours.sort_unstable();
+    watched.sort_unstable();
+    assert_eq!(
+        ours, watched,
+        "exactly the namespaces the chart makes the operator's Role in"
+    );
+    // The binding narrows nothing else: the parameters' own label selector is the only other selector in the document.
+    let resources = binding["spec"]["matchResources"]
+        .as_object()
+        .expect("matchResources");
+    assert_eq!(
+        resources.keys().map(String::as_str).collect::<Vec<_>>(),
+        vec!["namespaceSelector"],
+        "the binding selects namespaces and nothing else"
+    );
+    assert_eq!(
+        binding["spec"]["policyName"], policy["metadata"]["name"],
+        "the binding names the one policy"
     );
 }
 

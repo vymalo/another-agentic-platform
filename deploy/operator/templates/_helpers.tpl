@@ -40,9 +40,39 @@ helm.sh/chart: {{ printf "%s-%s" .Chart.Name .Chart.Version | replace "+" "_" | 
 {{- end -}}
 {{- end -}}
 
-{{/* The namespace the operator watches, and where its Role is: watchNamespace, else the release's. */}}
+{{/* The primary namespace the operator watches: watchNamespace, else the first of watchNamespaces, else the release's. It is where the
+run-pods settings ConfigMap, the cluster-scoped policy and the PriorityClass are named from, and what the API's defaults.namespace must
+be. A watchNamespaces that is not a list is left to aap.validate to refuse by name: `index` on a map would fail here first with a raw
+reflect error, before the template that runs the checks. */}}
 {{- define "aap.watchNamespace" -}}
-{{- default .Release.Namespace .Values.watchNamespace -}}
+{{- if .Values.watchNamespace -}}
+{{- .Values.watchNamespace -}}
+{{- else if and .Values.watchNamespaces (kindIs "slice" .Values.watchNamespaces) -}}
+{{- index .Values.watchNamespaces 0 -}}
+{{- else -}}
+{{- .Release.Namespace -}}
+{{- end -}}
+{{- end -}}
+
+{{/* Every namespace the operator watches, as a JSON list: watchNamespaces, else the one of aap.watchNamespace. The Role and
+RoleBinding, and the run pods' Role, are rendered in each. Helm's fromJsonArray turns a JSON error into a one-element list, so a
+value that is not a list is left to aap.validate to refuse by name. */}}
+{{- define "aap.watchNamespaces" -}}
+{{- if and .Values.watchNamespaces (kindIs "slice" .Values.watchNamespaces) -}}
+{{- toJson .Values.watchNamespaces -}}
+{{- else -}}
+{{- toJson (list (include "aap.watchNamespace" .)) -}}
+{{- end -}}
+{{- end -}}
+
+{{/* A namespace name as a YAML scalar: quoted when YAML 1.1 would read it as a boolean, a null or a number (on, no, 2024, 0x1f),
+plain otherwise. A DNS label may be any of those, and `namespace: on` is the boolean true to the API server, not a name. */}}
+{{- define "aap.namespaceScalar" -}}
+{{- if regexMatch "^(?i:y|yes|n|no|true|false|on|off|null|~|[0-9]+|0x[0-9a-f]+|0o[0-7]+|0b[01]+)$" . -}}
+{{- . | quote -}}
+{{- else -}}
+{{- . -}}
+{{- end -}}
 {{- end -}}
 
 {{- define "aap.serviceAccountName" -}}
