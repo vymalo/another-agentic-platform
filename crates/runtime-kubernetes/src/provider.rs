@@ -4,8 +4,9 @@ use std::collections::BTreeSet;
 use std::fmt::Debug;
 
 use aap_ports::{
-    Capabilities, DeleteOutcome, DeletionPolicy, Endpoint, Issue, IssueReason, Role, RuntimeError,
-    RuntimeId, RuntimeProvider, RuntimeSpec, RuntimeStatus, Surface,
+    Capabilities, DEFAULT_AGENT_CARD_PATH, DeleteOutcome, DeletionPolicy, Endpoint, Issue,
+    IssueReason, Role, RuntimeError, RuntimeId, RuntimeProvider, RuntimeSpec, RuntimeStatus,
+    Surface,
 };
 use futures::stream::BoxStream;
 use k8s_openapi::NamespaceResourceScope;
@@ -940,11 +941,17 @@ impl KubernetesRuntime {
             .ok_or_else(|| Error::NotFound {
                 what: format!("the port of runtime {id}"),
             })?;
+        let card = service
+            .metadata
+            .annotations
+            .as_ref()
+            .and_then(|a| a.get(names::CARD_PATH_ANNOTATION))
+            .map_or(DEFAULT_AGENT_CARD_PATH, String::as_str);
         let base = format!("http://{}.{}.svc:{port}/", id.name(), id.scope());
         Ok(Endpoint {
             url: match surface {
                 Surface::A2a => base,
-                Surface::AgentCard => format!("{base}.well-known/agent-card.json"),
+                Surface::AgentCard => format!("{base}{}", card.trim_start_matches('/')),
             },
         })
     }

@@ -389,6 +389,8 @@ fn a_new_agent_gets_the_defaults_and_an_old_one_keeps_what_it_holds() {
             .spec
             .harness
             .adam
+            .as_ref()
+            .unwrap()
             .coder
             .as_ref()
             .unwrap()

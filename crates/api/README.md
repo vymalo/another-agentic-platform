@@ -27,7 +27,7 @@ let crds: Vec<CustomResourceDefinition> = aap_api::crds(); // AgentConfig, Agent
 | Item | What |
 |---|---|
 | `AgentService`, `AgentServiceSpec`, `AgentServiceStatus` | The service: `configRef`, `interfaces`, `scaling`, `suspend`, `store`, `access`, `registry`, `deletionPolicy`, and the status the controller writes |
-| `AgentConfig`, `AgentConfigSpec`, `AgentConfigStatus` | The config: `harness`, `model`, `tools`, `environment`, `security`, `extraEnv` |
+| `AgentConfig`, `AgentConfigSpec`, `AgentConfigStatus` | The config: `harness` (`adam-rs`, or `a2a` since K11a), `model` (optional; required of `adam-rs`), `tools`, `environment`, `security`, `extraEnv` |
 | `ModelEndpoint`, `ModelEndpointSpec` | An OpenAI-compatible endpoint set once (`title`, `baseUrl`, `apiKeySecretRef`, `models`), named by `AgentConfig.spec.model.endpointRef`. Its status is a `SharedStatus` (K2) |
 | `ToolProvider`, `ToolProviderSpec`, `ProviderMcp` | One remote MCP server set once (`title`, `mcp: { url, headers, tools, optional }`), named by `AgentConfig.spec.tools.mcpServers.<n>.providerRef`. Its status is a `SharedStatus` (K2) |
 | `SharedStatus`, `MAX_USED_BY` | K2: the status of the two shared kinds, written by the operator and never by a person: `observedGeneration`, `usedBy` (the `AgentService`s of the namespace that run a config naming the object, sorted, **at most `MAX_USED_BY` = 64**, the bound being the operator's and not the schema's), counting a service being deleted and not one whose config is missing, so it may differ for a moment from the Platform API's own `usedBy`, which reads the cluster at the request and counts every owner's agents, `usedByMore` (how many are not listed; absent at zero) and the conditions `Accepted` (`Valid` / `Invalid`), `InUse` (`Referenced` / `Unreferenced`) and `AgentsReady` (`AllReady` / `SomeNotReady` / `NoAgents`, status `Unknown`). **It never holds a secret, a header value, a URL's credentials or a token** (§60a). **K3b:** a `ToolProvider` the deployment probes also has `probe` (the tool names the server listed, sorted, each once, at most `MAX_PROBED_TOOLS` = 64, `probe.toolsMore` for the rest, and `probe.incomplete` when the server still named a cursor after five pages) and the `Reachable` condition (`Probed`, `NeedsHeader`, `Invalid`, `Unreachable`, `NotMcp` or `Timeout`; `Unknown` when the server names a header, `False` when it does not answer or is not MCP); both absent when probing is off or the object was not probed, and no tool description, schema or URL is in them |
@@ -51,6 +51,26 @@ Retain`, `interfaces` (nothing exposed), `githubMcp` (`sidecar: true`, `port: 80
 A coder that sets it runs the commands of a run in pods of their own (adam-rs #131); `adam-agent` has no `coder` block, so
 there it is nothing. Nothing else about run pods is a field of the config: the image, the quota, the network policy and the placement are the
 deployment's (the operator chart's `runPods`), so that a person who may edit an agent cannot widen them. [`examples/coder-run-pods.yaml`](../../examples/coder-run-pods.yaml).
+
+## The A2A harness (K11a, AD-054)
+
+`harness.type` is `adam-rs` (the default, AD-022) or `a2a`: an image that serves A2A itself. The two blocks are exclusive (CEL), and
+`harness.adam` is optional, so the schema no longer requires it; `model` is optional too and required only of `adam-rs` (CEL:
+`self.harness.type != 'adam-rs' || has(self.model)`).
+
+| Field | Shape |
+|---|---|
+| `AgentConfig.spec.harness.a2a` | `{ image, port?, cardPath?, healthPath?, env? }`, only with `type: a2a` |
+| `…a2a.image` | An `Image` (`ref`): the harness's own. `environment.image` is refused with it (`aap-domain`), and the operator's `--default-agent-image` never applies |
+| `…a2a.port` | 1 to 65535, `8080` by default: the container's port, the Service's and the `NetworkPolicy`'s |
+| `…a2a.cardPath` | A path, `/.well-known/agent-card.json` by default: where the image serves its card, and what the registry's `href` names |
+| `…a2a.healthPath` | A path, `/healthz` by default: the startup and readiness probes' path |
+| `…a2a.env` | At most 64 entries (`MAX_A2A_ENV`), each `{ name, value }` or `{ name, secretKeyRef }`, exactly one (CEL) |
+
+`model`, `environment.image`, `environment.cache`, `environment.volumes`, `tools`, `extraEnv` and `scaling.topology: split` are refused
+for an `a2a` harness by `aap-domain` (an image that serves A2A itself brings its own model, cache, volumes, tools and variables, and is one
+server). [`examples/a2a.yaml`](../../examples/a2a.yaml). The dashboard's forms are the adam-rs harness's: an `a2a` config is YAML only
+(`aap-forms` says why).
 
 ## The dashboard's fields (D1)
 

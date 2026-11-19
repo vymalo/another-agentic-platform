@@ -117,9 +117,12 @@ pub fn resolve(
         workloads,
         file_sets,
         network: Network {
-            port: contract::PORT,
+            port: plan::service_port(config),
             selects,
             allow_from,
+            // Only an A2A image says where its card is; an adam process serves it at the fixed path
+            // (the provider's default), so no existing digest moves.
+            card_path: plan::a2a(config).map(|a| a.card_path.clone()),
         },
         run_pods: cx.run_pods_spec().map_err(|issue| vec![issue])?,
     };
@@ -164,6 +167,8 @@ struct Cx<'a> {
     name: &'a str,
     /// The namespace of the service: where its run pods' egress proxy is.
     namespace: String,
+    /// The adam-rs block, when the harness is adam-rs.
+    adam: Option<&'a aap_api::Adam>,
     coder: Option<&'a Coder>,
     placement: String,
     public_url: String,
@@ -197,6 +202,7 @@ impl<'a> Cx<'a> {
             .public_url
             .as_deref()
             .filter(|u| !u.is_empty());
+        let adam = plan::adam(config);
         Self {
             max_tier: externals.max_access_tier,
             service,
@@ -204,11 +210,14 @@ impl<'a> Cx<'a> {
             origins,
             name,
             namespace: namespace.to_owned(),
-            coder: config.spec.harness.adam.coder.as_ref(),
+            adam,
+            coder: adam.and_then(|a| a.coder.as_ref()),
             placement: plan::placement(config),
-            public_url: configured
-                .map_or_else(|| plan::default_public_url(name, namespace), str::to_owned),
-            is_coder: config.spec.harness.adam.binary == Binary::AdamCoder,
+            public_url: configured.map_or_else(
+                || plan::default_public_url(name, namespace, plan::service_port(config)),
+                str::to_owned,
+            ),
+            is_coder: adam.is_some_and(|a| a.binary == Binary::AdamCoder),
             // `validate` refused a config that asks for run pods the deployment does not give: there is no
             // run, and `run_pods_spec` says so if it is ever asked.
             run: plan::run_pods(config)
@@ -228,7 +237,17 @@ impl<'a> Cx<'a> {
         &self,
         database: &SecretRef,
     ) -> Result<(Vec<FileSet>, Vec<Workload>), ConfigIssue> {
-        let adam = &self.config.spec.harness.adam;
+        // A bring-your-own A2A image (AD-054): one server, the image's own entrypoint, the variables
+        // the config lists, and nothing of adam's.
+        if let Some(a2a) = plan::a2a(self.config) {
+            return Ok((Vec::new(), vec![self.a2a_workload(a2a)?]));
+        }
+        let Some(adam) = self.adam else {
+            return Err(refused(
+                "AgentConfig spec.harness",
+                "no adam-rs block, and no a2a image: the harness names neither",
+            ));
+        };
         let mut file_sets = Vec::new();
 
         // The folder: inline files become an immutable, content-named set; a ConfigMap of the
@@ -353,6 +372,102 @@ impl<'a> Cx<'a> {
         Ok((file_sets, workloads))
     }
 
+    /// The one workload of a bring-your-own A2A image (AD-054): no command and no args (the image's
+    /// entrypoint), the variables the config lists and no other, no volume, no sidecar, and the probes
+    /// on the image's own health path.
+    fn a2a_workload(&self, a2a: &aap_api::A2a) -> Result<Workload, ConfigIssue> {
+        let spec = &self.config.spec;
+        let port = u16::try_from(a2a.port)
+            .ok()
+            .filter(|p| *p != 0)
+            .ok_or_else(|| {
+                refused(
+                    "AgentConfig spec.harness.a2a.port",
+                    "a port number, 1 to 65535",
+                )
+            })?;
+        let mut names = std::collections::BTreeSet::new();
+        let mut env = Vec::with_capacity(a2a.env.len());
+        for (i, e) in a2a.env.iter().enumerate() {
+            if !names.insert(e.name.as_str()) {
+                return Err(refused(
+                    &format!("AgentConfig spec.harness.a2a.env[{i}].name"),
+                    "two variables of the image have this name",
+                ));
+            }
+            let var = match (&e.value, &e.secret_key_ref) {
+                (Some(value), None) => EnvVar::literal(&e.name, value),
+                (None, Some(r)) => EnvVar::secret(&e.name, SecretRef::new(&r.name, &r.key)),
+                _ => {
+                    return Err(refused(
+                        &format!("AgentConfig spec.harness.a2a.env[{i}]"),
+                        "exactly one of value and secretKeyRef",
+                    ));
+                }
+            };
+            env.push(var);
+        }
+        // The service's A2A token: the config names the Secret and the key, and the platform's registry contract
+        // (`AGENT_REGISTRY_AGENT_TOKEN`) is that a listed agent accepts it. It is the one variable an a2a image gets
+        // without naming it, because the service named it: without it a listed agent could never be called.
+        if let Some(r) = &self.service.spec.interfaces.a2a.bearer_tokens_secret_ref {
+            env.push(EnvVar::secret(
+                env::A2A_BEARER_TOKENS,
+                SecretRef::new(&r.name, &r.key),
+            ));
+        }
+        let http = |period, timeout, failures| Probe {
+            action: ProbeAction::Http {
+                path: a2a.health_path.clone(),
+            },
+            period_secs: period,
+            timeout_secs: timeout,
+            failure_threshold: failures,
+        };
+        let container = Container {
+            name: contract::AGENT_CONTAINER.to_owned(),
+            image: a2a.image.reference.clone(),
+            command: Vec::new(),
+            args: Vec::new(),
+            env,
+            port: Some(port),
+            mounts: Vec::new(),
+            probes: Probes {
+                startup: Some(http(
+                    probes::STARTUP_PERIOD,
+                    None,
+                    Some(probes::STARTUP_FAILURES),
+                )),
+                liveness: None,
+                readiness: Some(http(
+                    probes::READINESS_PERIOD,
+                    Some(probes::READINESS_TIMEOUT),
+                    None,
+                )),
+            },
+            resources: convert::resources(spec.environment.resources.as_ref()).0,
+            read_only_root_filesystem: false,
+        };
+        Ok(Workload {
+            name: self.name.to_owned(),
+            role: Role::All,
+            replicas: u32::try_from(self.service.spec.scaling.workers)
+                .unwrap_or(1)
+                .max(1),
+            stable_identity: false,
+            container,
+            sidecars: Vec::new(),
+            volumes: Vec::new(),
+            security: self.security(),
+            termination_grace_secs: spec
+                .environment
+                .termination_grace_period_seconds
+                .and_then(|s| u32::try_from(s).ok()),
+            min_available: None,
+            service_account: None,
+        })
+    }
+
     /// What the template and the provider's run-pod objects are made from, for this service.
     fn run_service<'r>(&'r self, run: &'r Run<'a>) -> Result<ForService<'r>, ConfigIssue> {
         let spec = &self.config.spec;
@@ -374,12 +489,16 @@ impl<'a> Cx<'a> {
                 "run pods need the coder's work volume",
             )
         })?;
-        let model_key = spec.model.api_key_secret_ref.as_ref().ok_or_else(|| {
-            refused(
-                "AgentConfig spec.model.apiKeySecretRef",
-                "no key: the ModelEndpoint it names was not read",
-            )
-        })?;
+        let model_key = spec
+            .model
+            .as_ref()
+            .and_then(|m| m.api_key_secret_ref.as_ref())
+            .ok_or_else(|| {
+                refused(
+                    "AgentConfig spec.model.apiKeySecretRef",
+                    "no key: the ModelEndpoint it names was not read",
+                )
+            })?;
         // The claim a run pod mounts: the shared claim of a ReadWriteMany volume, or the claim the StatefulSet makes
         // for the first worker (`<volume>-<workload>-0`), which only that worker's node has attached.
         let per_replica = work.source.persistent.per_replica;
@@ -705,6 +824,12 @@ impl<'a> Cx<'a> {
     /// `extraEnv`, then the Secret-backed ones.
     fn env(&self, role: Role, database: &SecretRef) -> Result<Vec<EnvVar>, ConfigIssue> {
         let spec = &self.config.spec;
+        let Some(adam) = self.adam else {
+            return Err(refused(
+                "AgentConfig spec.harness",
+                "no adam-rs block: the harness is not adam-rs",
+            ));
+        };
         let runs_workers = role.runs_workers();
         let serves_a2a = role != Role::Worker;
         let mut e: Vec<EnvVar> = vec![lit(env::LISTEN_ADDR, contract::LISTEN_ADDR)];
@@ -747,13 +872,20 @@ impl<'a> Cx<'a> {
                 e.push(lit(env::MAX_ACCESS_TIER, effective.as_str()));
             }
         }
-        if self.config.spec.harness.adam.agent.folder.is_some() {
+        if adam.agent.folder.is_some() {
             e.push(lit(env::ADAM_AGENT_DIR, contract::AGENT_DIR));
         }
 
         if runs_workers {
-            // `validate` refused a model with no address: an endpointRef that was not read.
-            let Some(base) = &spec.model.base_url else {
+            // `validate` refused a config with no model, and a model with no address: an endpointRef
+            // that was not read.
+            let Some(model) = &spec.model else {
+                return Err(refused(
+                    "AgentConfig spec.model",
+                    "an adam-rs agent needs a model",
+                ));
+            };
+            let Some(base) = &model.base_url else {
                 return Err(refused(
                     "AgentConfig spec.model.baseUrl",
                     "no address: the ModelEndpoint it names was not read",
@@ -774,8 +906,8 @@ impl<'a> Cx<'a> {
                     ));
                 }
             }
-            e.push(lit(env::MODEL, &spec.model.model));
-            if let Some(body) = &spec.model.extra_body
+            e.push(lit(env::MODEL, &model.model));
+            if let Some(body) = &model.extra_body
                 && !body.is_empty()
             {
                 // The kubelet expands `$(VAR)` in a literal and turns `$$` into `$`: every `$` is doubled, so the process
@@ -786,10 +918,10 @@ impl<'a> Cx<'a> {
                         .replace('$', "$$"),
                 ));
             }
-            if let Some(echo) = spec.model.echo_reasoning {
+            if let Some(echo) = model.echo_reasoning {
                 e.push(lit(env::MODEL_ECHO_REASONING, echo.as_str()));
             }
-            if let Some(window) = spec.model.context_window {
+            if let Some(window) = model.context_window {
                 e.push(lit(env::MODEL_CONTEXT_WINDOW, window.to_string()));
             }
             if let Some(c) = self.coder {
@@ -895,7 +1027,11 @@ impl<'a> Cx<'a> {
         e.push(EnvVar::secret(env::DATABASE_URL, database.clone()));
         if runs_workers {
             // `validate` refused a model with no key: an endpointRef that was not read.
-            let Some(key) = &spec.model.api_key_secret_ref else {
+            let Some(key) = spec
+                .model
+                .as_ref()
+                .and_then(|m| m.api_key_secret_ref.as_ref())
+            else {
                 return Err(refused(
                     "AgentConfig spec.model.apiKeySecretRef",
                     "no key: the ModelEndpoint it names was not read",

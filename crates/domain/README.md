@@ -92,6 +92,29 @@ replicas); a `split` one has the workers (`<svc>`, role `Worker`) and the front 
   context,repos,issues,pull_requests --listen-host 127.0.0.1 --port <port>`, an `exec` startup probe on
   loopback, its own small resources, `GITHUB_HOST` only when `host` is set; on workers only.
 
+### A bring-your-own A2A image (K11a, AD-054)
+
+`harness.type: a2a` is the second harness: an image that serves A2A itself, with an `image`, a `port`, a
+`cardPath`, a `healthPath` and a list of `env` entries that are each a plain `value` or a `secretKeyRef`.
+`resolve` makes **one workload** (role `All`, `<svc>`, `scaling.workers` replicas) with:
+
+* **no command and no args**: the image's own entrypoint;
+* **the variables the config lists and no other** (`EnvValue::Literal` / `EnvValue::Secret`). The operator
+  invents none: no `LISTEN_ADDR`, `PUBLIC_URL`, `DATABASE_URL`, model variable or `ADAM_*`;
+* **the port** from `port`, which is also the Service's and the `NetworkPolicy`'s;
+* **startup and readiness probes** on `port` and `healthPath` (no liveness probe: the image promised only
+  that path), with the chart's periods;
+* **resources and security** from `environment.resources` and `security`, as an adam agent has them, and
+  `environment.terminationGracePeriodSeconds` when set;
+* **no volume, no mount, no sidecar, no folder, no cache, no run pods, and no service account**.
+
+The store is provisioned exactly as for any agent (`ResolvedAgent.store`), and the container knows nothing of
+it unless its own `env` names a secret. `Network::card_path` is the harness's `cardPath` (absent for adam, so
+no adam digest moves); a provider answers the agent card at it, and the registry's `href` is
+`http://<svc>.<ns>.svc:<port><cardPath>`. `validate` refuses, naming the field, the adam-only fields an A2A
+image cannot use: `environment.image` (the harness names the image), `environment.cache`,
+`environment.volumes`, `tools`, `extraEnv`, `model`, and a `split` topology.
+
 ## The digest
 
 `sha256:<hex>` over a **canonical serialisation** (object keys sorted, no whitespace; written in this crate,

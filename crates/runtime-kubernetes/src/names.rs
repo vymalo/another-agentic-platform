@@ -29,6 +29,10 @@ pub const DIGEST_ANNOTATION: &str = "agents.vymalo.com/config-digest";
 /// workloads and on the shared claims.
 pub const DELETION_POLICY_ANNOTATION: &str = "agents.vymalo.com/deletion-policy";
 
+/// The path a bring-your-own A2A image serves its card at (`Network::card_path`, AD-054), on the
+/// Service: a provider that reads a live Service to answer `endpoint()` has no other way to know it.
+pub const CARD_PATH_ANNOTATION: &str = "agents.vymalo.com/card-path";
+
 /// The API group of the custom resources: an owner reference to it is an owner of ours.
 pub const OWNER_GROUP: &str = "agents.vymalo.com";
 

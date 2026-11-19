@@ -160,13 +160,14 @@ pub fn to_resources(form: &AgentForm, deployment: &Deployment, namespace: &str) 
     let config_spec = AgentConfigSpec {
         harness: Harness {
             kind: HarnessType::AdamRs,
-            adam: Adam {
+            adam: Some(Adam {
                 binary,
                 agent,
                 coder,
-            },
+            }),
+            a2a: None,
         },
-        model: Model {
+        model: Some(Model {
             model: form.model.model.clone(),
             endpoint_ref: Some(NameRef {
                 name: form.model.endpoint.clone(),
@@ -176,7 +177,7 @@ pub fn to_resources(form: &AgentForm, deployment: &Deployment, namespace: &str) 
             extra_body: None,
             echo_reasoning: None,
             context_window: None,
-        },
+        }),
         tools: Tools {
             github_mcp: deployment.github_mcp.clone(),
             mcp_servers: form
@@ -264,8 +265,18 @@ pub fn load_agent(agent: &Agent) -> Loaded<AgentView> {
     let (Some(service), Some(config_spec)) = (service, config_spec) else {
         return Loaded::yaml_only(managed_by, reasons);
     };
+    // The dashboard's forms are the adam-rs harness's: an A2A image's fields (AD-054) have no form, and
+    // a form that showed them as an adam agent's would write a different object back.
+    let Some(adam) = &config_spec.harness.adam else {
+        reasons.push(Unrepresentable {
+            object: Kind::AgentConfig,
+            path: "spec.harness.a2a".to_owned(),
+            reason: "a harness other than adam-rs has no form: edit the YAML".to_owned(),
+        });
+        return Loaded::yaml_only(managed_by, reasons);
+    };
 
-    let (form, deployment) = extract(&agent.service.name, &service, &config_spec);
+    let (form, deployment) = extract(&agent.service.name, &service, &config_spec, adam);
     let again = to_resources(&form, &deployment, &agent.service.namespace);
     differences(
         Kind::AgentService,
@@ -295,8 +306,8 @@ fn extract(
     name: &str,
     service: &AgentServiceSpec,
     config: &AgentConfigSpec,
+    adam: &Adam,
 ) -> (AgentForm, Deployment) {
-    let adam = &config.harness.adam;
     let coder = adam.coder.as_ref();
     let kind = match adam.binary {
         Binary::AdamCoder => {
@@ -340,11 +351,15 @@ fn extract(
         model: ModelChoice {
             endpoint: config
                 .model
-                .endpoint_ref
                 .as_ref()
+                .and_then(|m| m.endpoint_ref.as_ref())
                 .map(|r| r.name.clone())
                 .unwrap_or_default(),
-            model: config.model.model.clone(),
+            model: config
+                .model
+                .as_ref()
+                .map(|m| m.model.clone())
+                .unwrap_or_default(),
         },
         tool_servers: config.tools.mcp_servers.keys().cloned().collect(),
         allow_insecure_http: config.tools.allow_insecure_http,

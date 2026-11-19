@@ -489,7 +489,11 @@ fn the_samples_of_the_testkit_are_the_shape_of_the_real_custom_resources() {
         let refs = config_references(&draft.config);
         assert_eq!(
             refs.model_endpoint,
-            config.model.endpoint_ref.as_ref().map(|r| r.name.clone())
+            config
+                .model
+                .as_ref()
+                .and_then(|m| m.endpoint_ref.as_ref())
+                .map(|r| r.name.clone())
         );
         assert_eq!(
             refs.tool_providers,

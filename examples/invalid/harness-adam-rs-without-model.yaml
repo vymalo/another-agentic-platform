@@ -1,0 +1,18 @@
+# Refused: type adam-rs with no model. The adam binaries need one; only an a2a image brings its own (AD-054).
+# expect: harness.type adam-rs needs spec.model
+apiVersion: agents.vymalo.com/v1alpha1
+kind: AgentConfig
+metadata:
+  name: invalid-harness-adam-rs-without-model
+  namespace: another-agentic-system
+spec:
+  harness:
+    type: adam-rs
+    adam:
+      binary: adam-agent
+      agent:
+        folder:
+          files:
+            instructions.md: |
+              Hello.
+  environment: {}

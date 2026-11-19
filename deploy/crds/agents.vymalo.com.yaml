@@ -29,7 +29,7 @@ spec:
     name: v1alpha1
     schema:
       openAPIV3Schema:
-        description: What an adam-rs agent is made of. Referenced by an AgentService; the operator validates it and resolves it into a runtime.
+        description: What an agent is made of. Referenced by an AgentService; the operator validates it and resolves it into a runtime.
         properties:
           spec:
             description: |-
@@ -173,8 +173,84 @@ spec:
               harness:
                 description: The agent framework that runs.
                 properties:
+                  a2a:
+                    description: 'The settings of an image that serves A2A itself. Only with `type: a2a`.'
+                    nullable: true
+                    properties:
+                      cardPath:
+                        default: /.well-known/agent-card.json
+                        description: Where the image serves its A2A agent card, as a path.
+                        type: string
+                      env:
+                        default: []
+                        description: The variables the image gets, each a plain value or a Secret key. The operator invents none.
+                        items:
+                          description: 'One variable of an A2A image: a plain value, or a Secret key, never both.'
+                          properties:
+                            name:
+                              description: The variable's name.
+                              minLength: 1
+                              type: string
+                            secretKeyRef:
+                              description: The Secret key that holds the value.
+                              nullable: true
+                              properties:
+                                key:
+                                  description: Key inside the Secret.
+                                  minLength: 1
+                                  type: string
+                                name:
+                                  description: Name of the Secret.
+                                  minLength: 1
+                                  type: string
+                              required:
+                              - key
+                              - name
+                              type: object
+                            value:
+                              description: A plain value. Never a secret.
+                              nullable: true
+                              type: string
+                          required:
+                          - name
+                          type: object
+                          x-kubernetes-validations:
+                          - message: an a2a environment variable has exactly one of value and secretKeyRef
+                            rule: has(self.value) != has(self.secretKeyRef)
+                        maxItems: 64
+                        type: array
+                      healthPath:
+                        default: /healthz
+                        description: 'The path that answers 200 while the image serves: its startup and readiness probes.'
+                        type: string
+                      image:
+                        description: 'The image. The harness''s own: `environment.image` is refused with it.'
+                        properties:
+                          ref:
+                            description: 'The reference: a tag, or a tag and a digest.'
+                            minLength: 1
+                            type: string
+                        required:
+                        - ref
+                        type: object
+                      port:
+                        default: 8080
+                        description: The port the image serves on.
+                        format: int32
+                        maximum: 65535.0
+                        minimum: 1.0
+                        type: integer
+                    required:
+                    - image
+                    type: object
+                    x-kubernetes-validations:
+                    - message: 'harness.a2a.cardPath is an absolute path: it starts with `/`'
+                      rule: self.cardPath.startsWith('/')
+                    - message: 'harness.a2a.healthPath is an absolute path: it starts with `/`'
+                      rule: self.healthPath.startsWith('/')
                   adam:
-                    description: The adam-rs settings.
+                    description: 'The adam-rs settings. Only with `type: adam-rs`.'
+                    nullable: true
                     properties:
                       agent:
                         description: Where the agent comes from.
@@ -410,13 +486,21 @@ spec:
                     description: The harness type.
                     enum:
                     - adam-rs
+                    - a2a
                     type: string
                 required:
-                - adam
                 - type
                 type: object
+                x-kubernetes-validations:
+                - message: harness.type adam-rs needs harness.adam and no harness.a2a
+                  rule: self.type != 'adam-rs' || (has(self.adam) && !has(self.a2a))
+                - message: harness.type a2a needs harness.a2a and no harness.adam
+                  rule: self.type != 'a2a' || (has(self.a2a) && !has(self.adam))
               model:
-                description: The model the agent talks to.
+                description: |-
+                  The model the agent talks to. Required for `adam-rs`; an `a2a` image gets none from the
+                  platform (AD-054).
+                nullable: true
                 properties:
                   apiKeySecretRef:
                     description: |-
@@ -657,8 +741,10 @@ spec:
             required:
             - environment
             - harness
-            - model
             type: object
+            x-kubernetes-validations:
+            - message: harness.type adam-rs needs spec.model
+              rule: self.harness.type != 'adam-rs' || has(self.model)
           status:
             description: What the controller observed of an AgentConfig.
             nullable: true

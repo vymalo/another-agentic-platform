@@ -547,7 +547,10 @@ All eleven steps passed (44 `ok` lines, exit 0), with the real answers of the AP
 `aap-e2e-ns-ops`, is the Helm release's and is deliberately **not** watched. The operator reconciles an agent in each of the two, with **one
 Role and one RoleBinding in each and no ClusterRole anywhere**; the registry lists both, each with the card URL of its own namespace; and a
 service id that **both** namespaces share is listed for **neither** (a client that asks for `chat` would be given a coin flip otherwise), then
-listed again from the survivor when one of the two is deleted. This is the job `namespaces-e2e` of
+listed again from the survivor when one of the two is deleted. Since K11a it also runs `gamma`, an agent whose `harness.type` is `a2a` (an image
+that serves A2A itself, AD-054), on the stand-in: it becomes `Ready` with its store, is listed at its harness's card path, and its container has
+the image's own entrypoint, exactly the two variables its config declares (one literal, one `secretKeyRef`) and the service's `A2A_BEARER_TOKENS`, and no other, no volume and no
+sidecar; it is then deleted. This is the job `namespaces-e2e` of
 [`operator-image.yml`](../../../../.github/workflows/operator-image.yml) (it needs the job `image`, whose operator image it runs, and **`push`
 needs it**: unlike `chain-e2e` and `run-pods-e2e` it pins nothing outside this repository except the curl image `api-e2e` already pulls, like `api-e2e`). The script
 [`namespaces-e2e.sh`](namespaces-e2e.sh) is all of it and runs against any kind cluster that has the operator image and the stand-in:
@@ -594,7 +597,9 @@ sequenceDiagram
     O-->>J: the document lists chat again, with the card URL of aap-e2e-ns-a/chat
     J->>K: delete alpha
     O-->>J: the document keeps beta (and chat), and beta is still Ready
-    J->>K: no secret value and no token in any answer or log, then undo what was made
+    J->>K: gamma in a (harness.type a2a, the stand-in, one literal and one secretKeyRef)
+    O-->>J: gamma Ready, listed at its harness's card path, one container, the image's entrypoint, exactly its two variables and the service's token
+    J->>K: delete gamma, then no secret value and no token in any answer or log, then undo what was made
 ```
 
 ```mermaid
@@ -607,7 +612,8 @@ stateDiagram-v2
     Listed --> Shared: chat in both, listed for neither (the log names both)
     Shared --> Survivor: b/chat deleted, chat listed from a
     Survivor --> Checked: alpha deleted, beta kept
-    Checked --> [*]: no secret, no token, no panic
+    Checked --> A2a: gamma (harness.type a2a) Ready and listed at its card path, its own variables only
+    A2a --> [*]: gamma deleted, no secret, no token, no panic
     Made --> [*]: a missing tool, a refused context or namespace: the script prints what the cluster says and undoes only what it made
 ```
 
@@ -684,10 +690,12 @@ read by the built `aapctl validate -f` (the domain's own `validate`, which the o
 reject: the assertions can fail. `shellcheck` and `actionlint` are not installed where it was written: the script keeps the other scripts' style
 (quoted variables, `printf` for anything that can hold a body, no backtick in an unquoted heredoc) instead.
 
-**Unverified until the job has run**: everything that needs a kubelet and a real API server — that the stand-in's pod starts in each namespace
-and becomes Ready, that the operator's one process reads both namespaces (the `WATCH_NAMESPACES` it is given is the chart's; that the binary
-honours it is K6b's code), the registry's answers from a pod, kindnet admitting the curl pod, the two log lines of the skipped `chat`, and the
-timings on a runner.
+**Run in CI**: job `namespaces-e2e` of run 44487393662 (job 135436059044), *verified 2026-11-19* — the stand-in's pod starts in each
+namespace and becomes Ready, the operator's one process reads both, the registry answers from a pod, kindnet admits the curl pod, the two log
+lines of the skipped `chat` are there, and **the a2a agent `gamma` (K11a) became `Ready` in 6 s with its store, was listed at
+`http://gamma.aap-e2e-ns-a.svc:8080/.well-known/agent-card.json`, and its container ran the image's entrypoint with exactly its two variables and the service's `A2A_BEARER_TOKENS`
+(one literal, one `secretKeyRef`), no volume and no sidecar, probing `/healthz`** — which also put the new CRDs, CEL included, on a real API
+server. **Still unverified**: a real third-party A2A image (every pod here is the stand-in), and the timings of a runner under heavy load.
 
 **One assumption this script makes about K6b's code**: step 10 reads the operator's log for a line that holds `<namespace>/<name> is not in the
 registry` for **both** entries of a shared id, which is the message `crates/registry/src/server.rs` writes for an entry the document skips. The

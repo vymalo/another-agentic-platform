@@ -32,6 +32,10 @@
 #      service), and the operator's log says so for both, naming aap-e2e-ns-a/chat and aap-e2e-ns-b/chat;
 #  11. `b/chat` deleted: `chat` appears, with the card URL of aap-e2e-ns-a/chat, and b's workload is gone;
 #  12. `alpha` deleted: the document keeps `beta` (and `chat`), still pointing at b, and a's workload is gone;
+#  12b. `gamma` in a, an agent whose `harness.type` is `a2a` (K11a, AD-054) on the stand-in image: Ready with its store, listed at
+#      `http://gamma.<a>.svc:8080/.well-known/agent-card.json`, its container running the image's entrypoint with exactly the two
+#      variables the config declares (one literal, one `secretKeyRef`) and no other, no volume and no sidecar, probing `/healthz`; then
+#      deleted, and the document is `chat beta` again;
 #  13. no secret value (the model's key sentinel, the A2A bearer, the ledger URI, the registry's token) is in any answer the script read
 #      or in the operator's log, and the log holds no panic. The log counts only if its `kubectl logs` succeeded, it is not empty and it
 #      holds a line only the operator logs ("the caches are synced");
@@ -390,9 +394,86 @@ spec:
         memory: 64Mi
 EOF
 }
+# a2a_manifest <namespace> <name> <title>: the AgentService and its AgentConfig of a bring-your-own A2A image (K11a, AD-054) on the
+# stand-in image, which serves its card at the default path and answers /healthz on 8080: harness.type a2a, one literal variable and
+# one from a Secret, no model, and no environment.image (the harness names the image).
+a2a_manifest() {
+  m_ns=$1; m_name=$2; m_title=$3
+  cat > "$work/agent-$m_ns-$m_name.yaml" <<EOF
+apiVersion: agents.vymalo.com/v1alpha1
+kind: AgentService
+metadata:
+  name: $m_name
+  namespace: $m_ns
+  labels:
+    $made_by_key: $made_by
+spec:
+  description: An image that serves A2A itself, in the kind end-to-end of several watched namespaces (K11a).
+  configRef:
+    name: $m_name
+  interfaces:
+    a2a:
+      enabled: true
+      bearerTokensSecretRef:
+        name: $agent_secret
+        key: A2A_BEARER_TOKENS
+  scaling:
+    topology: combined
+    workers: 1
+  store:
+    postgres:
+      secretRef:
+        name: $db_secret
+        key: uri
+  access:
+    allowFrom:
+      - namespaceSelector:
+          matchLabels:
+            kubernetes.io/metadata.name: $ops
+  registry:
+    title: $m_title
+    tags: [e2e, k11a]
+---
+apiVersion: agents.vymalo.com/v1alpha1
+kind: AgentConfig
+metadata:
+  name: $m_name
+  namespace: $m_ns
+  labels:
+    $made_by_key: $made_by
+spec:
+  harness:
+    type: a2a
+    a2a:
+      image:
+        ref: $agent_image
+      env:
+        - name: E2E_LITERAL
+          value: from-the-config
+        - name: MODEL_API_KEY
+          secretKeyRef:
+            name: $agent_secret
+            key: MODEL_API_KEY
+  environment:
+    resources:
+      requests:
+        cpu: 10m
+        memory: 32Mi
+      limits:
+        memory: 64Mi
+EOF
+}
 # apply_agent <namespace> <name> <title>: the two objects, in that namespace, and the run may now have to undo them.
 apply_agent() {
   agent_manifest "$1" "$2" "$3"
+  not_foreign "$1" "agentservice/$2"
+  not_foreign "$1" "agentconfig/$2"
+  agents_made=1
+  kubectl -n "$1" apply -f "$work/agent-$1-$2.yaml" >/dev/null
+}
+# apply_a2a <namespace> <name> <title>: the two objects of an A2A image, and the run may now have to undo them.
+apply_a2a() {
+  a2a_manifest "$1" "$2" "$3"
   not_foreign "$1" "agentservice/$2"
   not_foreign "$1" "agentconfig/$2"
   agents_made=1
@@ -634,6 +715,42 @@ until_ok "$gone_timeout" "the Deployment of alpha in $a to be gone" absent -n "$
 [ "$(jp "$b" agentservice/beta '{.status.state}')" = Ready ] || die "beta is not Ready any more"
 agent_in "$b" beta
 ok "alpha is gone from $a (its Deployment too) and the registry lists 'chat beta' only, with beta's own card URL: the deletion of one namespace's agent does not disturb the other's"
+
+# ---- 12b. a bring-your-own A2A image: Ready, listed at its harness's card path, and only its own variables ---------------------------
+step "12b. gamma in $a: harness.type a2a, Ready and listed at its harness's card path"
+apply_a2a "$a" gamma Gamma
+start=$(date +%s)
+await_ready "$a" gamma
+ok "gamma (harness.type a2a) is Ready in $a after $(( $(date +%s) - start ))s, with the store still provisioned"
+agent_in "$a" gamma
+until_ok 120 "the registry to list chat, gamma and beta" lists "chat gamma beta"
+[ "$(href_of gamma)" = "http://gamma.$a.svc:8080/.well-known/agent-card.json" ] \
+  || die "the registry lists gamma with the card URL '$(href_of gamma)', not its harness's card path on its namespace's Service"
+kubectl -n "$a" get deployment gamma -o json > "$work/a2a-deployment.json" 2>/dev/null || die "$a has no Deployment gamma"
+# The image's entrypoint, the variables the config declares (and the service's own A2A token) and no other, and no volume:
+# the operator invents nothing beyond the token the service named. The step exercises the harness's DEFAULTS (8080, the
+# standard card path, /healthz); the non-default port and paths are the domain's and the provider's tests'.
+jqok "$work/a2a-deployment.json" "the a2a container has a command or args (the image's entrypoint must run)" \
+  '.spec.template.spec.containers[0] | ((has("command") | not) and (has("args") | not))'
+jqok "$work/a2a-deployment.json" "the a2a container does not get exactly its two variables and the service's token" \
+  '(.spec.template.spec.containers[0].env | map(.name) | sort) == ["A2A_BEARER_TOKENS", "E2E_LITERAL", "MODEL_API_KEY"]'
+jqok "$work/a2a-deployment.json" "the literal variable did not reach the a2a container" \
+  '.spec.template.spec.containers[0].env[] | select(.name == "E2E_LITERAL") | .value == "from-the-config"'
+jqok "$work/a2a-deployment.json" "the secret variable is not a secretKeyRef" \
+  '.spec.template.spec.containers[0].env[] | select(.name == "MODEL_API_KEY") | .valueFrom.secretKeyRef.key == "MODEL_API_KEY"'
+jqok "$work/a2a-deployment.json" "the a2a container mounts a volume" \
+  '.spec.template.spec.containers[0] | has("volumeMounts") | not'
+jqok "$work/a2a-deployment.json" "the a2a pod has more than the one container, or a volume" \
+  '((.spec.template.spec.containers | length) == 1) and (.spec.template.spec | has("volumes") | not)'
+jqok "$work/a2a-deployment.json" "the a2a container does not probe its harness's health path" \
+  '.spec.template.spec.containers[0] | (.startupProbe.httpGet.path == "/healthz") and (.readinessProbe.httpGet.path == "/healthz")'
+kubectl -n "$a" get service gamma -o json > "$work/a2a-service.json" 2>/dev/null || die "$a has no Service gamma"
+jqok "$work/a2a-service.json" "the a2a Service is not on the harness's port" '.spec.ports[0].port == 8080'
+ok "gamma runs the image's entrypoint with E2E_LITERAL, MODEL_API_KEY (a secretKeyRef) and the service's A2A_BEARER_TOKENS and no other variable, no volume and no sidecar, probes its /healthz, and the registry lists it at http://gamma.$a.svc:8080/.well-known/agent-card.json"
+kubectl -n "$a" delete agentservice gamma --wait=true --timeout=120s >/dev/null
+until_ok 120 "the registry to list chat and beta again" lists "chat beta"
+until_ok "$gone_timeout" "the Deployment of a/gamma to be gone" absent -n "$a" get deployment gamma
+ok "gamma deleted: the registry lists 'chat beta' again and its Deployment is gone"
 
 # ---- 13. no secret value, no token, no panic ----------------------------------------------------------------------------------------
 step "13. no secret value and no token in any answer or log"

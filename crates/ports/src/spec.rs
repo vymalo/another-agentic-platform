@@ -233,6 +233,14 @@ impl RuntimeSpec {
         if self.network.port == 0 {
             return bad("the network port is 0".into());
         }
+        if self
+            .network
+            .card_path
+            .as_deref()
+            .is_some_and(|p| !p.starts_with('/'))
+        {
+            return bad("the network's card path is not a path".into());
+        }
         self.check_run_pods()
     }
 
@@ -620,6 +628,10 @@ pub struct FileSet {
     pub immutable: bool,
 }
 
+/// Where an agent serves its A2A card when its spec says nothing: adam's fixed path, and the path an
+/// A2A image gets unless it names another (AD-054).
+pub const DEFAULT_AGENT_CARD_PATH: &str = "/.well-known/agent-card.json";
+
 /// How the agent is reached: a Service, and when there are peers, who may reach it.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Network {
@@ -630,6 +642,11 @@ pub struct Network {
     /// Who may reach the port. Empty: nobody is restricted and no policy is made. Ingress only: the
     /// agent needs git hosts, the model gateway and registries, so there is no egress rule.
     pub allow_from: Vec<Peer>,
+    /// The path the agent serves its A2A card at, when it is not [`DEFAULT_AGENT_CARD_PATH`]: a
+    /// bring-your-own A2A image names its own (AD-054). Off unless set, and then not in the serialised
+    /// spec, so the digest of a spec that never sets it is what it was.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub card_path: Option<String>,
 }
 
 /// One peer of an ingress rule: what a Kubernetes `NetworkPolicyPeer` says, in neutral terms. At

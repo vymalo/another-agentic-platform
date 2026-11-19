@@ -17,7 +17,7 @@ const CODER: &str = "/spec/harness/adam/coder";
 
 #[test]
 fn the_examples_are_valid() {
-    for name in ["coder", "chat"] {
+    for name in ["coder", "chat", "a2a"] {
         let (s, c) = example(name);
         let (s, c) = typed(&s, &c);
         validate(&s, &c, &Externals::default()).unwrap_or_else(|i| panic!("{name}: {i:?}"));
@@ -1106,6 +1106,133 @@ fn a_secret_in_a_refused_url_is_in_no_issue() {
             }
         }
     }
+}
+
+// -------------------------------------- a bring-your-own A2A image (K11a, AD-054)
+
+#[test]
+fn the_harnesses_are_exclusive_without_an_api_server() {
+    let found = issues("a2a", |_, c| {
+        set(
+            c,
+            "/spec/harness/adam",
+            json!({"binary": "adam-agent", "agent": {"folder": {"files": {"instructions.md": "x"}}}}),
+        )
+    });
+    assert_issue(
+        &found,
+        "spec.harness",
+        "type a2a needs the a2a block and no adam block",
+    );
+    let found = issues("coder", |_, c| {
+        set(c, "/spec/harness/a2a", json!({"image": {"ref": "x:1"}}))
+    });
+    assert_issue(
+        &found,
+        "spec.harness",
+        "type adam-rs needs the adam block and no a2a block",
+    );
+    // The model: required of adam-rs, refused for an a2a image, which brings its own.
+    let found = issues("coder", |_, c| remove(c, "/spec/model"));
+    assert_issue(&found, "spec.model", "an adam-rs agent needs a model");
+    let found = issues("a2a", |_, c| {
+        set(
+            c,
+            "/spec/model",
+            json!({"model": "m", "baseUrl": {"value": "https://gateway.example.invalid/v1"}, "apiKeySecretRef": {"name": "s", "key": "k"}}),
+        )
+    });
+    assert_issue(&found, "spec.model", "gets no model from the platform");
+}
+
+#[test]
+fn an_a2a_config_refuses_the_adam_fields_it_cannot_use() {
+    for (change, field, message) in [
+        (
+            (|_: &mut Value, c: &mut Value| {
+                set(c, "/spec/environment/image", json!({"ref": "x:1"}))
+            }) as Change,
+            "spec.environment.image",
+            "one image, one source",
+        ),
+        (
+            |_, c| set(c, "/spec/environment/cache", json!({"existingClaim": "c"})),
+            "spec.environment.cache",
+            "no package cache",
+        ),
+        (
+            |_, c| {
+                set(
+                    c,
+                    "/spec/environment/volumes",
+                    json!([{"name": "work", "scope": "agent", "mountPath": "/work", "source": {"persistent": {"size": "1Gi"}}}]),
+                )
+            },
+            "spec.environment.volumes",
+            "no work volume",
+        ),
+        (
+            |_, c| set(c, "/spec/tools/githubMcp", json!({"sidecar": true})),
+            "spec.tools",
+            "gets no tools from the platform",
+        ),
+        (
+            |_, c| set(c, "/spec/extraEnv", json!({"LOG_LEVEL": "debug"})),
+            "spec.extraEnv",
+            "one way to set a variable",
+        ),
+        (
+            |s, _| set(s, "/spec/scaling/topology", json!("split")),
+            "spec.scaling.topology",
+            "an a2a image is one server",
+        ),
+    ] {
+        let found = issues("a2a", change);
+        assert_issue(&found, field, message);
+    }
+}
+
+#[test]
+fn an_a2a_variables_and_paths_are_checked_again_without_an_api_server() {
+    let found = issues("a2a", |_, c| {
+        set(c, "/spec/harness/a2a/env/0/name", json!("1BAD"))
+    });
+    assert_issue(&found, "env[0].name", "not a variable name");
+    let found = issues("a2a", |_, c| {
+        set(c, "/spec/harness/a2a/env/1/name", json!("LOG_LEVEL"))
+    });
+    assert_issue(&found, "env[1].name", "two variables");
+    let found = issues("a2a", |_, c| {
+        set(c, "/spec/harness/a2a/env/0", json!({"name": "ONLY_A_NAME"}))
+    });
+    assert_issue(&found, "env[0]", "exactly one of value and secretKeyRef");
+    let found = issues("a2a", |_, c| {
+        set(
+            c,
+            "/spec/harness/a2a/env/0",
+            json!({"name": "BOTH", "value": "x", "secretKeyRef": {"name": "s", "key": "k"}}),
+        )
+    });
+    assert_issue(&found, "env[0]", "exactly one of value and secretKeyRef");
+    let found = issues("a2a", |_, c| set(c, "/spec/harness/a2a/port", json!(0)));
+    assert_issue(&found, "port", "1 to 65535");
+    let found = issues("a2a", |_, c| {
+        set(c, "/spec/harness/a2a/cardPath", json!("card.json"))
+    });
+    assert_issue(&found, "cardPath", "starts with `/`");
+    let found = issues("a2a", |_, c| {
+        set(c, "/spec/harness/a2a/healthPath", json!("healthz"))
+    });
+    assert_issue(&found, "healthPath", "starts with `/`");
+    let found = issues("a2a", |_, c| {
+        set(c, "/spec/harness/a2a/image/ref", json!(""))
+    });
+    assert_issue(&found, "image.ref", "no space");
+    let many: Vec<Value> = (0..65)
+        .map(|i| json!({"name": format!("VAR_{i}"), "value": "x"}))
+        .collect();
+    let found = issues("a2a", |_, c| set(c, "/spec/harness/a2a/env", json!(many)));
+    assert_issue(&found, "env", "at most 64");
 }
 
 // ------------------------------------------------------------------ the names of MCP servers

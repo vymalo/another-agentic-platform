@@ -315,10 +315,16 @@ impl RuntimeProvider for MemoryRuntime {
             id.scope(),
             e.spec.network.port
         );
+        let card = e
+            .spec
+            .network
+            .card_path
+            .as_deref()
+            .unwrap_or(crate::DEFAULT_AGENT_CARD_PATH);
         Ok(Endpoint {
             url: match surface {
                 Surface::A2a => base,
-                Surface::AgentCard => format!("{base}.well-known/agent-card.json"),
+                Surface::AgentCard => format!("{base}{}", card.trim_start_matches('/')),
             },
         })
     }
