@@ -441,6 +441,7 @@ jobs:
         run: |
           set -eu
           export AAP_TEST_KUBECONFIG="$HOME/.kube/config"
+          kubectl --kubeconfig "$AAP_TEST_KUBECONFIG" create namespace aap-test --dry-run=client -o yaml | kubectl apply -f -
           cargo test -p aap-leader-kubernetes --test cluster --locked -- --test-threads=4
       # An operator rolled out before the CRDs chart: the API server does not serve the shared kinds. The case deletes
       # the CRDs of ModelEndpoint and ToolProvider (and installs them again), so it runs alone, after the others.
