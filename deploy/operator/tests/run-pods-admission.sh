@@ -83,7 +83,16 @@ if [ -n "$runtime_class" ]; then
   try "another runtime class" denied "a run pod runs under the RuntimeClass $runtime_class" '.spec.runtimeClassName = "runc"'
   try "no runtime class" denied "a run pod runs under the RuntimeClass $runtime_class" 'del(.spec.runtimeClassName)'
 else
+  # The control: with no class named the policy does not judge the field. The API server still refuses a class that does not
+  # exist (its RuntimeClass admission), so the control makes one: a `RuntimeClass` object with a handler nothing runs is
+  # admitted, and a dry-run never starts it. It is cluster-scoped and this script leaves the cluster as it found it.
+  made_runtime_class=0
+  if ! kubectl get runtimeclass runc >/dev/null 2>&1; then
+    printf 'apiVersion: node.k8s.io/v1\nkind: RuntimeClass\nmetadata:\n  name: runc\nhandler: runc\n' | kubectl create -f - >/dev/null
+    made_runtime_class=1
+  fi
   try "a runtime class when the deployment names none" allowed "" '.spec.runtimeClassName = "runc"'
+  if [ "$made_runtime_class" = 1 ]; then kubectl delete runtimeclass runc --ignore-not-found >/dev/null 2>&1 || true; fi
 fi
 
 # What it runs: only the images the deployment allows, in every container.
