@@ -717,15 +717,53 @@ jobs:
           AGENT_IMAGE: aap-stub:ci
         run: sh deploy/operator/tests/e2e/namespaces-e2e.sh
 
+  leader-e2e:
+    name: leader-e2e
+    needs: image
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v7
+      - uses: azure/setup-helm@v4
+        with:
+          version: ${{ env.HELM_VERSION }}
+      - name: Create a kind cluster
+        uses: helm/kind-action@v1
+        with:
+          version: v0.33.0
+          # The same node image as the other jobs: Kubernetes v1.35.8, the digest of the index of the tag.
+          node_image: kindest/node:v1.35.8@sha256:07b2536e30b803ed61d1677a79df6115f798ce64c80f9e22f6ed45afd09323c0
+          cluster_name: aap-leader
+          wait: 120s
+      # The image that passed the smoke test, loaded into the cluster: the chart runs it with pullPolicy Never. The agent's image is the
+      # stand-in of operator.yml's operator-e2e (busybox pinned by digest that answers /healthz on 8080 as adam-agent would).
+      - uses: actions/download-artifact@v8
+        with:
+          name: operator-image
+          path: ${{ runner.temp }}
+      - name: Load the images into kind
+        run: |
+          docker load -i "$RUNNER_TEMP/operator.tar"
+          docker build -t aap-stub:ci bin/operator/tests/stub
+          kind load docker-image operator:smoke aap-stub:ci --name aap-leader
+      - name: Two replicas elect a leader, a killed one is replaced, and a stopped one releases the Lease
+        env:
+          OPERATOR_IMAGE_REPOSITORY: operator
+          OPERATOR_IMAGE_TAG: smoke
+          OPERATOR_PULL_POLICY: Never
+          AGENT_IMAGE: aap-stub:ci
+        run: sh deploy/operator/tests/e2e/leader-e2e.sh
+
   push:
     name: push the images that passed
     # Main only, and only after everything above: the chart, the Dockerfiles, the scripts, both images' own smoke tests, the coder, the API's
     # end-to-end (no API image is pushed that failed to start in a cluster and serve its first agent) and the end-to-end of several watched
     # namespaces (K6b: one Role and RoleBinding in each, no ClusterRole, an agent of each reconciled, and a shared service id listed for
-    # neither). NOT chain-e2e and NOT run-pods-e2e: they run other repositories' images, pinned here, and a red run of either is a reason to
-    # look, not to withhold the operator's release (owner decisions, §60a D13 and D15b; to flip one, add it to this list). The new
-    # namespaces-e2e pulls only the curl image api-e2e already pulls, and nothing else outside this repository.
-    needs: [chart, dockerfile, dockerfile-api, scripts, image, api-image, operator-coder-e2e, api-e2e, namespaces-e2e]
+    # neither) and of the leader election (K7b: two replicas, one Lease, a killed holder replaced after the lease and a stopped one
+    # released at once). NOT chain-e2e and NOT run-pods-e2e: they run other repositories' images, pinned here, and a red run of either is a
+    # reason to look, not to withhold the operator's release (owner decisions, §60a D13 and D15b; to flip one, add it to this list). The new
+    # namespaces-e2e and leader-e2e pull only the curl image api-e2e already pulls, and nothing else outside this repository.
+    needs: [chart, dockerfile, dockerfile-api, scripts, image, api-image, operator-coder-e2e, api-e2e, namespaces-e2e, leader-e2e]
     if: github.event_name == 'push' && github.ref == 'refs/heads/main'
     runs-on: ubuntu-latest
     # One push at a time, so the check below and the push of `latest` are not interleaved with another run's.
