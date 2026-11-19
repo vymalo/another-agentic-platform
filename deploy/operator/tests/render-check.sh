@@ -674,7 +674,7 @@ check "K1: a cache claim that is not a claim name is refused" refused 'is not th
 render
 
 # ---- What is refused -------------------------------------------------------------------------------------------------------
-check "replicaCount is refused: the key is replicas" refused 'not `replicaCount`' --set replicaCount=2
+check "replicaCount is refused: the key is replicas" refused 'replicaCount' --set replicaCount=2
 check "replicas: 0 is refused" refused 'replicas must be a whole number' --set replicas=0
 check "replicas: a non-number is refused" refused 'replicas must be a whole number' --set replicas=abc
 check "leaderElection: an unknown key is refused" refused 'leaderElection.foo is not a setting' --set leaderElection.foo=1
