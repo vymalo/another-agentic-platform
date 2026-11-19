@@ -805,8 +805,9 @@ stateDiagram-v2
 * **The operator's per-pass leadership decision.** It is not logged: the script infers it from the Lease and from a write only a holder makes.
   In particular the survivor's own pass for the new agent is not shown to have run and declined — a follower whose controllers were dead would
   look the same. What is shown is that the agent is not written for 8 s and that someone writes it after the takeover.
-* **Who wins the takeover.** It is a race between the survivor and the Deployment's replacement, both followers until the lease expires; in every
-  run so far the replacement won. The script accepts either and says which, because both are followers until the lease moves.
+* **Who wins the takeover.** It is a race between the survivor and the Deployment's replacement, both followers until the lease expires: the
+  replacement won in the first two runs and the survivor in the third. The script accepts either and says which, because both are followers
+  until the lease moves.
 * **A network partition** between a replica and the API server (a killed pod is not one), and **the `PodDisruptionBudget` under a real drain** (the
   object is asserted; a node drain is not simulated).
 * **A real agent.** Every pod is the stand-in: it answers `/healthz` and a card and reads nothing.
@@ -814,12 +815,13 @@ stateDiagram-v2
 
 ### What ran
 
-**Run for real, on kind, on 2026-11-19**, twice: locally (kindest/node v1.37.0, the operator image built from this tree) and in CI (job
-`leader-e2e` of run 44458607529, kindest/node v1.35.8, the image that passed its smoke test). The whole script passed in both, with the same
-numbers: the Lease was renewed by a living pod **15 s** after the kill (the bound is 10 s, and the earliest possible is 13 s), `leaseTransitions`
-`0 -> 1`, the follower wrote nothing for 8 s while its own registry listed the first agent every second, the parked agent was Ready **21 s** after
-the takeover, and the SIGTERM passed the Lease to another pod **0 to 1 s** after it (1 s and 2 s until that pod held it, in the runs so far). The takeover
-went to the Deployment's replacement in both runs, not to the survivor.
+**Run for real, on kind, on 2026-11-19**, three times: locally (kindest/node v1.37.0, the operator image built from this tree) and in CI (job
+`leader-e2e` of run 44458607529, and again of run 44460925046 at the reviewed head, kindest/node v1.35.8, the image that passed its smoke
+test). The whole script passed in all three, with the same numbers: the Lease was renewed by a living pod **15 to 16 s** after the kill (the
+bound is 10 s, and the earliest possible is 13 s), `leaseTransitions` `0 -> 1`, the follower wrote nothing for 8 s while its own registry
+listed the first agent every second, the parked agent was Ready **21 s** after the takeover, and the SIGTERM passed the Lease to another pod
+**0 to 1 s** after it (1 s and 2 s until that pod held it). The takeover went to the Deployment's replacement in the first two runs and to the
+survivor in the third: both are followers until the lease expires, and the script accepts either.
 
 The script needs `docker` as well as `kubectl`: it finds the holder's process through the kind node's `crictl` and `jq` and SIGKILLs it (a
 `kubectl delete` would still send SIGTERM, and the operator would release the Lease — which is step 10's claim, not step 8's), then waits until
