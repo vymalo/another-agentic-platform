@@ -20,7 +20,7 @@
 #      but not `get` or `list` leases unnamed, not `delete` it, and not in every namespace; and no Secret;
 #   7. the registry answers 401 without the token; an agent `solo` is applied, becomes Ready, and the registry lists it from the
 #      Service AND from EACH pod's own IP: the follower serves the registry too (its 200 is the point of a second replica);
-#   8. the holder is force-killed (grace 0: no release), and `late` is applied at once. For the first 8 s — well inside the 15 s lease —
+#   8. the holder is SIGKILLed and its pod force-deleted (no SIGTERM, so it releases nothing), and `late` is applied at once. For the first 8 s — well inside the 15 s lease —
 #      `late` has NO Deployment and is not Ready (the survivor, which sees the same watch event, writes nothing), while the survivor's
 #      registry answers 200 every second (a failover does not blank it). Then the Lease moves to a living pod no sooner than 10 s after
 #      the kill, `leaseTransitions` is exactly one more, and two pods are Ready again;
@@ -67,7 +67,7 @@ die() { printf 'FAIL %s\n' "$*" >&2; exit 1; }
 
 # ---- 1. before anything is made, and before the cleanup exists: the tools, a cluster that is a throwaway one, and the name ----------
 step "1. a throwaway cluster, the tools, and the namespace this script works in"
-for t in kubectl helm jq openssl; do command -v "$t" >/dev/null 2>&1 || die "$t is not installed"; done
+for t in kubectl helm jq openssl docker; do command -v "$t" >/dev/null 2>&1 || die "$t is not installed"; done
 context=$(kubectl config current-context 2>/dev/null) || context=''
 case $context in
   kind-*) ;;
@@ -439,6 +439,28 @@ env_of() { jp "$ns" "pod/$1" "{.spec.containers[?(@.name==\"operator\")].env[?(@
 holder() { jp "$ns" "lease/$lease" '{.spec.holderIdentity}'; }
 # transitions: the Lease's leaseTransitions.
 transitions() { jp "$ns" "lease/$lease" '{.spec.leaseTransitions}'; }
+# renew_time: the Lease's renewTime, the mark of the last renewal by whoever holds it. A killed holder stops moving it.
+renew_time() { jp "$ns" "lease/$lease" '{.spec.renewTime}'; }
+# crash <pod>: SIGKILL the operator process of that pod, as a crash, a panic or a lost node would — no SIGTERM, so it releases nothing —
+# and then delete the pod with force, so the kubelet does not restart the container in place. (A restart in place would renew the Lease
+# under the same pod name: safe, since the old process is dead, but it proves no failover.) The Deployment makes a NEW pod, which must win
+# the Lease by election. The node's own crictl and jq find the process: this script runs only on kind, whose nodes are the docker
+# containers `kind-<name>`.
+crash() {
+  c_node=$(jp "$ns" "pod/$1" '{.spec.nodeName}')
+  [ -n "$c_node" ] || die "cannot find the node of $1"
+  c_cid=$(docker exec "$c_node" crictl ps --name operator -o json 2>"$work/err" \
+    | jq -r --arg p "$1" '.containers[] | select(.labels["io.kubernetes.pod.name"] == $p) | .id' | head -1) \
+    || die "cannot ask $c_node for its containers: $(head -c 300 "$work/err")"
+  [ -n "$c_cid" ] || die "cannot find the operator container of $1 on $c_node"
+  # `crictl inspect` prints JSON by itself (its -o is a template flag, not a format): `.info.pid` is the container's init process.
+  c_pid=$(docker exec "$c_node" crictl inspect "$c_cid" 2>"$work/err" | jq -r '.info.pid') \
+    || die "cannot inspect $c_cid on $c_node: $(head -c 300 "$work/err")"
+  case $c_pid in '' | 0 | *[!0-9]*) die "the process of $c_cid on $c_node is '$c_pid', not a pid" ;; esac
+  docker exec "$c_node" sh -c "kill -9 $c_pid" || die "cannot kill $c_pid on $c_node"
+  kubectl -n "$ns" delete pod "$1" --grace-period=0 --force --wait=false >/dev/null \
+    || die "the process of $1 was killed, but the pod could not be deleted"
+}
 
 # ---- 2. the namespace ---------------------------------------------------------------------------------------------------------------
 step "2. the namespace, labelled $made_by_key=$made_by"
@@ -550,16 +572,19 @@ done
 ok "the registry answers 401 without the token, lists solo with the token, and each of the two replicas ($(printf '%s' "$pods" | tr '\n' ' ')) answers 200 with solo from its own IP: the follower serves the registry too"
 
 # ---- 8. the holder killed: the survivor writes nothing until the lease expires, and the registry stays up ----------------------------
-step "8. the holder force-killed: late is not reconciled by the survivor, the registry keeps answering, and the Lease moves only after it expires"
+step "8. the holder SIGKILLed: late is not reconciled by the survivor, the registry keeps answering, and the Lease moves only after it expires"
 holder_before=$(holder)
 [ -n "$holder_before" ] || die "nobody holds the Lease before the kill"
 transitions_before=$(transitions)
+renew_before=$(renew_time)
+[ -n "$renew_before" ] || die "the Lease names no renewTime before the kill"
 survivor=$(printf '%s\n' "$pods" | grep -vx "$holder_before" | sed -n 1p)
 [ -n "$survivor" ] || die "the holder $holder_before is not one of the two pods: $(printf '%s' "$pods" | tr '\n' ' ')"
-# Grace 0 and force: the process gets no SIGTERM and releases nothing. The Lease stays with a dead holder until it expires.
-kubectl -n "$ns" delete pod "$holder_before" --grace-period=0 --force --wait=false >/dev/null
+# SIGKILL, and not a delete: a deleted pod still gets its SIGTERM, and the operator would release the Lease at once (that is step 10). The
+# Lease keeps a dead holder's name until it expires.
+crash "$holder_before"
 killed_at=$(date +%s)
-ok "the holder $holder_before is gone (force, grace 0: no release); $survivor survives"
+ok "the holder $holder_before was killed with SIGKILL (no release); $survivor survives"
 # The same watch event reaches the survivor, which is a follower: it must write nothing. A new AgentService is the probe: were it
 # reconciling, a Deployment would appear within seconds.
 apply_agent late Late
@@ -577,19 +602,23 @@ while [ "$n" -lt 8 ]; do
 done
 ok "for 8 s after the kill late has no Deployment (the follower wrote nothing) and the survivor's registry answers 200 every second"
 # The Lease moves to a living pod, and not before it expires: lease 15 s, the holder renewed at most retry (2 s) before it died, so no
-# takeover is possible before 13 s; 10 s is the safe lower bound. A stopped process releases at once (step 10) and this would not hold.
+# takeover is possible before 13 s; 10 s is the safe lower bound. The mark is the renewTime: the dead process cannot move it, so the first
+# change is a renewal by a living one (the survivor, or the killed pod's own container after its restart — the name alone cannot tell).
 takeover=''
 while :; do
-  now_holder=$(holder)
-  if [ -n "$now_holder" ] && [ "$now_holder" != "$holder_before" ]; then takeover=$now_holder; break; fi
+  now_renew=$(renew_time)
+  if [ -n "$now_renew" ] && [ "$now_renew" != "$renew_before" ]; then takeover=$(holder); break; fi
   elapsed=$(( $(date +%s) - killed_at ))
-  [ "$elapsed" -lt 45 ] || die "45 s after the kill the Lease is held by '${now_holder:-nobody}', want a living pod (holderIdentity: $(holder))"
+  [ "$elapsed" -lt 45 ] || die "45 s after the kill the Lease was not renewed (renewTime: $(renew_time), holder: $(holder)): no living replica took it"
   sleep 1
 done
 elapsed=$(( $(date +%s) - killed_at ))
-[ "$elapsed" -ge 10 ] || die "the Lease moved to $takeover ${elapsed}s after the kill, inside the 15 s lease: a takeover that early is a second writer"
+[ "$elapsed" -ge 10 ] || die "the Lease was renewed ${elapsed}s after the kill, inside the 15 s lease: a takeover that early is a second writer"
+[ -n "$takeover" ] || die "the Lease was renewed with no holder (holderIdentity: $(holder))"
 [ -n "$(ready_pods)" ] || die "no pod of the release is Ready after the failover"
-[ "$takeover" = "$survivor" ] || printf '     the takeover went to the replacement pod %s, not the survivor %s\n' "$takeover" "$survivor"
+[ "$takeover" = "$survivor" ] || printf '     the takeover went to %s (the killed pod, restarted, or its replacement), not the survivor %s\n' "$takeover" "$survivor"
+# The bound is also the control of the crash: a holder that is STOPPED releases the Lease and the other takes it at once (step 10 measures
+# exactly that), so a Lease that moves only after 10 s is one that nobody released.
 transitions_after=$(transitions)
 [ "$transitions_after" = "$((transitions_before + 1))" ] \
   || die "leaseTransitions is $transitions_after, want $((transitions_before + 1)): one takeover, counted once"

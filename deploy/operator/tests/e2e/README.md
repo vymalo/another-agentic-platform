@@ -698,9 +698,9 @@ script proves it and does not implement it, and a change to that message's wordi
 
 **Two replicas, one writer.** The chart is installed with `replicas: 2`, so the two pods campaign for a `coordination.k8s.io/v1` `Lease` named for the
 release in the watched namespace (AD-057). Only its holder's four controller passes write; the other keeps its caches, is Ready and **serves the
-registry**, so a failover does not blank the fleet's list. The script shows that with a **killed** holder (force, grace 0: no release): the survivor
-writes nothing for the whole 15 s lease — a new agent applied at that moment has no Deployment — while its registry answers every second; then the
-Lease moves, no sooner than 10 s after the kill, and the new holder reconciles what the follower parked. A **stopped** holder (SIGTERM) releases the
+registry**, so a failover does not blank the fleet's list. The script shows that with a **killed** holder (SIGKILL, then the pod force-deleted, so it releases nothing and cannot restart in place): the
+survivor writes nothing for the whole 15 s lease — a new agent applied at that moment has no Deployment — while its registry answers every second;
+then the Lease moves, no sooner than 10 s after the kill, and the new holder reconciles what the follower parked. A **stopped** holder (SIGTERM) releases the
 Lease at once, and the other pod takes it well inside the 15 s. This is the job `leader-e2e` of
 [`operator-image.yml`](../../../../.github/workflows/operator-image.yml) (it needs the job `image`, whose operator image it runs, and **`push` needs
 it**: like `api-e2e` and `namespaces-e2e` it pins nothing outside this repository except the curl image those already pull). The script
@@ -738,7 +738,7 @@ sequenceDiagram
     J->>K: solo (a folder agent on the stand-in)
     A->>K: solo's Deployment, Service and pod, and the registry lists it
     J->>B: the registry at B's own IP lists solo too (the follower serves it)
-    J->>K: force-delete A (grace 0, no release), then apply late
+    J->>K: SIGKILL A's process and force-delete A (no release), then apply late
     B-->>J: late has no Deployment for 8 s, and B's registry answers 200 every second
     J->>K: poll the Lease
     K-->>J: the Lease moves to B 13 to 17 s after the kill (never before 10 s), leaseTransitions one more, two pods Ready
@@ -784,10 +784,10 @@ stateDiagram-v2
 * **The Lease itself.** It exists, names the chart's 15 s, and its `holderIdentity` is one of the two pods (the candidate is `POD_NAME`).
 * **Both replicas serve the registry.** Not through the Service only: each pod's **own IP** answers 200 with the agent, so the follower's caches
   are a real registry and not a shell.
-* **A follower writes nothing, and the registry stays up.** With the holder force-killed (grace 0: no release), a new agent applied at once has
+* **A follower writes nothing, and the registry stays up.** With the holder SIGKILLed and its pod force-deleted (no release), a new agent applied at once has
   **no Deployment for 8 s** — the survivor saw the same watch event and did not write — and the survivor's registry answers **200 every second**.
-* **The takeover respects the lease.** The Lease moves to a living pod no sooner than 10 s after the kill (the lease is 15 s and the holder renewed
-  at most 2 s before it died), `leaseTransitions` is exactly one more, and two pods are Ready again.
+* **The takeover respects the lease.** The Lease is renewed by a living pod no sooner than 10 s after the kill (the lease is 15 s and the holder
+  renewed at most 2 s before it died), `leaseTransitions` is exactly one more, and two pods are Ready again.
 * **The new holder writes.** The parked agent becomes Ready within 60 s of the takeover (the follower's 30 s requeue), and the registry lists it.
 * **A stopped holder releases the lease.** After a SIGTERM the `holderIdentity` is cleared within 10 s and another pod holds it within 10 s —
   well below the 15 s the expiry would take, so the release, not the expiry, moved it — and two replicas are Ready again.
@@ -807,13 +807,13 @@ stateDiagram-v2
 
 ### What ran, and what is unverified
 
-*Run where it was written, with no container daemon and no kind*: `sh -n` (and `dash -n`) on the script; `helm lint` and `helm template` of the chart
-with `leader.values.yaml` (the two replicas, the PDB, the lease rule and the six variables, which `render-check.sh` already holds); the workflow
-parsed as YAML; and the jq filters against the objects the script asserts (a rendered Deployment, a PDB, a Lease of each shape, and registry
-documents with one and two agents), which they accept and reject as they should.
+**Run for real, on kind (Kubernetes v1.35.8), on 2026-11-19**, with the operator image built from this tree and loaded into the cluster: the whole
+script passed, and the numbers are the design's — the Lease moved **15 s** after the kill (the bound is 10 s, and no sooner), `leaseTransitions`
+`0 -> 1`, the follower wrote nothing for 8 s while its registry answered every second, the parked agent was Ready **21 s** after the takeover, and
+the graceful stop **released** the Lease 0 s after the SIGTERM, with the other pod holding it 1 s later. What that run did not cover: a runner's
+timings under load, and a cluster whose CNI does not enforce NetworkPolicies (kindnet does).
 
-**Unverified until the job has run**: everything that needs a kubelet and a real API server — the two pods becoming Ready and campaigning, the
-Lease being created and renewed, `kubectl auth can-i` on the named Lease under the real `Role`, kindnet admitting the curl pod to **each pod's
-IP**, the force delete of a holder and the timing of the takeover on a runner, and the graceful release of the Lease. `shellcheck` and `actionlint`
-are not installed where it was written: the script keeps the other scripts' style (quoted variables, `printf` for anything that can hold a body, no
-backtick in an unquoted heredoc) instead.
+The script needs `docker` as well as `kubectl`: it finds the holder's process through the kind node's `crictl` and `jq` and SIGKILLs it (a
+`kubectl delete` would still send SIGTERM, and the operator would release the Lease — which is step 10's claim, not step 8's). `shellcheck` and
+`actionlint` are not installed where it was written: the script keeps the other scripts' style (quoted variables, `printf` for anything that can
+hold a body, no backtick in an unquoted heredoc) instead, and CI's `scripts` job runs `shellcheck` on it.
