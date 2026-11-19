@@ -549,7 +549,7 @@ Role and one RoleBinding in each and no ClusterRole anywhere**; the registry lis
 service id that **both** namespaces share is listed for **neither** (a client that asks for `chat` would be given a coin flip otherwise), then
 listed again from the survivor when one of the two is deleted. Since K11a it also runs `gamma`, an agent whose `harness.type` is `a2a` (an image
 that serves A2A itself, AD-054), on the stand-in: it becomes `Ready` with its store, is listed at its harness's card path, and its container has
-the image's own entrypoint, exactly the two variables its config declares (one literal, one `secretKeyRef`) and no other, no volume and no
+the image's own entrypoint, exactly the two variables its config declares (one literal, one `secretKeyRef`) and the service's `A2A_BEARER_TOKENS`, and no other, no volume and no
 sidecar; it is then deleted. This is the job `namespaces-e2e` of
 [`operator-image.yml`](../../../../.github/workflows/operator-image.yml) (it needs the job `image`, whose operator image it runs, and **`push`
 needs it**: unlike `chain-e2e` and `run-pods-e2e` it pins nothing outside this repository except the curl image `api-e2e` already pulls, like `api-e2e`). The script
@@ -598,7 +598,7 @@ sequenceDiagram
     J->>K: delete alpha
     O-->>J: the document keeps beta (and chat), and beta is still Ready
     J->>K: gamma in a (harness.type a2a, the stand-in, one literal and one secretKeyRef)
-    O-->>J: gamma Ready, listed at its harness's card path, one container, the image's entrypoint, exactly its two variables
+    O-->>J: gamma Ready, listed at its harness's card path, one container, the image's entrypoint, exactly its two variables and the service's token
     J->>K: delete gamma, then no secret value and no token in any answer or log, then undo what was made
 ```
 
@@ -693,7 +693,7 @@ reject: the assertions can fail. `shellcheck` and `actionlint` are not installed
 **Run in CI**: job `namespaces-e2e` of run 44487393662 (job 135436059044), *verified 2026-11-19* — the stand-in's pod starts in each
 namespace and becomes Ready, the operator's one process reads both, the registry answers from a pod, kindnet admits the curl pod, the two log
 lines of the skipped `chat` are there, and **the a2a agent `gamma` (K11a) became `Ready` in 6 s with its store, was listed at
-`http://gamma.aap-e2e-ns-a.svc:8080/.well-known/agent-card.json`, and its container ran the image's entrypoint with exactly its two variables
+`http://gamma.aap-e2e-ns-a.svc:8080/.well-known/agent-card.json`, and its container ran the image's entrypoint with exactly its two variables and the service's `A2A_BEARER_TOKENS`
 (one literal, one `secretKeyRef`), no volume and no sidecar, probing `/healthz`** — which also put the new CRDs, CEL included, on a real API
 server. **Still unverified**: a real third-party A2A image (every pod here is the stand-in), and the timings of a runner under heavy load.
 

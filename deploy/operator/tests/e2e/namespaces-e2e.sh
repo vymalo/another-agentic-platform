@@ -727,11 +727,13 @@ until_ok 120 "the registry to list chat, gamma and beta" lists "chat gamma beta"
 [ "$(href_of gamma)" = "http://gamma.$a.svc:8080/.well-known/agent-card.json" ] \
   || die "the registry lists gamma with the card URL '$(href_of gamma)', not its harness's card path on its namespace's Service"
 kubectl -n "$a" get deployment gamma -o json > "$work/a2a-deployment.json" 2>/dev/null || die "$a has no Deployment gamma"
-# The image's entrypoint, the variables the config declares and no other, and no volume: the operator invents nothing.
-jqok "$work/a2a-deployment.json" "the a2a container replaces the image's entrypoint" \
+# The image's entrypoint, the variables the config declares (and the service's own A2A token) and no other, and no volume:
+# the operator invents nothing beyond the token the service named. The step exercises the harness's DEFAULTS (8080, the
+# standard card path, /healthz); the non-default port and paths are the domain's and the provider's tests'.
+jqok "$work/a2a-deployment.json" "the a2a container has a command or args (the image's entrypoint must run)" \
   '.spec.template.spec.containers[0] | ((has("command") | not) and (has("args") | not))'
-jqok "$work/a2a-deployment.json" "the a2a container does not get exactly the two variables the config declares" \
-  '(.spec.template.spec.containers[0].env | map(.name) | sort) == ["E2E_LITERAL", "MODEL_API_KEY"]'
+jqok "$work/a2a-deployment.json" "the a2a container does not get exactly its two variables and the service's token" \
+  '(.spec.template.spec.containers[0].env | map(.name) | sort) == ["A2A_BEARER_TOKENS", "E2E_LITERAL", "MODEL_API_KEY"]'
 jqok "$work/a2a-deployment.json" "the literal variable did not reach the a2a container" \
   '.spec.template.spec.containers[0].env[] | select(.name == "E2E_LITERAL") | .value == "from-the-config"'
 jqok "$work/a2a-deployment.json" "the secret variable is not a secretKeyRef" \
@@ -744,7 +746,7 @@ jqok "$work/a2a-deployment.json" "the a2a container does not probe its harness's
   '.spec.template.spec.containers[0] | (.startupProbe.httpGet.path == "/healthz") and (.readinessProbe.httpGet.path == "/healthz")'
 kubectl -n "$a" get service gamma -o json > "$work/a2a-service.json" 2>/dev/null || die "$a has no Service gamma"
 jqok "$work/a2a-service.json" "the a2a Service is not on the harness's port" '.spec.ports[0].port == 8080'
-ok "gamma runs the image's entrypoint with E2E_LITERAL and MODEL_API_KEY (a secretKeyRef) and no other variable, no volume and no sidecar, probes its /healthz, and the registry lists it at http://gamma.$a.svc:8080/.well-known/agent-card.json"
+ok "gamma runs the image's entrypoint with E2E_LITERAL, MODEL_API_KEY (a secretKeyRef) and the service's A2A_BEARER_TOKENS and no other variable, no volume and no sidecar, probes its /healthz, and the registry lists it at http://gamma.$a.svc:8080/.well-known/agent-card.json"
 kubectl -n "$a" delete agentservice gamma --wait=true --timeout=120s >/dev/null
 until_ok 120 "the registry to list chat and beta again" lists "chat beta"
 until_ok "$gone_timeout" "the Deployment of a/gamma to be gone" absent -n "$a" get deployment gamma

@@ -1,6 +1,8 @@
 # A bring-your-own A2A image (AD-054, slice K11a): an agent whose image serves A2A itself, with no
 # adam-rs in it. The operator runs it with the pod hardening, store and registry entry of an adam-rs
-# agent, sets only the variables listed here, and invents none.
+# agent and sets the variables listed here and no other, except the service's own A2A token
+# (`A2A_BEARER_TOKENS`, from `interfaces.a2a.bearerTokensSecretRef`): a listed agent accepts the
+# orchestrator's token, whatever its harness.
 #
 # The image is the stand-in of the operator's kind end-to-end (`bin/operator/tests/stub`): it answers
 # `/healthz` on 8080 and serves a valid A2A 1.0 card at `/.well-known/agent-card.json`, which is what

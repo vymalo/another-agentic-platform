@@ -850,6 +850,17 @@ fn probe_path(p: &Option<aap_ports::Probe>) -> String {
     }
 }
 
+/// The default card path lives in two crates (the CRD's default and the neutral spec's fallback): they are one
+/// value, and this holds them together.
+#[test]
+fn the_default_card_path_is_the_same_in_the_crd_and_in_the_spec() {
+    assert_eq!(
+        aap_api::A2A_CARD_PATH,
+        aap_ports::DEFAULT_AGENT_CARD_PATH,
+        "harness.a2a.cardPath's default and the provider's fallback must be one path"
+    );
+}
+
 #[test]
 fn an_a2a_image_is_one_server_with_only_the_variables_it_declares() {
     let r = must_resolve("a2a", no_change);
@@ -867,9 +878,14 @@ fn an_a2a_image_is_one_server_with_only_the_variables_it_declares() {
         r.runtime.network.card_path.as_deref(),
         Some("/.well-known/agent-card.json")
     );
-    // The two variables the config lists, and no other: nothing of adam's, and nothing of the store.
+    // The variables the config lists, plus the service's own A2A token (the registry contract: a listed agent
+    // accepts the orchestrator's token), and nothing else: nothing of adam's, nothing of the store.
     let names: Vec<&str> = w.container.env.iter().map(|e| e.name.as_str()).collect();
-    assert_eq!(names, ["LOG_LEVEL", "API_TOKEN"]);
+    assert_eq!(names, ["LOG_LEVEL", "API_TOKEN", env::A2A_BEARER_TOKENS]);
+    assert_eq!(
+        secret(w, env::A2A_BEARER_TOKENS),
+        SecretRef::new("a2a-secrets", "A2A_BEARER_TOKENS")
+    );
     assert_eq!(lit(w, "LOG_LEVEL"), "info");
     assert_eq!(
         secret(w, "API_TOKEN"),

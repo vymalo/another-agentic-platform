@@ -3,7 +3,7 @@ kind: Service
 metadata:
   annotations:
     agents.vymalo.com/card-path: /.well-known/agent-card.json
-    agents.vymalo.com/config-digest: sha256:a4148eb8941b4be885b15757f9427ccbd4d0cedc570485b56b82f2fa9c49c6a4
+    agents.vymalo.com/config-digest: sha256:a5fc20c9a972bc240854c515a425ae7d210ab2cb24734536cbabc19251316c9b
   labels:
     app.kubernetes.io/instance: a2a
     app.kubernetes.io/managed-by: aap-operator
@@ -31,7 +31,7 @@ apiVersion: apps/v1
 kind: Deployment
 metadata:
   annotations:
-    agents.vymalo.com/config-digest: sha256:a4148eb8941b4be885b15757f9427ccbd4d0cedc570485b56b82f2fa9c49c6a4
+    agents.vymalo.com/config-digest: sha256:a5fc20c9a972bc240854c515a425ae7d210ab2cb24734536cbabc19251316c9b
     agents.vymalo.com/deletion-policy: Retain
   labels:
     app.kubernetes.io/component: agent
@@ -55,7 +55,7 @@ spec:
   template:
     metadata:
       annotations:
-        agents.vymalo.com/config-digest: sha256:a4148eb8941b4be885b15757f9427ccbd4d0cedc570485b56b82f2fa9c49c6a4
+        agents.vymalo.com/config-digest: sha256:a5fc20c9a972bc240854c515a425ae7d210ab2cb24734536cbabc19251316c9b
       labels:
         app.kubernetes.io/component: agent
         app.kubernetes.io/instance: a2a
@@ -71,6 +71,11 @@ spec:
           valueFrom:
             secretKeyRef:
               key: API_TOKEN
+              name: a2a-secrets
+        - name: A2A_BEARER_TOKENS
+          valueFrom:
+            secretKeyRef:
+              key: A2A_BEARER_TOKENS
               name: a2a-secrets
         image: aap-stub:ci
         name: agent
@@ -113,7 +118,7 @@ apiVersion: networking.k8s.io/v1
 kind: NetworkPolicy
 metadata:
   annotations:
-    agents.vymalo.com/config-digest: sha256:a4148eb8941b4be885b15757f9427ccbd4d0cedc570485b56b82f2fa9c49c6a4
+    agents.vymalo.com/config-digest: sha256:a5fc20c9a972bc240854c515a425ae7d210ab2cb24734536cbabc19251316c9b
   labels:
     app.kubernetes.io/instance: a2a
     app.kubernetes.io/managed-by: aap-operator

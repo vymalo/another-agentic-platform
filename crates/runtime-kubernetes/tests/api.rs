@@ -614,6 +614,21 @@ async fn the_endpoint_is_the_service_of_ours() {
             .url,
         "http://rt.aap-test.svc:9090/.well-known/agent-card.json"
     );
+
+    // A harness that serves its card elsewhere (K11a): the Service carries the path, and the card URL follows it.
+    let mut service = ours("rt", json!({}));
+    service["metadata"]["annotations"] =
+        json!({"agents.vymalo.com/card-path": "/cards/agent.json"});
+    service["spec"] = json!({"ports": [{"name": "http", "port": 9090}]});
+    fake.put(K::Service, NS, "rt", service);
+    assert_eq!(
+        runtime
+            .endpoint(&id(), Surface::AgentCard)
+            .await
+            .unwrap()
+            .url,
+        "http://rt.aap-test.svc:9090/cards/agent.json"
+    );
 }
 
 // ---------------------------------------------------------------- failures

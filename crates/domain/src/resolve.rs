@@ -407,6 +407,15 @@ impl<'a> Cx<'a> {
             };
             env.push(var);
         }
+        // The service's A2A token: the config names the Secret and the key, and the platform's registry contract
+        // (`AGENT_REGISTRY_AGENT_TOKEN`) is that a listed agent accepts it. It is the one variable an a2a image gets
+        // without naming it, because the service named it: without it a listed agent could never be called.
+        if let Some(r) = &self.service.spec.interfaces.a2a.bearer_tokens_secret_ref {
+            env.push(EnvVar::secret(
+                env::A2A_BEARER_TOKENS,
+                SecretRef::new(&r.name, &r.key),
+            ));
+        }
         let http = |period, timeout, failures| Probe {
             action: ProbeAction::Http {
                 path: a2a.health_path.clone(),

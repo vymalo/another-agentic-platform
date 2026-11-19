@@ -121,13 +121,20 @@ fn an_a2a_image_runs_its_own_entrypoint_with_only_its_variables() {
         .iter()
         .map(|e| (e["name"].as_str().unwrap(), e))
         .collect();
-    assert_eq!(env.len(), 2, "{env:?}");
+    // The two the config lists, then the service's own A2A token: a listed agent accepts the
+    // orchestrator's token, and the operator passes it to either harness.
+    assert_eq!(env.len(), 3, "{env:?}");
     assert_eq!(env[0].0, "LOG_LEVEL");
     assert_eq!(env[0].1["value"], "info");
     assert_eq!(env[1].0, "API_TOKEN");
     assert_eq!(
         env[1].1["valueFrom"]["secretKeyRef"],
         json!({"key": "API_TOKEN", "name": "a2a-secrets"})
+    );
+    assert_eq!(env[2].0, "A2A_BEARER_TOKENS");
+    assert_eq!(
+        env[2].1["valueFrom"]["secretKeyRef"],
+        json!({"key": "A2A_BEARER_TOKENS", "name": "a2a-secrets"})
     );
     assert!(
         container.get("volumeMounts").is_none(),

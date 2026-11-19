@@ -330,7 +330,7 @@ The model alias is a placeholder here: the real alias is the deployment's. The g
 
 #### A bring-your-own A2A image (K11a, AD-054)
 
-`harness.type` is `adam-rs` (above, the default) or `a2a`: an image that serves A2A itself. The operator runs it with the pod hardening, store and registry entry of an adam-rs agent, and **invents no variable**: the image gets exactly the `env` entries the config lists, each a plain value or a `secretKeyRef`.
+`harness.type` is `adam-rs` (above, the default) or `a2a`: an image that serves A2A itself. The operator runs it with the pod hardening, store and registry entry of an adam-rs agent, and **invents no variable of its own**: the image gets the `env` entries the config lists, each a plain value or a `secretKeyRef`, plus `A2A_BEARER_TOKENS` from the service's `interfaces.a2a.bearerTokensSecretRef` — the one variable the service names and the platform's A2A contract needs.
 
 ```yaml
 apiVersion: agents.vymalo.com/v1alpha1
@@ -440,7 +440,7 @@ The field-to-environment contract. It is the only place in the operator that kno
 | `…a2a.port` (K11a) | the container's, the Service's and the NetworkPolicy's port | 1 to 65535; `8080` by default |
 | `…a2a.cardPath` (K11a) | the registry item's `href`: `http://<svc>.<ns>.svc:<port><cardPath>` | Nothing else reaches the pod. `/.well-known/agent-card.json` by default |
 | `…a2a.healthPath` (K11a) | the startup and readiness probes' path | No liveness probe. `/healthz` by default |
-| `…a2a.env` (K11a) | exactly those variables, each a literal or a `secretKeyRef` | No variable is invented: no `LISTEN_ADDR`, `PUBLIC_URL`, `DATABASE_URL`, model variable or `ADAM_*` |
+| `…a2a.env` (K11a) | exactly those variables, each a literal or a `secretKeyRef`, plus `A2A_BEARER_TOKENS` from the service's `interfaces.a2a.bearerTokensSecretRef` | Nothing else is invented: no `LISTEN_ADDR`, `PUBLIC_URL`, `DATABASE_URL`, model variable or `ADAM_*`. The token is the platform's A2A contract (a listed agent accepts the orchestrator's), and the service names the Secret and key |
 | `…registry`, `…description`, `…access.audience` | the registry item (`title`, `tags`, `service`, and since D3 `audience`) | Nothing reaches the pod |
 | `…deletionPolicy` | the finalizer's behaviour | [Finalizer](#finalizer-and-deletion) |
 | `AgentConfig…adam.binary` | the container command | `adam-coder`: the image's entrypoint. `adam-agent`: `tini -- adam-agent` (the image says so in its `Dockerfile`) |

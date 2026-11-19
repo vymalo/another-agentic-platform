@@ -426,14 +426,16 @@ fn check_service(v: &mut Issues, svc: &AgentService, cfg: &AgentConfig) {
     if !a2a.enabled {
         v.add(
             format!("{me} spec.interfaces.a2a.enabled"),
-            "false: the adam binaries serve A2A and fail closed without a bearer token (exit 78), so a service with A2A off would not start; v0 has no other surface",
+            "false: v0 serves A2A and nothing else, so a service with A2A off is not served at all (an adam agent would also fail closed without a token, exit 78)",
         );
     }
     match &a2a.bearer_tokens_secret_ref {
         Some(r) => secret_ref(v, &format!("{me} spec.interfaces.a2a.bearerTokensSecretRef"), r),
+        // The platform's registry contract is that a listed agent accepts the orchestrator's token
+        // (`AGENT_REGISTRY_AGENT_TOKEN`), which the operator passes to either harness as A2A_BEARER_TOKENS.
         None => v.add(
             format!("{me} spec.interfaces.a2a.bearerTokensSecretRef"),
-            "no token, no server: the agent fails closed, so the Secret key that holds A2A_BEARER_TOKENS is required",
+            "no token, no server: a listed agent accepts the orchestrator's token, so the Secret key that holds A2A_BEARER_TOKENS is required",
         ),
     }
     if let Some(url) = a2a.public_url.as_deref().filter(|u| !u.is_empty())
@@ -565,6 +567,9 @@ fn check_config(v: &mut Issues, cfg: &AgentConfig, origins: &Origins) {
 
     if let Some(a2a) = plan::a2a(cfg) {
         check_a2a(v, cfg, a2a);
+        // The resources are the pod's, whatever the harness: an a2a image with a quantity the API server
+        // refuses must fail here, naming the field, not in the cluster.
+        check_resources(v, cfg);
         return;
     }
     let Some(adam) = plan::adam(cfg) else {
@@ -610,6 +615,15 @@ fn check_adam(v: &mut Issues, cfg: &AgentConfig, adam: &aap_api::Adam) {
 
 /// The rules of a bring-your-own A2A image (AD-054): its own fields, and the adam-rs fields it has no
 /// use for and would otherwise be a lie.
+/// A path that can be a URL's path as it is: absolute, and nothing that would end it or be escaped
+/// (`?` starts a query, `#` a fragment, a space and a backslash are not the same byte in a URL).
+fn is_url_path(path: &str) -> bool {
+    path.starts_with('/')
+        && !path
+            .chars()
+            .any(|c| matches!(c, '?' | '#' | ' ' | '\\') || c.is_control())
+}
+
 fn check_a2a(v: &mut Issues, cfg: &AgentConfig, a2a: &aap_api::A2a) {
     let me = "AgentConfig";
     let at = format!("{me} spec.harness.a2a");
@@ -620,16 +634,16 @@ fn check_a2a(v: &mut Issues, cfg: &AgentConfig, a2a: &aap_api::A2a) {
             format!("{}: a port number, 1 to 65535", a2a.port),
         );
     }
-    if !a2a.card_path.starts_with('/') {
+    if !is_url_path(&a2a.card_path) {
         v.add(
             format!("{at}.cardPath"),
-            "an absolute path: it starts with `/`",
+            "an absolute path that is a path and nothing else: it starts with `/` and holds no `?`, `#`, space or backslash (the registry lists it as the card's URL)",
         );
     }
-    if !a2a.health_path.starts_with('/') {
+    if !is_url_path(&a2a.health_path) {
         v.add(
             format!("{at}.healthPath"),
-            "an absolute path: it starts with `/`",
+            "an absolute path: it starts with `/` and holds no `?`, `#`, space or backslash",
         );
     }
     let mut names = BTreeSet::new();
@@ -1239,6 +1253,15 @@ fn check_image_ref(v: &mut Issues, at: &str, image: &str) {
     }
 }
 
+/// The pod's resources, for either harness: a quantity the API server would refuse is reported here, with
+/// the field's name.
+fn check_resources(v: &mut Issues, cfg: &AgentConfig) {
+    let (_, problems) = convert::resources(cfg.spec.environment.resources.as_ref());
+    for (field, message) in problems {
+        v.add(format!("AgentConfig {field}"), message);
+    }
+}
+
 fn check_environment(v: &mut Issues, cfg: &AgentConfig) {
     let me = "AgentConfig";
     let e = &cfg.spec.environment;
@@ -1251,10 +1274,7 @@ fn check_environment(v: &mut Issues, cfg: &AgentConfig) {
             &image.reference,
         ),
     }
-    let (_, problems) = convert::resources(e.resources.as_ref());
-    for (field, message) in problems {
-        v.add(format!("{me} {field}"), message);
-    }
+    check_resources(v, cfg);
 
     if let Some(cache) = &e.cache
         && !is_dns_subdomain(&cache.existing_claim)
