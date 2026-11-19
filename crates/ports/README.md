@@ -295,8 +295,9 @@ the campaign, and reports its changes; the operator gates every pass on `is_lead
 `is_leader()` is **a hint, not a lock**: a pass that reads it and then writes may have lost the election in
 between, and the implementation's own design (a lease that expires, with a margin before it does) is what keeps
 two writers apart. `run` is the only call that changes anything; `following` is what a composition root may log
-or gate on. The trait is object-safe (boxed futures, no generic method), because the operator holds one
-`Arc<dyn LeaderElection>` and names no implementation.
+or gate on (the operator does not subscribe to it: a follower re-passes every object every 30 s, so a new holder
+picks them up within that bound). The trait is object-safe (boxed futures, no generic method), because the
+operator holds one `Arc<dyn LeaderElection>` and names no implementation.
 
 ## The neutral types
 

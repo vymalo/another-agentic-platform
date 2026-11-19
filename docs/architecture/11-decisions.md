@@ -468,12 +468,18 @@ leader election, `Recreate`). With more than one, the replicas campaign for a `c
 namespace (`<fullname>`), through a `LeaderElection` seam (AD-020: a trait with its conformance macro, a `Memory` implementation and
 `aap-leader-kubernetes`), and **only the holder's passes write**: the others keep every watcher and cache, are `Ready` (so the
 `PodDisruptionBudget` of `maxUnavailable: 1` can move the lease), and serve the registry from their own caches, so a failover does
-not blank it. The timers are 15/10/2 s (the client-go defaults), and a pass is capped below the renew deadline
-(`tuning.reconcileTimeoutSecs`, 5 s with the election on), so a demoted replica does not write after losing the lease. The `Role`
-gains `get`, `create` and `update` on `leases` in the primary namespace and nothing wider; a lease is never a Secret. K7b proves it
-in kind (kill the leader). **For the owner to confirm:** readiness stays "the caches have listed" for both replicas (the
-alternative — leadership in readiness — makes the budget self-blocking and blanks the registry on every change), and every replica
-serves the registry (the alternative, the leader alone, has the same blank).
+not blank it. The timers are 15/10/2 s (the client-go defaults), and a pass is capped at 4 s with the election on
+(`tuning.reconcileTimeoutSecs`), below `lease - renew` (5 s), the margin between the renew deadline and the earliest takeover: a
+pass that started before the loss can still write until it ends, so the window is bounded, not zero. The `Role` gains `get` and
+`update` on the named lease and `create` on `leases`, **in the primary namespace only**; a lease is never a Secret. A killed leader
+costs `lease` (15 s) plus at most the follower's 30 s requeue before the new holder writes; a graceful stop releases the lease at
+once. Every follower runs the four controllers' passes every 30 s and writes nothing. K7b proves it in kind (kill the leader).
+**For the owner to confirm:** (1) readiness stays "the caches have listed" for both replicas (the alternative — leadership in
+readiness — makes the budget self-blocking and blanks the registry on every change); (2) every replica serves the registry (the
+alternative, the leader alone, has the same blank); (3) the lease is in the primary namespace, not the release's (the operator has a
+`Role` there; the release's may have none); (4) the timers 15/10/2 and the 4 s pass cap (a longer lease makes failover slower; a
+longer pass risks a write after the loss); (5) `replicas: 1` stays the default and `Recreate` at one (the six goldens unmoved);
+(6) `replicaCount` stays refused, the key is `replicas`; (7) the lease is named `<fullname>`.
 
 ---
 

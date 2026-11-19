@@ -20,9 +20,8 @@ aap-ports.workspace = true
 futures.workspace = true
 k8s-openapi.workspace = true
 kube = { workspace = true, features = ["client", "rustls-tls", "ring"] }
-thiserror.workspace = true
-# The renewals, the retries and the bounded wait of the release.
-tokio = { workspace = true, features = ["sync", "time"] }
+# The renewals, the retries and the bounded wait of the release; `select!` is a macro.
+tokio = { workspace = true, features = ["macros", "sync", "time"] }
 tracing.workspace = true
 
 [dev-dependencies]

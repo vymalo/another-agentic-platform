@@ -1174,6 +1174,17 @@ async fn two_replicas_one_leader() {
         second.readiness.is_ready(),
         "a follower's caches list, and it is ready: /readyz is not the election"
     );
+    // ... and its registry serves the agents from those caches, so a failover does not blank it.
+    let entry = second
+        .directory
+        .get("team", "chat")
+        .await
+        .expect("the follower's directory is synced")
+        .expect("the follower's registry serves the agent from its own cache");
+    assert!(
+        !entry.blocked,
+        "the holder made the agent Ready, and the follower's cache says so"
+    );
     // Several of the follower's 30 s rechecks, and several renewals of the holder's.
     tokio::time::sleep(Duration::from_secs(120)).await;
     assert!(!follower.is_leader(), "the second replica holds it too");
@@ -1260,6 +1271,10 @@ async fn a_follower_replica_writes_nothing() {
     // Several of the follower's 30 s rechecks: every object is reconciled again and again, and nothing is written.
     tokio::time::sleep(Duration::from_secs(120)).await;
     assert!(!election.is_leader());
+    assert!(
+        follower.readiness.is_ready(),
+        "a follower's caches list, and it is ready: /readyz is not the election"
+    );
     assert!(
         fake.writes().is_empty(),
         "a follower wrote: {:?}",

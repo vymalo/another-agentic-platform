@@ -36,13 +36,14 @@ Every `retry` a follower, and every `renew` a holder, one call:
    follower;
 5. otherwise: a follower.
 
-A holder that has not **written** for `lease - retry` demotes itself, which is before any other candidate's expiry
-check may let it take over (that needs `renewTime + lease`, and `retry < renew < lease`). That margin is what keeps
-two writers apart; a pass that outlives it is the one case the design does not exclude (the operator's
-`pass_timeout` should stay below the lease, see the [controller's README](../controller/README.md#leader-election-k7a)).
+A holder that has not **written** for `renew` demotes itself at the renew deadline, and the loop looks again at
+that deadline, so it stops before any other candidate's expiry check may let it take over (that needs
+`renewTime + lease`, and `retry < renew < lease`): the margin is `lease - renew`. A pass is capped below that margin
+(the operator's `pass_timeout`, see the [controller's README](../controller/README.md#leader-election-k7a)); a pass
+that started before the loss can still write until it ends, so the window is bounded, not zero.
 
 An API server that cannot be reached leaves the belief as it is until that deadline, and then demotes: a partition
-longer than `lease - retry` makes the replica a follower, and its next successful call says what the lease says.
+longer than `renew` makes the replica a follower, and its next successful call says what the lease says.
 
 **On the shutdown** the holder reads the lease and clears `holderIdentity` (best effort, within two seconds): a
 stopped replica does not make the next one wait for the lease to expire. The lease is never deleted, and no Secret
@@ -61,7 +62,7 @@ AAP_TEST_KUBECONFIG=$HOME/.kube/config cargo test -p aap-leader-kubernetes --tes
 
 | File | What |
 |---|---|
-| `tests/api.rs` | the conformance suite of `aap-ports` (7 cases: one candidate holds, the loser writes nothing, never two holders, a killed holder is replaced, a stopped candidate gives the lease up, `following` reports the change, two names are two elections) on `tests/support`'s fake API server (`GET`, `POST` and `PUT` on the lease path, a `resourceVersion` every write moves, `409` on a stale one and on a create of a name that is there, `404` on a read of one that is not, `201` on a create), with the shortest timings `check` allows (3 / 2 / 1); and the backend's own cases: an expired lease is taken over with one more transition, a live lease of somebody else is left alone, a `409` on a renewal demotes at once and a later write returns it, the object a create writes, the election asks for leases and nothing else, and `Timings::check` |
+| `tests/api.rs` | the conformance suite of `aap-ports` (7 cases: one candidate holds, the loser writes nothing, never two holders, a killed holder is replaced, a stopped candidate gives the lease up, `following` reports the change, two names are two elections) on `tests/support`'s fake API server (`GET`, `POST` and `PUT` on the lease path, a `resourceVersion` every write moves, `409` on a stale one and on a create of a name that is there, `404` on a read of one that is not, `201` on a create), with the shortest timings `check` allows (3 / 2 / 1); and the backend's own cases: an expired lease is taken over with one more transition, a live lease of somebody else is left alone, a `409` on a renewal demotes at once and a later write returns it, a holder whose API server has stopped answering demotes itself at the **renew** deadline and not when its lease expires (the `lease - renew` margin), a lease a foreign writer made cannot stall the election by naming a longer duration, the object a create writes, the election asks for leases and nothing else, and `Timings::check` |
 | `tests/cluster.rs` | the same suite against a real API server, with the default timings (a killed holder is replaced after the 15 s lease). **Opt in**: `AAP_TEST_KUBECONFIG` names a kubeconfig file (never the default context), the leases are `aap-leader-<hex>` in `aap-test`, and `AAP_TEST_REQUIRE_CLUSTER=1` turns the skip into a failure |
 
 ### What is not tested here
@@ -71,5 +72,5 @@ AAP_TEST_KUBECONFIG=$HOME/.kube/config cargo test -p aap-leader-kubernetes --tes
   field ownership, and no clock.
 * **Two replicas on a real cluster** (one pod killed, the other taking over through the kubelet's SIGTERM and the
   release) is the operator chart's end-to-end, not this crate's.
-* **The rights**: the `Role` needs `get`, `create` and `update` on `leases` in the election's namespace. The chart
-  that grants them is another slice's; this crate asks for nothing else.
+* **The rights**: the `Role` needs `get` and `update` on the named lease and `create` on `leases`, in the primary
+  namespace. The chart grants exactly that (K7a); this crate asks for nothing else.

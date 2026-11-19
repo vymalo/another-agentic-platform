@@ -125,11 +125,15 @@ rules:
   - apiGroups: [postgresql.cnpg.io]
     resources: [clusters]
     verbs: [get, patch, create, delete]
-  # K7: the leader's Lease, in the primary namespace (where this Role is made). `create` cannot be narrowed by resourceNames
-  # (RBAC ignores them for create); no delete: a released lease stays, with its holder cleared.
+  # K7: the leader's Lease, in the primary namespace (this Role). `get` and `update` are narrowed to its name; `create`
+  # cannot be (RBAC ignores resourceNames for create). No delete: a released lease stays, with its holder cleared.
   - apiGroups: [coordination.k8s.io]
     resources: [leases]
-    verbs: [get, create, update]
+    verbs: [get, update]
+    resourceNames: [aap-operator]
+  - apiGroups: [coordination.k8s.io]
+    resources: [leases]
+    verbs: [create]
 ---
 # Source: aap-operator/templates/rolebinding.yaml
 apiVersion: rbac.authorization.k8s.io/v1
@@ -280,10 +284,10 @@ spec:
             # AD-029: the image of an agent whose AgentConfig names none. A new value rolls those agents, and no other.
             - name: DEFAULT_AGENT_IMAGE
               value: "ghcr.io/vymalo/another-adam-rs/coder:sha-9a1fd4e@sha256:c3c178b7d73599f40d53f798616e510346abd3300a622b09b2bc233109f12b44"
-            # K7: with the election on, a pass must finish before the renew deadline (the default 5 s is below the 10 s
-            # renew); with one replica the binary's own 60 s applies.
+            # K7: with the election on, a pass must finish before the lease margin (the default 4 s is below the 5 s
+            # lease - renew); with one replica the binary's own 60 s applies.
             - name: AAP_RECONCILE_TIMEOUT_SECS
-              value: "5"
+              value: "4"
             # No token, no registry: this variable is what turns it on.
             - name: REGISTRY_TOKEN_FILE
               value: /var/run/secrets/aap/registry/token

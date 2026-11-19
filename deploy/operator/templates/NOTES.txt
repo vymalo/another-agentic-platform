@@ -4,6 +4,9 @@ The operator watches the namespaces of watchNamespaces ({{ include "aap.watchNam
 {{- if and .Values.watchNamespaces (gt (len .Values.watchNamespaces) 1) }}
 The chart makes the Role and RoleBinding in each of them.
 {{- end }}
+{{- if gt (int .Values.replicas) 1 }}
+{{ .Values.replicas }} replicas campaign for the Lease {{ include "aap.fullname" . }} in {{ include "aap.watchNamespace" . }}; only its holder reconciles. Both are Ready and serve the registry, so all replicas ready is expected, with one writer.
+{{- end }}
 {{- if include "aap.registrySecretName" . }}
 The agent registry is served at http://{{ include "aap.fullname" . }}-registry.{{ .Release.Namespace }}.svc:8080/registry/v1/agents (bearer token from the Secret {{ include "aap.registrySecretName" . }}).
 {{- else }}

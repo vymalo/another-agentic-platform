@@ -253,15 +253,17 @@ is what keeps it in its `Service` and makes it the one that takes over. `Readine
 
 **What is not covered.** A pass reads `is_leader()` once, at its start, and then writes for the length of the pass
 (a few requests, bounded by `Options::pass_timeout`). The lease's margin is what keeps that from being two
-writers: a holder that has not renewed for `lease - retry` demotes itself, and no other candidate may take the
-lease over before `lease`, so a pass that outlives the margin is the one case the design does not exclude. Keep
-`pass_timeout` well below the lease (the defaults are 60 s and 15 s, which is **not** below: a deployment that
-turns the election on with the defaults should lower `AAP_RECONCILE_TIMEOUT_SECS` or raise
-`LEADER_ELECTION_LEASE_SECS`; noted for the chart's slice, not changed here).
+writers: a holder that has not renewed for `renew` demotes itself at the renew deadline, and no other candidate may
+take the lease over before `lease`, so a pass that outlives the margin is the one case the design does not exclude.
+With the election on the chart caps `AAP_RECONCILE_TIMEOUT_SECS` at 4 s, below `lease - renew` (5 s with the
+defaults); a longer pass needs a longer lease (K7a).
 
 `two_replicas_one_leader` in `tests/operator.rs` holds the wiring: two operators on one fake API server and one
-`MemoryElection`, one agent; the second replica writes nothing while the first holds, and after the first is
-killed the second writes the next change.
+`MemoryElection`, one agent; the second replica writes nothing while the first holds, is `Ready`, and its directory
+lists the agent from its own cache (a failover does not blank the registry), and after the first is killed the second
+writes the next change. `a_follower_replica_writes_nothing` holds the other half: a replica whose campaign never runs
+writes nothing at all (no finalizer, no status, for each of the four controllers) while being `Ready`, and writes the
+moment its campaign holds the election.
 
 ## `ReflectorDirectory`
 
@@ -323,7 +325,7 @@ class label (`transient`, `conflict`, ...) or `timeout`, never the error's text.
 | (not in §59a) timers and back-off | The numbers above | §59a gives none |
 | (not in §59a) delete-time policy sync | Described under *Deletion* | A change of `deletionPolicy` followed at once by a delete must not lose data |
 | `status` of `AgentConfig` | `observedGeneration` and the condition `Valid` (True/`Valid`, False/`ConfigInvalid`), from `aap_domain::validate_config`, a function this slice added to `aap-domain` for the config's own rules | `validate` takes both objects |
-| (the brief) leader election "only if §59a asks" | **K7a added the seam** (`aap_ports::LeaderElection`), the lease-backed implementation ([`aap-leader-kubernetes`](../leader-kubernetes/README.md)) and the gate on every pass; `Operator::new`'s default is `AlwaysLeader`, so nothing changes unless a composition root elects one | §59a says "One replica, `Recreate`, no leader election", and that stays the default; a deployment that needs two replicas for availability gets the seam AD-020 asks for rather than a second controller that races the first. The chart's `Role` on `leases` and the pod's two replicas are the chart's slice |
+| (the brief) leader election "only if §59a asks" | **K7a added the seam** (`aap_ports::LeaderElection`), the lease-backed implementation ([`aap-leader-kubernetes`](../leader-kubernetes/README.md)) and the gate on every pass; `Operator::new`'s default is `AlwaysLeader`, so nothing changes unless a composition root elects one | §59a: one replica and `Recreate` stay the default; with `replicas > 1` the chart elects a leader through a `Lease` and only its holder's passes write (AD-057, K7a) |
 | §60a: "The reconciler reads the referents through the store it already uses" | The referents are read with `get` on the API server in each pass, as the config is, **not** from a reflector. Only the mapping from a referent to services uses the caches (those of the services and the configs) | A pass sees the cluster as it is, with no cache to be stale; the mapping is a hint and the timer is the net. Two more reflectors would only be read once per pass |
 | §60a: a missing referent is `ConfigInvalid` — **known behaviour, a question for the owner** | A service whose referent is missing is `Blocked`, and `ReflectorDirectory` marks a `Blocked` service `blocked`, which the registry does not list (`Listed: False`, reason `ServiceBlocked`), **while the pods keep running**. Deleting one `ModelEndpoint` delists every agent that uses it, at once (a deletion is a trigger), until the object is back. It is how an invalid `AgentConfig` has always been listed since S7; what is new is that one object is now shared by many agents. Not changed here. *Question for the owner, not decided (§93, the fifth of D2's decisions):* should a service that has run stay listed while a referent is missing, with its condition saying so? | The registry must not list what the operator could not apply; and an agent that is up but unlisted is unreachable for the people who find agents there |
 | §60a: a missing referent is `ConfigInvalid` | A referent that is missing is `ConfigResolved: False`, reason `ConfigInvalid` (not `ConfigNotFound`, which is the config's own), the message naming it; the `AgentConfig`'s `Valid` condition does not read referents. **A kind whose CRD is not installed** is the same condition with a message that says to install the CRDs of `deploy/operator-crds`, not to create the object. The pass tells the two 404s apart by `details.name` (an API server names the object it did not find; for a resource it does not serve it answers the plain text `404 page not found`, which kube makes a `Status` with no details: *verified 2026-10-15* on a bare kube-apiserver v1.35.8), because `Api::get_opt` reads only the first as "not found" and would make the second a failed pass that retries for ever and says nothing in the status | As §60a says. The config is well formed; the agent cannot be made |

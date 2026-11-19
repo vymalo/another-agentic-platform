@@ -100,16 +100,18 @@ The campaign is a task beside the controllers, on the same SIGTERM/SIGINT: the s
 that logs `shutting down`, sets the flag the exit code is decided from and sends the stop that the controllers,
 the two servers, the registry and the campaign all listen to. On the way out the holder **releases the lease**
 (clears `holderIdentity`, best effort within two seconds), so the next replica does not wait for it to expire; the
-binary then waits up to five seconds for that release before it exits.
+binary then waits up to five seconds for that release, and then gives the controllers up to ten seconds to finish
+the passes in flight (the campaign's `run` ends with the stop, so it is the arm that wins the shutdown and the
+drain is what keeps a SIGTERM from dropping a pass).
 
 The candidate's identity is `POD_NAME` (the chart sets it from the downward API), else `HOSTNAME`, else a refusal:
 a `holderIdentity` of `""` would make two replicas look like one, and they would renew each other's lease.
 
 The timings must satisfy `retry < renew < lease`, each at least a second, or `run` refuses to start naming the
-three variables. **The defaults are not a safe pair with the pass limit**: a pass may take up to
-`AAP_RECONCILE_TIMEOUT_SECS` (60 s), which is longer than the 15 s lease, so a deployment that turns the election
-on should lower the pass limit or raise the lease. The chart's slice owns that choice; it is noted here and in the
-controller's README.
+three variables. **The pass limit and the lease margin**: with the election on, the chart caps
+`AAP_RECONCILE_TIMEOUT_SECS` at 4 s, below `lease - renew` (5 s with the defaults), so a pass that started before
+the loss is bounded; a longer pass needs a longer lease (K7a). A deployment that turns the election on without the
+chart's cap makes that choice itself: the binary's own default is 60 s, longer than the 15 s lease.
 
 ## Cluster rights
 

@@ -359,7 +359,7 @@ metrics:
 logLevel: info
 tuning: {}
   # concurrency: 4          # AAP_CONCURRENCY: services reconciled at once, per controller and per watched namespace
-  # reconcileTimeoutSecs: 5 # AAP_RECONCILE_TIMEOUT_SECS: the longest one pass may take; with replicas > 1 it is 5 by default and must be below leaderElection.renewSecs
+  # reconcileTimeoutSecs: 4 # AAP_RECONCILE_TIMEOUT_SECS: the longest one pass may take; with replicas > 1 it is 4 by default and must be below leaseSecs - renewSecs
   # resyncSecs: 300         # AAP_RESYNC_SECS: timer of a service that is Ready or Suspended
   # resyncPendingSecs: 15   # AAP_RESYNC_PENDING_SECS: timer of one that is rolling out, unwell or held by a foreign object
 

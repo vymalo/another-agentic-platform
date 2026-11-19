@@ -90,7 +90,7 @@ sequence them with the CRDs first (a sync wave, or their Application first). **K
 | `networkPolicy.apiServer.ports`, `.cidrs` | `[443, 6443]`, `[]` | The API server as the pod reaches it (the Service is 443, most clusters' endpoint 6443). `cidrs`, from `kubectl get endpoints kubernetes`, narrows it to those addresses |
 | `toolProbe.to`, `.ports`, `.dns` | `[]`, `[80, 443]`, kube-dns and `[53]` | **K3a:** the MCP servers the operator may reach to probe a `ToolProvider`: [below](#the-tool-probe-k3a). Empty `to`: off, and not a rule of it in any render |
 | `logLevel` | `info` | `RUST_LOG` |
-| `tuning.concurrency`, `.resyncSecs`, `.resyncPendingSecs`, `.reconcileTimeoutSecs` | unset (the binary's 4, 300, 15; 5 for the pass timeout when `replicas > 1`) | `AAP_CONCURRENCY`, `AAP_RESYNC_SECS`, `AAP_RESYNC_PENDING_SECS`, `AAP_RECONCILE_TIMEOUT_SECS`; another key is refused. `concurrency` is **per controller and per watched namespace**: up to `4 × concurrency × watchNamespaces` passes in flight. With `replicas > 1`, `reconcileTimeoutSecs` must be below `leaderElection.renewSecs` (a pass must finish before the renew deadline) |
+| `tuning.concurrency`, `.resyncSecs`, `.resyncPendingSecs`, `.reconcileTimeoutSecs` | unset (the binary's 4, 300, 15; 4 for the pass timeout when `replicas > 1`) | `AAP_CONCURRENCY`, `AAP_RESYNC_SECS`, `AAP_RESYNC_PENDING_SECS`, `AAP_RECONCILE_TIMEOUT_SECS`; another key is refused. `concurrency` is **per controller and per watched namespace**: up to `4 × concurrency × watchNamespaces` passes in flight. With `replicas > 1`, `reconcileTimeoutSecs` must be below `leaderElection.leaseSecs - leaderElection.renewSecs` (the margin between the renew deadline and the earliest takeover) |
 | `resources` | 50m / 64Mi requested, 256Mi limit | |
 | `serviceAccount.create`, `.name`, `.annotations` | `true`, the fullname, none | |
 | `podAnnotations`, `podLabels`, `priorityClassName`, `nodeSelector`, `tolerations`, `affinity` | empty | |
@@ -577,10 +577,12 @@ in), and **only its holder reconciles**: the others keep every watcher and cache
 listed"), and serve the registry from their own caches, so a failover does not blank the registry. A follower's passes return a 30 s
 requeue and write nothing. The holder releases the lease on `SIGTERM`, so the next replica takes it without waiting for it to expire.
 The timers are `leaderElection.{leaseSecs,renewSecs,retrySecs}` (15/10/2, the client-go defaults; refused unless
-`retry < renew < lease`), the pod's name is the candidate, and the `Role` gains `get`, `create` and `update` on `leases` (no
-`delete`: a released lease stays, with its holder cleared). A pass is capped at `tuning.reconcileTimeoutSecs` (5 s by default with
-the election on, and it must be below `renewSecs`), so a pass finishes before the renew deadline and a demoted replica does not
-write after losing the lease. A `PodDisruptionBudget` of `maxUnavailable: 1` keeps one replica through
+`retry < renew < lease`), the pod's name is the candidate, and the `Role` gains `get` and `update` on the named lease and
+`create` on `leases` (no `delete`: a released lease stays, with its holder cleared), **in the primary namespace only**. A pass
+is capped at `tuning.reconcileTimeoutSecs` (4 s by default with the election on, and it must be below `lease - renew`, the
+margin between the renew deadline and the earliest takeover): a pass that started before the loss can still write until it
+ends, so the window is bounded, not zero. The MCP probe keeps 5 s of the pass for its other steps: with the election on,
+`toolProbe.timeoutSecs` above `reconcileTimeoutSecs - 5` is refused (raise the lease and renew, or lower the probe). A `PodDisruptionBudget` of `maxUnavailable: 1` keeps one replica through
 a drain. **The status shows `2/2` ready while one writes**: readiness is about the caches, and the lease is the one-writer proof; do
 not gate readiness on leadership (the budget would then never allow a drain, and the registry `Service` would drop a replica that
 could serve).

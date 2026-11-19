@@ -16,10 +16,10 @@
 //!    `409` again leaves a follower;
 //! 5. otherwise: a follower.
 //!
-//! A holder that has not written for [`Timings::lease`] minus [`Timings::retry`] **demotes itself**, so it stops
-//! claiming the election before another candidate's expiry check can let it take over. That margin is what keeps
-//! two writers apart: `retry < renew < lease` (which [`Timings::check`] holds) makes the deadline earlier than
-//! any takeover by at least `retry`.
+//! A holder that has not written for [`Timings::renew`] **demotes itself** at the renew deadline, and the loop looks
+//! again at that deadline (not after a whole renew period), so it stops claiming the election before another
+//! candidate's expiry check can let it take over: the margin is `lease - renew`, and a pass is capped below it.
+//! `retry < renew < lease` (which [`Timings::check`] holds) keeps the deadline earlier than any takeover.
 //!
 //! On the shutdown the holder clears `holderIdentity`, best effort and within two seconds: a stopped replica
 //! does not make the next one wait for the lease to expire. The lease is never deleted, and no Secret is read.
@@ -53,9 +53,10 @@ pub struct Timings {
     /// `leaseDurationSeconds`: how long a holder may go without renewing before another candidate may take the
     /// lease over.
     pub lease: Duration,
-    /// How often the holder renews.
+    /// The renew deadline: how long a holder may go without a successful renewal before it demotes itself. (It
+    /// renews every [`retry`](Self::retry) in between, so one failed renewal is retried.)
     pub renew: Duration,
-    /// How often a follower tries, and how soon a holder that failed to renew looks again.
+    /// How often a follower tries, and how often a holder renews.
     pub retry: Duration,
 }
 
@@ -97,10 +98,10 @@ impl Timings {
         Ok(())
     }
 
-    /// The moment after which a holder that has not written demotes itself: before any other candidate's expiry
-    /// check may let it take the lease over, by [`Timings::retry`].
+    /// The moment after which a holder that has not written demotes itself: the renew deadline, before any other
+    /// candidate's expiry check may let it take the lease over, by `lease - renew` (client-go's rule).
     fn deadline(&self) -> Duration {
-        self.lease.saturating_sub(self.retry)
+        self.renew
     }
 
     /// `leaseDurationSeconds`, as the lease holds it.
@@ -289,10 +290,21 @@ impl LeaseElection {
         let Some(renewed) = &spec.renew_time else {
             return true;
         };
-        let lease = spec
+        let theirs = spec
             .lease_duration_seconds
             .and_then(|seconds| u64::try_from(seconds).ok())
             .map_or(self.timings.lease, Duration::from_secs);
+        // A lease written by another actor may name a duration longer than ours (or a renewal time ahead of our clock):
+        // bound it by ours, so a foreign writer cannot stall the election for ever.
+        if theirs > self.timings.lease {
+            tracing::warn!(
+                lease = self.name,
+                observed_seconds = theirs.as_secs(),
+                ours_seconds = self.timings.lease.as_secs(),
+                "the lease names a longer duration than ours: it is read as ours, so a foreign writer cannot stall the election"
+            );
+        }
+        let lease = theirs.min(self.timings.lease);
         let micros = i64::try_from(lease.as_micros()).unwrap_or(i64::MAX);
         renewed.0.as_microsecond().saturating_add(micros) < now.0.as_microsecond()
     }
@@ -369,10 +381,17 @@ impl LeaseElection {
                     );
                 }
             }
-            let wait = if self.is_leader() {
-                self.timings.renew
-            } else {
-                self.timings.retry
+            // A holder renews every retry period and gives up at the renew deadline (client-go's rule): one failed
+            // renewal is retried, and another candidate cannot take the lease over before the deadline (the margin is
+            // `lease - renew`).
+            let wait = match written {
+                Some(at) => self
+                    .timings
+                    .deadline()
+                    .saturating_sub(at.elapsed())
+                    .min(self.timings.retry)
+                    .max(std::time::Duration::from_millis(100)),
+                None => self.timings.retry,
             };
             tokio::select! {
                 () = &mut shutdown => {

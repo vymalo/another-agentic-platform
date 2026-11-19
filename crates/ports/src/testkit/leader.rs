@@ -106,8 +106,10 @@ pub async fn the_loser_writes_nothing<T: LeaderElectionUnderTest>(a: T) {
     let other = LeaderElectionUnderTest::candidate(&a, &crate::testkit::unique("b"));
     let other_name = name(&other);
     let running = campaign(&a);
+    // The election **names** its holder before the loser starts: `is_leader` alone is what a broken candidate lies
+    // about, and a case that trusted it would fail for the wrong reason (or not at all) on such a candidate.
     poll("the first candidate to hold the election", || async {
-        a.is_leader()
+        a.is_leader() && a.holder().await.as_deref() == Some(me.as_str())
     })
     .await;
     let second = campaign(&other);

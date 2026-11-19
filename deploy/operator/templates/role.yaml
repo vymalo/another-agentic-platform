@@ -78,11 +78,15 @@ rules:
     resources: [clusters]
     verbs: [get, patch, create, delete]
   {{- end }}
-  {{- if gt (int $.Values.replicas) 1 }}
-  # K7: the leader's Lease, in the primary namespace (where this Role is made). `create` cannot be narrowed by resourceNames
-  # (RBAC ignores them for create); no delete: a released lease stays, with its holder cleared.
+  {{- if and (gt (int $.Values.replicas) 1) (eq $i 0) }}
+  # K7: the leader's Lease, in the primary namespace (this Role). `get` and `update` are narrowed to its name; `create`
+  # cannot be (RBAC ignores resourceNames for create). No delete: a released lease stays, with its holder cleared.
   - apiGroups: [coordination.k8s.io]
     resources: [leases]
-    verbs: [get, create, update]
+    verbs: [get, update]
+    resourceNames: [{{ include "aap.fullname" $ }}]
+  - apiGroups: [coordination.k8s.io]
+    resources: [leases]
+    verbs: [create]
   {{- end }}
 {{- end }}

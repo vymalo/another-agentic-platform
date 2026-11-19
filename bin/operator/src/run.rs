@@ -752,11 +752,13 @@ async fn run_with(args: RunArgs, tracer: aap_trace::Tracer) -> Result<()> {
     let campaign = election.run(Box::pin(signalled(stopped.clone())));
     tokio::pin!(campaign);
     let mut campaign_done = false;
+    let mut controllers_done = false;
 
     // The servers fail fast (a port in use is a deployment mistake); the controllers and the campaign end when
     // told to.
     let result = tokio::select! {
         () = &mut controllers => {
+            controllers_done = true;
             if asked.load(std::sync::atomic::Ordering::Acquire) {
                 Ok(())
             } else {
@@ -775,18 +777,52 @@ async fn run_with(args: RunArgs, tracer: aap_trace::Tracer) -> Result<()> {
         r = metrics => r.context("the metrics server task").and_then(|r| r).and(Err(anyhow::anyhow!("the metrics server stopped"))),
         r = registry => r.context("the registry task").and_then(|r| r).and(Err(anyhow::anyhow!("the registry stopped"))),
     };
-    // Stop whatever still serves, and give the campaign its bounded moment to release the lease.
+    // Stop whatever still serves, and give the campaign its bounded moment to release the lease, then the controllers
+    // their grace to let the passes in flight finish. The campaign arm wins on a shutdown (the election's run returns
+    // with the stop), so without this drain every SIGTERM would drop the controllers mid-pass.
     let _ = stop.send(true);
-    if !campaign_done && asked.load(std::sync::atomic::Ordering::Acquire) {
-        let _ = tokio::time::timeout(LEASE_RELEASE_WAIT, &mut campaign).await;
+    if asked.load(std::sync::atomic::Ordering::Acquire) {
+        drain(
+            campaign_done,
+            &mut campaign,
+            controllers_done,
+            &mut controllers,
+        )
+        .await;
     }
     result
+}
+
+/// Give whatever the winning arm of the shutdown left running its bounded moment: the campaign releases the lease
+/// ([`LEASE_RELEASE_WAIT`]; the release itself is bounded to two seconds), then the controllers finish their passes
+/// ([`CONTROLLER_DRAIN_WAIT`]).
+///
+/// The campaign arm wins a shutdown — [`AlwaysLeader`](aap_ports::AlwaysLeader)'s `run` **is** the shutdown — so
+/// without this drain every SIGTERM would drop the controllers mid-pass. A future that does not end within its
+/// bound is dropped, which is what the pod's own grace would do anyway.
+#[cfg(feature = "runtime-kubernetes")]
+async fn drain(
+    campaign_done: bool,
+    campaign: &mut (impl std::future::Future<Output = ()> + Unpin),
+    controllers_done: bool,
+    controllers: &mut (impl std::future::Future<Output = ()> + Unpin),
+) {
+    if !campaign_done {
+        let _ = tokio::time::timeout(LEASE_RELEASE_WAIT, &mut *campaign).await;
+    }
+    if !controllers_done {
+        let _ = tokio::time::timeout(CONTROLLER_DRAIN_WAIT, &mut *controllers).await;
+    }
 }
 
 /// How long the campaign may take to release the lease once the operator has stopped, inside the 30 s of
 /// `terminationGracePeriodSeconds`: the release itself is bounded to two seconds.
 #[cfg(feature = "runtime-kubernetes")]
 const LEASE_RELEASE_WAIT: std::time::Duration = std::time::Duration::from_secs(5);
+
+/// How long the controllers get to finish their passes once the stop is sent: the shards' own grace is five seconds.
+#[cfg(feature = "runtime-kubernetes")]
+const CONTROLLER_DRAIN_WAIT: std::time::Duration = std::time::Duration::from_secs(10);
 
 #[cfg(not(feature = "runtime-kubernetes"))]
 pub async fn run(args: RunArgs) -> Result<()> {
@@ -851,6 +887,70 @@ mod tests {
         assert!(
             !operator.leader().is_leader(),
             "a candidate whose campaign has not run holds nothing"
+        );
+    }
+
+    /// K7a: the campaign arm wins a shutdown (`AlwaysLeader`'s `run` **is** the shutdown), and the composition root
+    /// still drains what it left running: without it every SIGTERM would drop the controllers mid-pass, and a graceful
+    /// stop would leave the lease to expire instead of releasing it.
+    #[tokio::test]
+    async fn the_shutdown_drains_what_the_winning_arm_left_running() {
+        use std::sync::Arc;
+        use std::sync::atomic::{AtomicBool, Ordering};
+
+        // The campaign ended (it won the select); the controllers are still running, and are awaited.
+        let finished = Arc::new(AtomicBool::new(false));
+        let controllers_finished = finished.clone();
+        let mut campaign = std::pin::pin!(std::future::ready(()));
+        let mut controllers = std::pin::pin!(async move {
+            controllers_finished.store(true, Ordering::Release);
+        });
+        drain(true, &mut campaign, false, &mut controllers).await;
+        assert!(
+            finished.load(Ordering::Acquire),
+            "the controllers were not drained: the passes in flight would be dropped on every SIGTERM"
+        );
+
+        // And the other way round: the controllers ended, and the campaign releases the lease.
+        let released = Arc::new(AtomicBool::new(false));
+        let campaign_released = released.clone();
+        let mut campaign = std::pin::pin!(async move {
+            campaign_released.store(true, Ordering::Release);
+        });
+        let mut controllers = std::pin::pin!(std::future::ready(()));
+        drain(false, &mut campaign, true, &mut controllers).await;
+        assert!(
+            released.load(Ordering::Acquire),
+            "the campaign was not drained: the lease would expire instead of being released"
+        );
+    }
+
+    /// K7a: the six election settings as the binary parses them with nothing set: **off** (a chart that renders no
+    /// `LEADER_ELECTION_ENABLED`, which is every replica count of one, is a lone operator that writes), and the
+    /// client-go timers.
+    #[test]
+    fn the_run_settings_default_to_no_election_and_the_client_go_timers() {
+        use clap::Parser as _;
+
+        let cli = crate::Cli::try_parse_from(["operator", "run"]).expect("the defaults parse");
+        let crate::Command::Run(args) = cli.command else {
+            panic!("`run` parses to the controllers");
+        };
+        assert!(
+            !args.leader_election_enabled,
+            "the election must be off unless the chart sets LEADER_ELECTION_ENABLED: a lone replica would campaign for a \
+             Lease its Role does not grant, never hold it, and write nothing"
+        );
+        assert_eq!(args.leader_election_name, "aap-operator");
+        assert_eq!(args.leader_election_namespace, None);
+        assert_eq!(
+            (
+                args.leader_election_lease_secs,
+                args.leader_election_renew_secs,
+                args.leader_election_retry_secs
+            ),
+            (15, 10, 2),
+            "the client-go defaults, and the ones the chart's values.yaml holds"
         );
     }
 

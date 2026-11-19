@@ -226,6 +226,109 @@ async fn a_409_leaves_a_follower_and_a_later_write_returns_it() {
     run.await.expect("the campaign stops");
 }
 
+/// A holder that cannot reach the API server demotes itself at the **renew** deadline, and not when its lease
+/// expires: the margin between the two (`lease - renew`) is what keeps another candidate from taking the lease over
+/// while this one still believes it writes (K7a, AD-057).
+#[tokio::test]
+async fn a_holder_that_cannot_renew_demotes_at_the_renew_deadline() {
+    // A lease of six seconds renewed every two: a demotion at the renew deadline is three times earlier than the
+    // lease's expiry, so a bound between the two tells them apart.
+    let fake = Fake::new();
+    let election = LeaseElection::new(
+        fake.client(),
+        NS,
+        &unique("lease"),
+        CandidateId::new(unique("candidate")),
+    )
+    .with_timings(Timings {
+        lease: Duration::from_secs(6),
+        renew: Duration::from_secs(2),
+        retry: Duration::from_secs(1),
+    })
+    .expect("the timings are valid");
+    let (stop, run) = campaign(&election);
+    poll("the candidate to hold the election", || async {
+        election.is_leader()
+    })
+    .await;
+
+    // The API server stops answering: the renewal at the renew deadline fails.
+    fake.fail("GET", 500);
+    let armed = tokio::time::Instant::now();
+    poll("the holder to demote itself", || async {
+        !election.is_leader()
+    })
+    .await;
+    let took = armed.elapsed();
+    assert!(
+        took < Duration::from_secs(4),
+        "the holder still claimed the election after {took:?}: it must stop at the renew deadline ({} s), before \
+         another candidate may take the lease over ({} s)",
+        election.timings().renew.as_secs(),
+        election.timings().lease.as_secs()
+    );
+
+    // It is a demotion, not a death: the API server answers again, and the lease is renewed once more.
+    fake.clear_failures();
+    poll("the candidate to hold the election again", || async {
+        election.is_leader()
+    })
+    .await;
+
+    let _ = stop.send(());
+    run.await.expect("the campaign stops");
+}
+
+/// A lease another writer made may name a longer duration than ours. It is read as ours, so a foreign writer (a
+/// chart's lease, another tool's) cannot hold the election for ever by naming an hour: once its renewal is older
+/// than **our** lease, it is taken over (K7a).
+#[tokio::test]
+async fn a_foreign_lease_naming_a_longer_duration_cannot_stall_the_election() {
+    let (fake, election) = setup(); // our lease is three seconds
+    let name = election.lease().to_owned();
+    // Renewed a minute ago, with an hour's duration: expired by our clock, live by its own.
+    let renewed =
+        k8s_openapi::jiff::Timestamp::now() - k8s_openapi::jiff::SignedDuration::from_secs(60);
+    fake.put(
+        NS,
+        &name,
+        json!({
+            "apiVersion": "coordination.k8s.io/v1",
+            "kind": "Lease",
+            "metadata": {"name": name},
+            "spec": {
+                "holderIdentity": "another-tool",
+                "leaseDurationSeconds": 3600,
+                "leaseTransitions": 7,
+                "renewTime": renewed.to_string()
+            }
+        }),
+    );
+    let (stop, run) = campaign(&election);
+    poll("the lease to be taken over", || async {
+        election.is_leader()
+    })
+    .await;
+    let lease = fake.get(NS, &name).expect("the lease");
+    assert_eq!(
+        lease["spec"]["holderIdentity"],
+        json!(election.candidate().as_str()),
+        "the foreign lease was not taken over: a writer that names an hour holds the election for ever"
+    );
+    assert_eq!(
+        lease["spec"]["leaseTransitions"],
+        json!(8),
+        "a takeover is one transition"
+    );
+    assert_eq!(
+        lease["spec"]["leaseDurationSeconds"],
+        json!(3),
+        "and the takeover writes our duration"
+    );
+    let _ = stop.send(());
+    run.await.expect("the campaign stops");
+}
+
 /// The object a create writes: its name, its namespace, its holder, the timings and no transition yet.
 #[tokio::test]
 async fn a_create_writes_the_lease_of_this_candidate() {
