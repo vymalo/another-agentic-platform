@@ -69,6 +69,29 @@ const PROMETHEUS_READ_ONLY: &[&str] = &[
     "list_metrics",
 ];
 
+/// The `github-mcp-server` tools its README documents as reading, at `v2.2.0` (its *Tools* section), for the three toolsets
+/// the example enables (`repos`, `issues`, `pull_requests`). The write tools of those toolsets (`create_branch`,
+/// `create_or_update_file`, `push_files`, `create_pull_request`, `merge_pull_request`, `issue_write`, ...) are absent, and
+/// the server's `--read-only` refuses them too.
+const GITHUB_READ_ONLY: &[&str] = &[
+    "get_commit",
+    "get_file_contents",
+    "get_latest_release",
+    "issue_read",
+    "list_branches",
+    "list_commits",
+    "list_issues",
+    "list_pull_requests",
+    "list_releases",
+    "list_tags",
+    "pull_request_read",
+    "search_code",
+    "search_commits",
+    "search_issues",
+    "search_pull_requests",
+    "search_repositories",
+];
+
 /// The servers of the catalogue, keyed by the image repository the file runs: the tools each documents as reading, and nothing
 /// else. **A new example adds its row**: a file whose image is not here fails, so its allow-list is never checked against
 /// another server's list.
@@ -80,6 +103,39 @@ const SERVERS: &[(&str, &[&str])] = &[
     (
         "ghcr.io/pab1it0/prometheus-mcp-server",
         PROMETHEUS_READ_ONLY,
+    ),
+    ("ghcr.io/github/github-mcp-server", GITHUB_READ_ONLY),
+];
+
+/// How a server is told to refuse its own write tools, and where: an argument of its container, a line of the configuration
+/// it mounts, or nothing (a server whose tools all read).
+enum ReadOnly {
+    /// An exact argument of the container that runs the server (`--read-only`).
+    Arg(&'static str),
+    /// A line of the ConfigMap the container mounts, under this key (`read_only = true`).
+    ConfigLine {
+        key: &'static str,
+        line: &'static str,
+    },
+    /// No switch: every tool the server has reads. The row says so, so that a server that gains a write tool is looked at.
+    None,
+}
+
+/// The servers of the catalogue, keyed by the image repository: the tools each documents as reading (above) and how the
+/// server itself is told to refuse writes. **A new example adds its row here and in `SERVERS`**, or the test fails.
+const READ_ONLY_SWITCH: &[(&str, ReadOnly)] = &[
+    (
+        "quay.io/containers/kubernetes_mcp_server",
+        ReadOnly::ConfigLine {
+            key: "config.toml",
+            line: "read_only = true",
+        },
+    ),
+    // The Prometheus server has no write tool at all: it queries a Prometheus.
+    ("ghcr.io/pab1it0/prometheus-mcp-server", ReadOnly::None),
+    (
+        "ghcr.io/github/github-mcp-server",
+        ReadOnly::Arg("--read-only"),
     ),
 ];
 
@@ -176,6 +232,63 @@ fn every_provider_names_only_tools_its_own_server_documents_as_read_only() {
         }
     }
     assert!(providers > 0, "no ToolProvider in the catalogue");
+}
+
+/// Every server the catalogue runs is told to refuse its own writes, in the place its row names: the container's arguments,
+/// or the line of the configuration it mounts. Two controls, one in the platform's allow-list and one in the server.
+#[test]
+fn every_server_refuses_its_own_write_tools() {
+    for path in files() {
+        let docs = documents(&path);
+        for image in images(&docs) {
+            let repo = repository(&image);
+            let (_, how) = READ_ONLY_SWITCH
+                .iter()
+                .find(|(name, _)| *name == repo)
+                .unwrap_or_else(|| {
+                    panic!("{}: {repo} has no READ_ONLY_SWITCH row", path.display())
+                });
+            match how {
+                ReadOnly::Arg(arg) => {
+                    let found = docs.iter().any(|doc| {
+                        let containers = match doc["kind"].as_str() {
+                            Some("Deployment") | Some("StatefulSet") => {
+                                doc["spec"]["template"]["spec"]["containers"].clone()
+                            }
+                            Some("Pod") => doc["spec"]["containers"].clone(),
+                            _ => Value::Null,
+                        };
+                        containers.as_array().is_some_and(|cs| {
+                            cs.iter().any(|c| {
+                                c["args"]
+                                    .as_array()
+                                    .is_some_and(|args| args.iter().any(|a| a == arg))
+                            })
+                        })
+                    });
+                    assert!(
+                        found,
+                        "{}: no container of {repo} passes {arg}",
+                        path.display()
+                    );
+                }
+                ReadOnly::ConfigLine { key, line } => {
+                    let found = docs.iter().any(|doc| {
+                        doc["kind"] == "ConfigMap"
+                            && doc["data"][key]
+                                .as_str()
+                                .is_some_and(|text| text.lines().any(|l| l.trim() == *line))
+                    });
+                    assert!(
+                        found,
+                        "{}: no ConfigMap of {repo} says {line:?} under {key}",
+                        path.display()
+                    );
+                }
+                ReadOnly::None => {}
+            }
+        }
+    }
 }
 
 #[test]

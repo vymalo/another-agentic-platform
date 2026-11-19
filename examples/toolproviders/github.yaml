@@ -1,0 +1,172 @@
+# A read-only GitHub tool server (slice K10c, AD-056): the third of the catalogue's examples. An agent that names this
+# `ToolProvider` gets a read-only slice of GitHub, and the server refuses every write tool of its own as well
+# (`--read-only`): two controls, one in the platform's allow-list and one in the server.
+#
+# The image is `ghcr.io/github/github-mcp-server`, pinned by tag AND digest (*verified 2026-11-19*: an anonymous ghcr.io token
+# and a manifest request for the `v2.2.0` index returned this digest). Its licence, MIT, is recorded in
+# `third-party-notices.md`; the owner accepted it on 2026-11-19.
+#
+# **The token is the caller's, and this file holds none.** The server's HTTP transport takes the GitHub credential from each
+# request's `Authorization: Bearer <token>` header and answers 401 without one (its `pkg/http/middleware/token.go`), so the
+# Deployment carries no credential at all and the `ToolProvider` below names the header **by reference**: one Secret key, and
+# every agent that names this provider gets that token. Make it with
+#
+#   kubectl -n another-agentic-system create secret generic github-mcp-token --from-literal=token=<fine-grained PAT>
+#
+# and grant the PAT nothing but read: `Contents: read`, `Metadata: read`, `Issues: read`, `Pull requests: read` on the
+# repositories it should see. **A token with write scopes makes this server's `--read-only` the only thing between an agent
+# and a write**, which is why the token is the deployment's decision and not the catalogue's.
+#
+# The operator's own probe sends no `Authorization` header and reads no Secret (K3b), so it reports this provider `Unknown`,
+# `NeedsHeader`: that is the honest state of a server whose token is the caller's, and the agent's calls carry it.
+#
+# The transport is the image's `http` subcommand (the image's default is `stdio`), on `0.0.0.0:8080`; it has no HTTP health
+# route, so the probes are TCP. `--toolsets repos,issues,pull_requests` leaves out the toolsets this example does not want
+# (actions, code security, discussions, gists, notifications, orgs, projects, secret protection, advisories, stargazers,
+# users), and `--read-only` refuses the write tools of the three that remain.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: github-mcp
+  namespace: another-agentic-system
+  labels:
+    agents.vymalo.com/tool-catalogue: "true"
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: github-mcp
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: github-mcp
+        agents.vymalo.com/tool-catalogue: "true"
+    spec:
+      automountServiceAccountToken: false
+      securityContext:
+        runAsNonRoot: true
+        # The image is distroless and declares no `USER`; 65532 is that base image's `nonroot`. The binary is static and the
+        # server writes nothing, so it runs as this user with a read-only root file system.
+        runAsUser: 65532
+        runAsGroup: 65532
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: server
+          image: ghcr.io/github/github-mcp-server:v2.2.0@sha256:040c4e99810076035eb1d9beb4b4a96fcf589c43cefed6ff51a46a553eb4e174
+          args:
+            - http
+            - --port=8080
+            - --read-only
+            - --toolsets=repos,issues,pull_requests
+          ports:
+            - name: http
+              containerPort: 8080
+              protocol: TCP
+          readinessProbe:
+            tcpSocket:
+              port: http
+            periodSeconds: 10
+          livenessProbe:
+            tcpSocket:
+              port: http
+            periodSeconds: 20
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: ["ALL"]
+          resources:
+            requests:
+              cpu: 20m
+              memory: 32Mi
+            limits:
+              memory: 128Mi
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: github-mcp
+  namespace: another-agentic-system
+  labels:
+    agents.vymalo.com/tool-catalogue: "true"
+spec:
+  selector:
+    app.kubernetes.io/name: github-mcp
+  ports:
+    - name: http
+      port: 8080
+      targetPort: http
+---
+# Ingress: the pods of this namespace (the operator's probe and the agents), on the MCP port. Egress: `api.github.com` (and
+# nothing else of GitHub) on 443, and DNS. A GitHub Enterprise deployment changes the host and adds it here.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: github-mcp
+  namespace: another-agentic-system
+  labels:
+    agents.vymalo.com/tool-catalogue: "true"
+spec:
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/name: github-mcp
+  policyTypes: [Ingress, Egress]
+  ingress:
+    - from:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: another-agentic-system
+      ports:
+        - protocol: TCP
+          port: 8080
+  egress:
+    - ports:
+        - protocol: TCP
+          port: 443
+    - ports:
+        - protocol: TCP
+          port: 53
+        - protocol: UDP
+          port: 53
+---
+apiVersion: agents.vymalo.com/v1alpha1
+kind: ToolProvider
+metadata:
+  name: github
+  namespace: another-agentic-system
+spec:
+  title: GitHub (read-only)
+  mcp:
+    url: http://github-mcp.another-agentic-system.svc:8080/
+    # The caller's credential, by reference: the Secret this file's header tells the deployment to make. A write that names it
+    # needs `platform:secrets.pick` (AD-030).
+    headers:
+      Authorization:
+        prefix: "Bearer "
+        secretRef:
+          name: github-mcp-token
+          key: token
+    # The allow-list: sixteen read tools of the three toolsets, and nothing that writes. The names are the server's own (its
+    # README, *Tools*, at `v2.2.0`). `--read-only` above refuses the write tools at the server too.
+    tools:
+      # repos
+      - get_commit
+      - get_file_contents
+      - get_latest_release
+      - list_branches
+      - list_commits
+      - list_releases
+      - list_tags
+      - search_code
+      - search_commits
+      - search_repositories
+      # issues
+      - issue_read
+      - list_issues
+      - search_issues
+      # pull_requests
+      - list_pull_requests
+      - pull_request_read
+      - search_pull_requests
+    optional: false
