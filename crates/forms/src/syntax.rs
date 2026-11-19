@@ -119,6 +119,25 @@ pub(crate) fn is_size_class(s: &str) -> bool {
         && !s.ends_with('-')
 }
 
+/// A variable name of a pod: `[A-Za-z_][A-Za-z0-9_]*` (the API server's rule for `env[].name`).
+pub(crate) fn is_env_name(s: &str) -> bool {
+    let mut bytes = s.bytes();
+    match bytes.next() {
+        Some(b) if b.is_ascii_alphabetic() || b == b'_' => {}
+        _ => return false,
+    }
+    bytes.all(|b| b.is_ascii_alphanumeric() || b == b'_')
+}
+
+/// A path of a URL, as an A2A image's card and health paths are: absolute, and a path and nothing else (no
+/// `?`, `#`, space, backslash or control character). The rule `aap-domain` holds the operator to.
+pub(crate) fn is_url_path(path: &str) -> bool {
+    path.starts_with('/')
+        && !path
+            .chars()
+            .any(|c| matches!(c, '?' | '#' | ' ' | '\\') || c.is_control())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -238,6 +257,26 @@ mod tests {
         assert!(is_visible_ascii("agent.use:chat") && is_visible_ascii("*"));
         for bad in ["", "a b", "a\n", "a\t", "é", "\u{7f}"] {
             assert!(!is_visible_ascii(bad), "{bad:?}");
+        }
+    }
+
+    #[test]
+    fn env_names() {
+        for ok in ["LOG_LEVEL", "_x", "A1", "a_b_9"] {
+            assert!(is_env_name(ok), "{ok}");
+        }
+        for bad in ["", "1A", "-A", "A-B", "A B", "A.B", "É", "A\n"] {
+            assert!(!is_env_name(bad), "{bad:?}");
+        }
+    }
+
+    #[test]
+    fn url_paths() {
+        for ok in ["/", "/healthz", "/.well-known/agent-card.json", "/a/b"] {
+            assert!(is_url_path(ok), "{ok}");
+        }
+        for bad in ["", "healthz", "/a?b=1", "/a#f", "/a b", "/a\\b", "/a\nb"] {
+            assert!(!is_url_path(bad), "{bad:?}");
         }
     }
 }

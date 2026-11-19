@@ -11,12 +11,12 @@
 
 use std::collections::BTreeSet;
 
-use aap_api::{AgentConfig, AgentService, ModelEndpoint, ToolProvider};
+use aap_api::{AgentConfig, AgentService, MAX_A2A_ENV, ModelEndpoint, ToolProvider};
 use aap_domain::{ConfigIssue, Externals, RunPodSettings, name_issue};
 use aap_ports::{FieldError, Kind};
 use url::Url;
 
-use crate::agent::{AgentForm, AgentKindForm, ModelChoice};
+use crate::agent::{A2aEnvForm, A2aSettings, AgentForm, AgentKindForm, ModelChoice};
 use crate::defaults::{Defaults, Deployment, StoreDefault};
 use crate::error::{Errors, FormError};
 use crate::image::{ImagePolicy, is_host};
@@ -25,8 +25,8 @@ use crate::resources::{Resources, to_resources};
 use crate::secret::{OfferedKeys, SecretPick, is_secret_key_name};
 use crate::shared::{BaseUrlForm, ModelEndpointForm, ToolServerForm};
 use crate::syntax::{
-    chars, has_text, is_agent_name, is_github_login, is_model_name, is_scheme_prefix,
-    is_size_class, is_tag, is_tool_server_name, is_visible_ascii, shown,
+    chars, has_text, is_agent_name, is_env_name, is_github_login, is_model_name, is_scheme_prefix,
+    is_size_class, is_tag, is_tool_server_name, is_url_path, is_visible_ascii, shown,
 };
 
 /// The image `aap-domain` is told is the operator's default when the Platform API does not know it. The
@@ -131,14 +131,33 @@ fn check_agent(
         }
     }
 
-    let ModelChoice { endpoint, model } = &form.model;
-    if !has_text(endpoint) {
-        e.add("model.endpoint", "name a model endpoint");
-    } else if let Some(issue) = name_issue("model.endpoint", endpoint) {
-        e.add("model.endpoint", issue.message);
-    }
-    if !has_text(model) {
-        e.add("model.model", "name a model alias");
+    match (&form.model, &form.agent) {
+        // An A2A image gets no model from the platform (AD-054): the operator refuses one.
+        (None, AgentKindForm::A2a(_)) => {}
+        (Some(_), AgentKindForm::A2a(_)) => e.add(
+            "model",
+            "an A2A image gets no model from the platform: it brings its own, in its own variables",
+        ),
+        (None, _) => e.add("model.endpoint", "name a model endpoint"),
+        (Some(ModelChoice { endpoint, model }), _) => {
+            if !has_text(endpoint) {
+                e.add("model.endpoint", "name a model endpoint");
+            } else if let Some(issue) = name_issue("model.endpoint", endpoint) {
+                e.add("model.endpoint", issue.message);
+            }
+            if !has_text(model) {
+                e.add("model.model", "name a model alias");
+            }
+            if referents
+                .unreadable
+                .contains(&(Kind::ModelEndpoint, endpoint.clone()))
+            {
+                e.add(
+                    "model.endpoint",
+                    unreadable_message("ModelEndpoint", endpoint),
+                );
+            }
+        }
     }
     for name in &form.tool_servers {
         let field = format!("toolServers[{name}]");
@@ -153,19 +172,16 @@ fn check_agent(
             e.add(field, unreadable_message("ToolProvider", name));
         }
     }
-    if referents
-        .unreadable
-        .contains(&(Kind::ModelEndpoint, endpoint.clone()))
-    {
-        e.add(
-            "model.endpoint",
-            unreadable_message("ModelEndpoint", endpoint),
-        );
-    }
-    if let Some(image) = &form.image
-        && let Err(why) = images.check(image)
-    {
-        e.add("image", why);
+    // The agent's own image is the adam-rs agent's; an A2A image names its image in `agent.image`.
+    if let Some(image) = &form.image {
+        if matches!(form.agent, AgentKindForm::A2a(_)) {
+            e.add(
+                "image",
+                "an A2A image names its image in `agent.image`: one image, one source",
+            );
+        } else if let Err(why) = images.check(image) {
+            e.add("image", why);
+        }
     }
     if let Some(audience) = &form.audience {
         if audience.len() > 32 {
@@ -244,6 +260,67 @@ fn check_agent(
                         "is not part of the folder: the tools of an agent come from the Tool servers screen",
                     );
                 }
+            }
+        }
+        AgentKindForm::A2a(a) => {
+            if let Err(why) = images.check(&a.image) {
+                e.add("agent.image", why);
+            }
+            if !(1..=65535).contains(&a.port) {
+                e.add("agent.port", "is a port number, 1 to 65535");
+            }
+            for (field, path) in [
+                ("agent.cardPath", a.card_path.as_str()),
+                ("agent.healthPath", a.health_path.as_str()),
+            ] {
+                if !is_url_path(path) {
+                    e.add(
+                        field,
+                        "is an absolute path: it starts with `/` and holds no `?`, `#`, space or backslash",
+                    );
+                }
+            }
+            if a.env.len() as u64 > MAX_A2A_ENV {
+                e.add(
+                    "agent.env",
+                    format!(
+                        "{} variables: at most {MAX_A2A_ENV} (a schema bound)",
+                        a.env.len()
+                    ),
+                );
+            }
+            let mut names = BTreeSet::new();
+            for (i, v) in a.env.iter().enumerate() {
+                let field = format!("agent.env[{i}]");
+                if !is_env_name(&v.name) {
+                    e.add(
+                        format!("{field}.name"),
+                        "is a variable name: a letter or `_`, then letters, digits and `_`",
+                    );
+                } else if !names.insert(v.name.as_str()) {
+                    e.add(format!("{field}.name"), "is in the list twice");
+                }
+                match (&v.value, &v.secret) {
+                    (Some(_), None) => {}
+                    (None, Some(pick)) => {
+                        check_pick(&mut e, &format!("{field}.secret"), pick, offered);
+                    }
+                    _ => e.add(&field, "has exactly one of value and secret"),
+                }
+            }
+            // The platform gives an A2A image no tools, and it brings its own variables: the form's
+            // `toolServers` and `allowInsecureHttp` are the adam-rs agent's.
+            if !form.tool_servers.is_empty() {
+                e.add(
+                    "toolServers",
+                    "an A2A image gets no tools from the platform: it brings its own",
+                );
+            }
+            if form.allow_insecure_http {
+                e.add(
+                    "allowInsecureHttp",
+                    "an A2A image gets no tools from the platform",
+                );
             }
         }
     }
@@ -431,6 +508,12 @@ fn config_field(form: &AgentForm, path: &str) -> String {
         ("spec.harness.adam.agent.folder.files", "agent.files"),
         ("spec.harness.adam.agent.folder", "agent.files"),
         ("spec.harness.adam", "agent"),
+        ("spec.harness.a2a.image", "agent.image"),
+        ("spec.harness.a2a.port", "agent.port"),
+        ("spec.harness.a2a.cardPath", "agent.cardPath"),
+        ("spec.harness.a2a.healthPath", "agent.healthPath"),
+        ("spec.harness.a2a.env", "agent.env"),
+        ("spec.harness.a2a", "agent"),
         ("spec.model.model", "model.model"),
         ("spec.model.endpointRef", "model.endpoint"),
         ("spec.model", "model"),
@@ -441,6 +524,17 @@ fn config_field(form: &AgentForm, path: &str) -> String {
         ("spec.environment.volumes", "deployment.volumes"),
         ("spec.security", "deployment.security"),
     ];
+    // `spec.tools` as a whole: an A2A image is refused any tools (AD-054), and which of the form's fields
+    // is the one to change is what the form holds.
+    if path == "spec.tools" {
+        return if !form.tool_servers.is_empty() {
+            "toolServers".to_owned()
+        } else if form.allow_insecure_http {
+            "allowInsecureHttp".to_owned()
+        } else {
+            "deployment.githubMcp".to_owned()
+        };
+    }
     if let Some(server) = server_of(path) {
         return server_field(form, server);
     }
@@ -452,7 +546,7 @@ fn config_field(form: &AgentForm, path: &str) -> String {
         if let Some(rest) = under(path, prefix) {
             let keeps_index = matches!(
                 *field,
-                "agent.createRepoOwners" | "agent.files" | "agent.github.owners"
+                "agent.createRepoOwners" | "agent.files" | "agent.github.owners" | "agent.env"
             );
             return if keeps_index {
                 format!("{field}{}", index(rest))
@@ -588,7 +682,7 @@ pub fn check_replace(current: &AgentForm, new: &AgentForm) -> Vec<FormError> {
     if current.kind() != new.kind() {
         e.add(
             "agent.kind",
-            "a coder cannot become a folder agent, nor the reverse: make a new agent",
+            "an agent cannot become another kind: a coder, a folder agent and an A2A image are different agents, so make a new one",
         );
     }
     e.0
@@ -643,10 +737,10 @@ fn probe(
         description: None,
         tags: Vec::new(),
         suspend: false,
-        model: ModelChoice {
+        model: Some(ModelChoice {
             endpoint: endpoint.to_owned(),
             model: "probe".to_owned(),
-        },
+        }),
         tool_servers: tool_server.iter().map(|s| (*s).to_owned()).collect(),
         // The rule about a plain `http://` server is the agent's, and this is not an agent.
         allow_insecure_http: true,
@@ -892,10 +986,10 @@ impl Defaults {
             description: None,
             tags: Vec::new(),
             suspend: false,
-            model: ModelChoice {
+            model: Some(ModelChoice {
                 endpoint: "probe-endpoint".to_owned(),
                 model: "sample".to_owned(),
-            },
+            }),
             tool_servers: BTreeSet::new(),
             allow_insecure_http: false,
             image: None,
@@ -920,6 +1014,27 @@ impl Defaults {
                 files: [("instructions.md".to_owned(), "sample\n".to_owned())].into(),
             })),
         ];
+        // An A2A image (K11b): its own image, no model, and the two ways to give it a variable.
+        let mut a2a = sample(AgentKindForm::A2a(A2aSettings {
+            image: DEFAULT_IMAGE_STANDIN.to_owned(),
+            port: aap_api::A2A_PORT,
+            card_path: aap_api::A2A_CARD_PATH.to_owned(),
+            health_path: aap_api::A2A_HEALTH_PATH.to_owned(),
+            env: vec![
+                A2aEnvForm {
+                    name: "LOG_LEVEL".to_owned(),
+                    value: Some("info".to_owned()),
+                    secret: None,
+                },
+                A2aEnvForm {
+                    name: "API_TOKEN".to_owned(),
+                    value: None,
+                    secret: Some(SecretPick::new("sample-secrets", "API_TOKEN")),
+                },
+            ],
+        }));
+        a2a.model = None;
+        forms.push(a2a);
         let mut externals = Externals::default()
             .with_default_image(DEFAULT_IMAGE_STANDIN)
             .with_model_endpoint(probe_endpoint(ns));

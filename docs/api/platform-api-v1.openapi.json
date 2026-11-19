@@ -468,6 +468,77 @@
       }
     },
     "schemas": {
+      "A2aEnvForm": {
+        "additionalProperties": false,
+        "properties": {
+          "name": {
+            "description": "The variable's name, once.",
+            "pattern": "^[A-Za-z_][A-Za-z0-9_]*$",
+            "type": "string"
+          },
+          "secret": {
+            "description": "Where the value is: a reference to an offered Secret key. Exactly one of `value` and `secret`, and naming one needs platform:secrets.pick.",
+            "oneOf": [
+              {
+                "$ref": "#/components/schemas/SecretPick"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "value": {
+            "description": "A plain value. Never a secret: that is `secret`.",
+            "type": [
+              "string",
+              "null"
+            ]
+          }
+        },
+        "required": [
+          "name"
+        ],
+        "type": "object"
+      },
+      "A2aSettings": {
+        "additionalProperties": false,
+        "properties": {
+          "cardPath": {
+            "description": "Where it serves its agent card: an absolute path, and what the registry lists as the card's URL. `/.well-known/agent-card.json` when absent.",
+            "type": "string"
+          },
+          "env": {
+            "description": "The variables the image gets, each a plain value or a Secret key. The platform invents none, except the service's own A2A_BEARER_TOKENS.",
+            "items": {
+              "$ref": "#/components/schemas/A2aEnvForm"
+            },
+            "maxItems": 64,
+            "type": "array"
+          },
+          "healthPath": {
+            "description": "The path that answers 200 while it serves: its probes. `/healthz` when absent.",
+            "type": "string"
+          },
+          "image": {
+            "description": "The image that serves A2A itself (`harness.a2a.image`). It needs a tag or a digest and a registry from `Info.defaults.allowedImageRegistries`, else 422 on the field `agent.image`.",
+            "type": "string"
+          },
+          "kind": {
+            "const": "a2a"
+          },
+          "port": {
+            "description": "The port it serves on; 8080 when absent.",
+            "maximum": 65535,
+            "minimum": 1,
+            "type": "integer"
+          }
+        },
+        "required": [
+          "image",
+          "kind"
+        ],
+        "type": "object"
+      },
       "AgentDetail": {
         "additionalProperties": false,
         "properties": {
@@ -515,10 +586,11 @@
             ]
           },
           "kind": {
-            "description": "A coder or a folder agent; null when the config is missing or is neither.",
+            "description": "A coder, a folder agent or an image that serves A2A itself; null when the config is missing or is none of them.",
             "enum": [
               "coder",
               "folder",
+              "a2a",
               null
             ],
             "type": [
@@ -731,6 +803,9 @@
               },
               {
                 "$ref": "#/components/schemas/FolderSettings"
+              },
+              {
+                "$ref": "#/components/schemas/A2aSettings"
               }
             ]
           },
@@ -757,14 +832,22 @@
             ]
           },
           "image": {
-            "description": "The agent's own image, under Advanced; null: the operator's default coder image. It needs a tag or a digest and a registry from `Info.defaults.allowedImageRegistries`, else 422 on the field `image`.",
+            "description": "The agent's own image, under Advanced; null: the operator's default coder image. An A2A image names its image in `agent.image`. It needs a tag or a digest and a registry from `Info.defaults.allowedImageRegistries`, else 422 on the field `image`.",
             "type": [
               "string",
               "null"
             ]
           },
           "model": {
-            "$ref": "#/components/schemas/ModelChoice"
+            "description": "The model: an endpoint and an alias. Required of a coder and of a folder agent; null only for an A2A image, which gets none from the platform (AD-054).",
+            "oneOf": [
+              {
+                "$ref": "#/components/schemas/ModelChoice"
+              },
+              {
+                "type": "null"
+              }
+            ]
           },
           "name": {
             "description": "The name of both objects; fixed after the create.",
@@ -787,7 +870,7 @@
             "type": "string"
           },
           "toolServers": {
-            "description": "ToolProvider names, a set.",
+            "description": "ToolProvider names, a set. An A2A image gets no tools from the platform.",
             "items": {
               "type": "string"
             },
@@ -796,7 +879,6 @@
         },
         "required": [
           "agent",
-          "model",
           "name",
           "title"
         ],
@@ -853,10 +935,11 @@
             ]
           },
           "kind": {
-            "description": "A coder or a folder agent; null when the config is missing or is neither.",
+            "description": "A coder, a folder agent or an image that serves A2A itself; null when the config is missing or is none of them.",
             "enum": [
               "coder",
               "folder",
+              "a2a",
               null
             ],
             "type": [
@@ -1042,6 +1125,20 @@
       "Defaults": {
         "additionalProperties": false,
         "properties": {
+          "a2a": {
+            "additionalProperties": false,
+            "properties": {
+              "resources": {
+                "description": "Kubernetes resource requirements of an image that serves A2A itself (K11b).",
+                "type": [
+                  "object",
+                  "null"
+                ]
+              }
+            },
+            "required": [],
+            "type": "object"
+          },
           "a2aBearer": {
             "additionalProperties": false,
             "properties": {
@@ -1188,6 +1285,7 @@
           }
         },
         "required": [
+          "a2a",
           "a2aBearer",
           "allowFrom",
           "allowedImageRegistries",
@@ -3068,6 +3166,9 @@
               "application/json": {
                 "example": {
                   "defaults": {
+                    "a2a": {
+                      "resources": null
+                    },
                     "a2aBearer": {
                       "key": "AGENT_TOKEN",
                       "name": "agent-a2a"

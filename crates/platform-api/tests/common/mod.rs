@@ -330,6 +330,24 @@ pub fn folder_body(name: &str) -> Value {
     })
 }
 
+/// An image that serves A2A itself (K11b, AD-054): its own image, no model, and a variable of each kind.
+pub fn a2a_body(name: &str) -> Value {
+    json!({
+        "name": name,
+        "title": "A2A",
+        "tags": ["a2a"],
+        "audience": [format!("agent.use:{name}")],
+        "agent": {
+            "kind": "a2a",
+            "image": "ghcr.io/example/a2a:sha-1234567",
+            "env": [
+                { "name": "LOG_LEVEL", "value": "info" },
+                { "name": "API_TOKEN", "secret": { "secret": "a2a-secrets", "key": "API_TOKEN" } }
+            ]
+        }
+    })
+}
+
 pub fn coder_body(name: &str) -> Value {
     json!({
         "name": name,
@@ -354,6 +372,7 @@ pub fn offer_everything(objects: &MemoryObjects) {
     objects.offer("agent-models", "GATEWAY_API_KEY", "agent-models-es");
     objects.offer("agent-tools", "SEARCH_TOKEN", "agent-tools-es");
     objects.offer("github-app", "private-key.pem", "github-app-es");
+    objects.offer("a2a-secrets", "API_TOKEN", "a2a-secrets-es");
 }
 
 impl Api {

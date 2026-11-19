@@ -30,11 +30,12 @@ mod validate;
 mod yaml;
 
 pub use agent::{
-    AgentForm, AgentKind, AgentKindForm, CoderSettings, FolderSettings, GithubAppForm, ModelChoice,
+    A2aEnvForm, A2aSettings, AgentForm, AgentKind, AgentKindForm, CoderSettings, FolderSettings,
+    GithubAppForm, ModelChoice,
 };
 pub use defaults::{
-    CoderDefaults, CoderDeployment, Defaults, Deployment, FolderDefaults, SecretPattern,
-    StoreDefault,
+    A2aDefaults, CoderDefaults, CoderDeployment, Defaults, Deployment, FolderDefaults,
+    SecretPattern, StoreDefault,
 };
 pub use error::FormError;
 pub use export::{ExportError, export_agent, export_object};

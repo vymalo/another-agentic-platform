@@ -5,8 +5,8 @@
 mod support;
 
 use aap_forms::{
-    AgentKind, BaseUrlForm, ModelEndpointForm, Representation, ToolServerForm, Unrepresentable,
-    load_agent, to_resources,
+    AgentKind, AgentKindForm, BaseUrlForm, ModelEndpointForm, Representation, ToolServerForm,
+    Unrepresentable, load_agent, to_resources,
 };
 use aap_ports::{ARGO_TRACKING_ANNOTATION, Agent, Kind, Owner};
 use proptest::prelude::*;
@@ -70,7 +70,10 @@ fn the_coder_me_example_is_a_form_whoever_owns_it() {
         let f = &view.form;
         assert_eq!(f.name, "coder-me");
         assert_eq!(f.title, "Coder (me)");
-        assert_eq!(f.model.endpoint, "gateway");
+        assert_eq!(
+            f.model.as_ref().map(|m| m.endpoint.as_str()),
+            Some("gateway")
+        );
         assert_eq!(f.tool_servers, ["websearch".to_owned()].into());
         assert_eq!(
             f.audience.as_deref(),
@@ -122,12 +125,50 @@ fn the_netcup_coder_and_chat_are_yaml_only_and_say_what_to_change() {
 }
 
 #[test]
-fn the_a2a_image_is_yaml_only_and_says_why() {
-    // The dashboard's forms are the adam-rs harness's (K11a, AD-054): an image that serves A2A itself
-    // has fields no form edits, and a form that wrote an adam agent back would lose them.
+fn the_a2a_example_is_a_form() {
+    // The dashboard's forms say an image that serves A2A itself (K11b, AD-054): its image, its port, its
+    // card and health paths and its variables, and no model.
     let a2a = load_agent(&example_agent("a2a.yaml", false));
-    assert!(a2a.form().is_none());
-    assert_eq!(paths(a2a.reasons()), ["AgentConfig spec.harness.a2a"]);
+    let view = a2a.form().unwrap_or_else(|| panic!("{:?}", a2a.reasons()));
+    assert_eq!(view.kind(), AgentKind::A2a);
+    let f = &view.form;
+    assert_eq!(f.name, "a2a");
+    assert_eq!(f.title, "A2A");
+    assert_eq!(f.model, None);
+    assert!(f.tool_servers.is_empty());
+    assert_eq!(f.image, None);
+    let AgentKindForm::A2a(settings) = &f.agent else {
+        panic!("an a2a form");
+    };
+    assert_eq!(settings.image, "aap-stub:ci");
+    assert_eq!(settings.port, 8080);
+    assert_eq!(settings.card_path, "/.well-known/agent-card.json");
+    assert_eq!(settings.health_path, "/healthz");
+    assert_eq!(settings.env.len(), 2);
+    assert_eq!(settings.env[0].name, "LOG_LEVEL");
+    assert_eq!(settings.env[0].value.as_deref(), Some("info"));
+    assert_eq!(
+        settings.env[1]
+            .secret
+            .as_ref()
+            .map(|p| (&*p.secret, &*p.key)),
+        Some(("a2a-secrets", "API_TOKEN"))
+    );
+    // Its own image is not the form's `image`, and the deployment's part is what the object holds.
+    let resources = view
+        .deployment
+        .resources
+        .as_ref()
+        .expect("the example's resources");
+    assert_eq!(
+        resources
+            .requests
+            .as_ref()
+            .and_then(|r| r.get("memory"))
+            .map(|q| q.0.as_str()),
+        Some("32Mi")
+    );
+    assert!(view.deployment.store.postgres.secret_ref.is_some());
 }
 
 // ------------------------------------------ what the deployment's part may hold
@@ -561,6 +602,7 @@ proptest! {
         let changes: Vec<Change> = coder_changes()
             .into_iter()
             .filter(|c| form.kind() == AgentKind::Coder || !c.pointer.starts_with("/harness/adam/coder"))
+            .filter(|c| form.model.is_some() || !c.pointer.starts_with("/model"))
             .filter(|c| c.pointer != "/tools/mcpServers/websearch/optional" || form.tool_servers.contains("websearch"))
             .collect();
         let ch = &changes[pick % changes.len()];

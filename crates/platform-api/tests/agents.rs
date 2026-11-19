@@ -88,6 +88,48 @@ async fn a_folder_agent_is_created_read_listed_and_exported() {
 }
 
 #[tokio::test]
+async fn an_a2a_image_is_created_with_its_own_image_and_no_model() {
+    // K11b (AD-054): the third kind of form. Its own image, its variables, and none of the adam-rs
+    // fields the operator refuses it.
+    let (api, token) = Api::seeded().await;
+    let r = create(&api, &token, &a2a_body("a2a")).await;
+    assert_eq!(r.code(), 201, "{}", r.text());
+    let body = r.json();
+    assert_eq!(body["kind"], "a2a");
+    let form = &body["representation"]["form"]["form"];
+    assert!(form.get("model").is_none(), "an A2A image has no model");
+    assert_eq!(form["agent"]["image"], "ghcr.io/example/a2a:sha-1234567");
+    assert_eq!(form["agent"]["port"], 8080);
+    assert_eq!(form["agent"]["env"][0]["value"], "info");
+    assert_eq!(
+        form["agent"]["env"][1]["secret"],
+        json!({ "secret": "a2a-secrets", "key": "API_TOKEN" })
+    );
+
+    // The objects hold the a2a harness and no adam block.
+    let objects = api.objects.list_agents().await.unwrap();
+    let config = objects
+        .iter()
+        .find(|a| a.config.as_ref().is_some_and(|c| c.name == "a2a"))
+        .and_then(|a| a.config.as_ref())
+        .unwrap();
+    assert_eq!(config.spec["harness"]["type"], "a2a");
+    assert!(config.spec["harness"].get("adam").is_none());
+    assert!(config.spec.get("model").is_none());
+
+    // A model is refused, on the field that names it.
+    let mut with_model = a2a_body("a2a2");
+    with_model["model"] = json!({ "endpoint": "gateway", "model": "chat-model" });
+    let refused = create(&api, &token, &with_model).await;
+    assert_eq!(refused.code(), 422, "{}", refused.text());
+    assert!(
+        field_errors(&refused).iter().any(|(f, _)| f == "model"),
+        "{}",
+        refused.text()
+    );
+}
+
+#[tokio::test]
 async fn a_coder_is_created_with_the_secret_it_picks() {
     let (api, token) = Api::seeded().await;
     let r = create(&api, &token, &coder_body("coder-me")).await;

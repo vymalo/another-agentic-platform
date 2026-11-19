@@ -22,7 +22,6 @@ spec:
       bearerTokensSecretRef:
         name: a2a-secrets
         key: A2A_BEARER_TOKENS
-      publicUrl: "" # empty: http://<name>.<ns>.svc:<harness.a2a.port>/
   scaling:
     topology: combined
     workers: 1

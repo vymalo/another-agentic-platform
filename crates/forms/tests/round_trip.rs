@@ -5,8 +5,8 @@
 mod support;
 
 use aap_forms::{
-    AgentForm, AgentKind, AgentKindForm, AgentView, BaseUrlForm, ModelEndpointForm, Representation,
-    ToolServerForm, load_agent, to_resources,
+    AgentForm, AgentKind, AgentKindForm, AgentView, BaseUrlForm, ModelChoice, ModelEndpointForm,
+    Representation, ToolServerForm, load_agent, to_resources,
 };
 use aap_ports::{Kind, MANAGED_BY_DASHBOARD, MANAGED_BY_LABEL, Owner};
 use proptest::prelude::*;
@@ -82,6 +82,59 @@ fn the_form_of_a_folder_agent_round_trips() {
     let view = view_of(&form, &deployment).unwrap();
     assert_eq!(view.form, form);
     assert_eq!(view.deployment, deployment);
+}
+
+#[test]
+fn the_form_of_an_a2a_image_round_trips() {
+    // K11b (AD-054): an image that serves A2A itself is a form, with its own image and no model.
+    let form = a2a_form("a2a");
+    let deployment = defaults().deployment_for(AgentKind::A2a, "a2a");
+    let view = view_of(&form, &deployment).unwrap();
+    assert_eq!(view.form, form);
+    assert_eq!(view.deployment, deployment);
+    assert_eq!(view.kind(), AgentKind::A2a);
+    let r = to_resources(&form, &deployment, NS);
+    let config = j(&r.config.spec);
+    assert_eq!(config["harness"]["type"], "a2a");
+    assert!(
+        config["harness"].get("adam").is_none(),
+        "an a2a harness has no adam block"
+    );
+    assert_eq!(
+        config["harness"]["a2a"],
+        json_str(
+            r#"{"image":{"ref":"registry.invalid/a2a:sha-1234567"},"port":8080,"cardPath":"/.well-known/agent-card.json","healthPath":"/healthz","env":[{"name":"LOG_LEVEL","value":"info"},{"name":"API_TOKEN","secretKeyRef":{"name":"a2a-secrets","key":"API_TOKEN"}}]}"#
+        ),
+        "the image, its port, its paths and its variables: each a value or a Secret key"
+    );
+    assert!(
+        config.get("model").is_none(),
+        "an a2a image gets no model from the platform"
+    );
+    assert_eq!(config["tools"]["mcpServers"], json_str("{}"));
+    assert_eq!(config["tools"]["allowInsecureHttp"], false);
+    assert_eq!(
+        config["environment"]["resources"],
+        json_str(r#"{"requests":{"cpu":"100m","memory":"256Mi"}}"#),
+        "the a2a defaults' resources"
+    );
+}
+
+#[test]
+fn an_a2a_form_that_names_what_the_operator_refuses_is_still_a_form() {
+    // A form is not a validity claim: a form that validation refuses (a model, the adam image, tool
+    // servers) must still be read back unchanged, or a person could not be shown the mistake to fix.
+    let mut form = a2a_form("a2a");
+    form.model = Some(ModelChoice {
+        endpoint: "gateway".to_owned(),
+        model: "chat-model".to_owned(),
+    });
+    form.image = Some("registry.invalid/agent:tag".to_owned());
+    form.tool_servers = ["websearch".to_owned()].into();
+    form.allow_insecure_http = true;
+    let deployment = defaults().deployment_for(AgentKind::A2a, "a2a");
+    let view = view_of(&form, &deployment).unwrap();
+    assert_eq!(view.form, form);
 }
 
 #[test]
