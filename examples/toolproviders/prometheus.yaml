@@ -1,0 +1,175 @@
+# A read-only Prometheus tool server (slice K10b, AD-056): the second of the catalogue's examples. An agent that names this
+# `ToolProvider` gets the server's query and discovery tools, and the server holds no Kubernetes right at all: it reads a
+# Prometheus over HTTP and nothing else.
+#
+# The image is `ghcr.io/pab1it0/prometheus-mcp-server`, pinned by tag AND digest (*verified 2026-11-19*: an anonymous ghcr.io
+# token and a manifest request for the `1.4.2` index returned this digest). Its licence, MIT, is recorded in
+# `third-party-notices.md`; the owner accepted it on 2026-11-19.
+#
+# What the server is told: `PROMETHEUS_URL` (required) and the HTTP transport. The image already binds `0.0.0.0:8080` and sets
+# `PYTHONDONTWRITEBYTECODE`, so nothing else is needed; `PROMETHEUS_DISABLE_LINKS` keeps the Prometheus UI links out of query
+# results (they cost context and an agent cannot open them), and `PROMETHEUS_REQUEST_TIMEOUT` bounds a slow Prometheus.
+#
+# The probe is the image's own `/health`, which it answers on the HTTP transports (its Dockerfile's `HEALTHCHECK` asks for it).
+# It is not the `health_check` tool: that one is a tool, and this example does not offer it to agents.
+#
+# The account: none. `automountServiceAccountToken: false` and no `Role` or `RoleBinding`: the pod cannot read the cluster. Its
+# egress is its Prometheus and DNS, and nothing else.
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: prometheus-mcp-config
+  namespace: another-agentic-system
+  labels:
+    agents.vymalo.com/tool-catalogue: "true"
+data:
+  # Point this at the Prometheus of the deployment. The example names one in a `monitoring` namespace; a deployment that runs
+  # its Prometheus elsewhere changes this line and the NetworkPolicy's egress rule with it.
+  PROMETHEUS_URL: http://prometheus.monitoring.svc:9090
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: prometheus-mcp
+  namespace: another-agentic-system
+  labels:
+    agents.vymalo.com/tool-catalogue: "true"
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: prometheus-mcp
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: prometheus-mcp
+        agents.vymalo.com/tool-catalogue: "true"
+    spec:
+      automountServiceAccountToken: false
+      securityContext:
+        runAsNonRoot: true
+        # The image's own user (`app`, uid 1000, its Dockerfile).
+        runAsUser: 1000
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: server
+          image: ghcr.io/pab1it0/prometheus-mcp-server:1.4.2@sha256:32f2682e416f5b459fad4dcf7cfdd81206840e2f867aab4f15d5d8dc890d2349
+          env:
+            - name: PROMETHEUS_MCP_SERVER_TRANSPORT
+              value: http
+            - name: PROMETHEUS_DISABLE_LINKS
+              value: "true"
+            - name: PROMETHEUS_REQUEST_TIMEOUT
+              value: "15"
+            - name: PROMETHEUS_URL
+              valueFrom:
+                configMapKeyRef:
+                  name: prometheus-mcp-config
+                  key: PROMETHEUS_URL
+          ports:
+            - name: http
+              containerPort: 8080
+              protocol: TCP
+          readinessProbe:
+            httpGet:
+              path: /health
+              port: http
+            periodSeconds: 10
+          livenessProbe:
+            httpGet:
+              path: /health
+              port: http
+            periodSeconds: 20
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: ["ALL"]
+          resources:
+            requests:
+              cpu: 20m
+              memory: 64Mi
+            limits:
+              memory: 192Mi
+          volumeMounts:
+            # A read-only root file system, with somewhere for a temporary file: nothing of the server needs one, and a
+            # library that does finds it here instead of failing the pod.
+            - name: tmp
+              mountPath: /tmp
+      volumes:
+        - name: tmp
+          emptyDir:
+            sizeLimit: 32Mi
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: prometheus-mcp
+  namespace: another-agentic-system
+  labels:
+    agents.vymalo.com/tool-catalogue: "true"
+spec:
+  selector:
+    app.kubernetes.io/name: prometheus-mcp
+  ports:
+    - name: http
+      port: 8080
+      targetPort: http
+---
+# Ingress: the pods of this namespace (the operator's probe and the agents), on the MCP port. Egress: the Prometheus of the
+# ConfigMap (the `monitoring` namespace on 9090 here) and DNS. A deployment adds its own ranges and ports; this is the minimum
+# the example needs, and it never leaves the cluster.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: prometheus-mcp
+  namespace: another-agentic-system
+  labels:
+    agents.vymalo.com/tool-catalogue: "true"
+spec:
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/name: prometheus-mcp
+  policyTypes: [Ingress, Egress]
+  ingress:
+    - from:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: another-agentic-system
+      ports:
+        - protocol: TCP
+          port: 8080
+  egress:
+    - to:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: monitoring
+      ports:
+        - protocol: TCP
+          port: 9090
+    - ports:
+        - protocol: TCP
+          port: 53
+        - protocol: UDP
+          port: 53
+---
+apiVersion: agents.vymalo.com/v1alpha1
+kind: ToolProvider
+metadata:
+  name: prometheus
+  namespace: another-agentic-system
+spec:
+  title: Prometheus (read-only)
+  mcp:
+    url: http://prometheus-mcp.another-agentic-system.svc:8080/mcp
+    # The allow-list: the server's query and discovery tools, and not `health_check` (that one is for monitoring, and the
+    # pod's own probe uses `/health`). The names are the server's own (its README, *Available Tools*). Prometheus has no write
+    # API over this transport: every tool here reads.
+    tools:
+      - execute_query
+      - execute_range_query
+      - get_metric_metadata
+      - get_targets
+      - list_metrics
+    optional: false
