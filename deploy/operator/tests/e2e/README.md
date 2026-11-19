@@ -690,10 +690,12 @@ read by the built `aapctl validate -f` (the domain's own `validate`, which the o
 reject: the assertions can fail. `shellcheck` and `actionlint` are not installed where it was written: the script keeps the other scripts' style
 (quoted variables, `printf` for anything that can hold a body, no backtick in an unquoted heredoc) instead.
 
-**Unverified until the job has run**: everything that needs a kubelet and a real API server — that the stand-in's pod starts in each namespace
-and becomes Ready, that the operator's one process reads both namespaces (the `WATCH_NAMESPACES` it is given is the chart's; that the binary
-honours it is K6b's code), the registry's answers from a pod, kindnet admitting the curl pod, the two log lines of the skipped `chat`, and the
-timings on a runner.
+**Run in CI**: job `namespaces-e2e` of run 44487393662 (job 135436059044), *verified 2026-11-19* — the stand-in's pod starts in each
+namespace and becomes Ready, the operator's one process reads both, the registry answers from a pod, kindnet admits the curl pod, the two log
+lines of the skipped `chat` are there, and **the a2a agent `gamma` (K11a) became `Ready` in 6 s with its store, was listed at
+`http://gamma.aap-e2e-ns-a.svc:8080/.well-known/agent-card.json`, and its container ran the image's entrypoint with exactly its two variables
+(one literal, one `secretKeyRef`), no volume and no sidecar, probing `/healthz`** — which also put the new CRDs, CEL included, on a real API
+server. **Still unverified**: a real third-party A2A image (every pod here is the stand-in), and the timings of a runner under heavy load.
 
 **One assumption this script makes about K6b's code**: step 10 reads the operator's log for a line that holds `<namespace>/<name> is not in the
 registry` for **both** entries of a shared id, which is the message `crates/registry/src/server.rs` writes for an entry the document skips. The
