@@ -88,7 +88,6 @@ operator_image_tag=${OPERATOR_IMAGE_TAG:-smoke}
 operator_pull_policy=${OPERATOR_PULL_POLICY:-Never}
 agent_image=${AGENT_IMAGE:-aap-stub:ci}
 ready_timeout=${READY_TIMEOUT_SECS:-300}
-gone_timeout=${GONE_TIMEOUT_SECS:-180}
 # The one pin of this script outside the repository: the image the curl pod runs (the same one coder-e2e.sh, api-e2e.sh, chain-e2e.sh
 # and namespaces-e2e.sh use), read from Docker Hub by the kubelet. There is no other third-party image here.
 curl_image='docker.io/curlimages/curl:8.22.0@sha256:58adaa4e8dca9c988bae2aba4ab3434a0bb2da16bbe3f92dec39ec7785166777'

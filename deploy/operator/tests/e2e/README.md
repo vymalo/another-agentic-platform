@@ -715,7 +715,7 @@ sh deploy/operator/tests/e2e/leader-e2e.sh        # kubectl on that cluster; nee
 
 The cluster pulls one image the repository does not build: `docker.io/curlimages/curl`, pinned by digest, which the one curl pod runs (the same pin
 as the other scripts'). `OPERATOR_IMAGE_REPOSITORY`/`_TAG`/`_PULL_POLICY` (default `operator:smoke`, `Never`), `AGENT_IMAGE` (default
-`aap-stub:ci`), `READY_TIMEOUT_SECS` (300) and `GONE_TIMEOUT_SECS` (180) are the same knobs as `namespaces-e2e.sh`'s; `AAP_E2E_NAMESPACE` moves the
+`aap-stub:ci`) and `READY_TIMEOUT_SECS` (300) are the same knobs as `namespaces-e2e.sh`'s; `AAP_E2E_NAMESPACE` moves the
 one namespace, which is the release's, the watched one and the primary, because the Lease lives in the primary and the script asserts it.
 
 **It runs only on a throwaway cluster and touches only what it made**, as the other scripts do: a context that is not `kind-*` is refused before
