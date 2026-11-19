@@ -121,6 +121,15 @@ fn the_netcup_coder_and_chat_are_yaml_only_and_say_what_to_change() {
     );
 }
 
+#[test]
+fn the_a2a_image_is_yaml_only_and_says_why() {
+    // The dashboard's forms are the adam-rs harness's (K11a, AD-054): an image that serves A2A itself
+    // has fields no form edits, and a form that wrote an adam agent back would lose them.
+    let a2a = load_agent(&example_agent("a2a.yaml", false));
+    assert!(a2a.form().is_none());
+    assert_eq!(paths(a2a.reasons()), ["AgentConfig spec.harness.a2a"]);
+}
+
 // ------------------------------------------ what the deployment's part may hold
 
 #[test]

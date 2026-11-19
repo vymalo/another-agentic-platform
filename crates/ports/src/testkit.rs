@@ -415,6 +415,7 @@ pub fn sample_spec(id: &RuntimeId) -> RuntimeSpec {
             port: 8080,
             selects: name,
             allow_from: Vec::new(),
+            card_path: None,
         },
         run_pods: None,
     }
@@ -740,10 +741,17 @@ pub mod runtime {
         );
         assert!(card.url.starts_with("http"), "{}", card.url);
         assert!(
-            card.url.ends_with("/.well-known/agent-card.json"),
+            card.url.ends_with(crate::DEFAULT_AGENT_CARD_PATH),
             "{}",
             card.url
         );
+        // A spec that names another path is answered at that path (AD-054): a bring-your-own A2A
+        // image says where its card is.
+        let mut custom = sample_spec(&id);
+        custom.network.card_path = Some("/cards/agent.json".to_owned());
+        ready_or_rolling(&p, &id, &custom).await;
+        let card = p.endpoint(&id, crate::Surface::AgentCard).await.unwrap();
+        assert!(card.url.ends_with("/cards/agent.json"), "{}", card.url);
         p.delete(&id).await.unwrap();
     }
 

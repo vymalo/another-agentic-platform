@@ -1,0 +1,21 @@
+# Refused: type a2a with an adam-rs block too. An agent has one harness (AD-054).
+# expect: harness.type a2a needs harness.a2a and no harness.adam
+apiVersion: agents.vymalo.com/v1alpha1
+kind: AgentConfig
+metadata:
+  name: invalid-harness-a2a-with-adam
+  namespace: another-agentic-system
+spec:
+  harness:
+    type: a2a
+    a2a:
+      image:
+        ref: aap-stub:ci
+    adam:
+      binary: adam-agent
+      agent:
+        folder:
+          files:
+            instructions.md: |
+              Hello.
+  environment: {}

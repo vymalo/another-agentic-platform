@@ -1,0 +1,145 @@
+# Refused: more variables than an a2a image may be given. 64 is the schema's bound (AD-054).
+# expect: Too many: 65: must have at most 64 items
+apiVersion: agents.vymalo.com/v1alpha1
+kind: AgentConfig
+metadata:
+  name: invalid-a2a-env-too-many
+  namespace: another-agentic-system
+spec:
+  harness:
+    type: a2a
+    a2a:
+      image:
+        ref: aap-stub:ci
+      env:
+        - name: VAR_00
+          value: x
+        - name: VAR_01
+          value: x
+        - name: VAR_02
+          value: x
+        - name: VAR_03
+          value: x
+        - name: VAR_04
+          value: x
+        - name: VAR_05
+          value: x
+        - name: VAR_06
+          value: x
+        - name: VAR_07
+          value: x
+        - name: VAR_08
+          value: x
+        - name: VAR_09
+          value: x
+        - name: VAR_10
+          value: x
+        - name: VAR_11
+          value: x
+        - name: VAR_12
+          value: x
+        - name: VAR_13
+          value: x
+        - name: VAR_14
+          value: x
+        - name: VAR_15
+          value: x
+        - name: VAR_16
+          value: x
+        - name: VAR_17
+          value: x
+        - name: VAR_18
+          value: x
+        - name: VAR_19
+          value: x
+        - name: VAR_20
+          value: x
+        - name: VAR_21
+          value: x
+        - name: VAR_22
+          value: x
+        - name: VAR_23
+          value: x
+        - name: VAR_24
+          value: x
+        - name: VAR_25
+          value: x
+        - name: VAR_26
+          value: x
+        - name: VAR_27
+          value: x
+        - name: VAR_28
+          value: x
+        - name: VAR_29
+          value: x
+        - name: VAR_30
+          value: x
+        - name: VAR_31
+          value: x
+        - name: VAR_32
+          value: x
+        - name: VAR_33
+          value: x
+        - name: VAR_34
+          value: x
+        - name: VAR_35
+          value: x
+        - name: VAR_36
+          value: x
+        - name: VAR_37
+          value: x
+        - name: VAR_38
+          value: x
+        - name: VAR_39
+          value: x
+        - name: VAR_40
+          value: x
+        - name: VAR_41
+          value: x
+        - name: VAR_42
+          value: x
+        - name: VAR_43
+          value: x
+        - name: VAR_44
+          value: x
+        - name: VAR_45
+          value: x
+        - name: VAR_46
+          value: x
+        - name: VAR_47
+          value: x
+        - name: VAR_48
+          value: x
+        - name: VAR_49
+          value: x
+        - name: VAR_50
+          value: x
+        - name: VAR_51
+          value: x
+        - name: VAR_52
+          value: x
+        - name: VAR_53
+          value: x
+        - name: VAR_54
+          value: x
+        - name: VAR_55
+          value: x
+        - name: VAR_56
+          value: x
+        - name: VAR_57
+          value: x
+        - name: VAR_58
+          value: x
+        - name: VAR_59
+          value: x
+        - name: VAR_60
+          value: x
+        - name: VAR_61
+          value: x
+        - name: VAR_62
+          value: x
+        - name: VAR_63
+          value: x
+        - name: VAR_64
+          value: x
+  environment: {}

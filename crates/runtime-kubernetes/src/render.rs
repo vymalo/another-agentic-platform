@@ -401,9 +401,21 @@ impl Cx<'_> {
     }
 
     fn service(&self) -> core::Service {
-        let Network { port, selects, .. } = &self.spec.network;
+        let Network {
+            port,
+            selects,
+            card_path,
+            ..
+        } = &self.spec.network;
+        let mut metadata = self.meta(self.id.name(), service_labels(self.id), true, false);
+        if let Some(path) = card_path {
+            metadata
+                .annotations
+                .get_or_insert_with(BTreeMap::new)
+                .insert(names::CARD_PATH_ANNOTATION.to_owned(), path.clone());
+        }
         core::Service {
-            metadata: self.meta(self.id.name(), service_labels(self.id), true, false),
+            metadata,
             spec: Some(core::ServiceSpec {
                 type_: Some("ClusterIP".to_owned()),
                 selector: Some(names::selector_labels(selects, self.id)),

@@ -1,0 +1,20 @@
+# Refused: an a2a variable with a plain value and a Secret key. Exactly one (AD-054).
+# expect: an a2a environment variable has exactly one of value and secretKeyRef
+apiVersion: agents.vymalo.com/v1alpha1
+kind: AgentConfig
+metadata:
+  name: invalid-a2a-env-both
+  namespace: another-agentic-system
+spec:
+  harness:
+    type: a2a
+    a2a:
+      image:
+        ref: aap-stub:ci
+      env:
+        - name: LOG_LEVEL
+          value: info
+          secretKeyRef:
+            name: s
+            key: LOG_LEVEL
+  environment: {}

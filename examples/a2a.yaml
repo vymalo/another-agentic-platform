@@ -1,0 +1,68 @@
+# A bring-your-own A2A image (AD-054, slice K11a): an agent whose image serves A2A itself, with no
+# adam-rs in it. The operator runs it with the pod hardening, store and registry entry of an adam-rs
+# agent, sets only the variables listed here, and invents none.
+#
+# The image is the stand-in of the operator's kind end-to-end (`bin/operator/tests/stub`): it answers
+# `/healthz` on 8080 and serves a valid A2A 1.0 card at `/.well-known/agent-card.json`, which is what
+# the defaults of `harness.a2a` name. Every secret is a reference to a Secret key; no value is here.
+apiVersion: agents.vymalo.com/v1alpha1
+kind: AgentService
+metadata:
+  name: a2a
+  namespace: another-agentic-system
+spec:
+  description: An image that serves A2A itself.
+  configRef:
+    name: a2a
+  interfaces:
+    a2a:
+      enabled: true
+      bearerTokensSecretRef:
+        name: a2a-secrets
+        key: A2A_BEARER_TOKENS
+      publicUrl: "" # empty: http://<name>.<ns>.svc:<harness.a2a.port>/
+  scaling:
+    topology: combined
+    workers: 1
+  store:
+    postgres:
+      secretRef:
+        name: a2a-db-app
+        key: uri
+  access:
+    allowFrom:
+      - namespaceSelector:
+          matchLabels:
+            kubernetes.io/metadata.name: another-agentic-system
+  registry:
+    title: A2A
+    tags: [a2a]
+---
+apiVersion: agents.vymalo.com/v1alpha1
+kind: AgentConfig
+metadata:
+  name: a2a
+  namespace: another-agentic-system
+spec:
+  harness:
+    type: a2a
+    a2a:
+      image:
+        ref: aap-stub:ci
+      port: 8080 # the stub's, and the default
+      cardPath: /.well-known/agent-card.json # the default
+      healthPath: /healthz # the default, and what the probes ask for
+      env:
+        - name: LOG_LEVEL
+          value: info
+        - name: API_TOKEN
+          secretKeyRef:
+            name: a2a-secrets
+            key: API_TOKEN
+  environment:
+    resources:
+      requests:
+        cpu: 10m
+        memory: 32Mi
+      limits:
+        memory: 64Mi

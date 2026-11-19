@@ -101,10 +101,28 @@ fn subset(a: &Value, b: &Value, path: &str) -> Result<(), String> {
 
 /// The bounds of the OpenAPI schema `kube-cel` does not check, worded as kube-apiserver words them
 /// (*verified 2026-10-15*, v1.35.8): `maxItems`, `maxProperties` (the same words, for a map),
-/// `maxLength` and `minLength`. Lengths count characters, as the server does. Not a schema
-/// validator: a keyword the examples do not use is not read.
+/// `maxLength`, `minLength`, `minimum` and `maximum`. Lengths count characters, as the server does.
+/// Not a schema validator: a keyword the examples do not use is not read.
 fn bounds(schema: &Value, value: &Value, path: &str, out: &mut Vec<String>) {
     match value {
+        Value::Number(n) => {
+            if let Some(min) = schema["minimum"]
+                .as_f64()
+                .filter(|m| n.as_f64().is_some_and(|v| v < *m))
+            {
+                out.push(format!(
+                    "Invalid value: {n}: {path} in body should be greater than or equal to {min}"
+                ));
+            }
+            if let Some(max) = schema["maximum"]
+                .as_f64()
+                .filter(|m| n.as_f64().is_some_and(|v| v > *m))
+            {
+                out.push(format!(
+                    "Invalid value: {n}: {path} in body should be less than or equal to {max}"
+                ));
+            }
+        }
         Value::Array(items) => {
             if let Some(max) = schema["maxItems"]
                 .as_u64()
@@ -201,7 +219,7 @@ fn examples_round_trip_through_the_types_and_lose_nothing() {
 
 #[test]
 fn each_example_is_an_agent_service_and_its_agent_config() {
-    for name in ["coder.yaml", "chat.yaml"] {
+    for name in ["coder.yaml", "chat.yaml", "a2a.yaml"] {
         let docs = documents(&examples_dir().join(name));
         let kinds: Vec<_> = docs
             .iter()
@@ -466,6 +484,13 @@ const BOUND_EXAMPLES: &[(&str, &str, &str, &str)] = &[
         "spec.tools.mcpServers",
         "maxProperties",
         "mcp-servers-too-many",
+    ),
+    // AD-054: the variables of an a2a image
+    (
+        "AgentConfig",
+        "spec.harness.a2a.env",
+        "maxItems",
+        "a2a-env-too-many",
     ),
     (
         "AgentConfig",

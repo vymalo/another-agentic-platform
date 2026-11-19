@@ -547,7 +547,10 @@ All eleven steps passed (44 `ok` lines, exit 0), with the real answers of the AP
 `aap-e2e-ns-ops`, is the Helm release's and is deliberately **not** watched. The operator reconciles an agent in each of the two, with **one
 Role and one RoleBinding in each and no ClusterRole anywhere**; the registry lists both, each with the card URL of its own namespace; and a
 service id that **both** namespaces share is listed for **neither** (a client that asks for `chat` would be given a coin flip otherwise), then
-listed again from the survivor when one of the two is deleted. This is the job `namespaces-e2e` of
+listed again from the survivor when one of the two is deleted. Since K11a it also runs `gamma`, an agent whose `harness.type` is `a2a` (an image
+that serves A2A itself, AD-054), on the stand-in: it becomes `Ready` with its store, is listed at its harness's card path, and its container has
+the image's own entrypoint, exactly the two variables its config declares (one literal, one `secretKeyRef`) and no other, no volume and no
+sidecar; it is then deleted. This is the job `namespaces-e2e` of
 [`operator-image.yml`](../../../../.github/workflows/operator-image.yml) (it needs the job `image`, whose operator image it runs, and **`push`
 needs it**: unlike `chain-e2e` and `run-pods-e2e` it pins nothing outside this repository except the curl image `api-e2e` already pulls, like `api-e2e`). The script
 [`namespaces-e2e.sh`](namespaces-e2e.sh) is all of it and runs against any kind cluster that has the operator image and the stand-in:
@@ -594,7 +597,9 @@ sequenceDiagram
     O-->>J: the document lists chat again, with the card URL of aap-e2e-ns-a/chat
     J->>K: delete alpha
     O-->>J: the document keeps beta (and chat), and beta is still Ready
-    J->>K: no secret value and no token in any answer or log, then undo what was made
+    J->>K: gamma in a (harness.type a2a, the stand-in, one literal and one secretKeyRef)
+    O-->>J: gamma Ready, listed at its harness's card path, one container, the image's entrypoint, exactly its two variables
+    J->>K: delete gamma, then no secret value and no token in any answer or log, then undo what was made
 ```
 
 ```mermaid
@@ -607,7 +612,8 @@ stateDiagram-v2
     Listed --> Shared: chat in both, listed for neither (the log names both)
     Shared --> Survivor: b/chat deleted, chat listed from a
     Survivor --> Checked: alpha deleted, beta kept
-    Checked --> [*]: no secret, no token, no panic
+    Checked --> A2a: gamma (harness.type a2a) Ready and listed at its card path, its own variables only
+    A2a --> [*]: gamma deleted, no secret, no token, no panic
     Made --> [*]: a missing tool, a refused context or namespace: the script prints what the cluster says and undoes only what it made
 ```
 

@@ -122,8 +122,8 @@ pub fn references(config: &AgentConfig) -> References {
     References {
         model_endpoint: spec
             .model
-            .endpoint_ref
             .as_ref()
+            .and_then(|m| m.endpoint_ref.as_ref())
             .map(|r| r.name.clone())
             .filter(|n| is_dns_subdomain(n)),
         tool_providers: spec

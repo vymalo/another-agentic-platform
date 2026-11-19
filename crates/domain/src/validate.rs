@@ -5,8 +5,8 @@ use std::collections::BTreeSet;
 use std::fmt;
 
 use aap_api::{
-    AgentConfig, AgentService, Binary, MAX_CONTEXT_WINDOW, SecretKeyRef, Tools, Topology,
-    VolumeScope,
+    AgentConfig, AgentService, Binary, HarnessType, MAX_CONTEXT_WINDOW, SecretKeyRef, Tools,
+    Topology, VolumeScope,
 };
 
 use crate::contract::{self, env};
@@ -176,12 +176,8 @@ fn check_deployment_limits(
             );
         }
     }
-    if let Some(asked) = cfg
-        .spec
-        .harness
-        .adam
-        .coder
-        .as_ref()
+    if let Some(asked) = plan::adam(cfg)
+        .and_then(|a| a.coder.as_ref())
         .and_then(|c| c.max_access_tier)
         && asked > externals.max_access_tier
     {
@@ -471,6 +467,13 @@ fn check_service(v: &mut Issues, svc: &AgentService, cfg: &AgentConfig) {
             "at least one replica",
         );
     }
+    // A bring-your-own A2A image is one server (AD-054): a front and workers is adam's topology.
+    if plan::a2a(cfg).is_some() && scaling.topology != Topology::Combined {
+        v.add(
+            format!("{me} spec.scaling.topology"),
+            "an a2a image is one server: only topology combined is built for it",
+        );
+    }
     // The chart's rule: more than one worker needs a placement, or a run that lands on a worker
     // without its worktree forks into a second pull request. Only the coder has a worktree.
     if plan::is_coder(cfg) && scaling.workers > 1 && plan::placement(cfg).is_empty() {
@@ -530,10 +533,54 @@ fn check_service(v: &mut Issues, svc: &AgentService, cfg: &AgentConfig) {
 fn check_config(v: &mut Issues, cfg: &AgentConfig, origins: &Origins) {
     let me = "AgentConfig";
     let spec = &cfg.spec;
-    let adam = &spec.harness.adam;
-    let coder = adam.coder.as_ref();
 
     // Shape: what the CEL rules say, which `resolve` relies on.
+    match spec.harness.kind {
+        HarnessType::AdamRs => {
+            if spec.harness.adam.is_none() || spec.harness.a2a.is_some() {
+                v.add(
+                    format!("{me} spec.harness"),
+                    "type adam-rs needs the adam block and no a2a block",
+                );
+            }
+            if spec.model.is_none() {
+                v.add(format!("{me} spec.model"), "an adam-rs agent needs a model");
+            }
+        }
+        HarnessType::A2a => {
+            if spec.harness.a2a.is_none() || spec.harness.adam.is_some() {
+                v.add(
+                    format!("{me} spec.harness"),
+                    "type a2a needs the a2a block and no adam block",
+                );
+            }
+            if spec.model.is_some() {
+                v.add(
+                    format!("{me} spec.model"),
+                    "an a2a image gets no model from the platform: it brings its own, in its own variables",
+                );
+            }
+        }
+    }
+
+    if let Some(a2a) = plan::a2a(cfg) {
+        check_a2a(v, cfg, a2a);
+        return;
+    }
+    let Some(adam) = plan::adam(cfg) else {
+        return;
+    };
+    check_adam(v, cfg, adam);
+    check_model(v, cfg, origins);
+    check_tools(v, cfg, origins);
+    check_environment(v, cfg);
+    check_extra_env(v, cfg);
+}
+
+/// The rules of the adam-rs block that need the config alone.
+fn check_adam(v: &mut Issues, cfg: &AgentConfig, adam: &aap_api::Adam) {
+    let me = "AgentConfig";
+    let coder = adam.coder.as_ref();
     match adam.binary {
         Binary::AdamCoder => {
             if adam.agent.embedded.is_none() || adam.agent.folder.is_some() || coder.is_none() {
@@ -559,10 +606,106 @@ fn check_config(v: &mut Issues, cfg: &AgentConfig, origins: &Origins) {
     if let Some(coder) = coder {
         check_coder(v, cfg, coder);
     }
+}
 
-    // Model. With a ModelEndpoint the address and the key were read from it, and an issue about them is
-    // about it: `ModelEndpoint gateway spec.baseUrl`, not a field the config does not have.
-    let model = &spec.model;
+/// The rules of a bring-your-own A2A image (AD-054): its own fields, and the adam-rs fields it has no
+/// use for and would otherwise be a lie.
+fn check_a2a(v: &mut Issues, cfg: &AgentConfig, a2a: &aap_api::A2a) {
+    let me = "AgentConfig";
+    let at = format!("{me} spec.harness.a2a");
+    check_image_ref(v, &format!("{at}.image.ref"), &a2a.image.reference);
+    if !(1..=65535).contains(&a2a.port) {
+        v.add(
+            format!("{at}.port"),
+            format!("{}: a port number, 1 to 65535", a2a.port),
+        );
+    }
+    if !a2a.card_path.starts_with('/') {
+        v.add(
+            format!("{at}.cardPath"),
+            "an absolute path: it starts with `/`",
+        );
+    }
+    if !a2a.health_path.starts_with('/') {
+        v.add(
+            format!("{at}.healthPath"),
+            "an absolute path: it starts with `/`",
+        );
+    }
+    let mut names = BTreeSet::new();
+    for (i, e) in a2a.env.iter().enumerate() {
+        let env_at = format!("{at}.env[{i}]");
+        if !is_env_name(&e.name) {
+            v.add(
+                format!("{env_at}.name"),
+                "not a variable name ([A-Za-z_][A-Za-z0-9_]*)",
+            );
+        } else if !names.insert(e.name.as_str()) {
+            v.add(
+                format!("{env_at}.name"),
+                "two variables of the image have this name",
+            );
+        }
+        match (&e.value, &e.secret_key_ref) {
+            (Some(_), None) => {}
+            (None, Some(r)) => secret_ref(v, &format!("{env_at}.secretKeyRef"), r),
+            _ => v.add(&env_at, "exactly one of value and secretKeyRef"),
+        }
+    }
+    if a2a.env.len() as u64 > aap_api::MAX_A2A_ENV {
+        v.add(
+            format!("{at}.env"),
+            format!(
+                "{} variables: at most {} (a schema bound)",
+                a2a.env.len(),
+                aap_api::MAX_A2A_ENV
+            ),
+        );
+    }
+
+    // The adam-rs fields an A2A image has no use for: the platform would render them and the image
+    // would never read them.
+    if cfg.spec.environment.image.is_some() {
+        v.add(
+            format!("{me} spec.environment.image"),
+            "an a2a harness names its image in spec.harness.a2a.image: one image, one source",
+        );
+    }
+    if cfg.spec.environment.cache.is_some() {
+        v.add(
+            format!("{me} spec.environment.cache"),
+            "an a2a image has no package cache: the platform mounts none",
+        );
+    }
+    if !cfg.spec.environment.volumes.is_empty() {
+        v.add(
+            format!("{me} spec.environment.volumes"),
+            "an a2a image has no work volume: the platform mounts none",
+        );
+    }
+    if cfg.spec.tools != Tools::default() {
+        v.add(
+            format!("{me} spec.tools"),
+            "an a2a image gets no tools from the platform: it brings its own",
+        );
+    }
+    if !cfg.spec.extra_env.is_empty() {
+        v.add(
+            format!("{me} spec.extraEnv"),
+            "an a2a image gets no extraEnv: spec.harness.a2a.env is the one way to set a variable",
+        );
+    }
+}
+
+/// The model of an adam-rs agent. With a `ModelEndpoint` the address and the key were read from it,
+/// and an issue about them is about it: `ModelEndpoint gateway spec.baseUrl`, not a field the config
+/// does not have.
+fn check_model(v: &mut Issues, cfg: &AgentConfig, origins: &Origins) {
+    let me = "AgentConfig";
+    // `check_config` refused a config with no model already.
+    let Some(model) = &cfg.spec.model else {
+        return;
+    };
     let (base_at, key_at) = match &origins.endpoint {
         Some(endpoint) => (
             format!("ModelEndpoint {endpoint} spec.baseUrl"),
@@ -632,13 +775,13 @@ fn check_config(v: &mut Issues, cfg: &AgentConfig, origins: &Origins) {
             format!("{window}: a number of tokens from 1 to {MAX_CONTEXT_WINDOW} (adam exits 78 on anything else), or leave it out"),
         );
     }
+}
 
-    check_tools(v, cfg, origins);
-    check_environment(v, cfg);
-
-    // extraEnv: names the operator does not set.
-    let header_names: BTreeSet<&str> = plan::header_vars(&spec.tools).keys().copied().collect();
-    for name in spec.extra_env.keys() {
+/// `extraEnv`: names the operator does not set.
+fn check_extra_env(v: &mut Issues, cfg: &AgentConfig) {
+    let me = "AgentConfig";
+    let header_names: BTreeSet<&str> = plan::header_vars(&cfg.spec.tools).keys().copied().collect();
+    for name in cfg.spec.extra_env.keys() {
         if !is_env_name(name) {
             v.add(
                 format!("{me} spec.extraEnv.{name}"),
@@ -1089,21 +1232,24 @@ fn header_users(tools: &Tools, origins: &Origins, var: &str) -> Vec<String> {
     users
 }
 
+/// An image reference: not empty and with no space in it.
+fn check_image_ref(v: &mut Issues, at: &str, image: &str) {
+    if image.is_empty() || image.contains(char::is_whitespace) {
+        v.add(at, "an image reference with no space");
+    }
+}
+
 fn check_environment(v: &mut Issues, cfg: &AgentConfig) {
     let me = "AgentConfig";
     let e = &cfg.spec.environment;
     match &e.image {
         // The operator's default, or an issue `materialize` already raised: either way not this rule's.
         None => {}
-        Some(image) => {
-            let image = image.reference.as_str();
-            if image.is_empty() || image.contains(char::is_whitespace) {
-                v.add(
-                    format!("{me} spec.environment.image.ref"),
-                    "an image reference with no space",
-                );
-            }
-        }
+        Some(image) => check_image_ref(
+            v,
+            &format!("{me} spec.environment.image.ref"),
+            &image.reference,
+        ),
     }
     let (_, problems) = convert::resources(e.resources.as_ref());
     for (field, message) in problems {

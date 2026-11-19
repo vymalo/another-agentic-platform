@@ -157,6 +157,34 @@ const SPEC_RULES: &[(&str, &str)] = &[
         "has(self.providerRef) || has(self.url)",
         "an MCP server needs a url, or a providerRef",
     ),
+    // AD-054: an adam-rs agent needs a model; an a2a image brings its own
+    (
+        "self.harness.type != 'adam-rs' || has(self.model)",
+        "harness.type adam-rs needs spec.model",
+    ),
+    // AD-054: one harness, never both
+    (
+        "self.type != 'adam-rs' || (has(self.adam) && !has(self.a2a))",
+        "harness.type adam-rs needs harness.adam and no harness.a2a",
+    ),
+    (
+        "self.type != 'a2a' || (has(self.a2a) && !has(self.adam))",
+        "harness.type a2a needs harness.a2a and no harness.adam",
+    ),
+    // AD-054: the paths an a2a image serves are paths
+    (
+        "self.cardPath.startsWith('/')",
+        "harness.a2a.cardPath is an absolute path: it starts with `/`",
+    ),
+    (
+        "self.healthPath.startsWith('/')",
+        "harness.a2a.healthPath is an absolute path: it starts with `/`",
+    ),
+    // AD-054: a variable of an a2a image is a plain value or a Secret key, never both
+    (
+        "has(self.value) != has(self.secretKeyRef)",
+        "an a2a environment variable has exactly one of value and secretKeyRef",
+    ),
     // §60a, AD-028: access.audience, whose count and lengths are bounds of the schema (below)
     (
         "!self.exists(a, a == '*') || self.size() == 1",

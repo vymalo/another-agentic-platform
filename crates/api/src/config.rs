@@ -15,7 +15,7 @@ use crate::status::AgentConfigStatus;
 /// secret is never a value here: a field that needs one names a Secret and a key.
 // kube-derive's repeated `printcolumn(type_ = …)` trips this lint (a false positive).
 #[allow(clippy::duplicated_attributes)]
-#[derive(CustomResource, Clone, Debug, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[derive(CustomResource, KubeSchema, Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[kube(
     group = "agents.vymalo.com",
     version = "v1alpha1",
@@ -24,7 +24,7 @@ use crate::status::AgentConfigStatus;
     namespaced,
     status = "AgentConfigStatus",
     derive = "PartialEq",
-    doc = "What an adam-rs agent is made of. Referenced by an AgentService; the operator validates it and resolves it into a runtime.",
+    doc = "What an agent is made of. Referenced by an AgentService; the operator validates it and resolves it into a runtime.",
     printcolumn(
         name = "Binary",
         type_ = "string",
@@ -43,12 +43,15 @@ use crate::status::AgentConfigStatus;
     )
 )]
 #[serde(rename_all = "camelCase")]
+#[x_kube(validation = Rule::new("self.harness.type != 'adam-rs' || has(self.model)").message("harness.type adam-rs needs spec.model"))]
 pub struct AgentConfigSpec {
     /// The agent framework that runs.
     pub harness: Harness,
 
-    /// The model the agent talks to.
-    pub model: Model,
+    /// The model the agent talks to. Required for `adam-rs`; an `a2a` image gets none from the
+    /// platform (AD-054).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub model: Option<Model>,
 
     /// The tools the agent may use.
     #[serde(default)]
@@ -68,16 +71,23 @@ pub struct AgentConfigSpec {
 
 // ---------------------------------------------------------------- harness
 
-/// The agent framework. Only `adam-rs` exists in v0 (AD-022).
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize, JsonSchema)]
+/// The agent framework: `adam-rs`, the default (AD-022), or a bring-your-own A2A image (AD-054).
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize, KubeSchema)]
 #[serde(rename_all = "camelCase")]
+#[x_kube(validation = Rule::new("self.type != 'adam-rs' || (has(self.adam) && !has(self.a2a))").message("harness.type adam-rs needs harness.adam and no harness.a2a"))]
+#[x_kube(validation = Rule::new("self.type != 'a2a' || (has(self.a2a) && !has(self.adam))").message("harness.type a2a needs harness.a2a and no harness.adam"))]
 pub struct Harness {
     /// The harness type.
     #[serde(rename = "type")]
     pub kind: HarnessType,
 
-    /// The adam-rs settings.
-    pub adam: Adam,
+    /// The adam-rs settings. Only with `type: adam-rs`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub adam: Option<Adam>,
+
+    /// The settings of an image that serves A2A itself. Only with `type: a2a`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub a2a: Option<A2a>,
 }
 
 /// The harness types.
@@ -86,6 +96,77 @@ pub enum HarnessType {
     /// adam-rs: `adam-coder` or `adam-agent`, one image.
     #[serde(rename = "adam-rs")]
     AdamRs,
+    /// An image that serves A2A itself: the operator runs it and invents no variable (AD-054).
+    #[serde(rename = "a2a")]
+    A2a,
+}
+
+/// An image that serves A2A itself (AD-054): the operator runs it with the pod hardening, store and
+/// registry entry of an adam-rs agent, and sets only the variables listed here.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize, KubeSchema)]
+#[serde(rename_all = "camelCase")]
+#[x_kube(validation = Rule::new("self.cardPath.startsWith('/')").message("harness.a2a.cardPath is an absolute path: it starts with `/`"))]
+#[x_kube(validation = Rule::new("self.healthPath.startsWith('/')").message("harness.a2a.healthPath is an absolute path: it starts with `/`"))]
+pub struct A2a {
+    /// The image. The harness's own: `environment.image` is refused with it.
+    pub image: Image,
+
+    /// The port the image serves on.
+    #[serde(default = "a2a_port")]
+    #[schemars(range(min = 1, max = 65535))]
+    pub port: i32,
+
+    /// Where the image serves its A2A agent card, as a path.
+    #[serde(default = "a2a_card_path")]
+    pub card_path: String,
+
+    /// The path that answers 200 while the image serves: its startup and readiness probes.
+    #[serde(default = "a2a_health_path")]
+    pub health_path: String,
+
+    /// The variables the image gets, each a plain value or a Secret key. The operator invents none.
+    #[serde(default)]
+    #[schemars(extend("maxItems" = MAX_A2A_ENV))]
+    pub env: Vec<A2aEnv>,
+}
+
+/// The default port of an A2A image.
+pub const A2A_PORT: i32 = 8080;
+/// Where an A2A image serves its card unless it says otherwise.
+pub const A2A_CARD_PATH: &str = "/.well-known/agent-card.json";
+/// The path an A2A image answers 200 on unless it says otherwise.
+pub const A2A_HEALTH_PATH: &str = "/healthz";
+/// The most variables an A2A image may be given (a schema bound: one environment of a pod is limited).
+pub const MAX_A2A_ENV: u64 = 64;
+
+fn a2a_port() -> i32 {
+    A2A_PORT
+}
+
+fn a2a_card_path() -> String {
+    A2A_CARD_PATH.to_owned()
+}
+
+fn a2a_health_path() -> String {
+    A2A_HEALTH_PATH.to_owned()
+}
+
+/// One variable of an A2A image: a plain value, or a Secret key, never both.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize, KubeSchema)]
+#[serde(rename_all = "camelCase")]
+#[x_kube(validation = Rule::new("has(self.value) != has(self.secretKeyRef)").message("an a2a environment variable has exactly one of value and secretKeyRef"))]
+pub struct A2aEnv {
+    /// The variable's name.
+    #[schemars(length(min = 1))]
+    pub name: String,
+
+    /// A plain value. Never a secret.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub value: Option<String>,
+
+    /// The Secret key that holds the value.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub secret_key_ref: Option<SecretKeyRef>,
 }
 
 /// The adam-rs settings: which binary runs, where the agent comes from, and the coder's tunables.

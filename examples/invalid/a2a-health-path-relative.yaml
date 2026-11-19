@@ -1,0 +1,15 @@
+# Refused: a health path that is not absolute. A path starts with `/` (AD-054).
+# expect: harness.a2a.healthPath is an absolute path: it starts with `/`
+apiVersion: agents.vymalo.com/v1alpha1
+kind: AgentConfig
+metadata:
+  name: invalid-a2a-health-path-relative
+  namespace: another-agentic-system
+spec:
+  harness:
+    type: a2a
+    a2a:
+      image:
+        ref: aap-stub:ci
+      healthPath: healthz
+  environment: {}

@@ -1,0 +1,15 @@
+# Refused: 65536 is not a port. The schema's bound is 1 to 65535 (AD-054).
+# expect: Invalid value: 65536: spec.harness.a2a.port in body should be less than or equal to 65535
+apiVersion: agents.vymalo.com/v1alpha1
+kind: AgentConfig
+metadata:
+  name: invalid-a2a-port-too-high
+  namespace: another-agentic-system
+spec:
+  harness:
+    type: a2a
+    a2a:
+      image:
+        ref: aap-stub:ci
+      port: 65536
+  environment: {}

@@ -1,0 +1,143 @@
+apiVersion: v1
+kind: Service
+metadata:
+  annotations:
+    agents.vymalo.com/card-path: /.well-known/agent-card.json
+    agents.vymalo.com/config-digest: sha256:a4148eb8941b4be885b15757f9427ccbd4d0cedc570485b56b82f2fa9c49c6a4
+  labels:
+    app.kubernetes.io/instance: a2a
+    app.kubernetes.io/managed-by: aap-operator
+    app.kubernetes.io/name: a2a
+  name: a2a
+  namespace: another-agentic-system
+  ownerReferences:
+  - apiVersion: agents.vymalo.com/v1alpha1
+    controller: true
+    kind: AgentService
+    name: a2a
+    uid: 0b1f3c5e-1111-4222-8333-444455556666
+spec:
+  ports:
+  - name: http
+    port: 8080
+    protocol: TCP
+    targetPort: http
+  selector:
+    app.kubernetes.io/instance: a2a
+    app.kubernetes.io/name: a2a
+  type: ClusterIP
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  annotations:
+    agents.vymalo.com/config-digest: sha256:a4148eb8941b4be885b15757f9427ccbd4d0cedc570485b56b82f2fa9c49c6a4
+    agents.vymalo.com/deletion-policy: Retain
+  labels:
+    app.kubernetes.io/component: agent
+    app.kubernetes.io/instance: a2a
+    app.kubernetes.io/managed-by: aap-operator
+    app.kubernetes.io/name: a2a
+  name: a2a
+  namespace: another-agentic-system
+  ownerReferences:
+  - apiVersion: agents.vymalo.com/v1alpha1
+    controller: true
+    kind: AgentService
+    name: a2a
+    uid: 0b1f3c5e-1111-4222-8333-444455556666
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/instance: a2a
+      app.kubernetes.io/name: a2a
+  template:
+    metadata:
+      annotations:
+        agents.vymalo.com/config-digest: sha256:a4148eb8941b4be885b15757f9427ccbd4d0cedc570485b56b82f2fa9c49c6a4
+      labels:
+        app.kubernetes.io/component: agent
+        app.kubernetes.io/instance: a2a
+        app.kubernetes.io/managed-by: aap-operator
+        app.kubernetes.io/name: a2a
+    spec:
+      automountServiceAccountToken: false
+      containers:
+      - env:
+        - name: LOG_LEVEL
+          value: info
+        - name: API_TOKEN
+          valueFrom:
+            secretKeyRef:
+              key: API_TOKEN
+              name: a2a-secrets
+        image: aap-stub:ci
+        name: agent
+        ports:
+        - containerPort: 8080
+          name: http
+          protocol: TCP
+        readinessProbe:
+          httpGet:
+            path: /healthz
+            port: http
+          periodSeconds: 5
+          timeoutSeconds: 3
+        resources:
+          limits:
+            memory: 64Mi
+          requests:
+            cpu: 10m
+            memory: 32Mi
+        securityContext:
+          allowPrivilegeEscalation: false
+          capabilities:
+            drop:
+            - ALL
+        startupProbe:
+          failureThreshold: 40
+          httpGet:
+            path: /healthz
+            port: http
+          periodSeconds: 3
+      securityContext:
+        fsGroup: 10001
+        runAsGroup: 10001
+        runAsNonRoot: true
+        runAsUser: 10001
+        seccompProfile:
+          type: RuntimeDefault
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  annotations:
+    agents.vymalo.com/config-digest: sha256:a4148eb8941b4be885b15757f9427ccbd4d0cedc570485b56b82f2fa9c49c6a4
+  labels:
+    app.kubernetes.io/instance: a2a
+    app.kubernetes.io/managed-by: aap-operator
+    app.kubernetes.io/name: a2a
+  name: a2a
+  namespace: another-agentic-system
+  ownerReferences:
+  - apiVersion: agents.vymalo.com/v1alpha1
+    controller: true
+    kind: AgentService
+    name: a2a
+    uid: 0b1f3c5e-1111-4222-8333-444455556666
+spec:
+  ingress:
+  - from:
+    - namespaceSelector:
+        matchLabels:
+          kubernetes.io/metadata.name: another-agentic-system
+    ports:
+    - port: 8080
+      protocol: TCP
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/instance: a2a
+      app.kubernetes.io/managed-by: aap-operator
+  policyTypes:
+  - Ingress

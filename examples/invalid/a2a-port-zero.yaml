@@ -1,0 +1,15 @@
+# Refused: port 0 is not a port. The schema's bound is 1 to 65535 (AD-054).
+# expect: Invalid value: 0: spec.harness.a2a.port in body should be greater than or equal to 1
+apiVersion: agents.vymalo.com/v1alpha1
+kind: AgentConfig
+metadata:
+  name: invalid-a2a-port-zero
+  namespace: another-agentic-system
+spec:
+  harness:
+    type: a2a
+    a2a:
+      image:
+        ref: aap-stub:ci
+      port: 0
+  environment: {}

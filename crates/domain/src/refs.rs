@@ -90,13 +90,14 @@ pub(crate) fn materialize(config: &AgentConfig, externals: &Externals) -> Materi
     let mut issues = Vec::new();
 
     // The model. Only the valid shape is read: with an endpoint *and* an address, the exclusivity is
-    // what `validate` reports, and nothing is guessed.
-    let model = &config.spec.model;
-    if let (Some(r), None, None) = (
-        &model.endpoint_ref,
-        &model.base_url,
-        &model.api_key_secret_ref,
-    ) && is_dns_subdomain(&r.name)
+    // what `validate` reports, and nothing is guessed. An A2A image has no model (AD-054).
+    if let Some(model) = &config.spec.model
+        && let (Some(r), None, None) = (
+            &model.endpoint_ref,
+            &model.base_url,
+            &model.api_key_secret_ref,
+        )
+        && is_dns_subdomain(&r.name)
     {
         match find(
             &externals.model_endpoints,
@@ -108,9 +109,11 @@ pub(crate) fn materialize(config: &AgentConfig, externals: &Externals) -> Materi
             "set spec.model.baseUrl and spec.model.apiKeySecretRef inline",
         ) {
             Ok(endpoint) => {
-                out.spec.model.endpoint_ref = None;
-                out.spec.model.base_url = Some(endpoint.spec.base_url.clone());
-                out.spec.model.api_key_secret_ref = Some(endpoint.spec.api_key_secret_ref.clone());
+                if let Some(model) = &mut out.spec.model {
+                    model.endpoint_ref = None;
+                    model.base_url = Some(endpoint.spec.base_url.clone());
+                    model.api_key_secret_ref = Some(endpoint.spec.api_key_secret_ref.clone());
+                }
                 origins.endpoint = Some(r.name.clone());
             }
             Err(message) => issues.push(ConfigIssue {
@@ -164,8 +167,9 @@ pub(crate) fn materialize(config: &AgentConfig, externals: &Externals) -> Materi
         }
     }
 
-    // The image: the config's own, else the operator's default, else nothing to start.
-    if config.spec.environment.image.is_none() {
+    // The image: the config's own, else the operator's default, else nothing to start. An A2A image
+    // names its own in the harness and never takes the operator's (AD-054).
+    if crate::plan::a2a(config).is_none() && config.spec.environment.image.is_none() {
         let default = externals
             .default_image
             .as_deref()

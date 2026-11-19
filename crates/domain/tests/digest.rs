@@ -34,7 +34,7 @@ fn the_digest_of_the_examples_is_pinned() {
 
 #[test]
 fn resolving_twice_gives_the_same_everything() {
-    for name in ["coder", "chat"] {
+    for name in ["coder", "chat", "a2a"] {
         let a = must_resolve(name, |_, _| {});
         let b = must_resolve(name, |_, _| {});
         assert_eq!(a, b);
@@ -157,7 +157,7 @@ fn the_audience_reaches_no_pod() {
     // `access.audience` goes to the registry item and nowhere else (AD-028): whatever it says, absent,
     // empty, a star or 32 values, the resolved agent, its runtime spec and so its digest are the same.
     let many: Vec<String> = (0..32).map(|i| format!("agent.use:agent-{i:02}")).collect();
-    for name in ["coder", "chat"] {
+    for name in ["coder", "chat", "a2a"] {
         let base = must_resolve(name, |_, _| {});
         for audience in [
             json!([]),

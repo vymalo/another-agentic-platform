@@ -840,6 +840,133 @@ fn a_folder_agent_with_a_volume_mounts_it_and_sets_no_workspace() {
     assert!(w.stable_identity);
 }
 
+// -------------------------------------- a bring-your-own A2A image (K11a, AD-054)
+
+/// The path an HTTP probe asks for.
+fn probe_path(p: &Option<aap_ports::Probe>) -> String {
+    match &p.as_ref().unwrap_or_else(|| panic!("no probe")).action {
+        aap_ports::ProbeAction::Http { path } => path.clone(),
+        other => panic!("not an HTTP probe: {other:?}"),
+    }
+}
+
+#[test]
+fn an_a2a_image_is_one_server_with_only_the_variables_it_declares() {
+    let r = must_resolve("a2a", no_change);
+    assert_eq!(r.runtime.workloads.len(), 1);
+    let w = workload(&r.runtime, "a2a");
+    assert_eq!((w.role, w.replicas), (Role::All, 1));
+    assert!(
+        w.container.command.is_empty() && w.container.args.is_empty(),
+        "the image's own entrypoint"
+    );
+    assert_eq!(w.container.image, "aap-stub:ci");
+    assert_eq!(w.container.port, Some(8080));
+    assert_eq!(r.runtime.network.port, 8080);
+    assert_eq!(
+        r.runtime.network.card_path.as_deref(),
+        Some("/.well-known/agent-card.json")
+    );
+    // The two variables the config lists, and no other: nothing of adam's, and nothing of the store.
+    let names: Vec<&str> = w.container.env.iter().map(|e| e.name.as_str()).collect();
+    assert_eq!(names, ["LOG_LEVEL", "API_TOKEN"]);
+    assert_eq!(lit(w, "LOG_LEVEL"), "info");
+    assert_eq!(
+        secret(w, "API_TOKEN"),
+        SecretRef::new("a2a-secrets", "API_TOKEN")
+    );
+    for name in [
+        env::DATABASE_URL,
+        env::PUBLIC_URL,
+        env::LISTEN_ADDR,
+        env::MODEL,
+        env::MODEL_API_KEY,
+        env::ADAM_AGENT_DIR,
+    ] {
+        unset(w, name);
+    }
+    // No volume, no sidecar, no file set, no run pods, no account.
+    assert!(w.volumes.is_empty() && w.container.mounts.is_empty() && w.sidecars.is_empty());
+    assert!(r.runtime.file_sets.is_empty());
+    assert!(r.runtime.run_pods.is_none());
+    assert_eq!(w.service_account, None);
+    // The probes ask the health path, not the card's and not adam's fixed one; and no liveness probe
+    // the image did not promise.
+    assert_eq!(probe_path(&w.container.probes.startup), "/healthz");
+    assert_eq!(probe_path(&w.container.probes.readiness), "/healthz");
+    assert!(w.container.probes.liveness.is_none());
+    // The store is provisioned as for any agent, and the container knows nothing of it.
+    assert_eq!(
+        r.store.kind,
+        StoreKind::Secret(SecretRef::new("a2a-db-app", "uri"))
+    );
+    // Resources and security are the config's, as an adam agent's.
+    assert_eq!(w.container.resources.requests["cpu"], "10m");
+    assert_eq!(
+        (
+            w.security.run_as_user,
+            w.security.run_as_group,
+            w.security.fs_group
+        ),
+        (10001, 10001, 10001)
+    );
+    assert_eq!(r.public_url, "http://a2a.another-agentic-system.svc:8080/");
+}
+
+#[test]
+fn an_a2a_image_with_another_port_and_paths_resolves_to_them() {
+    let r = must_resolve("a2a", |_, c| {
+        set(c, "/spec/harness/a2a/port", json!(9090));
+        set(c, "/spec/harness/a2a/cardPath", json!("/cards/a2a.json"));
+        set(c, "/spec/harness/a2a/healthPath", json!("/live"));
+    });
+    let w = workload(&r.runtime, "a2a");
+    assert_eq!(w.container.port, Some(9090));
+    assert_eq!(r.runtime.network.port, 9090);
+    assert_eq!(
+        r.runtime.network.card_path.as_deref(),
+        Some("/cards/a2a.json")
+    );
+    assert_eq!(probe_path(&w.container.probes.startup), "/live");
+    assert_eq!(probe_path(&w.container.probes.readiness), "/live");
+    assert_eq!(r.public_url, "http://a2a.another-agentic-system.svc:9090/");
+}
+
+#[test]
+fn an_a2a_agents_digest_is_stable_and_follows_its_variables_and_paths() {
+    let base = must_resolve("a2a", no_change);
+    assert_eq!(base.digest, must_resolve("a2a", no_change).digest);
+    assert_eq!(base.runtime.digest, base.digest);
+    for change in [
+        (|_: &mut Value, c: &mut Value| set(c, "/spec/harness/a2a/env/0/value", json!("debug")))
+            as fn(&mut Value, &mut Value),
+        |_, c| set(c, "/spec/harness/a2a/port", json!(9090)),
+        |_, c| set(c, "/spec/harness/a2a/cardPath", json!("/cards/a2a.json")),
+        |_, c| set(c, "/spec/harness/a2a/healthPath", json!("/live")),
+    ] {
+        assert_ne!(base.digest, must_resolve("a2a", change).digest);
+    }
+    // An adam-rs spec never carries the field, so its digest is what it was: the goldens prove it.
+    assert!(
+        must_resolve("coder", no_change)
+            .runtime
+            .network
+            .card_path
+            .is_none()
+    );
+}
+
+#[test]
+fn an_a2a_image_keeps_the_service_scale_and_its_access() {
+    let r = must_resolve("a2a", |s, _| {
+        set(s, "/spec/scaling/workers", json!(3));
+        set(s, "/spec/access/allowFrom", json!([]));
+    });
+    assert_eq!(workload(&r.runtime, "a2a").replicas, 3);
+    assert!(r.runtime.network.allow_from.is_empty());
+    assert_eq!(r.runtime.network.selects, "a2a");
+}
+
 // ----------------------------------------------------------- the contract
 
 #[test]

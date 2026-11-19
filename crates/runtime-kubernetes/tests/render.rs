@@ -72,6 +72,11 @@ fn chat() -> (RuntimeId, RuntimeSpec) {
     (r.id, r.runtime)
 }
 
+fn a2a() -> (RuntimeId, RuntimeSpec) {
+    let r = resolved("a2a", |_, _| {});
+    (r.id, r.runtime)
+}
+
 fn rendered((id, spec): &(RuntimeId, RuntimeSpec)) -> Rendered {
     render(id, spec).unwrap()
 }
@@ -91,6 +96,73 @@ fn the_coder_split() {
 #[test]
 fn the_chat_folder_agent() {
     assert_golden("chat", &rendered(&chat()));
+}
+
+#[test]
+fn the_a2a_image() {
+    assert_golden("a2a", &rendered(&a2a()));
+}
+
+#[test]
+fn an_a2a_image_runs_its_own_entrypoint_with_only_its_variables() {
+    let docs = rendered(&a2a()).documents();
+    let deployment = find(&docs, "Deployment", "a2a");
+    let container = &deployment["spec"]["template"]["spec"]["containers"][0];
+    assert_eq!(container["image"], "aap-stub:ci");
+    assert!(
+        container.get("command").is_none() && container.get("args").is_none(),
+        "the image's entrypoint: {container}"
+    );
+    assert_eq!(container["ports"][0]["containerPort"], 8080);
+    assert_eq!(container["ports"][0]["name"], "http");
+    let env: Vec<(&str, &Value)> = container["env"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|e| (e["name"].as_str().unwrap(), e))
+        .collect();
+    assert_eq!(env.len(), 2, "{env:?}");
+    assert_eq!(env[0].0, "LOG_LEVEL");
+    assert_eq!(env[0].1["value"], "info");
+    assert_eq!(env[1].0, "API_TOKEN");
+    assert_eq!(
+        env[1].1["valueFrom"]["secretKeyRef"],
+        json!({"key": "API_TOKEN", "name": "a2a-secrets"})
+    );
+    assert!(
+        container.get("volumeMounts").is_none(),
+        "no volume: {container}"
+    );
+    assert_eq!(
+        deployment["spec"]["template"]["spec"]["containers"]
+            .as_array()
+            .unwrap()
+            .len(),
+        1,
+        "no sidecar"
+    );
+    assert_eq!(container["startupProbe"]["httpGet"]["path"], "/healthz");
+    assert_eq!(container["readinessProbe"]["httpGet"]["path"], "/healthz");
+    assert!(container.get("livenessProbe").is_none(), "{container}");
+    assert!(
+        deployment["spec"]["template"]["spec"]
+            .get("volumes")
+            .is_none(),
+        "no volume"
+    );
+    assert!(
+        deployment["spec"]["template"]["spec"]
+            .get("serviceAccountName")
+            .is_none(),
+        "the namespace's default account"
+    );
+    // The Service: the harness's port, and the card path the provider answers `endpoint()` with.
+    let service = find(&docs, "Service", "a2a");
+    assert_eq!(service["spec"]["ports"][0]["port"], 8080);
+    assert_eq!(
+        service["metadata"]["annotations"]["agents.vymalo.com/card-path"],
+        "/.well-known/agent-card.json"
+    );
 }
 
 // ---------------------------------------------------------------- the rules, one by one

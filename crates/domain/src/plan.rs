@@ -3,16 +3,32 @@
 
 use std::collections::BTreeMap;
 
-use aap_api::{AgentConfig, Binary, RunPods, SecretKeyRef, Tools, Volume};
+use aap_api::{AgentConfig, Binary, HarnessType, RunPods, SecretKeyRef, Tools, Volume};
 
-/// `WORKSPACE_PLACEMENT` as the binary parses it: trimmed and lower-cased; empty is "not set".
-pub fn placement(config: &AgentConfig) -> String {
+/// The adam-rs settings of a config, when its harness is adam-rs.
+pub fn adam(config: &AgentConfig) -> Option<&aap_api::Adam> {
     config
         .spec
         .harness
         .adam
-        .coder
         .as_ref()
+        .filter(|_| config.spec.harness.kind == HarnessType::AdamRs)
+}
+
+/// The A2A image's settings of a config, when its harness is an A2A image.
+pub fn a2a(config: &AgentConfig) -> Option<&aap_api::A2a> {
+    config
+        .spec
+        .harness
+        .a2a
+        .as_ref()
+        .filter(|_| config.spec.harness.kind == HarnessType::A2a)
+}
+
+/// `WORKSPACE_PLACEMENT` as the binary parses it: trimmed and lower-cased; empty is "not set".
+pub fn placement(config: &AgentConfig) -> String {
+    adam(config)
+        .and_then(|a| a.coder.as_ref())
         .and_then(|c| c.workspace_placement.as_deref())
         .unwrap_or_default()
         .trim()
@@ -37,18 +53,24 @@ pub fn work_volume(config: &AgentConfig) -> Option<&Volume> {
 
 /// The coder's run pods, if the config asks for them (`coder.runPods`, slice D15).
 pub fn run_pods(config: &AgentConfig) -> Option<&RunPods> {
-    config
-        .spec
-        .harness
-        .adam
-        .coder
-        .as_ref()
+    adam(config)
+        .and_then(|a| a.coder.as_ref())
         .and_then(|c| c.run_pods.as_ref())
 }
 
 /// Whether the binary is `adam-coder`.
 pub fn is_coder(config: &AgentConfig) -> bool {
-    config.spec.harness.adam.binary == Binary::AdamCoder
+    adam(config).is_some_and(|a| a.binary == Binary::AdamCoder)
+}
+
+/// The port the Service listens on and the agent serves: the A2A image's own, or adam's 8080.
+pub fn service_port(config: &AgentConfig) -> u16 {
+    a2a(config).map_or(crate::contract::PORT, |a| {
+        u16::try_from(a.port)
+            .ok()
+            .filter(|p| *p != 0)
+            .unwrap_or(crate::contract::PORT)
+    })
 }
 
 /// The header variables of the extra MCP servers: one per distinct Secret key, **named by the key**
@@ -67,7 +89,7 @@ pub fn header_vars(tools: &Tools) -> BTreeMap<&str, Vec<&SecretKeyRef>> {
     vars
 }
 
-/// The default address of the service: `http://<name>.<namespace>.svc:8080/`.
-pub fn default_public_url(name: &str, namespace: &str) -> String {
-    format!("http://{name}.{namespace}.svc:{}/", crate::contract::PORT)
+/// The default address of the service: `http://<name>.<namespace>.svc:<port>/`.
+pub fn default_public_url(name: &str, namespace: &str, port: u16) -> String {
+    format!("http://{name}.{namespace}.svc:{port}/")
 }
