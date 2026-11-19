@@ -124,6 +124,14 @@ fn run_lists_its_settings_and_the_environment_variables_that_set_them() {
         "--tool-probe-enabled",
         "TOOL_PROBE_TIMEOUT_SECS",
         "--tool-probe-timeout-secs",
+        "LEADER_ELECTION_ENABLED",
+        "--leader-election-enabled",
+        "LEADER_ELECTION_NAME",
+        "LEADER_ELECTION_NAMESPACE",
+        "LEADER_ELECTION_LEASE_SECS",
+        "LEADER_ELECTION_RENEW_SECS",
+        "LEADER_ELECTION_RETRY_SECS",
+        "--leader-election-retry-secs",
     ] {
         assert!(help.contains(variable), "{variable} is not in:\n{help}");
     }
@@ -146,6 +154,16 @@ fn run_without_a_cluster(default_image: Option<&str>) -> (bool, String) {
         .env("HOME", "/nonexistent")
         .env("HEALTH_ADDR", "127.0.0.1:0")
         .env("METRICS_ADDR", "127.0.0.1:0");
+    for variable in [
+        "LEADER_ELECTION_ENABLED",
+        "LEADER_ELECTION_NAME",
+        "LEADER_ELECTION_NAMESPACE",
+        "LEADER_ELECTION_LEASE_SECS",
+        "LEADER_ELECTION_RENEW_SECS",
+        "LEADER_ELECTION_RETRY_SECS",
+    ] {
+        command.env_remove(variable);
+    }
     if let Some(image) = default_image {
         command.env("DEFAULT_AGENT_IMAGE", image);
     }
@@ -188,6 +206,35 @@ fn a_default_image_that_is_empty_or_a_reference_goes_on_to_look_for_a_cluster() 
             "{value:?}: {stderr}"
         );
     }
+}
+
+/// K7a: the election is off by default, and on with no namespace anywhere the operator refuses **before** it looks
+/// for a cluster, naming the variable: a `Lease` lives in one.
+#[cfg(feature = "runtime-kubernetes")]
+#[test]
+fn a_leader_election_with_no_namespace_stops_the_operator_before_it_looks_for_a_cluster() {
+    let mut command = operator();
+    command
+        .arg("run")
+        .env_remove("KUBERNETES_SERVICE_HOST")
+        .env_remove("WATCH_NAMESPACE")
+        .env_remove("WATCH_NAMESPACES")
+        .env_remove("LEADER_ELECTION_NAMESPACE")
+        .env_remove("DEFAULT_AGENT_IMAGE")
+        .env("LEADER_ELECTION_ENABLED", "true")
+        .env("POD_NAME", "pod-1")
+        .env("KUBECONFIG", "/nonexistent/kubeconfig")
+        .env("HOME", "/nonexistent")
+        .env("HEALTH_ADDR", "127.0.0.1:0")
+        .env("METRICS_ADDR", "127.0.0.1:0");
+    let out = command.output().expect("runs the operator");
+    assert!(!out.status.success(), "the operator started");
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(stderr.contains("LEADER_ELECTION_NAMESPACE"), "{stderr}");
+    assert!(
+        !stderr.contains("connecting to the cluster"),
+        "it never got that far: {stderr}"
+    );
 }
 
 /// `run` with `WATCH_NAMESPACE` and/or `WATCH_NAMESPACES` and no cluster to reach (K6b). `None` is the variable

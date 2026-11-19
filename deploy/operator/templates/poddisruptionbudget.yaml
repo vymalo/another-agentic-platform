@@ -1,0 +1,15 @@
+{{- if gt (int .Values.replicas) 1 }}
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: {{ include "aap.fullname" . }}
+  labels:
+    {{- include "aap.labels" . | nindent 4 }}
+spec:
+  # One at a time, whatever the replica count: "never zero" would let two of three go at once. Only with more than one
+  # replica: a budget of 1 of 1 blocks every drain (the rule of the run pods' own budgets).
+  maxUnavailable: 1
+  selector:
+    matchLabels:
+      {{- include "aap.selectorLabels" . | nindent 6 }}
+{{- end }}

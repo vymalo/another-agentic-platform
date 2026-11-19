@@ -13,8 +13,10 @@ cargo run -q -p aap-operator -- run                                            #
 | `crdgen` | Prints the CRDs of [`aap-api`](../../crates/api/README.md) as multi-document YAML on standard output, behind a two-line header that says it is generated |
 | `run` | Composes `KubernetesRuntime` ([`aap-runtime-kubernetes`](../../crates/runtime-kubernetes/README.md)), `CnpgStore` ([`aap-store-cnpg`](../../crates/store-cnpg/README.md), which also serves a referenced Secret; `SecretStore` ([`aap-store-secret`](../../crates/store-secret/README.md)) without the `store-cnpg` feature) and the [`Operator`](../../crates/controller/README.md), serves health and metrics, and runs until SIGTERM or SIGINT, then lets the passes in flight finish |
 
-Libraries use `thiserror`; this binary uses `anyhow` (and has no error type of its own). **No leader election, one
-replica** (§59a: "One replica, `Recreate`, no leader election"): a second reconciler would only race the first.
+Libraries use `thiserror`; this binary uses `anyhow` (and has no error type of its own). **Leader election is off by
+default** — §59a's one replica, and every pass writes. With it on (K7a, `LEADER_ELECTION_ENABLED`) several replicas
+may run: each keeps its caches, serves health, metrics and the registry, and only the holder of a
+`coordination.k8s.io/v1` `Lease` writes (see *Leader election*).
 
 ## `run`: settings
 
@@ -40,6 +42,12 @@ Each is a flag and an environment variable, which is how the chart sets them (S8
 | `RUN_PODS_FILE` | `--run-pods-file` | none | The deployment's settings for run pods (slice D15a): a YAML file, `aap_domain::RunPodSettings`, that the chart renders from `runPods` and `runPodClasses` and mounts. Read **once**, at start. Unset or empty: **the operator has no run pods**, and an `AgentConfig` that sets `coder.runPods` is `ConfigInvalid` saying so. A file that does not exist, does not parse (an unknown key is refused; a file from before D15c, with no `egressProxy` or with `networkPolicy.enabled`, is one, and so is a file from before D15d, with no `gitSandbox`, or with a switch for it), or fails `RunPodSettings::validate()` (the egress proxy's allow-list included: an empty one, an entry that is not a host name or is a bare suffix, no port; and the git sandbox's: no memory limit, a `/tmp` that is not a quantity above zero, no command at once or more than 4096) stops the operator at start, naming every mistake: a pod that cannot start is the better way to hear it than agents that run without the guard |
 | `TOOL_PROBE_ENABLED` | `--tool-probe-enabled` | off | **K3b, AD-053:** probe a `ToolProvider`'s MCP server (`initialize` and `tools/list`, [`aap-tool-probe`](../../crates/tool-probe/README.md)) and write `Reachable` and its tool names into the provider's status. The chart sets it when `toolProbe.to` lists the peers; a server that needs a header is `Reachable: Unknown`, reason `NeedsHeader`, and the operator reads no Secret (AD-024) |
 | `TOOL_PROBE_TIMEOUT_SECS` | `--tool-probe-timeout-secs` | 5 | How long one probe may take, 1 to 60 s; a server that does not answer by then is `Reachable: False`, reason `Timeout` |
+| `LEADER_ELECTION_ENABLED` | `--leader-election-enabled` | off | **K7a:** elect one replica to write, with a `coordination.k8s.io/v1` `Lease`. Off: this replica is the only one, and every pass writes (`AlwaysLeader`) |
+| `LEADER_ELECTION_NAME` | `--leader-election-name` | `aap-operator` | The name of the `Lease`; the election is `<namespace>/<name>`. A DNS label |
+| `LEADER_ELECTION_NAMESPACE` | `--leader-election-namespace` | the primary | The namespace of the `Lease`: the primary one (`WATCH_NAMESPACE`, or the first of `WATCH_NAMESPACES`), where the chart's `Role` is. **With the election on and no namespace anywhere, `run` refuses to start**, naming the variable: a `Lease` lives in one |
+| `LEADER_ELECTION_LEASE_SECS` | `--leader-election-lease-secs` | 15 | How long the lease lives: a holder that has not renewed for this long may be replaced |
+| `LEADER_ELECTION_RENEW_SECS` | `--leader-election-renew-secs` | 10 | How often the holder renews |
+| `LEADER_ELECTION_RETRY_SECS` | `--leader-election-retry-secs` | 2 | How often a replica that is not the holder tries |
 | `RUST_LOG` | | `info` | `tracing` filter; logs go to standard error |
 | `KUBECONFIG` | | | Used when there is no in-cluster environment (`kube::Client::try_default`) |
 
@@ -76,6 +84,33 @@ on) name the resource. When on, `/metrics` also has `aap_trace_spans_exported_to
 the controllers' ([README](../../crates/controller/README.md)); §48a has the rest. `tests/trace_env.rs` runs the built binary with BuildKit's variables and with others it refuses: it warns once, never prints
 the value, and goes on to the cluster.
 
+## Leader election (K7a)
+
+Off by default. On, the binary is one candidate of an election whose lease is `LEADER_ELECTION_NAMESPACE` /
+`LEADER_ELECTION_NAME`, through [`aap-leader-kubernetes`](../../crates/leader-kubernetes/README.md)
+(`LeaseElection`); off, it is an `AlwaysLeader`, which asks nothing of the cluster.
+
+What the replica does, whatever the election says: it connects, lists and watches every namespace it was told to
+watch, serves `/healthz` and `/readyz` (200 once its caches have listed — **a follower is ready**), `/metrics`, and
+the registry on its 15 s refresh. What only the holder does is **write**: every reconcile pass of the four
+controllers asks `is_leader()` first, and a follower returns `Ok(Action::requeue(30 s))` with no request that
+changes anything ([the controller's README](../../crates/controller/README.md#leader-election-k7a)).
+
+The campaign is a task beside the controllers, on the same SIGTERM/SIGINT: the signal is read **once**, in a task
+that logs `shutting down`, sets the flag the exit code is decided from and sends the stop that the controllers,
+the two servers, the registry and the campaign all listen to. On the way out the holder **releases the lease**
+(clears `holderIdentity`, best effort within two seconds), so the next replica does not wait for it to expire; the
+binary then waits up to five seconds for that release before it exits.
+
+The candidate's identity is `POD_NAME` (the chart sets it from the downward API), else `HOSTNAME`, else a refusal:
+a `holderIdentity` of `""` would make two replicas look like one, and they would renew each other's lease.
+
+The timings must satisfy `retry < renew < lease`, each at least a second, or `run` refuses to start naming the
+three variables. **The defaults are not a safe pair with the pass limit**: a pass may take up to
+`AAP_RECONCILE_TIMEOUT_SECS` (60 s), which is longer than the 15 s lease, so a deployment that turns the election
+on should lower the pass limit or raise the lease. The chart's slice owns that choice; it is noted here and in the
+controller's README.
+
 ## Cluster rights
 
 Everything `run` does to the API, for the chart of S8 (a namespaced `Role`, §59a): the
@@ -102,6 +137,7 @@ AAP_TEST_KUBECONFIG=$HOME/.kube/config AAP_TEST_STUB_IMAGE=aap-stub:ci cargo tes
 | `src/run.rs` unit test | the provider is told to look for run pod objects to clear only with settings for run pods (without them the operator has no right to read an account, a quota or a binding, and looking would fail every reconcile) |
 | `src/run.rs` unit tests (K6b) | `WATCH_NAMESPACES` and `WATCH_NAMESPACE`: neither is every namespace, the shorthand is one, the list is exactly those in the order given, the primary must be in the list, and a name that is not a DNS label, a duplicate or a list with no name is refused; the runtime provider is given the list, and an empty one is every namespace |
 | `src/run.rs` unit tests (K5) | the operator is composed with the tracer it was given (`compose`), and the spans still queued are flushed on the way out, on `Ok` and on `Err` (`flushed`) |
+| `src/run.rs` unit tests (K7a) | the election is off by default; on, it takes the primary namespace (or `LEADER_ELECTION_NAMESPACE`), refuses timings that are not `retry < renew < lease` with each at least a second (naming the variables), refuses a replica with no `POD_NAME` and no `HOSTNAME`, and `compose` hands the election to the operator (an `AlwaysLeader` is a leader, a candidate whose campaign has not run is not) |
 | `src/serve.rs` unit tests | `/healthz` is up at once, `/readyz` answers 503 until the readiness handle is marked, `/metrics` is Prometheus text |
 | `tests/cli.rs` | runs the built binary (`RUN_PODS_FILE`: an absent file, junk, an unknown key, a file from before the egress proxy, the switch of the network policy that is gone, and settings that fail their checks each stop it before it looks for a cluster, naming the variable and the mistake): `crdgen` equals the checked-in file and prints one document per kind; `run` without a cluster fails and says it was connecting; `run --help` lists every variable above; a default image with white space stops `run` before it looks for a cluster, and an empty one or a reference does not |
 | `tests/e2e_fixture.rs` | the fixtures of the chart's kind end-to-end resolve; **the chart's `defaultAgentImage` is the image `tests/e2e/coder.yaml` runs**, and the fixture with its image removed, on an operator given that default, is the same agent, digest included |

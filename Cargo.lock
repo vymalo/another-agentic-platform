@@ -143,6 +143,23 @@ dependencies = [
 ]
 
 [[package]]
+name = "aap-leader-kubernetes"
+version = "0.1.0"
+dependencies = [
+ "aap-leader-kubernetes",
+ "aap-ports",
+ "futures",
+ "http",
+ "k8s-openapi",
+ "kube",
+ "serde_json",
+ "thiserror 2.0.21",
+ "tokio",
+ "tower",
+ "tracing",
+]
+
+[[package]]
 name = "aap-objects-kubernetes"
 version = "0.1.0"
 dependencies = [
@@ -170,6 +187,7 @@ dependencies = [
  "aap-api",
  "aap-controller",
  "aap-domain",
+ "aap-leader-kubernetes",
  "aap-ports",
  "aap-registry",
  "aap-runtime-kubernetes",

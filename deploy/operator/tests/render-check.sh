@@ -5,10 +5,11 @@
 #   sh deploy/operator/tests/render-check.sh                    (from the repository root)
 #   UPDATE_GOLDEN=1 sh deploy/operator/tests/render-check.sh    rewrites tests/golden/*.yaml, for a deliberate change
 #
-# Six renders are golden: the values of the Application on netcup (examples/netcup.values.yaml), the other shape those
+# Seven renders are golden: the values of the Application on netcup (examples/netcup.values.yaml), the other shape those
 # values do not make (tests/secret.values.yaml), the defaults, the Platform API component on (tests/api.values.yaml), run pods on
-# (tests/runpods.values.yaml) and traces of both on (tests/otel.values.yaml; the others have the API, run pods, traces and the tool
-# probe off, and the first three are equal to what they were before any existed).
+# (tests/runpods.values.yaml), traces of both on (tests/otel.values.yaml) and two replicas with the leader election on
+# (tests/leader.values.yaml; the others have the API, run pods, traces, the election and the tool probe off, and the first three are
+# equal to what they were before any existed).
 # Also checked: deploy/operator-crds against deploy/crds, and the API's Role against crates/objects-kubernetes/tests/rbac.yaml, the
 # Role that crate is tested under.
 set -eu
@@ -129,6 +130,7 @@ check "the render of tests/secret.values.yaml equals tests/golden/secret.yaml" g
 check "the default render equals tests/golden/default.yaml" golden default
 check "the Platform API render (tests/api.values.yaml) equals tests/golden/api.yaml" golden api -f "$here/api.values.yaml"
 check "the run pods render (tests/runpods.values.yaml) equals tests/golden/runpods.yaml" golden runpods -f "$here/runpods.values.yaml"
+check "the leader election render (tests/leader.values.yaml) equals tests/golden/leader.yaml" golden leader -f "$here/leader.values.yaml"
 
 # ---- The default render: no registry, nothing a secret could be in --------------------------------------------------------
 render
@@ -208,6 +210,24 @@ check "the binding is to the operator's own service account" dhas RoleBinding aa
 render --set storeCnpg=false
 check "storeCnpg=false: no right on CloudNativePG" rules_are "$base_rules"
 check "storeCnpg=false: no mention of CloudNativePG" lacks 'cnpg'
+
+# ---- K7: two replicas, a Lease, and a PodDisruptionBudget ---------------------------------------------------------------
+render --set replicas=2
+check "two replicas: a rolling update, one at a time" dhas Deployment aap-operator '^  replicas: 2$' 'type: RollingUpdate' 'maxSurge: 1' 'maxUnavailable: 0'
+check "two replicas: a PodDisruptionBudget of one, on the operator's pods" dhas PodDisruptionBudget aap-operator 'maxUnavailable: 1'
+check "two replicas: the election's variables, the lease in the primary namespace, the client-go timers" \
+  dhas Deployment aap-operator 'name: LEADER_ELECTION_ENABLED' 'value: "true"' 'name: LEADER_ELECTION_NAME' 'value: "aap-operator"' \
+    'name: LEADER_ELECTION_NAMESPACE' 'value: "another-agentic-system"' 'name: LEADER_ELECTION_LEASE_SECS' 'value: "15"' \
+    'name: LEADER_ELECTION_RENEW_SECS' 'value: "10"' 'name: LEADER_ELECTION_RETRY_SECS' 'value: "2"'
+check "two replicas: the Role holds the lease's verbs, get create update and no delete" \
+  rules_are "$base_rules
+$cnpg_rule
+[coordination.k8s.io] [leases] [get, create, update]"
+render
+check "one replica (the default): no PodDisruptionBudget and no lease rule" lacks '^kind: PodDisruptionBudget$|coordination.k8s.io'
+render -f "$here/leader.values.yaml"
+check "the leader election's values render two replicas and the PDB" dhas Deployment aap-operator '^  replicas: 2$' && dhas PodDisruptionBudget aap-operator 'maxUnavailable: 1'
+render
 render --set serviceAccount.create=false --set serviceAccount.name=elsewhere
 check "serviceAccount.create=false: no ServiceAccount is made" lacks '^kind: ServiceAccount$'
 check "serviceAccount.create=false: the binding and the pod name the given one" \
@@ -642,7 +662,11 @@ check "K1: a cache claim that is not a claim name is refused" refused 'is not th
 render
 
 # ---- What is refused -------------------------------------------------------------------------------------------------------
-check "a replica count is refused (no leader election in v0)" refused 'no leader election' --set replicaCount=2
+check "replicaCount is refused: the key is replicas" refused 'not `replicaCount`' --set replicaCount=2
+check "replicas: 0 is refused" refused 'replicas must be a whole number' --set replicas=0
+check "replicas: a non-number is refused" refused 'replicas must be a whole number' --set replicas=abc
+check "leaderElection: an unknown key is refused" refused 'leaderElection.foo is not a setting' --set leaderElection.foo=1
+check "leaderElection: renewSecs must be below leaseSecs" refused 'retrySecs < renewSecs < leaseSecs' --set replicas=2 --set leaderElection.renewSecs=15
 check "an empty image tag is refused" refused 'image.tag is required' --set image.tag=
 check "the latest tag is refused" refused 'must not be latest' --set image.tag=latest
 check "a malformed digest is refused" refused 'image.digest must be sha256' --set image.digest=abc

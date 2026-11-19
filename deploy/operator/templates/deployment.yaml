@@ -1,6 +1,12 @@
 {{- include "aap.validate" . -}}
+{{- if gt (int .Values.replicas) 1 }}
+# K7: more than one replica is a rolling update whose replicas campaign for a Lease in the primary namespace, and only its
+# holder reconciles. Both replicas keep their caches and serve the registry, so `/readyz` keeps its meaning (the caches have
+# listed) and the PodDisruptionBudget can move the lease.
+{{- else }}
 # One replica and no leader election (§59a): a second reconciler would only race the first. `Recreate`, so an upgrade
 # never runs two at once; the cost is a short gap in reconciling, and a running agent is not touched by it.
+{{- end }}
 apiVersion: apps/v1
 kind: Deployment
 metadata:
@@ -8,9 +14,17 @@ metadata:
   labels:
     {{- include "aap.labels" . | nindent 4 }}
 spec:
-  replicas: 1
+  replicas: {{ .Values.replicas }}
+  {{- if gt (int .Values.replicas) 1 }}
+  strategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxSurge: 1
+      maxUnavailable: 0
+  {{- else }}
   strategy:
     type: Recreate
+  {{- end }}
   selector:
     matchLabels:
       {{- include "aap.selectorLabels" . | nindent 6 }}
@@ -65,6 +79,21 @@ spec:
               value: {{ include "aap.watchNamespaces" . | fromJsonArray | join "," | quote }}
             - name: WATCH_NAMESPACE
               value: {{ include "aap.watchNamespace" . | quote }}
+            {{- if gt (int .Values.replicas) 1 }}
+            # K7: the lease every replica campaigns for; the holder reconciles, the others keep their caches and serve the registry.
+            - name: LEADER_ELECTION_ENABLED
+              value: "true"
+            - name: LEADER_ELECTION_NAME
+              value: {{ include "aap.fullname" . | quote }}
+            - name: LEADER_ELECTION_NAMESPACE
+              value: {{ include "aap.watchNamespace" . | quote }}
+            - name: LEADER_ELECTION_LEASE_SECS
+              value: {{ .Values.leaderElection.leaseSecs | quote }}
+            - name: LEADER_ELECTION_RENEW_SECS
+              value: {{ .Values.leaderElection.renewSecs | quote }}
+            - name: LEADER_ELECTION_RETRY_SECS
+              value: {{ .Values.leaderElection.retrySecs | quote }}
+            {{- end }}
             - name: POD_NAME
               valueFrom:
                 fieldRef:
@@ -104,6 +133,12 @@ spec:
             {{- with .Values.tuning.resyncPendingSecs }}
             - name: AAP_RESYNC_PENDING_SECS
               value: {{ . | quote }}
+            {{- end }}
+            {{- if or .Values.tuning.reconcileTimeoutSecs (gt (int .Values.replicas) 1) }}
+            # K7: with the election on, a pass must finish before the renew deadline (the default 5 s is below the 10 s
+            # renew); with one replica the binary's own 60 s applies.
+            - name: AAP_RECONCILE_TIMEOUT_SECS
+              value: {{ .Values.tuning.reconcileTimeoutSecs | default 5 | quote }}
             {{- end }}
             {{- if include "aap.otel.on" . }}
             # Traces (slice K5): the variables `operator run` reads. Absent, no span is made.

@@ -20,7 +20,7 @@ path = "src/main.rs"
 # the referenced-Secret one alone, and a service that asks for a cluster is `StoreReady: False`, reason
 # `CNPGNotInstalled`. Without `registry` nothing is served on 8080 and `Listed` says `RegistryDisabled`.
 default = ["runtime-kubernetes", "store-cnpg", "registry"]
-runtime-kubernetes = ["dep:aap-runtime-kubernetes"]
+runtime-kubernetes = ["dep:aap-runtime-kubernetes", "dep:aap-leader-kubernetes"]
 store-cnpg = ["dep:aap-store-cnpg"]
 registry = ["dep:aap-registry"]
 
@@ -32,6 +32,7 @@ aap-ports.workspace = true
 aap-trace.workspace = true
 aap-trace-otlp.workspace = true
 aap-registry = { workspace = true, optional = true }
+aap-leader-kubernetes = { workspace = true, optional = true }
 aap-runtime-kubernetes = { workspace = true, optional = true }
 aap-store-cnpg = { workspace = true, optional = true }
 aap-store-secret.workspace = true

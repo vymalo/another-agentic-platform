@@ -252,6 +252,25 @@ pub trait AuthenticatorUnderTest: crate::Authenticator + 'static {
     }
 }
 
+/// A [`LeaderElection`](crate::LeaderElection) the suite can run more than one candidate of (K7a).
+///
+/// [`candidate`](Self::candidate) has the name of [`LeaderElection::candidate`], which takes no argument: with
+/// both traits in scope, write `LeaderElectionUnderTest::candidate(&election, "b")`.
+pub trait LeaderElectionUnderTest: crate::LeaderElection + Clone + 'static {
+    /// Another candidate of **the same** election, named `id`: the second replica of the operator.
+    fn candidate(&self, id: &str) -> Self;
+
+    /// A second election of the same backend, under another name: the operator of another deployment.
+    fn another(&self) -> Self;
+
+    /// Who holds the election now, by candidate name; `None` when nobody does.
+    fn holder(&self) -> impl Future<Output = Option<String>> + Send;
+
+    /// This candidate is gone (its process was killed): its lease is left as it is, and nobody renews it. A
+    /// campaign that is running must step down.
+    fn kill(&self) -> impl Future<Output = ()> + Send;
+}
+
 /// A resolved-looking spec that uses every kind of thing a provider must handle: a workload with a
 /// sidecar, literal and secret variables, a pod-name variable, a per-replica volume `work`, a file
 /// set mounted read-only, a secret file, probes and resources. Secret names carry [`SENTINEL`].
@@ -533,6 +552,7 @@ pub fn sample_spec_with_run_pods(id: &RuntimeId) -> RuntimeSpec {
 }
 
 pub mod auth;
+pub mod leader;
 pub mod objects;
 
 pub use objects::{SECRET_VALUE, event_seed, sample_agent, sample_agent_using, sample_shared};
@@ -1136,6 +1156,32 @@ macro_rules! agent_directory_conformance {
                     return;
                 };
                 $crate::testkit::directory::$case(directory).await;
+            }
+        )*
+    };
+}
+
+/// Generate one `#[tokio::test]` per case of the leader election suite (K7a). `$make` is a path to an
+/// `async fn() -> Option<E>` where `E: LeaderElectionUnderTest`; `None` skips the suite, unless
+/// `AAP_TEST_REQUIRE_BACKEND=1`, which fails it instead.
+#[macro_export]
+macro_rules! leader_election_conformance {
+    ($make:path) => {
+        $crate::leader_election_conformance!(@cases $make;
+            one_candidate_holds, the_loser_writes_nothing, never_two_holders,
+            a_killed_holder_is_replaced, a_candidate_that_stops_gives_the_lease_up,
+            following_reports_the_change, two_names_are_two_elections,
+        );
+    };
+    (@cases $make:path; $($case:ident),* $(,)?) => {
+        $(
+            #[tokio::test]
+            async fn $case() {
+                let Some(election) = $make().await else {
+                    $crate::testkit::skipped(&format!("{}: leader election not configured", stringify!($case)));
+                    return;
+                };
+                $crate::testkit::leader::$case(election).await;
             }
         )*
     };
