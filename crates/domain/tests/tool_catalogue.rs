@@ -1,9 +1,10 @@
-//! The tool catalogue's examples (slice K10a, AD-056): every manifest under `examples/toolproviders/` is parsed, the
+//! The tool catalogue's examples (slices K10a and K10b, AD-056): every manifest under `examples/toolproviders/` is parsed, the
 //! `ToolProvider`s pass `aap_domain::validate_provider`, every image is pinned by tag and digest, every RBAC rule the example
-//! carries is read-only, and the allow-list names only tools the server itself documents as read-only.
+//! carries is read-only, and the allow-list names only tools **the server the file runs** documents as read-only.
 //!
-//! The server's tool names are the ones its README lists (*Tools*); if a release renames one, this test fails — which is the
-//! point: an allow-list that names a tool the server no longer has is an agent that cannot use it.
+//! The servers' tool names are the ones their READMEs list (*Tools*); if a release renames one, this test fails — which is the
+//! point: an allow-list that names a tool the server no longer has is an agent that cannot use it. A file whose image has no
+//! entry here fails too, so a new example cannot borrow another server's list.
 
 #![allow(clippy::unwrap_used, clippy::expect_used)] // tests may
 
@@ -58,30 +59,118 @@ const KUBERNETES_READ_ONLY: &[&str] = &[
     "targets_list",
 ];
 
+/// The `prometheus-mcp-server` tools its README documents (its *Available Tools* section). `health_check` is the sixth and is
+/// absent on purpose: it is a monitoring tool, and the pod's probe asks the server's own `/health` instead.
+const PROMETHEUS_READ_ONLY: &[&str] = &[
+    "execute_query",
+    "execute_range_query",
+    "get_metric_metadata",
+    "get_targets",
+    "list_metrics",
+];
+
+/// The servers of the catalogue, keyed by the image repository the file runs: the tools each documents as reading, and nothing
+/// else. **A new example adds its row**: a file whose image is not here fails, so its allow-list is never checked against
+/// another server's list.
+const SERVERS: &[(&str, &[&str])] = &[
+    (
+        "quay.io/containers/kubernetes_mcp_server",
+        KUBERNETES_READ_ONLY,
+    ),
+    (
+        "ghcr.io/pab1it0/prometheus-mcp-server",
+        PROMETHEUS_READ_ONLY,
+    ),
+];
+
+/// The repository of an image reference: `registry/repo`, without the tag and the digest.
+fn repository(image: &str) -> &str {
+    let before_digest = image.split('@').next().unwrap_or(image);
+    match before_digest.rsplit_once(':') {
+        // A registry with a port and no tag (`registry:5000/repo`) has no tag to cut: the colon is before the last `/`.
+        Some((head, tail)) if !tail.contains('/') => head,
+        _ => before_digest,
+    }
+}
+
+/// The read-only tools of the server a file runs, from its `SERVERS` row.
+fn read_only_of(image: &str) -> Option<&'static [&'static str]> {
+    let repo = repository(image);
+    SERVERS
+        .iter()
+        .find(|(name, _)| *name == repo)
+        .map(|(_, tools)| *tools)
+}
+
 #[test]
 fn the_catalogue_holds_at_least_one_example() {
     assert!(!files().is_empty(), "examples/toolproviders is empty");
 }
 
+/// The images of the workloads a file runs (a `Deployment`, a `StatefulSet` or a `Pod`).
+fn images(docs: &[Value]) -> Vec<String> {
+    let mut out = Vec::new();
+    for doc in docs {
+        let containers = match doc["kind"].as_str() {
+            Some("Deployment") | Some("StatefulSet") => {
+                doc["spec"]["template"]["spec"]["containers"]
+                    .as_array()
+                    .cloned()
+                    .unwrap_or_default()
+            }
+            Some("Pod") => doc["spec"]["containers"]
+                .as_array()
+                .cloned()
+                .unwrap_or_default(),
+            _ => Vec::new(),
+        };
+        for container in containers {
+            if let Some(image) = container["image"].as_str() {
+                out.push(image.to_owned());
+            }
+        }
+    }
+    out
+}
+
 #[test]
-fn every_provider_is_valid_and_names_only_read_only_kubernetes_tools() {
-    let read_only: BTreeSet<&str> = KUBERNETES_READ_ONLY.iter().copied().collect();
+fn every_provider_names_only_tools_its_own_server_documents_as_read_only() {
     let mut providers = 0;
     for path in files() {
-        for doc in documents(&path) {
+        let docs = documents(&path);
+        let images = images(&docs);
+        // Every image the file runs is a server this test knows: a new example must record its read-only tools here, or its
+        // allow-list would be checked against nothing (or, worse, against another server's list).
+        let mut read_only: BTreeSet<&str> = BTreeSet::new();
+        for image in &images {
+            let tools = read_only_of(image).unwrap_or_else(|| {
+                panic!(
+                    "{}: {} has no row in SERVERS: add the server's documented read-only tools",
+                    path.display(),
+                    repository(image)
+                )
+            });
+            read_only.extend(tools.iter().copied());
+        }
+        for doc in &docs {
             if doc["kind"] != "ToolProvider" {
                 continue;
             }
-            let provider: ToolProvider =
-                serde_json::from_value(doc).unwrap_or_else(|e| panic!("{}: {e}", path.display()));
+            let provider: ToolProvider = serde_json::from_value(doc.clone())
+                .unwrap_or_else(|e| panic!("{}: {e}", path.display()));
             aap_domain::validate_provider(&provider)
                 .unwrap_or_else(|issues| panic!("{}: {issues:?}", path.display()));
             providers += 1;
             for tool in &provider.spec.mcp.tools {
                 assert!(
                     read_only.contains(tool.as_str()),
-                    "{}: {tool} is not one of the server's read-only tools",
-                    path.display()
+                    "{}: {tool} is not one of the tools {} documents as read-only",
+                    path.display(),
+                    images
+                        .iter()
+                        .map(|i| repository(i))
+                        .collect::<Vec<_>>()
+                        .join(", ")
                 );
             }
         }
@@ -92,28 +181,12 @@ fn every_provider_is_valid_and_names_only_read_only_kubernetes_tools() {
 #[test]
 fn every_image_is_pinned_by_tag_and_digest() {
     for path in files() {
-        for doc in documents(&path) {
-            let containers = match doc["kind"].as_str() {
-                Some("Deployment") | Some("StatefulSet") => {
-                    doc["spec"]["template"]["spec"]["containers"]
-                        .as_array()
-                        .cloned()
-                        .unwrap_or_default()
-                }
-                Some("Pod") => doc["spec"]["containers"]
-                    .as_array()
-                    .cloned()
-                    .unwrap_or_default(),
-                _ => Vec::new(),
-            };
-            for container in containers {
-                let image = container["image"].as_str().unwrap_or_default();
-                assert!(
-                    image.contains("@sha256:") && image.contains(':'),
-                    "{}: {image} is not pinned by tag and digest",
-                    path.display()
-                );
-            }
+        for image in images(&documents(&path)) {
+            assert!(
+                image.contains("@sha256:") && repository(&image) != image,
+                "{}: {image} is not pinned by tag and digest",
+                path.display()
+            );
         }
     }
 }

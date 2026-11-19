@@ -19,5 +19,6 @@ read at its source and accepted by the owner before the server was added (AD-056
 | Server | Licence | Notice | Image (pinned) |
 |---|---|---|---|
 | [containers/kubernetes-mcp-server](https://github.com/containers/kubernetes-mcp-server) (formerly `manusa/kubernetes-mcp-server`) | Apache-2.0 (the repository's `LICENSE`, *verified 2026-11-19*) | [upstream `LICENSE`](https://github.com/containers/kubernetes-mcp-server/blob/main/LICENSE) — Copyright the Kubernetes MCP Server authors | `quay.io/containers/kubernetes_mcp_server:v0.1.3@sha256:6347155616c49c78512114500688b50d275ddde7597b6a38cefe6f40a8c42c16` (*verified 2026-11-19*: an anonymous quay.io token and a manifest request for the index) |
+| [pab1it0/prometheus-mcp-server](https://github.com/pab1it0/prometheus-mcp-server) | MIT (the repository's `LICENSE`, *verified 2026-11-19*) | [upstream `LICENSE`](https://github.com/pab1it0/prometheus-mcp-server/blob/main/LICENSE) — Copyright (c) 2025 pab1it0 | `ghcr.io/pab1it0/prometheus-mcp-server:1.4.2@sha256:32f2682e416f5b459fad4dcf7cfdd81206840e2f867aab4f15d5d8dc890d2349` (*verified 2026-11-19*: an anonymous ghcr.io token and a manifest request for the index) |
 
 Everything else in this repository is the project's own work.
