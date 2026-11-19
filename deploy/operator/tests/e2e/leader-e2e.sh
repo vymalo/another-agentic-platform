@@ -20,22 +20,25 @@
 #      but not `get` or `list` leases unnamed, not `delete` it, and not in every namespace; and no Secret;
 #   7. the registry answers 401 without the token; an agent `solo` is applied, becomes Ready, and the registry lists it from the
 #      Service AND from EACH pod's own IP: the follower serves the registry too (its 200 is the point of a second replica);
-#   8. the holder is SIGKILLed and its pod force-deleted (no SIGTERM, so it releases nothing), and `late` is applied at once. For the first 8 s — well inside the 15 s lease —
-#      `late` has NO Deployment and is not Ready (the survivor, which sees the same watch event, writes nothing), while the survivor's
-#      registry answers 200 every second (a failover does not blank it). Then the Lease moves to a living pod no sooner than 10 s after
-#      the kill, `leaseTransitions` is exactly one more, and two pods are Ready again;
+#   8. the holder is SIGKILLed and its pod force-deleted (no SIGTERM, so it releases nothing), and `late` is applied at once. For 8 s of
+#      wall clock — well inside the 15 s lease — `late` has NO Deployment (the survivor, which sees the same watch event, writes nothing),
+#      while the survivor's own registry still lists the agent (a failover does not blank it). Then the Lease is renewed by a living pod
+#      no sooner than 10 s after the kill, `leaseTransitions` is exactly one more, and two pods are Ready again;
 #   9. `late` becomes Ready within 60 s of the takeover: the new holder re-passes the object the follower parked;
-#  10. the new holder is stopped gracefully (SIGTERM): the Lease's holderIdentity is cleared within 10 s and the other pod holds it
-#      within 10 s — both well below the 15 s lease, so the release, not the expiry, moved it; two pods are Ready again;
-#  11. no secret value (the model's key sentinel, the A2A bearer, the ledger's URI, the registry's token) is in any answer the script
-#      read or in either replica's log, and neither log holds a panic. A log counts only if its `kubectl logs` succeeded, it is not
-#      empty and it holds a line only the operator logs ("the caches are synced");
+#  10. the new holder is stopped gracefully (SIGTERM): the Lease passes to another pod within 10 s — well below the 15 s lease, whose
+#      earliest possible expiry is 13 s, so the release and not the expiry moved it; two pods are Ready again;
+#  11. no secret value (the model's key sentinel, the A2A bearer, the ledger's URI, the registry's token) is in any registry answer the
+#      script read or in the log of the replicas alive at the end, and no log holds a panic. A log counts only if its `kubectl logs`
+#      succeeded, it is not empty and it holds a line only the operator logs ("the caches are synced");
 #  12. the cleanup undoes only what this run made: the agents (with the operator still there to run their finalizers), the release, and
 #      the namespace (labelled, and only that one). The CRDs stay: they are the cluster's, as Argo CD would leave them.
 #
 # What it does NOT prove: that two writers never overlap (the Lease is the mechanism, and the crate's conformance suite and its cluster
 # suite in operator-e2e hold that; this script holds the timing: no takeover inside the lease and a release at once); the operator's
-# per-pass leadership decision (not logged: the script infers it from the Lease and from a write that only a holder makes); a network
+# per-pass leadership decision (not logged: the script infers it from the Lease and from a write that only a holder makes, and the
+# survivor's own pass for `late` is not shown to have run and declined — a follower whose controllers were dead would look the same); who
+# wins the takeover (a race between the survivor and the Deployment's replacement, both followers until the lease expires; the runs so far
+# went to the replacement); a network
 # partition between the replicas and the API server (a killed pod is not one); the `PodDisruptionBudget` under a real drain (the object is
 # asserted, and a node drain is not simulated); a real agent (every pod is the stand-in: it answers /healthz and a card and reads
 # nothing), a model, a task, a store; the Platform API, run pods, traces, CloudNativePG; more than two replicas. deploy/operator/tests/
@@ -52,7 +55,9 @@
 #     there to run the finalizers), the Helm release, and the namespace THIS run made or took over. A run that stops before any of that
 #     (a missing tool, a refused context or namespace) deletes and uninstalls nothing. The CRDs stay.
 #
-# Needs kubectl, helm, jq and openssl; a cluster that has the operator image already (kind load docker-image): OPERATOR_IMAGE_* (default
+# Needs kubectl, helm, jq, openssl and docker (the last to SIGKILL the holder's process through the kind node's crictl: a `kubectl delete`
+# would still send SIGTERM, and the operator would release the Lease — that is step 10's claim, not step 8's). A cluster that has the
+# operator image already (kind load docker-image): OPERATOR_IMAGE_* (default
 # operator:smoke) and the stand-in AGENT_IMAGE (default aap-stub:ci, bin/operator/tests/stub), both with pullPolicy Never. The curl pod
 # pulls docker.io/curlimages/curl, pinned by digest, from the cluster. Every wait is bounded; on a failure the cluster's state is printed.
 set -eu
@@ -80,8 +85,8 @@ esac
 # helm resolves its context by itself (the current one of the same kubeconfig, unless told): the one that was just checked is the one it uses.
 if [ -n "$context" ]; then export HELM_KUBECONTEXT="$context"; fi
 
-ns=${AAP_E2E_NAMESPACE:-aap-e2e-leader}   # the release's, watched, the primary, and where the Lease lives
-case $ns in '' | -* | *- | *[!a-z0-9-]*) die "'$ns' is not a namespace name" ;; esac
+ns=aap-e2e-leader   # the release's, watched, the primary, and where the Lease lives; leader.values.yaml names it (there is no knob:
+                    # the chart's watchNamespace and the Lease's namespace are this value, and a second source would let them differ)
 
 operator_image_repository=${OPERATOR_IMAGE_REPOSITORY:-operator}
 operator_image_tag=${OPERATOR_IMAGE_TAG:-smoke}
@@ -210,14 +215,6 @@ absent() {
     return 1
   fi
 }
-# empty_list <kubectl args...>: `kubectl <args> -o name` succeeds and names nothing. A list that fails is not an empty one.
-empty_list() {
-  if ! out=$(kubectl "$@" -o name 2>"$work/list.err"); then
-    printf '%s\n' "cannot list $*: $(head -c 300 "$work/list.err")" >&2
-    return 1
-  fi
-  [ -z "$out" ] || { printf 'still there: %s\n' "$out" >&2; return 1; }
-}
 # jqok <file> <description> [jq options...] <jq filter>: the filter is true of the JSON file.
 jqok() {
   f=$1; what=$2; shift 2
@@ -257,14 +254,24 @@ secret() {
     | jq --arg k "$made_by_key" --arg v "$made_by" '.metadata.labels = ((.metadata.labels // {}) + {($k): $v})' \
     | kubectl apply -f - >/dev/null
 }
-# read_log <pod> <file> <text only that component's log holds> <what that line is>: the log, ANSI colour stripped, in $work/<file>.
-read_log() {
-  kubectl -n "$ns" logs "$1" --tail=-1 > "$work/$2.raw" 2> "$work/$2.err" \
-    || die "kubectl logs $1 failed, so its log was not read: $(head -c 400 "$work/$2.err")"
+# log_of <pod> <file> <text only that component's log holds> <what that line is>: the log, ANSI colour stripped, in $work/<file>. Returns 0
+# when it was read and is that component's; 1 when the pod has no log to read (it is gone); 2 when the log is empty or is not that
+# component's, saying why on stderr.
+log_of() {
+  kubectl -n "$ns" logs "$1" --tail=-1 > "$work/$2.raw" 2> "$work/$2.err" || return 1
   sed "s/${esc}\[[0-9;]*m//g" "$work/$2.raw" > "$work/$2"
-  [ -s "$work/$2" ] || die "the log of $1 is empty (kubectl's stderr: '$(head -c 300 "$work/$2.err")')"
-  grep -qF -- "$3" "$work/$2" \
-    || die "the log of $1 does not hold $4 ($3), so it is not the log of that component or the component did not start: $(redact < "$work/$2" | head -c 600)"
+  if [ ! -s "$work/$2" ]; then
+    printf 'the log of %s is empty (kubectl stderr: %s)\n' "$1" "$(head -c 300 "$work/$2.err")" >&2
+    return 2
+  fi
+  if ! grep -qF -- "$3" "$work/$2"; then
+    printf 'the log of %s does not hold %s (%s), so it is not the log of that component or it did not start\n' "$1" "$4" "$3" >&2
+    return 2
+  fi
+}
+# read_log <pod> <file> <text> <what that line is>: log_of, and a failure is the run's.
+read_log() {
+  log_of "$@" || die "the log of $1 was not read: $(redact < "$work/$2" 2>/dev/null | head -c 600)"
 }
 # ---- the registry, as the curl pod reaches it ----------------------------------------------------------------------------------------
 # req <pod> <curl args...>: the status code of a request (the body in /tmp/b of the pod), or 000.
@@ -296,14 +303,15 @@ pod_ip() { jp "$ns" "pod/$1" '{.status.podIP}'; }
 # at_pod <pod> <curl args...>: the status code of a request made to THAT pod's IP (not through the Service), or 000. This is how the
 # script shows that both replicas serve the registry, and not just whichever one the Service happens to pick.
 at_pod() {
-  p=$1; shift
-  ip=$(pod_ip "$p")
-  [ -n "$ip" ] || { printf 'the pod %s has no IP\n' "$p" >&2; return 1; }
-  req "$reader" -H "Authorization: Bearer $registry_token" -H 'Accept: application/linkset+json' "$@" "http://$ip:8080/registry/v1/agents"
+  ap_pod=$1; shift
+  ap_ip=$(pod_ip "$ap_pod")
+  [ -n "$ap_ip" ] || { printf 'the pod %s has no IP\n' "$ap_pod" >&2; return 1; }
+  req "$reader" -H "Authorization: Bearer $registry_token" -H 'Accept: application/linkset+json' "$@" "http://$ap_ip:8080/registry/v1/agents"
 }
 # pod_lists <pod> <service ids>: that pod's own registry answers 200 and lists exactly those.
 pod_lists() {
-  [ "$(at_pod "$1")" = 200 ] || { printf 'the registry at %s (%s) is %s, want 200\n' "$1" "$(pod_ip "$1")" "$(at_pod "$1")" >&2; return 1; }
+  pl_code=$(at_pod "$1")
+  [ "$pl_code" = 200 ] || { printf 'the registry at %s (%s) is %s, want 200\n' "$1" "$(pod_ip "$1")" "$pl_code" >&2; return 1; }
   pod_body "$reader" > "$work/pod-registry.json"
   cat "$work/pod-registry.json" >> "$work/seen"
   got=$(jq -r '[.linkset[0].item // [] | .[] | .service[0]] | join(" ")' "$work/pod-registry.json" 2>/dev/null || true)
@@ -434,12 +442,18 @@ two_ready() {
 }
 # env_of <pod> <name>: the value of an environment variable of the operator container.
 env_of() { jp "$ns" "pod/$1" "{.spec.containers[?(@.name==\"operator\")].env[?(@.name==\"$2\")].value}"; }
-# holder: the Lease's holderIdentity, empty when nobody holds it.
-holder() { jp "$ns" "lease/$lease" '{.spec.holderIdentity}'; }
-# transitions: the Lease's leaseTransitions.
-transitions() { jp "$ns" "lease/$lease" '{.spec.leaseTransitions}'; }
-# renew_time: the Lease's renewTime, the mark of the last renewal by whoever holds it. A killed holder stops moving it.
-renew_time() { jp "$ns" "lease/$lease" '{.spec.renewTime}'; }
+# refresh_lease: the Lease, read once into $work/lease.json, with the read required. `jp` (and so a bare `holder`) cannot tell "the Lease
+# says nobody holds it" from "the Lease could not be read", and step 10's whole claim rests on that difference.
+refresh_lease() {
+  kubectl -n "$ns" get lease "$lease" -o json > "$work/lease.json" 2>"$work/err" \
+    || die "cannot read the Lease $ns/$lease: $(head -c 300 "$work/err")"
+}
+# holder: the Lease's holderIdentity from that read, empty when it says nobody holds it.
+holder() { jq -r '.spec.holderIdentity // ""' "$work/lease.json"; }
+# transitions: the Lease's leaseTransitions from that read.
+transitions() { jq -r '.spec.leaseTransitions // ""' "$work/lease.json"; }
+# renew_time: the Lease's renewTime from that read, the mark of the last renewal by whoever holds it. A killed holder stops moving it.
+renew_time() { jq -r '.spec.renewTime // ""' "$work/lease.json"; }
 # crash <pod>: SIGKILL the operator process of that pod, as a crash, a panic or a lost node would — no SIGTERM, so it releases nothing —
 # and then delete the pod with force, so the kubelet does not restart the container in place. (A restart in place would renew the Lease
 # under the same pod name: safe, since the old process is dead, but it proves no failover.) The Deployment makes a NEW pod, which must win
@@ -456,9 +470,25 @@ crash() {
   c_pid=$(docker exec "$c_node" crictl inspect "$c_cid" 2>"$work/err" | jq -r '.info.pid') \
     || die "cannot inspect $c_cid on $c_node: $(head -c 300 "$work/err")"
   case $c_pid in '' | 0 | *[!0-9]*) die "the process of $c_cid on $c_node is '$c_pid', not a pid" ;; esac
-  docker exec "$c_node" sh -c "kill -9 $c_pid" || die "cannot kill $c_pid on $c_node"
+  timeout 30 docker exec "$c_node" sh -c "kill -9 $c_pid" || die "cannot kill $c_pid on $c_node"
   kubectl -n "$ns" delete pod "$1" --grace-period=0 --force --wait=false >/dev/null \
     || die "the process of $1 was killed, but the pod could not be deleted"
+  # The force delete is not instant, and the kubelet may restart the container in between: a container of that pod that comes back would
+  # renew the Lease under the same name (safe, but no failover, and `leaseTransitions` would stay put). Wait until none is left, killing
+  # any that reappears, so the process that could renew is gone before the clock starts.
+  c_deadline=$(( $(date +%s) + 30 ))
+  while :; do
+    c_left=$(timeout 30 docker exec "$c_node" crictl ps -o json 2>/dev/null \
+      | jq -r --arg p "$1" '.containers[] | select(.labels["io.kubernetes.pod.name"] == $p) | .id' || true)
+    [ -z "$c_left" ] && return 0
+    for c_id in $c_left; do
+      c_npid=$(timeout 30 docker exec "$c_node" crictl inspect "$c_id" 2>/dev/null | jq -r '.info.pid // 0' || true)
+      case $c_npid in '' | 0 | *[!0-9]*) ;; *) timeout 30 docker exec "$c_node" sh -c "kill -9 $c_npid" >/dev/null 2>&1 || true ;; esac
+    done
+    [ "$(date +%s)" -lt "$c_deadline" ] \
+      || die "a container of $1 is still running on $c_node 30 s after the kill: $(printf '%s' "$c_left" | tr '\n' ' ')"
+    sleep 1
+  done
 }
 
 # ---- 2. the namespace ---------------------------------------------------------------------------------------------------------------
@@ -532,7 +562,8 @@ for p in $pods; do
   [ "$(env_of "$p" AAP_RECONCILE_TIMEOUT_SECS)" = 4 ] || die "$p is given AAP_RECONCILE_TIMEOUT_SECS='$(env_of "$p" AAP_RECONCILE_TIMEOUT_SECS)', want 4 (below lease - renew)"
 done
 # The Lease exists, its duration is the chart's 15 s, and its holder is one of the two pods the Deployment runs (the candidate is POD_NAME).
-kubectl -n "$ns" get lease "$lease" -o json > "$work/lease.json" 2>/dev/null || die "$ns has no Lease $lease"
+# `helm --wait` returns when the pods are Ready, which is not ordered against the campaign's first create: poll for it.
+until_ok 30 "the Lease $ns/$lease to exist" refresh_lease
 jqok "$work/lease.json" "the Lease is not 15 s with one of the two pods as its holder" \
   --arg a "$(printf '%s\n' "$pods" | sed -n 1p)" --arg b "$(printf '%s\n' "$pods" | sed -n 2p)" \
   '.spec.leaseDurationSeconds == 15 and (.spec.holderIdentity == $a or .spec.holderIdentity == $b)'
@@ -572,50 +603,57 @@ ok "the registry answers 401 without the token, lists solo with the token, and e
 
 # ---- 8. the holder killed: the survivor writes nothing until the lease expires, and the registry stays up ----------------------------
 step "8. the holder SIGKILLed: late is not reconciled by the survivor, the registry keeps answering, and the Lease moves only after it expires"
+refresh_lease
 holder_before=$(holder)
 [ -n "$holder_before" ] || die "nobody holds the Lease before the kill"
-transitions_before=$(transitions)
-renew_before=$(renew_time)
-[ -n "$renew_before" ] || die "the Lease names no renewTime before the kill"
 survivor=$(printf '%s\n' "$pods" | grep -vx "$holder_before" | sed -n 1p)
 [ -n "$survivor" ] || die "the holder $holder_before is not one of the two pods: $(printf '%s' "$pods" | tr '\n' ' ')"
 # SIGKILL, and not a delete: a deleted pod still gets its SIGTERM, and the operator would release the Lease at once (that is step 10). The
 # Lease keeps a dead holder's name until it expires.
 crash "$holder_before"
 killed_at=$(date +%s)
+# The marks are read AFTER the crash: the holder renews every retry (2 s), so a read taken before the kill can be one renewal old and the
+# next one — by the process that is about to die — would look like a takeover at 0 s. The process is gone now, so the next change is a
+# living replica's.
+refresh_lease
+transitions_before=$(transitions)
+renew_before=$(renew_time)
+[ -n "$renew_before" ] || die "the Lease names no renewTime after the kill"
+[ -n "$transitions_before" ] || die "the Lease names no leaseTransitions after the kill"
 ok "the holder $holder_before was killed with SIGKILL (no release); $survivor survives"
 # The same watch event reaches the survivor, which is a follower: it must write nothing. A new AgentService is the probe: were it
 # reconciling, a Deployment would appear within seconds.
 apply_agent late Late
-# For 8 s — inside the 15 s lease, whatever the moment of the last renewal — late has no Deployment, and the survivor's registry answers
-# every second. Then the wait for the takeover.
-n=0
-while [ "$n" -lt 8 ]; do
+# For 8 s of WALL CLOCK — inside the 15 s lease, whose earliest possible expiry is 13 s after the kill — late has no Deployment, and the
+# survivor's own registry still lists solo (and not late). The deadline is a time, not a count of iterations: each turn is several
+# kubectl round trips, and 8 of them can outlast the lease on a loaded runner.
+while [ "$(( $(date +%s) - killed_at ))" -lt 8 ]; do
   absent -n "$ns" get deployment late >/dev/null 2>&1 \
     || die "the follower made a Deployment for late $(($(date +%s) - killed_at))s after the holder was killed, inside the lease: a replica that is not the holder wrote"
-  [ "$(at_pod "$survivor")" = 200 ] \
-    || die "the registry at the survivor $survivor answered $(at_pod "$survivor") $(($(date +%s) - killed_at))s after the kill: the failover blanked it"
-  pod_body "$reader" >> "$work/seen"
+  pod_lists "$survivor" "solo" \
+    || die "the registry at the survivor $survivor did not list solo $(($(date +%s) - killed_at))s after the kill: the failover blanked it"
   sleep 1
-  n=$((n + 1))
 done
-ok "for 8 s after the kill late has no Deployment (the follower wrote nothing) and the survivor's registry answers 200 every second"
+ok "for 8 s after the kill late has no Deployment (the follower wrote nothing) and the survivor's own registry still lists solo"
 # The Lease moves to a living pod, and not before it expires: lease 15 s, the holder renewed at most retry (2 s) before it died, so no
 # takeover is possible before 13 s; 10 s is the safe lower bound. The mark is the renewTime: the dead process cannot move it, so the first
 # change is a renewal by a living one (the survivor, or the killed pod's own container after its restart — the name alone cannot tell).
 takeover=''
 while :; do
+  refresh_lease
   now_renew=$(renew_time)
   if [ -n "$now_renew" ] && [ "$now_renew" != "$renew_before" ]; then takeover=$(holder); break; fi
   elapsed=$(( $(date +%s) - killed_at ))
-  [ "$elapsed" -lt 45 ] || die "45 s after the kill the Lease was not renewed (renewTime: $(renew_time), holder: $(holder)): no living replica took it"
+  [ "$elapsed" -lt 45 ] || die "45 s after the kill the Lease was not renewed (renewTime: '$(renew_time)', holder: '$(holder)'): no living replica took it"
   sleep 1
 done
 elapsed=$(( $(date +%s) - killed_at ))
-[ "$elapsed" -ge 10 ] || die "the Lease was renewed ${elapsed}s after the kill, inside the 15 s lease: a takeover that early is a second writer"
-[ -n "$takeover" ] || die "the Lease was renewed with no holder (holderIdentity: $(holder))"
-[ -n "$(ready_pods)" ] || die "no pod of the release is Ready after the failover"
-[ "$takeover" = "$survivor" ] || printf '     the takeover went to %s (the killed pod, restarted, or its replacement), not the survivor %s\n' "$takeover" "$survivor"
+[ -n "$takeover" ] || die "the Lease was renewed with no holder (holderIdentity: '$(holder)')"
+# The floor is the lease minus one renewal: 15 s lease, the holder renewed at most retry (2 s) before it died, so no takeover is possible
+# before 13 s. 10 s is the safe lower bound; an earlier one is a second writer (or a container of the killed pod that came back, which the
+# crash waits out).
+[ "$elapsed" -ge 10 ] || die "the Lease was renewed by $takeover ${elapsed}s after the kill, inside the 15 s lease: a takeover that early is a second writer (transitions: '$(transitions)', was '$transitions_before')"
+[ "$takeover" = "$survivor" ] || printf '     the takeover went to %s (the Deployment replaced the killed pod; the survivor %s did not win the race)\n' "$takeover" "$survivor"
 # The bound is also the control of the crash: a holder that is STOPPED releases the Lease and the other takes it at once (step 10 measures
 # exactly that), so a Lease that moves only after 10 s is one that nobody released.
 transitions_after=$(transitions)
@@ -628,35 +666,35 @@ ok "the Lease moved to $takeover ${elapsed}s after the kill (not before 10 s, an
 step "9. late becomes Ready: the new holder re-passes what the follower parked"
 start=$(date +%s)
 await_ready late
-ok "late, applied while nobody was writing, is Ready $(( $(date +%s) - start ))s after the takeover (the follower parked it for its 30 s requeue)"
+late_took=$(( $(date +%s) - start ))
+# The claim the header and the README make: the new holder re-passes what the follower parked within its 30 s requeue, so within 60 s of the
+# takeover (30 s of requeue, a pod to start, a pass). Asserted, not printed.
+[ "$late_took" -le 60 ] || die "late, applied while nobody was writing, took ${late_took}s to become Ready: more than the 60 s the follower's 30 s requeue allows"
+ok "late, applied while nobody was writing, is Ready ${late_took}s after the takeover (the follower parked it for its 30 s requeue)"
 until_ok 120 "the registry to list late and solo" lists "late solo"
 
 # ---- 10. the holder stopped gracefully: the Lease is released at once, not expired -----------------------------------------------
-step "10. the new holder stopped gracefully: the Lease is cleared at once and the other pod takes it, well inside the 15 s lease"
+step "10. the new holder stopped gracefully: the Lease passes to another pod within 10 s, well inside the 15 s lease"
+refresh_lease
 holder_now=$(holder)
 [ -n "$holder_now" ] || die "nobody holds the Lease before the graceful stop"
 transitions_before=$(transitions)
 kubectl -n "$ns" delete pod "$holder_now" --wait=false >/dev/null
 stopped_at=$(date +%s)
-# SIGTERM lets the operator drain, release the Lease and exit. The release is what makes this fast: the other pod takes a free Lease at
-# once, so it holds it well before the 15 s a dead holder's expiry would take.
-released_at=''
-while :; do
-  now_holder=$(holder)
-  if [ -z "$now_holder" ] || [ "$now_holder" != "$holder_now" ]; then released_at=$(date +%s); break; fi
-  [ "$(( $(date +%s) - stopped_at ))" -lt 10 ] || die "10 s after the SIGTERM the Lease still names $holder_now: it was not released (holderIdentity: $(holder))"
-  sleep 1
-done
+# SIGTERM lets the operator drain, release the Lease and exit; another pod takes a free Lease at once, so it holds it well before the 15 s a
+# dead holder's expiry would take (13 s at the earliest, one renewal before it died). What is asserted is the handover within 10 s: whether
+# the Lease is empty for a moment in between is the implementation's business, and polling every second would not see a 200 ms gap anyway.
 held_at=''
 while :; do
+  refresh_lease
   now_holder=$(holder)
   if [ -n "$now_holder" ] && [ "$now_holder" != "$holder_now" ]; then held_at=$(date +%s); break; fi
-  [ "$(( $(date +%s) - stopped_at ))" -lt 10 ] || die "10 s after the SIGTERM nobody else holds the Lease: the survivor did not take the released one"
+  [ "$(( $(date +%s) - stopped_at ))" -lt 10 ] \
+    || die "10 s after the SIGTERM the Lease still names '${now_holder:-nobody}': it was not released (transitions: '$(transitions)')"
   sleep 1
 done
-[ "$((held_at - stopped_at))" -lt 15 ] || die "the Lease was taken $((held_at - stopped_at))s after the stop, not before the 15 s expiry: the release did not happen"
 until_ok "$ready_timeout" "two Ready replicas after the graceful stop" two_ready
-ok "the stopped holder's Lease was released $((released_at - stopped_at))s after the SIGTERM and taken by $now_holder $((held_at - stopped_at))s after it (leaseTransitions $transitions_before -> $(transitions)), and two replicas are Ready again"
+ok "the stopped holder's Lease passed to $now_holder $((held_at - stopped_at))s after the SIGTERM (leaseTransitions $transitions_before -> $(transitions)), well inside the 15 s expiry, and two replicas are Ready again"
 
 # ---- 11. no secret value, no token, no panic ----------------------------------------------------------------------------------------
 step "11. no secret value and no token in any answer or log"
@@ -666,18 +704,29 @@ count=$(printf '%s\n' "$pods" | grep -c . || true)
 # one of them is read, so a log that leaked is found whichever pod wrote it.
 [ "$count" -ge 2 ] || die "want at least two Ready pods at the end, got: $(printf '%s' "$pods" | tr '\n' ' ')"
 i=0
+logs_read=0
 for p in $pods; do
-  i=$((i + 1))
-  read_log "$p" "operator-$i.log" 'the caches are synced' "the line the operator logs when its caches have listed the cluster"
-  # The Rust panic message, and not the words: a third party's log may say "panic" or "backtrace" in a harmless sentence.
-  if grep -q 'panicked at' "$work/operator-$i.log"; then die "the log of $p holds a panic ('panicked at')"; fi
+  # A pod that is Ready while Terminating can be removed in this window: its log is then simply not read (a NotFound from kubectl logs is
+  # the pod's absence, not a defect of the operator). A log that IS read must be that component's and hold no panic.
+  if log_of "$p" "operator-$i.log" 'the caches are synced' "the line the operator logs when its caches have listed the cluster"; then
+    i=$((i + 1))
+    logs_read=$((logs_read + 1))
+    # The Rust panic message, and not the words: a third party's log may say "panic" or "backtrace" in a harmless sentence.
+    if grep -q 'panicked at' "$work/operator-$i.log"; then die "the log of $p holds a panic ('panicked at')"; fi
+  else
+    # log_of says why on stderr; 1 is the pod's absence (it went away between ready_pods and here), 2 is a log that is not the operator's.
+    rc=$?
+    [ "$rc" = 1 ] || die "a replica's log was read and is not the operator's: see above"
+    printf '     %s is gone, so its log is not read\n' "$p"
+  fi
 done
+[ "$logs_read" -ge 2 ] || die "only $logs_read replica log(s) were read: the scan would pass on nothing"
 # Every registry answer the script read is in $work/seen, and it answered many times (steps 7 to 10): a scan of nothing would prove nothing.
 [ -s "$work/seen" ] || die "no registry answer was recorded: the scan of the answers would pass on nothing"
 if grep -qF -f "$work/secrets" "$work"/operator-*.log "$work/seen"; then
   die "a secret value (the model's key, the A2A bearer, the ledger's URI or the registry's token) is in a replica's log or in an answer the registry gave"
 fi
-ok "none of the four secret values is in any of the $count replicas' logs ($(cat "$work"/operator-*.log | wc -c) bytes, each read by a kubectl logs that succeeded) or in the $(wc -c < "$work/seen") bytes of registry answers this run read; no log holds a panic"
+ok "none of the four secret values is in the $logs_read replica logs this run read ($(cat "$work"/operator-*.log | wc -c) bytes, each by a kubectl logs that succeeded) or in the $(wc -c < "$work/seen") bytes of registry answers it read; no log holds a panic"
 
 step "12. the cleanup, which undoes only what this run made"
 ok "the agents, the release in $ns and the labelled namespace go; the CRDs stay"
