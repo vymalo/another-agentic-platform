@@ -350,13 +350,32 @@ proptest! {
     /// a name and a key and ends up as that name and that key, wherever the sentinel is in them.
     #[test]
     fn a_pick_is_a_reference_whatever_its_name((form, deployment) in arb_agent(), name in "[a-z]{1,5}-[a-zA-Z0-9]{1,6}") {
+        use aap_forms::{AgentKindForm, SecretPick};
         let mut form = form;
-        if let aap_forms::AgentKindForm::Coder(c) = &mut form.agent {
-            c.github.private_key = aap_forms::SecretPick::new(format!("{SENTINEL}-{name}"), format!("{name}.{SENTINEL}"));
+        // Every secret a form can name gets the sentinel in its name and in its key: the coder's private
+        // key, and each variable of an A2A image that is a Secret key (K11b).
+        let mut picks = 0usize;
+        match &mut form.agent {
+            AgentKindForm::Coder(c) => {
+                c.github.private_key = SecretPick::new(format!("{SENTINEL}-{name}"), format!("{name}.{SENTINEL}"));
+                picks = 1;
+            }
+            AgentKindForm::Folder(_) => {}
+            AgentKindForm::A2a(a) => {
+                for (i, e) in a.env.iter_mut().enumerate() {
+                    if e.secret.is_some() {
+                        e.secret = Some(SecretPick::new(
+                            format!("{SENTINEL}-{name}-{i}"),
+                            format!("{name}-{i}.{SENTINEL}"),
+                        ));
+                        picks += 1;
+                    }
+                }
+            }
         }
         let r = to_resources(&form, &deployment, NS);
         let agent = agent_of(&r, true);
-        // The sentinel is in the objects exactly as the reference's name and key, and nowhere else.
+        // The sentinel is in the objects exactly as the references' names and keys, and nowhere else.
         let docs = agent_values(&agent);
         let mut found = 0;
         fn count(doc: &Value, found: &mut usize) {
@@ -368,9 +387,9 @@ proptest! {
             }
         }
         docs.iter().for_each(|d| count(d, &mut found));
-        let expected = if form.names_a_secret() { 2 } else { 0 };
+        let expected = if form.names_a_secret() { 2 * picks } else { 0 };
         prop_assert_eq!(found, expected);
-        if form.names_a_secret() {
+        if let AgentKindForm::Coder(_) = &form.agent {
             let key = &docs[1]["harness"]["adam"]["coder"]["github"]["app"]["privateKeySecretRef"];
             let mut want = Map::new();
             want.insert("name".into(), json!(format!("{SENTINEL}-{name}")));

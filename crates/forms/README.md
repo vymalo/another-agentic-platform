@@ -1,7 +1,7 @@
 # aap-forms
 
 The admin dashboard's forms ([§60a](../../docs/architecture/10-control-plane-and-crds.md#the-platform-api-ad-025-ad-027), slice D4):
-the **agent** (a coder or a folder agent), the **model endpoint** and the **tool server**, to and from the custom resources of
+the **agent** (a coder, a folder agent or an image that serves A2A itself, K11b), the **model endpoint** and the **tool server**, to and from the custom resources of
 [`aap-api`](../api/README.md), with the deployment's defaults filled in; the validation that names every error by its form
 field; and the YAML export.
 
@@ -34,7 +34,7 @@ sequenceDiagram
 
 | Item | What |
 |---|---|
-| `AgentForm { name, title, description, tags, suspend, model, tool_servers, allow_insecure_http, image, audience, agent }` | The agent form. `agent` is `AgentKindForm::Coder(CoderSettings)` or `Folder(FolderSettings)`: a coder has a GitHub App and no files, a folder agent has files and no GitHub App, and a body that mixes them is not a form |
+| `AgentForm { name, title, description, tags, suspend, model, tool_servers, allow_insecure_http, image, audience, agent }` | The agent form. `agent` is `AgentKindForm::Coder(CoderSettings)`, `Folder(FolderSettings)` or `A2a(A2aSettings)`: a coder has a GitHub App and no files, a folder agent has files and no GitHub App, an A2A image has its own image and no model (K11b), and a body that mixes them is not a form. `model` is `Option<ModelChoice>`: required of the first two, absent on an A2A image |
 | `ModelEndpointForm`, `BaseUrlForm::{Value, Secret}`, `ToolServerForm`, `HeaderForm` | The forms of the Models and Tool servers screens |
 | `SecretPick { secret, key }`, `OfferedKeys` | How a form names a secret: **by reference only**. `OfferedKeys::from_offered(label, &[OfferedSecret])` is what a write may name; a Secret made with `dataFrom` takes any key of valid syntax (below) |
 | `Defaults`, `Deployment`, `Defaults::deployment_for(kind, name)`, `Defaults::check()`, `Defaults::image_policy()` | The deployment's defaults (the API's configuration file), and the part of an agent they fill |
@@ -73,7 +73,10 @@ that is how a value sent in a field called `value` or `password` is stopped, not
 }
 ```
 
-A folder agent has `"agent": { "kind": "folder", "files": { "instructions.md": "…" } }`. A model endpoint is `{ name, title,
+A folder agent has `"agent": { "kind": "folder", "files": { "instructions.md": "…" } }`, and an A2A image (K11b) has no `model` and
+`"agent": { "kind": "a2a", "image": "ghcr.io/example/a2a:sha-1234567", "port": 8080, "cardPath": "/.well-known/agent-card.json",
+"healthPath": "/healthz", "env": [{ "name": "LOG_LEVEL", "value": "info" }, { "name": "API_TOKEN", "secret": { "secret": "a2a-secrets", "key": "API_TOKEN" } }] }`:
+`port`, `cardPath` and `healthPath` default to the CRD's values, and each variable is a plain `value` or a `secret`, never both. A model endpoint is `{ name, title,
 baseUrl: { "value": "https://…" } | { "secret": { secret, key } }, apiKey: { secret, key }, models }`; a tool server is `{ name, title, url,
 headers: { "Authorization": { prefix, secret: { secret, key } } }, tools, optional }`.
 
@@ -112,7 +115,7 @@ because the CRD types below it deny nothing: a typo stops the API at start, and
 `Defaults::check()` makes a sample agent of each kind from the defaults and asks `aap-domain::validate`, so a store with no instances or a
 bearer without a key is found at start and not at the first save). It holds the namespace, the offer label, the registries an agent may pin its own image from (`allowedImageRegistries`, [below](#the-image-of-an-agent)), the store (`cnpg` or a
 `secretRef` named by a pattern with `{name}`), the A2A bearer reference, `allowFrom`, `security`, and per kind: for a coder `gitAuthor`,
-`allowedRepoHosts`, `githubApiUrl`, the GitHub MCP sidecar, the work volume and the resources; for a folder agent the resources. **`runPodSizeClasses`** (D15a) is the names of the classes of the operator's run pods: what `GET /v1/info` offers and what a coder form may pick (`agent.runPodSizeClass`). Empty: this deployment has no run pods. `Defaults::check()` refuses a name that is no DNS label and a name twice, and, with classes, asks `aap-domain` about a coder that asks for the first one (it needs `coder.workVolume`: run pods mount it), so the API does not start with defaults that would refuse every coder form that picks a class. The chart writes the list from `runPodClasses`; the operator, which reads the same values, answers for a class it does not have.
+`allowedRepoHosts`, `githubApiUrl`, the GitHub MCP sidecar, the work volume and the resources; for a folder agent the resources; for an A2A image (K11b) the resources, and nothing else: the platform gives it no model and no tools. **`runPodSizeClasses`** (D15a) is the names of the classes of the operator's run pods: what `GET /v1/info` offers and what a coder form may pick (`agent.runPodSizeClass`). Empty: this deployment has no run pods. `Defaults::check()` refuses a name that is no DNS label and a name twice, and, with classes, asks `aap-domain` about a coder that asks for the first one (it needs `coder.workVolume`: run pods mount it), so the API does not start with defaults that would refuse every coder form that picks a class. The chart writes the list from `runPodClasses`; the operator, which reads the same values, answers for a class it does not have.
 
 **A default is never a field of a form and is never shown as if a person had set it.** It enters the objects as a `Deployment`, the part of an
 agent's objects that no form edits, shown on the form read-only under *Deployment defaults*:

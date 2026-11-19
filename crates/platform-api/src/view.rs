@@ -68,15 +68,15 @@ pub fn state_of(agent: &Agent) -> AgentState {
 }
 
 fn kind_of(agent: &Agent) -> Option<AgentKind> {
-    let binary = agent
-        .config
-        .as_ref()?
-        .spec
-        .pointer("/harness/adam/binary")?
-        .as_str()?;
-    match binary {
-        "adam-coder" => Some(AgentKind::Coder),
-        "adam-agent" => Some(AgentKind::Folder),
+    let config = agent.config.as_ref()?;
+    match config.spec.pointer("/harness/type")?.as_str()? {
+        // An image that serves A2A itself (AD-054, K11b): its kind is the harness's, not a binary's.
+        "a2a" => Some(AgentKind::A2a),
+        "adam-rs" => match config.spec.pointer("/harness/adam/binary")?.as_str()? {
+            "adam-coder" => Some(AgentKind::Coder),
+            "adam-agent" => Some(AgentKind::Folder),
+            _ => None,
+        },
         _ => None,
     }
 }

@@ -8,10 +8,10 @@
 use std::collections::BTreeMap;
 
 use aap_api::{
-    A2aInterface, Access, Adam, AgentConfig, AgentConfigSpec, AgentService, AgentServiceSpec,
-    AgentSource, Binary, Coder, DeletionPolicy, Empty, Environment, Folder, Github, GithubApp,
-    Harness, HarnessType, Image, Interfaces, McpServer, Model, NameRef, Registry, RunPods, Scaling,
-    Tools, UnsupportedInterface,
+    A2a, A2aEnv, A2aInterface, Access, Adam, AgentConfig, AgentConfigSpec, AgentService,
+    AgentServiceSpec, AgentSource, Binary, Coder, DeletionPolicy, Empty, Environment, Folder,
+    Github, GithubApp, Harness, HarnessType, Image, Interfaces, McpServer, Model, NameRef,
+    Registry, RunPods, Scaling, Tools, UnsupportedInterface,
 };
 use aap_ports::{Agent, AgentDraft, Kind, MANAGED_BY_DASHBOARD, MANAGED_BY_LABEL};
 use k8s_openapi::apimachinery::pkg::apis::meta::v1::ObjectMeta;
@@ -20,7 +20,8 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 use crate::agent::{
-    AgentForm, AgentKind, AgentKindForm, CoderSettings, FolderSettings, GithubAppForm, ModelChoice,
+    A2aEnvForm, A2aSettings, AgentForm, AgentKind, AgentKindForm, CoderSettings, FolderSettings,
+    GithubAppForm, ModelChoice,
 };
 use crate::defaults::{CoderDeployment, Deployment};
 use crate::represent::{Loaded, Representation, Unrepresentable, differences, dropped};
@@ -110,67 +111,88 @@ pub fn to_resources(form: &AgentForm, deployment: &Deployment, namespace: &str) 
         deletion_policy: DeletionPolicy::Retain,
     };
 
-    let (binary, agent, coder) = match &form.agent {
-        AgentKindForm::Coder(c) => (
-            Binary::AdamCoder,
-            AgentSource {
-                folder: None,
-                embedded: Some(Empty {}),
-            },
-            Some(Coder {
-                workers: c.workers,
-                max_check_cycles: None,
-                check_timeout_secs: None,
-                workspace_sweep_secs: None,
-                workspace_placement: None,
-                allowed_repo_hosts: deployment.coder.allowed_repo_hosts.clone(),
-                github_api_url: deployment.coder.github_api_url.clone(),
-                pr_draft: c.pr_draft,
-                git_author: deployment.coder.git_author.clone(),
-                create_repo_owners: c.create_repo_owners.clone(),
-                opencode_model: c.opencode_model.clone(),
-                max_access_tier: c.max_access_tier,
-                run_pods: c.run_pod_size_class.as_ref().map(|size_class| RunPods {
-                    size_class: size_class.clone(),
-                }),
-                github: Github {
-                    app: Some(GithubApp {
-                        id: c.github.app_id.clone(),
-                        owners: Some(c.github.owners.clone()),
-                        installation_id: None,
-                        private_key_secret_ref: c.github.private_key.to_ref(),
-                    }),
-                    token: None,
-                },
-            }),
-        ),
-        AgentKindForm::Folder(f) => (
-            Binary::AdamAgent,
-            AgentSource {
-                folder: Some(Folder {
-                    files: Some(f.files.clone()),
-                    config_map_ref: None,
-                }),
-                embedded: None,
-            },
-            None,
-        ),
-    };
-
-    let config_spec = AgentConfigSpec {
-        harness: Harness {
+    let harness = match &form.agent {
+        AgentKindForm::Coder(c) => Harness {
             kind: HarnessType::AdamRs,
             adam: Some(Adam {
-                binary,
-                agent,
-                coder,
+                binary: Binary::AdamCoder,
+                agent: AgentSource {
+                    folder: None,
+                    embedded: Some(Empty {}),
+                },
+                coder: Some(Coder {
+                    workers: c.workers,
+                    max_check_cycles: None,
+                    check_timeout_secs: None,
+                    workspace_sweep_secs: None,
+                    workspace_placement: None,
+                    allowed_repo_hosts: deployment.coder.allowed_repo_hosts.clone(),
+                    github_api_url: deployment.coder.github_api_url.clone(),
+                    pr_draft: c.pr_draft,
+                    git_author: deployment.coder.git_author.clone(),
+                    create_repo_owners: c.create_repo_owners.clone(),
+                    opencode_model: c.opencode_model.clone(),
+                    max_access_tier: c.max_access_tier,
+                    run_pods: c.run_pod_size_class.as_ref().map(|size_class| RunPods {
+                        size_class: size_class.clone(),
+                    }),
+                    github: Github {
+                        app: Some(GithubApp {
+                            id: c.github.app_id.clone(),
+                            owners: Some(c.github.owners.clone()),
+                            installation_id: None,
+                            private_key_secret_ref: c.github.private_key.to_ref(),
+                        }),
+                        token: None,
+                    },
+                }),
             }),
             a2a: None,
         },
-        model: Some(Model {
-            model: form.model.model.clone(),
+        AgentKindForm::Folder(f) => Harness {
+            kind: HarnessType::AdamRs,
+            adam: Some(Adam {
+                binary: Binary::AdamAgent,
+                agent: AgentSource {
+                    folder: Some(Folder {
+                        files: Some(f.files.clone()),
+                        config_map_ref: None,
+                    }),
+                    embedded: None,
+                },
+                coder: None,
+            }),
+            a2a: None,
+        },
+        AgentKindForm::A2a(a) => Harness {
+            kind: HarnessType::A2a,
+            adam: None,
+            a2a: Some(A2a {
+                image: Image {
+                    reference: a.image.clone(),
+                },
+                port: a.port,
+                card_path: a.card_path.clone(),
+                health_path: a.health_path.clone(),
+                env: a
+                    .env
+                    .iter()
+                    .map(|e| A2aEnv {
+                        name: e.name.clone(),
+                        value: e.value.clone(),
+                        secret_key_ref: e.secret.as_ref().map(SecretPick::to_ref),
+                    })
+                    .collect(),
+            }),
+        },
+    };
+
+    let config_spec = AgentConfigSpec {
+        harness,
+        model: form.model.as_ref().map(|m| Model {
+            model: m.model.clone(),
             endpoint_ref: Some(NameRef {
-                name: form.model.endpoint.clone(),
+                name: m.endpoint.clone(),
             }),
             base_url: None,
             api_key_secret_ref: None,
@@ -265,18 +287,19 @@ pub fn load_agent(agent: &Agent) -> Loaded<AgentView> {
     let (Some(service), Some(config_spec)) = (service, config_spec) else {
         return Loaded::yaml_only(managed_by, reasons);
     };
-    // The dashboard's forms are the adam-rs harness's: an A2A image's fields (AD-054) have no form, and
-    // a form that showed them as an adam agent's would write a different object back.
-    let Some(adam) = &config_spec.harness.adam else {
+
+    // Every harness a form can say: the adam-rs ones (a coder, a folder agent) and an image that serves
+    // A2A itself (K11b, AD-054). A harness of one type that lacks its own block is an object a form cannot
+    // say, and says so: the form always writes the block of the type it names.
+    let Some((form, deployment)) = extract(&agent.service.name, &service, &config_spec) else {
         reasons.push(Unrepresentable {
             object: Kind::AgentConfig,
-            path: "spec.harness.a2a".to_owned(),
-            reason: "a harness other than adam-rs has no form: edit the YAML".to_owned(),
+            path: format!("spec.harness.{}", harness_block(&config_spec)),
+            reason: "the harness names a type and has no block of it: edit the YAML".to_owned(),
         });
         return Loaded::yaml_only(managed_by, reasons);
     };
 
-    let (form, deployment) = extract(&agent.service.name, &service, &config_spec, adam);
     let again = to_resources(&form, &deployment, &agent.service.namespace);
     differences(
         Kind::AgentService,
@@ -299,48 +322,74 @@ pub fn load_agent(agent: &Agent) -> Loaded<AgentView> {
     }
 }
 
-/// The form and the deployment's part an agent's objects hold, as best they can be said. Where an object
-/// has no such thing (a coder without a GitHub App) the form holds the empty one, and the comparison of
-/// [`load_agent`] finds it.
+/// The block a harness of `config`'s type must have: what an object is missing, for the reason that names it.
+fn harness_block(config: &AgentConfigSpec) -> &'static str {
+    match config.harness.kind {
+        HarnessType::AdamRs => "adam",
+        HarnessType::A2a => "a2a",
+    }
+}
+
+/// The form and the deployment's part an agent's objects hold, as best they can be said; `None` when the
+/// harness names a type and has no block of it. Where an object has no such thing (a coder without a GitHub
+/// App) the form holds the empty one, and the comparison of [`load_agent`] finds it.
 fn extract(
     name: &str,
     service: &AgentServiceSpec,
     config: &AgentConfigSpec,
-    adam: &Adam,
-) -> (AgentForm, Deployment) {
-    let coder = adam.coder.as_ref();
-    let kind = match adam.binary {
-        Binary::AdamCoder => {
-            let app = coder.and_then(|c| c.github.app.as_ref());
-            AgentKindForm::Coder(CoderSettings {
-                github: GithubAppForm {
-                    app_id: app.map(|a| a.id.clone()).unwrap_or_default(),
-                    private_key: app.map_or_else(
-                        || SecretPick::new("", ""),
-                        |a| SecretPick::from_ref(&a.private_key_secret_ref),
-                    ),
-                    owners: app.and_then(|a| a.owners.clone()).unwrap_or_default(),
-                },
-                create_repo_owners: coder
-                    .map(|c| c.create_repo_owners.clone())
+) -> Option<(AgentForm, Deployment)> {
+    let adam = config.harness.adam.as_ref();
+    let coder = adam.and_then(|a| a.coder.as_ref());
+    let kind = match config.harness.kind {
+        HarnessType::AdamRs => match adam?.binary {
+            Binary::AdamCoder => {
+                let app = coder.and_then(|c| c.github.app.as_ref());
+                AgentKindForm::Coder(CoderSettings {
+                    github: GithubAppForm {
+                        app_id: app.map(|a| a.id.clone()).unwrap_or_default(),
+                        private_key: app.map_or_else(
+                            || SecretPick::new("", ""),
+                            |a| SecretPick::from_ref(&a.private_key_secret_ref),
+                        ),
+                        owners: app.and_then(|a| a.owners.clone()).unwrap_or_default(),
+                    },
+                    create_repo_owners: coder
+                        .map(|c| c.create_repo_owners.clone())
+                        .unwrap_or_default(),
+                    workers: coder.and_then(|c| c.workers),
+                    pr_draft: coder.and_then(|c| c.pr_draft),
+                    opencode_model: coder.and_then(|c| c.opencode_model.clone()),
+                    max_access_tier: coder.and_then(|c| c.max_access_tier),
+                    run_pod_size_class: coder
+                        .and_then(|c| c.run_pods.as_ref())
+                        .map(|r| r.size_class.clone()),
+                })
+            }
+            Binary::AdamAgent => AgentKindForm::Folder(FolderSettings {
+                files: adam
+                    .and_then(|a| a.agent.folder.as_ref())
+                    .and_then(|f| f.files.clone())
                     .unwrap_or_default(),
-                workers: coder.and_then(|c| c.workers),
-                pr_draft: coder.and_then(|c| c.pr_draft),
-                opencode_model: coder.and_then(|c| c.opencode_model.clone()),
-                max_access_tier: coder.and_then(|c| c.max_access_tier),
-                run_pod_size_class: coder
-                    .and_then(|c| c.run_pods.as_ref())
-                    .map(|r| r.size_class.clone()),
+            }),
+        },
+        HarnessType::A2a => {
+            let a2a = config.harness.a2a.as_ref()?;
+            AgentKindForm::A2a(A2aSettings {
+                image: a2a.image.reference.clone(),
+                port: a2a.port,
+                card_path: a2a.card_path.clone(),
+                health_path: a2a.health_path.clone(),
+                env: a2a
+                    .env
+                    .iter()
+                    .map(|e| A2aEnvForm {
+                        name: e.name.clone(),
+                        value: e.value.clone(),
+                        secret: e.secret_key_ref.as_ref().map(SecretPick::from_ref),
+                    })
+                    .collect(),
             })
         }
-        Binary::AdamAgent => AgentKindForm::Folder(FolderSettings {
-            files: adam
-                .agent
-                .folder
-                .as_ref()
-                .and_then(|f| f.files.clone())
-                .unwrap_or_default(),
-        }),
     };
     let form = AgentForm {
         name: name.to_owned(),
@@ -348,19 +397,14 @@ fn extract(
         description: service.description.clone(),
         tags: service.registry.tags.clone(),
         suspend: service.suspend,
-        model: ModelChoice {
-            endpoint: config
-                .model
+        model: config.model.as_ref().map(|m| ModelChoice {
+            endpoint: m
+                .endpoint_ref
                 .as_ref()
-                .and_then(|m| m.endpoint_ref.as_ref())
                 .map(|r| r.name.clone())
                 .unwrap_or_default(),
-            model: config
-                .model
-                .as_ref()
-                .map(|m| m.model.clone())
-                .unwrap_or_default(),
-        },
+            model: m.model.clone(),
+        }),
         tool_servers: config.tools.mcp_servers.keys().cloned().collect(),
         allow_insecure_http: config.tools.allow_insecure_http,
         image: config
@@ -385,7 +429,7 @@ fn extract(
             github_api_url: c.github_api_url.clone(),
         }),
     };
-    (form, deployment)
+    Some((form, deployment))
 }
 
 impl AgentView {

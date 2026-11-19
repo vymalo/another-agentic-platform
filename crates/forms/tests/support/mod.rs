@@ -8,10 +8,10 @@ use aap_api::{
     VolumeScope, VolumeSource,
 };
 use aap_forms::{
-    AgentForm, AgentKind, AgentKindForm, BaseUrlForm, CoderDefaults, CoderDeployment,
-    CoderSettings, Defaults, Deployment, FolderDefaults, FolderSettings, GithubAppForm, HeaderForm,
-    ModelChoice, ModelEndpointForm, OfferedKeys, Resources, SecretPick, StoreDefault,
-    ToolServerForm,
+    A2aEnvForm, A2aSettings, AgentForm, AgentKind, AgentKindForm, BaseUrlForm, CoderDefaults,
+    CoderDeployment, CoderSettings, Defaults, Deployment, FolderDefaults, FolderSettings,
+    GithubAppForm, HeaderForm, ModelChoice, ModelEndpointForm, OfferedKeys, Resources, SecretPick,
+    StoreDefault, ToolServerForm,
 };
 use aap_ports::{
     Agent, Kind, MANAGED_BY_DASHBOARD, MANAGED_BY_LABEL, OfferedSecret, ResourceVersion, Stored,
@@ -123,6 +123,9 @@ pub fn defaults() -> Defaults {
         folder: FolderDefaults {
             resources: Some(requests("100m", "256Mi")),
         },
+        a2a: aap_forms::A2aDefaults {
+            resources: Some(requests("100m", "256Mi")),
+        },
         allowed_image_registries: None,
         run_pod_size_classes: RUN_POD_CLASSES.iter().map(|c| (*c).to_owned()).collect(),
         max_access_tier: aap_api::AccessTierCap::Auto,
@@ -148,10 +151,10 @@ pub fn coder_form(name: &str) -> AgentForm {
         description: Some("Coding task to verified pull request.".to_owned()),
         tags: vec!["coding".to_owned(), "git".to_owned()],
         suspend: false,
-        model: ModelChoice {
+        model: Some(ModelChoice {
             endpoint: "gateway".to_owned(),
             model: "coding-model".to_owned(),
-        },
+        }),
         tool_servers: ["websearch".to_owned()].into(),
         allow_insecure_http: true,
         image: None,
@@ -179,10 +182,10 @@ pub fn folder_form(name: &str) -> AgentForm {
         description: None,
         tags: vec!["chat".to_owned()],
         suspend: false,
-        model: ModelChoice {
+        model: Some(ModelChoice {
             endpoint: "gateway".to_owned(),
             model: "chat-model".to_owned(),
-        },
+        }),
         tool_servers: BTreeSet::new(),
         allow_insecure_http: false,
         image: None,
@@ -195,6 +198,41 @@ pub fn folder_form(name: &str) -> AgentForm {
                 ),
                 ("skills/review/SKILL.md".to_owned(), "# Review\n".to_owned()),
             ]),
+        }),
+    }
+}
+
+/// An image that serves A2A itself (K11b, AD-054): its own image, no model, and the two ways to give it a
+/// variable.
+pub fn a2a_form(name: &str) -> AgentForm {
+    AgentForm {
+        name: name.to_owned(),
+        title: "A2A".to_owned(),
+        description: Some("An image that serves A2A itself.".to_owned()),
+        tags: vec!["a2a".to_owned()],
+        suspend: false,
+        model: None,
+        tool_servers: BTreeSet::new(),
+        allow_insecure_http: false,
+        image: None,
+        audience: Some(vec![format!("agent.use:{name}")]),
+        agent: AgentKindForm::A2a(A2aSettings {
+            image: "registry.invalid/a2a:sha-1234567".to_owned(),
+            port: aap_api::A2A_PORT,
+            card_path: aap_api::A2A_CARD_PATH.to_owned(),
+            health_path: aap_api::A2A_HEALTH_PATH.to_owned(),
+            env: vec![
+                A2aEnvForm {
+                    name: "LOG_LEVEL".to_owned(),
+                    value: Some("info".to_owned()),
+                    secret: None,
+                },
+                A2aEnvForm {
+                    name: "API_TOKEN".to_owned(),
+                    value: None,
+                    secret: Some(SecretPick::new("a2a-secrets", "API_TOKEN")),
+                },
+            ],
         }),
     }
 }
@@ -235,6 +273,7 @@ pub fn offered() -> OfferedKeys {
             offer("agent-models", "GATEWAY_BASE_URL"),
             offer("agent-models", "GATEWAY_API_KEY"),
             offer("agent-tools", "SEARCH_MCP_TOKEN"),
+            offer("a2a-secrets", "API_TOKEN"),
         ],
     )
 }
@@ -485,10 +524,52 @@ fn arb_folder_settings() -> impl Strategy<Value = FolderSettings> {
     )
 }
 
+fn arb_a2a_env() -> impl Strategy<Value = Vec<A2aEnvForm>> {
+    prop::collection::vec(
+        (
+            "[A-Z][A-Z0-9_]{0,9}",
+            prop_oneof![2 => multiline(10).prop_map(Some), 1 => Just(None)],
+            pick(),
+        ),
+        0..3,
+    )
+    .prop_map(|entries| {
+        // A name once: a variable of the same name twice is a form validation refuses.
+        let mut seen = BTreeSet::new();
+        entries
+            .into_iter()
+            .filter(|(name, _, _)| seen.insert(name.clone()))
+            .map(|(name, value, secret)| A2aEnvForm {
+                name,
+                secret: value.is_none().then_some(secret),
+                value,
+            })
+            .collect()
+    })
+}
+
+fn arb_a2a_settings() -> impl Strategy<Value = A2aSettings> {
+    (
+        "[a-z]{3,8}\\.invalid/[a-z]{3,8}:[a-z0-9]{1,6}",
+        1i32..=65535,
+        "/[a-z][a-z0-9/._-]{0,12}",
+        "/[a-z][a-z0-9/._-]{0,12}",
+        arb_a2a_env(),
+    )
+        .prop_map(|(image, port, card_path, health_path, env)| A2aSettings {
+            image,
+            port,
+            card_path,
+            health_path,
+            env,
+        })
+}
+
 pub fn arb_agent_form() -> impl Strategy<Value = AgentForm> {
     let agent = prop_oneof![
         arb_coder_settings().prop_map(AgentKindForm::Coder),
         arb_folder_settings().prop_map(AgentKindForm::Folder),
+        arb_a2a_settings().prop_map(AgentKindForm::A2a),
     ];
     (
         (ident(), text(), prop::option::of(multiline(60))),
@@ -516,16 +597,20 @@ pub fn arb_agent_form() -> impl Strategy<Value = AgentForm> {
                 (image, audience),
                 agent,
             )| {
+                // An A2A image gets no model and no tools from the platform (AD-054): its forms here are
+                // valid by construction, as the others are, and a form that carries them anyway is a test
+                // of its own (`round_trip`: a form a validation refuses is still a form).
+                let a2a = matches!(agent, AgentKindForm::A2a(_));
                 AgentForm {
                     name,
                     title,
                     description,
                     tags: tags.into_iter().collect(),
                     suspend,
-                    model: ModelChoice { endpoint, model },
-                    tool_servers,
-                    allow_insecure_http: insecure,
-                    image,
+                    model: (!a2a).then_some(ModelChoice { endpoint, model }),
+                    tool_servers: if a2a { BTreeSet::new() } else { tool_servers },
+                    allow_insecure_http: !a2a && insecure,
+                    image: if a2a { None } else { image },
                     audience,
                     agent,
                 }
@@ -630,7 +715,7 @@ pub fn arb_deployment(kind: AgentKind) -> impl Strategy<Value = Deployment> {
                 },
             )
             .boxed(),
-        AgentKind::Folder => Just(CoderDeployment::default()).boxed(),
+        AgentKind::Folder | AgentKind::A2a => Just(CoderDeployment::default()).boxed(),
     };
     (
         arb_store(),
@@ -651,7 +736,7 @@ pub fn arb_deployment(kind: AgentKind) -> impl Strategy<Value = Deployment> {
         coder,
     )
         .prop_map(
-            |(
+            move |(
                 store,
                 a2a_bearer,
                 allow_from,
@@ -661,6 +746,12 @@ pub fn arb_deployment(kind: AgentKind) -> impl Strategy<Value = Deployment> {
                 github_mcp,
                 coder,
             )| {
+                // An A2A image gets no work volume and no tools from the platform (AD-054): its deployment
+                // part holds neither.
+                let (volumes, github_mcp) = match kind {
+                    AgentKind::A2a => (Vec::new(), None),
+                    _ => (volumes, github_mcp),
+                };
                 Deployment {
                     store,
                     a2a_bearer,

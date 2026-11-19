@@ -6,8 +6,8 @@ mod support;
 
 use aap_forms::{
     AgentForm, AgentKind, AgentKindForm, BaseUrlForm, Deployment, FormError, FormTarget,
-    HeaderForm, ImagePolicy, ModelEndpointForm, OfferedKeys, Referents, SecretPick, ToolServerForm,
-    from_object_errors, validate_agent, validate_model, validate_tool_server,
+    HeaderForm, ImagePolicy, ModelChoice, ModelEndpointForm, OfferedKeys, Referents, SecretPick,
+    ToolServerForm, from_object_errors, validate_agent, validate_model, validate_tool_server,
 };
 use aap_ports::{FieldError, Kind, OfferedSecret};
 use proptest::prelude::*;
@@ -70,14 +70,19 @@ fn fields(result: Result<aap_forms::Resources, Vec<FormError>>) -> Vec<String> {
 fn coder_settings(form: &mut AgentForm) -> &mut aap_forms::CoderSettings {
     match &mut form.agent {
         AgentKindForm::Coder(c) => c,
-        AgentKindForm::Folder(_) => panic!("a folder"),
+        AgentKindForm::Folder(_) | AgentKindForm::A2a(_) => panic!("not a coder"),
     }
+}
+
+/// The model of a coder or a folder agent: every form of those kinds has one.
+fn model_mut(form: &mut AgentForm) -> &mut aap_forms::ModelChoice {
+    form.model.as_mut().expect("a coder has a model")
 }
 
 fn folder_files(form: &mut AgentForm) -> &mut std::collections::BTreeMap<String, String> {
     match &mut form.agent {
         AgentKindForm::Folder(f) => &mut f.files,
-        AgentKindForm::Coder(_) => panic!("a coder"),
+        AgentKindForm::Coder(_) | AgentKindForm::A2a(_) => panic!("not a folder"),
     }
 }
 
@@ -111,19 +116,25 @@ fn what_the_dashboard_accepts_the_operator_resolves() {
     let accepted = std::cell::Cell::new(0usize);
     let mut runner = TestRunner::new(config(CASES));
     runner
-        .run(&arb_agent(), |(form, _d)| {
+        .run(&arb_agent(), |(mut form, _d)| {
             // A tool server the generated form names must exist, and a coder's secret key must be offered.
             let tools: Vec<_> = form
                 .tool_servers
                 .iter()
                 .map(|n| stored(Kind::ToolProvider, n, tool_form(n).draft().spec, true))
                 .collect();
-            let models = [stored(
-                Kind::ModelEndpoint,
-                &form.model.endpoint,
-                model_form(&form.model.endpoint).draft().spec,
-                true,
-            )];
+            let models: Vec<_> = form
+                .model
+                .iter()
+                .map(|m| {
+                    stored(
+                        Kind::ModelEndpoint,
+                        &m.endpoint,
+                        model_form(&m.endpoint).draft().spec,
+                        true,
+                    )
+                })
+                .collect();
             let externals = aap_forms::externals(&models, &tools, None, &classes());
             let offer: Vec<OfferedSecret> = form
                 .secret_picks()
@@ -131,8 +142,10 @@ fn what_the_dashboard_accepts_the_operator_resolves() {
                 .map(|(_, p)| offer(&p.secret, &p.key))
                 .collect();
             let offered = OfferedKeys::from_offered(aap_ports::OFFER_LABEL, &offer);
-            let mut form = form;
-            form.allow_insecure_http = true;
+            // The tool servers of the sample are plain http; an A2A image gets no tools at all.
+            if form.kind() != AgentKind::A2a {
+                form.allow_insecure_http = true;
+            }
             let deployment = defaults().deployment_for(form.kind(), &form.name);
             if let Ok(resources) = validate_agent(
                 &form,
@@ -172,12 +185,13 @@ proptest! {
         match noise {
             0 => form.name = "Bad Name".to_owned(),
             1 => form.title = String::new(),
-            2 => form.model.endpoint = "nothere".to_owned(),
+            // A model that is not there — and, on an A2A image, a model at all.
+            2 => form.model = Some(aap_forms::ModelChoice { endpoint: "nothere".to_owned(), model: "m".to_owned() }),
             3 => form.audience = Some(vec!["a b".to_owned()]),
             4 => form.image = Some("has space".to_owned()),
             5 => { form.tool_servers.insert("missing".to_owned()); }
             6 => form.tags = vec!["Bad".to_owned()],
-            _ => form.allow_insecure_http = false,
+            _ => form.tags = vec!["ok".to_owned(), "ok".to_owned()],
         }
         let result = validate_agent(&form, &d, NS, &Referents::default(), &OfferedKeys::default(), &ImagePolicy::any_registry());
         let errors = result.err().unwrap_or_default();
@@ -244,22 +258,22 @@ fn each_rule_of_the_coder_screen_names_its_field() {
         (
             "no endpoint",
             "model.endpoint",
-            Box::new(|f| f.model.endpoint = String::new()),
+            Box::new(|f| model_mut(f).endpoint = String::new()),
         ),
         (
             "an endpoint that is not a name",
             "model.endpoint",
-            Box::new(|f| f.model.endpoint = "Bad Name".into()),
+            Box::new(|f| model_mut(f).endpoint = "Bad Name".into()),
         ),
         (
             "an endpoint that is not there",
             "model.endpoint",
-            Box::new(|f| f.model.endpoint = "nothere".into()),
+            Box::new(|f| model_mut(f).endpoint = "nothere".into()),
         ),
         (
             "no alias",
             "model.model",
-            Box::new(|f| f.model.model = String::new()),
+            Box::new(|f| model_mut(f).model = String::new()),
         ),
         (
             "a tool server that is not there",
@@ -453,10 +467,133 @@ fn each_rule_of_the_folder_screen_names_its_field() {
 }
 
 #[test]
+fn each_rule_of_the_a2a_screen_names_its_field() {
+    // K11b: the rules of an image that serves A2A itself, each with the form field to fix.
+    fn a2a_settings(form: &mut AgentForm) -> &mut aap_forms::A2aSettings {
+        match &mut form.agent {
+            AgentKindForm::A2a(a) => a,
+            _ => panic!("an a2a form"),
+        }
+    }
+    type Change = Box<dyn Fn(&mut AgentForm)>;
+    let table: Vec<(&str, &str, Change)> = vec![
+        (
+            "no image",
+            "agent.image",
+            Box::new(|f| a2a_settings(f).image = String::new()),
+        ),
+        (
+            "an image with a space",
+            "agent.image",
+            Box::new(|f| a2a_settings(f).image = "has space".into()),
+        ),
+        (
+            "port zero",
+            "agent.port",
+            Box::new(|f| a2a_settings(f).port = 0),
+        ),
+        (
+            "port 65536",
+            "agent.port",
+            Box::new(|f| a2a_settings(f).port = 65536),
+        ),
+        (
+            "a card path that is not a path",
+            "agent.cardPath",
+            Box::new(|f| a2a_settings(f).card_path = "card.json".into()),
+        ),
+        (
+            "a card path with a query",
+            "agent.cardPath",
+            Box::new(|f| a2a_settings(f).card_path = "/card?x=1".into()),
+        ),
+        (
+            "a health path with a space",
+            "agent.healthPath",
+            Box::new(|f| a2a_settings(f).health_path = "/health z".into()),
+        ),
+        (
+            "a variable name that is not one",
+            "agent.env[0].name",
+            Box::new(|f| a2a_settings(f).env[0].name = "1LOG".into()),
+        ),
+        (
+            "a variable named twice",
+            "agent.env[1].name",
+            Box::new(|f| {
+                let a = a2a_settings(f);
+                a.env[1].name = a.env[0].name.clone();
+            }),
+        ),
+        (
+            "a variable with a value and a secret",
+            "agent.env[0]",
+            Box::new(|f| {
+                a2a_settings(f).env[0].secret = Some(SecretPick::new("a2a-secrets", "API_TOKEN"));
+            }),
+        ),
+        (
+            "a variable with neither",
+            "agent.env[0]",
+            Box::new(|f| a2a_settings(f).env[0].value = None),
+        ),
+        (
+            "a variable that names a key that is not offered",
+            "agent.env[1].secret",
+            Box::new(|f| {
+                a2a_settings(f).env[1].secret = Some(SecretPick::new("not-offered", "K"));
+            }),
+        ),
+        (
+            "a model, which an A2A image has none of",
+            "model",
+            Box::new(|f| {
+                f.model = Some(ModelChoice {
+                    endpoint: "gateway".into(),
+                    model: "chat-model".into(),
+                })
+            }),
+        ),
+        (
+            "the agent's own image, which is the adam-rs one",
+            "image",
+            Box::new(|f| f.image = Some("registry.invalid/agent:tag".into())),
+        ),
+        (
+            "a tool server, which the platform does not give it",
+            "toolServers",
+            Box::new(|f| {
+                f.tool_servers.insert("websearch".into());
+            }),
+        ),
+        (
+            "a plain http allowance, which is about tools",
+            "allowInsecureHttp",
+            Box::new(|f| f.allow_insecure_http = true),
+        ),
+    ];
+    for (what, field, change) in table {
+        let mut form = a2a_form("a2a");
+        change(&mut form);
+        let got = fields(check(&form));
+        assert!(
+            got.contains(&field.to_owned()),
+            "{what}: expected {field} among {got:?}"
+        );
+    }
+    // And the untouched form is accepted.
+    assert!(
+        check(&a2a_form("a2a")).is_ok(),
+        "{:?}",
+        fields(check(&a2a_form("a2a")))
+    );
+}
+
+#[test]
 fn every_error_is_reported_at_once_and_a_field_is_reported_once() {
     let mut form = coder_form("Coder");
     form.title.clear();
-    form.model.endpoint = "nothere".into();
+    model_mut(&mut form).endpoint = "nothere".into();
     coder_settings(&mut form).workers = Some(99);
     let errors = check(&form).unwrap_err();
     let names: Vec<&str> = errors.iter().map(|e| e.field.as_str()).collect();

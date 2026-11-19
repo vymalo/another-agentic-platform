@@ -13,8 +13,8 @@ use aap_platform_client::{Client, Collection, Options, Token};
 use aap_ports::testkit::Foreign;
 use aap_ports::{AgentObjects, Kind, Precondition, SharedKind};
 use api::{
-    Api, TOKEN, agent_docs, agent_docs_with, file, folder_form, model_doc, model_form, now, rows,
-    seed_gateway_and_chat, tool_doc, tool_form,
+    Api, TOKEN, a2a_docs, agent_docs, agent_docs_with, file, folder_form, model_doc, model_form,
+    now, rows, seed_gateway_and_chat, tool_doc, tool_form,
 };
 use common::set;
 use serde_json::{Value, json};
@@ -224,6 +224,22 @@ fn apply_creates_then_unchanged() {
     );
     assert!(!second.stderr.contains("> PUT"), "{}", second.stderr);
     assert_eq!(api_etag(&api, "chat"), before);
+}
+
+#[test]
+fn apply_creates_an_a2a_agent() {
+    // K11b (AD-054): an object of the third kind is a form, so `apply` sends it as one, and a second
+    // apply writes nothing.
+    let api = Api::start("apply-a2a");
+    let docs = a2a_docs("a2a");
+    let path = file(&api.dir, "a2a.yaml", &docs);
+    let f = path.to_str().unwrap();
+    let first = api.ctl(&["apply", "-f", f, "--verbose"], Some(TOKEN));
+    assert_eq!(first.code, 0, "{}", first.stderr);
+    assert_eq!(first.stdout, "agent/a2a created\n");
+    let second = api.ctl(&["apply", "-f", f], Some(TOKEN));
+    assert_eq!(second.code, 0, "{}", second.stderr);
+    assert_eq!(second.stdout, "agent/a2a unchanged\n");
 }
 
 #[test]

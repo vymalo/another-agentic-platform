@@ -663,7 +663,11 @@ async fn the_offered_keys_are_listed_and_a_value_is_never_among_them() {
     let body = r.json();
     assert_eq!(body["offerLabel"], "agents.vymalo.com/offer");
     let keys = body["keys"].as_array().unwrap();
-    assert_eq!(keys.len(), 4);
+    assert_eq!(
+        keys.len(),
+        5,
+        "the four of the sample agents and the freeform one"
+    );
     assert!(
         keys.contains(
             &json!({ "secret": "freeform", "key": null, "externalSecret": "freeform-es" })

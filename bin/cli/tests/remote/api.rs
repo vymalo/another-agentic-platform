@@ -195,6 +195,7 @@ impl Api {
         let objects = MemoryObjects::in_namespace(NS);
         objects.offer("agent-models", "GATEWAY_API_KEY", "agent-models-es");
         objects.offer("agent-tools", "SEARCH_TOKEN", "agent-tools-es");
+        objects.offer("a2a-secrets", "API_TOKEN", "a2a-secrets-es");
         let auth = MemoryAuthenticator::new();
         auth.grant(TOKEN, "tester", all_permissions());
         let hook = Arc::new(Mutex::new(None));
@@ -439,6 +440,31 @@ pub fn tool_doc(name: &str) -> Value {
 /// by the API writes.
 pub fn agent_docs(name: &str, title: &str) -> Vec<Value> {
     agent_docs_with(name, title, &[])
+}
+
+/// The two objects of an image that serves A2A itself (K11b, AD-054), as the API writes them with the
+/// deployment's defaults: no model, its own image, and a variable of each kind.
+pub fn a2a_docs(name: &str) -> Vec<Value> {
+    let form: AgentForm = serde_json::from_value(json!({
+        "name": name,
+        "title": "A2A",
+        "tags": ["a2a"],
+        "agent": {
+            "kind": "a2a",
+            "image": "ghcr.io/example/a2a:sha-1234567",
+            "env": [
+                { "name": "LOG_LEVEL", "value": "info" },
+                { "name": "API_TOKEN", "secret": { "secret": "a2a-secrets", "key": "API_TOKEN" } }
+            ]
+        }
+    }))
+    .unwrap();
+    let deployment = defaults().deployment_for(form.kind(), name);
+    let resources = to_resources(&form, &deployment, NS);
+    vec![
+        serde_json::to_value(&resources.config).unwrap(),
+        serde_json::to_value(&resources.service).unwrap(),
+    ]
 }
 
 pub fn agent_docs_with(name: &str, title: &str, tools: &[&str]) -> Vec<Value> {

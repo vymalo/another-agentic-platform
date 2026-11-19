@@ -59,6 +59,10 @@ pub struct Defaults {
     #[serde(default)]
     pub folder: FolderDefaults,
 
+    /// What an image that serves A2A itself gets (K11b).
+    #[serde(default)]
+    pub a2a: A2aDefaults,
+
     /// The registries an agent may pin its own image from (*Advanced*, §60a), as hosts (`ghcr.io`,
     /// `registry.example:5000`; an image with no registry is `docker.io`'s). **Absent: any registry**, the
     /// tag or digest still required. **A list: only those. An empty list: none**, so no agent may pin its
@@ -177,6 +181,16 @@ pub struct FolderDefaults {
     pub resources: Option<ResourceRequirements>,
 }
 
+/// The defaults of an image that serves A2A itself (`harness.type: a2a`, AD-054, K11b): its own image, so
+/// the platform sets none of its variables and gives it nothing but what a pod needs.
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct A2aDefaults {
+    /// CPU and memory of the agent container.
+    #[serde(default)]
+    pub resources: Option<ResourceRequirements>,
+}
+
 impl Defaults {
     /// The rule about the image an agent pins for itself.
     pub fn image_policy(&self) -> ImagePolicy {
@@ -229,6 +243,9 @@ impl Defaults {
             }
             AgentKind::Folder => {
                 deployment.resources.clone_from(&self.folder.resources);
+            }
+            AgentKind::A2a => {
+                deployment.resources.clone_from(&self.a2a.resources);
             }
         }
         deployment

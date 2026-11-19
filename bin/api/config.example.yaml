@@ -85,6 +85,12 @@ defaults:
       requests:
         cpu: 100m
         memory: 256Mi
+  # An image that serves A2A itself (K11b) gets the same, and nothing else: the platform gives it no model and no tools.
+  a2a:
+    resources:
+      requests:
+        cpu: 100m
+        memory: 256Mi
   # The registries an agent may pin its own image from. REQUIRED, and at least one: a person who may write agents can name a
   # folder agent's own image, and the pod of that image is handed the model endpoint's API key and the A2A bearer. An entry is
   # a registry host (and port, when it has one) and does not bound repositories: ghcr.io admits every image on ghcr.io, so

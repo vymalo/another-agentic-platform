@@ -91,7 +91,7 @@ fn a_tool_server_made_plain_http_breaks_the_agents_that_do_not_allow_it_and_says
 fn an_agent_that_was_already_refused_is_not_blamed_on_the_change() {
     let mut broken = coder_form("broken");
     broken.allow_insecure_http = false;
-    broken.model.endpoint = "no-such-model".to_owned();
+    broken.model.as_mut().expect("a model").endpoint = "no-such-model".to_owned();
     // The tool server is plain http already: the agent was invalid before the change as it is after.
     let plain = stored(
         Kind::ToolProvider,
