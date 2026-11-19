@@ -3,6 +3,8 @@
 //! [`aap_ports::StoreProvisioner`] (AD-020).
 //!
 //! * [`Operator`] wires the two controllers to their triggers and runs them.
+//! * [`Operator::with_leader`] gates every pass on a [`LeaderElection`](aap_ports::LeaderElection) (K7a): a
+//!   replica that does not hold the election writes nothing, and looks again in [`FOLLOWER_RECHECK`].
 //! * [`services_of_endpoint`] and [`services_of_provider`] say which services a changed `ModelEndpoint` or
 //!   `ToolProvider` concerns, for the watches the operator runs.
 //! * [`reconcile_endpoint`] and [`reconcile_provider`] write the status of the shared kinds (K2): who uses them, whether they
@@ -39,7 +41,7 @@ pub use context::{
 pub use directory::ReflectorDirectory;
 pub use error::Error;
 pub use metrics::{Metrics, name as metric};
-pub use operator::{Operator, Readiness};
+pub use operator::{FOLLOWER_RECHECK, Operator, Readiness};
 pub use options::{Options, Probe, RegistryMode, Resync};
 pub use service::{reconcile_service, service_error_policy};
 pub use shared::{

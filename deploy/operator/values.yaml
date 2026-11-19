@@ -19,6 +19,17 @@ image:
   pullPolicy: IfNotPresent
 imagePullSecrets: []
 
+# K7: the operator's replicas. One (the default): no leader election, `Recreate`. More than one: the replicas campaign for a
+# `coordination.k8s.io/v1` Lease in the primary namespace, only its holder reconciles (the others keep their caches and serve the
+# registry), and a PodDisruptionBudget keeps one through a drain. `replicaCount` is refused: the key is `replicas`.
+replicas: 1
+
+# K7: the lease's timers, in seconds, the client-go defaults. Read only when replicas > 1; refused unless retry < renew < lease.
+leaderElection:
+  leaseSecs: 15
+  renewSecs: 10
+  retrySecs: 2
+
 # The namespaces the operator watches, and where its Role and RoleBinding are made (K6a/K6b, AD-055): one of each per namespace,
 # and never a ClusterRole. Empty: the one of watchNamespace below, else the release's namespace. The operator watches every one (K6b).
 watchNamespaces: []
@@ -348,6 +359,7 @@ metrics:
 logLevel: info
 tuning: {}
   # concurrency: 4          # AAP_CONCURRENCY: services reconciled at once, per controller and per watched namespace
+  # reconcileTimeoutSecs: 4 # AAP_RECONCILE_TIMEOUT_SECS: the longest one pass may take; with replicas > 1 it is 4 by default and must be below leaseSecs - renewSecs
   # resyncSecs: 300         # AAP_RESYNC_SECS: timer of a service that is Ready or Suspended
   # resyncPendingSecs: 15   # AAP_RESYNC_PENDING_SECS: timer of one that is rolling out, unwell or held by a foreign object
 

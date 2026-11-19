@@ -433,6 +433,16 @@ jobs:
           export AAP_TEST_HOST_ADDR
           # Every case has a namespace, Secrets and object names of its own, so they run side by side.
           cargo test -p aap-operator --test cluster --locked -- --test-threads=4
+      # The leader election's own cases: a real API server's 409 on a stale resourceVersion, a killed holder replaced
+      # after the lease, a released lease taken at once. The crate's fake is not an API server.
+      - name: The leader election against the cluster
+        env:
+          AAP_TEST_REQUIRE_CLUSTER: "1"
+        run: |
+          set -eu
+          export AAP_TEST_KUBECONFIG="$HOME/.kube/config"
+          kubectl --kubeconfig "$AAP_TEST_KUBECONFIG" create namespace aap-test --dry-run=client -o yaml | kubectl apply -f -
+          cargo test -p aap-leader-kubernetes --test cluster --locked -- --test-threads=4
       # An operator rolled out before the CRDs chart: the API server does not serve the shared kinds. The case deletes
       # the CRDs of ModelEndpoint and ToolProvider (and installs them again), so it runs alone, after the others.
       - name: The operator without the CRDs of the shared kinds

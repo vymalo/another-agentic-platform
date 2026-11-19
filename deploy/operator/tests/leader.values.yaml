@@ -1,0 +1,16 @@
+# The seventh golden render (K7a): two replicas, the leader election on, the lease in `agents` (the primary, where the
+# Role is), and a registry token. The default `replicas: 1` render is the other six, and it is unchanged.
+replicas: 2
+watchNamespace: agents
+
+registry:
+  tokenSecret:
+    name: e2e-registry-token
+    key: token
+
+networkPolicy:
+  registry:
+    allowFrom:
+      - podSelector:
+          matchLabels:
+            aap-e2e/registry-reader: "true"

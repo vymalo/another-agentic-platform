@@ -49,6 +49,30 @@ scoped_id! {
     StoreId
 }
 
+/// The identity of one candidate of a leader election (K7a): the pod's name, so that two replicas of the
+/// operator are two candidates. It is written as the lease's `holderIdentity` and compared byte for byte, so
+/// no type of this crate looks inside it beyond [`CandidateId::as_str`].
+#[derive(Clone, Debug, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
+pub struct CandidateId(String);
+
+impl CandidateId {
+    /// A candidate named `name` (a pod name, or a name a test makes).
+    pub fn new(name: impl Into<String>) -> Self {
+        Self(name.into())
+    }
+
+    /// The name, as the lease holds it.
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+impl fmt::Display for CandidateId {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(&self.0)
+    }
+}
+
 /// A reference to one key of a Secret: **the only form in which a secret travels** (AD-024). No
 /// type of this crate has a field for a secret's value, so no provider can be handed one.
 #[derive(Clone, Debug, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]

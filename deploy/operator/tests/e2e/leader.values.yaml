@@ -1,0 +1,28 @@
+# The values the kind end-to-end of leader election (K7b, leader-e2e.sh) installs the operator chart with. Two replicas
+# campaign for one `coordination.k8s.io/v1` Lease in the watched namespace (`aap-e2e-leader`, the release's and the only one
+# watched); only the holder reconciles, the other keeps its caches and serves the registry, and a PodDisruptionBudget of
+# one keeps the lease through a drain. The registry is on, with an existing Secret the script makes with a random value, and
+# only the pods labelled `aap-e2e/registry-reader: "true"` (the script's curl pod) may read it.
+#
+# Nothing here is a secret. The cluster is a throwaway one; no value below is advice for a deployment (deploy/operator/README.md,
+# the `replicas` and `leaderElection` rows, is).
+
+replicas: 2
+
+watchNamespace: aap-e2e-leader
+
+tuning:
+  # A pending service is looked at again every 5 s instead of 15: the job waits for pods, not for a timer.
+  resyncPendingSecs: 5
+
+registry:
+  tokenSecret:
+    name: e2e-registry-token
+    key: token
+
+networkPolicy:
+  registry:
+    allowFrom:
+      - podSelector:
+          matchLabels:
+            aap-e2e/registry-reader: "true"

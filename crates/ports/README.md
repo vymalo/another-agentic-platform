@@ -4,7 +4,7 @@ The provider seams of the v0 operator ([§59a](../../docs/architecture/10-contro
 [§22](../../docs/architecture/05-runtime.md#22-runtimeprovider), AD-020): three traits and the neutral
 types that cross them; and the two seams of the admin dashboard's Platform API
 ([§60a](../../docs/architecture/10-control-plane-and-crds.md#the-platform-api-ad-025-ad-027), slice D4): `AgentObjects` and
-`Authenticator`.
+`Authenticator`; and, for several replicas of the operator (K7a), `LeaderElection`.
 
 | Trait | Does | Implemented by (later slices) |
 |---|---|---|
@@ -13,6 +13,7 @@ types that cross them; and the two seams of the admin dashboard's Platform API
 | `AgentDirectory` | lists the agents the platform runs, for the registry | the controller's reflector (S5), read by `aap-registry` (S7); `MemoryDirectory` here |
 | `AgentObjects` | the dashboard's custom resources: apply, get, list and delete an agent (`AgentService` + `AgentConfig`), a `ModelEndpoint`, a `ToolProvider`; list the offered secret references (D4) | [`objects-kubernetes`](../objects-kubernetes/README.md) (D5); `MemoryObjects` here |
 | `Authenticator` | a bearer token to a `Principal`: the subject and the values of the roles claim (D4) | [`auth-oidc`](../auth-oidc/README.md) (D6); `MemoryAuthenticator` here |
+| `LeaderElection` | who holds the election several replicas of the operator are candidates of (K7a): the identity, `is_leader`, the campaign and its changes | [`leader-kubernetes`](../leader-kubernetes/README.md) (a `Lease`); `MemoryElection` here; `AlwaysLeader` here |
 
 **No Kubernetes type, no driver type and no secret value appears in any signature.** A secret has no
 field anywhere in this crate: it travels as a `SecretRef { name, key }` and a provider hands it to the
@@ -66,6 +67,12 @@ trait AgentObjects: Send + Sync {                       // D4: the Platform API'
 }
 trait Authenticator: Send + Sync {                      // D4: a bearer token to a person
     async fn authenticate(&self, token: Option<&str>) -> Result<Principal, AuthError>;
+}
+trait LeaderElection: Send + Sync {                     // K7a: who writes, of several replicas
+    fn candidate(&self) -> &CandidateId;
+    fn is_leader(&self) -> bool;
+    fn run(&self, shutdown: BoxFuture<'static, ()>) -> BoxFuture<'static, ()>;
+    fn following(&self) -> BoxStream<'static, Leadership>;
 }
 ```
 
@@ -272,11 +279,32 @@ and an empty one would be an authenticated nobody.
 | `Invalid(InvalidToken)` | 401 | `Invalid` | the token does not verify. The reason is **a closed enum** (`Malformed`, `BadSignature`, `UnknownKey`, `Expired`, `WrongIssuer`, `WrongAudience`, `MissingClaim`), each a fixed word for a log (`expired`; `auth-oidc` also says `Expired` of a token whose `nbf` is still ahead: the set has no word for "not yet valid"): it cannot hold the token or a claim, whatever an implementer forgets |
 | `Unavailable(source)` | 503 | `Transient` | the issuer's keys cannot be fetched. Never a 401: a good token is not told it is bad. The source is the failure to fetch the keys: **an implementation must not put the token, a claim or a header of it in it** (a fetch for `kid` X that fails must not say X). The suite reads the message, the debug form and the whole chain of sources |
 
+## `LeaderElection` (K7a)
+
+Several replicas of the operator may run: all of them keep their caches and serve `/healthz`, `/readyz`,
+`/metrics` and the registry, and **only the one that holds the election writes**. The seam says who holds it, runs
+the campaign, and reports its changes; the operator gates every pass on `is_leader()`.
+
+| Type | What |
+|---|---|
+| `CandidateId` | the identity of one candidate: the pod's name, written as the lease's `holderIdentity` and compared byte for byte. `new(name)`, `as_str()`, `Display` |
+| `Leadership::{Leader, Follower}` | whether this candidate holds it now. `is_leader()` |
+| `LeaderElection` | `candidate()`, `is_leader()`, `run(shutdown)` (campaign until the shutdown, then release), `following()` (every change, the current one first) |
+| `AlwaysLeader` | the one-replica case and the operator's default: always the leader, `run` waits for the shutdown, `following` yields one `Leader`. Its default candidate is `operator` |
+
+`is_leader()` is **a hint, not a lock**: a pass that reads it and then writes may have lost the election in
+between, and the implementation's own design (a lease that expires, with a margin before it does) is what keeps
+two writers apart. `run` is the only call that changes anything; `following` is what a composition root may log
+or gate on (the operator does not subscribe to it: a follower re-passes every object every 30 s, so a new holder
+picks them up within that bound). The trait is object-safe (boxed futures, no generic method), because the
+operator holds one `Arc<dyn LeaderElection>` and names no implementation.
+
 ## The neutral types
 
 | Type | What |
 |---|---|
 | `RuntimeId`, `StoreId` | scope (a namespace) and name of the service. The same on every call |
+| `CandidateId` | **K7a**: the identity of one candidate of an election, the pod's name; the lease's `holderIdentity` |
 | `OwnerHandle` | **opaque** token the controller got from the object and a provider understands (owner references). Never read by the controller, never part of a digest |
 | `SecretRef { name, key }` | the only form of a secret |
 | `RuntimeSpec` | what to make: `workloads`, `file_sets`, `network`, `suspend`, `deletion`, `owner`, `run_pods` (D15a, below), and the `digest` the pods are stamped with |
@@ -324,7 +352,8 @@ Off by default (the controller and the providers depend on the traits only). Wit
 * **Conformance macros**, in the style of `adam-store-testkit`:
   `runtime_provider_conformance!(make)` (14 cases), `store_provisioner_conformance!(make)` (7),
   `agent_directory_conformance!(make)` (6), `agent_objects_conformance!(make)` (35, D4, K2 added `the_status_of_a_shared_object_is_read_back` and `a_status_write_does_not_invalidate_the_token_of_a_shared_object`; the one list of its cases is `agent_objects_cases!`, which a backend's own tests may use to run them all another way: `aap-objects-kubernetes` derives its `Role` from every request of every case) and
-  `authenticator_conformance!(make)` (8, D4; its sentinel token is JWT-shaped, three base64url parts with the sentinel as `kid`, `iss`, `aud`, `sub` and signature). `make` is a path to `async fn() -> Option<T>`; `None` skips
+  `authenticator_conformance!(make)` (8, D4; its sentinel token is JWT-shaped, three base64url parts with the sentinel as `kid`, `iss`, `aud`, `sub` and signature) and
+  `leader_election_conformance!(make)` (7, K7a: one candidate holds, the loser writes nothing, never two holders, a killed holder is replaced, a stopped candidate gives the lease up, `following` reports the change, two names are two elections; every wait is bounded). `make` is a path to `async fn() -> Option<T>`; `None` skips
   the suite, and `AAP_TEST_REQUIRE_BACKEND=1` turns the skip into a failure (CI sets it for the suites that
   need a cluster). The macros expand to `#[tokio::test]`, so the crate that uses them needs `tokio` with
   `macros` and `rt`.
@@ -349,14 +378,15 @@ Off by default (the controller and the providers depend on the traits only). Wit
 * `sample_spec(id)`: a spec that uses every kind of thing a provider must handle (a sidecar, literal,
   secret and pod-name variables, a per-replica volume, a file set, a secret file, probes). Providers reuse
   it in their own tests.
-* **`memory::{MemoryRuntime, MemoryStore, MemoryDirectory, MemoryObjects, MemoryAuthenticator}`**: in-memory implementations that pass
-  their own suites (`tests/memory.rs`, with and without `suspend`, with and without CloudNativePG) and serve the
+* **`memory::{MemoryRuntime, MemoryStore, MemoryDirectory, MemoryObjects, MemoryAuthenticator, MemoryElection}`**: in-memory implementations that pass
+  their own suites (`tests/memory.rs`, with and without `suspend`, with and without CloudNativePG; `tests/leader.rs` for the election), and serve the
   controller's unit tests: `set_foreign` (the adoption guard), `force_status` (a crash loop),
   `set_unavailable`, `set_cnpg_installed`, `set_cluster_ready`, `set_ready`. `MemoryObjects` refuses what is not an object and a
   `configRef` that is not the agent's name, and nothing else (no CEL); a write that changes nothing keeps the version (as a server-side
   apply of an unchanged object does: *verified 2026-10-16*), and has the finalizer hooks of `ObjectsUnderTest` (a delete of a service with the finalizer leaves it `deleting`
   and does not wait) and `remove` (an object removed as an administrator would, with no precondition). `MemoryAuthenticator` is a table of tokens (`with_token`, `grant`,
-  `set_unavailable`): it checks no signature.
+  `set_unavailable`): it checks no signature. `MemoryElection` **really competes**: one holder, a renewal time and short timings (600/200/50 ms, `MemoryTimings`),
+  so a suite exercises a takeover and a demotion; `kill` drops the holder (there is no lease left to expire).
 
 ```rust
 async fn make() -> Option<MemoryRuntime> {
@@ -370,7 +400,7 @@ aap_ports::runtime_provider_conformance!(make);
 `cargo test -p aap-ports`:
 
 * `tests/memory.rs`: the seven suites against the in-memory implementations (48 cases, then 35 for `MemoryObjects` and 8 for
-  `MemoryAuthenticator`).
+  `MemoryAuthenticator`); `tests/leader.rs`: the election suite against `MemoryElection` (7 cases).
 * `tests/contract.rs`: `RuntimeSpec::check` names each broken invariant (and each of run pods, 15), a spec round-trips through
   JSON (and a spec without run pods is the JSON it was), every error has the class that decides retrying, the suites **fail** what they must (a provider
   that materialises a secret, a `watch` that never speaks), the adoption guard, a forced status, an

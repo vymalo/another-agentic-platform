@@ -1,6 +1,7 @@
 //! The provider seams of the v0 operator (§59a, AD-020): [`RuntimeProvider`], [`StoreProvisioner`]
 //! and [`AgentDirectory`], and the neutral types that cross them; and, for the admin dashboard (§60a),
-//! the two seams of the Platform API: [`AgentObjects`] and [`Authenticator`].
+//! the two seams of the Platform API: [`AgentObjects`] and [`Authenticator`]; and, for several replicas of
+//! the operator (K7a), [`LeaderElection`].
 //!
 //! No Kubernetes type, no driver type and no secret value appears in any signature. The traits have
 //! implementations in their own crates (`runtime-kubernetes`, `store-secret`, `store-cnpg`, the
@@ -14,6 +15,7 @@ mod directory;
 mod error;
 mod events;
 mod ids;
+mod leader;
 mod objects;
 mod runtime;
 mod spec;
@@ -31,7 +33,8 @@ pub use events::{
     AgentEvent, AgentEvents, Attribution, EventObject, EventType, MAX_EVENTS, MAX_LABEL_CHARS,
     MAX_MESSAGE_CHARS, newest_first, shown,
 };
-pub use ids::{OwnerHandle, RuntimeId, SecretRef, StoreId};
+pub use ids::{CandidateId, OwnerHandle, RuntimeId, SecretRef, StoreId};
+pub use leader::{AlwaysLeader, LeaderElection, Leadership};
 pub use objects::{
     ARGO_TRACKING_ANNOTATION, Agent, AgentDraft, AgentObjects, ETag, FieldError, Kind,
     MANAGED_BY_DASHBOARD, MANAGED_BY_LABEL, OFFER_LABEL, ObjectsError, OfferedSecret, Owner,

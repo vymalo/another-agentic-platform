@@ -5,10 +5,11 @@
 #   sh deploy/operator/tests/render-check.sh                    (from the repository root)
 #   UPDATE_GOLDEN=1 sh deploy/operator/tests/render-check.sh    rewrites tests/golden/*.yaml, for a deliberate change
 #
-# Six renders are golden: the values of the Application on netcup (examples/netcup.values.yaml), the other shape those
+# Seven renders are golden: the values of the Application on netcup (examples/netcup.values.yaml), the other shape those
 # values do not make (tests/secret.values.yaml), the defaults, the Platform API component on (tests/api.values.yaml), run pods on
-# (tests/runpods.values.yaml) and traces of both on (tests/otel.values.yaml; the others have the API, run pods, traces and the tool
-# probe off, and the first three are equal to what they were before any existed).
+# (tests/runpods.values.yaml), traces of both on (tests/otel.values.yaml) and two replicas with the leader election on
+# (tests/leader.values.yaml; the others have the API, run pods, traces, the election and the tool probe off, and the first three are
+# equal to what they were before any existed).
 # Also checked: deploy/operator-crds against deploy/crds, and the API's Role against crates/objects-kubernetes/tests/rbac.yaml, the
 # Role that crate is tested under.
 set -eu
@@ -129,6 +130,7 @@ check "the render of tests/secret.values.yaml equals tests/golden/secret.yaml" g
 check "the default render equals tests/golden/default.yaml" golden default
 check "the Platform API render (tests/api.values.yaml) equals tests/golden/api.yaml" golden api -f "$here/api.values.yaml"
 check "the run pods render (tests/runpods.values.yaml) equals tests/golden/runpods.yaml" golden runpods -f "$here/runpods.values.yaml"
+check "the leader election render (tests/leader.values.yaml) equals tests/golden/leader.yaml" golden leader -f "$here/leader.values.yaml"
 
 # ---- The default render: no registry, nothing a secret could be in --------------------------------------------------------
 render
@@ -208,6 +210,36 @@ check "the binding is to the operator's own service account" dhas RoleBinding aa
 render --set storeCnpg=false
 check "storeCnpg=false: no right on CloudNativePG" rules_are "$base_rules"
 check "storeCnpg=false: no mention of CloudNativePG" lacks 'cnpg'
+
+# ---- K7: two replicas, a Lease, and a PodDisruptionBudget ---------------------------------------------------------------
+render --set replicas=2
+check "two replicas: a rolling update, one at a time" dhas Deployment aap-operator '^  replicas: 2$' 'type: RollingUpdate' 'maxSurge: 1' 'maxUnavailable: 0'
+check "two replicas: a PodDisruptionBudget of one, on the operator's pods" dhas PodDisruptionBudget aap-operator 'maxUnavailable: 1'
+check "two replicas: the election's variables, the lease in the primary namespace, the client-go timers" \
+  dhas Deployment aap-operator 'name: LEADER_ELECTION_ENABLED' 'value: "true"' 'name: LEADER_ELECTION_NAME' 'value: "aap-operator"' \
+    'name: LEADER_ELECTION_NAMESPACE' 'value: "another-agentic-system"' 'name: LEADER_ELECTION_LEASE_SECS' 'value: "15"' \
+    'name: LEADER_ELECTION_RENEW_SECS' 'value: "10"' 'name: LEADER_ELECTION_RETRY_SECS' 'value: "2"'
+check "two replicas: the Role holds the lease's verbs, get update narrowed to the lease and create, and no delete" \
+  rules_are "$base_rules
+$cnpg_rule
+[coordination.k8s.io] [leases] [get, update]
+[coordination.k8s.io] [leases] [create]"
+k7a_lease_only_in_the_primary() {
+  render --set replicas=2 --set-json 'watchNamespaces=["team-a","team-b"]' || return 1
+  dcount Role aap-operator 'resourceNames: \[aap-operator\]' 1 \
+    && dcount Role aap-operator '^  namespace: team-a$' 1 && dcount Role aap-operator '^  namespace: team-b$' 1 \
+    && [ "$(doc Role aap-operator | awk '/^  namespace: team-a$/ { a = 1; next } /^  namespace: team-b$/ { a = 0 } a && /resourceNames: \[aap-operator\]/ { n++ } END { print n + 0 }')" -eq 1 ]
+}
+check "two replicas and two namespaces: the lease rule is in the primary namespace only" k7a_lease_only_in_the_primary
+render
+check "one replica (the default): no PodDisruptionBudget and no lease rule" lacks '^kind: PodDisruptionBudget$|coordination.k8s.io'
+render -f "$here/leader.values.yaml"
+check "the leader election's values render two replicas and the PDB" dhas Deployment aap-operator '^  replicas: 2$' && dhas PodDisruptionBudget aap-operator 'maxUnavailable: 1'
+check "the leader election's values cap a pass at 4 s, below leaseSecs - renewSecs" dhas Deployment aap-operator 'name: AAP_RECONCILE_TIMEOUT_SECS' 'value: "4"'
+render -f "$here/e2e/leader.values.yaml"
+check "the leader election's end-to-end values render two replicas, the PDB and the lease in its namespace" \
+  dhas Deployment aap-operator '^  replicas: 2$' 'value: "aap-e2e-leader"' && dhas PodDisruptionBudget aap-operator 'maxUnavailable: 1'
+render
 render --set serviceAccount.create=false --set serviceAccount.name=elsewhere
 check "serviceAccount.create=false: no ServiceAccount is made" lacks '^kind: ServiceAccount$'
 check "serviceAccount.create=false: the binding and the pod name the given one" \
@@ -642,7 +674,24 @@ check "K1: a cache claim that is not a claim name is refused" refused 'is not th
 render
 
 # ---- What is refused -------------------------------------------------------------------------------------------------------
-check "a replica count is refused (no leader election in v0)" refused 'no leader election' --set replicaCount=2
+check "replicaCount is refused: the key is replicas" refused 'replicaCount' --set replicaCount=2
+check "replicas: 0 is refused" refused 'replicas must be a whole number' --set replicas=0
+check "replicas: a non-number is refused" refused 'replicas must be a whole number' --set replicas=abc
+check "leaderElection: an unknown key is refused" refused 'leaderElection.foo is not a setting' --set leaderElection.foo=1
+check "leaderElection: renewSecs must be below leaseSecs" refused 'retrySecs < renewSecs < leaseSecs' --set replicas=2 --set leaderElection.renewSecs=15
+check "replicas: a fraction is refused" refused 'replicas must be a whole number' --set replicas=2.5
+# `--set replicas=2.5` is a *string* to Helm (strvals parses no float), so the type check refuses it; a values file, or
+# `--set-json`, is a float, and only the whole-number check refuses that one. Both must be refused: the second is the
+# shape that would render `replicas: 2.5` and leave the Deployment to the API server.
+check "replicas: a fraction that is a float, as a values file gives it, is refused too" refused 'replicas must be a whole number' --set-json 'replicas=2.5'
+check "leaderElection: a retry of 0 is refused (the loop's retry is at least a second)" refused 'each at least 1' --set replicas=2 --set leaderElection.retrySecs=0
+check "with the election on, a pass that could outlive the lease margin is refused" refused 'reconcileTimeoutSecs must be below leaseSecs - renewSecs' --set replicas=2 --set tuning.reconcileTimeoutSecs=5
+check "with the election on, the probe's budget must fit the pass" refused 'toolProbe.timeoutSecs' --set replicas=2 \
+  --set-json 'toolProbe.to=[{"namespaceSelector":{"matchLabels":{"a":"b"}}}]' \
+  --set-json 'toolProbe.dns.to=[{"namespaceSelector":{"matchLabels":{"a":"b"}}}]' --set toolProbe.timeoutSecs=5
+render --set replicas=2 --set tuning=null
+check "tuning: null is the defaults, not a nil dereference" dhas Deployment aap-operator 'name: AAP_RECONCILE_TIMEOUT_SECS' 'value: "4"'
+render
 check "an empty image tag is refused" refused 'image.tag is required' --set image.tag=
 check "the latest tag is refused" refused 'must not be latest' --set image.tag=latest
 check "a malformed digest is refused" refused 'image.digest must be sha256' --set image.digest=abc

@@ -11,6 +11,7 @@ members = [
     "crates/objects-kubernetes",
     "crates/auth-oidc",
     "crates/registry",
+    "crates/leader-kubernetes",
     "crates/controller",
     "crates/platform-api",
     "crates/platform-client",
@@ -42,6 +43,7 @@ aap-store-cnpg = { path = "crates/store-cnpg" }
 aap-objects-kubernetes = { path = "crates/objects-kubernetes" }
 aap-auth-oidc = { path = "crates/auth-oidc" }
 aap-registry = { path = "crates/registry" }
+aap-leader-kubernetes = { path = "crates/leader-kubernetes" }
 aap-controller = { path = "crates/controller" }
 aap-platform-api = { path = "crates/platform-api" }
 aap-platform-client = { path = "crates/platform-client" }

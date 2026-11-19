@@ -16,7 +16,8 @@ use std::time::Duration;
 use aap_controller::{Operator, Options, OwnerOf, Resync};
 use aap_ports::memory::MemoryStore;
 use aap_ports::{
-    AgentDirectory, Issue, IssueReason, OwnerHandle, Phase, Role, RuntimeId, RuntimeStatus,
+    AgentDirectory, Issue, IssueReason, LeaderElection, OwnerHandle, Phase, Role, RuntimeId,
+    RuntimeStatus,
 };
 use serde_json::{Value, json};
 use support::Fake;
@@ -1048,4 +1049,277 @@ async fn the_tracer_given_to_the_operator_reaches_the_passes_of_both_controllers
         .await
         .expect("the operator stops when told to")
         .unwrap();
+}
+
+// ------------------------------------------------------------- leader election (K7a)
+
+/// An operator on `fake` whose passes are gated by `leader`, started when `ready` says its watches are where the
+/// case needs them.
+async fn start_led_by(
+    fake: Fake,
+    options: Options,
+    leader: Arc<dyn aap_ports::LeaderElection>,
+    ready: impl Fn(&Fake) -> bool,
+) -> Running {
+    let runtime = Scripted::new();
+    let owner: OwnerOf = Arc::new(|_| OwnerHandle::none());
+    let operator = Operator::new(
+        fake.client(),
+        runtime.clone(),
+        MemoryStore::new(),
+        owner,
+        options,
+    )
+    .with_leader(leader);
+    let directory = operator.directory();
+    let readiness = operator.readiness();
+    let metrics = operator.metrics();
+    let (stop, stopped) = oneshot::channel::<()>();
+    let operator_done = tokio::spawn(operator.run(async move {
+        let _ = stopped.await;
+    }));
+    eventually("the controllers' watches", || ready(&fake)).await;
+    Running {
+        fake,
+        runtime,
+        operator_done,
+        stop,
+        directory,
+        readiness,
+        metrics,
+    }
+}
+
+/// The options of the leader-election cases (K7a): one namespace, timers an hour away (only a trigger or the
+/// follower's own recheck makes a pass), the default image.
+fn leader_case_options() -> Options {
+    Options {
+        watch_namespaces: Some(vec!["team".to_owned()]),
+        resync: Resync {
+            settled: Duration::from_secs(3600),
+            pending: Duration::from_secs(3600),
+            not_installed: Duration::from_secs(3600),
+        },
+        default_agent_image: Some(DEFAULT_IMAGE.to_owned()),
+        pass_timeout: Duration::from_secs(30),
+        ..Options::default()
+    }
+}
+
+/// K7a: two replicas of one operator, one election. Both keep their caches and watch the cluster; **only the
+/// holder's passes write**. When the holder is killed, the other one takes the election over, and it is the one
+/// that writes the next change.
+///
+/// The campaigns are started by hand, as `bin/operator` runs them beside `Operator::run` (the sixth arm of its
+/// `select!`).
+#[tokio::test(start_paused = true)]
+async fn two_replicas_one_leader() {
+    use aap_ports::memory::MemoryElection;
+    use aap_ports::testkit::{LeaderElectionUnderTest, unique};
+
+    let fake = Fake::new();
+    let election = MemoryElection::new(&unique("election"), "a");
+    let follower = LeaderElectionUnderTest::candidate(&election, "b");
+
+    // The first replica's campaign, alone, holds the election.
+    let (stop_campaign_a, stopped_a) = oneshot::channel::<()>();
+    let campaign_a = tokio::spawn(election.clone().run(Box::pin(async move {
+        let _ = stopped_a.await;
+    })));
+    eventually("the first candidate to hold the election", || {
+        election.is_leader()
+    })
+    .await;
+
+    let first = start_led_by(
+        fake.clone(),
+        leader_case_options(),
+        Arc::new(election.clone()),
+        |fake| fake.watchers_in(SERVICES, "team") >= 1 && fake.watchers_in(CONFIGS, "team") >= 2,
+    )
+    .await;
+    let (service, config) = example("chat", "team");
+    fake.put(CONFIGS, config);
+    fake.put(SERVICES, service);
+    eventually("the holder's pass to make the agent Ready", || {
+        first.state("team", "chat").as_deref() == Some("Ready")
+    })
+    .await;
+
+    // The second replica joins: it lists and watches the cluster too, and writes nothing. Its runtime reports a
+    // **failure**, so its pass would write a different status if it ran at all: what stops it is the election,
+    // and not the fact that the status it would write is the one that is there.
+    fake.clear_calls();
+    let (stop_campaign_b, stopped_b) = oneshot::channel::<()>();
+    let campaign_b = tokio::spawn(follower.clone().run(Box::pin(async move {
+        let _ = stopped_b.await;
+    })));
+    let second = start_led_by(
+        fake.clone(),
+        leader_case_options(),
+        Arc::new(follower.clone()),
+        |fake| fake.watchers_in(SERVICES, "team") >= 2 && fake.watchers_in(CONFIGS, "team") >= 4,
+    )
+    .await;
+    second.runtime.script(Some(RuntimeStatus {
+        phase: Phase::Failed,
+        replicas: 0,
+        issues: vec![Issue {
+            role: Role::All,
+            reason: IssueReason::CrashLoop,
+            message: "the follower would write this".to_owned(),
+        }],
+    }));
+    assert!(
+        second.readiness.is_ready(),
+        "a follower's caches list, and it is ready: /readyz is not the election"
+    );
+    // ... and its registry serves the agents from those caches, so a failover does not blank it.
+    let entry = second
+        .directory
+        .get("team", "chat")
+        .await
+        .expect("the follower's directory is synced")
+        .expect("the follower's registry serves the agent from its own cache");
+    assert!(
+        !entry.blocked,
+        "the holder made the agent Ready, and the follower's cache says so"
+    );
+    // Several of the follower's 30 s rechecks, and several renewals of the holder's.
+    tokio::time::sleep(Duration::from_secs(120)).await;
+    assert!(!follower.is_leader(), "the second replica holds it too");
+    assert!(
+        fake.writes().is_empty(),
+        "the follower wrote: {:?}",
+        fake.writes()
+    );
+    second.runtime.script(None);
+
+    // The holder is killed: the second replica takes the election over.
+    election.kill().await;
+    eventually("the second replica to hold the election", || {
+        follower.is_leader()
+    })
+    .await;
+    fake.clear_calls();
+
+    // And it is the one that writes the next change: the first replica's passes write nothing, for ever after.
+    let before = first.digest("team", "chat");
+    let mut config = fake.get(CONFIGS, "team", "chat").unwrap();
+    config["spec"]["harness"]["adam"]["agent"]["folder"]["files"]["instructions.md"] =
+        json!("---\nname: chat\n---\nChanged while the second replica held the election.");
+    fake.put(CONFIGS, config);
+    within(
+        Duration::from_secs(120),
+        "the new holder to write the change",
+        || {
+            fake.writes()
+                .iter()
+                .any(|call| call.method == "PATCH" && call.path.contains("/agentservices/"))
+        },
+    )
+    .await;
+    assert_ne!(
+        first.digest("team", "chat"),
+        before,
+        "the change reached the service"
+    );
+    // The first replica is a follower for ever after: every write there is, is the second one's.
+    assert!(
+        fake.writes()
+            .iter()
+            .any(|call| call.method == "PATCH" && call.path.contains("/agentservices/")),
+        "the new holder wrote the status: {:?}",
+        fake.writes()
+    );
+    assert!(!election.is_leader(), "the killed holder writes nothing");
+
+    second.stop().await;
+    first.stop().await;
+    let _ = stop_campaign_b.send(());
+    let _ = stop_campaign_a.send(());
+    let _ = tokio::time::timeout(Duration::from_secs(10), campaign_b).await;
+    let _ = tokio::time::timeout(Duration::from_secs(10), campaign_a).await;
+}
+
+/// K7a: a replica that is not the holder writes **nothing at all**, for each of the four controllers: the whole
+/// dashboard (an agent and the two objects its config names) appears while the replica watches, and after several
+/// of its rechecks the service has no finalizer and no status, and the two shared kinds have none either.
+///
+/// The control is the same replica once its campaign runs: it holds the election and writes the status.
+#[tokio::test(start_paused = true)]
+async fn a_follower_replica_writes_nothing() {
+    use aap_ports::memory::MemoryElection;
+    use aap_ports::testkit::unique;
+
+    let fake = Fake::new();
+    // A candidate whose campaign nobody runs: it never holds the election, and it is not dead either.
+    let election = MemoryElection::new(&unique("election"), "follower");
+    let follower = start_led_by(
+        fake.clone(),
+        leader_case_options(),
+        Arc::new(election.clone()),
+        |fake| fake.watchers_in(SERVICES, "team") >= 1 && fake.watchers_in(CONFIGS, "team") >= 2,
+    )
+    .await;
+
+    let (service, config, endpoint, provider) = dashboard("team");
+    fake.put(ENDPOINTS, endpoint);
+    fake.put(PROVIDERS, provider);
+    fake.put(CONFIGS, config);
+    fake.put(SERVICES, service);
+    // Several of the follower's 30 s rechecks: every object is reconciled again and again, and nothing is written.
+    tokio::time::sleep(Duration::from_secs(120)).await;
+    assert!(!election.is_leader());
+    assert!(
+        follower.readiness.is_ready(),
+        "a follower's caches list, and it is ready: /readyz is not the election"
+    );
+    assert!(
+        fake.writes().is_empty(),
+        "a follower wrote: {:?}",
+        fake.writes()
+    );
+    let svc = fake.get(SERVICES, "team", "coder-me").expect("the service");
+    assert!(
+        svc["metadata"]["finalizers"].is_null(),
+        "a follower added the finalizer: {svc}"
+    );
+    assert!(
+        svc["status"].is_null(),
+        "a follower wrote the service's status: {svc}"
+    );
+    for (plural, name) in [
+        (CONFIGS, "coder-me"),
+        (ENDPOINTS, "gateway"),
+        (PROVIDERS, "websearch"),
+    ] {
+        assert!(
+            fake.get(plural, "team", name).expect(name)["status"].is_null(),
+            "a follower wrote the status of {plural}/{name}"
+        );
+    }
+
+    // The control: the campaign starts, the replica holds the election, and the same objects are written.
+    let (stop, stopped) = oneshot::channel::<()>();
+    let campaign = tokio::spawn(election.clone().run(Box::pin(async move {
+        let _ = stopped.await;
+    })));
+    eventually("the replica to hold the election", || election.is_leader()).await;
+    within(
+        Duration::from_secs(120),
+        "the holder to write the service's status",
+        || {
+            fake.get(SERVICES, "team", "coder-me")
+                .is_some_and(|svc| !svc["status"].is_null())
+        },
+    )
+    .await;
+    assert!(
+        !fake.writes().is_empty(),
+        "the holder wrote nothing either, so the case proves nothing"
+    );
+    follower.stop().await;
+    let _ = stop.send(());
+    let _ = tokio::time::timeout(Duration::from_secs(10), campaign).await;
 }

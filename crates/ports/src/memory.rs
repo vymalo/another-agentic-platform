@@ -17,9 +17,11 @@ use crate::{
 };
 
 mod auth;
+mod leader;
 mod objects;
 
 pub use auth::MemoryAuthenticator;
+pub use leader::{MemoryElection, MemoryTimings};
 pub use objects::MemoryObjects;
 
 fn lock<T>(m: &Mutex<T>) -> MutexGuard<'_, T> {

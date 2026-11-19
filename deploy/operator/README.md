@@ -1,6 +1,6 @@
 # aap-operator (the chart)
 
-The Helm chart of the operator of [§59a](../../docs/architecture/10-control-plane-and-crds.md#the-operator-chart): **one replica**
+The Helm chart of the operator of [§59a](../../docs/architecture/10-control-plane-and-crds.md#the-operator-chart): **one or more replicas** (a leader election when more than one)
 of the `operator` binary ([`bin/operator`](../../bin/operator/README.md)), which reconciles `AgentService` and `AgentConfig` in
 **every namespace of `watchNamespaces`** (the first is the primary) and serves the agent registry. The CRDs are another chart, [`deploy/operator-crds`](../operator-crds/README.md)
 (§93: a separate Argo CD app); the agents are custom resources of their own, in adam-rs's chart `deploy/coder-agent` and the
@@ -10,7 +10,7 @@ system chart (S11, S12), not here. The chart also carries, **off by default**, a
 ```mermaid
 flowchart LR
   subgraph rel[the release namespace]
-    D[Deployment aap-operator<br/>1 replica, Recreate] -->|reads and writes| API[(the API server)]
+    D[Deployment aap-operator<br/>1 replica, Recreate; 2+ elect a leader] -->|reads and writes| API[(the API server)]
     SA[ServiceAccount aap-operator]
     S1[Service aap-operator-registry :8080]
     S2[Service aap-operator-metrics :9090]
@@ -30,7 +30,7 @@ flowchart LR
 
 | Object | What |
 |---|---|
-| `Deployment aap-operator` | 1 replica, `Recreate`, no leader election (a second reconciler would only race the first). `operator run`, `WATCH_NAMESPACES` the list and `WATCH_NAMESPACE` the primary (the first), probes `/healthz` (startup, liveness) and `/readyz` (readiness) on 8081, `/metrics` on 9090 |
+| `Deployment aap-operator` | `replicas` (1 by default: `Recreate`, no leader election; 2 or more: a rolling update, the replicas campaign for a `Lease` and only its holder reconciles — [below](#leader-election-k7)). `operator run`, `WATCH_NAMESPACES` the list and `WATCH_NAMESPACE` the primary (the first), probes `/healthz` (startup, liveness) and `/readyz` (readiness) on 8081, `/metrics` on 9090 |
 | `ServiceAccount`, `Role`, `RoleBinding` | The account in the release's namespace; one `Role` and one `RoleBinding` in each namespace of `watchNamespaces` (K6a). Exactly the rights below. **No right on Secrets**, no `ClusterRole` |
 | `Service aap-operator-registry` | ClusterIP 8080, **only with a registry token**. No Ingress |
 | `Service aap-operator-metrics` | ClusterIP 9090 |
@@ -70,6 +70,8 @@ sequence them with the CRDs first (a sync wave, or their Application first). **K
 |---|---|---|
 | `image.repository`, `image.tag`, `image.digest`, `image.pullPolicy` | `ghcr.io/vymalo/another-agentic-platform/operator`, `sha-0000000`, none, `IfNotPresent` | The tag is **written by CI only** (`bump-tag.sh`), never by hand. `latest` and a malformed digest are refused |
 | `imagePullSecrets` | `[]` | For a private package ([below](#the-image)) |
+| `replicas` | `1` | **K7:** the operator's replicas. One: no leader election, `Recreate`. More: a rolling update, the replicas campaign for a `Lease` in the primary namespace and only its holder reconciles; a `PodDisruptionBudget` of one keeps the lease through a drain. `replicaCount` is refused |
+| `leaderElection.leaseSecs`, `.renewSecs`, `.retrySecs` | `15`, `10`, `2` | **K7:** the lease's timers, in seconds, the client-go defaults. Read only when `replicas > 1`; refused unless `retrySecs < renewSecs < leaseSecs`, each at least 1 |
 | `watchNamespaces` | `[]` (the release's namespace) | **K6a:** the namespaces watched; one `Role` and `RoleBinding` in each, never a `ClusterRole`. The first is the primary: `WATCH_NAMESPACE`, the API's `defaults.namespace`, the run pods' cluster-scoped names. A list of names, never a wildcard. **The operator watches every one (K6b).** The namespaces must exist (`--create-namespace` makes only the release's), and two releases must not name the same one: the Roles and RoleBindings would collide (Helm refuses the second), so uninstall the other release first. **A namespace that does not exist** is listed as empty (the operator may not `get` namespaces), so a typo is silent and that namespace reconciles nothing. **A namespace whose `Role` is missing, or one deleted while the operator runs, makes `/readyz` false, so the pod leaves the registry `Service`'s endpoints and every namespace is unlisted**: the operator names the namespaces still waiting every 30 s |
 | `watchNamespace` | empty | One namespace, the shorthand, and the primary. Not with `watchNamespaces`: one or the other. A name, never a wildcard: **there is no value that gives the operator a `ClusterRole`** |
 | `cacheAllowedClaims` | `[]` | **K1:** the claims an `AgentConfig` may name as its package cache; `CACHE_ALLOWED_CLAIMS`. Empty: no agent may have a cache. Names the operator makes are refused whatever is listed (AD-049) |
@@ -88,13 +90,13 @@ sequence them with the CRDs first (a sync wave, or their Application first). **K
 | `networkPolicy.apiServer.ports`, `.cidrs` | `[443, 6443]`, `[]` | The API server as the pod reaches it (the Service is 443, most clusters' endpoint 6443). `cidrs`, from `kubectl get endpoints kubernetes`, narrows it to those addresses |
 | `toolProbe.to`, `.ports`, `.dns` | `[]`, `[80, 443]`, kube-dns and `[53]` | **K3a:** the MCP servers the operator may reach to probe a `ToolProvider`: [below](#the-tool-probe-k3a). Empty `to`: off, and not a rule of it in any render |
 | `logLevel` | `info` | `RUST_LOG` |
-| `tuning.concurrency`, `.resyncSecs`, `.resyncPendingSecs` | unset (the binary's 4, 300, 15) | `AAP_CONCURRENCY`, `AAP_RESYNC_SECS`, `AAP_RESYNC_PENDING_SECS`; another key is refused. `concurrency` is **per controller and per watched namespace**: up to `4 × concurrency × watchNamespaces` passes in flight |
+| `tuning.concurrency`, `.resyncSecs`, `.resyncPendingSecs`, `.reconcileTimeoutSecs` | unset (the binary's 4, 300, 15; 4 for the pass timeout when `replicas > 1`) | `AAP_CONCURRENCY`, `AAP_RESYNC_SECS`, `AAP_RESYNC_PENDING_SECS`, `AAP_RECONCILE_TIMEOUT_SECS`; another key is refused. `concurrency` is **per controller and per watched namespace**: up to `4 × concurrency × watchNamespaces` passes in flight. With `replicas > 1`, `reconcileTimeoutSecs` must be below `leaderElection.leaseSecs - leaderElection.renewSecs` (the margin between the renew deadline and the earliest takeover) |
 | `resources` | 50m / 64Mi requested, 256Mi limit | |
 | `serviceAccount.create`, `.name`, `.annotations` | `true`, the fullname, none | |
 | `podAnnotations`, `podLabels`, `priorityClassName`, `nodeSelector`, `tolerations`, `affinity` | empty | |
 | `api.*` | `api.enabled: false` | The Platform API: [its own table](#the-platform-api). Of the values above only three reach it: `imagePullSecrets` (the pull secrets of both pods), `watchNamespaces` (its `Role` and its `defaults.namespace` are in the first) and `nameOverride` / `fullnameOverride` (its names are `<fullname>-api`). Everything else is its own: image, service account, resources, policy, scheduling, log level. CI bumps `image.tag` and `api.image.tag` in one commit, but they are two values |
 
-**There is no `replicaCount`** (a value of that name is refused), no `crds.install` (§59a listed one before §93 decided on a
+**There is no `replicaCount`** (a value of that name is refused: the key is `replicas`), no `crds.install` (§59a listed one before §93 decided on a
 separate app) and no `values.schema.json`: neither of the sibling charts, `deploy/coder` and `deploy/chart` of
 another-agentic-system, has one; [`templates/_validate.tpl`](templates/_validate.tpl) refuses what would deploy something other
 than what the values say.
@@ -311,7 +313,7 @@ flowchart LR
 |---|---|---|
 | `api.enabled` | `false` | |
 | `api.image.repository`, `.tag`, `.digest`, `.pullPolicy` | `ghcr.io/vymalo/another-agentic-platform/api`, `sha-0000000`, none, `IfNotPresent` | The tag is **written by CI only** (`bump-tag.sh <file> <tag> api`), in step with `image.tag` ([below](#the-image)); `sha-0000000` is a placeholder no image has. `latest` and a malformed digest are refused. `imagePullSecrets` (top level) apply to both images |
-| `api.replicas` | `1` | The API is stateless; two are fine. The operator has no `replicaCount`: this is the API's |
+| `api.replicas` | `1` | The API is stateless; two are fine. The operator's count is `replicas` (top-level), not `replicaCount`: this is the API's |
 | `api.port`, `api.healthPort` | `8080`, `8081` | The API, and `/healthz` and `/readyz`. The chart writes both into the file (`listen`, `healthListen`), so the probes, the Service and the file cannot disagree; they are not keys of `api.config` |
 | `api.metrics.port`, `.allowFrom`, `.serviceMonitor.enabled`, `.serviceMonitor.interval`, `.serviceMonitor.labels` | `9090`, `[]`, off, `30s`, `{}` | The API's `/metrics` and its `ServiceMonitor` (K4): [below](#metrics-and-servicemonitors). The chart writes `port` into the file (`metricsListen`) only while the port is exposed; it is not a key of `api.config` |
 | `api.config.oidc` | none | `issuer`, `audiences`, `rolesClaim` (required), `jwksUrl` (optional) |
@@ -528,7 +530,7 @@ list is empty (`templates/NOTES.txt`).
 K3a and K3b (2026-11-18; AD-053). With `toolProbe.to` non-empty the operator probes each `ToolProvider`'s MCP server (`initialize` and
 `tools/list`, [`aap-tool-probe`](../../crates/tool-probe/README.md)) and writes `Reachable` and the tool names into its status; a provider
 that names a header is `Reachable: Unknown`, reason `NeedsHeader`, because the operator reads no Secret (AD-024). **Off by default**:
-`to` empty, and then not a rule or a variable of it is rendered and the six goldens are byte for byte what they were. On, `to` lists the
+`to` empty, and then not a rule or a variable of it is rendered and the goldens are byte for byte what they were. On, `to` lists the
 peers the operator may reach (NetworkPolicyPeers: `namespaceSelector`, `podSelector`, `ipBlock`), `ports` the ports a probe may use and
 `timeoutSecs` its deadline; the chart adds **one egress rule to exactly those peers on those ports and one DNS rule**, turns the probe on
 (`TOOL_PROBE_ENABLED`) and passes the deadline (`TOOL_PROBE_TIMEOUT_SECS`). A NetworkPolicy names peers and never host names: a probe to a
@@ -566,6 +568,24 @@ and run its conformance suite under: `render-check.sh` reads that file and compa
 
 **No right on Secrets** (a `list` on Secrets would return their values), no `watch`, no workload, pod or ConfigMap, no `ClusterRole`. `/readyz`'s one call
 (a `list` of one `ModelEndpoint`) is inside it. The operator's `Role` gains nothing, and has no right on ExternalSecrets or on Events. The goldens that render the API's `Role` (`api.yaml`, `runpods.yaml`) moved by the rule `events: list` (K8) and the others did not.
+
+## Leader election (K7)
+
+With `replicas: 1` (the default) the chart renders what it always did: one replica, `Recreate`, no leader election. With more than
+one, the replicas campaign for a `coordination.k8s.io/v1` `Lease` in the primary namespace (`<fullname>`, the one the `Role` is made
+in), and **only its holder reconciles**: the others keep every watcher and cache, are `Ready` (`/readyz` still means "the caches have
+listed"), and serve the registry from their own caches, so a failover does not blank the registry. A follower's passes return a 30 s
+requeue and write nothing. The holder releases the lease on `SIGTERM`, so the next replica takes it without waiting for it to expire.
+The timers are `leaderElection.{leaseSecs,renewSecs,retrySecs}` (15/10/2, the client-go defaults; refused unless
+`retry < renew < lease`), the pod's name is the candidate, and the `Role` gains `get` and `update` on the named lease and
+`create` on `leases` (no `delete`: a released lease stays, with its holder cleared), **in the primary namespace only**. A pass
+is capped at `tuning.reconcileTimeoutSecs` (4 s by default with the election on, and it must be below `lease - renew`, the
+margin between the renew deadline and the earliest takeover): a pass that started before the loss can still write until it
+ends, so the window is bounded, not zero. The MCP probe keeps 5 s of the pass for its other steps: with the election on,
+`toolProbe.timeoutSecs` above `reconcileTimeoutSecs - 5` is refused (raise the lease and renew, or lower the probe). A `PodDisruptionBudget` of `maxUnavailable: 1` keeps one replica through
+a drain. **The status shows `2/2` ready while one writes**: readiness is about the caches, and the lease is the one-writer proof; do
+not gate readiness on leadership (the budget would then never allow a drain, and the registry `Service` would drop a replica that
+could serve).
 
 ## The image
 
@@ -650,7 +670,7 @@ sh deploy/operator/tests/api-shapes.sh /tmp/api-config && for f in /tmp/api-conf
 
 | File | What |
 |---|---|
-| `tests/render-check.sh` | the six golden renders (`tests/golden/netcup.yaml` from `examples/netcup.values.yaml`, `secret.yaml` from `tests/secret.values.yaml`, `default.yaml`, `api.yaml` from `tests/api.values.yaml`, the Platform API on, `runpods.yaml` from `tests/runpods.values.yaml`, run pods on, and `otel.yaml`; the first three have every optional component off and equal what they were before any existed); **K6a: `watchNamespaces` renders one `Role` and one `RoleBinding` per namespace with the same rules, the binding to the release's account, the run pods' `Role` and the operator's `bind` in each, the policy binding over all of them and the settings once in the release, and never a `ClusterRole`; *K6b: the Deployment is given `WATCH_NAMESPACES` (the list) and `WATCH_NAMESPACE` (the primary), and the end-to-end's values render the Role and RoleBinding in each watched namespace and none in the release's*; `watchNamespace` and `watchNamespaces` together, a value that is not a list, a bad name and a repeated one are refused; the API keeps its one (first) namespace**; **for run pods: not a trace of them in any render while they are off, the objects they add, the operator's `Role` rule by rule (and that it cannot make a pod, `exec`, read a Secret, write a Role or `bind` any other), the Role of run pods equal to the coder chart's, the policy's nine rules, the binding that denies and lets a namespace without parameters alone, the settings and the Deployment that reads them, the API told the names of the classes, and 32 refusals of `_validate.tpl` for them**; no Secret object, no `ClusterRole`, no host access; one replica, `Recreate`, the probes, the security context; the `Role` equal to the table above, with and without `storeCnpg`; the registry only with a token, mounted as a file; the NetworkPolicy; the ExternalSecret; every refusal of `_validate.tpl` (the default agent image's included); the shared kinds read and never written; `DEFAULT_AGENT_IMAGE` pinned by tag and digest, empty rendering none, and the chart's pin equal to the end-to-end's; and `deploy/operator-crds` equal to `deploy/crds`. For the API: its objects, pod and labels, the `Role` **equal to `crates/objects-kubernetes/tests/rbac.yaml`** (read from the file) with no right on Secrets, the Service without the health port, the policy, the Ingress and its annotations, no Secret in the render or the file, the second shape (`tests/api-secretref.values.yaml`), **the full shape** (`tests/api-full.values.yaml`: the ports in the file, the container, the probes, the Service and the policy; each of the three egress rules with its peers; the extra environment, volumes and mounts), the pod's `securityContext` and the container's each by themselves, `NOTES.txt` (read through a copy of the chart that includes it), nothing rendered or checked while it is off, and every refusal of `_validate.tpl` for it |
+| `tests/render-check.sh` | the seven golden renders (`tests/golden/netcup.yaml` from `examples/netcup.values.yaml`, `secret.yaml` from `tests/secret.values.yaml`, `default.yaml`, `api.yaml` from `tests/api.values.yaml`, the Platform API on, `runpods.yaml` from `tests/runpods.values.yaml`, run pods on, and `otel.yaml`; the first three have every optional component off and equal what they were before any existed; the seventh is `leader.yaml` from `tests/leader.values.yaml`, two replicas with the election on); **K6a: `watchNamespaces` renders one `Role` and one `RoleBinding` per namespace with the same rules, the binding to the release's account, the run pods' `Role` and the operator's `bind` in each, the policy binding over all of them and the settings once in the release, and never a `ClusterRole`; *K6b: the Deployment is given `WATCH_NAMESPACES` (the list) and `WATCH_NAMESPACE` (the primary), and the end-to-end's values render the Role and RoleBinding in each watched namespace and none in the release's*; `watchNamespace` and `watchNamespaces` together, a value that is not a list, a bad name and a repeated one are refused; the API keeps its one (first) namespace**; **for run pods: not a trace of them in any render while they are off, the objects they add, the operator's `Role` rule by rule (and that it cannot make a pod, `exec`, read a Secret, write a Role or `bind` any other), the Role of run pods equal to the coder chart's, the policy's nine rules, the binding that denies and lets a namespace without parameters alone, the settings and the Deployment that reads them, the API told the names of the classes, and 32 refusals of `_validate.tpl` for them**; no Secret object, no `ClusterRole`, no host access; one replica `Recreate`, or two with the rolling update, the `PodDisruptionBudget`, the election's variables and the lease rule (and no `PodDisruptionBudget`/lease rule at one); the probes, the security context; the `Role` equal to the table above, with and without `storeCnpg`; the registry only with a token, mounted as a file; the NetworkPolicy; the ExternalSecret; every refusal of `_validate.tpl` (the default agent image's included); the shared kinds read and never written; `DEFAULT_AGENT_IMAGE` pinned by tag and digest, empty rendering none, and the chart's pin equal to the end-to-end's; and `deploy/operator-crds` equal to `deploy/crds`. For the API: its objects, pod and labels, the `Role` **equal to `crates/objects-kubernetes/tests/rbac.yaml`** (read from the file) with no right on Secrets, the Service without the health port, the policy, the Ingress and its annotations, no Secret in the render or the file, the second shape (`tests/api-secretref.values.yaml`), **the full shape** (`tests/api-full.values.yaml`: the ports in the file, the container, the probes, the Service and the policy; each of the three egress rules with its peers; the extra environment, volumes and mounts), the pod's `securityContext` and the container's each by themselves, `NOTES.txt` (read through a copy of the chart that includes it), nothing rendered or checked while it is off, and every refusal of `_validate.tpl` for it |
 | `tests/bump-tag-test.sh` | `bump-tag.sh` edits only `image.tag` (a `defaultAgentImage` line beside it is left alone) or, with `api`, only `api.image.tag` (each leaves the other, and keys that only look like it, alone), is idempotent, refuses a malformed tag and an unknown component (the test of adam-rs's `deploy/coder`, with this chart's values) |
 | `tests/runpods.values.yaml`, `tests/golden/runpods.yaml`, `tests/run-pods-admission.sh` | run pods on beside the Platform API (two classes, a cluster CIDR, one extra egress rule, a toleration), its golden render, which `aap-domain` reads as the operator would (`RunPodSettings`, validated) and `aap-runtime-kubernetes` compares with the coder chart's policy and Role, and the admission test for a real cluster ([above](#checking-a-cluster)) |
 | `tests/api.values.yaml`, `tests/api-secretref.values.yaml`, `tests/api-full.values.yaml`, `tests/api-shapes.sh`, `tests/api-config.sh` | the shapes of the API component: the golden one, a Secret per agent, and **one that sets every value the chart exposes** (ports, `apiServer.cidrs`, `issuer.to`, every key of `defaults`, the Ingress, the scheduling), and the scripts that render a shape and write the ConfigMap's `config.yaml` to a file (`api-shapes.sh` writes `golden`, `secretref`, `minimal` and `full`), which CI hands to the image's `api --check` |

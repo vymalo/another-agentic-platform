@@ -8,7 +8,7 @@ use anyhow::Result;
 use clap::Args;
 
 /// Settings of `run`. Every one is also an environment variable, which is how the chart sets them.
-#[derive(Debug, Args)]
+#[derive(Clone, Debug, Args)]
 pub struct RunArgs {
     /// Watch one namespace (the namespaced operator of §93), and the primary one when `WATCH_NAMESPACES` lists
     /// several. Empty or unset: every namespace, unless `WATCH_NAMESPACES` lists some.
@@ -110,6 +110,34 @@ pub struct RunArgs {
         value_parser = clap::value_parser!(u64).range(1..=60)
     )]
     pub tool_probe_timeout_secs: u64,
+
+    /// Elect one replica to write (K7a), with a `coordination.k8s.io/v1` Lease: every replica keeps its caches,
+    /// serves `/healthz`, `/readyz`, `/metrics` and the registry, and **only the lease holder's passes write**.
+    /// Off (the default): this replica is the only one, and every pass writes.
+    #[arg(long, env = "LEADER_ELECTION_ENABLED")]
+    pub leader_election_enabled: bool,
+
+    /// The name of the Lease: the election is `<namespace>/<name>`.
+    #[arg(long, env = "LEADER_ELECTION_NAME", default_value = "aap-operator")]
+    pub leader_election_name: String,
+
+    /// The namespace of the Lease. Unset: the primary namespace, the first of `WATCH_NAMESPACES` (or
+    /// `WATCH_NAMESPACE`), which is where the operator's `Role` is. **With the election on and no namespace at
+    /// all, the operator refuses to start**: a Lease lives in one.
+    #[arg(long, env = "LEADER_ELECTION_NAMESPACE")]
+    pub leader_election_namespace: Option<String>,
+
+    /// How long the lease lives, in seconds: a holder that has not renewed for this long may be replaced.
+    #[arg(long, env = "LEADER_ELECTION_LEASE_SECS", default_value_t = 15)]
+    pub leader_election_lease_secs: u64,
+
+    /// How often the holder renews the lease, in seconds.
+    #[arg(long, env = "LEADER_ELECTION_RENEW_SECS", default_value_t = 10)]
+    pub leader_election_renew_secs: u64,
+
+    /// How often a replica that is not the holder tries, in seconds.
+    #[arg(long, env = "LEADER_ELECTION_RETRY_SECS", default_value_t = 2)]
+    pub leader_election_retry_secs: u64,
 }
 
 fn parse_tier(s: &str) -> Result<aap_api::AccessTierCap, String> {
@@ -146,6 +174,42 @@ fn check_label(variable: &str, name: &str) -> Result<()> {
     anyhow::bail!(
         "{variable} {name:?} is not a namespace: a namespace is a DNS label (lowercase letters, digits and '-', starting and ending with a letter or a digit, at most 63 characters)"
     );
+}
+
+/// The election this replica runs in (K7a), as `run` composed it.
+#[cfg(feature = "runtime-kubernetes")]
+#[derive(Clone, Debug)]
+pub struct LeaderSettings {
+    /// The namespace of the Lease.
+    pub namespace: String,
+    /// The name of the Lease.
+    pub name: String,
+    /// What this replica writes as the lease's `holderIdentity`.
+    pub candidate: aap_ports::CandidateId,
+    /// The lease, the renewal and the retry.
+    pub timings: aap_leader_kubernetes::Timings,
+}
+
+/// The identity this replica writes as the lease's holder (K7a): `POD_NAME`, else `HOSTNAME`, else a refusal. Two
+/// replicas with the same identity would renew each other's lease, which is no election at all.
+#[cfg(feature = "runtime-kubernetes")]
+fn candidate_id(instance: Option<&str>, hostname: Option<&str>) -> Result<aap_ports::CandidateId> {
+    let name = instance
+        .map(str::trim)
+        .filter(|name| !name.is_empty())
+        .or_else(|| hostname.map(str::trim).filter(|name| !name.is_empty()));
+    match name {
+        Some(name) => Ok(aap_ports::CandidateId::new(name)),
+        None => anyhow::bail!(
+            "LEADER_ELECTION_ENABLED is set, and neither POD_NAME nor HOSTNAME names this replica: the Lease's holderIdentity would be empty, and two replicas would look like one"
+        ),
+    }
+}
+
+/// `HOSTNAME`, if the environment has one.
+#[cfg(feature = "runtime-kubernetes")]
+fn hostname() -> Option<String> {
+    std::env::var("HOSTNAME").ok()
 }
 
 // What `run` composes needs a runtime provider; without one the settings are parsed and unused.
@@ -267,6 +331,65 @@ impl RunArgs {
             );
         }
         Ok(Some(names))
+    }
+
+    /// The election this replica is a candidate of (K7a), from the six `LEADER_ELECTION_*` settings:
+    ///
+    /// * off (the default): `None`, and the operator is an [`AlwaysLeader`](aap_ports::AlwaysLeader);
+    /// * on: the namespace of the Lease is `LEADER_ELECTION_NAMESPACE`, else the **primary** namespace (the first
+    ///   of `WATCH_NAMESPACES`, or `WATCH_NAMESPACE`) — the one the operator's `Role` is in — and a deployment
+    ///   that names neither is refused, because a Lease lives in one;
+    /// * the holder identity is `POD_NAME`, else `HOSTNAME` (see [`candidate_id`]);
+    /// * the timings are the three `_SECS` values, refused when they do not satisfy `retry < renew < lease`, each
+    ///   at least a second.
+    ///
+    /// # Errors
+    ///
+    /// One of those settings is missing or refused, naming the variable that gave it.
+    pub fn leader_election(&self, namespaces: Option<&[String]>) -> Result<Option<LeaderSettings>> {
+        if !self.leader_election_enabled {
+            return Ok(None);
+        }
+        let namespace = self
+            .leader_election_namespace
+            .as_deref()
+            .map(str::trim)
+            .filter(|name| !name.is_empty())
+            .map(str::to_owned)
+            .or_else(|| namespaces.and_then(|list| list.first().cloned()))
+            .ok_or_else(|| {
+                anyhow::anyhow!(
+                    "LEADER_ELECTION_ENABLED is set and LEADER_ELECTION_NAMESPACE (--leader-election-namespace) names no namespace, and WATCH_NAMESPACE/WATCH_NAMESPACES names none either: the Lease needs the namespace the operator's Role is in"
+                )
+            })?;
+        check_label(
+            "LEADER_ELECTION_NAMESPACE (--leader-election-namespace)",
+            &namespace,
+        )?;
+        let name = self.leader_election_name.trim();
+        if name.is_empty() {
+            anyhow::bail!(
+                "LEADER_ELECTION_NAME (--leader-election-name) is empty: a Lease has a name"
+            );
+        }
+        check_label("LEADER_ELECTION_NAME (--leader-election-name)", name)?;
+        let timings = aap_leader_kubernetes::Timings {
+            lease: std::time::Duration::from_secs(self.leader_election_lease_secs),
+            renew: std::time::Duration::from_secs(self.leader_election_renew_secs),
+            retry: std::time::Duration::from_secs(self.leader_election_retry_secs),
+        };
+        timings.check().map_err(|why| {
+            anyhow::anyhow!(
+                "LEADER_ELECTION_LEASE_SECS, LEADER_ELECTION_RENEW_SECS and LEADER_ELECTION_RETRY_SECS (--leader-election-lease-secs, --leader-election-renew-secs, --leader-election-retry-secs): {why}"
+            )
+        })?;
+        let candidate = candidate_id(self.instance.as_deref(), hostname().as_deref())?;
+        Ok(Some(LeaderSettings {
+            namespace,
+            name: name.to_owned(),
+            candidate,
+            timings,
+        }))
     }
 
     fn options(
@@ -428,8 +551,10 @@ async fn flushed<T>(
     result
 }
 
-/// The controllers, composed: the one place that hands the tracer to the operator, so a test can ask that it did.
+/// The controllers, composed: the one place that hands the tracer and the election to the operator, so a test can
+/// ask that it did.
 #[cfg(feature = "runtime-kubernetes")]
+#[allow(clippy::too_many_arguments)]
 fn compose<R, S>(
     client: kube::Client,
     runtime: R,
@@ -437,6 +562,7 @@ fn compose<R, S>(
     owner: aap_controller::OwnerOf,
     options: aap_controller::Options,
     tracer: &aap_trace::Tracer,
+    leader: std::sync::Arc<dyn aap_ports::LeaderElection>,
 ) -> aap_controller::Operator<R, S>
 where
     R: aap_ports::RuntimeProvider + Clone + 'static,
@@ -444,6 +570,7 @@ where
 {
     aap_controller::Operator::new(client, runtime, store, owner, options)
         .with_tracer(tracer.clone())
+        .with_leader(leader)
 }
 
 #[cfg(feature = "runtime-kubernetes")]
@@ -460,6 +587,7 @@ async fn run_with(args: RunArgs, tracer: aap_trace::Tracer) -> Result<()> {
     let default_image = args.default_image()?;
     let run_pods = args.run_pod_settings()?;
     let watch_namespaces = args.namespaces()?;
+    let leader = args.leader_election(watch_namespaces.as_deref())?;
     let registry_full = Arc::new(std::sync::atomic::AtomicBool::new(false));
     let token = registry_token(&args);
     let options = args.options(
@@ -505,7 +633,47 @@ async fn run_with(args: RunArgs, tracer: aap_trace::Tracer) -> Result<()> {
         )
     });
     let store = Arc::new(store(&client));
-    let operator = compose(client, runtime, store, owner, options, &tracer);
+    // The election (K7a): the one replica that holds the lease is the one whose passes write. The candidate id is
+    // POD_NAME, else HOSTNAME; without either, the election refuses to start (a holderIdentity of "" would make two
+    // replicas look like one), while a lone operator with no election needs no name at all.
+    let election: std::sync::Arc<dyn aap_ports::LeaderElection> = match &leader {
+        Some(settings) => {
+            let lease = aap_leader_kubernetes::LeaseElection::new(
+                client.clone(),
+                &settings.namespace,
+                &settings.name,
+                settings.candidate.clone(),
+            )
+            .with_timings(settings.timings)
+            .map_err(|why| anyhow::anyhow!("the leader election's timings: {why}"))?;
+            tracing::info!(
+                lease = %format!("{}/{}", settings.namespace, settings.name),
+                candidate = settings.candidate.as_str(),
+                lease_secs = settings.timings.lease.as_secs(),
+                renew_secs = settings.timings.renew.as_secs(),
+                retry_secs = settings.timings.retry.as_secs(),
+                "leader election on: every replica serves, and only the lease holder's passes write"
+            );
+            Arc::new(lease)
+        }
+        None => {
+            tracing::info!(
+                "no leader election: this replica is the only one, and every pass writes"
+            );
+            let candidate = candidate_id(args.instance.as_deref(), hostname().as_deref())
+                .unwrap_or_else(|_| aap_ports::CandidateId::new("operator"));
+            Arc::new(aap_ports::AlwaysLeader::new(candidate))
+        }
+    };
+    let operator = compose(
+        client,
+        runtime,
+        store,
+        owner,
+        options,
+        &tracer,
+        election.clone(),
+    );
 
     #[cfg(feature = "registry")]
     let registry_server = token.map(|token| {
@@ -563,32 +731,98 @@ async fn run_with(args: RunArgs, tracer: aap_trace::Tracer) -> Result<()> {
     #[cfg(not(feature = "registry"))]
     let registry = tokio::spawn(std::future::pending::<Result<()>>());
 
+    // The signal, once: the log, the flag, and the stop that every task listens to. It is a task of its own so
+    // that the campaign below can share the same signal.
     let asked = Arc::new(std::sync::atomic::AtomicBool::new(false));
-    let asked_by_signal = asked.clone();
-    let controllers = operator.run(async move {
-        termination().await;
-        asked_by_signal.store(true, std::sync::atomic::Ordering::Release);
-        tracing::info!("shutting down");
+    let _signal = tokio::spawn({
+        let asked = asked.clone();
+        let stop = stop.clone();
+        async move {
+            termination().await;
+            asked.store(true, std::sync::atomic::Ordering::Release);
+            tracing::info!("shutting down");
+            let _ = stop.send(true);
+        }
     });
-    tokio::pin!(controllers);
 
-    // The servers fail fast (a port in use is a deployment mistake); the controllers end when told to.
+    let controllers = operator.run(signalled(stopped.clone()));
+    tokio::pin!(controllers);
+    // The campaign (K7a) is a task of the same shutdown: on SIGTERM the holder releases the lease, so the next
+    // replica does not wait for it to expire.
+    let campaign = election.run(Box::pin(signalled(stopped.clone())));
+    tokio::pin!(campaign);
+    let mut campaign_done = false;
+    let mut controllers_done = false;
+
+    // The servers fail fast (a port in use is a deployment mistake); the controllers and the campaign end when
+    // told to.
     let result = tokio::select! {
         () = &mut controllers => {
+            controllers_done = true;
             if asked.load(std::sync::atomic::Ordering::Acquire) {
                 Ok(())
             } else {
                 Err(anyhow::anyhow!("the controllers stopped without being asked to"))
             }
         }
+        () = &mut campaign => {
+            campaign_done = true;
+            if asked.load(std::sync::atomic::Ordering::Acquire) {
+                Ok(())
+            } else {
+                Err(anyhow::anyhow!("the leader election stopped without being asked to"))
+            }
+        }
         r = health => r.context("the health server task").and_then(|r| r).and(Err(anyhow::anyhow!("the health server stopped"))),
         r = metrics => r.context("the metrics server task").and_then(|r| r).and(Err(anyhow::anyhow!("the metrics server stopped"))),
         r = registry => r.context("the registry task").and_then(|r| r).and(Err(anyhow::anyhow!("the registry stopped"))),
     };
-    // Stop whatever still serves.
+    // Stop whatever still serves, and give the campaign its bounded moment to release the lease, then the controllers
+    // their grace to let the passes in flight finish. The campaign arm wins on a shutdown (the election's run returns
+    // with the stop), so without this drain every SIGTERM would drop the controllers mid-pass.
     let _ = stop.send(true);
+    if asked.load(std::sync::atomic::Ordering::Acquire) {
+        drain(
+            campaign_done,
+            &mut campaign,
+            controllers_done,
+            &mut controllers,
+        )
+        .await;
+    }
     result
 }
+
+/// Give whatever the winning arm of the shutdown left running its bounded moment: the campaign releases the lease
+/// ([`LEASE_RELEASE_WAIT`]; the release itself is bounded to two seconds), then the controllers finish their passes
+/// ([`CONTROLLER_DRAIN_WAIT`]).
+///
+/// The campaign arm wins a shutdown — [`AlwaysLeader`](aap_ports::AlwaysLeader)'s `run` **is** the shutdown — so
+/// without this drain every SIGTERM would drop the controllers mid-pass. A future that does not end within its
+/// bound is dropped, which is what the pod's own grace would do anyway.
+#[cfg(feature = "runtime-kubernetes")]
+async fn drain(
+    campaign_done: bool,
+    campaign: &mut (impl std::future::Future<Output = ()> + Unpin),
+    controllers_done: bool,
+    controllers: &mut (impl std::future::Future<Output = ()> + Unpin),
+) {
+    if !campaign_done {
+        let _ = tokio::time::timeout(LEASE_RELEASE_WAIT, &mut *campaign).await;
+    }
+    if !controllers_done {
+        let _ = tokio::time::timeout(CONTROLLER_DRAIN_WAIT, &mut *controllers).await;
+    }
+}
+
+/// How long the campaign may take to release the lease once the operator has stopped, inside the 30 s of
+/// `terminationGracePeriodSeconds`: the release itself is bounded to two seconds.
+#[cfg(feature = "runtime-kubernetes")]
+const LEASE_RELEASE_WAIT: std::time::Duration = std::time::Duration::from_secs(5);
+
+/// How long the controllers get to finish their passes once the stop is sent: the shards' own grace is five seconds.
+#[cfg(feature = "runtime-kubernetes")]
+const CONTROLLER_DRAIN_WAIT: std::time::Duration = std::time::Duration::from_secs(10);
 
 #[cfg(not(feature = "runtime-kubernetes"))]
 pub async fn run(args: RunArgs) -> Result<()> {
@@ -620,11 +854,104 @@ mod tests {
                 std::sync::Arc::new(|_| aap_ports::OwnerHandle::none()),
                 aap_controller::Options::default(),
                 tracer,
+                std::sync::Arc::new(aap_ports::AlwaysLeader::default()),
             )
         };
         let (on, _) = aap_trace::Tracer::in_memory(aap_trace::Sampler::AlwaysOn);
         assert!(compose_with(&on).tracer().enabled());
         assert!(!compose_with(&aap_trace::Tracer::off()).tracer().enabled());
+    }
+
+    /// K7a: the election the composition root builds reaches the operator, and an operator with none is a leader.
+    #[tokio::test]
+    async fn the_operator_is_composed_with_the_election_it_was_given() {
+        let compose_with = |leader: std::sync::Arc<dyn aap_ports::LeaderElection>| {
+            compose(
+                client(),
+                aap_ports::memory::MemoryRuntime::new(),
+                aap_ports::memory::MemoryStore::new(),
+                std::sync::Arc::new(|_| aap_ports::OwnerHandle::none()),
+                aap_controller::Options::default(),
+                &aap_trace::Tracer::off(),
+                leader,
+            )
+        };
+        let always = compose_with(std::sync::Arc::new(aap_ports::AlwaysLeader::new(
+            aap_ports::CandidateId::new("pod-1"),
+        )));
+        assert!(always.leader().is_leader(), "AlwaysLeader holds it");
+        assert_eq!(always.leader().candidate().as_str(), "pod-1");
+
+        let follower = aap_ports::memory::MemoryElection::new("election", "b");
+        let operator = compose_with(std::sync::Arc::new(follower));
+        assert!(
+            !operator.leader().is_leader(),
+            "a candidate whose campaign has not run holds nothing"
+        );
+    }
+
+    /// K7a: the campaign arm wins a shutdown (`AlwaysLeader`'s `run` **is** the shutdown), and the composition root
+    /// still drains what it left running: without it every SIGTERM would drop the controllers mid-pass, and a graceful
+    /// stop would leave the lease to expire instead of releasing it.
+    #[tokio::test]
+    async fn the_shutdown_drains_what_the_winning_arm_left_running() {
+        use std::sync::Arc;
+        use std::sync::atomic::{AtomicBool, Ordering};
+
+        // The campaign ended (it won the select); the controllers are still running, and are awaited.
+        let finished = Arc::new(AtomicBool::new(false));
+        let controllers_finished = finished.clone();
+        let mut campaign = std::pin::pin!(std::future::ready(()));
+        let mut controllers = std::pin::pin!(async move {
+            controllers_finished.store(true, Ordering::Release);
+        });
+        drain(true, &mut campaign, false, &mut controllers).await;
+        assert!(
+            finished.load(Ordering::Acquire),
+            "the controllers were not drained: the passes in flight would be dropped on every SIGTERM"
+        );
+
+        // And the other way round: the controllers ended, and the campaign releases the lease.
+        let released = Arc::new(AtomicBool::new(false));
+        let campaign_released = released.clone();
+        let mut campaign = std::pin::pin!(async move {
+            campaign_released.store(true, Ordering::Release);
+        });
+        let mut controllers = std::pin::pin!(std::future::ready(()));
+        drain(false, &mut campaign, true, &mut controllers).await;
+        assert!(
+            released.load(Ordering::Acquire),
+            "the campaign was not drained: the lease would expire instead of being released"
+        );
+    }
+
+    /// K7a: the six election settings as the binary parses them with nothing set: **off** (a chart that renders no
+    /// `LEADER_ELECTION_ENABLED`, which is every replica count of one, is a lone operator that writes), and the
+    /// client-go timers.
+    #[test]
+    fn the_run_settings_default_to_no_election_and_the_client_go_timers() {
+        use clap::Parser as _;
+
+        let cli = crate::Cli::try_parse_from(["operator", "run"]).expect("the defaults parse");
+        let crate::Command::Run(args) = cli.command else {
+            panic!("`run` parses to the controllers");
+        };
+        assert!(
+            !args.leader_election_enabled,
+            "the election must be off unless the chart sets LEADER_ELECTION_ENABLED: a lone replica would campaign for a \
+             Lease its Role does not grant, never hold it, and write nothing"
+        );
+        assert_eq!(args.leader_election_name, "aap-operator");
+        assert_eq!(args.leader_election_namespace, None);
+        assert_eq!(
+            (
+                args.leader_election_lease_secs,
+                args.leader_election_renew_secs,
+                args.leader_election_retry_secs
+            ),
+            (15, 10, 2),
+            "the client-go defaults, and the ones the chart's values.yaml holds"
+        );
     }
 
     /// The operator flushes the spans still queued when it ends, whether it ended well or not.
@@ -708,6 +1035,12 @@ mod tests {
             max_access_tier: aap_api::AccessTierCap::Auto,
             tool_probe_enabled: false,
             tool_probe_timeout_secs: 5,
+            leader_election_enabled: false,
+            leader_election_name: "aap-operator".to_owned(),
+            leader_election_namespace: None,
+            leader_election_lease_secs: 15,
+            leader_election_renew_secs: 10,
+            leader_election_retry_secs: 2,
         }
     }
 
@@ -781,5 +1114,134 @@ mod tests {
         assert!(!is_dns_label(""));
         assert!(!is_dns_label(&"a".repeat(64)));
         assert!(!is_dns_label("-a") && !is_dns_label("a-"));
+    }
+
+    /// K7a: the election is off by default; on, it takes the primary namespace when none is named, refuses
+    /// timings the loop cannot honour, and refuses a replica that cannot name itself.
+    #[test]
+    fn the_leader_election_is_off_by_default_and_takes_the_primary_namespace() {
+        // Off: nothing is asked of the cluster, and the operator is the only replica.
+        let off = args(Some("agents"), None);
+        assert!(
+            off.leader_election(Some(&["agents".to_owned()]))
+                .expect("off is not an error")
+                .is_none()
+        );
+
+        // On, with a pod name: the primary namespace, the default lease name and the default timings.
+        let mut on = args(Some("agents"), None);
+        on.leader_election_enabled = true;
+        on.instance = Some("pod-7".to_owned());
+        let settings = on
+            .leader_election(Some(&["agents".to_owned()]))
+            .expect("on")
+            .expect("an election");
+        assert_eq!(settings.namespace, "agents", "the primary namespace");
+        assert_eq!(settings.name, "aap-operator");
+        assert_eq!(settings.candidate.as_str(), "pod-7");
+        assert_eq!(settings.timings, aap_leader_kubernetes::Timings::default());
+
+        // An explicit namespace wins over the primary.
+        let mut named = on.clone();
+        named.leader_election_namespace = Some("ops".to_owned());
+        assert_eq!(
+            named
+                .leader_election(Some(&["agents".to_owned()]))
+                .expect("on")
+                .expect("an election")
+                .namespace,
+            "ops"
+        );
+
+        // A list of several namespaces: the first is the primary.
+        assert_eq!(
+            on.leader_election(Some(&["one".to_owned(), "two".to_owned()]))
+                .expect("on")
+                .expect("an election")
+                .namespace,
+            "one"
+        );
+
+        // On, and no namespace anywhere: refused, naming the variable.
+        let mut nameless = args(None, None);
+        nameless.leader_election_enabled = true;
+        nameless.instance = Some("pod-7".to_owned());
+        let error = nameless
+            .leader_election(None)
+            .expect_err("a lease needs a namespace");
+        assert!(
+            format!("{error:#}").contains("LEADER_ELECTION_NAMESPACE"),
+            "{error:#}"
+        );
+        assert!(
+            nameless.leader_election(Some(&[])).is_err(),
+            "an empty list has no primary"
+        );
+
+        // A namespace that is not one, and a name that is not one.
+        let mut wrong = on.clone();
+        wrong.leader_election_namespace = Some("Agents".to_owned());
+        assert!(wrong.leader_election(Some(&["agents".to_owned()])).is_err());
+        let mut unnamed = on.clone();
+        unnamed.leader_election_name = "  ".to_owned();
+        assert!(
+            unnamed
+                .leader_election(Some(&["agents".to_owned()]))
+                .is_err()
+        );
+    }
+
+    /// K7a: timings the loop cannot honour are refused, naming the variables that gave them.
+    #[test]
+    fn inconsistent_leader_election_timings_are_refused() {
+        let mut on = args(Some("agents"), None);
+        on.leader_election_enabled = true;
+        on.instance = Some("pod-7".to_owned());
+        for (lease, renew, retry) in [(2, 2, 1), (15, 15, 2), (15, 10, 10), (0, 0, 0)] {
+            let mut bad = on.clone();
+            bad.leader_election_lease_secs = lease;
+            bad.leader_election_renew_secs = renew;
+            bad.leader_election_retry_secs = retry;
+            let error = bad
+                .leader_election(Some(&["agents".to_owned()]))
+                .expect_err("inconsistent timings");
+            let text = format!("{error:#}");
+            assert!(text.contains("LEADER_ELECTION_LEASE_SECS"), "{text}");
+            assert!(
+                text.contains("retry < renew < lease") || text.contains("at least 1 s"),
+                "{text}"
+            );
+        }
+    }
+
+    /// K7a: the candidate's identity is `POD_NAME`, else `HOSTNAME`, else a refusal.
+    #[test]
+    fn the_candidate_is_the_pod_name_then_the_hostname() {
+        assert_eq!(
+            candidate_id(Some("pod-7"), Some("host"))
+                .expect("the pod name wins")
+                .as_str(),
+            "pod-7"
+        );
+        assert_eq!(
+            candidate_id(None, Some("host"))
+                .expect("the hostname")
+                .as_str(),
+            "host"
+        );
+        assert_eq!(
+            candidate_id(Some("  "), Some("host"))
+                .expect("a blank pod name is none")
+                .as_str(),
+            "host"
+        );
+        let error = candidate_id(None, None).expect_err("no identity");
+        let text = format!("{error:#}");
+        assert!(text.contains("POD_NAME"), "{text}");
+        assert!(text.contains("HOSTNAME"), "{text}");
+        assert!(
+            candidate_id(Some(" "), Some("")).is_err(),
+            "two blank names are none"
+        );
     }
 }

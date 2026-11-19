@@ -39,6 +39,14 @@
 //!
 //! [`RuntimeProvider::watch`] is called **once** and its ids are fanned out ([`fan_out`]): each call is a set of watches
 //! of the API server, so one per shard would be one set too many. Each shard keeps the ids of the namespaces it watches.
+//!
+//! # Leader election (K7a)
+//!
+//! [`Operator::with_leader`] gives the operator the election this replica is a candidate of. Every pass of the four
+//! controllers asks it first: a replica that is not the holder returns `Ok(Action::requeue(`[`FOLLOWER_RECHECK`]`))`
+//! and writes nothing, while the holder writes. The caches, the watches, `/readyz` and the registry are the same on
+//! both, which is what makes a second replica worth running. The campaign itself is the composition root's
+//! ([`LeaderElection::run`](aap_ports::LeaderElection::run)): this module only asks.
 
 use std::collections::HashMap;
 use std::future::Future;
@@ -48,10 +56,10 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
 use aap_api::{AgentConfig, AgentService, ModelEndpoint, ToolProvider};
-use aap_ports::{RuntimeId, RuntimeProvider, StoreProvisioner};
+use aap_ports::{AlwaysLeader, LeaderElection, RuntimeId, RuntimeProvider, StoreProvisioner};
 use futures::stream::BoxStream;
 use futures::{FutureExt, Stream, StreamExt};
-use kube::runtime::controller::Config as ControllerConfig;
+use kube::runtime::controller::{Action, Config as ControllerConfig};
 use kube::runtime::reflector::{self, ObjectRef, Store};
 use kube::runtime::{Controller, WatchStreamExt, watcher};
 use kube::{Api, Client, Resource, ResourceExt};
@@ -113,6 +121,8 @@ pub struct Operator<R, S> {
     metrics: Arc<Metrics>,
     readiness: Readiness,
     tracer: aap_trace::Tracer,
+    /// Who holds the election this replica is a candidate of (K7a): only the leader's passes write.
+    leader: Arc<dyn LeaderElection>,
     /// One per namespace watched, in the order of [`Options::watch_namespaces`]; empty once [`run`](Self::run)
     /// has taken them.
     shards: Vec<Shard>,
@@ -145,8 +155,27 @@ where
             metrics: Arc::new(Metrics::new()),
             readiness: Readiness::default(),
             tracer: aap_trace::Tracer::off(),
+            leader: Arc::new(AlwaysLeader::default()),
             shards,
         }
+    }
+
+    /// Elect `leader`'s holder as the one whose passes write (K7a). The default is [`AlwaysLeader`]: one
+    /// replica, and every pass writes.
+    ///
+    /// A replica that is not the leader still runs every controller and keeps every cache, and still serves
+    /// `/readyz` and the registry; a pass it is woken for returns
+    /// `Ok(Action::requeue(`[`FOLLOWER_RECHECK`]`))` and writes nothing, so it looks again within the
+    /// election's own patience rather than waiting for a change of an object that may not come.
+    #[must_use]
+    pub fn with_leader(mut self, leader: Arc<dyn LeaderElection>) -> Self {
+        self.leader = leader;
+        self
+    }
+
+    /// The election this replica is a candidate of.
+    pub fn leader(&self) -> &Arc<dyn LeaderElection> {
+        &self.leader
     }
 
     /// Make a span of every pass with `tracer` (K5, §48a). Off by default.
@@ -254,6 +283,7 @@ where
                 signals,
                 metrics.clone(),
                 self.tracer.clone(),
+                self.leader.clone(),
                 stopped.clone(),
                 cfg.clone(),
             )));
@@ -374,6 +404,7 @@ async fn run_shard<R, S>(
     signals: BoxStream<'static, RuntimeId>,
     metrics: Arc<Metrics>,
     tracer: aap_trace::Tracer,
+    leader: Arc<dyn LeaderElection>,
     stopped: watch::Receiver<bool>,
     cfg: ControllerConfig,
 ) where
@@ -404,6 +435,7 @@ async fn run_shard<R, S>(
     let mapper_reader = reader.clone();
     let (endpoint_services, endpoint_configs) = (reader.clone(), config_reader.clone());
     let (provider_services, provider_configs) = (reader.clone(), config_reader.clone());
+    let service_leader = leader.clone();
     let services = services
         .with_config(cfg.clone())
         .graceful_shutdown_on(signal(stopped.clone()))
@@ -421,7 +453,19 @@ async fn run_shard<R, S>(
             move |provider| services_of_provider(&provider_services, &provider_configs, &provider),
         )
         .reconcile_on(signals)
-        .run(reconcile_service, service_error_policy, ctx)
+        .run(
+            move |svc, ctx| {
+                let leader = service_leader.clone();
+                async move {
+                    if !leader.is_leader() {
+                        return Ok(Action::requeue(FOLLOWER_RECHECK));
+                    }
+                    reconcile_service(svc, ctx).await
+                }
+            },
+            service_error_policy,
+            ctx,
+        )
         .for_each(|result| async move { log_plumbing("agentservice", result) });
     // A controller whose cache never lists — a namespace the `Role` does not allow — may not reach its shutdown trigger;
     // the grace bounds it either way, with a warning that names it and the namespace.
@@ -434,8 +478,21 @@ async fn run_shard<R, S>(
     );
 
     // The configs.
+    let config_leader = leader.clone();
     let configs = configs_controller
-        .run(reconcile_config, config_error_policy, config_ctx)
+        .run(
+            move |config, ctx| {
+                let leader = config_leader.clone();
+                async move {
+                    if !leader.is_leader() {
+                        return Ok(Action::requeue(FOLLOWER_RECHECK));
+                    }
+                    reconcile_config(config, ctx).await
+                }
+            },
+            config_error_policy,
+            config_ctx,
+        )
         .for_each(|result| async move { log_plumbing("agentconfig", result) });
     let configs = until_stopped(
         "agentconfig",
@@ -483,6 +540,7 @@ async fn run_shard<R, S>(
         );
         let (own_c, services_c, configs_s) =
             (own.clone(), shared_services.clone(), shared_configs.clone());
+        let endpoint_leader = leader.clone();
         let run = controller
             .watches_stream(endpoint_config_events, move |config| {
                 touched_by_config(&config, &services_c, &own_c, endpoint_of_config)
@@ -490,7 +548,19 @@ async fn run_shard<R, S>(
             .watches_stream(endpoint_service_events, move |service| {
                 touched_by_service(&service, &configs_s, &own, endpoint_of_config)
             })
-            .run(reconcile_endpoint, endpoint_error_policy, ctx)
+            .run(
+                move |endpoint, ctx| {
+                    let leader = endpoint_leader.clone();
+                    async move {
+                        if !leader.is_leader() {
+                            return Ok(Action::requeue(FOLLOWER_RECHECK));
+                        }
+                        reconcile_endpoint(endpoint, ctx).await
+                    }
+                },
+                endpoint_error_policy,
+                ctx,
+            )
             .for_each(|result| async move { log_plumbing("modelendpoint", result) });
         until_stopped("modelendpoint", &scope, GRACE, run, signal(stopped.clone()))
     };
@@ -512,6 +582,7 @@ async fn run_shard<R, S>(
         );
         let (own_c, services_c, configs_s) =
             (own.clone(), shared_services.clone(), shared_configs.clone());
+        let provider_leader = leader.clone();
         let run = controller
             .watches_stream(provider_config_events, move |config| {
                 touched_by_config(&config, &services_c, &own_c, providers_of_config)
@@ -519,7 +590,19 @@ async fn run_shard<R, S>(
             .watches_stream(provider_service_events, move |service| {
                 touched_by_service(&service, &configs_s, &own, providers_of_config)
             })
-            .run(reconcile_provider, provider_error_policy, ctx)
+            .run(
+                move |provider, ctx| {
+                    let leader = provider_leader.clone();
+                    async move {
+                        if !leader.is_leader() {
+                            return Ok(Action::requeue(FOLLOWER_RECHECK));
+                        }
+                        reconcile_provider(provider, ctx).await
+                    }
+                },
+                provider_error_policy,
+                ctx,
+            )
             .for_each(|result| async move { log_plumbing("toolprovider", result) });
         until_stopped("toolprovider", &scope, GRACE, run, signal(stopped.clone()))
     };
@@ -529,6 +612,12 @@ async fn run_shard<R, S>(
 
 /// How long a shared controller may take to stop once it has been told to.
 const GRACE: Duration = Duration::from_secs(5);
+
+/// How soon a pass that found this replica is not the leader looks again (K7a). The election's own changes are
+/// a stream ([`LeaderElection::following`]), but a controller's passes are woken by the cluster's objects: a
+/// replica that becomes the leader must start writing without waiting for one to change, and one that stops
+/// being it must stop, so both look again within this.
+pub const FOLLOWER_RECHECK: Duration = Duration::from_secs(30);
 
 /// `run` until it ends, or until `stopped` has resolved and `grace` more has passed.
 ///

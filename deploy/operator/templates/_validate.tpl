@@ -18,9 +18,16 @@ Included from deployment.yaml, which every render has, so they always run.
 {{- end -}}
 {{- /* The operator's traces (slice K5): off by default, and then the block is only checked to be a block. */ -}}
 {{- include "aap.otel.validate" (dict "what" "otel" "block" .Values.otel "policy" .Values.networkPolicy.enabled "dns" true) -}}
-{{- /* One replica and no leader election in v0 (§59a): a second reconciler would only race the first. */ -}}
-{{- if or (hasKey .Values "replicaCount") (hasKey .Values "replicas") -}}
-{{- fail "the operator has no leader election in v0 and runs one replica: there is no replicaCount (§59a, \"The operator chart\")" -}}
+{{- /* K7: the replica count is `replicas`; `replicaCount` is the Helm idiom this chart never had. */ -}}
+{{- if hasKey .Values "replicaCount" -}}
+{{- fail "the operator's replica count is `replicas`, not `replicaCount`" -}}
+{{- end -}}
+{{- if not (and (or (kindIs "float64" .Values.replicas) (kindIs "int" .Values.replicas) (kindIs "int64" .Values.replicas)) (ge (int .Values.replicas) 1) (eq (toString (int .Values.replicas)) (toString .Values.replicas))) -}}
+{{- fail (printf "replicas must be a whole number of at least 1, got %v" .Values.replicas) -}}
+{{- end -}}
+{{- range $k, $v := .Values.leaderElection }}{{ if not (has $k (list "leaseSecs" "renewSecs" "retrySecs")) }}{{ fail (printf "leaderElection.%s is not a setting: leaseSecs, renewSecs or retrySecs" $k) }}{{ end }}{{ end -}}
+{{- if and (ge (int .Values.replicas) 2) (not (and (lt (int .Values.leaderElection.renewSecs) (int .Values.leaderElection.leaseSecs)) (lt (int .Values.leaderElection.retrySecs) (int .Values.leaderElection.renewSecs)) (ge (int .Values.leaderElection.retrySecs) 1))) -}}
+{{- fail "leaderElection needs retrySecs < renewSecs < leaseSecs, each at least 1" -}}
 {{- end -}}
 {{- /* The image: a tag nothing moves under it. */ -}}
 {{- if not .Values.image.repository -}}
@@ -177,13 +184,21 @@ policy on, as the traces' is. */ -}}
 {{- fail "toolProbe.dns.to is required while toolProbe.to is set and the NetworkPolicy is enabled: the operator's policy has no DNS rule otherwise, and a rule with ports and no `to` is port 53 to anywhere" -}}
 {{- end -}}
 {{- /* Settings that have a default: a number, above zero. */ -}}
-{{- range $k, $v := .Values.tuning -}}
-{{- if not (has $k (list "concurrency" "resyncSecs" "resyncPendingSecs")) -}}
-{{- fail (printf "tuning.%s is not a setting: concurrency, resyncSecs or resyncPendingSecs" $k) -}}
+{{- $tuning := default (dict) .Values.tuning -}}
+{{- range $k, $v := $tuning -}}
+{{- if not (has $k (list "concurrency" "resyncSecs" "resyncPendingSecs" "reconcileTimeoutSecs")) -}}
+{{- fail (printf "tuning.%s is not a setting: concurrency, resyncSecs, resyncPendingSecs or reconcileTimeoutSecs" $k) -}}
 {{- end -}}
 {{- if not (and (or (kindIs "float64" $v) (kindIs "int" $v) (kindIs "int64" $v)) (ge (int $v) 1)) -}}
 {{- fail (printf "tuning.%s must be a whole number of at least 1, got %v" $k $v) -}}
 {{- end -}}
+{{- end -}}
+{{- /* K7: a pass must finish before the renew deadline, or it could write after losing the lease. */ -}}
+{{- if and (ge (int .Values.replicas) 2) (ge (int (default 4 $tuning.reconcileTimeoutSecs)) (sub (int .Values.leaderElection.leaseSecs) (int .Values.leaderElection.renewSecs))) -}}
+{{- fail "tuning.reconcileTimeoutSecs must be below leaseSecs - renewSecs while replicas > 1: the margin between the renew deadline and the earliest takeover, or a pass could write after losing the lease" -}}
+{{- end -}}
+{{- if and (ge (int .Values.replicas) 2) .Values.toolProbe.to (gt (int .Values.toolProbe.timeoutSecs) (sub (int (default 4 $tuning.reconcileTimeoutSecs)) 5)) -}}
+{{- fail (printf "with the election on, toolProbe.timeoutSecs (%d) needs to be at most tuning.reconcileTimeoutSecs - 5 (%d): the pass keeps 5 s for its other steps; raise leaderElection.leaseSecs/renewSecs or lower the probe" (int .Values.toolProbe.timeoutSecs) (sub (int (default 4 $tuning.reconcileTimeoutSecs)) 5)) -}}
 {{- end -}}
 {{- /* Run pods (slice D15a): off by default, and then nothing of them is checked or rendered. */ -}}
 {{- include "aap.runPods.validate" . -}}
