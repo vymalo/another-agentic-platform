@@ -1454,3 +1454,74 @@ fn the_guard_admits_the_cache_claim_only_when_the_deployment_lists_it_and_never_
     );
     common::assert_issue(&found, "existingClaim", "work-coder-0");
 }
+
+// ---------------------------------------------------------------- K14a (AD-052): the runtime class of a run pod
+
+#[test]
+fn the_runtime_class_of_a_run_pod_is_the_deployments_and_absent_when_it_names_none() {
+    let template_of = |r: &aap_domain::ResolvedAgent| -> Value {
+        let set = r
+            .runtime
+            .file_sets
+            .iter()
+            .find(|f| f.name == "coder-run-pod")
+            .expect("the template is a file set");
+        serde_json::from_str(&set.files["pod.yaml"]).expect("a JSON Pod")
+    };
+
+    // None: the template is what it was, the spec says nothing of the field, and the run pods' own spec has no class.
+    let none = resolved_on();
+    let pod = template_of(&none);
+    assert!(
+        pod["spec"].get("runtimeClassName").is_none(),
+        "no class named, no field: {pod}"
+    );
+    assert!(
+        !serde_json::to_string(&none.runtime)
+            .unwrap()
+            .contains("runtime_class_name")
+    );
+    assert_eq!(
+        none.runtime.run_pods.as_ref().unwrap().runtime_class_name,
+        None
+    );
+
+    // Named: the template of the run pods carries it, and the run pods' spec does too.
+    let named = must_resolve_with(
+        "coder",
+        &Externals::default().with_run_pods(settings_with(json!({ "runtimeClassName": "gvisor" }))),
+        on,
+    );
+    let pod = template_of(&named);
+    assert_eq!(pod["spec"]["runtimeClassName"], "gvisor");
+    assert_eq!(
+        named
+            .runtime
+            .run_pods
+            .as_ref()
+            .unwrap()
+            .runtime_class_name
+            .as_deref(),
+        Some("gvisor")
+    );
+    // The run pods' class is not the agents': the workers' pod is what it was.
+    assert!(
+        named.runtime.workloads[0].runtime_class_name.is_none(),
+        "runPods.runtimeClassName is the run pods' alone"
+    );
+}
+
+#[test]
+fn a_runtime_class_that_is_not_the_name_of_an_object_is_refused() {
+    let problems = settings_with(json!({ "runtimeClassName": "Not A Class" }))
+        .validate()
+        .unwrap_err();
+    assert!(
+        problems.iter().any(|p| p.contains("runtimeClassName")),
+        "{problems:?}"
+    );
+    // An empty value is none, as the chart leaves the key out, and is not a mistake.
+    let empty = settings_with(json!({ "runtimeClassName": "" }));
+    assert!(empty.validate().is_ok());
+    assert_eq!(empty.runtime_class_name(), None);
+}

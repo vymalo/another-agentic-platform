@@ -793,3 +793,44 @@ fn an_id_without_a_namespace_is_refused() {
     let (_, spec) = coder();
     assert!(render(&RuntimeId::new("", "coder"), &spec).is_err());
 }
+
+#[test]
+fn the_agents_runtime_class_is_on_every_workload_and_nowhere_when_the_spec_names_none() {
+    // K14a (AD-052): the deployment's class is every workload's pod template, for both harnesses, and the goldens above
+    // are the proof that nothing moves while it is not named.
+    for (name, (id, spec)) in [("coder", coder()), ("chat", chat()), ("a2a", a2a())] {
+        let docs = rendered(&(id.clone(), spec.clone())).documents();
+        let mut seen = 0;
+        for d in &docs {
+            let pod = &d["spec"]["template"]["spec"];
+            if pod.is_object() {
+                assert!(
+                    pod.get("runtimeClassName").is_none(),
+                    "{name}: {} has a class no one named",
+                    d["kind"]
+                );
+                seen += 1;
+            }
+        }
+        assert_eq!(
+            seen,
+            spec.workloads.len(),
+            "{name}: every workload, and only it"
+        );
+
+        let mut named = spec;
+        for w in &mut named.workloads {
+            w.runtime_class_name = Some("gvisor".to_owned());
+        }
+        let docs = rendered(&(id, named.clone())).documents();
+        let mut seen = 0;
+        for d in &docs {
+            let pod = &d["spec"]["template"]["spec"];
+            if pod.is_object() {
+                assert_eq!(pod["runtimeClassName"], "gvisor", "{name}: {}", d["kind"]);
+                seen += 1;
+            }
+        }
+        assert_eq!(seen, named.workloads.len(), "{name}: every workload");
+    }
+}

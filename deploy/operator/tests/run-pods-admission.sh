@@ -40,6 +40,7 @@ claims=$(params claims)
 secret=$(params secretName)
 key=$(params secretKey)
 class=$(params priorityClass)
+runtime_class=$(params runtimeClassName)
 if [ -z "$account" ] || [ -z "$managed_by" ] || [ -z "$run_label" ] || [ -z "$claim" ] || [ -z "$claims" ] || [ -z "$secret" ] || [ -z "$key" ] || [ -z "$class" ]; then
   die "the parameters of the guard are incomplete: $(kubectl -n "$ns" get configmap "$svc-run-pods-policy" -o 'jsonpath={.data}')"
 fi
@@ -75,6 +76,15 @@ try "no run label" denied "a run pod carries the labels" "del(.metadata.labels[\
 try "not managed by the coder" denied "a run pod carries the labels" '.metadata.labels["app.kubernetes.io/managed-by"] = "someone"'
 try "another priority class" denied "a run pod has the priority class $class" '.spec.priorityClassName = "system-cluster-critical"'
 try "no priority class" denied "a run pod has the priority class $class" 'del(.spec.priorityClassName)'
+
+# K14a (AD-052): once the deployment names a RuntimeClass, a run pod of the agent's account has that one and no other, or none; with no
+# class named, the policy does not judge the field at all (the control below: a pod with one is admitted).
+if [ -n "$runtime_class" ]; then
+  try "another runtime class" denied "a run pod runs under the RuntimeClass $runtime_class" '.spec.runtimeClassName = "runc"'
+  try "no runtime class" denied "a run pod runs under the RuntimeClass $runtime_class" 'del(.spec.runtimeClassName)'
+else
+  try "a runtime class when the deployment names none" allowed "" '.spec.runtimeClassName = "runc"'
+fi
 
 # What it runs: only the images the deployment allows, in every container.
 try "another image in the run container" denied "a run pod uses only the images" '.spec.containers[0].image = "docker.io/library/busybox:latest"'

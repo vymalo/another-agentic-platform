@@ -240,6 +240,14 @@ pub fn chart_run_pod_settings() -> Value {
     let object = settings.as_object_mut().expect("runPods is a map");
     object.remove("enabled");
     object.remove("priorityClassName");
+    // K14a: the chart leaves the key out when it is empty (the template does the same), so this stand-in does too.
+    if object
+        .get("runtimeClassName")
+        .and_then(Value::as_str)
+        .is_none_or(|c| c.trim().is_empty())
+    {
+        object.remove("runtimeClassName");
+    }
     object.insert("classes".into(), values["runPodClasses"].clone());
     object.insert("priorityClass".into(), serde_json::json!("coder-run"));
     object.insert("role".into(), serde_json::json!("coder-run-pods"));

@@ -35,6 +35,10 @@ pub struct RunPodSettings {
     /// The `PriorityClass` of run pods, which the quota is scoped to and the admission policy requires. The
     /// chart made it (or the deployment manages it); the operator makes no cluster-scoped object.
     pub priority_class: String,
+    /// The `RuntimeClass` of run pods (K14a, AD-052), when the deployment names one: the object is the administrator's,
+    /// and the admission policy requires this class once it is set. Empty or absent: none, and the template is what it was.
+    #[serde(default)]
+    pub runtime_class_name: Option<String>,
     /// The `Role` that lets an account make, find, watch and delete pods and `exec` in them. The chart made it;
     /// the operator binds each coder's account to it and holds the right to bind that role alone.
     pub role: String,
@@ -296,6 +300,7 @@ impl RunPodSettings {
     pub fn offering<'a>(classes: impl IntoIterator<Item = &'a str>) -> Self {
         Self {
             priority_class: "stand-in".to_owned(),
+            runtime_class_name: None,
             role: "stand-in".to_owned(),
             classes: classes
                 .into_iter()
@@ -364,6 +369,15 @@ impl RunPodSettings {
         self.classes.keys().cloned().collect()
     }
 
+    /// The `RuntimeClass` of run pods when the deployment names one: an empty value is none, as the chart leaves the key out.
+    #[must_use]
+    pub fn runtime_class_name(&self) -> Option<&str> {
+        self.runtime_class_name
+            .as_deref()
+            .map(str::trim)
+            .filter(|c| !c.is_empty())
+    }
+
     /// Every mistake of the settings, each as a sentence that names the key. `Ok` when there is none.
     ///
     /// # Errors
@@ -382,6 +396,13 @@ impl RunPodSettings {
                     "{key}: {name:?} is not the name of an object (a DNS-1123 subdomain)"
                 ));
             }
+        }
+        if let Some(class) = self.runtime_class_name()
+            && !is_dns_subdomain(class)
+        {
+            bad(format!(
+                "runtimeClassName: {class:?} is not the name of a RuntimeClass (a DNS-1123 subdomain)"
+            ));
         }
         if self.classes.is_empty() {
             bad(
@@ -784,6 +805,10 @@ impl ForService<'_> {
 
         let mut spec = serde_json::Map::new();
         spec.insert("priorityClassName".into(), json!(s.priority_class));
+        // K14a (AD-052): the sandboxed runtime, only when the deployment names one: a run pod without it is what it was.
+        if let Some(class) = s.runtime_class_name() {
+            spec.insert("runtimeClassName".into(), json!(class));
+        }
         // A run pod holds no credential for the cluster.
         spec.insert("automountServiceAccountToken".into(), json!(false));
         spec.insert("enableServiceLinks".into(), json!(false));
@@ -1071,6 +1096,7 @@ impl ForService<'_> {
             service_account: self.service.to_owned(),
             role: s.role.clone(),
             priority_class: s.priority_class.clone(),
+            runtime_class_name: s.runtime_class_name().map(str::to_owned),
             quota: RunPodQuota {
                 pods: s.quota.pods,
                 limits_memory: s.quota.limits_memory.clone(),

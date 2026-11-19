@@ -12,7 +12,7 @@ use std::path::PathBuf;
 use aap_ports::RuntimeId;
 use aap_runtime_kubernetes::names::{DIGEST_ANNOTATION, MANAGED_BY_LABEL, MANAGED_BY_VALUE};
 use aap_runtime_kubernetes::{Rendered, render};
-use common::{resolved, resolved_run_pods, set};
+use common::{resolved, resolved_run_pods, resolved_run_pods_with, set};
 use serde_json::{Value, json};
 
 fn rendered(r: &aap_domain::ResolvedAgent) -> Rendered {
@@ -904,4 +904,43 @@ fn a_spec_the_provider_cannot_render_is_refused_by_name() {
     let e = render(&RuntimeId::new("ns", "coder"), &spec);
     // `RuntimeSpec::check` refuses it before `render` would; render makes no object of a name it was not given.
     assert!(spec.check().is_err(), "{e:?}");
+}
+
+#[test]
+fn the_run_pod_template_carries_the_class_the_deployment_names_and_none_otherwise() {
+    // K14a (AD-052): the template the workers read, and the parameters the admission policy requires the class from.
+    let pod = |r: &aap_domain::ResolvedAgent| -> Value {
+        let docs = rendered(r).documents();
+        serde_json::from_str(
+            find(&docs, "ConfigMap", "coder-run-pod")["data"]["pod.yaml"]
+                .as_str()
+                .unwrap(),
+        )
+        .unwrap()
+    };
+    let none = resolved_run_pods(|_, _| {});
+    assert!(
+        pod(&none)["spec"].get("runtimeClassName").is_none(),
+        "no class named, no field"
+    );
+    let docs = rendered(&none).documents();
+    assert!(
+        find(&docs, "ConfigMap", "coder-run-pods-policy")["data"]
+            .get("runtimeClassName")
+            .is_none(),
+        "no class named, no parameter: the policy has no rule to read it"
+    );
+
+    let named = resolved_run_pods_with(
+        |file| {
+            file["runtimeClassName"] = json!("gvisor");
+        },
+        |_, _| {},
+    );
+    assert_eq!(pod(&named)["spec"]["runtimeClassName"], "gvisor");
+    let docs = rendered(&named).documents();
+    assert_eq!(
+        find(&docs, "ConfigMap", "coder-run-pods-policy")["data"]["runtimeClassName"],
+        "gvisor"
+    );
 }

@@ -75,6 +75,14 @@ pub struct RunArgs {
     #[arg(long, env = "DEFAULT_AGENT_IMAGE")]
     pub default_agent_image: Option<String>,
 
+    /// The `RuntimeClass` of every agent's own pod (K14a, AD-052): the name of an object the cluster
+    /// ADMINISTRATOR made (the chart makes none). Unset or empty: no class, and every workload is what it
+    /// was. Named, it goes into the pod template of every harness, and into the config digest, so naming
+    /// it rolls the agents once. A name that is not a DNS subdomain stops the operator at start, not one
+    /// agent at a time.
+    #[arg(long, env = "AGENT_RUNTIME_CLASS")]
+    pub agent_runtime_class: Option<String>,
+
     /// The file that holds the deployment's settings for run pods (slice D15a): the size classes, the run image,
     /// the quota, the network policy and the names of the cluster-scoped objects the chart made (a YAML file, a
     /// mounted ConfigMap; `aap_domain::RunPodSettings`, an unknown key refused). **Unset or empty: this operator has
@@ -239,6 +247,30 @@ impl RunArgs {
         Ok(Some(image.to_owned()))
     }
 
+    /// The `RuntimeClass` of the agents' pods, if there is one: an unset or empty value is none (a chart value left
+    /// blank), and a name that is not a DNS subdomain is a deployment mistake that stops the operator at start, not
+    /// one agent at a time.
+    ///
+    /// # Errors
+    ///
+    /// The name is not a DNS subdomain.
+    pub fn agent_runtime_class(&self) -> Result<Option<String>> {
+        let Some(class) = self
+            .agent_runtime_class
+            .as_deref()
+            .map(str::trim)
+            .filter(|c| !c.is_empty())
+        else {
+            return Ok(None);
+        };
+        if !aap_domain::is_dns_subdomain(class) {
+            anyhow::bail!(
+                "AGENT_RUNTIME_CLASS (--agent-runtime-class) {class:?} is not the name of a RuntimeClass (a DNS subdomain): the RuntimeClass object is the administrator's"
+            );
+        }
+        Ok(Some(class.to_owned()))
+    }
+
     /// The settings for run pods, if there are any: an unset or empty `RUN_PODS_FILE` is none, and a file that cannot be
     /// read, is not YAML of the settings or fails their checks stops the operator at start, naming every mistake: a
     /// pod that ran with half the settings would make run pods the guard does not match.
@@ -398,6 +430,7 @@ impl RunArgs {
         registry: bool,
         registry_full: std::sync::Arc<std::sync::atomic::AtomicBool>,
         default_agent_image: Option<String>,
+        agent_runtime_class: Option<String>,
         run_pods: Option<aap_domain::RunPodSettings>,
     ) -> aap_controller::Options {
         aap_controller::Options {
@@ -417,6 +450,7 @@ impl RunArgs {
             pass_timeout: std::time::Duration::from_secs(self.reconcile_timeout_secs.max(1)),
             instance: self.instance.clone().filter(|i| !i.is_empty()),
             default_agent_image,
+            agent_runtime_class,
             run_pods,
             cache_claims: self
                 .cache_allowed_claims
@@ -585,6 +619,7 @@ async fn run_with(args: RunArgs, tracer: aap_trace::Tracer) -> Result<()> {
     use tokio::sync::watch;
 
     let default_image = args.default_image()?;
+    let agent_runtime_class = args.agent_runtime_class()?;
     let run_pods = args.run_pod_settings()?;
     let watch_namespaces = args.namespaces()?;
     let leader = args.leader_election(watch_namespaces.as_deref())?;
@@ -595,6 +630,7 @@ async fn run_with(args: RunArgs, tracer: aap_trace::Tracer) -> Result<()> {
         token.is_some(),
         registry_full.clone(),
         default_image,
+        agent_runtime_class,
         run_pods,
     );
     if options.watch_namespaces.is_none() {
@@ -608,6 +644,7 @@ async fn run_with(args: RunArgs, tracer: aap_trace::Tracer) -> Result<()> {
             .as_ref()
             .map_or_else(|| "(all)".to_owned(), |n| n.join(",")),
         default_agent_image = options.default_agent_image.as_deref().unwrap_or("(none)"),
+        agent_runtime_class = options.agent_runtime_class.as_deref().unwrap_or("(none)"),
         run_pod_size_classes = options
             .run_pods
             .as_ref()
@@ -1030,6 +1067,7 @@ mod tests {
             resync_secs: 300,
             resync_pending_secs: 15,
             default_agent_image: None,
+            agent_runtime_class: None,
             run_pods_file: None,
             cache_allowed_claims: Vec::new(),
             max_access_tier: aap_api::AccessTierCap::Auto,

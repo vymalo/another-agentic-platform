@@ -70,6 +70,15 @@ serviceAccount:
 # and `false` is for a cluster that has no CloudNativePG at all.
 storeCnpg: true
 
+# K14a (AD-052): the RuntimeClass of the AGENTS' OWN pods, empty by default and then not a trace in any render. The untrusted code
+# is in a run pod (`runPods.runtimeClassName` below); the agent's pod holds the secrets and runs our code, and the owner widened
+# P-040 to it, so it is a setting of its own: run pods can be sandboxed before the agents are. `RuntimeClass` is a cluster-scoped
+# object of the ADMINISTRATOR'S, which this chart never makes (AD-052 decision 4): name one that exists. gVisor's handler is `runsc`,
+# not `runsc-kvm` (decision 5: the nodes are virtual machines). Empty: every agent's pod is scheduled as it was, and the config digest
+# does not move.
+agent:
+  runtimeClassName: ""
+
 # ---- Run pods (§60a, slice D15a; adam-rs ADR 0019 and 0041) --------------------------------------------------------------
 # `coder.runPods` of an AgentConfig puts the commands of a run (`run_command`, `run_checks`, OpenCode) in a pod of their own that sees
 # only its own run, instead of the coder's container, where they could read the GitHub App's private key. This is the deployment's
@@ -99,6 +108,13 @@ runPods:
   # Empty: the chart renders a PriorityClass <fullname>-<namespace>-run (value 0, preemptionPolicy Never) and the quota and the
   # admission policy use it. A name: a class you manage (the chart renders none).
   priorityClassName: ""
+  # K14a (AD-052): the RuntimeClass of a run pod, empty by default and then not a trace in any render. A run pod runs the commands of a
+  # repository the agent did not write, so a sandboxed class (gVisor, handler `runsc`) is what keeps a kernel fault reached from one of
+  # them away from the node. The object is the administrator's, never the operator's (decision 4); this chart only names it. **Named, it
+  # is REQUIRED**: the admission policy refuses a run pod of an agent's account that names another class, or none, so the sandbox cannot be
+  # skipped by whoever holds the account's token (decision 2). A class the cluster does not have is a pod that never starts, which the
+  # operator cannot tell from an image tag: README "Run pods".
+  runtimeClassName: ""
   # What the run pods of ONE agent may use in all: a ResourceQuota scoped to the priority class. A pod beyond it is refused (403
   # "exceeded quota") and the coder waits for a slot (waitSecs). The class is shared by the run pods of the namespace, so two agents in
   # one namespace share the tighter of their quotas.

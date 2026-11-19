@@ -1,0 +1,189 @@
+# A read-only Kubernetes tool server (slice K10a, AD-056): the first of the catalogue's examples. An agent that names this
+# `ToolProvider` gets a subset of the server's tools, and the server itself runs with `read_only = true` and the `core` toolset:
+# two controls, one in the platform's allow-list and one in the server.
+#
+# The image is `quay.io/containers/kubernetes_mcp_server`, pinned by tag AND digest (*verified 2026-11-19*: an anonymous quay.io
+# token and a manifest request for the index returned this digest for `v0.1.3`). Its licence, Apache-2.0, is recorded in
+# `third-party-notices.md`; the owner accepted it on 2026-11-19.
+#
+# What the server is told, in its own TOML (HTTP mode is a port, not a flag): `port = "8080"` makes it serve Streamable HTTP at
+# `/mcp`, `read_only = true` disables every write tool, and `toolsets = ["core"]` leaves the Kubernetes tools and nothing else
+# (no Helm, no kubevirt, no provider-specific sets).
+#
+# The account: the built-in `view` ClusterRole is the documented read-only role of the upstream guide. It is cluster-wide; a
+# deployment that wants less makes a Role in the one namespace it cares about and binds that instead. The example never
+# writes: `view` has get, list and watch.
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: kubernetes-mcp-config
+  namespace: another-agentic-system
+  labels:
+    agents.vymalo.com/tool-catalogue: "true"
+data:
+  config.toml: |
+    port = "8080"
+    bind_address = "0.0.0.0"
+    read_only = true
+    toolsets = ["core"]
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: kubernetes-mcp
+  namespace: another-agentic-system
+  labels:
+    agents.vymalo.com/tool-catalogue: "true"
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: kubernetes-mcp-view
+  labels:
+    agents.vymalo.com/tool-catalogue: "true"
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: view
+subjects:
+  - kind: ServiceAccount
+    name: kubernetes-mcp
+    namespace: another-agentic-system
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: kubernetes-mcp
+  namespace: another-agentic-system
+  labels:
+    agents.vymalo.com/tool-catalogue: "true"
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: kubernetes-mcp
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: kubernetes-mcp
+        agents.vymalo.com/tool-catalogue: "true"
+    spec:
+      serviceAccountName: kubernetes-mcp
+      automountServiceAccountToken: true
+      securityContext:
+        runAsNonRoot: true
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: server
+          image: quay.io/containers/kubernetes_mcp_server:v0.1.3@sha256:6347155616c49c78512114500688b50d275ddde7597b6a38cefe6f40a8c42c16
+          args: ["--config", "/etc/mcp/config.toml"]
+          ports:
+            - name: http
+              containerPort: 8080
+              protocol: TCP
+          readinessProbe:
+            httpGet:
+              path: /healthz
+              port: http
+            periodSeconds: 10
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: http
+            periodSeconds: 20
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: ["ALL"]
+          resources:
+            requests:
+              cpu: 20m
+              memory: 32Mi
+            limits:
+              memory: 128Mi
+          volumeMounts:
+            - name: config
+              mountPath: /etc/mcp
+              readOnly: true
+      volumes:
+        - name: config
+          configMap:
+            name: kubernetes-mcp-config
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: kubernetes-mcp
+  namespace: another-agentic-system
+  labels:
+    agents.vymalo.com/tool-catalogue: "true"
+spec:
+  selector:
+    app.kubernetes.io/name: kubernetes-mcp
+  ports:
+    - name: http
+      port: 8080
+      targetPort: http
+---
+# Ingress: the pods of this namespace (the operator's probe and the agents), on the MCP port. Egress: the API server (the
+# server reads the cluster through its account) and DNS. A deployment adds its own ranges and ports; this is the minimum the
+# example needs, and it never leaves the cluster.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: kubernetes-mcp
+  namespace: another-agentic-system
+  labels:
+    agents.vymalo.com/tool-catalogue: "true"
+spec:
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/name: kubernetes-mcp
+  policyTypes: [Ingress, Egress]
+  ingress:
+    - from:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: another-agentic-system
+      ports:
+        - protocol: TCP
+          port: 8080
+  egress:
+    - ports:
+        - protocol: TCP
+          port: 53
+        - protocol: UDP
+          port: 53
+    - ports:
+        - protocol: TCP
+          port: 443
+        - protocol: TCP
+          port: 6443
+---
+apiVersion: agents.vymalo.com/v1alpha1
+kind: ToolProvider
+metadata:
+  name: kubernetes
+  namespace: another-agentic-system
+spec:
+  title: Kubernetes (read-only)
+  mcp:
+    url: http://kubernetes-mcp.another-agentic-system.svc:8080/mcp
+    # The allow-list: the read-only tools of the `core` toolset that a person would want an agent to have. `pods_delete`,
+    # `pods_exec`, `pods_run`, `resources_create_or_update`, `resources_delete`, `resources_scale` and `nodes_log` are not
+    # here, and `read_only = true` above refuses them at the server too. The names are the server's own (its README, *Tools*).
+    tools:
+      - events_list
+      - namespaces_list
+      - nodes_stats_summary
+      - nodes_top
+      - pods_get
+      - pods_list
+      - pods_list_in_namespace
+      - pods_log
+      - pods_top
+      - resources_get
+      - resources_list
+    optional: false

@@ -6,9 +6,9 @@
 
 mod common;
 
-use aap_domain::{ResolvedAgent, spec_digest};
+use aap_domain::{Externals, ResolvedAgent, spec_digest};
 use aap_ports::{OwnerHandle, RuntimeSpec};
-use common::{example, must_resolve, remove, set, typed};
+use common::{example, must_resolve, must_resolve_with, remove, set, typed};
 use proptest::prelude::*;
 use serde_json::{Value, json};
 
@@ -480,4 +480,50 @@ fn a_spec_that_is_not_ours_still_has_a_digest() {
     spec.suspend = true;
     spec.workloads[0].replicas = 9;
     assert_eq!(spec_digest(&spec), r.digest);
+}
+
+#[test]
+fn the_agents_runtime_class_reaches_every_workload_and_moves_the_digest() {
+    // K14a (AD-052): the deployment's class is the pod template's, for every harness (the a2a image's pod too).
+    for name in ["coder", "chat", "a2a"] {
+        let plain = must_resolve(name, |_, _| {});
+        assert!(
+            plain
+                .runtime
+                .workloads
+                .iter()
+                .all(|w| w.runtime_class_name.is_none()),
+            "{name}: no class by default"
+        );
+        let named = must_resolve_with(
+            name,
+            &Externals::default().with_agent_runtime_class("gvisor"),
+            |_, _| {},
+        );
+        assert!(
+            named
+                .runtime
+                .workloads
+                .iter()
+                .all(|w| w.runtime_class_name.as_deref() == Some("gvisor")),
+            "{name}: every workload is under the class"
+        );
+        assert_ne!(named.digest, plain.digest, "{name}: a new class rolls");
+        // The class is the only difference: take it away and the spec is the one without it, byte for byte.
+        let mut without = named.runtime.clone();
+        without.digest.clear();
+        for w in &mut without.workloads {
+            w.runtime_class_name = None;
+        }
+        let mut bare = plain.runtime.clone();
+        bare.digest.clear();
+        assert_eq!(without, bare, "{name}");
+        // An empty setting is no setting (a chart value left blank): nothing moves.
+        let empty = must_resolve_with(
+            name,
+            &Externals::default().with_agent_runtime_class("  "),
+            |_, _| {},
+        );
+        assert_eq!(empty, plain, "{name}: an empty class changes nothing");
+    }
 }

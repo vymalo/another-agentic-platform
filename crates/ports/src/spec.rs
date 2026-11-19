@@ -241,6 +241,14 @@ impl RuntimeSpec {
         {
             return bad("the network's card path is not a path".into());
         }
+        for w in &self.workloads {
+            if w.runtime_class_name
+                .as_deref()
+                .is_some_and(|c| c.trim().is_empty())
+            {
+                return bad(format!("workload {}: the runtime class is empty", w.name));
+            }
+        }
         self.check_run_pods()
     }
 
@@ -268,6 +276,9 @@ impl RuntimeSpec {
         empty("the service account", &rp.service_account)?;
         empty("the role", &rp.role)?;
         empty("the priority class", &rp.priority_class)?;
+        if let Some(class) = &rp.runtime_class_name {
+            empty("the runtime class of the run pods", class)?;
+        }
         empty("the memory limit of the quota", &rp.quota.limits_memory)?;
         empty("the label that marks a pod managed", &rp.pods.managed_by)?;
         empty("the label that carries the run", &rp.pods.run_label)?;
@@ -372,6 +383,10 @@ pub struct Workload {
     /// (`check` refuses a sidecar that does). Part of the digest only when set.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub service_account: Option<String>,
+    /// The `RuntimeClass` of the pods (K14a, AD-052): the deployment's setting, the same for every harness. `None`:
+    /// no class, and the workload serialises exactly as it did before the field existed, so no digest moves.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub runtime_class_name: Option<String>,
 }
 
 /// One container.
@@ -724,6 +739,11 @@ pub struct RunPods {
     /// The class the pods have, and the quota is scoped to (a quota cannot select pods by label, but it
     /// can by priority class). The deployment made it.
     pub priority_class: String,
+    /// The `RuntimeClass` the pods run under (K14a, AD-052), when the deployment named one: the object is
+    /// the administrator's and the provider only names it. `None`: no class, and every object serialises
+    /// as it did before the field existed.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub runtime_class_name: Option<String>,
     /// What the pods may use in all.
     pub quota: RunPodQuota,
     /// What the pods may reach: deny by default, and the egress proxy. Always present: a spec with run pods and no

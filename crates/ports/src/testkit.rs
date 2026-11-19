@@ -405,6 +405,7 @@ pub fn sample_spec(id: &RuntimeId) -> RuntimeSpec {
             termination_grace_secs: Some(120),
             min_available: None,
             service_account: None,
+            runtime_class_name: None,
         }],
         file_sets: vec![FileSet {
             name: format!("{name}-agent-0a1b2c3d"),
@@ -496,6 +497,7 @@ pub fn sample_spec_with_run_pods(id: &RuntimeId) -> RuntimeSpec {
         service_account: account,
         role: "run-pods".to_owned(),
         priority_class: "run".to_owned(),
+        runtime_class_name: None,
         quota: RunPodQuota {
             pods: 4,
             limits_memory: "8Gi".to_owned(),

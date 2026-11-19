@@ -26,6 +26,7 @@ pub use run_pods::{
     ContainerResources, EgressProxySettings, EgressResources, GitSandboxSettings, RunImage,
     RunPodClass, RunPodNetworkSettings, RunPodQuotaSettings, RunPodSettings,
 };
+pub use syntax::is_dns_subdomain;
 pub use validate::{
     ConfigIssue, name_issue, validate, validate_config, validate_endpoint, validate_provider,
 };
