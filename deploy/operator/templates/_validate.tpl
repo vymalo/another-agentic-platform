@@ -86,6 +86,19 @@ Included from deployment.yaml, which every render has, so they always run.
 {{- if not (kindIs "bool" .Values.storeCnpg) -}}
 {{- fail "storeCnpg must be true or false" -}}
 {{- end -}}
+{{- /* K14a (AD-052): the RuntimeClass of the agents' own pods. Empty is none; a name is the name of an object the ADMINISTRATOR made
+   (the chart makes none, decision 4), so it is a DNS subdomain and nothing else. */ -}}
+{{- if not (kindIs "map" .Values.agent) -}}
+{{- fail "agent must be a map (agent.runtimeClassName, empty by default)" -}}
+{{- end -}}
+{{- range $k, $v := .Values.agent -}}
+{{- if not (has $k (list "runtimeClassName")) -}}
+{{- fail (printf "agent.%s is not a setting: runtimeClassName" $k) -}}
+{{- end -}}
+{{- end -}}
+{{- if not (and (kindIs "string" .Values.agent.runtimeClassName) (regexMatch `^([a-z0-9]([-a-z0-9]*[a-z0-9])?)?(\.[a-z0-9]([-a-z0-9]*[a-z0-9])?)*$` (toString .Values.agent.runtimeClassName))) -}}
+{{- fail (printf "agent.runtimeClassName must be the name of a RuntimeClass (a DNS subdomain) or empty, got %q: the RuntimeClass object is the administrator's and this chart never makes one" (toString .Values.agent.runtimeClassName)) -}}
+{{- end -}}
 {{- /* The service account. */ -}}
 {{- $_ := include "aap.serviceAccountName" . -}}
 {{- /* The registry token: from one place at most, and then the rest of the registry's settings follow. */ -}}
@@ -237,8 +250,8 @@ the CIDRs, a toleration or an egress rule, which the operator checks at start an
 {{- $quantity := `^([0-9]+\.?[0-9]*|\.[0-9]+)(Ki|Mi|Gi|Ti|Pi|Ei|n|u|m|k|M|G|T|P|E|[eE][+-]?[0-9]+)?$` -}}
 {{- $label := `^[a-z0-9]([-a-z0-9]*[a-z0-9])?$` -}}
 {{- range $k, $v := $r -}}
-{{- if not (has $k (list "enabled" "image" "container" "cargoBuildJobs" "extraEnv" "priorityClassName" "quota" "idleSecs" "readyTimeoutSecs" "waitSecs" "nodeSelector" "tolerations" "nodeAffinity" "extraAllowedImages" "networkPolicy" "egressProxy" "gitSandbox")) -}}
-{{- fail (printf "runPods.%s is not a setting: enabled, image, container, cargoBuildJobs, extraEnv, priorityClassName, quota, idleSecs, readyTimeoutSecs, waitSecs, nodeSelector, tolerations, nodeAffinity, extraAllowedImages, networkPolicy, egressProxy or gitSandbox (the operator refuses an unknown key at start)" $k) -}}
+{{- if not (has $k (list "enabled" "image" "container" "cargoBuildJobs" "extraEnv" "priorityClassName" "runtimeClassName" "quota" "idleSecs" "readyTimeoutSecs" "waitSecs" "nodeSelector" "tolerations" "nodeAffinity" "extraAllowedImages" "networkPolicy" "egressProxy" "gitSandbox")) -}}
+{{- fail (printf "runPods.%s is not a setting: enabled, image, container, cargoBuildJobs, extraEnv, priorityClassName, runtimeClassName, quota, idleSecs, readyTimeoutSecs, waitSecs, nodeSelector, tolerations, nodeAffinity, extraAllowedImages, networkPolicy, egressProxy or gitSandbox (the operator refuses an unknown key at start)" $k) -}}
 {{- end -}}
 {{- end -}}
 {{- range $k := list "image" "quota" "networkPolicy" "egressProxy" "gitSandbox" "extraEnv" "nodeSelector" -}}
@@ -316,6 +329,10 @@ the CIDRs, a toleration or an egress rule, which the operator checks at start an
 {{- /* The PriorityClass: the chart's own, or a name of an object the deployment manages. */ -}}
 {{- if not (regexMatch `^([a-z0-9]([-a-z0-9]*[a-z0-9])?)?(\.[a-z0-9]([-a-z0-9]*[a-z0-9])?)*$` (toString (default "" $r.priorityClassName))) -}}
 {{- fail (printf "runPods.priorityClassName must be the name of a PriorityClass (a DNS name) or empty, got %q" (toString $r.priorityClassName)) -}}
+{{- end -}}
+{{- /* K14a (AD-052): the RuntimeClass of a run pod, the administrator's object, which this chart never makes. */ -}}
+{{- if not (regexMatch `^([a-z0-9]([-a-z0-9]*[a-z0-9])?)?(\.[a-z0-9]([-a-z0-9]*[a-z0-9])?)*$` (toString (default "" $r.runtimeClassName))) -}}
+{{- fail (printf "runPods.runtimeClassName must be the name of a RuntimeClass (a DNS subdomain) or empty, got %q: the RuntimeClass object is the administrator's and this chart never makes one" (toString $r.runtimeClassName)) -}}
 {{- end -}}
 {{- /* What a run pod may reach: deny by default (adam-rs ADR 0042), so the policy has no switch. */ -}}
 {{- $n := $r.networkPolicy -}}

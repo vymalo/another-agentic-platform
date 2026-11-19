@@ -178,6 +178,8 @@ struct Cx<'a> {
     run: Option<Run<'a>>,
     /// The deployment's ceiling of the access tier (K1).
     max_tier: aap_api::AccessTierCap,
+    /// The `RuntimeClass` of every agent's pod (K14a, AD-052): the deployment's, empty for none.
+    agent_runtime_class: Option<String>,
 }
 
 /// What the config asks of run pods and the deployment gives: the settings, and the class chosen.
@@ -205,6 +207,7 @@ impl<'a> Cx<'a> {
         let adam = plan::adam(config);
         Self {
             max_tier: externals.max_access_tier,
+            agent_runtime_class: externals.agent_runtime_class.clone(),
             service,
             config,
             origins,
@@ -465,6 +468,7 @@ impl<'a> Cx<'a> {
                 .and_then(|s| u32::try_from(s).ok()),
             min_available: None,
             service_account: None,
+            runtime_class_name: self.agent_runtime_class.clone(),
         })
     }
 
@@ -810,6 +814,7 @@ impl<'a> Cx<'a> {
             min_available: front_replicas.then_some(contract::front::MIN_AVAILABLE),
             // Only the workers make run pods; they hold the token of the account that may.
             service_account: (runs_workers && self.run.is_some()).then(|| self.name.to_owned()),
+            runtime_class_name: self.agent_runtime_class.clone(),
         })
     }
 

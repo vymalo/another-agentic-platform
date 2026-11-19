@@ -166,6 +166,7 @@ async fn read_externals<R, S>(
     let wanted = references(config);
     let mut externals = Externals {
         default_image: ctx.options.default_agent_image.clone(),
+        agent_runtime_class: ctx.options.agent_runtime_class.clone(),
         run_pods: ctx.options.run_pods.clone(),
         cache_claims: ctx.options.cache_claims.clone(),
         max_access_tier: ctx.options.max_access_tier,

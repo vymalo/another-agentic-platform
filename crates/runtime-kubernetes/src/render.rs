@@ -496,6 +496,12 @@ impl Cx<'_> {
             ("secretName".to_owned(), r.guard.secret.name.clone()),
             ("secretKey".to_owned(), r.guard.secret.key.clone()),
         ]);
+        // K14a (AD-052): the RuntimeClass the policy requires, only when the deployment names one. The policy falls back to
+        // the chart's value while an operator that predates it has not written this key.
+        let mut data = data;
+        if let Some(class) = &r.runtime_class_name {
+            data.insert("runtimeClassName".to_owned(), class.clone());
+        }
         let mut labels = service_labels(self.id);
         labels.insert(RUN_PODS_POLICY_LABEL.to_owned(), "true".to_owned());
         let policy_params = core::ConfigMap {
@@ -928,6 +934,8 @@ impl Cx<'_> {
                 // container alone mounts.
                 automount_service_account_token: Some(false),
                 service_account_name: w.service_account.clone(),
+                // K14a (AD-052): the deployment's RuntimeClass, for every harness. None: no field, and the pod is what it was.
+                runtime_class_name: w.runtime_class_name.clone(),
                 termination_grace_period_seconds: w.termination_grace_secs.map(i64::from),
                 security_context: Some(pod_security(&w.security)),
                 init_containers: (!w.sidecars.is_empty())

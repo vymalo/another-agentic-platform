@@ -1285,6 +1285,32 @@ policy_claims_are_a_list() {
 check "run pods on: the claims rule admits the claims of the parameter 'claims' (the work volume's and the package cache's) and no other, and for parameters written before K1 (no 'claims') the work claim alone" policy_claims_are_a_list
 check "the admission test is a shell script sh can read" sh -n "$here/run-pods-admission.sh"
 
+# ---- K14a (AD-052): a RuntimeClass for run pods and for the agents' own pods, empty by default and then not a trace -----------------
+# Empty (the goldens and every render above): no variable, no key of the settings, no tenth rule of the policy.
+check "a RuntimeClass named nowhere: no AGENT_RUNTIME_CLASS and no runtimeClassName in any object" lacks 'AGENT_RUNTIME_CLASS|runtimeClassName|RuntimeClass'
+# The agents' pods: the deployment's own variable, and nothing of run pods.
+render --set agent.runtimeClassName=gvisor
+check "agent.runtimeClassName: the operator's Deployment gets AGENT_RUNTIME_CLASS, and no run pods object appears" \
+  dhas Deployment aap-operator 'name: AGENT_RUNTIME_CLASS' 'value: "gvisor"' \
+  && lacks 'RUN_PODS_FILE|^kind: (PriorityClass|ValidatingAdmissionPolicy)$'
+# Run pods: the settings carry it (the operator writes it into the template) and the policy requires it, one rule more.
+render -f "$here/runpods.values.yaml" --set runPods.runtimeClassName=gvisor --set agent.runtimeClassName=gvisor
+k14a_class_checks() {
+  dhas ConfigMap aap-operator-run-pods-settings '^    runtimeClassName: gvisor$' \
+    && dhas Deployment aap-operator 'name: AGENT_RUNTIME_CLASS' 'value: "gvisor"' \
+    && dhas ValidatingAdmissionPolicy aap-operator-agents-run-pods \
+      'variables.runtimeClass' \
+      'object.spec.runtimeClassName == variables.runtimeClass' \
+      'a run pod runs under the RuntimeClass' \
+    && [ "$(doc ValidatingAdmissionPolicy aap-operator-agents-run-pods | grep -c '^    - expression:')" -eq 10 ]
+}
+check "runPods.runtimeClassName: the settings name the class, the policy has ten rules and requires it" k14a_class_checks
+check "the class is never an object: the chart renders no RuntimeClass, as the administrator makes it" lacks '^kind: RuntimeClass$'
+check "refused: a run class that is not the name of a RuntimeClass" refused "runPods.runtimeClassName must be the name of a RuntimeClass" --set runPods.enabled=true --set 'runPods.runtimeClassName=Not A Class'
+check "refused: an agent class that is not the name of a RuntimeClass" refused "agent.runtimeClassName must be the name of a RuntimeClass" --set 'agent.runtimeClassName=Not A Class'
+check "refused: a key of the agent block the operator does not read" refused "agent.bogus is not a setting" --set agent.bogus=1
+check "refused: the agent block null" refused "agent must be a map" --set agent=null
+
 # The Platform API is told the names of the classes, the keys of runPodClasses in order, and nothing else of them.
 check "run pods on, the API on: the API's file lists the size classes, large then standard" \
   dhas ConfigMap aap-operator-api '^      runPodSizeClasses:$' '^      - large$' '^      - standard$'

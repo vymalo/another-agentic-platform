@@ -77,6 +77,7 @@ sequence them with the CRDs first (a sync wave, or their Application first). **K
 | `cacheAllowedClaims` | `[]` | **K1:** the claims an `AgentConfig` may name as its package cache; `CACHE_ALLOWED_CLAIMS`. Empty: no agent may have a cache. Names the operator makes are refused whatever is listed (AD-049) |
 | `maxAccessTier` | `auto` | **K1:** the highest access tier a config or a dashboard form may ask for; `AGENT_MAX_ACCESS_TIER` and, with the API on, its `defaults.maxAccessTier`. `auto` renders nothing (AD-050) |
 | `defaultAgentImage` | `ghcr.io/vymalo/another-adam-rs/coder:sha-9a1fd4e@sha256:c3c178b7d73599f40d53f798616e510346abd3300a622b09b2bc233109f12b44` | The image of an agent whose `AgentConfig` names none (`DEFAULT_AGENT_IMAGE`, `operator run --default-agent-image`; AD-029): the coder image, **by tag and digest** (the chart refuses a value without both, and `latest`). Empty: no variable, no default, and such an agent is `ConfigInvalid`. **Not** moved by `bump-tag.sh`: [below](#the-default-agent-image) |
+| `agent.runtimeClassName` | `""` | **K14a (AD-052):** the `RuntimeClass` of every agent's own pod (`AGENT_RUNTIME_CLASS`, `operator run --agent-runtime-class`). Empty: no variable and the pods are as they were. Named: the operator writes it into the pod template of every workload (both harnesses) and it is in the digest, so naming it rolls the agents once. The `RuntimeClass` object is the **administrator's** and this chart never makes one: [below](#the-sandboxed-runtime-k14a) |
 | `runPods.enabled` and the rest of `runPods.*`, `runPodClasses.*` | off | The operator sets up run pods for a coder that asks for them (`coder.runPods.sizeClass`): [its own section](#run-pods) lists every value. On, the operator reads them from `RUN_PODS_FILE`, and the chart refuses what the operator would refuse at start |
 | `storeCnpg` | `true` | The right on CloudNativePG `Cluster`s (`get patch create delete`). The image is built with the `store-cnpg` feature; `false` is for a cluster that has no CloudNativePG |
 | `registry.tokenSecret.name`, `.key` | none, `token` | An existing Secret that holds the registry's bearer token. The operator reads the file **once**, at start: after a rotation, restart the pod |
@@ -193,6 +194,7 @@ api:
 | `runPods.cargoBuildJobs` | `2` | `CARGO_BUILD_JOBS`, so that a Rust build stays inside the 2Gi of `standard` |
 | `runPods.extraEnv` | `{}` | More variables of the run container, text values; `MODEL_API_KEY`, `CARGO_BUILD_JOBS` and the six proxy variables (`HTTPS_PROXY`, `HTTP_PROXY`, `NO_PROXY`, lower case too) are the operator's and refused |
 | `runPods.priorityClassName` | `""` | Empty: the chart makes `<fullname>-<namespace>-run` (value 0, never preempts). A name: yours, and the chart makes none |
+| `runPods.runtimeClassName` | `""` | **K14a (AD-052):** the `RuntimeClass` of a run pod, the sandbox the untrusted commands run in (gVisor's handler is `runsc`). Empty: no key of the settings, no field of the template, no tenth rule of the policy. **Named, it is required**: the admission policy refuses a run pod of the agent's account that names another class, or none. The object is the **administrator's** and this chart never makes one: [below](#the-sandboxed-runtime-k14a) |
 | `runPods.quota.limitsMemory`, `.pods` | `8Gi`, `4` | What the run pods **of the namespace's priority class** may use in all. A pod beyond it is refused (`exceeded quota`) and the coder waits (`waitSecs`) |
 | `runPods.idleSecs`, `.readyTimeoutSecs`, `.waitSecs` | `900`, `600`, `600` | A pod nobody used for this long is deleted (0: when its run ends); how long a pod may take to be ready; how long a run waits for a slot |
 | `runPods.nodeSelector`, `.tolerations`, `.nodeAffinity` | none | Where run pods may go, on top of what the volume needs |
@@ -219,7 +221,7 @@ The chart writes the operator's settings (`runPods`, `runPodClasses`, and the na
 | Network policy | the operator | NetworkPolicy `<service>-run-pods` | Selects the run pods of the service by label: no ingress, egress to DNS and to the egress proxy's pods on 3128 (and `extraEgress`), nothing else |
 | Egress proxy | the operator | Deployment, Service, ServiceAccount, PodDisruptionBudget, NetworkPolicy `<service>-egress`, ConfigMap `<service>-egress-allow` | The one way out (D15c, adam-rs ADR 0042): `adam-egress` from the agent's own image accepts `CONNECT host:443` to the allow-listed hosts and nothing else, resolves the name itself and connects to public IPv4 addresses only. Its policy admits the run pods alone and reaches DNS and the internet on 443 except the blocked ranges. No token, a read-only root file system, uid 10001. Made before the policy that names it and before the right to make pods; removed before the run pods' policy |
 | Right to make pods | the operator | RoleBinding `<service>-run-pods` to the Role below | Made last, removed first |
-| Guard's parameters | the operator | ConfigMap `<service>-run-pods-policy`, labelled `agents.vymalo.com/run-pods-policy` | The account, the labels, the images, the claims (`claims`, one per line: the work volume's and, with a package cache (K1), the cache's; `claim` is the work volume's alone), the Secret key; read by the policy. **An upgrade from before K1:** until the operator has rewritten an agent's parameters (at its start) the policy cannot read `claims` and refuses that agent's run pods (it fails closed): they are made again at the next attempt |
+| Guard's parameters | the operator | ConfigMap `<service>-run-pods-policy`, labelled `agents.vymalo.com/run-pods-policy` | The account, the labels, the images, the claims (`claims`, one per line: the work volume's and, with a package cache (K1), the cache's; `claim` is the work volume's alone), the Secret key, and (K14a) the `RuntimeClass` the policy requires, empty when the deployment names none; read by the policy. **An upgrade from before K1:** until the operator has rewritten an agent's parameters (at its start) the policy cannot read `claims` and refuses that agent's run pods (it fails closed): they are made again at the next attempt. **An upgrade from before K14a with a class named:** the policy falls back to the chart's value, so the class is required from the first render; the parameter is what the operator then writes |
 | Role | **the chart** | `<fullname>-run-pods` | `pods` create, delete, get, list, watch; `pods/exec` create, get. Nothing else. **One in each namespace of `watchNamespaces`** (K6a), and the operator's `Role` in each holds `bind` on it |
 | PriorityClass | **the chart** | `<fullname>-<primary namespace>-run` | A quota cannot select pods by label, it can by priority class. Cluster-scoped, one for the deployment (the primary is the first of `watchNamespaces`) |
 | Admission policy and binding | **the chart** | `<fullname>-<primary namespace>-run-pods` | One policy for every agent: the 9 rules of the coder chart's policy, with the values read from the parameters of the account that makes the pod. Cluster-scoped; its binding covers **every namespace of `watchNamespaces`** (K6a) |
@@ -260,6 +262,31 @@ kubectl auth can-i get secrets --as system:serviceaccount:<namespace>:<service> 
 ```
 
 `run-pods-admission.sh` was run against a real API server (a bare kube-apiserver v1.35.8, no controller) with the objects this chart and the operator make, and against the coder chart's own policy with the same table. What a bare server cannot show is what D15b's kind end-to-end ([`tests/e2e/run-pods-e2e.sh`](tests/e2e/README.md#the-kind-end-to-end-of-run-pods-d15b), the job `run-pods-e2e`) shows: that a kubelet starts the pod, that the quota counts it, that the network policy is enforced, that the coder reads the mounted template and runs a command in the pod, that the pod sees only its own run, and that a deleted service leaves nothing. It has not run in CI yet (see *What is not proven*).
+
+## The sandboxed runtime (K14a)
+
+A run pod runs the commands of a repository the agent did not write, and an agent's pod holds the secrets and runs our code; both share the node's kernel unless a **`RuntimeClass`** puts a kernel in user space between them and it. AD-052 makes that the deployment's choice, in two settings:
+
+| Value | For | What the chart does |
+|---|---|---|
+| `runPods.runtimeClassName` | run pods | With `runPods.enabled`, the class goes into the settings file (`RUN_PODS_FILE`), so the operator writes it into the template the workers read and into the parameter `runtimeClassName` of each agent's `<service>-run-pods-policy`; the admission policy then **requires** it |
+| `agent.runtimeClassName` | every agent's own pod | The operator's Deployment gets `AGENT_RUNTIME_CLASS`, the operator writes the class into the pod template of **every** workload (a coder, a folder agent, an `a2a` image, both halves of a `split`), and the class is part of the config digest |
+
+Both are **empty by default, and then not a trace is rendered**: no variable, no key of the settings, no field of a template, no tenth rule of the policy, and the seven golden renders are byte for byte what they were. A name that is not a DNS subdomain is refused at render (`_validate.tpl`) and at start (`operator run`).
+
+**The `RuntimeClass` object is the administrator's** (AD-052 decision 4): this chart never makes one, and the operator holds no right on the kind. Make it yourself, for example with Talos's gVisor extension:
+
+```yaml
+apiVersion: node.k8s.io/v1
+kind: RuntimeClass
+metadata:
+  name: gvisor
+handler: runsc          # not runsc-kvm: the nodes are virtual machines (AD-052 decision 5)
+```
+
+**Named, a class is required.** Once `runPods.runtimeClassName` is set, a run pod of an agent's account that names another class, or none, is refused by the admission policy, so the sandbox cannot be skipped by whoever holds the account's token. The policy reads the class from the agent's parameter object and falls back to the chart's value, so a chart upgraded before the operator's image **refuses** rather than admits. Naming the agent's class, or the run pods', rolls the pods once: the class is in the digest, as an image is.
+
+**What it does not do.** The **egress proxy's pod** is not under the agent's class: it is infrastructure of the deployment and not the agent's compute (a decision of this slice, for the owner to confirm). A class the cluster does not have is a pod that never starts, which the operator cannot tell from a bad image tag. And AD-052's decision 3 — the image-build modes `Build` and `Engine` refused with a class — has no field to read in this platform (`coder.runPods` is `{ sizeClass }`), so it is not implemented. **What needs a cluster:** that a kubelet starts a pod under `runsc` at all, that the coder's `git-sandbox`, its projected token, its egress proxy and its store work under it, and the admission cases of `run-pods-admission.sh` with a class named (K14b).
 
 ## The registry and its token
 

@@ -38,6 +38,10 @@ pub struct Externals {
     /// The highest access tier a config may ask for (`AGENT_MAX_ACCESS_TIER`, K1), `auto` by default, which is the coder's own.
     /// A config above it is `ConfigInvalid`; one that names none gets the ceiling when it is below `auto`.
     pub max_access_tier: AccessTierCap,
+    /// The `RuntimeClass` of every agent's own pod (`AGENT_RUNTIME_CLASS`, K14a, AD-052). `None`: no class, and the spec
+    /// serialises exactly as it did before the field existed. **Named, it is part of the digest**, so naming it rolls the
+    /// agents once, as a new image would.
+    pub agent_runtime_class: Option<String>,
 }
 
 impl Externals {
@@ -70,6 +74,15 @@ impl Externals {
     #[must_use]
     pub fn with_run_pods(mut self, settings: RunPodSettings) -> Self {
         self.run_pods = Some(settings);
+        self
+    }
+
+    /// The `RuntimeClass` of every agent's own pod (K14a, AD-052). Empty: none, as before the setting existed.
+    #[must_use]
+    pub fn with_agent_runtime_class(mut self, class: impl Into<String>) -> Self {
+        let class = class.into();
+        let class = class.trim();
+        self.agent_runtime_class = (!class.is_empty()).then(|| class.to_owned());
         self
     }
 

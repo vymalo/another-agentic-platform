@@ -35,7 +35,19 @@ spec:
   variables:
     - name: containers
       expression: "object.spec.containers + (has(object.spec.initContainers) ? object.spec.initContainers : [])"
+    {{- with .Values.runPods.runtimeClassName }}
+    {{- /* K14a (AD-052): the class the deployment named. The parameters carry it; the chart's value is the fallback for an operator
+       older than this policy, so that a skew refuses rather than admits. */}}
+    - name: runtimeClass
+      expression: "has(params.data.runtimeClassName) ? params.data.runtimeClassName : '{{ . }}'"
+    {{- end }}
   validations:
+    {{- with .Values.runPods.runtimeClassName }}
+    {{- /* K14a (AD-052) decision 2: named, the class is REQUIRED. A run pod of the agent's account with another class, or none, is
+       refused, so the sandbox cannot be skipped by whoever holds the account's token. */}}
+    - expression: "has(object.spec.runtimeClassName) && object.spec.runtimeClassName == variables.runtimeClass"
+      messageExpression: "'a run pod runs under the RuntimeClass ' + variables.runtimeClass + ' (the deployment sandboxes run pods)'"
+    {{- end }}
     - expression: "has(object.metadata.labels) && params.data.runLabel in object.metadata.labels && 'app.kubernetes.io/managed-by' in object.metadata.labels && object.metadata.labels['app.kubernetes.io/managed-by'] == params.data.managedBy"
       messageExpression: "'a run pod carries the labels app.kubernetes.io/managed-by=' + params.data.managedBy + ' and ' + params.data.runLabel"
     - expression: "has(object.spec.priorityClassName) && object.spec.priorityClassName == params.data.priorityClass"
