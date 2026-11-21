@@ -579,7 +579,10 @@ The status is the K2 `SharedStatus` with `probe.tools` (at most 64 names, sorted
 name or value). `render-check.sh` holds that the default render has one egress rule, no port 80 and no probe variable, that the probe render
 has DNS and exactly the listed peers and ports, the two variables, the `Role` unmoved, that traces and the probe stack (five rules), and
 every refusal by name; `api-e2e.sh` step 6a makes a provider through the deployed API, probes a stub MCP server on the runner through this
-egress, and reads `Reachable: True` and the tools back; a second provider that names a header is `Unknown`, `NeedsHeader`.
+egress, and reads `Reachable: True` and the tools back; a second provider that names a header is `Unknown`, `NeedsHeader`. `k10-e2e.sh`
+probes the catalogue's Kubernetes server through it (the example's pods as the peers, `tests/e2e/k10.values.yaml`) and then has a folder agent
+call its `pods_list_in_namespace` through a `ToolProvider` (K10, *verified 2026-11-21* on a throwaway kind cluster; the job `k10-e2e` is
+*unverified* until CI has run it).
 
 ### The rights
 

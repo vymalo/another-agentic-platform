@@ -1,0 +1,106 @@
+# The agent of the kind end-to-end of the tool catalogue (K10, k10-e2e.sh): a folder agent served by `adam-agent`, on the model endpoint the script
+# runs (k10-model.js), whose one tool server is the catalogue's Kubernetes example (`examples/toolproviders/kubernetes.yaml`, which the script renders
+# into its own namespace). The manifest carries no namespace: the script applies it in its own (aap-e2e-k10), and every object carries the label
+# aap-e2e/made-by=k10-e2e.
+#
+# The image is the pin of run-pods.yaml (the one pin of the coder, which carries `adam-agent`), substituted by the script as `__CODER_IMAGE__`, so
+# that a move of the pin is a move in one file. Every Secret is a reference to a key the script makes, with a random or a dummy value; the model
+# endpoint's base URL is the script's Service, not a secret.
+#
+# `tools.allowInsecureHttp` is true because the catalogue's server is plain http inside the cluster (its example says so); the platform sets
+# `MCP_ALLOW_INSECURE` from it and nothing else.
+apiVersion: agents.vymalo.com/v1alpha1
+kind: ModelEndpoint
+metadata:
+  name: k10-model
+  labels:
+    aap-e2e/made-by: k10-e2e
+spec:
+  title: The scripted model of the end-to-end
+  baseUrl:
+    value: http://k10-model:8080/v1 # the script's own model, in this namespace
+  apiKeySecretRef:
+    name: k10-secrets
+    key: MODEL_API_KEY # a dummy value: the scripted model reads no header
+  models: [k10-model]
+---
+apiVersion: agents.vymalo.com/v1alpha1
+kind: AgentConfig
+metadata:
+  name: k10
+  labels:
+    aap-e2e/made-by: k10-e2e
+spec:
+  harness:
+    type: adam-rs
+    adam:
+      binary: adam-agent
+      agent:
+        folder:
+          files:
+            # Mounted at /etc/adam/agent (ADAM_AGENT_DIR). The front matter names the agent and gives the A2A card its description.
+            instructions.md: |
+              ---
+              name: k10
+              description: An agent that lists the pods of a namespace through the catalogue's Kubernetes server.
+              card:
+                name: K10
+                description: Lists pods, through the read-only Kubernetes tool server.
+              ---
+              Your name is K10.
+              In one sentence: I list the pods of a namespace with the read-only Kubernetes tool.
+              When you are asked to list the pods of a namespace, call the tool
+              `kubernetes__pods_list_in_namespace` with that namespace and answer with what it returned.
+  model:
+    endpointRef:
+      name: k10-model
+    model: k10-model
+  tools:
+    mcpServers:
+      # The key is the prefix of the server's tools: `kubernetes__pods_list_in_namespace`. The URL and the allow-list come from the
+      # ToolProvider (its `providerRef`), which the script applies from examples/toolproviders/kubernetes.yaml.
+      kubernetes:
+        providerRef:
+          name: kubernetes
+    allowInsecureHttp: true
+  environment:
+    image:
+      ref: __CODER_IMAGE__
+    resources:
+      requests:
+        cpu: 100m
+        memory: 128Mi
+      limits:
+        memory: 512Mi
+---
+apiVersion: agents.vymalo.com/v1alpha1
+kind: AgentService
+metadata:
+  name: k10
+  labels:
+    aap-e2e/made-by: k10-e2e
+spec:
+  description: A folder agent that lists pods through the catalogue's Kubernetes server.
+  configRef:
+    name: k10
+  interfaces:
+    a2a:
+      enabled: true
+      bearerTokensSecretRef:
+        name: k10-secrets
+        key: A2A_BEARER_TOKENS
+      publicUrl: "" # empty: http://<name>.<ns>.svc:8080/
+  scaling:
+    topology: combined
+    workers: 1
+  store:
+    postgres:
+      secretRef:
+        name: k10-secrets
+        key: DB_URI # a throwaway Postgres of the script's (k10-support.yaml)
+  access:
+    allowFrom:
+      - podSelector:
+          matchLabels:
+            aap-e2e/client: "true" # the script reaches the agent from inside its own pod: nobody else is named
+  deletionPolicy: Delete

@@ -1,0 +1,144 @@
+# What the kind end-to-end of the tool catalogue (K10, k10-e2e.sh) runs beside the operator and the agent: a throwaway Postgres for the agent's run
+# store and the scripted model it talks to (k10-model.js). The manifest carries no namespace: the script applies it in its own (aap-e2e-k10), and
+# every object carries the label aap-e2e/made-by=k10-e2e, the only objects the script applies over.
+#
+# The model is a Node script that the coder's own image runs (`__CODER_IMAGE__` is replaced by the script with the pin of run-pods.yaml, so that
+# the pin is in one file and nothing else is pulled for the model): the script's file is in the ConfigMap `k10-model-script`, which the script makes
+# from k10-model.js. It listens on 8080 and is reached as http://k10-model:8080/v1 by the agent (and, to read its journal, by the script from
+# inside the agent's pod). It holds no secret and asks nothing of anyone.
+#
+# Postgres is Docker Official Images' 17.9 on Alpine 3.23 from mirror.gcr.io, Google's mirror of Docker Hub, pinned by the digest of the index of the
+# tag (the pin of run-pods-support.yaml, which verified it; the same line). No volume, a password that is public (it guards nothing), and the
+# database is the image's own POSTGRES_DB.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: k10-postgres
+  labels:
+    aap-e2e/made-by: k10-e2e
+    aap-e2e/part: postgres
+spec:
+  replicas: 1
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: k10-postgres
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: k10-postgres
+        aap-e2e/made-by: k10-e2e
+    spec:
+      containers:
+        - name: postgres
+          image: mirror.gcr.io/library/postgres:17.9-alpine3.23@sha256:c7526c0f6c3f30260a563d7bcf8ad778effac59a44f8ffa86678c35418338609
+          env:
+            - name: POSTGRES_PASSWORD
+              value: e2e-throwaway
+            - name: POSTGRES_DB
+              value: k10
+          ports:
+            - name: postgres
+              containerPort: 5432
+          readinessProbe:
+            exec:
+              # Over TCP: the image's entrypoint first runs a temporary server that listens on its socket only, and a check over the socket would
+              # pass against it, before the server the agent connects to (by the Service, over TCP) exists.
+              command: [pg_isready, -h, 127.0.0.1, -U, postgres, -d, k10]
+            periodSeconds: 2
+            failureThreshold: 60
+          resources:
+            requests:
+              cpu: 50m
+              memory: 128Mi
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: k10-postgres
+  labels:
+    aap-e2e/made-by: k10-e2e
+    aap-e2e/part: postgres
+spec:
+  selector:
+    app.kubernetes.io/name: k10-postgres
+  ports:
+    - name: postgres
+      port: 5432
+      targetPort: postgres
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: k10-model
+  labels:
+    aap-e2e/made-by: k10-e2e
+    aap-e2e/part: model
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: k10-model
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: k10-model
+        aap-e2e/made-by: k10-e2e
+    spec:
+      automountServiceAccountToken: false
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 10001
+        runAsGroup: 10001
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: model
+          image: __CODER_IMAGE__
+          command: [node, /srv/model/k10-model.js]
+          env:
+            - name: PORT
+              value: "8080"
+          ports:
+            - name: http
+              containerPort: 8080
+          readinessProbe:
+            httpGet:
+              path: /healthz
+              port: http
+            periodSeconds: 2
+            failureThreshold: 30
+          securityContext:
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop: [ALL]
+          volumeMounts:
+            - name: script
+              mountPath: /srv/model
+              readOnly: true
+          resources:
+            requests:
+              cpu: 10m
+              memory: 48Mi
+            limits:
+              memory: 256Mi
+      volumes:
+        - name: script
+          configMap:
+            name: k10-model-script
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: k10-model
+  labels:
+    aap-e2e/made-by: k10-e2e
+    aap-e2e/part: model
+spec:
+  selector:
+    app.kubernetes.io/name: k10-model
+  ports:
+    - name: http
+      port: 8080
+      targetPort: http

@@ -981,6 +981,32 @@ e2e_own_names() {
 }
 check "e2e: the agents live in the namespace aap-e2e-api and read the bearer from e2e-a2a-bearer; neither the real namespace nor agent-a2a-bearer is named" e2e_own_names
 
+# ---- The values of the kind end-to-end of the tool catalogue (K10) --------------------------------------------------------------
+# tests/e2e/k10.values.yaml as k10-e2e.sh installs it: the tool probe ON, its egress to the pods the catalogue's example labels on the server's port,
+# and the chart's DNS rule. That the chart renders them as the script depends on is checked here, so that a change that breaks them fails in the
+# chart job and not in a kind cluster.
+k10_ns=aap-e2e-k10
+k10_render() {
+  helm template aap-operator "$chart" --namespace "$k10_ns" -f "$here/e2e/k10.values.yaml" \
+    --set image.repository=operator --set image.tag=smoke --set image.pullPolicy=Never > "$out"
+}
+if ! k10_render 2> "$err"; then echo "FAIL k10: the values of the tool catalogue end-to-end do not render: $(head -c 400 "$err")"; fail=1; fi
+check "k10: the values of the tool catalogue end-to-end render" has 'kind: Deployment'
+k10_probe() {
+  dhas Deployment aap-operator 'name: TOOL_PROBE_ENABLED' 'value: "true"' 'name: TOOL_PROBE_TIMEOUT_SECS' 'value: "5"' \
+    && all_of "$(op_egress_rule 3)" 'agents.vymalo.com/tool-catalogue: "true"' 'port: 8080$' '^      to:' \
+    && all_of "$(op_egress_rule 2)" 'port: 53$' 'k8s-app: kube-dns'
+}
+check "k10: the operator probes the catalogue's pods (K3b): the chart turns it on, and its policy reaches those pods on 8080 and DNS" k10_probe
+k10_script() {
+  script="$here/e2e/k10-e2e.sh"
+  # shellcheck disable=SC2016 # the pattern is the script's own text, ${...} and $crb and all
+  grep -q 'ns=${AAP_E2E_NAMESPACE:-aap-e2e-k10}$' "$script" && grep -q '^made_by=k10-e2e$' "$script" \
+    && grep -q 'examples/toolproviders/kubernetes.yaml' "$script" \
+    && grep -q 's#name: kubernetes-mcp-view#name: $crb#' "$script"
+}
+check "k10: the script's namespace and label are the ones the values name, and it renders the catalogue's example (its namespace and the binding's name)" k10_script
+
 # ---- The values of the kind end-to-end of the whole chain (D13) ----------------------------------------------------------------
 # tests/e2e/api.values.yaml and tests/e2e/chain.values.yaml (the operator's registry on, and the coder's defaults) with what chain-e2e.sh adds when it
 # runs, in the namespace of its own, aap-e2e-chain; and the three files it applies (the orchestrator's manifest, the offer) read as text. That the
