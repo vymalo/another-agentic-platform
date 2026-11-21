@@ -1,11 +1,13 @@
-# The kind end-to-ends of the operator: the coder (S9), the Platform API (D7b2), the whole chain (D13), run pods (D15b), several watched namespaces (K6b) and leader election (K7b)
+# The kind end-to-ends of the operator: the coder (S9), the Platform API (D7b2), the whole chain (D13), run pods (D15b), the tool catalogue (K10), several watched namespaces (K6b) and leader election (K7b)
 
-Six scripts, six jobs of [`operator-image.yml`](../../../../.github/workflows/operator-image.yml), one kind cluster each: [`coder-e2e.sh`](coder-e2e.sh)
+Seven scripts, seven jobs of [`operator-image.yml`](../../../../.github/workflows/operator-image.yml), one kind cluster each: [`coder-e2e.sh`](coder-e2e.sh)
 (the operator runs the real coder, [below](#the-kind-end-to-end-of-the-coder-s9)), [`api-e2e.sh`](api-e2e.sh) (the Platform API creates an agent the
 operator makes Ready, [further down](#the-kind-end-to-end-of-the-platform-api-d7b2)) and [`chain-e2e.sh`](chain-e2e.sh) (the API makes a coder with an
 audience, the operator runs it and lists it, and a pinned image of the system's orchestrator lists it for the person who holds the role and for nobody
 else, [further down](#the-kind-end-to-end-of-the-whole-chain-d13)), [`run-pods-e2e.sh`](run-pods-e2e.sh) (a coder runs the commands of its runs in pods of their own, the operator having
-set them up, [further down](#the-kind-end-to-end-of-run-pods-d15b)), [`namespaces-e2e.sh`](namespaces-e2e.sh) (one operator watches two
+set them up, [further down](#the-kind-end-to-end-of-run-pods-d15b)), [`k10-e2e.sh`](k10-e2e.sh) (a folder agent calls the catalogue's Kubernetes
+tool server through a `ToolProvider` and the tool's answer reaches its model, [further down](#the-kind-end-to-end-of-the-tool-catalogue-k10)),
+[`namespaces-e2e.sh`](namespaces-e2e.sh) (one operator watches two
 namespaces, with one Role and RoleBinding in each, and lists a service id the two share for neither of them,
 [further down](#the-kind-end-to-end-of-several-watched-namespaces-k6b)) and [`leader-e2e.sh`](leader-e2e.sh) (two replicas elect a leader, a killed
 one is replaced only after the Lease expires, a stopped one releases it at once, and the survivor serves the registry throughout,
@@ -540,6 +542,148 @@ All eleven steps passed (44 `ok` lines, exit 0), with the real answers of the AP
 **D15d (2026-10-27), the git sandbox.** Step 4 loses the automounted token (the coder's pod mounts the account's credentials as a volume of the coder container alone) and the new **step 4b** is adam-rs's sandbox checks at `581aeed`, applied to the pod the operator made (above); steps 2, 8, 9 and 11 gain a few lines; `git-sandbox-vector.sh` is vendored; and the pin moves to `sha-581aeed` (*verified 2026-10-27* by anonymous requests to `ghcr.io`: a Docker v2 image manifest, not an index, digest `sha256:5e851765…`, 14 layers, 3.0 GB, `linux/amd64`, user `10001`, entrypoint `tini -- adam-coder`, label `org.opencontainers.image.revision` the full hash of `581aeed`, and a layer in its history that copies `adam-coder`, `adam-agent`, `adam-kube-exec`, `adam-egress`, `adam-git-sandbox` and `adam-git` into `/usr/local/bin`; the image's content was not unpacked here; adam-rs's `values.yaml` named `sha-05cda7f`, which has the same layer, when this was read). Adam-rs's script passed in its CI on its first run (run 40507897870, job 122201831517, *verified 2026-10-27* in the commit message of `581aeed`). **Run where it was written:** `shellcheck` 0.9.0, `dash -n`, `actionlint`; **the jq programs of step 4b against a pod and a StatefulSet made from the operator's golden render**, passing, and failing under seventeen of seventeen mutations of the pod (a shared process namespace, an automounted token, an injected token volume, a writable root, a variable from a Secret, an `envFrom`, the token, the App's key or the template mounted in the sandbox, the GitHub server holding the token, the coder container without it or with it writable, a socket that is not the sandbox's, a sandbox not ready, restarted, not a native sidecar or of another image), and under three of four of the StatefulSet's (the fourth, the automounted token, is step 4's own line); `render-check.sh` and the Rust tests that hold the fixtures and the vendored file's hash. **Run green in CI (run 40520862547, job `run-pods-e2e` 122249371008, at `b8290bf`, *verified 2026-10-27* in its log): all of step 4b** (that a kubelet starts the sidecar and then the coder container, the controls and the emptiness as above, `awk`, `find`, `stat` and `curl` in the coder's image where the script runs them, the vector's marker, the shape of the sandbox's log lines) **and that the coder's own git for a run goes through the sandbox** (the `worktree` line of step 8, and that runs A, B and C, whose git now runs in another container, still behave as before). No container daemon and no kind exist where it was written.
 
 **D15c (2026-10-27), the egress proxy.** Step 4 gains the proxy's objects and their rollout, step 7 is rewritten (above), step 9 and 10 gain the proxy's six objects and pods, step 11 the proxy's log; the pin moves to `sha-7598255` (*verified 2026-10-27* by an anonymous request to `ghcr.io`: a Docker v2 image manifest, not an index, 14 layers, 3.0 GB, user `10001`, entrypoint `tini -- adam-coder`, label `org.opencontainers.image.revision` the full hash of `7598255`, and a layer in its history that copies `adam-egress` next to `adam-coder`; the image's content was not unpacked here). The new checks are adam-rs's `deploy/coder/tests/kind-run-pods.sh` at that revision, ported to the operator's objects (that script passed in adam-rs's CI, run 40471872938, *verified 2026-10-27* in adam-rs's commit message of `7598255`). **Run where it was written:** `shellcheck` 0.9.0, `dash -n`, `actionlint`; the jq programs against objects shaped like the operator's golden render; `render-check.sh` and the Rust tests that hold the fixtures. **Unverified until the job has run: all of the new step 7** (the controls, the refusals and their 60 s retry on kindnet, `npm` and `curl` through the proxy from the `workspace` image (it has `curl`, which step 7 of D15b ran, and `npm`, which its smoke test asks for: `npm config get cache`), the proxy's log lines and the absence of what the requests carried), the proxy's rollout in a cluster whose kubelet pulls the pin, and the cleanup of the six objects by the owner reference. No container daemon and no kind exist where it was written.
+
+## The kind end-to-end of the tool catalogue (K10)
+
+**A catalogue entry, a `ToolProvider`, and a tool's answer in a model.** The chart is installed with `toolProbe` on, and the catalogue's first
+server is applied as its example stands ([`examples/toolproviders/kubernetes.yaml`](../../../../examples/toolproviders/kubernetes.yaml), rendered
+into the script's own namespace): `containers/kubernetes_mcp_server`, `read_only`, the `core` toolset, the `view` account, and a `ToolProvider`
+whose allow-list is eleven read-only tools. A folder agent (`adam-agent`, the coder's pinned image) names that provider by `providerRef` and its
+model by `endpointRef`; the model is a script of the script's own, run in the cluster by the same image. The model asks for
+`kubernetes__pods_list_in_namespace` (the platform's `<server>__<tool>`), the agent calls the real server through the URL and allow-list the
+operator wrote into its `mcp.json`, and the tool's answer — the pods of the namespace, as the server words them — is the message the model reads
+next, which answers with the name of the pod it was given. This is the job `k10-e2e` of
+[`operator-image.yml`](../../../../.github/workflows/operator-image.yml) (it needs the job `image`, whose operator image it runs, and **`push` does
+not need it**: it pulls the coder's 3 GB image and the catalogue's from outside this repository, like `run-pods-e2e`, which `push` does not need
+either). The script [`k10-e2e.sh`](k10-e2e.sh) is all of it and runs against any kind cluster that has the operator image:
+
+```sh
+kind create cluster --name aap-k10
+docker build -t operator:smoke -f docker/operator/Dockerfile .
+kind load docker-image operator:smoke --name aap-k10
+sh deploy/operator/tests/e2e/k10-e2e.sh        # kubectl on that cluster; needs helm, jq and openssl
+```
+
+The cluster pulls three images the repository does not build: the coder's (pinned in [`run-pods.yaml`](run-pods.yaml), **the one pin**, which the
+agent and the scripted model both run), the catalogue's (pinned in the example, by tag and digest) and Postgres (pinned in
+[`k10-support.yaml`](k10-support.yaml), the same line as `run-pods-support.yaml`). `OPERATOR_IMAGE_REPOSITORY`/`_TAG`/`_PULL_POLICY` (default
+`operator:smoke`, `Never`), `AAP_E2E_NAMESPACE` (default `aap-e2e-k10`), `READY_TIMEOUT_SECS` (1500), `POD_TIMEOUT_SECS` (300) and
+`TASK_TIMEOUT_SECS` (240) are the knobs. The model's node tests run without a cluster: `node --test
+deploy/operator/tests/e2e/k10-model.test.js`.
+
+**It runs only on a throwaway cluster and touches only what it made**, as the other scripts do: a context that is not `kind-*` is refused before
+anything is made; the namespace is made with the label `aap-e2e/made-by=k10-e2e` and one of that name **without** the label is never used; every
+object it makes carries the label and one that exists without it is never overwritten. The catalogue's objects are the example's own (label
+`agents.vymalo.com/tool-catalogue`), in this namespace only, and its one cluster-scoped object — the `ClusterRoleBinding` to `view` — is renamed
+`kubernetes-mcp-view-<namespace>`, because the example's name is cluster-wide and a second installation would collide with it; the cleanup deletes
+it. The cleanup deletes the agents (with the operator still there to run their finalizers), that binding, the Helm release and the namespace;
+`INT`, `TERM` and `HUP` run it. The CRDs stay.
+
+```mermaid
+sequenceDiagram
+    participant J as k10-e2e.sh
+    participant K as kind (API server, kubelet)
+    participant O as the operator
+    participant S as the catalogue's server
+    participant A as the agent (adam-agent)
+    participant M as the scripted model
+
+    J->>K: the CRDs, the Secrets, a Postgres and the model (the coder's image), the catalogue's example in aap-e2e-k10
+    J->>K: helm upgrade --install with toolProbe.to = the catalogue's pods on 8080
+    K-->>J: the operator is Ready and TOOL_PROBE_ENABLED is true
+    O->>S: initialize and tools/list, through the chart's egress
+    S-->>O: the core toolset's tools
+    O-->>K: the ToolProvider: Accepted, Reachable True (Probed), probe.tools
+    J->>K: k10.yaml (the ModelEndpoint, the folder config, the service)
+    K-->>J: the agent is Ready on the coder's pin, its pod with mcp.json and no secret value
+    O-->>K: the ToolProvider: InUse, usedBy [k10], AgentsReady AllReady
+    J->>A: SendMessage (from inside its pod): the namespace and the agent's own pod
+    A->>M: the request, with kubernetes__pods_list_in_namespace among the tools
+    M-->>A: the tool call
+    A->>S: the call, at the provider's URL, with its allow-list
+    S-->>A: the pods of the namespace (the server's own rendering)
+    A->>M: the tool result
+    M-->>A: K10-PROBE <ns> found <pod>
+    A-->>J: the task completes with that answer
+    J->>M: the journal, read from the agent's pod
+    M-->>J: two turns, and the tool result holds the pod's name and the namespace
+    J->>K: delete the service, then the provider, the config and the endpoint
+    K-->>J: no object of the instance is left, the provider names no agent
+    J->>K: the logs, and the cleanup (the binding, the release, the namespace)
+```
+
+```mermaid
+stateDiagram-v2
+    [*] --> Installed: the namespace, the CRDs, the Secrets, Postgres, the model, the catalogue's server, the chart with toolProbe
+    Installed --> Probed: Accepted (Valid), Reachable True (Probed), the tools listed
+    Probed --> Ready: the ModelEndpoint, the folder config and the service; the agent's pod on the pin
+    Ready --> InUse: the provider names the agent, AgentsReady AllReady
+    InUse --> Answered: the A2A task completes with K10-PROBE <ns> found <pod>
+    Answered --> Checked: the journal holds the server's answer as the tool result
+    Checked --> Deleted: the service, its workload and its objects go; the provider names no agent
+    Deleted --> [*]: the provider, the config and the endpoint deleted, no secret in any log
+    Installed --> [*]: a missing tool, a refused context or namespace: the script prints what the cluster says and undoes only what it made
+```
+
+### Files
+
+| File | What |
+|---|---|
+| [`k10-e2e.sh`](k10-e2e.sh) | the script: steps 0 to 6, every wait bounded, every assertion named, the cluster's state printed on a failure (without any line that holds a secret of the run) |
+| [`k10-model.js`](k10-model.js) | the scripted model: an OpenAI-compatible chat completions server (standard library only), two turns, a journal of the tool results it was given and no header; run by the coder's own image from a ConfigMap |
+| [`k10-model.test.js`](k10-model.test.js) | its node tests: the two turns, the answer when the tool result holds the pod and when it does not, and the HTTP shapes (JSON, server-sent events, the journal) |
+| [`k10.yaml`](k10.yaml) | the agent: a `ModelEndpoint` of this namespace, a folder (`instructions.md`, inline), the catalogue's server by `providerRef`, `allowInsecureHttp`, and the service (A2A with a bearer, a Postgres by reference, `Delete`) |
+| [`k10-support.yaml`](k10-support.yaml) | what runs beside them: a throwaway Postgres and the model (the coder's image, the script's ConfigMap, `__CODER_IMAGE__` replaced by the pin) |
+| [`k10.values.yaml`](k10.values.yaml) | the chart's values for it: `toolProbe.to` = the pods the catalogue's example labels, on 8080, with the chart's DNS rule, and a pending service looked at every 5 s. `render-check.sh` renders it |
+| [`../../../../examples/toolproviders/kubernetes.yaml`](../../../../examples/toolproviders/kubernetes.yaml) | the catalogue's first server, applied as it stands but for the namespace and the cluster-scoped binding's name |
+| `../../../../deploy/crds/agents.vymalo.com.yaml` | the four CRDs, applied server-side (the chart does not carry them) |
+
+### What it proves
+
+* **The probe against the real server.** `Accepted` (`Valid`), `Reachable: True` (`Probed`), and `probe.tools` holds the server's own tool names,
+  `pods_list_in_namespace` and `pods_list` among them — the operator reached the server through the chart's `toolProbe.to` and its own
+  `NetworkPolicy`, not through a port-forward.
+* **The reference and the allow-list, as the agent sees them.** The pod mounts the ConfigMap the operator made (`extra-mcp`), and its `mcp.json`
+  holds the provider's URL (`http://kubernetes-mcp.<ns>.svc:8080/mcp`) and **exactly** the provider's `spec.mcp.tools`, sorted and once each, with
+  no `optional` key (the catalogue's provider is required). The folder is the ConfigMap the operator made of the config's `files`.
+* **No secret in a pod.** `MODEL_API_KEY`, `A2A_BEARER_TOKENS` and `DATABASE_URL` are `secretKeyRef`s (the key names are asserted), the model's URL
+  is a plain value from the `ModelEndpoint`, and `MCP_ALLOW_INSECURE` and `ADAM_EXTRA_MCP_FILE` are what the config's `tools` asked for.
+* **The chain, end to end.** The A2A task completes with `K10-PROBE <ns> found <pod>`; the model's journal holds exactly two turns, and the
+  second's one tool result holds the pod's name **and the namespace** — the server's answer, not a sentence of the platform's. The pod the model
+  is told about is the agent's own, read from the cluster, so the answer cannot be the script's own text.
+* **The status follows the fleet.** The provider is `InUse` with `usedBy: [k10]` and `AgentsReady: AllReady` while the agent runs; after the
+  service is deleted it is `Unreferenced` with no agent.
+* **The deletion.** The service's finalizer completes, its workload, pod and objects go (none of the instance label is left), and the provider,
+  the config and the endpoint can then be deleted.
+* **Nothing leaks.** The model's key sentinel and the A2A bearer are in no answer and no log; no log holds a panic; each log is read by a
+  `kubectl logs` that succeeded, is not empty and holds a line only that component logs (the operator's `the caches are synced`, the model's
+  `k10-model listening on 8080`, the server's `HTTP server starting`, `adam-agent`'s `agent files`).
+
+### What it does not prove
+
+* **The other two catalogue servers** (K10b, K10c): their images, their own read-only switches and their tools. The catalogue's own test
+  ([`crates/domain/tests/tool_catalogue.rs`](../../../../crates/domain/tests/tool_catalogue.rs)) holds their files; no kind cluster runs them.
+* **A real model, or a model that chooses its tools.** The model is a script that makes the same two calls for every probe, and it is told which
+  tool to call. What a real model does with the same tools is the model's business.
+* **The server's writes.** The example runs it `read_only` with the `view` account, and the catalogue's test holds the switch; this script shows
+  the read path, not a refused write.
+* **A NetworkPolicy on a plugin that does not enforce it.** The probe would still answer, and the policy would prove nothing.
+* **A Kubernetes older than the cluster's** (kind's node image, 1.35.8), and **the other namespaces' catalogues** (one namespace, one server).
+
+### What ran, and what is unverified
+
+**Run for real, on kind, on 2026-11-21**: the whole script passed on a throwaway kind cluster (kindest/node v1.35.8, kind v0.33.0), with the operator
+image made from this tree's binary (a debug build: the release image is CI's) and the coder's pin, the catalogue's server and Postgres pulled by the
+kubelet — about two minutes once the node had them. The provider was `Accepted` and `Reachable: True` (`Probed`) with the server's 14 tools; the
+agent was Ready on the pin; the answer was `K10-PROBE aap-e2e-k10 found k10-<hash>`, and the journal's one tool result was the server's own table of
+the namespace's five pods; the deletion left nothing; no secret and no panic was in any log. The model's five `node --test` tests, `shellcheck`, and
+`render-check.sh`'s three K10 checks (each broken on purpose: removing `toolProbe` failed the probe's and the script's checks, an empty `ports`
+failed the render and both) passed too.
+
+The job `k10-e2e` itself is *unverified* until CI has run it, and the local walk did not build the release image (the Dockerfile's stages are CI's).
+One thing a later walk should know: loading the coder's image into kind with `kind load docker-image` made containerd's checkpoint check fail on the
+digest-named image (`failed to check if this is a checkpoint image`); the walk let the kubelet pull it, as CI does, and the script needed no change
+for it.
 
 ## The kind end-to-end of several watched namespaces (K6b)
 

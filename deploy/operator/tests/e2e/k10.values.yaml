@@ -1,0 +1,20 @@
+# The values the kind end-to-end of the tool catalogue (K10, k10-e2e.sh) installs the operator chart with: the tool probe ON, reaching the pods of
+# the catalogue's Kubernetes server in the release's own namespace on the server's port (8080), plus the chart's default DNS rule. The script adds
+# the image (the one built in the job and loaded into kind, never pulled). There is no Platform API, no registry and no run pods: this end-to-end is
+# about an agent using a tool server.
+#
+# `tuning.resyncPendingSecs`: a pending service is looked at again every 5 s instead of 15, since the job waits for a pod, not for a timer.
+#
+# Nothing here is a secret. The cluster is a throwaway one; no value below is advice for a deployment (deploy/operator/README.md, "Tool servers",
+# is).
+tuning:
+  resyncPendingSecs: 5
+toolProbe:
+  # The pods the catalogue example labels (examples/toolproviders/kubernetes.yaml): a bare podSelector means the release's namespace, where the
+  # operator and the server both run. On, it is the operator's egress rule (with DNS below) and TOOL_PROBE_ENABLED in its Deployment.
+  to:
+    - podSelector:
+        matchLabels:
+          agents.vymalo.com/tool-catalogue: "true"
+  # The server's own port (its Service and container port): a probe goes where the provider's URL says, and the URL is ...:8080/mcp.
+  ports: [8080]
