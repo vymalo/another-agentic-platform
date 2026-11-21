@@ -139,7 +139,15 @@ fn check_agent(
             "an A2A image gets no model from the platform: it brings its own, in its own variables",
         ),
         (None, _) => e.add("model.endpoint", "name a model endpoint"),
-        (Some(ModelChoice { endpoint, model }), _) => {
+        (
+            Some(ModelChoice {
+                endpoint,
+                model,
+                extra_body,
+                ..
+            }),
+            _,
+        ) => {
             if !has_text(endpoint) {
                 e.add("model.endpoint", "name a model endpoint");
             } else if let Some(issue) = name_issue("model.endpoint", endpoint) {
@@ -147,6 +155,20 @@ fn check_agent(
             }
             if !has_text(model) {
                 e.add("model.model", "name a model alias");
+            }
+            // The schema's bound, asked here so the answer names the field: the domain checks the bytes and
+            // the keys a request owns, and the API server checks this one, whose refusal a person could not
+            // map to a form field.
+            if let Some(body) = extra_body
+                && body.len() as u64 > aap_api::MAX_EXTRA_BODY_MEMBERS
+            {
+                e.add(
+                    "model.extraBody",
+                    format!(
+                        "at most {} members (the schema's bound)",
+                        aap_api::MAX_EXTRA_BODY_MEMBERS
+                    ),
+                );
             }
             if referents
                 .unreadable
@@ -516,6 +538,9 @@ fn config_field(form: &AgentForm, path: &str) -> String {
         ("spec.harness.a2a", "agent"),
         ("spec.model.model", "model.model"),
         ("spec.model.endpointRef", "model.endpoint"),
+        ("spec.model.extraBody", "model.extraBody"),
+        ("spec.model.echoReasoning", "model.echoReasoning"),
+        ("spec.model.contextWindow", "model.contextWindow"),
         ("spec.model", "model"),
         ("spec.tools.githubMcp", "deployment.githubMcp"),
         ("spec.tools.allowInsecureHttp", "allowInsecureHttp"),
@@ -740,6 +765,9 @@ fn probe(
         model: Some(ModelChoice {
             endpoint: endpoint.to_owned(),
             model: "probe".to_owned(),
+            extra_body: None,
+            echo_reasoning: None,
+            context_window: None,
         }),
         tool_servers: tool_server.iter().map(|s| (*s).to_owned()).collect(),
         // The rule about a plain `http://` server is the agent's, and this is not an agent.
@@ -989,6 +1017,9 @@ impl Defaults {
             model: Some(ModelChoice {
                 endpoint: "probe-endpoint".to_owned(),
                 model: "sample".to_owned(),
+                extra_body: None,
+                echo_reasoning: None,
+                context_window: None,
             }),
             tool_servers: BTreeSet::new(),
             allow_insecure_http: false,

@@ -1216,6 +1216,10 @@ const MAY_BE_ABSENT: &[&str] = &[
     "SharedStatus/probe/incomplete",
     // A condition has no `observedGeneration` until the operator sets one.
     "Condition/observedGeneration",
+    // The model's own settings (parity gap 16) are absent when the object has none.
+    "ModelChoice/extraBody",
+    "ModelChoice/echoReasoning",
+    "ModelChoice/contextWindow",
     // A shared object has no status before the operator wrote one (`skip_serializing_if`).
     "ModelDetail/status",
     "ToolServerDetail/status",

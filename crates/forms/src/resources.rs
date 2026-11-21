@@ -196,9 +196,12 @@ pub fn to_resources(form: &AgentForm, deployment: &Deployment, namespace: &str) 
             }),
             base_url: None,
             api_key_secret_ref: None,
-            extra_body: None,
-            echo_reasoning: None,
-            context_window: None,
+            extra_body: m
+                .extra_body
+                .as_ref()
+                .map(|b| b.iter().map(|(k, v)| (k.clone(), v.clone())).collect()),
+            echo_reasoning: m.echo_reasoning,
+            context_window: m.context_window,
         }),
         tools: Tools {
             github_mcp: deployment.github_mcp.clone(),
@@ -404,6 +407,12 @@ fn extract(
                 .map(|r| r.name.clone())
                 .unwrap_or_default(),
             model: m.model.clone(),
+            extra_body: m
+                .extra_body
+                .as_ref()
+                .map(|b| b.iter().map(|(k, v)| (k.clone(), v.clone())).collect()),
+            echo_reasoning: m.echo_reasoning,
+            context_window: m.context_window,
         }),
         tool_servers: config.tools.mcp_servers.keys().cloned().collect(),
         allow_insecure_http: config.tools.allow_insecure_http,

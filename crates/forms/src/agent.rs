@@ -76,14 +76,31 @@ pub struct AgentForm {
     pub agent: AgentKindForm,
 }
 
-/// The model of an agent: a `ModelEndpoint` by name and one of its aliases, or one typed by hand.
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+/// The model of an agent: a `ModelEndpoint` by name and one of its aliases, or one typed by hand, and
+/// what the model itself needs (`model.extraBody`, `model.echoReasoning`, `model.contextWindow`, K1; a
+/// form since parity gap 16).
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct ModelChoice {
     /// The `ModelEndpoint` (`model.endpointRef.name`).
     pub endpoint: String,
     /// The alias (`model.model`). The endpoint's `models` are offers: nothing checks that it serves this one.
     pub model: String,
+    /// Members merged into every chat-completions request (`model.extraBody`, `MODEL_EXTRA_BODY`), for a
+    /// gateway or a model that needs them. Never `model`, `messages`, `tools`, `tool_choice` or `stream`
+    /// (the operator refuses them), at most 64 members and 16 KiB of canonical JSON. Absent: nothing is
+    /// added, and the key is absent from the object too.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub extra_body: Option<BTreeMap<String, serde_json::Value>>,
+    /// The member the reasoning of earlier turns is sent back under (`model.echoReasoning`,
+    /// `MODEL_ECHO_REASONING`): `reasoning_content` or `reasoning`. Absent: never sent, which is what
+    /// almost every model wants.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub echo_reasoning: Option<aap_api::EchoReasoning>,
+    /// The model's context window in tokens (`model.contextWindow`, `MODEL_CONTEXT_WINDOW`), 1 to
+    /// 2^53-1, so a usage report can say how full it is. Absent: reports carry no window.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub context_window: Option<u64>,
 }
 
 /// What is particular to a kind of agent.

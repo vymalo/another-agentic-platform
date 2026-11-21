@@ -1548,9 +1548,40 @@
       "ModelChoice": {
         "additionalProperties": false,
         "properties": {
+          "contextWindow": {
+            "description": "The model's context window in tokens (model.contextWindow, MODEL_CONTEXT_WINDOW), 1 to 2^53-1. null: reports carry no window.",
+            "format": "int64",
+            "maximum": 9007199254740991,
+            "minimum": 1,
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
+          "echoReasoning": {
+            "description": "The member the reasoning of earlier turns is sent back under (model.echoReasoning, MODEL_ECHO_REASONING). null: never sent.",
+            "enum": [
+              "reasoning_content",
+              "reasoning",
+              null
+            ],
+            "type": [
+              "string",
+              "null"
+            ]
+          },
           "endpoint": {
             "description": "The ModelEndpoint's name.",
             "type": "string"
+          },
+          "extraBody": {
+            "additionalProperties": true,
+            "description": "Members merged into every chat-completions request (model.extraBody, MODEL_EXTRA_BODY). Never model, messages, tools, tool_choice or stream; at most 64 members and 16 KiB of canonical JSON. null: nothing is added.",
+            "maxProperties": 64,
+            "type": [
+              "object",
+              "null"
+            ]
           },
           "model": {
             "description": "The alias.",

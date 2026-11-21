@@ -154,6 +154,9 @@ pub fn coder_form(name: &str) -> AgentForm {
         model: Some(ModelChoice {
             endpoint: "gateway".to_owned(),
             model: "coding-model".to_owned(),
+            extra_body: None,
+            echo_reasoning: None,
+            context_window: None,
         }),
         tool_servers: ["websearch".to_owned()].into(),
         allow_insecure_http: true,
@@ -185,6 +188,9 @@ pub fn folder_form(name: &str) -> AgentForm {
         model: Some(ModelChoice {
             endpoint: "gateway".to_owned(),
             model: "chat-model".to_owned(),
+            extra_body: None,
+            echo_reasoning: None,
+            context_window: None,
         }),
         tool_servers: BTreeSet::new(),
         allow_insecure_http: false,
@@ -565,6 +571,31 @@ fn arb_a2a_settings() -> impl Strategy<Value = A2aSettings> {
         })
 }
 
+/// The model's extra body: members a gateway or a model needs. A form is not a validity claim (a
+/// forbidden member is a validation test of its own), so any name and a few JSON shapes do.
+fn arb_extra_body() -> impl Strategy<Value = Option<BTreeMap<String, Value>>> {
+    prop::option::of(prop::collection::btree_map(
+        "[a-z][a-z0-9_]{0,15}",
+        prop_oneof![
+            any::<i64>().prop_map(Value::from),
+            "[a-z ]{0,8}".prop_map(Value::from),
+            any::<bool>().prop_map(Value::from),
+        ],
+        0..3,
+    ))
+}
+
+fn arb_echo_reasoning() -> impl Strategy<Value = Option<aap_api::EchoReasoning>> {
+    prop::option::of(prop_oneof![
+        Just(aap_api::EchoReasoning::ReasoningContent),
+        Just(aap_api::EchoReasoning::Reasoning),
+    ])
+}
+
+fn arb_context_window() -> impl Strategy<Value = Option<u64>> {
+    prop::option::of(1u64..=1_000_000)
+}
+
 pub fn arb_agent_form() -> impl Strategy<Value = AgentForm> {
     let agent = prop_oneof![
         arb_coder_settings().prop_map(AgentKindForm::Coder),
@@ -580,6 +611,9 @@ pub fn arb_agent_form() -> impl Strategy<Value = AgentForm> {
         (
             ident(),
             alias(),
+            arb_extra_body(),
+            arb_echo_reasoning(),
+            arb_context_window(),
             prop::collection::btree_set(ident(), 0..3),
             any::<bool>(),
         ),
@@ -593,7 +627,15 @@ pub fn arb_agent_form() -> impl Strategy<Value = AgentForm> {
             |(
                 (name, title, description),
                 (tags, suspend),
-                (endpoint, model, tool_servers, insecure),
+                (
+                    endpoint,
+                    model,
+                    extra_body,
+                    echo_reasoning,
+                    context_window,
+                    tool_servers,
+                    insecure,
+                ),
                 (image, audience),
                 agent,
             )| {
@@ -607,7 +649,13 @@ pub fn arb_agent_form() -> impl Strategy<Value = AgentForm> {
                     description,
                     tags: tags.into_iter().collect(),
                     suspend,
-                    model: (!a2a).then_some(ModelChoice { endpoint, model }),
+                    model: (!a2a).then_some(ModelChoice {
+                        endpoint,
+                        model,
+                        extra_body,
+                        echo_reasoning,
+                        context_window,
+                    }),
                     tool_servers: if a2a { BTreeSet::new() } else { tool_servers },
                     allow_insecure_http: !a2a && insecure,
                     image: if a2a { None } else { image },

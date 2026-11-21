@@ -186,7 +186,13 @@ proptest! {
             0 => form.name = "Bad Name".to_owned(),
             1 => form.title = String::new(),
             // A model that is not there — and, on an A2A image, a model at all.
-            2 => form.model = Some(aap_forms::ModelChoice { endpoint: "nothere".to_owned(), model: "m".to_owned() }),
+            2 => form.model = Some(aap_forms::ModelChoice {
+                endpoint: "nothere".to_owned(),
+                model: "m".to_owned(),
+                extra_body: None,
+                echo_reasoning: None,
+                context_window: None,
+            }),
             3 => form.audience = Some(vec!["a b".to_owned()]),
             4 => form.image = Some("has space".to_owned()),
             5 => { form.tool_servers.insert("missing".to_owned()); }
@@ -274,6 +280,32 @@ fn each_rule_of_the_coder_screen_names_its_field() {
             "no alias",
             "model.model",
             Box::new(|f| model_mut(f).model = String::new()),
+        ),
+        (
+            "an extra body member the runtime owns",
+            "model.extraBody",
+            Box::new(|f| {
+                model_mut(f).extra_body = Some(std::collections::BTreeMap::from([(
+                    "model".to_owned(),
+                    serde_json::json!("x"),
+                )]));
+            }),
+        ),
+        (
+            "an extra body of 65 members",
+            "model.extraBody",
+            Box::new(|f| {
+                model_mut(f).extra_body = Some(
+                    (0..65)
+                        .map(|i| (format!("k{i}"), serde_json::json!(1)))
+                        .collect(),
+                );
+            }),
+        ),
+        (
+            "a context window of zero",
+            "model.contextWindow",
+            Box::new(|f| model_mut(f).context_window = Some(0)),
         ),
         (
             "a tool server that is not there",
@@ -551,6 +583,9 @@ fn each_rule_of_the_a2a_screen_names_its_field() {
                 f.model = Some(ModelChoice {
                     endpoint: "gateway".into(),
                     model: "chat-model".into(),
+                    extra_body: None,
+                    echo_reasoning: None,
+                    context_window: None,
                 })
             }),
         ),

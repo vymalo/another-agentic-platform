@@ -121,6 +121,37 @@ fn the_form_of_an_a2a_image_round_trips() {
 }
 
 #[test]
+fn the_models_own_settings_are_a_forms_and_survive_it() {
+    // Parity gap 16: the extra body, the echo and the context window were YAML only. A form carries
+    // them, and what it writes back is what it read (`aapctl apply` writes nothing when unchanged).
+    let mut form = coder_form("coder");
+    form.model = Some(ModelChoice {
+        endpoint: "gateway".to_owned(),
+        model: "coding-model".to_owned(),
+        extra_body: Some(std::collections::BTreeMap::from([
+            ("reasoning_effort".to_owned(), serde_json::json!("low")),
+            ("parallel_tool_calls".to_owned(), serde_json::json!(false)),
+        ])),
+        echo_reasoning: Some(aap_api::EchoReasoning::ReasoningContent),
+        context_window: Some(131_072),
+    });
+    let deployment = defaults().deployment_for(AgentKind::Coder, "coder");
+    let view = view_of(&form, &deployment).unwrap();
+    assert_eq!(view.form, form);
+    let resources = to_resources(&form, &deployment, NS);
+    let model = resources.config.spec.model.as_ref().unwrap();
+    assert_eq!(model.context_window, Some(131_072));
+    assert_eq!(
+        model.echo_reasoning,
+        Some(aap_api::EchoReasoning::ReasoningContent)
+    );
+    assert_eq!(
+        model.extra_body.as_ref().unwrap().get("reasoning_effort"),
+        Some(&serde_json::json!("low"))
+    );
+}
+
+#[test]
 fn an_a2a_form_that_names_what_the_operator_refuses_is_still_a_form() {
     // A form is not a validity claim: a form that validation refuses (a model, the adam image, tool
     // servers) must still be read back unchanged, or a person could not be shown the mistake to fix.
@@ -128,6 +159,9 @@ fn an_a2a_form_that_names_what_the_operator_refuses_is_still_a_form() {
     form.model = Some(ModelChoice {
         endpoint: "gateway".to_owned(),
         model: "chat-model".to_owned(),
+        extra_body: None,
+        echo_reasoning: None,
+        context_window: None,
     });
     form.image = Some("registry.invalid/agent:tag".to_owned());
     form.tool_servers = ["websearch".to_owned()].into();
