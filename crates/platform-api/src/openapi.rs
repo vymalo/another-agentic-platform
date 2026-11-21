@@ -414,7 +414,7 @@ fn schemas() -> Value {
                                "description": "The member the reasoning of earlier turns is sent back under (model.echoReasoning, MODEL_ECHO_REASONING). null: never sent." },
             "contextWindow": { "type": ["integer", "null"], "minimum": 1, "maximum": 9007199254740991i64, "format": "int64",
                                "description": "The model's context window in tokens (model.contextWindow, MODEL_CONTEXT_WINDOW), 1 to 2^53-1. null: reports carry no window." },
-        }), &["endpoint", "model"]),
+        }), &["extraBody", "echoReasoning", "contextWindow"]),
         "GithubApp": object(json!({
             "appId": { "type": "string" },
             "privateKey": schema("SecretPick"),
