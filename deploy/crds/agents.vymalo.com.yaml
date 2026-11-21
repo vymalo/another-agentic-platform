@@ -595,6 +595,21 @@ spec:
                     description: The model alias (`MODEL`).
                     minLength: 1
                     type: string
+                  reasoningEffort:
+                    description: |-
+                      A reasoning effort a gateway accepts (ADR 0063): the vocabulary of a model profile's
+                      `reasoningEfforts`, the seven levels the gateway's probe observed. **`none` is a level of its own**:
+                      some models reason unless it is sent, and for the others "off" is the absence of the setting.
+                    enum:
+                    - none
+                    - minimal
+                    - low
+                    - medium
+                    - high
+                    - xhigh
+                    - max
+                    nullable: true
+                    type: string
                 required:
                 - model
                 type: object
@@ -1363,6 +1378,41 @@ spec:
                   type: string
                 maxItems: 32
                 type: array
+              reasoning:
+                additionalProperties:
+                  description: |-
+                    The reasoning levels one model alias of the endpoint accepts, and nothing else (ADR 0063): an
+                    agent's `model.reasoningEffort` must be one of them, and an alias with no entry (or an empty list)
+                    takes no reasoning setting.
+                  properties:
+                    efforts:
+                      default: []
+                      description: The levels, each at most once, at most the seven of the vocabulary.
+                      items:
+                        description: |-
+                          A reasoning effort a gateway accepts (ADR 0063): the vocabulary of a model profile's
+                          `reasoningEfforts`, the seven levels the gateway's probe observed. **`none` is a level of its own**:
+                          some models reason unless it is sent, and for the others "off" is the absence of the setting.
+                        enum:
+                        - none
+                        - minimal
+                        - low
+                        - medium
+                        - high
+                        - xhigh
+                        - max
+                        type: string
+                      maxItems: 7
+                      type: array
+                  type: object
+                description: |-
+                  The reasoning levels each alias accepts (`spec.reasoning.<alias>.efforts`), at most 32 aliases
+                  (ADR 0063; the owner's ruling: the levels live on the endpoint, the agent picks among them). An
+                  alias with no entry, or with an empty list, takes no reasoning setting. The wire (the
+                  `reasoning_effort` member, a `reasoning` object, a thinking budget) belongs to the model's
+                  profile in adam's `MODEL_ALIASES_FILE`: the platform only names the levels.
+                maxProperties: 32
+                type: object
               title:
                 description: What the dashboard shows. 1 to 128 characters.
                 maxLength: 128

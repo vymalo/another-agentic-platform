@@ -218,15 +218,18 @@ fn validate_accepts_every_example() {
     }
 }
 
-/// The invalid examples the CRD refuses by a bound of its schema alone, which only an API server reads, or by a rule of the
-/// audience that reaches no pod (the same list as `crates/domain/tests/validate.rs`). The CLI does not read a schema and does
-/// not evaluate CEL, so it cannot refuse them: it accepts them, and says so in its README.
-const REFUSED_BY_THE_API_SERVER_ONLY: [&str; 15] = [
+/// The invalid examples the CLI accepts: a bound of the CRD's schema, which only an API server reads, and an endpoint's own
+/// rules when a config uses it (the operator judges every endpoint; the CLI judges only the endpoints no config reaches).
+/// The CLI does not read a schema and does not evaluate CEL, so it cannot refuse them: it accepts them, and says so in its
+/// README.
+const REFUSED_BY_THE_API_SERVER_ONLY: [&str; 17] = [
     "audience-star-with-others.yaml",
     "audience-too-many.yaml",
     "audience-value-empty.yaml",
     "audience-value-too-long.yaml",
     "audience-value-with-space.yaml",
+    "endpoint-reasoning-efforts-too-many.yaml",
+    "endpoint-reasoning-too-many.yaml",
     "extra-body-too-many.yaml",
     "mcp-servers-too-many.yaml",
     "model-endpoint-models-too-many.yaml",

@@ -134,6 +134,7 @@ fn the_models_own_settings_are_a_forms_and_survive_it() {
         ])),
         echo_reasoning: Some(aap_api::EchoReasoning::ReasoningContent),
         context_window: Some(131_072),
+        reasoning_effort: Some(aap_api::ReasoningEffort::Low),
     });
     let deployment = defaults().deployment_for(AgentKind::Coder, "coder");
     let view = view_of(&form, &deployment).unwrap();
@@ -162,6 +163,7 @@ fn an_a2a_form_that_names_what_the_operator_refuses_is_still_a_form() {
         extra_body: None,
         echo_reasoning: None,
         context_window: None,
+        reasoning_effort: None,
     });
     form.image = Some("registry.invalid/agent:tag".to_owned());
     form.tool_servers = ["websearch".to_owned()].into();
@@ -378,7 +380,8 @@ fn the_wire_form_of_a_model_endpoint_and_a_tool_server() {
         r#"{"name":"gateway","title":"Gateway",
             "baseUrl":{"secret":{"secret":"agent-models","key":"GATEWAY_BASE_URL"}},
             "apiKey":{"secret":"agent-models","key":"GATEWAY_API_KEY"},
-            "models":["coding-model","chat-model"]}"#,
+            "models":["coding-model","chat-model"],
+            "reasoning":{"coding-model":["none","low"]}}"#,
     ))
     .unwrap();
     assert_eq!(model, model_form("gateway"));

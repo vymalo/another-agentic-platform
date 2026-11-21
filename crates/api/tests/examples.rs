@@ -472,6 +472,19 @@ const BOUND_EXAMPLES: &[(&str, &str, &str, &str)] = &[
         "minLength",
         "audience-value-empty",
     ),
+    // the reasoning levels of a ModelEndpoint (ADR 0063)
+    (
+        "ModelEndpoint",
+        "spec.reasoning",
+        "maxProperties",
+        "endpoint-reasoning-too-many",
+    ),
+    (
+        "ModelEndpoint",
+        "spec.reasoning{}.efforts",
+        "maxItems",
+        "endpoint-reasoning-efforts-too-many",
+    ),
     // the references (AD-029) and the map of servers their rules are priced by
     (
         "AgentConfig",

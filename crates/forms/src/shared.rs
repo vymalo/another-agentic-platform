@@ -74,6 +74,10 @@ pub struct ModelEndpointForm {
     /// The aliases the forms offer, at most 32. Informative: nothing checks that the endpoint serves them.
     #[serde(default)]
     pub models: Vec<String>,
+    /// The reasoning levels each alias accepts (`spec.reasoning.<alias>.efforts`, ADR 0063), at most 32
+    /// aliases. An alias with no entry takes no reasoning setting.
+    #[serde(default)]
+    pub reasoning: BTreeMap<String, Vec<aap_api::ReasoningEffort>>,
 }
 
 impl ModelEndpointForm {
@@ -101,6 +105,18 @@ impl ModelEndpointForm {
             },
             api_key_secret_ref: self.api_key.to_ref(),
             models: self.models.clone(),
+            reasoning: self
+                .reasoning
+                .iter()
+                .map(|(alias, efforts)| {
+                    (
+                        alias.clone(),
+                        aap_api::ModelReasoning {
+                            efforts: efforts.clone(),
+                        },
+                    )
+                })
+                .collect(),
         }
     }
 
@@ -147,6 +163,11 @@ impl ModelEndpointForm {
             },
             api_key: SecretPick::from_ref(&spec.api_key_secret_ref),
             models: spec.models.clone(),
+            reasoning: spec
+                .reasoning
+                .iter()
+                .map(|(alias, r)| (alias.clone(), r.efforts.clone()))
+                .collect(),
         };
         differences(
             Kind::ModelEndpoint,

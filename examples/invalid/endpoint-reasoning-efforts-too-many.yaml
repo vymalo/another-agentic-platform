@@ -1,0 +1,17 @@
+# Refused: one alias of spec.reasoning declares 8 levels; the vocabulary has 7 (a bound of the schema).
+# expect: Too many: 8: must have at most 7 items
+apiVersion: agents.vymalo.com/v1alpha1
+kind: ModelEndpoint
+metadata:
+  name: invalid-endpoint-reasoning-efforts-too-many
+  namespace: another-agentic-system
+spec:
+  title: Gateway
+  baseUrl:
+    value: https://gateway.example.invalid/v1
+  apiKeySecretRef:
+    name: agent-models
+    key: GATEWAY_API_KEY
+  reasoning:
+    coding-model:
+      efforts: [none, minimal, low, medium, high, xhigh, max, low]

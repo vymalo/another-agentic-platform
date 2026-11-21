@@ -1508,6 +1508,22 @@
           "offerLabel": {
             "type": "string"
           },
+          "reasoningEfforts": {
+            "description": "The reasoning levels a ModelEndpoint may declare (ADR 0063), lowest first.",
+            "items": {
+              "enum": [
+                "none",
+                "minimal",
+                "low",
+                "medium",
+                "high",
+                "xhigh",
+                "max"
+              ],
+              "type": "string"
+            },
+            "type": "array"
+          },
           "runPodSizeClasses": {
             "description": "The size classes of run pods the operator has; empty: none, and a coder form that asks is refused.",
             "items": {
@@ -1524,6 +1540,7 @@
           "limits",
           "namespace",
           "offerLabel",
+          "reasoningEfforts",
           "runPodSizeClasses",
           "version"
         ],
@@ -1586,6 +1603,23 @@
           "model": {
             "description": "The alias.",
             "type": "string"
+          },
+          "reasoningEffort": {
+            "description": "The reasoning effort (model.reasoningEffort, ADR 0063): one of the levels the ModelEndpoint declares for the model; null: nothing is sent. Stored and validated; it reaches no model yet.",
+            "enum": [
+              "none",
+              "minimal",
+              "low",
+              "medium",
+              "high",
+              "xhigh",
+              "max",
+              null
+            ],
+            "type": [
+              "string",
+              "null"
+            ]
           }
         },
         "required": [
@@ -1718,6 +1752,27 @@
             "description": "Fixed after the create.",
             "pattern": "^[a-z][a-z0-9-]{0,62}$",
             "type": "string"
+          },
+          "reasoning": {
+            "additionalProperties": {
+              "items": {
+                "enum": [
+                  "none",
+                  "minimal",
+                  "low",
+                  "medium",
+                  "high",
+                  "xhigh",
+                  "max"
+                ],
+                "type": "string"
+              },
+              "maxItems": 7,
+              "type": "array"
+            },
+            "description": "The reasoning levels each alias accepts (spec.reasoning.<alias>.efforts, ADR 0063). An alias with no entry takes no reasoning setting.",
+            "maxProperties": 32,
+            "type": "object"
           },
           "title": {
             "maxLength": 128,
@@ -3244,6 +3299,15 @@
                   },
                   "namespace": "another-agentic-system",
                   "offerLabel": "agents.vymalo.com/offer",
+                  "reasoningEfforts": [
+                    "none",
+                    "minimal",
+                    "low",
+                    "medium",
+                    "high",
+                    "xhigh",
+                    "max"
+                  ],
                   "runPodSizeClasses": [],
                   "version": "0.1.0"
                 },

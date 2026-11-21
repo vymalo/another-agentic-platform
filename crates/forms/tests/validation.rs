@@ -192,6 +192,7 @@ proptest! {
                 extra_body: None,
                 echo_reasoning: None,
                 context_window: None,
+                reasoning_effort: None,
             }),
             3 => form.audience = Some(vec!["a b".to_owned()]),
             4 => form.image = Some("has space".to_owned()),
@@ -280,6 +281,11 @@ fn each_rule_of_the_coder_screen_names_its_field() {
             "no alias",
             "model.model",
             Box::new(|f| model_mut(f).model = String::new()),
+        ),
+        (
+            "a reasoning level the endpoint does not declare",
+            "model.reasoningEffort",
+            Box::new(|f| model_mut(f).reasoning_effort = Some(aap_api::ReasoningEffort::Max)),
         ),
         (
             "an extra body member the runtime owns",
@@ -586,6 +592,7 @@ fn each_rule_of_the_a2a_screen_names_its_field() {
                     extra_body: None,
                     echo_reasoning: None,
                     context_window: None,
+                    reasoning_effort: None,
                 })
             }),
         ),
@@ -1024,6 +1031,30 @@ fn each_rule_of_the_models_screen_names_its_field() {
             "models[1]",
             Box::new(|f| f.models = vec!["ok".into(), " ".into()]),
         ),
+        (
+            "eight reasoning levels for an alias",
+            "reasoning[coding-model]",
+            Box::new(|f| {
+                f.reasoning.insert(
+                    "coding-model".into(),
+                    aap_api::ReasoningEffort::ALL
+                        .iter()
+                        .copied()
+                        .chain([aap_api::ReasoningEffort::Low])
+                        .collect(),
+                );
+            }),
+        ),
+        (
+            "a reasoning level twice",
+            "reasoning[coding-model]",
+            Box::new(|f| {
+                f.reasoning.insert(
+                    "coding-model".into(),
+                    vec![aap_api::ReasoningEffort::Low, aap_api::ReasoningEffort::Low],
+                );
+            }),
+        ),
     ];
     for (what, field, change) in table {
         let mut form = model_form("gateway");
@@ -1034,6 +1065,20 @@ fn each_rule_of_the_models_screen_names_its_field() {
             "{what}: expected {field} among {got:?}"
         );
     }
+}
+
+#[test]
+fn a_reasoning_level_the_endpoint_declares_is_accepted_and_one_it_does_not_is_refused() {
+    // ADR 0063: the endpoint declares the levels, the agent picks among them; a model with no entry takes none.
+    let mut form = coder_form("coder");
+    model_mut(&mut form).reasoning_effort = Some(aap_api::ReasoningEffort::Low);
+    assert!(check(&form).is_ok(), "{:?}", check(&form).err());
+    model_mut(&mut form).reasoning_effort = Some(aap_api::ReasoningEffort::Max);
+    assert_eq!(fields(check(&form)), ["model.reasoningEffort"]);
+    // The endpoint's `coding-model` declares [none, low]; the folder form's `chat-model` has no entry.
+    let mut folder = folder_form("chat");
+    folder.model.as_mut().unwrap().reasoning_effort = Some(aap_api::ReasoningEffort::Low);
+    assert_eq!(fields(check(&folder)), ["model.reasoningEffort"]);
 }
 
 #[test]

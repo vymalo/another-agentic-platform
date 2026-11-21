@@ -202,6 +202,7 @@ pub fn to_resources(form: &AgentForm, deployment: &Deployment, namespace: &str) 
                 .map(|b| b.iter().map(|(k, v)| (k.clone(), v.clone())).collect()),
             echo_reasoning: m.echo_reasoning,
             context_window: m.context_window,
+            reasoning_effort: m.reasoning_effort,
         }),
         tools: Tools {
             github_mcp: deployment.github_mcp.clone(),
@@ -413,6 +414,7 @@ fn extract(
                 .map(|b| b.iter().map(|(k, v)| (k.clone(), v.clone())).collect()),
             echo_reasoning: m.echo_reasoning,
             context_window: m.context_window,
+            reasoning_effort: m.reasoning_effort,
         }),
         tool_servers: config.tools.mcp_servers.keys().cloned().collect(),
         allow_insecure_http: config.tools.allow_insecure_http,
