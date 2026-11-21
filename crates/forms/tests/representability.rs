@@ -365,24 +365,6 @@ fn coder_changes() -> Vec<Change> {
         ),
         change(
             c,
-            "/model/extraBody",
-            json!({ "reasoning_effort": "medium" }),
-            "spec.model.extraBody",
-        ),
-        change(
-            c,
-            "/model/echoReasoning",
-            json!("reasoning_content"),
-            "spec.model.echoReasoning",
-        ),
-        change(
-            c,
-            "/model/contextWindow",
-            json!(128_000),
-            "spec.model.contextWindow",
-        ),
-        change(
-            c,
             "/environment/cache",
             json!({ "existingClaim": "package-cache" }),
             "spec.environment.cache",
