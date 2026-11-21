@@ -7,13 +7,64 @@ mod common;
 
 use aap_domain::{ConfigIssue, Externals, validate};
 use common::{
-    assert_issue, documents, example, issues, must_resolve, remove, repo_root, set, typed,
+    assert_issue, documents, example, issues, must_resolve, remove, repo_root, set, shared_objects,
+    typed,
 };
 use serde_json::{Value, json};
 
 type Change = fn(&mut Value, &mut Value);
 
 const CODER: &str = "/spec/harness/adam/coder";
+
+#[test]
+fn a_reasoning_effort_is_one_the_endpoint_declares() {
+    // ADR 0063: the endpoint declares the levels per model (`coder-me.yaml`: coding-model [none, low]), the
+    // agent picks one of them, and a model with no entry takes none.
+    let ext = shared_objects("coder-me").with_default_image("registry.invalid/agent:tag");
+    let (s, c) = example("coder-me");
+    let (s, c) = typed(&s, &c);
+    validate(&s, &c, &ext).unwrap();
+    let (raw_s, raw_c) = example("coder-me");
+    let mut c = raw_c;
+    set(&mut c, "/spec/model/reasoningEffort", json!("max"));
+    let (s, c) = typed(&raw_s, &c);
+    assert_issue(
+        &validate(&s, &c, &ext).unwrap_err(),
+        "spec.model.reasoningEffort",
+        "declares no such level",
+    );
+    // The `chat-model` has no entry: any level is refused.
+    let mut c = example("coder-me").1;
+    set(&mut c, "/spec/model/model", json!("chat-model"));
+    let (s, c) = typed(&example("coder-me").0, &c);
+    assert_issue(
+        &validate(&s, &c, &ext).unwrap_err(),
+        "spec.model.reasoningEffort",
+        "declares none",
+    );
+}
+
+#[test]
+fn an_endpoint_refuses_a_reasoning_level_twice() {
+    let endpoint: aap_api::ModelEndpoint = serde_json::from_value(json!({
+        "apiVersion": "agents.vymalo.com/v1alpha1", "kind": "ModelEndpoint",
+        "metadata": { "name": "gateway", "namespace": "another-agentic-system" },
+        "spec": {
+            "title": "Gateway",
+            "baseUrl": { "value": "https://x.invalid/v1" },
+            "apiKeySecretRef": { "name": "s", "key": "K" },
+            "models": ["coding-model"],
+            "reasoning": { "coding-model": { "efforts": ["low", "low"] } },
+        },
+    }))
+    .unwrap();
+    let issues = aap_domain::validate_endpoint(&endpoint).unwrap_err();
+    assert_issue(
+        &issues,
+        "spec.reasoning[coding-model].efforts[1]",
+        "listed twice",
+    );
+}
 
 #[test]
 fn the_examples_are_valid() {
@@ -699,6 +750,8 @@ fn outside_validate(file_name: &str) -> bool {
         || file_name == "extra-body-too-many.yaml"
         || file_name == "mcp-servers-too-many.yaml"
         || [
+            "endpoint-reasoning-efforts-too-many.yaml",
+            "endpoint-reasoning-too-many.yaml",
             "model-endpoint-models-too-many.yaml",
             "model-endpoint-title-empty.yaml",
             "model-endpoint-title-too-long.yaml",
@@ -809,6 +862,8 @@ fn the_shape_rules_of_the_crd_hold_without_an_api_server() {
             "audience-value-empty.yaml",
             "audience-value-too-long.yaml",
             "audience-value-with-space.yaml",
+            "endpoint-reasoning-efforts-too-many.yaml",
+            "endpoint-reasoning-too-many.yaml",
             "extra-body-too-many.yaml",
             "mcp-servers-too-many.yaml",
             "model-endpoint-models-too-many.yaml",

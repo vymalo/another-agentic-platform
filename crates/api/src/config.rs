@@ -9,6 +9,7 @@ use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
 use crate::common::{Empty, NameRef, SecretKeyRef};
+use crate::model_endpoint::ReasoningEffort;
 use crate::status::AgentConfigStatus;
 
 /// The configuration of an agent: its harness, model, tools, environment and security. A
@@ -453,6 +454,14 @@ pub struct Model {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[schemars(range(min = 1, max = MAX_CONTEXT_WINDOW), extend("format" = "int64"))]
     pub context_window: Option<u64>,
+
+    /// The reasoning effort of this agent (`model.reasoningEffort`, ADR 0063): one of the levels the
+    /// `ModelEndpoint`'s entry for `model` declares. Unset sends nothing. **The operator writes no variable
+    /// for it yet**: the coder's seat is the card's levels (from `MODEL_ALIASES_FILE`) and the
+    /// orchestrator's per-message `reasoning/v1`, which follow; until then the field is stored and
+    /// validated, and reaches no model (§60a).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reasoning_effort: Option<ReasoningEffort>,
 }
 
 /// The largest `model.contextWindow`: 2^53 - 1, the largest count a usage report carries (what

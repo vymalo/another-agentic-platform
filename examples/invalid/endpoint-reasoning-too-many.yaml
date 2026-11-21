@@ -1,0 +1,48 @@
+# Refused: spec.reasoning has 33 aliases; at most 32 (a bound of the schema, not a CEL rule).
+# expect: Too many: 33: must have at most 32 items
+apiVersion: agents.vymalo.com/v1alpha1
+kind: ModelEndpoint
+metadata:
+  name: invalid-endpoint-reasoning-too-many
+  namespace: another-agentic-system
+spec:
+  title: Gateway
+  baseUrl:
+    value: https://gateway.example.invalid/v1
+  apiKeySecretRef:
+    name: agent-models
+    key: GATEWAY_API_KEY
+  reasoning:
+    m00: { efforts: [low] }
+    m01: { efforts: [low] }
+    m02: { efforts: [low] }
+    m03: { efforts: [low] }
+    m04: { efforts: [low] }
+    m05: { efforts: [low] }
+    m06: { efforts: [low] }
+    m07: { efforts: [low] }
+    m08: { efforts: [low] }
+    m09: { efforts: [low] }
+    m10: { efforts: [low] }
+    m11: { efforts: [low] }
+    m12: { efforts: [low] }
+    m13: { efforts: [low] }
+    m14: { efforts: [low] }
+    m15: { efforts: [low] }
+    m16: { efforts: [low] }
+    m17: { efforts: [low] }
+    m18: { efforts: [low] }
+    m19: { efforts: [low] }
+    m20: { efforts: [low] }
+    m21: { efforts: [low] }
+    m22: { efforts: [low] }
+    m23: { efforts: [low] }
+    m24: { efforts: [low] }
+    m25: { efforts: [low] }
+    m26: { efforts: [low] }
+    m27: { efforts: [low] }
+    m28: { efforts: [low] }
+    m29: { efforts: [low] }
+    m30: { efforts: [low] }
+    m31: { efforts: [low] }
+    m32: { efforts: [low] }

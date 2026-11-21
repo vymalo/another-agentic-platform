@@ -541,6 +541,7 @@ fn config_field(form: &AgentForm, path: &str) -> String {
         ("spec.model.extraBody", "model.extraBody"),
         ("spec.model.echoReasoning", "model.echoReasoning"),
         ("spec.model.contextWindow", "model.contextWindow"),
+        ("spec.model.reasoningEffort", "model.reasoningEffort"),
         ("spec.model", "model"),
         ("spec.tools.githubMcp", "deployment.githubMcp"),
         ("spec.tools.allowInsecureHttp", "allowInsecureHttp"),
@@ -584,6 +585,12 @@ fn config_field(form: &AgentForm, path: &str) -> String {
 }
 
 fn model_field(path: &str) -> String {
+    // ADR 0063: a level of one alias is a field of that alias.
+    if let Some(rest) = path.strip_prefix("spec.reasoning[")
+        && let Some(end) = rest.find(']')
+    {
+        return format!("reasoning[{}]", &rest[..end]);
+    }
     for (prefix, field) in [
         ("spec.baseUrl.value", "baseUrl.value"),
         ("spec.baseUrl.secretRef", "baseUrl.secret"),
@@ -768,6 +775,7 @@ fn probe(
             extra_body: None,
             echo_reasoning: None,
             context_window: None,
+            reasoning_effort: None,
         }),
         tool_servers: tool_server.iter().map(|s| (*s).to_owned()).collect(),
         // The rule about a plain `http://` server is the agent's, and this is not an agent.
@@ -842,6 +850,26 @@ pub fn validate_model(
                 format!("models[{i}]"),
                 "name an alias, or take the line out",
             );
+        }
+    }
+    // ADR 0063: the levels each alias accepts, at most 32 aliases and the seven levels once each.
+    if form.reasoning.len() > 32 {
+        e.add("reasoning", "at most 32 aliases");
+    }
+    for (alias, levels) in &form.reasoning {
+        let at = format!("reasoning[{alias}]");
+        if !has_text(alias) {
+            e.add(&at, "name an alias, or take the line out");
+        }
+        if levels.len() > 7 {
+            e.add(&at, "at most 7 levels: the vocabulary has seven");
+        }
+        let mut seen = std::collections::BTreeSet::new();
+        for level in levels {
+            if !seen.insert(*level) {
+                e.add(&at, "a level is listed twice: the levels are a set");
+                break;
+            }
         }
     }
 
@@ -962,6 +990,7 @@ fn probe_endpoint(namespace: &str) -> ModelEndpoint {
                 key: "KEY".to_owned(),
             },
             models: Vec::new(),
+            reasoning: std::collections::BTreeMap::new(),
         },
     );
     object.metadata.namespace = Some(namespace.to_owned());
@@ -1020,6 +1049,7 @@ impl Defaults {
                 extra_body: None,
                 echo_reasoning: None,
                 context_window: None,
+                reasoning_effort: None,
             }),
             tool_servers: BTreeSet::new(),
             allow_insecure_http: false,

@@ -157,6 +157,7 @@ pub fn coder_form(name: &str) -> AgentForm {
             extra_body: None,
             echo_reasoning: None,
             context_window: None,
+            reasoning_effort: None,
         }),
         tool_servers: ["websearch".to_owned()].into(),
         allow_insecure_http: true,
@@ -191,6 +192,7 @@ pub fn folder_form(name: &str) -> AgentForm {
             extra_body: None,
             echo_reasoning: None,
             context_window: None,
+            reasoning_effort: None,
         }),
         tool_servers: BTreeSet::new(),
         allow_insecure_http: false,
@@ -250,6 +252,13 @@ pub fn model_form(name: &str) -> ModelEndpointForm {
         base_url: BaseUrlForm::Secret(SecretPick::new("agent-models", "GATEWAY_BASE_URL")),
         api_key: SecretPick::new("agent-models", "GATEWAY_API_KEY"),
         models: vec!["coding-model".to_owned(), "chat-model".to_owned()],
+        reasoning: BTreeMap::from([(
+            "coding-model".to_owned(),
+            vec![
+                aap_api::ReasoningEffort::None,
+                aap_api::ReasoningEffort::Low,
+            ],
+        )]),
     }
 }
 
@@ -596,6 +605,18 @@ fn arb_context_window() -> impl Strategy<Value = Option<u64>> {
     prop::option::of(1u64..=1_000_000)
 }
 
+fn arb_reasoning_effort() -> impl Strategy<Value = aap_api::ReasoningEffort> {
+    prop_oneof![
+        Just(aap_api::ReasoningEffort::None),
+        Just(aap_api::ReasoningEffort::Minimal),
+        Just(aap_api::ReasoningEffort::Low),
+        Just(aap_api::ReasoningEffort::Medium),
+        Just(aap_api::ReasoningEffort::High),
+        Just(aap_api::ReasoningEffort::Xhigh),
+        Just(aap_api::ReasoningEffort::Max),
+    ]
+}
+
 pub fn arb_agent_form() -> impl Strategy<Value = AgentForm> {
     let agent = prop_oneof![
         arb_coder_settings().prop_map(AgentKindForm::Coder),
@@ -655,6 +676,7 @@ pub fn arb_agent_form() -> impl Strategy<Value = AgentForm> {
                         extra_body,
                         echo_reasoning,
                         context_window,
+                        reasoning_effort: None,
                     }),
                     tool_servers: if a2a { BTreeSet::new() } else { tool_servers },
                     allow_insecure_http: !a2a && insecure,
@@ -837,14 +859,20 @@ pub fn arb_model_form() -> impl Strategy<Value = ModelEndpointForm> {
         ],
         pick(),
         prop::collection::vec(alias(), 0..4),
+        prop::collection::btree_map(
+            alias(),
+            prop::collection::vec(arb_reasoning_effort(), 0..3),
+            0..2,
+        ),
     )
         .prop_map(
-            |(name, title, base_url, api_key, models)| ModelEndpointForm {
+            |(name, title, base_url, api_key, models, reasoning)| ModelEndpointForm {
                 name,
                 title,
                 base_url,
                 api_key,
                 models,
+                reasoning,
             },
         )
 }

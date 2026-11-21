@@ -36,6 +36,8 @@ where
             // The size classes of run pods the operator has (slice D15a): the names of its chart's `runPodClasses`, which the
             // chart writes into the API's configuration. Empty: the operator has no run pods, and a coder form that asks is refused.
             "runPodSizeClasses": state.defaults.run_pod_size_classes,
+            // The reasoning levels a ModelEndpoint may declare (ADR 0063), lowest first: the vocabulary the forms offer.
+            "reasoningEfforts": aap_api::ReasoningEffort::ALL.iter().map(|e| e.as_str()).collect::<Vec<_>>(),
             "limits": { "maxBodyBytes": MAX_BODY_BYTES },
         }),
     )

@@ -101,6 +101,11 @@ pub struct ModelChoice {
     /// 2^53-1, so a usage report can say how full it is. Absent: reports carry no window.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub context_window: Option<u64>,
+    /// The reasoning effort (`model.reasoningEffort`, ADR 0063): one of the levels the `ModelEndpoint`
+    /// declares for `model`, absent when the agent picks none. **Stored and validated; it reaches no
+    /// model yet** — the coder's card's levels and the orchestrator's `reasoning/v1` follow (§60a).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reasoning_effort: Option<aap_api::ReasoningEffort>,
 }
 
 /// What is particular to a kind of agent.

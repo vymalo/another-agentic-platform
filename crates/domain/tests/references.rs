@@ -694,6 +694,16 @@ fn a_name_with_dots_is_a_name() {
     let (_, chat) = example("chat");
     let mut gateway = endpoint_like(&chat);
     gateway.metadata.name = Some("models.gateway-v1".to_owned());
+    // The config picks `low` (ADR 0063): the endpoint it names must declare that level for the model.
+    gateway.spec.reasoning.insert(
+        "coding-model".to_owned(),
+        aap_api::ModelReasoning {
+            efforts: vec![
+                aap_api::ReasoningEffort::None,
+                aap_api::ReasoningEffort::Low,
+            ],
+        },
+    );
     externals = externals.with_model_endpoint(gateway);
     let found = issues_with("coder-me", &externals, |_, c| {
         set(

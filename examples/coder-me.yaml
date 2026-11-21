@@ -22,6 +22,8 @@ spec:
     name: agent-models
     key: GATEWAY_API_KEY
   models: [coding-model, chat-model] # the aliases the forms offer; informative
+  reasoning: # ADR 0063: the reasoning levels each alias accepts; an alias with no entry takes none
+    coding-model: { efforts: [none, low] }
 ---
 apiVersion: agents.vymalo.com/v1alpha1
 kind: ToolProvider
@@ -67,6 +69,7 @@ spec:
     endpointRef: # exclusive with baseUrl and apiKeySecretRef
       name: gateway
     model: coding-model
+    reasoningEffort: low # ADR 0063: one of the endpoint's levels for that model
   tools:
     mcpServers:
       websearch:

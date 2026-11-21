@@ -1220,6 +1220,7 @@ const MAY_BE_ABSENT: &[&str] = &[
     "ModelChoice/extraBody",
     "ModelChoice/echoReasoning",
     "ModelChoice/contextWindow",
+    "ModelChoice/reasoningEffort",
     // A shared object has no status before the operator wrote one (`skip_serializing_if`).
     "ModelDetail/status",
     "ToolServerDetail/status",
@@ -1246,6 +1247,7 @@ const MAY_BE_ABSENT: &[&str] = &[
     "CoderSettings/maxAccessTier",
     "CoderSettings/runPodSizeClass",
     "ModelEndpointForm/models",
+    "ModelEndpointForm/reasoning",
     "HeaderForm/prefix",
     "ToolServerForm/headers",
     "ToolServerForm/tools",

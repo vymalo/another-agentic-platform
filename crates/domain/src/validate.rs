@@ -86,6 +86,7 @@ pub(crate) fn check_all(
     check_service(&mut v, service, &read.config);
     v.0.extend(read.issues.iter().cloned());
     check_config(&mut v, &read.config, &read.origins);
+    check_reasoning(&mut v, &read.config, &read.origins, externals);
     check_run_pods_offered(&mut v, &read.config, externals);
     check_deployment_limits(&mut v, service, &read.config, externals);
     if v.0.is_empty() { Ok(()) } else { Err(v.0) }
@@ -304,6 +305,21 @@ pub fn validate_endpoint(endpoint: &aap_api::ModelEndpoint) -> Result<(), Vec<Co
         &format!("{at}.apiKeySecretRef"),
         &spec.api_key_secret_ref,
     );
+    // ADR 0063: the levels each alias accepts, each once; the map's size is the schema's bound (32).
+    for (alias, levels) in &spec.reasoning {
+        if alias.trim().is_empty() {
+            v.add(format!("{at}.reasoning"), "an alias is empty");
+        }
+        let mut seen = std::collections::BTreeSet::new();
+        for (i, level) in levels.efforts.iter().enumerate() {
+            if !seen.insert(*level) {
+                v.add(
+                    format!("{at}.reasoning[{alias}].efforts[{i}]"),
+                    "the level is listed twice: the levels are a set",
+                );
+            }
+        }
+    }
     if v.0.is_empty() { Ok(()) } else { Err(v.0) }
 }
 
@@ -707,6 +723,56 @@ fn check_a2a(v: &mut Issues, cfg: &AgentConfig, a2a: &aap_api::A2a) {
         v.add(
             format!("{me} spec.extraEnv"),
             "an a2a image gets no extraEnv: spec.harness.a2a.env is the one way to set a variable",
+        );
+    }
+}
+
+/// `model.reasoningEffort` (ADR 0063): the level must be one the named `ModelEndpoint` declares for the
+/// model, and a model with no entry (or an empty list) takes no reasoning setting, so a level for it is
+/// `ConfigInvalid`. An inline model is left to the deployment's profile, which the platform does not
+/// read: the field is not judged there.
+fn check_reasoning(v: &mut Issues, cfg: &AgentConfig, origins: &Origins, externals: &Externals) {
+    let me = "AgentConfig";
+    let Some(model) = &cfg.spec.model else {
+        return;
+    };
+    let Some(level) = model.reasoning_effort else {
+        return;
+    };
+    // `materialize` reads the endpoint into the inline form, so `endpointRef` is gone here; the origin says
+    // which endpoint the address and the key came from, and that is the object that declares the levels.
+    let Some(name) = origins.endpoint.as_deref() else {
+        return;
+    };
+    let Some(endpoint) = externals.model_endpoints.get(name) else {
+        // `materialize` said the endpoint is missing; that issue is the one to fix.
+        return;
+    };
+    let efforts = endpoint
+        .spec
+        .reasoning
+        .get(&model.model)
+        .map(|r| r.efforts.as_slice())
+        .unwrap_or(&[]);
+    if !efforts.contains(&level) {
+        let declared = if efforts.is_empty() {
+            "none".to_owned()
+        } else {
+            efforts
+                .iter()
+                .map(|e| e.as_str())
+                .collect::<Vec<_>>()
+                .join(", ")
+        };
+        v.add(
+            format!("{me} spec.model.reasoningEffort"),
+            format!(
+                "{}: ModelEndpoint {} declares no such level for the model {} (it declares {}); a model with no level takes none",
+                level.as_str(),
+                name,
+                model.model,
+                declared
+            ),
         );
     }
 }
