@@ -149,7 +149,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
-      - uses: azure/setup-helm@v4
+      - uses: azure/setup-helm@v5
         with:
           version: ${{ env.HELM_VERSION }}
       - name: helm lint
@@ -369,7 +369,7 @@ jobs:
     steps:
       - uses: actions/checkout@v7
       - uses: docker/setup-buildx-action@v4
-      - uses: azure/setup-helm@v4
+      - uses: azure/setup-helm@v5
         with:
           version: ${{ env.HELM_VERSION }}
       # Built here, once, and loaded into the local daemon: the smoke test below and the push after it run what was tested.
@@ -495,7 +495,7 @@ jobs:
           df -h /
           sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /opt/hostedtoolcache/CodeQL /usr/local/share/boost
           df -h /
-      - uses: azure/setup-helm@v4
+      - uses: azure/setup-helm@v5
         with:
           version: ${{ env.HELM_VERSION }}
       - name: Create a kind cluster
@@ -532,7 +532,7 @@ jobs:
       RUST_TOOLCHAIN: "1.94.1"
     steps:
       - uses: actions/checkout@v7
-      - uses: azure/setup-helm@v4
+      - uses: azure/setup-helm@v5
         with:
           version: ${{ env.HELM_VERSION }}
       - name: Create a kind cluster
@@ -597,7 +597,7 @@ jobs:
       RUST_TOOLCHAIN: "1.94.1"
     steps:
       - uses: actions/checkout@v7
-      - uses: azure/setup-helm@v4
+      - uses: azure/setup-helm@v5
         with:
           version: ${{ env.HELM_VERSION }}
       - name: Create a kind cluster
@@ -661,7 +661,7 @@ jobs:
           df -h /
           sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /opt/hostedtoolcache/CodeQL /usr/local/share/boost
           df -h /
-      - uses: azure/setup-helm@v4
+      - uses: azure/setup-helm@v5
         with:
           version: ${{ env.HELM_VERSION }}
       - name: Create a kind cluster
@@ -703,7 +703,7 @@ jobs:
           df -h /
           sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /opt/hostedtoolcache/CodeQL /usr/local/share/boost
           df -h /
-      - uses: azure/setup-helm@v4
+      - uses: azure/setup-helm@v5
         with:
           version: ${{ env.HELM_VERSION }}
       - name: Create a kind cluster
@@ -742,7 +742,7 @@ jobs:
     timeout-minutes: 45
     steps:
       - uses: actions/checkout@v7
-      - uses: azure/setup-helm@v4
+      - uses: azure/setup-helm@v5
         with:
           version: ${{ env.HELM_VERSION }}
       - name: Create a kind cluster
@@ -779,7 +779,7 @@ jobs:
     timeout-minutes: 45
     steps:
       - uses: actions/checkout@v7
-      - uses: azure/setup-helm@v4
+      - uses: azure/setup-helm@v5
         with:
           version: ${{ env.HELM_VERSION }}
       - name: Create a kind cluster
