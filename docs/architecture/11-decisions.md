@@ -488,6 +488,10 @@ through the API, because a `kubectl delete` still sends SIGTERM and the operator
 that releases nothing, and the script already refuses a context that is not kind's; (10) the bounds are **8 s** inside the lease, **10 s** as
 the floor of a takeover, **45 s** as its ceiling and **60 s** for the parked agent, each with the measured value well inside it (8, 15, 15, 21).
 
+
+#### AD-058 — An agent sleeps when the agent says it is idle, and an activator wakes it
+
+*(2026-11-24, ANR-255; documentation only: the plan and its slice table are in [§21a](05-runtime.md#21a-sleep-when-idle-the-plan), none is built. Awaiting the owner's confirmation.)* It builds on AD-010 (compute follows leases, not connections) and AD-023 (v0 has only `spec.suspend`) and does not change either. Decisions: **(1)** no `AgentLease` is written for sleep; the agent reports `busy` and `nextDueAt` from its own run store and the operator decides, which answers the §93 question about the source of run leases; **(2)** a failed poll counts as busy, so a fault never puts a working agent to sleep; **(3)** an **activator** (a small front that stays up) holds a request while the operator wakes the workload, answers the agent card without waking it, and answers `503` with `Retry-After` at `wakeTimeout`; **(4)** a schedule wakes the agent `wakeAhead` before it is due; **(5)** `Sleeping` is a phase of its own, and `spec.suspend` always wins and is never woken; **(6)** sleep is off unless `scaling.idleTimeout` is set, so no existing agent changes. Rows A1 to A3 are adam's, P1 to P4 are this repository's.
 ---
 
 ## 92. Proposed Decisions
@@ -779,7 +783,7 @@ The following should be explicitly decided during architecture review.
 - Do runtimes always map one-to-one with revisions?
 - Can multiple runs reuse one live runtime? *Run pods (§59b): yes, within one owner, one lease per pod by default (AD-036, AD-037). Agent runtimes: still open.*
 - Revisions against adam's run ledger: adam keys a run by the agent's name, so two revisions running side by side would share or fork one ledger. Does a revision get its own agent name and ledger, a partition of one, or a drain before the switch? (§9, §59a)
-- What is the source of run leases for scale-to-zero? adam's store has run leases (`lease_until`), but the coder's workers keep stepping a run after the A2A call has returned, so the HTTP connection says nothing about idleness. Does the operator read adam's store, does adam export a signal, or does the agent call the lease service? (§20, §21, §59a)
+- ~~What is the source of run leases for scale-to-zero? adam's store has run leases (`lease_until`), but the coder's workers keep stepping a run after the A2A call has returned, so the HTTP connection says nothing about idleness. Does the operator read adam's store, does adam export a signal, or does the agent call the lease service? (§20, §21, §59a)~~ Proposed answer 2026-11-24 (AD-058, §21a): the agent reports `busy` from its own store and the operator reads it; awaiting the owner.
 
 ### CRDs
 

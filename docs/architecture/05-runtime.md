@@ -187,6 +187,97 @@ The stable service continues to exist while runtime compute is absent.
 
 ---
 
+## 21a. Sleep when idle: the plan
+
+*(2026-11-24, ANR-255; documentation only, nothing here is built. The decision is [AD-058](11-decisions.md#ad-058--an-agent-sleeps-when-the-agent-says-it-is-idle-and-an-activator-wakes-it).)*
+
+### What is built, and what is not (read at plat `main`, 2026-11-24)
+
+| Claim | State | Where |
+|---|---|---|
+| §21 and AD-010 say scale-to-zero is lease-controlled | Text only. AD-010 is one line, "Compute lifecycle is controlled by `AgentLease`, not HTTP connection lifetime", with no status line and no amendment of its own | `11-decisions.md` (AD-010) |
+| AD-023 defers leases and scale-to-zero | Decided: the v0 operator has `spec.suspend` and nothing else | `11-decisions.md` (AD-023), `05-runtime.md` §21 blockquote |
+| `spec.suspend` takes the workload to zero | Built: `replicas` is 0 when set, the phase is `Suspended` | `crates/api/src/service.rs` (`suspend`), `crates/runtime-kubernetes/src/render.rs` (`replicas` on `spec.suspend`), `crates/runtime-kubernetes/src/provider.rs` (`suspend`, `Capabilities { suspend: true }`) |
+| `idleTimeout`, `minReplicas`, `maxReplicas` | Not built: the CRD has no such field; the v0 table lists them as waiting | `10-control-plane-and-crds.md` §59a (the deferred-fields table), `02-domain-model.md` |
+| An idle timeout exists for **run pods** | Built, and unrelated: a free run pod is released after 300 s (the run pool, not the agent's workload) | `10-control-plane-and-crds.md` (run pool `idleTTLSeconds`), commit `cb6b5bc` |
+| An activator, or any front that holds a request while the agent starts | Not built, and not planned in any other row of §59c | `10-control-plane-and-crds.md` §59c |
+| `AgentLease` | A record in the lease service (AD-016), not built; `RunLease` (a CRD, AD-036) is the run pool's slot, not an agent lease | `05-runtime.md` §20 |
+
+So scale to zero is neither built nor planned with slices anywhere else. The open question in §93 (who is the source of run leases) is answered by AD-058.
+
+### The plan
+
+The seam is that **the agent says whether it is busy**, because the coder's workers step a run after the A2A call has returned, so a connection says nothing (AD-010). adam already holds the truth: a run is held while its status is `Runnable` and `lease_until` is in the future (`crates/adam-core/src/store/mod.rs`, `claimed`), and a schedule is a parked run with a next due time (adam ADR 0060).
+
+```mermaid
+sequenceDiagram
+    participant C as Caller
+    participant A as Activator (stays up)
+    participant O as Operator
+    participant W as Agent workload
+    participant S as Run store (durable)
+    loop every pollSeconds
+        O->>W: GET activity
+        W-->>O: busy, nextDueAt
+    end
+    O->>O: busy = 0 for idleTimeout, nothing due within wakeAhead
+    O->>W: drain (SIGTERM), replicas 0
+    W->>S: leases released, runs stay Runnable or Parked
+    O->>A: Service now selects the activator
+    C->>A: A2A request
+    A->>O: wake (AgentService annotation)
+    O->>W: replicas 1
+    W->>S: claims its runs, resumes
+    A->>W: forwards once Ready (or answers 503 and Retry-After at wakeTimeout)
+    W-->>C: answer, through the activator
+```
+
+```mermaid
+stateDiagram-v2
+    [*] --> Running
+    Running --> Draining: idle for idleTimeout
+    Draining --> Sleeping: workload at zero
+    Sleeping --> Waking: request, due schedule or push
+    Waking --> Running: Ready
+    Waking --> Sleeping: wakeTimeout, caller told to retry
+    Running --> Suspended: spec.suspend
+    Sleeping --> Suspended: spec.suspend
+    Suspended --> Running: suspend cleared
+```
+
+| Question | Answer (AD-058) |
+|---|---|
+| What holds the lease, and who renews it? | **Nobody renews an agent lease.** The run store's own run leases are the truth and the workers already renew them. The workload reports `busy` (runs claimed or stepping) and `nextDueAt` (the earliest schedule firing); the operator polls it and decides. `AgentLease` (§20) is not built for this |
+| What is idle? | `busy = 0` for `idleTimeout` (default 15 m, the §2 example), with no firing due within `wakeAhead`. A poll that fails counts as busy |
+| What wakes a sleeping agent? | (1) The next A2A request at the **activator**, a small front that stays up; (2) a schedule: the operator wakes the workload `wakeAhead` before `nextDueAt`; (3) a push or webhook, which arrives at the same activator route as a request. The activator only asks; the operator scales |
+| How does state come back on any machine? | The run store is durable and outside the pod (adam's Postgres or MongoDB store). A woken workload claims its runs again; nothing is copied |
+| What must adam do? | Serve the activity answer; on SIGTERM stop claiming, let a step finish or release its lease so the run is `Runnable` for the next claimer, and exit within the grace period; resume fast enough for `wakeTimeout` (rows A1 to A3) |
+| What does a caller see while it wakes? | The activator holds the request up to `wakeTimeout` (default 60 s, below a typical client's timeout) and then forwards it. At the timeout it answers `503` with `Retry-After`. The agent card is answered by the activator while asleep (from the registry the operator already serves), so discovery needs no wake. A caller never gets an answer from a half-started agent |
+| What does a sleeping agent show? | `runtime.phase: Sleeping`, distinct from `Suspended` (a person's choice, never woken) |
+
+### Slice table
+
+One row per pull request, one repository per row. "plat" is another-agentic-platform, "adam" is another-adam-rs. A slice that needs a cluster says so; its test is the decisive one.
+
+| Row | Repo | What | Decisive test | Depends on |
+|---|---|---|---|---|
+| A1 | adam | `GET /internal/activity` on the health listener: `{busy, nextDueAt}` read from the store (claimed runs, parked schedules), no secret, no run content, bearer-protected like the rest | A run claimed by a worker makes `busy` 1; a parked schedule due in an hour gives `nextDueAt`; with neither, `busy` 0 and no `nextDueAt` (store conformance case, both stores) | none |
+| A2 | adam | Clean park and drain on SIGTERM: stop claiming, finish or release the step's lease, so every run is `Runnable` for the next claimer; exit within the grace period | Start a run on a scripted slow model, send SIGTERM, assert the process exits within the grace period and a second process claims the same run and finishes it with no step done twice (journal compared) | none |
+| A3 | adam | Resume budget: from process start to `Ready` and the first claim, measured, with a ceiling that fails the test | The coder image started on an empty cache reaches `/readyz` and claims a waiting run under the ceiling (a number set in the PR from a measurement, not a guess) | A2 |
+| P1 | plat | CRD: `scaling.idleTimeout`, `scaling.wakeAhead`, `scaling.wakeTimeout` (CEL bounds, off by default: absent means never sleeps), the phase `Sleeping`, regenerated CRDs and API schema | A fleet with none of the fields renders byte for byte what it did (the goldens do not move); each new bound has an `examples/invalid/` file | none |
+| P2 | plat | Idle controller: polls the activity answer, counts idle time, drains and scales to zero, sets `Sleeping`; a failed poll is busy; `spec.suspend` wins | Fake API server and a scripted activity source: busy then idle for `idleTimeout` scales to zero; a poll error never scales down; a `nextDueAt` inside `wakeAhead` never scales down | P1, A1 |
+| P3 | plat | Activator: the stable front. While asleep the Service selects it; it answers the card, holds a request, asks the operator to wake, forwards when `Ready`, answers `503` and `Retry-After` at `wakeTimeout`. Wakes on schedule through the operator | Router test over `Memory` ports: a request while asleep is forwarded once after the wake, a second concurrent request shares the one wake, a wake that never completes is `503` with `Retry-After`; the card is answered with no wake | P2 |
+| P4 | plat | Kind end-to-end with the real coder: sleeps after `idleTimeout`, wakes on a request, continues a run parked by a schedule, state intact, no secret in any log (*needs a cluster and CI*) | The run's task id from before the sleep is answered after the wake by `GetTask`, and the journal holds each step once | P3, A2, A3 |
+
+### The seam the sys ADR for live connections needs
+
+ANR-9's third gap (a live connection kept while the agent is at zero) is a system ADR that depends on this plan. It needs two things from P3 and nothing else:
+
+1. **`Wake(agent) -> Ready | Timeout`**, the one call the activator makes to the operator, which a client-facing front in the system can make as well.
+2. **A task id that survives the sleep**: the stream is re-opened with `SubscribeToTask` (or `GetTask`) on the woken agent, which works because the run store is durable. The activator never holds a stream open across a sleep; it ends it and the client resumes by task id.
+
+---
+
 ## 22. RuntimeProvider
 
 The platform should define a narrow runtime abstraction.
