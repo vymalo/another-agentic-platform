@@ -122,7 +122,7 @@ runPods:
     limitsMemory: 8Gi
     pods: 4
   # A pod that no command used for this long is deleted (the files are on the volume). 0 keeps it until its run ends.
-  idleSecs: 900
+  idleSecs: 300
   # How long a pod may take to be ready (scheduling, the first pull of the image on a node).
   readyTimeoutSecs: 600
   # How long a run waits for a slot when the quota (or the nodes) cannot give one now.
