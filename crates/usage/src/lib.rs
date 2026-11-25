@@ -2,7 +2,7 @@
 //!
 //! The meter reports one [`PodMinuteEvent`] per pod and minute. [`UsageStore::insert`] takes it idempotently on
 //! `(source, id)` and says whether it was new. [`UsageStore::spend`] answers, per account and node type, the
-//! weighted pod-minutes **ingested** in a half-open window `[from, to)`. The store records no amount of money and
+//! weighted pod-minutes **ingested** in a half-open window `[from, to)`. The store records no amount and
 //! knows no rate: pricing is the reader's.
 //!
 //! With the feature `testkit` this crate also has [`testkit`], the conformance suite every adapter must pass, and
