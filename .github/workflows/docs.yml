@@ -27,3 +27,13 @@ jobs:
         run: npm --prefix tools/docs-check ci --no-fund --no-audit
       - name: Check diagrams and links
         run: node tools/docs-check/check-docs.mjs
+      - name: The api-docs profile mounts every OpenAPI document
+        # Swagger UI lists each document and mounts it (compose.yaml, profile `api-docs`): a document under docs/ that says `openapi`
+        # and is not mounted there fails here, so the dropdown stays "every document".
+        run: |
+          docker compose --profile api-docs config -q
+          docker compose --profile api-docs config --services | grep -Fx swagger-ui
+          for f in $(grep -rlE '^openapi:|"openapi" *: *"3' docs --include='*.yaml' --include='*.yml' --include='*.json' | grep -v '/examples/'); do
+            echo "openapi document: $f"
+            grep -q "$f:/usr/share/nginx/html/openapi/" compose.yaml || { echo "$f is not mounted by the api-docs profile in compose.yaml" >&2; exit 1; }
+          done

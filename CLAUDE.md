@@ -137,6 +137,7 @@ sh deploy/operator/tests/bump-tag-test.sh # the tag bump edits image.tag only
 sh deploy/operator/tests/e2e/coder-e2e.sh # in a kind cluster that has the operator image loaded (README in that directory): the real coder, 2.9 GB
 npm --prefix tools/docs-check ci          # once per clone
 node tools/docs-check/check-docs.mjs      # every diagram parses, every relative link resolves
+docker compose --profile api-docs up -d swagger-ui   # Swagger UI over docs/api/*.openapi.json on http://127.0.0.1:8104 (CONTRIBUTING.md)
 git config core.hooksPath .githooks       # once per clone: local Conventional Commits hook
 ```
 

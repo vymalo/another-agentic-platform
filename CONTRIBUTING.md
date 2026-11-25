@@ -43,6 +43,21 @@ AAP_TEST_KUBECONFIG=$HOME/.kube/config cargo test -p aap-runtime-kubernetes --te
 AAP_TEST_KUBECONFIG=$HOME/.kube/config cargo test -p aap-operator --test cluster   # build the stand-in image first
 ```
 
+## Read the OpenAPI documents
+
+The Platform API's contract, [`docs/api/platform-api-v1.openapi.json`](docs/api/platform-api-v1.openapi.json), opens in Swagger UI with one
+command (Docker or podman Compose; nothing is built, and the image is pulled once):
+
+```sh
+docker compose --profile api-docs up -d swagger-ui     # http://127.0.0.1:8104, a dropdown over every document
+docker compose --profile api-docs down                 # stop it
+```
+
+It reads the file from the checkout, mounted read-only, so a refresh shows what is on disk. There is no editor: the document is generated
+(`docs/api/README.md`), and your IDE reads it. The port is `SWAGGER_UI_PORT`, bound to `127.0.0.1`. A new OpenAPI document under `docs/` is one
+mount and one `URLS` entry on `swagger-ui` in [`compose.yaml`](compose.yaml); the Docs workflow fails when one is not mounted. The image is pinned
+by tag and digest (`x-swagger-ui-image`): move it by reading the new tag and digest from Docker Hub.
+
 `CLAUDE.md` ("Commands") lists the rest, and `deploy/operator/tests/e2e/README.md` the kind end-to-end scripts. CI is the
 reference: [`operator.yml`](.github/workflows/operator.yml) and [`operator-image.yml`](.github/workflows/operator-image.yml).
 
