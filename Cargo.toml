@@ -22,6 +22,7 @@ members = [
     "crates/usage-postgres",
     "bin/operator",
     "bin/api",
+    "bin/usage-ingest",
     "bin/cli",
 ]
 
