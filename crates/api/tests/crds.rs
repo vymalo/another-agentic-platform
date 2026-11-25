@@ -131,6 +131,23 @@ const SPEC_RULES: &[(&str, &str)] = &[
         "!has(self.front) || self.topology == 'split'",
         "scaling.front is only allowed with topology: split",
     ),
+    // AD-058, sleep when idle: the three durations and their dependence on idleTimeout
+    (
+        "self.matches('^[1-9][0-9]*[smh]$') && duration(self) >= duration('1m') && duration(self) <= duration('24h')",
+        "scaling.idleTimeout is a duration from 1m to 24h, such as 15m",
+    ),
+    (
+        "self.matches('^[1-9][0-9]*[smh]$') && duration(self) >= duration('10s') && duration(self) <= duration('1h')",
+        "scaling.wakeAhead is a duration from 10s to 1h, such as 2m",
+    ),
+    (
+        "self.matches('^[1-9][0-9]*[smh]$') && duration(self) >= duration('5s') && duration(self) <= duration('5m')",
+        "scaling.wakeTimeout is a duration from 5s to 5m, such as 60s",
+    ),
+    (
+        "has(self.idleTimeout) || (!has(self.wakeAhead) && !has(self.wakeTimeout))",
+        "scaling.wakeAhead and scaling.wakeTimeout need scaling.idleTimeout",
+    ),
     // beyond the list, same shape: a model endpoint is a value or a Secret key (an AgentConfig's
     // model.baseUrl and a ModelEndpoint's baseUrl)
     (

@@ -1,5 +1,5 @@
 # Refused: scaling.wakeTimeout is over 5m.
-# expect: scaling.wakeTimeout is a duration from 5s to 5m
+# expect: scaling.wakeTimeout is a duration from 5s to 5m, such as 60s
 apiVersion: agents.vymalo.com/v1alpha1
 kind: AgentService
 metadata:

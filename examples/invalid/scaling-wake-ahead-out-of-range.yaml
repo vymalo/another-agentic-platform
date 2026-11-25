@@ -1,5 +1,5 @@
 # Refused: scaling.wakeAhead is over 1h.
-# expect: scaling.wakeAhead is a duration from 10s to 1h
+# expect: scaling.wakeAhead is a duration from 10s to 1h, such as 2m
 apiVersion: agents.vymalo.com/v1alpha1
 kind: AgentService
 metadata:
