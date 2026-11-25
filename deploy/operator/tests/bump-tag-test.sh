@@ -177,4 +177,15 @@ if [ "$changed" -le 2 ]; then ok "the real file: at most one line changed"; else
 run "$work/real-api.yaml" sha-1234567 api
 case "$out" in unchanged*) ok "and bumping it again is a no-op" ;; *) bad "real values.yaml api, second run: '$out'" ;; esac
 
+# 10. The usage ingest's tag: only usageIngest.image.tag moves, and the other two stay.
+cp "$here/../values.yaml" "$work/real-ui.yaml"
+run "$work/real-ui.yaml" sha-7654321 usage-ingest
+if [ "$rc" -eq 0 ] && awk '/^usageIngest:/ { f = 1; next } /^[^ #]/ { f = 0 } f && /^    tag: sha-7654321/ { found = 1 } END { exit !found }' "$work/real-ui.yaml"; then ok "the chart's values.yaml usageIngest tag can be bumped"; else bad "real values.yaml usage-ingest: rc=$rc out='$out'"; fi
+changed=$(diff "$here/../values.yaml" "$work/real-ui.yaml" | grep -c '^[<>]' || true)
+if [ "$changed" -le 2 ]; then ok "the usage ingest bump changed at most one line"; else bad "the usage ingest bump changed $changed diff lines"; fi
+run "$work/real-ui.yaml" sha-7654321 usage-ingest
+case "$out" in unchanged*) ok "and bumping it again is a no-op" ;; *) bad "usage-ingest, second run: '$out'" ;; esac
+run "$work/op-only.yaml" sha-abc1234 usage-ingest
+if [ "$rc" -eq 1 ]; then ok "usage-ingest: a file without usageIngest.image.tag is an error"; else bad "usage-ingest: op-only: rc=$rc, want 1"; fi
+
 if [ "$fail" -eq 0 ]; then echo "bump-tag tests passed"; else echo "bump-tag tests FAILED"; exit 1; fi

@@ -600,6 +600,18 @@ and run its conformance suite under: `render-check.sh` reads that file and compa
 **No right on Secrets** (a `list` on Secrets would return their values), no `watch`, no workload, pod or ConfigMap, no `ClusterRole`. `/readyz`'s one call
 (a `list` of one `ModelEndpoint`) is inside it. The operator's `Role` gains nothing, and has no right on ExternalSecrets or on Events. The goldens that render the API's `Role` (`api.yaml`, `runpods.yaml`) moved by the rule `events: list` (K8) and the others did not.
 
+## The usage ingest (ANR-731)
+
+`usageIngest` runs `bin/usage-ingest` (AD-060, contract `docs/api/usage-ingest-v1.md`). **Off by default, and then not a trace of it in any render** (the existing goldens are unmoved). On, it renders a ServiceAccount, a Service, a Deployment (CPU and memory limits, non-root, read-only root, probes on a health port) and a NetworkPolicy.
+
+- Callers are the meter and the ledger, told apart by `usageIngest.meterSubject` and `ledgerSubject` (`system:serviceaccount:<ns>:<name>`, different) and the token `usageIngest.audience`. The policy's ingress is `networkPolicy.from` only, required.
+- The database is a CloudNativePG `Cluster` the deployment makes. The chart mounts the key `database.secretKey` (`uri`) of its app Secret `database.secretName` as a file; no Secret is rendered and no password is in a variable. Egress is the API server, DNS and `networkPolicy.database.to` (required).
+- **TokenReview needs a cluster-scoped `create`**, which a `Role` cannot grant. `usageIngest.tokenReview.clusterRole.create` (false by default) renders the chart's only ClusterRole and binding for the ingest's account; otherwise the deployment binds `system:auth-delegator` itself. This is the one place the chart departs from "never a ClusterRole", and it is opt-in: owner decision.
+- The card named mTLS; the binary built in ANR-730 checks service-account tokens by TokenReview on both routes and leaves TLS to the mesh or ingress, so the chart carries no certificate material.
+- The image is built and smoke-tested by `operator-image.yml` (`usage-ingest-image`, also run against the environment `tests/usage-ingest-env.sh` takes from the render), pushed with the other two and pinned by `bump-tag.sh <file> <tag> usage-ingest`. `usageIngest.image.tag` is `sha-0000000` until the first bump.
+
+Proven by `render-check.sh` (each object, the off render, nine refusals, one broken on purpose) and kubeconform on the render with and without the ClusterRole. Not proven: the image build (no Docker daemon here), the pod in a cluster, the NetworkPolicy under an enforcing plugin.
+
 ## Leader election (K7)
 
 With `replicas: 1` (the default) the chart renders what it always did: one replica, `Recreate`, no leader election. With more than
