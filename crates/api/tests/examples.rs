@@ -460,6 +460,7 @@ const BOUND_EXAMPLES: &[(&str, &str, &str, &str)] = &[
         "maxItems",
         "audience-too-many",
     ),
+    ("AgentService", "spec.owner", "maxLength", "owner-too-long"),
     (
         "AgentService",
         "spec.access.audience[]",

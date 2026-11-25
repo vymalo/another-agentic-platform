@@ -150,6 +150,7 @@ pub fn coder_form(name: &str) -> AgentForm {
         title: "Coder (me)".to_owned(),
         description: Some("Coding task to verified pull request.".to_owned()),
         tags: vec!["coding".to_owned(), "git".to_owned()],
+        owner: None,
         suspend: false,
         model: Some(ModelChoice {
             endpoint: "gateway".to_owned(),
@@ -185,6 +186,7 @@ pub fn folder_form(name: &str) -> AgentForm {
         title: "Chat".to_owned(),
         description: None,
         tags: vec!["chat".to_owned()],
+        owner: None,
         suspend: false,
         model: Some(ModelChoice {
             endpoint: "gateway".to_owned(),
@@ -218,6 +220,7 @@ pub fn a2a_form(name: &str) -> AgentForm {
         title: "A2A".to_owned(),
         description: Some("An image that serves A2A itself.".to_owned()),
         tags: vec!["a2a".to_owned()],
+        owner: None,
         suspend: false,
         model: None,
         tool_servers: BTreeSet::new(),
@@ -669,6 +672,7 @@ pub fn arb_agent_form() -> impl Strategy<Value = AgentForm> {
                     title,
                     description,
                     tags: tags.into_iter().collect(),
+                    owner: None,
                     suspend,
                     model: (!a2a).then_some(ModelChoice {
                         endpoint,

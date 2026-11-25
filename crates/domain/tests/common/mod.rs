@@ -263,6 +263,9 @@ pub fn run_pod_settings_of(case: &str) -> (RunPodSettings, String) {
     let rp = &case_values["runPods"];
     let mut settings = chart_run_pod_settings();
     let mut over = serde_json::Map::new();
+    // The operator chart releases an idle run pod after 300 s (its own choice, #82); the adam-rs chart the goldens come
+    // from says 900. Parity compares what the same inputs make, so a case that names no idle time runs with the chart's.
+    over.insert("idleSecs".to_owned(), serde_json::json!(900));
     for key in [
         "image",
         "container",

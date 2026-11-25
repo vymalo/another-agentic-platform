@@ -54,6 +54,18 @@
           "minLength": 1,
           "type": "string"
         }
+      },
+      "owner": {
+        "description": "The owner of the agents (`spec.owner`): 1 to 63 characters of lower-case letters, digits, `-` and `_`. Another text is a 400 `invalid-request`.",
+        "in": "path",
+        "name": "owner",
+        "required": true,
+        "schema": {
+          "maxLength": 63,
+          "minLength": 1,
+          "pattern": "^[a-z0-9][a-z0-9_-]*$",
+          "type": "string"
+        }
       }
     },
     "responses": {
@@ -853,6 +865,13 @@
             "description": "The name of both objects; fixed after the create.",
             "pattern": "^[a-z][a-z0-9-]{0,38}[a-z0-9]$",
             "type": "string"
+          },
+          "owner": {
+            "description": "Who the agent belongs to (`spec.owner`): 1 to 63 characters of lower-case letters, digits, `-` and `_`. null: nobody's, and no route under `/v1/owners/{owner}/agents` can touch it. On those routes it is the owner in the path or absent (any other value is 422 on `owner`); on `/v1/agents/{name}` it is set or cleared like any field.",
+            "type": [
+              "string",
+              "null"
+            ]
           },
           "suspend": {
             "type": "boolean"
@@ -3882,6 +3901,668 @@
           "platform"
         ],
         "x-permission": "platform:agents.read"
+      }
+    },
+    "/v1/owners/{owner}/agents": {
+      "get": {
+        "description": "Only the agents whose `spec.owner` is the owner in the path, ordered by name; other agents, and agents with no owner, are not in the answer. Needs `platform:agents.own`, which the orchestrator holds and a person's role must not.",
+        "operationId": "listOwnerAgents",
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/owner"
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "example": {
+                  "agents": [
+                    {
+                      "audience": [
+                        "*"
+                      ],
+                      "conditions": [
+                        {
+                          "lastTransitionTime": "2026-11-14T10:00:00Z",
+                          "message": "the runtime is ready",
+                          "reason": "RuntimeReady",
+                          "status": "True",
+                          "type": "Ready"
+                        }
+                      ],
+                      "configDigest": "sha256:1b2c3d4e5f60718293a4b5c6d7e8f9011b2c3d4e5f60718293a4b5c6d7e8f901",
+                      "deleting": false,
+                      "description": null,
+                      "kind": "folder",
+                      "managedBy": "dashboard",
+                      "name": "chat",
+                      "state": "ready",
+                      "suspend": false,
+                      "tags": [
+                        "chat"
+                      ],
+                      "title": "Chat"
+                    }
+                  ]
+                },
+                "schema": {
+                  "$ref": "#/components/schemas/AgentList"
+                }
+              }
+            },
+            "description": "The owner's agents."
+          },
+          "400": {
+            "$ref": "#/components/responses/Problem400"
+          },
+          "401": {
+            "$ref": "#/components/responses/Problem401"
+          },
+          "403": {
+            "$ref": "#/components/responses/Problem403"
+          },
+          "500": {
+            "$ref": "#/components/responses/Problem500"
+          },
+          "503": {
+            "$ref": "#/components/responses/Problem503"
+          }
+        },
+        "security": [
+          {
+            "bearer": []
+          }
+        ],
+        "summary": "The agents of one owner",
+        "tags": [
+          "agents"
+        ],
+        "x-permission": "platform:agents.own"
+      }
+    },
+    "/v1/owners/{owner}/agents/{name}": {
+      "delete": {
+        "description": "As `DELETE /v1/agents/{name}`, for an agent whose `spec.owner` is the owner in the path; any other agent is 404 `not-found`. `If-Match` is required, and the agent that was read is the one that is deleted.",
+        "operationId": "deleteOwnerAgent",
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/owner"
+          },
+          {
+            "$ref": "#/components/parameters/name"
+          },
+          {
+            "$ref": "#/components/parameters/IfMatchRequired"
+          }
+        ],
+        "responses": {
+          "202": {
+            "content": {
+              "application/json": {
+                "example": {
+                  "audience": [
+                    "*"
+                  ],
+                  "conditions": [
+                    {
+                      "lastTransitionTime": "2026-11-14T10:00:00Z",
+                      "message": "the runtime is ready",
+                      "reason": "RuntimeReady",
+                      "status": "True",
+                      "type": "Ready"
+                    }
+                  ],
+                  "configDigest": "sha256:1b2c3d4e5f60718293a4b5c6d7e8f9011b2c3d4e5f60718293a4b5c6d7e8f901",
+                  "deleting": true,
+                  "description": null,
+                  "kind": "folder",
+                  "managedBy": "dashboard",
+                  "name": "chat",
+                  "state": "deleting",
+                  "suspend": false,
+                  "tags": [
+                    "chat"
+                  ],
+                  "title": "Chat"
+                },
+                "schema": {
+                  "$ref": "#/components/schemas/AgentSummary"
+                }
+              }
+            },
+            "description": "Being deleted: the row, with `deleting: true`.",
+            "headers": {
+              "ETag": {
+                "$ref": "#/components/headers/ETag"
+              }
+            }
+          },
+          "204": {
+            "description": "Gone."
+          },
+          "400": {
+            "$ref": "#/components/responses/Problem400"
+          },
+          "401": {
+            "$ref": "#/components/responses/Problem401"
+          },
+          "403": {
+            "$ref": "#/components/responses/Problem403"
+          },
+          "404": {
+            "$ref": "#/components/responses/Problem404"
+          },
+          "409": {
+            "$ref": "#/components/responses/Problem409"
+          },
+          "412": {
+            "$ref": "#/components/responses/Problem412"
+          },
+          "428": {
+            "$ref": "#/components/responses/Problem428"
+          },
+          "500": {
+            "$ref": "#/components/responses/Problem500"
+          },
+          "503": {
+            "$ref": "#/components/responses/Problem503"
+          }
+        },
+        "security": [
+          {
+            "bearer": []
+          }
+        ],
+        "summary": "Delete an agent of an owner",
+        "tags": [
+          "agents"
+        ],
+        "x-permission": "platform:agents.own"
+      },
+      "get": {
+        "description": "As `GET /v1/agents/{name}`, for an agent whose `spec.owner` is the owner in the path. Any other agent, one with no owner included, is 404 `not-found`: the answer does not tell them apart.",
+        "operationId": "getOwnerAgent",
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/owner"
+          },
+          {
+            "$ref": "#/components/parameters/name"
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "example": {
+                  "audience": [
+                    "*"
+                  ],
+                  "conditions": [
+                    {
+                      "lastTransitionTime": "2026-11-14T10:00:00Z",
+                      "message": "the runtime is ready",
+                      "reason": "RuntimeReady",
+                      "status": "True",
+                      "type": "Ready"
+                    }
+                  ],
+                  "configDigest": "sha256:1b2c3d4e5f60718293a4b5c6d7e8f9011b2c3d4e5f60718293a4b5c6d7e8f901",
+                  "configStatus": {
+                    "observedGeneration": 1
+                  },
+                  "deleting": false,
+                  "description": null,
+                  "kind": "folder",
+                  "managedBy": "dashboard",
+                  "name": "chat",
+                  "representation": {
+                    "form": {
+                      "deployment": {
+                        "a2aBearer": {
+                          "key": "AGENT_TOKEN",
+                          "name": "agent-a2a"
+                        },
+                        "allowFrom": [],
+                        "coder": {
+                          "allowedRepoHosts": [],
+                          "gitAuthor": null,
+                          "githubApiUrl": null
+                        },
+                        "githubMcp": null,
+                        "resources": null,
+                        "security": {
+                          "fsGroup": 10001,
+                          "runAsGroup": 10001,
+                          "runAsUser": 10001
+                        },
+                        "store": {
+                          "cnpg": {
+                            "instances": 1,
+                            "storage": {
+                              "size": "5Gi"
+                            }
+                          }
+                        },
+                        "volumes": []
+                      },
+                      "form": {
+                        "agent": {
+                          "files": {
+                            "instructions.md": "---\nname: chat\n---\nYour name is Chat.\n"
+                          },
+                          "kind": "folder"
+                        },
+                        "allowInsecureHttp": false,
+                        "audience": [
+                          "*"
+                        ],
+                        "description": null,
+                        "image": null,
+                        "model": {
+                          "endpoint": "gateway",
+                          "model": "chat-model"
+                        },
+                        "name": "chat",
+                        "suspend": false,
+                        "tags": [
+                          "chat"
+                        ],
+                        "title": "Chat",
+                        "toolServers": []
+                      }
+                    }
+                  },
+                  "state": "ready",
+                  "status": {
+                    "conditions": [
+                      {
+                        "lastTransitionTime": "2026-11-14T10:00:00Z",
+                        "message": "the runtime is ready",
+                        "reason": "RuntimeReady",
+                        "status": "True",
+                        "type": "Ready"
+                      }
+                    ],
+                    "observedGeneration": 1,
+                    "state": "Ready"
+                  },
+                  "suspend": false,
+                  "tags": [
+                    "chat"
+                  ],
+                  "title": "Chat"
+                },
+                "schema": {
+                  "$ref": "#/components/schemas/AgentDetail"
+                }
+              }
+            },
+            "description": "The agent.",
+            "headers": {
+              "ETag": {
+                "$ref": "#/components/headers/ETag"
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/Problem400"
+          },
+          "401": {
+            "$ref": "#/components/responses/Problem401"
+          },
+          "403": {
+            "$ref": "#/components/responses/Problem403"
+          },
+          "404": {
+            "$ref": "#/components/responses/Problem404"
+          },
+          "500": {
+            "$ref": "#/components/responses/Problem500"
+          },
+          "503": {
+            "$ref": "#/components/responses/Problem503"
+          }
+        },
+        "security": [
+          {
+            "bearer": []
+          }
+        ],
+        "summary": "One agent of an owner",
+        "tags": [
+          "agents"
+        ],
+        "x-permission": "platform:agents.own"
+      },
+      "put": {
+        "description": "As `PUT /v1/agents/{name}`, and the agent belongs to the owner in the path: `owner` in the form is that owner or absent (another value is 422 on `owner`). A replace, which is also how the agent is suspended (`suspend`) or resumed, of an agent that is not that owner's is 404 `not-found`. A body that names a secret key needs `platform:secrets.pick` as well.",
+        "operationId": "putOwnerAgent",
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/owner"
+          },
+          {
+            "$ref": "#/components/parameters/name"
+          },
+          {
+            "$ref": "#/components/parameters/IfMatch"
+          },
+          {
+            "$ref": "#/components/parameters/IfNoneMatch"
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "example": {
+                "agent": {
+                  "files": {
+                    "instructions.md": "---\nname: chat\n---\nYour name is Chat.\n"
+                  },
+                  "kind": "folder"
+                },
+                "audience": [
+                  "*"
+                ],
+                "model": {
+                  "endpoint": "gateway",
+                  "model": "chat-model"
+                },
+                "name": "chat",
+                "tags": [
+                  "chat"
+                ],
+                "title": "Chat"
+              },
+              "schema": {
+                "$ref": "#/components/schemas/AgentForm"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "example": {
+                  "audience": [
+                    "*"
+                  ],
+                  "conditions": [
+                    {
+                      "lastTransitionTime": "2026-11-14T10:00:00Z",
+                      "message": "the runtime is ready",
+                      "reason": "RuntimeReady",
+                      "status": "True",
+                      "type": "Ready"
+                    }
+                  ],
+                  "configDigest": "sha256:1b2c3d4e5f60718293a4b5c6d7e8f9011b2c3d4e5f60718293a4b5c6d7e8f901",
+                  "configStatus": {
+                    "observedGeneration": 1
+                  },
+                  "deleting": false,
+                  "description": null,
+                  "kind": "folder",
+                  "managedBy": "dashboard",
+                  "name": "chat",
+                  "representation": {
+                    "form": {
+                      "deployment": {
+                        "a2aBearer": {
+                          "key": "AGENT_TOKEN",
+                          "name": "agent-a2a"
+                        },
+                        "allowFrom": [],
+                        "coder": {
+                          "allowedRepoHosts": [],
+                          "gitAuthor": null,
+                          "githubApiUrl": null
+                        },
+                        "githubMcp": null,
+                        "resources": null,
+                        "security": {
+                          "fsGroup": 10001,
+                          "runAsGroup": 10001,
+                          "runAsUser": 10001
+                        },
+                        "store": {
+                          "cnpg": {
+                            "instances": 1,
+                            "storage": {
+                              "size": "5Gi"
+                            }
+                          }
+                        },
+                        "volumes": []
+                      },
+                      "form": {
+                        "agent": {
+                          "files": {
+                            "instructions.md": "---\nname: chat\n---\nYour name is Chat.\n"
+                          },
+                          "kind": "folder"
+                        },
+                        "allowInsecureHttp": false,
+                        "audience": [
+                          "*"
+                        ],
+                        "description": null,
+                        "image": null,
+                        "model": {
+                          "endpoint": "gateway",
+                          "model": "chat-model"
+                        },
+                        "name": "chat",
+                        "suspend": false,
+                        "tags": [
+                          "chat"
+                        ],
+                        "title": "Chat",
+                        "toolServers": []
+                      }
+                    }
+                  },
+                  "state": "ready",
+                  "status": {
+                    "conditions": [
+                      {
+                        "lastTransitionTime": "2026-11-14T10:00:00Z",
+                        "message": "the runtime is ready",
+                        "reason": "RuntimeReady",
+                        "status": "True",
+                        "type": "Ready"
+                      }
+                    ],
+                    "observedGeneration": 1,
+                    "state": "Ready"
+                  },
+                  "suspend": false,
+                  "tags": [
+                    "chat"
+                  ],
+                  "title": "Chat"
+                },
+                "schema": {
+                  "$ref": "#/components/schemas/AgentDetail"
+                }
+              }
+            },
+            "description": "Replaced.",
+            "headers": {
+              "ETag": {
+                "$ref": "#/components/headers/ETag"
+              }
+            }
+          },
+          "201": {
+            "content": {
+              "application/json": {
+                "example": {
+                  "audience": [
+                    "*"
+                  ],
+                  "conditions": [
+                    {
+                      "lastTransitionTime": "2026-11-14T10:00:00Z",
+                      "message": "the runtime is ready",
+                      "reason": "RuntimeReady",
+                      "status": "True",
+                      "type": "Ready"
+                    }
+                  ],
+                  "configDigest": "sha256:1b2c3d4e5f60718293a4b5c6d7e8f9011b2c3d4e5f60718293a4b5c6d7e8f901",
+                  "configStatus": {
+                    "observedGeneration": 1
+                  },
+                  "deleting": false,
+                  "description": null,
+                  "kind": "folder",
+                  "managedBy": "dashboard",
+                  "name": "chat",
+                  "representation": {
+                    "form": {
+                      "deployment": {
+                        "a2aBearer": {
+                          "key": "AGENT_TOKEN",
+                          "name": "agent-a2a"
+                        },
+                        "allowFrom": [],
+                        "coder": {
+                          "allowedRepoHosts": [],
+                          "gitAuthor": null,
+                          "githubApiUrl": null
+                        },
+                        "githubMcp": null,
+                        "resources": null,
+                        "security": {
+                          "fsGroup": 10001,
+                          "runAsGroup": 10001,
+                          "runAsUser": 10001
+                        },
+                        "store": {
+                          "cnpg": {
+                            "instances": 1,
+                            "storage": {
+                              "size": "5Gi"
+                            }
+                          }
+                        },
+                        "volumes": []
+                      },
+                      "form": {
+                        "agent": {
+                          "files": {
+                            "instructions.md": "---\nname: chat\n---\nYour name is Chat.\n"
+                          },
+                          "kind": "folder"
+                        },
+                        "allowInsecureHttp": false,
+                        "audience": [
+                          "*"
+                        ],
+                        "description": null,
+                        "image": null,
+                        "model": {
+                          "endpoint": "gateway",
+                          "model": "chat-model"
+                        },
+                        "name": "chat",
+                        "suspend": false,
+                        "tags": [
+                          "chat"
+                        ],
+                        "title": "Chat",
+                        "toolServers": []
+                      }
+                    }
+                  },
+                  "state": "ready",
+                  "status": {
+                    "conditions": [
+                      {
+                        "lastTransitionTime": "2026-11-14T10:00:00Z",
+                        "message": "the runtime is ready",
+                        "reason": "RuntimeReady",
+                        "status": "True",
+                        "type": "Ready"
+                      }
+                    ],
+                    "observedGeneration": 1,
+                    "state": "Ready"
+                  },
+                  "suspend": false,
+                  "tags": [
+                    "chat"
+                  ],
+                  "title": "Chat"
+                },
+                "schema": {
+                  "$ref": "#/components/schemas/AgentDetail"
+                }
+              }
+            },
+            "description": "Created.",
+            "headers": {
+              "ETag": {
+                "$ref": "#/components/headers/ETag"
+              },
+              "Location": {
+                "$ref": "#/components/headers/Location"
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/Problem400"
+          },
+          "401": {
+            "$ref": "#/components/responses/Problem401"
+          },
+          "403": {
+            "$ref": "#/components/responses/Problem403"
+          },
+          "404": {
+            "$ref": "#/components/responses/Problem404"
+          },
+          "409": {
+            "$ref": "#/components/responses/Problem409"
+          },
+          "412": {
+            "$ref": "#/components/responses/Problem412"
+          },
+          "413": {
+            "$ref": "#/components/responses/Problem413"
+          },
+          "415": {
+            "$ref": "#/components/responses/Problem415"
+          },
+          "422": {
+            "$ref": "#/components/responses/Problem422"
+          },
+          "428": {
+            "$ref": "#/components/responses/Problem428"
+          },
+          "500": {
+            "$ref": "#/components/responses/Problem500"
+          },
+          "503": {
+            "$ref": "#/components/responses/Problem503"
+          }
+        },
+        "security": [
+          {
+            "bearer": []
+          }
+        ],
+        "summary": "Create or replace an agent of an owner",
+        "tags": [
+          "agents"
+        ],
+        "x-permission": "platform:agents.own",
+        "x-secrets-pick": "platform:secrets.pick"
       }
     },
     "/v1/secret-keys": {

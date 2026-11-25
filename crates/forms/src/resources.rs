@@ -85,6 +85,7 @@ fn meta(name: &str, namespace: &str) -> ObjectMeta {
 pub fn to_resources(form: &AgentForm, deployment: &Deployment, namespace: &str) -> Resources {
     let service_spec = AgentServiceSpec {
         description: form.description.clone(),
+        owner: form.owner.clone(),
         config_ref: NameRef {
             name: form.name.clone(),
         },
@@ -400,6 +401,7 @@ fn extract(
         title: service.registry.title.clone().unwrap_or_default(),
         description: service.description.clone(),
         tags: service.registry.tags.clone(),
+        owner: service.owner.clone(),
         suspend: service.suspend,
         model: config.model.as_ref().map(|m| ModelChoice {
             endpoint: m

@@ -459,6 +459,8 @@ fn schemas() -> Value {
             "title": { "type": "string", "minLength": 1, "maxLength": 80 },
             "description": { "type": ["string", "null"], "maxLength": 500 },
             "tags": { "type": "array", "maxItems": 16, "items": { "type": "string" } },
+            "owner": { "type": ["string", "null"],
+                       "description": "Who the agent belongs to (`spec.owner`): 1 to 63 characters of lower-case letters, digits, `-` and `_`. null: nobody's, and no route under `/v1/owners/{owner}/agents` can touch it. On those routes it is the owner in the path or absent (any other value is 422 on `owner`); on `/v1/agents/{name}` it is set or cleared like any field." },
             "suspend": { "type": "boolean" },
             "model": { "oneOf": [schema("ModelChoice"), { "type": "null" }],
                        "description": "The model: an endpoint and an alias. Required of a coder and of a folder agent; null only for an A2A image, which gets none from the platform (AD-054)." },
@@ -468,7 +470,7 @@ fn schemas() -> Value {
             "audience": { "type": ["array", "null"], "maxItems": 32, "items": { "type": "string", "pattern": "^[!-~]{1,64}$" },
                           "description": "Who may use the agent: the values of a person's roles claim that admit them, by convention `agent.use:<name>`; `[\"*\"]` admits everyone and is only allowed alone. 1 to 64 visible ASCII characters each, at most 32. null and `[]` are the same: administrators only." },
             "agent": { "oneOf": [schema("CoderSettings"), schema("FolderSettings"), schema("A2aSettings")], "description": "What is particular to the kind, discriminated by `kind`." },
-        }), &["description", "tags", "suspend", "model", "toolServers", "allowInsecureHttp", "image", "audience"]),
+        }), &["description", "owner", "tags", "suspend", "model", "toolServers", "allowInsecureHttp", "image", "audience"]),
         "ModelEndpointForm": object(json!({
             "name": { "type": "string", "pattern": "^[a-z][a-z0-9-]{0,62}$", "description": "Fixed after the create." },
             "title": { "type": "string", "minLength": 1, "maxLength": 128 },
@@ -940,6 +942,80 @@ fn describe(id: RouteId) -> Op {
             ],
             errors: REMOVE,
         },
+        RouteId::ListOwnerAgents => Op {
+            id: "listOwnerAgents",
+            summary: "The agents of one owner",
+            description: "Only the agents whose `spec.owner` is the owner in the path, ordered by name; other agents, and agents with no owner, are not in the answer. Needs `platform:agents.own`, which the orchestrator holds and a person's role must not.",
+            name: false,
+            request: None,
+            ok: vec![ok(
+                200,
+                "The owner's agents.",
+                Content::Json("AgentList", json!({ "agents": [example_summary()] })),
+                &[],
+            )],
+            errors: READ,
+        },
+        RouteId::GetOwnerAgent => Op {
+            id: "getOwnerAgent",
+            summary: "One agent of an owner",
+            description: "As `GET /v1/agents/{name}`, for an agent whose `spec.owner` is the owner in the path. Any other agent, one with no owner included, is 404 `not-found`: the answer does not tell them apart.",
+            name: true,
+            request: None,
+            ok: vec![ok(
+                200,
+                "The agent.",
+                Content::Json("AgentDetail", example_agent_detail()),
+                &["ETag"],
+            )],
+            errors: READ_ONE,
+        },
+        RouteId::PutOwnerAgent => Op {
+            id: "putOwnerAgent",
+            summary: "Create or replace an agent of an owner",
+            description: "As `PUT /v1/agents/{name}`, and the agent belongs to the owner in the path: `owner` in the form is that owner or absent (another value is 422 on `owner`). A replace, which is also how the agent is suspended (`suspend`) or resumed, of an agent that is not that owner's is 404 `not-found`. A body that names a secret key needs `platform:secrets.pick` as well.",
+            name: true,
+            request: Some(("AgentForm", example_folder_form())),
+            ok: vec![
+                ok(
+                    201,
+                    "Created.",
+                    Content::Json("AgentDetail", example_agent_detail()),
+                    &["ETag", "Location"],
+                ),
+                ok(
+                    200,
+                    "Replaced.",
+                    Content::Json("AgentDetail", example_agent_detail()),
+                    &["ETag"],
+                ),
+            ],
+            errors: WRITE,
+        },
+        RouteId::DeleteOwnerAgent => Op {
+            id: "deleteOwnerAgent",
+            summary: "Delete an agent of an owner",
+            description: "As `DELETE /v1/agents/{name}`, for an agent whose `spec.owner` is the owner in the path; any other agent is 404 `not-found`. `If-Match` is required, and the agent that was read is the one that is deleted.",
+            name: true,
+            request: None,
+            ok: vec![
+                ok(204, "Gone.", Content::Empty, &[]),
+                ok(
+                    202,
+                    "Being deleted: the row, with `deleting: true`.",
+                    Content::Json("AgentSummary", {
+                        let mut s = example_summary();
+                        if let Some(o) = s.as_object_mut() {
+                            o.insert("state".into(), json!("deleting"));
+                            o.insert("deleting".into(), json!(true));
+                        }
+                        s
+                    }),
+                    &["ETag"],
+                ),
+            ],
+            errors: REMOVE,
+        },
         RouteId::AgentYaml => Op {
             id: "getAgentYaml",
             summary: "An agent as YAML",
@@ -1115,7 +1191,7 @@ fn describe(id: RouteId) -> Op {
 
 fn tag_of(path: &str) -> &'static str {
     match path.split('/').nth(2).unwrap_or_default() {
-        "agents" => "agents",
+        "agents" | "owners" => "agents",
         "models" => "models",
         "tool-servers" => "tool-servers",
         _ => "platform",
@@ -1161,6 +1237,9 @@ fn success_response(s: &Success) -> Value {
 fn operation(route: &Route) -> Value {
     let op = describe(route.id);
     let mut parameters = Vec::new();
+    if route.path.contains("{owner}") {
+        parameters.push(json!({ "$ref": "#/components/parameters/owner" }));
+    }
     if op.name {
         parameters.push(json!({ "$ref": "#/components/parameters/name" }));
     }
@@ -1215,6 +1294,8 @@ fn components() -> Value {
             "description": "The access token of an OIDC issuer, `Authorization: Bearer <token>`: RS256, RS384, ES256 or EdDSA; `iss` exactly, `aud` one of the configured audiences, `exp` required. The values of the configured roles claim are the permissions; the ones that start with `platform:` are this API's. There is no cookie, and no DPoP: a token that carries `cnf` is read as a plain bearer."
         } },
         "parameters": {
+            "owner": { "name": "owner", "in": "path", "required": true, "schema": { "type": "string", "minLength": 1, "maxLength": 63, "pattern": "^[a-z0-9][a-z0-9_-]*$" },
+                       "description": "The owner of the agents (`spec.owner`): 1 to 63 characters of lower-case letters, digits, `-` and `_`. Another text is a 400 `invalid-request`." },
             "name": { "name": "name", "in": "path", "required": true, "schema": { "type": "string", "minLength": 1 },
                       "description": "The object's name (an agent's is at most 40 characters of lower-case words and dashes, a model's 63, a tool server's 32: the forms' `name` patterns). A name no object has is a 404 `not-found`; a name that cannot be percent-decoded is a 400 `invalid-request`." },
             "IfMatch": { "name": "If-Match", "in": "header", "required": false, "schema": { "type": "string" },

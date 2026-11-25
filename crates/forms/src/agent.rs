@@ -50,6 +50,10 @@ pub struct AgentForm {
     /// Tags (`registry.tags`): at most 16, each 1 to 64 characters of lower-case words and dashes.
     #[serde(default)]
     pub tags: Vec<String>,
+    /// Who the agent belongs to (`spec.owner`): 1 to 63 characters of lower-case letters, digits, `-` and `_`.
+    /// Absent: nobody's. Set by the orchestrator through the owner-scoped routes; an administrator may set it too.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub owner: Option<String>,
     /// Scale to zero (`spec.suspend`): the Suspend and Resume actions.
     #[serde(default)]
     pub suspend: bool,

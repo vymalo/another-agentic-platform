@@ -279,6 +279,7 @@ mod tests {
             None => (lower.as_str(), None),
         };
         if let Some((int, frac)) = mantissa.split_once('.')
+            && (int.is_empty() || int.starts_with(|c: char| c.is_ascii_digit()))
             && digits_or_empty(int, true)
             && digits_or_empty(frac, false)
             && exponent.is_none_or(|e| {
