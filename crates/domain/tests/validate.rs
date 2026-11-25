@@ -743,12 +743,14 @@ fn a_folder_agent_with_many_workers_needs_no_placement() {
 /// the registry lists an item with a malformed one for administrators only (§60a, AD-028); and what is a
 /// bound of the schema alone costs the operator nothing to resolve and it does not enforce: the number
 /// of extra MCP servers, the length of a title or of a provider's URL, and how many aliases, tools or
-/// headers a shared object lists. What the operator *does* check of a `ModelEndpoint` and a
+/// headers a shared object lists, and the sleep durations of `scaling` (AD-058), whose bounds are CEL
+/// the API server judges and nothing reads until the idle controller. What the operator *does* check of a `ModelEndpoint` and a
 /// `ToolProvider` (an address, the Secret references, the exclusive forms, the URL) is asked of it.
 fn outside_validate(file_name: &str) -> bool {
     file_name.starts_with("audience-")
         || file_name == "extra-body-too-many.yaml"
         || file_name == "mcp-servers-too-many.yaml"
+        || file_name.starts_with("scaling-")
         || [
             "endpoint-reasoning-efforts-too-many.yaml",
             "endpoint-reasoning-too-many.yaml",
@@ -869,6 +871,12 @@ fn the_shape_rules_of_the_crd_hold_without_an_api_server() {
             "model-endpoint-models-too-many.yaml",
             "model-endpoint-title-empty.yaml",
             "model-endpoint-title-too-long.yaml",
+            "scaling-idle-timeout-malformed.yaml",
+            "scaling-idle-timeout-too-long.yaml",
+            "scaling-idle-timeout-too-short.yaml",
+            "scaling-wake-ahead-out-of-range.yaml",
+            "scaling-wake-timeout-out-of-range.yaml",
+            "scaling-wake-without-idle-timeout.yaml",
             "tool-provider-headers-too-many.yaml",
             "tool-provider-title-empty.yaml",
             "tool-provider-title-too-long.yaml",

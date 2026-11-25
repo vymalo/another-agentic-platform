@@ -1,0 +1,23 @@
+# Refused: wakeAhead is set without idleTimeout.
+# expect: scaling.wakeAhead and scaling.wakeTimeout need scaling.idleTimeout
+apiVersion: agents.vymalo.com/v1alpha1
+kind: AgentService
+metadata:
+  name: invalid-sleep
+  namespace: another-agentic-system
+spec:
+  configRef:
+    name: chat
+  interfaces:
+    a2a:
+      enabled: true
+      bearerTokensSecretRef:
+        name: tokens
+        key: A2A_BEARER_TOKENS
+  scaling:
+    wakeAhead: 2m
+  store:
+    postgres:
+      secretRef:
+        name: db
+        key: uri

@@ -1,0 +1,23 @@
+# Refused: scaling.idleTimeout is under 1m.
+# expect: scaling.idleTimeout is a duration from 1m to 24h, such as 15m
+apiVersion: agents.vymalo.com/v1alpha1
+kind: AgentService
+metadata:
+  name: invalid-sleep
+  namespace: another-agentic-system
+spec:
+  configRef:
+    name: chat
+  interfaces:
+    a2a:
+      enabled: true
+      bearerTokensSecretRef:
+        name: tokens
+        key: A2A_BEARER_TOKENS
+  scaling:
+    idleTimeout: 30s
+  store:
+    postgres:
+      secretRef:
+        name: db
+        key: uri
