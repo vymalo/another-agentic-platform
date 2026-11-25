@@ -2016,6 +2016,10 @@ for t in 'usageIngest.audience=|usageIngest.audience is required' \
   set_=${t%%|*}; frag=${t#*|}
   check "usageIngest refuses --set $set_" refused "$frag" -f "$here/usage-ingest.values.yaml" --set "$set_"
 done
+render -f "$here/usage-ingest.values.yaml" --set usageIngest.serviceAccount.create=false --set usageIngest.serviceAccount.name=elsewhere
+ui_no_sa() { [ -z "$(doc ServiceAccount "$ui")" ]; }
+check "usageIngest serviceAccount.create=false: no ServiceAccount of the ingest is made" ui_no_sa
+check "usageIngest serviceAccount.create=false: the pod names the given one" dhas Deployment "$ui" 'serviceAccountName: elsewhere'
 check "usageIngest refuses an empty networkPolicy.from" refused "networkPolicy.from must name" -f "$here/usage-ingest.values.yaml" --set-json 'usageIngest.networkPolicy.from=[]'
 check "usageIngest refuses an empty networkPolicy.database.to" refused "networkPolicy.database.to must name" -f "$here/usage-ingest.values.yaml" --set-json 'usageIngest.networkPolicy.database.to=[]'
 
