@@ -380,6 +380,27 @@ dependencies = [
 ]
 
 [[package]]
+name = "aap-usage-ingest"
+version = "0.1.0"
+dependencies = [
+ "aap-usage",
+ "aap-usage-postgres",
+ "anyhow",
+ "axum",
+ "clap",
+ "k8s-openapi",
+ "kube",
+ "serde",
+ "serde_json",
+ "subtle",
+ "tokio",
+ "tokio-postgres",
+ "tower",
+ "tracing",
+ "tracing-subscriber",
+]
+
+[[package]]
 name = "aap-usage-postgres"
 version = "0.1.0"
 dependencies = [

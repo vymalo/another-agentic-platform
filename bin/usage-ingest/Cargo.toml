@@ -1,0 +1,43 @@
+[package]
+name = "aap-usage-ingest"
+description = "The usage ingest (ANR-730, AD-060): takes the pod meter's CloudEvents once into a UsageStore and answers the ledger's spend query; each route is open to one Kubernetes identity only"
+readme = "README.md"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+publish.workspace = true
+
+[lib]
+name = "aap_usage_ingest"
+path = "src/lib.rs"
+
+[[bin]]
+name = "usage-ingest"
+path = "src/main.rs"
+
+[dependencies]
+aap-usage.workspace = true
+aap-usage-postgres = { path = "../../crates/usage-postgres" }
+anyhow.workspace = true
+axum.workspace = true
+clap.workspace = true
+k8s-openapi.workspace = true
+kube = { workspace = true, features = ["client", "rustls-tls", "ring"] }
+serde.workspace = true
+serde_json.workspace = true
+subtle.workspace = true
+tokio = { workspace = true, features = ["macros", "net", "rt-multi-thread", "signal", "sync", "time"] }
+tokio-postgres = { version = "0.7", default-features = false, features = ["runtime"] }
+tracing.workspace = true
+tracing-subscriber.workspace = true
+
+[dev-dependencies]
+aap-usage = { workspace = true, features = ["testkit"] }
+tokio = { workspace = true, features = ["io-util", "test-util"] }
+tower = { workspace = true, features = ["util"] }
+
+[lints]
+workspace = true
