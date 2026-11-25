@@ -60,7 +60,7 @@ fn every_route_permission_of_the_text_is_a_constant() {
     assert_eq!(
         routes.len(),
         permission::ALL.len(),
-        "the table names all five"
+        "the table names every permission"
     );
     let built: BTreeSet<String> = permission::ALL.iter().map(|p| (*p).to_owned()).collect();
     assert!(

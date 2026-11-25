@@ -22,6 +22,12 @@ pub const AGENTS_READ: &str = "platform:agents.read";
 /// `/v1/agents/{name}`.
 pub const AGENTS_WRITE: &str = "platform:agents.write";
 
+/// Read, make, replace, suspend and delete **the agents whose `spec.owner` is the owner named in the path**, and no other
+/// agent. Guards the four routes under `/v1/owners/{owner}/agents`; an agent with another owner, or none, is answered as
+/// one that does not exist. It is data-scoped on purpose: unlike [`AGENTS_WRITE`], it is the orchestrator's, which makes
+/// one coder per person, and must never be granted to a person's own role.
+pub const AGENTS_OWN: &str = "platform:agents.own";
+
 /// Create, edit and delete `ModelEndpoint`s. Guards `PUT` and `DELETE` of `/v1/models/{name}`.
 pub const MODELS_WRITE: &str = "platform:models.write";
 
@@ -33,9 +39,10 @@ pub const TOOLPROVIDERS_WRITE: &str = "platform:toolproviders.write";
 pub const SECRETS_PICK: &str = "platform:secrets.pick";
 
 /// Every permission of the dashboard, in the order of the table of AD-032.
-pub const ALL: [&str; 5] = [
+pub const ALL: [&str; 6] = [
     AGENTS_READ,
     AGENTS_WRITE,
+    AGENTS_OWN,
     MODELS_WRITE,
     TOOLPROVIDERS_WRITE,
     SECRETS_PICK,

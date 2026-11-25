@@ -1,0 +1,27 @@
+# Refused: owner is 64 characters; at most 63 (a bound of the schema).
+# expect: Too long: may not be more than 63 bytes
+apiVersion: agents.vymalo.com/v1alpha1
+kind: AgentService
+metadata:
+  name: invalid-owner-too-long
+  namespace: another-agentic-system
+spec:
+  owner: aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
+  configRef:
+    name: chat
+  interfaces:
+    a2a:
+      enabled: true
+      bearerTokensSecretRef:
+        name: tokens
+        key: A2A_BEARER_TOKENS
+  scaling:
+    topology: combined
+    workers: 1
+  store:
+    postgres:
+      secretRef:
+        name: db
+        key: uri
+  access:
+    audience: ["*"]

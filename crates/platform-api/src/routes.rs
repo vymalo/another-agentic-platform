@@ -28,6 +28,14 @@ pub enum RouteId {
     AgentYaml,
     /// `GET /v1/agents/{name}/events`.
     AgentEvents,
+    /// `GET /v1/owners/{owner}/agents`.
+    ListOwnerAgents,
+    /// `GET /v1/owners/{owner}/agents/{name}`.
+    GetOwnerAgent,
+    /// `PUT /v1/owners/{owner}/agents/{name}`.
+    PutOwnerAgent,
+    /// `DELETE /v1/owners/{owner}/agents/{name}`.
+    DeleteOwnerAgent,
     /// `GET /v1/openapi.json`.
     OpenApi,
     /// `GET /v1/models`.
@@ -124,7 +132,7 @@ const fn route(
 }
 
 /// Every route, in the order of §60a's table.
-pub const ROUTES: [Route; 18] = [
+pub const ROUTES: [Route; 22] = [
     route(RouteId::Me, Verb::Get, "/v1/me", Needs::Token, false),
     route(
         RouteId::Info,
@@ -173,6 +181,34 @@ pub const ROUTES: [Route; 18] = [
         Verb::Get,
         "/v1/agents/{name}/events",
         Needs::Permission(permission::AGENTS_READ),
+        false,
+    ),
+    route(
+        RouteId::ListOwnerAgents,
+        Verb::Get,
+        "/v1/owners/{owner}/agents",
+        Needs::Permission(permission::AGENTS_OWN),
+        false,
+    ),
+    route(
+        RouteId::GetOwnerAgent,
+        Verb::Get,
+        "/v1/owners/{owner}/agents/{name}",
+        Needs::Permission(permission::AGENTS_OWN),
+        false,
+    ),
+    route(
+        RouteId::PutOwnerAgent,
+        Verb::Put,
+        "/v1/owners/{owner}/agents/{name}",
+        Needs::Permission(permission::AGENTS_OWN),
+        true,
+    ),
+    route(
+        RouteId::DeleteOwnerAgent,
+        Verb::Delete,
+        "/v1/owners/{owner}/agents/{name}",
+        Needs::Permission(permission::AGENTS_OWN),
         false,
     ),
     route(

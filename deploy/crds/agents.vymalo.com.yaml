@@ -1063,6 +1063,17 @@ spec:
                           rule: self == false
                     type: object
                 type: object
+              owner:
+                description: |-
+                  The person or account this agent belongs to, as the orchestrator names them: 1 to 63 characters of
+                  lower-case letters, digits, `-` and `_`. Absent: nobody's, and no owner-scoped route of the Platform API
+                  can touch it. Changing it never restarts the agent (it is not in the digest). It is **not** the Kubernetes
+                  owner reference of a pod.
+                maxLength: 63
+                minLength: 1
+                nullable: true
+                pattern: ^[a-z0-9][a-z0-9_-]*$
+                type: string
               registry:
                 default:
                   tags: []

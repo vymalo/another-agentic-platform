@@ -462,6 +462,7 @@ fn service_field(path: &str) -> String {
         ("metadata.name", "name"),
         ("spec.configRef", "name"),
         ("spec.description", "description"),
+        ("spec.owner", "owner"),
         ("spec.suspend", "suspend"),
         ("spec.registry.title", "title"),
         ("spec.registry.tags", "tags"),
@@ -768,6 +769,7 @@ fn probe(
         title: "Probe".to_owned(),
         description: None,
         tags: Vec::new(),
+        owner: None,
         suspend: false,
         model: Some(ModelChoice {
             endpoint: endpoint.to_owned(),
@@ -1042,6 +1044,7 @@ impl Defaults {
             title: "Sample".to_owned(),
             description: None,
             tags: Vec::new(),
+            owner: None,
             suspend: false,
             model: Some(ModelChoice {
                 endpoint: "probe-endpoint".to_owned(),

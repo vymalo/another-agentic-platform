@@ -412,6 +412,14 @@ fn check_service(v: &mut Issues, svc: &AgentService, cfg: &AgentConfig) {
             format!("{name:?} is not a DNS label of at most {MAX_NAME} characters: the operator derives `<name>-front`, `<name>-agent-<hash>` and `<name>-db-app` from it"),
         );
     }
+    if let Some(owner) = &svc.spec.owner
+        && !aap_api::is_owner_name(owner)
+    {
+        v.add(
+            format!("{me} spec.owner"),
+            "is not 1 to 63 characters of lower-case letters, digits, `-` and `_`, starting with a letter or a digit",
+        );
+    }
     let ns = svc.metadata.namespace.as_deref().unwrap_or_default();
     if ns.is_empty() {
         v.add(

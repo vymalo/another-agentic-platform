@@ -60,10 +60,30 @@ impl<S: Send + Sync> FromRequestParts<S> for Name {
     type Rejection = Problem;
 
     async fn from_request_parts(parts: &mut Parts, state: &S) -> Result<Self, Self::Rejection> {
-        Path::<String>::from_request_parts(parts, state)
+        use std::collections::HashMap;
+        Path::<HashMap<String, String>>::from_request_parts(parts, state)
             .await
-            .map(|Path(name)| Self(name))
-            .map_err(|_| Problem::invalid_request("the name in the path cannot be decoded"))
+            .ok()
+            .and_then(|Path(mut p)| p.remove("name"))
+            .map(Self)
+            .ok_or_else(|| Problem::invalid_request("the name in the path cannot be decoded"))
+    }
+}
+
+/// The `{owner}` of an owner-scoped path.
+pub(crate) struct Owner(pub(crate) String);
+
+impl<S: Send + Sync> FromRequestParts<S> for Owner {
+    type Rejection = Problem;
+
+    async fn from_request_parts(parts: &mut Parts, state: &S) -> Result<Self, Self::Rejection> {
+        use std::collections::HashMap;
+        Path::<HashMap<String, String>>::from_request_parts(parts, state)
+            .await
+            .ok()
+            .and_then(|Path(mut p)| p.remove("owner"))
+            .map(Self)
+            .ok_or_else(|| Problem::invalid_request("the owner in the path cannot be decoded"))
     }
 }
 

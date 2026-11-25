@@ -11,12 +11,14 @@ use axum::http::header::CONTENT_TYPE;
 use axum::http::{HeaderValue, StatusCode};
 use axum::response::{IntoResponse, Response};
 use serde_json::json;
+use std::sync::Arc;
 
-use super::{Name, St, Surroundings, json, with_etag, with_location};
+use super::{Name, Owner, St, Surroundings, json, with_etag, with_location};
 use crate::authz::Caller;
 use crate::body::{self, MAX_BODY_BYTES};
 use crate::etag::{self, Condition};
 use crate::problem::Problem;
+use crate::state::ApiState;
 use crate::view;
 
 fn read_failed(error: &ObjectsError) -> Problem {
@@ -122,19 +124,155 @@ where
     O: AgentObjects + 'static,
     A: Authenticator + 'static,
 {
-    let state = state.0;
+    put_inner(state.0, caller, None, name, request).await
+}
+
+/// The owner an agent's service names (`spec.owner`), if any.
+fn owner_of(agent: &aap_ports::Agent) -> Option<&str> {
+    agent.service.spec.get("owner").and_then(|v| v.as_str())
+}
+
+/// The agent as an owner-scoped route may see it: one whose `spec.owner` is `owner`. Any other agent, an unowned one
+/// included, is answered as one that does not exist, so a caller learns nothing about what is not theirs.
+fn owned_by(agent: aap_ports::Agent, owner: &str, name: &str) -> Result<aap_ports::Agent, Problem> {
+    if owner_of(&agent) == Some(owner) {
+        Ok(agent)
+    } else {
+        Err(Problem::not_found("agent", name))
+    }
+}
+
+fn check_scope(owner: &str) -> Result<(), Problem> {
+    if aap_api::is_owner_name(owner) {
+        Ok(())
+    } else {
+        Err(Problem::invalid_request(
+            "the owner in the path is not 1 to 63 characters of lower-case letters, digits, `-` and `_`",
+        ))
+    }
+}
+
+/// `GET /v1/owners/{owner}/agents`: the agents of that owner, and no other.
+pub(crate) async fn list_owned<O, A>(
+    state: St<O, A>,
+    Owner(owner): Owner,
+) -> Result<Response, Problem>
+where
+    O: AgentObjects + 'static,
+    A: Authenticator + 'static,
+{
+    check_scope(&owner)?;
+    let agents = state
+        .0
+        .objects
+        .list_agents()
+        .await
+        .map_err(|e| read_failed(&e))?;
+    let rows: Vec<_> = agents
+        .iter()
+        .filter(|a| owner_of(a) == Some(owner.as_str()))
+        .map(view::summary)
+        .collect();
+    Ok(json(StatusCode::OK, &json!({ "agents": rows })))
+}
+
+/// `GET /v1/owners/{owner}/agents/{name}`.
+pub(crate) async fn get_owned<O, A>(
+    state: St<O, A>,
+    Owner(owner): Owner,
+    Name(name): Name,
+) -> Result<Response, Problem>
+where
+    O: AgentObjects + 'static,
+    A: Authenticator + 'static,
+{
+    check_scope(&owner)?;
+    let agent = owned_by(fetch(&state.0.objects, &name).await?, &owner, &name)?;
+    Ok(with_etag(
+        json(StatusCode::OK, &view::detail(&agent)),
+        &agent.etag(),
+    ))
+}
+
+/// `PUT /v1/owners/{owner}/agents/{name}`: create or replace an agent that belongs to `owner`. The form's `owner` is that
+/// owner or absent; a replace of an agent that is not `owner`'s is a `404`.
+pub(crate) async fn put_owned<O, A>(
+    state: St<O, A>,
+    Extension(caller): Extension<Caller>,
+    Owner(owner): Owner,
+    Name(name): Name,
+    request: Request,
+) -> Result<Response, Problem>
+where
+    O: AgentObjects + 'static,
+    A: Authenticator + 'static,
+{
+    check_scope(&owner)?;
+    put_inner(state.0, caller, Some(owner), name, request).await
+}
+
+/// `DELETE /v1/owners/{owner}/agents/{name}`.
+pub(crate) async fn delete_owned<O, A>(
+    state: St<O, A>,
+    Extension(caller): Extension<Caller>,
+    Owner(owner): Owner,
+    Name(name): Name,
+    request: Request,
+) -> Result<Response, Problem>
+where
+    O: AgentObjects + 'static,
+    A: Authenticator + 'static,
+{
+    check_scope(&owner)?;
+    let tag = etag::for_delete(request.headers())?;
+    // Read first, and delete only the version that was read: the owner that was checked is the owner that is deleted.
+    let agent = owned_by(fetch(&state.0.objects, &name).await?, &owner, &name)?;
+    if agent.etag() != tag {
+        return Err(Problem::from_objects(
+            &ObjectsError::PreconditionFailed,
+            None,
+        ));
+    }
+    delete_inner(state.0, caller, name, tag).await
+}
+
+async fn put_inner<O, A>(
+    state: Arc<ApiState<O, A>>,
+    caller: Caller,
+    scope: Option<String>,
+    name: String,
+    request: Request,
+) -> Result<Response, Problem>
+where
+    O: AgentObjects + 'static,
+    A: Authenticator + 'static,
+{
     let (parts, request_body) = request.into_parts();
     let headers = parts.headers;
 
     // The headers first: they cost nothing, and a client that forgot them should not be told about its form.
     body::require_json(&headers)?;
     let condition = etag::for_put(&headers)?;
-    let form: AgentForm = body::json(&headers, request_body, MAX_BODY_BYTES).await?;
+    let mut form: AgentForm = body::json(&headers, request_body, MAX_BODY_BYTES).await?;
     if form.names_a_secret() {
         caller.require_secrets_pick()?;
     }
     if form.name != name {
         return Err(name_mismatch());
+    }
+    if let Some(owner) = &scope {
+        match form.owner.as_deref() {
+            None => form.owner = Some(owner.clone()),
+            Some(o) if o == owner => {}
+            Some(_) => {
+                return Err(Problem::validation(&[FormError {
+                    field: "owner".to_owned(),
+                    message:
+                        "is the owner in the path: an agent cannot be given to another owner here"
+                            .to_owned(),
+                }]));
+            }
+        }
     }
 
     // A replace starts from the agent that was read: its owner, its token, and the part of its objects no form edits.
@@ -142,6 +280,10 @@ where
         Condition::DoesNotExist => None,
         Condition::Matches(tag) => {
             let agent = fetch(&state.objects, &name).await?;
+            let agent = match &scope {
+                Some(owner) => owned_by(agent, owner, &name)?,
+                None => agent,
+            };
             if let Some(refusal) = view::refusal_of(&agent) {
                 return Err(Problem::from_objects(&refusal, None));
             }
@@ -197,7 +339,15 @@ where
     };
     let response = with_etag(json(status, &view::detail(&agent)), &agent.etag());
     Ok(if created {
-        with_location(response, &format!("/v1/agents/{}", agent.name()))
+        with_location(
+            response,
+            &match agent.service.spec.get("owner").and_then(|v| v.as_str()) {
+                Some(owner) if scope.is_some() => {
+                    format!("/v1/owners/{owner}/agents/{}", agent.name())
+                }
+                _ => format!("/v1/agents/{}", agent.name()),
+            },
+        )
     } else {
         response
     })
@@ -214,8 +364,20 @@ where
     O: AgentObjects + 'static,
     A: Authenticator + 'static,
 {
-    let state = state.0;
     let tag = etag::for_delete(request.headers())?;
+    delete_inner(state.0, caller, name, tag).await
+}
+
+async fn delete_inner<O, A>(
+    state: Arc<ApiState<O, A>>,
+    caller: Caller,
+    name: String,
+    tag: aap_ports::ETag,
+) -> Result<Response, Problem>
+where
+    O: AgentObjects + 'static,
+    A: Authenticator + 'static,
+{
     state
         .objects
         .delete_agent(&name, &tag)

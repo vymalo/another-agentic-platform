@@ -60,7 +60,7 @@ fn openapi_lists_every_route() {
         documented, table,
         "the document and the table of routes list different operations"
     );
-    assert_eq!(ROUTES.len(), 18);
+    assert_eq!(ROUTES.len(), 22);
     // Each operation is documented once, with an id of its own.
     let ids: Vec<&str> = operations(&doc)
         .values()
@@ -532,7 +532,7 @@ impl Rec {
 }
 
 fn at(template: &str, name: &str) -> String {
-    template.replace("{name}", name)
+    template.replace("{owner}", "alice").replace("{name}", name)
 }
 
 fn method(verb: &str) -> axum::http::Method {
@@ -542,7 +542,7 @@ fn method(verb: &str) -> axum::http::Method {
 /// A valid form for a write route, named `name`.
 fn form_for(template: &str, name: &str) -> Value {
     match template {
-        "/v1/agents/{name}" => folder_body(name),
+        "/v1/agents/{name}" | "/v1/owners/{owner}/agents/{name}" => folder_body(name),
         "/v1/models/{name}" => model_body(name),
         "/v1/tool-servers/{name}" => open_tool_body(name),
         other => panic!("{other}"),
@@ -749,6 +749,128 @@ async fn session() -> Vec<Seen> {
         .await;
     rec.add("DELETE", "/v1/agents/{name}", r);
 
+    // ---- the owner's routes (ANR-661): an agent of `alice`, made, read, listed, replaced and deleted through them.
+    let r = api
+        .put("/v1/owners/alice/agents/mine")
+        .token(&admin)
+        .create()
+        .json(&folder_body("mine"))
+        .send()
+        .await;
+    let mine_tag = r.etag();
+    rec.add("PUT", "/v1/owners/{owner}/agents/{name}", r);
+    let r = api
+        .get("/v1/owners/alice/agents/mine")
+        .token(&admin)
+        .send()
+        .await;
+    rec.add("GET", "/v1/owners/{owner}/agents/{name}", r);
+    let r = api
+        .get("/v1/owners/alice/agents")
+        .token(&admin)
+        .send()
+        .await;
+    rec.add("GET", "/v1/owners/{owner}/agents", r);
+    let mut mine = folder_body("mine");
+    mine["suspend"] = json!(true);
+    let r = api
+        .put("/v1/owners/alice/agents/mine")
+        .token(&admin)
+        .replace(&mine_tag)
+        .json(&mine)
+        .send()
+        .await;
+    rec.add("PUT", "/v1/owners/{owner}/agents/{name}", r);
+    for (verb, template, path) in [
+        (
+            "GET",
+            "/v1/owners/{owner}/agents",
+            "/v1/owners/Not%20Valid/agents",
+        ),
+        (
+            "GET",
+            "/v1/owners/{owner}/agents/{name}",
+            "/v1/owners/Not%20Valid/agents/mine",
+        ),
+    ] {
+        let r = api.request(method(verb), path).token(&admin).send().await;
+        rec.add(verb, template_static(template), r);
+    }
+    let r = api
+        .put("/v1/owners/Not%20Valid/agents/mine")
+        .token(&admin)
+        .create()
+        .json(&folder_body("mine"))
+        .send()
+        .await;
+    rec.add("PUT", "/v1/owners/{owner}/agents/{name}", r);
+    let r = api
+        .delete("/v1/owners/Not%20Valid/agents/mine")
+        .token(&admin)
+        .replace("\"x\"")
+        .send()
+        .await;
+    rec.add("DELETE", "/v1/owners/{owner}/agents/{name}", r);
+    let r = api
+        .put("/v1/owners/alice/agents/ogoing")
+        .token(&admin)
+        .create()
+        .json(&folder_body("ogoing"))
+        .send()
+        .await;
+    rec.add("PUT", "/v1/owners/{owner}/agents/{name}", r);
+    api.objects.seed_finalizer("ogoing");
+    let tag = api
+        .get("/v1/owners/alice/agents/ogoing")
+        .token(&admin)
+        .send()
+        .await
+        .etag();
+    let r = api
+        .delete("/v1/owners/alice/agents/ogoing")
+        .token(&admin)
+        .replace(&tag)
+        .send()
+        .await;
+    rec.add("DELETE", "/v1/owners/{owner}/agents/{name}", r);
+    let r = api
+        .put("/v1/owners/alice/agents/ogone")
+        .token(&admin)
+        .create()
+        .json(&folder_body("ogone"))
+        .send()
+        .await;
+    let tag = r.etag();
+    rec.add("PUT", "/v1/owners/{owner}/agents/{name}", r);
+    let r = api
+        .delete("/v1/owners/alice/agents/ogone")
+        .token(&admin)
+        .replace(&tag)
+        .send()
+        .await;
+    rec.add("DELETE", "/v1/owners/{owner}/agents/{name}", r);
+
+    // 409: an agent of `alice` that GitOps owns is not the dashboard's to delete, through the owner's routes either.
+    api.objects.seed_foreign(
+        Kind::AgentService,
+        "ogit",
+        json!({ "configRef": { "name": "ogit" }, "owner": "alice" }),
+        Foreign::Unlabelled,
+    );
+    let tag = api
+        .get("/v1/owners/alice/agents/ogit")
+        .token(&admin)
+        .send()
+        .await
+        .etag();
+    let r = api
+        .delete("/v1/owners/alice/agents/ogit")
+        .token(&admin)
+        .replace(&tag)
+        .send()
+        .await;
+    rec.add("DELETE", "/v1/owners/{owner}/agents/{name}", r);
+
     // ---- every route: no token (401), two Authorization headers (400), and a token without the permission (403).
     for route in &ROUTES {
         let path = at(route.path, "chat");
@@ -843,6 +965,7 @@ async fn session() -> Vec<Seen> {
         let verb = route.verb.as_str();
         let name = match route.path {
             "/v1/agents/{name}" => "chat",
+            "/v1/owners/{owner}/agents/{name}" => "mine",
             "/v1/models/{name}" => "gateway",
             _ => "docs",
         };
@@ -920,7 +1043,7 @@ async fn session() -> Vec<Seen> {
                     .await;
                 rec.add(verb, route.path, r);
                 // 409: the model and the tool server are named by the agents above.
-                if route.path != "/v1/agents/{name}" {
+                if !route.path.ends_with("agents/{name}") {
                     let r = api.delete(&path).token(&admin).replace(&fresh).send().await;
                     rec.add(verb, route.path, r);
                 }
@@ -1226,6 +1349,7 @@ const MAY_BE_ABSENT: &[&str] = &[
     "ToolServerDetail/status",
     // Forms: a member with a serde default may be left out of a request.
     "AgentForm/description",
+    "AgentForm/owner",
     "AgentForm/tags",
     "AgentForm/suspend",
     "AgentForm/toolServers",

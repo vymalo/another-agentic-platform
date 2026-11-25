@@ -9,14 +9,14 @@
 mod common;
 
 use aap_api::permission::{
-    AGENTS_READ, AGENTS_WRITE, ALL, MODELS_WRITE, SECRETS_PICK, TOOLPROVIDERS_WRITE,
+    AGENTS_OWN, AGENTS_READ, AGENTS_WRITE, ALL, MODELS_WRITE, SECRETS_PICK, TOOLPROVIDERS_WRITE,
 };
 use aap_platform_api::{Needs, ROUTES};
 use axum::http::Method;
 use common::*;
 
 /// (method, template, the one permission it needs; `None`: any valid token).
-const EXPECTED: [(&str, &str, Option<&str>); 18] = [
+const EXPECTED: [(&str, &str, Option<&str>); 22] = [
     ("GET", "/v1/me", None),
     ("GET", "/v1/info", Some(AGENTS_READ)),
     ("GET", "/v1/agents", Some(AGENTS_READ)),
@@ -25,6 +25,14 @@ const EXPECTED: [(&str, &str, Option<&str>); 18] = [
     ("DELETE", "/v1/agents/{name}", Some(AGENTS_WRITE)),
     ("GET", "/v1/agents/{name}/yaml", Some(AGENTS_READ)),
     ("GET", "/v1/agents/{name}/events", Some(AGENTS_READ)),
+    ("GET", "/v1/owners/{owner}/agents", Some(AGENTS_OWN)),
+    ("GET", "/v1/owners/{owner}/agents/{name}", Some(AGENTS_OWN)),
+    ("PUT", "/v1/owners/{owner}/agents/{name}", Some(AGENTS_OWN)),
+    (
+        "DELETE",
+        "/v1/owners/{owner}/agents/{name}",
+        Some(AGENTS_OWN),
+    ),
     ("GET", "/v1/openapi.json", Some(AGENTS_READ)),
     ("GET", "/v1/models", Some(AGENTS_READ)),
     ("GET", "/v1/models/{name}", Some(AGENTS_READ)),
@@ -42,7 +50,7 @@ const EXPECTED: [(&str, &str, Option<&str>); 18] = [
 ];
 
 fn concrete(template: &str) -> String {
-    template.replace("{name}", "x")
+    template.replace("{owner}", "alice").replace("{name}", "x")
 }
 
 fn method(name: &str) -> Method {
