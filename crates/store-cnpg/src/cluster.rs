@@ -20,6 +20,10 @@ pub const NAME_LABEL: &str = "app.kubernetes.io/name";
 /// same annotation the runtime provider writes on its workloads and claims.
 pub const DELETION_POLICY_ANNOTATION: &str = "agents.vymalo.com/deletion-policy";
 
+/// When a `Retain` release let go of the Cluster, in seconds since the Unix epoch. Written by `release`, removed by
+/// `ensure`: a Cluster that has it belongs to no running service, and is what the retention sweep lists.
+pub const RETAINED_AT_ANNOTATION: &str = "agents.vymalo.com/retained-at";
+
 /// The group of CloudNativePG's API.
 pub const GROUP: &str = "postgresql.cnpg.io";
 /// Its version.

@@ -299,6 +299,23 @@ where
             }
         };
         running.push(Box::pin(feed));
+        // The retention sweep: one task for every namespace watched (an empty scope is every namespace).
+        let scopes = self
+            .options
+            .watch_namespaces
+            .clone()
+            .unwrap_or_else(|| vec![String::new()]);
+        if !scopes.is_empty() {
+            running.push(Box::pin(crate::retention::run(
+                self.runtime.clone(),
+                self.store.clone(),
+                scopes,
+                self.options.retention,
+                self.leader.clone(),
+                metrics.clone(),
+                stopped.clone(),
+            )));
+        }
 
         // Ready once **every** shard's caches have listed what they watch: an operator whose second namespace
         // cannot be read is not ready, and the namespace that can still reconciles. A cache that never lists (a

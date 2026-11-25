@@ -28,15 +28,18 @@ pub mod cluster;
 mod error;
 
 use aap_ports::{
-    ReleaseOutcome, StoreCapabilities, StoreError, StoreId, StoreKind, StoreProvisioner, StoreSpec,
-    StoreStatus, cnpg_connection,
+    ReleaseOutcome, RetainedStore, StoreCapabilities, StoreError, StoreId, StoreKind,
+    StoreProvisioner, StoreSpec, StoreStatus, cnpg_connection,
 };
 use aap_store_secret::SecretStore;
-use kube::api::{DeleteParams, DynamicObject, Patch, PatchParams};
+use kube::api::{DeleteParams, DynamicObject, ListParams, Patch, PatchParams};
 use kube::{Api, Client};
 use serde_json::json;
 
-use crate::cluster::{FIELD_MANAGER, cluster_name, is_ours};
+use crate::cluster::{
+    FIELD_MANAGER, INSTANCE_LABEL, MANAGED_BY_LABEL, MANAGED_BY_VALUE, RETAINED_AT_ANNOTATION,
+    cluster_name, is_ours,
+};
 use crate::error::map;
 
 /// The provisioner of operator-owned CloudNativePG clusters (and of referenced Secrets).
@@ -111,6 +114,14 @@ impl CnpgStore {
                 "a Cluster {name} exists and is not managed by {FIELD_MANAGER} for this service; nothing was changed (rename the service, or remove that Cluster)"
             )));
         }
+        // A service that comes back claims its database again: the retention mark is gone before anything else.
+        if existing
+            .as_ref()
+            .and_then(|c| c.metadata.annotations.as_ref())
+            .is_some_and(|a| a.contains_key(RETAINED_AT_ANNOTATION))
+        {
+            self.patch_annotation(&api, &name, None).await?;
+        }
         let object = cluster::render(id, spec.deletion, cnpg);
         let applied = api
             .patch(
@@ -153,12 +164,35 @@ impl CnpgStore {
             }
             aap_ports::DeletionPolicy::Retain => {
                 self.strip_owners(&api, &name, &found).await?;
+                self.patch_annotation(&api, &name, Some(&unix_now().to_string()))
+                    .await?;
                 Ok(ReleaseOutcome {
                     existed: true,
                     retained: true,
                 })
             }
         }
+    }
+
+    /// Set (or, with `None`, remove) the retention mark of a Cluster.
+    async fn patch_annotation(
+        &self,
+        api: &Api<DynamicObject>,
+        name: &str,
+        value: Option<&str>,
+    ) -> Result<(), StoreError> {
+        let params = PatchParams {
+            field_manager: Some(FIELD_MANAGER.to_owned()),
+            ..PatchParams::default()
+        };
+        api.patch(
+            name,
+            &params,
+            &Patch::Merge(json!({"metadata": {"annotations": {RETAINED_AT_ANNOTATION: value}}})),
+        )
+        .await
+        .map_err(|e| map(format!("Cluster {name}"), e))?;
+        Ok(())
     }
 
     /// A kept Cluster keeps nothing that would let the garbage collector take it.
@@ -213,6 +247,12 @@ impl CnpgStore {
     }
 }
 
+fn unix_now() -> i64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |d| i64::try_from(d.as_secs()).unwrap_or(i64::MAX))
+}
+
 impl StoreProvisioner for CnpgStore {
     fn capabilities(&self) -> StoreCapabilities {
         StoreCapabilities { cnpg: true }
@@ -233,6 +273,62 @@ impl StoreProvisioner for CnpgStore {
             existed: secret.existed || cluster.existed,
             retained: cluster.retained,
         })
+    }
+
+    async fn retained(&self, scope: &str) -> Result<Vec<RetainedStore>, StoreError> {
+        // A missing CloudNativePG API is no Cluster: nothing is retained.
+        if !self.installed().await? {
+            return Ok(Vec::new());
+        }
+        let api: Api<DynamicObject> = if scope.is_empty() {
+            Api::all_with(self.client.clone(), &cluster::api_resource())
+        } else {
+            self.api(scope)
+        };
+        let ours = ListParams::default().labels(&format!("{MANAGED_BY_LABEL}={MANAGED_BY_VALUE}"));
+        let list = api
+            .list(&ours)
+            .await
+            .map_err(|e| map("the Clusters of the operator", e))?;
+        Ok(list
+            .items
+            .into_iter()
+            .filter_map(|c| {
+                let meta = &c.metadata;
+                let at = meta.annotations.as_ref()?.get(RETAINED_AT_ANNOTATION)?;
+                Some(RetainedStore {
+                    id: StoreId::new(
+                        meta.namespace.clone()?,
+                        meta.labels.as_ref()?.get(INSTANCE_LABEL)?.clone(),
+                    ),
+                    retained_at: at.parse().ok()?,
+                })
+            })
+            .collect())
+    }
+
+    async fn purge(&self, id: &StoreId) -> Result<ReleaseOutcome, StoreError> {
+        let name = cluster_name(id.name());
+        let api = self.api(id.scope());
+        // Read again: only a Cluster that is ours and still carries the mark is deleted. A running service's does not.
+        let Some(found) = Self::get(&api, &name).await?.filter(|c| {
+            is_ours(&c.metadata, id)
+                && c.metadata
+                    .annotations
+                    .as_ref()
+                    .is_some_and(|a| a.contains_key(RETAINED_AT_ANNOTATION))
+        }) else {
+            return Ok(ReleaseOutcome::default());
+        };
+        let _ = found;
+        match api.delete(&name, &DeleteParams::background()).await {
+            Ok(_) => Ok(ReleaseOutcome {
+                existed: true,
+                retained: false,
+            }),
+            Err(kube::Error::Api(status)) if status.code == 404 => Ok(ReleaseOutcome::default()),
+            Err(e) => Err(map(format!("Cluster {name}"), e)),
+        }
     }
 }
 

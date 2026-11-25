@@ -119,6 +119,11 @@ pub struct RunArgs {
     )]
     pub tool_probe_timeout_secs: u64,
 
+    /// Days the operator keeps the database and volumes a deleted agent left behind (`deletionPolicy: Retain`) before it
+    /// deletes them (ANR-770). 90 by default; `0` keeps them for ever and turns the sweep off.
+    #[arg(long, env = "RETENTION_AFTER_DELETE_DAYS", default_value_t = 90)]
+    pub retention_after_delete_days: u64,
+
     /// Elect one replica to write (K7a), with a `coordination.k8s.io/v1` Lease: every replica keeps its caches,
     /// serves `/healthz`, `/readyz`, `/metrics` and the registry, and **only the lease holder's passes write**.
     /// Off (the default): this replica is the only one, and every pass writes.
@@ -459,6 +464,15 @@ impl RunArgs {
                 .filter(|c| !c.is_empty())
                 .collect(),
             max_access_tier: self.max_access_tier,
+            retention: aap_controller::Retention {
+                after_delete: (self.retention_after_delete_days > 0).then(|| {
+                    std::time::Duration::from_secs(
+                        self.retention_after_delete_days
+                            .saturating_mul(24 * 60 * 60),
+                    )
+                }),
+                ..aap_controller::Retention::default()
+            },
             probe: aap_controller::Probe {
                 enabled: self.tool_probe_enabled,
                 timeout: std::time::Duration::from_secs(self.tool_probe_timeout_secs),
@@ -1073,6 +1087,7 @@ mod tests {
             max_access_tier: aap_api::AccessTierCap::Auto,
             tool_probe_enabled: false,
             tool_probe_timeout_secs: 5,
+            retention_after_delete_days: 90,
             leader_election_enabled: false,
             leader_election_name: "aap-operator".to_owned(),
             leader_election_namespace: None,

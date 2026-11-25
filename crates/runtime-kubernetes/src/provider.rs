@@ -27,7 +27,7 @@ use serde_json::{Value, json};
 use crate::error::Error;
 use crate::names::{
     self, DELETION_POLICY_ANNOTATION, FIELD_MANAGER, INSTANCE_LABEL, MANAGED_BY_LABEL,
-    MANAGED_BY_VALUE, VOLUME_LABEL,
+    MANAGED_BY_VALUE, RETAINED_AT_ANNOTATION, VOLUME_LABEL,
 };
 use crate::render::{self, Rendered, WorkloadObject, parse_policy};
 use crate::status::{self, WorkloadObservation};
@@ -276,6 +276,8 @@ impl KubernetesRuntime {
         } else {
             None
         };
+        // A service that comes back claims its kept volumes again: the retention mark goes first.
+        self.mark_claims(id, None).await?;
         self.apply_all(id, &rendered).await?;
         self.remove_stale(id, &rendered).await?;
         if let Some(revoked) = &revoked {
@@ -864,6 +866,9 @@ impl KubernetesRuntime {
                 for c in &claims {
                     self.strip_owners(ns, &c.metadata).await?;
                 }
+                if existed {
+                    self.mark_claims(id, Some(&unix_now().to_string())).await?;
+                }
                 volumes.extend(
                     claims
                         .iter()
@@ -880,6 +885,108 @@ impl KubernetesRuntime {
                 })
             }
         }
+    }
+
+    /// Set (`Some`) or remove (`None`) the retention mark of every claim of the service that is not already so.
+    async fn mark_claims(&self, id: &RuntimeId, value: Option<&str>) -> Result<()> {
+        let params = PatchParams {
+            field_manager: Some(FIELD_MANAGER.to_owned()),
+            ..PatchParams::default()
+        };
+        for c in self.list_ours::<PersistentVolumeClaim>(id).await? {
+            let marked = c
+                .metadata
+                .annotations
+                .as_ref()
+                .is_some_and(|a| a.contains_key(RETAINED_AT_ANNOTATION));
+            if marked == value.is_some() {
+                continue;
+            }
+            let name = c.metadata.name.clone().unwrap_or_default();
+            self.api::<PersistentVolumeClaim>(id.scope())
+                .patch(
+                    &name,
+                    &params,
+                    &Patch::Merge(
+                        json!({"metadata": {"annotations": {RETAINED_AT_ANNOTATION: value}}}),
+                    ),
+                )
+                .await
+                .map_err(|e| Error::from_kube(what::<PersistentVolumeClaim>(&name), e))?;
+        }
+        Ok(())
+    }
+
+    /// The runtimes of `scope` (empty: every namespace) whose claims carry the retention mark and which have no workload.
+    async fn retained_claims(&self, scope: &str) -> Result<Vec<aap_ports::RetainedVolumes>> {
+        let api: Api<PersistentVolumeClaim> = if scope.is_empty() {
+            Api::all(self.client.clone())
+        } else {
+            self.api(scope)
+        };
+        let list = api
+            .list(&ListParams::default().labels(&format!("{MANAGED_BY_LABEL}={MANAGED_BY_VALUE}")))
+            .await
+            .map_err(|e| Error::from_kube(what::<PersistentVolumeClaim>("(list)"), e))?;
+        // The oldest mark of a service's claims is the one that counts.
+        let mut found: std::collections::BTreeMap<(String, String), i64> = Default::default();
+        for c in list.items {
+            let meta = &c.metadata;
+            let (Some(ns), Some(instance), Some(at)) = (
+                meta.namespace.clone(),
+                meta.labels
+                    .as_ref()
+                    .and_then(|l| l.get(INSTANCE_LABEL))
+                    .cloned(),
+                meta.annotations
+                    .as_ref()
+                    .and_then(|a| a.get(RETAINED_AT_ANNOTATION))
+                    .and_then(|v| v.parse::<i64>().ok()),
+            ) else {
+                continue;
+            };
+            let slot = found.entry((ns, instance)).or_insert(at);
+            *slot = (*slot).max(at);
+        }
+        Ok(found
+            .into_iter()
+            .map(|((ns, name), retained_at)| aap_ports::RetainedVolumes {
+                id: RuntimeId::new(ns, name),
+                retained_at,
+            })
+            .collect())
+    }
+
+    /// Delete the claims of a service that has no workload and whose claims all carry the retention mark.
+    async fn purge_claims(&self, id: &RuntimeId) -> Result<DeleteOutcome> {
+        let ns = id.scope();
+        if !self.list_ours::<StatefulSet>(id).await?.is_empty()
+            || !self.list_ours::<Deployment>(id).await?.is_empty()
+        {
+            return Ok(DeleteOutcome::default());
+        }
+        let claims = self.list_ours::<PersistentVolumeClaim>(id).await?;
+        let all_marked = !claims.is_empty()
+            && claims.iter().all(|c| {
+                c.metadata
+                    .annotations
+                    .as_ref()
+                    .is_some_and(|a| a.contains_key(RETAINED_AT_ANNOTATION))
+            });
+        if !all_marked {
+            return Ok(DeleteOutcome::default());
+        }
+        for c in &claims {
+            self.delete_named::<PersistentVolumeClaim>(
+                ns,
+                c.metadata.name.as_deref().unwrap_or_default(),
+            )
+            .await?;
+        }
+        Ok(DeleteOutcome {
+            existed: true,
+            retained_volumes: Vec::new(),
+        })
     }
 
     /// Delete every object of a kind that is this service's. `true` when there was one.
@@ -1062,6 +1169,19 @@ impl RuntimeProvider for KubernetesRuntime {
             .map_err(|e| e.into_runtime(id))
     }
 
+    async fn retained_volumes(
+        &self,
+        scope: &str,
+    ) -> Result<Vec<aap_ports::RetainedVolumes>, RuntimeError> {
+        self.retained_claims(scope)
+            .await
+            .map_err(|e| e.into_runtime(&RuntimeId::new(scope, "(retained volumes)")))
+    }
+
+    async fn purge_volumes(&self, id: &RuntimeId) -> Result<DeleteOutcome, RuntimeError> {
+        self.purge_claims(id).await.map_err(|e| e.into_runtime(id))
+    }
+
     async fn status(&self, id: &RuntimeId) -> Result<RuntimeStatus, RuntimeError> {
         self.observe(id).await.map_err(|e| e.into_runtime(id))
     }
@@ -1085,6 +1205,12 @@ impl aap_ports::testkit::RuntimeUnderTest for KubernetesRuntime {
             .await
             .unwrap_or_else(|e| panic!("reading the objects of {id}: {e}"))
     }
+}
+
+fn unix_now() -> i64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |d| i64::try_from(d.as_secs()).unwrap_or(i64::MAX))
 }
 
 #[cfg(test)]

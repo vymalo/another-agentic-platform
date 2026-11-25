@@ -107,6 +107,9 @@ pub struct Options {
     pub max_access_tier: aap_api::AccessTierCap,
     /// The MCP probe of a `ToolProvider` (K3b): off by default.
     pub probe: Probe,
+    /// How long data a deleted agent left behind (`deletionPolicy: Retain`) is kept before the operator deletes it:
+    /// 90 days by default (`RETENTION_AFTER_DELETE`).
+    pub retention: crate::Retention,
 }
 
 impl Default for Options {
@@ -125,6 +128,7 @@ impl Default for Options {
             cache_claims: std::collections::BTreeSet::new(),
             max_access_tier: aap_api::AccessTierCap::Auto,
             probe: Probe::default(),
+            retention: crate::Retention::default(),
         }
     }
 }

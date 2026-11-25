@@ -20,6 +20,9 @@ pub const INSTANCE_LABEL: &str = "app.kubernetes.io/instance";
 pub const MANAGED_BY_LABEL: &str = "app.kubernetes.io/managed-by";
 /// `app.kubernetes.io/component`: `agent`, `worker` or `front` (the [`Role`] of a workload).
 pub const COMPONENT_LABEL: &str = "app.kubernetes.io/component";
+/// On a kept claim: when the delete that kept it happened, in seconds since the Unix epoch. Written by `delete` with
+/// `Retain`, removed by `ensure`; a claim that has it belongs to no running service, and is what the retention sweep lists.
+pub const RETAINED_AT_ANNOTATION: &str = "agents.vymalo.com/retained-at";
 /// On a claim: the name of the volume it backs (`work`), so a delete can say which volumes stay.
 pub const VOLUME_LABEL: &str = "agents.vymalo.com/volume";
 

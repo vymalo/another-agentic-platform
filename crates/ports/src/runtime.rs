@@ -118,6 +118,15 @@ pub struct DeleteOutcome {
     pub retained_volumes: Vec<String>,
 }
 
+/// The volumes of a deleted runtime that were kept (`Retain`), with when it was deleted.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RetainedVolumes {
+    /// Whose volumes they were.
+    pub id: RuntimeId,
+    /// When the delete happened, in seconds since the Unix epoch.
+    pub retained_at: i64,
+}
+
 /// Makes the compute of an agent exist.
 ///
 /// A provider is a build-time choice (AD-020): the controller is generic over it. The methods are
@@ -170,6 +179,34 @@ pub trait RuntimeProvider: Send + Sync {
         &self,
         id: &RuntimeId,
     ) -> impl Future<Output = Result<DeleteOutcome, RuntimeError>> + Send;
+
+    /// The runtimes of `scope` whose volumes a `delete` with `Retain` kept and nobody claimed since, with the time
+    /// of that delete. A running runtime is never in it. The default is none.
+    ///
+    /// # Errors
+    ///
+    /// `Unavailable` when the backend cannot be reached.
+    fn retained_volumes(
+        &self,
+        scope: &str,
+    ) -> impl Future<Output = Result<Vec<RetainedVolumes>, RuntimeError>> + Send {
+        let _ = scope;
+        async { Ok(Vec::new()) }
+    }
+
+    /// Delete the kept volumes of `id` (the retention period ran out). A runtime that is running, or whose
+    /// volumes were not kept, is left alone and the answer is `existed: false`.
+    ///
+    /// # Errors
+    ///
+    /// `Unavailable` when the backend cannot be reached.
+    fn purge_volumes(
+        &self,
+        id: &RuntimeId,
+    ) -> impl Future<Output = Result<DeleteOutcome, RuntimeError>> + Send {
+        let _ = id;
+        async { Ok(DeleteOutcome::default()) }
+    }
 
     /// How the runtime is doing. A runtime that does not exist is `Phase::Absent`, not an error.
     ///
@@ -231,6 +268,20 @@ impl<T: RuntimeProvider + ?Sized> RuntimeProvider for std::sync::Arc<T> {
         id: &RuntimeId,
     ) -> impl Future<Output = Result<DeleteOutcome, RuntimeError>> + Send {
         (**self).delete(id)
+    }
+
+    fn retained_volumes(
+        &self,
+        scope: &str,
+    ) -> impl Future<Output = Result<Vec<RetainedVolumes>, RuntimeError>> + Send {
+        (**self).retained_volumes(scope)
+    }
+
+    fn purge_volumes(
+        &self,
+        id: &RuntimeId,
+    ) -> impl Future<Output = Result<DeleteOutcome, RuntimeError>> + Send {
+        (**self).purge_volumes(id)
     }
 
     fn status(

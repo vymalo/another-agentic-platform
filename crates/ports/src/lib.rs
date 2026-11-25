@@ -42,11 +42,11 @@ pub use objects::{
     config_references,
 };
 pub use runtime::{
-    Capabilities, DeleteOutcome, Endpoint, Issue, IssueReason, Phase, RuntimeProvider,
-    RuntimeStatus, Surface,
+    Capabilities, DeleteOutcome, Endpoint, Issue, IssueReason, Phase, RetainedVolumes,
+    RuntimeProvider, RuntimeStatus, Surface,
 };
 pub use spec::*;
 pub use store::{
-    CNPG_URI_KEY, CnpgSpec, ReleaseOutcome, StoreCapabilities, StoreKind, StoreProvisioner,
-    StoreSpec, StoreState, StoreStatus, cnpg_connection,
+    CNPG_URI_KEY, CnpgSpec, ReleaseOutcome, RetainedStore, StoreCapabilities, StoreKind,
+    StoreProvisioner, StoreSpec, StoreState, StoreStatus, cnpg_connection,
 };
