@@ -1832,6 +1832,7 @@ The cost is a second image and a second Deployment. The registry stays in the op
 | `GET /v1/agents/{name}/events` | **K8.** The Kubernetes Events about the agent's objects, newest first, at most 100: `{ "events": [{ type, reason, message, object: { kind, name }, count, firstSeen, lastSeen }] }`. Why an agent is not `Ready` (see *Events and the OpenAPI document*) |
 | `GET`, `PUT`, `DELETE /v1/models/{name}`, `GET /v1/models` | `ModelEndpoint` objects; a delete of one still referenced is 409 with the agents that use it |
 | `GET`, `PUT`, `DELETE /v1/tool-servers/{name}`, `GET /v1/tool-servers` | `ToolProvider` objects; the same 409 rule |
+| `GET /v1/owners/{owner}/agents`, `GET`, `PUT`, `DELETE /v1/owners/{owner}/agents/{name}` | **ANR-661.** The same agent operations, for the agents whose `spec.owner` is the owner in the path and no other (the orchestrator makes one coder per person). An agent with another owner, or none, is a `404`, never a `403`, so nothing of it is learned; a replace is also how such an agent is suspended; the form's `owner` is the path's or absent |
 | `GET /v1/secret-keys` | The Secret keys an agent may reference (AD-030): Secret name, key, and the ExternalSecret that makes it. Never a value |
 | `GET /v1/openapi.json` | **K8.** The OpenAPI 3.1 document of this API, generated from the table of routes (see *Events and the OpenAPI document*) |
 
@@ -1842,6 +1843,7 @@ The cost is a second image and a second Deployment. The registry stays in the op
 | none beyond a valid token | `GET /v1/me` |
 | `platform:agents.read` | every `GET` of `/v1/info`, `/v1/agents`, `/v1/models` and `/v1/tool-servers`, `GET /v1/agents/{name}/yaml`, `GET /v1/agents/{name}/events` and `GET /v1/openapi.json` (K8) |
 | `platform:agents.write` | `PUT` and `DELETE` of `/v1/agents/{name}`, which includes `spec.suspend` and `spec.access.audience` |
+| `platform:agents.own` | **ANR-661.** The four routes under `/v1/owners/{owner}/agents`: read, create, replace (suspend and resume included) and delete the agents whose `spec.owner` is the owner in the path. It is **scoped by data**, not by route, so it is the orchestrator's alone and never a person's role |
 | `platform:models.write` | `PUT` and `DELETE` of `/v1/models/{name}` |
 | `platform:toolproviders.write` | `PUT` and `DELETE` of `/v1/tool-servers/{name}` |
 | `platform:secrets.pick` | `GET /v1/secret-keys`, **and any write whose body names a secret key** (a model's API key, a tool server's header, a coder's GitHub App key), in addition to the write's own permission |
@@ -2037,6 +2039,7 @@ The owner, 2026-10-05, asked *"can we break down into permissions and let roles 
 |---|---|
 | `platform:agents.read` | Read the dashboard: agents, models, tool servers, deployment defaults, View YAML. Draws `/admin` |
 | `platform:agents.write` | Create, edit, suspend, resume and delete agents, including their audience |
+| `platform:agents.own` | Read, make, replace, suspend and delete the agents whose `spec.owner` is the owner named in the path of `/v1/owners/{owner}/agents`, and no other (ANR-661). The orchestrator's |
 | `platform:models.write` | Create, edit and delete `ModelEndpoint`s |
 | `platform:toolproviders.write` | Create, edit and delete `ToolProvider`s |
 | `platform:secrets.pick` | See the offered Secret keys and name one in a write (AD-030) |

@@ -42,6 +42,14 @@ pub struct AgentServiceSpec {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub description: Option<String>,
 
+    /// The person or account this agent belongs to, as the orchestrator names them: 1 to 63 characters of
+    /// lower-case letters, digits, `-` and `_`. Absent: nobody's, and no owner-scoped route of the Platform API
+    /// can touch it. Changing it never restarts the agent (it is not in the digest). It is **not** the Kubernetes
+    /// owner reference of a pod.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schemars(length(min = 1, max = 63), regex(pattern = r"^[a-z0-9][a-z0-9_-]*$"))]
+    pub owner: Option<String>,
+
     /// The AgentConfig, in the same namespace, this service runs.
     pub config_ref: NameRef,
 
@@ -71,6 +79,17 @@ pub struct AgentServiceSpec {
     /// What happens to data (work volumes, an operator-owned database) when the service is deleted.
     #[serde(default)]
     pub deletion_policy: DeletionPolicy,
+}
+
+/// An agent's owner (`AgentService.spec.owner`): 1 to 63 characters of lower-case letters, digits, `-` and `_`, starting
+/// with a letter or a digit. Never a path separator or a space: it is a segment of a route.
+pub fn is_owner_name(s: &str) -> bool {
+    let mut bytes = s.bytes();
+    s.len() <= 63
+        && bytes
+            .next()
+            .is_some_and(|b| b.is_ascii_lowercase() || b.is_ascii_digit())
+        && bytes.all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'-' || b == b'_')
 }
 
 /// The protocol surfaces of a service (§11). Only A2A is served in v0.

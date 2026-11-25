@@ -187,6 +187,7 @@ expanded (AD-032). **The Platform API checks one of these strings and never a ro
 |---|---|---|
 | `AGENTS_READ` | `platform:agents.read` | every `GET` of `/v1/info`, `/v1/agents`, `/v1/models`, `/v1/tool-servers`, and `GET /v1/agents/{name}/yaml`; draws `/admin` |
 | `AGENTS_WRITE` | `platform:agents.write` | `PUT` and `DELETE` of `/v1/agents/{name}` (suspend and the audience included) |
+| `AGENTS_OWN` | `platform:agents.own` | the four routes under `/v1/owners/{owner}/agents`: only agents whose `spec.owner` is the owner in the path (the orchestrator's; never a person's role) |
 | `MODELS_WRITE` | `platform:models.write` | `PUT` and `DELETE` of `/v1/models/{name}` |
 | `TOOLPROVIDERS_WRITE` | `platform:toolproviders.write` | `PUT` and `DELETE` of `/v1/tool-servers/{name}` |
 | `SECRETS_PICK` | `platform:secrets.pick` | `GET /v1/secret-keys`, and any write whose body names a secret key, beside the write's own permission |
