@@ -222,7 +222,7 @@ fn validate_accepts_every_example() {
 /// rules when a config uses it (the operator judges every endpoint; the CLI judges only the endpoints no config reaches).
 /// The CLI does not read a schema and does not evaluate CEL, so it cannot refuse them: it accepts them, and says so in its
 /// README.
-const REFUSED_BY_THE_API_SERVER_ONLY: [&str; 17] = [
+const REFUSED_BY_THE_API_SERVER_ONLY: [&str; 23] = [
     "audience-star-with-others.yaml",
     "audience-too-many.yaml",
     "audience-value-empty.yaml",
@@ -235,6 +235,12 @@ const REFUSED_BY_THE_API_SERVER_ONLY: [&str; 17] = [
     "model-endpoint-models-too-many.yaml",
     "model-endpoint-title-empty.yaml",
     "model-endpoint-title-too-long.yaml",
+    "scaling-idle-timeout-malformed.yaml",
+    "scaling-idle-timeout-too-long.yaml",
+    "scaling-idle-timeout-too-short.yaml",
+    "scaling-wake-ahead-out-of-range.yaml",
+    "scaling-wake-timeout-out-of-range.yaml",
+    "scaling-wake-without-idle-timeout.yaml",
     "tool-provider-headers-too-many.yaml",
     "tool-provider-title-empty.yaml",
     "tool-provider-title-too-long.yaml",
