@@ -164,8 +164,17 @@ impl CnpgStore {
             }
             aap_ports::DeletionPolicy::Retain => {
                 self.strip_owners(&api, &name, &found).await?;
-                self.patch_annotation(&api, &name, Some(&unix_now().to_string()))
-                    .await?;
+                // Stamped once: a release that finds the mark leaves it, or every reconcile of a
+                // retained store would restart its retention period and it would never fall due.
+                let marked = found
+                    .metadata
+                    .annotations
+                    .as_ref()
+                    .is_some_and(|a| a.contains_key(RETAINED_AT_ANNOTATION));
+                if !marked {
+                    self.patch_annotation(&api, &name, Some(&unix_now().to_string()))
+                        .await?;
+                }
                 Ok(ReleaseOutcome {
                     existed: true,
                     retained: true,
