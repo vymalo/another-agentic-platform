@@ -24,6 +24,12 @@ pub use auth::MemoryAuthenticator;
 pub use leader::{MemoryElection, MemoryTimings};
 pub use objects::MemoryObjects;
 
+fn unix_now() -> i64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |d| i64::try_from(d.as_secs()).unwrap_or(i64::MAX))
+}
+
 fn lock<T>(m: &Mutex<T>) -> MutexGuard<'_, T> {
     m.lock().unwrap_or_else(PoisonError::into_inner)
 }
@@ -87,6 +93,8 @@ struct RuntimeEntry {
 
 struct RuntimeState {
     runtimes: BTreeMap<RuntimeId, RuntimeEntry>,
+    retained: BTreeMap<RuntimeId, i64>,
+    now: Option<i64>,
     foreign: BTreeSet<RuntimeId>,
     unavailable: bool,
     can_suspend: bool,
@@ -117,6 +125,8 @@ impl MemoryRuntime {
             inner: Arc::new(RuntimeInner {
                 state: Mutex::new(RuntimeState {
                     runtimes: BTreeMap::new(),
+                    retained: BTreeMap::new(),
+                    now: None,
                     foreign: BTreeSet::new(),
                     unavailable: false,
                     can_suspend: true,
@@ -124,6 +134,11 @@ impl MemoryRuntime {
                 changes,
             }),
         }
+    }
+
+    /// Fix the clock that stamps a retained delete (seconds since the Unix epoch); without it, the system's.
+    pub fn set_now(&self, unix_seconds: i64) {
+        lock(&self.inner.state).now = Some(unix_seconds);
     }
 
     /// A provider without the `suspend` capability.
@@ -253,6 +268,7 @@ impl RuntimeProvider for MemoryRuntime {
                     forced: None,
                 },
             );
+            s.retained.remove(id);
             Self::status_of(&s, id)
         };
         self.notify(id);
@@ -282,19 +298,54 @@ impl RuntimeProvider for MemoryRuntime {
             Self::up(&s)?;
             match s.runtimes.remove(id) {
                 None => DeleteOutcome::default(),
-                Some(e) => DeleteOutcome {
-                    existed: true,
-                    retained_volumes: match e.spec.deletion {
+                Some(e) => {
+                    let retained_volumes = match e.spec.deletion {
                         crate::DeletionPolicy::Retain => persistent_volumes(&e.spec),
                         crate::DeletionPolicy::Delete => Vec::new(),
-                    },
-                },
+                    };
+                    if !retained_volumes.is_empty() {
+                        let now = s.now.unwrap_or_else(unix_now);
+                        s.retained.insert(id.clone(), now);
+                    }
+                    DeleteOutcome {
+                        existed: true,
+                        retained_volumes,
+                    }
+                }
             }
         };
         if outcome.existed {
             self.notify(id);
         }
         Ok(outcome)
+    }
+
+    async fn retained_volumes(
+        &self,
+        scope: &str,
+    ) -> Result<Vec<crate::RetainedVolumes>, RuntimeError> {
+        let s = lock(&self.inner.state);
+        Self::up(&s)?;
+        Ok(s.retained
+            .iter()
+            .filter(|(id, _)| id.scope() == scope && !s.runtimes.contains_key(*id))
+            .map(|(id, at)| crate::RetainedVolumes {
+                id: id.clone(),
+                retained_at: *at,
+            })
+            .collect())
+    }
+
+    async fn purge_volumes(&self, id: &RuntimeId) -> Result<DeleteOutcome, RuntimeError> {
+        let mut s = lock(&self.inner.state);
+        Self::up(&s)?;
+        if s.runtimes.contains_key(id) {
+            return Ok(DeleteOutcome::default());
+        }
+        Ok(DeleteOutcome {
+            existed: s.retained.remove(id).is_some(),
+            retained_volumes: Vec::new(),
+        })
     }
 
     async fn status(&self, id: &RuntimeId) -> Result<RuntimeStatus, RuntimeError> {
@@ -359,6 +410,8 @@ impl crate::testkit::RuntimeUnderTest for MemoryRuntime {
 
 struct StoreInner {
     stores: BTreeMap<StoreId, StoreSpec>,
+    retained: BTreeMap<StoreId, i64>,
+    now: Option<i64>,
     can_cnpg: bool,
     cnpg_installed: bool,
     cluster_ready: bool,
@@ -382,11 +435,18 @@ impl MemoryStore {
         Self {
             state: Arc::new(Mutex::new(StoreInner {
                 stores: BTreeMap::new(),
+                retained: BTreeMap::new(),
+                now: None,
                 can_cnpg: true,
                 cnpg_installed: true,
                 cluster_ready: true,
             })),
         }
+    }
+
+    /// Fix the clock that stamps a retained release (seconds since the Unix epoch); without it, the system's.
+    pub fn set_now(&self, unix_seconds: i64) {
+        lock(&self.state).now = Some(unix_seconds);
     }
 
     /// A provisioner that serves the Secret kind only.
@@ -445,20 +505,51 @@ impl StoreProvisioner for MemoryStore {
                 }
             }
         };
+        s.retained.remove(id);
         s.stores.insert(id.clone(), spec.clone());
         Ok(status)
     }
 
     async fn release(&self, id: &StoreId) -> Result<ReleaseOutcome, StoreError> {
         let mut s = lock(&self.state);
+        let now = s.now.unwrap_or_else(unix_now);
         Ok(match s.stores.remove(id) {
             None => ReleaseOutcome::default(),
-            Some(spec) => ReleaseOutcome {
-                existed: true,
+            Some(spec) => {
                 // Only an operator-owned cluster holds data of ours.
-                retained: matches!(spec.kind, StoreKind::Cnpg(_))
-                    && spec.deletion == crate::DeletionPolicy::Retain,
-            },
+                let retained = matches!(spec.kind, StoreKind::Cnpg(_))
+                    && spec.deletion == crate::DeletionPolicy::Retain;
+                if retained {
+                    s.retained.insert(id.clone(), now);
+                }
+                ReleaseOutcome {
+                    existed: true,
+                    retained,
+                }
+            }
+        })
+    }
+
+    async fn retained(&self, scope: &str) -> Result<Vec<crate::RetainedStore>, StoreError> {
+        let s = lock(&self.state);
+        Ok(s.retained
+            .iter()
+            .filter(|(id, _)| id.scope() == scope && !s.stores.contains_key(*id))
+            .map(|(id, at)| crate::RetainedStore {
+                id: id.clone(),
+                retained_at: *at,
+            })
+            .collect())
+    }
+
+    async fn purge(&self, id: &StoreId) -> Result<ReleaseOutcome, StoreError> {
+        let mut s = lock(&self.state);
+        if s.stores.contains_key(id) {
+            return Ok(ReleaseOutcome::default());
+        }
+        Ok(ReleaseOutcome {
+            existed: s.retained.remove(id).is_some(),
+            retained: false,
         })
     }
 }

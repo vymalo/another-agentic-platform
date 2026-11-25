@@ -311,6 +311,11 @@ networkPolicy:
 # whose CIDR has a `/0` prefix, or that has no cidr, is refused (for `to` and for `dns.to`). NOTE: the API server's own egress rule is separate and, with `networkPolicy.apiServer.cidrs` empty,
 # already allows any address on 443 and 6443; an https probe on 443 is therefore bounded by `toolProbe.to` only once that list names the API
 # server's addresses. Narrow it in a deployment that probes https servers.
+# ANR-770: what the operator does with the database and volumes a deleted agent left behind (deletionPolicy: Retain).
+# Unset: the operator's default, 90 days, then it deletes them. `afterDeleteDays: 0` keeps them for ever. Uncomment to set.
+retention: {}
+#  afterDeleteDays: 90
+
 toolProbe:
   # Who the operator may reach. Empty: no probe, and not a trace of it in any render. The peers of an in-cluster MCP server (a
   # namespaceSelector or a podSelector) or its addresses (an ipBlock).

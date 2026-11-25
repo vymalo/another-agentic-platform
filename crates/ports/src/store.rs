@@ -110,6 +110,15 @@ pub struct ReleaseOutcome {
     pub retained: bool,
 }
 
+/// A store whose service is gone and whose data was kept (`Retain`), with when it was let go.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RetainedStore {
+    /// Whose store it was.
+    pub id: StoreId,
+    /// When the release happened, in seconds since the Unix epoch.
+    pub retained_at: i64,
+}
+
 /// Makes the store of an agent exist.
 ///
 /// The same conventions as [`RuntimeProvider`](crate::RuntimeProvider): native `async fn`s with a
@@ -141,6 +150,35 @@ pub trait StoreProvisioner: Send + Sync {
         &self,
         id: &StoreId,
     ) -> impl Future<Output = Result<ReleaseOutcome, StoreError>> + Send;
+
+    /// The stores of `scope` whose data was kept by a `release` with `Retain` and not claimed since, with the time of
+    /// that release. A store of a running service is never in it: `ensure` clears the mark. The default is none,
+    /// for a provisioner that keeps nothing of its own.
+    ///
+    /// # Errors
+    ///
+    /// `Unavailable` when the backend cannot be reached.
+    fn retained(
+        &self,
+        scope: &str,
+    ) -> impl Future<Output = Result<Vec<RetainedStore>, StoreError>> + Send {
+        let _ = scope;
+        async { Ok(Vec::new()) }
+    }
+
+    /// Delete the data of a retained store (the retention period ran out). Refuses, with
+    /// `existed: false`, a store that is not retained: a running service's data is never purged here.
+    ///
+    /// # Errors
+    ///
+    /// `Unavailable` when the backend cannot be reached.
+    fn purge(
+        &self,
+        id: &StoreId,
+    ) -> impl Future<Output = Result<ReleaseOutcome, StoreError>> + Send {
+        let _ = id;
+        async { Ok(ReleaseOutcome::default()) }
+    }
 }
 
 /// An `Arc` of a provisioner is a provisioner: every call is the one it wraps. It is how a composition root hands
@@ -164,5 +202,19 @@ impl<T: StoreProvisioner + ?Sized> StoreProvisioner for std::sync::Arc<T> {
         id: &StoreId,
     ) -> impl Future<Output = Result<ReleaseOutcome, StoreError>> + Send {
         (**self).release(id)
+    }
+
+    fn retained(
+        &self,
+        scope: &str,
+    ) -> impl Future<Output = Result<Vec<RetainedStore>, StoreError>> + Send {
+        (**self).retained(scope)
+    }
+
+    fn purge(
+        &self,
+        id: &StoreId,
+    ) -> impl Future<Output = Result<ReleaseOutcome, StoreError>> + Send {
+        (**self).purge(id)
     }
 }

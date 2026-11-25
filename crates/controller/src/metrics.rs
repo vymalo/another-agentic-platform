@@ -26,6 +26,8 @@ pub mod name {
     pub const RUNTIME_SIGNALS: &str = "aap_runtime_signals_total";
     /// Services deleted: the finalizer ran `RuntimeProvider::delete` and the store's release.
     pub const SERVICES_DELETED: &str = "aap_services_deleted_total";
+    /// Retained databases and volumes the retention sweep deleted.
+    pub const RETENTION_PURGED: &str = "aap_retention_purged_total";
 }
 
 fn help(series: &str) -> &'static str {
@@ -37,6 +39,9 @@ fn help(series: &str) -> &'static str {
         name::STATE_CHANGES => "AgentService state changes, by the new state.",
         name::RUNTIME_SIGNALS => "Runtime ids reported by the provider's watch.",
         name::SERVICES_DELETED => "AgentServices whose runtime and store were released.",
+        name::RETENTION_PURGED => {
+            "Retained databases and volumes deleted after the retention period."
+        }
         _ => "",
     }
 }

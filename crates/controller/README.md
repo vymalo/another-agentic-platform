@@ -291,6 +291,16 @@ directory hands the registry both entries, and the registry leaves both out. The
 **not** know it — both still say `True`, because the controller never builds the document; a `Listed: False` for this
 reason would be a new condition reason the owner has not decided (a note in the K6b report).
 
+## Retention sweep (ANR-770)
+
+A deleted `AgentService` with `deletionPolicy: Retain` leaves its CloudNativePG `Cluster` and its volume claims. `release` and `delete`
+stamp them with `agents.vymalo.com/retained-at` (Unix seconds); `ensure` removes the stamp, so a running agent's data never carries it.
+The sweep (`retention.rs`, `Operator::run`, leader-gated, hourly) asks `StoreProvisioner::retained` and `RuntimeProvider::retained_volumes`
+and deletes what is older than `Options::retention` (default 90 days; `RETENTION_AFTER_DELETE_DAYS`, `0` turns it off) through `purge` and
+`purge_volumes`, which refuse anything that is not marked or has a workload. `sweep(runtime, store, scope, now, period)` is pure over a
+given time: `retained_store_is_purged_only_after_the_period` and `running_agent_store_is_never_purged` drive it with `MemoryStore::set_now`.
+The four new port methods have defaults (nothing retained), so no implementer breaks. Counter: `aap_retention_purged_total`.
+
 ## Metrics
 
 `Metrics` is a few counters in Prometheus text (no client library): `aap_reconcile_total{controller,result}`,
