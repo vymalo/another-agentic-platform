@@ -265,6 +265,30 @@ jobs:
           kubectl -n aap-test get events --sort-by=.lastTimestamp | tail -80 || true
           kubectl -n aap-test describe pods | tail -200 || true
 
+  usage-postgres:
+    # The UsageStore adapter (ANR-729) on a real Postgres. Nothing may skip: with AAP_TEST_REQUIRE_DB an unset database is a failure.
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_PASSWORD: aap
+          POSTGRES_DB: usage_test
+        ports: ["5432:5432"]
+        options: >-
+          --health-cmd "pg_isready -U postgres" --health-interval 5s --health-timeout 5s --health-retries 10
+    steps:
+      - uses: actions/checkout@v7
+      - name: Install Rust
+        run: rustup toolchain install "$RUST_TOOLCHAIN" --profile minimal --no-self-update && rustup default "$RUST_TOOLCHAIN"
+      - uses: Swatinem/rust-cache@v2
+      - name: The adapter against Postgres
+        env:
+          AAP_TEST_REQUIRE_DB: "1"
+          AAP_TEST_DATABASE_URL: host=127.0.0.1 port=5432 user=postgres password=aap dbname=usage_test
+        run: cargo test -p aap-usage-postgres --locked
+
   store-cnpg:
     # StoreProvisioner for an operator-owned CloudNativePG Cluster against a real API server (S6): the conformance
     # suite of aap-ports and the cases only CloudNativePG shows. Nothing may skip.

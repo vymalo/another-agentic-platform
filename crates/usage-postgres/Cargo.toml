@@ -1,0 +1,23 @@
+[package]
+name = "aap-usage-postgres"
+description = "The Postgres adapter of the usage ingest's UsageStore (ANR-729, AD-060): takes each pod-minute event once on (source, id) and sums distinct events by ingestion window"
+readme = "README.md"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+publish.workspace = true
+
+[dependencies]
+aap-usage = { path = "../usage" }
+tokio-postgres = { version = "0.7", default-features = false }
+
+[dev-dependencies]
+aap-usage = { path = "../usage", features = ["testkit"] }
+tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }
+tokio-postgres = { version = "0.7", default-features = false, features = ["runtime"] }
+
+[lints]
+workspace = true
