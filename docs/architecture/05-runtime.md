@@ -189,7 +189,7 @@ The stable service continues to exist while runtime compute is absent.
 
 ## 21a. Sleep when idle: the plan
 
-*(2026-11-24, ANR-255; documentation only, nothing here is built. The decision is [AD-058](11-decisions.md#ad-058--an-agent-sleeps-when-the-agent-says-it-is-idle-and-an-activator-wakes-it).)*
+*(2026-11-24, ANR-255; accepted 2026-11-25. Slice P1 is built (the CRD fields `scaling.idleTimeout`, `wakeAhead`, `wakeTimeout` and the status phase `Sleeping`, durations like `15m`, all absent by default); P2 to P4 are not. The decision is [AD-058](11-decisions.md#ad-058--an-agent-sleeps-when-the-agent-says-it-is-idle-and-an-activator-wakes-it).)*
 
 ### What is built, and what is not (read at plat `main`, 2026-11-24)
 

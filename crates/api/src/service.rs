@@ -156,6 +156,24 @@ pub struct Scaling {
     /// The front of a `split` topology.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub front: Option<Front>,
+
+    /// Sleep when idle (AD-058, §21a). How long the agent must report no work before the operator
+    /// scales it to zero, as a duration (`15m`, `1h`): 1 m to 24 h. Absent: the agent never sleeps.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[x_kube(validation = Rule::new("self.matches('^[0-9]+(s|m|h)$') && duration(self) >= duration('1m') && duration(self) <= duration('24h')").message("scaling.idleTimeout must be a duration of 1m to 24h, like 15m"))]
+    pub idle_timeout: Option<String>,
+
+    /// How long before a schedule is due the agent is woken, as a duration: 0 s to 1 h. Absent: 60 s.
+    /// Only read when `idleTimeout` is set.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[x_kube(validation = Rule::new("self.matches('^[0-9]+(s|m|h)$') && duration(self) <= duration('1h')").message("scaling.wakeAhead must be a duration of 0s to 1h, like 60s"))]
+    pub wake_ahead: Option<String>,
+
+    /// How long a request is held while a sleeping agent wakes, as a duration: 5 s to 5 m. Absent:
+    /// 60 s. Only read when `idleTimeout` is set.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[x_kube(validation = Rule::new("self.matches('^[0-9]+(s|m|h)$') && duration(self) >= duration('5s') && duration(self) <= duration('5m')").message("scaling.wakeTimeout must be a duration of 5s to 5m, like 60s"))]
+    pub wake_timeout: Option<String>,
 }
 
 fn one() -> i32 {
@@ -168,6 +186,9 @@ impl Default for Scaling {
             topology: Topology::default(),
             workers: one(),
             front: None,
+            idle_timeout: None,
+            wake_ahead: None,
+            wake_timeout: None,
         }
     }
 }

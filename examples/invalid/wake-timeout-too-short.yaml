@@ -1,0 +1,25 @@
+# Refused: scaling.wakeTimeout is 1s.
+# expect: scaling.wakeTimeout must be a duration of 5s to 5m
+apiVersion: agents.vymalo.com/v1alpha1
+kind: AgentService
+metadata:
+  name: invalid-wake-timeout-too-short
+  namespace: another-agentic-system
+spec:
+  configRef:
+    name: chat
+  interfaces:
+    a2a:
+      enabled: true
+      bearerTokensSecretRef:
+        name: tokens
+        key: A2A_BEARER_TOKENS
+  scaling:
+    topology: combined
+    workers: 1
+    wakeTimeout: 1s
+  store:
+    postgres:
+      secretRef:
+        name: db
+        key: uri

@@ -1,0 +1,25 @@
+# Refused: scaling.wakeAhead is 2h.
+# expect: scaling.wakeAhead must be a duration of 0s to 1h
+apiVersion: agents.vymalo.com/v1alpha1
+kind: AgentService
+metadata:
+  name: invalid-wake-ahead-too-long
+  namespace: another-agentic-system
+spec:
+  configRef:
+    name: chat
+  interfaces:
+    a2a:
+      enabled: true
+      bearerTokensSecretRef:
+        name: tokens
+        key: A2A_BEARER_TOKENS
+  scaling:
+    topology: combined
+    workers: 1
+    wakeAhead: 2h
+  store:
+    postgres:
+      secretRef:
+        name: db
+        key: uri

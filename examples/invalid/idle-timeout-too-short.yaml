@@ -1,0 +1,25 @@
+# Refused: scaling.idleTimeout is 30s.
+# expect: scaling.idleTimeout must be a duration of 1m to 24h
+apiVersion: agents.vymalo.com/v1alpha1
+kind: AgentService
+metadata:
+  name: invalid-idle-timeout-too-short
+  namespace: another-agentic-system
+spec:
+  configRef:
+    name: chat
+  interfaces:
+    a2a:
+      enabled: true
+      bearerTokensSecretRef:
+        name: tokens
+        key: A2A_BEARER_TOKENS
+  scaling:
+    topology: combined
+    workers: 1
+    idleTimeout: 30s
+  store:
+    postgres:
+      secretRef:
+        name: db
+        key: uri
