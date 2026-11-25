@@ -121,7 +121,7 @@ shared_status_is_patched_only() {
 # renders below, which do not set them.
 golden() { # golden <name> <helm args>: the render equals tests/golden/<name>.yaml (or rewrites it)
   name=$1; shift
-  render "$@" --set image.tag=sha-0000000 --set api.image.tag=sha-0000000
+  render "$@" --set image.tag=sha-0000000 --set api.image.tag=sha-0000000 --set usageIngest.image.tag=sha-0000000
   if [ "${UPDATE_GOLDEN:-}" = 1 ]; then cp "$out" "$here/golden/$name.yaml"; echo "wrote tests/golden/$name.yaml" >&2; return 0; fi
   cmp -s "$out" "$here/golden/$name.yaml"
 }
@@ -131,6 +131,7 @@ check "the default render equals tests/golden/default.yaml" golden default
 check "the Platform API render (tests/api.values.yaml) equals tests/golden/api.yaml" golden api -f "$here/api.values.yaml"
 check "the run pods render (tests/runpods.values.yaml) equals tests/golden/runpods.yaml" golden runpods -f "$here/runpods.values.yaml"
 check "the leader election render (tests/leader.values.yaml) equals tests/golden/leader.yaml" golden leader -f "$here/leader.values.yaml"
+check "the usage ingest render (tests/usage-ingest.values.yaml) equals tests/golden/usage-ingest.yaml" golden usage-ingest -f "$here/usage-ingest.values.yaml"
 
 # ---- The default render: no registry, nothing a secret could be in --------------------------------------------------------
 render
@@ -1962,6 +1963,66 @@ check "toolProbe.dns must be a map" refused_tool 'toolProbe.dns must be a map' -
 check "toolProbe.dns is required with the policy on" refused_tool 'toolProbe.dns is required' --set toolProbe.dns=null
 check "toolProbe.dns.to is required with the policy on" refused_tool 'toolProbe.dns.to is required' --set-json 'toolProbe.dns.to=[]'
 check "toolProbe.dns.ports must name a port" refused 'toolProbe.dns.ports must name at least one port' --set-json 'toolProbe.dns.ports=[]'
+
+# ---- The usage ingest (ANR-731): off by default and then not a trace; on, each object is checked and each refusal is named ---------
+check "usage ingest off: nothing of it is rendered (no usage-ingest object, no tokenreviews right)" \
+  sh -c 'render() { helm template aap-operator "$1" --namespace "$2" > "$3"; }; render "$1" "$2" "$3" && ! grep -Eq "usage-ingest|tokenreviews" "$3"' _ "$chart" "$ns" "$out"
+render -f "$here/usage-ingest.values.yaml"
+usage_objects() {
+  dhas Deployment aap-operator-usage-ingest 'kind: Deployment' && dhas Service aap-operator-usage-ingest 'kind: Service' \
+    && dhas ServiceAccount aap-operator-usage-ingest 'kind: ServiceAccount' && dhas NetworkPolicy aap-operator-usage-ingest 'kind: NetworkPolicy' \
+    && dhas ClusterRole aap-operator-usage-ingest-another-agentic-system 'kind: ClusterRole' \
+    && dhas ClusterRoleBinding aap-operator-usage-ingest-another-agentic-system 'kind: ClusterRoleBinding'
+}
+check "usage ingest on: a Deployment, Service, ServiceAccount, NetworkPolicy, ClusterRole and ClusterRoleBinding" usage_objects
+usage_deployment() {
+  dhas Deployment aap-operator-usage-ingest 'image: "ghcr.io/vymalo/another-agentic-platform/usage-ingest:sha-1234567"' \
+    'name: USAGE_TOKEN_AUDIENCE' 'value: "another-usage-ingest"' \
+    'value: "system:serviceaccount:another-agentic-system:usage-meter"' 'value: "system:serviceaccount:another-agentic-system:usage-ledger"' \
+    'value: /etc/usage-ingest/db/uri' 'secretName: usage-db-app' 'readOnlyRootFilesystem: true' 'runAsNonRoot: true' 'drop: \[ALL\]' \
+    'cpu: 500m' 'memory: 256Mi' 'secretName: usage-ingest-tls' 'path: /readyz'
+}
+check "usage ingest on: the pinned image, the identity settings, the database Secret as a file, hardened container, CPU and memory limits, the tls Secret" usage_deployment
+usage_no_secret_value() {
+  dlacks Deployment aap-operator-usage-ingest 'DATABASE_URL$' 'postgres(ql)?://' 'secretKeyRef' && lacks '^kind: Secret$' \
+    && lacks '(ghp_|github_pat_|-----BEGIN|AKIA[0-9A-Z]{16}|eyJ[A-Za-z0-9_-]{20})'
+}
+check "usage ingest on: the connection string is a mounted file, never a variable, and no Secret object or token-looking value is rendered" usage_no_secret_value
+usage_cluster_right() {
+  d=$(doc ClusterRole aap-operator-usage-ingest-another-agentic-system)
+  printf '%s\n' "$d" | grep -Eq 'authentication.k8s.io' && printf '%s\n' "$d" | grep -Eq 'tokenreviews' \
+    && [ "$(printf '%s\n' "$d" | grep -c 'verbs:')" = 1 ] && printf '%s\n' "$d" | grep -Eq 'verbs: \["create"\]' \
+    && ! printf '%s\n' "$d" | grep -Eq 'secrets|\*|get|list|watch|patch|delete|update'
+}
+check "usage ingest on: the one cluster-scoped right is create on tokenreviews, no Secret, no wildcard" usage_cluster_right
+usage_policy() {
+  d=$(doc NetworkPolicy aap-operator-usage-ingest)
+  printf '%s\n' "$d" | grep -Eq 'app.kubernetes.io/name: usage-meter' && printf '%s\n' "$d" | grep -Eq 'app.kubernetes.io/name: usage-ledger' \
+    && printf '%s\n' "$d" | grep -Eq 'cnpg.io/cluster: usage-db' && printf '%s\n' "$d" | grep -Eq 'cidr: 10.96.0.1/32' \
+    && [ "$(printf '%s\n' "$d" | grep -c '^    - from:')" = 2 ] && ! printf '%s\n' "$d" | grep -Eq '0\.0\.0\.0/0|podSelector: \{\}'
+}
+check "usage ingest on: ingress is the meter's pods and the ledger's only; egress names the API server, DNS and the database's pods" usage_policy
+check "usage ingest on: no operator, API or other component object is selected by its labels" \
+  dlacks Deployment aap-operator-usage-ingest 'app.kubernetes.io/name: aap-operator$'
+usage_no_rbac() { render -f "$here/usage-ingest.values.yaml" --set usageIngest.rbac.create=false && lacks '^kind: Cluster'; }
+check "usage ingest rbac.create=false: no cluster-scoped object" usage_no_rbac
+usage_no_tls() { render -f "$here/usage-ingest.values.yaml" --set usageIngest.tls.secretName= && lacks 'usage-ingest/tls'; }
+check "usage ingest with no tls Secret: the tls volume is not rendered" usage_no_tls
+refused_usage() { frag=$1; shift; refused "$frag" -f "$here/usage-ingest.values.yaml" "$@"; }
+check "usage ingest: an audience is required" refused_usage 'usageIngest.identity.audience is required' --set usageIngest.identity.audience=
+check "usage ingest: the meter subject must be a service account" refused_usage 'usageIngest.identity.meterSubject must be system:serviceaccount' --set usageIngest.identity.meterSubject=meter
+check "usage ingest: the ledger subject must be a service account" refused_usage 'usageIngest.identity.ledgerSubject must be system:serviceaccount' --set usageIngest.identity.ledgerSubject=system:serviceaccount:a
+check "usage ingest: the meter and the ledger must differ" refused_usage 'must be different identities' --set usageIngest.identity.ledgerSubject=system:serviceaccount:another-agentic-system:usage-meter
+check "usage ingest: the lag is at least 60 s" refused_usage 'usageIngest.lagSecs must be a whole number of at least 60' --set usageIngest.lagSecs=30
+check "usage ingest: the database cluster is required" refused_usage 'usageIngest.database.clusterName is required' --set usageIngest.database.clusterName=
+check "usage ingest: the image tag is never latest" refused_usage 'must not be latest' --set usageIngest.image.tag=latest
+check "usage ingest: the ports differ" refused_usage 'port and usageIngest.healthPort must differ' --set usageIngest.healthPort=8090
+check "usage ingest: meterFrom is required with the policy on" refused_usage 'usageIngest.networkPolicy.meterFrom is required' --set-json 'usageIngest.networkPolicy.meterFrom=[]'
+check "usage ingest: ledgerFrom is required with the policy on" refused_usage 'usageIngest.networkPolicy.ledgerFrom is required' --set-json 'usageIngest.networkPolicy.ledgerFrom=[]'
+check "usage ingest: the database peers are required (never an open rule)" refused_usage 'usageIngest.networkPolicy.database.to is required' --set-json 'usageIngest.networkPolicy.database.to=[]'
+check "usage ingest: a peer of every address is refused" refused_usage 'is every address' --set-json 'usageIngest.networkPolicy.meterFrom=[{"ipBlock":{"cidr":"0.0.0.0/0"}}]'
+check "usage ingest: a port that is not a port is refused" refused_usage 'is not a port number' --set-json 'usageIngest.networkPolicy.database.ports=[70000]'
+check "usage ingest: enabled must be a bool" refused 'usageIngest.enabled must be true or false' --set usageIngest.enabled=yes
 
 # ---- The CRDs chart: one source ------------------------------------------------------------------------------------------
 check "deploy/operator-crds/files is a copy of deploy/crds (cp deploy/crds/agents.vymalo.com.yaml deploy/operator-crds/files/)" \

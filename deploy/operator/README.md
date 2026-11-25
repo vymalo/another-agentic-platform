@@ -600,6 +600,26 @@ and run its conformance suite under: `render-check.sh` reads that file and compa
 **No right on Secrets** (a `list` on Secrets would return their values), no `watch`, no workload, pod or ConfigMap, no `ClusterRole`. `/readyz`'s one call
 (a `list` of one `ModelEndpoint`) is inside it. The operator's `Role` gains nothing, and has no right on ExternalSecrets or on Events. The goldens that render the API's `Role` (`api.yaml`, `runpods.yaml`) moved by the rule `events: list` (K8) and the others did not.
 
+## The usage ingest (ANR-731)
+
+`usageIngest` (off by default; then nothing of it is rendered and the goldens are what they were) runs `bin/usage-ingest`: the meter's
+pod-minute CloudEvents are stored once, and the ledger asks for spend by window. On, the chart renders a Deployment (CPU and memory limits,
+read-only root, non-root), a Service, a ServiceAccount and a NetworkPolicy whose ingress is only `networkPolicy.meterFrom` and
+`ledgerFrom` and whose egress is the API server, DNS and `networkPolicy.database.to`.
+
+- **Database.** `database.clusterName` names a CloudNativePG `Cluster` you already have; the chart creates none. The connection string is
+  the key `uri` of that cluster's app Secret (`<clusterName>-app`), mounted as a file (`DATABASE_URL_FILE`), never a variable.
+- **Identity.** `identity.audience`, `meterSubject` and `ledgerSubject` are required and must differ; they are the binary's settings.
+- **One cluster-scoped right.** The token check is the API server's `TokenReview`, which has no namespaced form: the chart makes a
+  ClusterRole with `create` on `authentication.k8s.io` `tokenreviews` and nothing else (`rbac.create: false` to supply it yourself). This
+  is the chart's only ClusterRole; the operator and the API stay namespaced.
+- **TLS material.** `tls.secretName` mounts a Secret at `/etc/usage-ingest/tls`; the binary does not read it yet (the transport is the
+  mesh's or the ingress's).
+- **Image.** `docker/usage-ingest`, built and smoke-tested by `operator-image.yml`, pushed with the others and pinned in
+  `usageIngest.image.tag` by `bump-tag.sh <file> <tag> usage-ingest`.
+
+Proven by `render-check.sh` (the golden, each object, each refusal red once) and kubeconform; not run against a cluster or a built image.
+
 ## Leader election (K7)
 
 With `replicas: 1` (the default) the chart renders what it always did: one replica, `Recreate`, no leader election. With more than

@@ -89,7 +89,7 @@ name: Operator and API images
 #              image (the API's included) means no image is pushed and no tag bumped: a decision for the owner (deploy/operator/README.md,
 #              "The image").
 # bump:        main only, after the push: `deploy/operator/bump-tag.sh` sets `image.tag` and, with `api`, `api.image.tag` in
-#              deploy/operator/values.yaml and `chore(deploy): bump operator and api to sha-<7>` is pushed to main as
+#              deploy/operator/values.yaml and `chore(deploy): bump operator, api and usage-ingest to sha-<7>` is pushed to main as
 #              github-actions[bot] (decided in §93, 2026-10-05).
 #              It is made with GITHUB_TOKEN, which does not trigger workflows, so it cannot loop; Argo CD in home-os tracks this
 #              repository and rolls the new tag out (S10). It is a no-op when the tag is current, and it does not put an older
@@ -110,6 +110,7 @@ on:
       - "Cargo.lock"
       - "docker/operator/**"
       - "docker/api/**"
+      - "docker/usage-ingest/**"
       - "deploy/operator/**"
       - "deploy/operator-crds/**"
       - "deploy/crds/**"
@@ -123,6 +124,7 @@ on:
       - "Cargo.lock"
       - "docker/operator/**"
       - "docker/api/**"
+      - "docker/usage-ingest/**"
       - "deploy/operator/**"
       - "deploy/operator-crds/**"
       - "deploy/crds/**"
@@ -131,6 +133,7 @@ on:
 env:
   IMAGE: ghcr.io/vymalo/another-agentic-platform/operator
   API_IMAGE: ghcr.io/vymalo/another-agentic-platform/api
+  USAGE_IMAGE: ghcr.io/vymalo/another-agentic-platform/usage-ingest
   HELM_VERSION: v3.19.0
   KUBECONFORM_VERSION: v0.7.0
   # The Kubernetes version the rendered manifests are validated against.
@@ -165,6 +168,7 @@ jobs:
           # install run, deletes the key; render-check.sh, `api --check` and kubeconform read this shape, and that is its guard.
           helm lint deploy/operator -f deploy/operator/tests/api-full.values.yaml
           helm lint deploy/operator -f deploy/operator/tests/runpods.values.yaml
+          helm lint deploy/operator -f deploy/operator/tests/usage-ingest.values.yaml
           helm lint deploy/operator-crds
       - name: helm template (the values of the netcup Application)
         run: |
@@ -215,6 +219,8 @@ jobs:
             -f deploy/operator/tests/metrics.values.yaml > "$RUNNER_TEMP/rendered-metrics.yaml"
           helm template aap-operator deploy/operator --namespace another-agentic-system \
             -f deploy/operator/tests/otel.values.yaml > "$RUNNER_TEMP/rendered-otel.yaml"
+          helm template aap-operator deploy/operator --namespace another-agentic-system \
+            -f deploy/operator/tests/usage-ingest.values.yaml > "$RUNNER_TEMP/rendered-usage-ingest.yaml"
           helm template aap-operator-crds deploy/operator-crds > "$RUNNER_TEMP/rendered-crds.yaml"
           for attempt in 1 2 3; do
             status=0
@@ -223,7 +229,7 @@ jobs:
                 -schema-location 'deploy/operator/tests/schemas/{{.Group}}/{{.ResourceKind}}_{{.ResourceAPIVersion}}.json' \
                 "$RUNNER_TEMP/rendered-default.yaml" "$RUNNER_TEMP/rendered-netcup.yaml" "$RUNNER_TEMP/rendered-secret.yaml" \
                 "$RUNNER_TEMP/rendered-api.yaml" "$RUNNER_TEMP/rendered-api-secretref.yaml" "$RUNNER_TEMP/rendered-api-full.yaml" \
-                "$RUNNER_TEMP/rendered-runpods.yaml" "$RUNNER_TEMP/rendered-runpods-two.yaml" "$RUNNER_TEMP/rendered-metrics.yaml" "$RUNNER_TEMP/rendered-otel.yaml" "$RUNNER_TEMP/rendered-crds.yaml" \
+                "$RUNNER_TEMP/rendered-runpods.yaml" "$RUNNER_TEMP/rendered-runpods-two.yaml" "$RUNNER_TEMP/rendered-metrics.yaml" "$RUNNER_TEMP/rendered-otel.yaml" "$RUNNER_TEMP/rendered-usage-ingest.yaml" "$RUNNER_TEMP/rendered-crds.yaml" \
                 > "$RUNNER_TEMP/kubeconform.out" 2>&1 || status=$?
             cat "$RUNNER_TEMP/kubeconform.out"
             if [ "$status" -eq 0 ]; then exit 0; fi
@@ -250,6 +256,15 @@ jobs:
       - uses: hadolint/hadolint-action@v3.1.0
         with:
           dockerfile: docker/api/Dockerfile
+
+  dockerfile-usage-ingest:
+    name: lint the usage ingest's Dockerfile
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: hadolint/hadolint-action@v3.1.0
+        with:
+          dockerfile: docker/usage-ingest/Dockerfile
 
   scripts:
     name: shell scripts and the bump
@@ -280,6 +295,7 @@ jobs:
           tag="sha-$(printf '%s' "$SHA" | cut -c1-7)"
           sh deploy/operator/bump-tag.sh deploy/operator/values.yaml "$tag" operator
           sh deploy/operator/bump-tag.sh deploy/operator/values.yaml "$tag" api
+          sh deploy/operator/bump-tag.sh deploy/operator/values.yaml "$tag" usage-ingest
           {
             echo "### Tag bump dry run"
             echo
@@ -521,6 +537,64 @@ jobs:
           OPERATOR_IMAGE_TAG: smoke
           OPERATOR_PULL_POLICY: Never
         run: sh deploy/operator/tests/e2e/coder-e2e.sh
+
+  usage-ingest-image:
+    name: build and smoke-test the usage ingest image
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v7
+      - uses: docker/setup-buildx-action@v4
+      - name: Build
+        uses: docker/build-push-action@v7
+        with:
+          context: .
+          file: docker/usage-ingest/Dockerfile
+          platforms: linux/amd64
+          push: false
+          load: true
+          provenance: false
+          tags: usage-ingest:smoke
+          labels: |
+            org.opencontainers.image.revision=${{ github.sha }}
+          cache-from: type=gha,scope=usage-ingest
+          cache-to: type=gha,mode=max,scope=usage-ingest,ignore-error=true
+      - name: Smoke test the image
+        run: |
+          set -euo pipefail
+          user=$(docker inspect -f '{{.Config.User}}' usage-ingest:smoke)
+          [ "$user" = "65532:65532" ] || { echo "::error::the image's user is '$user', want 65532:65532"; exit 1; }
+          version=$(docker run --rm usage-ingest:smoke --version)
+          grep -q '^usage-ingest ' <<<"$version" || { echo "::error::--version said: $version"; exit 1; }
+          docker run --rm usage-ingest:smoke --help | grep -q -e '--check' || { echo "::error::--help does not name --check"; exit 1; }
+          # The settings the chart writes (tests/usage-ingest.values.yaml), accepted by `--check` with no cluster and no database.
+          out=$(docker run --rm usage-ingest:smoke --check --database-url-file /nonexistent --audience another-usage-ingest \
+            --meter-subject system:serviceaccount:another-agentic-system:usage-meter \
+            --ledger-subject system:serviceaccount:another-agentic-system:usage-ledger)
+          grep -q 'usage-ingest: ok' <<<"$out" || { echo "::error::--check said: $out"; exit 1; }
+          # The same identity for both roles, and a lag under 60 s, are refused.
+          if docker run --rm usage-ingest:smoke --check --database-url-file /nonexistent --audience a \
+            --meter-subject system:serviceaccount:n:x --ledger-subject system:serviceaccount:n:x > /dev/null 2>&1; then
+            echo "::error::equal identities were accepted"; exit 1; fi
+          if docker run --rm usage-ingest:smoke --check --database-url-file /nonexistent --audience a --lag-secs 30 \
+            --meter-subject system:serviceaccount:n:m --ledger-subject system:serviceaccount:n:l > /dev/null 2>&1; then
+            echo "::error::a lag of 30 s was accepted"; exit 1; fi
+          # No shell and no other binary in the image.
+          cid=$(docker create usage-ingest:smoke)
+          files=$(docker export "$cid" | tar -t)
+          docker rm "$cid" > /dev/null
+          grep -qx 'usage-ingest' <<<"$files" || { echo "::error::no /usage-ingest in the image"; exit 1; }
+          if grep -Eq '^bin/(ba)?sh$' <<<"$files"; then echo "::error::the image has a shell"; exit 1; fi
+          size=$(docker image inspect -f '{{.Size}}' usage-ingest:smoke)
+          echo "usage-ingest image size: $size bytes" | tee -a "$GITHUB_STEP_SUMMARY"
+      - name: Save the image
+        run: docker save usage-ingest:smoke -o "$RUNNER_TEMP/usage-ingest.tar"
+      - uses: actions/upload-artifact@v7
+        with:
+          name: usage-ingest-image
+          path: ${{ runner.temp }}/usage-ingest.tar
+          retention-days: 1
+          if-no-files-found: error
 
   api-e2e:
     name: api-e2e
@@ -818,7 +892,7 @@ jobs:
     # released at once). NOT chain-e2e and NOT run-pods-e2e: they run other repositories' images, pinned here, and a red run of either is a
     # reason to look, not to withhold the operator's release (owner decisions, §60a D13 and D15b; to flip one, add it to this list). The new
     # namespaces-e2e and leader-e2e pull only the curl image api-e2e already pulls, and nothing else outside this repository.
-    needs: [chart, dockerfile, dockerfile-api, scripts, image, api-image, operator-coder-e2e, api-e2e, namespaces-e2e, leader-e2e]
+    needs: [chart, dockerfile, dockerfile-api, dockerfile-usage-ingest, scripts, image, api-image, usage-ingest-image, operator-coder-e2e, api-e2e, namespaces-e2e, leader-e2e]
     if: github.event_name == 'push' && github.ref == 'refs/heads/main'
     runs-on: ubuntu-latest
     # One push at a time, so the check below and the push of `latest` are not interleaved with another run's.
@@ -841,10 +915,15 @@ jobs:
         with:
           name: api-image
           path: ${{ runner.temp }}
+      - uses: actions/download-artifact@v8
+        with:
+          name: usage-ingest-image
+          path: ${{ runner.temp }}
       - name: Load the images that passed
         run: |
           docker load -i "$RUNNER_TEMP/operator.tar"
           docker load -i "$RUNNER_TEMP/api.tar"
+          docker load -i "$RUNNER_TEMP/usage-ingest.tar"
       - uses: docker/login-action@v4
         with:
           registry: ghcr.io
@@ -859,17 +938,21 @@ jobs:
           docker push "$IMAGE:$tag"
           docker tag api:smoke "$API_IMAGE:$tag"
           docker push "$API_IMAGE:$tag"
+          docker tag usage-ingest:smoke "$USAGE_IMAGE:$tag"
+          docker push "$USAGE_IMAGE:$tag"
           # `latest` follows the newest build only: image jobs can finish out of order, and an older run must not move it back
           # (the same rule as the bump below; the bump commits themselves, old subject and new, do not count).
-          newer="$(git log --format=%s "$GITHUB_SHA..origin/main" -- crates bin Cargo.toml Cargo.lock docker/operator docker/api deploy/operator deploy/operator-crds deploy/crds .github/workflows/operator-image.yml | grep -Ev '^chore\(deploy\): bump (operator|operator and api) to ' || true)"
+          newer="$(git log --format=%s "$GITHUB_SHA..origin/main" -- crates bin Cargo.toml Cargo.lock docker/operator docker/api docker/usage-ingest deploy/operator deploy/operator-crds deploy/crds .github/workflows/operator-image.yml | grep -Ev '^chore\(deploy\): bump (operator|operator and api|operator, api and usage-ingest) to ' || true)"
           if [ -n "$newer" ]; then
-            pushed="\`$IMAGE:$tag\` and \`$API_IMAGE:$tag\` (not \`latest\`: main has moved on since this commit, the newer build pushes it)."
+            pushed="\`$IMAGE:$tag\`, \`$API_IMAGE:$tag\` and \`$USAGE_IMAGE:$tag\` (not \`latest\`: main has moved on since this commit, the newer build pushes it)."
           else
             docker tag operator:smoke "$IMAGE:latest"
             docker push "$IMAGE:latest"
             docker tag api:smoke "$API_IMAGE:latest"
             docker push "$API_IMAGE:latest"
-            pushed="\`$IMAGE:$tag\`, \`$IMAGE:latest\`, \`$API_IMAGE:$tag\` and \`$API_IMAGE:latest\`."
+            docker tag usage-ingest:smoke "$USAGE_IMAGE:latest"
+            docker push "$USAGE_IMAGE:latest"
+            pushed="\`$IMAGE:$tag\`, \`$API_IMAGE:$tag\` and \`$USAGE_IMAGE:$tag\`, and \`latest\` of each."
           fi
           {
             echo "### Pushed"
@@ -880,7 +963,7 @@ jobs:
           } >> "$GITHUB_STEP_SUMMARY"
 
   # The images that were just pushed are the ones the chart deploys: set `image.tag` and `api.image.tag` in deploy/operator/values.yaml to
-  # `sha-<first 7 of the commit>` and push `chore(deploy): bump operator and api to sha-xxxxxxx` to main as github-actions. One job, one
+  # `sha-<first 7 of the commit>` and push `chore(deploy): bump operator, api and usage-ingest to sha-xxxxxxx` to main as github-actions. One job, one
   # commit, one retry loop for both tags: a second workflow with a bump of its own would race this one on `git push` and, because the
   # "has main moved on?" test below reads the subjects of the commits that follow, take the other's bump for a newer build.
   bump:
@@ -910,19 +993,20 @@ jobs:
             git reset --hard origin/main
             # A newer commit that changes what this workflow builds makes its own image and bumps for itself; do not put the tag
             # back to this older one (image jobs can finish out of order). The bump commits themselves do not count.
-            newer="$(git log --format=%s "$SHA..origin/main" -- crates bin Cargo.toml Cargo.lock docker/operator docker/api deploy/operator deploy/operator-crds deploy/crds .github/workflows/operator-image.yml | grep -Ev '^chore\(deploy\): bump (operator|operator and api) to ' || true)"
+            newer="$(git log --format=%s "$SHA..origin/main" -- crates bin Cargo.toml Cargo.lock docker/operator docker/api docker/usage-ingest deploy/operator deploy/operator-crds deploy/crds .github/workflows/operator-image.yml | grep -Ev '^chore\(deploy\): bump (operator|operator and api|operator, api and usage-ingest) to ' || true)"
             if [ -n "$newer" ]; then
               echo "main has moved on since $SHA; the newer build will bump"
               exit 0
             fi
             sh deploy/operator/bump-tag.sh deploy/operator/values.yaml "$tag" operator
             sh deploy/operator/bump-tag.sh deploy/operator/values.yaml "$tag" api
+            sh deploy/operator/bump-tag.sh deploy/operator/values.yaml "$tag" usage-ingest
             if git diff --quiet -- deploy/operator/values.yaml; then
               echo "both tags are current"
               exit 0
             fi
             git add deploy/operator/values.yaml
-            git commit -m "chore(deploy): bump operator and api to $tag"
+            git commit -m "chore(deploy): bump operator, api and usage-ingest to $tag"
             if git push origin HEAD:main; then
               exit 0
             fi

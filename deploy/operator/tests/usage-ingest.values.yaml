@@ -1,0 +1,35 @@
+# The usage ingest on (usageIngest.enabled): the render tests/golden/usage-ingest.yaml. The identities, peers and cluster are examples.
+usageIngest:
+  enabled: true
+  image:
+    tag: sha-1234567
+  identity:
+    audience: another-usage-ingest
+    meterSubject: system:serviceaccount:another-agentic-system:usage-meter
+    ledgerSubject: system:serviceaccount:another-agentic-system:usage-ledger
+  database:
+    clusterName: usage-db
+  tls:
+    secretName: usage-ingest-tls
+  networkPolicy:
+    meterFrom:
+      - namespaceSelector:
+          matchLabels:
+            kubernetes.io/metadata.name: another-agentic-system
+        podSelector:
+          matchLabels:
+            app.kubernetes.io/name: usage-meter
+    ledgerFrom:
+      - namespaceSelector:
+          matchLabels:
+            kubernetes.io/metadata.name: another-agentic-system
+        podSelector:
+          matchLabels:
+            app.kubernetes.io/name: usage-ledger
+    apiServer:
+      cidrs: [10.96.0.1/32]
+    database:
+      to:
+        - podSelector:
+            matchLabels:
+              cnpg.io/cluster: usage-db

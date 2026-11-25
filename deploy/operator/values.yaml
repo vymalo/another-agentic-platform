@@ -600,3 +600,84 @@ api:
   tolerations: []
   affinity: {}
   topologySpreadConstraints: []
+
+# The usage ingest (ANR-731, AD-060; bin/usage-ingest): takes the meter's CloudEvents pod-minute lines once and answers the ledger's
+# spend queries. OFF by default, and then nothing of it is checked or rendered (the goldens do not move). On, the chart renders a
+# Deployment, a Service, a ServiceAccount, a NetworkPolicy and, unless `rbac.create` is false, the one cluster-scoped right it needs.
+# It stores in a CloudNativePG `Cluster` the deployment already has: the chart names it and reads its app Secret, and creates neither.
+usageIngest:
+  enabled: false
+  image:
+    repository: ghcr.io/vymalo/another-agentic-platform/usage-ingest
+    # Bumped by .github/workflows/operator-image.yml with `deploy/operator/bump-tag.sh <file> <tag> usage-ingest`, with the other two.
+    # `sha-0000000` is a placeholder: no image has that tag.
+    tag: sha-0000000
+    digest: ""
+    pullPolicy: IfNotPresent
+  replicas: 1
+  port: 8090
+  healthPort: 8091
+  logLevel: info
+  # Who may call, as the settings of the binary (USAGE_TOKEN_AUDIENCE, USAGE_METER_SUBJECT, USAGE_LEDGER_SUBJECT). REQUIRED, no default.
+  # A caller presents a service-account token with this audience; the subject is `system:serviceaccount:<namespace>:<name>`; the meter
+  # may post events and the ledger may ask for spend, and they must differ.
+  identity:
+    audience: ""
+    meterSubject: ""
+    ledgerSubject: ""
+  # A spend window must end at least this long ago (USAGE_LAG_SECS; the binary refuses less than 60).
+  lagSecs: 300
+  # The CloudNativePG Cluster to store in. `clusterName` is REQUIRED. The connection string is read from the cluster's app Secret
+  # (`<clusterName>-app` unless `secretName` says another), key `uri`, mounted as a file (DATABASE_URL_FILE): never a variable.
+  database:
+    clusterName: ""
+    secretName: ""
+    key: uri
+  # Optional certificate material from a Secret you name (keys tls.crt, tls.key, ca.crt), mounted read-only at /etc/usage-ingest/tls.
+  # The binary does not read it yet: the callers' identity is the token check, and the transport is the mesh's or the ingress's. It is
+  # here so that a sidecar or a later listener finds it where the chart says.
+  tls:
+    secretName: ""
+  rbac:
+    # The token check is the API server's TokenReview, a cluster-scoped resource: it needs a ClusterRole with `create` on
+    # authentication.k8s.io tokenreviews and nothing else. Set false to supply it yourself (the chart then makes no cluster-scoped object).
+    create: true
+  serviceAccount:
+    create: true
+    name: ""
+    annotations: {}
+  # Ingress is closed except these two lists (NetworkPolicyPeers), both REQUIRED while the policy is enabled: the meter's pods, and the ledger's.
+  networkPolicy:
+    enabled: true
+    meterFrom: []
+    ledgerFrom: []
+    apiServer:
+      ports: [443, 6443]
+      # Empty means ANY ADDRESS on those ports; SET IT (the /32 of `kubectl get endpoints kubernetes`).
+      cidrs: []
+    dns:
+      to:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: kube-system
+          podSelector:
+            matchLabels:
+              k8s-app: kube-dns
+      ports: [53]
+    # The database's pods (NetworkPolicyPeers) on `ports`: REQUIRED while the policy is enabled, never an open rule.
+    database:
+      to: []
+      ports: [5432]
+  resources:
+    requests:
+      cpu: 50m
+      memory: 64Mi
+    limits:
+      cpu: 500m
+      memory: 256Mi
+  podAnnotations: {}
+  podLabels: {}
+  priorityClassName: ""
+  nodeSelector: {}
+  tolerations: []
+  affinity: {}
