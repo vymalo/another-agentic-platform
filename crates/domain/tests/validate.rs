@@ -749,6 +749,8 @@ fn outside_validate(file_name: &str) -> bool {
     file_name.starts_with("audience-")
         || file_name == "extra-body-too-many.yaml"
         || file_name == "mcp-servers-too-many.yaml"
+        || file_name.starts_with("idle-timeout-")
+        || file_name.starts_with("wake-")
         || [
             "endpoint-reasoning-efforts-too-many.yaml",
             "endpoint-reasoning-too-many.yaml",
@@ -865,6 +867,8 @@ fn the_shape_rules_of_the_crd_hold_without_an_api_server() {
             "endpoint-reasoning-efforts-too-many.yaml",
             "endpoint-reasoning-too-many.yaml",
             "extra-body-too-many.yaml",
+            "idle-timeout-not-a-duration.yaml",
+            "idle-timeout-too-short.yaml",
             "mcp-servers-too-many.yaml",
             "model-endpoint-models-too-many.yaml",
             "model-endpoint-title-empty.yaml",
@@ -874,6 +878,9 @@ fn the_shape_rules_of_the_crd_hold_without_an_api_server() {
             "tool-provider-title-too-long.yaml",
             "tool-provider-tools-too-many.yaml",
             "tool-provider-url-too-long.yaml",
+            "wake-ahead-too-long.yaml",
+            "wake-timeout-too-long.yaml",
+            "wake-timeout-too-short.yaml",
         ],
         "an invalid example `validate` is not asked about must be named, with its reason"
     );

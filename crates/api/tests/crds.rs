@@ -194,6 +194,19 @@ const SPEC_RULES: &[(&str, &str)] = &[
         "self.all(a, a.matches('^[!-~]+$'))",
         "access.audience: a value is visible ASCII characters, with no space or control character",
     ),
+    // AD-058, §21a: sleep when idle, durations with bounds, all absent by default
+    (
+        "self.matches('^[0-9]+(s|m|h)$') && duration(self) >= duration('1m') && duration(self) <= duration('24h')",
+        "scaling.idleTimeout must be a duration of 1m to 24h, like 15m",
+    ),
+    (
+        "self.matches('^[0-9]+(s|m|h)$') && duration(self) <= duration('1h')",
+        "scaling.wakeAhead must be a duration of 0s to 1h, like 60s",
+    ),
+    (
+        "self.matches('^[0-9]+(s|m|h)$') && duration(self) >= duration('5s') && duration(self) <= duration('5m')",
+        "scaling.wakeTimeout must be a duration of 5s to 5m, like 60s",
+    ),
 ];
 
 #[test]

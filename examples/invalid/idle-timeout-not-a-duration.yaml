@@ -1,5 +1,5 @@
 # Refused: scaling.idleTimeout is soon.
-# expect: scaling.idleTimeout must be a duration of 1m to 24h
+# expect: scaling.idleTimeout must be a duration of 1m to 24h, like 15m
 apiVersion: agents.vymalo.com/v1alpha1
 kind: AgentService
 metadata:
