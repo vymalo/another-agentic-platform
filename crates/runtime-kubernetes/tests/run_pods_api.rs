@@ -11,7 +11,7 @@ mod support;
 
 use aap_ports::{IssueReason, RuntimeProvider};
 use aap_runtime_kubernetes::KubernetesRuntime;
-use common::{resolved, resolved_run_pods};
+use common::{resolved, resolved_run_pods, resolved_run_pods_with};
 use serde_json::{Value, json};
 use support::{Call, Fake, K};
 
@@ -964,4 +964,60 @@ async fn a_pass_rewrites_the_guards_parameters_when_they_differ_though_the_diges
     let now = fake.get(K::ConfigMap, NS, name).unwrap();
     assert_eq!(now["data"]["claims"], "work-coder-0", "{now}");
     assert_eq!(now["data"]["claim"], "work-coder-0");
+}
+
+// ---------------------------------------------------------------- ANR-402 (AD-052): a size class's own runtime class
+
+/// What the fake API server holds after one pass of a service whose settings are `settings`: the class of the run pod template and the
+/// class the guard's parameters carry for it.
+async fn runtime_class_on_the_server(
+    settings: impl FnOnce(&mut Value),
+) -> (Option<String>, Option<String>) {
+    let (fake, runtime) = setup();
+    let r = resolved_run_pods_with(settings, |_, _| {});
+    runtime.ensure(&r.id, &r.runtime).await.unwrap();
+    let template = fake
+        .get(K::ConfigMap, NS, "coder-run-pod")
+        .expect("the template");
+    let pod: Value = serde_json::from_str(template["data"]["pod.yaml"].as_str().unwrap()).unwrap();
+    let params = fake
+        .get(K::ConfigMap, NS, "coder-run-pods-policy")
+        .expect("the guard's parameters");
+    (
+        pod["spec"]["runtimeClassName"].as_str().map(str::to_owned),
+        params["data"]["runtimeClassName"]
+            .as_str()
+            .map(str::to_owned),
+    )
+}
+
+#[tokio::test]
+async fn the_class_of_a_size_class_reaches_the_template_and_the_guards_parameters_together() {
+    // The deployment names none and the picked class does: both objects on the server say it.
+    let own = runtime_class_on_the_server(|file| {
+        file["classes"]["standard"]["runtimeClassName"] = json!("sandbox-small");
+    })
+    .await;
+    assert_eq!(
+        own,
+        (Some("sandbox-small".into()), Some("sandbox-small".into()))
+    );
+    // The deployment names one and the class another: the class's wins in both, so the guard requires what the template says.
+    let over = runtime_class_on_the_server(|file| {
+        file["runtimeClassName"] = json!("sandbox");
+        file["classes"]["standard"]["runtimeClassName"] = json!("sandbox-kata");
+    })
+    .await;
+    assert_eq!(
+        over,
+        (Some("sandbox-kata".into()), Some("sandbox-kata".into()))
+    );
+    // The class names none: the deployment's.
+    let inherited = runtime_class_on_the_server(|file| {
+        file["runtimeClassName"] = json!("sandbox");
+    })
+    .await;
+    assert_eq!(inherited, (Some("sandbox".into()), Some("sandbox".into())));
+    // Neither: no class in the template and no parameter, as before the field existed.
+    assert_eq!(runtime_class_on_the_server(|_| {}).await, (None, None));
 }

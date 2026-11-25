@@ -93,6 +93,22 @@ pub struct RunPodClass {
     /// What it may not exceed. `memory` is required: the quota counts it.
     #[serde(default)]
     pub limits: BTreeMap<String, String>,
+    /// The `RuntimeClass` of the pods of THIS class (ANR-402, AD-052): it replaces the deployment's `runtimeClassName` for them,
+    /// so one class can be sandboxed with another runtime handler than the rest, or sandboxed while the deployment names none.
+    /// Empty or absent: the deployment's, if it names one.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub runtime_class_name: Option<String>,
+}
+
+impl RunPodClass {
+    /// The class's own `RuntimeClass`, when it names one (an empty value is none).
+    #[must_use]
+    pub fn runtime_class_name(&self) -> Option<&str> {
+        self.runtime_class_name
+            .as_deref()
+            .map(str::trim)
+            .filter(|c| !c.is_empty())
+    }
 }
 
 /// The run container's image.
@@ -310,6 +326,7 @@ impl RunPodSettings {
                         RunPodClass {
                             requests: BTreeMap::new(),
                             limits: BTreeMap::from([("memory".to_owned(), "1Gi".to_owned())]),
+                            runtime_class_name: None,
                         },
                     )
                 })
@@ -433,6 +450,13 @@ impl RunPodSettings {
                         ));
                     }
                 }
+            }
+            if let Some(runtime) = class.runtime_class_name()
+                && !is_dns_subdomain(runtime)
+            {
+                bad(format!(
+                    "{at}.runtimeClassName: {runtime:?} is not the name of a RuntimeClass (a DNS-1123 subdomain)"
+                ));
             }
             match class.limits.get("memory") {
                 None => bad(format!(
@@ -737,6 +761,14 @@ pub(crate) struct ForService<'a> {
 }
 
 impl ForService<'_> {
+    /// The `RuntimeClass` of this service's run pods (ANR-402): the class's own when it names one, else the deployment's, else none.
+    /// The pod template and the guard's parameters read this one function, so a pod and the rule that judges it cannot disagree.
+    fn runtime_class_name(&self) -> Option<&str> {
+        self.class
+            .runtime_class_name()
+            .or_else(|| self.settings.runtime_class_name())
+    }
+
     /// The pod every run pod is made from, as `_runpods.tpl` makes it.
     pub(crate) fn template(&self) -> Value {
         let s = self.settings;
@@ -806,7 +838,7 @@ impl ForService<'_> {
         let mut spec = serde_json::Map::new();
         spec.insert("priorityClassName".into(), json!(s.priority_class));
         // K14a (AD-052): the sandboxed runtime, only when the deployment names one: a run pod without it is what it was.
-        if let Some(class) = s.runtime_class_name() {
+        if let Some(class) = self.runtime_class_name() {
             spec.insert("runtimeClassName".into(), json!(class));
         }
         // A run pod holds no credential for the cluster.
@@ -1096,7 +1128,7 @@ impl ForService<'_> {
             service_account: self.service.to_owned(),
             role: s.role.clone(),
             priority_class: s.priority_class.clone(),
-            runtime_class_name: s.runtime_class_name().map(str::to_owned),
+            runtime_class_name: self.runtime_class_name().map(str::to_owned),
             quota: RunPodQuota {
                 pods: s.quota.pods,
                 limits_memory: s.quota.limits_memory.clone(),

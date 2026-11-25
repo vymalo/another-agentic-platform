@@ -242,6 +242,12 @@ runPods:
 # ephemeral-storage limit. A CPU limit is a CFS quota and can throttle a build: keep it well above the request (the default is eight
 # times it). The ephemeral-storage limit bounds what the container writes outside its volumes (its layer, `/tmp`, logs), not the work
 # volume, which is a claim.
+# ANR-402 (AD-052): a class may also name `runtimeClassName`, the RuntimeClass of the pods of THAT class. It replaces
+# `runPods.runtimeClassName` for them (empty or absent: the deployment's, if it names one), so a class can be sandboxed with another
+# handler than the rest, or alone while the deployment names none. Named, it is required of the pods of that class by the admission
+# policy, exactly as the deployment's is. Nothing here sets one: with none named anywhere, no render carries a trace of the field.
+#   large:
+#     runtimeClassName: gvisor-large
 runPodClasses:
   standard:
     requests:
