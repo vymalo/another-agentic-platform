@@ -1271,9 +1271,9 @@ check "run pods on: the PriorityClass has value 0, never preempts and is not the
 run_pods_policy() {
   dhas ValidatingAdmissionPolicy aap-operator-agents-run-pods 'failurePolicy: Fail' 'paramKind:' 'kind: ConfigMap' 'operations: \["CREATE"\]' 'resources: \["pods"\]' \
     'request.userInfo.username == params.data.serviceAccount' \
-    && [ "$(doc ValidatingAdmissionPolicy aap-operator-agents-run-pods | grep -c '^    - expression:')" -eq 9 ]
+    && [ "$(doc ValidatingAdmissionPolicy aap-operator-agents-run-pods | grep -c '^    - expression:')" -eq 10 ]
 }
-check "run pods on: the policy fails closed, takes a ConfigMap of parameters, judges the pods CREATED by the account its parameters name, and has nine rules" run_pods_policy
+check "run pods on: the policy fails closed, takes a ConfigMap of parameters, judges the pods CREATED by the account its parameters name, and has ten rules (the coder chart's nine and AD-061's limits rule)" run_pods_policy
 run_pods_binding() {
   dhas ValidatingAdmissionPolicyBinding aap-operator-agents-run-pods 'policyName: aap-operator-agents-run-pods' 'validationActions: \["Deny"\]' \
     'agents.vymalo.com/run-pods-policy: "true"' 'parameterNotFoundAction: Allow' 'key: kubernetes.io/metadata.name' 'operator: In' '- agents' \
@@ -1295,10 +1295,14 @@ policy_rules_are_the_scripts() {
   # Every rule the admission test (run-pods-admission.sh) expects a message of is in the policy.
   for frag in 'a run pod carries the labels' 'a run pod has the priority class' 'a run pod uses only the images' 'a run pod mounts only emptyDir volumes and the ' \
     'a run pod references no Secret but the key' 'a run pod is not privileged' 'allowPrivilegeEscalation: false on every container' 'a run pod does not run as root' \
-    'a run pod uses its own network, PID and IPC namespaces' 'a run pod sets automountServiceAccountToken: false'; do
+    'a run pod uses its own network, PID and IPC namespaces' 'a run pod sets automountServiceAccountToken: false' \
+    'a run pod sets limits.memory, limits.cpu and limits.ephemeral-storage on every container'; do
     doc ValidatingAdmissionPolicy aap-operator-agents-run-pods | grep -qF -- "$frag" || { echo "no rule says: $frag" >&2; return 1; }
   done
 }
+check "run pods on (AD-061): the limits rule asks of every container, the init containers included, a memory, a CPU and an ephemeral-storage limit" \
+  dhas ValidatingAdmissionPolicy aap-operator-agents-run-pods 'variables.containers.all\(c, has\(c.resources\) && has\(c.resources.limits\)' \
+    "'memory' in c.resources.limits" "'cpu' in c.resources.limits" "'ephemeral-storage' in c.resources.limits\)"
 check "run pods on: every message the admission test expects (tests/run-pods-admission.sh) is a message of the policy" policy_rules_are_the_scripts
 policy_claims_are_a_list() {
   # K1: the claims rule reads one parameter, a list with the work volume's claim and, with a package cache, its claim (the coder chart's second claim).
@@ -1328,9 +1332,9 @@ k14a_class_checks() {
       'variables.runtimeClass' \
       'object.spec.runtimeClassName == variables.runtimeClass' \
       'a run pod runs under the RuntimeClass' \
-    && [ "$(doc ValidatingAdmissionPolicy aap-operator-agents-run-pods | grep -c '^    - expression:')" -eq 10 ]
+    && [ "$(doc ValidatingAdmissionPolicy aap-operator-agents-run-pods | grep -c '^    - expression:')" -eq 11 ]
 }
-check "runPods.runtimeClassName: the settings name the class, the policy has ten rules and requires it" k14a_class_checks
+check "runPods.runtimeClassName: the settings name the class, the policy has eleven rules and requires it" k14a_class_checks
 check "the class is never an object: the chart renders no RuntimeClass, as the administrator makes it" lacks '^kind: RuntimeClass$'
 check "refused: a run class that is not the name of a RuntimeClass" refused "runPods.runtimeClassName must be the name of a RuntimeClass" --set runPods.enabled=true --set 'runPods.runtimeClassName=Not A Class'
 check "refused: an agent class that is not the name of a RuntimeClass" refused "agent.runtimeClassName must be the name of a RuntimeClass" --set 'agent.runtimeClassName=Not A Class'
@@ -1356,6 +1360,12 @@ check "runPods.networkPolicy.enabled=true: tolerated, and not written to the ope
 # What the chart refuses, with the name of the value: the operator would refuse the same at start, and a pod that never starts is the worse way to hear it.
 check "refused: run pods on with no size class" refused "runPodClasses must name at least one size class" --set runPods.enabled=true --set runPodClasses.standard=null
 check "refused: a size class with no memory limit" refused "runPodClasses.standard.limits.memory is required" --set runPods.enabled=true --set runPodClasses.standard.limits=null
+# AD-061: the CPU and ephemeral-storage limits the admission policy requires of every container are required of a class at render.
+check "refused: a size class with no CPU limit (AD-061)" refused "runPodClasses.standard.limits.cpu is required" --set runPods.enabled=true --set runPodClasses.standard.limits.cpu=null
+check "refused: a size class with no ephemeral-storage limit (AD-061)" refused "runPodClasses.standard.limits.ephemeral-storage is required" --set runPods.enabled=true --set 'runPodClasses.standard.limits.ephemeral-storage=null'
+check "refused: a size class with no ephemeral-storage request (AD-061)" refused "runPodClasses.standard.requests.ephemeral-storage is required" --set runPods.enabled=true --set 'runPodClasses.standard.requests.ephemeral-storage=null'
+check "run pods on: the default class carries the CPU limit (2) and both ephemeral-storage values, and the render shows them in the settings" \
+  dhas ConfigMap aap-operator-run-pods-settings 'ephemeral-storage: 1Gi' 'ephemeral-storage: 4Gi' 'cpu: "?2"?$'
 check "refused: a size class named as no DNS label" refused "the name of a class is a DNS label" --set runPods.enabled=true --set 'runPodClasses.Big_One.limits.memory=1Gi'
 check "refused: a size class resource that is not a quantity" refused "is not a quantity" --set runPods.enabled=true --set runPodClasses.standard.limits.memory=lots
 check "refused: a key of a size class that is not requests or limits" refused "is not a setting: requests or limits" --set runPods.enabled=true --set runPodClasses.standard.cpu=1

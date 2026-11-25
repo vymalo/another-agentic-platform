@@ -332,6 +332,36 @@ fn compare_container(case: &str, who: &str, chart: &Value, mine: &Value) {
     );
 }
 
+/// AD-061, the one difference of the run pod template: every container of a run pod carries the CPU and ephemeral-storage limits the
+/// run pods' admission policy requires (the coder chart's policy asks none, so its template has none). The operator chart's default
+/// class has them and so has the init container that copies the tools. They are asserted present and taken out of ours, so that the
+/// rest of the template is compared as it was. The tuned case is the coder chart's own numbers (memory and CPU only): no extra keys.
+fn without_the_limits_of_ad_061(case: &str, mut template: Value) -> Value {
+    if template.is_null() {
+        return template;
+    }
+    for at in ["/pod/spec/initContainers/0", "/pod/spec/containers/0"] {
+        let container = template.pointer_mut(at).expect("a container");
+        let run = at.contains("/containers/");
+        if run && case == "coder-run-pods-tuned" {
+            continue;
+        }
+        let resources = container["resources"].as_object_mut().expect("resources");
+        for (kind, key) in [
+            ("limits", "cpu"),
+            ("limits", "ephemeral-storage"),
+            ("requests", "ephemeral-storage"),
+        ] {
+            let removed = resources
+                .get_mut(kind)
+                .and_then(Value::as_object_mut)
+                .and_then(|m| m.remove(key));
+            assert!(removed.is_some(), "{case}: {at} has {kind}.{key} (AD-061)");
+        }
+    }
+    template
+}
+
 fn compare(case: &str, chart: &Value, mine: &Value) {
     assert_eq!(chart["service"], mine["service"], "{case}: service");
     assert_eq!(
@@ -348,7 +378,8 @@ fn compare(case: &str, chart: &Value, mine: &Value) {
     );
     // The pod run pods are made from: the chart's ConfigMap and ours, parsed. Absent for a case without run pods.
     assert_eq!(
-        chart["runPods"]["template"], mine["runPods"]["template"],
+        chart["runPods"]["template"],
+        without_the_limits_of_ad_061(case, mine["runPods"]["template"].clone()),
         "{case}: the run pod template"
     );
     let cw = chart["workloads"].as_object().unwrap();

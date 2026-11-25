@@ -884,7 +884,29 @@ fn the_policy_with_the_parameters_is_the_coder_charts(adam: Value, docs: Vec<Val
     // Rule by rule: the same expression with the values substituted, the same words said when it refuses.
     let ours = policy["spec"]["validations"].as_array().unwrap();
     let theirs = adam["admissionPolicy"]["validations"].as_array().unwrap();
-    assert_eq!(ours.len(), theirs.len(), "the same number of rules");
+    // AD-061: the operator chart's policy has one rule more than the coder chart's, the last: every container of a run pod sets a
+    // memory, a CPU and an ephemeral-storage limit. It is asserted as that and held apart; the nine before it are the coder chart's.
+    assert_eq!(
+        ours.len(),
+        theirs.len() + 1,
+        "the coder chart's rules and the limits rule"
+    );
+    let limits_rule = ours.last().unwrap();
+    assert_eq!(
+        limits_rule["message"],
+        "a run pod sets limits.memory, limits.cpu and limits.ephemeral-storage on every container"
+    );
+    let expression = limits_rule["expression"].as_str().unwrap();
+    for resource in ["memory", "cpu", "ephemeral-storage"] {
+        assert!(
+            expression.contains(&format!("'{resource}' in c.resources.limits")),
+            "the limits rule asks for {resource}"
+        );
+    }
+    assert!(
+        expression.starts_with("variables.containers.all("),
+        "init containers too"
+    );
     for (mine, chart_rule) in ours.iter().zip(theirs) {
         assert_eq!(
             without_the_coders_digest(&substitute(mine["expression"].as_str().unwrap(), &params)),

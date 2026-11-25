@@ -470,6 +470,13 @@ pub mod run_pods {
     pub const TOOLS_REQUEST_MEMORY: &str = "32Mi";
     /// Memory limit.
     pub const TOOLS_LIMIT_MEMORY: &str = "256Mi";
+    /// CPU limit (AD-061): the admission policy of run pods refuses a container without a CPU limit, the init container's included.
+    /// The coder chart's template has none: this is the one place the operator's template differs from it.
+    pub const TOOLS_LIMIT_CPU: &str = "500m";
+    /// Ephemeral-storage request (AD-061).
+    pub const TOOLS_REQUEST_EPHEMERAL_STORAGE: &str = "64Mi";
+    /// Ephemeral-storage limit (AD-061): the copy of the tools goes to an `emptyDir`, which counts against the pod's.
+    pub const TOOLS_LIMIT_EPHEMERAL_STORAGE: &str = "1Gi";
 
     /// The labels of the pods of a workload, which a run pod's affinity selects (`aap-runtime-kubernetes` puts
     /// them on, `tests/run_pods.rs` there holds the two equal).

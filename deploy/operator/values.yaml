@@ -237,13 +237,21 @@ runPods:
 
 # The size classes an AgentConfig picks by name (`coder.runPods.sizeClass`, AD-031): the resources of the run container. A class whose
 # memory limit is above `runPods.quota.limitsMemory` is refused (no pod of it could ever be made). `GET /v1/info` offers the names.
+# AD-061: every class carries `limits.memory`, `limits.cpu`, `requests.ephemeral-storage` and `limits.ephemeral-storage`, and a class
+# without one is refused at render; the run pods' admission policy refuses a run pod whose containers lack a memory, CPU or
+# ephemeral-storage limit. A CPU limit is a CFS quota and can throttle a build: keep it well above the request (the default is eight
+# times it). The ephemeral-storage limit bounds what the container writes outside its volumes (its layer, `/tmp`, logs), not the work
+# volume, which is a claim.
 runPodClasses:
   standard:
     requests:
       cpu: 250m
       memory: 512Mi
+      ephemeral-storage: 1Gi
     limits:
+      cpu: "2"
       memory: 2Gi
+      ephemeral-storage: 4Gi
 
 # The agent registry (§12b, crates/registry/README.md), served on 8080 only with a bearer token: no token, no registry. The
 # token comes from exactly one of the two below, and none of them is a value of this chart.
