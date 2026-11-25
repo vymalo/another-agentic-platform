@@ -18,6 +18,7 @@ members = [
     "crates/trace",
     "crates/trace-otlp",
     "crates/tool-probe",
+    "crates/usage",
     "bin/operator",
     "bin/api",
     "bin/cli",
@@ -48,6 +49,7 @@ aap-controller = { path = "crates/controller" }
 aap-platform-api = { path = "crates/platform-api" }
 aap-platform-client = { path = "crates/platform-client" }
 aap-trace = { path = "crates/trace" }
+aap-usage = { path = "crates/usage" }
 aap-trace-otlp = { path = "crates/trace-otlp" }
 aap-tool-probe = { path = "crates/tool-probe" }
 anyhow = "1"

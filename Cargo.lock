@@ -370,6 +370,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "aap-usage"
+version = "0.1.0"
+dependencies = [
+ "aap-usage",
+ "sha2",
+ "thiserror 2.0.21",
+ "tokio",
+]
+
+[[package]]
 name = "ahash"
 version = "0.8.12"
 source = "registry+https://github.com/rust-lang/crates.io-index"
