@@ -472,15 +472,25 @@ the CIDRs, a toleration or an egress rule, which the operator checks at start an
 {{- fail (printf "runPodClasses.%s must be a map with requests and limits" $name) -}}
 {{- end -}}
 {{- range $k, $v := $class -}}
-{{- if not (has $k (list "requests" "limits")) -}}
-{{- fail (printf "runPodClasses.%s.%s is not a setting: requests or limits" $name $k) -}}
+{{- if not (has $k (list "requests" "limits" "runtimeClassName")) -}}
+{{- fail (printf "runPodClasses.%s.%s is not a setting: requests, limits or runtimeClassName" $name $k) -}}
 {{- end -}}
+{{- /* ANR-402: the class's own RuntimeClass, replacing runPods.runtimeClassName for the pods of this class (empty or null: the deployment's). */ -}}
+{{- if eq $k "runtimeClassName" -}}
+{{- if not (kindIs "string" $v) -}}
+{{- fail (printf "runPodClasses.%s.runtimeClassName must be a string, the name of a RuntimeClass" $name) -}}
+{{- end -}}
+{{- if and $v (not (regexMatch `^[a-z0-9]([-a-z0-9.]*[a-z0-9])?$` $v)) -}}
+{{- fail (printf "runPodClasses.%s.runtimeClassName: %q is not the name of a RuntimeClass (a DNS-1123 subdomain)" $name $v) -}}
+{{- end -}}
+{{- else -}}
 {{- if not (kindIs "map" $v) -}}
 {{- fail (printf "runPodClasses.%s.%s must be a map of resource -> quantity" $name $k) -}}
 {{- end -}}
 {{- range $res, $q := $v -}}
 {{- if not (and (or (kindIs "string" $q) (kindIs "float64" $q) (kindIs "int" $q) (kindIs "int64" $q)) (regexMatch $quantity (toString $q))) -}}
 {{- fail (printf "runPodClasses.%s.%s.%s: %v is not a quantity such as 512Mi" $name $k $res $q) -}}
+{{- end -}}
 {{- end -}}
 {{- end -}}
 {{- end -}}

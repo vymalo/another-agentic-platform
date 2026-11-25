@@ -1525,3 +1525,113 @@ fn a_runtime_class_that_is_not_the_name_of_an_object_is_refused() {
     assert!(empty.validate().is_ok());
     assert_eq!(empty.runtime_class_name(), None);
 }
+
+// ---------------------------------------------------------------- ANR-402 (AD-052): a size class's own runtime class
+
+/// The run pod template's class and the class of the run pods' own spec (the one the guard's parameter carries) of a coder that
+/// picks `class`, under the settings.
+fn runtime_class_of(settings: RunPodSettings, class: &str) -> (Option<String>, Option<String>) {
+    let class = class.to_owned();
+    let r = must_resolve_with(
+        "coder",
+        &Externals::default().with_run_pods(settings),
+        move |_, c| set(c, RUN, json!({ "sizeClass": class })),
+    );
+    let set_ = r
+        .runtime
+        .file_sets
+        .iter()
+        .find(|f| f.name == "coder-run-pod")
+        .expect("the template is a file set");
+    let pod: Value = serde_json::from_str(&set_.files["pod.yaml"]).expect("a JSON Pod");
+    (
+        pod["spec"]
+            .get("runtimeClassName")
+            .map(|c| c.as_str().expect("a string").to_owned()),
+        r.runtime
+            .run_pods
+            .as_ref()
+            .expect("run pods")
+            .runtime_class_name
+            .clone(),
+    )
+}
+
+fn two_classes(deployment: Option<&str>, own: Value) -> RunPodSettings {
+    let mut over = json!({ "classes": { "boxed": {
+        "requests": { "cpu": "250m", "memory": "512Mi" }, "limits": { "memory": "1Gi" } } } });
+    over["classes"]["boxed"]["runtimeClassName"] = own;
+    if let Some(class) = deployment {
+        over["runtimeClassName"] = json!(class);
+    }
+    settings_with(over)
+}
+
+#[test]
+fn a_size_class_names_its_own_runtime_class_and_it_replaces_the_deployments() {
+    // The deployment names gvisor; `boxed` names another handler and takes it, `standard` keeps the deployment's.
+    let s = two_classes(Some("gvisor"), json!("kata"));
+    assert_eq!(
+        runtime_class_of(s.clone(), "standard"),
+        (Some("gvisor".into()), Some("gvisor".into()))
+    );
+    // The template's class and the class the guard's parameter will carry are one value: the pod and its rule cannot disagree.
+    assert_eq!(
+        runtime_class_of(s, "boxed"),
+        (Some("kata".into()), Some("kata".into()))
+    );
+}
+
+#[test]
+fn a_size_class_can_be_sandboxed_while_the_deployment_names_none() {
+    let s = two_classes(None, json!("gvisor"));
+    assert_eq!(runtime_class_of(s.clone(), "standard"), (None, None));
+    assert_eq!(
+        runtime_class_of(s, "boxed"),
+        (Some("gvisor".into()), Some("gvisor".into()))
+    );
+}
+
+#[test]
+fn an_empty_or_absent_class_runtime_is_the_deployments() {
+    for own in [json!(""), json!("   "), Value::Null] {
+        let s = two_classes(Some("gvisor"), own);
+        assert_eq!(
+            runtime_class_of(s, "boxed"),
+            (Some("gvisor".into()), Some("gvisor".into()))
+        );
+    }
+    // Nothing named anywhere: nothing in the pod and nothing in the spec, as before the field existed.
+    assert_eq!(
+        runtime_class_of(two_classes(None, Value::Null), "boxed"),
+        (None, None)
+    );
+}
+
+#[test]
+fn a_class_runtime_that_is_not_the_name_of_an_object_is_refused_naming_the_class() {
+    let problems = two_classes(None, json!("Not A Class"))
+        .validate()
+        .unwrap_err();
+    assert!(
+        problems
+            .iter()
+            .any(|p| p.contains("classes.boxed.runtimeClassName")),
+        "{problems:?}"
+    );
+}
+
+#[test]
+fn run_pods_have_no_build_mode_for_a_runtime_class_to_be_refused_with() {
+    // AD-052 decision 3 (the image-build modes `Build` and `Engine` refused with a class until proven) has no field to read in this
+    // platform: `coder.runPods` is `{ sizeClass }` and nothing else, and naming a class there is the only way to ask for run pods.
+    // The CRDs are the proof: a mode cannot be set beside a class, so there is nothing to refuse. The day a field is added this
+    // fails, and the decision needs its refusal and a test of it.
+    let text = serde_json::to_string(&aap_api::crds()).expect("the CRDs");
+    for word in ["\"Build\"", "\"Engine\"", "buildMode", "engineMode"] {
+        assert!(
+            !text.contains(word),
+            "a CRD names {word}: AD-052 decision 3 now needs a refusal and a test of it"
+        );
+    }
+}

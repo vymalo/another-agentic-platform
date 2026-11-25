@@ -35,18 +35,30 @@ spec:
   variables:
     - name: containers
       expression: "object.spec.containers + (has(object.spec.initContainers) ? object.spec.initContainers : [])"
-    {{- with .Values.runPods.runtimeClassName }}
-    {{- /* K14a (AD-052): the class the deployment named. The parameters carry it; the chart's value is the fallback for an operator
-       older than this policy, so that a skew refuses rather than admits. */}}
+    {{- /* K14a (AD-052), ANR-402: the class the pods of this agent run under is the one its size class names, else the deployment's. The
+       operator writes that one into the parameters (it knows the agent's class); the chart's deployment-wide value is the fallback for
+       an operator older than this policy, so that a skew refuses rather than admits. The rule exists when the deployment names a
+       class or any size class does, and is absent from every render when none does. */}}
+    {{- $runtime := .Values.runPods.runtimeClassName | default "" }}
+    {{- $classRuntime := false }}
+    {{- range $name, $class := .Values.runPodClasses }}
+    {{- if and (kindIs "map" $class) (get $class "runtimeClassName") }}{{ $classRuntime = true }}{{ end }}
+    {{- end }}
+    {{- if or $runtime $classRuntime }}
     - name: runtimeClass
-      expression: "has(params.data.runtimeClassName) ? params.data.runtimeClassName : '{{ . }}'"
+      expression: "has(params.data.runtimeClassName) ? params.data.runtimeClassName : '{{ $runtime }}'"
     {{- end }}
   validations:
-    {{- with .Values.runPods.runtimeClassName }}
+    {{- if $runtime }}
     {{- /* K14a (AD-052) decision 2: named, the class is REQUIRED. A run pod of the agent's account with another class, or none, is
        refused, so the sandbox cannot be skipped by whoever holds the account's token. */}}
     - expression: "has(object.spec.runtimeClassName) && object.spec.runtimeClassName == variables.runtimeClass"
       messageExpression: "'a run pod runs under the RuntimeClass ' + variables.runtimeClass + ' (the deployment sandboxes run pods)'"
+    {{- else if $classRuntime }}
+    {{- /* ANR-402: only some size classes name a class. An agent whose class names none has no parameter, so the variable is empty and
+       the rule judges nothing; an agent whose class names one is held to it, as above. */}}
+    - expression: "variables.runtimeClass == '' || (has(object.spec.runtimeClassName) && object.spec.runtimeClassName == variables.runtimeClass)"
+      messageExpression: "'a run pod runs under the RuntimeClass ' + variables.runtimeClass + ' (its size class sandboxes run pods)'"
     {{- end }}
     - expression: "has(object.metadata.labels) && params.data.runLabel in object.metadata.labels && 'app.kubernetes.io/managed-by' in object.metadata.labels && object.metadata.labels['app.kubernetes.io/managed-by'] == params.data.managedBy"
       messageExpression: "'a run pod carries the labels app.kubernetes.io/managed-by=' + params.data.managedBy + ' and ' + params.data.runLabel"

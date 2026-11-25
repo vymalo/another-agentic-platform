@@ -1338,6 +1338,32 @@ check "runPods.runtimeClassName: the settings name the class, the policy has ele
 check "the class is never an object: the chart renders no RuntimeClass, as the administrator makes it" lacks '^kind: RuntimeClass$'
 check "refused: a run class that is not the name of a RuntimeClass" refused "runPods.runtimeClassName must be the name of a RuntimeClass" --set runPods.enabled=true --set 'runPods.runtimeClassName=Not A Class'
 check "refused: an agent class that is not the name of a RuntimeClass" refused "agent.runtimeClassName must be the name of a RuntimeClass" --set 'agent.runtimeClassName=Not A Class'
+
+# ANR-402 (AD-052): a size class may name its own RuntimeClass, which replaces the deployment's for the pods of that class.
+render -f "$here/runpods.values.yaml" --set runPodClasses.large.runtimeClassName=gvisor-large
+anr402_class_only() {
+  dhas ConfigMap aap-operator-run-pods-settings '^        runtimeClassName: gvisor-large$' \
+    && dlacks ConfigMap aap-operator-run-pods-settings '^    runtimeClassName:' \
+    && dhas ValidatingAdmissionPolicy aap-operator-agents-run-pods \
+      "has\\(params.data.runtimeClassName\\) \\? params.data.runtimeClassName : ''" \
+      "variables.runtimeClass == '' \\|\\| \\(has\\(object.spec.runtimeClassName\\)" \
+      'its size class sandboxes run pods' \
+    && [ "$(doc ValidatingAdmissionPolicy aap-operator-agents-run-pods | grep -c '^    - expression:')" -eq 11 ]
+}
+check "runPodClasses.<name>.runtimeClassName alone: the settings carry it under the class, the deployment's key is absent, and the policy judges only a pod whose parameters name a class" anr402_class_only
+render -f "$here/runpods.values.yaml" --set runPods.runtimeClassName=gvisor --set runPodClasses.large.runtimeClassName=gvisor-large
+anr402_class_and_deployment() {
+  dhas ConfigMap aap-operator-run-pods-settings '^    runtimeClassName: gvisor$' '^        runtimeClassName: gvisor-large$' \
+    && dhas ValidatingAdmissionPolicy aap-operator-agents-run-pods "':' gvisor|: 'gvisor'" 'object.spec.runtimeClassName == variables.runtimeClass' \
+    && dlacks ValidatingAdmissionPolicy aap-operator-agents-run-pods "variables.runtimeClass == ''"
+}
+check "a class's runtimeClassName beside the deployment's: both are in the settings, the policy's fallback is the deployment's and the rule stays strict" anr402_class_and_deployment
+check "refused: a size class's runtimeClassName that is not the name of a RuntimeClass" refused "runPodClasses.large.runtimeClassName: \"Not A Class\" is not the name of a RuntimeClass" \
+  --set runPods.enabled=true --set 'runPodClasses.large.runtimeClassName=Not A Class' --set runPodClasses.large.limits.memory=1Gi --set runPodClasses.large.limits.cpu=1 \
+  --set runPodClasses.large.limits.ephemeral-storage=1Gi --set runPodClasses.large.requests.ephemeral-storage=1Gi
+check "refused: a size class's runtimeClassName that is not a string" refused "runPodClasses.large.runtimeClassName must be a string" \
+  --set runPods.enabled=true --set runPodClasses.large.runtimeClassName=7 --set runPodClasses.large.limits.memory=1Gi --set runPodClasses.large.limits.cpu=1 \
+  --set runPodClasses.large.limits.ephemeral-storage=1Gi --set runPodClasses.large.requests.ephemeral-storage=1Gi
 check "refused: a key of the agent block the operator does not read" refused "agent.bogus is not a setting" --set agent.bogus=1
 check "refused: the agent block null" refused "agent must be a map" --set agent=null
 
@@ -1368,7 +1394,7 @@ check "run pods on: the default class carries the CPU limit (2) and both ephemer
   dhas ConfigMap aap-operator-run-pods-settings 'ephemeral-storage: 1Gi' 'ephemeral-storage: 4Gi' 'cpu: "?2"?$'
 check "refused: a size class named as no DNS label" refused "the name of a class is a DNS label" --set runPods.enabled=true --set 'runPodClasses.Big_One.limits.memory=1Gi'
 check "refused: a size class resource that is not a quantity" refused "is not a quantity" --set runPods.enabled=true --set runPodClasses.standard.limits.memory=lots
-check "refused: a key of a size class that is not requests or limits" refused "is not a setting: requests or limits" --set runPods.enabled=true --set runPodClasses.standard.cpu=1
+check "refused: a key of a size class that is not requests or limits" refused "is not a setting: requests, limits or runtimeClassName" --set runPods.enabled=true --set runPodClasses.standard.cpu=1
 check "refused: a run image with no digest" refused "runPods.image.digest must be sha256:" --set runPods.enabled=true --set runPods.image.digest=
 check "refused: a run image whose digest is not one" refused "runPods.image.digest must be sha256:" --set runPods.enabled=true --set runPods.image.digest=sha256:abc
 check "refused: a run image tagged latest" refused "runPods.image.tag must not be latest" --set runPods.enabled=true --set runPods.image.tag=latest
