@@ -49,6 +49,7 @@ RUN cargo build --release --locked --package aap-usage-ingest --bin usage-ingest
 # repository's pull request 52, run 43729018865, under docker/build-push-action: OTEL_EXPORTER_OTLP_TRACES_PROTOCOL=grpc and an
 # endpoint on a unix socket, for BuildKit's own tracing), and `api --check` reads them as the API's tracing settings and refuses
 # a protocol it does not speak. A smoke test must not depend on what a builder puts in the environment.
+# hadolint ignore=SC2086
 RUN set -eu; \
     bin=/src/target/release/usage-ingest; \
     clean="env -i PATH=$PATH"; \
