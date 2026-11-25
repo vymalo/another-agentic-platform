@@ -1,0 +1,24 @@
+# The usage ingest on (slice ANR-731). Every required value set; nothing here is a secret.
+usageIngest:
+  enabled: true
+  image:
+    tag: sha-83e1c6e
+  audience: usage-ingest
+  meterSubject: system:serviceaccount:meter:pod-meter
+  ledgerSubject: system:serviceaccount:ledger:ledger
+  database:
+    clusterName: usage-db
+    secretName: usage-db-app
+  networkPolicy:
+    from:
+      - namespaceSelector:
+          matchLabels:
+            kubernetes.io/metadata.name: meter
+      - namespaceSelector:
+          matchLabels:
+            kubernetes.io/metadata.name: ledger
+    database:
+      to:
+        - podSelector:
+            matchLabels:
+              cnpg.io/cluster: usage-db

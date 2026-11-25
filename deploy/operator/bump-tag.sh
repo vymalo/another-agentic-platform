@@ -1,7 +1,7 @@
 #!/bin/sh
 # Set the image tag of one component in a values file to a new tag and show the change.
 #
-#   bump-tag.sh <values.yaml> <tag> [operator|api]
+#   bump-tag.sh <values.yaml> <tag> [operator|api|usage-ingest]
 #
 # `operator` (the default) is `image.tag`, the `tag:` key inside the top-level `image:` block. `api` is `api.image.tag`, the `tag:` key
 # inside `image:` inside the top-level `api:` block (the Platform API, slice D7b1). Prints `unchanged` (and leaves the file alone)
@@ -11,7 +11,7 @@
 set -eu
 
 if [ "$#" -lt 2 ] || [ "$#" -gt 3 ]; then
-  echo "usage: $0 <values.yaml> <tag> [operator|api]" >&2
+  echo "usage: $0 <values.yaml> <tag> [operator|api|usage-ingest]" >&2
   exit 2
 fi
 file=$1
@@ -25,7 +25,8 @@ esac
 case "$component" in
   operator) key="image.tag" ;;
   api) key="api.image.tag" ;;
-  *) echo "refusing component '$component': expected operator or api" >&2; exit 2 ;;
+  usage-ingest) key="usageIngest.image.tag" ;;
+  *) echo "refusing component '$component': expected operator, api or usage-ingest" >&2; exit 2 ;;
 esac
 
 # One awk program for both passes. `find` prints the current tag; `edit` prints the file with that one line replaced.
@@ -39,7 +40,7 @@ prog='
     if (mode == "edit") print
     next
   }
-  comp == "api" && in_top && /^  [^ #]/ { in_img = ($0 ~ /^  image:/) }
+  (comp == "api" || comp == "usage-ingest") && in_top && /^  [^ #]/ { in_img = ($0 ~ /^  image:/) }
   in_img && !done && $0 ~ tagre {
     done = 1
     if (mode == "find") { sub(/^ *tag:[ ]*/, ""); sub(/[ ]*(#.*)?$/, ""); gsub(/"/, ""); print; exit }
@@ -48,7 +49,9 @@ prog='
   }
   mode == "edit" { print }
 '
-if [ "$component" = api ]; then
+if [ "$component" = usage-ingest ]; then
+  top=usageIngest; tagre='^    tag:'; indent='    '
+elif [ "$component" = api ]; then
   top=api; tagre='^    tag:'; indent='    '
 else
   top=image; tagre='^  tag:'; indent='  '

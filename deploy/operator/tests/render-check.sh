@@ -1980,4 +1980,47 @@ crds_kinds() {
 }
 check "it holds the four CRDs and nothing else" crds_kinds
 
+# ---- The usage ingest (ANR-731): off by default and then not a trace; on, each object checked; each refusal seen.
+render
+check "usageIngest off (the default): no usage-ingest object in the default render" lacks 'usage-ingest'
+render -f "$here/usage-ingest.values.yaml"
+ui=aap-operator-usage-ingest
+ui_objects() { for k in Deployment Service ServiceAccount NetworkPolicy; do [ -n "$(doc "$k" "$ui")" ] || return 1; done; }
+check "usageIngest on: a Deployment, a Service, a ServiceAccount and a NetworkPolicy, all named $ui" ui_objects
+check "usageIngest on: no ClusterRole unless asked" lacks '^kind: Cluster(Role|RoleBinding)$'
+check "usageIngest on: no Secret object and no secret variable (the connection string is a mounted file)" \
+  lacks '^kind: Secret$|secretKeyRef|DATABASE_URL:'
+check "usageIngest on: the container is non-root, read-only, drops ALL, with CPU and memory limits" \
+  dhas Deployment $ui 'readOnlyRootFilesystem: true' 'runAsUser: 65532' 'drop: \[ALL\]' 'cpu: 500m' 'memory: 256Mi'
+check "usageIngest on: the identity, the audience and the lag are the values" \
+  dhas Deployment $ui 'name: USAGE_TOKEN_AUDIENCE' 'value: "usage-ingest"' 'system:serviceaccount:meter:pod-meter' 'system:serviceaccount:ledger:ledger' 'name: USAGE_LAG_SECS'
+check "usageIngest on: the database is a file from the app Secret's key, mounted read-only" \
+  dhas Deployment $ui 'name: DATABASE_URL_FILE' 'value: /etc/usage-ingest/db/uri' 'secretName: usage-db-app' 'readOnly: true'
+check "usageIngest on: the policy admits the meter's and the ledger's peers on the ingest port only" \
+  dhas NetworkPolicy $ui 'kubernetes.io/metadata.name: meter' 'kubernetes.io/metadata.name: ledger' 'port: 8090'
+check "usageIngest on: egress is the API server, DNS and the database's pods (three rules)" \
+  dhas NetworkPolicy $ui 'cnpg.io/cluster: usage-db' 'port: 5432' 'port: 53'
+operator_has_no_ingest_env() { ! doc Deployment aap-operator | grep -q USAGE_; }
+check "usageIngest on: the operator's own Deployment names no ingest variable" operator_has_no_ingest_env
+render -f "$here/usage-ingest.values.yaml" --set usageIngest.tokenReview.clusterRole.create=true
+check "usageIngest tokenReview.clusterRole.create: one ClusterRole with create on tokenreviews and nothing else, bound to the ingest's account" \
+  dhas ClusterRole $ui-tokenreview 'tokenreviews' 'verbs: \["create"\]'
+check "... and the binding names the ingest's ServiceAccount" dhas ClusterRoleBinding $ui-tokenreview "name: $ui"
+for t in 'usageIngest.audience=|usageIngest.audience is required' \
+         'usageIngest.meterSubject=nope|must be system:serviceaccount' \
+         'usageIngest.ledgerSubject=system:serviceaccount:meter:pod-meter|must be different' \
+         'usageIngest.image.tag=latest|must be sha-' \
+         'usageIngest.lagSecs=30|lagSecs must be' \
+         'usageIngest.database.secretName=|database.clusterName, secretName' \
+         'usageIngest.port=8091|must differ'; do
+  set_=${t%%|*}; frag=${t#*|}
+  check "usageIngest refuses --set $set_" refused "$frag" -f "$here/usage-ingest.values.yaml" --set "$set_"
+done
+render -f "$here/usage-ingest.values.yaml" --set usageIngest.serviceAccount.create=false --set usageIngest.serviceAccount.name=elsewhere
+ui_no_sa() { [ -z "$(doc ServiceAccount "$ui")" ]; }
+check "usageIngest serviceAccount.create=false: no ServiceAccount of the ingest is made" ui_no_sa
+check "usageIngest serviceAccount.create=false: the pod names the given one" dhas Deployment "$ui" 'serviceAccountName: elsewhere'
+check "usageIngest refuses an empty networkPolicy.from" refused "networkPolicy.from must name" -f "$here/usage-ingest.values.yaml" --set-json 'usageIngest.networkPolicy.from=[]'
+check "usageIngest refuses an empty networkPolicy.database.to" refused "networkPolicy.database.to must name" -f "$here/usage-ingest.values.yaml" --set-json 'usageIngest.networkPolicy.database.to=[]'
+
 if [ "$fail" -eq 0 ]; then echo "operator chart checks passed"; else echo "operator chart checks FAILED"; exit 1; fi
