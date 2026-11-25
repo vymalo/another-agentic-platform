@@ -1,0 +1,26 @@
+# Local development helpers. Nothing here is the platform: the operator and the Platform API run in a cluster (`deploy/operator`).
+#
+# Profiles (opt-in; name the service, so that nothing else starts):
+#   api-docs   Swagger UI over every OpenAPI document of this repository (http://127.0.0.1:8104, a dropdown):
+#              `docker compose --profile api-docs up -d swagger-ui` (CONTRIBUTING.md, "Read the OpenAPI documents").
+
+name: another-agentic-platform
+
+# Latest stable on 2026-11-25 (Docker Hub, `swaggerapi/swagger-ui` v5.36.0), pinned by tag and by the digest of the multi-arch index.
+# To move it: read the new tag and digest from https://hub.docker.com/v2/repositories/swaggerapi/swagger-ui/tags and change this line.
+x-swagger-ui-image: &swagger-ui-image swaggerapi/swagger-ui:v5.36.0@sha256:a6c9dae9b7bf7aa691ad8cf76574d0a9c3c8ce6e0d3946d6bb55acc36f24c4e5
+
+services:
+  # Every OpenAPI document of the repository in one page: a dropdown (Swagger UI's `URLS`) over files mounted read-only into the image's web
+  # root. A new document is one `volumes` line here and one entry in `URLS`; the Docs workflow fails when a document under docs/ that
+  # says `openapi` is not mounted. The document's server is a variable (`{base}`): set it to the API's address to use "Try it out".
+  swagger-ui:
+    image: *swagger-ui-image
+    profiles: [api-docs]
+    environment:
+      URLS: '[{"url":"openapi/platform-api-v1.openapi.json","name":"Platform API v1 (docs/api/platform-api-v1.openapi.json)"}]'
+      URLS_PRIMARY_NAME: Platform API v1 (docs/api/platform-api-v1.openapi.json)
+    volumes:
+      - ./docs/api/platform-api-v1.openapi.json:/usr/share/nginx/html/openapi/platform-api-v1.openapi.json:ro
+    ports:
+      - "127.0.0.1:${SWAGGER_UI_PORT:-8104}:8080"
