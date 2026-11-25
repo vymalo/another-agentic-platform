@@ -744,8 +744,7 @@ fn a_folder_agent_with_many_workers_needs_no_placement() {
 /// bound of the schema alone costs the operator nothing to resolve and it does not enforce: the number
 /// of extra MCP servers, the length of a title or of a provider's URL, and how many aliases, tools or
 /// headers a shared object lists, and the sleep durations of `scaling` (AD-058), whose bounds are CEL
-/// the API server judges and nothing reads until the idle controller.
-/// headers a shared object lists. What the operator *does* check of a `ModelEndpoint` and a
+/// the API server judges and nothing reads until the idle controller. What the operator *does* check of a `ModelEndpoint` and a
 /// `ToolProvider` (an address, the Secret references, the exclusive forms, the URL) is asked of it.
 fn outside_validate(file_name: &str) -> bool {
     file_name.starts_with("audience-")
