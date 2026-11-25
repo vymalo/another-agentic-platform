@@ -143,6 +143,7 @@ pub struct UnsupportedInterface {
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize, KubeSchema)]
 #[serde(rename_all = "camelCase")]
 #[x_kube(validation = Rule::new("!has(self.front) || self.topology == 'split'").message("scaling.front is only allowed with topology: split"))]
+#[x_kube(validation = Rule::new("has(self.idleTimeout) || (!has(self.wakeAhead) && !has(self.wakeTimeout))").message("scaling.wakeAhead and scaling.wakeTimeout need scaling.idleTimeout"))]
 pub struct Scaling {
     /// `combined`: one workload runs every role. `split`: a control plane (`<name>-front`) and workers.
     #[serde(default)]
@@ -156,6 +157,24 @@ pub struct Scaling {
     /// The front of a `split` topology.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub front: Option<Front>,
+
+    /// How long the agent must report no work before it sleeps (scaled to zero). A duration such as
+    /// `15m`, from `1m` to `24h`. Absent: the agent never sleeps (AD-058).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[x_kube(validation = Rule::new("self.matches('^[1-9][0-9]*[smh]$') && duration(self) >= duration('1m') && duration(self) <= duration('24h')").message("scaling.idleTimeout is a duration from 1m to 24h, such as 15m"))]
+    pub idle_timeout: Option<String>,
+
+    /// How long before a scheduled firing a sleeping agent is woken. A duration from `10s` to `1h`.
+    /// Only with `idleTimeout`; absent: 2m.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[x_kube(validation = Rule::new("self.matches('^[1-9][0-9]*[smh]$') && duration(self) >= duration('10s') && duration(self) <= duration('1h')").message("scaling.wakeAhead is a duration from 10s to 1h, such as 2m"))]
+    pub wake_ahead: Option<String>,
+
+    /// How long a request waits for a sleeping agent to wake before the caller is told to retry.
+    /// A duration from `5s` to `5m`. Only with `idleTimeout`; absent: 60s.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[x_kube(validation = Rule::new("self.matches('^[1-9][0-9]*[smh]$') && duration(self) >= duration('5s') && duration(self) <= duration('5m')").message("scaling.wakeTimeout is a duration from 5s to 5m, such as 60s"))]
+    pub wake_timeout: Option<String>,
 }
 
 fn one() -> i32 {
@@ -168,6 +187,9 @@ impl Default for Scaling {
             topology: Topology::default(),
             workers: one(),
             front: None,
+            idle_timeout: None,
+            wake_ahead: None,
+            wake_timeout: None,
         }
     }
 }

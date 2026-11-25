@@ -84,6 +84,9 @@ pub enum RuntimePhase {
     Ready,
     /// Scaled to zero on purpose.
     Suspended,
+    /// Scaled to zero because the agent reported no work (AD-058); a request or a due schedule wakes it.
+    /// Distinct from `Suspended`, which is a person's choice.
+    Sleeping,
     /// Failed.
     Failed,
 }

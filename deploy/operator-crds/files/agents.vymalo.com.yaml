@@ -1107,6 +1107,15 @@ spec:
                         minimum: 1.0
                         type: integer
                     type: object
+                  idleTimeout:
+                    description: |-
+                      How long the agent must report no work before it sleeps (scaled to zero). A duration such as
+                      `15m`, from `1m` to `24h`. Absent: the agent never sleeps (AD-058).
+                    nullable: true
+                    type: string
+                    x-kubernetes-validations:
+                    - message: scaling.idleTimeout is a duration from 1m to 24h, such as 15m
+                      rule: self.matches('^[1-9][0-9]*[smh]$') && duration(self) >= duration('1m') && duration(self) <= duration('24h')
                   topology:
                     default: combined
                     description: '`combined`: one workload runs every role. `split`: a control plane (`<name>-front`) and workers.'
@@ -1114,6 +1123,24 @@ spec:
                     - combined
                     - split
                     type: string
+                  wakeAhead:
+                    description: |-
+                      How long before a scheduled firing a sleeping agent is woken. A duration from `10s` to `1h`.
+                      Only with `idleTimeout`; absent: 2m.
+                    nullable: true
+                    type: string
+                    x-kubernetes-validations:
+                    - message: scaling.wakeAhead is a duration from 10s to 1h, such as 2m
+                      rule: self.matches('^[1-9][0-9]*[smh]$') && duration(self) >= duration('10s') && duration(self) <= duration('1h')
+                  wakeTimeout:
+                    description: |-
+                      How long a request waits for a sleeping agent to wake before the caller is told to retry.
+                      A duration from `5s` to `5m`. Only with `idleTimeout`; absent: 60s.
+                    nullable: true
+                    type: string
+                    x-kubernetes-validations:
+                    - message: scaling.wakeTimeout is a duration from 5s to 5m, such as 60s
+                      rule: self.matches('^[1-9][0-9]*[smh]$') && duration(self) >= duration('5s') && duration(self) <= duration('5m')
                   workers:
                     default: 1
                     description: Replicas of the workload `<name>` (the adam workers as pods).
@@ -1124,6 +1151,8 @@ spec:
                 x-kubernetes-validations:
                 - message: 'scaling.front is only allowed with topology: split'
                   rule: '!has(self.front) || self.topology == ''split'''
+                - message: scaling.wakeAhead and scaling.wakeTimeout need scaling.idleTimeout
+                  rule: has(self.idleTimeout) || (!has(self.wakeAhead) && !has(self.wakeTimeout))
               store:
                 description: Where the agent's durable run ledger lives.
                 properties:
@@ -1273,6 +1302,7 @@ spec:
                     - Provisioning
                     - Ready
                     - Suspended
+                    - Sleeping
                     - Failed
                     type: string
                   provider:
