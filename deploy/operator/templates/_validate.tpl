@@ -232,7 +232,7 @@ Run pods (values `runPods` and `runPodClasses`, slice D15a; the egress proxy, D1
 belongs is a named refusal and not a nil pointer; the rest only with `runPods.enabled`, and then it is what the operator would refuse at
 start (RunPodSettings::validate, crates/domain/src/run_pods.rs) and a pod that never starts is worse than a refused render: every key
 the operator reads is a known one (it refuses an unknown key), the run image is pinned by tag and digest, the quota and the classes are
-quantities, every class has the memory limit the quota counts. Not here: that a class fits the quota (a comparison of two quantities),
+quantities, every class has the memory limit the quota counts and (AD-061) the CPU and ephemeral-storage limits the admission policy requires. Not here: that a class fits the quota (a comparison of two quantities),
 the CIDRs, a toleration or an egress rule, which the operator checks at start and the domain's tests check on the chart's own values.
 */}}
 {{- define "aap.runPods.validate" -}}
@@ -486,6 +486,17 @@ the CIDRs, a toleration or an egress rule, which the operator checks at start an
 {{- end -}}
 {{- if not (hasKey (default (dict) $class.limits) "memory") -}}
 {{- fail (printf "runPodClasses.%s.limits.memory is required: the quota counts it, and a pod with no memory limit is refused by the quota" $name) -}}
+{{- end -}}
+{{- /* AD-061: the run pods' admission policy refuses a container without a CPU and an ephemeral-storage limit, so a class without them would make
+   pods that are never admitted: refused here, at render, naming the key. */ -}}
+{{- if not (hasKey (default (dict) $class.limits) "cpu") -}}
+{{- fail (printf "runPodClasses.%s.limits.cpu is required (AD-061): the admission policy refuses a run pod with no CPU limit" $name) -}}
+{{- end -}}
+{{- if not (hasKey (default (dict) $class.limits) "ephemeral-storage") -}}
+{{- fail (printf "runPodClasses.%s.limits.ephemeral-storage is required (AD-061): the admission policy refuses a run pod with no ephemeral-storage limit" $name) -}}
+{{- end -}}
+{{- if not (hasKey (default (dict) $class.requests) "ephemeral-storage") -}}
+{{- fail (printf "runPodClasses.%s.requests.ephemeral-storage is required (AD-061): the scheduler places a run pod by it" $name) -}}
 {{- end -}}
 {{- end -}}
 {{- end -}}

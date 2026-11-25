@@ -613,7 +613,7 @@ fn the_default_class_is_standard_and_a_class_is_the_resources_of_the_run_contain
     let pod: Value = serde_json::from_str(&set_.files["pod.yaml"]).unwrap();
     assert_eq!(
         pod["spec"]["containers"][0]["resources"],
-        json!({"requests": {"cpu": "250m", "memory": "512Mi"}, "limits": {"memory": "2Gi"}})
+        json!({"requests": {"cpu": "250m", "memory": "512Mi", "ephemeral-storage": "1Gi"}, "limits": {"cpu": "2", "memory": "2Gi", "ephemeral-storage": "4Gi"}})
     );
     // Another class.
     let big = settings_with(json!({"classes": {"large": {

@@ -212,15 +212,21 @@ data:
     classes:
       large:
         limits:
+          cpu: "4"
+          ephemeral-storage: 8Gi
           memory: 8Gi
         requests:
           cpu: "1"
+          ephemeral-storage: 2Gi
           memory: 2Gi
       standard:
         limits:
+          cpu: "2"
+          ephemeral-storage: 4Gi
           memory: 2Gi
         requests:
           cpu: 250m
+          ephemeral-storage: 1Gi
           memory: 512Mi
     container: run
     egressProxy:
@@ -667,7 +673,7 @@ spec:
         app.kubernetes.io/instance: aap-operator
       annotations:
         # The settings for run pods are read once, at start: a changed file is a new pod.
-        checksum/run-pods: 87f39335d1dfec97b65c90674c3ae22fcc61a2c3523b8b2fe515c0d0e6876804
+        checksum/run-pods: b9f19db76165ef019b91188a1bbbc97860086d5fd0339e1ac859d0c997750cc1
     spec:
       serviceAccountName: aap-operator
       # The API token is the operator's way in.
@@ -817,6 +823,8 @@ spec:
       message: "a run pod uses its own network, PID and IPC namespaces"
     - expression: "has(object.spec.automountServiceAccountToken) && object.spec.automountServiceAccountToken == false"
       message: "a run pod sets automountServiceAccountToken: false: it holds no credential for the cluster"
+    - expression: "variables.containers.all(c, has(c.resources) && has(c.resources.limits) && 'memory' in c.resources.limits && 'cpu' in c.resources.limits && 'ephemeral-storage' in c.resources.limits)"
+      message: "a run pod sets limits.memory, limits.cpu and limits.ephemeral-storage on every container"
 ---
 # Source: aap-operator/templates/run-pods-admission.yaml
 apiVersion: admissionregistration.k8s.io/v1

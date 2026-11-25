@@ -835,8 +835,8 @@ impl ForService<'_> {
                 "command": rp::TOOLS_COMMAND,
                 "securityContext": container_security,
                 "resources": {
-                    "requests": { "cpu": rp::TOOLS_REQUEST_CPU, "memory": rp::TOOLS_REQUEST_MEMORY },
-                    "limits": { "memory": rp::TOOLS_LIMIT_MEMORY },
+                    "requests": { "cpu": rp::TOOLS_REQUEST_CPU, "memory": rp::TOOLS_REQUEST_MEMORY, "ephemeral-storage": rp::TOOLS_REQUEST_EPHEMERAL_STORAGE },
+                    "limits": { "cpu": rp::TOOLS_LIMIT_CPU, "memory": rp::TOOLS_LIMIT_MEMORY, "ephemeral-storage": rp::TOOLS_LIMIT_EPHEMERAL_STORAGE },
                 },
                 "volumeMounts": [{ "name": rp::TOOLS_VOLUME, "mountPath": rp::TOOLS_COPY_DIR }],
             }]),

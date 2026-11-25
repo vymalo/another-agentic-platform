@@ -66,6 +66,10 @@ spec:
       message: "a run pod uses its own network, PID and IPC namespaces"
     - expression: "has(object.spec.automountServiceAccountToken) && object.spec.automountServiceAccountToken == false"
       message: "a run pod sets automountServiceAccountToken: false: it holds no credential for the cluster"
+    {{- /* AD-061: the one rule this chart has that the coder chart's policy does not. Its place is last, so that the first nine are the coder
+       chart's in the coder chart's order (the parity test compares them one by one and holds this one apart). */}}
+    - expression: "variables.containers.all(c, has(c.resources) && has(c.resources.limits) && 'memory' in c.resources.limits && 'cpu' in c.resources.limits && 'ephemeral-storage' in c.resources.limits)"
+      message: "a run pod sets limits.memory, limits.cpu and limits.ephemeral-storage on every container"
 ---
 apiVersion: admissionregistration.k8s.io/v1
 kind: ValidatingAdmissionPolicyBinding

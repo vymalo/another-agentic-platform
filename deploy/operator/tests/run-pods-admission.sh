@@ -132,6 +132,17 @@ a run pod mounts only emptyDir volumes and the $claims_words"
 try "the account's token" denied "$token_refused" '.spec.automountServiceAccountToken = true'
 try "no word on the token" denied "$token_refused" 'del(.spec.automountServiceAccountToken)'
 
+# AD-061: every container sets a memory, a CPU and an ephemeral-storage limit, the init container's included (the quota counts the first,
+# a run pod with no CPU limit can starve a node, one with no ephemeral-storage limit can fill its disk).
+limits_words="a run pod sets limits.memory, limits.cpu and limits.ephemeral-storage on every container"
+for resource in memory cpu ephemeral-storage; do
+  try "no $resource limit in the run container" denied "$limits_words" "del(.spec.containers[0].resources.limits[\"$resource\"])"
+  try "no $resource limit in the init container" denied "$limits_words" "del(.spec.initContainers[0].resources.limits[\"$resource\"])"
+done
+try "no limits at all in the run container" denied "$limits_words" 'del(.spec.containers[0].resources.limits)'
+try "no resources at all in the init container" denied "$limits_words" 'del(.spec.initContainers[0].resources)'
+try "an extra container of an allowed image with no limits" denied "$limits_words" '.spec.containers += [.spec.containers[0] | .name = "extra" | del(.resources.limits)]'
+
 # The guard is for the agent's account, and for it alone: another account is judged by what the cluster judges everybody by.
 if out=$(kubectl --dry-run=server create -f - 2>&1 <<EOF
 $(jq '.spec.volumes += [{name: "host", hostPath: {path: "/"}}]' "$work/pod.json")
