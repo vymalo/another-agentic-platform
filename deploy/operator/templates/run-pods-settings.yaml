@@ -1,10 +1,14 @@
 {{- if include "aap.runPods" . }}
 {{- /* networkPolicy.enabled is not a setting any more (deny by default, adam-rs ADR 0042): `true` is tolerated and not written. */}}
-{{- $s := omit .Values.runPods "enabled" "priorityClassName" "runtimeClassName" }}
+{{- $s := omit .Values.runPods "enabled" "priorityClassName" "runtimeClassName" "nodeType" }}
 {{- $s = set $s "networkPolicy" (omit .Values.runPods.networkPolicy "enabled") }}
 {{- /* K14a (AD-052): the class only when one is named, so that the file (and the digest, and every render) is what it was while empty. */}}
 {{- with .Values.runPods.runtimeClassName }}
 {{- $s = set $s "runtimeClassName" . }}
+{{- end }}
+{{- /* ANR-660 (AD-066): the node types only when one is named, so that the file (and every render) is what it was while empty. */}}
+{{- if or .Values.runPods.nodeType.labelKey .Values.runPods.nodeType.admitted }}
+{{- $s = set $s "nodeType" (pick .Values.runPods.nodeType "labelKey" "admitted") }}
 {{- end }}
 {{- $file := merge (dict "priorityClass" (include "aap.runPodsPriorityClass" .) "role" (include "aap.runPodsRole" .) "classes" .Values.runPodClasses) $s }}
 # runPods.enabled: what the operator reads about run pods (RUN_PODS_FILE, read once at start; a change is a new pod). The names of

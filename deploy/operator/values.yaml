@@ -129,6 +129,15 @@ runPods:
   waitSecs: 600
   # Where run pods may be scheduled, on top of what the volume needs.
   nodeSelector: {}
+  # ANR-660 (AD-066): the node types run pods are pinned to. `labelKey` is the key of a node label and `admitted` the values of it that
+  # run pods may run on; both or neither, empty (off) by default and then not a trace in any render. Set, the operator adds the
+  # requirement `labelKey In admitted` to every required node-affinity term of the template (or makes the one term), and the admission
+  # policy refuses a run pod of an agent's account that is not restricted to those values (by `nodeSelector` or by required node
+  # affinity) or that sets `spec.nodeName`. It must not be the key of `nodeSelector`. The policy cannot read a Node's labels: it
+  # proves a pod is PINNED to the admitted types, and that those labels are honest is the administrator's (README "Run pods").
+  nodeType:
+    labelKey: ""
+    admitted: []
   tolerations: []
   # An affinity.nodeAffinity (the pod affinity to the coder is added when the volume is a ReadWriteOnce claim of the coder's pod).
   nodeAffinity: {}
@@ -248,6 +257,9 @@ runPods:
 # policy, exactly as the deployment's is. Nothing here sets one: with none named anywhere, no render carries a trace of the field.
 #   large:
 #     runtimeClassName: gvisor-large
+# A class is weighed from its `requests` (ANR-660, AD-066): the larger of cpu / 1 vCPU and memory / 2 GiB must be exactly 0.25, 0.5, 1, 2, 4
+# or 8, which the operator checks at start (a class off the grid is refused, never rounded) and shows on the run pod template as the
+# annotation agents.vymalo.com/size-weight. `requests.cpu` and `requests.memory` are required. `standard` weighs 0.25.
 runPodClasses:
   standard:
     requests:
