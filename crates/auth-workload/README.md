@@ -13,10 +13,10 @@ carry what this grants.
 |---|---|
 | the certificate parses | `Malformed` |
 | it chains to the configured CA bundle | `BadChain` |
-| its extended key usage names client authentication | `WrongUse` |
+| its extended key usage names client authentication, **and the extension is present** (`webpki`'s check is required-if-present, so the extension is required by hand) | `WrongUse` |
 | it is inside its validity window | `Expired` |
 | it carries a URI SAN | `NoIdentity` |
-| the configuration names that exact URI | `UnknownIdentity` |
+| the configuration names that exact URI — and there is exactly one (`two or more` is ambiguous) | `UnknownIdentity` |
 
 **Only `platform:agents.own` is grantable this way.** A permission outside that set is refused when the
 configuration is loaded, not when a request arrives.
@@ -49,8 +49,11 @@ file and holds no key.
 
 `cargo test -p aap-auth-workload` runs `aap_ports::client_authenticator_conformance!` against a
 **checked-in test CA** and its leaves (`tests/fixtures/`, generated once by `tests/fixtures/generate.sh`):
-a valid leaf, an unknown identity, another CA, a server-authentication leaf and an expired one. Each
-refusal has a single cause, and the suite checks that no error carries the certificate or its identity.
+a valid leaf, one mapped to no permissions, an unknown identity, a leaf with **no** extended key usage, one
+with a DNS SAN and no URI SAN, one with two URI SANs, another CA, a server-authentication leaf and an
+expired one. Each refusal has a single cause, and the suite checks that no error carries the certificate or
+its identity. Two crate tests go beyond the suite: an identity mapped to no permissions holds nothing, and
+the **configured** bundle decides (the accepted leaf is refused when the authenticator trusts the other CA).
 
 ## Not in this slice
 

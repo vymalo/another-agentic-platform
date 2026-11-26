@@ -82,6 +82,7 @@ dependencies = [
  "rustls-pki-types",
  "rustls-webpki",
  "serde",
+ "serde_yaml_ng",
  "thiserror 2.0.21",
  "tokio",
  "x509-parser",

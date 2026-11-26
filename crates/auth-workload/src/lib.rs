@@ -22,6 +22,8 @@
 //! No type of this crate holds a key, a token or a certificate's bytes in a printable form: a
 //! [`Certificate`]'s `Debug` says how long it is, and every error is a closed word.
 
+#![warn(missing_docs)]
+
 use std::collections::{BTreeMap, BTreeSet};
 
 use aap_ports::{Certificate, ClientAuthError, ClientAuthenticator, InvalidCertificate, Principal};
@@ -63,6 +65,16 @@ pub enum ConfigError {
         /// The entry's position.
         index: usize,
     },
+    /// An entry names something that is not a SPIFFE id.
+    #[error(
+        "workloadClients.clients[{index}].spiffeId {spiffe_id:?} is not a SPIFFE id: it starts with spiffe://"
+    )]
+    NotAnIdentity {
+        /// The entry's position.
+        index: usize,
+        /// The value, which is a name and not a secret.
+        spiffe_id: String,
+    },
     /// The same identity is named twice: one identity has one set of permissions.
     #[error("workloadClients.clients[{index}].spiffeId {spiffe_id:?} is named twice")]
     Duplicate {
@@ -98,6 +110,12 @@ impl WorkloadClients {
             let identity = client.spiffe_id.trim();
             if identity.is_empty() {
                 return Err(ConfigError::EmptyIdentity { index });
+            }
+            if !identity.starts_with("spiffe://") {
+                return Err(ConfigError::NotAnIdentity {
+                    index,
+                    spiffe_id: identity.to_owned(),
+                });
             }
             let mut permissions = BTreeSet::new();
             for permission in &client.permissions {
@@ -209,12 +227,19 @@ impl ClientAuthenticator for WorkloadAuth {
             .map_err(|_| invalid(InvalidCertificate::Malformed))?;
 
         // 2-4. It chains to the configured bundle, is for client authentication, and is in its window.
+        //
+        // `KeyUsage::client_auth()` is *required if present*: `webpki` accepts a leaf that carries no
+        // extended key usage at all. The extension is therefore required here, by hand, after the chain
+        // — otherwise a role of the same CA that issues leaves without an EKU would be callable.
         let anchors: Vec<TrustAnchor<'_>> = self
             .roots
             .iter()
             .map(|root| {
-                webpki::anchor_from_trusted_cert(root)
-                    .map_err(|_| invalid(InvalidCertificate::Malformed))
+                webpki::anchor_from_trusted_cert(root).map_err(|e| {
+                    // The trust this authenticator was built with cannot be read: never the client's
+                    // certificate's fault, and never a 401.
+                    ClientAuthError::Unavailable(Box::new(e))
+                })
             })
             .collect::<Result<_, _>>()?;
         end_entity
@@ -228,23 +253,36 @@ impl ClientAuthenticator for WorkloadAuth {
                 None,
             )
             .map_err(|e| invalid(reason(e)))?;
+        let usage = parsed
+            .extended_key_usage()
+            .map_err(|_| invalid(InvalidCertificate::Malformed))?;
+        if !usage.is_some_and(|extension| extension.value.client_auth) {
+            return Err(invalid(InvalidCertificate::WrongUse));
+        }
 
-        // 5. It names a workload, and the configuration names that exact URI.
-        let identity = parsed
+        // 5. It names exactly one workload, and the configuration names that exact URI.
+        let uris: Vec<&str> = parsed
             .subject_alternative_name()
             .ok()
             .flatten()
-            .and_then(|extension| {
+            .map(|extension| {
                 extension
                     .value
                     .general_names
                     .iter()
-                    .find_map(|name| match name {
+                    .filter_map(|name| match name {
                         GeneralName::URI(uri) => Some(*uri),
                         _ => None,
                     })
+                    .collect()
             })
-            .ok_or_else(|| invalid(InvalidCertificate::NoIdentity))?;
+            .unwrap_or_default();
+        let identity = match uris.as_slice() {
+            [] => return Err(invalid(InvalidCertificate::NoIdentity)),
+            // More than one URI SAN is ambiguous, and the set has no separate word for that.
+            [_first, _second, ..] => return Err(invalid(InvalidCertificate::UnknownIdentity)),
+            [only] => *only,
+        };
         let permissions = self
             .identities
             .get(identity)
@@ -258,7 +296,9 @@ fn reason(error: webpki::Error) -> InvalidCertificate {
     use webpki::Error;
     match error {
         Error::CertExpired { .. } | Error::CertNotValidYet { .. } => InvalidCertificate::Expired,
-        Error::RequiredEkuNotFoundContext(_) => InvalidCertificate::WrongUse,
+        Error::RequiredEkuNotFoundContext(_) | Error::EmptyEkuExtension => {
+            InvalidCertificate::WrongUse
+        }
         Error::BadDer | Error::BadDerTime | Error::InvalidCertValidity => {
             InvalidCertificate::Malformed
         }
@@ -270,8 +310,10 @@ fn invalid(reason: InvalidCertificate) -> ClientAuthError {
     ClientAuthError::Invalid(reason)
 }
 
-/// The certificates of a PEM bundle.
+/// The certificates of a PEM bundle. Text between blocks (a comment, a header) is skipped to the next
+/// block; a block that cannot be read, or text with no block after it, refuses the bundle.
 fn roots_from_pem(bundle: &str) -> Result<Vec<CertificateDer<'static>>, ConfigError> {
+    const BEGIN: &[u8] = b"-----BEGIN";
     let mut rest = bundle.as_bytes();
     let mut roots = Vec::new();
     loop {
@@ -285,12 +327,25 @@ fn roots_from_pem(bundle: &str) -> Result<Vec<CertificateDer<'static>>, ConfigEr
                 roots.push(CertificateDer::from(pem.contents));
                 rest = next;
             }
-            Err(_) => {
-                return Err(ConfigError::Bundle(
-                    "the bundle is not PEM certificates".to_owned(),
-                ));
-            }
+            Err(_) if !rest.starts_with(BEGIN) => match find(BEGIN, rest) {
+                Some(at) => rest = &rest[at..],
+                // Text after the last block is a comment or a header; no block and no roots is refused
+                // by the caller as an empty bundle.
+                None => break,
+            },
+            Err(_) => return Err(not_pem()),
         }
     }
     Ok(roots)
+}
+
+fn not_pem() -> ConfigError {
+    ConfigError::Bundle("the bundle is not PEM certificates".to_owned())
+}
+
+/// The first position of `needle` in `haystack`.
+fn find(needle: &[u8], haystack: &[u8]) -> Option<usize> {
+    haystack
+        .windows(needle.len())
+        .position(|window| window == needle)
 }

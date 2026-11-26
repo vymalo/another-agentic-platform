@@ -65,7 +65,8 @@ pub enum InvalidCertificate {
     /// word for "not valid yet", and the caller's remedy is the same: another certificate — the choice
     /// [`InvalidToken::Expired`](crate::InvalidToken::Expired) already makes for a token.
     Expired,
-    /// A valid certificate whose URI SAN the configuration does not name.
+    /// A valid certificate whose URI SAN the configuration does not name, or which carries **more than
+    /// one** URI SAN: the identity is ambiguous, and the set has no separate word for that.
     UnknownIdentity,
     /// A valid certificate with no URI SAN at all: it names no workload.
     NoIdentity,

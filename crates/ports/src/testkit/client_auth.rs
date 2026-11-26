@@ -41,6 +41,16 @@ pub trait ClientAuthenticatorUnderTest: crate::ClientAuthenticator + 'static {
     /// A certificate of the trusted CA, for client authentication, whose URI SAN the configuration does
     /// not name, and that URI SAN.
     fn unknown_identity(&self) -> impl Future<Output = (Certificate, String)> + Send;
+
+    /// A certificate of the trusted CA that carries **no** extended key usage extension at all: the one
+    /// a `required-if-present` check lets through.
+    fn no_eku(&self) -> impl Future<Output = Certificate> + Send;
+
+    /// A certificate of the trusted CA, for client authentication, with a DNS SAN and no URI SAN.
+    fn no_identity(&self) -> impl Future<Output = Certificate> + Send;
+
+    /// A certificate of the trusted CA, for client authentication, with **two** URI SANs.
+    fn two_identities(&self) -> impl Future<Output = Certificate> + Send;
 }
 
 /// What an error shows: its message, its debug form and those of its whole chain of sources.
@@ -147,6 +157,45 @@ pub mod cases {
         );
     }
 
+    pub async fn a_certificate_without_the_extension_is_invalid<A: ClientAuthenticatorUnderTest>(
+        a: A,
+    ) {
+        // `webpki`'s client-auth check is required-if-present: a leaf with no EKU at all passes it. The
+        // extension is required by the implementation, not by the library.
+        let certificate = a.no_eku().await;
+        let err = a.authenticate(Some(&certificate)).await.unwrap_err();
+        assert!(
+            matches!(err, ClientAuthError::Invalid(InvalidCertificate::WrongUse)),
+            "{err:?}"
+        );
+    }
+
+    pub async fn a_certificate_without_a_uri_san_is_invalid<A: ClientAuthenticatorUnderTest>(a: A) {
+        let certificate = a.no_identity().await;
+        let err = a.authenticate(Some(&certificate)).await.unwrap_err();
+        assert!(
+            matches!(
+                err,
+                ClientAuthError::Invalid(InvalidCertificate::NoIdentity)
+            ),
+            "{err:?}"
+        );
+    }
+
+    pub async fn a_certificate_with_two_identities_is_invalid<A: ClientAuthenticatorUnderTest>(
+        a: A,
+    ) {
+        let certificate = a.two_identities().await;
+        let err = a.authenticate(Some(&certificate)).await.unwrap_err();
+        assert!(
+            matches!(
+                err,
+                ClientAuthError::Invalid(InvalidCertificate::UnknownIdentity)
+            ),
+            "{err:?}"
+        );
+    }
+
     pub async fn an_error_does_not_carry_the_certificate<A: ClientAuthenticatorUnderTest>(a: A) {
         // A valid certificate whose URI SAN is the sentinel, which the configuration does not name: the
         // implementation reads it, refuses it, and must not repeat it.
@@ -207,6 +256,9 @@ macro_rules! client_authenticator_conformance {
             an_expired_certificate_is_invalid,
             an_unknown_identity_is_invalid,
             garbage_is_malformed,
+            a_certificate_without_the_extension_is_invalid,
+            a_certificate_without_a_uri_san_is_invalid,
+            a_certificate_with_two_identities_is_invalid,
             an_error_does_not_carry_the_certificate,
             only_the_configured_permissions_are_granted,
         );
