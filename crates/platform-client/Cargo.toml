@@ -16,6 +16,7 @@ publish.workspace = true
 reqwest.workspace = true
 # The sign-in (`oidc`): the S256 challenge, the verifier and the state from the OS, base64url, a constant-time comparison of the state.
 base64.workspace = true
+ciborium.workspace = true
 getrandom.workspace = true
 sha2.workspace = true
 subtle.workspace = true

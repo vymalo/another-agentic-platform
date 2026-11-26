@@ -71,6 +71,29 @@
     "responses": {
       "Problem400": {
         "content": {
+          "application/cbor": {
+            "examples": {
+              "invalid-body": {
+                "value": {
+                  "detail": "the body is not a JSON form of this route",
+                  "status": 400,
+                  "title": "The body is not a form",
+                  "type": "urn:vymalo:agents:problem:invalid-body"
+                }
+              },
+              "invalid-request": {
+                "value": {
+                  "detail": "send one Authorization header",
+                  "status": 400,
+                  "title": "The request is not understood",
+                  "type": "urn:vymalo:agents:problem:invalid-request"
+                }
+              }
+            },
+            "schema": {
+              "$ref": "#/components/schemas/Problem"
+            }
+          },
           "application/problem+json": {
             "examples": {
               "invalid-body": {
@@ -111,6 +134,29 @@
       },
       "Problem401": {
         "content": {
+          "application/cbor": {
+            "examples": {
+              "invalid-token": {
+                "value": {
+                  "detail": "the bearer token is not valid: expired",
+                  "status": 401,
+                  "title": "Unauthorized",
+                  "type": "urn:vymalo:agents:problem:invalid-token"
+                }
+              },
+              "missing-token": {
+                "value": {
+                  "detail": "send the access token as Authorization: Bearer <token>",
+                  "status": 401,
+                  "title": "Unauthorized",
+                  "type": "urn:vymalo:agents:problem:missing-token"
+                }
+              }
+            },
+            "schema": {
+              "$ref": "#/components/schemas/Problem"
+            }
+          },
           "application/problem+json": {
             "examples": {
               "invalid-token": {
@@ -151,6 +197,22 @@
       },
       "Problem403": {
         "content": {
+          "application/cbor": {
+            "examples": {
+              "forbidden": {
+                "value": {
+                  "detail": "this needs the permission platform:agents.write",
+                  "permission": "platform:agents.write",
+                  "status": 403,
+                  "title": "Forbidden",
+                  "type": "urn:vymalo:agents:problem:forbidden"
+                }
+              }
+            },
+            "schema": {
+              "$ref": "#/components/schemas/Problem"
+            }
+          },
           "application/problem+json": {
             "examples": {
               "forbidden": {
@@ -183,6 +245,21 @@
       },
       "Problem404": {
         "content": {
+          "application/cbor": {
+            "examples": {
+              "not-found": {
+                "value": {
+                  "detail": "there is no agent named x",
+                  "status": 404,
+                  "title": "Not found",
+                  "type": "urn:vymalo:agents:problem:not-found"
+                }
+              }
+            },
+            "schema": {
+              "$ref": "#/components/schemas/Problem"
+            }
+          },
           "application/problem+json": {
             "examples": {
               "not-found": {
@@ -208,6 +285,21 @@
       },
       "Problem405": {
         "content": {
+          "application/cbor": {
+            "examples": {
+              "method-not-allowed": {
+                "value": {
+                  "detail": "this method is not served for this path",
+                  "status": 405,
+                  "title": "Method not allowed",
+                  "type": "urn:vymalo:agents:problem:method-not-allowed"
+                }
+              }
+            },
+            "schema": {
+              "$ref": "#/components/schemas/Problem"
+            }
+          },
           "application/problem+json": {
             "examples": {
               "method-not-allowed": {
@@ -239,6 +331,49 @@
       },
       "Problem409": {
         "content": {
+          "application/cbor": {
+            "examples": {
+              "already-exists": {
+                "value": {
+                  "detail": "AgentService x already exists",
+                  "status": 409,
+                  "title": "Already exists",
+                  "type": "urn:vymalo:agents:problem:already-exists"
+                }
+              },
+              "referenced": {
+                "value": {
+                  "agentCount": 2,
+                  "agents": [
+                    "chat",
+                    "coder"
+                  ],
+                  "detail": "ModelEndpoint gateway is still used by 2 agents",
+                  "status": 409,
+                  "title": "Still in use",
+                  "type": "urn:vymalo:agents:problem:referenced"
+                }
+              },
+              "yaml-only": {
+                "value": {
+                  "detail": "this object has fields no form says, so saving a form would lose them: change it as YAML",
+                  "reasons": [
+                    {
+                      "object": "AgentConfig",
+                      "path": "spec.model.extraBody",
+                      "reason": "a form cannot say it"
+                    }
+                  ],
+                  "status": 409,
+                  "title": "No form can save this object",
+                  "type": "urn:vymalo:agents:problem:yaml-only"
+                }
+              }
+            },
+            "schema": {
+              "$ref": "#/components/schemas/Problem"
+            }
+          },
           "application/problem+json": {
             "examples": {
               "already-exists": {
@@ -297,6 +432,21 @@
       },
       "Problem412": {
         "content": {
+          "application/cbor": {
+            "examples": {
+              "stale": {
+                "value": {
+                  "detail": "the object changed since you read it (somebody saved first, or the operator wrote its status): read it again",
+                  "status": 412,
+                  "title": "The object changed",
+                  "type": "urn:vymalo:agents:problem:stale"
+                }
+              }
+            },
+            "schema": {
+              "$ref": "#/components/schemas/Problem"
+            }
+          },
           "application/problem+json": {
             "examples": {
               "stale": {
@@ -321,6 +471,22 @@
       },
       "Problem413": {
         "content": {
+          "application/cbor": {
+            "examples": {
+              "payload-too-large": {
+                "value": {
+                  "detail": "a body is at most 2097152 bytes",
+                  "limit": 2097152,
+                  "status": 413,
+                  "title": "The body is too large",
+                  "type": "urn:vymalo:agents:problem:payload-too-large"
+                }
+              }
+            },
+            "schema": {
+              "$ref": "#/components/schemas/Problem"
+            }
+          },
           "application/problem+json": {
             "examples": {
               "payload-too-large": {
@@ -346,6 +512,21 @@
       },
       "Problem415": {
         "content": {
+          "application/cbor": {
+            "examples": {
+              "unsupported-media-type": {
+                "value": {
+                  "detail": "send the form as application/json",
+                  "status": 415,
+                  "title": "Unsupported media type",
+                  "type": "urn:vymalo:agents:problem:unsupported-media-type"
+                }
+              }
+            },
+            "schema": {
+              "$ref": "#/components/schemas/Problem"
+            }
+          },
           "application/problem+json": {
             "examples": {
               "unsupported-media-type": {
@@ -370,6 +551,27 @@
       },
       "Problem422": {
         "content": {
+          "application/cbor": {
+            "examples": {
+              "validation": {
+                "value": {
+                  "detail": "1 field is not valid",
+                  "errors": [
+                    {
+                      "field": "model.endpoint",
+                      "message": "no model endpoint named gateway"
+                    }
+                  ],
+                  "status": 422,
+                  "title": "The form is not valid",
+                  "type": "urn:vymalo:agents:problem:validation"
+                }
+              }
+            },
+            "schema": {
+              "$ref": "#/components/schemas/Problem"
+            }
+          },
           "application/problem+json": {
             "examples": {
               "validation": {
@@ -400,6 +602,21 @@
       },
       "Problem428": {
         "content": {
+          "application/cbor": {
+            "examples": {
+              "precondition-required": {
+                "value": {
+                  "detail": "send If-None-Match: * to create, or If-Match with the ETag you read to replace",
+                  "status": 428,
+                  "title": "A precondition is required",
+                  "type": "urn:vymalo:agents:problem:precondition-required"
+                }
+              }
+            },
+            "schema": {
+              "$ref": "#/components/schemas/Problem"
+            }
+          },
           "application/problem+json": {
             "examples": {
               "precondition-required": {
@@ -424,6 +641,21 @@
       },
       "Problem500": {
         "content": {
+          "application/cbor": {
+            "examples": {
+              "internal": {
+                "value": {
+                  "detail": "the Platform API failed; it is not a mistake of the request",
+                  "status": 500,
+                  "title": "Internal error",
+                  "type": "urn:vymalo:agents:problem:internal"
+                }
+              }
+            },
+            "schema": {
+              "$ref": "#/components/schemas/Problem"
+            }
+          },
           "application/problem+json": {
             "examples": {
               "internal": {
@@ -448,6 +680,21 @@
       },
       "Problem503": {
         "content": {
+          "application/cbor": {
+            "examples": {
+              "unavailable": {
+                "value": {
+                  "detail": "the cluster's API server cannot be reached or refused the call: try again",
+                  "status": 503,
+                  "title": "Unavailable",
+                  "type": "urn:vymalo:agents:problem:unavailable"
+                }
+              }
+            },
+            "schema": {
+              "$ref": "#/components/schemas/Problem"
+            }
+          },
           "application/problem+json": {
             "examples": {
               "unavailable": {
@@ -2480,6 +2727,41 @@
         "responses": {
           "200": {
             "content": {
+              "application/cbor": {
+                "example": {
+                  "agents": [
+                    {
+                      "audience": [
+                        "*"
+                      ],
+                      "conditions": [
+                        {
+                          "lastTransitionTime": "2026-11-14T10:00:00Z",
+                          "message": "the runtime is ready",
+                          "reason": "RuntimeReady",
+                          "status": "True",
+                          "type": "Ready"
+                        }
+                      ],
+                      "configDigest": "sha256:1b2c3d4e5f60718293a4b5c6d7e8f9011b2c3d4e5f60718293a4b5c6d7e8f901",
+                      "deleting": false,
+                      "description": null,
+                      "kind": "folder",
+                      "managedBy": "dashboard",
+                      "name": "chat",
+                      "state": "ready",
+                      "suspend": false,
+                      "tags": [
+                        "chat"
+                      ],
+                      "title": "Chat"
+                    }
+                  ]
+                },
+                "schema": {
+                  "$ref": "#/components/schemas/AgentList"
+                }
+              },
               "application/json": {
                 "example": {
                   "agents": [
@@ -2561,6 +2843,37 @@
         "responses": {
           "202": {
             "content": {
+              "application/cbor": {
+                "example": {
+                  "audience": [
+                    "*"
+                  ],
+                  "conditions": [
+                    {
+                      "lastTransitionTime": "2026-11-14T10:00:00Z",
+                      "message": "the runtime is ready",
+                      "reason": "RuntimeReady",
+                      "status": "True",
+                      "type": "Ready"
+                    }
+                  ],
+                  "configDigest": "sha256:1b2c3d4e5f60718293a4b5c6d7e8f9011b2c3d4e5f60718293a4b5c6d7e8f901",
+                  "deleting": true,
+                  "description": null,
+                  "kind": "folder",
+                  "managedBy": "dashboard",
+                  "name": "chat",
+                  "state": "deleting",
+                  "suspend": false,
+                  "tags": [
+                    "chat"
+                  ],
+                  "title": "Chat"
+                },
+                "schema": {
+                  "$ref": "#/components/schemas/AgentSummary"
+                }
+              },
               "application/json": {
                 "example": {
                   "audience": [
@@ -2653,6 +2966,110 @@
         "responses": {
           "200": {
             "content": {
+              "application/cbor": {
+                "example": {
+                  "audience": [
+                    "*"
+                  ],
+                  "conditions": [
+                    {
+                      "lastTransitionTime": "2026-11-14T10:00:00Z",
+                      "message": "the runtime is ready",
+                      "reason": "RuntimeReady",
+                      "status": "True",
+                      "type": "Ready"
+                    }
+                  ],
+                  "configDigest": "sha256:1b2c3d4e5f60718293a4b5c6d7e8f9011b2c3d4e5f60718293a4b5c6d7e8f901",
+                  "configStatus": {
+                    "observedGeneration": 1
+                  },
+                  "deleting": false,
+                  "description": null,
+                  "kind": "folder",
+                  "managedBy": "dashboard",
+                  "name": "chat",
+                  "representation": {
+                    "form": {
+                      "deployment": {
+                        "a2aBearer": {
+                          "key": "AGENT_TOKEN",
+                          "name": "agent-a2a"
+                        },
+                        "allowFrom": [],
+                        "coder": {
+                          "allowedRepoHosts": [],
+                          "gitAuthor": null,
+                          "githubApiUrl": null
+                        },
+                        "githubMcp": null,
+                        "resources": null,
+                        "security": {
+                          "fsGroup": 10001,
+                          "runAsGroup": 10001,
+                          "runAsUser": 10001
+                        },
+                        "store": {
+                          "cnpg": {
+                            "instances": 1,
+                            "storage": {
+                              "size": "5Gi"
+                            }
+                          }
+                        },
+                        "volumes": []
+                      },
+                      "form": {
+                        "agent": {
+                          "files": {
+                            "instructions.md": "---\nname: chat\n---\nYour name is Chat.\n"
+                          },
+                          "kind": "folder"
+                        },
+                        "allowInsecureHttp": false,
+                        "audience": [
+                          "*"
+                        ],
+                        "description": null,
+                        "image": null,
+                        "model": {
+                          "endpoint": "gateway",
+                          "model": "chat-model"
+                        },
+                        "name": "chat",
+                        "suspend": false,
+                        "tags": [
+                          "chat"
+                        ],
+                        "title": "Chat",
+                        "toolServers": []
+                      }
+                    }
+                  },
+                  "state": "ready",
+                  "status": {
+                    "conditions": [
+                      {
+                        "lastTransitionTime": "2026-11-14T10:00:00Z",
+                        "message": "the runtime is ready",
+                        "reason": "RuntimeReady",
+                        "status": "True",
+                        "type": "Ready"
+                      }
+                    ],
+                    "observedGeneration": 1,
+                    "state": "Ready"
+                  },
+                  "suspend": false,
+                  "tags": [
+                    "chat"
+                  ],
+                  "title": "Chat"
+                },
+                "schema": {
+                  "$ref": "#/components/schemas/AgentDetail"
+                }
+              },
               "application/json": {
                 "example": {
                   "audience": [
@@ -2811,6 +3228,31 @@
         ],
         "requestBody": {
           "content": {
+            "application/cbor": {
+              "example": {
+                "agent": {
+                  "files": {
+                    "instructions.md": "---\nname: chat\n---\nYour name is Chat.\n"
+                  },
+                  "kind": "folder"
+                },
+                "audience": [
+                  "*"
+                ],
+                "model": {
+                  "endpoint": "gateway",
+                  "model": "chat-model"
+                },
+                "name": "chat",
+                "tags": [
+                  "chat"
+                ],
+                "title": "Chat"
+              },
+              "schema": {
+                "$ref": "#/components/schemas/AgentForm"
+              }
+            },
             "application/json": {
               "example": {
                 "agent": {
@@ -2842,6 +3284,110 @@
         "responses": {
           "200": {
             "content": {
+              "application/cbor": {
+                "example": {
+                  "audience": [
+                    "*"
+                  ],
+                  "conditions": [
+                    {
+                      "lastTransitionTime": "2026-11-14T10:00:00Z",
+                      "message": "the runtime is ready",
+                      "reason": "RuntimeReady",
+                      "status": "True",
+                      "type": "Ready"
+                    }
+                  ],
+                  "configDigest": "sha256:1b2c3d4e5f60718293a4b5c6d7e8f9011b2c3d4e5f60718293a4b5c6d7e8f901",
+                  "configStatus": {
+                    "observedGeneration": 1
+                  },
+                  "deleting": false,
+                  "description": null,
+                  "kind": "folder",
+                  "managedBy": "dashboard",
+                  "name": "chat",
+                  "representation": {
+                    "form": {
+                      "deployment": {
+                        "a2aBearer": {
+                          "key": "AGENT_TOKEN",
+                          "name": "agent-a2a"
+                        },
+                        "allowFrom": [],
+                        "coder": {
+                          "allowedRepoHosts": [],
+                          "gitAuthor": null,
+                          "githubApiUrl": null
+                        },
+                        "githubMcp": null,
+                        "resources": null,
+                        "security": {
+                          "fsGroup": 10001,
+                          "runAsGroup": 10001,
+                          "runAsUser": 10001
+                        },
+                        "store": {
+                          "cnpg": {
+                            "instances": 1,
+                            "storage": {
+                              "size": "5Gi"
+                            }
+                          }
+                        },
+                        "volumes": []
+                      },
+                      "form": {
+                        "agent": {
+                          "files": {
+                            "instructions.md": "---\nname: chat\n---\nYour name is Chat.\n"
+                          },
+                          "kind": "folder"
+                        },
+                        "allowInsecureHttp": false,
+                        "audience": [
+                          "*"
+                        ],
+                        "description": null,
+                        "image": null,
+                        "model": {
+                          "endpoint": "gateway",
+                          "model": "chat-model"
+                        },
+                        "name": "chat",
+                        "suspend": false,
+                        "tags": [
+                          "chat"
+                        ],
+                        "title": "Chat",
+                        "toolServers": []
+                      }
+                    }
+                  },
+                  "state": "ready",
+                  "status": {
+                    "conditions": [
+                      {
+                        "lastTransitionTime": "2026-11-14T10:00:00Z",
+                        "message": "the runtime is ready",
+                        "reason": "RuntimeReady",
+                        "status": "True",
+                        "type": "Ready"
+                      }
+                    ],
+                    "observedGeneration": 1,
+                    "state": "Ready"
+                  },
+                  "suspend": false,
+                  "tags": [
+                    "chat"
+                  ],
+                  "title": "Chat"
+                },
+                "schema": {
+                  "$ref": "#/components/schemas/AgentDetail"
+                }
+              },
               "application/json": {
                 "example": {
                   "audience": [
@@ -2956,6 +3502,110 @@
           },
           "201": {
             "content": {
+              "application/cbor": {
+                "example": {
+                  "audience": [
+                    "*"
+                  ],
+                  "conditions": [
+                    {
+                      "lastTransitionTime": "2026-11-14T10:00:00Z",
+                      "message": "the runtime is ready",
+                      "reason": "RuntimeReady",
+                      "status": "True",
+                      "type": "Ready"
+                    }
+                  ],
+                  "configDigest": "sha256:1b2c3d4e5f60718293a4b5c6d7e8f9011b2c3d4e5f60718293a4b5c6d7e8f901",
+                  "configStatus": {
+                    "observedGeneration": 1
+                  },
+                  "deleting": false,
+                  "description": null,
+                  "kind": "folder",
+                  "managedBy": "dashboard",
+                  "name": "chat",
+                  "representation": {
+                    "form": {
+                      "deployment": {
+                        "a2aBearer": {
+                          "key": "AGENT_TOKEN",
+                          "name": "agent-a2a"
+                        },
+                        "allowFrom": [],
+                        "coder": {
+                          "allowedRepoHosts": [],
+                          "gitAuthor": null,
+                          "githubApiUrl": null
+                        },
+                        "githubMcp": null,
+                        "resources": null,
+                        "security": {
+                          "fsGroup": 10001,
+                          "runAsGroup": 10001,
+                          "runAsUser": 10001
+                        },
+                        "store": {
+                          "cnpg": {
+                            "instances": 1,
+                            "storage": {
+                              "size": "5Gi"
+                            }
+                          }
+                        },
+                        "volumes": []
+                      },
+                      "form": {
+                        "agent": {
+                          "files": {
+                            "instructions.md": "---\nname: chat\n---\nYour name is Chat.\n"
+                          },
+                          "kind": "folder"
+                        },
+                        "allowInsecureHttp": false,
+                        "audience": [
+                          "*"
+                        ],
+                        "description": null,
+                        "image": null,
+                        "model": {
+                          "endpoint": "gateway",
+                          "model": "chat-model"
+                        },
+                        "name": "chat",
+                        "suspend": false,
+                        "tags": [
+                          "chat"
+                        ],
+                        "title": "Chat",
+                        "toolServers": []
+                      }
+                    }
+                  },
+                  "state": "ready",
+                  "status": {
+                    "conditions": [
+                      {
+                        "lastTransitionTime": "2026-11-14T10:00:00Z",
+                        "message": "the runtime is ready",
+                        "reason": "RuntimeReady",
+                        "status": "True",
+                        "type": "Ready"
+                      }
+                    ],
+                    "observedGeneration": 1,
+                    "state": "Ready"
+                  },
+                  "suspend": false,
+                  "tags": [
+                    "chat"
+                  ],
+                  "title": "Chat"
+                },
+                "schema": {
+                  "$ref": "#/components/schemas/AgentDetail"
+                }
+              },
               "application/json": {
                 "example": {
                   "audience": [
@@ -3133,6 +3783,42 @@
         "responses": {
           "200": {
             "content": {
+              "application/cbor": {
+                "example": {
+                  "events": [
+                    {
+                      "by": "name",
+                      "count": 12,
+                      "firstSeen": "2026-11-14T10:00:05Z",
+                      "lastSeen": "2026-11-14T10:07:41Z",
+                      "message": "Back-off pulling image \"ghcr.io/example/coder:sha-0000000\"",
+                      "object": {
+                        "kind": "Pod",
+                        "name": "coder-7d9f8b6c5-x2x4q"
+                      },
+                      "reason": "BackOff",
+                      "type": "Warning"
+                    },
+                    {
+                      "by": "name",
+                      "count": 1,
+                      "firstSeen": "2026-11-14T10:00:02Z",
+                      "lastSeen": "2026-11-14T10:00:02Z",
+                      "message": "Scaled up replica set coder-7d9f8b6c5 to 1",
+                      "object": {
+                        "kind": "Deployment",
+                        "name": "coder"
+                      },
+                      "reason": "ScalingReplicaSet",
+                      "type": "Normal"
+                    }
+                  ],
+                  "incomplete": false
+                },
+                "schema": {
+                  "$ref": "#/components/schemas/AgentEvents"
+                }
+              },
               "application/json": {
                 "example": {
                   "events": [
@@ -3268,6 +3954,72 @@
         "responses": {
           "200": {
             "content": {
+              "application/cbor": {
+                "example": {
+                  "defaults": {
+                    "a2a": {
+                      "resources": null
+                    },
+                    "a2aBearer": {
+                      "key": "AGENT_TOKEN",
+                      "name": "agent-a2a"
+                    },
+                    "allowFrom": [],
+                    "allowedImageRegistries": [
+                      "ghcr.io"
+                    ],
+                    "coder": {
+                      "allowedRepoHosts": [
+                        "github.com"
+                      ],
+                      "gitAuthor": null,
+                      "githubApiUrl": null,
+                      "githubMcp": null,
+                      "resources": null,
+                      "workVolume": null
+                    },
+                    "folder": {
+                      "resources": null
+                    },
+                    "maxAccessTier": "auto",
+                    "namespace": "another-agentic-system",
+                    "offerLabel": "agents.vymalo.com/offer",
+                    "runPodSizeClasses": [],
+                    "security": {
+                      "fsGroup": 10001,
+                      "runAsGroup": 10001,
+                      "runAsUser": 10001
+                    },
+                    "store": {
+                      "cnpg": {
+                        "instances": 1,
+                        "storage": {
+                          "size": "5Gi"
+                        }
+                      }
+                    }
+                  },
+                  "limits": {
+                    "maxBodyBytes": 2097152
+                  },
+                  "namespace": "another-agentic-system",
+                  "offerLabel": "agents.vymalo.com/offer",
+                  "reasoningEfforts": [
+                    "none",
+                    "minimal",
+                    "low",
+                    "medium",
+                    "high",
+                    "xhigh",
+                    "max"
+                  ],
+                  "runPodSizeClasses": [],
+                  "version": "0.1.0"
+                },
+                "schema": {
+                  "$ref": "#/components/schemas/Info"
+                }
+              },
               "application/json": {
                 "example": {
                   "defaults": {
@@ -3370,6 +4122,17 @@
         "responses": {
           "200": {
             "content": {
+              "application/cbor": {
+                "example": {
+                  "permissions": [
+                    "platform:agents.read",
+                    "platform:agents.write"
+                  ]
+                },
+                "schema": {
+                  "$ref": "#/components/schemas/Me"
+                }
+              },
               "application/json": {
                 "example": {
                   "permissions": [
@@ -3414,6 +4177,57 @@
         "responses": {
           "200": {
             "content": {
+              "application/cbor": {
+                "example": {
+                  "models": [
+                    {
+                      "deleting": false,
+                      "managedBy": "dashboard",
+                      "name": "gateway",
+                      "representation": {
+                        "form": {
+                          "apiKey": {
+                            "key": "GATEWAY_API_KEY",
+                            "secret": "agent-models"
+                          },
+                          "baseUrl": {
+                            "value": "https://gateway.example.com/v1"
+                          },
+                          "models": [
+                            "chat-model",
+                            "coding-model"
+                          ],
+                          "name": "gateway",
+                          "title": "Gateway"
+                        }
+                      },
+                      "status": {
+                        "conditions": [
+                          {
+                            "lastTransitionTime": "2026-11-14T10:00:00Z",
+                            "message": "the object is valid",
+                            "reason": "Valid",
+                            "status": "True",
+                            "type": "Accepted"
+                          }
+                        ],
+                        "observedGeneration": 1,
+                        "usedBy": [
+                          "chat"
+                        ]
+                      },
+                      "title": "Gateway",
+                      "usedBy": [
+                        "chat"
+                      ],
+                      "usedByCount": 1
+                    }
+                  ]
+                },
+                "schema": {
+                  "$ref": "#/components/schemas/ModelList"
+                }
+              },
               "application/json": {
                 "example": {
                   "models": [
@@ -3562,6 +4376,53 @@
         "responses": {
           "200": {
             "content": {
+              "application/cbor": {
+                "example": {
+                  "deleting": false,
+                  "managedBy": "dashboard",
+                  "name": "gateway",
+                  "representation": {
+                    "form": {
+                      "apiKey": {
+                        "key": "GATEWAY_API_KEY",
+                        "secret": "agent-models"
+                      },
+                      "baseUrl": {
+                        "value": "https://gateway.example.com/v1"
+                      },
+                      "models": [
+                        "chat-model",
+                        "coding-model"
+                      ],
+                      "name": "gateway",
+                      "title": "Gateway"
+                    }
+                  },
+                  "status": {
+                    "conditions": [
+                      {
+                        "lastTransitionTime": "2026-11-14T10:00:00Z",
+                        "message": "the object is valid",
+                        "reason": "Valid",
+                        "status": "True",
+                        "type": "Accepted"
+                      }
+                    ],
+                    "observedGeneration": 1,
+                    "usedBy": [
+                      "chat"
+                    ]
+                  },
+                  "title": "Gateway",
+                  "usedBy": [
+                    "chat"
+                  ],
+                  "usedByCount": 1
+                },
+                "schema": {
+                  "$ref": "#/components/schemas/ModelDetail"
+                }
+              },
               "application/json": {
                 "example": {
                   "deleting": false,
@@ -3663,6 +4524,26 @@
         ],
         "requestBody": {
           "content": {
+            "application/cbor": {
+              "example": {
+                "apiKey": {
+                  "key": "GATEWAY_API_KEY",
+                  "secret": "agent-models"
+                },
+                "baseUrl": {
+                  "value": "https://gateway.example.com/v1"
+                },
+                "models": [
+                  "chat-model",
+                  "coding-model"
+                ],
+                "name": "gateway",
+                "title": "Gateway"
+              },
+              "schema": {
+                "$ref": "#/components/schemas/ModelEndpointForm"
+              }
+            },
             "application/json": {
               "example": {
                 "apiKey": {
@@ -3689,6 +4570,53 @@
         "responses": {
           "200": {
             "content": {
+              "application/cbor": {
+                "example": {
+                  "deleting": false,
+                  "managedBy": "dashboard",
+                  "name": "gateway",
+                  "representation": {
+                    "form": {
+                      "apiKey": {
+                        "key": "GATEWAY_API_KEY",
+                        "secret": "agent-models"
+                      },
+                      "baseUrl": {
+                        "value": "https://gateway.example.com/v1"
+                      },
+                      "models": [
+                        "chat-model",
+                        "coding-model"
+                      ],
+                      "name": "gateway",
+                      "title": "Gateway"
+                    }
+                  },
+                  "status": {
+                    "conditions": [
+                      {
+                        "lastTransitionTime": "2026-11-14T10:00:00Z",
+                        "message": "the object is valid",
+                        "reason": "Valid",
+                        "status": "True",
+                        "type": "Accepted"
+                      }
+                    ],
+                    "observedGeneration": 1,
+                    "usedBy": [
+                      "chat"
+                    ]
+                  },
+                  "title": "Gateway",
+                  "usedBy": [
+                    "chat"
+                  ],
+                  "usedByCount": 1
+                },
+                "schema": {
+                  "$ref": "#/components/schemas/ModelDetail"
+                }
+              },
               "application/json": {
                 "example": {
                   "deleting": false,
@@ -3746,6 +4674,53 @@
           },
           "201": {
             "content": {
+              "application/cbor": {
+                "example": {
+                  "deleting": false,
+                  "managedBy": "dashboard",
+                  "name": "gateway",
+                  "representation": {
+                    "form": {
+                      "apiKey": {
+                        "key": "GATEWAY_API_KEY",
+                        "secret": "agent-models"
+                      },
+                      "baseUrl": {
+                        "value": "https://gateway.example.com/v1"
+                      },
+                      "models": [
+                        "chat-model",
+                        "coding-model"
+                      ],
+                      "name": "gateway",
+                      "title": "Gateway"
+                    }
+                  },
+                  "status": {
+                    "conditions": [
+                      {
+                        "lastTransitionTime": "2026-11-14T10:00:00Z",
+                        "message": "the object is valid",
+                        "reason": "Valid",
+                        "status": "True",
+                        "type": "Accepted"
+                      }
+                    ],
+                    "observedGeneration": 1,
+                    "usedBy": [
+                      "chat"
+                    ]
+                  },
+                  "title": "Gateway",
+                  "usedBy": [
+                    "chat"
+                  ],
+                  "usedByCount": 1
+                },
+                "schema": {
+                  "$ref": "#/components/schemas/ModelDetail"
+                }
+              },
               "application/json": {
                 "example": {
                   "deleting": false,
@@ -3915,6 +4890,41 @@
         "responses": {
           "200": {
             "content": {
+              "application/cbor": {
+                "example": {
+                  "agents": [
+                    {
+                      "audience": [
+                        "*"
+                      ],
+                      "conditions": [
+                        {
+                          "lastTransitionTime": "2026-11-14T10:00:00Z",
+                          "message": "the runtime is ready",
+                          "reason": "RuntimeReady",
+                          "status": "True",
+                          "type": "Ready"
+                        }
+                      ],
+                      "configDigest": "sha256:1b2c3d4e5f60718293a4b5c6d7e8f9011b2c3d4e5f60718293a4b5c6d7e8f901",
+                      "deleting": false,
+                      "description": null,
+                      "kind": "folder",
+                      "managedBy": "dashboard",
+                      "name": "chat",
+                      "state": "ready",
+                      "suspend": false,
+                      "tags": [
+                        "chat"
+                      ],
+                      "title": "Chat"
+                    }
+                  ]
+                },
+                "schema": {
+                  "$ref": "#/components/schemas/AgentList"
+                }
+              },
               "application/json": {
                 "example": {
                   "agents": [
@@ -3999,6 +5009,37 @@
         "responses": {
           "202": {
             "content": {
+              "application/cbor": {
+                "example": {
+                  "audience": [
+                    "*"
+                  ],
+                  "conditions": [
+                    {
+                      "lastTransitionTime": "2026-11-14T10:00:00Z",
+                      "message": "the runtime is ready",
+                      "reason": "RuntimeReady",
+                      "status": "True",
+                      "type": "Ready"
+                    }
+                  ],
+                  "configDigest": "sha256:1b2c3d4e5f60718293a4b5c6d7e8f9011b2c3d4e5f60718293a4b5c6d7e8f901",
+                  "deleting": true,
+                  "description": null,
+                  "kind": "folder",
+                  "managedBy": "dashboard",
+                  "name": "chat",
+                  "state": "deleting",
+                  "suspend": false,
+                  "tags": [
+                    "chat"
+                  ],
+                  "title": "Chat"
+                },
+                "schema": {
+                  "$ref": "#/components/schemas/AgentSummary"
+                }
+              },
               "application/json": {
                 "example": {
                   "audience": [
@@ -4094,6 +5135,110 @@
         "responses": {
           "200": {
             "content": {
+              "application/cbor": {
+                "example": {
+                  "audience": [
+                    "*"
+                  ],
+                  "conditions": [
+                    {
+                      "lastTransitionTime": "2026-11-14T10:00:00Z",
+                      "message": "the runtime is ready",
+                      "reason": "RuntimeReady",
+                      "status": "True",
+                      "type": "Ready"
+                    }
+                  ],
+                  "configDigest": "sha256:1b2c3d4e5f60718293a4b5c6d7e8f9011b2c3d4e5f60718293a4b5c6d7e8f901",
+                  "configStatus": {
+                    "observedGeneration": 1
+                  },
+                  "deleting": false,
+                  "description": null,
+                  "kind": "folder",
+                  "managedBy": "dashboard",
+                  "name": "chat",
+                  "representation": {
+                    "form": {
+                      "deployment": {
+                        "a2aBearer": {
+                          "key": "AGENT_TOKEN",
+                          "name": "agent-a2a"
+                        },
+                        "allowFrom": [],
+                        "coder": {
+                          "allowedRepoHosts": [],
+                          "gitAuthor": null,
+                          "githubApiUrl": null
+                        },
+                        "githubMcp": null,
+                        "resources": null,
+                        "security": {
+                          "fsGroup": 10001,
+                          "runAsGroup": 10001,
+                          "runAsUser": 10001
+                        },
+                        "store": {
+                          "cnpg": {
+                            "instances": 1,
+                            "storage": {
+                              "size": "5Gi"
+                            }
+                          }
+                        },
+                        "volumes": []
+                      },
+                      "form": {
+                        "agent": {
+                          "files": {
+                            "instructions.md": "---\nname: chat\n---\nYour name is Chat.\n"
+                          },
+                          "kind": "folder"
+                        },
+                        "allowInsecureHttp": false,
+                        "audience": [
+                          "*"
+                        ],
+                        "description": null,
+                        "image": null,
+                        "model": {
+                          "endpoint": "gateway",
+                          "model": "chat-model"
+                        },
+                        "name": "chat",
+                        "suspend": false,
+                        "tags": [
+                          "chat"
+                        ],
+                        "title": "Chat",
+                        "toolServers": []
+                      }
+                    }
+                  },
+                  "state": "ready",
+                  "status": {
+                    "conditions": [
+                      {
+                        "lastTransitionTime": "2026-11-14T10:00:00Z",
+                        "message": "the runtime is ready",
+                        "reason": "RuntimeReady",
+                        "status": "True",
+                        "type": "Ready"
+                      }
+                    ],
+                    "observedGeneration": 1,
+                    "state": "Ready"
+                  },
+                  "suspend": false,
+                  "tags": [
+                    "chat"
+                  ],
+                  "title": "Chat"
+                },
+                "schema": {
+                  "$ref": "#/components/schemas/AgentDetail"
+                }
+              },
               "application/json": {
                 "example": {
                   "audience": [
@@ -4255,6 +5400,31 @@
         ],
         "requestBody": {
           "content": {
+            "application/cbor": {
+              "example": {
+                "agent": {
+                  "files": {
+                    "instructions.md": "---\nname: chat\n---\nYour name is Chat.\n"
+                  },
+                  "kind": "folder"
+                },
+                "audience": [
+                  "*"
+                ],
+                "model": {
+                  "endpoint": "gateway",
+                  "model": "chat-model"
+                },
+                "name": "chat",
+                "tags": [
+                  "chat"
+                ],
+                "title": "Chat"
+              },
+              "schema": {
+                "$ref": "#/components/schemas/AgentForm"
+              }
+            },
             "application/json": {
               "example": {
                 "agent": {
@@ -4286,6 +5456,110 @@
         "responses": {
           "200": {
             "content": {
+              "application/cbor": {
+                "example": {
+                  "audience": [
+                    "*"
+                  ],
+                  "conditions": [
+                    {
+                      "lastTransitionTime": "2026-11-14T10:00:00Z",
+                      "message": "the runtime is ready",
+                      "reason": "RuntimeReady",
+                      "status": "True",
+                      "type": "Ready"
+                    }
+                  ],
+                  "configDigest": "sha256:1b2c3d4e5f60718293a4b5c6d7e8f9011b2c3d4e5f60718293a4b5c6d7e8f901",
+                  "configStatus": {
+                    "observedGeneration": 1
+                  },
+                  "deleting": false,
+                  "description": null,
+                  "kind": "folder",
+                  "managedBy": "dashboard",
+                  "name": "chat",
+                  "representation": {
+                    "form": {
+                      "deployment": {
+                        "a2aBearer": {
+                          "key": "AGENT_TOKEN",
+                          "name": "agent-a2a"
+                        },
+                        "allowFrom": [],
+                        "coder": {
+                          "allowedRepoHosts": [],
+                          "gitAuthor": null,
+                          "githubApiUrl": null
+                        },
+                        "githubMcp": null,
+                        "resources": null,
+                        "security": {
+                          "fsGroup": 10001,
+                          "runAsGroup": 10001,
+                          "runAsUser": 10001
+                        },
+                        "store": {
+                          "cnpg": {
+                            "instances": 1,
+                            "storage": {
+                              "size": "5Gi"
+                            }
+                          }
+                        },
+                        "volumes": []
+                      },
+                      "form": {
+                        "agent": {
+                          "files": {
+                            "instructions.md": "---\nname: chat\n---\nYour name is Chat.\n"
+                          },
+                          "kind": "folder"
+                        },
+                        "allowInsecureHttp": false,
+                        "audience": [
+                          "*"
+                        ],
+                        "description": null,
+                        "image": null,
+                        "model": {
+                          "endpoint": "gateway",
+                          "model": "chat-model"
+                        },
+                        "name": "chat",
+                        "suspend": false,
+                        "tags": [
+                          "chat"
+                        ],
+                        "title": "Chat",
+                        "toolServers": []
+                      }
+                    }
+                  },
+                  "state": "ready",
+                  "status": {
+                    "conditions": [
+                      {
+                        "lastTransitionTime": "2026-11-14T10:00:00Z",
+                        "message": "the runtime is ready",
+                        "reason": "RuntimeReady",
+                        "status": "True",
+                        "type": "Ready"
+                      }
+                    ],
+                    "observedGeneration": 1,
+                    "state": "Ready"
+                  },
+                  "suspend": false,
+                  "tags": [
+                    "chat"
+                  ],
+                  "title": "Chat"
+                },
+                "schema": {
+                  "$ref": "#/components/schemas/AgentDetail"
+                }
+              },
               "application/json": {
                 "example": {
                   "audience": [
@@ -4400,6 +5674,110 @@
           },
           "201": {
             "content": {
+              "application/cbor": {
+                "example": {
+                  "audience": [
+                    "*"
+                  ],
+                  "conditions": [
+                    {
+                      "lastTransitionTime": "2026-11-14T10:00:00Z",
+                      "message": "the runtime is ready",
+                      "reason": "RuntimeReady",
+                      "status": "True",
+                      "type": "Ready"
+                    }
+                  ],
+                  "configDigest": "sha256:1b2c3d4e5f60718293a4b5c6d7e8f9011b2c3d4e5f60718293a4b5c6d7e8f901",
+                  "configStatus": {
+                    "observedGeneration": 1
+                  },
+                  "deleting": false,
+                  "description": null,
+                  "kind": "folder",
+                  "managedBy": "dashboard",
+                  "name": "chat",
+                  "representation": {
+                    "form": {
+                      "deployment": {
+                        "a2aBearer": {
+                          "key": "AGENT_TOKEN",
+                          "name": "agent-a2a"
+                        },
+                        "allowFrom": [],
+                        "coder": {
+                          "allowedRepoHosts": [],
+                          "gitAuthor": null,
+                          "githubApiUrl": null
+                        },
+                        "githubMcp": null,
+                        "resources": null,
+                        "security": {
+                          "fsGroup": 10001,
+                          "runAsGroup": 10001,
+                          "runAsUser": 10001
+                        },
+                        "store": {
+                          "cnpg": {
+                            "instances": 1,
+                            "storage": {
+                              "size": "5Gi"
+                            }
+                          }
+                        },
+                        "volumes": []
+                      },
+                      "form": {
+                        "agent": {
+                          "files": {
+                            "instructions.md": "---\nname: chat\n---\nYour name is Chat.\n"
+                          },
+                          "kind": "folder"
+                        },
+                        "allowInsecureHttp": false,
+                        "audience": [
+                          "*"
+                        ],
+                        "description": null,
+                        "image": null,
+                        "model": {
+                          "endpoint": "gateway",
+                          "model": "chat-model"
+                        },
+                        "name": "chat",
+                        "suspend": false,
+                        "tags": [
+                          "chat"
+                        ],
+                        "title": "Chat",
+                        "toolServers": []
+                      }
+                    }
+                  },
+                  "state": "ready",
+                  "status": {
+                    "conditions": [
+                      {
+                        "lastTransitionTime": "2026-11-14T10:00:00Z",
+                        "message": "the runtime is ready",
+                        "reason": "RuntimeReady",
+                        "status": "True",
+                        "type": "Ready"
+                      }
+                    ],
+                    "observedGeneration": 1,
+                    "state": "Ready"
+                  },
+                  "suspend": false,
+                  "tags": [
+                    "chat"
+                  ],
+                  "title": "Chat"
+                },
+                "schema": {
+                  "$ref": "#/components/schemas/AgentDetail"
+                }
+              },
               "application/json": {
                 "example": {
                   "audience": [
@@ -4573,6 +5951,21 @@
         "responses": {
           "200": {
             "content": {
+              "application/cbor": {
+                "example": {
+                  "keys": [
+                    {
+                      "externalSecret": "agent-models-es",
+                      "key": "GATEWAY_API_KEY",
+                      "secret": "agent-models"
+                    }
+                  ],
+                  "offerLabel": "agents.vymalo.com/offer"
+                },
+                "schema": {
+                  "$ref": "#/components/schemas/SecretKeys"
+                }
+              },
               "application/json": {
                 "example": {
                   "keys": [
@@ -4627,6 +6020,58 @@
         "responses": {
           "200": {
             "content": {
+              "application/cbor": {
+                "example": {
+                  "toolServers": [
+                    {
+                      "deleting": false,
+                      "managedBy": "dashboard",
+                      "name": "search",
+                      "representation": {
+                        "form": {
+                          "headers": {
+                            "Authorization": {
+                              "prefix": "Bearer ",
+                              "secret": {
+                                "key": "SEARCH_TOKEN",
+                                "secret": "agent-tools"
+                              }
+                            }
+                          },
+                          "name": "search",
+                          "optional": true,
+                          "title": "Web search",
+                          "tools": [],
+                          "url": "https://search.example.com/mcp"
+                        }
+                      },
+                      "status": {
+                        "conditions": [
+                          {
+                            "lastTransitionTime": "2026-11-14T10:00:00Z",
+                            "message": "the object is valid",
+                            "reason": "Valid",
+                            "status": "True",
+                            "type": "Accepted"
+                          }
+                        ],
+                        "observedGeneration": 1,
+                        "usedBy": [
+                          "chat"
+                        ]
+                      },
+                      "title": "Web search",
+                      "usedBy": [
+                        "chat"
+                      ],
+                      "usedByCount": 1
+                    }
+                  ]
+                },
+                "schema": {
+                  "$ref": "#/components/schemas/ToolServerList"
+                }
+              },
               "application/json": {
                 "example": {
                   "toolServers": [
@@ -4776,6 +6221,54 @@
         "responses": {
           "200": {
             "content": {
+              "application/cbor": {
+                "example": {
+                  "deleting": false,
+                  "managedBy": "dashboard",
+                  "name": "search",
+                  "representation": {
+                    "form": {
+                      "headers": {
+                        "Authorization": {
+                          "prefix": "Bearer ",
+                          "secret": {
+                            "key": "SEARCH_TOKEN",
+                            "secret": "agent-tools"
+                          }
+                        }
+                      },
+                      "name": "search",
+                      "optional": true,
+                      "title": "Web search",
+                      "tools": [],
+                      "url": "https://search.example.com/mcp"
+                    }
+                  },
+                  "status": {
+                    "conditions": [
+                      {
+                        "lastTransitionTime": "2026-11-14T10:00:00Z",
+                        "message": "the object is valid",
+                        "reason": "Valid",
+                        "status": "True",
+                        "type": "Accepted"
+                      }
+                    ],
+                    "observedGeneration": 1,
+                    "usedBy": [
+                      "chat"
+                    ]
+                  },
+                  "title": "Web search",
+                  "usedBy": [
+                    "chat"
+                  ],
+                  "usedByCount": 1
+                },
+                "schema": {
+                  "$ref": "#/components/schemas/ToolServerDetail"
+                }
+              },
               "application/json": {
                 "example": {
                   "deleting": false,
@@ -4878,6 +6371,27 @@
         ],
         "requestBody": {
           "content": {
+            "application/cbor": {
+              "example": {
+                "headers": {
+                  "Authorization": {
+                    "prefix": "Bearer ",
+                    "secret": {
+                      "key": "SEARCH_TOKEN",
+                      "secret": "agent-tools"
+                    }
+                  }
+                },
+                "name": "search",
+                "optional": true,
+                "title": "Web search",
+                "tools": [],
+                "url": "https://search.example.com/mcp"
+              },
+              "schema": {
+                "$ref": "#/components/schemas/ToolServerForm"
+              }
+            },
             "application/json": {
               "example": {
                 "headers": {
@@ -4905,6 +6419,54 @@
         "responses": {
           "200": {
             "content": {
+              "application/cbor": {
+                "example": {
+                  "deleting": false,
+                  "managedBy": "dashboard",
+                  "name": "search",
+                  "representation": {
+                    "form": {
+                      "headers": {
+                        "Authorization": {
+                          "prefix": "Bearer ",
+                          "secret": {
+                            "key": "SEARCH_TOKEN",
+                            "secret": "agent-tools"
+                          }
+                        }
+                      },
+                      "name": "search",
+                      "optional": true,
+                      "title": "Web search",
+                      "tools": [],
+                      "url": "https://search.example.com/mcp"
+                    }
+                  },
+                  "status": {
+                    "conditions": [
+                      {
+                        "lastTransitionTime": "2026-11-14T10:00:00Z",
+                        "message": "the object is valid",
+                        "reason": "Valid",
+                        "status": "True",
+                        "type": "Accepted"
+                      }
+                    ],
+                    "observedGeneration": 1,
+                    "usedBy": [
+                      "chat"
+                    ]
+                  },
+                  "title": "Web search",
+                  "usedBy": [
+                    "chat"
+                  ],
+                  "usedByCount": 1
+                },
+                "schema": {
+                  "$ref": "#/components/schemas/ToolServerDetail"
+                }
+              },
               "application/json": {
                 "example": {
                   "deleting": false,
@@ -4963,6 +6525,54 @@
           },
           "201": {
             "content": {
+              "application/cbor": {
+                "example": {
+                  "deleting": false,
+                  "managedBy": "dashboard",
+                  "name": "search",
+                  "representation": {
+                    "form": {
+                      "headers": {
+                        "Authorization": {
+                          "prefix": "Bearer ",
+                          "secret": {
+                            "key": "SEARCH_TOKEN",
+                            "secret": "agent-tools"
+                          }
+                        }
+                      },
+                      "name": "search",
+                      "optional": true,
+                      "title": "Web search",
+                      "tools": [],
+                      "url": "https://search.example.com/mcp"
+                    }
+                  },
+                  "status": {
+                    "conditions": [
+                      {
+                        "lastTransitionTime": "2026-11-14T10:00:00Z",
+                        "message": "the object is valid",
+                        "reason": "Valid",
+                        "status": "True",
+                        "type": "Accepted"
+                      }
+                    ],
+                    "observedGeneration": 1,
+                    "usedBy": [
+                      "chat"
+                    ]
+                  },
+                  "title": "Web search",
+                  "usedBy": [
+                    "chat"
+                  ],
+                  "usedByCount": 1
+                },
+                "schema": {
+                  "$ref": "#/components/schemas/ToolServerDetail"
+                }
+              },
               "application/json": {
                 "example": {
                   "deleting": false,

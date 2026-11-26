@@ -82,6 +82,10 @@ So `.route_service`, `.merge`, `.nest`, `.nest_service` and `.fallback(handler)`
 `404`/`405`/`500` and do not run, with or without a token (`router.rs`, a unit test that adds each of them). `tests/matrix.rs` is the second wall:
 the source of the crate has `.route(` once, in the loop over the table, and none of those methods.
 
+### CBOR (AD-062)
+
+`src/negotiate.rs` is one layer outside the guard: a request with `Content-Type: application/cbor` is turned into the JSON the handlers read, and an answer is turned into CBOR when `Accept` asks for it (`406` when `Accept` lists neither type; `Vary: Accept` on every answer; `GET /v1/openapi.json` stays JSON). Both go through `serde_json::Value`, so equal requests answer equal values and the `ETag` is the same. Nesting over 64 and malformed CBOR are `400 invalid-body`. `tests/cbor.rs` holds it.
+
 ### Status codes
 
 Every error is `application/problem+json` with `type` (`urn:vymalo:agents:problem:<slug>`), `title`, `status` and `detail`.

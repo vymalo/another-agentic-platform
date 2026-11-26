@@ -19,6 +19,7 @@ aap-trace.workspace = true
 # the table of routes is refused and not served. No `json`, `query` or `form`: bodies are read and answered here, so that
 # every refusal is a problem detail and none quotes a value.
 axum = { workspace = true, features = ["matched-path"] }
+ciborium.workspace = true
 futures.workspace = true
 serde.workspace = true
 serde_json.workspace = true
