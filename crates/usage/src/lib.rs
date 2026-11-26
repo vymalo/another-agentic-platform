@@ -166,6 +166,16 @@ pub trait UsageStore: Send + Sync {
         ingested_at: u64,
     ) -> impl Future<Output = Result<Inserted, UsageError>> + Send;
 
+    /// Takes a batch at one `ingested_at`, in one round trip where the store can. The answer has one entry per
+    /// event, in order: the first copy of a `(source, id)` is `New` (also against an earlier call), a copy of it
+    /// later in the batch is `Duplicate`. An invalid event is [`UsageError::Invalid`] and the whole batch stores
+    /// nothing. An empty batch answers an empty list.
+    fn insert_many(
+        &self,
+        events: Vec<PodMinuteEvent>,
+        ingested_at: u64,
+    ) -> impl Future<Output = Result<Vec<Inserted>, UsageError>> + Send;
+
     /// Weighted minutes per account and node type ingested in the window, sorted by account then node type,
     /// with no line of zero. An empty or reversed window is [`UsageError::EmptyWindow`].
     fn spend(
