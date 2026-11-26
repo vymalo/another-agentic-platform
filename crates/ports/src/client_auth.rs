@@ -61,7 +61,9 @@ pub enum InvalidCertificate {
     BadChain,
     /// It is not for client authentication: its extended key usage does not name it.
     WrongUse,
-    /// Past its `notAfter`.
+    /// Outside its validity window: past its `notAfter`, or before its `notBefore`. The set has no
+    /// word for "not valid yet", and the caller's remedy is the same: another certificate — the choice
+    /// [`InvalidToken::Expired`](crate::InvalidToken::Expired) already makes for a token.
     Expired,
     /// A valid certificate whose URI SAN the configuration does not name.
     UnknownIdentity,

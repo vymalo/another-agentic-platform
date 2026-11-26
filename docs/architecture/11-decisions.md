@@ -585,7 +585,7 @@ sequenceDiagram
   participant R as the router
   P->>T: TLS handshake, its client certificate
   T->>C: the peer's DER, if any
-  C->>C: parse, chain to the bundle, client-auth EKU, notAfter
+  C->>C: parse, chain to the bundle, client-auth EKU, validity window
   C->>C: the URI SAN, exactly one the configuration names
   alt no certificate, or one check fails
     C-->>T: ClientAuthError (a closed word)
