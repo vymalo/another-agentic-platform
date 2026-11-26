@@ -247,16 +247,21 @@ impl OtlpSection {
                 "a header's value looks like the old name=value format: it starts with the header's own name and `=` (the Secret now holds the value alone, e.g. `Bearer <token>`)",
             );
         }
-        let list_form = value.match_indices(',').any(|(i, _)| {
-            let rest = &value[i + 1..];
-            let name = rest
+        // The old list's own shape: it STARTS with `<token>=` and holds `,<token>=` later. A lone `,name=` inside an ordinary
+        // value (`Signature keyId="k",algorithm="hs2019"`, `Bearer x,y==`) is not the list.
+        let starts_with_pair = |text: &str| {
+            let name = text
                 .bytes()
                 .take_while(|b| b.is_ascii_alphanumeric() || *b == b'-')
                 .count();
-            name > 0 && rest.as_bytes().get(name) == Some(&b'=')
-        });
+            name > 0 && text.as_bytes().get(name) == Some(&b'=')
+        };
+        let list_form = starts_with_pair(value)
+            && value
+                .match_indices(',')
+                .any(|(i, _)| starts_with_pair(&value[i + 1..]));
         list_form.then_some(
-            "a header's value looks like the old name=value format: it holds `,` followed by `name=` (the Secret now holds the value alone, not a list)",
+            "a header's value looks like the old name=value format: it starts with `name=` and holds `,` followed by `name=` (the Secret now holds the value alone, not a list)",
         )
     }
 
@@ -584,7 +589,6 @@ mod tests {
             ),
             ("AUTHORIZATION=s3cr3t", "starts with the header's own name"),
             ("a=b,c=d", "followed by `name=`"),
-            ("Bearer s3cr3t,x-team=blue", "followed by `name=`"),
         ] {
             let lookup = |_: &str| Some(old.to_owned());
             let error = section("H").settings("aap", lookup).unwrap_err();
@@ -606,6 +610,8 @@ mod tests {
             "Basic dXNlcjpwYXNz",
             "Bearer abc==",
             "eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIxIn0.c2ln",
+            "Signature keyId=\"k\",algorithm=\"hs2019\"",
+            "Bearer x,y==",
         ] {
             let lookup = |_: &str| Some(fine.to_owned());
             assert!(

@@ -146,7 +146,8 @@ const SETTING_FLAGS: [(&str, &str); 8] = [
     ("defaults.agentImage", "--default-agent-image"),
     ("defaults.cacheAllowedClaims", "--cache-allowed-claims"),
     ("defaults.maxAccessTier", "--max-access-tier"),
-    ("runPods", "--run-pods-file"),
+    // The file-key form with its dot (`runPods.classes…`): the bare word is in unrelated messages (the `extraEnv` one).
+    ("runPods.", "--run-pods-file"),
     ("DEFAULT_AGENT_IMAGE", "--default-agent-image"),
     ("RUN_PODS_FILE", "--run-pods-file"),
     ("CACHE_ALLOWED_CLAIMS", "--cache-allowed-claims"),
@@ -398,5 +399,33 @@ fn whose<'a>(
             .get(&key(namespace, name))
             .map_or(service, |p| &p.object),
         _ => service,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn issue(message: &str) -> ConfigIssue {
+        ConfigIssue {
+            field: "AgentConfig spec.x".to_owned(),
+            message: message.to_owned(),
+        }
+    }
+
+    #[test]
+    fn the_run_pods_flag_is_named_for_the_file_key_and_not_for_the_word() {
+        // The `extraEnv` message of aap-domain says "(runPods)" and has nothing to do with the flag.
+        let text = text_of(&issue(
+            "the operator sets this variable itself when run pods are on (runPods)",
+        ));
+        assert!(!text.contains("--run-pods-file"), "{text}");
+        for message in [
+            "runPods.classes.standard.requests weigh nothing on the grid",
+            "the file's RUN_PODS_FILE names no class",
+        ] {
+            let text = text_of(&issue(message));
+            assert!(text.ends_with("(aapctl: --run-pods-file)"), "{text}");
+        }
     }
 }
