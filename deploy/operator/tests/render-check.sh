@@ -1366,6 +1366,20 @@ check "nodeType named: the policy falls back to the chart's key and values when 
 check "refused: nodeType.labelKey without admitted" refused "runPods.nodeType.labelKey and runPods.nodeType.admitted go together" --set runPods.enabled=true --set runPods.nodeType.labelKey=example.com/node-type
 check "refused: nodeType.admitted without labelKey" refused "runPods.nodeType.labelKey and runPods.nodeType.admitted go together" --set runPods.enabled=true --set 'runPods.nodeType.admitted={a}'
 check "refused: a nodeType key that is not a label key" refused "is not a label key" --set runPods.enabled=true --set 'runPods.nodeType.labelKey=not a key' --set 'runPods.nodeType.admitted={a}'
+# The lengths of is_label_key (crates/domain/src/run_pods.rs): a prefix of at most 253, a name of at most 63. Each refusal is paired with the
+# accepted edge, so a bound that is too tight fails too.
+nt_rep() { awk -v n="$2" -v c="$1" 'BEGIN { for (i = 0; i < n; i++) printf "%s", c }'; }
+nt_key_renders() { helm template aap-operator "$chart" --namespace "$ns" --set runPods.enabled=true --set "runPods.nodeType.labelKey=$1" --set 'runPods.nodeType.admitted={a}' > /dev/null 2> "$err"; }
+nt_value_renders() { helm template aap-operator "$chart" --namespace "$ns" --set runPods.enabled=true --set runPods.nodeType.labelKey=example.com/node-type --set "runPods.nodeType.admitted={$1}" > /dev/null 2> "$err"; }
+nt_prefix_253="$(nt_rep a 253)"; nt_prefix_254="$(nt_rep a 254)"; nt_name_63="$(nt_rep b 63)"; nt_name_64="$(nt_rep b 64)"
+check "refused: a nodeType key whose prefix is 254 characters" refused "is too long" --set runPods.enabled=true --set "runPods.nodeType.labelKey=$nt_prefix_254/node-type" --set 'runPods.nodeType.admitted={a}'
+check "a nodeType key whose prefix is 253 characters renders" nt_key_renders "$nt_prefix_253/node-type"
+check "refused: a nodeType key whose name is 64 characters" refused "is too long" --set runPods.enabled=true --set "runPods.nodeType.labelKey=example.com/$nt_name_64" --set 'runPods.nodeType.admitted={a}'
+check "a nodeType key whose name is 63 characters renders" nt_key_renders "example.com/$nt_name_63"
+check "refused: a nodeType key with no prefix whose name is 64 characters" refused "is too long" --set runPods.enabled=true --set "runPods.nodeType.labelKey=$nt_name_64" --set 'runPods.nodeType.admitted={a}'
+check "a nodeType key with no prefix whose name is 63 characters renders" nt_key_renders "$nt_name_63"
+check "refused: a nodeType value of 64 characters" refused "is not a label value" --set runPods.enabled=true --set runPods.nodeType.labelKey=example.com/node-type --set "runPods.nodeType.admitted={$nt_name_64}"
+check "a nodeType value of 63 characters renders" nt_value_renders "$nt_name_63"
 check "refused: a nodeType value that is not a label value" refused "is not a label value" --set runPods.enabled=true --set runPods.nodeType.labelKey=example.com/node-type --set 'runPods.nodeType.admitted={a b}'
 check "refused: a nodeSelector on the key of nodeType" refused "runPods.nodeSelector.example.com/node-type is the key of runPods.nodeType.labelKey" --set runPods.enabled=true \
   --set runPods.nodeType.labelKey=example.com/node-type --set 'runPods.nodeType.admitted={a}' --set 'runPods.nodeSelector.example\.com/node-type=a'

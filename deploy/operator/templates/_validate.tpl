@@ -396,6 +396,12 @@ the CIDRs, a toleration or an egress rule, which the operator checks at start an
 {{- if not (regexMatch `^(([a-z0-9]([-a-z0-9]*[a-z0-9])?)(\.[a-z0-9]([-a-z0-9]*[a-z0-9])?)*/)?[A-Za-z0-9]([-A-Za-z0-9_.]*[A-Za-z0-9])?$` $nt.labelKey) -}}
 {{- fail (printf "runPods.nodeType.labelKey %q is not a label key such as example.com/node-type" $nt.labelKey) -}}
 {{- end -}}
+{{- /* The lengths the operator's is_label_key holds (crates/domain/src/run_pods.rs): a prefix of at most 253, a name of at most 63. */ -}}
+{{- $ntParts := splitList "/" $nt.labelKey -}}
+{{- $ntName := last $ntParts -}}
+{{- if or (gt (len $ntName) 63) (and (gt (len $ntParts) 1) (gt (len (first $ntParts)) 253)) -}}
+{{- fail (printf "runPods.nodeType.labelKey %q is too long: a label key's prefix is at most 253 characters and its name at most 63" $nt.labelKey) -}}
+{{- end -}}
 {{- range $nt.admitted -}}
 {{- if not (and (kindIs "string" .) (regexMatch `^[A-Za-z0-9]([-A-Za-z0-9_.]*[A-Za-z0-9])?$` .) (le (len .) 63)) -}}
 {{- fail (printf "runPods.nodeType.admitted entry %q is not a label value (letters, digits, -, _ and ., at most 63, starting and ending with a letter or a digit)" (toString .)) -}}
