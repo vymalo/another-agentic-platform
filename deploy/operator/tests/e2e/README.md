@@ -590,7 +590,7 @@ sequenceDiagram
 
     J->>K: the CRDs, the Secrets, a Postgres and the model (the coder's image), the catalogue's example in aap-e2e-k10
     J->>K: helm upgrade --install with toolProbe.to = the catalogue's pods on 8080
-    K-->>J: the operator is Ready and TOOL_PROBE_ENABLED is true
+    K-->>J: the operator is Ready and its file has `toolProbe.enabled: true` (was `TOOL_PROBE_ENABLED`)
     O->>S: initialize and tools/list, through the chart's egress
     S-->>O: the core toolset's tools
     O-->>K: the ToolProvider: Accepted, Reachable True (Probed), probe.tools
@@ -729,7 +729,7 @@ sequenceDiagram
     J->>K: refuse a context that is not kind-*, make aap-e2e-ns-ops, -a and -b (labelled), the CRDs
     J->>K: the registry's token, the agents' Secrets in a and b (a sentinel for the model's key), the curl pod
     J->>K: helm upgrade --install with watchNamespaces=[aap-e2e-ns-a, aap-e2e-ns-b]
-    K-->>J: the operator pod Ready, WATCH_NAMESPACES="aap-e2e-ns-a,aap-e2e-ns-b", WATCH_NAMESPACE="aap-e2e-ns-a"
+    K-->>J: the operator pod Ready, its file watching aap-e2e-ns-a (the primary) and aap-e2e-ns-b
     K-->>J: one Role and one RoleBinding in a and in b (the release's account), none in the release's namespace, no ClusterRole
     K-->>J: auth can-i: agentservices and pods in a and in b, nothing in the release's namespace, in kube-system or --all-namespaces
     J->>K: alpha in a, beta in b (folder agents on the stand-in)
@@ -783,7 +783,7 @@ stateDiagram-v2
   `aap-e2e-ns-ops`, in `kube-system`, or with `--all-namespaces`, not `list pods` with `--all-namespaces`, and no `get secrets` in either
   watched namespace.
 * **One operator reconciles two namespaces independently.** The operator's pod is Ready and did not restart, and is given
-  `WATCH_NAMESPACES="aap-e2e-ns-a,aap-e2e-ns-b"` and `WATCH_NAMESPACE="aap-e2e-ns-a"` (the primary). `alpha` in `aap-e2e-ns-a` and `beta` in
+  `watch.namespaces: ["aap-e2e-ns-a", "aap-e2e-ns-b"]` in the operator's file, the first being the primary (was `WATCH_NAMESPACES` and `WATCH_NAMESPACE`). `alpha` in `aap-e2e-ns-a` and `beta` in
   `aap-e2e-ns-b` are both `Ready` with their four conditions True; each has its Deployment, its Service on 8080 and one Running, Ready pod
   **in its own namespace**, and the other namespace and the release's have none of those objects and no pod of that agent. The release's
   namespace is the control that a namespace the operator does not watch is left alone: it holds the operator's own objects and not one of an
@@ -826,7 +826,7 @@ stateDiagram-v2
 
 *Run where it was written, with no container daemon and no kind*: `sh -n`, `bash -n` and `dash -n` on the script; `helm lint` and `helm template`
 of the chart with `namespaces.values.yaml` and `--set-json 'watchNamespaces=["aap-e2e-ns-a","aap-e2e-ns-b"]'`, which renders the Role and the
-RoleBinding in the two watched namespaces and **none** in the release's, and the operator's `WATCH_NAMESPACES` and `WATCH_NAMESPACE`; the
+RoleBinding in the two watched namespaces and **none** in the release's, and the operator's file's `watch.namespaces` (was `WATCH_NAMESPACES` and `WATCH_NAMESPACE`); the
 workflow parsed as YAML; `node tools/docs-check/check-docs.mjs` (the diagrams of this section parse); and the agent fixture the script generates,
 read by the built `aapctl validate -f` (the domain's own `validate`, which the operator runs) and `aapctl render -f` (which makes
 `deployment/alpha`, `service/alpha` on 8080, the pod on `aap-stub:ci` and the NetworkPolicy the script asserts). The jq filters of steps 6, 8, 9,
@@ -886,7 +886,7 @@ sequenceDiagram
     J->>K: refuse a context that is not kind-*, make aap-e2e-leader (labelled), the CRDs, the Secrets, the curl pod
     J->>K: helm upgrade --install with replicas=2
     K-->>J: a RollingUpdate of maxSurge 1 / maxUnavailable 0, a budget of maxUnavailable 1, two Ready pods that did not restart
-    K-->>J: the six LEADER_ELECTION_* variables (15/10/2), a 4 s pass cap, and the Lease held by one of the two pods
+    K-->>J: the file's `leaderElection` keys (15/10/2), a 4 s `reconcile.timeoutSecs`, and the Lease held by one of the two pods
     K-->>J: auth can-i: create a Lease and get/update the NAMED one, not unnamed, not another name, not delete, not in every namespace
     J->>K: solo (a folder agent on the stand-in)
     A->>K: solo's Deployment, Service and pod, and the registry lists it
@@ -929,7 +929,7 @@ stateDiagram-v2
 
 * **Two replicas, one writer, and the chart's shape for it.** The Deployment is two replicas in a `RollingUpdate` of `maxSurge: 1` /
   `maxUnavailable: 0`, a `PodDisruptionBudget` allows one to go, both pods are Ready with no restart, and each is given
-  `LEADER_ELECTION_ENABLED=true`, the release's name, this namespace, 15/10/2 and `AAP_RECONCILE_TIMEOUT_SECS=4` (below `lease - renew`).
+  the file's `leaderElection.enabled: true`, the release's name, this namespace, 15/10/2 and `reconcile.timeoutSecs: 4` (below `lease - renew`; were the `LEADER_ELECTION_*` variables and `AAP_RECONCILE_TIMEOUT_SECS`).
 * **The `leases` rule under the real RBAC of a real API server.** As the operator's ServiceAccount: `create` a Lease, and `get` and `update` the
   **named** one; **not** `get` or `list` Leases unnamed, **not** `update` another name, **not** `delete`, **not** in every namespace — the
   `resourceNames` narrowing is asked of the API server and not read off the chart. No Secret.

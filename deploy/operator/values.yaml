@@ -387,6 +387,10 @@ otel:
   # configuration file, and that file names the header whose value the key holds (the key holds the value alone, not a
   # `name=value` list): `Authorization` is the one a collector wants, and a token is `Bearer <token>` there. The API's
   # `api.otel.headersSecret` has no `header`: its file is the `name=value` list.
+  # UPGRADE NOTE (ANR-962, AD-064): before this change the operator's key held `name=value,...` (`authorization=Bearer abc`). It
+  # now holds the value alone (`Bearer abc`), and `header` names the header. A key that still holds the old shape (a value that
+  # starts with `name=`) turns the operator's tracing OFF with one warning ("looks like the old name=value format"); the operator
+  # keeps running. Rewrite the Secret's key before upgrading.
   headersSecret:
     name: ""
     key: ""

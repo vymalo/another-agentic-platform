@@ -189,7 +189,7 @@ out is written behind a response that streams for up to 290 s. A trace with the 
 
 What the controller does about a call that is never answered, whatever the cause:
 
-* **`Options::pass_timeout`** (60 s; `AAP_RECONCILE_TIMEOUT_SECS` of the binary) bounds every pass, of services and of
+* **`Options::pass_timeout`** (60 s; the file's `reconcile.timeoutSecs`, was `AAP_RECONCILE_TIMEOUT_SECS`) bounds every pass, of services and of
   configs. A pass that is not done by then is dropped (its requests are cancelled, and a connection a cancelled call
   was queued on is not put back in the pool), fails with `Error::TimedOut`, class `Transient`, so that the error policy
   logs `reconcile failed: the pass did not finish within 60s …` at `warn` and tries again after 5 s. Counted by
@@ -255,7 +255,7 @@ is what keeps it in its `Service` and makes it the one that takes over. `Readine
 (a few requests, bounded by `Options::pass_timeout`). The lease's margin is what keeps that from being two
 writers: a holder that has not renewed for `renew` demotes itself at the renew deadline, and no other candidate may
 take the lease over before `lease`, so a pass that outlives the margin is the one case the design does not exclude.
-With the election on the chart caps `AAP_RECONCILE_TIMEOUT_SECS` at 4 s, below `lease - renew` (5 s with the
+With the election on the chart caps `reconcile.timeoutSecs` (was `AAP_RECONCILE_TIMEOUT_SECS`) at 4 s, below `lease - renew` (5 s with the
 defaults); a longer pass needs a longer lease (K7a).
 
 `two_replicas_one_leader` in `tests/operator.rs` holds the wiring: two operators on one fake API server and one
@@ -296,7 +296,7 @@ reason would be a new condition reason the owner has not decided (a note in the 
 A deleted `AgentService` with `deletionPolicy: Retain` leaves its CloudNativePG `Cluster` and its volume claims. `release` and `delete`
 stamp them with `agents.vymalo.com/retained-at` (Unix seconds); `ensure` removes the stamp, so a running agent's data never carries it.
 The sweep (`retention.rs`, `Operator::run`, leader-gated, hourly) asks `StoreProvisioner::retained` and `RuntimeProvider::retained_volumes`
-and deletes what is older than `Options::retention` (default 90 days; `RETENTION_AFTER_DELETE_DAYS`, `0` turns it off) through `purge` and
+and deletes what is older than `Options::retention` (default 90 days; the file's `retention.afterDeleteDays`, was `RETENTION_AFTER_DELETE_DAYS`; `0` turns it off) through `purge` and
 `purge_volumes`, which refuse anything that is not marked or has a workload. `sweep(runtime, store, scope, now, period)` is pure over a
 given time: `retained_store_is_purged_only_after_the_period` and `running_agent_store_is_never_purged` drive it with `MemoryStore::set_now`.
 The four new port methods have defaults (nothing retained), so no implementer breaks. Counter: `aap_retention_purged_total`.
