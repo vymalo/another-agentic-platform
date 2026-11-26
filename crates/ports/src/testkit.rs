@@ -507,6 +507,7 @@ pub fn sample_spec_with_run_pods(id: &RuntimeId) -> RuntimeSpec {
         role: "run-pods".to_owned(),
         priority_class: "run".to_owned(),
         runtime_class_name: None,
+        node_type: None,
         quota: RunPodQuota {
             pods: 4,
             limits_memory: "8Gi".to_owned(),

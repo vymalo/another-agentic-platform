@@ -48,6 +48,16 @@ spec:
     - name: runtimeClass
       expression: "has(params.data.runtimeClassName) ? params.data.runtimeClassName : '{{ $runtime }}'"
     {{- end }}
+    {{- /* ANR-660 (AD-066): the node types the deployment admits. As the runtime-class rule does, the key and the admitted values come from the
+       agent's parameters when they carry them and from THIS chart's values otherwise, so a parameter object written by an operator that predates
+       the rule (a skew) is judged, not waved through. The variables exist only when the chart names node types, so every other render is what
+       it was. The values are label syntax, which _validate.tpl checks, so they cannot close a string. */}}
+    {{- if and .Values.runPods.nodeType.labelKey .Values.runPods.nodeType.admitted }}
+    - name: nodeTypeKey
+      expression: "has(params.data.nodeTypeKey) ? params.data.nodeTypeKey : '{{ .Values.runPods.nodeType.labelKey }}'"
+    - name: admittedNodeTypes
+      expression: "has(params.data.nodeTypeAdmitted) ? params.data.nodeTypeAdmitted.split('\\n') : [{{ range $i, $v := .Values.runPods.nodeType.admitted }}{{ if $i }}, {{ end }}'{{ $v }}'{{ end }}]"
+    {{- end }}
   validations:
     {{- if $runtime }}
     {{- /* K14a (AD-052) decision 2: named, the class is REQUIRED. A run pod of the agent's account with another class, or none, is
@@ -82,6 +92,15 @@ spec:
        chart's in the coder chart's order (the parity test compares them one by one and holds this one apart). */}}
     - expression: "variables.containers.all(c, has(c.resources) && has(c.resources.limits) && 'memory' in c.resources.limits && 'cpu' in c.resources.limits && 'ephemeral-storage' in c.resources.limits)"
       message: "a run pod sets limits.memory, limits.cpu and limits.ephemeral-storage on every container"
+    {{- if and .Values.runPods.nodeType.labelKey .Values.runPods.nodeType.admitted }}
+    {{- /* ANR-660 (AD-066), appended last: with node types named, a run pod is PINNED to the admitted node types and has no
+       spec.nodeName (which would skip the scheduler). Pinned is `nodeSelector[key]` in the admitted values, or required node affinity with
+       at least one term of which EVERY term has a matchExpressions entry `key In <only admitted values>` (the terms are alternatives: one
+       without it lets the pod go anywhere; Exists, NotIn and matchFields-only terms do not count). The policy cannot read a Node's labels:
+       it proves the pod is pinned, and that the labels are honest is the administrator's. Parameters with no nodeTypeKey fall back to the chart's own values (the rule stays on). */}}
+    - expression: "!has(object.spec.nodeName) && ((has(object.spec.nodeSelector) && variables.nodeTypeKey in object.spec.nodeSelector && object.spec.nodeSelector[variables.nodeTypeKey] in variables.admittedNodeTypes) || (has(object.spec.affinity) && has(object.spec.affinity.nodeAffinity) && has(object.spec.affinity.nodeAffinity.requiredDuringSchedulingIgnoredDuringExecution) && object.spec.affinity.nodeAffinity.requiredDuringSchedulingIgnoredDuringExecution.nodeSelectorTerms.size() > 0 && object.spec.affinity.nodeAffinity.requiredDuringSchedulingIgnoredDuringExecution.nodeSelectorTerms.all(t, has(t.matchExpressions) && t.matchExpressions.exists(e, e.key == variables.nodeTypeKey && e.operator == 'In' && has(e.values) && e.values.size() > 0 && e.values.all(v, v in variables.admittedNodeTypes)))))"
+      messageExpression: "'a run pod is pinned to the node types ' + variables.admittedNodeTypes.join(', ') + ' (' + variables.nodeTypeKey + ' In those values, by nodeSelector or by required node affinity in every term) and sets no nodeName'"
+    {{- end }}
 ---
 apiVersion: admissionregistration.k8s.io/v1
 kind: ValidatingAdmissionPolicyBinding

@@ -356,6 +356,26 @@
       },
       "additionalProperties": false
     },
+    "NodeTypeSettings": {
+      "description": "The node types a run pod may be scheduled on (ANR-660, AD-066): the key of a node label the deployment keeps honest and the values\nof it that it admits. The template is pinned to them by a required node affinity and the admission policy refuses a run pod that\nis not. Both parts or neither.",
+      "type": "object",
+      "properties": {
+        "admitted": {
+          "description": "The label values admitted.",
+          "type": "array",
+          "default": [],
+          "items": {
+            "type": "string"
+          }
+        },
+        "labelKey": {
+          "description": "The node label's key (`example.com/node-type`). Empty: off.",
+          "type": "string",
+          "default": ""
+        }
+      },
+      "additionalProperties": false
+    },
     "OtlpSection": {
       "description": "The `telemetry.otlp` section of a configuration file (ANR-962, AD-064): the settings the `OTEL_*` variables carry,\nwritten as YAML. Absent: tracing is off, exactly as with no variable.\n\nThe file names the headers by reference (a mounted file per header, or a variable) and the certificate by path; none\nof them is read by [`validate`](Self::validate), which is what `--check` runs.",
       "type": "object",
@@ -699,6 +719,10 @@
             "type": "string"
           },
           "default": {}
+        },
+        "nodeType": {
+          "description": "The node types the deployment admits for run pods (ANR-660, AD-066). Empty (the default) is no restriction, and then the\nfield is not written, so no file, template or digest moves.",
+          "$ref": "#/$defs/NodeTypeSettings"
         },
         "priorityClass": {
           "description": "The `PriorityClass` of run pods, which the quota is scoped to and the admission policy requires. The\nchart made it (or the deployment manages it); the operator makes no cluster-scoped object.",

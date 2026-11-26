@@ -18,3 +18,9 @@ runPods:
   # A pod nobody used for this long is deleted. The janitor of the coder (workspaceSweepSecs: 10 in run-pods.yaml) releases a finished run's pod far
   # sooner; this is the bound if it did not.
   idleSecs: 120
+  # ANR-660 (AD-066): run pods are pinned to this node type. The script labels every node of the throwaway cluster with it before the upgrade
+  # and takes the label off at the end; run-pods-admission.sh then asks the real policy its node-type cases, and the pods the kubelet runs are
+  # held to the template's affinity and to the size weight annotation.
+  nodeType:
+    labelKey: aap-e2e/node-type
+    admitted: [e2e]
