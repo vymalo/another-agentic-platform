@@ -95,7 +95,8 @@ export KUBECONFIG="$work/kubeconfig"
 # Values that must be found nowhere in the output: the Secret's.
 secret_a=$(openssl rand -hex 16)
 secret_b=$(openssl rand -hex 16)
-printf '%s\n%s\n' "$secret_a" "$secret_b" > "$work/secrets"
+secret_c=$(openssl rand -hex 16)
+printf '%s\n%s\n%s\n' "$secret_a" "$secret_b" "$secret_c" > "$work/secrets"
 
 record() { printf '%s\n' "$*" >> "$work/summary"; printf 'MEASURE %s\n' "$*"; }
 # failed: a record that is a failure of the run (the admission policy not doing its job), not a measure: the script exits 1 at the end.
@@ -208,7 +209,7 @@ step "2. the operator's chart with runPods.runtimeClassName=$class, and a coder 
 kubectl apply --server-side -f "$repo/deploy/operator-crds/files/agents.vymalo.com.yaml" >/dev/null
 printf 'apiVersion: v1\nkind: Namespace\nmetadata:\n  name: %s\n  labels:\n    %s: %s\n' "$ns" "$made_by_key" "$made_by" | kubectl create -f - >/dev/null
 kubectl -n "$ns" create secret generic gv-secrets --from-literal=GITHUB_TOKEN="$secret_a" --from-literal=MODEL_API_KEY="$secret_b" \
-  --from-literal=A2A_BEARER_TOKENS="$(openssl rand -hex 8)" --from-literal=DATABASE_URL=postgres://nobody@nowhere/none >/dev/null
+  --from-literal=A2A_BEARER_TOKENS="$secret_c" --from-literal=DATABASE_URL=postgres://nobody@nowhere/none >/dev/null
 cat > "$work/values.yaml" <<EOF
 tuning:
   resyncPendingSecs: 5
