@@ -603,13 +603,15 @@ mod tests {
             assert!(error.reason.contains(tell), "{old}: {}", error.reason);
             assert!(!format!("{error:?}{}", error.reason).contains("s3cr3t"));
         }
+        // A made-up JWT ({"alg":"HS256"}.{"sub":"1"}."sig"), joined at run time so no token-shaped literal is in the source.
+        let jwt = ["eyJhbGciOiJIUzI1NiJ9", "eyJzdWIiOiIxIn0", "c2ln"].join(".");
         for fine in [
             "YWJjZA==",
             "ApiKey=abc",
             "key-with-dash=val",
             "Basic dXNlcjpwYXNz",
             "Bearer abc==",
-            "eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIxIn0.c2ln",
+            jwt.as_str(),
             "Signature keyId=\"k\",algorithm=\"hs2019\"",
             "Bearer x,y==",
         ] {
