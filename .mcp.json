@@ -1,0 +1,21 @@
+{
+  "mcpServers": {
+    "corntchap-anr": {
+      "type": "http",
+      "url": "https://corntchap.camer.digital/mcp/ANR"
+    },
+    "local-grep": {
+      "type": "remote",
+      "url": "https://mcp.grep.app"
+    },
+    "context7": {
+      "disabled": false,
+      "oauth": {
+        "client_id": "opencode-cli",
+        "scope": "openid profile offline_access"
+      },
+      "type": "remote",
+      "url": "https://api.ai.camer.digital/mcp/context7"
+    }
+  }
+}
