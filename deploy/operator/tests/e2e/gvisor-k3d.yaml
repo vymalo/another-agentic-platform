@@ -1,0 +1,112 @@
+# The one coder of the gVisor measurement (ANR-404, gvisor-k3d.sh): a coder with `coder.runPods`, so that the operator makes the run pod
+# template (ConfigMap `gv-coder-run-pod`), the account, the quota, the policy's parameters and the egress proxy, all of which the script reads.
+#
+# THE CODER IS NOT THE REAL ONE. `environment.image.ref` is __ALPINE__, a placeholder the script replaces with its pinned alpine (tag and digest):
+# the coder's pod, its git sandbox and the egress proxy therefore crash-loop (alpine has no `adam-coder`), and the service is `Degraded`. That is
+# on purpose and is said in the script's output: this measurement is about the RUN POD (what the kubelet does with a `runtimeClassName: runsc` pod
+# the operator's template describes), and the 2.9 GB coder is run-pods-e2e.sh's. The operator still makes everything it makes from the
+# AgentService, the claim `work-gv-coder-0` is bound when the coder's pod is scheduled, and the template's init container, which names the agent's
+# image, therefore names alpine, which the admission policy allows (the image allow-list holds the agent's image).
+#
+# Every object carries the label aap-e2e/made-by=gvisor-k3d. No value is a secret: the Secret `gv-secrets` is made by the script with random values.
+apiVersion: agents.vymalo.com/v1alpha1
+kind: AgentConfig
+metadata:
+  name: gv-coder
+  labels:
+    aap-e2e/made-by: gvisor-k3d
+spec:
+  harness:
+    type: adam-rs
+    adam:
+      binary: adam-coder
+      agent:
+        embedded: {}
+      coder:
+        workers: 1
+        maxCheckCycles: 3
+        checkTimeoutSecs: 900
+        workspaceSweepSecs: 10
+        allowedRepoHosts: [github.com]
+        githubApiUrl: https://api.github.com
+        prDraft: true
+        gitAuthor:
+          name: "e2e[bot]"
+          email: "e2e@example.invalid"
+        opencodeModel: coding-model
+        runPods:
+          sizeClass: standard
+        github:
+          token:
+            secretRef:
+              name: gv-secrets
+              key: GITHUB_TOKEN
+  model:
+    model: coding-model
+    baseUrl:
+      value: http://gv-model:8080/v1
+    apiKeySecretRef:
+      name: gv-secrets
+      key: MODEL_API_KEY
+  tools:
+    githubMcp:
+      sidecar: true
+      port: 8082
+      host: ""
+    mcpServers: {}
+  environment:
+    image:
+      ref: __ALPINE__
+    resources:
+      requests:
+        cpu: 10m
+        memory: 16Mi
+      limits:
+        memory: 256Mi
+    volumes:
+      - name: work
+        scope: agent
+        mountPath: /work
+        source:
+          persistent:
+            size: 1Gi
+            perReplica: true
+    terminationGracePeriodSeconds: 5
+  security:
+    runAsUser: 10001
+    runAsGroup: 10001
+    fsGroup: 10001
+    fsGroupChangePolicy: OnRootMismatch
+  extraEnv: {}
+---
+apiVersion: agents.vymalo.com/v1alpha1
+kind: AgentService
+metadata:
+  name: gv-coder
+  labels:
+    aap-e2e/made-by: gvisor-k3d
+spec:
+  description: A coder with run pods, for the gVisor measurement.
+  configRef:
+    name: gv-coder
+  interfaces:
+    a2a:
+      enabled: true
+      bearerTokensSecretRef:
+        name: gv-secrets
+        key: A2A_BEARER_TOKENS
+      publicUrl: ""
+  scaling:
+    topology: combined
+    workers: 1
+  store:
+    postgres:
+      secretRef:
+        name: gv-secrets
+        key: DATABASE_URL
+  access:
+    allowFrom:
+      - podSelector:
+          matchLabels:
+            aap-e2e/client: "true"
+  deletionPolicy: Delete

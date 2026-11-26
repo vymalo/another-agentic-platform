@@ -17,7 +17,7 @@
 #      sentinel for the model's key, a random A2A bearer, a ledger URI that is never opened), and the curl pod the registry's
 #      NetworkPolicy admits (the label aap-e2e/registry-reader=true);
 #   5. the chart installed with the two watched namespaces: the operator's pod is Ready and did not restart, and it is given
-#      WATCH_NAMESPACES="aap-e2e-ns-a,aap-e2e-ns-b" and WATCH_NAMESPACE="aap-e2e-ns-a" (the primary);
+#      a file whose watch.namespaces are aap-e2e-ns-a (the primary) and aap-e2e-ns-b;
 #   6. the chart's objects: ONE Role and ONE RoleBinding, named for the release, in EACH watched namespace, the RoleBinding giving the
 #      release's ServiceAccount (in the release's namespace) that Role; no Role and no RoleBinding in the release's namespace, and no
 #      ClusterRole or ClusterRoleBinding for the release at all — by name, and by the release's instance label;
@@ -93,7 +93,7 @@ esac
 if [ -n "$context" ]; then export HELM_KUBECONTEXT="$context"; fi
 
 ops=${AAP_E2E_NAMESPACE:-aap-e2e-ns-ops}   # the Helm release: the operator's pod, its account, the registry and its token, the curl pod
-a=aap-e2e-ns-a                             # watched, and the primary (WATCH_NAMESPACE, the cluster-scoped names, the API's defaults)
+a=aap-e2e-ns-a                             # watched, and the primary (the first of watch.namespaces, the cluster-scoped names, the API's defaults)
 b=aap-e2e-ns-b                             # watched, and not the primary
 for n in "$ops" "$a" "$b"; do
   case $n in '' | -* | *- | *[!a-z0-9-]*) die "'$n' is not a namespace name" ;; esac
@@ -589,11 +589,11 @@ op_pod=$(kubectl -n "$ops" get pod -l "app.kubernetes.io/name=$release" -o jsonp
 # ANR-962: the settings are one file (the ConfigMap `$release`), and the pod reads it with `--config`. The namespaces are the
 # file's watch.namespaces, in order: the first is the primary.
 watch=$(jp "$ops" "configmap/$release" '{.data["config.yaml"]}')
-[ "$(printf '%s\n' "$watch" | grep -c "^        - \"$a\"$")" -eq 1 ] || die "the file does not watch $a"
-[ "$(printf '%s\n' "$watch" | grep -c "^        - \"$b\"$")" -eq 1 ] || die "the file does not watch $b"
-[ "$(printf '%s\n' "$watch" | awk '/^      namespaces:$/ { f = 1; next } f && /^        - / { sub(/^        - /, ""); print; exit }')" = "\"$a\"" ] \
+[ "$(printf '%s\n' "$watch" | grep -c "^    - \"$a\"$")" -eq 1 ] || die "the file does not watch $a"
+[ "$(printf '%s\n' "$watch" | grep -c "^    - \"$b\"$")" -eq 1 ] || die "the file does not watch $b"
+[ "$(printf '%s\n' "$watch" | awk '/^  namespaces:$/ { f = 1; next } f && /^    - / { sub(/^    - /, ""); print; exit }')" = "\"$a\"" ] \
   || die "the primary (the first of watch.namespaces) is not $a"
-[ -n "$(printf '%s\n' "$watch" | grep -c '^        file: /var/run/secrets/aap/registry/token$')" ] \
+[ "$(printf '%s\n' "$watch" | grep -c '^    file: /var/run/secrets/aap/registry/token$')" -ge 1 ] \
   || die "the file names no registry token: no registry would be served"
 [ "$(jp "$ops" "pod/$op_pod" '{.spec.containers[?(@.name=="operator")].args[0]}')" = run ] \
   || die "the operator's container does not run the controllers"

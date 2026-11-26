@@ -97,6 +97,7 @@ pub struct Context<R, S> {
     pub(crate) clock: Clock,
     pub(crate) retries: Retries,
     pub(crate) tracer: Tracer,
+    pub(crate) sleepers: Arc<crate::Sleepers>,
 }
 
 impl<R, S> Context<R, S> {
@@ -120,7 +121,15 @@ impl<R, S> Context<R, S> {
             clock: system_clock(),
             retries: Retries::default(),
             tracer: Tracer::off(),
+            sleepers: Arc::new(crate::Sleepers::default()),
         }
+    }
+
+    /// Share the idle loop's state (AD-058): what it put to sleep stays at zero, and its status says `Sleeping`.
+    #[must_use]
+    pub fn with_sleepers(mut self, sleepers: Arc<crate::Sleepers>) -> Self {
+        self.sleepers = sleepers;
+        self
     }
 
     /// Make a span of every pass with `tracer` (K5). Off by default.

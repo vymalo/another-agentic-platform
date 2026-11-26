@@ -58,6 +58,9 @@ pub struct Config {
     /// What the operator keeps of a deleted agent's store (ANR-770).
     #[serde(default)]
     pub retention: RetentionSection,
+    /// Asking each agent what work it holds (AD-058 P2c).
+    #[serde(default)]
+    pub activity: ActivitySection,
     /// The `Lease` of a leader election (K7a).
     #[serde(default)]
     pub leader_election: LeaderElectionSection,
@@ -239,6 +242,44 @@ fn default_probe_timeout() -> u64 {
     5
 }
 
+/// `activity`: the HTTP activity source (AD-058 P2c), which asks each agent `GET /internal/activity` for the idle controller.
+#[derive(Debug, Deserialize, schemars::JsonSchema)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct ActivitySection {
+    /// Build the source. **Off by default**: no request is made. On, `token` is required, because the agents refuse a request
+    /// without their bearer.
+    #[serde(default)]
+    pub enabled: bool,
+    /// The port agents serve `/internal/activity` on (their `LISTEN_ADDR`).
+    #[serde(default = "default_activity_port")]
+    pub port: u16,
+    /// How long one question may take, in seconds (1 to 30). An agent that does not answer by then counts as busy.
+    #[serde(default = "default_activity_timeout")]
+    pub timeout_secs: u64,
+    /// The bearer the agents accept, by reference (a mounted Secret key). Read once at start, never logged.
+    #[serde(default, deserialize_with = "token_ref")]
+    pub token: Option<SecretRef>,
+}
+
+impl Default for ActivitySection {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            port: default_activity_port(),
+            timeout_secs: default_activity_timeout(),
+            token: None,
+        }
+    }
+}
+
+fn default_activity_port() -> u16 {
+    8080
+}
+
+fn default_activity_timeout() -> u64 {
+    3
+}
+
 /// `retention`: what a deleted agent leaves behind.
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
@@ -363,6 +404,8 @@ pub struct Settings {
     pub tool_probe: ToolProbe,
     /// Days a deleted agent's store is kept (`0`: for ever).
     pub retention_after_delete_days: u64,
+    /// The activity source.
+    pub activity: Activity,
     /// The election.
     pub leader: Leader,
     /// The `tracing` filter.
@@ -409,6 +452,15 @@ pub struct Defaults {
 pub struct ToolProbe {
     pub enabled: bool,
     pub timeout: Duration,
+}
+
+/// The activity source.
+#[derive(Clone, Debug)]
+pub struct Activity {
+    pub enabled: bool,
+    pub port: u16,
+    pub timeout: Duration,
+    pub token: Option<SecretRef>,
 }
 
 /// The election, with the timings still as the file gave them (the provider's `Timings` needs the runtime feature).
@@ -522,6 +574,21 @@ impl Config {
             );
         }
 
+        if self.activity.port == 0 {
+            bail!("activity.port: 0 is not a port");
+        }
+        if !(1..=30).contains(&self.activity.timeout_secs) {
+            bail!(
+                "activity.timeoutSecs: {} is not a whole number of seconds from 1 to 30",
+                self.activity.timeout_secs
+            );
+        }
+        if self.activity.enabled && self.activity.token.is_none() {
+            bail!(
+                "activity.token: required while activity.enabled is true: the agents refuse a request with no bearer"
+            );
+        }
+
         let leader = self.leader_election;
         let mut leader_namespace = leader
             .namespace
@@ -603,6 +670,12 @@ impl Config {
                 timeout: Duration::from_secs(self.tool_probe.timeout_secs),
             },
             retention_after_delete_days: self.retention.after_delete_days,
+            activity: Activity {
+                enabled: self.activity.enabled,
+                port: self.activity.port,
+                timeout: Duration::from_secs(self.activity.timeout_secs),
+                token: self.activity.token,
+            },
             leader: Leader {
                 enabled: leader.enabled,
                 name: leader.name.trim().to_owned(),

@@ -14,7 +14,7 @@
 #   4. the registry's token Secret (a random value), the agent's Secrets (a sentinel for the model's key, a random A2A bearer, a ledger
 #      URI that is never opened), and the curl pod the registry's NetworkPolicy admits (aap-e2e/registry-reader=true);
 #   5. the chart with two replicas: a RollingUpdate of maxSurge 1 / maxUnavailable 0, a PodDisruptionBudget of maxUnavailable 1, two
-#      Ready pods that did not restart, the six LEADER_ELECTION_* variables (on, the release's name, this namespace, 15/10/2) and a pass
+#      Ready pods that did not restart, the leaderElection keys of the rendered file (on, the release's name, this namespace, 15/10/2) and a pass
 #      cap of 4 s, and the Lease `<release>` with a leaseDurationSeconds of 15 whose holderIdentity is one of the two pods;
 #   6. under the real RBAC of a real API server, as the operator's ServiceAccount: `create leases` and `get`/`update` the NAMED lease,
 #      but not `get` or `list` leases unnamed, not `delete` it, and not in every namespace; and no Secret;
@@ -440,8 +440,6 @@ ready_pods() {
 two_ready() {
   [ "$(ready_pods | grep -c . || true)" = 2 ] || { printf 'want two Ready pods, got: %s\n' "$(ready_pods | tr '\n' ' ')" >&2; return 1; }
 }
-# env_of <pod> <name>: the value of an environment variable of the operator container.
-env_of() { jp "$ns" "pod/$1" "{.spec.containers[?(@.name==\"operator\")].env[?(@.name==\"$2\")].value}"; }
 # refresh_lease: the Lease, read once into $work/lease.json, with the read required. `jp` (and so a bare `holder`) cannot tell "the Lease
 # says nobody holds it" from "the Lease could not be read", and step 10's whole claim rests on that difference.
 refresh_lease() {
@@ -548,18 +546,18 @@ jqok "$work/deployment.json" "the Deployment is not two Ready replicas" '.status
 kubectl -n "$ns" get poddisruptionbudget "$release" -o json > "$work/pdb.json" 2>/dev/null || die "$ns has no PodDisruptionBudget $release"
 jqok "$work/pdb.json" "the budget does not allow exactly one replica to go at a time" \
   '.spec.maxUnavailable == 1 and .spec.minAvailable == null'
+# ANR-962: the settings are the file the chart renders (the ConfigMap $release, mounted and read with --config), not variables: the
+# election's six keys (the block scalar's own indent is gone from what kubectl prints) and the pass cap below the lease margin are in it, in the release's own words.
+cfg=$(jp "$ns" "configmap/$release" '{.data["config.yaml"]}')
+[ -n "$cfg" ] || die "the ConfigMap $release holds no config.yaml"
+for want in 'leaderElection:' '  enabled: true' "  name: \"$lease\"" "  namespace: \"$ns\"" '  leaseSecs: 15' '  renewSecs: 10' '  retrySecs: 2' '  timeoutSecs: 4'; do
+  printf '%s\n' "$cfg" | grep -Fxq -- "$want" || die "the operator's file lacks the line '$want' (below lease - renew for the pass cap)"
+done
 pods=$(ready_pods)
 [ "$(printf '%s\n' "$pods" | grep -c . || true)" = 2 ] || die "want two Ready pods, got: $(printf '%s' "$pods" | tr '\n' ' ')"
 for p in $pods; do
   restarts=$(jp "$ns" "pod/$p" '{.status.containerStatuses[?(@.name=="operator")].restartCount}')
   [ "$restarts" = 0 ] || die "$p restarted $restarts time(s): it did not start cleanly"
-  [ "$(env_of "$p" LEADER_ELECTION_ENABLED)" = true ] || die "$p is not given LEADER_ELECTION_ENABLED=true"
-  [ "$(env_of "$p" LEADER_ELECTION_NAME)" = "$lease" ] || die "$p is given LEADER_ELECTION_NAME='$(env_of "$p" LEADER_ELECTION_NAME)', want '$lease'"
-  [ "$(env_of "$p" LEADER_ELECTION_NAMESPACE)" = "$ns" ] || die "$p is given LEADER_ELECTION_NAMESPACE='$(env_of "$p" LEADER_ELECTION_NAMESPACE)', want '$ns'"
-  [ "$(env_of "$p" LEADER_ELECTION_LEASE_SECS)" = 15 ] || die "$p is given LEADER_ELECTION_LEASE_SECS='$(env_of "$p" LEADER_ELECTION_LEASE_SECS)', want 15"
-  [ "$(env_of "$p" LEADER_ELECTION_RENEW_SECS)" = 10 ] || die "$p is given LEADER_ELECTION_RENEW_SECS='$(env_of "$p" LEADER_ELECTION_RENEW_SECS)', want 10"
-  [ "$(env_of "$p" LEADER_ELECTION_RETRY_SECS)" = 2 ] || die "$p is given LEADER_ELECTION_RETRY_SECS='$(env_of "$p" LEADER_ELECTION_RETRY_SECS)', want 2"
-  [ "$(env_of "$p" AAP_RECONCILE_TIMEOUT_SECS)" = 4 ] || die "$p is given AAP_RECONCILE_TIMEOUT_SECS='$(env_of "$p" AAP_RECONCILE_TIMEOUT_SECS)', want 4 (below lease - renew)"
 done
 # The Lease exists, its duration is the chart's 15 s, and its holder is one of the two pods the Deployment runs (the candidate is POD_NAME).
 # `helm --wait` returns when the pods are Ready, which is not ordered against the campaign's first create: poll for it.

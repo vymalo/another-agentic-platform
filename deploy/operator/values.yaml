@@ -13,7 +13,7 @@ image:
   repository: ghcr.io/vymalo/another-agentic-platform/operator
   # Bumped on every green build of main by .github/workflows/operator-image.yml (`sha-<7 hex>`), with
   # deploy/operator/bump-tag.sh: a plain key, written by that script only. `latest` is refused.
-  tag: sha-dd8c474
+  tag: sha-1fd24c1
   # Optional `sha256:...`: when set the image is `repository:tag@digest`.
   digest: ""
   pullPolicy: IfNotPresent
@@ -318,6 +318,31 @@ networkPolicy:
 retention: {}
 #  afterDeleteDays: 90
 
+# AD-058 P2c: the operator asks each agent service what work it holds (`GET /internal/activity`), for the idle controller. Empty `to`: off,
+# and not a trace of it in any render. `to` is who the operator may reach: the pods of the agents (a namespaceSelector and a podSelector).
+# The agents refuse a question without their bearer, so `tokenSecret` is required while `to` is set; the operator reads the file the Secret
+# is mounted as and never the Secret through the API.
+activity:
+  to: []
+  # The port the agents serve /internal/activity on (their LISTEN_ADDR).
+  port: 8080
+  # How long one question may take, in seconds (1 to 30). An agent that does not answer by then counts as busy.
+  timeoutSecs: 3
+  tokenSecret:
+    name: ""
+    key: token
+  # How the operator resolves an agent's service name: the cluster's DNS, as for toolProbe.dns. A rule with ports and no `to` would be
+  # port 53 to anywhere, so `to` may not be emptied while `to` above is set and networkPolicy is enabled.
+  dns:
+    to:
+      - namespaceSelector:
+          matchLabels:
+            kubernetes.io/metadata.name: kube-system
+        podSelector:
+          matchLabels:
+            k8s-app: kube-dns
+    ports: [53]
+
 toolProbe:
   # Who the operator may reach. Empty: no probe, and not a trace of it in any render. The peers of an in-cluster MCP server (a
   # namespaceSelector or a podSelector) or its addresses (an ipBlock).
@@ -438,7 +463,7 @@ api:
     # Bumped on every green build of main by .github/workflows/operator-image.yml (`sha-<7 hex>`), with
     # `deploy/operator/bump-tag.sh <file> <tag> api`: a plain key, written by that script only, in step with `image.tag`
     # (one workflow builds both images from one commit). `latest` is refused. `sha-0000000` is a placeholder: no image has that tag.
-    tag: sha-dd8c474
+    tag: sha-1fd24c1
     # Optional `sha256:...`: when set the image is `repository:tag@digest`.
     digest: ""
     pullPolicy: IfNotPresent
@@ -628,7 +653,7 @@ usageIngest:
     repository: ghcr.io/vymalo/another-agentic-platform/usage-ingest
     # Written by `bump-tag.sh <file> <tag> usage-ingest` only, in step with the other two tags. `sha-0000000` is a placeholder:
     # no image has that tag until the first bump after the image is pushed. `latest` is refused.
-    tag: sha-dd8c474
+    tag: sha-1fd24c1
     digest: ""
     pullPolicy: IfNotPresent
   replicas: 1

@@ -71,6 +71,17 @@ toolProbe:
 retention:
   afterDeleteDays: 90
 
+# Ask each agent what work it holds (AD-058 P2c): `GET /internal/activity`, the source the idle controller polls. Off: no
+# request is made. On, `token` is required (the agents refuse a request without their bearer), read once at start.
+activity:
+  enabled: false
+  # The port the agents serve /internal/activity on.
+  port: 8080
+  # 1 to 30 seconds; an agent that does not answer by then counts as busy.
+  timeoutSecs: 3
+  # token:
+  #   file: /var/run/secrets/aap/activity/token
+
 # Elect one replica to write (K7a), with a coordination.k8s.io/v1 Lease. Every replica keeps its caches and serves; only the
 # holder's passes write. Off: this replica is the only one. `retrySecs < renewSecs < leaseSecs`, each at least 1.
 leaderElection:

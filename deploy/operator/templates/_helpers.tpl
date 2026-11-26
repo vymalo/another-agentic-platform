@@ -97,6 +97,12 @@ plain otherwise. A DNS label may be any of those, and `namespace: on` is the boo
 {{- if .Values.externalSecrets.enabled -}}token{{- else -}}{{- .Values.registry.tokenSecret.key -}}{{- end -}}
 {{- end -}}
 
+{{/* The activity source (AD-058 P2c): "true" or nothing. On when `activity.to` names peers; off by default and then nothing of it is rendered. */}}
+{{- define "aap.activity" -}}
+{{- $a := .Values.activity -}}
+{{- if and (kindIs "map" $a) $a.to -}}true{{- end -}}
+{{- end -}}
+
 {{/*
 Run pods (values `runPods`, `runPodClasses`; slice D15a): "true" or nothing. Off by default, and then nothing of them is rendered,
 checked or given a right.

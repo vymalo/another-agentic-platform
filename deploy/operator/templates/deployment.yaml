@@ -132,6 +132,11 @@ spec:
               mountPath: /var/run/secrets/aap/registry
               readOnly: true
             {{- end }}
+            {{- if include "aap.activity" . }}
+            - name: activity-token
+              mountPath: /var/run/secrets/aap/activity
+              readOnly: true
+            {{- end }}
             {{- if include "aap.otel.on" . }}
             {{- include "aap.otel.mounts" (dict "block" .Values.otel) | nindent 12 }}
             {{- end }}
@@ -147,6 +152,15 @@ spec:
             defaultMode: 288 # 0440
             items:
               - key: {{ include "aap.registrySecretKey" . }}
+                path: token
+        {{- end }}
+        {{- if include "aap.activity" . }}
+        - name: activity-token
+          secret:
+            secretName: {{ .Values.activity.tokenSecret.name }}
+            defaultMode: 288 # 0440
+            items:
+              - key: {{ .Values.activity.tokenSecret.key }}
                 path: token
         {{- end }}
         {{- if include "aap.otel.on" . }}

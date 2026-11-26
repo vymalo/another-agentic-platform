@@ -4,6 +4,10 @@
   "description": "The file, as it is read. [`validate`](Config::validate) says whether the operator can work with it.",
   "type": "object",
   "properties": {
+    "activity": {
+      "description": "Asking each agent what work it holds (AD-058 P2c).",
+      "$ref": "#/$defs/ActivitySection"
+    },
     "defaults": {
       "description": "What an agent gets when its config names nothing.",
       "$ref": "#/$defs/DefaultsSection"
@@ -92,6 +96,44 @@
           "const": "bypass"
         }
       ]
+    },
+    "ActivitySection": {
+      "description": "`activity`: the HTTP activity source (AD-058 P2c), which asks each agent `GET /internal/activity` for the idle controller.",
+      "type": "object",
+      "properties": {
+        "enabled": {
+          "description": "Build the source. **Off by default**: no request is made. On, `token` is required, because the agents refuse a request\nwithout their bearer.",
+          "type": "boolean",
+          "default": false
+        },
+        "port": {
+          "description": "The port agents serve `/internal/activity` on (their `LISTEN_ADDR`).",
+          "type": "integer",
+          "format": "uint16",
+          "default": 8080,
+          "maximum": 65535,
+          "minimum": 0
+        },
+        "timeoutSecs": {
+          "description": "How long one question may take, in seconds (1 to 30). An agent that does not answer by then counts as busy.",
+          "type": "integer",
+          "format": "uint64",
+          "default": 3,
+          "minimum": 0
+        },
+        "token": {
+          "description": "The bearer the agents accept, by reference (a mounted Secret key). Read once at start, never logged.",
+          "anyOf": [
+            {
+              "$ref": "#/$defs/SecretRef"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      },
+      "additionalProperties": false
     },
     "ContainerResources": {
       "description": "The resources of a container the operator makes beside the agent's: the egress proxy's, the git sandbox's.",

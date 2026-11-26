@@ -579,8 +579,9 @@ ok "the operator and the API are Ready (the API's /readyz: the issuer's keys fet
 [ "$(jp deployment/aap-operator '{.spec.template.spec.volumes[*].secret.secretName}')" = "$registry_secret" ] \
   || die "the operator does not mount the registry's token from $registry_secret: $(jp deployment/aap-operator '{.spec.template.spec.volumes[*].secret.secretName}')"
 ok "the operator serves its registry (Service aap-operator-registry on 8080) with the token of $registry_secret"
-[ "$(jp deployment/aap-operator '{.spec.template.spec.containers[0].env[?(@.name=="OTEL_EXPORTER_OTLP_TRACES_ENDPOINT")].value}')" = "http://$collector.$ns.svc:4318/v1/traces" ] \
-  || die "the operator does not send its traces to the collector"
+# ANR-962: the operator's traces are the file's telemetry.otlp.endpoint (the ConfigMap), not a variable; the API's are still variables.
+[ "$(jp configmap/aap-operator '{.data.config\.yaml}' | grep -c "^    endpoint: \"http://$collector.$ns.svc:4318/v1/traces\"$")" = 1 ] \
+  || die "the operator's file does not send its traces to the collector"
 [ "$(jp "deployment/$api_name" '{.spec.template.spec.containers[0].env[?(@.name=="OTEL_EXPORTER_OTLP_TRACES_ENDPOINT")].value}')" = "http://$collector.$ns.svc:4318/v1/traces" ] \
   || die "the API does not send its traces to the collector"
 ok "the operator and the API are told to send their traces to the collector (otel.* and api.otel.*)"

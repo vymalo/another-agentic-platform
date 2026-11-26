@@ -90,6 +90,15 @@ data:
       enabled: true
       timeoutSecs: {{ .Values.toolProbe.timeoutSecs | default 5 }}
     {{- end }}
+    {{- if include "aap.activity" . }}
+    # AD-058 P2c: ask each agent what work it holds. The bearer is the mounted Secret's file, read once at start.
+    activity:
+      enabled: true
+      port: {{ .Values.activity.port | int }}
+      timeoutSecs: {{ .Values.activity.timeoutSecs | int }}
+      token:
+        file: /var/run/secrets/aap/activity/token
+    {{- end }}
     {{- if hasKey (default dict .Values.retention) "afterDeleteDays" }}
     retention:
       # ANR-770: days a deleted agent's retained database and volumes are kept (0: for ever).

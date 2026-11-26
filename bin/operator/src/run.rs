@@ -134,8 +134,42 @@ impl crate::config::Settings {
                 enabled: self.tool_probe.enabled,
                 timeout: self.tool_probe.timeout,
             },
+            // The binary builds the activity source (P2c) but does not hand it to the operator yet, so the idle loop does not run.
+            sleep_poll: aap_controller::DEFAULT_POLL,
         }
     }
+}
+
+/// The HTTP activity source (AD-058 P2c), or `None` while `activity.enabled` is off. **Fail closed**: enabled, the bearer is
+/// read now and a reference that gives nothing (a missing or unreadable file, an empty or unset variable, a blank text) is an
+/// error at start, never a source that asks with no bearer. `--check` does not come here: it holds only the reference's shape.
+///
+/// # Errors
+///
+/// The bearer cannot be read or is blank, or the HTTP client cannot be built.
+pub fn activity_source(
+    activity: &crate::config::Activity,
+) -> anyhow::Result<Option<aap_activity_http::HttpActivity>> {
+    use aap_trace_otlp::SecretRef;
+    use anyhow::Context;
+    if !activity.enabled {
+        return Ok(None);
+    }
+    let reference = activity
+        .token
+        .as_ref()
+        .context("activity.token: required while activity.enabled is true: the agents refuse a request with no bearer")?;
+    let text = match reference {
+        SecretRef::File(path) => std::fs::read_to_string(path)
+            .with_context(|| format!("reading activity.token {}", path.display()))?,
+        SecretRef::Env(name) => std::env::var(name)
+            .with_context(|| format!("reading activity.token: the variable {name} is not set"))?,
+    };
+    let token = aap_activity_http::Token::new(&text)
+        .with_context(|| format!("activity.token {reference:?}"))?;
+    let source =
+        aap_activity_http::HttpActivity::in_cluster(activity.port, activity.timeout, Some(token))?;
+    Ok(Some(source))
 }
 
 /// The store provisioner of this build: with `store-cnpg`, the one that makes a CloudNativePG cluster and
@@ -303,6 +337,8 @@ async fn run_with(settings: crate::config::Settings, tracer: aap_trace::Tracer) 
 
     let leader = settings.leader_election()?;
     let registry_full = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    // Built and checked now so a bad setting stops the start; the idle controller (P2b) is what polls it.
+    let activity = activity_source(&settings.activity)?;
     let token = registry_token(&settings.registry);
     let options = settings.options(token.is_some(), registry_full.clone());
     if options.watch_namespaces.is_none() {
@@ -322,6 +358,8 @@ async fn run_with(settings: crate::config::Settings, tracer: aap_trace::Tracer) 
             .as_ref()
             .map_or_else(|| "(no run pods)".to_owned(), |s| s.class_names().join(",")),
         tool_probe = options.probe.enabled,
+        activity = activity.is_some(),
+        activity = activity.is_some(),
         "starting the operator {}",
         env!("CARGO_PKG_VERSION")
     );
@@ -775,5 +813,86 @@ mod tests {
             candidate_id(Some(" "), Some("")).is_err(),
             "two blank names are none"
         );
+    }
+
+    /// Ruling 5 of ANR-962: `--check` holds a reference's shape, and the start reads it and fails closed. A registry token
+    /// that is a missing file, an unset variable or blank gives no token (so no registry is served), never a registry that
+    /// demands nothing; a readable one gives a token.
+    #[cfg(all(feature = "runtime-kubernetes", feature = "registry"))]
+    #[test]
+    fn a_registry_token_that_cannot_be_read_gives_no_registry() {
+        use aap_trace_otlp::SecretRef;
+        let registry = |token: Option<SecretRef>| crate::config::Registry {
+            public_url: None,
+            token,
+        };
+        assert!(registry_token(&registry(None)).is_none(), "no reference");
+        let dir = std::env::temp_dir().join(format!("aap-registry-token-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).expect("a directory");
+        let file = dir.join("token");
+        assert!(
+            registry_token(&registry(Some(SecretRef::File(file.clone())))).is_none(),
+            "a missing file"
+        );
+        assert!(
+            registry_token(&registry(Some(SecretRef::Env(
+                "AAP_TEST_NO_SUCH_REGISTRY_TOKEN".to_owned()
+            ))))
+            .is_none(),
+            "an unset variable"
+        );
+        std::fs::write(&file, " \n").expect("write");
+        assert!(
+            registry_token(&registry(Some(SecretRef::File(file.clone())))).is_none(),
+            "a blank file"
+        );
+        std::fs::write(&file, "registry-bearer\n").expect("write");
+        assert!(
+            registry_token(&registry(Some(SecretRef::File(file)))).is_some(),
+            "a readable file"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn the_activity_source_is_off_by_default_and_fails_closed_without_a_token() {
+        let off = settings("version: 1\n");
+        assert!(
+            activity_source(&off.activity)
+                .expect("off is fine")
+                .is_none()
+        );
+
+        let dir = std::env::temp_dir().join(format!("aap-activity-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).expect("a directory");
+        let file = dir.join("token");
+        let on = |token: &str| {
+            settings(&format!(
+                "version: 1\nactivity:\n  enabled: true\n  token: {token}\n"
+            ))
+        };
+
+        let text = format!(
+            "{:#}",
+            activity_source(&on(&format!("{{ file: {} }}", file.display())).activity)
+                .expect_err("missing file")
+        );
+        assert!(text.contains("reading activity.token"), "{text}");
+
+        std::fs::write(&file, " \n").expect("write");
+        assert!(
+            activity_source(&on(&format!("{{ file: {} }}", file.display())).activity).is_err(),
+            "a blank token is refused"
+        );
+
+        std::fs::write(&file, "s3cret-bearer\n").expect("write");
+        let source = activity_source(&on(&format!("{{ file: {} }}", file.display())).activity)
+            .expect("a token")
+            .expect("a source");
+        assert!(
+            !format!("{source:?}").contains("s3cret"),
+            "the token never prints"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

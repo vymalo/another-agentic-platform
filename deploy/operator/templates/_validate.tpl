@@ -196,6 +196,45 @@ policy on, as the traces' is. */ -}}
 {{- if and $tp.to .Values.networkPolicy.enabled (not $tp.dns.to) -}}
 {{- fail "toolProbe.dns.to is required while toolProbe.to is set and the NetworkPolicy is enabled: the operator's policy has no DNS rule otherwise, and a rule with ports and no `to` is port 53 to anywhere" -}}
 {{- end -}}
+{{- /* The activity source (AD-058 P2c): off by default (an empty `to`). On, the peers are a NetworkPolicy's, the bearer's Secret is named and
+the DNS rule is required with the policy on, as the tool probe's is. */ -}}
+{{- if not (kindIs "map" .Values.activity) -}}
+{{- fail "activity must be a map (the defaults of values.yaml are its keys; a null removes them)" -}}
+{{- end -}}
+{{- $ac := .Values.activity -}}
+{{- range $k, $_ := $ac -}}
+{{- if not (has $k (list "to" "port" "timeoutSecs" "tokenSecret" "dns")) -}}
+{{- fail (printf "activity.%s is not a setting: to, port, timeoutSecs, tokenSecret or dns" $k) -}}
+{{- end -}}
+{{- end -}}
+{{- if not (kindIs "slice" (default (list) $ac.to)) -}}
+{{- fail "activity.to must be a list of NetworkPolicy peers" -}}
+{{- end -}}
+{{- include "aap.checkPeers" (dict "what" "activity.to" "peers" (default (list) $ac.to)) -}}
+{{- include "aap.checkIpBlocks" (dict "what" "activity.to" "peers" (default (list) $ac.to)) -}}
+{{- if $ac.to -}}
+{{- if not (include "aap.isPort" $ac.port) -}}
+{{- fail (printf "activity.port: %v is not a port number" $ac.port) -}}
+{{- end -}}
+{{- if not (and (include "aap.isWholeNumber" $ac.timeoutSecs) (ge (int $ac.timeoutSecs) 1) (le (int $ac.timeoutSecs) 30)) -}}
+{{- fail (printf "activity.timeoutSecs must be a whole number of seconds from 1 to 30, got %v" $ac.timeoutSecs) -}}
+{{- end -}}
+{{- if not (and (kindIs "map" $ac.tokenSecret) $ac.tokenSecret.name $ac.tokenSecret.key) -}}
+{{- fail "activity.tokenSecret.name and activity.tokenSecret.key are required while activity.to is set: the agents refuse a question with no bearer" -}}
+{{- end -}}
+{{- if .Values.networkPolicy.enabled -}}
+{{- if not (and (kindIs "map" $ac.dns) (kindIs "slice" $ac.dns.ports) $ac.dns.ports $ac.dns.to) -}}
+{{- fail "activity.dns.to and activity.dns.ports are required while activity.to is set and the NetworkPolicy is enabled: the operator's policy has no DNS rule otherwise, and a rule with ports and no `to` is port 53 to anywhere" -}}
+{{- end -}}
+{{- range $p := $ac.dns.ports -}}
+{{- if not (include "aap.isPort" $p) -}}
+{{- fail (printf "activity.dns.ports: %v is not a port number" $p) -}}
+{{- end -}}
+{{- end -}}
+{{- include "aap.checkPeers" (dict "what" "activity.dns.to" "peers" $ac.dns.to) -}}
+{{- include "aap.checkIpBlocks" (dict "what" "activity.dns.to" "peers" $ac.dns.to) -}}
+{{- end -}}
+{{- end -}}
 {{- /* Settings that have a default: a number, above zero. */ -}}
 {{- $tuning := default (dict) .Values.tuning -}}
 {{- range $k, $v := $tuning -}}
