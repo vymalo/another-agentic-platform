@@ -521,6 +521,46 @@ the floor of a takeover, **45 s** as its ceiling and **60 s** for the parked age
 - **`ciborium` is pinned `=0.2.2`** (*verified 2026-11-26*: latest on crates.io) and adds `ciborium-io`, `ciborium-ll`, `half` and `crunchy` to the lock file; no HTTP or TLS stack.
 - **Clients.** `aap-platform-client` has `Options::encoding` (JSON default) and `aapctl` `--encoding json|cbor` (`AAPCTL_ENCODING`); the token, redirect and proxy rules are unchanged.
 
+#### AD-063 — The operator renders a run's signer: a sidecar or the agent itself, a token for the issuer's audience, and no certificate of its own
+
+*(2026-11-26; documentation only, nothing built. On the owner's direction of 2026-11-26, recorded in another-agentic-system's [ADR 0101](https://github.com/vymalo/another-agentic-system/blob/main/docs/decisions/0101-a-cloud-runs-model-calls-are-signed-for-the-run-and-the-injector-stays-for-custom-cases.md) (accepted 2026-11-26). AD-062 is the CBOR entry above, so this entry is AD-063.)* The owner: *"We can have an intermediary certificate per user in the cloud for their agents, each agent getting a final certificate per run. Then we go with signatures only. A bring-your-own A2A doesn't use our gateway anyways. And for models not using adam or not signing yet, we proxy with a small signature injector, local to the cloud run and that's it. We own the deployment right? We can do that. We just need the -system and -platform to be modular enough. We can even keep the injector for completely custom use-cases, let's be creative"*. On the cloud path a run's model calls go from the run's pod straight to the model gateway, each signed with a certificate **of that run** whose URI SAN names the person and the run; the system's credential broker issues it once per run from a CSR the signer sends. This entry is the platform's half: what the operator renders so that a signer exists in the pod and can ask for its certificate. It builds on AD-024 (secrets are references; the operator reads no Secret), AD-037 (a pod is never shared across owners) and the git sandbox of slice D15d (a native sidecar the operator renders), and changes none of them.
+
+Decisions *(accepted 2026-11-26: the owner accepts them by merging; the names marked proposed are the slices' to fix)*: **(1)** **off by default**: an agent with no `signing` setting renders exactly what it renders today and no digest moves; the deployment's setting is a block of the operator chart (*proposed:* `signing.issuer.url`, `signing.issuer.audience`, `signing.sidecar.image` pinned by tag and digest like `defaultAgentImage`, `signing.to` for the egress peers), and an agent picks a mode (*proposed:* `AgentConfig.spec.signing.mode`, `inProcess` or `sidecar`, the deployment's default when absent); **(2)** **in-process** (an adam that signs its requests): the agent container gets the issuer's URL and a token file (*proposed names, adam's to fix:* `RUN_CERT_ISSUER_URL`, `RUN_CERT_TOKEN_FILE`), its `MODEL_BASE_URL` is the model gateway's and **no `MODEL_API_KEY`** is rendered; **(3)** **sidecar** (an agent that does not sign yet: an older adam, or a harness that is not adam): a **native sidecar** `run-signer` from the chart's pinned image, listening on loopback, holding each run's key and leaf **in memory**; the agent's `MODEL_BASE_URL` points at it and its upstream is the model endpoint's URL; it requires `X-Run-Id` and the prompt headers from the agent (adam-rs ADR 0067 and 0077) and adds `Turn-Signature`; it has a read-only root file system, no volume but its token, and no other container mounts that token; **(4)** in both modes the agent runs as a **service account of its own**, bound to no `Role`, and the signer alone mounts a **projected service-account token for the issuer's audience** (a new variant of the closed enum `VolumeSource`, *proposed* `AudienceToken { audience, expiration_secs }`, which unlike `AccountToken` names an audience other than the API server's and may be mounted by the sidecar, but by one container only), so the broker can tell which agent asks (its `TokenReview` names the service account); **(5)** the registry item publishes two optional attributes (*proposed:* `workload`, the agent's service-account identity in the SPIFFE shape the deployment's PKI uses, and `signing`, `in-process` or `sidecar`), from which the orchestrator matches the caller to the run's binding and picks the run's signing path; the contract stays `agent-registry/v1`, as `audience` did (D3); **(6)** the agent's `NetworkPolicy` gains egress to exactly the peers of `signing.to` (the model gateway and the broker's internal listener), and nothing wider; **(7)** **the operator holds no certificate, no key and no Secret, sees no run and asks no issuer** (AD-024 holds): the token is the kubelet's, the key is the signer's, the leaf is the broker's answer to the signer; **(8)** run pods never get the token, the key or the sidecar: a run pod's commands reach no model; **(9)** an `a2a` harness (AD-054) is out of scope: a bring-your-own image does not call the deployment's gateway, and `signing` on one is refused, naming the field.
+
+*How the certificate reaches the pod, the options weighed:* **an OpenBao agent or a CSI driver** in the pod gives the pod the right to sign any SAN the role allows (any person, any run) and issues per pod, not per run: rejected. **The operator asks the orchestrator** and mounts what it gets: the operator would carry key or certificate material it has no business with, against AD-024, and it sees no run: rejected. **The signer asks the broker with a projected token** (chosen): the key never leaves the signer's memory, the broker checks the run's binding and the caller, and the operator renders only a token volume, a container and an egress rule. *Unverified:* the issuance latency at run start (no signature against the deployed PKI has been timed), and that a kubelet's projected token for a custom audience reaches a native sidecar as it reaches the agent container (it should: both are containers of one pod).
+
+```mermaid
+sequenceDiagram
+  participant Op as operator
+  participant K as kubelet
+  participant S as signer (adam, or the run-signer sidecar)
+  participant B as system's broker
+  participant G as model gateway
+  Op->>K: Deployment: own service account, AudienceToken volume (signer only), sidecar or env, egress to signing.to
+  K->>S: projected token for the issuer's audience
+  Note over Op,S: the operator holds no key, no certificate, no Secret
+  S->>S: a run's first model call: new key in memory, CSR
+  S->>B: POST /internal/runs/{run}/certificate, the token
+  B-->>S: the run's leaf (person and run in its URI SAN)
+  S->>G: signed calls, no bearer
+```
+
+```mermaid
+stateDiagram-v2
+  [*] --> Plain: no signing setting (today's render, no digest moves)
+  [*] --> Rendered: signing set (inProcess or sidecar)
+  Rendered --> Refused: an a2a harness, or a mode the chart does not configure
+  Rendered --> Ready: the pod runs, the signer mounts its token
+  Ready --> Signing: a run starts, the signer holds that run's leaf
+  Signing --> Ready: the run ends, its key is dropped
+  Ready --> [*]: the agent is deleted, its service account with it
+  Refused --> [*]
+  Plain --> [*]
+```
+
+Slices *(proposed)*: G1, the `AudienceToken` variant and the spec's rule that one container mounts it (the parity goldens unmoved); G2, the chart's `signing` block, `_validate.tpl`'s refusals and a golden render; G3, the in-process render; G4, the sidecar render; G5, the registry's two attributes; G6, a kind end-to-end with a stub issuer and a stub gateway that verifies the signature. The sidecar's image is built where the request signature is (the owner's question in ADR 0101).
+
+
 ---
 
 ## 92. Proposed Decisions
