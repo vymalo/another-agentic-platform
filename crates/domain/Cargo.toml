@@ -16,6 +16,7 @@ aap-ports.workspace = true
 # Named inside the crate only (to read the types `aap-api` embeds); none is in a public signature.
 k8s-openapi.workspace = true
 serde.workspace = true
+schemars.workspace = true
 serde_json.workspace = true
 sha2.workspace = true
 

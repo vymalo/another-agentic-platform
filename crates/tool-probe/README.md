@@ -57,7 +57,7 @@ no image).
 | A tool name | 256 characters (`MAX_TOOL_NAME`), no control character | a longer or control-bearing name is not a name a model can call |
 | `tools/list` pages | 5, then `incomplete` | a server that keeps a cursor cannot hold the probe, and the status says the count is a lower bound |
 | Answer body | 1 MiB | the status holds names, not schemas |
-| Deadline | 1 to 60 s, `toolProbe.timeoutSecs`, cut to five seconds under the pass's budget | the operator's `TOOL_PROBE_TIMEOUT_SECS` |
+| Deadline | 1 to 60 s, `toolProbe.timeoutSecs`, cut to five seconds under the pass's budget | the operator's file key `toolProbe.timeoutSecs` (was `TOOL_PROBE_TIMEOUT_SECS`) |
 
 ## The tests
 

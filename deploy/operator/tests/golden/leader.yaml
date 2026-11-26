@@ -72,6 +72,56 @@ metadata:
     app.kubernetes.io/part-of: another-agentic-platform
     helm.sh/chart: aap-operator-0.1.0
 ---
+# Source: aap-operator/templates/config.yaml
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: aap-operator
+  namespace: another-agentic-system
+  labels:
+    app.kubernetes.io/name: aap-operator
+    app.kubernetes.io/instance: aap-operator
+    app.kubernetes.io/version: "0.1.0"
+    app.kubernetes.io/managed-by: Helm
+    app.kubernetes.io/part-of: another-agentic-platform
+    helm.sh/chart: aap-operator-0.1.0
+data:
+  config.yaml: |
+    # The configuration of `operator run` (ANR-962, AD-064), rendered by the chart from its values. A typo is refused by the
+    # binary at start, and `render-check.sh` runs `operator run --check` on every golden render. THERE IS NO SECRET IN IT: the
+    # registry's token and the traces' headers are mounted files this file names, and an agent's secret is a reference.
+    version: 1
+    listen:
+      health: 0.0.0.0:8081
+      metrics: 0.0.0.0:9090
+      registry: 0.0.0.0:8080
+    watch:
+      # K6b: every namespace the operator watches, the first being the primary (the API's defaults.namespace, the run pods'
+      # cluster-scoped names). Quoted: a namespace YAML would read as a boolean or a number is still a name.
+      namespaces:
+        - "agents"
+    reconcile:
+      # K7: with the election on, a pass must finish before the lease margin (the default 4 s is below the 5 s lease - renew);
+      # with one replica the binary's own 60 s applies.
+      timeoutSecs: 4
+    registry:
+      # No token, no registry: this reference is what turns it on. A mounted Secret, read once at start.
+      token:
+        file: /var/run/secrets/aap/registry/token
+    defaults:
+      # AD-029: the image of an agent whose AgentConfig names none. A new value rolls those agents, and no other.
+      agentImage: "ghcr.io/vymalo/another-adam-rs/coder:sha-9a1fd4e@sha256:c3c178b7d73599f40d53f798616e510346abd3300a622b09b2bc233109f12b44"
+    # K7: the lease every replica campaigns for; the holder reconciles, the others keep their caches and serve the registry.
+    leaderElection:
+      enabled: true
+      name: "aap-operator"
+      namespace: "agents"
+      leaseSecs: 15
+      renewSecs: 10
+      retrySecs: 2
+    log:
+      filter: "info"
+---
 # Source: aap-operator/templates/role.yaml
 apiVersion: rbac.authorization.k8s.io/v1
 kind: Role
@@ -235,6 +285,9 @@ spec:
       labels:
         app.kubernetes.io/name: aap-operator
         app.kubernetes.io/instance: aap-operator
+      annotations:
+        # The configuration file is read once, at start: a changed file is a new pod (ANR-962).
+        checksum/config: 4960e100021e5bf75999e01068764a2ec8a6b9af6886cf0a9346fdc41b242c0f
     spec:
       serviceAccountName: aap-operator
       # The API token is the operator's way in.
@@ -253,44 +306,14 @@ spec:
         - name: operator
           image: "ghcr.io/vymalo/another-agentic-platform/operator:sha-0000000"
           imagePullPolicy: IfNotPresent
-          args: [run]
+          # The file is the only way in (ANR-962): no setting is an environment variable any more.
+          args: [run, --config, /etc/aap-operator/config.yaml]
           env:
-            # K6b: every namespace the operator watches, comma separated (the chart makes the Role and RoleBinding in each).
-            # WATCH_NAMESPACE below is the primary, which must be one of them: it names the cluster-scoped objects and the
-            # API's defaults.namespace.
-            - name: WATCH_NAMESPACES
-              value: "agents"
-            - name: WATCH_NAMESPACE
-              value: "agents"
-            # K7: the lease every replica campaigns for; the holder reconciles, the others keep their caches and serve the registry.
-            - name: LEADER_ELECTION_ENABLED
-              value: "true"
-            - name: LEADER_ELECTION_NAME
-              value: "aap-operator"
-            - name: LEADER_ELECTION_NAMESPACE
-              value: "agents"
-            - name: LEADER_ELECTION_LEASE_SECS
-              value: "15"
-            - name: LEADER_ELECTION_RENEW_SECS
-              value: "10"
-            - name: LEADER_ELECTION_RETRY_SECS
-              value: "2"
+            # The downward API's identity of this replica (the reporting instance of Events and the lease's holderIdentity).
             - name: POD_NAME
               valueFrom:
                 fieldRef:
                   fieldPath: metadata.name
-            - name: RUST_LOG
-              value: "info"
-            # AD-029: the image of an agent whose AgentConfig names none. A new value rolls those agents, and no other.
-            - name: DEFAULT_AGENT_IMAGE
-              value: "ghcr.io/vymalo/another-adam-rs/coder:sha-9a1fd4e@sha256:c3c178b7d73599f40d53f798616e510346abd3300a622b09b2bc233109f12b44"
-            # K7: with the election on, a pass must finish before the lease margin (the default 4 s is below the 5 s
-            # lease - renew); with one replica the binary's own 60 s applies.
-            - name: AAP_RECONCILE_TIMEOUT_SECS
-              value: "4"
-            # No token, no registry: this variable is what turns it on.
-            - name: REGISTRY_TOKEN_FILE
-              value: /var/run/secrets/aap/registry/token
           ports:
             - name: registry
               containerPort: 8080
@@ -334,10 +357,18 @@ spec:
             capabilities:
               drop: [ALL]
           volumeMounts:
+            # The configuration file (ANR-962), read once at start.
+            - name: config
+              mountPath: /etc/aap-operator
+              readOnly: true
             - name: registry-token
               mountPath: /var/run/secrets/aap/registry
               readOnly: true
       volumes:
+        - name: config
+          configMap:
+            name: aap-operator
+            defaultMode: 288 # 0440
         - name: registry-token
           secret:
             secretName: e2e-registry-token

@@ -25,7 +25,7 @@ const FORBIDDEN: [&str; 14] = [
 ];
 
 /// Parsed headers. There is no `Display`, and `Debug` says how many, never what.
-#[derive(Clone, Default)]
+#[derive(Clone, Default, PartialEq)]
 pub struct Headers(HeaderMap);
 
 impl std::fmt::Debug for Headers {
@@ -46,20 +46,31 @@ impl Headers {
         if text.len() > MAX_HEADERS_FILE {
             return Err("the file is longer than 4 KiB");
         }
-        let mut map = HeaderMap::new();
+        let mut headers = Self::default();
         for pair in text.trim().split(',').filter(|p| !p.trim().is_empty()) {
             let (name, value) = pair.split_once('=').ok_or("a pair has no `=`")?;
-            let name = HeaderName::from_bytes(name.trim().as_bytes())
-                .map_err(|_| "a header name is not an HTTP token")?;
-            if FORBIDDEN.contains(&name.as_str()) {
-                return Err("a header is one the exporter sets itself");
-            }
-            let mut value =
-                HeaderValue::from_str(value.trim()).map_err(|_| "a header value is not valid")?;
-            value.set_sensitive(true);
-            map.append(name, value);
+            headers.insert(name.trim(), value.trim())?;
         }
-        Ok(Self(map))
+        Ok(headers)
+    }
+
+    /// One header from a value read elsewhere (a file of its own, a variable). The same rules as [`parse`](Self::parse): a
+    /// name is an HTTP token and not one the exporter owns, and the value is marked sensitive.
+    ///
+    /// # Errors
+    ///
+    /// The name is not an HTTP token or is one the exporter owns, or the value is not a header value.
+    pub fn insert(&mut self, name: &str, value: &str) -> Result<(), &'static str> {
+        let name = HeaderName::from_bytes(name.trim().as_bytes())
+            .map_err(|_| "a header name is not an HTTP token")?;
+        if FORBIDDEN.contains(&name.as_str()) {
+            return Err("a header is one the exporter sets itself");
+        }
+        let mut value =
+            HeaderValue::from_str(value.trim()).map_err(|_| "a header value is not valid")?;
+        value.set_sensitive(true);
+        self.0.append(name, value);
+        Ok(())
     }
 
     /// The map to put on a request.

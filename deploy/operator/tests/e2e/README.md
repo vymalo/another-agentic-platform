@@ -536,7 +536,7 @@ stateDiagram-v2
 
 All eleven steps passed (44 `ok` lines, exit 0), with the real answers of the API server for the refusal of the quota (`exceeded quota: e2e-coder-run-pods, requested: pods=1, used: pods=2, limited: pods=2`), the 25 refusals of `run-pods-admission.sh`, `kubectl auth can-i`, and the real coder's own step "Waiting for a slot for the run's environment"; **the operator was refused nothing** under its own Role (no `Forbidden` in its log). The operator's log has one `WARN ... 404 page not found` per deleted agent, run pods or not: it is `kube-rs` reading the API server's plain-text `404` for the CloudNativePG `Cluster` that a cluster without that CRD does not have, which `aap-store-cnpg` treats as "there is none" (its source documents it); the script does not look at it. **That is the script's mechanics and the operator's and the coder's behaviour against a real API server. It is not a kubelet.**
 
-*Each assertion that matters was broken on purpose*, one edit at a time in a copy of the tree or in the stand-in, a fresh world each time, and the script failed where it should (a quota of three pods in the values: step 4 refuses the quota object, and, with that one assertion neutralised, step 6 finds that the third pod was admitted; the second install with run pods off: step 3 finds no `RUN_PODS_FILE`; a stand-in kubelet that mounts the whole `workspaces` directory in a run pod: step 5 sees the other run's lock file where its own directory alone should be; a run pod that can reach the Service address: step 7 gives up after its 60 s, and with `AAP_E2E_CNI_MAY_IGNORE_POLICIES=1` the same world passes with a warning that says the enforcement was not proven; a quota named for the plain agent: step 2 finds it; a model that ends a run without the command's output: step 8 finds the answer without it; a model whose journal keeps the key it was sent: step 11 finds the secret). Two mutations did not take effect the first time (a wrong mount path in the stand-in, an address nothing reached, a stray quota the script never applied, an environment dump that leaked nothing because the stand-in gives a command a clean environment) and were redone; the walks that had run beside a leftover process of the stand-in were thrown away and run again. `render-check.sh`: each of the nine checks it gained for this end-to-end (its values render, the objects and the settings they name, no registry or API, the namespace and the image, one flag apart, the pin, the support manifest, the script's constants, the model's agreement with the script) fails when its input is broken (a flag turned off, a quota of three, a registry added, a watched namespace set, a template that renders without the flag, a tag changed, the digest copied into another file, a label removed, a name changed, the first line of the answer changed).
+*Each assertion that matters was broken on purpose*, one edit at a time in a copy of the tree or in the stand-in, a fresh world each time, and the script failed where it should (a quota of three pods in the values: step 4 refuses the quota object, and, with that one assertion neutralised, step 6 finds that the third pod was admitted; the second install with run pods off: step 3 finds no `runPods` block in the operator's file; a stand-in kubelet that mounts the whole `workspaces` directory in a run pod: step 5 sees the other run's lock file where its own directory alone should be; a run pod that can reach the Service address: step 7 gives up after its 60 s, and with `AAP_E2E_CNI_MAY_IGNORE_POLICIES=1` the same world passes with a warning that says the enforcement was not proven; a quota named for the plain agent: step 2 finds it; a model that ends a run without the command's output: step 8 finds the answer without it; a model whose journal keeps the key it was sent: step 11 finds the secret). Two mutations did not take effect the first time (a wrong mount path in the stand-in, an address nothing reached, a stray quota the script never applied, an environment dump that leaked nothing because the stand-in gives a command a clean environment) and were redone; the walks that had run beside a leftover process of the stand-in were thrown away and run again. `render-check.sh`: each of the nine checks it gained for this end-to-end (its values render, the objects and the settings they name, no registry or API, the namespace and the image, one flag apart, the pin, the support manifest, the script's constants, the model's agreement with the script) fails when its input is broken (a flag turned off, a quota of three, a registry added, a watched namespace set, a template that renders without the flag, a tag changed, the digest copied into another file, a label removed, a name changed, the first line of the answer changed).
 
 **Still unverified, and what only the job can show**: that a **real kubelet** pulls the coder, the run image and Postgres by digest and starts the run pod from the operator's template (the init container, uid `10001`, the mounts with sub-paths on a real volume, the readiness); that the coder's `adam-kube-exec` reaches it by the WebSocket `exec` of Kubernetes 1.35 with the Role the chart made; that **kindnet enforces the egress rule** (`ipBlock` with `except`) of a new pod, which `api-e2e.sh` has not asked of it (it asked for an ingress rule), and refuses the model's Service address while the coder's pod reaches it (*amended 2026-10-27*: the job has run green with that check, run 40435825771; D15c replaces it by the checks of the egress proxy, below); the timings; the runner's disk; the workflow's syntax in a runner (`actionlint` passes). **D15 stays open until the job has run green.** *(Amended 2026-10-27: D15b's job has run green, run 40435825771, *verified 2026-10-27*.)*
 
@@ -591,7 +591,7 @@ sequenceDiagram
 
     J->>K: the CRDs, the Secrets, a Postgres and the model (the coder's image), the catalogue's example in aap-e2e-k10
     J->>K: helm upgrade --install with toolProbe.to = the catalogue's pods on 8080
-    K-->>J: the operator is Ready and TOOL_PROBE_ENABLED is true
+    K-->>J: the operator is Ready and its file has `toolProbe.enabled: true` (was `TOOL_PROBE_ENABLED`)
     O->>S: initialize and tools/list, through the chart's egress
     S-->>O: the core toolset's tools
     O-->>K: the ToolProvider: Accepted, Reachable True (Probed), probe.tools
@@ -730,7 +730,7 @@ sequenceDiagram
     J->>K: refuse a context that is not kind-*, make aap-e2e-ns-ops, -a and -b (labelled), the CRDs
     J->>K: the registry's token, the agents' Secrets in a and b (a sentinel for the model's key), the curl pod
     J->>K: helm upgrade --install with watchNamespaces=[aap-e2e-ns-a, aap-e2e-ns-b]
-    K-->>J: the operator pod Ready, WATCH_NAMESPACES="aap-e2e-ns-a,aap-e2e-ns-b", WATCH_NAMESPACE="aap-e2e-ns-a"
+    K-->>J: the operator pod Ready, its file watching aap-e2e-ns-a (the primary) and aap-e2e-ns-b
     K-->>J: one Role and one RoleBinding in a and in b (the release's account), none in the release's namespace, no ClusterRole
     K-->>J: auth can-i: agentservices and pods in a and in b, nothing in the release's namespace, in kube-system or --all-namespaces
     J->>K: alpha in a, beta in b (folder agents on the stand-in)
@@ -784,7 +784,7 @@ stateDiagram-v2
   `aap-e2e-ns-ops`, in `kube-system`, or with `--all-namespaces`, not `list pods` with `--all-namespaces`, and no `get secrets` in either
   watched namespace.
 * **One operator reconciles two namespaces independently.** The operator's pod is Ready and did not restart, and is given
-  `WATCH_NAMESPACES="aap-e2e-ns-a,aap-e2e-ns-b"` and `WATCH_NAMESPACE="aap-e2e-ns-a"` (the primary). `alpha` in `aap-e2e-ns-a` and `beta` in
+  `watch.namespaces: ["aap-e2e-ns-a", "aap-e2e-ns-b"]` in the operator's file, the first being the primary (was `WATCH_NAMESPACES` and `WATCH_NAMESPACE`). `alpha` in `aap-e2e-ns-a` and `beta` in
   `aap-e2e-ns-b` are both `Ready` with their four conditions True; each has its Deployment, its Service on 8080 and one Running, Ready pod
   **in its own namespace**, and the other namespace and the release's have none of those objects and no pod of that agent. The release's
   namespace is the control that a namespace the operator does not watch is left alone: it holds the operator's own objects and not one of an
@@ -827,7 +827,7 @@ stateDiagram-v2
 
 *Run where it was written, with no container daemon and no kind*: `sh -n`, `bash -n` and `dash -n` on the script; `helm lint` and `helm template`
 of the chart with `namespaces.values.yaml` and `--set-json 'watchNamespaces=["aap-e2e-ns-a","aap-e2e-ns-b"]'`, which renders the Role and the
-RoleBinding in the two watched namespaces and **none** in the release's, and the operator's `WATCH_NAMESPACES` and `WATCH_NAMESPACE`; the
+RoleBinding in the two watched namespaces and **none** in the release's, and the operator's file's `watch.namespaces` (was `WATCH_NAMESPACES` and `WATCH_NAMESPACE`); the
 workflow parsed as YAML; `node tools/docs-check/check-docs.mjs` (the diagrams of this section parse); and the agent fixture the script generates,
 read by the built `aapctl validate -f` (the domain's own `validate`, which the operator runs) and `aapctl render -f` (which makes
 `deployment/alpha`, `service/alpha` on 8080, the pod on `aap-stub:ci` and the NetworkPolicy the script asserts). The jq filters of steps 6, 8, 9,
@@ -887,7 +887,7 @@ sequenceDiagram
     J->>K: refuse a context that is not kind-*, make aap-e2e-leader (labelled), the CRDs, the Secrets, the curl pod
     J->>K: helm upgrade --install with replicas=2
     K-->>J: a RollingUpdate of maxSurge 1 / maxUnavailable 0, a budget of maxUnavailable 1, two Ready pods that did not restart
-    K-->>J: the six LEADER_ELECTION_* variables (15/10/2), a 4 s pass cap, and the Lease held by one of the two pods
+    K-->>J: the file's `leaderElection` keys (15/10/2), a 4 s `reconcile.timeoutSecs`, and the Lease held by one of the two pods
     K-->>J: auth can-i: create a Lease and get/update the NAMED one, not unnamed, not another name, not delete, not in every namespace
     J->>K: solo (a folder agent on the stand-in)
     A->>K: solo's Deployment, Service and pod, and the registry lists it
@@ -930,7 +930,7 @@ stateDiagram-v2
 
 * **Two replicas, one writer, and the chart's shape for it.** The Deployment is two replicas in a `RollingUpdate` of `maxSurge: 1` /
   `maxUnavailable: 0`, a `PodDisruptionBudget` allows one to go, both pods are Ready with no restart, and each is given
-  `LEADER_ELECTION_ENABLED=true`, the release's name, this namespace, 15/10/2 and `AAP_RECONCILE_TIMEOUT_SECS=4` (below `lease - renew`).
+  the file's `leaderElection.enabled: true`, the release's name, this namespace, 15/10/2 and `reconcile.timeoutSecs: 4` (below `lease - renew`; were the `LEADER_ELECTION_*` variables and `AAP_RECONCILE_TIMEOUT_SECS`).
 * **The `leases` rule under the real RBAC of a real API server.** As the operator's ServiceAccount: `create` a Lease, and `get` and `update` the
   **named** one; **not** `get` or `list` Leases unnamed, **not** `update` another name, **not** `delete`, **not** in every namespace — the
   `resourceNames` narrowing is asked of the API server and not read off the chart. No Secret.
@@ -987,7 +987,7 @@ version in the `scripts` job) passes on it; `actionlint` is not installed there.
 workflow [`gvisor-k3d.yml`](../../../../.github/workflows/gvisor-k3d.yml), a workflow of its own: **not a required check and not a need of `push`**; on a pull request it runs only when
 the script, its fixture, that workflow, the chart's templates (`deploy/operator/templates/**`), its CRDs chart (`deploy/operator-crds/**`), its `values.yaml` or the admission script change, and on `workflow_dispatch`. It is a
 **measurement**: it fails when the cluster cannot be made, when the run pod of the operator's template does not run under `runsc`, or when the admission policy does not do what
-`run-pods-admission.sh` says, and reports the rest as results, each with its failing step quoted, in a summary at the end. **The job installs the chart of the pull request but runs the operator image that chart pins (`image.tag` in `deploy/operator/values.yaml`, built by an earlier run on `main`), not an image built from the pull request**; k3d and kubectl are installed by the job, each pinned by version and SHA-256.
+`run-pods-admission.sh` says, and reports the rest as results, each with its failing step quoted, in a summary at the end. **The job installs the chart of the pull request and runs an operator image built from the pull request** (`AAP_OPERATOR_IMAGE=operator:pr`, imported into the cluster; ANR-962: the operator reads one configuration file, `run --config`, which the image the chart pins, built before that change, does not know, so the pinned image would refuse to start). **A local run with no `AAP_OPERATOR_IMAGE` still runs the chart's pin** (`image.tag` in `deploy/operator/values.yaml`); k3d and kubectl are installed by the job, each pinned by version and SHA-256.
 
 ```sh
 sh deploy/operator/tests/e2e/gvisor-k3d.sh   # from the repository root; needs docker, k3d (v5.9.0), kubectl, helm, jq, curl, tar with bzip2, sha512sum, openssl

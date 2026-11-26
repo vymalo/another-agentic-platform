@@ -221,6 +221,16 @@ trap 'exit 143' TERM HUP
 
 # jp <resource> <jsonpath>: a field of an object of the namespace, empty when it is not there.
 jp() { kubectl -n "$ns" get "$1" -o "jsonpath=$2" 2>/dev/null || true; }
+# operator_file <configmap>: the operator's configuration file (the ConfigMap's `config.yaml`), as kubectl prints it: the block scalar
+# without its indent, so the file's keys are at column 0. `{.data["config.yaml"]}` is NOT a jsonpath kubectl takes ("invalid array index"),
+# and `jp` hides a failure, so this reads it with the escaped dot and **fails when the read fails or is empty**: an empty read can never
+# pass a check that something is absent. Call it as `x=$(operator_file NAME) || die "..."`.
+operator_file() {
+  out=$(kubectl -n "$ns" get "configmap/$1" -o 'jsonpath={.data.config\.yaml}' 2>"$work/operator-file.err") \
+    || { printf 'cannot read configmap/%s: %s\n' "$1" "$(head -c 300 "$work/operator-file.err")" >&2; return 1; }
+  [ -n "$out" ] || { printf 'configmap/%s holds no config.yaml\n' "$1" >&2; return 1; }
+  printf '%s\n' "$out"
+}
 # not_foreign <kind/name>: the object is not there, or it carries this script's label. Anything else is somebody's, and is not overwritten.
 not_foreign() {
   if out=$(kubectl -n "$ns" get "$1" -o json 2>"$work/err"); then
@@ -579,8 +589,10 @@ ok "the operator and the API are Ready (the API's /readyz: the issuer's keys fet
 [ "$(jp deployment/aap-operator '{.spec.template.spec.volumes[*].secret.secretName}')" = "$registry_secret" ] \
   || die "the operator does not mount the registry's token from $registry_secret: $(jp deployment/aap-operator '{.spec.template.spec.volumes[*].secret.secretName}')"
 ok "the operator serves its registry (Service aap-operator-registry on 8080) with the token of $registry_secret"
-[ "$(jp deployment/aap-operator '{.spec.template.spec.containers[0].env[?(@.name=="OTEL_EXPORTER_OTLP_TRACES_ENDPOINT")].value}')" = "http://$collector.$ns.svc:4318/v1/traces" ] \
-  || die "the operator does not send its traces to the collector"
+# ANR-962: the operator's traces are the file's telemetry.otlp.endpoint (the ConfigMap), not a variable; the API's are still variables.
+op_file=$(operator_file aap-operator) || die "the operator's file cannot be read"
+[ "$(printf '%s\n' "$op_file" | grep -Fxc "    endpoint: \"http://$collector.$ns.svc:4318/v1/traces\"")" = 1 ] \
+  || die "the operator's file does not send its traces to the collector"
 [ "$(jp "deployment/$api_name" '{.spec.template.spec.containers[0].env[?(@.name=="OTEL_EXPORTER_OTLP_TRACES_ENDPOINT")].value}')" = "http://$collector.$ns.svc:4318/v1/traces" ] \
   || die "the API does not send its traces to the collector"
 ok "the operator and the API are told to send their traces to the collector (otel.* and api.otel.*)"

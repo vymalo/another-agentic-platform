@@ -38,6 +38,7 @@
 # uses a private kubeconfig in its work directory (the person's own is never read or written), and touches nothing else. It needs the network:
 # github.com (k3d is installed by the job, not here), storage.googleapis.com (the gVisor archive, checked against a pinned SHA-512), ghcr.io (the operator
 # image), docker.io, quay.io and mirror.gcr.io (the images below, by digest). AAP_GVISOR_ARCHIVE=<path> uses an archive you downloaded (still checked);
+# AAP_OPERATOR_IMAGE=<repository>:<tag> runs an operator image built from this tree instead of the chart's pin (CI sets it).
 # AAP_GVISOR_REMOVE_IMAGES=1 removes the k3s and k3d-tools images from the local Docker at the end.
 #
 # What it does NOT prove: the real coder under the class (git sandbox, projected token, egress proxy, the store's connections: K14d), a node that is not
@@ -225,6 +226,25 @@ runPods:
     - $podman6
     - $podman5
 EOF
+# ANR-962: the operator reads its settings from a configuration file (`run --config`), which an image built before that change does not know:
+# the chart of this tree on the image the chart pins refuses to start ("unexpected argument '--config'"). AAP_OPERATOR_IMAGE=<repository>:<tag> is an
+# image built from this tree (the workflow builds it): it is imported into the cluster and the chart is told to run it. Unset (a local run), the
+# chart's own pin is what runs, as it always did.
+if [ -n "${AAP_OPERATOR_IMAGE:-}" ]; then
+  case "$AAP_OPERATOR_IMAGE" in *:*) ;; *) die "AAP_OPERATOR_IMAGE must be <repository>:<tag>, got '$AAP_OPERATOR_IMAGE'" ;; esac
+  # Not `k3d image import`: it runs a tools container that must reach the Docker socket (it cannot on a rootless or group-restricted host, and on a hosted runner it
+  # left containerd's CRI hanging on the operator pod's sandbox, ANR-962). The image goes from this daemon straight into the node's containerd, which is all
+  # the import is.
+  docker save "$AAP_OPERATOR_IMAGE" | docker exec -i "k3d-$cluster-server-0" ctr --address /run/k3s/containerd/containerd.sock -n k8s.io images import - >"$work/import.out" 2>&1 \
+    || die "the image $AAP_OPERATOR_IMAGE could not be imported into the node's containerd: $(tail -c 400 "$work/import.out")"
+  cat >> "$work/values.yaml" <<EOF
+image:
+  repository: ${AAP_OPERATOR_IMAGE%:*}
+  tag: "${AAP_OPERATOR_IMAGE##*:}"
+  pullPolicy: Never
+EOF
+  note "the operator runs the image built from this tree: $AAP_OPERATOR_IMAGE"
+fi
 helm upgrade --install aap-operator "$repo/deploy/operator" --namespace "$ns" -f "$work/values.yaml" --wait --timeout 300s >/dev/null \
   || die "the operator's chart did not install"
 ok "the operator runs: $(kubectl -n "$ns" get deployment aap-operator -o jsonpath='{.spec.template.spec.containers[0].image}')"

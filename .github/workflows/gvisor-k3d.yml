@@ -49,8 +49,21 @@ jobs:
       - uses: azure/setup-helm@v5
         with:
           version: ${{ env.HELM_VERSION }}
-      # NOTE: this job runs the operator image the chart pins (`image.tag` in deploy/operator/values.yaml, built by an earlier run on main), NOT an image built
-      # from the pull request: a change to the operator's Rust code is not what this job measures; the chart's templates and the admission script of the PR are.
+      # ANR-962: the operator reads one configuration file (`run --config`), so the chart of the pull request cannot run the image the chart pins (built from main
+      # before the change: "unexpected argument '--config'"). This job builds the operator image from the pull request, as operator-image.yml's `image` job does, and
+      # the script imports it into the k3d cluster (AAP_OPERATOR_IMAGE). A local run, with no override, still runs the chart's pin.
+      - uses: docker/setup-buildx-action@v4
+      - name: Build the operator image from this tree
+        uses: docker/build-push-action@v7
+        with:
+          context: .
+          file: docker/operator/Dockerfile
+          platforms: linux/amd64
+          push: false
+          load: true
+          provenance: false
+          tags: operator:pr
+          cache-from: type=gha,scope=operator
       - name: Install k3d and kubectl
         run: |
           curl -sSfL -o "$RUNNER_TEMP/k3d" "https://github.com/k3d-io/k3d/releases/download/${K3D_VERSION}/k3d-linux-amd64"
@@ -67,6 +80,8 @@ jobs:
       # then `tee`'s status would hide the script's.
       - name: A run pod under runsc, and what the card asks to measure
         shell: bash
+        env:
+          AAP_OPERATOR_IMAGE: operator:pr
         run: sh deploy/operator/tests/e2e/gvisor-k3d.sh 2>&1 | tee "$RUNNER_TEMP/gvisor-k3d.log"
       - name: The summary of the measures
         if: always()

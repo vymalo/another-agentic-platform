@@ -160,7 +160,7 @@ fn check_deployment_limits(
         if externals.cache_claims.is_empty() {
             v.add(
                 &at,
-                "this operator allows no package cache: its deployment lists the claims that may be one (the operator chart's `cache.allowedClaims`, `CACHE_ALLOWED_CLAIMS`); ask whoever runs the operator to list a claim made for it, or remove `environment.cache`",
+                "this operator allows no package cache: its deployment lists the claims that may be one (the operator chart's `cacheAllowedClaims`, the file key `defaults.cacheAllowedClaims`); ask whoever runs the operator to list a claim made for it, or remove `environment.cache`",
             );
         } else if !externals.cache_claims.contains(claim) {
             v.add(
@@ -185,7 +185,7 @@ fn check_deployment_limits(
         v.add(
             format!("{me} spec.harness.adam.coder.maxAccessTier"),
             format!(
-                "{:?} is above the ceiling of this operator, {:?} (its `maxAccessTier`, `AGENT_MAX_ACCESS_TIER`): ask for that tier or a lower one",
+                "{:?} is above the ceiling of this operator, {:?} (its `maxAccessTier`, the file key `defaults.maxAccessTier`): ask for that tier or a lower one",
                 asked.as_str(),
                 externals.max_access_tier.as_str()
             ),

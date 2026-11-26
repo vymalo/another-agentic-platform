@@ -35,7 +35,7 @@ leaderElection:
 watchNamespaces: []
 
 # One namespace, the shorthand, and the primary one: the API's defaults.namespace, the run pods' cluster-scoped names (the policy and
-# the PriorityClass) and the operator's WATCH_NAMESPACE. Empty: the first of watchNamespaces, else the release's. Not with
+# the PriorityClass) and the operator's first `watch.namespaces`. Empty: the first of watchNamespaces, else the release's. Not with
 # watchNamespaces: one or the other.
 watchNamespace: ""
 
@@ -46,14 +46,14 @@ watchNamespace: ""
 # end-to-end of the coder runs (tests/e2e/coder.yaml), and `cargo test -p aap-operator` fails when the two differ.
 defaultAgentImage: ghcr.io/vymalo/another-adam-rs/coder:sha-9a1fd4e@sha256:c3c178b7d73599f40d53f798616e510346abd3300a622b09b2bc233109f12b44
 
-# K1: the package caches an agent may have. An AgentConfig's `environment.cache.existingClaim` names a claim of its namespace, which
+# K1: the package caches an agent may have (the file's defaults.cacheAllowedClaims). An AgentConfig's `environment.cache.existingClaim` names a claim of its namespace, which
 # the pod mounts read-write and which a run pod may mount too: any claim, another agent's data included, unless the deployment says which.
 # These are the claims made for the purpose (ReadWriteMany, writable by uid and gid 10001). Empty (the default): no agent may have a cache,
 # and a config that asks for one is ConfigInvalid, saying how a deployment allows it. Names an operator makes (`<volume>-<service>-<n>`,
 # `<service>-db-<n>`, ...) are refused whatever is listed here.
 cacheAllowedClaims: []
 
-# K1: the highest access tier (plan, edits, auto or bypass) an AgentConfig may ask for with `coder.maxAccessTier`, and the tier of an agent
+# K1: the highest access tier (the file's defaults.maxAccessTier) an AgentConfig may ask for with `coder.maxAccessTier`, and the tier of an agent
 # that asks for none when this is below auto. `auto` is the coder's own default and renders nothing. `bypass` (renaming and deleting
 # repositories, no consent form for a repository) is the deployment's opt-in: raise this only for a deployment whose GitHub credentials
 # you are willing to see used so, by whoever may write an AgentConfig.
@@ -70,7 +70,8 @@ serviceAccount:
 # and `false` is for a cluster that has no CloudNativePG at all.
 storeCnpg: true
 
-# K14a (AD-052): the RuntimeClass of the AGENTS' OWN pods, empty by default and then not a trace in any render. The untrusted code
+# K14a (AD-052): the RuntimeClass of the AGENTS' OWN pods (the file's defaults.agentRuntimeClass), empty by default and then not a trace in
+# any render. The untrusted code
 # is in a run pod (`runPods.runtimeClassName` below); the agent's pod holds the secrets and runs our code, and the owner widened
 # P-040 to it, so it is a setting of its own: run pods can be sandboxed before the agents are. `RuntimeClass` is a cluster-scoped
 # object of the ADMINISTRATOR'S, which this chart never makes (AD-052 decision 4): name one that exists. gVisor's handler is `runsc`,
@@ -272,14 +273,15 @@ runPodClasses:
       ephemeral-storage: 4Gi
 
 # The agent registry (§12b, crates/registry/README.md), served on 8080 only with a bearer token: no token, no registry. The
-# token comes from exactly one of the two below, and none of them is a value of this chart.
+# token comes from exactly one of the two below, and none of them is a value of this chart: the operator's file names it by
+# reference (registry.token), a mounted Secret.
 registry:
   # An existing Secret in the release's namespace that holds the token (the operator reads the file once, at start: after
   # a change, restart the pod).
   tokenSecret:
     name: ""
     key: token
-  # `REGISTRY_PUBLIC_URL`: the URL of the registry document itself, sent as its `anchor`. Optional.
+  # The file's `registry.publicUrl` (was `REGISTRY_PUBLIC_URL`): the URL of the registry document itself, sent as its `anchor`. Optional.
   publicUrl: ""
 
 # The token from AWS Secrets Manager through External Secrets (the ARC runner pools of home-os, and the system chart):
@@ -315,16 +317,16 @@ networkPolicy:
     # Optional: only these addresses (`kubectl get endpoints kubernetes`). Empty: any address on those ports.
     cidrs: []
 
-# K3 (AD-053): the operator may probe the MCP server of a ToolProvider (`initialize` and `tools/list`) and write its reachability and
-# tool names into the provider's status. OFF by default: `to` empty, and then not a rule of it is rendered. On, `to` lists the peers the
+# K3 (AD-053): the operator may probe the MCP server of a ToolProvider (`initialize` and `tools/list`, the file's toolProbe.enabled) and
+# write its reachability and tool names into the provider's status. OFF by default: `to` empty, and then not a rule of it is rendered. On, `to` lists the peers the
 # operator may reach (NetworkPolicyPeers: namespaceSelector, podSelector, ipBlock). A NetworkPolicy names peers and never host names, so
 # the policy is what bounds a probe: the chart opens the operator's egress to exactly these peers on `ports`, plus DNS, and a probe to a
 # server that is not covered has no route. The operator still reads no Secret (AD-024). A rule always has a `to`: an ipBlock
 # whose CIDR has a `/0` prefix, or that has no cidr, is refused (for `to` and for `dns.to`). NOTE: the API server's own egress rule is separate and, with `networkPolicy.apiServer.cidrs` empty,
 # already allows any address on 443 and 6443; an https probe on 443 is therefore bounded by `toolProbe.to` only once that list names the API
 # server's addresses. Narrow it in a deployment that probes https servers.
-# ANR-770: what the operator does with the database and volumes a deleted agent left behind (deletionPolicy: Retain).
-# Unset: the operator's default, 90 days, then it deletes them. `afterDeleteDays: 0` keeps them for ever. Uncomment to set.
+# ANR-770: what the operator does with the database and volumes a deleted agent left behind (deletionPolicy: Retain), the file's
+# retention.afterDeleteDays. Unset: the operator's default, 90 days, then it deletes them. `afterDeleteDays: 0` keeps them for ever.
 retention: {}
 #  afterDeleteDays: 90
 
@@ -374,10 +376,11 @@ toolProbe:
             k8s-app: kube-dns
     ports: [53]
 
-# Traces of the operator (slice K5, §48a): one span per reconcile pass with its steps as children, sent as OTLP/HTTP JSON to a collector
-# (crates/trace-otlp/README.md). OFF by default, and then nothing of it is rendered: no variable, volume or egress rule. On, the chart writes the
-# OTEL_* variables the binary reads, a headers file from an existing Secret (never an environment variable) and a CA bundle from an existing
-# ConfigMap, and opens egress to the collector's peers and to nothing else. A span holds the controller, the kind, the namespace and the
+# Traces of the operator (slice K5, §48a; ANR-962): one span per reconcile pass with its steps as children, sent as OTLP/HTTP JSON to a
+# collector (crates/trace-otlp/README.md). OFF by default, and then nothing of it is rendered: no key of the operator's file, no volume, no
+# egress rule. On, the chart writes the `telemetry.otlp` section of the operator's configuration file (the file, not variables), mounts a
+# headers file from an existing Secret (never an environment variable) and a CA bundle from an existing ConfigMap, and opens egress to the
+# collector's peers and to nothing else. A span holds the controller, the kind, the namespace and the
 # name of the object, the step and the CLASS of an error, never the error, and never a token, a Secret, a URL or an object's content (the
 # attribute list is crates/trace/README.md). The exporter speaks OTLP/HTTP JSON only: a backend that wants protobuf or gRPC is behind a
 # Collector. The operator's Role gains nothing: the kubelet resolves the Secret and the ConfigMap.
@@ -391,11 +394,19 @@ otel:
   samplerRatio: "1"
   # Only deployment.environment.name, k8s.cluster.name and service.namespace, values [A-Za-z0-9._-]{1,128}.
   resourceAttributes: {}
-  # An existing Secret (this namespace) whose key holds `name=value,name2=value2`, at most 4 KiB: the headers the collector wants (a token).
-  # Mounted read-only at /var/run/secrets/aap/otel (mode 0440) and named by AAP_OTEL_HEADERS_FILE. Both `name` and `key`, or neither.
+  # An existing Secret (this namespace) whose key holds the headers the collector wants, at most 4 KiB, mounted read-only at
+  # /var/run/secrets/aap/otel (mode 0440). Both `name` and `key`, or neither. ANR-962: the operator's traces are a section of its
+  # configuration file, and that file names the header whose value the key holds (the key holds the value alone, not a
+  # `name=value` list): `Authorization` is the one a collector wants, and a token is `Bearer <token>` there. The API's
+  # `api.otel.headersSecret` has no `header`: its file is the `name=value` list.
+  # UPGRADE NOTE (ANR-962, AD-064): before this change the operator's key held `name=value,...` (`authorization=Bearer abc`). It
+  # now holds the value alone (`Bearer abc`), and `header` names the header. A key that still holds the old shape (a value that
+  # starts with the header's own name and `=`, or holds `,` followed by `name=`) turns the operator's tracing OFF with one warning
+  # ("looks like the old name=value format", saying which); the operator keeps running. Rewrite the Secret's key before upgrading.
   headersSecret:
     name: ""
     key: ""
+    header: authorization
   # An existing ConfigMap whose key holds a PEM bundle that is the exporter's ONLY trust (a private CA), for an https collector. Both, or neither.
   certificate:
     configMap: ""
@@ -427,13 +438,15 @@ metrics:
     # Labels the Prometheus selects ServiceMonitors by (`release: kube-prometheus-stack`).
     labels: {}
 
-# Settings of `operator run` that have a default (bin/operator/README.md, "run: settings"); a key left out keeps the default.
+# The log's `tracing` filter, the file's `log.filter`.
 logLevel: info
+# Settings of `operator run` that have a default, the file's `reconcile` block (bin/operator/README.md, "run: the configuration file"); a key
+# left out keeps the binary's default.
 tuning: {}
-  # concurrency: 4          # AAP_CONCURRENCY: services reconciled at once, per controller and per watched namespace
-  # reconcileTimeoutSecs: 4 # AAP_RECONCILE_TIMEOUT_SECS: the longest one pass may take; with replicas > 1 it is 4 by default and must be below leaseSecs - renewSecs
-  # resyncSecs: 300         # AAP_RESYNC_SECS: timer of a service that is Ready or Suspended
-  # resyncPendingSecs: 15   # AAP_RESYNC_PENDING_SECS: timer of one that is rolling out, unwell or held by a foreign object
+  # concurrency: 4          # services reconciled at once, per controller and per watched namespace
+  # reconcileTimeoutSecs: 4 # the longest one pass may take; with replicas > 1 it is 4 by default and must be below leaseSecs - renewSecs
+  # resyncSecs: 300         # timer of a service that is Ready or Suspended
+  # resyncPendingSecs: 15   # timer of one that is rolling out, unwell or held by a foreign object
 
 resources:
   requests:

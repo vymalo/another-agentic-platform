@@ -89,21 +89,21 @@ pub struct Options {
     /// never answered holds the object's slot, so that no signal and no timer reaches it, for as long as the
     /// request lives (*seen 2026-10-16*: up to the 290 s of a watch; see the README, "A pass that hangs").
     pub pass_timeout: Duration,
-    /// The image of an agent whose `AgentConfig` names none (`--default-agent-image`; AD-029, §60a).
+    /// The image of an agent whose `AgentConfig` names none (the file key `defaults.agentImage`; AD-029, §60a).
     /// `None`: the operator has no default, and such a config is `ConfigInvalid`. A change of it is a
     /// new digest, and so a rollout, for exactly the agents that name no image.
     pub default_agent_image: Option<String>,
-    /// The `RuntimeClass` of every agent's own pod (`AGENT_RUNTIME_CLASS`, K14a, AD-052): the deployment's, `None` for
+    /// The `RuntimeClass` of every agent's own pod (`defaults.agentRuntimeClass`, K14a, AD-052): the deployment's, `None` for
     /// none. A change of it is a new digest, and so a rollout, for every agent.
     pub agent_runtime_class: Option<String>,
-    /// What the deployment says about run pods (`RUN_PODS_FILE`; slice D15a): the size classes, the image, the
+    /// What the deployment says about run pods (the file's `runPods`; slice D15a): the size classes, the image, the
     /// quota, the network policy. `None`: this operator has no run pods, and a config that asks for them is
     /// `ConfigInvalid`, saying so. Changing it is a new digest, and so a rollout, for exactly the agents that
     /// ask for run pods and read what changed.
     pub run_pods: Option<aap_domain::RunPodSettings>,
-    /// The claims the deployment allows as a package cache (`CACHE_ALLOWED_CLAIMS`, K1). Empty: none.
+    /// The claims the deployment allows as a package cache (the file key `defaults.cacheAllowedClaims`, K1). Empty: none.
     pub cache_claims: std::collections::BTreeSet<String>,
-    /// The ceiling of the access tier (`AGENT_MAX_ACCESS_TIER`, K1).
+    /// The ceiling of the access tier (the file key `defaults.maxAccessTier`, K1).
     pub max_access_tier: aap_api::AccessTierCap,
     /// The MCP probe of a `ToolProvider` (K3b): off by default.
     pub probe: Probe,

@@ -77,7 +77,7 @@ name: Operator and API images
 #              not.
 # leader-e2e (K7b): a kind cluster of its own. The operator's chart installed with THAT image and `replicas: 2`, the stand-in for the adam
 #              image (bin/operator/tests/stub) as the agents' image: the shape of the two replicas (a rolling update, the PodDisruptionBudget,
-#              the six LEADER_ELECTION_* variables, the pass cap), the Lease held by one of the two pods, the `leases` rule asked of the real API
+#              the `leaderElection` keys of its file, the pass cap), the Lease held by one of the two pods, the `leases` rule asked of the real API
 #              server (`resourceNames` narrows get/update), an agent Ready and the registry listing it from the Service AND from each pod's own
 #              IP, the holder SIGKILLed through the kind node's crictl and its pod force-deleted (a `kubectl delete` would still send SIGTERM,
 #              and the operator would release the Lease: that is the graceful step's claim, not this one's), a new agent with NO Deployment for
@@ -150,6 +150,9 @@ jobs:
   chart:
     name: helm lint, render checks and kubeconform
     runs-on: ubuntu-latest
+    env:
+      # The toolchain of operator.yml, which builds the same workspace (and of the jobs below that define it).
+      RUST_TOOLCHAIN: "1.94.1"
     steps:
       - uses: actions/checkout@v7
       - uses: azure/setup-helm@v5
@@ -175,7 +178,17 @@ jobs:
           helm template aap-operator deploy/operator --namespace another-agentic-system -f deploy/operator/examples/netcup.values.yaml \
             -f deploy/operator/tests/api.values.yaml > /dev/null
           helm template aap-operator-crds deploy/operator-crds > /dev/null
+      # ANR-962: the chart renders the operator's configuration file from its values, and `operator run --check` is what says the
+      # binary accepts it (an unknown key or a value it cannot work with would otherwise be a pod that never starts). The binary is
+      # the workspace's, built here: the job has no image.
+      - name: Install Rust
+        run: rustup toolchain install "$RUST_TOOLCHAIN" --profile minimal --no-self-update && rustup default "$RUST_TOOLCHAIN"
+      - uses: Swatinem/rust-cache@v2
+      - name: Build the operator binary (the file the chart renders is checked by it)
+        run: cargo build --locked -p aap-operator
       - name: The rendered chart keeps its guarantees
+        env:
+          AAP_OPERATOR_BIN: target/debug/operator
         run: sh deploy/operator/tests/render-check.sh
       # Core kinds against the Kubernetes schemas, the ExternalSecret against the CRD schema vendored in
       # deploy/operator/tests/schemas (a pinned copy of the datreeio catalog: a live catalog 500 once skipped the image job of
@@ -337,24 +350,32 @@ jobs:
           help=$(docker run --rm operator:smoke --help)
           grep -q crdgen <<<"$help"
           run_help=$(docker run --rm operator:smoke run --help)
-          grep -q REGISTRY_TOKEN_FILE <<<"$run_help"
+          grep -q -- '--config' <<<"$run_help"
           # `crdgen` prints the CRDs of the repository, byte for byte: the image's binary is this commit's.
           docker run --rm operator:smoke crdgen > "$RUNNER_TEMP/crds.yaml"
           cmp "$RUNNER_TEMP/crds.yaml" deploy/crds/agents.vymalo.com.yaml
           cmp "$RUNNER_TEMP/crds.yaml" deploy/operator-crds/files/agents.vymalo.com.yaml
-          # `run` with no cluster to reach fails, and says so (never a panic, never a hang).
-          out=$(docker run --rm -e KUBECONFIG=/nonexistent operator:smoke run 2>&1) && { echo "::error::run succeeded with no cluster"; exit 1; } || true
+          # ANR-962: the configuration file is the only way in. `run` with no file refuses to start, exits 1 (the file cannot be
+          # read: a mount that is wrong, not a file that is refused) and names the file it wanted.
+          code=0; out=$(docker run --rm operator:smoke run 2>&1) || code=$?
+          [ "$code" = 1 ] || { echo "::error::run with no configuration file exited $code, not 1: $out"; exit 1; }
+          grep -q '/etc/aap-operator/config.yaml' <<<"$out" || { echo "::error::run did not name the file it wanted: $out"; exit 1; }
+          # The example in the repository is a file the image's binary accepts (`--check` reads no file the configuration names, and no cluster).
+          out=$(docker run --rm -v "$PWD/bin/operator:/cfg:ro" operator:smoke run --config /cfg/config.example.yaml --check)
+          grep -Fxq '/cfg/config.example.yaml: ok' <<<"$out" || { echo "::error::--check said: $out"; exit 1; }
+          # A misspelt key, nested, is refused with 78 (EX_CONFIG) and the key is named.
+          bad="$RUNNER_TEMP/operator-bad"; mkdir -p "$bad"
+          printf 'version: 1\nregistry:\n  tokne: x\n' > "$bad/config.yaml"
+          code=0; out=$(docker run --rm -v "$bad:/cfg:ro" operator:smoke run --config /cfg/config.yaml --check 2>&1) || code=$?
+          [ "$code" = 78 ] || { echo "::error::a misspelt key exited $code, not 78: $out"; exit 1; }
+          grep -q tokne <<<"$out" || { echo "::error::the refusal did not name the key: $out"; exit 1; }
+          # A good file and no cluster to reach fails, and says so (never a panic, never a hang).
+          printf 'version: 1\n' > "$bad/config.yaml"
+          out=$(docker run --rm -e KUBECONFIG=/nonexistent -v "$bad:/cfg:ro" operator:smoke run --config /cfg/config.yaml 2>&1) && { echo "::error::run succeeded with no cluster"; exit 1; } || true
           grep -q 'connecting to the cluster' <<<"$out" || { echo "::error::run did not say it was connecting: $out"; exit 1; }
-          # A tracing variable the exporter does not speak never stops the operator (K5, §48a: a tracing setting never stops the process):
-          # it warns once, by variable name, and goes on with tracing off, so the run goes on to the cluster and fails there, as above.
-          # `docker run` passes nothing of the runner's environment: what the container sees is what is written here.
-          out=$(docker run --rm -e KUBECONFIG=/nonexistent -e OTEL_EXPORTER_OTLP_ENDPOINT=http://collector.invalid:4318 -e OTEL_EXPORTER_OTLP_PROTOCOL=grpc operator:smoke run 2>&1) && { echo "::error::run succeeded with no cluster"; exit 1; } || true
-          grep -q 'OTEL_EXPORTER_OTLP_PROTOCOL' <<<"$out" || { echo "::error::the warning did not name the variable: $out"; exit 1; }
-          [ "$(grep -c 'tracing is off' <<<"$out")" = 1 ] || { echo "::error::expected exactly one tracing warning: $out"; exit 1; }
-          grep -q 'connecting to the cluster' <<<"$out" || { echo "::error::the tracing variable stopped the start: $out"; exit 1; }
-          # BuildKit's own shape (what it injects into RUN steps): the same, a warning and a start.
-          out=$(docker run --rm -e KUBECONFIG=/nonexistent -e OTEL_TRACES_EXPORTER=otlp -e OTEL_EXPORTER_OTLP_TRACES_PROTOCOL=grpc -e OTEL_EXPORTER_OTLP_TRACES_ENDPOINT=unix:///dev/otel-grpc.sock operator:smoke run 2>&1) && { echo "::error::run succeeded with no cluster"; exit 1; } || true
-          grep -q 'connecting to the cluster' <<<"$out" || { echo "::error::BuildKit's variables stopped the start: $out"; exit 1; }
+          # No `OTEL_*` variable is read any more (the file's `telemetry.otlp` is the only way): one the exporter could not speak stops nothing.
+          out=$(docker run --rm -e KUBECONFIG=/nonexistent -e OTEL_EXPORTER_OTLP_PROTOCOL=grpc -v "$bad:/cfg:ro" operator:smoke run --config /cfg/config.yaml 2>&1) && { echo "::error::run succeeded with no cluster"; exit 1; } || true
+          grep -q 'connecting to the cluster' <<<"$out" || { echo "::error::an OTEL variable stopped the start: $out"; exit 1; }
           # Only the operator: no shell, no package manager in the image (a read of the whole file system).
           cid=$(docker create operator:smoke)
           files=$(docker export "$cid" | tar -t)

@@ -1105,8 +1105,9 @@ fn the_charts_settings_are_valid() {
     settings().validate().expect("valid");
 }
 
-/// The settings ConfigMap and the Platform API's file of the chart's golden render with run pods on
+/// The operator's configuration file and the Platform API's of the chart's golden render with run pods on
 /// (`deploy/operator/tests/golden/runpods.yaml`, held equal to the render by `render-check.sh`): what the cluster would give the operator.
+/// Since ANR-962 (AD-064) the run pods' settings are the `runPods` block of that one file.
 fn rendered() -> (Value, Value) {
     let path = common::repo_root().join("deploy/operator/tests/golden/runpods.yaml");
     let docs = common::documents(&path);
@@ -1118,8 +1119,9 @@ fn rendered() -> (Value, Value) {
         let text = doc["data"][key].as_str().expect("a text");
         serde_yaml::from_str(text).expect("YAML")
     };
+    let config = data("aap-operator", "config.yaml");
     (
-        data("aap-operator-run-pods-settings", "settings.yaml"),
+        config["runPods"].clone(),
         data("aap-operator-api", "config.yaml"),
     )
 }

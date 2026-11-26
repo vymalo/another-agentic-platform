@@ -300,7 +300,7 @@ fn an_issue_line_is_file_object_field_message() {
         )),
         "{line}"
     );
-    // the flag of this command where the operator's message names its variable
+    // the flag of this command where the operator's message names its setting
     assert!(line.ends_with("(aapctl: --default-agent-image)"), "{line}");
     assert!(!line.contains("AgentConfig spec"), "{line}");
 

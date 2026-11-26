@@ -3,7 +3,7 @@
 use aap_trace::{K8sName, Limits, Pipeline, Resource, Tracer};
 
 use crate::exporter::OtlpJson;
-use crate::settings::{SettingsError, TraceSettings, any_set};
+use crate::settings::{OtlpSection, SettingsError, TraceSettings, any_set};
 
 /// The variables, from the process's environment (`std::env::var`: a value that is not text is unset).
 fn from_process(name: &str) -> Option<String> {
@@ -41,6 +41,40 @@ impl Started {
                 "tracing is off: a tracing setting was refused"
             );
         }
+    }
+}
+
+/// [`start`] over a configuration file's `telemetry.otlp` section (ANR-962, AD-064): the headers and the certificate the
+/// section names are read here, and a reference that cannot be read is a refusal like a bad variable (tracing off, one
+/// warning, the operator runs). `POD_NAME` and `POD_NAMESPACE` still come from the environment (the downward API).
+#[must_use]
+pub fn start_section(
+    default_service: &str,
+    version: &str,
+    section: Option<&OtlpSection>,
+) -> Started {
+    let configured = section.is_some_and(OtlpSection::is_set);
+    let off = || {
+        if configured {
+            Tracer::off_but_asked()
+        } else {
+            Tracer::off()
+        }
+    };
+    let built = section.map_or(Ok(None), |s| s.settings(default_service, from_process));
+    match built.and_then(|settings| tracer_from(version, settings, from_process)) {
+        Ok(tracer) if tracer.enabled() => Started {
+            tracer,
+            refused: None,
+        },
+        Ok(_) => Started {
+            tracer: off(),
+            refused: None,
+        },
+        Err(e) => Started {
+            tracer: off(),
+            refused: Some(e),
+        },
     }
 }
 
@@ -105,7 +139,23 @@ pub fn tracer_with(
     version: &str,
     lookup: impl Fn(&str) -> Option<String>,
 ) -> Result<Tracer, SettingsError> {
-    let Some(settings) = TraceSettings::from_env(default_service, &lookup)? else {
+    let settings = TraceSettings::from_env(default_service, &lookup)?;
+    tracer_from(version, settings, lookup)
+}
+
+/// The tracer these settings ask for: [`Tracer::off`] when they ask for none. `lookup` reads `POD_NAME` and
+/// `POD_NAMESPACE` only (the downward API, which the chart sets): they become `k8s.pod.name`, `service.instance.id` and
+/// `k8s.namespace.name`, and a value that is not a Kubernetes name is left out.
+///
+/// # Errors
+///
+/// A headers or certificate file that is not usable.
+pub fn tracer_from(
+    version: &str,
+    settings: Option<TraceSettings>,
+    lookup: impl Fn(&str) -> Option<String>,
+) -> Result<Tracer, SettingsError> {
+    let Some(settings) = settings else {
         return Ok(Tracer::off());
     };
     let exporter = OtlpJson::new(&settings)?;

@@ -17,7 +17,7 @@
 #      sentinel for the model's key, a random A2A bearer, a ledger URI that is never opened), and the curl pod the registry's
 #      NetworkPolicy admits (the label aap-e2e/registry-reader=true);
 #   5. the chart installed with the two watched namespaces: the operator's pod is Ready and did not restart, and it is given
-#      WATCH_NAMESPACES="aap-e2e-ns-a,aap-e2e-ns-b" and WATCH_NAMESPACE="aap-e2e-ns-a" (the primary);
+#      a file whose watch.namespaces are aap-e2e-ns-a (the primary) and aap-e2e-ns-b;
 #   6. the chart's objects: ONE Role and ONE RoleBinding, named for the release, in EACH watched namespace, the RoleBinding giving the
 #      release's ServiceAccount (in the release's namespace) that Role; no Role and no RoleBinding in the release's namespace, and no
 #      ClusterRole or ClusterRoleBinding for the release at all — by name, and by the release's instance label;
@@ -93,7 +93,7 @@ esac
 if [ -n "$context" ]; then export HELM_KUBECONTEXT="$context"; fi
 
 ops=${AAP_E2E_NAMESPACE:-aap-e2e-ns-ops}   # the Helm release: the operator's pod, its account, the registry and its token, the curl pod
-a=aap-e2e-ns-a                             # watched, and the primary (WATCH_NAMESPACE, the cluster-scoped names, the API's defaults)
+a=aap-e2e-ns-a                             # watched, and the primary (the first of watch.namespaces, the cluster-scoped names, the API's defaults)
 b=aap-e2e-ns-b                             # watched, and not the primary
 for n in "$ops" "$a" "$b"; do
   case $n in '' | -* | *- | *[!a-z0-9-]*) die "'$n' is not a namespace name" ;; esac
@@ -200,6 +200,16 @@ trap 'exit 143' TERM HUP
 
 # jp <namespace> <resource> <jsonpath>: a field of an object of that namespace, empty when it is not there.
 jp() { kubectl -n "$1" get "$2" -o "jsonpath=$3" 2>/dev/null || true; }
+# operator_file <namespace> <configmap>: the operator's configuration file (the ConfigMap's `config.yaml`), as kubectl prints it: the block scalar
+# without its indent, so the file's keys are at column 0. `{.data["config.yaml"]}` is NOT a jsonpath kubectl takes ("invalid array index"),
+# and `jp` hides a failure, so this reads it with the escaped dot and **fails when the read fails or is empty**: an empty read can never
+# pass a check that something is absent. Call it as `x=$(operator_file NS NAME) || die "..."`.
+operator_file() {
+  out=$(kubectl -n "$1" get "configmap/$2" -o 'jsonpath={.data.config\.yaml}' 2>"$work/operator-file.err") \
+    || { printf 'cannot read configmap/%s: %s\n' "$2" "$(head -c 300 "$work/operator-file.err")" >&2; return 1; }
+  [ -n "$out" ] || { printf 'configmap/%s holds no config.yaml\n' "$2" >&2; return 1; }
+  printf '%s\n' "$out"
+}
 # not_foreign <namespace> <kind/name>: the object is not there, or it carries this script's label. Anything else is somebody's, and is
 # not overwritten.
 not_foreign() {
@@ -586,13 +596,19 @@ op_pod=$(kubectl -n "$ops" get pod -l "app.kubernetes.io/name=$release" -o jsonp
 [ -n "$op_pod" ] || die "the operator has no pod"
 [ "$(jp "$ops" "pod/$op_pod" '{.status.containerStatuses[?(@.name=="operator")].restartCount}')" = 0 ] \
   || die "the operator's container restarted: it did not read its namespaces cleanly ($(jp "$ops" "pod/$op_pod" '{.status.containerStatuses[?(@.name=="operator")].restartCount}') restarts)"
-watch_all=$(jp "$ops" "pod/$op_pod" '{.spec.containers[?(@.name=="operator")].env[?(@.name=="WATCH_NAMESPACES")].value}')
-watch_one=$(jp "$ops" "pod/$op_pod" '{.spec.containers[?(@.name=="operator")].env[?(@.name=="WATCH_NAMESPACE")].value}')
-[ "$watch_all" = "$a,$b" ] || die "the operator is given WATCH_NAMESPACES='$watch_all', want '$a,$b'"
-[ "$watch_one" = "$a" ] || die "the operator is given WATCH_NAMESPACE='$watch_one', want the primary '$a'"
-[ -n "$(jp "$ops" "pod/$op_pod" '{.spec.containers[?(@.name=="operator")].env[?(@.name=="REGISTRY_TOKEN_FILE")].value}')" ] \
-  || die "the operator is given no REGISTRY_TOKEN_FILE: no registry would be served"
-ok "the operator ($op_pod) is Ready, did not restart, and is given WATCH_NAMESPACES='$watch_all' and WATCH_NAMESPACE='$watch_one'"
+# ANR-962: the settings are one file (the ConfigMap `$release`), and the pod reads it with `--config`. The namespaces are the
+# file's watch.namespaces, in order: the first is the primary.
+watch=$(operator_file "$ops" "$release") || die "the operator's file cannot be read"
+printf '%s\n' "$watch" | grep -Fxq 'version: 1' || die "the operator's file is not the file (no 'version: 1')"
+[ "$(printf '%s\n' "$watch" | grep -Fxc "    - \"$a\"")" -eq 1 ] || die "the file does not watch $a"
+[ "$(printf '%s\n' "$watch" | grep -Fxc "    - \"$b\"")" -eq 1 ] || die "the file does not watch $b"
+[ "$(printf '%s\n' "$watch" | awk '/^  namespaces:$/ { f = 1; next } f && /^    - / { sub(/^    - /, ""); print; exit }')" = "\"$a\"" ] \
+  || die "the primary (the first of watch.namespaces) is not $a"
+[ "$(printf '%s\n' "$watch" | grep -Fxc '    file: /var/run/secrets/aap/registry/token')" -ge 1 ] \
+  || die "the file names no registry token: no registry would be served"
+[ "$(jp "$ops" "pod/$op_pod" '{.spec.containers[?(@.name=="operator")].args[0]}')" = run ] \
+  || die "the operator's container does not run the controllers"
+ok "the operator ($op_pod) is Ready, did not restart, reads one file that watches $a and $b (the primary $a) and names the registry token"
 
 # ---- 6. the chart's RBAC: one Role and one RoleBinding per watched namespace, and nothing cluster-scoped -----------------------------
 step "6. one Role and one RoleBinding in $a and in $b, and no ClusterRole"
