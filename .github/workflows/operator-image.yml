@@ -77,7 +77,7 @@ name: Operator and API images
 #              not.
 # leader-e2e (K7b): a kind cluster of its own. The operator's chart installed with THAT image and `replicas: 2`, the stand-in for the adam
 #              image (bin/operator/tests/stub) as the agents' image: the shape of the two replicas (a rolling update, the PodDisruptionBudget,
-#              the six LEADER_ELECTION_* variables, the pass cap), the Lease held by one of the two pods, the `leases` rule asked of the real API
+#              the `leaderElection` keys of its file, the pass cap), the Lease held by one of the two pods, the `leases` rule asked of the real API
 #              server (`resourceNames` narrows get/update), an agent Ready and the registry listing it from the Service AND from each pod's own
 #              IP, the holder SIGKILLed through the kind node's crictl and its pod force-deleted (a `kubectl delete` would still send SIGTERM,
 #              and the operator would release the Lease: that is the graceful step's claim, not this one's), a new agent with NO Deployment for

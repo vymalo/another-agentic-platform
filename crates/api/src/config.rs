@@ -628,7 +628,7 @@ pub struct McpHeader {
 #[serde(rename_all = "camelCase")]
 pub struct Environment {
     /// The image. adam-rs ships one image for both binaries. Absent: the operator's default coder
-    /// image (AD-029, the operator's `--default-agent-image`; with no default configured, a config
+    /// image (AD-029, the operator's file key `defaults.agentImage`; with no default configured, a config
     /// with no image is `ConfigInvalid`). An agent may still pin its own.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub image: Option<Image>,

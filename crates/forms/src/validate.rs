@@ -30,7 +30,7 @@ use crate::syntax::{
 };
 
 /// The image `aap-domain` is told is the operator's default when the Platform API does not know it. The
-/// operator's default is its own flag (`--default-agent-image`); a config with no image is the operator's
+/// operator's default is its own setting (the file key `defaults.agentImage`, was `--default-agent-image`); a config with no image is the operator's
 /// `ConfigInvalid`, not the dashboard's, so a form with no image must not be refused for it.
 pub const DEFAULT_IMAGE_STANDIN: &str = "stand-in.invalid/default-agent-image:unknown";
 

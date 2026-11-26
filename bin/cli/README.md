@@ -79,14 +79,13 @@ written back through its type and what was lost is unknown.
 | Flag | Of | Default |
 |---|---|---|
 | `--allow-missing-refs` | `validate` | off: a referent that is not among the documents (a config, a model endpoint, a tool provider) is an issue, in the operator's words (`ModelEndpoint "x" was not found in namespace …`). On: a `warning:` line on stderr, and exit 0 if nothing else is wrong |
-| `--default-agent-image <ref>` | both | none, as the operator's `--default-agent-image`: a config that names no image is then an issue. Blank is none; white space inside is exit 2, as the operator refuses to start with it |
+| `--default-agent-image <ref>` | both | none, as the operator's file key `defaults.agentImage` (was `--default-agent-image`; aapctl keeps the flag): a config that names no image is then an issue. Blank is none; white space inside is exit 2, as the operator refuses to start with it |
 | `--run-pods-file <file>` | both | none: a config that asks for run pods is an issue. The file is a `runPods` block as the operator reads it (since ANR-962 that block lives in the operator's one configuration file; `aapctl` keeps its own flag), checked as the operator checks it (a blank path is none; a file that does not parse or fails its checks is exit 2) |
 | `--max-access-tier <tier>` | both | `auto` (`plan`, `edits`, `auto`, `bypass`) |
 | `--cache-allowed-claims a,b` | both | none: no agent may have a cache |
 | `--owner-uid <uid>` | `render` | `00000000-0000-0000-0000-000000000000`. Empty or blank is exit 2: an object with no owner is one the operator never applies |
 
-The names and defaults are those of `bin/operator`'s `run` arguments. **The environment is not read** (the operator reads
-`DEFAULT_AGENT_IMAGE` and the like): the same files give the same answer on every machine.
+The flags carry the settings of the operator's configuration file (`defaults.agentImage`, `defaults.maxAccessTier`, `defaults.cacheAllowedClaims`, `runPods`) with the operator's defaults; aapctl does not read that file. **The environment is not read** (the operator once read `DEFAULT_AGENT_IMAGE` and the like): the same files give the same answer on every machine.
 
 `--owner-uid`: the objects are not applied, so no service has a uid, and the owner reference of each object names this one.
 It is a placeholder; the goldens of `aap-runtime-kubernetes` use `0b1f3c5e-1111-4222-8333-444455556666`, which is how the

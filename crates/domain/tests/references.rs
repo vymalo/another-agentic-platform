@@ -1259,7 +1259,7 @@ fn a_default_image_with_white_space_is_refused_only_when_it_is_used() {
     let bad = Externals::default().with_default_image("ghcr.io/x/y:tag with space");
     let found = issues_with("chat", &bad, no_image);
     assert_eq!(found.len(), 1, "{found:#?}");
-    assert_eq!(found[0].field, "operator --default-agent-image");
+    assert_eq!(found[0].field, "operator defaults.agentImage");
     // A config that pins its own image never reads it.
     must_resolve_with("chat", &bad, |_, _| {});
 }

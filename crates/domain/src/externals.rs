@@ -31,11 +31,11 @@ pub struct Externals {
     /// What the operator's deployment says about run pods (the configuration file's `runPods`, slice D15a). `None`: this operator
     /// has no run pods (the chart's `runPods.enabled` is false), and a config that asks for them is invalid.
     pub run_pods: Option<RunPodSettings>,
-    /// The claims the deployment allows as a package cache (`CACHE_ALLOWED_CLAIMS`, K1): an `environment.cache` names one of
+    /// The claims the deployment allows as a package cache (the file key `defaults.cacheAllowedClaims`, K1): an `environment.cache` names one of
     /// these or is `ConfigInvalid`. **Empty (the default): no agent may have a cache**, because a claim of the namespace that
     /// is not the cache's (another agent's data, this agent's own work volume) must not be mountable by whoever writes a config.
     pub cache_claims: BTreeSet<String>,
-    /// The highest access tier a config may ask for (`AGENT_MAX_ACCESS_TIER`, K1), `auto` by default, which is the coder's own.
+    /// The highest access tier a config may ask for (the file key `defaults.maxAccessTier`, K1), `auto` by default, which is the coder's own.
     /// A config above it is `ConfigInvalid`; one that names none gets the ceiling when it is below `auto`.
     pub max_access_tier: AccessTierCap,
     /// The `RuntimeClass` of every agent's own pod (the configuration file's `defaults.agentRuntimeClass`, K14a, AD-052). `None`: no class, and the spec

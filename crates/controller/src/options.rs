@@ -89,7 +89,7 @@ pub struct Options {
     /// never answered holds the object's slot, so that no signal and no timer reaches it, for as long as the
     /// request lives (*seen 2026-10-16*: up to the 290 s of a watch; see the README, "A pass that hangs").
     pub pass_timeout: Duration,
-    /// The image of an agent whose `AgentConfig` names none (`--default-agent-image`; AD-029, §60a).
+    /// The image of an agent whose `AgentConfig` names none (the file key `defaults.agentImage`; AD-029, §60a).
     /// `None`: the operator has no default, and such a config is `ConfigInvalid`. A change of it is a
     /// new digest, and so a rollout, for exactly the agents that name no image.
     pub default_agent_image: Option<String>,
@@ -101,9 +101,9 @@ pub struct Options {
     /// `ConfigInvalid`, saying so. Changing it is a new digest, and so a rollout, for exactly the agents that
     /// ask for run pods and read what changed.
     pub run_pods: Option<aap_domain::RunPodSettings>,
-    /// The claims the deployment allows as a package cache (`CACHE_ALLOWED_CLAIMS`, K1). Empty: none.
+    /// The claims the deployment allows as a package cache (the file key `defaults.cacheAllowedClaims`, K1). Empty: none.
     pub cache_claims: std::collections::BTreeSet<String>,
-    /// The ceiling of the access tier (`AGENT_MAX_ACCESS_TIER`, K1).
+    /// The ceiling of the access tier (the file key `defaults.maxAccessTier`, K1).
     pub max_access_tier: aap_api::AccessTierCap,
     /// The MCP probe of a `ToolProvider` (K3b): off by default.
     pub probe: Probe,

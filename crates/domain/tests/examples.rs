@@ -1209,7 +1209,7 @@ fn with_no_claim_listed_no_agent_may_have_a_cache_and_the_refusal_says_how_to_al
     assert_issue(
         &found,
         "spec.environment.cache.existingClaim",
-        "this operator allows no package cache: its deployment lists the claims that may be one (the operator chart's `cache.allowedClaims`",
+        "this operator allows no package cache: its deployment lists the claims that may be one (the operator chart's `cacheAllowedClaims`, the file key `defaults.cacheAllowedClaims`",
     );
     assert_issue(&found, "existingClaim", "ask whoever runs the operator");
     // a config with no cache is what it always was

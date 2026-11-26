@@ -11,16 +11,16 @@ use serde_json::Value;
 
 use crate::load::Object;
 
-/// What the operator's flags and environment say (`bin/operator`'s `RunArgs`), with the operator's own defaults.
+/// What the operator's configuration file says in `defaults.*` and `runPods` (aapctl's own flags carry them), with the operator's own defaults.
 #[derive(Clone, Debug, Default)]
 pub struct Settings {
-    /// `--default-agent-image`.
+    /// `--default-agent-image` (the file's `defaults.agentImage`).
     pub default_image: Option<String>,
-    /// `--run-pods-file`, read and checked.
+    /// `--run-pods-file` (the file's `runPods` block), read and checked.
     pub run_pods: Option<RunPodSettings>,
-    /// `--cache-allowed-claims`.
+    /// `--cache-allowed-claims` (`defaults.cacheAllowedClaims`).
     pub cache_claims: Vec<String>,
-    /// `--max-access-tier`.
+    /// `--max-access-tier` (`defaults.maxAccessTier`).
     pub max_access_tier: AccessTierCap,
     /// The uid the owner reference of a rendered object names (the objects are not applied, so there is none).
     pub owner_uid: String,
