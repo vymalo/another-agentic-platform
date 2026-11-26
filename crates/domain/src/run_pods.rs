@@ -1088,9 +1088,17 @@ impl ForService<'_> {
                 }),
             );
         }
-        // `validate` has refused an affinity that cannot be pinned; there is nothing to drop here.
-        if let Ok(Some(a)) = s.node_affinity_for_template() {
-            affinity.insert("nodeAffinity".into(), a);
+        // `validate` has refused an affinity that cannot be pinned. An unvalidated settings object reaching here is a bug, and tests must see it
+        // (the debug assertion); in a release build the pin is left out and the admission policy, which requires it, refuses the pod: fail closed.
+        match s.node_affinity_for_template() {
+            Ok(Some(a)) => {
+                affinity.insert("nodeAffinity".into(), a);
+            }
+            Ok(None) => {}
+            Err(why) => debug_assert!(
+                false,
+                "nodeAffinity cannot be pinned and was not validated: {why}"
+            ),
         }
 
         let mut spec = serde_json::Map::new();

@@ -1551,6 +1551,7 @@ rp_settings() {
     '^      replicas: 2$' '^      - 443$' '^      - registry.npmjs.org$' '^      extraAllow: \[\]$'
 }
 check "run pods e2e: the quota is two pods (the script fills it, is refused a third pod and makes a third run wait), a pod idle for 120 s goes, the class is standard, and the run image is pinned by digest" rp_settings
+# shellcheck disable=SC2016  # the patterns are the script's own text, `$name` in them is literal
 rp_node_type() {
   # ANR-660: the values pin run pods to a node type, the script labels the nodes with the same key and value before the upgrade (and not before the
   # first install, which has no run pods) and takes the label off in its cleanup, and the policy and the settings of the render carry it.
@@ -1561,7 +1562,9 @@ rp_node_type() {
     && grep -q 'kubectl label node --all "$node_type_key=$node_type_value"' "$script" \
     && grep -q 'kubectl label node --all "$node_type_key-"' "$script" \
     && [ "$(grep -n 'kubectl label node --all "$node_type_key=' "$script" | cut -d: -f1)" -gt "$(grep -n '^helm_install --set runPods.enabled=false' "$script" | cut -d: -f1)" ] \
-    && grep -q 'ran fewer than 40 cases' "$script"
+    && grep -q 'ran fewer than 40 cases' "$script" \
+    && grep -q 'restore_node_type_params()' "$script" && grep -q '^params_patched=0' "$script" && grep -q 'if \[ "$params_patched" = 1 \]; then restore_node_type_params' "$script" \
+    && grep -q '"op":"remove","path":"/data/nodeTypeKey"' "$script" && grep -q 'ran fewer than 40 cases without the node-type keys' "$script"
 }
 check "run pods e2e: the values pin run pods to aap-e2e/node-type=e2e, the script labels the nodes after the first install and unlabels them in its cleanup, and expects the node-type cases of the admission test" rp_node_type
 check "run pods e2e: no registry, no Platform API, no Ingress and no ExternalSecret are rendered: this end-to-end is about the operator and the coder" \

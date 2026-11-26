@@ -147,6 +147,7 @@ openssl genrsa -out "$work/app-key.pem" 2048 2>/dev/null || die "openssl cannot 
 # What the cleanup undoes, recorded when it happens.
 ns_made=0       # the namespace (or a leftover of ours that is used again) is ours
 installed=0     # `helm upgrade --install` was started
+params_patched=0 # the agent's guard parameters have had their node-type keys removed for the no-key run (ANR-660); the cleanup puts them back
 nodes_labelled=0 # the node-type label was put on the nodes (ANR-660); the cleanup takes it off
 agents_made=0   # an AgentConfig or an AgentService may exist
 c_pid=''        # the stream of run C
@@ -202,6 +203,11 @@ diagnostics() {
   echo "last answer:"; redact 2>/dev/null < "$work/a2a.json" | head -c 2000 || true; echo
   echo "::endgroup::"
 }
+# restore_node_type_params: the two keys saved in $work/policy-params.json back into the ConfigMap, as a merge patch built from the saved object.
+restore_node_type_params() {
+  patch=$(jq -c '{data: (.data | {nodeTypeKey, nodeTypeAdmitted} | with_entries(select(.value != null)))}' "$work/policy-params.json") || return 1
+  kubectl -n "$ns" patch configmap "$coder-run-pods-policy" --type=merge -p "$patch"
+}
 cleanup() {
   status=$?
   trap - EXIT
@@ -212,6 +218,8 @@ cleanup() {
   # What this run made and only that, in the order that lets the operator, which is still there, run the finalizers of the agents (and clear the run
   # pods): the agents, then the release (which takes the PriorityClass, the policy and its binding and the Role with it), then the namespace.
   # The CRDs stay: they are the cluster's, as Argo CD would leave them.
+  # The node-type keys removed from the guard's parameters for the fallback run: put back (best effort; the operator rewrites the object on its own too).
+  if [ "$params_patched" = 1 ]; then restore_node_type_params >/dev/null 2>&1 || true; fi
   if [ "$agents_made" = 1 ]; then
     kubectl -n "$ns" delete agentservice,agentconfig -l "$made_by_key=$made_by" --ignore-not-found --wait=true --timeout=180s >/dev/null 2>&1 || true
     for r in $(kubectl -n "$ns" get agentservice,agentconfig -l "$made_by_key=$made_by" -o name 2>/dev/null || true); do
@@ -796,6 +804,25 @@ sh "$here/../run-pods-admission.sh" "$ns" "$coder" > "$work/admission.out" 2>&1 
 [ "$(grep -c '^ok ' "$work/admission.out")" -ge 40 ] || die "run-pods-admission.sh ran fewer than 40 cases (27, and the 13 of the node types, ANR-660): $(redact < "$work/admission.out" | tail -n 8)"
 if grep -q '^FAIL' "$work/admission.out"; then die "run-pods-admission.sh printed a failure: $(grep '^FAIL' "$work/admission.out" | head -n 3)"; fi
 ok "run-pods-admission.sh, run here against the policy the chart installed and the parameters the operator made: $(tail -n 1 "$work/admission.out")"
+# ANR-660 (AD-066), the fallback: the operator always writes nodeTypeKey, so the branch of the policy for parameters that LACK it (an operator older than the
+# rule) is never reached above. Remove the two keys from this agent's parameters, run the admission test again (it then expects the unrestricted pod refused by
+# the chart's own key and values) and put them back. The operator may rewrite the object on its next reconcile: the keys are checked absent just before the run
+# and just after it, and if they came back the branch was not proven and the script says so and fails instead of passing.
+policy_cm="$coder-run-pods-policy"
+kubectl -n "$ns" get configmap "$policy_cm" -o json > "$work/policy-params.json"
+[ -n "$(jq -r '.data.nodeTypeKey // empty' "$work/policy-params.json")" ] || die "$policy_cm has no nodeTypeKey: the operator did not write the node types it was given"
+params_patched=1
+kubectl -n "$ns" patch configmap "$policy_cm" --type=json -p '[{"op":"remove","path":"/data/nodeTypeKey"},{"op":"remove","path":"/data/nodeTypeAdmitted"}]' >/dev/null
+[ -z "$(jp "configmap/$policy_cm" '{.data.nodeTypeKey}')" ] || die "the operator wrote nodeTypeKey back before the run: the fallback is not proven (re-run)"
+sh "$here/../run-pods-admission.sh" "$ns" "$coder" > "$work/admission-nokey.out" 2>&1 \
+  || die "run-pods-admission.sh failed with the node-type keys removed from the parameters: $(redact < "$work/admission-nokey.out" | tail -n 30 | head -c 3000)"
+[ -z "$(jp "configmap/$policy_cm" '{.data.nodeTypeKey}')" ] || die "the operator wrote nodeTypeKey back during the run: the fallback is not proven (re-run)"
+restore_node_type_params >/dev/null || die "the node-type keys could not be put back into $policy_cm"
+params_patched=0
+[ "$(grep -c '^ok ' "$work/admission-nokey.out")" -ge 40 ] || die "run-pods-admission.sh ran fewer than 40 cases without the node-type keys: $(redact < "$work/admission-nokey.out" | tail -n 8)"
+[ "$(grep -c '^ok .*parameters without nodeTypeKey' "$work/admission-nokey.out")" -eq 2 ] || die "the two cases of parameters without nodeTypeKey did not run: $(redact < "$work/admission-nokey.out" | tail -n 8)"
+if grep -q '^FAIL' "$work/admission-nokey.out"; then die "run-pods-admission.sh printed a failure without the node-type keys: $(grep '^FAIL' "$work/admission-nokey.out" | head -n 3)"; fi
+ok "run-pods-admission.sh with the node-type keys removed from the parameters: an unrestricted pod is still refused by the chart's own values ($(tail -n 1 "$work/admission-nokey.out")); the keys are put back"
 
 step "4b. the git sandbox of $coder: the coder's own git runs where no secret is readable (D15d)"
 in_coder() { kubectl -n "$ns" exec "$coder-0" -c agent -- "$@"; }
