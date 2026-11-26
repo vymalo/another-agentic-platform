@@ -41,6 +41,8 @@ secret=$(params secretName)
 key=$(params secretKey)
 class=$(params priorityClass)
 runtime_class=$(params runtimeClassName)
+node_key=$(params nodeTypeKey)
+node_admitted=$(params nodeTypeAdmitted)
 if [ -z "$account" ] || [ -z "$managed_by" ] || [ -z "$run_label" ] || [ -z "$claim" ] || [ -z "$claims" ] || [ -z "$secret" ] || [ -z "$key" ] || [ -z "$class" ]; then
   die "the parameters of the guard are incomplete: $(kubectl -n "$ns" get configmap "$svc-run-pods-policy" -o 'jsonpath={.data}')"
 fi
@@ -142,6 +144,28 @@ done
 try "no limits at all in the run container" denied "$limits_words" 'del(.spec.containers[0].resources.limits)'
 try "no resources at all in the init container" denied "$limits_words" 'del(.spec.initContainers[0].resources)'
 try "an extra container of an allowed image with no limits" denied "$limits_words" '.spec.containers += [.spec.containers[0] | .name = "extra" | del(.resources.limits)]'
+
+# ANR-660 (AD-065): with node types named (the parameters carry nodeTypeKey), a run pod is PINNED to the admitted values by nodeSelector or by
+# required node affinity in every term, and sets no nodeName. The pod of the template (the control, above) is the proof that the operator's own
+# affinity is admitted. With none named the rule is silent: the control below is a pod with no restriction at all, admitted.
+if [ -n "$node_key" ]; then
+  first=$(printf '%s\n' "$node_admitted" | head -n 1)
+  node_words="a run pod is pinned to the node types"
+  try "node types: restricted by nodeSelector to an admitted value, with no affinity" allowed "" ".spec.nodeSelector = {(\"$node_key\"): \"$first\"} | del(.spec.affinity.nodeAffinity)"
+  try "node types: no restriction at all" denied "$node_words" 'del(.spec.affinity.nodeAffinity) | del(.spec.nodeSelector)'
+  try "node types: a value outside the admitted ones in the affinity" denied "$node_words" ".spec.affinity.nodeAffinity.requiredDuringSchedulingIgnoredDuringExecution.nodeSelectorTerms[].matchExpressions |= map(select(.key == \"$node_key\").values += [\"not-admitted\"])"
+  try "node types: a value outside the admitted ones in the selector" denied "$node_words" ".spec.nodeSelector = {(\"$node_key\"): \"not-admitted\"} | del(.spec.affinity.nodeAffinity)"
+  try "node types: a second term with no restriction (the terms are alternatives)" denied "$node_words" '.spec.affinity.nodeAffinity.requiredDuringSchedulingIgnoredDuringExecution.nodeSelectorTerms += [{matchExpressions: [{key: "kubernetes.io/arch", operator: "In", values: ["amd64"]}]}]'
+  try "node types: Exists on the key instead of In" denied "$node_words" ".spec.affinity.nodeAffinity.requiredDuringSchedulingIgnoredDuringExecution.nodeSelectorTerms |= map(.matchExpressions = [{key: \"$node_key\", operator: \"Exists\"}])"
+  # NotIn with ADMITTED values is the dangerous one: the pod may go anywhere but the admitted types.
+  try "node types: NotIn on the key with the admitted values, instead of In" denied "$node_words" ".spec.affinity.nodeAffinity.requiredDuringSchedulingIgnoredDuringExecution.nodeSelectorTerms |= map(.matchExpressions = [{key: \"$node_key\", operator: \"NotIn\", values: [\"$first\"]}])"
+  try "node types: a term with matchFields only" denied "$node_words" '.spec.affinity.nodeAffinity.requiredDuringSchedulingIgnoredDuringExecution.nodeSelectorTerms |= map(del(.matchExpressions) | .matchFields = [{key: "metadata.name", operator: "In", values: ["n1"]}])'
+  try "node types: only a preferred affinity" denied "$node_words" 'del(.spec.nodeSelector) | .spec.affinity.nodeAffinity = {preferredDuringSchedulingIgnoredDuringExecution: [{weight: 1, preference: {matchExpressions: [{key: "x", operator: "Exists"}]}}]}'
+  try "node types: a nodeSelector on another key" denied "$node_words" '.spec.nodeSelector = {"kubernetes.io/arch": "amd64"} | del(.spec.affinity.nodeAffinity)'
+  try "node types: spec.nodeName set, though the affinity is right" denied "$node_words" '.spec.nodeName = "some-node"'
+else
+  try "no node types named: a run pod with no node restriction is admitted (the rule is silent)" allowed "" 'del(.spec.nodeSelector)'
+fi
 
 # The guard is for the agent's account, and for it alone: another account is judged by what the cluster judges everybody by.
 if out=$(kubectl --dry-run=server create -f - 2>&1 <<EOF

@@ -128,6 +128,11 @@ run_role=$op-run-pods                # the Role of run pods (the chart's)
 sa_op="system:serviceaccount:$ns:$op"
 sa_coder="system:serviceaccount:$ns:$coder"
 steps_ext=https://agents.vymalo.com/a2a/extensions/steps/v1
+# ANR-660 (AD-065): the node type run pods are pinned to (run-pods.values.yaml `runPods.nodeType`, held equal by render-check.sh). The nodes of the
+# throwaway cluster are labelled with it before the upgrade, because the policy only proves a pod is PINNED to the admitted types, and the scheduler
+# then needs a node that has the label.
+node_type_key=aap-e2e/node-type
+node_type_value=e2e
 # The label on the namespace and on everything the script makes in it: what it may overwrite and delete.
 made_by_key=aap-e2e/made-by
 made_by=run-pods-e2e
@@ -142,6 +147,7 @@ openssl genrsa -out "$work/app-key.pem" 2048 2>/dev/null || die "openssl cannot 
 # What the cleanup undoes, recorded when it happens.
 ns_made=0       # the namespace (or a leftover of ours that is used again) is ours
 installed=0     # `helm upgrade --install` was started
+nodes_labelled=0 # the node-type label was put on the nodes (ANR-660); the cleanup takes it off
 agents_made=0   # an AgentConfig or an AgentService may exist
 c_pid=''        # the stream of run C
 : > "$work/seen"
@@ -213,6 +219,8 @@ cleanup() {
       kubectl -n "$ns" patch "$r" --type=merge -p '{"metadata":{"finalizers":null}}' >/dev/null 2>&1 || true
     done
   fi
+  # The label this run put on the nodes (it refused to start if one had the key already), and nothing else of the nodes.
+  if [ "$nodes_labelled" = 1 ]; then kubectl label node --all "$node_type_key-" >/dev/null 2>&1 || true; fi
   if [ "$installed" = 1 ]; then helm uninstall aap-operator --namespace "$ns" --timeout 120s >/dev/null 2>&1 || true; fi
   if [ "$ns_made" = 1 ]; then kubectl delete namespace "$ns" --ignore-not-found --wait=false >/dev/null 2>&1 || true; fi
   rm -rf "$work"
@@ -502,7 +510,7 @@ must_be_refused() {
 # check_pod <pod> <task id> <name>: the pod the kubelet runs is the one the operator's template describes, narrowed to the run. Saves it in $work/pod-<name>.json.
 check_pod() {
   kubectl -n "$ns" get pod "$1" -o json > "$work/pod-$3.json"
-  jqok "$work/pod-$3.json" "$1: not the pod of the template" --slurpfile tpl "$work/template.json" --arg id "$2" --arg svc "$coder" --arg class "$class" '
+  jqok "$work/pod-$3.json" "$1: not the pod of the template" --slurpfile tpl "$work/template.json" --arg id "$2" --arg svc "$coder" --arg class "$class" --arg nk "$node_type_key" --arg nv "$node_type_value" '
     .status.phase == "Running"
     and (.status.containerStatuses | map(select(.name == "run")) | .[0].ready == true)
     and .spec.priorityClassName == $class
@@ -512,6 +520,9 @@ check_pod() {
     and (.metadata.labels["adam.vymalo.com/run"] | length > 0)
     and .metadata.annotations["adam.vymalo.com/run-id"] == $id
     and .spec.automountServiceAccountToken == false
+    and ((.spec.affinity.nodeAffinity.requiredDuringSchedulingIgnoredDuringExecution.nodeSelectorTerms | length) > 0
+      and (.spec.affinity.nodeAffinity.requiredDuringSchedulingIgnoredDuringExecution.nodeSelectorTerms
+        | all(.matchExpressions | any(.key == $nk and .operator == "In" and .values == [$nv]))))
     and (.spec.containers | map(.name)) == ["run"]
     and (.spec.initContainers | map(.name)) == ["tools"]
     and .spec.containers[0].image == $tpl[0].spec.containers[0].image
@@ -624,6 +635,13 @@ ok "$plain has no git sandbox, no socket, no scratch directory, no projected vol
 ok "$plain has no run-pod object; its objects, its pod ($plain_pod_uid, restarts $plain_pod_restarts) and its config digest ($plain_digest) are recorded"
 
 step "3. the upgrade: the same chart with run pods on"
+# The nodes are labelled first (a run pod pinned to a type no node has would never be scheduled). A node that already has the key is somebody's: not touched.
+if kubectl get nodes -o json | jq -e --arg k "$node_type_key" '[.items[].metadata.labels | has($k)] | any' >/dev/null; then
+  die "a node already has the label $node_type_key: it is not overwritten (this script puts it on every node of the throwaway cluster and takes it off at the end)"
+fi
+nodes_labelled=1
+kubectl label node --all "$node_type_key=$node_type_value" >/dev/null
+ok "every node carries $node_type_key=$node_type_value, which the script took off again at the end"
 helm_install
 ok "the operator is upgraded with runPods.enabled (the same values file, one flag apart)"
 [ "$(jp "deployment/$op" '{.status.readyReplicas}')" = 1 ] || die "the operator has no ready replica after the upgrade"
@@ -704,6 +722,11 @@ jqok "$work/statefulset.json" "the coder's pod is not given the account, the tem
   and ([.spec.template.spec.volumes[] | select(.name == "run-pod") | .configMap.name] == [$svc + "-run-pod"])'
 jq -r '.data["pod.yaml"]' "$work/template-cm.json" > "$work/template.json"
 jqok "$work/template.json" "the template is not a Pod with a container run and an init container tools" '.kind == "Pod" and (.spec.containers | map(.name)) == ["run"] and (.spec.initContainers | map(.name)) == ["tools"]'
+# ANR-660 (AD-065): the template says the class's size weight (`standard` is 0.25) and is pinned to the node type of the values, in its one required term.
+jqok "$work/template.json" "the template has no size weight of 0.25, or is not pinned to $node_type_key In [$node_type_value] in its one required term" --arg nk "$node_type_key" --arg nv "$node_type_value" '
+  .metadata.annotations["agents.vymalo.com/size-weight"] == "0.25"
+  and (.spec.affinity.nodeAffinity.requiredDuringSchedulingIgnoredDuringExecution.nodeSelectorTerms
+    | length == 1 and (.[0].matchExpressions | any(.key == $nk and .operator == "In" and .values == [$nv])))'
 ok "the operator made, for $coder alone: the account, the quota (2 pods, scoped to $class), the network policy, the binding to $run_role, the template and the guard's parameters, each owned by the service; the coder's pod runs as the account with the template mounted"
 # The egress proxy (D15c): the one way out of a run pod, made beside the rest, from the coder's own image. The operator does not wait for it (it is no
 # workload of the service), so this script does.
@@ -770,7 +793,7 @@ ok "the account of $coder may make, get, list, watch and delete pods and exec in
 # that breaks a rule is refused with that rule's message. 25 of them.
 sh "$here/../run-pods-admission.sh" "$ns" "$coder" > "$work/admission.out" 2>&1 \
   || die "run-pods-admission.sh failed in this cluster: $(redact < "$work/admission.out" | tail -n 30 | head -c 3000)"
-[ "$(grep -c '^ok ' "$work/admission.out")" -ge 27 ] || die "run-pods-admission.sh ran fewer than 27 cases: $(redact < "$work/admission.out" | tail -n 8)"
+[ "$(grep -c '^ok ' "$work/admission.out")" -ge 38 ] || die "run-pods-admission.sh ran fewer than 38 cases (27, and the 11 of the node types, ANR-660): $(redact < "$work/admission.out" | tail -n 8)"
 if grep -q '^FAIL' "$work/admission.out"; then die "run-pods-admission.sh printed a failure: $(grep '^FAIL' "$work/admission.out" | head -n 3)"; fi
 ok "run-pods-admission.sh, run here against the policy the chart installed and the parameters the operator made: $(tail -n 1 "$work/admission.out")"
 

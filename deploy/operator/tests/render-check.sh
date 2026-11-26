@@ -1328,6 +1328,42 @@ policy_claims_are_a_list() {
 check "run pods on: the claims rule admits the claims of the parameter 'claims' (the work volume's and the package cache's) and no other, and for parameters written before K1 (no 'claims') the work claim alone" policy_claims_are_a_list
 check "the admission test is a shell script sh can read" sh -n "$here/run-pods-admission.sh"
 
+# ---- ANR-660 (AD-065): node types for run pods, empty by default and then not a trace --------------------------------------------------
+# Off (the goldens, and run pods on with no node type): no key in the settings, no variable, no eleventh rule, no parameter name in any object.
+render -f "$here/runpods.values.yaml"
+check "no node type named: not a trace of nodeType in the settings or the policy" lacks 'nodeType|nodeTypeKey|nodeTypeAdmitted|admittedNodeTypes'
+check "no node type named: the policy keeps its ten rules" run_pods_policy
+render -f "$here/runpods.values.yaml" --set runPods.nodeType.labelKey=example.com/node-type --set 'runPods.nodeType.admitted={a,b}'
+nodetype_on() {
+  dhas ConfigMap aap-operator-run-pods-settings '^    nodeType:$' '^      labelKey: example.com/node-type$' '^      - a$' '^      - b$' \
+    && dhas ValidatingAdmissionPolicy aap-operator-agents-run-pods 'name: admittedNodeTypes' "params.data.nodeTypeAdmitted.split" \
+      '!has\(params.data.nodeTypeKey\) \|\| \(!has\(object.spec.nodeName\)' "e.operator == 'In'" 'a run pod is pinned to the node types' \
+    && [ "$(doc ValidatingAdmissionPolicy aap-operator-agents-run-pods | grep -c '^    - expression:')" -eq 11 ]
+}
+check "nodeType named: the settings carry it, and the policy has eleven rules, the node-type rule last and reading the parameters' key and values" nodetype_on
+nodetype_rule_is_last() {
+  last=$(doc ValidatingAdmissionPolicy aap-operator-agents-run-pods | grep '^    - expression:' | tail -n 1)
+  printf '%s\n' "$last" | grep -qF 'params.data.nodeTypeKey' \
+    && ! printf '%s\n' "$last" | grep -qF 'c.resources.limits'
+}
+check "nodeType named: the node-type rule is appended after the limits rule (AD-061), so the coder chart's nine and the limits rule keep their places" nodetype_rule_is_last
+nodetype_message_quotes_only_key_and_values() {
+  msg=$(doc ValidatingAdmissionPolicy aap-operator-agents-run-pods | grep -A1 'params.data.nodeTypeKey' | grep 'messageExpression')
+  printf '%s\n' "$msg" | grep -qF 'variables.admittedNodeTypes.join' && printf '%s\n' "$msg" | grep -qF 'params.data.nodeTypeKey' \
+    && ! printf '%s\n' "$msg" | grep -qE 'object\.|request\.'
+}
+check "nodeType named: the refusal says the key and the admitted values and quotes nothing of the pod" nodetype_message_quotes_only_key_and_values
+
+check "refused: nodeType.labelKey without admitted" refused "runPods.nodeType.labelKey and runPods.nodeType.admitted go together" --set runPods.enabled=true --set runPods.nodeType.labelKey=example.com/node-type
+check "refused: nodeType.admitted without labelKey" refused "runPods.nodeType.labelKey and runPods.nodeType.admitted go together" --set runPods.enabled=true --set 'runPods.nodeType.admitted={a}'
+check "refused: a nodeType key that is not a label key" refused "is not a label key" --set runPods.enabled=true --set 'runPods.nodeType.labelKey=not a key' --set 'runPods.nodeType.admitted={a}'
+check "refused: a nodeType value that is not a label value" refused "is not a label value" --set runPods.enabled=true --set runPods.nodeType.labelKey=example.com/node-type --set 'runPods.nodeType.admitted={a b}'
+check "refused: a nodeSelector on the key of nodeType" refused "runPods.nodeSelector.example.com/node-type is the key of runPods.nodeType.labelKey" --set runPods.enabled=true \
+  --set runPods.nodeType.labelKey=example.com/node-type --set 'runPods.nodeType.admitted={a}' --set 'runPods.nodeSelector.example\.com/node-type=a'
+check "refused: a key of nodeType that is not a setting" refused "runPods.nodeType.bogus is not a setting" --set runPods.enabled=true --set runPods.nodeType.bogus=1
+check "refused: a size class with no CPU request (ANR-660)" refused "runPodClasses.standard.requests.cpu is required" --set runPods.enabled=true --set runPodClasses.standard.requests.cpu=null
+check "refused: a size class with no memory request (ANR-660)" refused "runPodClasses.standard.requests.memory is required" --set runPods.enabled=true --set runPodClasses.standard.requests.memory=null
+
 # ---- K14a (AD-052): a RuntimeClass for run pods and for the agents' own pods, empty by default and then not a trace -----------------
 # Empty (the goldens and every render above): no variable, no key of the settings, no tenth rule of the policy.
 check "a RuntimeClass named nowhere: no AGENT_RUNTIME_CLASS and no runtimeClassName in any object" lacks 'AGENT_RUNTIME_CLASS|runtimeClassName|RuntimeClass'
@@ -1496,6 +1532,19 @@ rp_settings() {
     '^      replicas: 2$' '^      - 443$' '^      - registry.npmjs.org$' '^      extraAllow: \[\]$'
 }
 check "run pods e2e: the quota is two pods (the script fills it, is refused a third pod and makes a third run wait), a pod idle for 120 s goes, the class is standard, and the run image is pinned by digest" rp_settings
+rp_node_type() {
+  # ANR-660: the values pin run pods to a node type, the script labels the nodes with the same key and value before the upgrade (and not before the
+  # first install, which has no run pods) and takes the label off in its cleanup, and the policy and the settings of the render carry it.
+  script="$here/e2e/run-pods-e2e.sh"
+  dhas ConfigMap aap-operator-run-pods-settings '^    nodeType:$' '^      labelKey: aap-e2e/node-type$' '^      - e2e$' \
+    && dhas ValidatingAdmissionPolicy aap-operator-aap-e2e-runpods-run-pods 'params.data.nodeTypeKey' \
+    && grep -q '^node_type_key=aap-e2e/node-type$' "$script" && grep -q '^node_type_value=e2e$' "$script" \
+    && grep -q 'kubectl label node --all "$node_type_key=$node_type_value"' "$script" \
+    && grep -q 'kubectl label node --all "$node_type_key-"' "$script" \
+    && [ "$(grep -n 'kubectl label node --all "$node_type_key=' "$script" | cut -d: -f1)" -gt "$(grep -n '^helm_install --set runPods.enabled=false' "$script" | cut -d: -f1)" ] \
+    && grep -q 'ran fewer than 38 cases' "$script"
+}
+check "run pods e2e: the values pin run pods to aap-e2e/node-type=e2e, the script labels the nodes after the first install and unlabels them in its cleanup, and expects the node-type cases of the admission test" rp_node_type
 check "run pods e2e: no registry, no Platform API, no Ingress and no ExternalSecret are rendered: this end-to-end is about the operator and the coder" \
   lacks 'aap-operator-registry|aap-operator-api|^kind: (Ingress|ExternalSecret)$|REGISTRY_TOKEN_FILE'
 check "run pods e2e: the operator watches the namespace of the release, runs the image of the job and never pulls it" \

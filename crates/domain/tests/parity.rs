@@ -359,6 +359,25 @@ fn without_the_limits_of_ad_061(case: &str, mut template: Value) -> Value {
             assert!(removed.is_some(), "{case}: {at} has {kind}.{key} (AD-061)");
         }
     }
+    // ANR-660 (AD-065), the second difference: the template carries the class's size weight as an annotation (the coder chart's has
+    // none). It is asserted present and on the grid, and taken out, so the rest of the metadata is compared as it was.
+    let annotations = template
+        .pointer_mut("/pod/metadata")
+        .and_then(Value::as_object_mut)
+        .and_then(|m| m.remove("annotations"))
+        .unwrap_or_else(|| panic!("{case}: the template carries the size weight (ANR-660)"));
+    let weight = annotations["agents.vymalo.com/size-weight"]
+        .as_str()
+        .unwrap_or_else(|| panic!("{case}: the size weight annotation"));
+    assert!(
+        ["0.25", "0.5", "1", "2", "4", "8"].contains(&weight),
+        "{case}: {weight} is on the grid"
+    );
+    assert_eq!(
+        annotations.as_object().unwrap().len(),
+        1,
+        "{case}: the size weight is the only annotation"
+    );
     template
 }
 

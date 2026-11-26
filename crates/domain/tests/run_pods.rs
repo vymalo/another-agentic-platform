@@ -1635,3 +1635,259 @@ fn run_pods_have_no_build_mode_for_a_runtime_class_to_be_refused_with() {
         );
     }
 }
+
+// ---------------------------------------------------------------- the size weight (ANR-660, AD-065)
+
+fn weighed(cpu: &str, memory: &str) -> Result<String, String> {
+    let class: aap_domain::RunPodClass = serde_json::from_value(
+        json!({ "requests": { "cpu": cpu, "memory": memory }, "limits": { "memory": "8Gi" } }),
+    )
+    .unwrap();
+    aap_domain::SizeWeight::of(&class).map(|w| w.to_string())
+}
+
+#[test]
+fn a_class_weighs_the_larger_of_a_vcpu_and_two_gib_and_only_on_the_grid() {
+    // On the steps.
+    for (cpu, memory, weight) in [
+        ("250m", "512Mi", "0.25"),
+        ("500m", "1Gi", "0.5"),
+        ("1", "2Gi", "1"),
+        ("2", "4Gi", "2"),
+        ("4", "8Gi", "4"),
+        ("8", "16Gi", "8"),
+    ] {
+        assert_eq!(
+            weighed(cpu, memory).as_deref(),
+            Ok(weight),
+            "{cpu}/{memory}"
+        );
+    }
+    // The memory dominates, and so does the CPU.
+    assert_eq!(weighed("100m", "4Gi").as_deref(), Ok("2"));
+    assert_eq!(weighed("4", "512Mi").as_deref(), Ok("4"));
+    // Just over a step is refused, never rounded.
+    assert!(weighed("300m", "512Mi").is_err());
+    assert!(weighed("1", "2100Mi").is_err());
+    // 3 vCPU is below the largest step and still off the grid.
+    assert!(weighed("3", "2Gi").is_err());
+    // Over the grid.
+    assert!(weighed("9", "2Gi").is_err());
+    assert!(weighed("1", "17Gi").is_err());
+    // Binary: `2G` is not `2Gi` (it is 0.93 of it), so where the memory dominates it is off the grid.
+    assert!(weighed("100m", "2G").is_err());
+    assert_eq!(weighed("100m", "2Gi").as_deref(), Ok("1"));
+    // Nothing is a float or a panic: an exponent or a quantity too large to fit is refused.
+    assert!(weighed("1e3", "2Gi").is_err());
+    assert!(weighed("1", "1E").is_err());
+    assert!(weighed("340282366920938463463374607431768211455", "2Gi").is_err());
+    assert!(weighed("1", "340282366920938463463374607431768211455Ei").is_err());
+}
+
+#[test]
+fn a_class_with_no_cpu_or_no_memory_request_is_refused_naming_the_key() {
+    for key in ["cpu", "memory"] {
+        let mut requests = json!({ "cpu": "250m", "memory": "512Mi" });
+        requests.as_object_mut().unwrap().remove(key);
+        let class: aap_domain::RunPodClass =
+            serde_json::from_value(json!({ "requests": requests, "limits": { "memory": "1Gi" } }))
+                .unwrap();
+        let why = aap_domain::SizeWeight::of(&class).unwrap_err();
+        assert!(why.contains(&format!("requests.{key}")), "{why}");
+    }
+}
+
+#[test]
+fn the_settings_refuse_a_class_off_the_grid_naming_the_class_and_the_chart_default_weighs_a_quarter()
+ {
+    settings().validate().expect("the chart's own classes");
+    let standard = &settings().classes["standard"];
+    assert_eq!(
+        aap_domain::SizeWeight::of(standard).unwrap().to_string(),
+        "0.25"
+    );
+    assert_eq!(aap_domain::SizeWeight::of(standard).unwrap().quarters(), 1);
+    let off = settings_with(json!({ "classes": { "odd": {
+        "requests": { "cpu": "3", "memory": "2Gi" }, "limits": { "memory": "4Gi" } } } }));
+    let problems = off.validate().unwrap_err();
+    assert!(
+        problems.iter().any(|p| p.starts_with("classes.odd.")),
+        "{problems:?}"
+    );
+    let missing =
+        settings_with(json!({ "classes": { "bare": { "limits": { "memory": "1Gi" } } } }));
+    let problems = missing.validate().unwrap_err();
+    assert!(
+        problems
+            .iter()
+            .any(|p| p.contains("classes.bare.requests.cpu")),
+        "{problems:?}"
+    );
+}
+
+#[test]
+fn the_offering_placeholders_are_not_weighed() {
+    // The dashboard's stand-in classes have no requests: they are resolved against, never validated, and their template says no weight.
+    let r = must_resolve_with(
+        "coder",
+        &Externals::default().with_run_pods(RunPodSettings::offering(["standard"])),
+        on,
+    );
+    let set_ = r
+        .runtime
+        .file_sets
+        .iter()
+        .find(|f| f.name == "coder-run-pod")
+        .unwrap();
+    let pod: Value = serde_json::from_str(&set_.files["pod.yaml"]).unwrap();
+    assert!(pod["metadata"].get("annotations").is_none(), "{pod}");
+}
+
+fn template_of(settings: RunPodSettings) -> Value {
+    let r = must_resolve_with("coder", &Externals::default().with_run_pods(settings), on);
+    let set_ = r
+        .runtime
+        .file_sets
+        .iter()
+        .find(|f| f.name == "coder-run-pod")
+        .unwrap();
+    serde_json::from_str(&set_.files["pod.yaml"]).unwrap()
+}
+
+#[test]
+fn the_template_carries_the_size_weight_as_an_annotation() {
+    let pod = template_of(settings());
+    assert_eq!(
+        pod["metadata"]["annotations"],
+        json!({ "agents.vymalo.com/size-weight": "0.25" })
+    );
+}
+
+// ---------------------------------------------------------------- node types (ANR-660)
+
+const NODE_KEY: &str = "example.com/node-type";
+
+fn typed(over: Value) -> RunPodSettings {
+    let mut o = json!({ "nodeType": { "labelKey": NODE_KEY, "admitted": ["a", "b"] } });
+    helm_merge(&mut o, &over);
+    settings_with(o)
+}
+
+fn required_terms(pod: &Value) -> Vec<Value> {
+    pod["spec"]["affinity"]["nodeAffinity"]["requiredDuringSchedulingIgnoredDuringExecution"]
+        ["nodeSelectorTerms"]
+        .as_array()
+        .cloned()
+        .unwrap_or_default()
+}
+
+#[test]
+fn with_no_node_type_the_template_and_the_spec_do_not_mention_it() {
+    let pod = template_of(settings());
+    assert!(
+        pod["spec"]["affinity"]["nodeAffinity"].is_null(),
+        "no node affinity: {pod}"
+    );
+    let r = resolved_on();
+    let text = serde_json::to_string(&r.runtime).unwrap();
+    assert!(
+        !text.contains("node_type") && !text.contains(NODE_KEY),
+        "{text}"
+    );
+    assert!(r.runtime.run_pods.unwrap().node_type.is_none());
+    // And a file that says it empty is the same as one that does not say it.
+    let mut v = chart_run_pod_settings();
+    v["nodeType"] = json!({ "labelKey": "", "admitted": [] });
+    let s: RunPodSettings = serde_json::from_value(v).unwrap();
+    assert_eq!(s, settings());
+    assert!(!serde_json::to_string(&s).unwrap().contains("nodeType"));
+}
+
+#[test]
+fn a_node_type_makes_the_one_required_term_when_there_is_none() {
+    let pod = template_of(typed(json!({})));
+    assert_eq!(
+        required_terms(&pod),
+        vec![
+            json!({ "matchExpressions": [{ "key": NODE_KEY, "operator": "In", "values": ["a", "b"] }] })
+        ]
+    );
+    let r = must_resolve_with(
+        "coder",
+        &Externals::default().with_run_pods(typed(json!({}))),
+        on,
+    );
+    let node_type = r.runtime.run_pods.unwrap().node_type.unwrap();
+    assert_eq!(node_type.label_key, NODE_KEY);
+    assert_eq!(node_type.admitted, ["a", "b"]);
+}
+
+#[test]
+fn a_node_type_is_added_to_every_required_term_and_nothing_else_moves() {
+    let affinity = json!({
+        "requiredDuringSchedulingIgnoredDuringExecution": { "nodeSelectorTerms": [
+            { "matchExpressions": [{ "key": "kubernetes.io/arch", "operator": "In", "values": ["amd64"] }] },
+            { "matchFields": [{ "key": "metadata.name", "operator": "In", "values": ["n1"] }] },
+        ] },
+        "preferredDuringSchedulingIgnoredDuringExecution": [
+            { "weight": 1, "preference": { "matchExpressions": [{ "key": "x", "operator": "Exists" }] } },
+        ],
+    });
+    let pod = template_of(typed(json!({ "nodeAffinity": affinity })));
+    let terms = required_terms(&pod);
+    assert_eq!(terms.len(), 2, "the terms stay alternatives");
+    let wanted = json!({ "key": NODE_KEY, "operator": "In", "values": ["a", "b"] });
+    for term in &terms {
+        assert!(
+            term["matchExpressions"]
+                .as_array()
+                .unwrap()
+                .contains(&wanted),
+            "{term}"
+        );
+    }
+    assert_eq!(terms[0]["matchExpressions"][0]["key"], "kubernetes.io/arch");
+    assert_eq!(terms[1]["matchFields"][0]["key"], "metadata.name");
+    assert_eq!(
+        pod["spec"]["affinity"]["nodeAffinity"]["preferredDuringSchedulingIgnoredDuringExecution"],
+        affinity["preferredDuringSchedulingIgnoredDuringExecution"]
+    );
+}
+
+#[test]
+fn node_types_are_refused_when_half_given_malformed_or_fighting_the_node_selector() {
+    let refused = |s: RunPodSettings, what: &str| {
+        let problems = s.validate().expect_err(what);
+        assert!(
+            problems
+                .iter()
+                .any(|p| p.contains("nodeType") || p.contains("nodeSelector")),
+            "{what}: {problems:?}"
+        );
+    };
+    typed(json!({})).validate().expect("a node type");
+    refused(
+        typed(json!({ "nodeType": { "admitted": [] } })),
+        "key without values",
+    );
+    refused(
+        settings_with(json!({ "nodeType": { "admitted": ["a"] } })),
+        "values without key",
+    );
+    refused(
+        typed(json!({ "nodeType": { "labelKey": "not a key" } })),
+        "a key",
+    );
+    refused(
+        typed(json!({ "nodeType": { "admitted": ["a b"] } })),
+        "a value",
+    );
+    refused(
+        typed(json!({ "nodeSelector": { NODE_KEY: "a" } })),
+        "a selector on the node type's key",
+    );
+    // Another key in the selector is fine.
+    typed(json!({ "nodeSelector": { "kubernetes.io/arch": "amd64" } }))
+        .validate()
+        .expect("another key");
+}

@@ -23,8 +23,8 @@ pub use digest::{canonical_json, digest_json, spec_digest};
 pub use externals::{Externals, References, references};
 pub use resolve::{ResolvedAgent, resolve};
 pub use run_pods::{
-    ContainerResources, EgressProxySettings, EgressResources, GitSandboxSettings, RunImage,
-    RunPodClass, RunPodNetworkSettings, RunPodQuotaSettings, RunPodSettings,
+    ContainerResources, EgressProxySettings, EgressResources, GitSandboxSettings, NodeTypeSettings,
+    RunImage, RunPodClass, RunPodNetworkSettings, RunPodQuotaSettings, RunPodSettings, SizeWeight,
 };
 pub use syntax::is_dns_subdomain;
 pub use validate::{

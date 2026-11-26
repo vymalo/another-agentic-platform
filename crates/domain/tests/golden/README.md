@@ -45,6 +45,18 @@ The chart's own `cache.create` (it makes a claim for the release) is **not** por
 the operator makes none. *Verified 2026-11-14*: moving the revision from `581aeed` to `4bc6742` changed the seven existing goldens by the revision and the helm
 version alone (whatever else changed in `deploy/coder` since `581aeed` is what the three new cases show: nothing of the seven moved), so **the env contract of the seven cases did not move**.
 
+## Differences the operator makes on purpose in the run pods
+
+The run pod comparison is exact except for these, each asserted and taken out in `tests/parity.rs` (`without_the_limits_of_ad_061`) or held apart in
+`crates/runtime-kubernetes/tests/run_pods_parity.rs`, never loosened for the rest:
+
+- **AD-061:** the run pod template's containers carry the CPU and ephemeral-storage limits the operator chart's admission policy requires, and the policy has a
+  tenth rule, last, that asks for them.
+- **ANR-660 (AD-065):** the template's metadata carries the annotation `agents.vymalo.com/size-weight` (`0.25` for `standard`: the larger of `requests.cpu` / 1 vCPU
+  and `requests.memory` / 2 GiB, on the grid 0.25, 0.5, 1, 2, 4, 8); the coder chart's has none. With `runPods.nodeType` set the template also carries the required
+  node affinity and the policy an eleventh rule, last (`!has(params.data.nodeTypeKey) || ...`), neither of which exists in the coder chart, and neither of which is in
+  any golden here: nothing renders them while `nodeType` is empty.
+
 ## Regenerating them
 
 By hand; they need `helm` 3.x, `python3` with PyYAML and a clone of adam-rs that contains the revision. No

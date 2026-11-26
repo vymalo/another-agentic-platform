@@ -279,6 +279,14 @@ impl RuntimeSpec {
         if let Some(class) = &rp.runtime_class_name {
             empty("the runtime class of the run pods", class)?;
         }
+        if let Some(node_type) = &rp.node_type {
+            empty("the node type label's key", &node_type.label_key)?;
+            if node_type.admitted.is_empty()
+                || node_type.admitted.iter().any(|v| v.trim().is_empty())
+            {
+                return bad("run pods: the admitted node types are empty".into());
+            }
+        }
         empty("the memory limit of the quota", &rp.quota.limits_memory)?;
         empty("the label that marks a pod managed", &rp.pods.managed_by)?;
         empty("the label that carries the run", &rp.pods.run_label)?;
@@ -744,6 +752,10 @@ pub struct RunPods {
     /// as it did before the field existed.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub runtime_class_name: Option<String>,
+    /// The node types the pods are restricted to (ANR-660, AD-065), when the deployment admits some: the admission policy refuses a
+    /// pod that is not pinned to them. `None`: no restriction, and every object serialises as it did before the field existed.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub node_type: Option<RunPodNodeType>,
     /// What the pods may use in all.
     pub quota: RunPodQuota,
     /// What the pods may reach: deny by default, and the egress proxy. Always present: a spec with run pods and no
@@ -753,6 +765,15 @@ pub struct RunPods {
     pub pods: RunPodLabels,
     /// What the guard lets a pod made by the account be.
     pub guard: RunPodGuard,
+}
+
+/// The node label whose values the deployment admits for run pods (ANR-660): the provider writes it into the guard's parameters.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RunPodNodeType {
+    /// The label's key.
+    pub label_key: String,
+    /// The values admitted, in order.
+    pub admitted: Vec<String>,
 }
 
 /// What the pods of one agent may use in all. A pod beyond it is refused with a quota error, which the

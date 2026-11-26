@@ -299,11 +299,11 @@ the CIDRs, a toleration or an egress rule, which the operator checks at start an
 {{- $quantity := `^([0-9]+\.?[0-9]*|\.[0-9]+)(Ki|Mi|Gi|Ti|Pi|Ei|n|u|m|k|M|G|T|P|E|[eE][+-]?[0-9]+)?$` -}}
 {{- $label := `^[a-z0-9]([-a-z0-9]*[a-z0-9])?$` -}}
 {{- range $k, $v := $r -}}
-{{- if not (has $k (list "enabled" "image" "container" "cargoBuildJobs" "extraEnv" "priorityClassName" "runtimeClassName" "quota" "idleSecs" "readyTimeoutSecs" "waitSecs" "nodeSelector" "tolerations" "nodeAffinity" "extraAllowedImages" "networkPolicy" "egressProxy" "gitSandbox")) -}}
-{{- fail (printf "runPods.%s is not a setting: enabled, image, container, cargoBuildJobs, extraEnv, priorityClassName, runtimeClassName, quota, idleSecs, readyTimeoutSecs, waitSecs, nodeSelector, tolerations, nodeAffinity, extraAllowedImages, networkPolicy, egressProxy or gitSandbox (the operator refuses an unknown key at start)" $k) -}}
+{{- if not (has $k (list "enabled" "image" "container" "cargoBuildJobs" "extraEnv" "priorityClassName" "runtimeClassName" "quota" "idleSecs" "readyTimeoutSecs" "waitSecs" "nodeSelector" "nodeType" "tolerations" "nodeAffinity" "extraAllowedImages" "networkPolicy" "egressProxy" "gitSandbox")) -}}
+{{- fail (printf "runPods.%s is not a setting: enabled, image, container, cargoBuildJobs, extraEnv, priorityClassName, runtimeClassName, quota, idleSecs, readyTimeoutSecs, waitSecs, nodeSelector, nodeType, tolerations, nodeAffinity, extraAllowedImages, networkPolicy, egressProxy or gitSandbox (the operator refuses an unknown key at start)" $k) -}}
 {{- end -}}
 {{- end -}}
-{{- range $k := list "image" "quota" "networkPolicy" "egressProxy" "gitSandbox" "extraEnv" "nodeSelector" -}}
+{{- range $k := list "image" "quota" "networkPolicy" "egressProxy" "gitSandbox" "extraEnv" "nodeSelector" "nodeType" -}}
 {{- if not (kindIs "map" (get $r $k)) -}}
 {{- fail (printf "runPods.%s must be a map (the defaults of values.yaml are its keys; a null removes them all)" $k) -}}
 {{- end -}}
@@ -374,6 +374,36 @@ the CIDRs, a toleration or an egress rule, which the operator checks at start an
 {{- end -}}
 {{- if and (hasKey $r "nodeAffinity") (not (or (kindIs "invalid" $r.nodeAffinity) (kindIs "map" $r.nodeAffinity))) -}}
 {{- fail "runPods.nodeAffinity must be a map (an affinity.nodeAffinity) or empty" -}}
+{{- end -}}
+{{- /* ANR-660 (AD-065): the node types run pods are pinned to: both parts or neither, label syntax, and not the key of nodeSelector (the operator pins to
+   the admitted values, and a selector on the key would fight that). */ -}}
+{{- $nt := $r.nodeType -}}
+{{- range $k, $v := $nt -}}
+{{- if not (has $k (list "labelKey" "admitted")) -}}
+{{- fail (printf "runPods.nodeType.%s is not a setting: labelKey or admitted" $k) -}}
+{{- end -}}
+{{- end -}}
+{{- if and (hasKey $nt "labelKey") (not (kindIs "string" $nt.labelKey)) -}}
+{{- fail "runPods.nodeType.labelKey must be a string, the key of a node label" -}}
+{{- end -}}
+{{- if and (hasKey $nt "admitted") (not (or (kindIs "invalid" $nt.admitted) (kindIs "slice" $nt.admitted))) -}}
+{{- fail "runPods.nodeType.admitted must be a list of label values" -}}
+{{- end -}}
+{{- if or $nt.labelKey $nt.admitted -}}
+{{- if not (and $nt.labelKey $nt.admitted) -}}
+{{- fail "runPods.nodeType.labelKey and runPods.nodeType.admitted go together: name the node label's key and the values of it that run pods may run on, or neither" -}}
+{{- end -}}
+{{- if not (regexMatch `^(([a-z0-9]([-a-z0-9]*[a-z0-9])?)(\.[a-z0-9]([-a-z0-9]*[a-z0-9])?)*/)?[A-Za-z0-9]([-A-Za-z0-9_.]*[A-Za-z0-9])?$` $nt.labelKey) -}}
+{{- fail (printf "runPods.nodeType.labelKey %q is not a label key such as example.com/node-type" $nt.labelKey) -}}
+{{- end -}}
+{{- range $nt.admitted -}}
+{{- if not (and (kindIs "string" .) (regexMatch `^[A-Za-z0-9]([-A-Za-z0-9_.]*[A-Za-z0-9])?$` .) (le (len .) 63)) -}}
+{{- fail (printf "runPods.nodeType.admitted entry %q is not a label value (letters, digits, -, _ and ., at most 63, starting and ending with a letter or a digit)" (toString .)) -}}
+{{- end -}}
+{{- end -}}
+{{- if hasKey $r.nodeSelector $nt.labelKey -}}
+{{- fail (printf "runPods.nodeSelector.%s is the key of runPods.nodeType.labelKey: the operator pins run pods to the admitted values, and a selector on the same key would fight that. Remove it from nodeSelector" $nt.labelKey) -}}
+{{- end -}}
 {{- end -}}
 {{- /* The PriorityClass: the chart's own, or a name of an object the deployment manages. */ -}}
 {{- if not (regexMatch `^([a-z0-9]([-a-z0-9]*[a-z0-9])?)?(\.[a-z0-9]([-a-z0-9]*[a-z0-9])?)*$` (toString (default "" $r.priorityClassName))) -}}
@@ -542,6 +572,14 @@ the CIDRs, a toleration or an egress rule, which the operator checks at start an
 {{- end -}}
 {{- end -}}
 {{- end -}}
+{{- end -}}
+{{- /* ANR-660 (AD-065): a class is weighed from its requests, so both are required (this deliberately reverses AD-061 decision 4's "no new
+   required key"). That the weight is on the grid is checked by the operator at start (RunPodSettings::validate), not here. */ -}}
+{{- if not (hasKey (default (dict) $class.requests) "cpu") -}}
+{{- fail (printf "runPodClasses.%s.requests.cpu is required (ANR-660): the size weight is made of it" $name) -}}
+{{- end -}}
+{{- if not (hasKey (default (dict) $class.requests) "memory") -}}
+{{- fail (printf "runPodClasses.%s.requests.memory is required (ANR-660): the size weight is made of it" $name) -}}
 {{- end -}}
 {{- if not (hasKey (default (dict) $class.limits) "memory") -}}
 {{- fail (printf "runPodClasses.%s.limits.memory is required: the quota counts it, and a pod with no memory limit is refused by the quota" $name) -}}

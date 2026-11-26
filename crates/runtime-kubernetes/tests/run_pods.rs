@@ -944,3 +944,36 @@ fn the_run_pod_template_carries_the_class_the_deployment_names_and_none_otherwis
         "gvisor"
     );
 }
+
+#[test]
+fn the_guards_parameters_name_the_node_types_only_when_the_deployment_does() {
+    // ANR-660 (AD-065): the parameters the policy's last rule reads, one admitted value per line, and nothing when none are named.
+    let none = resolved_run_pods(|_, _| {});
+    let docs = rendered(&none).documents();
+    let data = &find(&docs, "ConfigMap", "coder-run-pods-policy")["data"];
+    assert!(data.get("nodeTypeKey").is_none() && data.get("nodeTypeAdmitted").is_none());
+
+    let named = resolved_run_pods_with(
+        |file| {
+            file["nodeType"] =
+                json!({ "labelKey": "example.com/node-type", "admitted": ["a", "b"] });
+        },
+        |_, _| {},
+    );
+    let docs = rendered(&named).documents();
+    let data = &find(&docs, "ConfigMap", "coder-run-pods-policy")["data"];
+    assert_eq!(data["nodeTypeKey"], "example.com/node-type");
+    assert_eq!(data["nodeTypeAdmitted"], "a\nb");
+    // The template the workers read carries the affinity the rule accepts.
+    let pod: Value = serde_json::from_str(
+        find(&docs, "ConfigMap", "coder-run-pod")["data"]["pod.yaml"]
+            .as_str()
+            .unwrap(),
+    )
+    .unwrap();
+    assert_eq!(
+        pod["spec"]["affinity"]["nodeAffinity"]["requiredDuringSchedulingIgnoredDuringExecution"]["nodeSelectorTerms"]
+            [0]["matchExpressions"][0]["key"],
+        "example.com/node-type"
+    );
+}

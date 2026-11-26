@@ -1081,3 +1081,64 @@ fn the_admission_rule_refuses_an_unlisted_claim() {
     old.remove("claims");
     assert_eq!(claims_the_rule_admits(&rule, &old), ["work-coder-0"]);
 }
+
+/// ANR-660 (AD-065), two intended differences from the coder chart's run pods, each held apart and not folded into the comparison above:
+/// the template carries the class's size weight as an annotation (the coder chart's has none), and the policy gains a node-type rule
+/// that exists only when the deployment names node types (so the checked-in render, which names none, has the limits rule last).
+#[test]
+fn the_size_weight_annotation_and_the_node_type_rule_are_the_operators_and_not_the_coder_charts() {
+    let theirs = adam();
+    assert!(
+        theirs["template"]["pod"]["metadata"]
+            .get("annotations")
+            .is_none(),
+        "the coder chart's template has no annotation"
+    );
+    let docs = operator();
+    let template: Value = serde_json::from_str(
+        find_config_map(&docs, "coder-run-pod")["data"]["pod.yaml"]
+            .as_str()
+            .unwrap(),
+    )
+    .unwrap();
+    assert_eq!(
+        template["metadata"]["annotations"],
+        json!({ "agents.vymalo.com/size-weight": "0.25" })
+    );
+
+    // The rule is the last of the template's validations and is guarded by the parameter the provider writes only when node types are named.
+    let text = std::fs::read_to_string(
+        repo_root().join("deploy/operator/templates/run-pods-admission.yaml"),
+    )
+    .unwrap();
+    let limits = text
+        .find("a run pod sets limits.memory")
+        .expect("limits rule");
+    let rule = text
+        .find("- expression: \"!has(params.data.nodeTypeKey) ||")
+        .expect("the node-type rule");
+    assert!(rule > limits, "the node-type rule is appended last");
+    assert!(
+        text[rule..].contains("{{- end }}"),
+        "and rendered only when the chart names node types"
+    );
+    let chart = chart();
+    let policy = of_kind(&chart, "ValidatingAdmissionPolicy");
+    assert_eq!(
+        policy["spec"]["validations"].as_array().unwrap().len(),
+        adam()["admissionPolicy"]["validations"]
+            .as_array()
+            .unwrap()
+            .len()
+            + 1,
+        "with no node type named the policy has the limits rule and not the node-type rule"
+    );
+    let rendered = serde_json::to_string(&chart).unwrap();
+    assert!(!rendered.contains("nodeTypeKey"), "no trace when off");
+}
+
+fn find_config_map<'a>(docs: &'a [Value], name: &str) -> &'a Value {
+    docs.iter()
+        .find(|d| d["kind"] == "ConfigMap" && d["metadata"]["name"] == name)
+        .unwrap_or_else(|| panic!("no ConfigMap {name}"))
+}
