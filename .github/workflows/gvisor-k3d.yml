@@ -6,8 +6,8 @@ name: gVisor in k3d
 #
 # A workflow of its own, NOT a required check and NOT a need of `push` in operator-image.yml: it pulls other registries' images by digest, and a hosted
 # runner may refuse what a local machine allowed, which is what it is here to say. It runs on a pull request only when the script, its fixture, this file
-# or the chart templates and the admission script it measures change, and on demand. *Unverified* on a hosted runner until it has run there: the script was
-# run on a local machine only.
+# or the chart templates and the admission script it measures change, and on demand. *Verified 2026-11-26* on a hosted runner: run 45889453084 (PR #112, kernel
+# 7.0.0-1020-azure) started a run pod under runsc and passed the admission cases; limits are not enforced under ignore-cgroups, as locally.
 
 on:
   pull_request:
