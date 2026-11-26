@@ -210,6 +210,64 @@ pub async fn check_empty_window<S: UsageStore>(s: &S) -> Result<(), String> {
     Ok(())
 }
 
+/// Rule 9: a batch answers one entry per event in order: a first copy is `New` (a copy stored by an earlier call
+/// is `Duplicate`, and so is a repeat inside the batch), the first copy's time stands, and a batch with an invalid
+/// event stores nothing.
+pub async fn check_batch<S: UsageStore>(s: &S) -> Result<(), String> {
+    s.insert(event("m1", "old", 1), 10)
+        .await
+        .map_err(|x| err("batch", x))?;
+    let got = s
+        .insert_many(
+            vec![
+                event("m1", "p1", 1),
+                event("m1", "old", 1),
+                event("m1", "p2", 1),
+                event("m1", "p1", 1),
+            ],
+            100,
+        )
+        .await
+        .map_err(|x| err("batch", x))?;
+    let want = vec![
+        Inserted::New,
+        Inserted::Duplicate,
+        Inserted::New,
+        Inserted::Duplicate,
+    ];
+    if got != want {
+        return Err(format!("batch: got {got:?}, want {want:?}"));
+    }
+    let at_100 = s
+        .spend(q(100, 101, None))
+        .await
+        .map_err(|x| err("batch", x))?;
+    if at_100 != vec![line("acct-a", "std", 2)] {
+        return Err(format!("batch: ingested at 100 got {at_100:?}, want 2"));
+    }
+    let empty = s
+        .insert_many(Vec::new(), 100)
+        .await
+        .map_err(|x| err("batch", x))?;
+    if !empty.is_empty() {
+        return Err(format!("batch: an empty batch answered {empty:?}"));
+    }
+    let mut bad = event("m1", "p3", 1);
+    bad.weight = 0;
+    match s.insert_many(vec![event("m1", "p4", 1), bad], 200).await {
+        Err(UsageError::Invalid { field: "weight" }) => {}
+        other => return Err(format!("batch: want Invalid(weight), got {other:?}")),
+    }
+    let after = s
+        .spend(q(200, 201, None))
+        .await
+        .map_err(|x| err("batch", x))?;
+    if !after.is_empty() {
+        return Err(format!("batch: a refused batch stored {after:?}"));
+    }
+    Ok(())
+}
+
 /// Runs every rule, each on a store `make` returns fresh. The first broken rule is the error.
 pub async fn run<S: UsageStore, F: Fn() -> S>(make: F) -> Result<(), String> {
     check_idempotent(&make()).await?;
@@ -219,5 +277,6 @@ pub async fn run<S: UsageStore, F: Fn() -> S>(make: F) -> Result<(), String> {
     check_window_half_open(&make()).await?;
     check_account_filter(&make()).await?;
     check_invalid_refused(&make()).await?;
-    check_empty_window(&make()).await
+    check_empty_window(&make()).await?;
+    check_batch(&make()).await
 }

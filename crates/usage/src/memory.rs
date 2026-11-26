@@ -1,4 +1,5 @@
 use std::collections::BTreeMap;
+use std::collections::btree_map::Entry;
 use std::sync::Mutex;
 
 use crate::{Inserted, PodMinuteEvent, SpendLine, SpendQuery, UsageError, UsageStore};
@@ -30,6 +31,29 @@ impl UsageStore for MemoryUsageStore {
         }
         seen.insert(key, (event, ingested_at));
         Ok(Inserted::New)
+    }
+
+    async fn insert_many(
+        &self,
+        events: Vec<PodMinuteEvent>,
+        ingested_at: u64,
+    ) -> Result<Vec<Inserted>, UsageError> {
+        for event in &events {
+            event.validate()?;
+        }
+        let mut seen = self.seen.lock().map_err(|_| UsageError::Unavailable)?;
+        Ok(events
+            .into_iter()
+            .map(
+                |event| match seen.entry((event.source.clone(), event.id.clone())) {
+                    Entry::Vacant(slot) => {
+                        slot.insert((event, ingested_at));
+                        Inserted::New
+                    }
+                    Entry::Occupied(_) => Inserted::Duplicate,
+                },
+            )
+            .collect())
     }
 
     async fn spend(&self, query: SpendQuery) -> Result<Vec<SpendLine>, UsageError> {
