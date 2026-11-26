@@ -563,6 +563,47 @@ stateDiagram-v2
 Slices *(proposed)*: G1, the `AudienceToken` variant and the spec's rule that one container mounts it (the parity goldens unmoved); G2, the chart's `signing` block, `_validate.tpl`'s refusals and a golden render; G3, the in-process render; G4, the sidecar render; G5, the registry's two attributes; G6, a kind end-to-end with a stub issuer and a stub gateway that verifies the signature. The sidecar's image is built where the request signature is (the owner's question in ADR 0101).
 
 
+#### AD-064 — The operator reads one configuration file and no setting is an environment variable
+
+*(2026-11-26, ANR-962. Built: the schema, `operator run --config` and `--check`, the chart's ConfigMap and the seven goldens, `render-check.sh`'s check of every golden render. The kind jobs are *unverified* until CI has run them.)* `operator run` read 26 settings as flags with an `env =` each, plus a second file for run pods and a `RUST_LOG`; the chart rendered all of them into the pod's `env`. That is a surface no one can review whole: a misspelt value is a pod that runs with a default, the settings of one release are scattered across a Deployment's `env` and a ConfigMap, and the run pods' block was a file of its own with a lifecycle of its own. The operator now reads **one YAML document** (`--config`, default `/etc/aap-operator/config.yaml`, which the chart mounts from its ConfigMap), and every setting is a key of it: `version` (required, `1`), `listen.{health,metrics,registry}`, `watch.namespaces` (the first is the primary), `reconcile.{concurrency,timeoutSecs,resyncSecs,resyncPendingSecs}`, `registry.{publicUrl,token}`, `defaults.{agentImage,agentRuntimeClass,cacheAllowedClaims,maxAccessTier}`, `runPods` (today's `RunPodSettings`, the separate file gone), `toolProbe.{enabled,timeoutSecs}`, `retention.afterDeleteDays`, `leaderElection.{enabled,name,namespace,leaseSecs,renewSecs,retrySecs}`, `log.filter` and `telemetry.otlp.{endpoint,headers,certificate,timeout,sampler,samplerRatio,serviceName,resourceAttributes}`.
+
+Decisions: **(1)** **an unknown key is refused at every level** (`deny_unknown_fields` throughout, the pattern of `bin/api`), and `version` is required, so a misspelt key stops the operator instead of leaving a setting on its default; the checks the flags made are kept and named by their keys (a DNS label for a namespace, the primary among `watch.namespaces`, an image with no white space, a `RuntimeClass` name, `retry < renew < lease`, a probe timeout of 1 to 60 s, `RunPodSettings::validate`'s every mistake, prefixed `runPods.`), and two listeners on one port are refused (the registry's only when a token turns it on). **(2)** **a secret is a reference, never a value**: `SecretRef` is `{ file: /path }` (a mounted Secret) or `{ env: NAME }`, and the registry's token (`registry.token`, was `REGISTRY_TOKEN_FILE`) and each trace header (`telemetry.otlp.headers.<name>`) are read from one. An error names the setting and never what it holds, and a string where a reference belongs is refused **without quoting it** (it may be the token). **(3)** **`operator run --check`** loads and validates the file, resolves no file it names (a Secret is mounted in the pod, not on the machine that checks a chart), and exits **0**, or **78** (`EX_CONFIG`) when the file is refused; `run` exits 78 for the same reason and 1 for anything else, so a script and a deployment can tell a refused file from a crash. **(4)** **`POD_NAME`, `POD_NAMESPACE` and `HOSTNAME` stay the environment's**: they are the downward API's identity of this replica (the `Events`' `reportingInstance`, the lease's `holderIdentity`, the trace resource), not settings of a deployment, and a pod cannot set them to another pod's. **(5)** **the traces move with the file**: `aap-trace-otlp` gains `OtlpSection` (`Deserialize`, camelCase, `deny_unknown_fields`) and `TraceSettings::from_env` **stays** for `bin/api` and `bin/usage-ingest`, whose own cards remove it; the operator builds its `TraceSettings` from the section. A section the exporter cannot use is refused **with the file** (78), because a deployment wrote it; a **file** the section names (a header, a certificate) that cannot be read is still one warning and tracing off, because the kubelet resolves it and tracing is not a security control. The chart's `otel.headersSecret` gains `header` (default `authorization`): the operator's file names the header whose value the Secret's key holds, where the API's file is still a `name=value` list. **(6)** **the chart renders the file**: `templates/config.yaml` builds it from the values it already had (`watchNamespaces`, `tuning`, `registry`, `defaultAgentImage`, `agent.runtimeClassName`, `cacheAllowedClaims`, `maxAccessTier`, `runPods`/`runPodClasses`, `toolProbe`, `retention`, `leaderElection`, `logLevel`, `otel`), the Deployment runs `args: [run, --config, /etc/aap-operator/config.yaml]` with one `checksum/config` and one `POD_NAME`, and `run-pods-settings.yaml` and its ConfigMap are gone (the run pods' block is `runPods` of the file). **`bump-tag.sh` is unchanged**: the image's tag is still the only key it writes. **(7)** `render-check.sh` runs `operator run --check` on the configuration of **every golden render and of the shapes CI tests** (`AAP_OPERATOR_BIN` names the binary; the `chart` job of `operator-image.yml` builds it), so a chart that renders a file the binary refuses fails in the chart job and not in a pod that never starts.
+
+*Not decided here:* whether the other two binaries' settings should become files too (their cards do it, ANR-970 and ANR-971); a schema for the file (`values.schema.json` or a committed JSON Schema) — the binary is the check, and the chart's `_validate.tpl` the render-time one; and whether `SecretRef` should gain a Kubernetes `secretKeyRef` variant, which would make the operator read a Secret (AD-024 says it does not: the kubelet mounts it).
+
+*Proof:* `bin/operator/src/config.rs`'s tests (the example passes and holds no secret; `version` required and 1; an unknown key at the top, in a block, in `runPods` and in `telemetry.otlp`; a string where a reference belongs, refused without quoting it; the namespaces, the listeners, the timers, the election, the probe, the filter and the trace section each refused by name; the chart's `runPods` block accepted, and a bad quota named `runPods.quota.pods`), `bin/operator/tests/cli.rs` on the built binary (78 for a file that is not there, for an unknown key and for each refusal, 0 for the example, and a run that ignores the old variables), `bin/operator/tests/trace_env.rs` (a refused section exits 78; an unreadable header warns once and goes on), and `render-check.sh`, whose new check runs the binary on ten renders and each of whose golden checks was regenerated deliberately. *Unverified until CI has run them:* the kind jobs that now read the ConfigMap (`namespaces-e2e.sh`, `k10-e2e.sh`, `run-pods-e2e.sh`) and the chart job's build of the binary.
+
+```mermaid
+sequenceDiagram
+  participant H as helm
+  participant K as kubelet
+  participant O as operator
+  H->>K: ConfigMap (config.yaml), Secret volumes (registry token, trace headers)
+  K->>O: /etc/aap-operator/config.yaml, /var/run/secrets/...
+  O->>O: parse, refuse an unknown key, validate, resolve references
+  alt the file is refused
+    O-->>K: exit 78 (EX_CONFIG), naming the setting
+  else the file is accepted
+    O->>O: compose the runtime, the store, the controllers, the registry
+    O-->>K: run until SIGTERM
+  end
+```
+
+```mermaid
+stateDiagram-v2
+  [*] --> Read: --config <path>
+  Read --> Refused: not YAML, an unknown key, version ≠ 1, a setting refused
+  Read --> Checked: valid, and --check
+  Read --> Running: valid
+  Refused --> [*]: exit 78
+  Checked --> [*]: exit 0
+  Running --> Stopped: SIGTERM or SIGINT
+  Running --> Failed: the cluster, a listener, the election
+  Stopped --> [*]: exit 0
+  Failed --> [*]: exit 1
+```
+
+
 ---
 
 ## 92. Proposed Decisions

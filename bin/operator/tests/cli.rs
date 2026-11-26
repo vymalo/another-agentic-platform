@@ -1,8 +1,11 @@
-//! The binary's contract: `crdgen` prints exactly the checked-in CRDs, and `run` says what it needs.
+//! The binary's contract: `crdgen` prints exactly the checked-in CRDs, and `run` reads one configuration file (ANR-962).
+//!
+//! `operator run --check` and `operator run` exit **78** (`EX_CONFIG`) when the file is refused, naming the setting, and 1
+//! for anything else. No secret is ever quoted: a value that could be a token never appears in a message.
 
 #![allow(clippy::expect_used, clippy::unwrap_used)] // tests may
 
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::process::Command;
 
 fn operator() -> Command {
@@ -70,266 +73,215 @@ fn crdgen_prints_one_document_per_kind() {
     }
 }
 
-#[cfg(not(feature = "runtime-kubernetes"))]
-#[test]
-fn run_without_a_runtime_provider_says_what_to_rebuild_with() {
-    let out = operator().arg("run").output().expect("runs the operator");
-    assert!(!out.status.success());
-    let stderr = String::from_utf8_lossy(&out.stderr);
-    assert!(stderr.contains("no runtime provider"), "{stderr}");
+/// A directory of files this test made.
+fn dir() -> PathBuf {
+    let dir = std::env::temp_dir().join(format!("aap-cli-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).expect("a directory");
+    dir
 }
 
-#[cfg(feature = "runtime-kubernetes")]
-#[test]
-fn run_without_a_cluster_fails_and_says_where_it_looked() {
-    // No in-cluster environment, and a kubeconfig that is not there: nothing to connect to.
+/// A configuration file with this text.
+fn file(name: &str, text: &str) -> PathBuf {
+    let path = dir().join(name);
+    std::fs::write(&path, text).expect("writes");
+    path
+}
+
+/// `run` on a file, with no cluster to reach: `KUBERNETES_SERVICE_HOST` unset and a kubeconfig that is not there, so it
+/// stops at `connecting to the cluster` unless something before that stopped it.
+fn run(config: &Path) -> (Option<i32>, String, String) {
     let out = operator()
         .arg("run")
+        .arg("--config")
+        .arg(config)
         .env_remove("KUBERNETES_SERVICE_HOST")
         .env("KUBECONFIG", "/nonexistent/kubeconfig")
         .env("HOME", "/nonexistent")
-        .env("HEALTH_ADDR", "127.0.0.1:0")
-        .env("METRICS_ADDR", "127.0.0.1:0")
         .output()
         .expect("runs the operator");
-    assert!(!out.status.success());
-    let stderr = String::from_utf8_lossy(&out.stderr);
-    assert!(stderr.contains("connecting to the cluster"), "{stderr}");
+    (
+        out.status.code(),
+        String::from_utf8_lossy(&out.stdout).into_owned(),
+        String::from_utf8_lossy(&out.stderr).into_owned(),
+    )
 }
 
+/// `run --check` on a file.
+fn check(config: &Path) -> (Option<i32>, String, String) {
+    let out = operator()
+        .arg("run")
+        .arg("--check")
+        .arg("--config")
+        .arg(config)
+        .output()
+        .expect("runs the operator");
+    (
+        out.status.code(),
+        String::from_utf8_lossy(&out.stdout).into_owned(),
+        String::from_utf8_lossy(&out.stderr).into_owned(),
+    )
+}
+
+/// The least a deployment must say: a version, and nothing else.
+const MINIMAL: &str = "version: 1\n";
+
 #[test]
-fn run_lists_its_settings_and_the_environment_variables_that_set_them() {
+fn run_lists_its_two_settings() {
     let out = operator()
         .args(["run", "--help"])
         .output()
         .expect("runs the operator");
     assert!(out.status.success());
     let help = String::from_utf8_lossy(&out.stdout);
-    for variable in [
-        "WATCH_NAMESPACE",
-        "WATCH_NAMESPACES",
-        "--watch-namespaces",
-        "HEALTH_ADDR",
-        "METRICS_ADDR",
-        "POD_NAME",
-        "AAP_CONCURRENCY",
-        "AAP_RESYNC_SECS",
-        "AAP_RESYNC_PENDING_SECS",
-        "AAP_RECONCILE_TIMEOUT_SECS",
-        "DEFAULT_AGENT_IMAGE",
-        "--default-agent-image",
-        "RUN_PODS_FILE",
-        "--run-pods-file",
-        "TOOL_PROBE_ENABLED",
-        "--tool-probe-enabled",
-        "TOOL_PROBE_TIMEOUT_SECS",
-        "--tool-probe-timeout-secs",
-        "LEADER_ELECTION_ENABLED",
-        "--leader-election-enabled",
-        "LEADER_ELECTION_NAME",
-        "LEADER_ELECTION_NAMESPACE",
-        "LEADER_ELECTION_LEASE_SECS",
-        "LEADER_ELECTION_RENEW_SECS",
-        "LEADER_ELECTION_RETRY_SECS",
-        "--leader-election-retry-secs",
-    ] {
-        assert!(help.contains(variable), "{variable} is not in:\n{help}");
+    for setting in ["--config", "--check", "/etc/aap-operator/config.yaml"] {
+        assert!(help.contains(setting), "{setting} is not in:\n{help}");
     }
+    // No setting is an environment variable any more: the file is the only way in.
+    assert!(!help.contains("env:"), "{help}");
+}
+
+#[test]
+fn the_example_is_a_file_the_operator_accepts() {
+    let example = Path::new(env!("CARGO_MANIFEST_DIR")).join("config.example.yaml");
+    let (code, stdout, stderr) = check(&example);
+    assert_eq!(code, Some(0), "{stderr}");
+    assert!(stdout.contains(": ok"), "{stdout}");
+    // And `run` takes it too, and goes on to look for the cluster it does not have.
+    let (code, _, stderr) = run(&example);
+    assert_eq!(code, Some(1), "{stderr}");
+    assert!(stderr.contains("connecting to the cluster"), "{stderr}");
+}
+
+#[test]
+fn a_file_that_is_not_there_stops_the_operator_with_ex_config() {
+    let absent = dir().join("absent.yaml");
+    for (code, _, stderr) in [
+        run(&absent),
+        check(&absent),
+        // The default path is the chart's, and nothing is mounted here.
+        {
+            let out = operator()
+                .arg("run")
+                .env_remove("KUBERNETES_SERVICE_HOST")
+                .output()
+                .expect("runs the operator");
+            (
+                out.status.code(),
+                String::new(),
+                String::from_utf8_lossy(&out.stderr).into_owned(),
+            )
+        },
+    ] {
+        assert_eq!(code, Some(78), "{stderr}");
+        assert!(stderr.contains("cannot be read"), "{stderr}");
+        assert!(!stderr.contains("connecting to the cluster"), "{stderr}");
+    }
+}
+
+#[test]
+fn a_key_the_file_does_not_have_is_refused_by_both_with_ex_config() {
+    for text in [
+        format!("{MINIMAL}typo: x\n"),
+        format!("{MINIMAL}runPods: {{ typo: 1 }}\n"),
+        format!("{MINIMAL}watch: {{ namespaces: [], typo: x }}\n"),
+        format!("{MINIMAL}telemetry: {{ otlp: {{ typo: x }} }}\n"),
+    ] {
+        let path = file("typo.yaml", &text);
+        for (code, _, stderr) in [run(&path), check(&path)] {
+            assert_eq!(code, Some(78), "{text}: {stderr}");
+            assert!(stderr.contains("typo"), "{text}: {stderr}");
+            assert!(!stderr.contains("connecting to the cluster"), "{stderr}");
+        }
+    }
+}
+
+#[test]
+fn a_secret_that_is_a_value_and_not_a_reference_is_refused_without_quoting_it() {
+    let path = file(
+        "token.yaml",
+        &format!("{MINIMAL}registry: {{ token: s3cret-token-value }}\n"),
+    );
+    let (code, _, stderr) = check(&path);
+    assert_eq!(code, Some(78), "{stderr}");
+    assert!(stderr.contains("token"), "{stderr}");
     assert!(
-        help.contains("0.0.0.0:8081") && help.contains("0.0.0.0:9090"),
-        "{help}"
+        !stderr.contains("s3cret-token-value"),
+        "a value that may be the token is in the message: {stderr}"
     );
 }
 
-/// `run` with no cluster to reach: `KUBERNETES_SERVICE_HOST` unset and no kubeconfig, so it stops at
-/// `connecting to the cluster` unless something before that stopped it.
-#[cfg(feature = "runtime-kubernetes")]
-fn run_without_a_cluster(default_image: Option<&str>) -> (bool, String) {
-    let mut command = operator();
-    command
-        .arg("run")
-        .env_remove("KUBERNETES_SERVICE_HOST")
-        .env_remove("DEFAULT_AGENT_IMAGE")
-        .env("KUBECONFIG", "/nonexistent/kubeconfig")
-        .env("HOME", "/nonexistent")
-        .env("HEALTH_ADDR", "127.0.0.1:0")
-        .env("METRICS_ADDR", "127.0.0.1:0");
-    for variable in [
-        "LEADER_ELECTION_ENABLED",
-        "LEADER_ELECTION_NAME",
-        "LEADER_ELECTION_NAMESPACE",
-        "LEADER_ELECTION_LEASE_SECS",
-        "LEADER_ELECTION_RENEW_SECS",
-        "LEADER_ELECTION_RETRY_SECS",
-    ] {
-        command.env_remove(variable);
-    }
-    if let Some(image) = default_image {
-        command.env("DEFAULT_AGENT_IMAGE", image);
-    }
-    let out = command.output().expect("runs the operator");
-    (
-        out.status.success(),
-        String::from_utf8_lossy(&out.stderr).into_owned(),
-    )
-}
-
-#[cfg(feature = "runtime-kubernetes")]
 #[test]
-fn a_default_image_with_white_space_stops_the_operator_before_it_looks_for_a_cluster() {
-    let (ok, stderr) = run_without_a_cluster(Some("ghcr.io/x/y:tag with space"));
-    assert!(!ok);
-    assert!(
-        stderr.contains("DEFAULT_AGENT_IMAGE") && stderr.contains("white space"),
-        "{stderr}"
-    );
-    assert!(
-        !stderr.contains("connecting to the cluster"),
-        "it never got that far: {stderr}"
-    );
-}
-
-#[cfg(feature = "runtime-kubernetes")]
-#[test]
-fn a_default_image_that_is_empty_or_a_reference_goes_on_to_look_for_a_cluster() {
-    // An empty value is a chart value left blank: no default, not a mistake.
-    for value in [
-        None,
-        Some(""),
-        Some("  "),
-        Some("ghcr.io/x/y:sha-1@sha256:abc"),
+fn a_version_that_is_not_one_is_refused() {
+    for text in [
+        "listen: { health: 0.0.0.0:1 }\n".to_owned(),
+        "version: 2\n".to_owned(),
     ] {
-        let (ok, stderr) = run_without_a_cluster(value);
-        assert!(!ok);
-        assert!(
-            stderr.contains("connecting to the cluster"),
-            "{value:?}: {stderr}"
-        );
+        let path = file("version.yaml", &text);
+        let (code, _, stderr) = check(&path);
+        assert_eq!(code, Some(78), "{text}: {stderr}");
+        assert!(stderr.contains("version"), "{text}: {stderr}");
     }
 }
 
-/// K7a: the election is off by default, and on with no namespace anywhere the operator refuses **before** it looks
-/// for a cluster, naming the variable: a `Lease` lives in one.
-#[cfg(feature = "runtime-kubernetes")]
 #[test]
-fn a_leader_election_with_no_namespace_stops_the_operator_before_it_looks_for_a_cluster() {
-    let mut command = operator();
-    command
-        .arg("run")
-        .env_remove("KUBERNETES_SERVICE_HOST")
-        .env_remove("WATCH_NAMESPACE")
-        .env_remove("WATCH_NAMESPACES")
-        .env_remove("LEADER_ELECTION_NAMESPACE")
-        .env_remove("DEFAULT_AGENT_IMAGE")
-        .env("LEADER_ELECTION_ENABLED", "true")
-        .env("POD_NAME", "pod-1")
-        .env("KUBECONFIG", "/nonexistent/kubeconfig")
-        .env("HOME", "/nonexistent")
-        .env("HEALTH_ADDR", "127.0.0.1:0")
-        .env("METRICS_ADDR", "127.0.0.1:0");
-    let out = command.output().expect("runs the operator");
-    assert!(!out.status.success(), "the operator started");
-    let stderr = String::from_utf8_lossy(&out.stderr);
-    assert!(stderr.contains("LEADER_ELECTION_NAMESPACE"), "{stderr}");
-    assert!(
-        !stderr.contains("connecting to the cluster"),
-        "it never got that far: {stderr}"
-    );
+fn the_settings_the_file_refuses_stop_the_operator_before_it_looks_for_a_cluster() {
+    // Each is a file the operator could not work with, and the message names the setting.
+    for (text, named) in [
+        (
+            "version: 1\ndefaults: { agentImage: 'ghcr.io/x/y:tag with space' }\n",
+            "defaults.agentImage",
+        ),
+        (
+            "version: 1\ndefaults: { agentRuntimeClass: 'Not A Class' }\n",
+            "defaults.agentRuntimeClass",
+        ),
+        (
+            "version: 1\nwatch: { namespaces: [Bad_Name] }\n",
+            "watch.namespaces",
+        ),
+        ("version: 1\nwatch: { namespaces: [a, a] }\n", "twice"),
+        (
+            "version: 1\nreconcile: { concurrency: 0 }\n",
+            "reconcile.concurrency",
+        ),
+        (
+            "version: 1\nlisten: { health: 0.0.0.0:9090 }\n",
+            "listen.metrics",
+        ),
+        (
+            "version: 1\ntoolProbe: { timeoutSecs: 61 }\n",
+            "toolProbe.timeoutSecs",
+        ),
+        (
+            "version: 1\nleaderElection: { enabled: true }\n",
+            "leaderElection.namespace",
+        ),
+        (
+            "version: 1\nwatch: { namespaces: [agents] }\nleaderElection: { enabled: true, renewSecs: 15 }\n",
+            "retry < renew < lease",
+        ),
+        ("version: 1\nlog: { filter: '=' }\n", "log.filter"),
+        (
+            "version: 1\ntelemetry: { otlp: { endpoint: 'unix:///tmp/x' } }\n",
+            "telemetry.otlp.endpoint",
+        ),
+        (
+            "version: 1\ntelemetry: { otlp: { endpoint: 'http://c:4318/v1/traces', headers: { authorization: { file: /h } } } }\n",
+            "telemetry.otlp.headers",
+        ),
+    ] {
+        let path = file("refused.yaml", text);
+        for (code, _, stderr) in [run(&path), check(&path)] {
+            assert_eq!(code, Some(78), "{text}: {stderr}");
+            assert!(stderr.contains(named), "{text}: {stderr}");
+            assert!(!stderr.contains("connecting to the cluster"), "{stderr}");
+        }
+    }
 }
 
-/// `run` with `WATCH_NAMESPACE` and/or `WATCH_NAMESPACES` and no cluster to reach (K6b). `None` is the variable
-/// unset, which is not the same as set and empty.
-#[cfg(feature = "runtime-kubernetes")]
-fn run_with_namespaces(one: Option<&str>, list: Option<&str>) -> (bool, String) {
-    let mut command = operator();
-    command
-        .arg("run")
-        .env_remove("KUBERNETES_SERVICE_HOST")
-        .env_remove("WATCH_NAMESPACE")
-        .env_remove("WATCH_NAMESPACES")
-        .env("KUBECONFIG", "/nonexistent/kubeconfig")
-        .env("HOME", "/nonexistent")
-        .env("HEALTH_ADDR", "127.0.0.1:0")
-        .env("METRICS_ADDR", "127.0.0.1:0");
-    if let Some(one) = one {
-        command.env("WATCH_NAMESPACE", one);
-    }
-    if let Some(list) = list {
-        command.env("WATCH_NAMESPACES", list);
-    }
-    let out = command.output().expect("runs the operator");
-    (
-        out.status.success(),
-        String::from_utf8_lossy(&out.stderr).into_owned(),
-    )
-}
-
-/// K6b: a list the operator cannot watch stops it at start, naming the variable and what is wrong, and never after it
-/// has looked for a cluster; a list it accepts goes on to look for one.
-#[cfg(feature = "runtime-kubernetes")]
 #[test]
-fn a_watch_namespaces_that_is_refused_stops_the_operator_before_it_looks_for_a_cluster() {
-    for (one, list) in [
-        (None, Some("")),
-        (None, Some(",")),
-        (None, Some("team,,other")),
-        (None, Some("Team")),
-        (None, Some("a,b,a")),
-        (Some("c"), Some("a,b")),
-    ] {
-        let (ok, stderr) = run_with_namespaces(one, list);
-        assert!(!ok, "{one:?} {list:?} was accepted");
-        assert!(
-            stderr.contains("WATCH_NAMESPACE"),
-            "{one:?} {list:?}: {stderr}"
-        );
-        assert!(
-            !stderr.contains("connecting to the cluster"),
-            "{one:?} {list:?}: it got as far as the cluster: {stderr}"
-        );
-    }
-    for (one, list) in [
-        (None, None),
-        (Some(""), None),
-        (Some("team"), None),
-        (None, Some("team,other")),
-        (Some("team"), Some("team,other")),
-    ] {
-        let (ok, stderr) = run_with_namespaces(one, list);
-        assert!(!ok);
-        assert!(
-            stderr.contains("connecting to the cluster"),
-            "{one:?} {list:?}: {stderr}"
-        );
-    }
-}
-
-/// `run` with a `RUN_PODS_FILE` and no cluster to reach.
-#[cfg(feature = "runtime-kubernetes")]
-fn run_with_run_pods_file(file: &std::path::Path) -> (bool, String) {
-    let mut command = operator();
-    command
-        .arg("run")
-        .env_remove("KUBERNETES_SERVICE_HOST")
-        .env_remove("DEFAULT_AGENT_IMAGE")
-        .env("RUN_PODS_FILE", file)
-        .env("KUBECONFIG", "/nonexistent/kubeconfig")
-        .env("HOME", "/nonexistent")
-        .env("HEALTH_ADDR", "127.0.0.1:0")
-        .env("METRICS_ADDR", "127.0.0.1:0");
-    let out = command.output().expect("runs the operator");
-    (
-        out.status.success(),
-        String::from_utf8_lossy(&out.stderr).into_owned(),
-    )
-}
-
-/// The settings the operator chart ships, as the file the chart renders for the operator.
-#[cfg(feature = "runtime-kubernetes")]
-fn chart_settings_file(
-    dir: &std::path::Path,
-    change: impl FnOnce(&mut serde_json::Value),
-) -> std::path::PathBuf {
+fn the_run_pods_settings_of_the_chart_are_the_files_and_their_checks_are_named() {
+    // The chart's `runPods` and `runPodClasses`, as the chart renders them, are a block this file takes.
     let values: serde_json::Value = serde_yaml::from_str(
         &std::fs::read_to_string(concat!(
             env!("CARGO_MANIFEST_DIR"),
@@ -338,8 +290,8 @@ fn chart_settings_file(
         .expect("the chart's values"),
     )
     .expect("YAML");
-    let mut settings = values["runPods"].clone();
-    let object = settings.as_object_mut().expect("a map");
+    let mut run_pods = values["runPods"].clone();
+    let object = run_pods.as_object_mut().expect("a map");
     object.remove("enabled");
     object.remove("priorityClassName");
     object.insert("classes".into(), values["runPodClasses"].clone());
@@ -348,161 +300,65 @@ fn chart_settings_file(
         serde_json::json!("aap-operator-ns-run"),
     );
     object.insert("role".into(), serde_json::json!("aap-operator-run-pods"));
-    change(&mut settings);
-    let path = dir.join("run-pods.yaml");
-    std::fs::write(&path, serde_yaml::to_string(&settings).expect("YAML")).expect("writes");
-    path
-}
 
-#[cfg(feature = "runtime-kubernetes")]
-#[test]
-fn settings_for_run_pods_that_are_not_valid_stop_the_operator_before_it_looks_for_a_cluster() {
-    let dir = std::env::temp_dir().join(format!("aap-cli-run-pods-{}", std::process::id()));
-    std::fs::create_dir_all(&dir).expect("a directory");
-    // A file that is not there, one that is not the settings, and settings that fail their checks: each says what and where.
-    let (ok, stderr) = run_with_run_pods_file(&dir.join("absent.yaml"));
-    assert!(
-        !ok && stderr.contains("RUN_PODS_FILE") && stderr.contains("cannot be read"),
-        "{stderr}"
+    let mut document: serde_json::Value = serde_yaml::from_str(MINIMAL).expect("YAML");
+    document["runPods"] = run_pods.clone();
+    let valid = file("run-pods.yaml", &serde_yaml::to_string(&document).unwrap());
+    let (code, _, stderr) = run(&valid);
+    assert_eq!(code, Some(1), "{stderr}");
+    assert!(stderr.contains("connecting to the cluster"), "{stderr}");
+
+    // A mistake in them names the key: the operator does not start with half the guard.
+    let mut broken = run_pods;
+    broken["quota"]["pods"] = serde_json::json!(0);
+    document["runPods"] = broken;
+    let path = file(
+        "run-pods-broken.yaml",
+        &serde_yaml::to_string(&document).unwrap(),
     );
-    let junk = dir.join("junk.yaml");
-    std::fs::write(&junk, "classes: 3\n").expect("writes");
-    let (ok, stderr) = run_with_run_pods_file(&junk);
-    assert!(
-        !ok && stderr.contains("not the settings of run pods"),
-        "{stderr}"
-    );
-    let unknown = chart_settings_file(&dir, |s| {
-        s["admissionPolicy"] = serde_json::json!({"enabled": false});
-    });
-    let (ok, stderr) = run_with_run_pods_file(&unknown);
-    assert!(
-        !ok && stderr.contains("not the settings of run pods"),
-        "{stderr:?}"
-    );
-    // The egress proxy (D15c): a file from before it (no `egressProxy`) and one that still has the switch the policy lost
-    // are not the settings of run pods; a list that would be empty, an entry that is a bare suffix, and a port that is none are named.
-    let without_proxy = chart_settings_file(&dir, |s| {
-        s.as_object_mut().expect("a map").remove("egressProxy");
-    });
-    let (ok, stderr) = run_with_run_pods_file(&without_proxy);
-    assert!(
-        !ok && stderr.contains("not the settings of run pods"),
-        "{stderr:?}"
-    );
-    let switch = chart_settings_file(&dir, |s| {
-        s["networkPolicy"]["enabled"] = serde_json::json!(false);
-    });
-    let (ok, stderr) = run_with_run_pods_file(&switch);
-    assert!(
-        !ok && stderr.contains("not the settings of run pods"),
-        "no way to run pods without the policy: {stderr:?}"
-    );
-    let bad_proxy = chart_settings_file(&dir, |s| {
-        s["egressProxy"]["allow"] = serde_json::json!([".com"]);
-        s["egressProxy"]["extraAllow"] = serde_json::json!([]);
-        s["egressProxy"]["ports"] = serde_json::json!([0]);
-    });
-    let (ok, stderr) = run_with_run_pods_file(&bad_proxy);
-    assert!(
-        !ok && stderr.contains("egressProxy.allow[0]")
-            && stderr.contains("bare suffix")
-            && stderr.contains("egressProxy.ports"),
-        "every mistake is named: {stderr}"
-    );
-    // The git sandbox (D15d): a file from before it, and one that still has a switch for it, are not the settings of run pods; a
-    // sandbox with no memory limit, a /tmp of zero and no command at once are named.
-    let without_sandbox = chart_settings_file(&dir, |s| {
-        s.as_object_mut().expect("a map").remove("gitSandbox");
-    });
-    let (ok, stderr) = run_with_run_pods_file(&without_sandbox);
-    assert!(
-        !ok && stderr.contains("not the settings of run pods"),
-        "{stderr:?}"
-    );
-    let sandbox_switch = chart_settings_file(&dir, |s| {
-        s["gitSandbox"]["enabled"] = serde_json::json!(false);
-    });
-    let (ok, stderr) = run_with_run_pods_file(&sandbox_switch);
-    assert!(
-        !ok && stderr.contains("not the settings of run pods"),
-        "no way to run pods without the git sandbox: {stderr:?}"
-    );
-    let bad_sandbox = chart_settings_file(&dir, |s| {
-        s["gitSandbox"]["resources"]["limits"] = serde_json::json!({});
-        s["gitSandbox"]["tmpSize"] = serde_json::json!("0Mi");
-        s["gitSandbox"]["maxCommands"] = serde_json::json!(0);
-    });
-    let (ok, stderr) = run_with_run_pods_file(&bad_sandbox);
-    assert!(
-        !ok && stderr.contains("gitSandbox.resources.limits.memory is required")
-            && stderr.contains("gitSandbox.tmpSize")
-            && stderr.contains("gitSandbox.maxCommands"),
-        "every mistake is named: {stderr}"
-    );
-    let invalid = chart_settings_file(&dir, |s| {
-        s["quota"]["pods"] = serde_json::json!(0);
-        s["image"]["digest"] = serde_json::json!("sha256:short");
-    });
-    let (ok, stderr) = run_with_run_pods_file(&invalid);
-    assert!(
-        !ok && stderr.contains("quota.pods") && stderr.contains("image.digest"),
-        "every mistake is named: {stderr}"
-    );
+    let (code, _, stderr) = run(&path);
+    assert_eq!(code, Some(78), "{stderr}");
+    assert!(stderr.contains("runPods.quota.pods"), "{stderr}");
     assert!(!stderr.contains("connecting to the cluster"), "{stderr}");
-    // Valid settings go on to look for a cluster; so does an empty name, which is no run pods.
-    let valid = chart_settings_file(&dir, |_| {});
-    let (ok, stderr) = run_with_run_pods_file(&valid);
-    assert!(
-        !ok && stderr.contains("connecting to the cluster"),
-        "{stderr}"
-    );
-    let (ok, stderr) = run_with_run_pods_file(std::path::Path::new(""));
-    assert!(
-        !ok && stderr.contains("connecting to the cluster"),
-        "{stderr}"
-    );
-    let _ = std::fs::remove_dir_all(&dir);
 }
 
-/// `run` with a value for `AGENT_MAX_ACCESS_TIER` and no cluster to reach.
-#[cfg(feature = "runtime-kubernetes")]
-fn run_with_tier(value: &str) -> (bool, String) {
-    let mut command = operator();
-    command
+/// The variables `run` used to read. The file is the only way in now: a shell cannot change what the operator does, and a
+/// chart cannot either.
+#[test]
+fn the_environment_variables_of_the_old_settings_are_not_read() {
+    let path = file("minimal.yaml", MINIMAL);
+    let out = operator()
         .arg("run")
+        .arg("--config")
+        .arg(&path)
         .env_remove("KUBERNETES_SERVICE_HOST")
-        .env_remove("DEFAULT_AGENT_IMAGE")
-        .env("AGENT_MAX_ACCESS_TIER", value)
-        .env("CACHE_ALLOWED_CLAIMS", "package-cache, other-cache")
         .env("KUBECONFIG", "/nonexistent/kubeconfig")
         .env("HOME", "/nonexistent")
-        .env("HEALTH_ADDR", "127.0.0.1:0")
-        .env("METRICS_ADDR", "127.0.0.1:0");
-    let out = command.output().expect("runs the operator");
-    (
-        out.status.success(),
-        String::from_utf8_lossy(&out.stderr).into_owned(),
-    )
+        // Each was a setting, and each is a value the file would refuse.
+        .env("DEFAULT_AGENT_IMAGE", "ghcr.io/x/y:tag with space")
+        .env("WATCH_NAMESPACE", "Bad_Name")
+        .env("WATCH_NAMESPACES", "Bad_Name")
+        .env("RUN_PODS_FILE", "/nonexistent/run-pods.yaml")
+        .env("HEALTH_ADDR", "not-an-address")
+        .env("AGENT_MAX_ACCESS_TIER", "root")
+        .env("TOOL_PROBE_TIMEOUT_SECS", "0")
+        .env("LEADER_ELECTION_ENABLED", "true")
+        .env("RUST_LOG", "=")
+        .output()
+        .expect("runs the operator");
+    assert_eq!(out.status.code(), Some(1));
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        stderr.contains("connecting to the cluster"),
+        "an old variable changed what the operator did: {stderr}"
+    );
 }
 
-#[cfg(feature = "runtime-kubernetes")]
+#[cfg(not(feature = "runtime-kubernetes"))]
 #[test]
-fn the_access_tier_ceiling_is_one_of_the_four_tiers_and_the_claims_a_list() {
-    // K1: a name that is no tier stops the operator at start, naming the four; the four go on to look for a cluster.
-    let (ok, stderr) = run_with_tier("root");
-    assert!(!ok);
-    assert!(
-        stderr.contains("plan, edits, auto or bypass")
-            && !stderr.contains("connecting to the cluster"),
-        "{stderr}"
-    );
-    for tier in ["plan", "edits", "auto", "bypass"] {
-        let (ok, stderr) = run_with_tier(tier);
-        assert!(!ok);
-        assert!(
-            stderr.contains("connecting to the cluster"),
-            "{tier}: {stderr}"
-        );
-    }
+fn run_without_a_runtime_provider_says_what_to_rebuild_with() {
+    let path = file("no-runtime.yaml", MINIMAL);
+    let (code, _, stderr) = run(&path);
+    assert_eq!(code, Some(1), "{stderr}");
+    assert!(stderr.contains("no runtime provider"), "{stderr}");
 }

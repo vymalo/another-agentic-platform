@@ -140,8 +140,13 @@ fn lost_fields(input: &Value, kept: &Value, path: &str, out: &mut Vec<String>) {
     }
 }
 
-/// The environment variables the operator's messages name, and the flag that is their place here.
-const ENV_FLAGS: [(&str, &str); 4] = [
+/// The settings the operator's messages name — its configuration file's keys since ANR-962, and the environment variables
+/// the messages of an older operator named — and the flag that is their place here.
+const SETTING_FLAGS: [(&str, &str); 8] = [
+    ("defaults.agentImage", "--default-agent-image"),
+    ("defaults.cacheAllowedClaims", "--cache-allowed-claims"),
+    ("defaults.maxAccessTier", "--max-access-tier"),
+    ("runPods", "--run-pods-file"),
     ("DEFAULT_AGENT_IMAGE", "--default-agent-image"),
     ("RUN_PODS_FILE", "--run-pods-file"),
     ("CACHE_ALLOWED_CLAIMS", "--cache-allowed-claims"),
@@ -163,8 +168,8 @@ fn text_of(issue: &ConfigIssue) -> String {
         }
     }
     let mut message = issue.message.clone();
-    for (env, flag) in ENV_FLAGS {
-        if message.contains(env) {
+    for (setting, flag) in SETTING_FLAGS {
+        if message.contains(setting) {
             message.push_str(&format!(" (aapctl: {flag})"));
         }
     }

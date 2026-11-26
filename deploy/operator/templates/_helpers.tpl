@@ -112,11 +112,6 @@ checked or given a right.
 {{- printf "%s-run-pods" (include "aap.fullname" .) | trunc 63 | trimSuffix "-" -}}
 {{- end -}}
 
-{{/* The ConfigMap that holds the operator's settings for run pods (RUN_PODS_FILE). */}}
-{{- define "aap.runPodsSettings" -}}
-{{- printf "%s-run-pods-settings" (include "aap.fullname" .) | trunc 63 | trimSuffix "-" -}}
-{{- end -}}
-
 {{/* The names of the admission policy and its binding, and of the PriorityClass: cluster-scoped, so they carry the namespace as well as the release. */}}
 {{- define "aap.runPodsPolicy" -}}
 {{- printf "%s-%s-run-pods" (include "aap.fullname" .) (include "aap.watchNamespace" .) | trunc 63 | trimSuffix "-" -}}

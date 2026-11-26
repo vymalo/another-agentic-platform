@@ -30,6 +30,27 @@ dropped.
 | `AAP_OTEL_HEADERS_FILE` | ours: a file of `k=v,k2=v2`, at most 4 KiB, **only with an `https` endpoint** (a token is never sent in clear); `host`, `content-type`, `content-length`, `content-encoding`, `traceparent`, `connection`, `transfer-encoding`, `te`, `upgrade`, `proxy-authorization`, `cookie`, `user-agent`, `accept-encoding`, `expect` are refused; the values are marked sensitive and no type prints them |
 | `OTEL_EXPORTER_OTLP_CERTIFICATE` | a PEM bundle that is the exporter's **only** trust (not `SSL_CERT_FILE`) |
 
+### From a configuration file (ANR-962, AD-064)
+
+The operator reads **one configuration file**, and its traces are the `telemetry.otlp` section of it. `OtlpSection`
+(`Deserialize`, camelCase, `deny_unknown_fields`) is that section; `OtlpSection::validate()` says whether the exporter could
+use it **without reading any file it names** (`--check` runs it), and `OtlpSection::settings(default_service, lookup)` returns
+the `TraceSettings`, reading each header from its reference. `start_section(service, version, section)` is `start` for a
+section. `TraceSettings::from_env` stays: `bin/api` and `bin/usage-ingest` still read variables.
+
+| Key | Rule |
+|---|---|
+| `endpoint` | the full URL, used as written (no base-URL form here); absent or empty: off |
+| `headers` | a map of header name to a `SecretRef` — `{ file: /path }` (a mounted Secret, one header per file) or `{ env: NAME }` — each read when the exporter is built; a header needs an `https` endpoint; the rules of the table above apply |
+| `certificate` | a path to a PEM bundle that is the exporter's only trust |
+| `timeout` | milliseconds, 10000 by default, at most 60000 |
+| `sampler`, `samplerRatio` | `always_on` (default), `always_off`, `traceidratio` with a ratio from 0 to 1 |
+| `serviceName` | `[a-z0-9-]{1,63}`; the binary's name by default |
+| `resourceAttributes` | the same closed keys as `OTEL_RESOURCE_ATTRIBUTES` |
+
+A section the exporter cannot use is refused **with the file** (exit 78 in the operator): a deployment wrote it. A file a
+reference names that cannot be read is still a `Started` refusal — one warning, tracing off — because the kubelet resolves it.
+
 `OtlpJson::new(&settings)` reads the two files and builds the client: no redirect followed, no proxy (`HTTPS_PROXY` is not
 read), the timeout above. An answer is read up to 64 KiB; `partialSuccess.rejectedSpans` is counted as dropped and its
 `errorMessage` is read by nobody.

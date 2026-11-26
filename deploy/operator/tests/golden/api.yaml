@@ -167,6 +167,40 @@ data:
       jwksUrl: https://keycloak.example.com/realms/another-agentic/protocol/openid-connect/certs
       rolesClaim: agentic_roles
 ---
+# Source: aap-operator/templates/config.yaml
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: aap-operator
+  namespace: another-agentic-system
+  labels:
+    app.kubernetes.io/name: aap-operator
+    app.kubernetes.io/instance: aap-operator
+    app.kubernetes.io/version: "0.1.0"
+    app.kubernetes.io/managed-by: Helm
+    app.kubernetes.io/part-of: another-agentic-platform
+    helm.sh/chart: aap-operator-0.1.0
+data:
+  config.yaml: |
+    # The configuration of `operator run` (ANR-962, AD-064), rendered by the chart from its values. A typo is refused by the
+    # binary at start, and `render-check.sh` runs `operator run --check` on every golden render. THERE IS NO SECRET IN IT: the
+    # registry's token and the traces' headers are mounted files this file names, and an agent's secret is a reference.
+    version: 1
+    listen:
+      health: 0.0.0.0:8081
+      metrics: 0.0.0.0:9090
+      registry: 0.0.0.0:8080
+    watch:
+      # K6b: every namespace the operator watches, the first being the primary (the API's defaults.namespace, the run pods'
+      # cluster-scoped names). Quoted: a namespace YAML would read as a boolean or a number is still a name.
+      namespaces:
+        - "agents"
+    defaults:
+      # AD-029: the image of an agent whose AgentConfig names none. A new value rolls those agents, and no other.
+      agentImage: "ghcr.io/vymalo/another-adam-rs/coder:sha-9a1fd4e@sha256:c3c178b7d73599f40d53f798616e510346abd3300a622b09b2bc233109f12b44"
+    log:
+      filter: "info"
+---
 # Source: aap-operator/templates/api-role.yaml
 apiVersion: rbac.authorization.k8s.io/v1
 kind: Role
@@ -479,6 +513,9 @@ spec:
       labels:
         app.kubernetes.io/name: aap-operator
         app.kubernetes.io/instance: aap-operator
+      annotations:
+        # The configuration file is read once, at start: a changed file is a new pod (ANR-962).
+        checksum/config: ee8ec4df3ac03bab8d33344b76b222a8fa6ae2e40448752377290f25af7163dd
     spec:
       serviceAccountName: aap-operator
       # The API token is the operator's way in.
@@ -497,24 +534,14 @@ spec:
         - name: operator
           image: "ghcr.io/vymalo/another-agentic-platform/operator:sha-0000000"
           imagePullPolicy: IfNotPresent
-          args: [run]
+          # The file is the only way in (ANR-962): no setting is an environment variable any more.
+          args: [run, --config, /etc/aap-operator/config.yaml]
           env:
-            # K6b: every namespace the operator watches, comma separated (the chart makes the Role and RoleBinding in each).
-            # WATCH_NAMESPACE below is the primary, which must be one of them: it names the cluster-scoped objects and the
-            # API's defaults.namespace.
-            - name: WATCH_NAMESPACES
-              value: "agents"
-            - name: WATCH_NAMESPACE
-              value: "agents"
+            # The downward API's identity of this replica (the reporting instance of Events and the lease's holderIdentity).
             - name: POD_NAME
               valueFrom:
                 fieldRef:
                   fieldPath: metadata.name
-            - name: RUST_LOG
-              value: "info"
-            # AD-029: the image of an agent whose AgentConfig names none. A new value rolls those agents, and no other.
-            - name: DEFAULT_AGENT_IMAGE
-              value: "ghcr.io/vymalo/another-adam-rs/coder:sha-9a1fd4e@sha256:c3c178b7d73599f40d53f798616e510346abd3300a622b09b2bc233109f12b44"
           ports:
             - name: health
               containerPort: 8081
@@ -554,6 +581,16 @@ spec:
             runAsNonRoot: true
             capabilities:
               drop: [ALL]
+          volumeMounts:
+            # The configuration file (ANR-962), read once at start.
+            - name: config
+              mountPath: /etc/aap-operator
+              readOnly: true
+      volumes:
+        - name: config
+          configMap:
+            name: aap-operator
+            defaultMode: 288 # 0440
 ---
 # Source: aap-operator/templates/api-ingress.yaml
 # The edge's route to the API (§60a, "Clients without a web server"). TLS, a check of the JWT and a rate limit per token are the edge's:

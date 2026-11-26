@@ -21,7 +21,8 @@ Included helpers take a dict: .block (the values of the block), .api (true for t
 {{- if or .block.headersSecret.name .block.certificate.configMap -}}true{{- end -}}
 {{- end -}}
 
-{{/* The environment of a container: the variables the binaries read. `.block` is otel or api.otel; `.pod` says whether POD_NAME is the chart's already. */}}
+{{/* The environment of a container: the variables the binaries read. `.block` is api.otel; `.pod` says whether POD_NAME is the chart's already.
+The operator's traces are a section of its configuration file (ANR-962, `aap.otel.config`), not variables. */}}
 {{- define "aap.otel.env" -}}
 {{- $o := .block -}}
 - name: OTEL_EXPORTER_OTLP_TRACES_ENDPOINT
@@ -160,7 +161,26 @@ the component is on, `.dns` whether the block has a DNS rule of its own (the ope
 {{- end -}}
 {{- end -}}
 {{- if and $o.headersSecret (kindIs "map" $o.headersSecret) $o.headersSecret.name (not (hasPrefix "https://" $o.endpoint)) -}}
-{{- fail (printf "%s.headersSecret needs an https endpoint: the headers (a token) would be sent in clear to %s.endpoint, and the binaries refuse that pair too (AAP_OTEL_HEADERS_FILE)" $what $what) -}}
+{{- fail (printf "%s.headersSecret needs an https endpoint: the headers (a token) would be sent in clear to %s.endpoint" $what $what) -}}
+{{- end -}}
+{{- /* ANR-962: the operator's configuration file names the header whose value the Secret's key holds; the API's file is a
+`name=value,...` list, so it has no `header`. */}}
+{{- if kindIs "map" $o.headersSecret -}}
+{{- if .headersInConfig -}}
+{{- $header := get $o.headersSecret "header" -}}
+{{- if and $header (not (regexMatch `^[A-Za-z0-9!#$%&'*+.^_|~-]+$` (toString $header))) -}}
+{{- fail (printf "%s.headersSecret.header: %q is not an HTTP header name" $what (toString $header)) -}}
+{{- end -}}
+{{- range $k, $_ := $o.headersSecret -}}
+{{- if not (has $k (list "name" "key" "header")) -}}
+{{- fail (printf "%s.headersSecret.%s is not a setting: name, key or header" $what $k) -}}
+{{- end -}}
+{{- end -}}
+{{- else -}}
+{{- if get $o.headersSecret "header" -}}
+{{- fail (printf "%s.headersSecret.header is the operator's: its configuration file names the header, and this component's file is a name=value list (remove the key)" $what) -}}
+{{- end -}}
+{{- end -}}
 {{- end -}}
 {{- if not (and (kindIs "slice" $o.ports) $o.ports) -}}
 {{- fail (printf "%s.ports must name at least one port: the collector is reached on nothing else" $what) -}}

@@ -23,13 +23,14 @@ use crate::contract::{self, run_pods as rp};
 use crate::syntax::{is_dns_label, is_dns_subdomain, is_env_name, is_quantity, quantity_nanos};
 
 /// What the deployment says about run pods: the operator chart's `runPods` block, its `runPodClasses`, the
-/// names of the cluster-scoped objects it made, in the file `RUN_PODS_FILE` (`bin/operator/README.md`). An
+/// names of the cluster-scoped objects it made, as the `runPods` block of the operator's configuration file
+/// (`bin/operator/README.md`). An
 /// unknown key is refused. Everything the file does not default is required: the chart writes it all, so the
 /// defaults are in one place.
 ///
 /// A `RunPodSettings` is **checked** by [`validate`](Self::validate); the operator refuses to start with one
 /// that fails, as it refuses a default image with white space in it.
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct RunPodSettings {
     /// The `PriorityClass` of run pods, which the quota is scoped to and the admission policy requires. The
@@ -84,7 +85,7 @@ pub struct RunPodSettings {
 }
 
 /// One size class: the resources of the run container.
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct RunPodClass {
     /// What the container is guaranteed.
@@ -112,7 +113,7 @@ impl RunPodClass {
 }
 
 /// The run container's image.
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct RunImage {
     /// The repository.
@@ -144,7 +145,7 @@ impl RunImage {
 }
 
 /// The quota of one agent's run pods.
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct RunPodQuotaSettings {
     /// A quantity (`8Gi`), counted on the limits of the pods.
@@ -156,7 +157,7 @@ pub struct RunPodQuotaSettings {
 /// What a run pod may reach, deny by default (adam-rs ADR 0042): no ingress; egress to DNS, to the egress proxy and to
 /// `extraEgress`. There is no setting that opens the internet to a run pod, and none that turns the policy off: the
 /// operator chart refuses `networkPolicy.enabled: false`, and a file that still has the key is refused here (an unknown key).
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct RunPodNetworkSettings {
     /// The pod and service CIDRs of the cluster, besides the ranges below: what the proxy never connects to. IPv4.
@@ -180,7 +181,7 @@ pub struct RunPodNetworkSettings {
 /// HTTPS-only forward proxy, from the agent's own coder image. It accepts `CONNECT host:port` to the hosts of the allow-list
 /// and nothing else, resolves the name itself and connects to public IPv4 addresses only. The allow-list is the
 /// **deployment's**: an `AgentConfig` cannot extend it (§60a, D15c, decision 1).
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct EgressProxySettings {
     /// Pods of the proxy, at least 1. With more than one, a PodDisruptionBudget keeps one up through a drain.
@@ -200,7 +201,7 @@ pub struct EgressProxySettings {
 }
 
 /// The resources of a container the operator makes beside the agent's: the egress proxy's, the git sandbox's.
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct ContainerResources {
     /// What the container is guaranteed.
@@ -221,7 +222,7 @@ pub type EgressResources = ContainerResources;
 /// sidecar has no Secret volume, no variable from a Secret, no service-account token (the token is a volume of the coder
 /// container alone), a pid namespace of its own, a read-only root file system and a `/tmp` of its own. It mounts the work
 /// volume at the same path as the coder and runs as the same user. It is on with run pods and has no switch.
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct GitSandboxSettings {
     /// CPU and memory of the sidecar. The memory limit is required: a program that a filter starts is stopped by this limit

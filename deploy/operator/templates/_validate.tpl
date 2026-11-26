@@ -17,7 +17,7 @@ Included from deployment.yaml, which every render has, so they always run.
 {{- end -}}
 {{- end -}}
 {{- /* The operator's traces (slice K5): off by default, and then the block is only checked to be a block. */ -}}
-{{- include "aap.otel.validate" (dict "what" "otel" "block" .Values.otel "policy" .Values.networkPolicy.enabled "dns" true) -}}
+{{- include "aap.otel.validate" (dict "what" "otel" "block" .Values.otel "policy" .Values.networkPolicy.enabled "dns" true "headersInConfig" true) -}}
 {{- /* K7: the replica count is `replicas`; `replicaCount` is the Helm idiom this chart never had. */ -}}
 {{- if hasKey .Values "replicaCount" -}}
 {{- fail "the operator's replica count is `replicas`, not `replicaCount`" -}}

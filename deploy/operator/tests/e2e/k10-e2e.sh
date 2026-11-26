@@ -385,9 +385,9 @@ ok "the catalogue's server is ready and answers /healthz from inside $ns (its ow
 installed=1
 helm_install
 [ "$(jp "deployment/$op" '{.status.readyReplicas}')" = 1 ] || die "the operator has no ready replica"
-[ "$(jp "deployment/$op" '{.spec.template.spec.containers[0].env[?(@.name=="TOOL_PROBE_ENABLED")].value}')" = true ] \
-  || die "the operator is not told to probe (TOOL_PROBE_ENABLED is not true): toolProbe.to was not rendered"
-ok "the operator is installed with toolProbe.to naming the catalogue's pods on 8080 (TOOL_PROBE_ENABLED is true in its Deployment)"
+[ "$(jp "configmap/$op" '{.data["config.yaml"]}' | grep -c '^      enabled: true$')" -eq 1 ] \
+  || die "the operator's file does not turn the probe on (toolProbe.enabled): toolProbe.to was not rendered"
+ok "the operator is installed with toolProbe.to naming the catalogue's pods on 8080 (the file's toolProbe.enabled is true)"
 
 step "2. the tool probe: the provider is accepted, in use, reachable, and its tools are the server's"
 until_ok 120 "the provider to be Accepted" accepted

@@ -19,6 +19,8 @@ aap-trace.workspace = true
 # The exporter's client: the workspace's reqwest 0.12 with its one feature (rustls with ring). Nothing else is turned on:
 # `rustls-tls` would add webpki-roots and the defaults native-tls, and 0.13's `rustls` is aws-lc-rs.
 reqwest.workspace = true
+serde.workspace = true
+schemars.workspace = true
 serde_json.workspace = true
 thiserror.workspace = true
 # Already in the lock file (the binaries log with it): the one line the exporter says when exports start failing. No bridge.

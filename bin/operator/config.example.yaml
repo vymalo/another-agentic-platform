@@ -1,0 +1,112 @@
+# The configuration of `operator run` (ANR-962, AD-064): one YAML document, read at start (`--config`, default
+# /etc/aap-operator/config.yaml). A typo is an error and stops the operator (an unknown key is refused at every level), and so
+# is anything the operator could not work with. `operator run --check` reads it and says so, without a cluster.
+#
+# THERE IS NO SECRET IN THIS FILE, and there is no place for one: the registry's token and the tracing headers are
+# references (`{ file: /path }` of a mounted Secret, or `{ env: NAME }`), and an agent names a Secret key by reference.
+# `POD_NAME`, `POD_NAMESPACE` and `HOSTNAME` are not here: they are the downward API's identity of this replica.
+
+# Required, and 1: a file of another shape is refused rather than read as this one.
+version: 1
+
+# Where the three listeners are. Each needs a port of its own (checked), and the registry's only counts when a token turns
+# it on.
+listen:
+  health: 0.0.0.0:8081
+  metrics: 0.0.0.0:9090
+  registry: 0.0.0.0:8080
+
+# The namespaces to watch, in order: THE FIRST IS THE PRIMARY, which names the cluster-scoped objects of run pods and the
+# API's `defaults.namespace`. Empty: every namespace, which needs a `ClusterRole` the chart does not make.
+watch:
+  namespaces: [another-agentic-system]
+
+# The timers of a pass and how many passes run at once. Each is at least 1.
+reconcile:
+  concurrency: 4
+  timeoutSecs: 60
+  resyncSecs: 300
+  resyncPendingSecs: 15
+
+# The agent registry (GET /registry/v1/agents). NO TOKEN, NO REGISTRY: without `token`, nothing is served on its port and
+# every service is `Listed: False`, reason `RegistryDisabled`.
+registry:
+  # The URL of the registry document itself, sent as its `anchor`. Absent: no anchor.
+  publicUrl: https://registry.example.com/registry/v1/agents
+  # The bearer token, from a mounted Secret (the chart's registry.tokenSecret) or a variable. Read once, at start.
+  token:
+    file: /var/run/secrets/aap/registry/token
+
+# What an agent gets when its AgentConfig names nothing.
+defaults:
+  # The image of an agent that names none (AD-029): the coder image, by tag and digest. Absent: no default, and such a
+  # config is `ConfigInvalid`. A new value rolls every agent that names none, and no other.
+  agentImage: ghcr.io/vymalo/another-adam-rs/coder:sha-9a1fd4e@sha256:c3c178b7d73599f40d53f798616e510346abd3300a622b09b2bc233109f12b44
+  # The RuntimeClass of every agent's own pod (K14a, AD-052), the name of an object the administrator made. Empty: none.
+  agentRuntimeClass: ""
+  # The claims an agent may name as its package cache (K1). Empty: no agent may have one.
+  cacheAllowedClaims: []
+  # The highest access tier an AgentConfig may ask for (K1): plan, edits, auto or bypass.
+  maxAccessTier: auto
+
+# The settings for run pods (slice D15a): the size classes, the run image, the quota, the network policy, the egress proxy
+# and the git sandbox, exactly as the operator chart renders them from `runPods` and `runPodClasses` (with `priorityClass`
+# and `role` naming the objects the chart made). Absent: this operator has no run pods, and an AgentConfig that asks for them
+# is `ConfigInvalid`. See deploy/operator/values.yaml for every key and its documentation; `helm template` with
+# `runPods.enabled=true` prints the block as this file takes it (tests/golden/runpods.yaml).
+# runPods:
+#   priorityClass: aap-operator-agents-run
+#   role: aap-operator-run-pods
+#   ...
+
+# Probe the MCP servers of ToolProviders (K3b, AD-053): `initialize` and `tools/list`, and the reachability and tool names in
+# the provider's status. Off: no request is made and the status has no `Reachable` condition.
+toolProbe:
+  enabled: true
+  # 1 to 60 seconds.
+  timeoutSecs: 5
+
+# What the operator keeps of a deleted agent's database and volumes (`deletionPolicy: Retain`, ANR-770). `0` keeps them for
+# ever and turns the sweep off.
+retention:
+  afterDeleteDays: 90
+
+# Elect one replica to write (K7a), with a coordination.k8s.io/v1 Lease. Every replica keeps its caches and serves; only the
+# holder's passes write. Off: this replica is the only one. `retrySecs < renewSecs < leaseSecs`, each at least 1.
+leaderElection:
+  enabled: false
+  name: aap-operator
+  # Absent: the primary namespace, the first of `watch.namespaces`.
+  namespace: another-agentic-system
+  leaseSecs: 15
+  renewSecs: 10
+  retrySecs: 2
+
+# A `tracing` filter. `info` when absent.
+log:
+  filter: info
+
+# Traces (K5): the OTLP/HTTP JSON exporter's settings, as the OTEL_* variables would say them. Absent: no span is made.
+telemetry:
+  otlp:
+    # The full URL of the collector's traces endpoint, used as written. An http(s) URL with no user name, no credential in
+    # it, no query or fragment.
+    endpoint: https://otel-collector.observability.svc:4318/v1/traces
+    # The headers the collector wants, by name, each read from a mounted Secret (or a variable). A header needs an https
+    # endpoint: a token in clear is a token given away.
+    headers:
+      authorization:
+        file: /var/run/secrets/aap/otel/headers
+    # A PEM bundle that is the exporter's only trust (a private CA), as a path.
+    certificate: /etc/aap/otel/ca/ca.pem
+    # How long an export may take, in milliseconds (1 to 60000). 10000 when absent.
+    timeout: 10000
+    # always_on (the default), always_off or traceidratio (with samplerRatio, 0 to 1).
+    sampler: traceidratio
+    samplerRatio: 0.25
+    # service.name. `aap-operator` when absent.
+    serviceName: aap-operator
+    # Only deployment.environment.name, k8s.cluster.name and service.namespace, values [A-Za-z0-9._-]{1,128}.
+    resourceAttributes:
+      deployment.environment.name: prod
+      k8s.cluster.name: example

@@ -1,0 +1,134 @@
+{{- $tuning := default (dict) .Values.tuning -}}
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ include "aap.fullname" . }}
+  namespace: {{ include "aap.namespaceScalar" .Release.Namespace }}
+  labels:
+    {{- include "aap.labels" . | nindent 4 }}
+data:
+  config.yaml: |
+    # The configuration of `operator run` (ANR-962, AD-064), rendered by the chart from its values. A typo is refused by the
+    # binary at start, and `render-check.sh` runs `operator run --check` on every golden render. THERE IS NO SECRET IN IT: the
+    # registry's token and the traces' headers are mounted files this file names, and an agent's secret is a reference.
+    version: 1
+    listen:
+      health: 0.0.0.0:8081
+      metrics: 0.0.0.0:9090
+      registry: 0.0.0.0:8080
+    watch:
+      # K6b: every namespace the operator watches, the first being the primary (the API's defaults.namespace, the run pods'
+      # cluster-scoped names). Quoted: a namespace YAML would read as a boolean or a number is still a name.
+      namespaces:
+        {{- range $ns := include "aap.watchNamespaces" . | fromJsonArray }}
+        - {{ $ns | quote }}
+        {{- end }}
+    {{- if or $tuning.concurrency $tuning.resyncSecs $tuning.resyncPendingSecs $tuning.reconcileTimeoutSecs (gt (int .Values.replicas) 1) }}
+    reconcile:
+      {{- with $tuning.concurrency }}
+      concurrency: {{ . }}
+      {{- end }}
+      {{- if or $tuning.reconcileTimeoutSecs (gt (int .Values.replicas) 1) }}
+      # K7: with the election on, a pass must finish before the lease margin (the default 4 s is below the 5 s lease - renew);
+      # with one replica the binary's own 60 s applies.
+      timeoutSecs: {{ $tuning.reconcileTimeoutSecs | default 4 }}
+      {{- end }}
+      {{- with $tuning.resyncSecs }}
+      resyncSecs: {{ . }}
+      {{- end }}
+      {{- with $tuning.resyncPendingSecs }}
+      resyncPendingSecs: {{ . }}
+      {{- end }}
+    {{- end }}
+    {{- if include "aap.registrySecretName" . }}
+    registry:
+      {{- with .Values.registry.publicUrl }}
+      publicUrl: {{ . | quote }}
+      {{- end }}
+      # No token, no registry: this reference is what turns it on. A mounted Secret, read once at start.
+      token:
+        file: /var/run/secrets/aap/registry/token
+    {{- end }}
+    {{- if or .Values.defaultAgentImage .Values.agent.runtimeClassName .Values.cacheAllowedClaims (and .Values.maxAccessTier (ne (toString .Values.maxAccessTier) "auto")) }}
+    defaults:
+      {{- with .Values.defaultAgentImage }}
+      # AD-029: the image of an agent whose AgentConfig names none. A new value rolls those agents, and no other.
+      agentImage: {{ . | quote }}
+      {{- end }}
+      {{- with .Values.agent.runtimeClassName }}
+      # K14a (AD-052): the RuntimeClass of every agent's own pod.
+      agentRuntimeClass: {{ . | quote }}
+      {{- end }}
+      {{- with .Values.cacheAllowedClaims }}
+      # K1: the claims an AgentConfig may name as its package cache.
+      cacheAllowedClaims:
+        {{- range . }}
+        - {{ . | quote }}
+        {{- end }}
+      {{- end }}
+      {{- if and .Values.maxAccessTier (ne (toString .Values.maxAccessTier) "auto") }}
+      # K1: the highest access tier an AgentConfig may ask for.
+      maxAccessTier: {{ .Values.maxAccessTier | quote }}
+      {{- end }}
+    {{- end }}
+    {{- if include "aap.runPods" . }}
+    {{- /* networkPolicy.enabled is not a setting any more (deny by default, adam-rs ADR 0042): `true` is tolerated and not written. */}}
+    {{- $s := omit .Values.runPods "enabled" "priorityClassName" "runtimeClassName" }}
+    {{- $s = set $s "networkPolicy" (omit .Values.runPods.networkPolicy "enabled") }}
+    {{- /* K14a (AD-052): the class only when one is named, so that the file (and the digest, and every render) is what it was while empty. */}}
+    {{- with .Values.runPods.runtimeClassName }}
+    {{- $s = set $s "runtimeClassName" . }}
+    {{- end }}
+    {{- $file := merge (dict "priorityClass" (include "aap.runPodsPriorityClass" .) "role" (include "aap.runPodsRole" .) "classes" .Values.runPodClasses) $s }}
+    # Run pods (slice D15a): the size classes, the run image, the quota, the network policy, the egress proxy and the git sandbox,
+    # and the names of the cluster-scoped objects this chart made. No secret: the model key is the agent's.
+    runPods:
+      {{- toYaml $file | nindent 6 }}
+    {{- end }}
+    {{- if .Values.toolProbe.to }}
+    toolProbe:
+      enabled: true
+      timeoutSecs: {{ .Values.toolProbe.timeoutSecs | default 5 }}
+    {{- end }}
+    {{- if hasKey (default dict .Values.retention) "afterDeleteDays" }}
+    retention:
+      # ANR-770: days a deleted agent's retained database and volumes are kept (0: for ever).
+      afterDeleteDays: {{ .Values.retention.afterDeleteDays | int }}
+    {{- end }}
+    {{- if gt (int .Values.replicas) 1 }}
+    # K7: the lease every replica campaigns for; the holder reconciles, the others keep their caches and serve the registry.
+    leaderElection:
+      enabled: true
+      name: {{ include "aap.fullname" . | quote }}
+      namespace: {{ include "aap.watchNamespace" . | quote }}
+      leaseSecs: {{ .Values.leaderElection.leaseSecs }}
+      renewSecs: {{ .Values.leaderElection.renewSecs }}
+      retrySecs: {{ .Values.leaderElection.retrySecs }}
+    {{- end }}
+    log:
+      filter: {{ .Values.logLevel | quote }}
+    {{- if include "aap.otel.on" . }}
+    # Traces (slice K5): the OTLP/HTTP JSON exporter's settings, as the OTEL_* variables would say them. A header needs an https
+    # endpoint, and the headers file holds the value of the header named here (never a `name=value` list).
+    telemetry:
+      otlp:
+        endpoint: {{ .Values.otel.endpoint | quote }}
+        {{- if eq (toString .Values.otel.sampler) "traceidratio" }}
+        sampler: traceidratio
+        samplerRatio: {{ .Values.otel.samplerRatio }}
+        {{- else }}
+        sampler: {{ .Values.otel.sampler | quote }}
+        {{- end }}
+        {{- with .Values.otel.resourceAttributes }}
+        resourceAttributes:
+          {{- toYaml . | nindent 10 }}
+        {{- end }}
+        {{- if .Values.otel.headersSecret.name }}
+        headers:
+          {{ .Values.otel.headersSecret.header | default "authorization" | quote }}:
+            file: /var/run/secrets/aap/otel/headers
+        {{- end }}
+        {{- if .Values.otel.certificate.configMap }}
+        certificate: /etc/aap/otel/ca/ca.pem
+        {{- end }}
+    {{- end }}

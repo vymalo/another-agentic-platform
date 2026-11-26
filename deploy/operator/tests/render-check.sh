@@ -10,8 +10,9 @@
 # (tests/runpods.values.yaml), traces of both on (tests/otel.values.yaml) and two replicas with the leader election on
 # (tests/leader.values.yaml; the others have the API, run pods, traces, the election and the tool probe off, and the first three are
 # equal to what they were before any existed).
-# Also checked: deploy/operator-crds against deploy/crds, and the API's Role against crates/objects-kubernetes/tests/rbac.yaml, the
-# Role that crate is tested under.
+# Also checked: deploy/operator-crds against deploy/crds, the API's Role against crates/objects-kubernetes/tests/rbac.yaml (the
+# Role that crate is tested under), and the configuration file the chart renders for the operator against `operator run --check`
+# (ANR-962: AAP_OPERATOR_BIN names the binary).
 set -eu
 
 here=$(cd "$(dirname "$0")" && pwd)
@@ -132,21 +133,57 @@ check "the Platform API render (tests/api.values.yaml) equals tests/golden/api.y
 check "the run pods render (tests/runpods.values.yaml) equals tests/golden/runpods.yaml" golden runpods -f "$here/runpods.values.yaml"
 check "the leader election render (tests/leader.values.yaml) equals tests/golden/leader.yaml" golden leader -f "$here/leader.values.yaml"
 
+# ---- The configuration file the chart renders is one the operator accepts (ANR-962, AD-064) ---------------------------------
+# The chart renders the operator's file from its values; the binary refuses a key it does not have or a value it cannot work with.
+# `operator run --check` reads no file the configuration names (the token and the headers are mounted in the pod, not here), so the
+# Secret names of a render are enough. Set AAP_OPERATOR_BIN to the built binary (`cargo build --locked -p aap-operator`).
+operator_bin=${AAP_OPERATOR_BIN:-}
+if [ -z "$operator_bin" ] || [ ! -x "$operator_bin" ]; then
+  echo "FAIL AAP_OPERATOR_BIN does not name the operator binary: the configuration the chart renders cannot be checked" >&2
+  fail=1
+fi
+# The config.yaml of the operator's ConfigMap, unindented: the file the pod mounts.
+operator_config() {
+  helm template aap-operator "$chart" --namespace "$ns" "$@" --show-only templates/config.yaml > "$out" || return 1
+  awk '/^  config.yaml: \|$/ { f = 1; next } f { if ($0 ~ /^    /) { sub(/^    /, ""); print } else exit }' "$out"
+}
+check_config() { # check_config <name> [helm args]
+  name=$1; shift
+  if ! operator_config "$@" > "$err"; then echo "FAIL $name: the operator's configuration does not render" >&2; fail=1; return; fi
+  if "$operator_bin" run --check --config "$err" > "$out" 2>&1; then
+    echo "ok   $name: operator run --check"
+  else
+    echo "FAIL $name: the operator refuses the configuration the chart renders: $(head -c 400 "$out")" >&2
+    fail=1
+  fi
+}
+check_config "the default render"
+check_config "the netcup render" -f "$chart/examples/netcup.values.yaml"
+check_config "tests/secret.values.yaml" -f "$here/secret.values.yaml"
+check_config "tests/api.values.yaml" -f "$here/api.values.yaml"
+check_config "tests/runpods.values.yaml" -f "$here/runpods.values.yaml"
+check_config "tests/otel.values.yaml" -f "$here/otel.values.yaml"
+check_config "tests/leader.values.yaml" -f "$here/leader.values.yaml"
+check_config "tests/api-full.values.yaml" -f "$here/api-full.values.yaml"
+check_config "tests/metrics.values.yaml" -f "$here/metrics.values.yaml"
+check_config "tests/e2e/run-pods.values.yaml" -f "$here/e2e/run-pods.values.yaml"
+
 # ---- The default render: no registry, nothing a secret could be in --------------------------------------------------------
 render
 check "no Secret object is rendered (the token is an existing Secret or an ExternalSecret)" lacks '^kind: Secret$'
 check "no token-looking value in the render" lacks '(ghp_|github_pat_|gho_|sk-[A-Za-z0-9]{8}|-----BEGIN|AKIA[0-9A-Z]{16}|xox[bp]-|eyJ[A-Za-z0-9_-]{20})'
 check "no ClusterRole and no ClusterRoleBinding: the operator is namespaced" lacks '^kind: Cluster(Role|RoleBinding)$'
 check "no Ingress, ServiceMonitor or CRD: nothing is routed from outside by default" lacks '^kind: (Ingress|ServiceMonitor|CustomResourceDefinition)$'
-check "no token, no registry: no REGISTRY_TOKEN_FILE, no registry port, no registry Service" \
-  lacks 'REGISTRY_TOKEN_FILE|name: registry|aap-operator-registry'
-check "no token: the pod mounts no volume" dlacks Deployment aap-operator '^      volumes:'
+check "no token, no registry: no registry block in the file, no registry port, no registry Service" \
+  lacks '^    registry:$|name: registry|aap-operator-registry'
+check "no token: the pod mounts the file alone (no Secret volume)" \
+  dhas Deployment aap-operator '^      volumes:$' 'name: aap-operator$' && dlacks Deployment aap-operator 'secret:|configMap:.*run-pods'
 check "no token: ingress is closed, not open (ingress: [])" dhas NetworkPolicy aap-operator '^  ingress: \[\]$'
 check "the metrics Service is there" dhas Service aap-operator-metrics 'port: 9090'
 
 # ---- The default agent image (AD-029) ----------------------------------------------------------------------------------
-check "the default agent image is DEFAULT_AGENT_IMAGE, pinned by tag and digest" \
-  dhas Deployment aap-operator 'name: DEFAULT_AGENT_IMAGE' 'value: "ghcr.io/vymalo/another-adam-rs/coder:[A-Za-z0-9._-]+@sha256:[0-9a-f]{64}"'
+check "the default agent image is defaults.agentImage in the file, pinned by tag and digest" \
+  dhas ConfigMap aap-operator '^      agentImage: "ghcr.io/vymalo/another-adam-rs/coder:[A-Za-z0-9._-]+@sha256:[0-9a-f]{64}"$'
 default_matches_the_kind_end_to_end() {
   # The pin the chart ships is the one the kind end-to-end of the coder runs: moving one means moving, and proving, the other.
   pin=$(awk '/^defaultAgentImage:/ { print $2 }' "$chart/values.yaml")
@@ -154,10 +191,10 @@ default_matches_the_kind_end_to_end() {
 }
 check "the chart's default agent image is the coder image of tests/e2e/coder.yaml, tag and digest" default_matches_the_kind_end_to_end
 render --set defaultAgentImage=
-check "an empty defaultAgentImage renders no DEFAULT_AGENT_IMAGE: the operator has no default" lacks 'DEFAULT_AGENT_IMAGE'
+check "an empty defaultAgentImage renders no agentImage: the operator has no default" lacks 'agentImage'
 other=ghcr.io/vymalo/another-adam-rs/coder:sha-aaaaaaa@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
 render --set "defaultAgentImage=$other"
-check "defaultAgentImage is the value of DEFAULT_AGENT_IMAGE" dhas Deployment aap-operator "value: \"$other\""
+check "defaultAgentImage is defaults.agentImage" dhas ConfigMap aap-operator "agentImage: \"$other\""
 render
 
 # ---- The Deployment -----------------------------------------------------------------------------------------------------
@@ -165,9 +202,15 @@ check "one replica" dhas Deployment aap-operator '^  replicas: 1$'
 check "strategy Recreate (never two reconcilers at once)" dhas Deployment aap-operator '^    type: Recreate$'
 check "the image is a sha-<7 hex> tag of the operator package" \
   dhas Deployment aap-operator 'image: "ghcr.io/vymalo/another-agentic-platform/operator:sha-[0-9a-f]{7}"'
-check "the container runs \`run\`" dhas Deployment aap-operator '^          args: \[run\]$'
-check "WATCH_NAMESPACE is the release's namespace" dhas Deployment aap-operator "value: \"$ns\""
-check "WATCH_NAMESPACES is the one namespace the chart watches by default" dhas Deployment aap-operator "name: WATCH_NAMESPACES" "value: \"$ns\""
+check "the container runs \`run\` on the configuration file, and the file is mounted read-only" \
+  dhas Deployment aap-operator '^          args: \[run, --config, /etc/aap-operator/config.yaml\]$' \
+  && dhas Deployment aap-operator 'name: config' 'mountPath: /etc/aap-operator' 'readOnly: true'
+check "watch.namespaces is the one namespace the chart watches by default (the primary)" dhas ConfigMap aap-operator "^        - \"$ns\"$"
+check "the file is the operator's ConfigMap, and the pod rolls with it (a checksum)" \
+  dhas Deployment aap-operator 'checksum/config: [0-9a-f]{64}' 'name: aap-operator$'
+check "no setting of the old environment is in the pod: POD_NAME (the downward API) and nothing else" \
+  dhas Deployment aap-operator 'name: POD_NAME' \
+  && lacks '(WATCH_NAMESPACE|AAP_|DEFAULT_AGENT_IMAGE|RUN_PODS_FILE|REGISTRY_|TOOL_PROBE|LEADER_ELECTION_|RETENTION_|CACHE_ALLOWED_CLAIMS|AGENT_MAX_ACCESS_TIER|AGENT_RUNTIME_CLASS|RUST_LOG)'
 check "POD_NAME is the pod's name (the reporting instance of Events)" dhas Deployment aap-operator 'fieldPath: metadata.name'
 check "probes: /healthz twice (startup, liveness) and /readyz once, on the health port 8081" \
   dcount Deployment aap-operator 'path: /healthz' 2
@@ -215,10 +258,9 @@ check "storeCnpg=false: no mention of CloudNativePG" lacks 'cnpg'
 render --set replicas=2
 check "two replicas: a rolling update, one at a time" dhas Deployment aap-operator '^  replicas: 2$' 'type: RollingUpdate' 'maxSurge: 1' 'maxUnavailable: 0'
 check "two replicas: a PodDisruptionBudget of one, on the operator's pods" dhas PodDisruptionBudget aap-operator 'maxUnavailable: 1'
-check "two replicas: the election's variables, the lease in the primary namespace, the client-go timers" \
-  dhas Deployment aap-operator 'name: LEADER_ELECTION_ENABLED' 'value: "true"' 'name: LEADER_ELECTION_NAME' 'value: "aap-operator"' \
-    'name: LEADER_ELECTION_NAMESPACE' 'value: "another-agentic-system"' 'name: LEADER_ELECTION_LEASE_SECS' 'value: "15"' \
-    'name: LEADER_ELECTION_RENEW_SECS' 'value: "10"' 'name: LEADER_ELECTION_RETRY_SECS' 'value: "2"'
+check "two replicas: the election's block, the lease in the primary namespace, the client-go timers" \
+  dhas ConfigMap aap-operator '^    leaderElection:$' '^      enabled: true$' '^      name: "aap-operator"$' \
+    '^      namespace: "another-agentic-system"$' '^      leaseSecs: 15$' '^      renewSecs: 10$' '^      retrySecs: 2$'
 check "two replicas: the Role holds the lease's verbs, get update narrowed to the lease and create, and no delete" \
   rules_are "$base_rules
 $cnpg_rule
@@ -235,10 +277,11 @@ render
 check "one replica (the default): no PodDisruptionBudget and no lease rule" lacks '^kind: PodDisruptionBudget$|coordination.k8s.io'
 render -f "$here/leader.values.yaml"
 check "the leader election's values render two replicas and the PDB" dhas Deployment aap-operator '^  replicas: 2$' && dhas PodDisruptionBudget aap-operator 'maxUnavailable: 1'
-check "the leader election's values cap a pass at 4 s, below leaseSecs - renewSecs" dhas Deployment aap-operator 'name: AAP_RECONCILE_TIMEOUT_SECS' 'value: "4"'
+check "the leader election's values cap a pass at 4 s, below leaseSecs - renewSecs" dhas ConfigMap aap-operator '^      timeoutSecs: 4$'
 render -f "$here/e2e/leader.values.yaml"
 check "the leader election's end-to-end values render two replicas, the PDB and the lease in its namespace" \
-  dhas Deployment aap-operator '^  replicas: 2$' 'value: "aap-e2e-leader"' && dhas PodDisruptionBudget aap-operator 'maxUnavailable: 1'
+  dhas Deployment aap-operator '^  replicas: 2$' && dhas ConfigMap aap-operator '^      namespace: "aap-e2e-leader"$' \
+  && dhas PodDisruptionBudget aap-operator 'maxUnavailable: 1'
 render
 render --set serviceAccount.create=false --set serviceAccount.name=elsewhere
 check "serviceAccount.create=false: no ServiceAccount is made" lacks '^kind: ServiceAccount$'
@@ -249,21 +292,21 @@ check "serviceAccount.create=false: the pod runs as it" dhas Deployment aap-oper
 # ---- The registry: only with a token --------------------------------------------------------------------------------------
 render -f "$here/secret.values.yaml"
 check "a token Secret: the registry Service is ClusterIP on 8080" dhas Service aap-operator-registry 'type: ClusterIP' 'port: 8080'
-check "a token Secret: the token is a file, mounted read-only, from the Secret and the key named" \
-  dhas Deployment aap-operator 'value: /var/run/secrets/aap/registry/token' 'secretName: aap-registry-token' 'key: bearer' 'readOnly: true' \
-  'path: token'
+check "a token Secret: the file names it, and it is mounted read-only from the Secret and the key named" \
+  dhas ConfigMap aap-operator '^      token:$' '^        file: /var/run/secrets/aap/registry/token$' \
+  && dhas Deployment aap-operator 'secretName: aap-registry-token' 'key: bearer' 'readOnly: true' 'path: token' \
+    'mountPath: /var/run/secrets/aap/registry'
 check "a token Secret: the file is readable by the group only (0440), and the pod has that group" \
   dhas Deployment aap-operator 'defaultMode: 288' 'fsGroup: 65532'
-check "the token is never an environment variable" lacks 'REGISTRY_TOKEN$'
-check "registry.publicUrl is REGISTRY_PUBLIC_URL" dhas Deployment aap-operator 'https://registry.example.com/registry/v1/agents'
+check "the token is never an environment variable" lacks 'REGISTRY_TOKEN'
+check "registry.publicUrl is the file's publicUrl" dhas ConfigMap aap-operator '^      publicUrl: "https://registry.example.com/registry/v1/agents"$'
 subject_in_release_ns() { doc RoleBinding aap-operator | grep -A3 'kind: ServiceAccount' | grep -q "namespace: $ns"; }
-check "WATCH_NAMESPACE follows watchNamespace" dhas Deployment aap-operator 'value: "agents"'
-check "WATCH_NAMESPACES follows the one namespace too" dhas Deployment aap-operator 'name: WATCH_NAMESPACES' 'value: "agents"'
+check "watch.namespaces follows watchNamespace, quoted" dhas ConfigMap aap-operator '^        - "agents"$'
 check "the Role and the binding are in the watched namespace" dhas Role aap-operator 'namespace: agents'
 check "the binding too" dhas RoleBinding aap-operator 'namespace: agents'
 check "the subject stays the release's service account" subject_in_release_ns
-check "tuning keys are the variables of \`run\`" \
-  dhas Deployment aap-operator 'AAP_CONCURRENCY' 'AAP_RESYNC_SECS' 'AAP_RESYNC_PENDING_SECS'
+check "tuning keys are the reconcile block of the file" \
+  dhas ConfigMap aap-operator '^      concurrency: 8$' '^      resyncSecs: 600$' '^      resyncPendingSecs: 10$'
 check "imagePullSecrets are passed on" dhas Deployment aap-operator 'name: ghcr-pull'
 check "the NetworkPolicy has Ingress and Egress, and ingress is the registry's peers and the scrapers, on their ports" \
   dhas NetworkPolicy aap-operator '^    - Ingress$' '^    - Egress$' 'port: 8080' 'port: 9090'
@@ -285,8 +328,7 @@ k6a_two() {
   dcount Role aap-operator '^  namespace: team-a$' 1 && dcount Role aap-operator '^  namespace: team-b$' 1 \
     && dcount RoleBinding aap-operator '^  namespace: team-a$' 1 && dcount RoleBinding aap-operator '^  namespace: team-b$' 1 \
     && dhas RoleBinding aap-operator 'namespace: another-agentic-system' \
-    && dhas Deployment aap-operator 'value: "team-a"' \
-    && dhas Deployment aap-operator 'name: WATCH_NAMESPACES' 'value: "team-a,team-b"' \
+    && dhas ConfigMap aap-operator '^        - "team-a"$' '^        - "team-b"$' \
     && lacks '^kind: ClusterRole$' && lacks '^kind: ClusterRoleBinding$'
 }
 check "watchNamespaces: one Role and one RoleBinding per namespace, the same rules, the binding to the release's service account, and no ClusterRole" k6a_two
@@ -302,13 +344,13 @@ k6a_runpods_two() {
   render --set runPods.enabled=true --set-json 'watchNamespaces=["team-a","team-b"]' || return 1
   [ "$(doc Role aap-operator-run-pods | grep -c '^kind: Role$')" -eq 2 ] || return 1
   [ "$(doc Role aap-operator | grep -c 'resourceNames: \[aap-operator-run-pods\]')" -eq 2 ] || return 1
-  [ "$(doc ConfigMap aap-operator-run-pods-settings | grep -c '^kind: ConfigMap$')" -eq 1 ] || return 1
+  [ "$(doc ConfigMap aap-operator | grep -c '^    runPods:$')" -eq 1 ] || return 1
   dcount Role aap-operator-run-pods '^  namespace: team-a$' 1 && dcount Role aap-operator-run-pods '^  namespace: team-b$' 1 \
     && dhas ValidatingAdmissionPolicyBinding aap-operator-team-a-run-pods '- team-a' '- team-b' \
     && [ "$(binding_namespace_selector aap-operator-team-a-run-pods | grep -c 'matchLabels')" -eq 0 ] \
     && [ -n "$(doc Role aap-operator)" ] \
     && [ "$(doc Role aap-operator | awk '/^  namespace: / { print $2 }' | sort)" = "$(binding_namespace_selector aap-operator-team-a-run-pods | awk '/^            - / { print $2 }' | sort)" ] \
-    && dhas ConfigMap aap-operator-run-pods-settings '^  namespace: another-agentic-system$' \
+    && dhas ConfigMap aap-operator '^  namespace: another-agentic-system$' \
     && dhas PriorityClass aap-operator-team-a-run 'kind: PriorityClass'
 }
 check "watchNamespaces with run pods on: the Role of run pods in each namespace, the operator's bind in each, the binding over both, and the settings once in the release" k6a_runpods_two
@@ -327,10 +369,13 @@ watch_namespaces_too_long() {
 check "watchNamespaces: a name longer than 63 characters is refused" watch_namespaces_too_long
 render --set watchNamespaces=null
 check "watchNamespaces: null is no list, the release's namespace" dhas Role aap-operator '^  namespace: another-agentic-system$'
-# The value of the operator's WATCH_NAMESPACES variable alone: a pattern on the whole Deployment cannot tell it from
-# WATCH_NAMESPACE, which is the same string when one namespace is watched.
+# The names of the file's watch.namespaces list, comma separated: a pattern on the whole ConfigMap cannot tell the list from
+# the other quoted names of the file.
 watch_namespaces_value() {
-  awk '/- name: WATCH_NAMESPACES$/{getline; sub(/^[[:space:]]*value: /, ""); print}' "$out"
+  doc ConfigMap aap-operator | awk '
+    /^      namespaces:$/ { f = 1; next }
+    f && /^        - / { sub(/^        - /, ""); printf "%s%s", sep, $0; sep = ","; next }
+    f { exit }'
 }
 yaml_ambiguous_names() {
   helm template aap-operator "$chart" --namespace on --set-json 'watchNamespaces=["on","2024","agents"]' > "$out" || return 1
@@ -339,7 +384,7 @@ yaml_ambiguous_names() {
     && dcount Role aap-operator '^  namespace: agents$' 1 \
     && dhas RoleBinding aap-operator '^    namespace: "on"$' \
     && dlacks Role aap-operator '^  namespace: on$' \
-    && [ "$(watch_namespaces_value)" = '"on,2024,agents"' ] || return 1
+    && [ "$(watch_namespaces_value)" = '"on","2024","agents"' ] || return 1
   # One ambiguous namespace alone: the whole value is `on` to YAML 1.1 unless it is quoted, and an environment value
   # that is a boolean is refused by the API server (the same reason the Role's namespace is quoted above).
   helm template aap-operator "$chart" --namespace on --set-json 'watchNamespaces=["on"]' > "$out" || return 1
@@ -351,8 +396,7 @@ check "namespaces that YAML would read as a boolean or a number are quoted (on, 
 k6b_namespaces() {
   helm template aap-operator "$chart" --namespace aap-e2e-ns-ops -f "$here/e2e/namespaces.values.yaml" \
     --set-json 'watchNamespaces=["aap-e2e-ns-a","aap-e2e-ns-b"]' > "$out" || return 1
-  dhas Deployment aap-operator 'name: WATCH_NAMESPACES' 'value: "aap-e2e-ns-a,aap-e2e-ns-b"' \
-    && dhas Deployment aap-operator 'name: WATCH_NAMESPACE' 'value: "aap-e2e-ns-a"' \
+  dhas ConfigMap aap-operator '^        - "aap-e2e-ns-a"$' '^        - "aap-e2e-ns-b"$' \
     && dcount Role aap-operator '^  namespace: aap-e2e-ns-a$' 1 \
     && dcount Role aap-operator '^  namespace: aap-e2e-ns-b$' 1 \
     && dlacks Role aap-operator '^  namespace: aap-e2e-ns-ops$' \
@@ -401,7 +445,7 @@ all_api_objects() {
 }
 check "api on: a Deployment, Service, ServiceAccount, Role, RoleBinding, ConfigMap, NetworkPolicy and Ingress of the API" all_api_objects
 check "api on: the operator's Deployment is the operator's (one replica, Recreate, the namespace of tests/api.values.yaml)" \
-  dhas Deployment aap-operator '^  replicas: 1$' '^    type: Recreate$' 'value: "agents"'
+  dhas Deployment aap-operator '^  replicas: 1$' '^    type: Recreate$' && dhas ConfigMap aap-operator '^        - "agents"$'
 
 # The pods of the two components never select each other: the operator's selectors (name, instance) match no API pod.
 check "api: the API's pods have a name label of their own (aap-operator-api) and the component label" \
@@ -663,12 +707,12 @@ render
 
 # ---- K1: what the deployment allows an AgentConfig --------------------------------------------------------------------------
 render
-check "K1: by default the operator is told no cache claim and no ceiling (the pod's environment is what it was)" lacks 'CACHE_ALLOWED_CLAIMS|AGENT_MAX_ACCESS_TIER'
+check "K1: by default the file names no cache claim and no ceiling" lacks 'cacheAllowedClaims|maxAccessTier'
 render --set 'cacheAllowedClaims={package-cache,other-cache}' --set maxAccessTier=edits
-check "K1: cacheAllowedClaims and maxAccessTier become the operator's CACHE_ALLOWED_CLAIMS and AGENT_MAX_ACCESS_TIER" \
-  has_all 'name: CACHE_ALLOWED_CLAIMS' 'value: "package-cache,other-cache"' 'name: AGENT_MAX_ACCESS_TIER' 'value: "edits"'
+check "K1: cacheAllowedClaims and maxAccessTier become the file's cacheAllowedClaims and maxAccessTier" \
+  has_all '^      cacheAllowedClaims:$' '^        - "package-cache"$' '^        - "other-cache"$' '^      maxAccessTier: "edits"$'
 render --set maxAccessTier=auto
-check "K1: a ceiling of auto renders nothing" lacks 'AGENT_MAX_ACCESS_TIER'
+check "K1: a ceiling of auto renders nothing" lacks 'maxAccessTier'
 check "K1: an access tier that is not one is refused" refused 'maxAccessTier must be plan, edits, auto or bypass' --set maxAccessTier=root
 check "K1: a cache claim that is not a claim name is refused" refused 'is not the name of a PersistentVolumeClaim' --set 'cacheAllowedClaims={Not A Name}'
 render
@@ -690,7 +734,7 @@ check "with the election on, the probe's budget must fit the pass" refused 'tool
   --set-json 'toolProbe.to=[{"namespaceSelector":{"matchLabels":{"a":"b"}}}]' \
   --set-json 'toolProbe.dns.to=[{"namespaceSelector":{"matchLabels":{"a":"b"}}}]' --set toolProbe.timeoutSecs=5
 render --set replicas=2 --set tuning=null
-check "tuning: null is the defaults, not a nil dereference" dhas Deployment aap-operator 'name: AAP_RECONCILE_TIMEOUT_SECS' 'value: "4"'
+check "tuning: null is the defaults, not a nil dereference" dhas ConfigMap aap-operator '^      timeoutSecs: 4$'
 render
 check "an empty image tag is refused" refused 'image.tag is required' --set image.tag=
 check "the latest tag is refused" refused 'must not be latest' --set image.tag=latest
@@ -958,23 +1002,23 @@ e2e_issuer() {
 }
 check "e2e: the issuer is the runner's address, and the policy's third egress rule reaches exactly it" e2e_issuer
 e2e_probe() {
-  dhas Deployment aap-operator 'name: TOOL_PROBE_ENABLED' 'value: "true"' 'name: TOOL_PROBE_TIMEOUT_SECS' 'value: "5"' \
+  dhas ConfigMap aap-operator '^    toolProbe:$' '^      enabled: true$' '^      timeoutSecs: 5$' \
     && all_of "$(op_egress_rule 3)" 'cidr: 172.18.0.1/32' 'port: 40123$' '^      to:'
 }
 check "e2e: the operator probes the stub MCP server on the runner (K3b): the chart turns it on and its policy reaches exactly that address and port" e2e_probe
 # Retention of a finished agent's store: a setting only a deployment sets, so the default render names no variable.
 # The later checks read the render in $out that precedes these, so each puts it back.
-retention_default_off() { keep=$(mktemp); cp "$out" "$keep"; render && lacks 'RETENTION_AFTER_DELETE_DAYS'; r=$?; cp "$keep" "$out"; rm -f "$keep"; return $r; }
-check "retention: by default the operator gets no RETENTION_AFTER_DELETE_DAYS (the setting is off unless a deployment sets it)" retention_default_off
+retention_default_off() { keep=$(mktemp); cp "$out" "$keep"; render && lacks 'afterDeleteDays'; r=$?; cp "$keep" "$out"; rm -f "$keep"; return $r; }
+check "retention: by default the file names no afterDeleteDays (the setting is off unless a deployment sets it)" retention_default_off
 retention_set() {
   keep=$(mktemp); cp "$out" "$keep"
   retention_set_asserts; r=$?; cp "$keep" "$out"; rm -f "$keep"; return $r
 }
 retention_set_asserts() {
-  render --set retention.afterDeleteDays=30 && dhas Deployment aap-operator 'name: RETENTION_AFTER_DELETE_DAYS' 'value: "30"' \
-    && render --set retention.afterDeleteDays=0 && dhas Deployment aap-operator 'name: RETENTION_AFTER_DELETE_DAYS' 'value: "0"'
+  render --set retention.afterDeleteDays=30 && dhas ConfigMap aap-operator '^    retention:$' '^      afterDeleteDays: 30$' \
+    && render --set retention.afterDeleteDays=0 && dhas ConfigMap aap-operator '^      afterDeleteDays: 0$'
 }
-check "retention: retention.afterDeleteDays renders RETENTION_AFTER_DELETE_DAYS as a quoted number (30, and 0 which keeps for ever)" retention_set
+check "retention: retention.afterDeleteDays is the file's afterDeleteDays (30, and 0 which keeps for ever)" retention_set
 e2e_probe_values_in_script() {
   awk '/^toolProbe:$/ { t = 1 } t && /cidr: \$host_addr\/32/ { c = 1 } t && /ports: \[\$mcp_port\]/ { p = 1 } t && /^EOF$/ { exit } END { exit !(c && p) }' "$here/e2e/api-e2e.sh" || return 1
   grep -q 'aap-tool-probe --example test-mcp' "$here/e2e/api-e2e.sh" \
@@ -1006,7 +1050,7 @@ k10_render() {
 if ! k10_render 2> "$err"; then echo "FAIL k10: the values of the tool catalogue end-to-end do not render: $(head -c 400 "$err")"; fail=1; fi
 check "k10: the values of the tool catalogue end-to-end render" has 'kind: Deployment'
 k10_probe() {
-  dhas Deployment aap-operator 'name: TOOL_PROBE_ENABLED' 'value: "true"' 'name: TOOL_PROBE_TIMEOUT_SECS' 'value: "5"' \
+  dhas ConfigMap aap-operator '^    toolProbe:$' '^      enabled: true$' '^      timeoutSecs: 5$' \
     && all_of "$(op_egress_rule 3)" 'agents.vymalo.com/tool-catalogue: "true"' 'port: 8080$' '^      to:' \
     && all_of "$(op_egress_rule 2)" 'port: 53$' 'k8s-app: kube-dns'
 }
@@ -1043,7 +1087,8 @@ check "chain: the values of the whole-chain end-to-end render, with the API on" 
 # The operator serves its registry with the token of the script's own Secret (the orchestrator reads the same Secret as a file).
 chain_registry() {
   dhas Service aap-operator-registry 'port: 8080' \
-    && dhas Deployment aap-operator 'name: REGISTRY_TOKEN_FILE' 'secretName: e2e-registry-token' '- key: token'
+    && dhas ConfigMap aap-operator '^        file: /var/run/secrets/aap/registry/token$' \
+    && dhas Deployment aap-operator 'secretName: e2e-registry-token' '- key: token'
 }
 check "chain: the operator serves the registry (Service on 8080) with the token of the Secret e2e-registry-token, key token" chain_registry
 # Only the pods the script labels may read it: the orchestrator's pod (the label is in its manifest too: below) and the script's curl pod.
@@ -1105,7 +1150,7 @@ check "chain: the script's namespace, label, audience and Secrets are the ones t
 # back; the collector's manifest is pinned by tag and digest on one line, in one file, and is the collector the script's steps 6b and 7 read; and the
 # collector's log is in the scan for the secrets and the tokens in step 7.
 chain_otel_values() {
-  dhas Deployment aap-operator 'value: "http://e2e-otel-collector\.aap-e2e-chain\.svc:4318/v1/traces"' 'deployment.environment.name=e2e' \
+  dhas ConfigMap aap-operator '^        endpoint: "http://e2e-otel-collector\.aap-e2e-chain\.svc:4318/v1/traces"$' 'deployment.environment.name: e2e' \
     && dhas Deployment aap-operator-api 'value: "http://e2e-otel-collector\.aap-e2e-chain\.svc:4318/v1/traces"' 'deployment.environment.name=e2e' \
     && all_of "$(op_egress_rule 3)" 'port: 4318' 'app.kubernetes.io/name: e2e-otel-collector' \
     && all_of "$(api_egress_rule 4)" 'port: 4318' 'app.kubernetes.io/name: e2e-otel-collector'
@@ -1162,7 +1207,7 @@ check "api-e2e: step 6b (aapctl) is before step 7, passes its token in the envir
 
 # ---- Run pods (slice D15a): off by default, and then not a trace; on, exactly these rights and this guard ---------------------------
 # What a render with run pods off must not contain, anywhere: an object, a variable, a right, a mount, a key of the API's file.
-run_pods_traces='run-pods|RUN_PODS_FILE|PriorityClass|ValidatingAdmissionPolicy|runPodSizeClasses|serviceaccounts|resourcequotas|rolebindings|checksum/run-pods|egressProxy|adam-egress|gitSandbox|adam-git-sandbox|GIT_SANDBOX'
+run_pods_traces='run-pods|runPods|PriorityClass|ValidatingAdmissionPolicy|runPodSizeClasses|serviceaccounts|resourcequotas|rolebindings|egressProxy|adam-egress|gitSandbox|adam-git-sandbox|GIT_SANDBOX'
 render
 check "run pods off (the default): nothing of them is rendered, in any object" lacks "$run_pods_traces"
 render -f "$chart/examples/netcup.values.yaml"
@@ -1176,7 +1221,7 @@ check "run pods off: their values are not checked and not rendered, whatever the
 
 render -f "$here/runpods.values.yaml"
 run_pods_objects() {
-  dhas ConfigMap aap-operator-run-pods-settings 'namespace: another-agentic-system' 'settings.yaml' \
+  dhas ConfigMap aap-operator 'namespace: another-agentic-system' '^    runPods:$' \
     && dhas Role aap-operator-run-pods 'namespace: agents' \
     && dhas PriorityClass aap-operator-agents-run 'kind: PriorityClass' \
     && dhas ValidatingAdmissionPolicy aap-operator-agents-run-pods 'kind: ValidatingAdmissionPolicy' \
@@ -1227,19 +1272,20 @@ check "run pods on: the Role of run pods has no right on Secrets, ConfigMaps, se
 check "run pods on: no RoleBinding of the Role of run pods is rendered: the operator makes one per agent" \
   lacks 'roleRef:[[:space:]]+(apiGroup: rbac.authorization.k8s.io[[:space:]]+)?kind: Role[[:space:]]+name: aap-operator-run-pods'
 
-# The Deployment reads the settings once, at start: a file, mounted read-only, and a change to it is a new pod.
+# The settings are the file's runPods block, read once at start: a change to it is a new pod (the file's checksum).
 run_pods_deployment() {
-  dhas Deployment aap-operator 'name: RUN_PODS_FILE' 'value: /etc/aap/run-pods/settings.yaml' 'name: run-pods' 'mountPath: /etc/aap/run-pods' 'readOnly: true' \
-    'name: aap-operator-run-pods-settings' 'checksum/run-pods: [0-9a-f]{64}'
+  dhas ConfigMap aap-operator '^    runPods:$' \
+    && dhas Deployment aap-operator '^          args: \[run, --config, /etc/aap-operator/config.yaml\]$' 'checksum/config: [0-9a-f]{64}' \
+    && dlacks Deployment aap-operator 'RUN_PODS_FILE|run-pods/settings'
 }
-check "run pods on: the operator reads RUN_PODS_FILE from the ConfigMap, mounted read-only, and rolls with it (a checksum)" run_pods_deployment
+check "run pods on: the settings are the file's runPods block, and the pod rolls with the file (a checksum)" run_pods_deployment
 check "run pods on: the operator's pod is as locked down as before (non-root, read-only root, no capability)" \
   dhas Deployment aap-operator 'runAsUser: 65532' 'readOnlyRootFilesystem: true' 'drop: \[ALL\]' 'allowPrivilegeEscalation: false'
 
 # The settings: the operator's own file, with what values.yaml says, and the names of the objects of this chart.
 run_pods_settings() {
-  dhas ConfigMap aap-operator-run-pods-settings '^    priorityClass: aap-operator-agents-run$' '^    role: aap-operator-run-pods$' '^      large:$' '^      standard:$' \
-    '^      limitsMemory: 16Gi$' '^      pods: 6$' '^      - 10.42.0.0/16$' 'RUSTFLAGS: -C debuginfo=0' 'image: *$' \
+  dhas ConfigMap aap-operator '^      priorityClass: aap-operator-agents-run$' '^      role: aap-operator-run-pods$' '^        large:$' '^        standard:$' \
+    '^        limitsMemory: 16Gi$' '^        pods: 6$' '^        - 10.42.0.0/16$' 'RUSTFLAGS: -C debuginfo=0' 'image: *$' \
     'repository: ghcr.io/vymalo/another-agentic-images/workspace' 'digest: sha256:[0-9a-f]{64}'
 }
 check "run pods on: the settings hold the names of the PriorityClass and the Role, the classes (large and standard), the quota, the CIDR and the variable" run_pods_settings
@@ -1247,12 +1293,12 @@ check "run pods on: the settings hold the names of the PriorityClass and the Rol
 # objects are the operator's, per agent (aap-runtime-kubernetes): none is rendered here, and the operator's Role gains nothing for it (Deployments, Services,
 # ConfigMaps, NetworkPolicies and PodDisruptionBudgets were its rights already, and ServiceAccounts came with run pods).
 run_pods_egress_proxy() {
-  dhas ConfigMap aap-operator-run-pods-settings '^    egressProxy:$' '^      - registry.npmjs.org$' '^      - pypi.org$' '^      - files.pythonhosted.org$' '^      - crates.io$' \
-    '^      - index.crates.io$' '^      - static.crates.io$' '^      - proxy.golang.org$' '^      - sum.golang.org$' '^      - github.com$' '^      - codeload.github.com$' \
-    '^      - objects.githubusercontent.com$' '^      - release-assets.githubusercontent.com$' '^      - pub.dev$' \
-    '^      extraAllow:$' '^      - artifacts.example.com$' '^      extraNoProxy:$' '^      - models.internal$' '^      replicas: 3$' '^      - 443$' '^      - 8443$' \
+  dhas ConfigMap aap-operator '^      egressProxy:$' '^        - registry.npmjs.org$' '^        - pypi.org$' '^        - files.pythonhosted.org$' '^        - crates.io$' \
+    '^        - index.crates.io$' '^        - static.crates.io$' '^        - proxy.golang.org$' '^        - sum.golang.org$' '^        - github.com$' '^        - codeload.github.com$' \
+    '^        - objects.githubusercontent.com$' '^        - release-assets.githubusercontent.com$' '^        - pub.dev$' \
+    '^        extraAllow:$' '^        - artifacts.example.com$' '^        extraNoProxy:$' '^        - models.internal$' '^        replicas: 3$' '^        - 443$' '^        - 8443$' \
     'cpu: 25m' 'memory: 32Mi' 'memory: 256Mi' \
-    && dlacks ConfigMap aap-operator-run-pods-settings 'storage.googleapis.com'
+    && dlacks ConfigMap aap-operator 'storage.googleapis.com'
 }
 check "run pods on: the settings hold the egress proxy: the coder chart's allow-list, the extra host, the names that bypass it, three replicas, two ports and the resources" run_pods_egress_proxy
 check "run pods on: the chart renders no object of the egress proxy (the operator makes one per agent) and the operator's Role has no right more for it" \
@@ -1261,18 +1307,18 @@ check "run pods on: the chart renders no object of the egress proxy (the operato
 # commands), written as the operator reads them. The sidecar itself is the operator's, per agent, in the coder's pod (aap-domain, aap-runtime-kubernetes): no
 # object of it is rendered here, and the operator's Role gains nothing for it (it is the pod spec of a StatefulSet it applied already).
 run_pods_git_sandbox() {
-  dhas ConfigMap aap-operator-run-pods-settings '^    gitSandbox:$' '^      maxCommands: 32$' '^      tmpSize: 128Mi$' \
-    && [ "$(doc ConfigMap aap-operator-run-pods-settings | sed -n '/^    gitSandbox:$/,/^    [a-z]/p' | sed '$d' | tr -d '\n ')" \
+  dhas ConfigMap aap-operator '^      gitSandbox:$' '^        maxCommands: 32$' '^        tmpSize: 128Mi$' \
+    && [ "$(doc ConfigMap aap-operator | sed -n '/^      gitSandbox:$/,/^      [a-z]/p' | sed '$d' | tr -d '\n ')" \
       = 'gitSandbox:maxCommands:32resources:limits:memory:2Girequests:cpu:100mmemory:128MitmpSize:128Mi' ]
 }
 check "run pods on: the settings hold the git sandbox: its resources (the memory limit of this render, the coder chart's requests), the size of its /tmp and the number of commands, and no switch" run_pods_git_sandbox
 check "run pods on: the chart renders no object of the git sandbox (the operator puts it in the coder's pod) and the operator's Role has no right more for it" \
   lacks 'adam-git|git-sandbox|kube-api-access'
 check "run pods on: the run image is pinned by tag and digest, and the tag is not latest" \
-  dhas ConfigMap aap-operator-run-pods-settings 'tag: [0-9A-Za-z._-]+$' 'digest: sha256:[0-9a-f]{64}$'
+  dhas ConfigMap aap-operator 'tag: [0-9A-Za-z._-]+$' 'digest: sha256:[0-9a-f]{64}$'
 settings_hold_no_secret() {
   # The data only: the comment above the object says there is none.
-  ! doc ConfigMap aap-operator-run-pods-settings | grep -v '^#' | grep -Eiq 'secret|token|password|MODEL_API_KEY|apikey'
+  ! doc ConfigMap aap-operator | grep -v '^ *#' | grep -Eiq 'secret|token|password|MODEL_API_KEY|apikey'
 }
 check "run pods on: the settings are a ConfigMap and hold no secret, no token and not the model key" settings_hold_no_secret
 
@@ -1330,17 +1376,17 @@ check "the admission test is a shell script sh can read" sh -n "$here/run-pods-a
 
 # ---- K14a (AD-052): a RuntimeClass for run pods and for the agents' own pods, empty by default and then not a trace -----------------
 # Empty (the goldens and every render above): no variable, no key of the settings, no tenth rule of the policy.
-check "a RuntimeClass named nowhere: no AGENT_RUNTIME_CLASS and no runtimeClassName in any object" lacks 'AGENT_RUNTIME_CLASS|runtimeClassName|RuntimeClass'
+check "a RuntimeClass named nowhere: no agentRuntimeClass and no runtimeClassName in any object" lacks 'agentRuntimeClass|runtimeClassName|RuntimeClass'
 # The agents' pods: the deployment's own variable, and nothing of run pods.
 render --set agent.runtimeClassName=gvisor
-check "agent.runtimeClassName: the operator's Deployment gets AGENT_RUNTIME_CLASS, and no run pods object appears" \
-  dhas Deployment aap-operator 'name: AGENT_RUNTIME_CLASS' 'value: "gvisor"' \
-  && lacks 'RUN_PODS_FILE|^kind: (PriorityClass|ValidatingAdmissionPolicy)$'
+check "agent.runtimeClassName: the file gets agentRuntimeClass, and no run pods object appears" \
+  dhas ConfigMap aap-operator '^      agentRuntimeClass: "gvisor"$' \
+  && lacks '^    runPods:$|^kind: (PriorityClass|ValidatingAdmissionPolicy)$'
 # Run pods: the settings carry it (the operator writes it into the template) and the policy requires it, one rule more.
 render -f "$here/runpods.values.yaml" --set runPods.runtimeClassName=gvisor --set agent.runtimeClassName=gvisor
 k14a_class_checks() {
-  dhas ConfigMap aap-operator-run-pods-settings '^    runtimeClassName: gvisor$' \
-    && dhas Deployment aap-operator 'name: AGENT_RUNTIME_CLASS' 'value: "gvisor"' \
+  dhas ConfigMap aap-operator '^      runtimeClassName: gvisor$' \
+    && dhas ConfigMap aap-operator '^      agentRuntimeClass: "gvisor"$' \
     && dhas ValidatingAdmissionPolicy aap-operator-agents-run-pods \
       'variables.runtimeClass' \
       'object.spec.runtimeClassName == variables.runtimeClass' \
@@ -1355,8 +1401,8 @@ check "refused: an agent class that is not the name of a RuntimeClass" refused "
 # ANR-402 (AD-052): a size class may name its own RuntimeClass, which replaces the deployment's for the pods of that class.
 render -f "$here/runpods.values.yaml" --set runPodClasses.large.runtimeClassName=gvisor-large
 anr402_class_only() {
-  dhas ConfigMap aap-operator-run-pods-settings '^        runtimeClassName: gvisor-large$' \
-    && dlacks ConfigMap aap-operator-run-pods-settings '^    runtimeClassName:' \
+  dhas ConfigMap aap-operator '^          runtimeClassName: gvisor-large$' \
+    && dlacks ConfigMap aap-operator '^      runtimeClassName:' \
     && dhas ValidatingAdmissionPolicy aap-operator-agents-run-pods \
       "has\\(params.data.runtimeClassName\\) \\? params.data.runtimeClassName : ''" \
       "variables.runtimeClass == '' \\|\\| \\(has\\(object.spec.runtimeClassName\\)" \
@@ -1366,7 +1412,7 @@ anr402_class_only() {
 check "runPodClasses.<name>.runtimeClassName alone: the settings carry it under the class, the deployment's key is absent, and the policy judges only a pod whose parameters name a class" anr402_class_only
 render -f "$here/runpods.values.yaml" --set runPods.runtimeClassName=gvisor --set runPodClasses.large.runtimeClassName=gvisor-large
 anr402_class_and_deployment() {
-  dhas ConfigMap aap-operator-run-pods-settings '^    runtimeClassName: gvisor$' '^        runtimeClassName: gvisor-large$' \
+  dhas ConfigMap aap-operator '^      runtimeClassName: gvisor$' '^          runtimeClassName: gvisor-large$' \
     && dhas ValidatingAdmissionPolicy aap-operator-agents-run-pods "':' gvisor|: 'gvisor'" 'object.spec.runtimeClassName == variables.runtimeClass' \
     && dlacks ValidatingAdmissionPolicy aap-operator-agents-run-pods "variables.runtimeClass == ''"
 }
@@ -1385,7 +1431,7 @@ check "run pods on, the API on: the API's file lists the size classes, large the
   dhas ConfigMap aap-operator-api '^      runPodSizeClasses:$' '^      - large$' '^      - standard$'
 render -f "$here/runpods.values.yaml" --set runPods.priorityClassName=managed-elsewhere
 check "runPods.priorityClassName: the chart renders no PriorityClass, and the settings name the one given" \
-  lacks '^kind: PriorityClass$' && dhas ConfigMap aap-operator-run-pods-settings '^    priorityClass: managed-elsewhere$'
+  lacks '^kind: PriorityClass$' && dhas ConfigMap aap-operator '^      priorityClass: managed-elsewhere$'
 render -f "$here/runpods.values.yaml" --set storeCnpg=false
 check "run pods on, storeCnpg=false: the base rules and the run pods rules, no CloudNativePG" rules_are "$base_rules
 $run_pod_rules"
@@ -1393,7 +1439,7 @@ $run_pod_rules"
 check "refused: networkPolicy.enabled=false (it would be open egress: the policy that makes the egress proxy the one way out is always made)" \
   refused "runPods.networkPolicy.enabled is no longer a choice" -f "$here/runpods.values.yaml" --set runPods.networkPolicy.enabled=false
 render -f "$here/runpods.values.yaml" --set runPods.networkPolicy.enabled=true
-enabled_true_is_not_written() { dhas ConfigMap aap-operator-run-pods-settings '^    networkPolicy:$' && dlacks ConfigMap aap-operator-run-pods-settings '^      enabled:'; }
+enabled_true_is_not_written() { dhas ConfigMap aap-operator '^      networkPolicy:$' && dlacks ConfigMap aap-operator '^        enabled:'; }
 check "runPods.networkPolicy.enabled=true: tolerated, and not written to the operator's settings (it refuses an unknown key)" enabled_true_is_not_written
 
 # What the chart refuses, with the name of the value: the operator would refuse the same at start, and a pod that never starts is the worse way to hear it.
@@ -1404,7 +1450,7 @@ check "refused: a size class with no CPU limit (AD-061)" refused "runPodClasses.
 check "refused: a size class with no ephemeral-storage limit (AD-061)" refused "runPodClasses.standard.limits.ephemeral-storage is required" --set runPods.enabled=true --set 'runPodClasses.standard.limits.ephemeral-storage=null'
 check "refused: a size class with no ephemeral-storage request (AD-061)" refused "runPodClasses.standard.requests.ephemeral-storage is required" --set runPods.enabled=true --set 'runPodClasses.standard.requests.ephemeral-storage=null'
 check "run pods on: the default class carries the CPU limit (2) and both ephemeral-storage values, and the render shows them in the settings" \
-  dhas ConfigMap aap-operator-run-pods-settings 'ephemeral-storage: 1Gi' 'ephemeral-storage: 4Gi' 'cpu: "?2"?$'
+  dhas ConfigMap aap-operator 'ephemeral-storage: 1Gi' 'ephemeral-storage: 4Gi' 'cpu: "?2"?$'
 check "refused: a size class named as no DNS label" refused "the name of a class is a DNS label" --set runPods.enabled=true --set 'runPodClasses.Big_One.limits.memory=1Gi'
 check "refused: a size class resource that is not a quantity" refused "is not a quantity" --set runPods.enabled=true --set runPodClasses.standard.limits.memory=lots
 check "refused: a key of a size class that is not requests or limits" refused "is not a setting: requests, limits or runtimeClassName" --set runPods.enabled=true --set runPodClasses.standard.cpu=1
@@ -1488,23 +1534,24 @@ rp_objects() {
     && dhas ValidatingAdmissionPolicy aap-operator-aap-e2e-runpods-run-pods 'kind: ValidatingAdmissionPolicy' \
     && dhas ValidatingAdmissionPolicyBinding aap-operator-aap-e2e-runpods-run-pods 'validationActions:' 'parameterNotFoundAction: Allow' 'key: kubernetes.io/metadata.name' 'operator: In' '- aap-e2e-runpods' \
     && dhas Role aap-operator-run-pods 'namespace: aap-e2e-runpods' 'resources: \["pods/exec"\]' \
-    && dhas ConfigMap aap-operator-run-pods-settings 'namespace: aap-e2e-runpods' 'priorityClass: aap-operator-aap-e2e-runpods-run' 'role: aap-operator-run-pods'
+    && dhas ConfigMap aap-operator 'namespace: aap-e2e-runpods' 'priorityClass: aap-operator-aap-e2e-runpods-run' 'role: aap-operator-run-pods'
 }
 check "run pods e2e: the values render the PriorityClass, the policy and its binding for the namespace aap-e2e-runpods, the Role of run pods, and the settings that name them" rp_objects
 rp_settings() {
-  dhas ConfigMap aap-operator-run-pods-settings '^      pods: 2$' '^  idleSecs: 120$|idleSecs: 120' '^  standard:$|standard:' 'memory: 2Gi' 'digest: sha256:[0-9a-f]{64}' 'tag: [0-9]' \
-    '^      replicas: 2$' '^      - 443$' '^      - registry.npmjs.org$' '^      extraAllow: \[\]$'
+  dhas ConfigMap aap-operator '^        pods: 2$' 'idleSecs: 120' 'standard:' 'memory: 2Gi' 'digest: sha256:[0-9a-f]{64}' 'tag: [0-9]' \
+    '^        replicas: 2$' '^        - 443$' '^        - registry.npmjs.org$' '^        extraAllow: \[\]$'
 }
 check "run pods e2e: the quota is two pods (the script fills it, is refused a third pod and makes a third run wait), a pod idle for 120 s goes, the class is standard, and the run image is pinned by digest" rp_settings
 check "run pods e2e: no registry, no Platform API, no Ingress and no ExternalSecret are rendered: this end-to-end is about the operator and the coder" \
-  lacks 'aap-operator-registry|aap-operator-api|^kind: (Ingress|ExternalSecret)$|REGISTRY_TOKEN_FILE'
+  lacks 'aap-operator-registry|aap-operator-api|^kind: (Ingress|ExternalSecret)$|^    registry:$|^    telemetry:$'
 check "run pods e2e: the operator watches the namespace of the release, runs the image of the job and never pulls it" \
-  dhas Deployment aap-operator 'name: WATCH_NAMESPACES' 'value: "aap-e2e-runpods"' 'name: WATCH_NAMESPACE' 'value: "aap-e2e-runpods"' 'image: "operator:smoke"' 'imagePullPolicy: Never' 'name: RUN_PODS_FILE'
+  dhas Deployment aap-operator '^          args: \[run, --config, /etc/aap-operator/config.yaml\]$' 'image: "operator:smoke"' 'imagePullPolicy: Never' \
+  && dhas ConfigMap aap-operator '^        - "aap-e2e-runpods"$' '^    runPods:$'
 rp_one_flag_apart() {
   # The script installs twice with one values file: with run pods off, nothing of them is rendered, and the keys they leave behind (the quota, the idle time)
   # are not checked; with the flag removed, they are all there.
-  rp_render --set runPods.enabled=false && lacks "$run_pods_traces" && dhas Deployment aap-operator 'name: WATCH_NAMESPACES' 'value: "aap-e2e-runpods"' 'name: WATCH_NAMESPACE' \
-    && rp_render && has_all 'kind: PriorityClass' 'kind: ValidatingAdmissionPolicy$' 'name: RUN_PODS_FILE'
+  rp_render --set runPods.enabled=false && lacks "$run_pods_traces" && dhas ConfigMap aap-operator '^        - "aap-e2e-runpods"$' \
+    && rp_render && has_all 'kind: PriorityClass' 'kind: ValidatingAdmissionPolicy$' '^    runPods:$'
 }
 check "run pods e2e: the same values file renders no trace of run pods with runPods.enabled=false (the first install) and all of them without the flag (the upgrade)" rp_one_flag_apart
 rp_render
@@ -1702,37 +1749,38 @@ otel_off_everywhere() {
 check "otel off (the default): not a trace of it in the default, netcup, secret, api and run pods renders (no variable, volume, mount, POD_NAMESPACE or rule on 4318)" otel_off_everywhere
 check "the otel render (tests/otel.values.yaml) equals tests/golden/otel.yaml" golden otel -f "$here/otel.values.yaml"
 
-op_env() { doc Deployment aap-operator; }
+op_pod() { doc Deployment aap-operator; }
+op_file() { doc ConfigMap aap-operator; }
 otel_blocks_are_not_crossed() {
   render -f "$here/otel.values.yaml" || return 1
-  # The operator reads otel.*, the API reads api.otel.*, and neither the other's.
-  dhas Deployment aap-operator 'otel-collector\.observability\.svc:4318/v1/traces' 'OTEL_TRACES_SAMPLER_ARG' '"0.25"' \
-    'deployment.environment.name=prod,k8s.cluster.name=netcup,service.namespace=another-agentic' || return 1
-  dlacks Deployment aap-operator 'otel-gateway|otel-api-|bundle\.pem' || return 1
+  # The operator reads otel.* into its configuration file, the API reads api.otel.* as variables, and neither the other's.
+  dhas ConfigMap aap-operator 'endpoint: "https://otel-collector\.observability\.svc:4318/v1/traces"' '^        sampler: traceidratio$' '^        samplerRatio: 0.25$' \
+    'deployment.environment.name: prod' 'k8s.cluster.name: netcup' 'service.namespace: another-agentic' || return 1
+  dlacks ConfigMap aap-operator 'otel-gateway|otel-api-|bundle\.pem' || return 1
   dhas Deployment aap-operator-api 'otel-gateway\.observability\.svc:4319/v1/traces' 'value: "always_on"' 'otel-api-headers' 'otel-api-ca' || return 1
   dlacks Deployment aap-operator-api 'otel-collector|otel-operator-|OTEL_TRACES_SAMPLER_ARG|k8s.cluster.name' || return 1
-  # Each variable once per pod, and the protocol is the one the exporter speaks.
-  [ "$(op_env | grep -c 'name: OTEL_EXPORTER_OTLP_TRACES_ENDPOINT')" -eq 1 ] && dhas Deployment aap-operator 'OTEL_EXPORTER_OTLP_PROTOCOL' 'value: http/json' \
-    && dhas Deployment aap-operator-api 'value: http/json' || return 1
+  # One endpoint in the file, and not a trace of the old variables in the pod.
+  [ "$(op_file | grep -c '^        endpoint:')" -eq 1 ] && ! op_pod | grep -q 'OTEL_' || return 1
   # The operator already had POD_NAME: it is not written twice; the API had none.
-  [ "$(op_env | grep -c 'name: POD_NAME$')" -eq 1 ] && [ "$(doc Deployment aap-operator-api | grep -c 'name: POD_NAME$')" -eq 1 ] \
+  [ "$(op_pod | grep -c 'name: POD_NAME$')" -eq 1 ] && [ "$(doc Deployment aap-operator-api | grep -c 'name: POD_NAME$')" -eq 1 ] \
     && dhas Deployment aap-operator 'name: POD_NAMESPACE' 'fieldPath: metadata.namespace' \
     && dhas Deployment aap-operator-api 'name: POD_NAMESPACE' 'fieldPath: metadata.namespace'
 }
-check "otel: the operator's variables are otel.* and the API's are api.otel.*, not crossed; POD_NAME once, POD_NAMESPACE from the downward API" otel_blocks_are_not_crossed
+check "otel: the operator's section is otel.* and the API's variables are api.otel.*, not crossed; POD_NAME once, POD_NAMESPACE from the downward API" otel_blocks_are_not_crossed
 otel_headers() {
   render -f "$here/otel.values.yaml" || return 1
-  # A Secret volume at mode 0440, mounted read-only, named by AAP_OTEL_HEADERS_FILE: the headers are a file and never a variable.
-  dhas Deployment aap-operator 'name: AAP_OTEL_HEADERS_FILE' 'value: /var/run/secrets/aap/otel/headers' 'secretName: otel-operator-headers' 'defaultMode: 288' \
+  # The file names the header and the mounted file its value; the Secret volume is mode 0440 and read-only.
+  dhas ConfigMap aap-operator '^        headers:$' '^          "authorization":$' '^            file: /var/run/secrets/aap/otel/headers$' || return 1
+  dhas Deployment aap-operator 'secretName: otel-operator-headers' 'defaultMode: 288' \
     'key: headers' 'path: headers' 'mountPath: /var/run/secrets/aap/otel' || return 1
   dhas Deployment aap-operator-api 'secretName: otel-api-headers' 'defaultMode: 288' 'key: token' 'mountPath: /var/run/secrets/aap/otel' || return 1
   lacks 'OTEL_EXPORTER_OTLP_HEADERS' || return 1
   lacks 'secretKeyRef' || return 1
   lacks '^kind: Secret$' || return 1
   # The mount is read-only.
-  [ "$(op_env | awk '/name: otel-headers/ { s = 1 } s && /readOnly: true/ { n++; exit } END { print n + 0 }')" -eq 1 ]
+  [ "$(op_pod | awk '/name: otel-headers/ { s = 1 } s && /readOnly: true/ { n++; exit } END { print n + 0 }')" -eq 1 ]
 }
-check "otel: the headers are a Secret volume (0440, read-only) named by AAP_OTEL_HEADERS_FILE; no OTEL_EXPORTER_OTLP_HEADERS, no secretKeyRef, no Secret rendered" otel_headers
+check "otel: the operator's file names the header and the mounted file its value; the headers are a Secret volume (0440, read-only); no OTEL_EXPORTER_OTLP_HEADERS, no secretKeyRef, no Secret rendered" otel_headers
 otel_fsgroup() {
   render -f "$here/otel.values.yaml" || return 1
   [ "$(doc Deployment aap-operator-api | awk '/^      securityContext:$/ { s = 1; next } s && /^        / { print; next } s { exit }' | grep -c 'fsGroup: 65532')" -eq 1 ] || return 1
@@ -1743,24 +1791,26 @@ otel_fsgroup() {
 check "otel: the API pod gets an fsGroup only to read its headers file" otel_fsgroup
 otel_certificate() {
   render -f "$here/otel.values.yaml" || return 1
-  dhas Deployment aap-operator 'name: OTEL_EXPORTER_OTLP_CERTIFICATE' 'value: /etc/aap/otel/ca/ca.pem' 'name: otel-operator-ca' 'key: ca.pem' 'path: ca.pem' \
-    'mountPath: /etc/aap/otel/ca' || return 1
-  dhas Deployment aap-operator-api 'name: otel-api-ca' 'key: bundle.pem' 'mountPath: /etc/aap/otel/ca' || return 1
-  [ "$(op_env | awk '/name: otel-ca/ { s = 1 } s && /readOnly: true/ { n++; exit } END { print n + 0 }')" -eq 1 ]
+  dhas ConfigMap aap-operator '^        certificate: /etc/aap/otel/ca/ca.pem$' || return 1
+  dhas Deployment aap-operator 'name: otel-operator-ca' 'key: ca.pem' 'path: ca.pem' 'mountPath: /etc/aap/otel/ca' || return 1
+  dhas Deployment aap-operator-api 'name: OTEL_EXPORTER_OTLP_CERTIFICATE' 'value: /etc/aap/otel/ca/ca.pem' 'name: otel-api-ca' 'key: bundle.pem' 'mountPath: /etc/aap/otel/ca' || return 1
+  [ "$(op_pod | awk '/name: otel-ca/ { s = 1 } s && /readOnly: true/ { n++; exit } END { print n + 0 }')" -eq 1 ]
 }
-check "otel: the CA bundle is a read-only ConfigMap mount and the variable names its path" otel_certificate
+check "otel: the CA bundle is a read-only ConfigMap mount and the file names its path" otel_certificate
 otel_no_volumes_without_files() {
   render --set otel.enabled=true --set otel.endpoint=http://c:4318/v1/traces --set-json 'otel.to=[{"podSelector":{"matchLabels":{"a":"b"}}}]' || return 1
-  dhas Deployment aap-operator 'OTEL_EXPORTER_OTLP_TRACES_ENDPOINT' || return 1
-  dlacks Deployment aap-operator 'otel-headers|otel-ca|AAP_OTEL_HEADERS_FILE|OTEL_EXPORTER_OTLP_CERTIFICATE|volumes:|OTEL_RESOURCE_ATTRIBUTES|OTEL_TRACES_SAMPLER_ARG'
+  dhas ConfigMap aap-operator '^        endpoint: "http://c:4318/v1/traces"$' || return 1
+  dlacks Deployment aap-operator 'otel-headers|otel-ca|AAP_OTEL_HEADERS_FILE|OTEL_EXPORTER_OTLP_CERTIFICATE|OTEL_RESOURCE_ATTRIBUTES|OTEL_TRACES_SAMPLER_ARG' || return 1
+  dlacks ConfigMap aap-operator '^        headers:$|^        certificate:$|resourceAttributes'
 }
-check "otel: with no headers Secret and no CA ConfigMap there is neither volume nor variable for them" otel_no_volumes_without_files
-# A CA bundle and no headers Secret (a collector on a private CA that wants no token): the variable and the volume come together, or
-# the pod names a file that is not there. The operator has no other volume here (no registry token, no run pods).
+check "otel: with no headers Secret and no CA ConfigMap the file names neither, and the pod has no volume for them" otel_no_volumes_without_files
+# A CA bundle and no headers Secret (a collector on a private CA that wants no token): the file names the certificate and the
+# volume mounts it, or the pod names a file that is not there.
 otel_certificate_alone() {
   render --set otel.enabled=true --set otel.endpoint=https://c:4318/v1/traces --set-json 'otel.to=[{"podSelector":{"matchLabels":{"a":"b"}}}]' \
     --set otel.certificate.configMap=only-ca --set otel.certificate.key=ca.pem || return 1
-  dhas Deployment aap-operator 'name: OTEL_EXPORTER_OTLP_CERTIFICATE' 'value: /etc/aap/otel/ca/ca.pem' '^      volumes:' 'name: otel-ca' 'name: only-ca' 'mountPath: /etc/aap/otel/ca' || return 1
+  dhas ConfigMap aap-operator '^        certificate: /etc/aap/otel/ca/ca.pem$' || return 1
+  dhas Deployment aap-operator 'name: otel-ca' 'name: only-ca' 'mountPath: /etc/aap/otel/ca' || return 1
   dlacks Deployment aap-operator 'otel-headers|AAP_OTEL_HEADERS_FILE' || return 1
   render -f "$here/api.values.yaml" --set api.otel.enabled=true --set api.otel.endpoint=https://c:4318/v1/traces \
     --set-json 'api.otel.to=[{"podSelector":{"matchLabels":{"a":"b"}}}]' \
@@ -1899,9 +1949,9 @@ check "api.extraVolumeMounts may not mount under the chart's otel paths while ap
 tool_peer='[{"namespaceSelector":{"matchLabels":{"kubernetes.io/metadata.name":"tools"}}}]'
 tool_probe_off() {
   render || return 1
-  [ "$(op_egress_rules)" -eq 1 ] && lacks 'port: 80$' && lacks 'TOOL_PROBE' || return 1
+  [ "$(op_egress_rules)" -eq 1 ] && lacks 'port: 80$' && lacks 'toolProbe' || return 1
   render -f "$here/otel.values.yaml" || return 1
-  [ "$(op_egress_rules)" -eq 3 ] && lacks 'port: 80$' && lacks 'TOOL_PROBE'
+  [ "$(op_egress_rules)" -eq 3 ] && lacks 'port: 80$' && lacks 'toolProbe'
 }
 check "toolProbe off (the default): no rule and no variable of it in the default or the traces render (one egress rule, three with traces), and no port 80" tool_probe_off
 tool_probe_on() {
@@ -1921,20 +1971,20 @@ check "toolProbe: the rule is exactly the peers and ports listed (a pod selector
 tool_probe_on_the_deployment() {
   render || return 1
   a_role=$(doc Role aap-operator) || return 1
-  dlacks Deployment aap-operator 'TOOL_PROBE' || return 1
+  dlacks ConfigMap aap-operator 'toolProbe' || return 1
   render --set-json "toolProbe.to=$tool_peer" || return 1
-  dhas Deployment aap-operator 'name: TOOL_PROBE_ENABLED' 'value: "true"' 'name: TOOL_PROBE_TIMEOUT_SECS' 'value: "5"' || return 1
+  dhas ConfigMap aap-operator '^    toolProbe:$' '^      enabled: true$' '^      timeoutSecs: 5$' || return 1
   [ "$(doc Role aap-operator)" = "$a_role" ]
 }
-check "toolProbe on: the Deployment gains the probe's two variables and nothing else; the Role is what it was (egress, no right)" tool_probe_on_the_deployment
+check "toolProbe on: the file gains the probe's two keys and nothing else; the Role is what it was (egress, no right)" tool_probe_on_the_deployment
 tool_probe_timeout() {
   render --set-json "toolProbe.to=$tool_peer" --set toolProbe.timeoutSecs=9 || return 1
-  dhas Deployment aap-operator 'name: TOOL_PROBE_TIMEOUT_SECS' 'value: "9"'
+  dhas ConfigMap aap-operator '^      timeoutSecs: 9$'
 }
 check "toolProbe.timeoutSecs is the deadline the operator reads" tool_probe_timeout
 tool_probe_default_timeout() {
   render --set toolProbe.timeoutSecs=null --set-json 'toolProbe.to=[{"podSelector":{"matchLabels":{"a":"b"}}}]' || return 1
-  dhas Deployment aap-operator 'name: TOOL_PROBE_TIMEOUT_SECS' 'value: "5"'
+  dhas ConfigMap aap-operator '^      timeoutSecs: 5$'
 }
 check "toolProbe.timeoutSecs left out is the default 5 (the chart renders a number, never an empty value)" tool_probe_default_timeout
 check "toolProbe.timeoutSecs below 1 is refused" refused 'toolProbe.timeoutSecs must be a whole number of seconds from 1 to 60' --set toolProbe.timeoutSecs=0

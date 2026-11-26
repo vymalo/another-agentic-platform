@@ -6,7 +6,7 @@
 //! the cluster ends up with: the workload, the Service, the ConfigMap, the status the operator writes, the
 //! Events, and that deleting the service completes its finalizer.
 //!
-//! The operator is given the stub image as its default agent image (`DEFAULT_AGENT_IMAGE`, AD-029), which only the case of
+//! The operator is given the stub image as its default agent image (`defaults.agentImage`, AD-029), which only the case of
 //! the shared objects (`ModelEndpoint`, `ToolProvider`) relies on: every other manifest names its image.
 //!
 //! **No real adam image is needed.** The pods run `stub/Dockerfile`: busybox that answers `/healthz` on 8080,
@@ -378,40 +378,42 @@ fn free_port() -> u16 {
 
 impl OperatorProc {
     /// `registry_token`: the token the registry demands, written to a file the operator reads. `None`: no
-    /// `REGISTRY_TOKEN_FILE`, so no registry (fail closed), which is what most cases run with.
+    /// `registry.token`, so no registry (fail closed), which is what most cases run with.
     ///
-    /// `namespaces`: the ones it watches (`WATCH_NAMESPACES`, K6b); the first is the primary (`WATCH_NAMESPACE`).
+    /// `namespaces`: the ones it watches (`watch.namespaces`, K6b); the first is the primary.
     fn spawn(cluster: &Cluster, namespaces: &[&str], registry_token: Option<&str>) -> Self {
         let namespace = namespaces.first().copied().unwrap_or_default();
         let log = std::env::temp_dir().join(format!("aap-e2e-{namespace}-{}.log", free_port()));
         let (health, metrics, registry) = (free_port(), free_port(), free_port());
-        let mut command = Command::new(env!("CARGO_BIN_EXE_operator"));
+        // The file `operator run` reads (ANR-962): the chart's, written here for this case.
+        let mut config = format!(
+            "version: 1\n\
+             listen:\n  health: 127.0.0.1:{health}\n  metrics: 127.0.0.1:{metrics}\n  registry: 0.0.0.0:{registry}\n\
+             watch:\n  namespaces: [{}]\n\
+             reconcile:\n  resyncPendingSecs: 5\n  timeoutSecs: 30\n\
+             defaults:\n  agentImage: \"{}\"\n\
+             log:\n  filter: 'info,kube=warn,aap_controller=debug'\n",
+            namespaces.join(", "),
+            cluster.image
+        );
         if let Some(token) = registry_token {
             let file = std::env::temp_dir().join(format!("aap-e2e-{namespace}.token"));
             // A mounted Secret ends its value with a newline as often as not.
             std::fs::write(&file, format!("{token}\n")).unwrap();
-            command.env("REGISTRY_TOKEN_FILE", file);
+            config.push_str(&format!(
+                "registry:\n  token:\n    file: {}\n",
+                file.display()
+            ));
         }
-        let child = command
+        let config_file =
+            std::env::temp_dir().join(format!("aap-e2e-{namespace}-{}.yaml", free_port()));
+        std::fs::write(&config_file, config).unwrap();
+        let child = Command::new(env!("CARGO_BIN_EXE_operator"))
             .arg("run")
+            .arg("--config")
+            .arg(&config_file)
             .env("KUBECONFIG", &cluster.kubeconfig)
-            .env("WATCH_NAMESPACES", namespaces.join(","))
-            .env("WATCH_NAMESPACE", namespace)
-            .env("HEALTH_ADDR", format!("127.0.0.1:{health}"))
-            .env("METRICS_ADDR", format!("127.0.0.1:{metrics}"))
-            // Every interface, so that a pod can reach it (the registry case); the port is this case's own.
-            .env("REGISTRY_ADDR", format!("0.0.0.0:{registry}"))
             .env("POD_NAME", "operator-under-test")
-            .env("DEFAULT_AGENT_IMAGE", &cluster.image)
-            // The pending timer is short, so what a signal missed is found soon.
-            .env("AAP_RESYNC_PENDING_SECS", "5")
-            // A pass that waits for a request nobody answers is cut short well inside the shortest wait of a
-            // case (60 s), so that the case still gets its status, and `Case::finish` fails on it: a hang is
-            // something to see, not something to be healed behind the test's back.
-            .env("AAP_RECONCILE_TIMEOUT_SECS", "30")
-            // `aap_controller=debug` is a line when a pass starts and one when it ends, with its duration. The log is
-            // printed when a case fails, and a pass that never ended is then the one with a start and no end.
-            .env("RUST_LOG", "info,kube=warn,aap_controller=debug")
             .stdout(Stdio::null())
             .stderr(std::fs::File::create(&log).unwrap())
             .spawn()
@@ -1557,7 +1559,7 @@ async fn without_a_token_no_registry_is_served_and_nothing_is_listed() {
     case.finish().await;
 }
 
-/// K6b: one operator over **two namespaces**, one set of controllers and caches each (`WATCH_NAMESPACES`), and a
+/// K6b: one operator over **two namespaces**, one set of controllers and caches each (`watch.namespaces`), and a
 /// service id both of them use. Both agents are made and `Ready`; the registry lists **neither** of the two (the
 /// registry's rule: "the first" would be the directory's order, not a decision of the platform's); and when one goes,
 /// the survivor is listed. The two services' own `Listed` conditions still say `True`, which is the gap the K6b

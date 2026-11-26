@@ -1,12 +1,17 @@
-//! The operator: the composition root (AD-020). `crdgen` prints the CRDs; `run` composes the
-//! Kubernetes runtime provider, the store (CloudNativePG, or referenced Secrets) and the controllers, and
-//! serves health (8081), metrics (9090) and, with a token, the agent registry (8080).
+//! The operator: the composition root (AD-020). `crdgen` prints the CRDs; `run` reads one configuration file
+//! (`config.example.yaml` documents every key), composes the Kubernetes runtime provider, the store (CloudNativePG, or
+//! referenced Secrets) and the controllers, and serves health, metrics and, with a token, the agent registry.
+//!
+//! `operator run --check` reads the file, says whether the operator can work with it, and exits: 0 when it can, 78
+//! (`EX_CONFIG`) when it is refused, and 1 for anything else.
 
+mod config;
 mod run;
 #[cfg(feature = "runtime-kubernetes")]
 mod serve;
 
 use std::io::{self, Write};
+use std::path::PathBuf;
 use std::process::ExitCode;
 
 use anyhow::{Context, Result};
@@ -20,19 +25,32 @@ struct Cli {
     command: Command,
 }
 
-// `Run` carries every setting of `run`; the enum is parsed once at start, so its size costs nothing.
 #[derive(Debug, Subcommand)]
-#[allow(clippy::large_enum_variant)]
 enum Command {
     /// Print the CustomResourceDefinitions as multi-document YAML.
     Crdgen,
+    /// Print the JSON Schema of the configuration file (ANR-962), as `bin/operator/config.schema.json` holds it.
+    Schema,
     /// Run the controllers: reconcile AgentService and AgentConfig objects.
-    Run(run::RunArgs),
+    Run(RunArgs),
+}
+
+/// The settings of `run`: where the file is, and whether to stop after reading it.
+#[derive(Debug, clap::Args)]
+struct RunArgs {
+    /// The configuration file (`config.example.yaml` documents every key).
+    #[arg(long, default_value = config::DEFAULT_PATH)]
+    config: PathBuf,
+
+    /// Read the configuration file, say whether the operator can work with it, and exit. Needs no cluster and reads no
+    /// file the configuration names (a Secret is mounted in the pod, not on the machine that checks a chart).
+    #[arg(long)]
+    check: bool,
 }
 
 fn main() -> ExitCode {
     match real_main(Cli::parse()) {
-        Ok(()) => ExitCode::SUCCESS,
+        Ok(code) => code,
         Err(err) => {
             eprintln!("operator: {err:#}");
             ExitCode::FAILURE
@@ -40,13 +58,33 @@ fn main() -> ExitCode {
     }
 }
 
-fn real_main(cli: Cli) -> Result<()> {
+fn real_main(cli: Cli) -> Result<ExitCode> {
     match cli.command {
-        Command::Crdgen => crdgen(&mut io::stdout().lock()),
+        Command::Crdgen => {
+            crdgen(&mut io::stdout().lock())?;
+            Ok(ExitCode::SUCCESS)
+        }
+        Command::Schema => {
+            print!("{}", config::schema()?);
+            Ok(ExitCode::SUCCESS)
+        }
         Command::Run(args) => {
+            // The file is the only way in (ANR-962): without it there is nothing to run, and a file that is refused is
+            // `EX_CONFIG`, so that a deployment and a script can tell it from a crash.
+            let settings = match config::load(&args.config) {
+                Ok(settings) => settings,
+                Err(err) => {
+                    eprintln!("operator: {err:#}");
+                    return Ok(ExitCode::from(config::EXIT_CONFIG));
+                }
+            };
+            if args.check {
+                println!("{}: ok", args.config.display());
+                return Ok(ExitCode::SUCCESS);
+            }
             tracing_subscriber::fmt()
                 .with_env_filter(
-                    tracing_subscriber::EnvFilter::try_from_default_env()
+                    tracing_subscriber::EnvFilter::try_new(&settings.log_filter)
                         .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("info")),
                 )
                 .with_writer(io::stderr)
@@ -55,7 +93,8 @@ fn real_main(cli: Cli) -> Result<()> {
                 .enable_all()
                 .build()
                 .context("starting the async runtime")?
-                .block_on(run::run(args))
+                .block_on(run::run(settings))?;
+            Ok(ExitCode::SUCCESS)
         }
     }
 }

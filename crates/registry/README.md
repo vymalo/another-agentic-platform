@@ -133,7 +133,7 @@ first 128 bits of the SHA-256 of the body, quoted. A change of the `anchor` is a
   token is held as its SHA-256 and the digests are compared with `subtle`, so neither the token's length nor how much of a
   guess is right shows in the time. Two `Authorization` headers are no credential. A `401` has **no body**, and an
   unauthenticated caller learns nothing, not even a `304`. The token is never in a body, a header, a log line or `Debug`.
-* **No token, no registry.** The binary reads `REGISTRY_TOKEN_FILE` once at start (a mounted Secret; the trailing newline is
+* **No token, no registry.** The binary reads the token file the operator's configuration names (`registry.token`, was `REGISTRY_TOKEN_FILE`) once at start (a mounted Secret; the trailing newline is
   not part of it). Unset, missing, unreadable or empty, it serves nothing on the port and logs why. Rotating the Secret is
   a restart (the operator is one replica with `Recreate`, §59a).
 * **`HEAD`** has the headers and no body. The `Accept` header is not read: there is one media type.

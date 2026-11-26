@@ -189,7 +189,7 @@ pub(crate) fn materialize(config: &AgentConfig, externals: &Externals) -> Materi
             }
             None => issues.push(ConfigIssue {
                 field: format!("{me} spec.environment.image"),
-                message: "no image, and this operator has no default agent image (--default-agent-image, DEFAULT_AGENT_IMAGE): name an image in the config, or give the operator a default".to_owned(),
+                message: "no image, and this operator has no default agent image (the operator configuration file's defaults.agentImage): name an image in the config, or give the operator a default".to_owned(),
             }),
         }
     }

@@ -175,7 +175,17 @@ jobs:
           helm template aap-operator deploy/operator --namespace another-agentic-system -f deploy/operator/examples/netcup.values.yaml \
             -f deploy/operator/tests/api.values.yaml > /dev/null
           helm template aap-operator-crds deploy/operator-crds > /dev/null
+      # ANR-962: the chart renders the operator's configuration file from its values, and `operator run --check` is what says the
+      # binary accepts it (an unknown key or a value it cannot work with would otherwise be a pod that never starts). The binary is
+      # the workspace's, built here: the job has no image.
+      - name: Install Rust
+        run: rustup toolchain install "$RUST_TOOLCHAIN" --profile minimal --no-self-update && rustup default "$RUST_TOOLCHAIN"
+      - uses: Swatinem/rust-cache@v2
+      - name: Build the operator binary (the file the chart renders is checked by it)
+        run: cargo build --locked -p aap-operator
       - name: The rendered chart keeps its guarantees
+        env:
+          AAP_OPERATOR_BIN: target/debug/operator
         run: sh deploy/operator/tests/render-check.sh
       # Core kinds against the Kubernetes schemas, the ExternalSecret against the CRD schema vendored in
       # deploy/operator/tests/schemas (a pinned copy of the datreeio catalog: a live catalog 500 once skipped the image job of

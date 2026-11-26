@@ -1121,13 +1121,13 @@ fn no_image(_: &mut Value, c: &mut Value) {
 }
 
 #[test]
-fn a_config_with_no_image_and_no_default_is_refused_naming_the_flag() {
+fn a_config_with_no_image_and_no_default_is_refused_naming_the_setting() {
     for name in ["coder", "chat"] {
         let found = issues_with(name, &Externals::default(), no_image);
         assert_eq!(found.len(), 1, "{name}: {found:#?}");
         assert_eq!(found[0].field, "AgentConfig spec.environment.image");
         assert!(
-            found[0].message.contains("--default-agent-image")
+            found[0].message.contains("defaults.agentImage")
                 && found[0].message.contains("no default"),
             "{}",
             found[0]

@@ -586,13 +586,18 @@ op_pod=$(kubectl -n "$ops" get pod -l "app.kubernetes.io/name=$release" -o jsonp
 [ -n "$op_pod" ] || die "the operator has no pod"
 [ "$(jp "$ops" "pod/$op_pod" '{.status.containerStatuses[?(@.name=="operator")].restartCount}')" = 0 ] \
   || die "the operator's container restarted: it did not read its namespaces cleanly ($(jp "$ops" "pod/$op_pod" '{.status.containerStatuses[?(@.name=="operator")].restartCount}') restarts)"
-watch_all=$(jp "$ops" "pod/$op_pod" '{.spec.containers[?(@.name=="operator")].env[?(@.name=="WATCH_NAMESPACES")].value}')
-watch_one=$(jp "$ops" "pod/$op_pod" '{.spec.containers[?(@.name=="operator")].env[?(@.name=="WATCH_NAMESPACE")].value}')
-[ "$watch_all" = "$a,$b" ] || die "the operator is given WATCH_NAMESPACES='$watch_all', want '$a,$b'"
-[ "$watch_one" = "$a" ] || die "the operator is given WATCH_NAMESPACE='$watch_one', want the primary '$a'"
-[ -n "$(jp "$ops" "pod/$op_pod" '{.spec.containers[?(@.name=="operator")].env[?(@.name=="REGISTRY_TOKEN_FILE")].value}')" ] \
-  || die "the operator is given no REGISTRY_TOKEN_FILE: no registry would be served"
-ok "the operator ($op_pod) is Ready, did not restart, and is given WATCH_NAMESPACES='$watch_all' and WATCH_NAMESPACE='$watch_one'"
+# ANR-962: the settings are one file (the ConfigMap `$release`), and the pod reads it with `--config`. The namespaces are the
+# file's watch.namespaces, in order: the first is the primary.
+watch=$(jp "$ops" "configmap/$release" '{.data["config.yaml"]}')
+[ "$(printf '%s\n' "$watch" | grep -c "^        - \"$a\"$")" -eq 1 ] || die "the file does not watch $a"
+[ "$(printf '%s\n' "$watch" | grep -c "^        - \"$b\"$")" -eq 1 ] || die "the file does not watch $b"
+[ "$(printf '%s\n' "$watch" | awk '/^      namespaces:$/ { f = 1; next } f && /^        - / { sub(/^        - /, ""); print; exit }')" = "\"$a\"" ] \
+  || die "the primary (the first of watch.namespaces) is not $a"
+[ -n "$(printf '%s\n' "$watch" | grep -c '^        file: /var/run/secrets/aap/registry/token$')" ] \
+  || die "the file names no registry token: no registry would be served"
+[ "$(jp "$ops" "pod/$op_pod" '{.spec.containers[?(@.name=="operator")].args[0]}')" = run ] \
+  || die "the operator's container does not run the controllers"
+ok "the operator ($op_pod) is Ready, did not restart, reads one file that watches $a and $b (the primary $a) and names the registry token"
 
 # ---- 6. the chart's RBAC: one Role and one RoleBinding per watched namespace, and nothing cluster-scoped -----------------------------
 step "6. one Role and one RoleBinding in $a and in $b, and no ClusterRole"

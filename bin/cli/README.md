@@ -80,7 +80,7 @@ written back through its type and what was lost is unknown.
 |---|---|---|
 | `--allow-missing-refs` | `validate` | off: a referent that is not among the documents (a config, a model endpoint, a tool provider) is an issue, in the operator's words (`ModelEndpoint "x" was not found in namespace …`). On: a `warning:` line on stderr, and exit 0 if nothing else is wrong |
 | `--default-agent-image <ref>` | both | none, as the operator's `--default-agent-image`: a config that names no image is then an issue. Blank is none; white space inside is exit 2, as the operator refuses to start with it |
-| `--run-pods-file <file>` | both | none: a config that asks for run pods is an issue. The file is the operator's `RUN_PODS_FILE`, read and checked as it checks it (a blank path is none; a file that does not parse or fails its checks is exit 2) |
+| `--run-pods-file <file>` | both | none: a config that asks for run pods is an issue. The file is a `runPods` block as the operator reads it (since ANR-962 that block lives in the operator's one configuration file; `aapctl` keeps its own flag), checked as the operator checks it (a blank path is none; a file that does not parse or fails its checks is exit 2) |
 | `--max-access-tier <tier>` | both | `auto` (`plan`, `edits`, `auto`, `bypass`) |
 | `--cache-allowed-claims a,b` | both | none: no agent may have a cache |
 | `--owner-uid <uid>` | `render` | `00000000-0000-0000-0000-000000000000`. Empty or blank is exit 2: an object with no owner is one the operator never applies |

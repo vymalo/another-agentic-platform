@@ -36,16 +36,12 @@ spec:
         {{- with .Values.podLabels }}
         {{- toYaml . | nindent 8 }}
         {{- end }}
-      {{- if or .Values.podAnnotations (include "aap.runPods" .) }}
       annotations:
         {{- with .Values.podAnnotations }}
         {{- toYaml . | nindent 8 }}
         {{- end }}
-        {{- if include "aap.runPods" . }}
-        # The settings for run pods are read once, at start: a changed file is a new pod.
-        checksum/run-pods: {{ include (print $.Template.BasePath "/run-pods-settings.yaml") . | sha256sum }}
-        {{- end }}
-      {{- end }}
+        # The configuration file is read once, at start: a changed file is a new pod (ANR-962).
+        checksum/config: {{ include (print $.Template.BasePath "/config.yaml") . | sha256sum }}
     spec:
       serviceAccountName: {{ include "aap.serviceAccountName" . }}
       # The API token is the operator's way in.
@@ -71,105 +67,20 @@ spec:
         - name: operator
           image: {{ include "aap.image" . | quote }}
           imagePullPolicy: {{ .Values.image.pullPolicy }}
-          args: [run]
+          # The file is the only way in (ANR-962): no setting is an environment variable any more.
+          args: [run, --config, /etc/aap-operator/config.yaml]
           env:
-            # K6b: every namespace the operator watches, comma separated (the chart makes the Role and RoleBinding in each).
-            # WATCH_NAMESPACE below is the primary, which must be one of them: it names the cluster-scoped objects and the
-            # API's defaults.namespace.
-            - name: WATCH_NAMESPACES
-              value: {{ include "aap.watchNamespaces" . | fromJsonArray | join "," | quote }}
-            - name: WATCH_NAMESPACE
-              value: {{ include "aap.watchNamespace" . | quote }}
-            {{- if gt (int .Values.replicas) 1 }}
-            # K7: the lease every replica campaigns for; the holder reconciles, the others keep their caches and serve the registry.
-            - name: LEADER_ELECTION_ENABLED
-              value: "true"
-            - name: LEADER_ELECTION_NAME
-              value: {{ include "aap.fullname" . | quote }}
-            - name: LEADER_ELECTION_NAMESPACE
-              value: {{ include "aap.watchNamespace" . | quote }}
-            - name: LEADER_ELECTION_LEASE_SECS
-              value: {{ .Values.leaderElection.leaseSecs | quote }}
-            - name: LEADER_ELECTION_RENEW_SECS
-              value: {{ .Values.leaderElection.renewSecs | quote }}
-            - name: LEADER_ELECTION_RETRY_SECS
-              value: {{ .Values.leaderElection.retrySecs | quote }}
-            {{- end }}
+            # The downward API's identity of this replica (the reporting instance of Events and the lease's holderIdentity).
             - name: POD_NAME
               valueFrom:
                 fieldRef:
                   fieldPath: metadata.name
-            - name: RUST_LOG
-              value: {{ .Values.logLevel | quote }}
-            {{- with .Values.defaultAgentImage }}
-            # AD-029: the image of an agent whose AgentConfig names none. A new value rolls those agents, and no other.
-            - name: DEFAULT_AGENT_IMAGE
-              value: {{ . | quote }}
-            {{- end }}
-            {{- with .Values.agent.runtimeClassName }}
-            # K14a (AD-052): the RuntimeClass of every agent's own pod. Named, the operator writes it into the pod template of each
-            # workload (and into the config digest, so naming it rolls the agents once). Empty: no variable, and the pods are as they were.
-            - name: AGENT_RUNTIME_CLASS
-              value: {{ . | quote }}
-            {{- end }}
-            {{- if .Values.cacheAllowedClaims }}
-            # K1: the claims an AgentConfig may name as its package cache (environment.cache.existingClaim). Absent: none may.
-            - name: CACHE_ALLOWED_CLAIMS
-              value: {{ join "," .Values.cacheAllowedClaims | quote }}
-            {{- end }}
-            {{- if and .Values.maxAccessTier (ne (toString .Values.maxAccessTier) "auto") }}
-            # K1: the highest access tier an AgentConfig may ask for, and the one an agent that asks for none gets when it is below auto.
-            - name: AGENT_MAX_ACCESS_TIER
-              value: {{ .Values.maxAccessTier | quote }}
-            {{- end }}
-            {{- if .Values.toolProbe.to }}
-            # K3b: probe a ToolProvider's MCP server. The chart turns it on with the peers above; the timeout is the deployment's.
-            - name: TOOL_PROBE_ENABLED
-              value: "true"
-            - name: TOOL_PROBE_TIMEOUT_SECS
-              value: {{ .Values.toolProbe.timeoutSecs | default 5 | quote }}
-            {{- end }}
-            {{- if hasKey (default dict .Values.retention) "afterDeleteDays" }}
-            # ANR-770: days a deleted agent's retained database and volumes are kept (0: for ever). The operator's own default is 90.
-            - name: RETENTION_AFTER_DELETE_DAYS
-              value: {{ .Values.retention.afterDeleteDays | int | quote }}
-            {{- end }}
-            {{- with $tuning.concurrency }}
-            - name: AAP_CONCURRENCY
-              value: {{ . | quote }}
-            {{- end }}
-            {{- with $tuning.resyncSecs }}
-            - name: AAP_RESYNC_SECS
-              value: {{ . | quote }}
-            {{- end }}
-            {{- with $tuning.resyncPendingSecs }}
-            - name: AAP_RESYNC_PENDING_SECS
-              value: {{ . | quote }}
-            {{- end }}
-            {{- if or $tuning.reconcileTimeoutSecs (gt (int .Values.replicas) 1) }}
-            # K7: with the election on, a pass must finish before the lease margin (the default 4 s is below the 5 s
-            # lease - renew); with one replica the binary's own 60 s applies.
-            - name: AAP_RECONCILE_TIMEOUT_SECS
-              value: {{ $tuning.reconcileTimeoutSecs | default 4 | quote }}
-            {{- end }}
             {{- if include "aap.otel.on" . }}
-            # Traces (slice K5): the variables `operator run` reads. Absent, no span is made.
-            {{- include "aap.otel.env" (dict "block" .Values.otel "pod" true) | nindent 12 }}
-            {{- end }}
-            {{- if include "aap.runPods" . }}
-            # Run pods (slice D15a): present, the operator has them, with the size classes, image and quota this file says. Absent, it has none
-            # and an AgentConfig that asks for them is ConfigInvalid.
-            - name: RUN_PODS_FILE
-              value: /etc/aap/run-pods/settings.yaml
-            {{- end }}
-            {{- if include "aap.registrySecretName" . }}
-            # No token, no registry: this variable is what turns it on.
-            - name: REGISTRY_TOKEN_FILE
-              value: /var/run/secrets/aap/registry/token
-            {{- with .Values.registry.publicUrl }}
-            - name: REGISTRY_PUBLIC_URL
-              value: {{ . | quote }}
-            {{- end }}
+            # K5: the traces' resource names this pod and its namespace; both are the downward API's, not settings.
+            - name: POD_NAMESPACE
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.namespace
             {{- end }}
           ports:
             {{- if include "aap.registrySecretName" . }}
@@ -211,24 +122,24 @@ spec:
             runAsNonRoot: true
             capabilities:
               drop: [ALL]
-          {{- if or (include "aap.registrySecretName" .) (include "aap.runPods" .) (and (include "aap.otel.on" .) (include "aap.otel.hasVolumes" (dict "block" .Values.otel))) }}
           volumeMounts:
+            # The configuration file (ANR-962), read once at start.
+            - name: config
+              mountPath: /etc/aap-operator
+              readOnly: true
             {{- if include "aap.registrySecretName" . }}
             - name: registry-token
               mountPath: /var/run/secrets/aap/registry
               readOnly: true
             {{- end }}
-            {{- if include "aap.runPods" . }}
-            - name: run-pods
-              mountPath: /etc/aap/run-pods
-              readOnly: true
-            {{- end }}
             {{- if include "aap.otel.on" . }}
             {{- include "aap.otel.mounts" (dict "block" .Values.otel) | nindent 12 }}
             {{- end }}
-          {{- end }}
-      {{- if or (include "aap.registrySecretName" .) (include "aap.runPods" .) (and (include "aap.otel.on" .) (include "aap.otel.hasVolumes" (dict "block" .Values.otel))) }}
       volumes:
+        - name: config
+          configMap:
+            name: {{ include "aap.fullname" . }}
+            defaultMode: 288 # 0440
         {{- if include "aap.registrySecretName" . }}
         - name: registry-token
           secret:
@@ -238,16 +149,9 @@ spec:
               - key: {{ include "aap.registrySecretKey" . }}
                 path: token
         {{- end }}
-        {{- if include "aap.runPods" . }}
-        - name: run-pods
-          configMap:
-            name: {{ include "aap.runPodsSettings" . }}
-            defaultMode: 288 # 0440
-        {{- end }}
         {{- if include "aap.otel.on" . }}
         {{- include "aap.otel.volumes" (dict "block" .Values.otel) | nindent 8 }}
         {{- end }}
-      {{- end }}
       {{- with .Values.nodeSelector }}
       nodeSelector:
         {{- toYaml . | nindent 8 }}

@@ -573,13 +573,13 @@ absent get priorityclass "$class" || die "the PriorityClass of run pods exists w
 absent get validatingadmissionpolicy "$policy" || die "the admission policy of run pods exists with run pods off"
 absent get validatingadmissionpolicybinding "$policy" || die "the binding of the admission policy exists with run pods off"
 absent -n "$ns" get role "$run_role" || die "the Role of run pods exists with run pods off"
-absent -n "$ns" get configmap "$op-run-pods-settings" || die "the settings of run pods exist with run pods off"
-[ -z "$(jp "deployment/$op" '{.spec.template.spec.containers[0].env[?(@.name=="RUN_PODS_FILE")].value}')" ] || die "the operator is given RUN_PODS_FILE with run pods off"
+[ "$(jp "configmap/$op" '{.data["config.yaml"]}' | grep -c '^    runPods:$')" -eq 0 ] || die "the file names run pods with run pods off"
+[ "$(jp "configmap/$op" '{.data["config.yaml"]}' | grep -c '^    version: 1$')" -eq 1 ] || die "the operator's file is not the file"
 for v in "create serviceaccounts" "create resourcequotas" "create rolebindings" "delete pods" "create pods" "get secrets"; do
   # shellcheck disable=SC2086
   [ "$(can "$sa_op" $v)" = no ] || die "the operator may $v with run pods off"
 done
-ok "with run pods off: no PriorityClass, no policy, no Role, no settings, no RUN_PODS_FILE, and the operator may not make a service account, a quota or a binding, delete or make a pod, or read a Secret"
+ok "with run pods off: no PriorityClass, no policy, no Role, no runPods block in the operator's file, and the operator may not make a service account, a quota or a binding, delete or make a pod, or read a Secret"
 
 step "2. the scripted model, and $plain: a coder with no run pods, on the real image"
 kubectl -n "$ns" create configmap e2e-model-script "--from-file=run-pods-model.js=$here/run-pods-model.js" --dry-run=client -o json \
@@ -627,7 +627,7 @@ step "3. the upgrade: the same chart with run pods on"
 helm_install
 ok "the operator is upgraded with runPods.enabled (the same values file, one flag apart)"
 [ "$(jp "deployment/$op" '{.status.readyReplicas}')" = 1 ] || die "the operator has no ready replica after the upgrade"
-[ -n "$(jp "deployment/$op" '{.spec.template.spec.containers[0].env[?(@.name=="RUN_PODS_FILE")].value}')" ] || die "the operator is not given RUN_PODS_FILE with run pods on"
+[ "$(jp "configmap/$op" '{.data["config.yaml"]}' | grep -c '^    runPods:$')" -eq 1 ] || die "the file does not name run pods with run pods on"
 kubectl get priorityclass "$class" -o json > "$work/priorityclass.json"
 jqok "$work/priorityclass.json" "the PriorityClass of run pods is not value 0 and never-preempting" '.value == 0 and .preemptionPolicy == "Never"'
 kubectl get validatingadmissionpolicybinding "$policy" -o json > "$work/vapb.json"
