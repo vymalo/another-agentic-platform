@@ -565,6 +565,60 @@ Slices *(proposed)*: G1, the `AudienceToken` variant and the spec's rule that on
 
 ---
 
+#### AD-065 — The Platform API gains a second authenticator seam for workload certificates, and reads the URI SAN with `x509-parser`
+
+*(2026-11-26, ANR-1010; the owner's decision of 2026-11-26 — row 116 of that day's decisions, another-context#177 — and [ADR-0042](https://github.com/skyengpro/another-backend/blob/main/docs/adr/0042-the-orchestrator-calls-the-platform-api-with-a-workload-certificate.md) of another-backend, accepted the same day. Built: the seam, `crates/auth-workload`, the checked-in test CA and the conformance suite. **The listener that presents it is ANR-1011's**, and the live PKI is ANR-714's.)*
+
+The Platform API's `Authenticator` is a bearer-token seam: `authenticate(Option<&str>)`, and the guard reads `Authorization: Bearer` (`crates/ports/src/auth.rs`, `crates/platform-api/src/authz.rs`). The orchestrator is a **service**: its OpenBao workload leaf is presented over mutual TLS, and the identity that matters is the leaf's **URI SAN** (its SPIFFE id), not a claim of a token. Adding a certificate to the bearer seam would make every implementer of it — and the conformance suite of each — answer a second kind of credential it was never asked about, and it would let a listener fall back from one kind to the other. ADR-0042 decision 5 says the opposite: two listeners, neither falls back.
+
+Decisions: **(1) a second, additive seam.** `aap_ports::ClientAuthenticator` takes `Option<&Certificate>` (DER bytes in a type whose `Debug` says only how long it is) and answers a `Principal` or a `ClientAuthError` from a closed set: `Missing`, `Invalid(InvalidCertificate)` with the words `Malformed`, `BadChain`, `WrongUse`, `Expired`, `UnknownIdentity` and `NoIdentity`, and `Unavailable`. `authenticator_conformance!` is untouched; `client_authenticator_conformance!` is its counterpart, with the same rule that each case is broken once. **(2) what it checks, in one order, each with one cause:** the certificate parses; it chains to the **one configured CA bundle**; its extended key usage names **client authentication** (so the prompt-signing leaf of the same PKI is refused here, as this leaf is refused there); it is inside its validity window; it carries a URI SAN, and the configuration names that exact URI. **(3) the URI SAN is read with `x509-parser`**, the owner's choice: `rustls-webpki` verifies the chain, the EKU and the time but exposes no SAN, and a hand-written DER walk is a parser to own. `x509-parser` adds `asn1-rs` and `oid-registry` (and their deps) to the lock file and **no TLS stack**: `rustls-webpki` and `tokio-rustls` are already there, with `ring` as the provider the dependency gate requires. **(4) only `platform:agents.own` is grantable this way**, and a permission outside that set is refused when the configuration is loaded, not when a request arrives: a workload never gets a person's permission, and a typo in the table is a process that does not start rather than one that grants more than it should. **(5) the table is the file's:** `workloadClients.clients` is a list of `{ spiffeId, permissions }` (`deny_unknown_fields`), and an empty identity, an identity named twice and a non-grantable permission are refused at load. **(6) the trust is one bundle**, refused at load when it is not PEM, holds no certificate or holds one whose `basicConstraints` does not say CA — `webpki` would accept a leaf as an anchor, so the CA bit is read here. **(7) a checked-in test CA** and its leaves (valid, unknown identity, another CA, server authentication, expired) are the suite's fixtures, generated once by `tests/fixtures/generate.sh`; a suite that minted its own CA would not prove that a real bundle loads.
+
+*Not decided here:* the **CRL** of ADR-0042 decision 2 (fetched at most 2 h ago, fail closed when it cannot be read) — this card's checklist names the chain, the EKU and `notAfter`, and a CRL needs a source to fetch from, which is the deployment's; the **listener, the second router and the chart** (ANR-1011); and whether a person's listener should also refuse a client certificate explicitly (it presents no verifier, so it does).
+
+*Proof:* `cargo test -p aap-auth-workload` — 13 tests. The conformance suite's 9 cases (a certificate is its identity and permissions; no certificate is `Missing`; another CA is `BadChain`; a server-authentication leaf is `WrongUse`; an expired leaf is `Expired`; an unknown identity is `UnknownIdentity`; garbage is `Malformed`; an error carries neither the certificate nor its identity; only the configured permissions are granted), and the 4 load-time refusals (a permission other than `platform:agents.own`, a duplicated identity, an empty one, a bundle that is not a CA or is empty). The suite runs against the real fixtures and each refusal has a single cause.
+
+```mermaid
+sequenceDiagram
+  participant P as peer (the orchestrator)
+  participant T as the mTLS listener (ANR-1011)
+  participant C as ClientAuthenticator
+  participant R as the router
+  P->>T: TLS handshake, its client certificate
+  T->>C: the peer's DER, if any
+  C->>C: parse, chain to the bundle, client-auth EKU, notAfter
+  C->>C: the URI SAN, exactly one the configuration names
+  alt no certificate, or one check fails
+    C-->>T: ClientAuthError (a closed word)
+    T-->>P: 401 (or 503 when the trust cannot be read)
+  else accepted
+    C-->>T: Principal(subject = the SPIFFE id, the table's permissions)
+    T->>R: the request, the principal on it
+    R-->>P: the route's answer, if it holds the route's permission
+  end
+```
+
+```mermaid
+stateDiagram-v2
+  [*] --> Missing: no client certificate
+  [*] --> Malformed: not a certificate
+  [*] --> Chain: a certificate
+  Chain --> BadChain: not the configured CA
+  Chain --> WrongUse: not for client authentication
+  Chain --> Expired: outside its window
+  Chain --> Identity: chain, use and time good
+  Identity --> NoIdentity: no URI SAN
+  Identity --> UnknownIdentity: a URI SAN the table does not name
+  Identity --> Principal: the exact URI SAN, mapped
+  Principal --> [*]
+  Missing --> [*]
+  Malformed --> [*]
+  BadChain --> [*]
+  WrongUse --> [*]
+  Expired --> [*]
+  NoIdentity --> [*]
+  UnknownIdentity --> [*]
+```
+
 ## 92. Proposed Decisions
 
 These still deserve architecture review.

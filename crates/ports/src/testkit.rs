@@ -564,6 +564,7 @@ pub fn sample_spec_with_run_pods(id: &RuntimeId) -> RuntimeSpec {
 }
 
 pub mod auth;
+pub mod client_auth;
 pub mod leader;
 pub mod objects;
 

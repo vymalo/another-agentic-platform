@@ -12,6 +12,7 @@
 
 mod activity;
 mod auth;
+mod client_auth;
 mod directory;
 mod error;
 mod events;
@@ -29,6 +30,7 @@ pub mod testkit;
 
 pub use activity::{Activity, ActivityError, ActivitySource};
 pub use auth::{AuthError, Authenticator, InvalidToken, Principal};
+pub use client_auth::{Certificate, ClientAuthError, ClientAuthenticator, InvalidCertificate};
 pub use directory::{AgentDirectory, DirectoryEntry};
 pub use error::{BoxError, Classify, DirectoryError, ErrorClass, RuntimeError, StoreError};
 pub use events::{

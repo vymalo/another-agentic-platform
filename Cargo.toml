@@ -10,6 +10,7 @@ members = [
     "crates/store-cnpg",
     "crates/objects-kubernetes",
     "crates/auth-oidc",
+    "crates/auth-workload",
     "crates/registry",
     "crates/leader-kubernetes",
     "crates/controller",
@@ -46,6 +47,7 @@ aap-store-secret = { path = "crates/store-secret" }
 aap-store-cnpg = { path = "crates/store-cnpg" }
 aap-objects-kubernetes = { path = "crates/objects-kubernetes" }
 aap-auth-oidc = { path = "crates/auth-oidc" }
+aap-auth-workload = { path = "crates/auth-workload" }
 aap-registry = { path = "crates/registry" }
 aap-leader-kubernetes = { path = "crates/leader-kubernetes" }
 aap-controller = { path = "crates/controller" }
@@ -75,6 +77,11 @@ proptest = "1"
 # Only `aapctl`'s safe read of its 0600 file: `geteuid` and `O_NOFOLLOW` without `unsafe` (already in the lock file through tempfile).
 rustix = { version = "1", default-features = false, features = ["std", "fs", "process"] }
 reqwest = { version = "0.12", default-features = false, features = ["rustls-tls-native-roots"] }
+# The workload authenticator (ANR-1010, ADR-0042): rustls-webpki is already in the lock through rustls,
+# with ring as its provider, so this adds no TLS stack; x509-parser reads the URI SAN, which webpki does not expose.
+rustls-pki-types = "1"
+rustls-webpki = { version = "0.103", default-features = false, features = ["std", "ring"] }
+x509-parser = "0.18"
 schemars = "1"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
