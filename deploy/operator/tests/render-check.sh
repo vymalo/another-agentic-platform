@@ -1879,6 +1879,36 @@ check "api.extraVolumes may not take the name of the chart's otel volume while a
 check "api.extraVolumeMounts may not mount under the chart's otel paths while api.otel is on" refused_api_otel 'where api.otel mounts its headers and CA bundle' \
   --set-json 'api.extraVolumes=[{"name":"x","emptyDir":{}}]' --set-json 'api.extraVolumeMounts=[{"name":"x","mountPath":"/etc/aap/otel/more"}]'
 
+# ---- Activity source (AD-058 P2c) -----------------------------------------------------------------------------------------
+# `activity.to` is who the operator may ask what work an agent holds. Empty (the default): off, no variable, volume or rule of it. On: the
+# four variables, the bearer's Secret as a file, DNS and exactly those peers on the agents' port.
+act_peer='[{"namespaceSelector":{"matchLabels":{"kubernetes.io/metadata.name":"agents"}},"podSelector":{"matchLabels":{"app":"agent"}}}]'
+act_on() { render --set-json "activity.to=$act_peer" --set activity.tokenSecret.name=agent-bearer "$@"; }
+activity_off() {
+  render || return 1
+  lacks 'ACTIVITY' && lacks 'activity-token' && lacks 'agent-bearer' && [ "$(op_egress_rules)" -eq 1 ]
+}
+check "activity off (the default): no variable, volume, Secret or egress rule of it" activity_off
+activity_on() {
+  act_on --set activity.port=8090 --set activity.timeoutSecs=7 || return 1
+  has 'name: ACTIVITY_ENABLED' && has 'name: ACTIVITY_PORT' && has 'value: "8090"' && has 'name: ACTIVITY_TIMEOUT_SECS' && has 'value: "7"' \
+    && has 'value: /var/run/secrets/aap/activity/token' && has 'secretName: agent-bearer' || return 1
+  [ "$(op_egress_rules)" -eq 3 ] || return 1
+  all_of "$(op_egress_rule 2)" 'port: 53' 'k8s-app: kube-dns' || return 1
+  all_of "$(op_egress_rule 3)" 'port: 8090$' '^      to:' 'kubernetes.io/metadata.name: agents' 'app: agent' || return 1
+  none_of "$(op_egress_rule 3)" 'port: 53|ipBlock|0\.0\.0\.0/0'
+}
+check "activity on: the four variables, the bearer file from the named Secret, DNS and the listed peers on the agents' port, nothing else" activity_on
+activity_no_token_in_render() { act_on --set activity.tokenSecret.key=bearer-key || return 1; lacks 'hunter2' && has 'key: bearer-key'; }
+check "activity on: the Secret's key is the one named, and no value of it is rendered" activity_no_token_in_render
+check "activity.to without a bearer Secret is refused" refused 'activity.tokenSecret.name and activity.tokenSecret.key are required' --set-json "activity.to=$act_peer"
+check "activity.timeoutSecs above 30 is refused" refused 'activity.timeoutSecs must be a whole number of seconds from 1 to 30' --set-json "activity.to=$act_peer" --set activity.tokenSecret.name=x --set activity.timeoutSecs=31
+check "activity.port 0 is refused" refused 'activity.port: 0 is not a port number' --set-json "activity.to=$act_peer" --set activity.tokenSecret.name=x --set activity.port=0
+check "activity.dns.to emptied is refused while the policy is on" refused 'activity.dns.to and activity.dns.ports are required' --set-json "activity.to=$act_peer" --set activity.tokenSecret.name=x --set-json 'activity.dns.to=[]'
+check "activity: a key that is not a setting is refused" refused 'activity.foo is not a setting' --set activity.foo=1
+check "activity must be a map" refused 'activity must be a map' --set activity=null
+check "an ipBlock of 0.0.0.0/0 as an activity peer is refused" refused 'is every address' --set activity.tokenSecret.name=x --set-json 'activity.to=[{"ipBlock":{"cidr":"0.0.0.0/0"}}]'
+
 # ---- Tool probe (slice K3a, AD-053) ---------------------------------------------------------------------------------------
 # `toolProbe.to` is the deployment's list of the peers the operator may reach to probe a ToolProvider's MCP server (a NetworkPolicy
 # names peers, never host names: the policy is what bounds the probe). Empty (the default): off, and then not a rule of it is rendered.

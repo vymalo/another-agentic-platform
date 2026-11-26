@@ -1,0 +1,27 @@
+[package]
+name = "aap-activity-http"
+description = "The HTTP ActivitySource (AD-058 P2c): asks an agent service's GET /internal/activity what work it holds"
+readme = "README.md"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+publish.workspace = true
+
+[dependencies]
+aap-ports.workspace = true
+# reqwest 0.12 with rustls and ring, as every HTTP client of the workspace (see crates/auth-oidc/README.md).
+reqwest.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+tokio = { workspace = true, features = ["time"] }
+
+[dev-dependencies]
+aap-ports = { workspace = true, features = ["testkit"] }
+axum = { workspace = true, features = ["json"] }
+tokio = { workspace = true, features = ["macros", "rt", "rt-multi-thread", "net", "time"] }
+
+[lints]
+workspace = true

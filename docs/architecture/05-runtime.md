@@ -271,6 +271,8 @@ One row per pull request, one repository per row. "plat" is another-agentic-plat
 
 P2a as built (2026-11-26, ANR-850): the `ActivitySource` port (`aap-ports`, `poll(id) -> {busy, nextDueAt}`, the suite `activity_source_conformance!`, `MemoryActivity`) and the pure `decide` of `crates/controller/src/sleep.rs`, with the four rules of the row tested by name. Nothing polls or scales yet (P2b); the HTTP source is P2c.
 
+P2c as built (2026-11-26, ANR-852): `crates/activity-http` (`aap-activity-http`), `HttpActivity`, the `ActivitySource` over `GET http://<name>.<namespace>.svc:<port>/internal/activity` with the agents' bearer. A failed, refused, oversized or malformed answer is an error, never idleness. The operator builds it from `ACTIVITY_ENABLED`, `ACTIVITY_PORT` (8080), `ACTIVITY_TIMEOUT_SECS` (3) and `ACTIVITY_TOKEN_FILE` (enabled without a token file stops the start); the chart's `activity` block (`to`, `port`, `timeoutSecs`, `tokenSecret`, `dns`) turns it on, mounts the bearer's Secret as a file and opens egress to those peers on that port, and renders nothing while `activity.to` is empty. Nothing polls it yet: P2b wires the controller.
+
 P1 as built: `scaling.idleTimeout` (`1m` to `24h`), `scaling.wakeAhead` (`10s` to `1h`) and `scaling.wakeTimeout` (`5s` to `5m`) are duration strings with CEL bounds; the last two need `idleTimeout`. All three are absent by default, so an agent never sleeps and nothing renders differently. `status.runtime.phase` gains `Sleeping`; nothing sets it until P2. Defaults (2m and 60s) are P2's and P3's to apply. The owner confirmed `idleTimeout: 10m` as the value of the hosted deployment (2026-11-25); the fields stay off by default in the CRD.
 
 ### The seam the sys ADR for live connections needs

@@ -119,6 +119,29 @@ pub struct RunArgs {
     )]
     pub tool_probe_timeout_secs: u64,
 
+    /// Ask each agent service what work it holds (AD-058 P2c): `GET http://<name>.<namespace>.svc:<ACTIVITY_PORT>/internal/activity`,
+    /// the source the idle controller (P2b) polls. **Off by default**: no request is made. It needs `ACTIVITY_TOKEN_FILE`, because the
+    /// agents refuse a request without their bearer.
+    #[arg(long, env = "ACTIVITY_ENABLED")]
+    pub activity_enabled: bool,
+
+    /// The port agents serve `/internal/activity` on (their `LISTEN_ADDR`).
+    #[arg(long, env = "ACTIVITY_PORT", default_value_t = 8080, value_parser = clap::value_parser!(u16).range(1..))]
+    pub activity_port: u16,
+
+    /// How long one question may take, in seconds (1 to 30). An agent that does not answer by then counts as busy.
+    #[arg(
+        long,
+        env = "ACTIVITY_TIMEOUT_SECS",
+        default_value_t = 3,
+        value_parser = clap::value_parser!(u64).range(1..=30)
+    )]
+    pub activity_timeout_secs: u64,
+
+    /// A file holding the bearer the agents accept (a mounted Secret key). Read once at start; never an argument, never logged.
+    #[arg(long, env = "ACTIVITY_TOKEN_FILE")]
+    pub activity_token_file: Option<PathBuf>,
+
     /// Days the operator keeps the database and volumes a deleted agent left behind (`deletionPolicy: Retain`) before it
     /// deletes them (ANR-770). 90 by default; `0` keeps them for ever and turns the sweep off.
     #[arg(long, env = "RETENTION_AFTER_DELETE_DAYS", default_value_t = 90)]
@@ -481,6 +504,36 @@ impl RunArgs {
     }
 }
 
+impl RunArgs {
+    /// The HTTP activity source (AD-058 P2c), or `None` while `ACTIVITY_ENABLED` is off. **Fail closed**: enabled with no
+    /// readable, non-empty `ACTIVITY_TOKEN_FILE` is an error at start, never a source that asks with no bearer.
+    pub fn activity_source(&self) -> anyhow::Result<Option<aap_activity_http::HttpActivity>> {
+        use anyhow::Context;
+        if !self.activity_enabled {
+            if self.activity_token_file.is_some() {
+                tracing::warn!(
+                    "ACTIVITY_TOKEN_FILE is set but ACTIVITY_ENABLED is not: no agent is asked about its work"
+                );
+            }
+            return Ok(None);
+        }
+        let path = self
+            .activity_token_file
+            .as_ref()
+            .context("ACTIVITY_ENABLED needs ACTIVITY_TOKEN_FILE: the agents refuse a request with no bearer")?;
+        let text = std::fs::read_to_string(path)
+            .with_context(|| format!("reading ACTIVITY_TOKEN_FILE {}", path.display()))?;
+        let token = aap_activity_http::Token::new(&text)
+            .with_context(|| format!("ACTIVITY_TOKEN_FILE {}", path.display()))?;
+        let source = aap_activity_http::HttpActivity::in_cluster(
+            self.activity_port,
+            std::time::Duration::from_secs(self.activity_timeout_secs),
+            Some(token),
+        )?;
+        Ok(Some(source))
+    }
+}
+
 /// The store provisioner of this build: with `store-cnpg`, the one that makes a CloudNativePG cluster and
 /// also serves a referenced Secret (it passes the whole suite of `aap-ports`, so the controller sees one
 /// type); without it, referenced Secrets alone, and a cluster is refused as not installed.
@@ -638,6 +691,8 @@ async fn run_with(args: RunArgs, tracer: aap_trace::Tracer) -> Result<()> {
     let watch_namespaces = args.namespaces()?;
     let leader = args.leader_election(watch_namespaces.as_deref())?;
     let registry_full = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    // Built and checked now so a bad setting stops the start; the idle controller (P2b) is what polls it.
+    let activity = args.activity_source()?;
     let token = registry_token(&args);
     let options = args.options(
         watch_namespaces,
@@ -664,6 +719,7 @@ async fn run_with(args: RunArgs, tracer: aap_trace::Tracer) -> Result<()> {
             .as_ref()
             .map_or_else(|| "(no run pods)".to_owned(), |s| s.class_names().join(",")),
         tool_probe = options.probe.enabled,
+        activity = activity.is_some(),
         "starting the operator {}",
         env!("CARGO_PKG_VERSION")
     );
@@ -1087,6 +1143,10 @@ mod tests {
             max_access_tier: aap_api::AccessTierCap::Auto,
             tool_probe_enabled: false,
             tool_probe_timeout_secs: 5,
+            activity_enabled: false,
+            activity_port: 8080,
+            activity_timeout_secs: 3,
+            activity_token_file: None,
             retention_after_delete_days: 90,
             leader_election_enabled: false,
             leader_election_name: "aap-operator".to_owned(),
@@ -1296,5 +1356,33 @@ mod tests {
             candidate_id(Some(" "), Some("")).is_err(),
             "two blank names are none"
         );
+    }
+
+    #[test]
+    fn the_activity_source_is_off_by_default_and_fails_closed_without_a_token() {
+        let mut a = args(Some("agents"), None);
+        assert!(a.activity_source().expect("off is fine").is_none());
+
+        a.activity_enabled = true;
+        let text = format!("{:#}", a.activity_source().expect_err("no token file"));
+        assert!(text.contains("ACTIVITY_TOKEN_FILE"), "{text}");
+
+        let dir = std::env::temp_dir().join(format!("aap-activity-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).expect("a directory");
+        let file = dir.join("token");
+        a.activity_token_file = Some(file.clone());
+        let text = format!("{:#}", a.activity_source().expect_err("missing file"));
+        assert!(text.contains("reading ACTIVITY_TOKEN_FILE"), "{text}");
+
+        std::fs::write(&file, " \n").expect("write");
+        assert!(a.activity_source().is_err(), "a blank token is refused");
+
+        std::fs::write(&file, "s3cret-bearer\n").expect("write");
+        let source = a.activity_source().expect("a token").expect("a source");
+        assert!(
+            !format!("{source:?}").contains("s3cret"),
+            "the token never prints"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

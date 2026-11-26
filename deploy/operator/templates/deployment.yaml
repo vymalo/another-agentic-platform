@@ -129,6 +129,17 @@ spec:
             - name: TOOL_PROBE_TIMEOUT_SECS
               value: {{ .Values.toolProbe.timeoutSecs | default 5 | quote }}
             {{- end }}
+            {{- if include "aap.activity" . }}
+            # AD-058 P2c: ask each agent what work it holds. The chart turns it on with the peers above; the bearer is the file below.
+            - name: ACTIVITY_ENABLED
+              value: "true"
+            - name: ACTIVITY_PORT
+              value: {{ .Values.activity.port | int | quote }}
+            - name: ACTIVITY_TIMEOUT_SECS
+              value: {{ .Values.activity.timeoutSecs | int | quote }}
+            - name: ACTIVITY_TOKEN_FILE
+              value: /var/run/secrets/aap/activity/token
+            {{- end }}
             {{- if hasKey (default dict .Values.retention) "afterDeleteDays" }}
             # ANR-770: days a deleted agent's retained database and volumes are kept (0: for ever). The operator's own default is 90.
             - name: RETENTION_AFTER_DELETE_DAYS
@@ -211,11 +222,16 @@ spec:
             runAsNonRoot: true
             capabilities:
               drop: [ALL]
-          {{- if or (include "aap.registrySecretName" .) (include "aap.runPods" .) (and (include "aap.otel.on" .) (include "aap.otel.hasVolumes" (dict "block" .Values.otel))) }}
+          {{- if or (include "aap.registrySecretName" .) (include "aap.activity" .) (include "aap.runPods" .) (and (include "aap.otel.on" .) (include "aap.otel.hasVolumes" (dict "block" .Values.otel))) }}
           volumeMounts:
             {{- if include "aap.registrySecretName" . }}
             - name: registry-token
               mountPath: /var/run/secrets/aap/registry
+              readOnly: true
+            {{- end }}
+            {{- if include "aap.activity" . }}
+            - name: activity-token
+              mountPath: /var/run/secrets/aap/activity
               readOnly: true
             {{- end }}
             {{- if include "aap.runPods" . }}
@@ -227,7 +243,7 @@ spec:
             {{- include "aap.otel.mounts" (dict "block" .Values.otel) | nindent 12 }}
             {{- end }}
           {{- end }}
-      {{- if or (include "aap.registrySecretName" .) (include "aap.runPods" .) (and (include "aap.otel.on" .) (include "aap.otel.hasVolumes" (dict "block" .Values.otel))) }}
+      {{- if or (include "aap.registrySecretName" .) (include "aap.activity" .) (include "aap.runPods" .) (and (include "aap.otel.on" .) (include "aap.otel.hasVolumes" (dict "block" .Values.otel))) }}
       volumes:
         {{- if include "aap.registrySecretName" . }}
         - name: registry-token
@@ -236,6 +252,15 @@ spec:
             defaultMode: 288 # 0440
             items:
               - key: {{ include "aap.registrySecretKey" . }}
+                path: token
+        {{- end }}
+        {{- if include "aap.activity" . }}
+        - name: activity-token
+          secret:
+            secretName: {{ .Values.activity.tokenSecret.name }}
+            defaultMode: 288 # 0440
+            items:
+              - key: {{ .Values.activity.tokenSecret.key }}
                 path: token
         {{- end }}
         {{- if include "aap.runPods" . }}
