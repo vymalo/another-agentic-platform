@@ -984,9 +984,9 @@ version in the `scripts` job) passes on it; `actionlint` is not installed there.
 
 [`gvisor-k3d.sh`](gvisor-k3d.sh) and its fixture [`gvisor-k3d.yaml`](gvisor-k3d.yaml) (held without a cluster by `bin/operator/tests/e2e_gvisor_fixture.rs`) are run by the
 workflow [`gvisor-k3d.yml`](../../../../.github/workflows/gvisor-k3d.yml), a workflow of its own: **not a required check and not a need of `push`**; on a pull request it runs only when
-the script, its fixture, that workflow, the run pods' templates, the chart's `_validate.tpl` and `values.yaml` or the admission script change, and on `workflow_dispatch`. It is a
+the script, its fixture, that workflow, the chart's templates (`deploy/operator/templates/**`), its CRDs chart (`deploy/operator-crds/**`), its `values.yaml` or the admission script change, and on `workflow_dispatch`. It is a
 **measurement**: it fails when the cluster cannot be made, when the run pod of the operator's template does not run under `runsc`, or when the admission policy does not do what
-`run-pods-admission.sh` says, and reports the rest as results, each with its failing step quoted, in a summary at the end.
+`run-pods-admission.sh` says, and reports the rest as results, each with its failing step quoted, in a summary at the end. **The job installs the chart of the pull request but runs the operator image that chart pins (`image.tag` in `deploy/operator/values.yaml`, built by an earlier run on `main`), not an image built from the pull request**; k3d and kubectl are installed by the job, each pinned by version and SHA-256.
 
 ```sh
 sh deploy/operator/tests/e2e/gvisor-k3d.sh   # from the repository root; needs docker, k3d (v5.9.0), kubectl, helm, jq, curl, tar with bzip2, sha512sum, openssl
@@ -1006,7 +1006,7 @@ the `RuntimeClass`, installs the operator's chart from this tree with `runPods.r
    (two rounds of three) under runsc and runc, the median of the six in ms (a time, nothing else); **(e)** a pod with `limits.memory: 64Mi` that holds 256 MiB and a fixed loop under
    `limits.cpu: 100m` against 2, under runsc and under runc as the control, the outcome read from the pod's terminated state.
 
-Every image is pinned by tag and digest in the script (read from the registries on 2026-11-26), k3d's helper image too (`K3D_IMAGE_TOOLS`, which k3d reads: a made-up digest makes it fail to pull). The exit status is 0 when the run pod ran under `runsc` and the
+Every image the script names is pinned by tag and digest (read from the registries on 2026-11-26). k3d's helper image is also named, through `K3D_IMAGE_TOOLS`; whether k3d used it is not assumed: the script watches the daemon's container-create events while the cluster is made and prints `the tools container ran: <image>` (see the run's log), and says so when it sees none. The exit status is 0 when the run pod ran under `runsc` and the
 admission policy held; a measure that fails is a line of the summary, not a failing run. **Run for real on 2026-11-26** on a local machine (rootless Docker 29.9.3, kernel
 7.0.0-43, k3d v5.9.0, k3s v1.35.5, gVisor `release-20261116.0`; exit 0): the numbers and the failing steps are in §59c row K14 of `docs/architecture/10-control-plane-and-crds.md`;
 the decisive one is (e): **under `ignore-cgroups` runsc did not enforce the pod's memory or CPU limits and runc did**. *Unverified*: a hosted runner (the workflow has not run), the real coder under the class (K14d), a node that is not a container, the owner's nodes. `shellcheck` passes on the script, `actionlint` on the workflow.

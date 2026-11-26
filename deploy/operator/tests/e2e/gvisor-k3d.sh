@@ -53,7 +53,7 @@ ok() { printf 'ok   %s\n' "$*"; }
 die() { printf 'FAIL %s\n' "$*" >&2; exit 1; }
 note() { printf 'note %s\n' "$*"; }
 
-# ---- the pins. Every image is by tag AND digest (the digest of the index of the tag, read from the registry on 2026-11-26 with `docker buildx imagetools
+# ---- the pins. Every image the script names is by tag AND digest (k3d's own tools image: see below, the log says which one ran) (the digest of the index of the tag, read from the registry on 2026-11-26 with `docker buildx imagetools
 # inspect`), the gVisor archive by its SHA-512 (the file `gvisor.tar.bz2.sha512` next to it at the same address, and the same value computed locally). ----
 k3s_image=rancher/k3s:v1.35.5-k3s1@sha256:2074403abe1bded11ef3dde09d457e13be8e0b64c218b1c4f8269b4565cfbc65
 gvisor_release=20261116
@@ -65,8 +65,8 @@ podman6=quay.io/podman/stable:v6.2.0@sha256:a02eea67f0ebb539679b938f58acf47a566f
 podman5=quay.io/podman/stable:v5.8.9@sha256:f7a17ef911a2b9b866ada8a9426a07e29a6e4f8109ef8c0e0b7010c2541b4e49
 
 # k3d's helper image, by tag and digest (the digest of the index, read with `docker buildx imagetools inspect` on 2026-11-26). k3d reads K3D_IMAGE_TOOLS
-# (its binary holds that name beside K3D_IMAGE_LOADBALANCER, which `--no-lb` leaves unused); whether it accepts a digest is shown by the run: the log says
-# which image the tools node was made from.
+# (its binary holds that name beside K3D_IMAGE_LOADBALANCER, which `--no-lb` leaves unused). Whether k3d honours it is not assumed: the script watches the
+# Docker daemon's container-create events while the cluster is made and prints the image the k3d-tools container was made from ("the tools container ran").
 k3d_tools=ghcr.io/k3d-io/k3d-tools:5.9.0@sha256:c57abce697e66feeb826922718738fe186b47779312d49d4e51e6fb9b8a6f34d
 export K3D_IMAGE_TOOLS=$k3d_tools
 
@@ -117,6 +117,7 @@ cleanup() {
   trap - EXIT
   trap '' INT TERM HUP
   if [ "$status" -ne 0 ] && [ "$cluster_made" = 1 ]; then diagnostics; fi
+  [ -z "${events_pid:-}" ] || kill "$events_pid" 2>/dev/null || true
   if [ "$cluster_made" = 1 ]; then k3d cluster delete "$cluster" >/dev/null 2>&1 || true; fi
   if [ "${AAP_GVISOR_REMOVE_IMAGES:-}" = 1 ]; then
     docker rmi "${k3s_image%@*}" "$k3d_tools" >/dev/null 2>&1 || true
@@ -169,6 +170,10 @@ printf 'k3d: %s\n' "$(k3d version | tr '\n' ' ')"
 printf 'docker server: %s; %s\n' "$(docker version --format '{{.Server.Version}}' 2>&1)" "$(docker info --format 'security {{.SecurityOptions}}, cgroup version {{.CgroupVersion}}, storage driver {{.Driver}}' 2>&1)"
 printf 'host kernel: %s; kubectl client: %s; helm: %s\n' "$(uname -sr)" "$(kubectl version --client -o json 2>/dev/null | jq -r '.clientVersion.gitVersion // "?"')" "$(helm version --short 2>/dev/null)"
 cluster_made=1
+# The images of the containers created while k3d works, from the daemon's own events (the tools container lives only for a moment, so it is not found afterwards).
+docker events --filter type=container --filter event=create --format '{{.Actor.Attributes.image}}' > "$work/events.out" 2>/dev/null &
+events_pid=$!
+sleep 2
 k3d cluster create "$cluster" --servers 1 --agents 0 --servers-memory 6g --no-lb --image "$k3s_image" \
   --k3s-arg '--kubelet-arg=feature-gates=KubeletInUserNamespace=true@server:*' \
   --k3s-arg '--kube-proxy-arg=conntrack-max-per-core=0@server:*' \
@@ -177,7 +182,10 @@ k3d cluster create "$cluster" --servers 1 --agents 0 --servers-memory 6g --no-lb
   --volume "$work/runsc.toml:/etc/containerd/runsc.toml@server:*" \
   --volume "$work/config.toml.tmpl:/var/lib/rancher/k3s/agent/etc/containerd/config.toml.tmpl@server:*" \
   --kubeconfig-update-default=false --kubeconfig-switch-context=false \
-  --wait --timeout 300s >"$work/k3d-create.out" 2>&1 || die "k3d could not make the cluster: $(tail -c 600 "$work/k3d-create.out")"
+  --wait --timeout 300s >"$work/k3d-create.out" 2>&1 || { kill "$events_pid" 2>/dev/null || true; die "k3d could not make the cluster: $(tail -c 600 "$work/k3d-create.out")"; }
+sleep 1
+kill "$events_pid" 2>/dev/null || true
+wait "$events_pid" 2>/dev/null || true
 # A kubeconfig of its own: the person's is never read or written.
 ( umask 077; k3d kubeconfig get "$cluster" > "$work/kubeconfig" )
 context=$(kubectl config current-context)
@@ -187,7 +195,9 @@ until_ok 180 "the node to be Ready" kubectl wait --for=condition=Ready node --al
 until_ok 180 "CoreDNS" kubectl -n kube-system wait --for=condition=Available deployment/coredns --timeout=10s
 kubectl get nodes -o wide
 printf 'node: containerd %s; kernel %s; cgroup filesystem of the node: %s\n' "$(kubectl get nodes -o jsonpath='{.items[0].status.nodeInfo.containerRuntimeVersion}')" "$(kubectl get nodes -o jsonpath='{.items[0].status.nodeInfo.kernelVersion}')" "$(docker exec "k3d-$cluster-server-0" stat -fc %T /sys/fs/cgroup 2>&1)"
-printf 'tools image of the cluster: %s\n' "$(docker ps -a --filter "name=k3d-$cluster-tools" --format '{{.Image}}' 2>&1)"
+printf 'images created while k3d made the cluster: %s\n' "$(sort -u "$work/events.out" | tr '\n' ' ')"
+tools_ran=$(grep 'k3d-tools' "$work/events.out" | sort -u | tr '\n' ' ')
+if [ -n "$tools_ran" ]; then printf 'the tools container ran: %s (pinned: %s)\n' "$tools_ran" "$k3d_tools"; else note "no k3d-tools container was seen in the daemon's events, so which tools image ran is not shown by this log"; fi
 ok "a k3d cluster ($(kubectl version -o json 2>/dev/null | jq -r '.serverVersion.gitVersion // "?"')), one server, no agent"
 
 printf 'apiVersion: node.k8s.io/v1\nkind: RuntimeClass\nmetadata:\n  name: %s\n  labels:\n    %s: %s\nhandler: runsc\n' "$class" "$made_by_key" "$made_by" | kubectl create -f - >/dev/null
@@ -289,7 +299,7 @@ kernel_gv=$(px rp-core 'uname -sr')
 kernel_plain=$(kubectl -n "$ns" exec plain -- uname -sr)
 printf 'uname in the run pod: %s; in the plain pod: %s\n' "$kernel_gv" "$kernel_plain"
 ok "the run pod runs under $class (dmesg: Starting gVisor; kernel $kernel_gv) and the plain pod does not (klogctl refused; kernel $kernel_plain)"
-record "sandbox start (K14c): VERIFIED here, a run pod of the operator's template ran under runsc (release $gvisor_release) in k3d; its dmesg said 'Starting gVisor...', the plain pod's 'klogctl: Operation not permitted'; uname $kernel_gv against $kernel_plain"
+record "sandbox start (K14c): VERIFIED here (limits NOT enforced under ignore-cgroups, see (e)), a run pod of the operator's template ran under runsc (release $gvisor_release) in k3d; its dmesg said 'Starting gVisor...', the plain pod's 'klogctl: Operation not permitted'; uname $kernel_gv against $kernel_plain"
 # The policy, asked of the same API server: a pod without the class, and one with another class, made as the account, are refused.
 make_pod rp-noclass "$alpine" 0 runc 0
 if launch rp-noclass account; then
@@ -298,7 +308,7 @@ if launch rp-noclass account; then
 elif grep -q "RuntimeClass $class" "$work/launch.out"; then
   ok "the policy refuses a run pod with no class: $(head -c 220 "$work/launch.out")"
 else
-  record "admission: a pod with no class was refused, but not with the policy's own words: $(head -c 300 "$work/launch.out")"
+  failed "admission: a pod with no class was refused, but not with the policy's own words: $(head -c 300 "$work/launch.out")"
 fi
 # run-pods-admission.sh's case "another runtime class" names `runc`, and the API server's own RuntimeClass admission answers "RuntimeClass runc not found"
 # before the policy is asked when the cluster has no such object (k3s makes none): the cluster here gets one, a handler its containerd has.
@@ -370,7 +380,7 @@ probe() {
   # The policy's word on the relaxed pods: the agent's account may not make them (that is the guard), so the administrator does.
   if [ "$p_relaxed" = 1 ] && [ "$p_rt" = runsc ]; then
     if kubectl --as="$account" create --dry-run=server -f "$work/$p_pod.json" >"$work/dry.out" 2>&1; then
-      note "$p_label: the account would be ALLOWED to make this relaxed pod (unexpected): $(head -c 200 "$work/dry.out")"
+      failed "admission: $p_label: the account would be ALLOWED to make this relaxed pod, the guard should refuse it: $(head -c 200 "$work/dry.out")"
     else
       note "$p_label: the policy refuses this pod to the account ($(grep -o 'allowPrivilegeEscalation: false on every container' "$work/dry.out" | head -n 1)); made as the administrator"
     fi
