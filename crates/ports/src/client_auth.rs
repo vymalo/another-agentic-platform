@@ -135,7 +135,7 @@ impl Classify for ClientAuthError {
 /// [`authenticate`](Self::authenticate) is the first half, *who and which permissions*; whether a route
 /// admits them is the router's, which reads [`Principal::holds`]. An implementation checks the
 /// certificate against one configured CA bundle, requires the client-authentication extended key usage,
-/// and refuses a leaf past its `notAfter` — each with its [`InvalidCertificate`] word.
+/// and refuses a leaf outside its validity window — each with its [`InvalidCertificate`] word.
 pub trait ClientAuthenticator: Send + Sync {
     /// The workload `certificate` names. `certificate` is what the TLS layer read from the connection, or
     /// `None` when the peer presented none.

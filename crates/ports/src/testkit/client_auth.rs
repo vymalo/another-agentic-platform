@@ -1,6 +1,6 @@
 //! Cases of the `ClientAuthenticator` suite (ANR-1010). The workload implementation
-//! (`aap-auth-workload`) is held to these, and adds the cases only a certificate has (a chain with an
-//! intermediate, a revoked leaf, a SAN of another shape).
+//! (`aap-auth-workload`) is held to these. **Not covered yet:** a chain through an intermediate and a
+//! revoked leaf — the implementation passes no intermediates and fetches no CRL.
 //!
 //! The certificates are **fixtures**, not minted at test time: a checked-in test CA and its leaves are
 //! what the card asks for, and a suite that generated its own CA would not prove that a real CA bundle

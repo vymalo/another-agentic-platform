@@ -142,7 +142,7 @@ impl WorkloadClients {
 /// The [`ClientAuthenticator`] of the workload listener: one CA bundle, and the exact identities the
 /// configuration names.
 pub struct WorkloadAuth {
-    roots: Vec<CertificateDer<'static>>,
+    anchors: Vec<TrustAnchor<'static>>,
     identities: BTreeMap<String, BTreeSet<String>>,
 }
 
@@ -150,7 +150,7 @@ impl std::fmt::Debug for WorkloadAuth {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         // Never the bundle's bytes or the identities' permissions: the shape only.
         f.debug_struct("WorkloadAuth")
-            .field("roots", &self.roots.len())
+            .field("anchors", &self.anchors.len())
             .field("identities", &self.identities.len())
             .finish()
     }
@@ -183,7 +183,9 @@ impl WorkloadAuth {
             ));
         }
         // A bundle that cannot be an anchor is refused at load, not at the first request. `webpki` parses a
-        // trust anchor without asking whether it may sign, so the CA bit is read here.
+        // trust anchor without asking whether it may sign, so the CA bit is read here. The anchors are kept,
+        // so a request parses the bundle no more.
+        let mut anchors = Vec::with_capacity(roots.len());
         for der in &roots {
             let (_, parsed) = X509Certificate::from_der(der.as_ref()).map_err(|_| {
                 ConfigError::Bundle("a certificate of the bundle cannot be read".to_owned())
@@ -194,12 +196,13 @@ impl WorkloadAuth {
                         .to_owned(),
                 ));
             }
-            webpki::anchor_from_trusted_cert(der).map_err(|e| {
+            let anchor = webpki::anchor_from_trusted_cert(der).map_err(|e| {
                 ConfigError::Bundle(format!("a certificate of the bundle is not a CA: {e}"))
             })?;
+            anchors.push(anchor.to_owned());
         }
         Ok(Self {
-            roots,
+            anchors,
             identities: clients.table()?,
         })
     }
@@ -231,21 +234,10 @@ impl ClientAuthenticator for WorkloadAuth {
         // `KeyUsage::client_auth()` is *required if present*: `webpki` accepts a leaf that carries no
         // extended key usage at all. The extension is therefore required here, by hand, after the chain
         // — otherwise a role of the same CA that issues leaves without an EKU would be callable.
-        let anchors: Vec<TrustAnchor<'_>> = self
-            .roots
-            .iter()
-            .map(|root| {
-                webpki::anchor_from_trusted_cert(root).map_err(|e| {
-                    // The trust this authenticator was built with cannot be read: never the client's
-                    // certificate's fault, and never a 401.
-                    ClientAuthError::Unavailable(Box::new(e))
-                })
-            })
-            .collect::<Result<_, _>>()?;
         end_entity
             .verify_for_usage(
                 webpki::ALL_VERIFICATION_ALGS,
-                &anchors,
+                &self.anchors,
                 &[],
                 UnixTime::now(),
                 webpki::KeyUsage::client_auth(),
