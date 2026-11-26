@@ -979,3 +979,31 @@ The script needs `docker` as well as `kubectl`: it finds the holder's process th
 `kubectl delete` would still send SIGTERM, and the operator would release the Lease — which is step 10's claim, not step 8's), then waits until
 no container of that pod is left, so a restarted one cannot renew "its own" lease. `shellcheck` (0.10.0 where it was written, and the CI's own
 version in the `scripts` job) passes on it; `actionlint` is not installed there.
+
+## A run pod under gVisor's runsc, in k3d (ANR-404, K14c)
+
+[`gvisor-k3d.sh`](gvisor-k3d.sh) and its fixture [`gvisor-k3d.yaml`](gvisor-k3d.yaml) are the job `gvisor-k3d` of
+[`operator-image.yml`](../../../../.github/workflows/operator-image.yml) (**`push` does not need it**; it runs on a pull request only when the script, its
+fixture or that job changed, and on `workflow_dispatch`). It is a **measurement**: it asserts that a run pod of the operator's template ran under `runsc`, and
+reports the rest as results, each with its failing step quoted, in a summary at the end.
+
+```sh
+sh deploy/operator/tests/e2e/gvisor-k3d.sh   # from the repository root; needs docker, k3d (v5.9.0), kubectl, helm, jq, curl, tar with bzip2, sha512sum, openssl
+```
+
+It makes its own k3d cluster (`aap-gvisor-404`, one server, 6 GB; it refuses to run if one by that name exists and deletes it at the end), a kubeconfig of its own
+in a temporary directory, and nothing else of yours. It downloads gVisor's whole release archive (pinned by SHA-512; `AAP_GVISOR_ARCHIVE=<path>` uses one you have),
+mounts it at `/usr/local/bin` of the node with a containerd template that adds the `runsc` runtime and a `runsc.toml` (`ignore-cgroups`) that the shim reads, makes
+the `RuntimeClass`, installs the operator's chart from this tree with `runPods.runtimeClassName: runsc`, and applies a coder with `coder.runPods` whose image is a pinned alpine
+(so the coder itself crash-loops: said in the output), then:
+
+1. makes a **real** pod from the operator's template, as the agent's service account (the admission policy admits it), and shows its `runtimeClassName`, its `dmesg`
+   (`Starting gVisor...`) and `uname` beside a plain pod's (`klogctl: Operation not permitted`); asks the policy for a pod with no class and runs `run-pods-admission.sh`;
+2. **(b)** writes and reads the coder's claim in one run pod, then another, and execs in it; **(a)** `hostUsers: false` with and without the class; **(c)** rootless BuildKit
+   and Podman (v6.2.0 and v5.8.9) under the template's security context and under a relaxed one, each beside the same pod under runc; **(d)** one tiny Podman build, six runs each
+   under runsc and runc, the median of the six in ms (a time, nothing else).
+
+Every image is pinned by tag and digest in the script (read from the registries on 2026-11-26). The exit status is 0 when the run pod ran under `runsc` and the
+cluster did what it should; a measure that fails is a line of the summary, not a failing run. **Run for real on 2026-11-26** on a local machine (rootless Docker 29.9.3, kernel
+7.0.0-43, k3d v5.9.0, k3s v1.35.5, gVisor `release-20261116.0`): the numbers and the failing steps are in §59c row K14 of `docs/architecture/10-control-plane-and-crds.md`. *Unverified*: a
+hosted runner (the job has not run), the real coder under the class (K14d), the owner's nodes. `shellcheck` passes on the script; `actionlint` on the workflow.

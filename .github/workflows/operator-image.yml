@@ -102,6 +102,7 @@ name: Operator and API images
 # get a dry run that shows the edit the bump would make.
 
 on:
+  workflow_dispatch:
   pull_request:
     paths:
       - "crates/**"
@@ -884,6 +885,64 @@ jobs:
           OPERATOR_PULL_POLICY: Never
           AGENT_IMAGE: aap-stub:ci
         run: sh deploy/operator/tests/e2e/leader-e2e.sh
+
+  # ANR-404 (K14c, AD-052): a run pod under gVisor's runsc, in k3d (K14b recorded that kind refuses runsc's device cgroup; the way past is the shim's own
+  # configuration, gvisor-k3d.sh's header says how). NOT in `push`'s needs: it pulls other registries' images by digest and a hosted runner may refuse
+  # what a local machine allowed, which is the thing it is here to say. It runs on a pull request only when the script, its fixture or this job changed
+  # (the check below: the diff of this file must mention gvisor), and on demand (`workflow_dispatch`, which also starts the rest of this workflow).
+  # *Unverified* until it has run on a hosted runner: the script was run on a local machine only.
+  gvisor-k3d:
+    name: gvisor-k3d
+    if: github.event_name == 'pull_request' || github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    env:
+      # k3d is pinned by version and by the SHA-256 of its release binary (checksums.txt of the release, *verified 2026-11-26* with a local copy of the same file).
+      K3D_VERSION: v5.9.0
+      K3D_SHA256: 06d8f25bc3a971c4eb29e0ff08429b180402db0f4dec838c9eac427e296800a0
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+      - name: Did the script, its fixture or this job change?
+        id: changed
+        run: |
+          if [ "$GITHUB_EVENT_NAME" = workflow_dispatch ]; then echo "run=true" >> "$GITHUB_OUTPUT"; exit 0; fi
+          base="${{ github.event.pull_request.base.sha }}"
+          if git diff --name-only "$base" HEAD | grep -q '^deploy/operator/tests/e2e/gvisor-k3d'; then
+            echo "run=true" >> "$GITHUB_OUTPUT"
+          elif git diff -U0 "$base" HEAD -- .github/workflows/operator-image.yml | grep -qi 'gvisor'; then
+            echo "run=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "run=false" >> "$GITHUB_OUTPUT"
+            echo "gvisor-k3d: nothing of the script, its fixture or this job changed; skipped"
+          fi
+      - uses: azure/setup-helm@v5
+        if: steps.changed.outputs.run == 'true'
+        with:
+          version: ${{ env.HELM_VERSION }}
+      - name: Install k3d
+        if: steps.changed.outputs.run == 'true'
+        run: |
+          curl -sSfL -o "$RUNNER_TEMP/k3d" "https://github.com/k3d-io/k3d/releases/download/${K3D_VERSION}/k3d-linux-amd64"
+          echo "${K3D_SHA256}  $RUNNER_TEMP/k3d" | sha256sum -c -
+          sudo install -m 0755 "$RUNNER_TEMP/k3d" /usr/local/bin/k3d
+          k3d version
+          docker version --format 'docker server {{.Server.Version}}'
+          stat -fc 'cgroup filesystem of /sys/fs/cgroup: %T' /sys/fs/cgroup
+      - name: A run pod under runsc, and what the card asks to measure
+        if: steps.changed.outputs.run == 'true'
+        run: sh deploy/operator/tests/e2e/gvisor-k3d.sh 2>&1 | tee "$RUNNER_TEMP/gvisor-k3d.log"
+      - name: The summary of the measures
+        if: always() && steps.changed.outputs.run == 'true'
+        run: |
+          { echo '### gvisor-k3d'; echo '```'; sed -n '/==== SUMMARY/,$p' "$RUNNER_TEMP/gvisor-k3d.log"; echo '```'; } >> "$GITHUB_STEP_SUMMARY" || true
+      - uses: actions/upload-artifact@v7
+        if: always() && steps.changed.outputs.run == 'true'
+        with:
+          name: gvisor-k3d-log
+          path: ${{ runner.temp }}/gvisor-k3d.log
+          if-no-files-found: ignore
 
   push:
     name: push the images that passed
