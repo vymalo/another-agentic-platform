@@ -126,6 +126,9 @@ pub struct Operator<R, S> {
     /// One per namespace watched, in the order of [`Options::watch_namespaces`]; empty once [`run`](Self::run)
     /// has taken them.
     shards: Vec<Shard>,
+    /// Where the idle loop asks what work an agent holds (AD-058); none: no agent sleeps.
+    activity: Option<crate::ActivityFn>,
+    sleepers: Arc<crate::Sleepers>,
 }
 
 impl<R, S> Operator<R, S>
@@ -157,7 +160,17 @@ where
             tracer: aap_trace::Tracer::off(),
             leader: Arc::new(AlwaysLeader::default()),
             shards,
+            activity: None,
+            sleepers: Arc::new(crate::Sleepers::default()),
         }
+    }
+
+    /// Let agents that set `scaling.idleTimeout` sleep (AD-058, P2b): the idle loop asks `source` what each holds
+    /// and scales to zero the ones that report no work for that long. **Off without it**, whatever the objects say.
+    #[must_use]
+    pub fn with_activity<A: aap_ports::ActivitySource + 'static>(mut self, source: A) -> Self {
+        self.activity = Some(crate::erase_activity(source));
+        self
     }
 
     /// Elect `leader`'s holder as the one whose passes write (K7a). The default is [`AlwaysLeader`]: one
@@ -268,7 +281,8 @@ where
                     self.options.clone(),
                 )
                 .with_metrics(metrics.clone())
-                .with_tracer(self.tracer.clone()),
+                .with_tracer(self.tracer.clone())
+                .with_sleepers(self.sleepers.clone()),
             );
             let config_ctx = Arc::new(
                 ConfigContext::new(self.client.clone(), metrics.clone())
@@ -305,6 +319,7 @@ where
             .watch_namespaces
             .clone()
             .unwrap_or_else(|| vec![String::new()]);
+        let scopes_for_sleep = scopes.clone();
         if !scopes.is_empty() {
             running.push(Box::pin(crate::retention::run(
                 self.runtime.clone(),
@@ -313,6 +328,22 @@ where
                 self.options.retention,
                 self.leader.clone(),
                 metrics.clone(),
+                stopped.clone(),
+            )));
+        }
+
+        if let (Some(activity), false) = (self.activity.clone(), scopes_for_sleep.is_empty()) {
+            running.push(Box::pin(crate::sleeper::run(
+                crate::sleeper::IdleLoop {
+                    client: self.client.clone(),
+                    activity,
+                    sleepers: self.sleepers.clone(),
+                    scopes: scopes_for_sleep,
+                    period: self.options.sleep_poll,
+                    leader: self.leader.clone(),
+                    metrics: metrics.clone(),
+                },
+                self.runtime.clone(),
                 stopped.clone(),
             )));
         }

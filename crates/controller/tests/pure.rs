@@ -28,6 +28,7 @@ fn observed() -> Observed {
     Observed {
         generation: Some(3),
         suspend: false,
+        sleeping: false,
         a2a_enabled: true,
         registry: RegistryMode::Disabled,
         registry_full: false,
@@ -849,4 +850,37 @@ fn a_missing_referent_is_the_condition_of_an_invalid_config_with_its_words() {
     assert_eq!(missing, invalid);
     assert_eq!(missing.conditions[0].reason, "ConfigInvalid");
     assert_eq!(missing.conditions[0].status, "False");
+}
+
+#[test]
+fn a_runtime_the_idle_loop_scaled_to_zero_is_sleeping_not_suspended() {
+    let now = at("2026-10-05T10:00:00Z");
+    let mut sleeping = observed();
+    sleeping.runtime = Some(RuntimeStatus {
+        phase: Phase::Suspended,
+        replicas: 0,
+        issues: vec![],
+    });
+    sleeping.sleeping = true;
+    let status = derive(&sleeping, &[], &now);
+    assert_eq!(
+        status.runtime.as_ref().unwrap().phase,
+        aap_api::RuntimePhase::Sleeping
+    );
+    assert!(
+        types(&status).contains(&("Ready", "False", "Sleeping")),
+        "{:?}",
+        types(&status)
+    );
+
+    // A person's suspend stays a Suspended, with its own reason.
+    let mut suspended = sleeping.clone();
+    suspended.sleeping = false;
+    suspended.suspend = true;
+    let status = derive(&suspended, &[], &now);
+    assert_eq!(
+        status.runtime.as_ref().unwrap().phase,
+        aap_api::RuntimePhase::Suspended
+    );
+    assert!(types(&status).contains(&("Ready", "False", "Suspended")));
 }

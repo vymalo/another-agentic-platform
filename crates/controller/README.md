@@ -383,3 +383,11 @@ the runtime reports and sends the signals of `watch()` itself.
 ## The idle decision (AD-058, P2a)
 
 `sleep.rs` is pure: `decide(policy, state, suspended, polled, now)` says `Stay` or `Sleep` and what to remember. An agent sleeps only after its own `ActivitySource` answer has said "no run held" for `scaling.idleTimeout`; **a failed poll counts as busy** and forgets the idle stretch; a `nextDueAt` within `wakeAhead` (default 2m, overdue included) keeps it awake; `spec.suspend` wins. `SleepPolicy::from_scaling` is `None` without `idleTimeout`, or with a value the CRD would not admit. Nothing polls or scales yet: the wiring is P2b.
+
+## Idle loop (ANR-851, AD-058 P2b)
+
+`sleeper.rs`: `Operator::with_activity(source)` turns it on (off without a source). Every `Options::sleep_poll` the leader polls each
+service that sets `scaling.idleTimeout` (and not `spec.suspend`) through the `ActivitySource`, decides with `sleep::decide`, asks once
+more before scaling down (the drain check) and calls `RuntimeProvider::suspend`. `Sleepers` (shared with the service reconciler) keeps the
+idle clocks and the set of sleeping agents in memory; a sleeping agent is ensured with `suspend: true` and shows `runtime.phase: Sleeping`,
+`Ready` False, reason `Sleeping`. Counter: `aap_agent_sleeps_total`. Waking is P3; the operator binary has no source until P2c.

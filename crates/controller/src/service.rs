@@ -288,6 +288,7 @@ where
     let mut obs = Observed {
         generation: svc.metadata.generation,
         suspend: svc.spec.suspend,
+        sleeping: false,
         a2a_enabled: svc.spec.interfaces.a2a.enabled,
         registry: ctx.options.registry,
         registry_full: ctx
@@ -350,7 +351,16 @@ where
         return finish(svc, ctx, &previous, obs).await;
     }
 
-    // 4. The runtime.
+    // 4. The runtime. An agent the idle loop put to sleep stays at zero until something wakes it (AD-058): an
+    // `ensure` of the plain spec would scale it up again at once. A person's `suspend` and a removed
+    // `scaling.idleTimeout` end the sleep.
+    let mut agent = agent;
+    if crate::sleep::SleepPolicy::from_scaling(&svc.spec.scaling).is_none() || svc.spec.suspend {
+        ctx.sleepers.forget(&id);
+    } else if ctx.sleepers.is_sleeping(&id) {
+        agent.runtime.suspend = true;
+        obs.sleeping = true;
+    }
     match step(
         Step::RuntimeEnsure,
         ctx.runtime.ensure(&id, &agent.runtime),
@@ -568,6 +578,7 @@ where
         }
     }
 
+    ctx.sleepers.forget(&id);
     let deleted = step(Step::RuntimeDelete, ctx.runtime.delete(&id), class_of).await?;
     let released = step(Step::StoreRelease, ctx.store.release(&store_id), class_of).await?;
     ctx.metrics.inc(name::SERVICES_DELETED, &[]);
