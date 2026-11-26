@@ -35,7 +35,7 @@ leaderElection:
 watchNamespaces: []
 
 # One namespace, the shorthand, and the primary one: the API's defaults.namespace, the run pods' cluster-scoped names (the policy and
-# the PriorityClass) and the operator's WATCH_NAMESPACE. Empty: the first of watchNamespaces, else the release's. Not with
+# the PriorityClass) and the operator's first `watch.namespaces`. Empty: the first of watchNamespaces, else the release's. Not with
 # watchNamespaces: one or the other.
 watchNamespace: ""
 
@@ -269,7 +269,7 @@ registry:
   tokenSecret:
     name: ""
     key: token
-  # `REGISTRY_PUBLIC_URL`: the URL of the registry document itself, sent as its `anchor`. Optional.
+  # The file's `registry.publicUrl` (was `REGISTRY_PUBLIC_URL`): the URL of the registry document itself, sent as its `anchor`. Optional.
   publicUrl: ""
 
 # The token from AWS Secrets Manager through External Secrets (the ARC runner pools of home-os, and the system chart):
@@ -389,8 +389,8 @@ otel:
   # `api.otel.headersSecret` has no `header`: its file is the `name=value` list.
   # UPGRADE NOTE (ANR-962, AD-064): before this change the operator's key held `name=value,...` (`authorization=Bearer abc`). It
   # now holds the value alone (`Bearer abc`), and `header` names the header. A key that still holds the old shape (a value that
-  # starts with `name=`) turns the operator's tracing OFF with one warning ("looks like the old name=value format"); the operator
-  # keeps running. Rewrite the Secret's key before upgrading.
+  # starts with the header's own name and `=`, or holds `,` followed by `name=`) turns the operator's tracing OFF with one warning
+  # ("looks like the old name=value format", saying which); the operator keeps running. Rewrite the Secret's key before upgrading.
   headersSecret:
     name: ""
     key: ""

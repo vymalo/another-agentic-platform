@@ -220,11 +220,8 @@ impl OtlpSection {
                 let value = reference
                     .resolve(&lookup)
                     .map_err(|reason| bad("telemetry.otlp.headers", reason))?;
-                if Self::looks_like_the_old_format(&value) {
-                    return Err(bad(
-                        "telemetry.otlp.headers",
-                        "a header's value looks like the old name=value format: the Secret now holds the value of the one header the file names (e.g. `Bearer <token>`), not `name=value,...`",
-                    ));
+                if let Some(reason) = Self::old_format(name, &value) {
+                    return Err(bad("telemetry.otlp.headers", reason));
                 }
                 headers
                     .insert(name, &value)
@@ -235,15 +232,32 @@ impl OtlpSection {
         Ok(Some(settings))
     }
 
-    /// The `OTEL_EXPORTER_OTLP_HEADERS` shape the operator's Secret held before ANR-962 (`name=value,...`). A real header value
-    /// (a token, `Bearer abc`) has no `=` straight after a run of token characters, so this catches the upgrade mistake and
-    /// nothing a collector would be given.
-    fn looks_like_the_old_format(value: &str) -> bool {
-        let name_len = value
-            .bytes()
-            .take_while(|b| b.is_ascii_alphanumeric() || *b == b'-')
-            .count();
-        name_len > 0 && value.as_bytes().get(name_len) == Some(&b'=')
+    /// What the operator's headers Secret held before ANR-962 (`name=value,...`), seen in a value that is now one header's value:
+    /// `Some(which)` when the value (a) starts with the configured header's own name and `=` (case-insensitive), or (b) holds
+    /// `,` followed by `<token>=` (the old list form). Nothing else: `ApiKey=abc`, `key-with-dash=val` and padded base64
+    /// (`YWJjZA==`) are values a collector may be given, so a shape test alone would refuse them. The text never holds the value.
+    fn old_format(header: &str, value: &str) -> Option<&'static str> {
+        let value = value.trim_start();
+        if value.len() > header.len()
+            && value.as_bytes()[header.len()] == b'='
+            && value.is_char_boundary(header.len())
+            && value[..header.len()].eq_ignore_ascii_case(header)
+        {
+            return Some(
+                "a header's value looks like the old name=value format: it starts with the header's own name and `=` (the Secret now holds the value alone, e.g. `Bearer <token>`)",
+            );
+        }
+        let list_form = value.match_indices(',').any(|(i, _)| {
+            let rest = &value[i + 1..];
+            let name = rest
+                .bytes()
+                .take_while(|b| b.is_ascii_alphanumeric() || *b == b'-')
+                .count();
+            name > 0 && rest.as_bytes().get(name) == Some(&b'=')
+        });
+        list_form.then_some(
+            "a header's value looks like the old name=value format: it holds `,` followed by `name=` (the Secret now holds the value alone, not a list)",
+        )
     }
 
     /// The settings the section describes, with no header read: what [`validate`](Self::validate) asks of.
@@ -552,7 +566,7 @@ mod tests {
     }
 
     /// ANR-962 upgrade: the operator's headers Secret held `name=value,...`; it now holds the one header's value. A value of the
-    /// old shape turns tracing off with one warning that names the setting and the old format, and never quotes the value.
+    /// old shape turns tracing off with one warning that names the setting and which tell it saw, and never quotes the value.
     #[test]
     fn a_header_value_in_the_old_name_value_format_is_refused_without_quoting_it() {
         let section = |value_var: &'static str| OtlpSection {
@@ -563,10 +577,14 @@ mod tests {
             )]),
             ..OtlpSection::default()
         };
-        for old in [
-            "authorization=Bearer s3cr3t",
-            "x-team=blue,authorization=abc",
-            "a-b=c",
+        for (old, tell) in [
+            (
+                "authorization=Bearer s3cr3t",
+                "starts with the header's own name",
+            ),
+            ("AUTHORIZATION=s3cr3t", "starts with the header's own name"),
+            ("a=b,c=d", "followed by `name=`"),
+            ("Bearer s3cr3t,x-team=blue", "followed by `name=`"),
         ] {
             let lookup = |_: &str| Some(old.to_owned());
             let error = section("H").settings("aap", lookup).unwrap_err();
@@ -578,9 +596,17 @@ mod tests {
                 "{}",
                 error.reason
             );
+            assert!(error.reason.contains(tell), "{old}: {}", error.reason);
             assert!(!format!("{error:?}{}", error.reason).contains("s3cr3t"));
         }
-        for fine in ["Bearer abc==", "s3cr3t-token", "abc", "Basic dXNlcjpwYXNz"] {
+        for fine in [
+            "YWJjZA==",
+            "ApiKey=abc",
+            "key-with-dash=val",
+            "Basic dXNlcjpwYXNz",
+            "Bearer abc==",
+            "eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIxIn0.c2ln",
+        ] {
             let lookup = |_: &str| Some(fine.to_owned());
             assert!(
                 section("H").settings("aap", lookup).unwrap().is_some(),
