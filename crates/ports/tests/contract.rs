@@ -508,6 +508,7 @@ async fn a_missing_cnpg_api_is_reported_not_swallowed() {
             instances: 1,
             size: "5Gi".into(),
             storage_class: None,
+            ..Default::default()
         }),
     };
     let err = store

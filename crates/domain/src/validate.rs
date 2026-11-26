@@ -543,6 +543,27 @@ fn check_service(v: &mut Issues, svc: &AgentService, cfg: &AgentConfig) {
                     format!("{:?} is not a size such as 5Gi", c.storage.size.0),
                 );
             }
+            if let Some(w) = &c.wal_storage
+                && !is_size(&w.size.0)
+            {
+                v.add(
+                    format!("{me} spec.store.postgres.cnpg.walStorage.size"),
+                    format!("{:?} is not a size such as 5Gi", w.size.0),
+                );
+            }
+            if let Some(pg) = &c.postgresql {
+                for key in pg.parameters.keys() {
+                    if !aap_api::CNPG_PARAMETERS.contains(&key.as_str()) {
+                        v.add(
+                            format!("{me} spec.store.postgres.cnpg.postgresql.parameters"),
+                            format!(
+                                "{key:?} is not allowed; the parameters are {}",
+                                aap_api::CNPG_PARAMETERS.join(", ")
+                            ),
+                        );
+                    }
+                }
+            }
         }
         _ => v.add(
             format!("{me} spec.store.postgres"),

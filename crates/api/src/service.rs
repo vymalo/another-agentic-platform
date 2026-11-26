@@ -1,5 +1,6 @@
 //! `AgentService`: the stable, addressable agent (§59a, "The v0 CRDs").
 
+use k8s_openapi::api::core::v1::ResourceRequirements;
 use k8s_openapi::api::networking::v1::NetworkPolicyPeer;
 use k8s_openapi::apimachinery::pkg::api::resource::Quantity;
 use kube::{CustomResource, KubeSchema};
@@ -254,7 +255,32 @@ pub struct Cnpg {
 
     /// Storage of each instance.
     pub storage: CnpgStorage,
+
+    /// CPU and memory requests and limits of each instance. Unset: none (the pod is BestEffort).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub resources: Option<ResourceRequirements>,
+
+    /// A volume of its own for the write-ahead log. Unset: the log stays on the data volume.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub wal_storage: Option<CnpgStorage>,
+
+    /// PostgreSQL parameters: only `shared_buffers`, `max_connections` and `work_mem`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub postgresql: Option<CnpgPostgresql>,
 }
+
+/// The PostgreSQL settings of a CloudNativePG cluster the operator makes.
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct CnpgPostgresql {
+    /// Parameter name to value. The names allowed are `shared_buffers`, `max_connections` and
+    /// `work_mem` (the operator refuses any other); each value is at most 32 characters.
+    #[schemars(length(max = 3), inner(length(min = 1, max = 32)))]
+    pub parameters: std::collections::BTreeMap<String, String>,
+}
+
+/// The parameters a service's database may set.
+pub const CNPG_PARAMETERS: [&str; 3] = ["shared_buffers", "max_connections", "work_mem"];
 
 /// Storage of a CloudNativePG instance.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize, JsonSchema)]

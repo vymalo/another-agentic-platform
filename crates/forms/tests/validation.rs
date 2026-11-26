@@ -1613,6 +1613,9 @@ fn the_defaults_are_checked_by_the_operators_rules_when_the_api_starts() {
             size: k8s_openapi::apimachinery::pkg::api::resource::Quantity("5Gi".into()),
             storage_class: None,
         },
+        resources: None,
+        wal_storage: None,
+        postgresql: None,
     });
     assert!(
         zero.check().iter().any(|p| p.contains("deployment.store")),
