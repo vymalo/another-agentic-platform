@@ -390,4 +390,4 @@ the runtime reports and sends the signals of `watch()` itself.
 service that sets `scaling.idleTimeout` (and not `spec.suspend`) through the `ActivitySource`, decides with `sleep::decide`, asks once
 more before scaling down (the drain check) and calls `RuntimeProvider::suspend`. `Sleepers` (shared with the service reconciler) keeps the
 idle clocks and the set of sleeping agents in memory; a sleeping agent is ensured with `suspend: true` and shows `runtime.phase: Sleeping`,
-`Ready` False, reason `Sleeping`. Counter: `aap_agent_sleeps_total`. Waking is P3; the operator binary has no source until P2c.
+`Ready` False, reason `Sleeping`. Counter: `aap_agent_sleeps_total`. Waking is P3; the operator binary builds the P2c source but does not hand it to `with_activity` yet.

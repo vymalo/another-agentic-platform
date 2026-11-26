@@ -89,4 +89,22 @@ spec:
       to:
         {{- toYaml $t.to | nindent 8 }}
     {{- end }}
+    {{- if include "aap.activity" . }}
+    {{- /* The activity source (AD-058 P2c): DNS to resolve an agent's service name, and exactly the peers the deployment listed, on the agents' port. */}}
+    {{- $a := .Values.activity }}
+    - ports:
+        {{- range $a.dns.ports }}
+        - protocol: UDP
+          port: {{ . }}
+        - protocol: TCP
+          port: {{ . }}
+        {{- end }}
+      to:
+        {{- toYaml $a.dns.to | nindent 8 }}
+    - ports:
+        - protocol: TCP
+          port: {{ $a.port | int }}
+      to:
+        {{- toYaml $a.to | nindent 8 }}
+    {{- end }}
 {{- end }}

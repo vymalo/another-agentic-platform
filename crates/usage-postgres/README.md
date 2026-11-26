@@ -15,3 +15,9 @@ The Postgres adapter of `aap_usage::UsageStore` (ANR-729, AD-060, `docs/api/usag
 `cargo test -p aap-usage-postgres`. They skip unless `AAP_TEST_DATABASE_URL` is set and fail under `AAP_TEST_REQUIRE_DB=1`
 (CI sets both). Each rule runs in a schema of its own. They run the kit's eight rules, two concurrent writers on two
 connections (one `New`), and a store opened again (a duplicate stays one).
+
+## Batch insert and the spend index
+
+`insert_many` is one `INSERT ... SELECT FROM UNNEST(...) ON CONFLICT (source, id) DO NOTHING RETURNING source, id`: one round trip and one commit for the batch, and the keys returned are the `New` ones.
+
+Measured on a local Postgres 16 with 3M rows spread over 150k seconds (rows in ingestion order, one day-sized window of ~1.7M rows): the existing btree on `ingested_at` answers the spend query in about 285 ms, and a covering btree `(ingested_at) INCLUDE (account, node_type, weight)` did not change the plan or the time, so no index was changed. A BRIN index was not measured; revisit if the table grows far past this.

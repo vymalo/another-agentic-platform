@@ -78,6 +78,60 @@ impl UsageStore for PgUsageStore {
         })
     }
 
+    async fn insert_many(
+        &self,
+        events: Vec<PodMinuteEvent>,
+        ingested_at: u64,
+    ) -> Result<Vec<Inserted>, UsageError> {
+        for event in &events {
+            event.validate()?;
+        }
+        if events.is_empty() {
+            return Ok(Vec::new());
+        }
+        let at = to_i64(ingested_at)?;
+        let col = |f: fn(&PodMinuteEvent) -> String| events.iter().map(f).collect::<Vec<_>>();
+        let sources = col(|e| e.source.clone());
+        let ids = col(|e| e.id.clone());
+        let accounts = col(|e| e.subject.clone());
+        let weights: Vec<i64> = events.iter().map(|e| i64::from(e.weight)).collect();
+        let node_types = col(|e| e.node_type.clone());
+        let pod_kinds = col(|e| e.pod_kind.clone());
+        let services = col(|e| e.agent_service.clone());
+        let runs: Vec<Option<String>> = events.iter().map(|e| e.run.clone()).collect();
+        // `DO NOTHING` takes the first row of a key repeated inside the batch too; `RETURNING` names the keys
+        // this call stored, so the others are duplicates.
+        let rows = self
+            .client
+            .query(
+                "INSERT INTO usage_events \
+                 (source, id, account, weight, node_type, pod_kind, agent_service, run, ingested_at) \
+                 SELECT s, i, a, w, n, k, g, r, $9 \
+                 FROM UNNEST($1::text[], $2::text[], $3::text[], $4::bigint[], $5::text[], $6::text[], \
+                             $7::text[], $8::text[]) AS t(s, i, a, w, n, k, g, r) \
+                 ON CONFLICT (source, id) DO NOTHING \
+                 RETURNING source, id",
+                &[
+                    &sources, &ids, &accounts, &weights, &node_types, &pod_kinds, &services, &runs,
+                    &at,
+                ],
+            )
+            .await
+            .map_err(|_| UsageError::Unavailable)?;
+        let mut stored: std::collections::HashSet<(String, String)> =
+            rows.iter().map(|r| (r.get(0), r.get(1))).collect();
+        Ok(events
+            .iter()
+            .map(|e| {
+                if stored.remove(&(e.source.clone(), e.id.clone())) {
+                    Inserted::New
+                } else {
+                    Inserted::Duplicate
+                }
+            })
+            .collect())
+    }
+
     async fn spend(&self, query: SpendQuery) -> Result<Vec<SpendLine>, UsageError> {
         let w = query.window;
         if w.from >= w.to {

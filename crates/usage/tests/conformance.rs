@@ -25,6 +25,8 @@ enum Fault {
     IgnoresAccount,
     AcceptsInvalid,
     EmptyWindowIsEmpty,
+    BatchAllNew,
+    BatchKeepsTheValidPart,
 }
 
 struct Broken {
@@ -70,6 +72,28 @@ impl UsageStore for Broken {
                 self.inner.insert(e, at).await
             }
             _ => self.inner.insert(e, at).await,
+        }
+    }
+
+    async fn insert_many(
+        &self,
+        events: Vec<PodMinuteEvent>,
+        at: u64,
+    ) -> Result<Vec<Inserted>, UsageError> {
+        match self.fault {
+            Fault::BatchAllNew => {
+                let n = events.len();
+                self.inner.insert_many(events, at).await?;
+                Ok(vec![Inserted::New; n])
+            }
+            Fault::BatchKeepsTheValidPart => {
+                let mut out = Vec::new();
+                for e in events {
+                    out.push(self.inner.insert(e, at).await?);
+                }
+                Ok(out)
+            }
+            _ => self.inner.insert_many(events, at).await,
         }
     }
 
@@ -163,6 +187,14 @@ async fn each_rule_is_broken_once_and_named() {
         "empty window",
     )
     .await;
+    for fault in [Fault::BatchAllNew, Fault::BatchKeepsTheValidPart] {
+        named(
+            fault,
+            |s| async move { testkit::check_batch(&s).await },
+            "batch",
+        )
+        .await;
+    }
 }
 
 #[tokio::test]
@@ -176,6 +208,8 @@ async fn the_whole_suite_fails_every_broken_store() {
         Fault::IgnoresAccount,
         Fault::AcceptsInvalid,
         Fault::EmptyWindowIsEmpty,
+        Fault::BatchAllNew,
+        Fault::BatchKeepsTheValidPart,
     ] {
         assert!(testkit::run(|| Broken::new(fault)).await.is_err());
     }
