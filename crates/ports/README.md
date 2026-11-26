@@ -13,6 +13,7 @@ types that cross them; and the two seams of the admin dashboard's Platform API
 | `AgentDirectory` | lists the agents the platform runs, for the registry | the controller's reflector (S5), read by `aap-registry` (S7); `MemoryDirectory` here |
 | `AgentObjects` | the dashboard's custom resources: apply, get, list and delete an agent (`AgentService` + `AgentConfig`), a `ModelEndpoint`, a `ToolProvider`; list the offered secret references (D4) | [`objects-kubernetes`](../objects-kubernetes/README.md) (D5); `MemoryObjects` here |
 | `Authenticator` | a bearer token to a `Principal`: the subject and the values of the roles claim (D4) | [`auth-oidc`](../auth-oidc/README.md) (D6); `MemoryAuthenticator` here |
+| `ActivitySource` | what an agent says about its own work: runs held and the next schedule; an error is **never** idleness (AD-058, P2a) | none yet (the HTTP source is P2c); `MemoryActivity` here, suite `activity_source_conformance!` |
 | `LeaderElection` | who holds the election several replicas of the operator are candidates of (K7a): the identity, `is_leader`, the campaign and its changes | [`leader-kubernetes`](../leader-kubernetes/README.md) (a `Lease`); `MemoryElection` here; `AlwaysLeader` here |
 
 **No Kubernetes type, no driver type and no secret value appears in any signature.** A secret has no
