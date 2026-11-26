@@ -242,6 +242,16 @@ trap 'exit 143' TERM HUP
 
 # jp <resource> <jsonpath>: a field of an object of the namespace, empty when it is not there.
 jp() { kubectl -n "$ns" get "$1" -o "jsonpath=$2" 2>/dev/null || true; }
+# operator_file <configmap>: the operator's configuration file (the ConfigMap's `config.yaml`), as kubectl prints it: the block scalar
+# without its indent, so the file's keys are at column 0. `{.data["config.yaml"]}` is NOT a jsonpath kubectl takes ("invalid array index"),
+# and `jp` hides a failure, so this reads it with the escaped dot and **fails when the read fails or is empty**: an empty read can never
+# pass a check that something is absent. Call it as `x=$(operator_file NAME) || die "..."`.
+operator_file() {
+  out=$(kubectl -n "$ns" get "configmap/$1" -o 'jsonpath={.data.config\.yaml}' 2>"$work/operator-file.err") \
+    || { printf 'cannot read configmap/%s: %s\n' "$1" "$(head -c 300 "$work/operator-file.err")" >&2; return 1; }
+  [ -n "$out" ] || { printf 'configmap/%s holds no config.yaml\n' "$1" >&2; return 1; }
+  printf '%s\n' "$out"
+}
 # not_foreign <kind/name>: the object is not there, or it carries this script's label. Anything else is somebody's, and is not overwritten.
 not_foreign() {
   if out=$(kubectl -n "$ns" get "$1" -o json 2>"$work/err"); then
@@ -593,7 +603,7 @@ absent get validatingadmissionpolicy "$policy" || die "the admission policy of r
 absent get validatingadmissionpolicybinding "$policy" || die "the binding of the admission policy exists with run pods off"
 absent -n "$ns" get role "$run_role" || die "the Role of run pods exists with run pods off"
 # kubectl prints the block scalar without its indent: the file's keys are at column 0. Positive first, so an empty read is not "off".
-off_file=$(jp "configmap/$op" '{.data["config.yaml"]}')
+off_file=$(operator_file "$op") || die "the operator's file cannot be read after the install with run pods off"
 printf '%s\n' "$off_file" | grep -Fxq 'version: 1' || die "the operator's file is not the file (no 'version: 1')"
 ! printf '%s\n' "$off_file" | grep -Fxq 'runPods:' || die "the file names run pods with run pods off"
 for v in "create serviceaccounts" "create resourcequotas" "create rolebindings" "delete pods" "create pods" "get secrets"; do
@@ -655,7 +665,9 @@ ok "every node carries $node_type_key=$node_type_value, which the script took of
 helm_install
 ok "the operator is upgraded with runPods.enabled (the same values file, one flag apart)"
 [ "$(jp "deployment/$op" '{.status.readyReplicas}')" = 1 ] || die "the operator has no ready replica after the upgrade"
-jp "configmap/$op" '{.data["config.yaml"]}' | grep -Fxq 'runPods:' || die "the file does not name run pods with run pods on"
+on_file=$(operator_file "$op") || die "the operator's file cannot be read after the upgrade"
+printf '%s\n' "$on_file" | grep -Fxq 'version: 1' || die "the operator's file after the upgrade is not the file (no 'version: 1')"
+printf '%s\n' "$on_file" | grep -Fxq 'runPods:' || die "the file does not name run pods with run pods on"
 kubectl get priorityclass "$class" -o json > "$work/priorityclass.json"
 jqok "$work/priorityclass.json" "the PriorityClass of run pods is not value 0 and never-preempting" '.value == 0 and .preemptionPolicy == "Never"'
 kubectl get validatingadmissionpolicybinding "$policy" -o json > "$work/vapb.json"

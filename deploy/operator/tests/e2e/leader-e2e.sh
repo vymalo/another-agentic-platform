@@ -184,6 +184,16 @@ trap 'exit 143' TERM HUP
 
 # jp <namespace> <resource> <jsonpath>: a field of an object of that namespace, empty when it is not there.
 jp() { kubectl -n "$1" get "$2" -o "jsonpath=$3" 2>/dev/null || true; }
+# operator_file <namespace> <configmap>: the operator's configuration file (the ConfigMap's `config.yaml`), as kubectl prints it: the block scalar
+# without its indent, so the file's keys are at column 0. `{.data["config.yaml"]}` is NOT a jsonpath kubectl takes ("invalid array index"),
+# and `jp` hides a failure, so this reads it with the escaped dot and **fails when the read fails or is empty**: an empty read can never
+# pass a check that something is absent. Call it as `x=$(operator_file NS NAME) || die "..."`.
+operator_file() {
+  out=$(kubectl -n "$1" get "configmap/$2" -o 'jsonpath={.data.config\.yaml}' 2>"$work/operator-file.err") \
+    || { printf 'cannot read configmap/%s: %s\n' "$2" "$(head -c 300 "$work/operator-file.err")" >&2; return 1; }
+  [ -n "$out" ] || { printf 'configmap/%s holds no config.yaml\n' "$2" >&2; return 1; }
+  printf '%s\n' "$out"
+}
 # not_foreign <namespace> <kind/name>: the object is not there, or it carries this script's label. Anything else is somebody's, and is
 # not overwritten.
 not_foreign() {
@@ -548,8 +558,7 @@ jqok "$work/pdb.json" "the budget does not allow exactly one replica to go at a 
   '.spec.maxUnavailable == 1 and .spec.minAvailable == null'
 # ANR-962: the settings are the file the chart renders (the ConfigMap $release, mounted and read with --config), not variables: the
 # election's six keys (the block scalar's own indent is gone from what kubectl prints) and the pass cap below the lease margin are in it, in the release's own words.
-cfg=$(jp "$ns" "configmap/$release" '{.data["config.yaml"]}')
-[ -n "$cfg" ] || die "the ConfigMap $release holds no config.yaml"
+cfg=$(operator_file "$ns" "$release") || die "the operator's file cannot be read"
 for want in 'leaderElection:' '  enabled: true' "  name: \"$lease\"" "  namespace: \"$ns\"" '  leaseSecs: 15' '  renewSecs: 10' '  retrySecs: 2' '  timeoutSecs: 4'; do
   printf '%s\n' "$cfg" | grep -Fxq -- "$want" || die "the operator's file lacks the line '$want' (below lease - renew for the pass cap)"
 done
