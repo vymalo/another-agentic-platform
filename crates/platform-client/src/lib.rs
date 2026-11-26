@@ -104,9 +104,35 @@ impl Reply {
     }
 }
 
+/// The media type the client writes and asks for (AD-061). The answers it hands on are JSON bytes either way.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum Encoding {
+    /// `application/json`, the default.
+    #[default]
+    Json,
+    /// `application/cbor` for the body sent and `Accept`.
+    Cbor,
+}
+
+/// JSON text as CBOR, or `None` when it is not JSON.
+fn json_to_cbor(json: &[u8]) -> Option<Vec<u8>> {
+    let value: Value = serde_json::from_slice(json).ok()?;
+    let mut out = Vec::new();
+    ciborium::ser::into_writer(&value, &mut out).ok()?;
+    Some(out)
+}
+
+/// CBOR as JSON text, or `None` when it is not CBOR of a JSON value.
+fn cbor_to_json(cbor: &[u8]) -> Option<Vec<u8>> {
+    let value: Value = ciborium::de::from_reader_with_recursion_limit(cbor, 64).ok()?;
+    serde_json::to_vec(&value).ok()
+}
+
 /// How a [`Client`] is made.
 #[derive(Clone, Copy, Debug)]
 pub struct Options {
+    /// The encoding of bodies; JSON unless the caller opts in.
+    pub encoding: Encoding,
     /// Allow `http://` for a host that is not a loopback address. Off: the token would cross the network in the clear.
     pub allow_insecure_http: bool,
     /// Use the proxy the environment names (`HTTPS_PROXY`, `HTTP_PROXY`, `ALL_PROXY`, `NO_PROXY`). Off in the crate's own tests.
@@ -122,6 +148,7 @@ pub struct Options {
 impl Default for Options {
     fn default() -> Self {
         Self {
+            encoding: Encoding::Json,
             allow_insecure_http: false,
             system_proxy: true,
             connect_timeout: Duration::from_secs(10),
@@ -148,6 +175,7 @@ pub struct Client {
     /// Replaced when a refresh gave a new one ([`Client::replace_token`]).
     token: Mutex<Token>,
     trace: Mutex<Vec<String>>,
+    encoding: Encoding,
 }
 
 impl std::fmt::Debug for Client {
@@ -231,6 +259,7 @@ impl Client {
             base,
             token: Mutex::new(token),
             trace: Mutex::new(Vec::new()),
+            encoding: options.encoding,
         })
     }
 
@@ -330,16 +359,38 @@ impl Client {
             None => {}
         }
         self.note(line);
+        // The YAML export is text, never CBOR.
+        let cbor = self.encoding == Encoding::Cbor && !matches!(op, Op::AgentYaml);
+        if cbor {
+            request = request.header("accept", "application/cbor");
+        }
         if let Some(body) = body {
-            request = request.header(CONTENT_TYPE, "application/json").body(
-                serde_json::to_vec(body).map_err(|_| {
-                    ClientError::Config("the form cannot be written as JSON".to_owned())
-                })?,
-            );
+            let json = serde_json::to_vec(body).map_err(|_| {
+                ClientError::Config("the form cannot be written as JSON".to_owned())
+            })?;
+            request = if cbor {
+                let bytes = json_to_cbor(&json).ok_or_else(|| {
+                    ClientError::Config("the form cannot be written as CBOR".to_owned())
+                })?;
+                request.header(CONTENT_TYPE, "application/cbor").body(bytes)
+            } else {
+                request.header(CONTENT_TYPE, "application/json").body(json)
+            };
         }
         let response = request.send().await.map_err(|e| self.unreachable(&e))?;
         let status = response.status().as_u16();
         self.note(format!("< {status}"));
+        let answered_cbor = response
+            .headers()
+            .get(CONTENT_TYPE)
+            .and_then(|v| v.to_str().ok())
+            .is_some_and(|v| {
+                v.split(';')
+                    .next()
+                    .unwrap_or_default()
+                    .trim()
+                    .eq_ignore_ascii_case("application/cbor")
+            });
         let etag = response
             .headers()
             .get(ETAG)
@@ -352,6 +403,13 @@ impl Client {
             return Err(ClientError::BadAnswer(format!(
                 "the answer is larger than {MAX_ANSWER_BYTES} bytes"
             )));
+        };
+        // What the rest of the client reads is JSON, whatever the wire was.
+        let body = if answered_cbor {
+            cbor_to_json(&body)
+                .ok_or_else(|| ClientError::BadAnswer("the answer is not CBOR".to_owned()))?
+        } else {
+            body
         };
         if status >= 300 {
             return Err(ClientError::Problem(Box::new(Problem::read(status, &body))));

@@ -10,6 +10,7 @@
   ```
 
   `cargo test -p aap-platform-api --test openapi` fails until you do. A breaking change is `/v2` and a new file, not an edit of this one.
+* **CBOR (AD-062).** Every JSON body of the API is also `application/cbor` on the same schema: send `Content-Type: application/cbor` and/or `Accept: application/cbor`. JSON is the default; an `Accept` that lists neither is `406`; every answer says `Vary: Accept`; the `ETag` of an object is the same in both. Maps have text keys and there are no byte strings. `GET /v1/openapi.json` and the YAML export stay as they are. `aapctl --encoding cbor` (or `AAPCTL_ENCODING=cbor`) opts in.
 * **The running API serves the same document** at `GET /v1/openapi.json` (it needs `platform:agents.read`).
 * **Not in it, on purpose:** cookies, CORS credentials and a wildcard origin, an unconditional write or delete, a secret value, DPoP.
 

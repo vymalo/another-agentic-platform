@@ -50,6 +50,19 @@ pub struct Conn {
     /// Allow `http://` for an address that is not a loopback address. The token is then sent in the clear.
     #[arg(long)]
     insecure_http: bool,
+    /// The encoding of request and answer bodies: `json` (the default) or `cbor` (`application/cbor`, the same forms and
+    /// answers). The token, redirect and proxy rules do not change.
+    #[arg(long, value_enum, env = "AAPCTL_ENCODING", default_value = "json")]
+    encoding: Wire,
+}
+
+/// `--encoding`.
+#[derive(Clone, Copy, Debug, ValueEnum)]
+pub enum Wire {
+    /// `application/json`.
+    Json,
+    /// `application/cbor`.
+    Cbor,
 }
 
 /// What `get`, `delete` and the like name: the plural and the singular both work.
@@ -367,6 +380,10 @@ fn client_for(server: &str, token: Token, conn: &Conn) -> Result<Client, Failure
         token,
         Options {
             allow_insecure_http: conn.insecure_http,
+            encoding: match conn.encoding {
+                Wire::Json => aap_platform_client::Encoding::Json,
+                Wire::Cbor => aap_platform_client::Encoding::Cbor,
+            },
             ..Options::default()
         },
     )
