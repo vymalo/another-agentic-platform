@@ -1219,6 +1219,216 @@ macro_rules! activity_source_conformance {
     };
 }
 
+/// A [`Waker`](crate::Waker) the suite can script. Every script finishes within a few milliseconds.
+pub trait WakerUnderTest: crate::Waker + 'static {
+    /// From now on waking `agent` ends `Ready`.
+    fn script_ready(&self, agent: &RuntimeId) -> impl Future<Output = ()> + Send;
+    /// From now on waking `agent` ends `TimedOut`.
+    fn script_timed_out(&self, agent: &RuntimeId) -> impl Future<Output = ()> + Send;
+    /// From now on waking `agent` fails because the operator cannot be reached.
+    fn script_failure(&self, agent: &RuntimeId) -> impl Future<Output = ()> + Send;
+}
+
+/// An [`Upstream`](crate::Upstream) the suite can script and read back.
+pub trait UpstreamUnderTest: crate::Upstream + 'static {
+    /// From now on every agent answers `response`.
+    fn answer(&self, response: crate::UpstreamResponse) -> impl Future<Output = ()> + Send;
+    /// From now on no agent can be reached.
+    fn break_upstream(&self) -> impl Future<Output = ()> + Send;
+    /// What the agents received, in order.
+    fn received(&self) -> impl Future<Output = Vec<(RuntimeId, crate::UpstreamRequest)>> + Send;
+}
+
+/// A [`CardSource`](crate::CardSource) the suite can feed.
+pub trait CardsUnderTest: crate::CardSource + 'static {
+    /// From now on `agent` has `card`.
+    fn put(&self, agent: &RuntimeId, card: crate::Card) -> impl Future<Output = ()> + Send;
+    /// From now on the source cannot be read.
+    fn break_source(&self) -> impl Future<Output = ()> + Send;
+    /// Undo [`break_source`](Self::break_source).
+    fn mend(&self) -> impl Future<Output = ()> + Send;
+}
+
+/// Cases of the activator's three suites (AD-058, P3b).
+#[allow(missing_docs)] // each case is named for what it asserts
+pub mod activator {
+    use super::*;
+    use crate::{
+        Card, CardError, Route, UpstreamError, UpstreamRequest, UpstreamResponse, WakeError,
+        WakeOutcome,
+    };
+
+    fn id() -> RuntimeId {
+        RuntimeId::new(unique("ns"), unique("agent"))
+    }
+
+    pub async fn a_scripted_wake_ends_ready<W: WakerUnderTest>(w: W) {
+        let a = id();
+        w.script_ready(&a).await;
+        assert_eq!(w.wake(&a).await.unwrap(), WakeOutcome::Ready);
+    }
+
+    pub async fn waking_an_agent_that_is_awake_is_ready_and_repeatable<W: WakerUnderTest>(w: W) {
+        let a = id();
+        w.script_ready(&a).await;
+        assert_eq!(w.wake(&a).await.unwrap(), WakeOutcome::Ready);
+        assert_eq!(w.wake(&a).await.unwrap(), WakeOutcome::Ready);
+    }
+
+    pub async fn a_wake_that_gives_up_is_timed_out_not_an_error<W: WakerUnderTest>(w: W) {
+        let a = id();
+        w.script_timed_out(&a).await;
+        assert_eq!(w.wake(&a).await.unwrap(), WakeOutcome::TimedOut);
+    }
+
+    pub async fn an_unreachable_operator_is_a_transient_error<W: WakerUnderTest>(w: W) {
+        let a = id();
+        w.script_failure(&a).await;
+        let err = w.wake(&a).await.unwrap_err();
+        assert!(matches!(err, WakeError::Unavailable(_)), "{err:?}");
+        assert!(err.class().is_retryable());
+    }
+
+    pub async fn agents_do_not_mix<W: WakerUnderTest>(w: W) {
+        let (one, two) = (id(), id());
+        w.script_failure(&one).await;
+        w.script_ready(&two).await;
+        assert!(w.wake(&one).await.is_err());
+        assert_eq!(w.wake(&two).await.unwrap(), WakeOutcome::Ready);
+    }
+
+    fn request() -> UpstreamRequest {
+        UpstreamRequest {
+            method: "POST".into(),
+            path_and_query: "/a2a/v1/message:send?x=1".into(),
+            headers: vec![
+                ("content-type".into(), "application/json".into()),
+                ("x-trace".into(), "t-1".into()),
+            ],
+            body: b"{\"k\":1}".to_vec(),
+        }
+    }
+
+    pub async fn the_request_reaches_the_agent_unchanged<U: UpstreamUnderTest>(u: U) {
+        let a = id();
+        let req = request();
+        u.forward(&a, &Route::Default, req.clone()).await.unwrap();
+        assert_eq!(u.received().await, vec![(a, req)]);
+    }
+
+    pub async fn the_answer_comes_back_unchanged_whatever_its_status<U: UpstreamUnderTest>(u: U) {
+        let answer = UpstreamResponse {
+            status: 404,
+            headers: vec![("x-a".into(), "b".into())],
+            body: vec![0, 1, 2, 255],
+        };
+        u.answer(answer.clone()).await;
+        let got = u.forward(&id(), &Route::Default, request()).await.unwrap();
+        assert_eq!(got, answer, "a 4xx is an answer, not an error");
+    }
+
+    pub async fn each_call_is_one_forward<U: UpstreamUnderTest>(u: U) {
+        let a = id();
+        u.forward(&a, &Route::Default, request()).await.unwrap();
+        u.forward(&a, &Route::Default, request()).await.unwrap();
+        assert_eq!(u.received().await.len(), 2);
+    }
+
+    pub async fn an_unreachable_agent_is_a_transient_error<U: UpstreamUnderTest>(u: U) {
+        u.break_upstream().await;
+        let err = u
+            .forward(&id(), &Route::Default, request())
+            .await
+            .unwrap_err();
+        assert!(matches!(err, UpstreamError::Unavailable(_)), "{err:?}");
+        assert!(err.class().is_retryable());
+    }
+
+    fn card() -> Card {
+        Card {
+            content_type: "application/json".into(),
+            bytes: br#"{"name":"x"}"#.to_vec(),
+        }
+    }
+
+    pub async fn a_card_is_served_as_published<C: CardsUnderTest>(c: C) {
+        let a = id();
+        c.put(&a, card()).await;
+        assert_eq!(c.card(&a).await.unwrap(), Some(card()));
+    }
+
+    pub async fn an_agent_with_no_card_is_none_not_an_error<C: CardsUnderTest>(c: C) {
+        assert_eq!(c.card(&id()).await.unwrap(), None);
+    }
+
+    pub async fn cards_do_not_mix<C: CardsUnderTest>(c: C) {
+        let (one, two) = (id(), id());
+        c.put(&one, card()).await;
+        assert_eq!(c.card(&two).await.unwrap(), None);
+    }
+
+    pub async fn an_unreadable_source_is_an_error_then_recovers<C: CardsUnderTest>(c: C) {
+        let a = id();
+        c.put(&a, card()).await;
+        c.break_source().await;
+        let err = c.card(&a).await.unwrap_err();
+        assert!(matches!(err, CardError::Unavailable(_)), "{err:?}");
+        assert!(err.class().is_retryable());
+        c.mend().await;
+        assert!(c.card(&a).await.unwrap().is_some());
+    }
+}
+
+/// Generate one `#[tokio::test]` per case of the [`Waker`](crate::Waker) suite. `$make` is an `async fn() -> Option<W>`
+/// where `W: WakerUnderTest`; `None` skips, unless `AAP_TEST_REQUIRE_BACKEND=1`, which fails instead.
+#[macro_export]
+macro_rules! waker_conformance {
+    ($make:path) => {
+        $crate::waker_conformance!(@cases $make, waker, "waker";
+            a_scripted_wake_ends_ready, waking_an_agent_that_is_awake_is_ready_and_repeatable,
+            a_wake_that_gives_up_is_timed_out_not_an_error, an_unreachable_operator_is_a_transient_error,
+            agents_do_not_mix,
+        );
+    };
+    (@cases $make:path, $kind:ident, $what:literal; $($case:ident),* $(,)?) => {
+        $(
+            #[tokio::test]
+            async fn $case() {
+                let Some(under_test) = $make().await else {
+                    $crate::testkit::skipped(&format!("{}: {} not configured", stringify!($case), $what));
+                    return;
+                };
+                $crate::testkit::activator::$case(under_test).await;
+            }
+        )*
+    };
+}
+
+/// Generate one `#[tokio::test]` per case of the [`Upstream`](crate::Upstream) suite. `$make` is an
+/// `async fn() -> Option<U>` where `U: UpstreamUnderTest`.
+#[macro_export]
+macro_rules! upstream_conformance {
+    ($make:path) => {
+        $crate::waker_conformance!(@cases $make, upstream, "upstream";
+            the_request_reaches_the_agent_unchanged,
+            the_answer_comes_back_unchanged_whatever_its_status, each_call_is_one_forward,
+            an_unreachable_agent_is_a_transient_error,
+        );
+    };
+}
+
+/// Generate one `#[tokio::test]` per case of the [`CardSource`](crate::CardSource) suite. `$make` is an
+/// `async fn() -> Option<C>` where `C: CardsUnderTest`.
+#[macro_export]
+macro_rules! card_source_conformance {
+    ($make:path) => {
+        $crate::waker_conformance!(@cases $make, cards, "card source";
+            a_card_is_served_as_published, an_agent_with_no_card_is_none_not_an_error,
+            cards_do_not_mix, an_unreadable_source_is_an_error_then_recovers,
+        );
+    };
+}
+
 /// Generate one `#[tokio::test]` per case of the runtime suite. `$make` is a path to an
 /// `async fn() -> Option<R>` where `R: RuntimeUnderTest`; `None` skips the suite, unless
 /// `AAP_TEST_REQUIRE_BACKEND=1`, which fails it instead.

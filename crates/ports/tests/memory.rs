@@ -78,3 +78,27 @@ mod activity {
     }
     aap_ports::activity_source_conformance!(make);
 }
+
+mod waker {
+
+    async fn make() -> Option<aap_ports::memory::MemoryWaker> {
+        Some(aap_ports::memory::MemoryWaker::new())
+    }
+    aap_ports::waker_conformance!(make);
+}
+
+mod upstream {
+
+    async fn make() -> Option<aap_ports::memory::MemoryUpstream> {
+        Some(aap_ports::memory::MemoryUpstream::new())
+    }
+    aap_ports::upstream_conformance!(make);
+}
+
+mod cards {
+
+    async fn make() -> Option<aap_ports::memory::MemoryCards> {
+        Some(aap_ports::memory::MemoryCards::new())
+    }
+    aap_ports::card_source_conformance!(make);
+}
