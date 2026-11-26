@@ -10,6 +10,7 @@ use axum::routing::{MethodFilter, MethodRouter};
 
 use crate::authz::guard;
 use crate::handlers::{agents, misc, shared};
+use crate::negotiate;
 use crate::routes::{ROUTES, Route, RouteId};
 use crate::state::ApiState;
 use crate::trace;
@@ -90,7 +91,12 @@ where
     let state: S<O, A> = Arc::new(state);
     // From the inside out: the guard; CORS (which answers a preflight itself, before the guard asks for a token); the log;
     // and the headers of every answer, outside all of them, so that a preflight, a 404 and a 405 carry them too.
-    let router = routes.layer(from_fn_with_state(state.clone(), guard::<O, A>));
+    // The CBOR request body is turned into JSON after the guard (only an authorized caller costs a decode), and every answer,
+    // the guard's refusals included, is encoded as the caller accepts, outside it.
+    let router = routes
+        .layer(from_fn(negotiate::decode_request))
+        .layer(from_fn_with_state(state.clone(), guard::<O, A>))
+        .layer(from_fn(negotiate::encode_response));
     let router = match cors {
         Some(cors) => router.layer(cors),
         None => router,

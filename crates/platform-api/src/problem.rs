@@ -160,6 +160,16 @@ impl Problem {
         )
     }
 
+    /// `406`: the caller accepts neither JSON nor CBOR.
+    pub fn not_acceptable() -> Self {
+        Self::new(
+            StatusCode::NOT_ACCEPTABLE,
+            "not-acceptable",
+            "Not acceptable",
+            "this API answers application/json or application/cbor",
+        )
+    }
+
     // ------------------------------------------------------------------ who
 
     /// `401` or `503` for a token that did not become a person.

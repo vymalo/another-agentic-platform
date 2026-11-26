@@ -248,6 +248,13 @@ agent name, no body, header, query or token is in any span (a test asks every ro
 `assert_clean`), and no inbound `traceparent` is read: every request is a root. The attribute list is
 [`aap-trace`](../trace/README.md)'s; §48a has the rest.
 
+## CBOR (AD-062)
+
+`src/negotiate.rs` makes `application/cbor` a second media type of every JSON body: `Content-Type: application/cbor` is read
+(checked, then turned into JSON inside the authorization layer), `Accept: application/cbor` is answered in CBOR (outside it),
+`Vary: Accept` is set, no acceptable medium is `406`. Byte strings, tags, indefinite lengths and duplicate keys are `400`. The
+`ETag` is the same in both encodings. `tests/cbor.rs` holds the equal-values rule.
+
 ## CORS
 
 `CorsOrigins::new` takes **exact origins** as a browser writes them (`scheme://host[:port]`, lower case, no path, no trailing slash) and refuses `*`,

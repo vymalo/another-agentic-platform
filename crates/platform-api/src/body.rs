@@ -60,7 +60,11 @@ pub fn require_json(headers: &HeaderMap) -> Result<(), Problem> {
 }
 
 /// The body, whole, if it is at most `limit` bytes.
-async fn bytes(headers: &HeaderMap, body: Body, limit: usize) -> Result<Vec<u8>, Problem> {
+pub(crate) async fn bytes(
+    headers: &HeaderMap,
+    body: Body,
+    limit: usize,
+) -> Result<Vec<u8>, Problem> {
     let declared = headers
         .get(CONTENT_LENGTH)
         .and_then(|v| v.to_str().ok())
