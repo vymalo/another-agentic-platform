@@ -220,6 +220,12 @@ impl OtlpSection {
                 let value = reference
                     .resolve(&lookup)
                     .map_err(|reason| bad("telemetry.otlp.headers", reason))?;
+                if Self::looks_like_the_old_format(&value) {
+                    return Err(bad(
+                        "telemetry.otlp.headers",
+                        "a header's value looks like the old name=value format: the Secret now holds the value of the one header the file names (e.g. `Bearer <token>`), not `name=value,...`",
+                    ));
+                }
                 headers
                     .insert(name, &value)
                     .map_err(|reason| bad("telemetry.otlp.headers", reason))?;
@@ -227,6 +233,17 @@ impl OtlpSection {
             settings.headers = Some(headers);
         }
         Ok(Some(settings))
+    }
+
+    /// The `OTEL_EXPORTER_OTLP_HEADERS` shape the operator's Secret held before ANR-962 (`name=value,...`). A real header value
+    /// (a token, `Bearer abc`) has no `=` straight after a run of token characters, so this catches the upgrade mistake and
+    /// nothing a collector would be given.
+    fn looks_like_the_old_format(value: &str) -> bool {
+        let name_len = value
+            .bytes()
+            .take_while(|b| b.is_ascii_alphanumeric() || *b == b'-')
+            .count();
+        name_len > 0 && value.as_bytes().get(name_len) == Some(&b'=')
     }
 
     /// The settings the section describes, with no header read: what [`validate`](Self::validate) asks of.
@@ -532,6 +549,62 @@ mod tests {
                 .find(|(n, _)| *n == k)
                 .map(|(_, v)| (*v).to_owned())
         }
+    }
+
+    /// ANR-962 upgrade: the operator's headers Secret held `name=value,...`; it now holds the one header's value. A value of the
+    /// old shape turns tracing off with one warning that names the setting and the old format, and never quotes the value.
+    #[test]
+    fn a_header_value_in_the_old_name_value_format_is_refused_without_quoting_it() {
+        let section = |value_var: &'static str| OtlpSection {
+            endpoint: Some("https://collector.example:4318/v1/traces".to_owned()),
+            headers: BTreeMap::from([(
+                "authorization".to_owned(),
+                SecretRef::Env(value_var.to_owned()),
+            )]),
+            ..OtlpSection::default()
+        };
+        for old in [
+            "authorization=Bearer s3cr3t",
+            "x-team=blue,authorization=abc",
+            "a-b=c",
+        ] {
+            let lookup = |_: &str| Some(old.to_owned());
+            let error = section("H").settings("aap", lookup).unwrap_err();
+            assert_eq!(error.variable, "telemetry.otlp.headers");
+            assert!(
+                error
+                    .reason
+                    .contains("looks like the old name=value format"),
+                "{}",
+                error.reason
+            );
+            assert!(!format!("{error:?}{}", error.reason).contains("s3cr3t"));
+        }
+        for fine in ["Bearer abc==", "s3cr3t-token", "abc", "Basic dXNlcjpwYXNz"] {
+            let lookup = |_: &str| Some(fine.to_owned());
+            assert!(
+                section("H").settings("aap", lookup).unwrap().is_some(),
+                "{fine}"
+            );
+        }
+        // Never stops the process: the start turns tracing off and carries the refusal, for one warning. The value is read from
+        // a file, as the chart mounts it.
+        let dir = std::env::temp_dir().join(format!("aap-old-headers-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let file = dir.join("headers");
+        std::fs::write(&file, "authorization=Bearer s3cr3t\n").unwrap();
+        let mut from_file = section("UNUSED");
+        from_file.headers = BTreeMap::from([("authorization".to_owned(), SecretRef::File(file))]);
+        let started = crate::process::start_section("aap", "0", Some(&from_file));
+        let _ = std::fs::remove_dir_all(&dir);
+        assert!(!started.tracer.enabled());
+        let refused = started.refused.expect("one refusal");
+        assert_eq!(refused.variable, "telemetry.otlp.headers");
+        assert!(
+            refused
+                .reason
+                .contains("looks like the old name=value format")
+        );
     }
 
     fn read(pairs: &[(&str, &str)]) -> Result<Option<TraceSettings>, SettingsError> {
