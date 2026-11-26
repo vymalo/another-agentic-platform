@@ -75,3 +75,7 @@ members, no token in an error or a trace, the addresses and names that are refus
 that is not quoted, a server that accepts and never answers (the request timeout ends the call with a fixed phrase), the default
 timeouts, two spellings of one server, and the cleaning of controls. No cluster and no network are needed. **Keep this README current in the change that changes a call, a status or a
 refusal.**
+
+## Encoding (AD-062)
+
+`Options::encoding` is `Encoding::Json` (default) or `Encoding::Cbor`: bodies are sent as `application/cbor` with `Accept: application/cbor` (not for the YAML export), and the answers are handed on as JSON bytes either way. Adds `ciborium =0.2.2`.

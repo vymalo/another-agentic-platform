@@ -544,9 +544,9 @@ fn problem_responses() -> Value {
             json!({
                 "description": "The path exists and not for this method (no operation below has it). `Allow` lists the methods. Answered before a token is asked for.",
                 "headers": { "Allow": { "description": "`GET, HEAD, PUT, DELETE` or the methods the path serves.", "schema": { "type": "string" } } },
-                "content": { PROBLEM_JSON: { "schema": schema("Problem"), "examples": { "method-not-allowed": { "value": {
+                "content": both_media(PROBLEM_JSON, json!({ "schema": schema("Problem"), "examples": { "method-not-allowed": { "value": {
                     "type": "urn:vymalo:agents:problem:method-not-allowed", "title": "Method not allowed", "status": 405,
-                    "detail": "this method is not served for this path" } } } } },
+                    "detail": "this method is not served for this path" } } } })),
             }),
         );
         for (name, response) in map.iter_mut() {
@@ -581,7 +581,7 @@ fn problem_responses_raw() -> Value {
         json!({
             "description": description,
             "headers": headers,
-            "content": { PROBLEM_JSON: { "schema": schema("Problem"), "examples": examples } },
+            "content": both_media(PROBLEM_JSON, json!({ "schema": schema("Problem"), "examples": examples })),
         })
     };
     let none = json!({});
@@ -1189,6 +1189,14 @@ fn describe(id: RouteId) -> Op {
     }
 }
 
+/// A body in its JSON media type and, with the same schema and example, `application/cbor` (AD-061).
+fn both_media(json_type: &str, entry: Value) -> Value {
+    let mut content = serde_json::Map::new();
+    content.insert(json_type.to_owned(), entry.clone());
+    content.insert("application/cbor".to_owned(), entry);
+    Value::Object(content)
+}
+
 fn tag_of(path: &str) -> &'static str {
     match path.split('/').nth(2).unwrap_or_default() {
         "agents" | "owners" => "agents",
@@ -1222,8 +1230,13 @@ fn success_response(s: &Success) -> Value {
     }
     match &s.content {
         Content::Json(name, example) => {
-            response["content"] =
-                json!({ "application/json": { "schema": schema(name), "example": example } });
+            let entry = json!({ "schema": schema(name), "example": example });
+            // The document itself stays JSON (AD-061).
+            response["content"] = if *name == "OpenApiDocument" {
+                json!({ "application/json": entry })
+            } else {
+                both_media("application/json", entry)
+            };
         }
         Content::Yaml(text) => {
             response["content"] =
@@ -1281,7 +1294,7 @@ fn operation(route: &Route) -> Value {
     if let Some((name, example)) = op.request {
         out["requestBody"] = json!({
             "required": true,
-            "content": { "application/json": { "schema": schema(name), "example": example } },
+            "content": both_media("application/json", json!({ "schema": schema(name), "example": example })),
         });
     }
     out

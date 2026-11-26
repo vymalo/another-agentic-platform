@@ -60,7 +60,7 @@ pub enum StoreKind {
 }
 
 /// An operator-owned CloudNativePG cluster.
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct CnpgSpec {
     /// Instances of the cluster.
     pub instances: u32,
@@ -68,6 +68,19 @@ pub struct CnpgSpec {
     pub size: String,
     /// Storage class. `None`: the cluster's default.
     pub storage_class: Option<String>,
+    /// CPU and memory requests and limits of each instance, as the JSON of a Kubernetes
+    /// `ResourceRequirements`. `None`: none.
+    #[serde(default)]
+    pub resources: Option<serde_json::Value>,
+    /// Size of a volume for the write-ahead log. `None`: the log stays on the data volume.
+    #[serde(default)]
+    pub wal_size: Option<String>,
+    /// Storage class of the log's volume. `None`: the cluster's default.
+    #[serde(default)]
+    pub wal_storage_class: Option<String>,
+    /// PostgreSQL parameters (already checked against the allow-list). Empty: CloudNativePG's own.
+    #[serde(default)]
+    pub parameters: std::collections::BTreeMap<String, String>,
 }
 
 /// How a store is doing: the reasons of the `StoreReady` condition that are not errors.

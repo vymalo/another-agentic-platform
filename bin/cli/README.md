@@ -407,3 +407,7 @@ stays synchronous) that the workspace already uses. The client brings `reqwest` 
 `docker/operator/Dockerfile` and `docker/api/Dockerfile` copy `bin` and `crates` whole, so the cook layer of **both images also
 depends on `bin/cli/Cargo.toml` and `crates/platform-client/Cargo.toml`** (a change to them, or to the workspace's member list,
 invalidates the cached dependency layer of both); `aapctl` itself is built into neither.
+
+## `--encoding json|cbor` (AD-062)
+
+Every network command takes `--encoding` (env `AAPCTL_ENCODING`, default `json`): `cbor` sends and asks for `application/cbor`; outputs are unchanged. The token, redirect and proxy rules are unchanged.

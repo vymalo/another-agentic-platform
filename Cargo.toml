@@ -58,6 +58,8 @@ anyhow = "1"
 aws-lc-rs = "1.15"
 axum = { version = "0.8", default-features = false, features = ["http1", "tokio"] }
 base64 = "0.22"
+# CBOR as the second media type of the Platform API (AD-061): pinned exactly; it adds ciborium-io, ciborium-ll and half, no HTTP or TLS stack.
+ciborium = "=0.2.2"
 clap = { version = "4", features = ["derive", "env"] }
 # Only `aapctl login`: 32 bytes of OS randomness for the PKCE verifier and the state (already in the lock file, 0.2.17).
 getrandom = "0.2"
