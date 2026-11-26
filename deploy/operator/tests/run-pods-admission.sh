@@ -145,12 +145,16 @@ try "no limits at all in the run container" denied "$limits_words" 'del(.spec.co
 try "no resources at all in the init container" denied "$limits_words" 'del(.spec.initContainers[0].resources)'
 try "an extra container of an allowed image with no limits" denied "$limits_words" '.spec.containers += [.spec.containers[0] | .name = "extra" | del(.resources.limits)]'
 
-# ANR-660 (AD-065): with node types named (the parameters carry nodeTypeKey), a run pod is PINNED to the admitted values by nodeSelector or by
-# required node affinity in every term, and sets no nodeName. The pod of the template (the control, above) is the proof that the operator's own
-# affinity is admitted. With none named the rule is silent: the control below is a pod with no restriction at all, admitted.
-if [ -n "$node_key" ]; then
+# ANR-660 (AD-066): with node types named, a run pod is PINNED to the admitted values by nodeSelector or by required node affinity in every term,
+# and sets no nodeName. The pod of the template (the control, above) is the proof that the operator's own affinity is admitted. The policy has the
+# rule exactly when the chart names node types, and then a parameter object WITHOUT nodeTypeKey (an operator older than the rule) is judged by the
+# chart's own key and values, not waved through: the same unrestricted pod is refused. With no rule in the policy, nothing here is judged.
+node_rule=$(kubectl get validatingadmissionpolicy -o json | jq '[.items[] | select(any(.spec.validations[]?; (.messageExpression // "") | contains("a run pod is pinned to the node types")))] | length')
+node_words="a run pod is pinned to the node types"
+if [ -n "$node_key" ] && [ "$node_rule" = 0 ]; then
+  bad "the parameters name the node type $node_key and the policy has no node-type rule: the chart does not name node types, or the policy is an old one"
+elif [ -n "$node_key" ]; then
   first=$(printf '%s\n' "$node_admitted" | head -n 1)
-  node_words="a run pod is pinned to the node types"
   try "node types: restricted by nodeSelector to an admitted value, with no affinity" allowed "" ".spec.nodeSelector = {(\"$node_key\"): \"$first\"} | del(.spec.affinity.nodeAffinity)"
   try "node types: no restriction at all" denied "$node_words" 'del(.spec.affinity.nodeAffinity) | del(.spec.nodeSelector)'
   try "node types: a value outside the admitted ones in the affinity" denied "$node_words" ".spec.affinity.nodeAffinity.requiredDuringSchedulingIgnoredDuringExecution.nodeSelectorTerms[].matchExpressions |= map(select(.key == \"$node_key\").values += [\"not-admitted\"])"
@@ -159,12 +163,20 @@ if [ -n "$node_key" ]; then
   try "node types: Exists on the key instead of In" denied "$node_words" ".spec.affinity.nodeAffinity.requiredDuringSchedulingIgnoredDuringExecution.nodeSelectorTerms |= map(.matchExpressions = [{key: \"$node_key\", operator: \"Exists\"}])"
   # NotIn with ADMITTED values is the dangerous one: the pod may go anywhere but the admitted types.
   try "node types: NotIn on the key with the admitted values, instead of In" denied "$node_words" ".spec.affinity.nodeAffinity.requiredDuringSchedulingIgnoredDuringExecution.nodeSelectorTerms |= map(.matchExpressions = [{key: \"$node_key\", operator: \"NotIn\", values: [\"$first\"]}])"
+  try "node types: an In on ANOTHER key with the admitted values" denied "$node_words" ".spec.affinity.nodeAffinity.requiredDuringSchedulingIgnoredDuringExecution.nodeSelectorTerms |= map(.matchExpressions = [{key: \"kubernetes.io/arch\", operator: \"In\", values: [\"$first\"]}])"
   try "node types: a term with matchFields only" denied "$node_words" '.spec.affinity.nodeAffinity.requiredDuringSchedulingIgnoredDuringExecution.nodeSelectorTerms |= map(del(.matchExpressions) | .matchFields = [{key: "metadata.name", operator: "In", values: ["n1"]}])'
   try "node types: only a preferred affinity" denied "$node_words" 'del(.spec.nodeSelector) | .spec.affinity.nodeAffinity = {preferredDuringSchedulingIgnoredDuringExecution: [{weight: 1, preference: {matchExpressions: [{key: "x", operator: "Exists"}]}}]}'
   try "node types: a nodeSelector on another key" denied "$node_words" '.spec.nodeSelector = {"kubernetes.io/arch": "amd64"} | del(.spec.affinity.nodeAffinity)'
   try "node types: spec.nodeName set, though the affinity is right" denied "$node_words" '.spec.nodeName = "some-node"'
+  # S7: an EMPTY nodeName is no nodeName (the API server drops an empty string before any rule reads it), so a pod that is pinned and says so is
+  # judged as pinned. Recorded against a real API server (k3s v1.35.5, 2026-11-26): admitted.
+  try "node types: spec.nodeName is the empty string, with a valid pin" allowed "" '.spec.nodeName = ""'
+elif [ "$node_rule" != 0 ]; then
+  # The parameters have no nodeTypeKey and the policy has the rule: the chart's own key and values judge them.
+  try "node types, parameters without nodeTypeKey: no restriction at all is refused all the same" denied "$node_words" 'del(.spec.affinity.nodeAffinity) | del(.spec.nodeSelector)'
+  try "node types, parameters without nodeTypeKey: a value outside the admitted ones is refused" denied "$node_words" '.spec.nodeSelector = {"example.com/not-the-key": "x"} | del(.spec.affinity.nodeAffinity)'
 else
-  try "no node types named: a run pod with no node restriction is admitted (the rule is silent)" allowed "" 'del(.spec.nodeSelector)'
+  try "no node types named anywhere: a run pod with no node restriction is admitted (the policy has no rule)" allowed "" 'del(.spec.nodeSelector)'
 fi
 
 # The guard is for the agent's account, and for it alone: another account is judged by what the cluster judges everybody by.

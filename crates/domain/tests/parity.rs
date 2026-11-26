@@ -359,7 +359,7 @@ fn without_the_limits_of_ad_061(case: &str, mut template: Value) -> Value {
             assert!(removed.is_some(), "{case}: {at} has {kind}.{key} (AD-061)");
         }
     }
-    // ANR-660 (AD-065), the second difference: the template carries the class's size weight as an annotation (the coder chart's has
+    // ANR-660 (AD-066), the second difference: the template carries the class's size weight as an annotation (the coder chart's has
     // none). It is asserted present and on the grid, and taken out, so the rest of the metadata is compared as it was.
     let annotations = template
         .pointer_mut("/pod/metadata")

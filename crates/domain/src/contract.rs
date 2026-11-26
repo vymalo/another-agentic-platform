@@ -435,7 +435,7 @@ pub mod run_pods {
     pub const MANAGED_BY: &str = "adam-coder";
     /// The label whose presence marks a pod as a run's.
     pub const RUN_LABEL: &str = "adam.vymalo.com/run";
-    /// The annotation of the template that carries the class's size weight (ANR-660, AD-065), in the operator's own domain.
+    /// The annotation of the template that carries the class's size weight (ANR-660, AD-066), in the operator's own domain.
     pub const SIZE_WEIGHT_ANNOTATION: &str = "agents.vymalo.com/size-weight";
 
     /// The name label of the run pods of a service: not the workloads', so that no selector of the service

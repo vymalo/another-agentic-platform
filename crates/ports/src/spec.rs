@@ -752,7 +752,7 @@ pub struct RunPods {
     /// as it did before the field existed.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub runtime_class_name: Option<String>,
-    /// The node types the pods are restricted to (ANR-660, AD-065), when the deployment admits some: the admission policy refuses a
+    /// The node types the pods are restricted to (ANR-660, AD-066), when the deployment admits some: the admission policy refuses a
     /// pod that is not pinned to them. `None`: no restriction, and every object serialises as it did before the field existed.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub node_type: Option<RunPodNodeType>,

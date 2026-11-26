@@ -65,7 +65,7 @@ pub struct RunPodSettings {
     /// `nodeSelector` of the template.
     #[serde(default)]
     pub node_selector: BTreeMap<String, String>,
-    /// The node types the deployment admits for run pods (ANR-660, AD-065). Empty (the default) is no restriction, and then the
+    /// The node types the deployment admits for run pods (ANR-660, AD-066). Empty (the default) is no restriction, and then the
     /// field is not written, so no file, template or digest moves.
     #[serde(default, skip_serializing_if = "NodeTypeSettings::is_empty")]
     pub node_type: NodeTypeSettings,
@@ -105,7 +105,7 @@ pub struct RunPodClass {
     pub runtime_class_name: Option<String>,
 }
 
-/// The node types a run pod may be scheduled on (ANR-660, AD-065): the key of a node label the deployment keeps honest and the values
+/// The node types a run pod may be scheduled on (ANR-660, AD-066): the key of a node label the deployment keeps honest and the values
 /// of it that it admits. The template is pinned to them by a required node affinity and the admission policy refuses a run pod that
 /// is not. Both parts or neither.
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -125,7 +125,7 @@ impl NodeTypeSettings {
     }
 }
 
-/// The size weight of a run-pod class (ANR-660, AD-065): the larger of `requests.cpu` / 1 vCPU and `requests.memory` / 2 GiB, which
+/// The size weight of a run-pod class (ANR-660, AD-066): the larger of `requests.cpu` / 1 vCPU and `requests.memory` / 2 GiB, which
 /// must be one of the grid 0.25, 0.5, 1, 2, 4, 8. Held as **quarter-units** (1, 2, 4, 8, 16, 32), so that it is exact: no float is
 /// ever made of a quantity, and a class that is off the grid is refused and never rounded.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
@@ -150,16 +150,20 @@ impl SizeWeight {
         // One vCPU and two GiB (binary: `2G` is not `2Gi`), in the nano-units `quantity_nanos` counts in.
         const CPU_UNIT: u128 = 1_000_000_000;
         const MEMORY_UNIT: u128 = 2 * (1 << 30) * 1_000_000_000;
-        let ask = |key: &str| -> Result<u128, String> {
+        // `quantity_nanos` drops digits finer than a nano-unit, which would weigh `1.0000000001` CPU as exactly 1: the weight is made
+        // of an EXACT value, and a quantity that does not fit one is refused. Memory must also be a whole number of bytes.
+        let ask = |key: &str, bytes: bool| -> Result<u128, String> {
             let value = class.requests.get(key).ok_or_else(|| {
                 format!("requests.{key} is required: the size weight is made of it")
             })?;
-            quantity_nanos(value).ok_or_else(|| {
-                format!("requests.{key}: {value:?} is not a plain quantity (no exponent) that fits")
-            })
+            exact_nanos(value)
+                .filter(|n| !bytes || n % CPU_UNIT == 0)
+                .ok_or_else(|| {
+                    format!("requests.{key}: {value:?} is not an exact plain quantity (no exponent, no digit finer than the unit's resolution) that fits")
+                })
         };
-        let cpu = ask("cpu")?;
-        let memory = ask("memory")?;
+        let cpu = ask("cpu", false)?;
+        let memory = ask("memory", true)?;
         // The larger ratio, by cross-multiplication: cpu/CPU_UNIT against memory/MEMORY_UNIT.
         let overflow = || "requests are too large to weigh".to_owned();
         let cpu_scaled = cpu.checked_mul(MEMORY_UNIT).ok_or_else(overflow)?;
@@ -551,7 +555,7 @@ impl RunPodSettings {
                     }
                 }
             }
-            // ANR-660 (AD-065): a class is weighed from its requests, and one that is off the grid is refused, not rounded.
+            // ANR-660 (AD-066): a class is weighed from its requests, and one that is off the grid is refused, not rounded.
             if let Err(why) = SizeWeight::of(class) {
                 bad(format!("{at}.{why}"));
             }
@@ -666,6 +670,15 @@ impl RunPodSettings {
                     ));
                 }
             }
+            if let Err(why) = self.node_affinity_for_template() {
+                bad(format!("nodeAffinity: {why}"));
+            }
+            if self.node_affinity_names_key(&node_type.label_key) {
+                bad(format!(
+                    "nodeAffinity: a required term already has a matchExpressions entry on {:?}, the key of nodeType.labelKey: the operator adds its own requirement to every term, and one of the deployment's on the same label would be ANDed with it. Remove it from nodeAffinity",
+                    node_type.label_key
+                ));
+            }
             if self.node_selector.contains_key(&node_type.label_key) {
                 bad(format!(
                     "nodeSelector.{}: the key is the node type's (nodeType.labelKey): the operator pins run pods to the admitted values, and a selector on it would fight that",
@@ -771,11 +784,29 @@ impl RunPodSettings {
 
     /// The `nodeAffinity` of the template: what the deployment wrote, and, when it admits node types (ANR-660), the requirement
     /// `labelKey In admitted` added to **every** required term (the terms are alternatives, so one left without it would let a pod
-    /// go anywhere), or made the one term when there is none.
-    fn node_affinity_for_template(&self) -> Option<Value> {
+    /// go anywhere), or made the one term when there is none. A `null` where a map or a list belongs is absent, as the API server reads
+    /// it; a value of another type, which cannot be pinned, is an error naming the path, and `validate` asks the same function so the
+    /// operator refuses to start rather than drop the pin.
+    fn node_affinity_for_template(&self) -> Result<Option<Value>, String> {
         let written = self.node_affinity_value().cloned();
         if self.node_type.is_empty() {
-            return written;
+            return Ok(written);
+        }
+        /// The member `key` of `parent` as a mutable value: a missing or `null` one becomes `fresh`.
+        fn slot<'a>(
+            parent: &'a mut Value,
+            key: &str,
+            path: &str,
+            fresh: Value,
+        ) -> Result<&'a mut Value, String> {
+            let map = parent.as_object_mut().ok_or_else(|| {
+                format!("{path} is not a map, so it cannot be pinned to the node types")
+            })?;
+            let v = map.entry(key.to_owned()).or_insert_with(|| fresh.clone());
+            if v.is_null() {
+                *v = fresh;
+            }
+            Ok(v)
         }
         let requirement = json!({
             "key": self.node_type.label_key,
@@ -783,26 +814,48 @@ impl RunPodSettings {
             "values": self.node_type.admitted,
         });
         let mut affinity = written.unwrap_or_else(|| json!({}));
-        let required = affinity
-            .as_object_mut()?
-            .entry("requiredDuringSchedulingIgnoredDuringExecution")
-            .or_insert_with(|| json!({}));
-        let terms = required
-            .as_object_mut()?
-            .entry("nodeSelectorTerms")
-            .or_insert_with(|| json!([]));
-        let terms = terms.as_array_mut()?;
+        let at = "nodeAffinity.requiredDuringSchedulingIgnoredDuringExecution";
+        let required = slot(
+            &mut affinity,
+            "requiredDuringSchedulingIgnoredDuringExecution",
+            at,
+            json!({}),
+        )?;
+        let terms_at = format!("{at}.nodeSelectorTerms");
+        let terms = slot(required, "nodeSelectorTerms", at, json!([]))?
+            .as_array_mut()
+            .ok_or_else(|| {
+                format!("{terms_at} is not a list, so it cannot be pinned to the node types")
+            })?;
         if terms.is_empty() {
             terms.push(json!({}));
         }
-        for term in terms {
-            let expressions = term
-                .as_object_mut()?
-                .entry("matchExpressions")
-                .or_insert_with(|| json!([]));
-            expressions.as_array_mut()?.push(requirement.clone());
+        for (i, term) in terms.iter_mut().enumerate() {
+            if term.is_null() {
+                *term = json!({});
+            }
+            let at = format!("{terms_at}[{i}]");
+            let expressions = slot(term, "matchExpressions", &at, json!([]))?
+                .as_array_mut()
+                .ok_or_else(|| format!("{at}.matchExpressions is not a list, so it cannot be pinned to the node types"))?;
+            expressions.push(requirement.clone());
         }
-        Some(affinity)
+        Ok(Some(affinity))
+    }
+
+    /// Whether a required term of the deployment's own `nodeAffinity` already has a `matchExpressions` entry on `key`, with any operator
+    /// and any values: the node type's requirement would then be ANDed with something the deployment wrote about the same label.
+    fn node_affinity_names_key(&self, key: &str) -> bool {
+        self.node_affinity_value()
+            .and_then(|a| {
+                a.pointer("/requiredDuringSchedulingIgnoredDuringExecution/nodeSelectorTerms")
+            })
+            .and_then(Value::as_array)
+            .into_iter()
+            .flatten()
+            .filter_map(|t| t.get("matchExpressions").and_then(Value::as_array))
+            .flatten()
+            .any(|e| e.get("key").and_then(Value::as_str) == Some(key))
     }
 
     /// `nodeAffinity` when it says something: absent, `null` and `{}` say nothing.
@@ -834,6 +887,24 @@ fn is_plain_quantity(s: &str) -> bool {
         None => rest,
     };
     matches!(rest, "" | "Ki" | "Mi" | "Gi" | "Ti" | "k" | "M" | "G" | "T")
+}
+
+/// A quantity in nano-units like `quantity_nanos`, but **exact**: `None` when any non-zero digit would be dropped (or the unit has an
+/// exponent, or it does not fit 128 bits). The number is taken as an integer over a power of ten, so nothing is truncated on the way.
+fn exact_nanos(s: &str) -> Option<u128> {
+    if !is_quantity(s) {
+        return None;
+    }
+    let end = s
+        .find(|c: char| !(c.is_ascii_digit() || c == '.'))
+        .unwrap_or(s.len());
+    let (number, suffix) = s.split_at(end);
+    let unit = quantity_nanos(&format!("1{suffix}"))?;
+    let (whole, fraction) = number.split_once('.').unwrap_or((number, ""));
+    let digits: u128 = format!("{whole}{fraction}").parse().ok()?;
+    let divisor = 10u128.checked_pow(u32::try_from(fraction.len()).ok()?)?;
+    let total = digits.checked_mul(unit)?;
+    (total % divisor == 0).then(|| total / divisor)
 }
 
 /// A label value: at most 63 characters of letters, digits, `-`, `_` and `.`, starting and ending with a letter or a digit.
@@ -1017,7 +1088,8 @@ impl ForService<'_> {
                 }),
             );
         }
-        if let Some(a) = s.node_affinity_for_template() {
+        // `validate` has refused an affinity that cannot be pinned; there is nothing to drop here.
+        if let Ok(Some(a)) = s.node_affinity_for_template() {
             affinity.insert("nodeAffinity".into(), a);
         }
 
@@ -1096,7 +1168,7 @@ impl ForService<'_> {
             "app.kubernetes.io/name": rp::name_label(self.service),
             "app.kubernetes.io/component": "run",
         } });
-        // ANR-660 (AD-065): the class's size weight, for whatever reads the pod. A class that is not weighable (the placeholders of
+        // ANR-660 (AD-066): the class's size weight, for whatever reads the pod. A class that is not weighable (the placeholders of
         // `offering`, which `validate` is never asked about) carries none.
         if let Ok(weight) = SizeWeight::of(self.class) {
             metadata["annotations"] = json!({ rp::SIZE_WEIGHT_ANNOTATION: weight.to_string() });

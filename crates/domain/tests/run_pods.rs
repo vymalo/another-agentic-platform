@@ -1636,7 +1636,7 @@ fn run_pods_have_no_build_mode_for_a_runtime_class_to_be_refused_with() {
     }
 }
 
-// ---------------------------------------------------------------- the size weight (ANR-660, AD-065)
+// ---------------------------------------------------------------- the size weight (ANR-660, AD-066)
 
 fn weighed(cpu: &str, memory: &str) -> Result<String, String> {
     let class: aap_domain::RunPodClass = serde_json::from_value(
@@ -1890,4 +1890,125 @@ fn node_types_are_refused_when_half_given_malformed_or_fighting_the_node_selecto
     typed(json!({ "nodeSelector": { "kubernetes.io/arch": "amd64" } }))
         .validate()
         .expect("another key");
+}
+
+// ---------------------------------------------------------------- review rulings S3, S4, S5 (ANR-660)
+
+#[test]
+fn a_null_in_the_deployments_affinity_is_absent_and_never_drops_the_pin() {
+    // Each place a `null` can stand for a map or a list. Whatever `validate` says, a pin is never silently dropped: either the settings are
+    // refused (naming the key), or the template carries the requirement in every term.
+    let required = "requiredDuringSchedulingIgnoredDuringExecution";
+    let wanted = json!({ "key": NODE_KEY, "operator": "In", "values": ["a", "b"] });
+    let cases = [
+        ("required is null", json!({ required: null })),
+        (
+            "terms is null",
+            json!({ required: { "nodeSelectorTerms": null } }),
+        ),
+        (
+            "a term is null",
+            json!({ required: { "nodeSelectorTerms": [null] } }),
+        ),
+        (
+            "matchExpressions is null",
+            json!({ required: { "nodeSelectorTerms": [{ "matchExpressions": null }] } }),
+        ),
+        (
+            "matchExpressions is null in the second term",
+            json!({ required: { "nodeSelectorTerms": [
+                { "matchExpressions": [{ "key": "kubernetes.io/arch", "operator": "In", "values": ["amd64"] }] },
+                { "matchExpressions": null },
+            ] } }),
+        ),
+    ];
+    let mut pinned = 0;
+    for (what, affinity) in cases {
+        let s = typed(json!({ "nodeAffinity": affinity }));
+        match s.validate() {
+            Err(problems) => assert!(
+                problems.iter().any(|p| p.contains("nodeAffinity")),
+                "{what}: refused, but not naming the key: {problems:?}"
+            ),
+            Ok(()) => {
+                let terms = required_terms(&template_of(s));
+                assert!(!terms.is_empty(), "{what}: the pin was dropped");
+                for term in &terms {
+                    assert!(
+                        term["matchExpressions"]
+                            .as_array()
+                            .unwrap()
+                            .contains(&wanted),
+                        "{what}: a term without the pin: {term}"
+                    );
+                }
+                pinned += 1;
+            }
+        }
+    }
+    assert!(
+        pinned >= 2,
+        "the nulls an affinity may legally hold are pinned, not refused"
+    );
+    // A value that is not a map or a list cannot be pinned and is refused at start, naming the key.
+    let problems = typed(json!({ "nodeAffinity": { required: "x" } }))
+        .validate()
+        .unwrap_err();
+    assert!(
+        problems.iter().any(|p| p.contains("nodeAffinity")),
+        "{problems:?}"
+    );
+}
+
+#[test]
+fn a_required_term_of_the_deployments_own_on_the_key_is_refused() {
+    let own = |operator: &str, values: Value| {
+        json!({ "nodeAffinity": { "requiredDuringSchedulingIgnoredDuringExecution": { "nodeSelectorTerms": [
+            { "matchExpressions": [{ "key": NODE_KEY, "operator": operator, "values": values }] },
+        ] } } })
+    };
+    for (operator, values) in [
+        ("In", json!(["a"])),
+        ("NotIn", json!(["z"])),
+        ("Exists", json!([])),
+    ] {
+        let problems = typed(own(operator, values)).validate().unwrap_err();
+        assert!(
+            problems
+                .iter()
+                .any(|p| p.contains("nodeAffinity") && p.contains(NODE_KEY)),
+            "{operator}: {problems:?}"
+        );
+    }
+    // Another key is fine, and so is the same key with no node type named.
+    typed(json!({ "nodeAffinity": { "requiredDuringSchedulingIgnoredDuringExecution": { "nodeSelectorTerms": [
+        { "matchExpressions": [{ "key": "kubernetes.io/arch", "operator": "In", "values": ["amd64"] }] },
+    ] } } }))
+    .validate()
+    .expect("another key");
+    settings_with(own("In", json!(["a"])))
+        .validate()
+        .expect("no node type named");
+}
+
+#[test]
+fn a_quantity_finer_than_it_can_say_exactly_is_refused_not_truncated() {
+    // `quantity_nanos` drops digits below a nano-unit; the weight must not.
+    for cpu in [
+        "1.0000000001",
+        "1.00000000010",
+        "1.0000000000000000001",
+        "0.2500000001",
+    ] {
+        assert!(weighed(cpu, "2Gi").is_err(), "cpu {cpu}");
+    }
+    // Zeros beyond the resolution change nothing, and are exact.
+    assert_eq!(weighed("1.0000000000", "2Gi").as_deref(), Ok("1"));
+    assert_eq!(weighed("0.2500000000", "512Mi").as_deref(), Ok("0.25"));
+    assert_eq!(weighed("0.25", "512Mi").as_deref(), Ok("0.25"));
+    // Memory is a whole number of bytes: a fraction of a byte is refused, though it is exact in nano-units.
+    assert!(weighed("100m", "2147483648.5").is_err());
+    assert!(weighed("100m", "2147483648.0000000000001").is_err());
+    // A whole number of bytes written with a fraction is exact.
+    assert_eq!(weighed("100m", "1.0Gi").as_deref(), Ok("0.5"));
 }

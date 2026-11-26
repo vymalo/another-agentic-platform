@@ -41,7 +41,7 @@ else: the provider has no right on Secrets, never reads one, and copies no kubel
 | `NetworkPolicy` | `<svc>-run-pods` | run pods: the run pods of the service by label, **deny by default** (D15c): no ingress, egress to DNS, to the egress proxy's pods on its port and to the deployment's extra rules, and nothing else (no rule names an address range) |
 | `Deployment`, `Service`, `ServiceAccount`, `PodDisruptionBudget`, `NetworkPolicy`, `ConfigMap` | `<svc>-egress` (the file: `<svc>-egress-allow`) | run pods, **the egress proxy** (D15c, [below](#the-egress-proxy-d15c)): the one way out of a run pod |
 | `RoleBinding` | `<svc>-run-pods` | run pods: the account to the Role the deployment made (`RunPods::role`) |
-| `ConfigMap` | `<svc>-run-pods-policy` | run pods: the parameters of the deployment's admission policy, labelled `agents.vymalo.com/run-pods-policy: "true"` |
+| `ConfigMap` | `<svc>-run-pods-policy` | run pods: the parameters of the deployment's admission policy, labelled `agents.vymalo.com/run-pods-policy: "true"` | **With node types (ANR-660, AD-066) two more keys, `nodeTypeKey` and `nodeTypeAdmitted` (one value per line), only when `RunPods::node_type` is set; the chart's policy falls back to its own values when they are absent.**
 | (the StatefulSet's `volumeClaimTemplates`) | `<volume>`, claims `<volume>-<workload>-<n>` | a `PerReplica` volume: ReadWriteOnce, one per replica |
 
 **The pod template** is the adam-rs chart's `statefulset.yaml`: no service-account token, `runAsNonRoot` with the ids of

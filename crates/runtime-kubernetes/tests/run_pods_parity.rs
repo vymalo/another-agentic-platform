@@ -1082,7 +1082,7 @@ fn the_admission_rule_refuses_an_unlisted_claim() {
     assert_eq!(claims_the_rule_admits(&rule, &old), ["work-coder-0"]);
 }
 
-/// ANR-660 (AD-065), two intended differences from the coder chart's run pods, each held apart and not folded into the comparison above:
+/// ANR-660 (AD-066), two intended differences from the coder chart's run pods, each held apart and not folded into the comparison above:
 /// the template carries the class's size weight as an annotation (the coder chart's has none), and the policy gains a node-type rule
 /// that exists only when the deployment names node types (so the checked-in render, which names none, has the limits rule last).
 #[test]
@@ -1115,7 +1115,7 @@ fn the_size_weight_annotation_and_the_node_type_rule_are_the_operators_and_not_t
         .find("a run pod sets limits.memory")
         .expect("limits rule");
     let rule = text
-        .find("- expression: \"!has(params.data.nodeTypeKey) ||")
+        .find("- expression: \"!has(object.spec.nodeName) && ((has(object.spec.nodeSelector) && variables.nodeTypeKey in")
         .expect("the node-type rule");
     assert!(rule > limits, "the node-type rule is appended last");
     assert!(

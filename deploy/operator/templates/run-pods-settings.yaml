@@ -6,7 +6,7 @@
 {{- with .Values.runPods.runtimeClassName }}
 {{- $s = set $s "runtimeClassName" . }}
 {{- end }}
-{{- /* ANR-660 (AD-065): the node types only when one is named, so that the file (and every render) is what it was while empty. */}}
+{{- /* ANR-660 (AD-066): the node types only when one is named, so that the file (and every render) is what it was while empty. */}}
 {{- if or .Values.runPods.nodeType.labelKey .Values.runPods.nodeType.admitted }}
 {{- $s = set $s "nodeType" (pick .Values.runPods.nodeType "labelKey" "admitted") }}
 {{- end }}

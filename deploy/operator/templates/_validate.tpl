@@ -375,7 +375,7 @@ the CIDRs, a toleration or an egress rule, which the operator checks at start an
 {{- if and (hasKey $r "nodeAffinity") (not (or (kindIs "invalid" $r.nodeAffinity) (kindIs "map" $r.nodeAffinity))) -}}
 {{- fail "runPods.nodeAffinity must be a map (an affinity.nodeAffinity) or empty" -}}
 {{- end -}}
-{{- /* ANR-660 (AD-065): the node types run pods are pinned to: both parts or neither, label syntax, and not the key of nodeSelector (the operator pins to
+{{- /* ANR-660 (AD-066): the node types run pods are pinned to: both parts or neither, label syntax, and not the key of nodeSelector (the operator pins to
    the admitted values, and a selector on the key would fight that). */ -}}
 {{- $nt := $r.nodeType -}}
 {{- range $k, $v := $nt -}}
@@ -403,6 +403,15 @@ the CIDRs, a toleration or an egress rule, which the operator checks at start an
 {{- end -}}
 {{- if hasKey $r.nodeSelector $nt.labelKey -}}
 {{- fail (printf "runPods.nodeSelector.%s is the key of runPods.nodeType.labelKey: the operator pins run pods to the admitted values, and a selector on the same key would fight that. Remove it from nodeSelector" $nt.labelKey) -}}
+{{- end -}}
+{{- /* The deployment's own required terms must not already name the key either (any operator, any values): the operator adds its requirement
+   to every term and the two would be ANDed. */ -}}
+{{- range ((($r.nodeAffinity | default dict).requiredDuringSchedulingIgnoredDuringExecution | default dict).nodeSelectorTerms | default list) -}}
+{{- range ((. | default dict).matchExpressions | default list) -}}
+{{- if eq (toString (. | default dict).key) $nt.labelKey -}}
+{{- fail (printf "runPods.nodeAffinity: a required term already has a matchExpressions entry on %q, the key of runPods.nodeType.labelKey: the operator adds its own requirement to every term, and one of yours on the same label would be ANDed with it. Remove it from nodeAffinity" $nt.labelKey) -}}
+{{- end -}}
+{{- end -}}
 {{- end -}}
 {{- end -}}
 {{- /* The PriorityClass: the chart's own, or a name of an object the deployment manages. */ -}}
@@ -573,7 +582,7 @@ the CIDRs, a toleration or an egress rule, which the operator checks at start an
 {{- end -}}
 {{- end -}}
 {{- end -}}
-{{- /* ANR-660 (AD-065): a class is weighed from its requests, so both are required (this deliberately reverses AD-061 decision 4's "no new
+{{- /* ANR-660 (AD-066): a class is weighed from its requests, so both are required (this deliberately reverses AD-061 decision 4's "no new
    required key"). That the weight is on the grid is checked by the operator at start (RunPodSettings::validate), not here. */ -}}
 {{- if not (hasKey (default (dict) $class.requests) "cpu") -}}
 {{- fail (printf "runPodClasses.%s.requests.cpu is required (ANR-660): the size weight is made of it" $name) -}}

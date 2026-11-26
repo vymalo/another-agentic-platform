@@ -947,7 +947,7 @@ fn the_run_pod_template_carries_the_class_the_deployment_names_and_none_otherwis
 
 #[test]
 fn the_guards_parameters_name_the_node_types_only_when_the_deployment_does() {
-    // ANR-660 (AD-065): the parameters the policy's last rule reads, one admitted value per line, and nothing when none are named.
+    // ANR-660 (AD-066): the parameters the policy's last rule reads, one admitted value per line, and nothing when none are named.
     let none = resolved_run_pods(|_, _| {});
     let docs = rendered(&none).documents();
     let data = &find(&docs, "ConfigMap", "coder-run-pods-policy")["data"];

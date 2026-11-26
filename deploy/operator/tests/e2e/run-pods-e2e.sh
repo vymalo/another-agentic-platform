@@ -128,7 +128,7 @@ run_role=$op-run-pods                # the Role of run pods (the chart's)
 sa_op="system:serviceaccount:$ns:$op"
 sa_coder="system:serviceaccount:$ns:$coder"
 steps_ext=https://agents.vymalo.com/a2a/extensions/steps/v1
-# ANR-660 (AD-065): the node type run pods are pinned to (run-pods.values.yaml `runPods.nodeType`, held equal by render-check.sh). The nodes of the
+# ANR-660 (AD-066): the node type run pods are pinned to (run-pods.values.yaml `runPods.nodeType`, held equal by render-check.sh). The nodes of the
 # throwaway cluster are labelled with it before the upgrade, because the policy only proves a pod is PINNED to the admitted types, and the scheduler
 # then needs a node that has the label.
 node_type_key=aap-e2e/node-type
@@ -722,7 +722,7 @@ jqok "$work/statefulset.json" "the coder's pod is not given the account, the tem
   and ([.spec.template.spec.volumes[] | select(.name == "run-pod") | .configMap.name] == [$svc + "-run-pod"])'
 jq -r '.data["pod.yaml"]' "$work/template-cm.json" > "$work/template.json"
 jqok "$work/template.json" "the template is not a Pod with a container run and an init container tools" '.kind == "Pod" and (.spec.containers | map(.name)) == ["run"] and (.spec.initContainers | map(.name)) == ["tools"]'
-# ANR-660 (AD-065): the template says the class's size weight (`standard` is 0.25) and is pinned to the node type of the values, in its one required term.
+# ANR-660 (AD-066): the template says the class's size weight (`standard` is 0.25) and is pinned to the node type of the values, in its one required term.
 jqok "$work/template.json" "the template has no size weight of 0.25, or is not pinned to $node_type_key In [$node_type_value] in its one required term" --arg nk "$node_type_key" --arg nv "$node_type_value" '
   .metadata.annotations["agents.vymalo.com/size-weight"] == "0.25"
   and (.spec.affinity.nodeAffinity.requiredDuringSchedulingIgnoredDuringExecution.nodeSelectorTerms
@@ -793,7 +793,7 @@ ok "the account of $coder may make, get, list, watch and delete pods and exec in
 # that breaks a rule is refused with that rule's message. 25 of them.
 sh "$here/../run-pods-admission.sh" "$ns" "$coder" > "$work/admission.out" 2>&1 \
   || die "run-pods-admission.sh failed in this cluster: $(redact < "$work/admission.out" | tail -n 30 | head -c 3000)"
-[ "$(grep -c '^ok ' "$work/admission.out")" -ge 38 ] || die "run-pods-admission.sh ran fewer than 38 cases (27, and the 11 of the node types, ANR-660): $(redact < "$work/admission.out" | tail -n 8)"
+[ "$(grep -c '^ok ' "$work/admission.out")" -ge 40 ] || die "run-pods-admission.sh ran fewer than 40 cases (27, and the 13 of the node types, ANR-660): $(redact < "$work/admission.out" | tail -n 8)"
 if grep -q '^FAIL' "$work/admission.out"; then die "run-pods-admission.sh printed a failure: $(grep '^FAIL' "$work/admission.out" | head -n 3)"; fi
 ok "run-pods-admission.sh, run here against the policy the chart installed and the parameters the operator made: $(tail -n 1 "$work/admission.out")"
 

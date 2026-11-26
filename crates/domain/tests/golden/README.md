@@ -52,7 +52,7 @@ The run pod comparison is exact except for these, each asserted and taken out in
 
 - **AD-061:** the run pod template's containers carry the CPU and ephemeral-storage limits the operator chart's admission policy requires, and the policy has a
   tenth rule, last, that asks for them.
-- **ANR-660 (AD-065):** the template's metadata carries the annotation `agents.vymalo.com/size-weight` (`0.25` for `standard`: the larger of `requests.cpu` / 1 vCPU
+- **ANR-660 (AD-066):** the template's metadata carries the annotation `agents.vymalo.com/size-weight` (`0.25` for `standard`: the larger of `requests.cpu` / 1 vCPU
   and `requests.memory` / 2 GiB, on the grid 0.25, 0.5, 1, 2, 4, 8); the coder chart's has none. With `runPods.nodeType` set the template also carries the required
   node affinity and the policy an eleventh rule, last (`!has(params.data.nodeTypeKey) || ...`), neither of which exists in the coder chart, and neither of which is in
   any golden here: nothing renders them while `nodeType` is empty.
