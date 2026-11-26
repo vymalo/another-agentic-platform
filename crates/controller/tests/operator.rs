@@ -146,15 +146,27 @@ async fn start_where(fake: Fake, namespaces: &[&str], ready: impl Fn(&Fake) -> b
 /// The operator on `fake` with `options`, started when `ready` says its watches are where the case needs them: the
 /// cases that are about the settings themselves (no namespace at all) compose their own.
 async fn start_options(fake: Fake, options: Options, ready: impl Fn(&Fake) -> bool) -> Running {
+    start_with_activity(fake, options, ready, None).await
+}
+
+async fn start_with_activity(
+    fake: Fake,
+    options: Options,
+    ready: impl Fn(&Fake) -> bool,
+    activity: Option<aap_ports::memory::MemoryActivity>,
+) -> Running {
     let runtime = Scripted::new();
     let owner: OwnerOf = Arc::new(|_| OwnerHandle::none());
-    let operator = Operator::new(
+    let mut operator = Operator::new(
         fake.client(),
         runtime.clone(),
         MemoryStore::new(),
         owner,
         options,
     );
+    if let Some(source) = activity {
+        operator = operator.with_activity(source);
+    }
     let directory = operator.directory();
     let readiness = operator.readiness();
     let metrics = operator.metrics();
@@ -1322,4 +1334,86 @@ async fn a_follower_replica_writes_nothing() {
     follower.stop().await;
     let _ = stop.send(());
     let _ = tokio::time::timeout(Duration::from_secs(10), campaign).await;
+}
+
+fn phase_of(r: &Running, ns: &str, name: &str) -> Option<String> {
+    r.fake
+        .get(SERVICES, ns, name)?
+        .pointer("/status/runtime/phase")?
+        .as_str()
+        .map(str::to_owned)
+}
+
+#[tokio::test]
+async fn an_idle_agent_sleeps_and_a_removed_policy_wakes_it() {
+    let source = aap_ports::memory::MemoryActivity::new();
+    let id = RuntimeId::new("team", "chat");
+    source.set(
+        &id,
+        aap_ports::Activity {
+            busy: 1,
+            next_due_at: None,
+        },
+    );
+    let options = Options {
+        watch_namespaces: Some(vec!["team".to_owned()]),
+        resync: Resync {
+            settled: Duration::from_secs(3600),
+            pending: Duration::from_secs(3600),
+            not_installed: Duration::from_secs(3600),
+        },
+        default_agent_image: Some(DEFAULT_IMAGE.to_owned()),
+        sleep_poll: Duration::from_millis(50),
+        ..Options::default()
+    };
+    let r = start_with_activity(
+        Fake::new(),
+        options,
+        |f| f.watchers_in(SERVICES, "team") >= 1 && f.watchers_in(CONFIGS, "team") >= 2,
+        Some(source.clone()),
+    )
+    .await;
+    eventually("the caches to sync", || r.readiness.is_ready()).await;
+
+    let (mut service, config) = example("chat", "team");
+    // The fake does not run the CRD's CEL, so a one-second timeout stands for ten minutes.
+    service["spec"]["scaling"]["idleTimeout"] = json!("1s");
+    r.fake.put(CONFIGS, config);
+    r.fake.put(SERVICES, service.clone());
+    eventually("the service to be Ready", || {
+        r.state("team", "chat").as_deref() == Some("Ready")
+    })
+    .await;
+
+    // Busy: it is asked, and it stays up.
+    tokio::time::sleep(Duration::from_millis(1500)).await;
+    assert!(!source.asked().is_empty(), "the loop polled");
+    assert_eq!(r.state("team", "chat").as_deref(), Some("Ready"));
+
+    // Idle for the timeout: scaled to zero, shown as Sleeping, and an ensure does not wake it.
+    source.set(&id, aap_ports::Activity::IDLE);
+    // The scripted runtime's `watch` speaks only when the test says so; a real provider's does when the workload scales.
+    within(Duration::from_secs(15), "the agent to sleep", || {
+        r.runtime.signal(&id);
+        phase_of(&r, "team", "chat").as_deref() == Some("Sleeping")
+    })
+    .await;
+    assert_eq!(r.state("team", "chat").as_deref(), Some("Suspended"));
+    assert_eq!(
+        r.metrics.get(aap_controller::metric::SLEEPS, &[]),
+        1,
+        "slept once"
+    );
+    r.runtime.signal(&id);
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    assert_eq!(phase_of(&r, "team", "chat").as_deref(), Some("Sleeping"));
+
+    // The person takes the policy away: the next pass ensures it running again.
+    service["spec"]["scaling"]["idleTimeout"] = Value::Null;
+    r.fake.put(SERVICES, service);
+    within(Duration::from_secs(15), "the agent to wake", || {
+        phase_of(&r, "team", "chat").as_deref() == Some("Ready")
+    })
+    .await;
+    r.stop().await;
 }
