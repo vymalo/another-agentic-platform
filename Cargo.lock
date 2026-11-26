@@ -3,6 +3,16 @@
 version = 4
 
 [[package]]
+name = "aap-activator"
+version = "0.1.0"
+dependencies = [
+ "aap-ports",
+ "axum",
+ "tokio",
+ "tower",
+]
+
+[[package]]
 name = "aap-activity-http"
 version = "0.1.0"
 dependencies = [
