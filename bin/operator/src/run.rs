@@ -500,6 +500,8 @@ impl RunArgs {
                 enabled: self.tool_probe_enabled,
                 timeout: std::time::Duration::from_secs(self.tool_probe_timeout_secs),
             },
+            // The binary builds the activity source (P2c) but does not hand it to the operator yet, so the idle loop does not run.
+            sleep_poll: aap_controller::DEFAULT_POLL,
         }
     }
 }

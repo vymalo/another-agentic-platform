@@ -229,6 +229,8 @@ pub mod reason {
     pub const PROVISIONING: &str = "Provisioning";
     /// `RuntimeReady` false: suspended on purpose.
     pub const SUSPENDED: &str = "Suspended";
+    /// `RuntimeReady` false: scaled to zero because the agent reported no work (AD-058).
+    pub const SLEEPING: &str = "Sleeping";
     /// `RuntimeReady` false: a referenced Secret or key does not exist.
     pub const MISSING_SECRET: &str = "MissingSecret";
     /// `RuntimeReady` false: the agent process refused its configuration (exit 78).

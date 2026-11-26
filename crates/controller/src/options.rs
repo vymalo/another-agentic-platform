@@ -110,6 +110,9 @@ pub struct Options {
     /// How long data a deleted agent left behind (`deletionPolicy: Retain`) is kept before the operator deletes it:
     /// 90 days by default (`RETENTION_AFTER_DELETE`).
     pub retention: crate::Retention,
+    /// How often the idle loop asks agents what work they hold (AD-058). It runs only when the operator is given
+    /// an activity source ([`Operator::with_activity`](crate::Operator::with_activity)).
+    pub sleep_poll: Duration,
 }
 
 impl Default for Options {
@@ -129,6 +132,7 @@ impl Default for Options {
             max_access_tier: aap_api::AccessTierCap::Auto,
             probe: Probe::default(),
             retention: crate::Retention::default(),
+            sleep_poll: crate::sleeper::DEFAULT_POLL,
         }
     }
 }
