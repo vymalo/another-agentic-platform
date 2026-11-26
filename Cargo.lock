@@ -3,6 +3,18 @@
 version = 4
 
 [[package]]
+name = "aap-activity-http"
+version = "0.1.0"
+dependencies = [
+ "aap-ports",
+ "axum",
+ "reqwest",
+ "serde",
+ "serde_json",
+ "tokio",
+]
+
+[[package]]
 name = "aap-api"
 version = "0.1.0"
 dependencies = [
