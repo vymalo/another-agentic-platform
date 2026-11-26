@@ -28,6 +28,8 @@ pub mod name {
     pub const SERVICES_DELETED: &str = "aap_services_deleted_total";
     /// Retained databases and volumes the retention sweep deleted.
     pub const RETENTION_PURGED: &str = "aap_retention_purged_total";
+    /// Agents the idle loop scaled to zero (AD-058).
+    pub const SLEEPS: &str = "aap_agent_sleeps_total";
 }
 
 fn help(series: &str) -> &'static str {
@@ -42,6 +44,7 @@ fn help(series: &str) -> &'static str {
         name::RETENTION_PURGED => {
             "Retained databases and volumes deleted after the retention period."
         }
+        name::SLEEPS => "Agents scaled to zero after reporting no work.",
         _ => "",
     }
 }
