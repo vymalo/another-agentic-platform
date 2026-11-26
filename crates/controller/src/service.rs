@@ -480,7 +480,10 @@ async fn announce<R, S>(
         ctx.metrics
             .inc(name::STATE_CHANGES, &[("state", &format!("{state:?}"))]);
     }
-    let calm = matches!(reason, "Reconciled" | "Provisioning" | "Suspended");
+    let calm = matches!(
+        reason,
+        "Reconciled" | "Provisioning" | "Suspended" | "Sleeping"
+    );
     let event = KubeEvent {
         type_: if calm && state != ServiceState::Blocked {
             EventType::Normal
