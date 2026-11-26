@@ -153,20 +153,31 @@ pub fn activity_source(
     use aap_trace_otlp::SecretRef;
     use anyhow::Context;
     if !activity.enabled {
+        if activity.token.is_some() {
+            tracing::warn!(
+                "activity.token is set but activity.enabled is not: no agent is asked about its work"
+            );
+        }
         return Ok(None);
     }
     let reference = activity
         .token
         .as_ref()
         .context("activity.token: required while activity.enabled is true: the agents refuse a request with no bearer")?;
+    let refused = |why: String| {
+        anyhow::Error::new(crate::config::ReferenceRefused(format!(
+            "activity.token {reference:?}: {why}"
+        )))
+    };
     let text = match reference {
         SecretRef::File(path) => std::fs::read_to_string(path)
-            .with_context(|| format!("reading activity.token {}", path.display()))?,
-        SecretRef::Env(name) => std::env::var(name)
-            .with_context(|| format!("reading activity.token: the variable {name} is not set"))?,
+            .map_err(|e| refused(format!("the file cannot be read ({})", e.kind())))?,
+        SecretRef::Env(name) => {
+            std::env::var(name).map_err(|_| refused("the variable is not set".to_owned()))?
+        }
     };
     let token = aap_activity_http::Token::new(&text)
-        .with_context(|| format!("activity.token {reference:?}"))?;
+        .map_err(|_| refused("the bearer is empty".to_owned()))?;
     let source =
         aap_activity_http::HttpActivity::in_cluster(activity.port, activity.timeout, Some(token))?;
     Ok(Some(source))
@@ -185,16 +196,23 @@ fn store(_client: &kube::Client) -> aap_store_secret::SecretStore {
     aap_store_secret::SecretStore::new()
 }
 
-/// The registry's token, or why there is none. **No token, no registry** (fail closed): the operator
-/// keeps reconciling, says so loudly, and every service is `Listed: False`, reason `RegistryDisabled`.
+/// The registry's token. **No token configured, no registry** (fail closed): the operator keeps reconciling, says so loudly,
+/// and every service is `Listed: False`, reason `RegistryDisabled`. **A token configured and unusable is a refusal of the
+/// file** (exit 78, as `activity.token`'s is): a missing or empty file, an unset or empty variable. It used to be the same as
+/// none, and a deployment whose Secret was misnamed then ran for hours with no registry and a single log line (AD-064).
+///
+/// # Errors
+///
+/// [`ReferenceRefused`](crate::config::ReferenceRefused): the reference gives no token. The message names the reference, never
+/// a value.
 #[cfg(all(feature = "runtime-kubernetes", feature = "registry"))]
-fn registry_token(registry: &crate::config::Registry) -> Option<aap_registry::Token> {
+fn registry_token(registry: &crate::config::Registry) -> Result<Option<aap_registry::Token>> {
     use aap_trace_otlp::SecretRef;
     let Some(reference) = &registry.token else {
         tracing::warn!(
             "no registry.token: the agent registry is not served (it has no token to demand)"
         );
-        return None;
+        return Ok(None);
     };
     let token = match reference {
         SecretRef::File(path) => aap_registry::Token::from_file(path).map_err(|e| e.to_string()),
@@ -203,26 +221,22 @@ fn registry_token(registry: &crate::config::Registry) -> Option<aap_registry::To
             .and_then(|text| aap_registry::Token::new(&text))
             .ok_or_else(|| "the variable is not set or is empty".to_owned()),
     };
-    match token {
-        Ok(token) => Some(token),
-        Err(why) => {
-            // The reference, never the value: a file's path and a variable's name are not the token.
-            tracing::error!(
-                "registry.token {reference:?}: {why}: the agent registry is not served (it has no token to demand)"
-            );
-            None
-        }
-    }
+    token.map(Some).map_err(|why| {
+        // The reference, never the value: a file's path and a variable's name are not the token.
+        anyhow::Error::new(crate::config::ReferenceRefused(format!(
+            "registry.token {reference:?}: {why}"
+        )))
+    })
 }
 
 #[cfg(all(feature = "runtime-kubernetes", not(feature = "registry")))]
-fn registry_token(registry: &crate::config::Registry) -> Option<()> {
+fn registry_token(registry: &crate::config::Registry) -> Result<Option<()>> {
     if registry.token.is_some() {
         tracing::warn!(
             "registry.token is set, but this build has no `registry` feature: nothing is served on the registry's port"
         );
     }
-    None
+    Ok(None)
 }
 
 /// How often the registry's document is built when nobody asks, so that `RegistryFull` is true to the
@@ -339,7 +353,7 @@ async fn run_with(settings: crate::config::Settings, tracer: aap_trace::Tracer) 
     let registry_full = Arc::new(std::sync::atomic::AtomicBool::new(false));
     // Built and checked now so a bad setting stops the start; the idle controller (P2b) is what polls it.
     let activity = activity_source(&settings.activity)?;
-    let token = registry_token(&settings.registry);
+    let token = registry_token(&settings.registry)?;
     let options = settings.options(token.is_some(), registry_full.clone());
     if options.watch_namespaces.is_none() {
         tracing::warn!(
@@ -358,7 +372,6 @@ async fn run_with(settings: crate::config::Settings, tracer: aap_trace::Tracer) 
             .as_ref()
             .map_or_else(|| "(no run pods)".to_owned(), |s| s.class_names().join(",")),
         tool_probe = options.probe.enabled,
-        activity = activity.is_some(),
         activity = activity.is_some(),
         "starting the operator {}",
         env!("CARGO_PKG_VERSION")
@@ -815,41 +828,40 @@ mod tests {
         );
     }
 
-    /// Ruling 5 of ANR-962: `--check` holds a reference's shape, and the start reads it and fails closed. A registry token
-    /// that is a missing file, an unset variable or blank gives no token (so no registry is served), never a registry that
-    /// demands nothing; a readable one gives a token.
+    /// Ruling 5 of ANR-962, and AD-064 (changed on upgrade): `--check` holds a reference's shape, and the start reads it and
+    /// fails closed. No `registry.token` is no registry; a token that is configured and cannot be used (a missing or empty file,
+    /// an unset or empty variable) refuses the file, which is exit 78, never a registry that demands nothing.
     #[cfg(all(feature = "runtime-kubernetes", feature = "registry"))]
     #[test]
-    fn a_registry_token_that_cannot_be_read_gives_no_registry() {
+    fn a_registry_token_that_is_configured_and_unusable_refuses_the_file() {
         use aap_trace_otlp::SecretRef;
         let registry = |token: Option<SecretRef>| crate::config::Registry {
             public_url: None,
             token,
         };
-        assert!(registry_token(&registry(None)).is_none(), "no reference");
+        assert!(
+            registry_token(&registry(None))
+                .expect("none is no registry")
+                .is_none(),
+            "no reference is no registry, and not a refusal"
+        );
+        let refused = |token: SecretRef| {
+            let error = registry_token(&registry(Some(token))).expect_err("a refusal");
+            assert!(crate::config::is_reference_refused(&error), "{error:#}");
+            assert!(format!("{error:#}").contains("registry.token"), "{error:#}");
+        };
         let dir = std::env::temp_dir().join(format!("aap-registry-token-{}", std::process::id()));
         std::fs::create_dir_all(&dir).expect("a directory");
         let file = dir.join("token");
-        assert!(
-            registry_token(&registry(Some(SecretRef::File(file.clone())))).is_none(),
-            "a missing file"
-        );
-        assert!(
-            registry_token(&registry(Some(SecretRef::Env(
-                "AAP_TEST_NO_SUCH_REGISTRY_TOKEN".to_owned()
-            ))))
-            .is_none(),
-            "an unset variable"
-        );
+        refused(SecretRef::File(file.clone())); // missing
         std::fs::write(&file, " \n").expect("write");
-        assert!(
-            registry_token(&registry(Some(SecretRef::File(file.clone())))).is_none(),
-            "a blank file"
-        );
+        refused(SecretRef::File(file.clone())); // empty
+        refused(SecretRef::Env("AAP_TEST_NO_SUCH_REGISTRY_TOKEN".to_owned())); // unset
         std::fs::write(&file, "registry-bearer\n").expect("write");
         assert!(
-            registry_token(&registry(Some(SecretRef::File(file)))).is_some(),
-            "a readable file"
+            registry_token(&registry(Some(SecretRef::File(file))))
+                .expect("a readable file")
+                .is_some()
         );
         let _ = std::fs::remove_dir_all(&dir);
     }
@@ -877,7 +889,8 @@ mod tests {
             activity_source(&on(&format!("{{ file: {} }}", file.display())).activity)
                 .expect_err("missing file")
         );
-        assert!(text.contains("reading activity.token"), "{text}");
+        assert!(text.contains("activity.token"), "{text}");
+        assert!(text.contains("cannot be read"), "{text}");
 
         std::fs::write(&file, " \n").expect("write");
         assert!(

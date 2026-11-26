@@ -1,7 +1,8 @@
 //! The binary's contract: `crdgen` prints exactly the checked-in CRDs, and `run` reads one configuration file (ANR-962).
 //!
-//! `operator run --check` and `operator run` exit **78** (`EX_CONFIG`) when the file is refused, naming the setting, and 1
-//! for anything else. No secret is ever quoted: a value that could be a token never appears in a message.
+//! `operator run --check` and `operator run` exit **78** (`EX_CONFIG`) when the file is refused (it does not parse, names a key the
+//! operator does not have, fails a check, or names a reference the start cannot use), naming the setting, and **1** when the file cannot
+//! be read or for anything else. No secret is ever quoted: a value that could be a token never appears in a message.
 
 #![allow(clippy::expect_used, clippy::unwrap_used)] // tests may
 
@@ -204,14 +205,26 @@ fn the_example_is_a_file_the_operator_accepts() {
     let (code, stdout, stderr) = check(&example);
     assert_eq!(code, Some(0), "{stderr}");
     assert!(stdout.contains(": ok"), "{stdout}");
-    // And `run` takes it too, and goes on to look for the cluster it does not have.
+    // At start the references are read: the example's token is a Secret mounted in a pod, so it is refused here (AD-064)...
     let (code, _, stderr) = run(&example);
+    assert_eq!(code, Some(78), "{stderr}");
+    assert!(stderr.contains("registry.token"), "{stderr}");
+    // ... and with a token that is there, `run` takes the file too and goes on to look for the cluster it does not have.
+    let token = file("example-registry-token", "a-bearer\n");
+    let text = std::fs::read_to_string(&example).expect("the example");
+    let from = "file: /var/run/secrets/aap/registry/token";
+    assert!(text.contains(from), "the example's registry token moved");
+    let with_token = file(
+        "example-with-token.yaml",
+        &text.replace(from, &format!("file: {}", token.display())),
+    );
+    let (code, _, stderr) = run(&with_token);
     assert_eq!(code, Some(1), "{stderr}");
     assert!(stderr.contains("connecting to the cluster"), "{stderr}");
 }
 
 #[test]
-fn a_file_that_is_not_there_stops_the_operator_with_ex_config() {
+fn a_file_that_is_not_there_stops_the_operator_with_exit_1() {
     let absent = dir().join("absent.yaml");
     for (code, _, stderr) in [
         run(&absent),
@@ -230,7 +243,8 @@ fn a_file_that_is_not_there_stops_the_operator_with_ex_config() {
             )
         },
     ] {
-        assert_eq!(code, Some(78), "{stderr}");
+        // Cannot be read is 1 (the pod's mount), not 78 (the author's file): the card's two codes.
+        assert_eq!(code, Some(1), "{stderr}");
         assert!(stderr.contains("cannot be read"), "{stderr}");
         assert!(!stderr.contains("connecting to the cluster"), "{stderr}");
     }
@@ -251,6 +265,48 @@ fn a_key_the_file_does_not_have_is_refused_by_both_with_ex_config() {
             assert!(!stderr.contains("connecting to the cluster"), "{stderr}");
         }
     }
+}
+
+#[test]
+fn a_directory_is_unreadable_and_exits_1_while_invalid_yaml_is_refused_with_78() {
+    let directory = dir();
+    for (code, _, stderr) in [run(&directory), check(&directory)] {
+        assert_eq!(code, Some(1), "{stderr}");
+        assert!(stderr.contains("cannot be read"), "{stderr}");
+    }
+    let path = file("invalid.yaml", "version: [1\n");
+    for (code, _, stderr) in [run(&path), check(&path)] {
+        assert_eq!(code, Some(78), "{stderr}");
+    }
+}
+
+/// AD-064: a `registry.token` the file names and the start cannot use refuses the file, before any cluster is asked. `--check`
+/// reads no reference, so it passes the same file. No token at all is still no registry (and the operator goes on).
+#[test]
+fn a_registry_token_that_is_configured_and_unusable_exits_78_at_start_and_passes_check() {
+    let missing = dir().join("no-such-registry-token");
+    let empty = file("empty-registry-token", "\n");
+    for reference in [
+        format!("{{ file: {} }}", missing.display()),
+        format!("{{ file: {} }}", empty.display()),
+        "{ env: AAP_TEST_UNSET_REGISTRY_TOKEN }".to_owned(),
+    ] {
+        let path = file(
+            "registry.yaml",
+            &format!("{MINIMAL}registry: {{ token: {reference} }}\n"),
+        );
+        let (code, _, stderr) = run(&path);
+        assert_eq!(code, Some(78), "{reference}: {stderr}");
+        assert!(stderr.contains("registry.token"), "{reference}: {stderr}");
+        assert!(!stderr.contains("connecting to the cluster"), "{stderr}");
+        let (code, stdout, stderr) = check(&path);
+        assert_eq!(code, Some(0), "{reference}: {stderr}");
+        assert!(stdout.contains(": ok"), "{stdout}");
+    }
+    // Nothing configured: the operator starts, and goes on to the cluster (which is not there).
+    let (code, _, stderr) = run(&file("no-token.yaml", MINIMAL));
+    assert_eq!(code, Some(1), "{stderr}");
+    assert!(stderr.contains("connecting to the cluster"), "{stderr}");
 }
 
 #[test]

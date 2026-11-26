@@ -69,13 +69,14 @@ fn real_main(cli: Cli) -> Result<ExitCode> {
             Ok(ExitCode::SUCCESS)
         }
         Command::Run(args) => {
-            // The file is the only way in (ANR-962): without it there is nothing to run, and a file that is refused is
-            // `EX_CONFIG`, so that a deployment and a script can tell it from a crash.
+            // The file is the only way in (ANR-962): without it there is nothing to run. A file that is refused is
+            // `EX_CONFIG` (78), and one that cannot be read (missing, a directory, no permission) is 1, so that a deployment
+            // and a script can tell the author's mistake from a pod whose mount is wrong.
             let settings = match config::load(&args.config) {
                 Ok(settings) => settings,
                 Err(err) => {
                     eprintln!("operator: {err:#}");
-                    return Ok(ExitCode::from(config::EXIT_CONFIG));
+                    return Ok(ExitCode::from(err.exit_code()));
                 }
             };
             if args.check {
@@ -89,11 +90,19 @@ fn real_main(cli: Cli) -> Result<ExitCode> {
                 )
                 .with_writer(io::stderr)
                 .init();
-            tokio::runtime::Builder::new_multi_thread()
+            let result = tokio::runtime::Builder::new_multi_thread()
                 .enable_all()
                 .build()
                 .context("starting the async runtime")?
-                .block_on(run::run(settings))?;
+                .block_on(run::run(settings));
+            // A reference the file names that gives nothing (a token file that is missing or empty) is the file refused: 78.
+            if let Err(err) = &result
+                && config::is_reference_refused(err)
+            {
+                eprintln!("operator: {err:#}");
+                return Ok(ExitCode::from(config::EXIT_CONFIG));
+            }
+            result?;
             Ok(ExitCode::SUCCESS)
         }
     }

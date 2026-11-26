@@ -750,17 +750,75 @@ pub fn schema() -> Result<String> {
     Ok(text)
 }
 
+/// Why [`load`] gave no settings. The two are different exit codes (the card's): a file that is **refused** (it does not parse,
+/// names a key the operator does not have, or fails a check) is `EX_CONFIG`, 78, and a file that **cannot be read** (missing, a
+/// directory, no permission) is an ordinary failure, 1: the first is the author's mistake, the second the pod's (a mount).
+#[derive(Debug)]
+pub enum LoadError {
+    /// The file could not be read.
+    Unreadable(anyhow::Error),
+    /// The file was read and refused.
+    Refused(anyhow::Error),
+}
+
+impl LoadError {
+    /// The exit code of the process: [`EXIT_CONFIG`] for a refused file, 1 for one that cannot be read.
+    #[must_use]
+    pub fn exit_code(&self) -> u8 {
+        match self {
+            Self::Unreadable(_) => 1,
+            Self::Refused(_) => EXIT_CONFIG,
+        }
+    }
+}
+
+impl std::fmt::Display for LoadError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Unreadable(e) | Self::Refused(e) => write!(f, "{e:#}"),
+        }
+    }
+}
+
+impl std::error::Error for LoadError {}
+
+/// A reference the file names that the start could not use: a token file that is missing or empty, a variable that is unset or
+/// empty. It is a refusal of the file (exit 78), found when the reference is read at start and not by `--check`, which holds
+/// only the reference's shape. The message names the setting and the reference, never a value.
+#[derive(Debug)]
+pub struct ReferenceRefused(pub String);
+
+impl std::fmt::Display for ReferenceRefused {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.0)
+    }
+}
+
+impl std::error::Error for ReferenceRefused {}
+
+/// Whether `error`, or something it wraps, is a [`ReferenceRefused`]: the process then exits [`EXIT_CONFIG`].
+#[must_use]
+pub fn is_reference_refused(error: &anyhow::Error) -> bool {
+    error.chain().any(|e| e.is::<ReferenceRefused>())
+}
+
 /// Read, parse and validate the file at `path`.
 ///
 /// # Errors
 ///
-/// The file cannot be read, or [`Config::parse`] or [`Config::validate`] refuses it.
-pub fn load(path: &Path) -> Result<Settings> {
-    let text = std::fs::read_to_string(path)
-        .with_context(|| format!("the configuration file {} cannot be read", path.display()))?;
+/// [`LoadError::Unreadable`] when the file cannot be read, [`LoadError::Refused`] when [`Config::parse`] or
+/// [`Config::validate`] refuses it.
+pub fn load(path: &Path) -> Result<Settings, LoadError> {
+    let text = std::fs::read_to_string(path).map_err(|e| {
+        LoadError::Unreadable(anyhow::Error::new(e).context(format!(
+            "the configuration file {} cannot be read",
+            path.display()
+        )))
+    })?;
     Config::parse(&text)
         .and_then(Config::validate)
         .with_context(|| format!("the configuration file {}", path.display()))
+        .map_err(LoadError::Refused)
 }
 
 #[cfg(test)]
@@ -1144,6 +1202,53 @@ mod tests {
             run_pods["networkPolicy"]["enabled"] = serde_json::json!(false);
         }));
         assert!(error.contains("enabled"), "{error}");
+    }
+
+    fn temp(name: &str) -> std::path::PathBuf {
+        let dir = std::env::temp_dir().join(format!("aap-load-{}-{name}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    #[test]
+    fn a_file_that_cannot_be_read_is_exit_1_and_one_that_is_refused_is_78() {
+        let dir = temp("codes");
+        // Cannot be read: a missing path, and a directory.
+        let missing = load(&dir.join("nope.yaml")).unwrap_err();
+        assert!(matches!(missing, LoadError::Unreadable(_)), "{missing}");
+        assert_eq!(missing.exit_code(), 1);
+        let directory = load(&dir).unwrap_err();
+        assert!(matches!(directory, LoadError::Unreadable(_)), "{directory}");
+        assert_eq!(directory.exit_code(), 1);
+        // Refused: invalid YAML, an unknown key, a wrong version.
+        for (name, text, fragment) in [
+            ("yaml.yaml", "version: [1\n", "not valid"),
+            ("key.yaml", "version: 1\nregistry:\n  tokne: x\n", "tokne"),
+            ("version.yaml", "version: 2\n", "version"),
+        ] {
+            let file = dir.join(name);
+            std::fs::write(&file, text).unwrap();
+            let error = load(&file).unwrap_err();
+            assert!(matches!(error, LoadError::Refused(_)), "{name}: {error}");
+            assert_eq!(error.exit_code(), 78, "{name}");
+            assert!(error.to_string().contains(fragment), "{name}: {error}");
+        }
+        // Unreadable by mode: skipped under root, which reads anything.
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let file = dir.join("mode000.yaml");
+            std::fs::write(&file, "version: 1\n").unwrap();
+            std::fs::set_permissions(&file, std::fs::Permissions::from_mode(0o000)).unwrap();
+            if std::fs::read_to_string(&file).is_err() {
+                let error = load(&file).unwrap_err();
+                assert!(matches!(error, LoadError::Unreadable(_)), "{error}");
+                assert_eq!(error.exit_code(), 1);
+            } else {
+                eprintln!("skipped the mode 000 case: this process can read it (root)");
+            }
+        }
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
