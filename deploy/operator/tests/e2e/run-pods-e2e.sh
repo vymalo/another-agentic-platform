@@ -573,8 +573,10 @@ absent get priorityclass "$class" || die "the PriorityClass of run pods exists w
 absent get validatingadmissionpolicy "$policy" || die "the admission policy of run pods exists with run pods off"
 absent get validatingadmissionpolicybinding "$policy" || die "the binding of the admission policy exists with run pods off"
 absent -n "$ns" get role "$run_role" || die "the Role of run pods exists with run pods off"
-[ "$(jp "configmap/$op" '{.data["config.yaml"]}' | grep -c '^    runPods:$')" -eq 0 ] || die "the file names run pods with run pods off"
-[ "$(jp "configmap/$op" '{.data["config.yaml"]}' | grep -c '^    version: 1$')" -eq 1 ] || die "the operator's file is not the file"
+# kubectl prints the block scalar without its indent: the file's keys are at column 0. Positive first, so an empty read is not "off".
+off_file=$(jp "configmap/$op" '{.data["config.yaml"]}')
+printf '%s\n' "$off_file" | grep -Fxq 'version: 1' || die "the operator's file is not the file (no 'version: 1')"
+! printf '%s\n' "$off_file" | grep -Fxq 'runPods:' || die "the file names run pods with run pods off"
 for v in "create serviceaccounts" "create resourcequotas" "create rolebindings" "delete pods" "create pods" "get secrets"; do
   # shellcheck disable=SC2086
   [ "$(can "$sa_op" $v)" = no ] || die "the operator may $v with run pods off"
@@ -627,7 +629,7 @@ step "3. the upgrade: the same chart with run pods on"
 helm_install
 ok "the operator is upgraded with runPods.enabled (the same values file, one flag apart)"
 [ "$(jp "deployment/$op" '{.status.readyReplicas}')" = 1 ] || die "the operator has no ready replica after the upgrade"
-[ "$(jp "configmap/$op" '{.data["config.yaml"]}' | grep -c '^    runPods:$')" -eq 1 ] || die "the file does not name run pods with run pods on"
+jp "configmap/$op" '{.data["config.yaml"]}' | grep -Fxq 'runPods:' || die "the file does not name run pods with run pods on"
 kubectl get priorityclass "$class" -o json > "$work/priorityclass.json"
 jqok "$work/priorityclass.json" "the PriorityClass of run pods is not value 0 and never-preempting" '.value == 0 and .preemptionPolicy == "Never"'
 kubectl get validatingadmissionpolicybinding "$policy" -o json > "$work/vapb.json"

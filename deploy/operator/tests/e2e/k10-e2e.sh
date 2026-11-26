@@ -385,7 +385,8 @@ ok "the catalogue's server is ready and answers /healthz from inside $ns (its ow
 installed=1
 helm_install
 [ "$(jp "deployment/$op" '{.status.readyReplicas}')" = 1 ] || die "the operator has no ready replica"
-[ "$(jp "configmap/$op" '{.data["config.yaml"]}' | grep -c '^      enabled: true$')" -eq 1 ] \
+# the probe block of the file (kubectl prints it unindented): from `toolProbe:` to the next key at column 0.
+jp "configmap/$op" '{.data["config.yaml"]}' | awk '/^toolProbe:$/ { f = 1; next } /^[^ ]/ { f = 0 } f' | grep -Fxq '  enabled: true' \
   || die "the operator's file does not turn the probe on (toolProbe.enabled): toolProbe.to was not rendered"
 ok "the operator is installed with toolProbe.to naming the catalogue's pods on 8080 (the file's toolProbe.enabled is true)"
 
