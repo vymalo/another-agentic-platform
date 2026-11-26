@@ -232,7 +232,11 @@ EOF
 # chart's own pin is what runs, as it always did.
 if [ -n "${AAP_OPERATOR_IMAGE:-}" ]; then
   case "$AAP_OPERATOR_IMAGE" in *:*) ;; *) die "AAP_OPERATOR_IMAGE must be <repository>:<tag>, got '$AAP_OPERATOR_IMAGE'" ;; esac
-  k3d image import "$AAP_OPERATOR_IMAGE" -c "$cluster" >/dev/null || die "the image $AAP_OPERATOR_IMAGE could not be imported into $cluster"
+  # Not `k3d image import`: it runs a tools container that must reach the Docker socket (it cannot on a rootless or group-restricted host, and on a hosted runner it
+  # left containerd's CRI hanging on the operator pod's sandbox, ANR-962). The image goes from this daemon straight into the node's containerd, which is all
+  # the import is.
+  docker save "$AAP_OPERATOR_IMAGE" | docker exec -i "k3d-$cluster-server-0" ctr --address /run/k3s/containerd/containerd.sock -n k8s.io images import - >"$work/import.out" 2>&1 \
+    || die "the image $AAP_OPERATOR_IMAGE could not be imported into the node's containerd: $(tail -c 400 "$work/import.out")"
   cat >> "$work/values.yaml" <<EOF
 image:
   repository: ${AAP_OPERATOR_IMAGE%:*}
