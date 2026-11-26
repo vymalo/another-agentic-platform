@@ -84,6 +84,17 @@ pub fn resolve(
                 instances: u32::try_from(c.instances).unwrap_or(1),
                 size: c.storage.size.0.clone(),
                 storage_class: c.storage.storage_class.clone(),
+                resources: c
+                    .resources
+                    .as_ref()
+                    .and_then(|r| serde_json::to_value(r).ok()),
+                wal_size: c.wal_storage.as_ref().map(|w| w.size.0.clone()),
+                wal_storage_class: c.wal_storage.as_ref().and_then(|w| w.storage_class.clone()),
+                parameters: c
+                    .postgresql
+                    .as_ref()
+                    .map(|p| p.parameters.clone())
+                    .unwrap_or_default(),
             }),
             cnpg_connection(&name),
         ),

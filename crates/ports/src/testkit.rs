@@ -849,6 +849,7 @@ pub mod store {
                 instances: 1,
                 size: "5Gi".to_owned(),
                 storage_class: Some("fast".to_owned()),
+                ..Default::default()
             }),
         }
     }

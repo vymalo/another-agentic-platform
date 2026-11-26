@@ -59,6 +59,25 @@ pub fn render(id: &StoreId, deletion: DeletionPolicy, spec: &CnpgSpec) -> Value 
     if let Some(class) = &spec.storage_class {
         storage["storageClass"] = json!(class);
     }
+    let mut cluster_spec = json!({
+        "instances": spec.instances,
+        "storage": storage,
+    });
+    if let Some(resources) = &spec.resources
+        && resources.as_object().is_some_and(|o| !o.is_empty())
+    {
+        cluster_spec["resources"] = resources.clone();
+    }
+    if let Some(size) = &spec.wal_size {
+        let mut wal = json!({"size": size});
+        if let Some(class) = &spec.wal_storage_class {
+            wal["storageClass"] = json!(class);
+        }
+        cluster_spec["walStorage"] = wal;
+    }
+    if !spec.parameters.is_empty() {
+        cluster_spec["postgresql"] = json!({"parameters": spec.parameters});
+    }
     json!({
         "apiVersion": API_VERSION,
         "kind": KIND,
@@ -77,10 +96,7 @@ pub fn render(id: &StoreId, deletion: DeletionPolicy, spec: &CnpgSpec) -> Value 
                 },
             },
         },
-        "spec": {
-            "instances": spec.instances,
-            "storage": storage,
-        },
+        "spec": cluster_spec,
     })
 }
 
@@ -146,7 +162,32 @@ mod tests {
             instances: 2,
             size: "5Gi".to_owned(),
             storage_class: Some("longhorn".to_owned()),
+            ..CnpgSpec::default()
         }
+    }
+
+    #[test]
+    fn an_unset_sizing_adds_nothing_and_a_set_one_is_rendered() {
+        let id = StoreId::new("ns", "coder");
+        let bare = render(&id, DeletionPolicy::Retain, &spec());
+        assert_eq!(
+            bare["spec"],
+            json!({"instances": 2, "storage": {"size": "5Gi", "storageClass": "longhorn"}})
+        );
+        let mut sized = spec();
+        sized.resources = Some(json!({"requests": {"memory": "1Gi"}, "limits": {"memory": "1Gi"}}));
+        sized.wal_size = Some("2Gi".to_owned());
+        sized.wal_storage_class = Some("fast".to_owned());
+        sized
+            .parameters
+            .insert("max_connections".to_owned(), "50".to_owned());
+        let s = render(&id, DeletionPolicy::Retain, &sized)["spec"].clone();
+        assert_eq!(s["resources"]["limits"]["memory"], "1Gi");
+        assert_eq!(
+            s["walStorage"],
+            json!({"size": "2Gi", "storageClass": "fast"})
+        );
+        assert_eq!(s["postgresql"]["parameters"]["max_connections"], "50");
     }
 
     #[test]

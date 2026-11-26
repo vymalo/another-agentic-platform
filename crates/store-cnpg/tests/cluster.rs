@@ -97,6 +97,7 @@ fn spec(deletion: DeletionPolicy) -> StoreSpec {
             size: "1Gi".to_owned(),
             // The cluster's default class (kind's `standard`).
             storage_class: None,
+            ..Default::default()
         }),
     }
 }
