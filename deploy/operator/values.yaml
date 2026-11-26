@@ -316,6 +316,31 @@ networkPolicy:
 retention: {}
 #  afterDeleteDays: 90
 
+# AD-058 P2c: the operator asks each agent service what work it holds (`GET /internal/activity`), for the idle controller. Empty `to`: off,
+# and not a trace of it in any render. `to` is who the operator may reach: the pods of the agents (a namespaceSelector and a podSelector).
+# The agents refuse a question without their bearer, so `tokenSecret` is required while `to` is set; the operator reads the file the Secret
+# is mounted as and never the Secret through the API.
+activity:
+  to: []
+  # The port the agents serve /internal/activity on (their LISTEN_ADDR).
+  port: 8080
+  # How long one question may take, in seconds (1 to 30). An agent that does not answer by then counts as busy.
+  timeoutSecs: 3
+  tokenSecret:
+    name: ""
+    key: token
+  # How the operator resolves an agent's service name: the cluster's DNS, as for toolProbe.dns. A rule with ports and no `to` would be
+  # port 53 to anywhere, so `to` may not be emptied while `to` above is set and networkPolicy is enabled.
+  dns:
+    to:
+      - namespaceSelector:
+          matchLabels:
+            kubernetes.io/metadata.name: kube-system
+        podSelector:
+          matchLabels:
+            k8s-app: kube-dns
+    ports: [53]
+
 toolProbe:
   # Who the operator may reach. Empty: no probe, and not a trace of it in any render. The peers of an in-cluster MCP server (a
   # namespaceSelector or a podSelector) or its addresses (an ipBlock).
