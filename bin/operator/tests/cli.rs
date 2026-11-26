@@ -52,6 +52,64 @@ fn crdgen_matches_the_checked_in_crds() {
 }
 
 #[test]
+fn schema_matches_the_checked_in_schema() {
+    let out = operator()
+        .arg("schema")
+        .output()
+        .expect("runs the operator");
+    assert!(
+        out.status.success(),
+        "schema failed: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let generated = String::from_utf8(out.stdout).expect("utf-8");
+
+    let golden = Path::new(env!("CARGO_MANIFEST_DIR")).join("config.schema.json");
+    let checked_in = std::fs::read_to_string(&golden).unwrap_or_default();
+    assert!(
+        generated == checked_in,
+        "{} differs from the output of `schema`. Regenerate it:\n  cargo run -q -p aap-operator -- schema > bin/operator/config.schema.json",
+        golden.display()
+    );
+}
+
+/// Every object the file names its keys of refuses any other key (`deny_unknown_fields`), so the schema refuses a typo as the
+/// binary does; the count guards against a schema that has no objects at all.
+#[test]
+fn schema_refuses_unknown_keys_at_every_object_with_properties() {
+    fn walk(value: &serde_json::Value, path: &str, with_properties: &mut usize) {
+        match value {
+            serde_json::Value::Object(map) => {
+                if map.contains_key("properties") {
+                    *with_properties += 1;
+                    assert_eq!(
+                        map.get("additionalProperties"),
+                        Some(&serde_json::Value::Bool(false)),
+                        "{path} accepts unknown keys"
+                    );
+                }
+                for (key, child) in map {
+                    walk(child, &format!("{path}/{key}"), with_properties);
+                }
+            }
+            serde_json::Value::Array(items) => {
+                for (i, child) in items.iter().enumerate() {
+                    walk(child, &format!("{path}/{i}"), with_properties);
+                }
+            }
+            _ => {}
+        }
+    }
+    let text =
+        std::fs::read_to_string(Path::new(env!("CARGO_MANIFEST_DIR")).join("config.schema.json"))
+            .expect("the schema is checked in");
+    let schema: serde_json::Value = serde_json::from_str(&text).expect("JSON");
+    let mut with_properties = 0;
+    walk(&schema, "#", &mut with_properties);
+    assert!(with_properties >= 10, "only {with_properties} objects");
+}
+
+#[test]
 fn crdgen_prints_one_document_per_kind() {
     let out = operator()
         .arg("crdgen")

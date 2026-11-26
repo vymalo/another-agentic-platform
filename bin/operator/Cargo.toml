@@ -42,6 +42,7 @@ clap.workspace = true
 kube = { workspace = true, features = ["client", "rustls-tls", "ring"] }
 serde.workspace = true
 schemars.workspace = true
+serde_json.workspace = true
 serde_yaml.workspace = true
 tokio = { workspace = true, features = ["macros", "net", "rt-multi-thread", "signal", "sync", "time"] }
 tracing.workspace = true
@@ -52,7 +53,6 @@ aap-ports = { workspace = true, features = ["testkit"] }
 aap-trace = { workspace = true, features = ["testkit"] }
 http = "1"
 k8s-openapi.workspace = true
-serde_json.workspace = true
 tokio = { workspace = true, features = ["io-util"] }
 tower = { version = "0.5", default-features = false, features = ["util"] }
 
