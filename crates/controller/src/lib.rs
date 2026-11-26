@@ -33,6 +33,7 @@ mod pass;
 mod retention;
 mod service;
 mod shared;
+pub mod sleep;
 mod watches;
 
 pub use config::{config_error_policy, reconcile_config};

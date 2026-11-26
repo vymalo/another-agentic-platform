@@ -101,6 +101,15 @@ pub trait DirectoryUnderTest: crate::AgentDirectory + 'static {
     fn remove(&self, scope: &str, name: &str) -> impl Future<Output = ()> + Send;
 }
 
+/// An [`ActivitySource`](crate::ActivitySource) the suite can script: what each service reports, and whether
+/// it can be reached.
+pub trait ActivityUnderTest: crate::ActivitySource + 'static {
+    /// From now on `id` reports `activity` and is reachable.
+    fn set(&self, id: &RuntimeId, activity: crate::Activity) -> impl Future<Output = ()> + Send;
+    /// From now on `id` cannot be reached (until the next `set`).
+    fn break_source(&self, id: &RuntimeId) -> impl Future<Output = ()> + Send;
+}
+
 /// How an object that is not the dashboard's came to be (AD-031): the two ways §60a names.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Foreign {
@@ -1090,6 +1099,122 @@ pub mod directory {
             d.get(&b, "coder").await.unwrap()
         );
     }
+}
+
+/// Cases of the activity suite (AD-058).
+#[allow(missing_docs)] // each case is named for what it asserts
+pub mod activity {
+    use super::*;
+    use crate::{Activity, ActivityError};
+
+    fn id() -> RuntimeId {
+        RuntimeId::new(unique("ns"), unique("agent"))
+    }
+
+    pub async fn a_service_with_no_work_is_idle<A: ActivityUnderTest>(a: A) {
+        let id = id();
+        a.set(&id, Activity::IDLE).await;
+        let got = a.poll(&id).await.unwrap();
+        assert_eq!(got, Activity::IDLE);
+        assert!(!got.is_busy());
+    }
+
+    pub async fn held_runs_are_reported_as_busy<A: ActivityUnderTest>(a: A) {
+        let id = id();
+        a.set(
+            &id,
+            Activity {
+                busy: 3,
+                next_due_at: None,
+            },
+        )
+        .await;
+        let got = a.poll(&id).await.unwrap();
+        assert_eq!(got.busy, 3);
+        assert!(got.is_busy());
+    }
+
+    pub async fn the_next_schedule_is_reported<A: ActivityUnderTest>(a: A) {
+        let id = id();
+        let wanted = Activity {
+            busy: 0,
+            next_due_at: Some(1_900_000_000),
+        };
+        a.set(&id, wanted).await;
+        assert_eq!(a.poll(&id).await.unwrap(), wanted);
+    }
+
+    pub async fn the_latest_answer_replaces_the_earlier_one<A: ActivityUnderTest>(a: A) {
+        let id = id();
+        a.set(
+            &id,
+            Activity {
+                busy: 1,
+                next_due_at: Some(5),
+            },
+        )
+        .await;
+        a.set(&id, Activity::IDLE).await;
+        assert_eq!(a.poll(&id).await.unwrap(), Activity::IDLE);
+    }
+
+    pub async fn services_do_not_mix<A: ActivityUnderTest>(a: A) {
+        let (one, two) = (id(), id());
+        a.set(
+            &one,
+            Activity {
+                busy: 2,
+                next_due_at: None,
+            },
+        )
+        .await;
+        a.set(&two, Activity::IDLE).await;
+        assert_eq!(a.poll(&one).await.unwrap().busy, 2);
+        assert_eq!(a.poll(&two).await.unwrap(), Activity::IDLE);
+    }
+
+    /// An agent that cannot be asked is an error, never an idle answer, and the error says a later
+    /// attempt may succeed.
+    pub async fn an_unreachable_service_is_an_error_not_idleness<A: ActivityUnderTest>(a: A) {
+        let id = id();
+        a.set(&id, Activity::IDLE).await;
+        a.break_source(&id).await;
+        let err = a.poll(&id).await.unwrap_err();
+        assert!(matches!(err, ActivityError::Unavailable(_)), "{err:?}");
+        assert_eq!(err.class(), ErrorClass::Transient);
+        assert!(err.class().is_retryable());
+        a.set(&id, Activity::IDLE).await;
+        assert!(
+            a.poll(&id).await.is_ok(),
+            "a set service is reachable again"
+        );
+    }
+}
+
+/// Generate one `#[tokio::test]` per case of the activity suite. `$make` is a path to an
+/// `async fn() -> Option<A>` where `A: ActivityUnderTest`; `None` skips the suite, unless
+/// `AAP_TEST_REQUIRE_BACKEND=1`, which fails it instead.
+#[macro_export]
+macro_rules! activity_source_conformance {
+    ($make:path) => {
+        $crate::activity_source_conformance!(@cases $make;
+            a_service_with_no_work_is_idle, held_runs_are_reported_as_busy,
+            the_next_schedule_is_reported, the_latest_answer_replaces_the_earlier_one,
+            services_do_not_mix, an_unreachable_service_is_an_error_not_idleness,
+        );
+    };
+    (@cases $make:path; $($case:ident),* $(,)?) => {
+        $(
+            #[tokio::test]
+            async fn $case() {
+                let Some(source) = $make().await else {
+                    $crate::testkit::skipped(&format!("{}: activity source not configured", stringify!($case)));
+                    return;
+                };
+                $crate::testkit::activity::$case(source).await;
+            }
+        )*
+    };
 }
 
 /// Generate one `#[tokio::test]` per case of the runtime suite. `$make` is a path to an

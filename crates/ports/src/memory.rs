@@ -16,10 +16,12 @@ use crate::{
     StoreProvisioner, StoreSpec, StoreState, StoreStatus, Surface, VolumeSource, cnpg_connection,
 };
 
+mod activity;
 mod auth;
 mod leader;
 mod objects;
 
+pub use activity::MemoryActivity;
 pub use auth::MemoryAuthenticator;
 pub use leader::{MemoryElection, MemoryTimings};
 pub use objects::MemoryObjects;

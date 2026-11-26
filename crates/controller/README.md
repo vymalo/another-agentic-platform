@@ -379,3 +379,7 @@ the runtime reports and sends the signals of `watch()` itself.
   flows against a real one (and found the 422 above); read [`bin/operator`](../../bin/operator/README.md#tests) for what
   has and has not been run.
 * A watch that breaks and resumes, a lost signal the timer has to find, and a reflector under load.
+
+## The idle decision (AD-058, P2a)
+
+`sleep.rs` is pure: `decide(policy, state, suspended, polled, now)` says `Stay` or `Sleep` and what to remember. An agent sleeps only after its own `ActivitySource` answer has said "no run held" for `scaling.idleTimeout`; **a failed poll counts as busy** and forgets the idle stretch; a `nextDueAt` within `wakeAhead` (default 2m, overdue included) keeps it awake; `spec.suspend` wins. `SleepPolicy::from_scaling` is `None` without `idleTimeout`, or with a value the CRD would not admit. Nothing polls or scales yet: the wiring is P2b.

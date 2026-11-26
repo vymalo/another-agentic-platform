@@ -4,7 +4,7 @@
 #![allow(clippy::unwrap_used, clippy::expect_used)]
 
 use aap_ports::memory::{
-    MemoryAuthenticator, MemoryDirectory, MemoryObjects, MemoryRuntime, MemoryStore,
+    MemoryActivity, MemoryAuthenticator, MemoryDirectory, MemoryObjects, MemoryRuntime, MemoryStore,
 };
 
 mod runtime {
@@ -68,4 +68,13 @@ mod authenticator {
         Some(MemoryAuthenticator::new())
     }
     aap_ports::authenticator_conformance!(make);
+}
+
+mod activity {
+    use super::*;
+
+    async fn make() -> Option<MemoryActivity> {
+        Some(MemoryActivity::new())
+    }
+    aap_ports::activity_source_conformance!(make);
 }

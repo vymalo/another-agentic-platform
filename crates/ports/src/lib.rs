@@ -10,6 +10,7 @@
 
 #![warn(missing_docs)]
 
+mod activity;
 mod auth;
 mod directory;
 mod error;
@@ -26,6 +27,7 @@ pub mod memory;
 #[cfg(feature = "testkit")]
 pub mod testkit;
 
+pub use activity::{Activity, ActivityError, ActivitySource};
 pub use auth::{AuthError, Authenticator, InvalidToken, Principal};
 pub use directory::{AgentDirectory, DirectoryEntry};
 pub use error::{BoxError, Classify, DirectoryError, ErrorClass, RuntimeError, StoreError};
