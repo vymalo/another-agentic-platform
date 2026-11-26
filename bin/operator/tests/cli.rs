@@ -274,6 +274,12 @@ fn a_directory_is_unreadable_and_exits_1_while_invalid_yaml_is_refused_with_78()
         assert_eq!(code, Some(1), "{stderr}");
         assert!(stderr.contains("cannot be read"), "{stderr}");
     }
+    let binary = dir().join("binary.yaml");
+    std::fs::write(&binary, b"version: 1\n# \xff\xfe\n").expect("writes");
+    for (code, _, stderr) in [run(&binary), check(&binary)] {
+        assert_eq!(code, Some(78), "{stderr}");
+        assert!(stderr.contains("UTF-8"), "{stderr}");
+    }
     let path = file("invalid.yaml", "version: [1\n");
     for (code, _, stderr) in [run(&path), check(&path)] {
         assert_eq!(code, Some(78), "{stderr}");

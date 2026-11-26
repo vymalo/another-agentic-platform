@@ -810,10 +810,22 @@ pub fn is_reference_refused(error: &anyhow::Error) -> bool {
 /// [`Config::validate`] refuses it.
 pub fn load(path: &Path) -> Result<Settings, LoadError> {
     let text = std::fs::read_to_string(path).map_err(|e| {
-        LoadError::Unreadable(anyhow::Error::new(e).context(format!(
-            "the configuration file {} cannot be read",
-            path.display()
-        )))
+        // `InvalidData` is a file that was read and is not UTF-8: its content is what is wrong, so it is refused (78), where a
+        // missing file, a directory or a mode that forbids the read is the pod's mount (1).
+        let invalid = e.kind() == std::io::ErrorKind::InvalidData;
+        let error = anyhow::Error::new(e).context(if invalid {
+            format!(
+                "the configuration file {} is not valid UTF-8",
+                path.display()
+            )
+        } else {
+            format!("the configuration file {} cannot be read", path.display())
+        });
+        if invalid {
+            LoadError::Refused(error)
+        } else {
+            LoadError::Unreadable(error)
+        }
     })?;
     Config::parse(&text)
         .and_then(Config::validate)
@@ -1233,6 +1245,13 @@ mod tests {
             assert_eq!(error.exit_code(), 78, "{name}");
             assert!(error.to_string().contains(fragment), "{name}: {error}");
         }
+        // Not UTF-8: read, and refused for its content.
+        let binary = dir.join("binary.yaml");
+        std::fs::write(&binary, b"version: 1\n# \xff\xfe\n").unwrap();
+        let error = load(&binary).unwrap_err();
+        assert!(matches!(error, LoadError::Refused(_)), "{error}");
+        assert_eq!(error.exit_code(), 78);
+        assert!(error.to_string().contains("UTF-8"), "{error}");
         // Unreadable by mode: skipped under root, which reads anything.
         #[cfg(unix)]
         {
