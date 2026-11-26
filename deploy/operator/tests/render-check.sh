@@ -962,6 +962,19 @@ e2e_probe() {
     && all_of "$(op_egress_rule 3)" 'cidr: 172.18.0.1/32' 'port: 40123$' '^      to:'
 }
 check "e2e: the operator probes the stub MCP server on the runner (K3b): the chart turns it on and its policy reaches exactly that address and port" e2e_probe
+# Retention of a finished agent's store: a setting only a deployment sets, so the default render names no variable.
+# The later checks read the render in $out that precedes these, so each puts it back.
+retention_default_off() { keep=$(mktemp); cp "$out" "$keep"; render && lacks 'RETENTION_AFTER_DELETE_DAYS'; r=$?; cp "$keep" "$out"; rm -f "$keep"; return $r; }
+check "retention: by default the operator gets no RETENTION_AFTER_DELETE_DAYS (the setting is off unless a deployment sets it)" retention_default_off
+retention_set() {
+  keep=$(mktemp); cp "$out" "$keep"
+  retention_set_asserts; r=$?; cp "$keep" "$out"; rm -f "$keep"; return $r
+}
+retention_set_asserts() {
+  render --set retention.afterDeleteDays=30 && dhas Deployment aap-operator 'name: RETENTION_AFTER_DELETE_DAYS' 'value: "30"' \
+    && render --set retention.afterDeleteDays=0 && dhas Deployment aap-operator 'name: RETENTION_AFTER_DELETE_DAYS' 'value: "0"'
+}
+check "retention: retention.afterDeleteDays renders RETENTION_AFTER_DELETE_DAYS as a quoted number (30, and 0 which keeps for ever)" retention_set
 e2e_probe_values_in_script() {
   awk '/^toolProbe:$/ { t = 1 } t && /cidr: \$host_addr\/32/ { c = 1 } t && /ports: \[\$mcp_port\]/ { p = 1 } t && /^EOF$/ { exit } END { exit !(c && p) }' "$here/e2e/api-e2e.sh" || return 1
   grep -q 'aap-tool-probe --example test-mcp' "$here/e2e/api-e2e.sh" \

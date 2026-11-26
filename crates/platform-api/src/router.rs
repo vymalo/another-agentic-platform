@@ -91,6 +91,8 @@ where
     // From the inside out: the guard; CORS (which answers a preflight itself, before the guard asks for a token); the log;
     // and the headers of every answer, outside all of them, so that a preflight, a 404 and a 405 carry them too.
     let router = routes.layer(from_fn_with_state(state.clone(), guard::<O, A>));
+    // Outside the guard, inside CORS: a `406`, a `415` and a `401` are negotiated like an answer.
+    let router = router.layer(from_fn(crate::negotiate::layer));
     let router = match cors {
         Some(cors) => router.layer(cors),
         None => router,

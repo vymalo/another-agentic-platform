@@ -54,6 +54,7 @@ async fn it_does_not_serve_clusters() {
             instances: 1,
             size: "5Gi".to_owned(),
             storage_class: None,
+            ..Default::default()
         }),
     };
     let err = store

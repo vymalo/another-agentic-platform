@@ -93,6 +93,9 @@ pub fn defaults() -> Defaults {
                 size: Quantity("5Gi".to_owned()),
                 storage_class: None,
             },
+            resources: None,
+            wal_storage: None,
+            postgresql: None,
         }),
         a2a_bearer: SecretKeyRef {
             name: "agent-a2a".to_owned(),
@@ -739,6 +742,9 @@ fn arb_store() -> impl Strategy<Value = aap_api::Store> {
                                 size,
                                 storage_class,
                             },
+                            resources: None,
+                            wal_storage: None,
+                            postgresql: None,
                         }),
                     },
                 }

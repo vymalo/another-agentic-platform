@@ -227,6 +227,42 @@ fn apply_creates_then_unchanged() {
 }
 
 #[test]
+fn apply_in_cbor_creates_then_writes_nothing_and_reads_the_same_values() {
+    // AD-061: `--encoding cbor` is the same exchange on another media type.
+    let api = Api::start("apply-cbor");
+    let mut docs = agent_docs("chat", "Chat");
+    docs.push(model_doc("gateway"));
+    let path = file(&api.dir, "all.yaml", &docs);
+    let f = path.to_str().unwrap();
+    let first = api.ctl(&["apply", "-f", f, "--encoding", "cbor"], Some(TOKEN));
+    assert_eq!(first.code, 0, "{}", first.stderr);
+    assert_eq!(first.stdout, "model/gateway created\nagent/chat created\n");
+    let second = api.ctl(
+        &["apply", "-f", f, "--encoding", "cbor", "--verbose"],
+        Some(TOKEN),
+    );
+    assert_eq!(second.code, 0, "{}", second.stderr);
+    assert_eq!(
+        second.stdout,
+        "model/gateway unchanged\nagent/chat unchanged\n"
+    );
+    assert!(!second.stderr.contains("> PUT"), "{}", second.stderr);
+    let json = api.ctl(&["get", "agents", "-o", "json"], Some(TOKEN));
+    let cbor = api.ctl(
+        &["get", "agents", "-o", "json", "--encoding", "cbor"],
+        Some(TOKEN),
+    );
+    assert_eq!(json.code, 0, "{}", json.stderr);
+    assert_eq!(json.stdout, cbor.stdout);
+    // The same exchange written in JSON finds nothing to change.
+    let third = api.ctl(&["apply", "-f", f], Some(TOKEN));
+    assert_eq!(
+        third.stdout,
+        "model/gateway unchanged\nagent/chat unchanged\n"
+    );
+}
+
+#[test]
 fn apply_creates_an_a2a_agent() {
     // K11b (AD-054): an object of the third kind is a form, so `apply` sends it as one, and a second
     // apply writes nothing.

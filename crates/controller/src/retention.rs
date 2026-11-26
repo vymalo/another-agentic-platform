@@ -139,6 +139,7 @@ mod tests {
                 instances: 1,
                 size: "1Gi".into(),
                 storage_class: None,
+                ..Default::default()
             }),
         }
     }

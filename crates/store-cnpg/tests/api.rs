@@ -35,6 +35,7 @@ fn cnpg(deletion: DeletionPolicy) -> StoreSpec {
             instances: 2,
             size: "5Gi".to_owned(),
             storage_class: Some("longhorn".to_owned()),
+            ..Default::default()
         }),
     }
 }
