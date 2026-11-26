@@ -59,6 +59,8 @@ pub struct Observed {
     pub generation: Option<i64>,
     /// `spec.suspend`.
     pub suspend: bool,
+    /// The idle loop scaled the agent to zero (AD-058): `Suspended` from the provider is then `Sleeping`.
+    pub sleeping: bool,
     /// `spec.interfaces.a2a.enabled`.
     pub a2a_enabled: bool,
     /// Whether this operator serves a registry.
@@ -85,7 +87,7 @@ pub struct Observed {
 pub fn derive(obs: &Observed, previous: &[Condition], now: &Time) -> AgentServiceStatus {
     let config = config_condition(&obs.config);
     let store = store_condition(&obs.store);
-    let runtime = runtime_condition(obs.runtime.as_ref());
+    let runtime = runtime_condition(obs.runtime.as_ref(), obs.sleeping);
 
     let state = state(obs, &config, &store, &runtime);
     let listed = listed_condition(obs, state);
@@ -108,7 +110,7 @@ pub fn derive(obs: &Observed, previous: &[Condition], now: &Time) -> AgentServic
         config: obs.config_status.clone(),
         runtime: obs.runtime.as_ref().map(|r| aap_api::RuntimeStatus {
             provider: obs.provider.to_owned(),
-            phase: phase(r.phase),
+            phase: phase(r.phase, obs.sleeping),
             replicas: i32::try_from(r.replicas).unwrap_or(i32::MAX),
         }),
         endpoints: obs.endpoints.clone(),
@@ -247,7 +249,7 @@ fn issue_reason(reason: &IssueReason) -> &'static str {
     }
 }
 
-fn runtime_condition(runtime: Option<&RuntimeStatus>) -> Draft {
+fn runtime_condition(runtime: Option<&RuntimeStatus>, sleeping: bool) -> Draft {
     let Some(rt) = runtime else {
         return Draft::new(
             Truth::Unknown,
@@ -271,6 +273,11 @@ fn runtime_condition(runtime: Option<&RuntimeStatus>) -> Draft {
             Truth::True,
             reason::READY,
             format!("{} replicas ready", rt.replicas),
+        ),
+        Phase::Suspended if sleeping => Draft::new(
+            Truth::False,
+            reason::SLEEPING,
+            "scaled to zero because the agent reported no work (scaling.idleTimeout)",
         ),
         Phase::Suspended => Draft::new(
             Truth::False,
@@ -301,7 +308,7 @@ fn state(obs: &Observed, config: &Draft, store: &Draft, runtime: &Draft) -> Serv
         return ServiceState::Blocked;
     }
     match obs.runtime.as_ref().map(|r| r.phase) {
-        Some(Phase::Suspended) if obs.suspend => ServiceState::Suspended,
+        Some(Phase::Suspended) if obs.suspend || obs.sleeping => ServiceState::Suspended,
         Some(Phase::Ready) if runtime.status == Truth::True => ServiceState::Ready,
         _ => ServiceState::Degraded,
     }
@@ -367,11 +374,12 @@ fn ready_condition(first_three: [&Draft; 3]) -> Draft {
     }
 }
 
-fn phase(p: Phase) -> RuntimePhase {
+fn phase(p: Phase, sleeping: bool) -> RuntimePhase {
     match p {
         Phase::Absent => RuntimePhase::Absent,
         Phase::Provisioning => RuntimePhase::Provisioning,
         Phase::Ready => RuntimePhase::Ready,
+        Phase::Suspended if sleeping => RuntimePhase::Sleeping,
         Phase::Suspended => RuntimePhase::Suspended,
         Phase::Failed => RuntimePhase::Failed,
     }

@@ -34,6 +34,7 @@ mod retention;
 mod service;
 mod shared;
 pub mod sleep;
+mod sleeper;
 mod watches;
 
 pub use config::{config_error_policy, reconcile_config};
@@ -50,5 +51,9 @@ pub use service::{reconcile_service, service_error_policy};
 pub use shared::{
     RESYNC, SharedContext, endpoint_error_policy, provider_error_policy, reconcile_endpoint,
     reconcile_provider,
+};
+pub use sleeper::{
+    ActivityFn, DEFAULT_POLL, Outcome as SleepOutcome, Sleepers, erase as erase_activity,
+    step as sleep_step,
 };
 pub use watches::{services_of_endpoint, services_of_provider};
