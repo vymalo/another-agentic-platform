@@ -150,6 +150,9 @@ jobs:
   chart:
     name: helm lint, render checks and kubeconform
     runs-on: ubuntu-latest
+    env:
+      # The toolchain of operator.yml, which builds the same workspace (and of the jobs below that define it).
+      RUST_TOOLCHAIN: "1.94.1"
     steps:
       - uses: actions/checkout@v7
       - uses: azure/setup-helm@v5
@@ -352,11 +355,14 @@ jobs:
           docker run --rm operator:smoke crdgen > "$RUNNER_TEMP/crds.yaml"
           cmp "$RUNNER_TEMP/crds.yaml" deploy/crds/agents.vymalo.com.yaml
           cmp "$RUNNER_TEMP/crds.yaml" deploy/operator-crds/files/agents.vymalo.com.yaml
-          # ANR-962: the configuration file is the only way in. `run` with no file refuses to start, and says which file.
-          out=$(docker run --rm operator:smoke run 2>&1) && { echo "::error::run started with no configuration file"; exit 1; } || true
+          # ANR-962: the configuration file is the only way in. `run` with no file refuses to start, exits 1 (the file cannot be
+          # read: a mount that is wrong, not a file that is refused) and names the file it wanted.
+          code=0; out=$(docker run --rm operator:smoke run 2>&1) || code=$?
+          [ "$code" = 1 ] || { echo "::error::run with no configuration file exited $code, not 1: $out"; exit 1; }
           grep -q '/etc/aap-operator/config.yaml' <<<"$out" || { echo "::error::run did not name the file it wanted: $out"; exit 1; }
           # The example in the repository is a file the image's binary accepts (`--check` reads no file the configuration names, and no cluster).
           out=$(docker run --rm -v "$PWD/bin/operator:/cfg:ro" operator:smoke run --config /cfg/config.example.yaml --check)
+          grep -Fxq '/cfg/config.example.yaml: ok' <<<"$out" || { echo "::error::--check said: $out"; exit 1; }
           # A misspelt key, nested, is refused with 78 (EX_CONFIG) and the key is named.
           bad="$RUNNER_TEMP/operator-bad"; mkdir -p "$bad"
           printf 'version: 1\nregistry:\n  tokne: x\n' > "$bad/config.yaml"
