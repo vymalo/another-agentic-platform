@@ -4,11 +4,13 @@
 # `runPods.runtimeClassName: runsc`, makes the run pod template of a coder; the script makes a REAL pod from that template (as the agent's service account,
 # so the admission policy, whose tenth rule requires the class, admits it), shows its runtime (`dmesg` says `Starting gVisor...` where a plain pod's says
 # `klogctl: Operation not permitted`), and then MEASURES what the card asks for, each result in the summary at the end, a failure with the failing step
-# quoted and the script going on:
+# quoted and the script going on. It FAILS (exit 1) when the cluster cannot be made, the run pod does not run under the class, or the admission policy does not
+# do what run-pods-admission.sh says; the measures (a) to (e) are results and never fail the run:
 #   (a) `hostUsers: false` together with the runsc class;
 #   (b) the pod's volume (the coder's claim) and `kubectl exec` under it;
 #   (c) rootless BuildKit and Podman under it, each beside the same pod under the node's own runtime (runc) as the control;
-#   (d) the time of one tiny build under runsc and under runc, three runs each, the median (a size and a time, nothing more).
+#   (d) the time of one tiny build under runsc and under runc, six runs each (two rounds of three), the median (a size and a time, nothing more);
+#   (e) a pod's memory and CPU limits under the same runsc configuration (`ignore-cgroups`), beside the same pod under runc as the control.
 #
 #   sh deploy/operator/tests/e2e/gvisor-k3d.sh        (from the repository root; needs docker, k3d, kubectl, helm, jq, curl, tar with bzip2, sha512sum)
 #
@@ -39,8 +41,8 @@
 # AAP_GVISOR_REMOVE_IMAGES=1 removes the k3s and k3d-tools images from the local Docker at the end.
 #
 # What it does NOT prove: the real coder under the class (git sandbox, projected token, egress proxy, the store's connections: K14d), a node that is not
-# a container (the owner's Talos nodes), what a hosted runner does (this file was run on a local machine; the job `gvisor-k3d` of operator-image.yml is
-# what says), and any cost: the times of (d) are seconds of one tiny build on one machine.
+# a container (the owner's Talos nodes), what a hosted runner does (this file was run on a local machine; the workflow gvisor-k3d.yml is
+# what says), and how a real build behaves: the times of (d) are seconds of one tiny build on one machine.
 set -eu
 
 here=$(cd "$(dirname "$0")" && pwd)
@@ -62,6 +64,12 @@ buildkit=docker.io/moby/buildkit:v0.30.0-rootless@sha256:d76eb1caecac5733ef7553c
 podman6=quay.io/podman/stable:v6.2.0@sha256:a02eea67f0ebb539679b938f58acf47a566fb8876e3223ce527fc725826556f0
 podman5=quay.io/podman/stable:v5.8.9@sha256:f7a17ef911a2b9b866ada8a9426a07e29a6e4f8109ef8c0e0b7010c2541b4e49
 
+# k3d's helper image, by tag and digest (the digest of the index, read with `docker buildx imagetools inspect` on 2026-11-26). k3d reads K3D_IMAGE_TOOLS
+# (its binary holds that name beside K3D_IMAGE_LOADBALANCER, which `--no-lb` leaves unused); whether it accepts a digest is shown by the run: the log says
+# which image the tools node was made from.
+k3d_tools=ghcr.io/k3d-io/k3d-tools:5.9.0@sha256:c57abce697e66feeb826922718738fe186b47779312d49d4e51e6fb9b8a6f34d
+export K3D_IMAGE_TOOLS=$k3d_tools
+
 cluster=aap-gvisor-404
 ns=aap-e2e-gvisor
 svc=gv-coder
@@ -78,6 +86,11 @@ fi
 
 work=$(mktemp -d)
 cluster_made=0
+fail=0
+# A kubeconfig of its own, an empty file, named before anything that can fail: no command below reads or writes the person's own (k3d writes the new
+# cluster into this one, and diagnostics() runs only once it holds that cluster).
+( umask 077; : > "$work/kubeconfig" )
+export KUBECONFIG="$work/kubeconfig"
 : > "$work/summary"
 # Values that must be found nowhere in the output: the Secret's.
 secret_a=$(openssl rand -hex 16)
@@ -85,9 +98,13 @@ secret_b=$(openssl rand -hex 16)
 printf '%s\n%s\n' "$secret_a" "$secret_b" > "$work/secrets"
 
 record() { printf '%s\n' "$*" >> "$work/summary"; printf 'MEASURE %s\n' "$*"; }
+# failed: a record that is a failure of the run (the admission policy not doing its job), not a measure: the script exits 1 at the end.
+failed() { fail=1; record "$@"; }
 redact() { grep -vF -f "$work/secrets" || true; }
 
 diagnostics() {
+  # Only against the cluster this run made: the private kubeconfig holds it and the context is its own.
+  [ -s "$work/kubeconfig" ] && [ "$(kubectl config current-context 2>/dev/null)" = "k3d-$cluster" ] || { echo "no cluster of this run to ask"; return 0; }
   echo "::group::what the cluster says"
   kubectl get nodes,runtimeclass -o wide 2>&1 | redact || true
   kubectl -n "$ns" get agentservices,pods,pvc,resourcequota -o wide 2>&1 | redact || true
@@ -102,7 +119,7 @@ cleanup() {
   if [ "$status" -ne 0 ] && [ "$cluster_made" = 1 ]; then diagnostics; fi
   if [ "$cluster_made" = 1 ]; then k3d cluster delete "$cluster" >/dev/null 2>&1 || true; fi
   if [ "${AAP_GVISOR_REMOVE_IMAGES:-}" = 1 ]; then
-    docker rmi "${k3s_image%@*}" ghcr.io/k3d-io/k3d-tools:5.9.0 >/dev/null 2>&1 || true
+    docker rmi "${k3s_image%@*}" "$k3d_tools" >/dev/null 2>&1 || true
   fi
   rm -rf "$work"
   exit "$status"
@@ -148,6 +165,9 @@ cat > "$work/config.toml.tmpl" <<'EOF'
     TypeUrl = "io.containerd.runsc.v1.options"
     ConfigPath = "/etc/containerd/runsc.toml"
 EOF
+printf 'k3d: %s\n' "$(k3d version | tr '\n' ' ')"
+printf 'docker server: %s; %s\n' "$(docker version --format '{{.Server.Version}}' 2>&1)" "$(docker info --format 'security {{.SecurityOptions}}, cgroup version {{.CgroupVersion}}, storage driver {{.Driver}}' 2>&1)"
+printf 'host kernel: %s; kubectl client: %s; helm: %s\n' "$(uname -sr)" "$(kubectl version --client -o json 2>/dev/null | jq -r '.clientVersion.gitVersion // "?"')" "$(helm version --short 2>/dev/null)"
 cluster_made=1
 k3d cluster create "$cluster" --servers 1 --agents 0 --servers-memory 6g --no-lb --image "$k3s_image" \
   --k3s-arg '--kubelet-arg=feature-gates=KubeletInUserNamespace=true@server:*' \
@@ -156,16 +176,18 @@ k3d cluster create "$cluster" --servers 1 --agents 0 --servers-memory 6g --no-lb
   --volume "$work/gvisor:/usr/local/bin@server:*" \
   --volume "$work/runsc.toml:/etc/containerd/runsc.toml@server:*" \
   --volume "$work/config.toml.tmpl:/var/lib/rancher/k3s/agent/etc/containerd/config.toml.tmpl@server:*" \
-  --wait --timeout 300s >/dev/null 2>&1 || die "k3d could not make the cluster"
+  --kubeconfig-update-default=false --kubeconfig-switch-context=false \
+  --wait --timeout 300s >"$work/k3d-create.out" 2>&1 || die "k3d could not make the cluster: $(tail -c 600 "$work/k3d-create.out")"
 # A kubeconfig of its own: the person's is never read or written.
 ( umask 077; k3d kubeconfig get "$cluster" > "$work/kubeconfig" )
-export KUBECONFIG="$work/kubeconfig"
 context=$(kubectl config current-context)
 [ "$context" = "k3d-$cluster" ] || die "the context is '$context', not k3d-$cluster"
 export HELM_KUBECONTEXT="$context"
 until_ok 180 "the node to be Ready" kubectl wait --for=condition=Ready node --all --timeout=10s
 until_ok 180 "CoreDNS" kubectl -n kube-system wait --for=condition=Available deployment/coredns --timeout=10s
 kubectl get nodes -o wide
+printf 'node: containerd %s; kernel %s; cgroup filesystem of the node: %s\n' "$(kubectl get nodes -o jsonpath='{.items[0].status.nodeInfo.containerRuntimeVersion}')" "$(kubectl get nodes -o jsonpath='{.items[0].status.nodeInfo.kernelVersion}')" "$(docker exec "k3d-$cluster-server-0" stat -fc %T /sys/fs/cgroup 2>&1)"
+printf 'tools image of the cluster: %s\n' "$(docker ps -a --filter "name=k3d-$cluster-tools" --format '{{.Image}}' 2>&1)"
 ok "a k3d cluster ($(kubectl version -o json 2>/dev/null | jq -r '.serverVersion.gitVersion // "?"')), one server, no agent"
 
 printf 'apiVersion: node.k8s.io/v1\nkind: RuntimeClass\nmetadata:\n  name: %s\n  labels:\n    %s: %s\nhandler: runsc\n' "$class" "$made_by_key" "$made_by" | kubectl create -f - >/dev/null
@@ -271,7 +293,7 @@ record "sandbox start (K14c): VERIFIED here, a run pod of the operator's templat
 # The policy, asked of the same API server: a pod without the class, and one with another class, made as the account, are refused.
 make_pod rp-noclass "$alpine" 0 runc 0
 if launch rp-noclass account; then
-  record "admission: NOT VERIFIED, the account made a run pod with no runtimeClassName (the policy should have refused it)"
+  failed "admission: NOT VERIFIED, the account made a run pod with no runtimeClassName (the policy should have refused it)"
   drop_pod rp-noclass
 elif grep -q "RuntimeClass $class" "$work/launch.out"; then
   ok "the policy refuses a run pod with no class: $(head -c 220 "$work/launch.out")"
@@ -284,7 +306,7 @@ printf 'apiVersion: node.k8s.io/v1\nkind: RuntimeClass\nmetadata:\n  name: runc\
 if sh "$repo/deploy/operator/tests/run-pods-admission.sh" "$ns" "$svc" > "$work/admission.out" 2>&1; then
   record "admission (run-pods-admission.sh against this cluster): VERIFIED, $(tail -n 1 "$work/admission.out")"
 else
-  record "admission (run-pods-admission.sh against this cluster): FAILED, $(grep '^FAIL' "$work/admission.out" | head -n 3 | tr '\n' ' ' | cut -c1-400)"
+  failed "admission (run-pods-admission.sh against this cluster): FAILED, $(grep '^FAIL' "$work/admission.out" | head -n 3 | tr '\n' ' ' | cut -c1-400)"
 fi
 
 # ---- (b) the volume and exec under runsc ---------------------------------------------------------------------------------------------------
@@ -358,7 +380,9 @@ probe() {
   if ! launch "$p_pod" "$who"; then
     printf 'FAILED_LAUNCH %s\n' "$(head -c 300 "$work/launch.out")" > "$work/probe.out"; return 1
   fi
-  if ! ready "$p_pod"; then
+  if ready "$p_pod"; then
+    note "$p_label: runs $(px "$p_pod" 'buildkitd --version 2>/dev/null || podman --version 2>/dev/null' 2>&1 | head -n 1 | cut -c1-120)"
+  else
     printf 'FAILED_START %s\n' "$(tr '\n' ' ' < "$work/ready.out" | cut -c1-400)" > "$work/probe.out"; return 1
   fi
   if px "$p_pod" "$p_prog" > "$work/probe.out" 2>&1; then return 0; fi
@@ -414,7 +438,7 @@ drop_pod rp-pm5-t
 record "(c) Podman under runsc: v6.2.0 build, relaxed pod: $r_pm6_runsc$( [ "$r_pm6_runsc" = fail ] && printf ', failing step: %s' "$o_pm6_runsc" ) [control, runc: $r_pm6_runc$( [ "$r_pm6_runc" = fail ] && printf ', %s' "$o_pm6_runc" )]; v5.8.9 build, relaxed pod: $r_pm5_runsc$( [ "$r_pm5_runsc" = fail ] && printf ', failing step: %s' "$o_pm5_runsc" ) [control, runc: $r_pm5_runc]; v5.8.9 run --rm: ${run_pm5_runsc}$( [ "$run_pm5_runsc" = fail ] && printf ', failing step: %s' "$orun_pm5_runsc" ) [control, runc: $run_pm5_runc]; v5.8.9 build with the template's own security context: $r_pm5_t$( [ "$r_pm5_t" = fail ] && printf ', failing step: %s' "$o_pm5_t" )"
 
 # ---- (d) the time of one tiny build ---------------------------------------------------------------------------------------------------------
-step "(d) one tiny build, three runs each, under $class and under the node's runtime (Podman 5.8.9, the same relaxed pod; rootless BuildKit cannot run under runc here)"
+step "(d) one tiny build, six runs each (two rounds of three), under $class and under the node's runtime (Podman 5.8.9, the same relaxed pod; rootless BuildKit cannot run under runc here)"
 # timing <pod> <command>: three runs of the command in the pod, milliseconds each, on stdout one per line; a run that fails prints FAIL.
 timing() {
   px "$1" "for i in 1 2 3; do s=\$(date +%s%N); if ( $2 ) >/dev/null 2>&1; then e=\$(date +%s%N); echo \$(( (e - s) / 1000000 )); else echo FAIL; fi; done"
@@ -440,7 +464,7 @@ if [ "$have_runsc" = 1 ] && [ "$have_runc" = 1 ]; then
   else
     m_runsc=$(sort -n "$work/t-runsc.txt" | sed -n 3p) # the median of six
     m_runc=$(sort -n "$work/t-runc.txt" | sed -n 3p)
-    record "(d) one tiny build (Podman 5.8.9 build of a 3-line Dockerfile: an 8.7 MB rootfs ADD and one RUN that hashes 3000 files), six runs each, median of the six in ms: runsc $m_runsc, runc $m_runc (runsc/runc = $(awk -v a="$m_runsc" -v b="$m_runc" 'BEGIN{ if (b > 0) printf "%.2f", a / b; else print "?" }')); all runs, runsc: $(sort -n "$work/t-runsc.txt" | tr '\n' ' '), runc: $(sort -n "$work/t-runc.txt" | tr '\n' ' ')"
+    record "(d) one tiny build, in a nested rootless k3d (rootless Docker, a k3s node in a container), Podman 5.8.9 with --storage-driver vfs, one build of a 3-line Dockerfile (a rootfs ADD and one RUN that hashes 3000 files), six runs each, median of the six in ms: runsc $m_runsc, runc $m_runc (runsc/runc = $(awk -v a="$m_runsc" -v b="$m_runc" 'BEGIN{ if (b > 0) printf "%.2f", a / b; else print "?" }')); all runs, runsc: $(sort -n "$work/t-runsc.txt" | tr '\n' ' '), runc: $(sort -n "$work/t-runc.txt" | tr '\n' ' ')"
   fi
 else
   record "(d) the time of one tiny build: NOT MEASURED, runsc pod present=$have_runsc, runc pod present=$have_runc"
@@ -461,6 +485,69 @@ if [ -n "${keep_bk:-}" ] && kubectl -n "$ns" get pod "$keep_bk" >/dev/null 2>&1 
 fi
 drop_pod rp-time-runc "${keep_pm5:-none}" "${keep_bk:-none}"
 
+# ---- (e) a pod's limits under the same runsc configuration -----------------------------------------------------------------------------------
+# The shim is told `ignore-cgroups`, which is how runsc starts at all on this node. Whether the pod's own limits are still enforced is the question: a pod
+# with limits.memory 64Mi tries to hold 256 MiB, once under runsc and once under runc (the control: if runc does not kill it either, the probe proves nothing).
+step "(e) a pod's limits under $class (ignore-cgroups) and under the node's runtime: 64Mi of memory against 256 MiB held, and 100m of CPU against a busy loop"
+# limits_pod <name> <runsc|runc> <program> <memory limit> <cpu limit>: the base pod, restartPolicy Never, that program as its command, those memory and CPU
+# limits (requests equal); the template's other resources (the ephemeral storage the policy requires) stay.
+limits_pod() {
+  make_pod "$1" "$alpine" 0 "$2" 0
+  jq --arg prog "$3" --arg mem "$4" --arg cpu "$5" '
+    .spec.restartPolicy = "Never"
+    | .spec.containers[0].command = ["sh", "-c", $prog]
+    | .spec.containers[0].resources.limits += {memory: $mem, cpu: $cpu}
+    | .spec.containers[0].resources.requests += {memory: $mem, cpu: $cpu}' "$work/$1.json" > "$work/$1.tmp" && mv "$work/$1.tmp" "$work/$1.json"
+}
+# finished <pod> <seconds>: 0 once the pod's phase is Succeeded or Failed.
+finished() {
+  f_deadline=$(( $(date +%s) + $2 ))
+  while :; do
+    case $(kubectl -n "$ns" get pod "$1" -o jsonpath='{.status.phase}' 2>/dev/null) in Succeeded|Failed) return 0 ;; esac
+    [ "$(date +%s)" -lt "$f_deadline" ] || return 1
+    sleep 2
+  done
+}
+# terminated <pod>: one line, what the kubelet recorded for the container, and its log.
+terminated() {
+  printf 'reason=%s exitCode=%s signal=%s phase=%s; log: %s' \
+    "$(kubectl -n "$ns" get pod "$1" -o jsonpath='{.status.containerStatuses[0].state.terminated.reason}' 2>&1)" \
+    "$(kubectl -n "$ns" get pod "$1" -o jsonpath='{.status.containerStatuses[0].state.terminated.exitCode}' 2>&1)" \
+    "$(kubectl -n "$ns" get pod "$1" -o jsonpath='{.status.containerStatuses[0].state.terminated.signal}' 2>&1)" \
+    "$(kubectl -n "$ns" get pod "$1" -o jsonpath='{.status.phase}' 2>&1)" \
+    "$(kubectl -n "$ns" logs "$1" -c run 2>&1 | tr '\n' '|' | cut -c1-300)"
+}
+mem_prog='echo "memory.max seen: $(cat /sys/fs/cgroup/memory.max 2>&1 | head -n 1)"; x=$(head -c 268435456 /dev/zero | tr "\0" a); echo "held ${#x} bytes"'
+for v in runsc runc; do
+  limits_pod "rp-mem-$v" "$v" "$mem_prog" 64Mi 100m
+  if [ "$v" = runsc ]; then who="account"; else who="admin"; fi
+  if launch "rp-mem-$v" "$who" && finished "rp-mem-$v" 150; then
+    res_e=$(terminated "rp-mem-$v")
+  else
+    res_e="NOT RUN: $(head -c 300 "$work/launch.out") $(kubectl -n "$ns" get pod "rp-mem-$v" -o jsonpath='{.status.phase}' 2>&1 || true)"
+  fi
+  printf 'memory limit 64Mi, 256 MiB held, %s: %s\n' "$v" "$res_e"
+  eval "res_mem_$v=\$res_e"
+  drop_pod "rp-mem-$v"
+done
+# CPU: a fixed amount of shell arithmetic, timed in seconds (the busybox date has no finer clock), under 100m and under 2 CPUs, in each runtime.
+cpu_prog='s=$(date +%s); i=0; while [ $i -lt 1500000 ]; do i=$((i+1)); done; echo "elapsed $(( $(date +%s) - s )) s"'
+for v in runsc runc; do
+  for lim in 100m 2; do
+    limits_pod "rp-cpu-$v-$lim" "$v" "$cpu_prog" 64Mi "$lim"
+    if [ "$v" = runsc ]; then who="account"; else who="admin"; fi
+    if launch "rp-cpu-$v-$lim" "$who" && finished "rp-cpu-$v-$lim" 240; then
+      res_e=$(kubectl -n "$ns" logs "rp-cpu-$v-$lim" -c run 2>&1 | tr '\n' ' ' | cut -c1-80)
+    else
+      res_e="NOT RUN: $(head -c 200 "$work/launch.out")"
+    fi
+    printf 'cpu limit %s, fixed loop, %s: %s\n' "$lim" "$v" "$res_e"
+    eval "res_cpu_${v}_${lim}=\$res_e"
+    drop_pod "rp-cpu-$v-$lim"
+  done
+done
+record "(e) limits under runsc with ignore-cgroups, beside runc as the control. Memory (limits.memory 64Mi, the pod tries to hold 256 MiB): runsc: $res_mem_runsc; runc: $res_mem_runc. CPU (limits.cpu 100m against 2, the same loop, seconds): runsc $res_cpu_runsc_100m against $res_cpu_runsc_2; runc $res_cpu_runc_100m against $res_cpu_runc_2"
+
 # ---- 4. nothing of a secret, and what the coder looked like ---------------------------------------------------------------------------------
 step "4. the end"
 kubectl -n "$ns" get agentservice "$svc" -o jsonpath='{.status.state}{" "}{.status.runtime.phase}{"\n"}' || true
@@ -470,4 +557,8 @@ ok "no secret value of this run is in the operator's log or in the summary"
 
 printf '\n==== SUMMARY (%s) ====\n' "gVisor $gvisor_release, $(kubectl version -o json 2>/dev/null | jq -r '.serverVersion.gitVersion // "?"')"
 cat "$work/summary"
-printf '\n(the script exits 0 when the run pod ran under %s; the measures above are results, not assertions)\n' "$class"
+if [ "$fail" != 0 ]; then
+  printf '\nFAIL the admission policy did not do what it should (see the records "admission" above): exit 1\n' >&2
+  exit 1
+fi
+printf '\n(the script exits 0 when the run pod ran under %s and the admission policy held; the measures (a) to (e) are results, not assertions)\n' "$class"
