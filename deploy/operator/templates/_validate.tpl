@@ -132,11 +132,9 @@ Included from deployment.yaml, which every render has, so they always run.
 {{- fail "networkPolicy.registry.allowFrom is required while the registry has a token and networkPolicy is enabled: with none, nothing could read it (list the orchestrator's namespace or pods, or set networkPolicy.enabled=false)" -}}
 {{- end -}}
 {{- range $list := list "registry" "metrics" -}}
-{{- range $peer := (get $.Values.networkPolicy $list).allowFrom -}}
-{{- if not (or (hasKey $peer "namespaceSelector") (hasKey $peer "podSelector") (hasKey $peer "ipBlock")) -}}
-{{- fail (printf "networkPolicy.%s.allowFrom: a peer needs a namespaceSelector, a podSelector or an ipBlock, got %s" $list (toJson $peer)) -}}
-{{- end -}}
-{{- end -}}
+{{- $peers := (get $.Values.networkPolicy $list).allowFrom -}}
+{{- include "aap.checkPeers" (dict "what" (printf "networkPolicy.%s.allowFrom" $list) "peers" (default (list) $peers)) -}}
+{{- include "aap.checkIpBlocks" (dict "what" (printf "networkPolicy.%s.allowFrom" $list) "peers" (default (list) $peers)) -}}
 {{- end -}}
 {{- if not .Values.networkPolicy.apiServer.ports -}}
 {{- fail "networkPolicy.apiServer.ports must name at least one port: the operator reaches nothing else" -}}
@@ -998,6 +996,12 @@ for each tested shape (tests/api-shapes.sh) to find such a value before it is de
 {{- range $peer := .peers -}}
 {{- if not (and (kindIs "map" $peer) (or (hasKey $peer "namespaceSelector") (hasKey $peer "podSelector") (hasKey $peer "ipBlock"))) -}}
 {{- fail (printf "%s: a peer needs a namespaceSelector, a podSelector or an ipBlock, got %s" $what (toJson $peer)) -}}
+{{- end -}}
+{{- if hasKey $peer "namespaceSelector" -}}
+{{- $ns := $peer.namespaceSelector -}}
+{{- if or (not (kindIs "map" $ns)) (not (or $ns.matchLabels $ns.matchExpressions)) -}}
+{{- fail (printf "%s: a namespaceSelector with no matchLabels and no matchExpressions selects every namespace: name the namespaces" $what) -}}
+{{- end -}}
 {{- end -}}
 {{- end -}}
 {{- end -}}

@@ -61,6 +61,15 @@ fn noisy(mut object: Stored) -> Stored {
     object
         .annotations
         .insert("agents.vymalo.com/note".into(), "kept".into());
+    // Desired state, kept; and the activator's transient wake request, which an export leaves out (ANR-1352).
+    object.annotations.insert(
+        "agents.vymalo.com/config-digest".into(),
+        "sha256:kept".into(),
+    );
+    object.annotations.insert(
+        "agents.vymalo.com/wake-at".into(),
+        "2026-11-27T22:00:00Z".into(),
+    );
     object
         .labels
         .insert("agents.vymalo.com/team".into(), "kept".into());
@@ -176,14 +185,19 @@ fn what_a_server_sets_and_what_a_tool_writes_is_not_exported() {
             ]),
             "the allow-list: no tool's label"
         );
-        // The annotations: the platform's, and nothing else, a person's note included.
+        // The annotations: the platform's desired state, and nothing else — a person's note included, and not
+        // the activator's transient wake request (ANR-1352).
         assert_eq!(
             doc["metadata"]["annotations"]
                 .as_object()
                 .unwrap()
                 .keys()
                 .collect::<Vec<_>>(),
-            ["agents.vymalo.com/note"]
+            ["agents.vymalo.com/config-digest", "agents.vymalo.com/note"]
+        );
+        assert_eq!(
+            doc["metadata"]["annotations"]["agents.vymalo.com/config-digest"],
+            "sha256:kept"
         );
     }
     for gone in [

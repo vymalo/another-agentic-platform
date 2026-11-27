@@ -46,13 +46,15 @@ fn keeps_label(key: &str, value: &str) -> bool {
         || (key == MANAGED_BY_LABEL && value == MANAGED_BY_DASHBOARD)
 }
 
-/// Whether the export keeps an annotation. **An allow-list**, and a short one: the platform's own. An annotation
-/// is where tools keep copies of the object (`kubectl.kubernetes.io/last-applied-configuration`), their
-/// tracking ids and their state, and a person's note has no prefix a tool could not also use, so none of
-/// them is exported: a GitOps export needs the spec, the name and the labels, and a note is added in the
-/// repository where the object goes.
+/// Whether the export keeps an annotation. **An allow-list**, and a short one: the platform's own, minus the
+/// transient ones. An annotation is where tools keep copies of the object
+/// (`kubectl.kubernetes.io/last-applied-configuration`), their tracking ids and their state, and a person's note
+/// has no prefix a tool could not also use, so none of them is exported: a GitOps export needs the spec, the name
+/// and the labels, and a note is added in the repository where the object goes. The platform's transient
+/// annotations are out too (`aap_ports::annotations::TRANSIENT`): a `wake-at` committed to GitOps is a wake
+/// request replayed on every sync, not desired state (AD-058, ANR-1352).
 fn keeps_annotation(key: &str) -> bool {
-    key.starts_with(PLATFORM_PREFIX)
+    key.starts_with(PLATFORM_PREFIX) && !aap_ports::annotations::TRANSIENT.contains(&key)
 }
 
 fn kept(
