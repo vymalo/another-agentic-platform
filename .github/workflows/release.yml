@@ -6,6 +6,8 @@ name: release
 #   ghcr.io/vymalo/another-agentic-platform/api:X.Y.Z and :X.Y           the Platform API image
 #   oci://ghcr.io/vymalo/another-agentic-platform/charts/aap-operator       the operator chart, X.Y.Z
 #   oci://ghcr.io/vymalo/another-agentic-platform/charts/aap-operator-crds  the CRDs chart, X.Y.Z
+#   aapctl_<version>_linux_x86_64.tar.gz, aapctl_<version>_linux_aarch64.tar.gz,
+#   aapctl_<version>_darwin_x86_64.tar.gz and aapctl_<version>_darwin_arm64.tar.gz, plus SHA256SUMS   the command line (AD-071)
 #
 # Never `latest`. `:X.Y` moves only to the highest patch of its minor. A deployment pins `X.Y.Z` (and the chart pins the digests).
 #
@@ -13,8 +15,12 @@ name: release
 # names (a release commit changes Cargo.toml and both Chart.yaml files, which are in its paths), and pushed them as `sha-<7>` only after
 # every job that gates its push passed. This workflow waits for those two tags, checks that their revision label is the tag's commit,
 # and copies each by digest (`imagetools create --prefer-index=false`: a carbon copy, the digest unchanged). If that commit's run did
-# not push (a red gating job, or a run cancelled by a newer push to main), nothing is published: re-run its failed jobs, then run this
-# workflow again with `workflow_dispatch` and the tag. There is no fallback build: a release is an image that passed the end-to-ends.
+# not push (a red gating job, or a run that was replaced), nothing is published: re-run its failed jobs, or run operator-image.yml by hand
+# on the tag (`workflow_dispatch` on the tag, which pushes the `sha-<7>` images of that commit), then run this workflow again with
+# `workflow_dispatch` and the tag. The gate asks the registry, not a run's conclusion: `sha-<7>` is pushed only after every gating job
+# passed, and a later job of that run (the bump) may be cancelled without harm. The release commit's run has a concurrency group of its
+# own, so a burst of merges cannot replace it (ANR-1196, AD-070 amended 2026-11-27). There is no fallback build: a release is an image
+# that passed the end-to-ends.
 #
 # Because the images are copied and not built here, BuildKit's `provenance: mode=max` and `sbom: true` (vaam-apps/vpay's release.yml,
 # which builds) cannot be attached to them. Instead each digest gets: a cosign keyless signature, an SPDX SBOM made by syft from the
@@ -30,9 +36,31 @@ name: release
 # The charts: a COPY of deploy/operator has `image.tag` and `api.image.tag` set to X.Y.Z and both digests set by
 # deploy/operator/release-pin.sh, and is packaged; git keeps `sha-<7>`, written by bump-tag.sh only, and main's bump commit is unchanged.
 #
+# The binaries are BUILT here, unlike the images (AD-071). There is no earlier tested run to copy a tarball from, and four
+# targets are not one image. Linux is musl (`x86_64-unknown-linux-musl`, `aarch64-unknown-linux-musl`): `aapctl` links rustls
+# and ring, and a static binary runs on any distribution, including the alpine images people put it in. macOS is built on a
+# GitHub-hosted macOS runner of each architecture, because a cross build from Linux needs the SDK; its two binaries are
+# ordinary dynamically linked ones (the static check below is Linux's alone). Apple notarisation is out of scope, and a
+# formula download is not quarantined. Each tarball and `SHA256SUMS` get a cosign keyless signature (a `.bundle` beside it)
+# and a build provenance attestation. **A release is published once:** the builds are not bit-reproducible, so nothing is
+# uploaded with `--clobber`, and a re-run that finds assets compares their `SHA256SUMS` with its own — identical, it uploads
+# nothing; different, it stops and says why, because a formula's checksums already name them. Verify a binary as a consumer
+# would (the identity is this workflow at a tag; a re-run with `workflow_dispatch` signs from main, so `heads/main` is in the
+# expression it verifies with):
+#
+#   cosign verify-blob aapctl_X.Y.Z_linux_x86_64.tar.gz --bundle aapctl_X.Y.Z_linux_x86_64.tar.gz.bundle \
+#     --certificate-oidc-issuer https://token.actions.githubusercontent.com \
+#     --certificate-identity-regexp '^https://github\.com/vymalo/another-agentic-platform/\.github/workflows/release\.yml@refs/(tags/v|heads/main$)'
+#   gh attestation verify aapctl_X.Y.Z_linux_x86_64.tar.gz -R vymalo/another-agentic-platform
+#
+# The Homebrew formula is the tap's, not this repository's: `homebrew-tap` opens one pull request on vymalo/homebrew-tap after
+# the four installation jobs passed. `aapctl` still ships in no image.
+#
 # On a pull request that touches what a release reads, the `version` and `charts` jobs run as a dry run (placeholder digests, nothing
-# pushed or signed), so a broken marker, version or pin is found before a tag. Every action is pinned by full commit SHA; the tag in the
-# comment is the one that SHA was read from (git ls-remote, 2026-11-27).
+# pushed or signed), so a broken marker, version or pin is found before a tag, and `aapctl-dry-run` builds two targets (linux
+# x86_64 musl and darwin arm64, nothing published), so a darwin build that breaks is found before the tag: the four-target
+# matrix, the upload, the signatures and the tap are the tag's alone.
+# Every action is pinned by full commit SHA; the tag in the comment is the one that SHA was read from (git ls-remote, 2026-11-27).
 
 on:
   push:
@@ -52,6 +80,13 @@ on:
       - "deploy/operator-crds/**"
       - "deploy/crds/**"
       - "tools/check-release-version.sh"
+      - "tools/release/**"
+      - "bin/cli/**"
+      # The dry run builds the CLI and judges examples/coder.yaml, so it also reads the lock file, the crates it depends on and
+      # the examples.
+      - "Cargo.lock"
+      - "crates/**"
+      - "examples/**"
       - ".github/workflows/release.yml"
       - ".github/workflows/release-please.yml"
 
@@ -64,6 +99,9 @@ env:
   API_IMAGE: ghcr.io/vymalo/another-agentic-platform/api
   CHARTS: ghcr.io/vymalo/another-agentic-platform/charts
   HELM_VERSION: v4.3.2
+  # The aapctl legs install it (`rustup toolchain install "$RUST_TOOLCHAIN"` under `set -u`), as operator.yml, operator-image.yml
+  # and release-please.yml do.
+  RUST_TOOLCHAIN: "1.94.1"
 
 permissions:
   contents: read
@@ -163,33 +201,37 @@ jobs:
           digest_of() { docker buildx imagetools inspect "$1" --format '{{json .Manifest}}' 2> "$err" | jq -er .digest; }
           both() { op=$(digest_of "$IMAGE:$short") && api=$(digest_of "$API_IMAGE:$short"); }
           started=$(date +%s)
-          run_id=""
           while ! both; do
             now=$(date +%s)
-            run=$(gh run list --repo "$GITHUB_REPOSITORY" --workflow operator-image.yml --commit "$SHA" --event push --limit 1 \
-              --json databaseId,status,conclusion --jq '.[0] | select(.) | "\(.databaseId) \(.status) \(.conclusion)"')
-            if [ -z "$run" ]; then
+            # Every run of operator-image.yml on this commit, whatever its event: a push, or a dispatch on the tag.
+            runs=$(gh run list --repo "$GITHUB_REPOSITORY" --workflow operator-image.yml --commit "$SHA" --limit 30 \
+              --json databaseId,status,conclusion --jq '.[] | "\(.databaseId) \(.status) \(.conclusion)"')
+            if [ -z "$runs" ]; then
               if [ $((now - started)) -gt 1200 ]; then
-                echo "::error::no run of operator-image.yml on a push of $SHA after 20 minutes: start it (re-run, or push), then run this workflow with tag=$TAG"
+                echo "::error::no run of operator-image.yml on $SHA after 20 minutes: re-run the failed jobs of its run if there is one, else run operator-image.yml with workflow_dispatch on the tag $TAG (it pushes $short), then re-run this workflow."
                 exit 1
               fi
             else
-              read -r run_id run_status run_conclusion <<< "$run"
-              if [ "$run_status" = completed ]; then
+              pending=""
+              while read -r _ run_status _; do
+                [ "$run_status" = completed ] || pending=1
+              done <<< "$runs"
+              if [ -z "$pending" ]; then
                 both && break
-                echo "::error::operator-image.yml run $run_id for $SHA ended '$run_conclusion' and $short is not in the registry for both images ($(cat "$err")). Re-run its failed jobs; once it has pushed, run this workflow with workflow_dispatch and tag=$TAG."
+                echo "::error::every operator-image.yml run on $SHA has ended and $short is not in the registry for both images ($(cat "$err")); runs (id status conclusion): $(tr '\n' ';' <<< "$runs"). Re-run the failed jobs of the operator-image.yml run first; if that cannot work, run operator-image.yml with workflow_dispatch on the tag $TAG (it pushes $short). Then re-run this workflow."
                 exit 1
               fi
             fi
             if [ $((now - started)) -gt 9600 ]; then echo "::error::$short did not appear within 160 minutes"; exit 1; fi
-            echo "waiting for $short (operator-image.yml: ${run:-no run yet})"
+            echo "waiting for $short (operator-image.yml: ${runs:-no run yet})"
             sleep 60
           done
-          # The run that pushed them, for the summary (when they were there before this job asked).
-          if [ -z "$run_id" ]; then
-            run_id=$(gh run list --repo "$GITHUB_REPOSITORY" --workflow operator-image.yml --commit "$SHA" --event push --limit 1 \
-              --json databaseId --jq '.[0].databaseId // empty' || true)
-          fi
+          # The run that pushed them, for the summary: the one whose push job succeeded (a later job of it may have been cancelled).
+          run_id=""
+          for id in $(gh run list --repo "$GITHUB_REPOSITORY" --workflow operator-image.yml --commit "$SHA" --limit 30 --json databaseId --jq '.[].databaseId' || true); do
+            pushed=$(gh api "repos/$GITHUB_REPOSITORY/actions/runs/$id/jobs?per_page=100" --jq '.jobs[] | select(.name == "push the images that passed") | .conclusion // "none"' || true)
+            if [ "$pushed" = success ]; then run_id=$id; break; fi
+          done
           # The label operator-image.yml sets (org.opencontainers.image.revision) must be the tag's commit: a seven-digit tag names a
           # commit, it does not prove one. A multi-platform index is read through its first image.
           revision_of() {
@@ -276,8 +318,9 @@ jobs:
           retention-days: 1
           if-no-files-found: error
 
-  # The one job that writes to the registry and signs (`id-token: write` is here and nowhere else). It checks out no code: it runs
-  # pinned actions and the CLIs of the runner on the digests the jobs above found and the packages they made.
+  # The job that writes to the registry and signs the images and charts. It checks out no code: it runs
+  # pinned actions and the CLIs of the runner on the digests the jobs above found and the packages they made. `id-token: write`
+  # is here and in `aapctl-release` (AD-071), the two signing jobs, and in no other job; neither of them checks out code.
   publish:
     name: publish, sign and attest
     needs: [version, images, charts]
@@ -457,3 +500,428 @@ jobs:
             echo
             echo "A new GHCR package is private until it is made public (deploy/operator/README.md, \"Releases\"): the two chart packages, the first time."
           } >> "$GITHUB_STEP_SUMMARY"
+
+  # ---------------------------------------------------------------------------------------------------------------------
+  # aapctl (AD-071)
+  # ---------------------------------------------------------------------------------------------------------------------
+  # The command line, built from the tag's commit on a runner of each platform. Nothing is uploaded here: each leg hands its
+  # tarball to `aapctl-release`, the one job that writes to the release and signs.
+  aapctl:
+    name: aapctl for ${{ matrix.os }} ${{ matrix.arch }}
+    needs: version
+    if: needs.version.outputs.dry_run == 'false'
+    runs-on: ${{ matrix.runner }}
+    # No dependency cache, on purpose: a release artifact is not built from a cache. A cold build of the workspace on a
+    # three-core Intel runner is the slow case; 60 minutes leaves it room.
+    timeout-minutes: 60
+    permissions:
+      contents: read
+    env:
+      VERSION: ${{ needs.version.outputs.version }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          # The LTS image, not `ubuntu-latest` (26.04): a release is built on a distribution that is chosen, not on whichever
+          # is newest on the day. The arm64 runner builds natively, so musl needs no cross compiler and no `gcc-*-linux-gnu`.
+          - runner: ubuntu-24.04
+            os: linux
+            arch: x86_64
+            target: x86_64-unknown-linux-musl
+          - runner: ubuntu-24.04-arm
+            os: linux
+            arch: aarch64
+            target: aarch64-unknown-linux-musl
+          # GitHub-hosted macOS of each architecture. `macos-13` and `macos-14` no longer exist (read 2026-11-27 at
+          # actions/runner-images): Intel is `macos-26-intel`, Apple Silicon `macos-26`, which `macos-latest` names today.
+          # Why macOS runners and not a cross build: the Darwin SDK is not on a Linux runner, and Apple notarisation is out
+          # of scope (AD-071); the binary is signed by cosign like every other asset.
+          - runner: macos-26-intel
+            os: darwin
+            arch: x86_64
+            target: x86_64-apple-darwin
+          - runner: macos-26
+            os: darwin
+            arch: arm64
+            target: aarch64-apple-darwin
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ needs.version.outputs.sha }}
+          persist-credentials: false
+      - name: the pinned toolchain, and the target
+        env:
+          TARGET: ${{ matrix.target }}
+        run: |
+          set -euo pipefail
+          rustup toolchain install "$RUST_TOOLCHAIN" --profile minimal --no-self-update
+          rustup default "$RUST_TOOLCHAIN"
+          rustup target add "$TARGET"
+      - name: musl's C toolchain (ring has C and assembly)
+        if: matrix.os == 'linux'
+        run: |
+          set -euo pipefail
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends musl-tools file
+      - name: build
+        env:
+          TARGET: ${{ matrix.target }}
+        run: cargo build --release --locked -p aap-cli --target "$TARGET"
+      - name: it runs, and on Linux it is static
+        env:
+          TARGET: ${{ matrix.target }}
+          OS: ${{ matrix.os }}
+        run: |
+          set -euo pipefail
+          bin="target/$TARGET/release/aapctl"
+          test -x "$bin"
+          "$bin" --version | grep -F "$VERSION"
+          if [ "$OS" = linux ]; then
+            # The point of musl: one file that runs on any distribution. Rust's musl target links a static-pie, which `file`
+            # words "static-pie linked", so both words are accepted; the decisive check is that `.dynamic` names no NEEDED
+            # library (`ldd` is not used: on a static-pie some loaders run the program to answer).
+            file "$bin" | grep -Eq 'statically linked|static-pie linked' || { echo "::error::$bin is not static: $(file "$bin")"; exit 1; }
+            if readelf -d "$bin" 2> /dev/null | grep -q NEEDED; then
+              echo "::error::$bin links a shared library:"; readelf -d "$bin" | grep NEEDED; exit 1
+            fi
+          fi
+      - name: package
+        env:
+          TARGET: ${{ matrix.target }}
+          OS: ${{ matrix.os }}
+          ARCH: ${{ matrix.arch }}
+        run: |
+          set -euo pipefail
+          dist="$RUNNER_TEMP/dist"; stage="$RUNNER_TEMP/stage"
+          mkdir -p "$dist" "$stage"
+          install -m 0755 "target/$TARGET/release/aapctl" "$stage/aapctl"
+          asset="aapctl_${VERSION}_${OS}_${ARCH}.tar.gz"
+          # On macOS, bsdtar copies extended attributes as `._name` members; a release archive is not a place for them.
+          if [ "$OS" = darwin ]; then export COPYFILE_DISABLE=1; fi
+          tar -czf "$dist/$asset" -C "$stage" aapctl
+          # The list goes to a file: `tar -tzf ... | grep -q` lets grep exit early, tar takes SIGPIPE and `pipefail` fails it.
+          tar -tzf "$dist/$asset" > "$RUNNER_TEMP/contents.txt"
+          if [ "$(wc -l < "$RUNNER_TEMP/contents.txt")" -ne 1 ] || ! grep -qx aapctl "$RUNNER_TEMP/contents.txt"; then
+            echo "::error::$asset must hold aapctl and nothing else (an AppleDouble ._ member is not a file of a release):"
+            cat "$RUNNER_TEMP/contents.txt"
+            exit 1
+          fi
+          echo "- \`$asset\`" >> "$GITHUB_STEP_SUMMARY"
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: aapctl-${{ matrix.os }}-${{ matrix.arch }}
+          path: ${{ runner.temp }}/dist/*.tar.gz
+          retention-days: 1
+          if-no-files-found: error
+
+  # On a pull request: two targets, built and run, and nothing published — linux x86_64 musl (the static check, and an example
+  # judged) and darwin arm64 (the first build of this workspace on the macOS SDK, so a darwin build that breaks is found here
+  # and not by the tag, after the images and charts are already published). The other two targets, the signatures and the tap
+  # are the tag's.
+  aapctl-dry-run:
+    name: "aapctl builds on ${{ matrix.os }} (dry run: nothing published)"
+    needs: version
+    if: needs.version.outputs.dry_run == 'true'
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 45
+    permissions:
+      contents: read
+    env:
+      VERSION: ${{ needs.version.outputs.version }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: ubuntu-24.04
+            os: linux
+            target: x86_64-unknown-linux-musl
+          - runner: macos-26
+            os: darwin
+            target: aarch64-apple-darwin
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: the pinned toolchain, and the target
+        env:
+          TARGET: ${{ matrix.target }}
+        run: |
+          set -euo pipefail
+          rustup toolchain install "$RUST_TOOLCHAIN" --profile minimal --no-self-update
+          rustup default "$RUST_TOOLCHAIN"
+          rustup target add "$TARGET"
+      - name: musl's C toolchain (ring has C and assembly)
+        if: matrix.os == 'linux'
+        run: |
+          set -euo pipefail
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends musl-tools file
+      - name: build
+        env:
+          TARGET: ${{ matrix.target }}
+        run: cargo build --release --locked -p aap-cli --target "$TARGET"
+      - name: it runs, and on Linux it is static and judges an example
+        env:
+          TARGET: ${{ matrix.target }}
+          OS: ${{ matrix.os }}
+        run: |
+          set -euo pipefail
+          bin="target/$TARGET/release/aapctl"
+          test -x "$bin"
+          "$bin" --version | grep -F "$VERSION"
+          if [ "$OS" = linux ]; then
+            file "$bin" | grep -Eq 'statically linked|static-pie linked' || { echo "::error::$bin is not static: $(file "$bin")"; exit 1; }
+            if readelf -d "$bin" 2> /dev/null | grep -q NEEDED; then echo "::error::$bin links a shared library"; exit 1; fi
+            "$bin" validate -f examples/coder.yaml
+          fi
+
+  # Attach the four tarballs to the release release-please made, sign them, and attest them. It checks out no code: it runs the
+  # runner's `gh` and the pinned cosign, on what the jobs above built. `id-token: write` is here and in `publish`.
+  aapctl-release:
+    name: attach, sign and attest the binaries
+    needs: [version, aapctl]
+    if: needs.version.outputs.dry_run == 'false'
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    permissions:
+      contents: write
+      id-token: write
+      attestations: write
+    outputs:
+      linux_x86_64_sha: ${{ steps.assets.outputs.linux_x86_64_sha }}
+      linux_aarch64_sha: ${{ steps.assets.outputs.linux_aarch64_sha }}
+      darwin_x86_64_sha: ${{ steps.assets.outputs.darwin_x86_64_sha }}
+      darwin_arm64_sha: ${{ steps.assets.outputs.darwin_arm64_sha }}
+    env:
+      TAG: ${{ needs.version.outputs.tag }}
+      VERSION: ${{ needs.version.outputs.version }}
+    steps:
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          pattern: aapctl-*
+          path: ${{ runner.temp }}/dist
+          merge-multiple: true
+      - name: the release exists, and the four tarballs are here
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          # release-please creates the release with the tag; a tag without one is not something to attach to silently.
+          if ! gh release view "$TAG" --repo "$GITHUB_REPOSITORY" > /dev/null; then
+            echo "::error::no GitHub release $TAG: release-please creates it with the tag, so a tag without one is not a release"
+            exit 1
+          fi
+          for asset in linux_x86_64 linux_aarch64 darwin_x86_64 darwin_arm64; do
+            f="$RUNNER_TEMP/dist/aapctl_${VERSION}_${asset}.tar.gz"
+            [ -f "$f" ] || { echo "::error::the build of $asset produced no $f"; ls -l "$RUNNER_TEMP/dist"; exit 1; }
+          done
+      - name: checksum, and publish the tarballs and the sums, or refuse to replace them
+        id: assets
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          dist="$RUNNER_TEMP/dist"
+          ( cd "$dist" && sha256sum aapctl_*.tar.gz > SHA256SUMS )
+          [ "$(wc -l < "$dist/SHA256SUMS")" -eq 4 ] || { echo "::error::SHA256SUMS does not hold four lines:"; cat "$dist/SHA256SUMS"; exit 1; }
+          sum() { awk -v want="aapctl_${VERSION}_$1.tar.gz" '$2 == want { print $1 }' "$dist/SHA256SUMS"; }
+          for asset in linux_x86_64 linux_aarch64 darwin_x86_64 darwin_arm64; do
+            value=$(sum "$asset")
+            [ -n "$value" ] || { echo "::error::SHA256SUMS holds no line for $asset"; exit 1; }
+            echo "${asset}_sha=$value" >> "$GITHUB_OUTPUT"
+          done
+          # A release is published once, and nothing here uses `--clobber`: a rebuild is not bit-reproducible, and the formula a
+          # merged tap pull request carries names these checksums, so replacing them would break every install that has it.
+          # A re-run therefore compares, and stops when the release holds other bytes; the fix is a new version.
+          names=$(gh release view "$TAG" --repo "$GITHUB_REPOSITORY" --json assets --jq '.assets[].name')
+          expected=(
+            "aapctl_${VERSION}_linux_x86_64.tar.gz" "aapctl_${VERSION}_linux_aarch64.tar.gz"
+            "aapctl_${VERSION}_darwin_x86_64.tar.gz" "aapctl_${VERSION}_darwin_arm64.tar.gz"
+            "SHA256SUMS"
+          )
+          present=0
+          for name in "${expected[@]}"; do
+            if grep -Fxq "$name" <<< "$names"; then present=$((present + 1)); fi
+          done
+          if [ "$present" -eq 0 ]; then
+            gh release upload "$TAG" "$dist"/aapctl_*.tar.gz "$dist"/SHA256SUMS --repo "$GITHUB_REPOSITORY"
+            echo "published the four binaries and SHA256SUMS"
+          elif [ "$present" -eq "${#expected[@]}" ]; then
+            mkdir -p "$RUNNER_TEMP/published"
+            gh release download "$TAG" --repo "$GITHUB_REPOSITORY" --pattern SHA256SUMS --dir "$RUNNER_TEMP/published"
+            if cmp -s "$dist/SHA256SUMS" "$RUNNER_TEMP/published/SHA256SUMS"; then
+              echo "$TAG already holds these exact bytes: nothing uploaded"
+            else
+              echo "::error::release $TAG already holds aapctl assets built from other bytes (its SHA256SUMS is not this build's). A merged formula's checksums name them, so they are never replaced: publish a new version."
+              diff -u "$RUNNER_TEMP/published/SHA256SUMS" "$dist/SHA256SUMS" || true
+              exit 1
+            fi
+          else
+            echo "::error::release $TAG holds $present of aapctl's ${#expected[@]} assets. A partial release is neither completed nor replaced by hand: publish a new version."
+            printf 'on the release:\n%s\n' "$names"
+            exit 1
+          fi
+          {
+            echo "### aapctl $VERSION"
+            echo
+            echo "- four binaries and \`SHA256SUMS\` on the release"
+            echo "- \`SHA256SUMS\`:"
+            echo
+            echo '```'
+            cat "$dist/SHA256SUMS"
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+      - uses: sigstore/cosign-installer@7e8b541eb2e61bf99390e1afd4be13a184e9ebc5 # v3.10.1
+      - name: sign and attach a bundle only where the release has none
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          cd "$RUNNER_TEMP/dist"
+          # We get here only when the release's tarballs are byte for byte this build's (the step above stops otherwise), so a
+          # bundle made here signs the same bytes as one already published. None is ever replaced: only the missing ones are
+          # signed and uploaded, and a re-run of a release that has them all signs and uploads nothing.
+          names=$(gh release view "$TAG" --repo "$GITHUB_REPOSITORY" --json assets --jq '.assets[].name')
+          missing=()
+          for f in aapctl_*.tar.gz SHA256SUMS; do
+            if ! grep -Fxq "$f.bundle" <<< "$names"; then missing+=("$f"); fi
+          done
+          if [ "${#missing[@]}" -eq 0 ]; then
+            echo "$TAG already carries a bundle for every asset: nothing signed or uploaded"
+            exit 0
+          fi
+          bundles=()
+          for f in "${missing[@]}"; do
+            cosign sign-blob --yes --bundle "$f.bundle" "$f"
+            echo "signed $f"
+            bundles+=("$f.bundle")
+          done
+          gh release upload "$TAG" "${bundles[@]}" --repo "$GITHUB_REPOSITORY"
+          printf 'attached %s\n' "${bundles[@]}"
+      # `actions/attest` with `subject-path`, not `actions/attest-build-provenance`: the latter's own commit SHA is pinned nowhere
+      # in this repository, and one is not invented here (AD-071 decision 4). The predicate is the same SLSA provenance.
+      - name: attest the binaries' build provenance
+        uses: actions/attest@1e69f48acb82d1966a394da916b4c1698aa569d6 # v4.2.2
+        with:
+          subject-path: ${{ runner.temp }}/dist/aapctl_*.tar.gz
+      - name: attest SHA256SUMS
+        uses: actions/attest@1e69f48acb82d1966a394da916b4c1698aa569d6 # v4.2.2
+        with:
+          subject-path: ${{ runner.temp }}/dist/SHA256SUMS
+      - name: the release's own signatures and attestations verify, as a consumer would check it
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          EVENT: ${{ github.event_name }}
+          ISSUER: https://token.actions.githubusercontent.com
+          STRICT: ^https://github\.com/vymalo/another-agentic-platform/\.github/workflows/release\.yml@refs/tags/v
+          RERUN: ^https://github\.com/vymalo/another-agentic-platform/\.github/workflows/release\.yml@refs/(tags/v|heads/main$)
+        run: |
+          set -euo pipefail
+          # A tag's own run must prove the tag's identity; only a `workflow_dispatch` re-run may have signed from main.
+          if [ "$EVENT" = push ]; then IDENTITY=$STRICT; else IDENTITY=$RERUN; fi
+          cd "$RUNNER_TEMP/dist"
+          mkdir -p "$RUNNER_TEMP/published"
+          # The bundles the release carries, not the ones just made: this is what a person downloads.
+          gh release download "$TAG" --repo "$GITHUB_REPOSITORY" --pattern '*.bundle' --dir "$RUNNER_TEMP/published"
+          for f in aapctl_*.tar.gz SHA256SUMS; do
+            [ -f "$RUNNER_TEMP/published/$f.bundle" ] || { echo "::error::the release carries no bundle for $f"; exit 1; }
+            cosign verify-blob "$f" --bundle "$RUNNER_TEMP/published/$f.bundle" \
+              --certificate-oidc-issuer "$ISSUER" --certificate-identity-regexp "$IDENTITY" > /dev/null
+            echo "verified the release's signature on $f"
+            gh attestation verify "$f" --repo "$GITHUB_REPOSITORY" > /dev/null
+            echo "attested $f"
+          done
+
+  # Install the formula the tap will get, in a throwaway tap, on each platform the formula serves. Nothing is written to the
+  # real tap until all four pass.
+  homebrew-smoke:
+    name: Homebrew installs it on ${{ matrix.platform }}
+    needs: [version, aapctl-release]
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 30
+    permissions:
+      contents: read
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - platform: macOS Apple Silicon
+            runner: macos-26
+          - platform: macOS Intel
+            runner: macos-26-intel
+          - platform: Linux x86_64
+            runner: ubuntu-24.04
+          - platform: Linux arm64
+            runner: ubuntu-24.04-arm
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ needs.version.outputs.sha }}
+          persist-credentials: false
+      - name: install it through Homebrew and run it
+        env:
+          VERSION: ${{ needs.version.outputs.version }}
+          LINUX_X86_64_SHA: ${{ needs.aapctl-release.outputs.linux_x86_64_sha }}
+          LINUX_AARCH64_SHA: ${{ needs.aapctl-release.outputs.linux_aarch64_sha }}
+          DARWIN_X86_64_SHA: ${{ needs.aapctl-release.outputs.darwin_x86_64_sha }}
+          DARWIN_ARM64_SHA: ${{ needs.aapctl-release.outputs.darwin_arm64_sha }}
+        run: bash tools/release/homebrew-smoke.sh
+
+  # The formula is the tap's. One bot branch and one open pull request, a version that only moves forward, and a lease on the
+  # branch, as the system's tap workflow does.
+  homebrew-tap:
+    name: propose the Homebrew tap update
+    needs: [version, aapctl-release, homebrew-smoke]
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    concurrency:
+      group: homebrew-tap-aapctl
+      cancel-in-progress: false
+      # Preserve pending updates rather than replacing one with a later arrival.
+      # https://docs.github.com/en/actions/how-tos/write-workflows/choose-when-workflows-run/control-workflow-concurrency
+      queue: max
+    permissions:
+      contents: read
+    steps:
+      - name: Mint the release App token for the tap
+        id: app-token
+        uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1 # v3.2.0
+        with:
+          client-id: ${{ secrets.RELEASE_PLEASE_APP_CLIENT_ID }}
+          private-key: ${{ secrets.RELEASE_PLEASE_APP_PRIVATE_KEY }}
+          owner: vymalo
+          # Only the tap: this repository is read with GITHUB_TOKEN, and a token that can write it is not needed here.
+          repositories: homebrew-tap
+          permission-contents: write
+          permission-pull-requests: write
+      - name: Discover the tap default branch
+        id: tap
+        env:
+          GH_TOKEN: ${{ steps.app-token.outputs.token }}
+        run: |
+          set -euo pipefail
+          echo "base=$(gh api repos/vymalo/homebrew-tap --jq .default_branch)" >> "$GITHUB_OUTPUT"
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          repository: vymalo/homebrew-tap
+          ref: ${{ steps.tap.outputs.base }}
+          token: ${{ steps.app-token.outputs.token }}
+          path: homebrew-tap
+          persist-credentials: false
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          path: source
+          ref: ${{ needs.version.outputs.sha }}
+          persist-credentials: false
+      - name: Create or update the monotonic tap upgrade
+        env:
+          GH_TOKEN: ${{ steps.app-token.outputs.token }}
+          BASE: ${{ steps.tap.outputs.base }}
+          VERSION: ${{ needs.version.outputs.version }}
+          LINUX_X86_64_SHA: ${{ needs.aapctl-release.outputs.linux_x86_64_sha }}
+          LINUX_AARCH64_SHA: ${{ needs.aapctl-release.outputs.linux_aarch64_sha }}
+          DARWIN_X86_64_SHA: ${{ needs.aapctl-release.outputs.darwin_x86_64_sha }}
+          DARWIN_ARM64_SHA: ${{ needs.aapctl-release.outputs.darwin_arm64_sha }}
+        run: |
+          node source/tools/release/update-homebrew-tap.mjs "$PWD/homebrew-tap" "$BASE" "$VERSION" \
+            "$LINUX_X86_64_SHA" "$LINUX_AARCH64_SHA" "$DARWIN_X86_64_SHA" "$DARWIN_ARM64_SHA"

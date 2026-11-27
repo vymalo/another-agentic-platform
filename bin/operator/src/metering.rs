@@ -1,5 +1,5 @@
 //! The pod-minute meter's composition (ANR-1103, AD-069): the sink that carries a line to the collector, the sources that
-//! say whose minute it is (the broker for a run pod, the `AgentService` for an agent's own pod: AD-071), and the meter's
+//! say whose minute it is (the broker for a run pod, the `AgentService` for an agent's own pod: AD-072), and the meter's
 //! settings, built from `metering` of the file.
 //!
 //! **Fail closed.** The bearer is read now: a missing or empty file, an unset or empty variable is a refusal of the file
@@ -36,7 +36,7 @@ impl UsageSink for SharedSink {
     }
 }
 
-/// The two account sources, composed by pod kind (AD-071): a run pod is the `run` source's to answer, an agent's own pod
+/// The two account sources, composed by pod kind (AD-072): a run pod is the `run` source's to answer, an agent's own pod
 /// the `agent` source's, and neither is asked about the other kind.
 pub struct MeterAccounts<R, A> {
     run: R,

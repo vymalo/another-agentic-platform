@@ -246,7 +246,7 @@ pub enum PodRef {
     },
     /// A pod of the agent's own workload.
     ///
-    /// **Breaking change (ANR-1100, AD-071): `namespace` is new**, so every construction and every pattern that
+    /// **Breaking change (ANR-1100, AD-072): `namespace` is new**, so every construction and every pattern that
     /// names all fields must be updated (a pattern with `..` still compiles).
     Agent {
         /// The namespace of the `AgentService`: the meter merges every watched namespace, so the name alone is
@@ -264,7 +264,7 @@ pub struct AccountUnavailable;
 
 /// Says which account a pod's minutes are for. The source for a run pod is `aap-usage-broker` (it asks the
 /// orchestrator's broker); the source for an agent pod is `aap-usage-kubernetes` (it reads `AgentService.spec.account`,
-/// AD-071). `operator run` composes the two by pod kind.
+/// AD-072). `operator run` composes the two by pod kind.
 ///
 /// **Breaking change (ANR-1100): [`PodRef::Agent`] gained a `namespace`**, which every implementer that matches on it
 /// must now handle.

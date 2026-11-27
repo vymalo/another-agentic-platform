@@ -461,7 +461,7 @@ async fn run_with(settings: crate::config::Settings, tracer: aap_trace::Tracer) 
     // The meter sends only while this replica leads (`Operator::run` gates it); the sink is kept to flush on the way out.
     let (operator, meter_sink) = match meter {
         Some(parts) => {
-            // A run pod's account is the broker's; an agent's own pod's is read from its `AgentService` (AD-071).
+            // A run pod's account is the broker's; an agent's own pod's is read from its `AgentService` (AD-072).
             let accounts = crate::metering::MeterAccounts::new(
                 parts.accounts,
                 aap_usage_kubernetes::AgentAccounts::new(meter_client.clone()),

@@ -178,7 +178,7 @@ struct PodState {
     unknown_counted: u64,
     /// Whether the pod's `no-end` or `no-start` was counted.
     unmetered_counted: bool,
-    /// The last account the source named for **this pod**, for its tombstone (AD-071): the `AgentService` may be
+    /// The last account the source named for **this pod**, for its tombstone (AD-072): the `AgentService` may be
     /// gone by the time the pod's last minutes are replayed, and the source then answers nothing. Cleared when the
     /// source says the pod has none. Kept per pod uid, never per service: a service deleted and re-created with
     /// another account must not give the old pod's minutes to the new account.
@@ -245,7 +245,7 @@ struct Pending {
 /// What a pod is for a line, once its facts say so.
 struct Attributed {
     pod_kind: PodKind,
-    /// The pod's namespace: an agent pod's account is read from the `AgentService` there (AD-071).
+    /// The pod's namespace: an agent pod's account is read from the `AgentService` there (AD-072).
     namespace: String,
     service: String,
     run: Option<String>,
@@ -834,7 +834,7 @@ impl Meter {
         let subject = match &a.run {
             Some(run) => self.with(|i| i.accounts.get(&(a.service.clone(), run.clone())).cloned()),
             // The pod's own last account, never the service's: a service deleted and re-created with another
-            // account must not give this pod's minutes to the new account (AD-071).
+            // account must not give this pod's minutes to the new account (AD-072).
             None => self.state(&closed.uid).last_account,
         };
         let t = Tombstone {
@@ -1098,7 +1098,7 @@ impl Meter {
                     .saturating_sub(due.send.start.max(self.state(&t.uid).unknown_counted));
                 self.unattributed(Unattributed::UnknownAccount, fresh);
                 if a.run.is_none() {
-                    // An agent's pod with no account is final (AD-071): a shared agent has none, and an account
+                    // An agent's pod with no account is final (AD-072): a shared agent has none, and an account
                     // it gets later is not for the minutes before it. They are given up, and counted once.
                     self.update(&t.uid, |s| {
                         s.unknown_counted = due.send.end;
@@ -1189,7 +1189,7 @@ impl Meter {
         };
         let subject = match self.account_for(&attributed).await {
             Ok(Some(account)) => {
-                // The pod's own last account, for its tombstone (AD-071).
+                // The pod's own last account, for its tombstone (AD-072).
                 self.update(&pod.uid, |s| s.last_account = Some(account.clone()));
                 account
             }
@@ -1201,7 +1201,7 @@ impl Meter {
                     .saturating_sub(due.send.start.max(state.unknown_counted));
                 self.unattributed(Unattributed::UnknownAccount, fresh);
                 if attributed.run.is_none() {
-                    // An agent's pod with no account is final (AD-071): a shared agent has none, and an account
+                    // An agent's pod with no account is final (AD-072): a shared agent has none, and an account
                     // it gets later is not for the minutes before it. They are given up, and counted once.
                     self.update(&pod.uid, |s| {
                         s.unknown_counted = due.send.end;
@@ -1310,7 +1310,7 @@ impl Meter {
         };
         if let (Ok(Some(account)), Some(k)) = (&asked, cache_key) {
             // A bound run's account never changes: remembered for the life of the process. An agent pod's last
-            // account is kept per pod uid by its caller, for the tombstone (AD-071).
+            // account is kept per pod uid by its caller, for the tombstone (AD-072).
             self.with(|i| i.accounts.insert(k, account.clone()));
         }
         asked

@@ -33,7 +33,7 @@ With the pod-minute meter on ([Turn on the pod-minute meter](../deploy/metering.
 | `aap_meter_invalid_total` | none | Lines the sink called invalid: a bug, dropped and never retried |
 | `aap_meter_account_failures_total` | none | Times the broker could not answer (a `401`, a `5xx`, a timeout): the pod's minutes are held for the next pass |
 
-Only the leading replica counts them. A pod of an agent makes no line: only run pods carry the size-weight annotation, so it stops at `no-weight` (its account is read from `AgentService.spec.account`, AD-071; its weight is ANR-1045). The sink's own counters (queued, sent, refused, retrying) are not exported yet: until they are, an unreachable collector shows as a growing `aap_meter_send_failures_total` and nothing on the collector's side.
+Only the leading replica counts them. A pod of an agent makes no line: only run pods carry the size-weight annotation, so it stops at `no-weight` (its account is read from `AgentService.spec.account`, AD-072; its weight is ANR-1045). The sink's own counters (queued, sent, refused, retrying) are not exported yet: until they are, an unreachable collector shows as a growing `aap_meter_send_failures_total` and nothing on the collector's side.
 
 The names come from `crates/controller/src/metrics.rs`. The label values are fixed in the code: none of them is a name from your cluster.
 

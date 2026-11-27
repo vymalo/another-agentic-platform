@@ -1055,7 +1055,7 @@
         "additionalProperties": false,
         "properties": {
           "account": {
-            "description": "The account the agent's own pods' minutes are for (`spec.account`, AD-071): the person's opaque id from the identity provider (the `sub`, trimmed and lower-cased), 1 to 128 bytes of `[A-Za-z0-9._:/-]`; an `@` is never one, so an e-mail is not an account (422 on `account`). null or absent: for a caller that holds `platform:agents.own`, nobody's (a shared agent); for any other caller, the stored one is kept. Only a caller that holds platform:agents.own may name or change it: for any other caller an absent account keeps the stored one (a replace carries it over), the stored value sent back is accepted, a different value is 403 naming that permission, and a save that changes `owner` clears it.",
+            "description": "The account the agent's own pods' minutes are for (`spec.account`, AD-072): the person's opaque id from the identity provider (the `sub`, trimmed and lower-cased), 1 to 128 bytes of `[A-Za-z0-9._:/-]`; an `@` is never one, so an e-mail is not an account (422 on `account`). null or absent: for a caller that holds `platform:agents.own`, nobody's (a shared agent); for any other caller, the stored one is kept. Only a caller that holds platform:agents.own may name or change it: for any other caller an absent account keeps the stored one (a replace carries it over), the stored value sent back is accepted, a different value is 403 naming that permission, and a save that changes `owner` clears it.",
             "type": [
               "string",
               "null"

@@ -1,4 +1,4 @@
-//! [`AgentAccounts`] (ANR-1100, AD-071): the [`AccountSource`] of the pod-minute meter for an **agent's own pod**. It
+//! [`AgentAccounts`] (ANR-1100, AD-072): the [`AccountSource`] of the pod-minute meter for an **agent's own pod**. It
 //! reads the `AgentService` the pod belongs to, in the pod's own namespace, and answers its `spec.account`: the
 //! person's opaque id, the one the orchestrator's broker returns for a run (never an e-mail).
 //!
