@@ -297,7 +297,8 @@ registry_answers() {
   ra_deadline=$(( $(date +%s) + ${1:-60} ))
   while :; do
     ra_code=$(req "$reader" "$reg")
-    [ "$ra_code" != 000 ] && return 0
+    # Empty is no answer too: `req` prints nothing when the exec itself fails (the reader pod restarting).
+    [ -n "$ra_code" ] && [ "$ra_code" != 000 ] && return 0
     [ "$(date +%s)" -lt "$ra_deadline" ] || die "the registry at $reg never answered a request from $reader in ${1:-60}s (the last code: $ra_code)"
     sleep 1
   done
