@@ -108,17 +108,7 @@ The token reaches the pod as a mounted file, never as a variable. The operator r
 
 With `replicas: 1` (the default) there is one pod, with strategy `Recreate`, and no election. With more than one, the replicas campaign for a `coordination.k8s.io/v1` `Lease` named `aap-operator` in the primary namespace. Only the holder reconciles. The others keep their caches, answer `/readyz` and serve the registry, so all pods show ready while one writes. A `PodDisruptionBudget` of `maxUnavailable: 1` is added. The timers are `leaderElection.leaseSecs`, `.renewSecs` and `.retrySecs` (15, 10 and 2).
 
-```mermaid
-stateDiagram-v2
-  [*] --> Follower
-  Follower --> Leader: no Lease, or it expired, and the write wins
-  Leader --> Follower: a 409 on renew, or no write for renewSecs
-  Leader --> Released: SIGTERM, holderIdentity cleared
-  Released --> [*]
-  Follower --> [*]: SIGTERM
-```
-
-A follower's passes write nothing. A leader that has not written for `renewSecs` demotes itself before another replica may take over. A pass that began before the loss can still write until it ends, so the overlap is bounded, not zero ([`aap-leader-kubernetes`](../../../crates/leader-kubernetes/README.md#the-loop)).
+The election, what a follower does, and how long a failover takes are on [Run two replicas](../operate/replicas.md), with the diagrams.
 
 ## What the chart refuses
 

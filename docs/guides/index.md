@@ -10,4 +10,8 @@ One task per page.
 
 ## Operate
 
-The Operate guides are planned. There are none yet.
+- [Find why an agent is not Ready](operate/not-ready.md): the five conditions, their reasons, the Events and the API route that reads them.
+- [Upgrade](operate/upgrade.md): the CRDs first, then the operator, which revision to use, and how the pods roll.
+- [Run two replicas](operate/replicas.md): the leader election through a `Lease`, a follower, and how long a failover takes.
+- [Scrape metrics](operate/metrics.md): what the operator and the API export, and the `ServiceMonitor`s, off by default.
+- [Send traces to a collector](operate/traces.md): `otel` and `api.otel`, the settings the binaries accept, and what a span never holds.
