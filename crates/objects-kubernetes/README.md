@@ -82,8 +82,8 @@ the config is already written. What happens is decided by what changed (`tests/a
 
 | The service, when its apply comes | The answer |
 |---|---|
-| Only its `resourceVersion` moved: the operator wrote its `status` (it does whenever the config changes, which the write just did) or put its finalizer on | **No answer: the apply is repeated once** with the version the service has now, and the save succeeds. The service is re-read, and has to be the object that was read (same `uid`), not being deleted, with the same `spec`, labels and annotations |
-| Its `spec`, labels or annotations changed (somebody saved it, or `kubectl edit`ed it) | `PreconditionFailed` (`412`): the person saved over a service that is no longer the one they read. The config stays written |
+| Only its `resourceVersion` moved: the operator wrote its `status` (it does whenever the config changes, which the write just did) or put its finalizer on | **No answer: the apply is repeated once** with the version the service has now, and the save succeeds. The service is re-read, and has to be the object that was read (same `uid`), not being deleted, with the same `spec`, labels and annotations — **except the wake path's `agents.vymalo.com/wake-at`**, which the operator writes while a save is in flight (ANR-1183) |
+| Its `spec`, labels or another annotation changed (somebody saved it, or `kubectl edit`ed it) | `PreconditionFailed` (`412`): the person saved over a service that is no longer the one they read. The config stays written |
 | It is another object (deleted and made again), or gone, or made in the meantime (a create) | `PreconditionFailed` for the config, `NotFound` for a replace of the service, `AlreadyExists` for a create over it |
 | It began to be deleted | `Deleting` (`409`) |
 | A field the apply sets is owned by another manager | `Conflict` (`409`), with the server's words. A retry is refused by the dry run, with nothing written, until they let go of the field |

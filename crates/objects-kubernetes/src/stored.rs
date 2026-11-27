@@ -54,14 +54,15 @@ impl Live {
     }
 
     /// Whether this is the object `earlier` was, and what moved since is not what a save is about: the same `uid`, not
-    /// being deleted, with the same `spec`, labels and annotations. The `resourceVersion` moves with a write of the
-    /// `status` (the operator's) and with a finalizer, and the `status` is in no apply of the dashboard.
+    /// being deleted, with the same `spec`, labels and annotations — **except the wake path's mark**. The
+    /// `resourceVersion` moves with a write of the `status` (the operator's) and with a finalizer, and the `status` is in
+    /// no apply of the dashboard.
     pub(crate) fn only_moved_since(&self, earlier: &Self) -> bool {
         self.uid == earlier.uid
             && !self.stored.deleting
             && self.stored.spec == earlier.stored.spec
             && self.stored.labels == earlier.stored.labels
-            && self.stored.annotations == earlier.stored.annotations
+            && same_annotations(&self.stored.annotations, &earlier.stored.annotations)
     }
 
     pub(crate) fn from_object(kind: Kind, namespace: &str, object: DynamicObject) -> Self {
@@ -88,6 +89,20 @@ impl Live {
             },
         }
     }
+}
+
+/// The annotations a save is about: every one but the wake path's mark. The operator's wake loop writes
+/// `agents.vymalo.com/wake-at` on a service while a person's save is in flight (ANR-1067), and that save must take the
+/// repeat-once path a status write gets, not a `412` (ANR-1183). The mark is not a save's change; **any other**
+/// annotation still is.
+fn same_annotations(a: &BTreeMap<String, String>, b: &BTreeMap<String, String>) -> bool {
+    fn without(m: &BTreeMap<String, String>) -> BTreeMap<&str, &str> {
+        m.iter()
+            .filter(|(k, _)| k.as_str() != aap_api::WAKE_AT_ANNOTATION)
+            .map(|(k, v)| (k.as_str(), v.as_str()))
+            .collect()
+    }
+    without(a) == without(b)
 }
 
 /// The fields some manager owns, as a tree: the union of every entry of `managedFields`.
@@ -309,6 +324,33 @@ mod tests {
         assert_eq!(
             seen.spec["access"]["allowFrom"].as_array().map(Vec::len),
             Some(2)
+        );
+    }
+
+    #[test]
+    fn a_wake_at_written_between_the_read_and_the_save_is_not_a_change() {
+        let earlier = live(Kind::AgentService, SERVICE);
+        let mut later = earlier.clone();
+        later.stored.annotations.insert(
+            aap_api::WAKE_AT_ANNOTATION.to_owned(),
+            "2026-11-27T22:00:00Z".to_owned(),
+        );
+        assert!(
+            later.only_moved_since(&earlier),
+            "the wake path's mark is not a save's change"
+        );
+        // And the other way: the mark cleared while the save was in flight.
+        assert!(
+            earlier.only_moved_since(&later),
+            "the mark's removal is not a save's change either"
+        );
+        later
+            .stored
+            .annotations
+            .insert("agents.vymalo.com/another".to_owned(), "x".to_owned());
+        assert!(
+            !later.only_moved_since(&earlier),
+            "any other annotation still moves"
         );
     }
 
