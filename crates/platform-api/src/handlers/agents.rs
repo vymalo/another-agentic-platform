@@ -236,9 +236,10 @@ where
     delete_inner(state.0, caller, name, tag).await
 }
 
-/// Who may name the account (`spec.account`, AD-071): only a holder of `platform:agents.own`, which writes the form's
-/// value as it stands (absent is nobody's). Any other caller must send the stored value, or none when nothing is stored,
-/// and a replace writes the stored value back, so a person's save never moves it. The value is never quoted.
+/// Who may name the account (`spec.account`, AD-071): only a holder of `platform:agents.own`, whose form's value is
+/// written as it stands (absent clears it). For any other caller an absent `account` means "keep the stored one" and the
+/// stored value is carried over (a person's save never moves it); the stored value sent back is kept; a different value is
+/// `403` naming that permission, a create having no stored value. The value is never quoted.
 fn apply_account_rule(
     caller: &Caller,
     form: &mut AgentForm,
@@ -250,10 +251,11 @@ fn apply_account_rule(
     let stored = current
         .and_then(|a| a.service.spec.get("account"))
         .and_then(|v| v.as_str());
-    if form.account.as_deref() != stored {
-        return Err(Problem::forbidden(aap_api::permission::AGENTS_OWN));
+    match form.account.as_deref() {
+        None => form.account = stored.map(str::to_owned),
+        Some(sent) if Some(sent) == stored => {}
+        Some(_) => return Err(Problem::forbidden(aap_api::permission::AGENTS_OWN)),
     }
-    form.account = stored.map(str::to_owned);
     Ok(())
 }
 
