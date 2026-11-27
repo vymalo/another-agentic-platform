@@ -20,7 +20,7 @@ name: release-please
 # digests in the packaged chart only (release.yml, deploy/operator/release-pin.sh).
 #
 # Cargo.lock records every first-party crate at the workspace version and cannot be marked (it is generated, and a third-party crate
-# can sit at the same version string), so the step below refreshes it on the release branch: operator.yml builds with --locked, and a
+# can sit at the same version string), so the step below refreshes it on the release branch: operator-image.yml's `scripts` job runs `cargo metadata --locked` (operator.yml is skipped there, ANR-1206), and a
 # stale lock file would make the release pull request red. Only the versions of the workspace's own crates may move; the step
 # checks that and fails otherwise.
 #

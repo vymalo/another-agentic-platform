@@ -70,7 +70,7 @@ env:
 jobs:
   fmt:
     # ANR-1206: the release pull request only moves version strings and main's own push run already tested this code; skipped here to spare the shared runner queue (a skipped job satisfies a required check).
-    if: ${{ !startsWith(github.head_ref, 'release-please--') }}
+    if: ${{ !(startsWith(github.head_ref, 'release-please--') && github.event.pull_request.head.repo.full_name == github.repository) }}
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
@@ -80,7 +80,7 @@ jobs:
 
   clippy:
     # ANR-1206: the release pull request only moves version strings and main's own push run already tested this code; skipped here to spare the shared runner queue (a skipped job satisfies a required check).
-    if: ${{ !startsWith(github.head_ref, 'release-please--') }}
+    if: ${{ !(startsWith(github.head_ref, 'release-please--') && github.event.pull_request.head.repo.full_name == github.repository) }}
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
@@ -91,7 +91,7 @@ jobs:
 
   test:
     # ANR-1206: the release pull request only moves version strings and main's own push run already tested this code; skipped here to spare the shared runner queue (a skipped job satisfies a required check).
-    if: ${{ !startsWith(github.head_ref, 'release-please--') }}
+    if: ${{ !(startsWith(github.head_ref, 'release-please--') && github.event.pull_request.head.repo.full_name == github.repository) }}
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
@@ -102,7 +102,7 @@ jobs:
 
   dependencies:
     # ANR-1206: the release pull request only moves version strings and main's own push run already tested this code; skipped here to spare the shared runner queue (a skipped job satisfies a required check).
-    if: ${{ !startsWith(github.head_ref, 'release-please--') }}
+    if: ${{ !(startsWith(github.head_ref, 'release-please--') && github.event.pull_request.head.repo.full_name == github.repository) }}
     # K5: TLS stays rustls with ring and no second TLS stack or HTTP client enters the lock file (tools/check-dependencies.sh, gates 1 to 4).
     # There is no gate on the packages a pull request adds: that is review's, and the script's opt-in gate 5 is for local use.
     runs-on: ubuntu-latest
@@ -118,7 +118,7 @@ jobs:
 
   crds-drift:
     # ANR-1206: the release pull request only moves version strings and main's own push run already tested this code; skipped here to spare the shared runner queue (a skipped job satisfies a required check).
-    if: ${{ !startsWith(github.head_ref, 'release-please--') }}
+    if: ${{ !(startsWith(github.head_ref, 'release-please--') && github.event.pull_request.head.repo.full_name == github.repository) }}
     # deploy/crds/agents.vymalo.com.yaml must be exactly what `crdgen` prints.
     runs-on: ubuntu-latest
     steps:
@@ -143,7 +143,7 @@ jobs:
 
   kind:
     # ANR-1206: the release pull request only moves version strings and main's own push run already tested this code; skipped here to spare the shared runner queue (a skipped job satisfies a required check).
-    if: ${{ !startsWith(github.head_ref, 'release-please--') }}
+    if: ${{ !(startsWith(github.head_ref, 'release-please--') && github.event.pull_request.head.repo.full_name == github.repository) }}
     # The CEL rules and the schema against a real API server. The CRDs and examples are files, so
     # this job needs no Rust.
     runs-on: ubuntu-latest
@@ -246,7 +246,7 @@ jobs:
 
   runtime-kubernetes:
     # ANR-1206: the release pull request only moves version strings and main's own push run already tested this code; skipped here to spare the shared runner queue (a skipped job satisfies a required check).
-    if: ${{ !startsWith(github.head_ref, 'release-please--') }}
+    if: ${{ !(startsWith(github.head_ref, 'release-please--') && github.event.pull_request.head.repo.full_name == github.repository) }}
     # RuntimeProvider on native Kubernetes against a real API server (S4): the conformance suite of
     # aap-ports and the cases only a cluster shows. Nothing may skip: with the two REQUIRE variables an
     # unset cluster is a failure, not a green run that proved nothing.
@@ -284,7 +284,7 @@ jobs:
 
   store-cnpg:
     # ANR-1206: the release pull request only moves version strings and main's own push run already tested this code; skipped here to spare the shared runner queue (a skipped job satisfies a required check).
-    if: ${{ !startsWith(github.head_ref, 'release-please--') }}
+    if: ${{ !(startsWith(github.head_ref, 'release-please--') && github.event.pull_request.head.repo.full_name == github.repository) }}
     # StoreProvisioner for an operator-owned CloudNativePG Cluster against a real API server (S6): the conformance
     # suite of aap-ports and the cases only CloudNativePG shows. Nothing may skip.
     runs-on: ubuntu-latest
@@ -339,7 +339,7 @@ jobs:
 
   objects-kubernetes:
     # ANR-1206: the release pull request only moves version strings and main's own push run already tested this code; skipped here to spare the shared runner queue (a skipped job satisfies a required check).
-    if: ${{ !startsWith(github.head_ref, 'release-please--') }}
+    if: ${{ !(startsWith(github.head_ref, 'release-please--') && github.event.pull_request.head.repo.full_name == github.repository) }}
     # AgentObjects on the Kubernetes API server against a real one (D5): server-side apply, the preconditions, the
     # ownership rules, the offered keys. The crate runs as a ServiceAccount that has the Role of
     # crates/objects-kubernetes/tests/rbac.yaml and nothing else, so a verb the crate uses and the Role lacks is a
@@ -410,7 +410,7 @@ jobs:
 
   operator-e2e:
     # ANR-1206: the release pull request only moves version strings and main's own push run already tested this code; skipped here to spare the shared runner queue (a skipped job satisfies a required check).
-    if: ${{ !startsWith(github.head_ref, 'release-please--') }}
+    if: ${{ !(startsWith(github.head_ref, 'release-please--') && github.event.pull_request.head.repo.full_name == github.repository) }}
     # The operator binary against a real cluster, with real pods (S5). Nothing may skip: with
     # AAP_TEST_REQUIRE_CLUSTER an unset cluster is a failure, not a green run that proved nothing.
     runs-on: ubuntu-latest

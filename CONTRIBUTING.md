@@ -61,7 +61,7 @@ by tag and digest (`x-swagger-ui-image`): move it by reading the new tag and dig
 `CLAUDE.md` ("Commands") lists the rest, and `deploy/operator/tests/e2e/README.md` the kind end-to-end scripts. CI is the
 reference: [`operator.yml`](.github/workflows/operator.yml) and [`operator-image.yml`](.github/workflows/operator-image.yml).
 
-To spare the shared runner queue, the release-please pull request (head branch `release-please--*`) skips every job of `operator.yml`, `operator-image.yml` and `gvisor-k3d.yml` except the `scripts` job, which holds `tools/check-release-version.sh`: it only moves versions and main's push run already tested the code. `governance.yml` cancels its older run for the same pull request.
+To spare the shared runner queue, the release-please pull request (head branch `release-please--*`) skips every job of `operator.yml`, `operator-image.yml` and `gvisor-k3d.yml` except the `scripts` job, which holds `tools/check-release-version.sh` and a `cargo metadata --locked` check of the lock file (the skip applies only to a branch of this repository, never a fork's): it only moves versions and main's push run already tested the code. `governance.yml` cancels its older run for the same pull request.
 
 ## Conventions
 
