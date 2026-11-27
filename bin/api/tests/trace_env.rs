@@ -40,6 +40,9 @@ fn api() -> Command {
             cmd.env_remove(name);
         }
     }
+    // A developer's or a runner's `RUST_LOG` is no business of these tests: it would change what the child logs (the
+    // BuildKit test reads a WARN line) and could fill the piped stderr while the test polls.
+    cmd.env_remove("RUST_LOG");
     cmd
 }
 
@@ -138,11 +141,18 @@ fn free_addrs() -> (SocketAddr, SocketAddr, SocketAddr) {
     (at(0), at(1), at(2))
 }
 
-/// Start the API and wait for `/metrics`. A child that **exits** before it serves is retried on three fresh addresses —
-/// `free_addrs()` cannot reserve a port, so another test or process can take one before the child binds it, and a bind
-/// failure is an immediate exit — and every failure says what the child wrote to stderr. The old shape sent stderr to
-/// `null` and reported only "the API did not come up", which is why the flake of ANR-1065 could not be read.
+/// Start the API and wait for `/metrics`. A child that **exits** before it serves is retried on three fresh addresses,
+/// but **only** when it says the port was taken (`Address already in use`): `free_addrs()` cannot reserve a port, so
+/// another process can take one before the child binds it — and any other exit is the test's answer, not a flake, so a
+/// refused variable or a panic is never hidden by a retry. Every failure says what the child wrote to stderr; the old
+/// shape sent it to `null` and reported only "the API did not come up" (ANR-1065).
 fn serve_metrics(tag: &str, env: &[(&str, &str)]) -> (Killed, String) {
+    // The two running tests start in parallel, and each releases its ports before its child binds them: without this,
+    // one test's child can be answered by the other's API on a port it never bound (the review of ANR-1065).
+    static START: std::sync::Mutex<()> = std::sync::Mutex::new(());
+    let _starting = START
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
     let mut why = String::new();
     for attempt in 1..=3 {
         let (listen, health, metrics) = free_addrs();
@@ -169,10 +179,14 @@ fn serve_metrics(tag: &str, env: &[(&str, &str)]) -> (Killed, String) {
                 return (child, text);
             }
             if let Some(status) = child.0.try_wait().unwrap() {
-                why = format!(
-                    "attempt {attempt}: the API exited ({status}): {}",
-                    stderr_of(&mut child)
-                );
+                let tail = stderr_of(&mut child);
+                let said = format!("attempt {attempt}: the API exited ({status}): {tail}");
+                assert!(tail.contains("Address already in use"), "{said}");
+                if !why.is_empty() {
+                    why.push_str("; ");
+                }
+                why.push_str(&said);
+                eprintln!("{said}; retrying on fresh ports");
                 break;
             }
             if Instant::now() >= deadline {
@@ -188,15 +202,15 @@ fn serve_metrics(tag: &str, env: &[(&str, &str)]) -> (Killed, String) {
 }
 
 /// Kill the child, reap it, and answer what it wrote to stderr. Called once it has exited or been killed, so the read
-/// cannot block.
+/// cannot block; the bytes are read rather than a `String`, so a message that is not UTF-8 still reaches the failure.
 fn stderr_of(child: &mut Killed) -> String {
     let _ = child.0.kill();
     let _ = child.0.wait();
-    let mut text = String::new();
+    let mut bytes = Vec::new();
     if let Some(mut err) = child.0.stderr.take() {
-        let _ = err.read_to_string(&mut text);
+        let _ = err.read_to_end(&mut bytes);
     }
-    text
+    String::from_utf8_lossy(&bytes).into_owned()
 }
 
 /// A kubeconfig that names a server nobody answers: the client is built (the API connects lazily), nothing is reachable.
