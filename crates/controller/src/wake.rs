@@ -88,6 +88,9 @@ pub struct PlanInput<'a> {
     pub now: i64,
     /// See [`mark_max_age`].
     pub mark_max_age: Duration,
+    /// The mark is claimed: its record is being (or was) written. A claimed mark is never aged out, as
+    /// `Sleepers::is_marked` does not age it, or a pass whose object is behind its own write would erase the record.
+    pub mark_claimed: bool,
 }
 
 /// The time of `seconds` since the Unix epoch, as the API writes it.
@@ -157,7 +160,7 @@ pub fn plan(input: &PlanInput<'_>) -> Option<SleepStatus> {
 }
 
 fn is_fresh(mark: &Mark, input: &PlanInput<'_>) -> bool {
-    input.now.saturating_sub(mark.made_at) <= secs(input.mark_max_age)
+    input.mark_claimed || input.now.saturating_sub(mark.made_at) <= secs(input.mark_max_age)
 }
 
 /// Whether the caller should drop the idle loop's mark after [`plan`] gave `planned`: the mark was there and no
@@ -224,6 +227,7 @@ mod tests {
             wake_at,
             now,
             mark_max_age: Duration::from_secs(90),
+            mark_claimed: false,
         }
     }
 
@@ -404,5 +408,54 @@ mod tests {
                 .waking
                 .is_some()
         );
+    }
+
+    #[test]
+    fn a_claimed_mark_is_never_aged_out_by_plan() {
+        let mark = Mark {
+            next_due_at: None,
+            wake_at_seen: None,
+            made_at: 1_000,
+        };
+        let mut old = input(None, Some(&mark), None, 1_000 + 10_000);
+        assert_eq!(plan(&old), None, "unclaimed, it is too old");
+        old.mark_claimed = true;
+        let record = plan(&old).expect("claimed: the record its write made is kept");
+        assert!(record.waking.is_none());
+        assert!(!stale_or_stillborn(&old, &Some(record)));
+    }
+
+    #[test]
+    fn each_boundary_of_a_wake_is_exact() {
+        // Schedule: `>=` at nextDueAt - wakeAhead (see also the 121 and 120 cases above).
+        let r = record(Some(10_000), None);
+        assert!(
+            plan(&input(Some(&r), None, None, 9_879))
+                .unwrap()
+                .waking
+                .is_none()
+        );
+        assert!(
+            plan(&input(Some(&r), None, None, 9_880))
+                .unwrap()
+                .waking
+                .is_some()
+        );
+        // Timeout: late exactly at since + wakeTimeout.
+        let mut w = record(None, None);
+        w.waking = Some(WakingStatus {
+            since: time_of(2_000),
+            cause: WakeCause::Request,
+        });
+        assert!(!timed_out(&w, &POLICY, 2_059));
+        assert!(timed_out(&w, &POLICY, 2_060));
+        // Mark age: good at the bound, gone one second after.
+        let m = Mark {
+            next_due_at: None,
+            wake_at_seen: None,
+            made_at: 1_000,
+        };
+        assert!(plan(&input(None, Some(&m), None, 1_090)).is_some());
+        assert!(plan(&input(None, Some(&m), None, 1_091)).is_none());
     }
 }

@@ -361,10 +361,12 @@ where
     let mut agent = agent;
     let policy = crate::sleep::SleepPolicy::from_scaling(&svc.spec.scaling);
     let now = (ctx.clock)().0.as_second();
-    let mark = ctx.sleepers.mark(&id);
+    let held = ctx.sleepers.mark(&id);
+    let mark = held.as_ref().map(|(m, _)| m);
     let input = crate::wake::PlanInput {
         record: previous.sleep.as_ref(),
-        mark: mark.as_ref(),
+        mark,
+        mark_claimed: held.as_ref().is_some_and(|(_, claimed)| *claimed),
         policy: policy.as_ref(),
         suspend: svc.spec.suspend,
         wake_at: svc
@@ -376,8 +378,19 @@ where
     };
     let planned = crate::wake::plan(&input);
     // A mark that made no record (too old, or the sleep would have been born waking) is spent: the loop polls again.
-    if crate::wake::stale_or_stillborn(&input, &planned) {
-        ctx.sleepers.wake(&id);
+    if crate::wake::stale_or_stillborn(&input, &planned)
+        && let Some(mark) = mark
+    {
+        let old = !input.mark_claimed
+            && now.saturating_sub(mark.made_at)
+                > i64::try_from(input.mark_max_age.as_secs()).unwrap_or(i64::MAX);
+        tracing::debug!(
+            service = %id.name(),
+            reason = if old { "stale" } else { "stillborn" },
+            "a mark was dropped without a record"
+        );
+        // Only the mark this pass read: the loop may have made a newer one since.
+        ctx.sleepers.drop_mark(&id, mark.made_at);
     }
     // Forget only what a person ended. A pass that merely found no record must leave the idle loop's mark alone: the
     // loop may have made it since this pass read it.
@@ -386,8 +399,17 @@ where
     }
     if let Some(record) = &planned {
         if previous.sleep.is_none() {
-            persist_sleep(svc, ctx, &previous, record).await?;
-            if ctx.sleepers.note_recorded(&id) {
+            // Claim first, so a lap of the idle loop that runs while the write is in flight cannot age the mark away
+            // and poll an agent whose record is not visible yet. A failed write gives the claim back (the mark then
+            // ages like any other: a retry long after the poll is not acted on).
+            let first = ctx.sleepers.claim(&id);
+            if let Err(e) = persist_sleep(svc, ctx, &previous, record).await {
+                if first {
+                    ctx.sleepers.unclaim(&id);
+                }
+                return Err(e);
+            }
+            if first {
                 ctx.metrics.inc(name::SLEEPS, &[]);
                 tracing::info!(service = %id.name(), "asleep: the record is written, scaling to zero");
             }

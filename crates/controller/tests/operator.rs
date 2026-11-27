@@ -1662,8 +1662,9 @@ async fn a_scheduled_wake_fires_at_next_due_at_minus_wake_ahead() {
         "the schedule is kept: {record}"
     );
 
-    // One second before the moment: asleep.
-    clock.set(due - 120 - 1);
+    // Three seconds before the moment (the clock is real time plus an offset in whole seconds, so the margin keeps
+    // this assertion off the edge; the exact `>=` is held by `wake.rs`): asleep.
+    clock.set(due - 120 - 3);
     r.runtime.signal(&chat_id());
     tokio::time::sleep(Duration::from_millis(500)).await;
     assert_eq!(phase_of(&r, "team", "chat").as_deref(), Some("Sleeping"));
@@ -1807,12 +1808,13 @@ async fn waking_past_wake_timeout_keeps_waking_and_says_so() {
     .await;
     assert_eq!(ready_reason(&r).as_deref(), Some("Waking"));
 
-    // One second before the timeout: not late. At it: late, said, and still waking.
-    clock.set(clock.get() + 4);
+    // Three seconds before the timeout (off the edge, which `wake.rs` holds exactly): not late. Then past it: late,
+    // said, and still waking.
+    clock.set(clock.get() + 2);
     r.runtime.signal(&chat_id());
     tokio::time::sleep(Duration::from_millis(400)).await;
     assert_eq!(ready_reason(&r).as_deref(), Some("Waking"));
-    clock.set(clock.get() + 1);
+    clock.set(clock.get() + 4);
     r.runtime.signal(&chat_id());
     within(Duration::from_secs(15), "the wake to be late", || {
         ready_reason(&r).as_deref() == Some("WakeTimedOut")

@@ -87,6 +87,7 @@ impl Sleepers {
             });
             if stale {
                 i.marks.remove(&k);
+                tracing::debug!(service = %id.name(), reason = "stale", "a mark was dropped: the agent is polled again");
             }
             i.marks.contains_key(&k)
         })
@@ -98,18 +99,46 @@ impl Sleepers {
         self.with(|i| i.marks.clear());
     }
 
-    /// The loop's proposal for this agent.
-    pub(crate) fn mark(&self, id: &RuntimeId) -> Option<Mark> {
-        self.with(|i| i.marks.get(&key(id)).map(|(m, _)| m.clone()))
+    /// The loop's proposal for this agent, and whether the reconcile has claimed it.
+    pub(crate) fn mark(&self, id: &RuntimeId) -> Option<(Mark, bool)> {
+        self.with(|i| {
+            i.marks
+                .get(&key(id))
+                .map(|(m, claimed)| (m.clone(), *claimed))
+        })
     }
 
-    /// Say the proposal was written to the status: true the first time only (so the metric counts one sleep).
-    pub(crate) fn note_recorded(&self, id: &RuntimeId) -> bool {
+    /// Claim the proposal **before** its record is written, so that aging cannot drop it while the write is in flight
+    /// (a loop lap in that window would otherwise poll an agent whose record is not visible yet, and the sleep would
+    /// go uncounted). True the first time only: that pass counts the sleep once its write succeeded.
+    pub(crate) fn claim(&self, id: &RuntimeId) -> bool {
         self.with(|i| {
             i.marks
                 .get_mut(&key(id))
-                .is_some_and(|(_, recorded)| !std::mem::replace(recorded, true))
+                .is_some_and(|(_, claimed)| !std::mem::replace(claimed, true))
         })
+    }
+
+    /// Give a claim back because the write failed: the mark ages again, so a retry a long time later is no longer
+    /// acted on (the safe choice: a failing write must not keep an old poll alive for ever).
+    pub(crate) fn unclaim(&self, id: &RuntimeId) {
+        self.with(|i| {
+            if let Some((_, claimed)) = i.marks.get_mut(&key(id)) {
+                *claimed = false;
+            }
+        });
+    }
+
+    /// Remove the mark only if it is the one a pass read (`made_at`): the loop may have made a newer one since.
+    pub(crate) fn drop_mark(&self, id: &RuntimeId, made_at: i64) {
+        self.with(|i| {
+            if i.marks
+                .get(&key(id))
+                .is_some_and(|(m, _)| m.made_at == made_at)
+            {
+                i.marks.remove(&key(id));
+            }
+        });
     }
 
     /// Forget everything about an agent: it was deleted, suspended by a person, or no longer asks to sleep.
@@ -384,11 +413,14 @@ mod tests {
         r.at(&svc, 600).await;
         assert_eq!(
             r.sleepers.mark(&r.id),
-            Some(Mark {
-                next_due_at: Some(50_000),
-                wake_at_seen: Some("2026-01-01T00:00:00Z".to_owned()),
-                made_at: 600,
-            })
+            Some((
+                Mark {
+                    next_due_at: Some(50_000),
+                    wake_at_seen: Some("2026-01-01T00:00:00Z".to_owned()),
+                    made_at: 600,
+                },
+                false
+            ))
         );
     }
 
@@ -553,6 +585,35 @@ mod tests {
             "the leader keeps its marks"
         );
         on_leadership(&r.sleepers, false);
+        assert!(!r.sleepers.is_marked(&r.id, 600, MAX_AGE));
+    }
+
+    #[tokio::test]
+    async fn a_claimed_mark_older_than_the_bound_is_not_dropped_by_aging() {
+        let r = rig();
+        let svc = service(sleepy(), false);
+        r.at(&svc, 0).await;
+        r.at(&svc, 600).await;
+        assert!(r.sleepers.claim(&r.id), "the first claim is new");
+        assert!(!r.sleepers.claim(&r.id), "the second is not");
+        assert!(
+            r.sleepers.is_marked(&r.id, 600 + 10_000, MAX_AGE),
+            "a record is being written for it"
+        );
+        // A failed write gives the claim back: it ages again.
+        r.sleepers.unclaim(&r.id);
+        assert!(!r.sleepers.is_marked(&r.id, 600 + 10_000, MAX_AGE));
+    }
+
+    #[tokio::test]
+    async fn a_newer_mark_is_not_removed_by_a_pass_that_read_an_older_one() {
+        let r = rig();
+        let svc = service(sleepy(), false);
+        r.at(&svc, 0).await;
+        r.at(&svc, 600).await;
+        r.sleepers.drop_mark(&r.id, 599);
+        assert!(r.sleepers.is_marked(&r.id, 600, MAX_AGE));
+        r.sleepers.drop_mark(&r.id, 600);
         assert!(!r.sleepers.is_marked(&r.id, 600, MAX_AGE));
     }
 }
