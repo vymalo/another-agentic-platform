@@ -2239,6 +2239,49 @@ check "metering: a key that is not a setting is refused" refused 'metering.foo i
 check "metering must be a map" refused 'metering must be a map' --set metering=null
 check "an ipBlock of 0.0.0.0/0 as a collector peer is refused" met_refused 'is every address' --set-json 'metering.collector.to=[{"ipBlock":{"cidr":"0.0.0.0/0"}}]'
 
+# ---- An empty namespaceSelector is every namespace (ANR-1191) ------------------------------------------------------------------
+# `namespaceSelector: {}` selects every namespace in a NetworkPolicy, so every list of peers refuses a namespaceSelector that has no
+# matchLabels and no matchExpressions; one with either renders.
+every_ns='[{"namespaceSelector":{}}]'
+ns_msg='a namespaceSelector with no matchLabels and no matchExpressions selects every namespace'
+ns_dns='[{"namespaceSelector":{"matchLabels":{"a":"b"}}}]'
+check "an empty namespaceSelector as a toolProbe peer is refused" refused "toolProbe.to: $ns_msg" \
+  --set-json "toolProbe.to=$every_ns" --set-json "toolProbe.dns.to=$ns_dns"
+check "an empty namespaceSelector as an activity peer is refused" refused "activity.to: $ns_msg" \
+  --set-json "activity.to=$every_ns" --set activity.tokenSecret.name=agent-bearer --set-json "activity.dns.to=$ns_dns"
+check "an empty namespaceSelector as a traces collector peer is refused" refused "otel.to: $ns_msg" \
+  -f "$here/otel.values.yaml" --set-json "otel.to=$every_ns"
+check "an empty namespaceSelector as a metering broker peer is refused" refused "metering.broker.to: $ns_msg" \
+  -f "$here/metering.values.yaml" --set-json "metering.broker.to=$every_ns"
+check "an empty namespaceSelector as a registry reader is refused" refused "networkPolicy.registry.allowFrom: $ns_msg" \
+  -f "$here/leader.values.yaml" --set-json "networkPolicy.registry.allowFrom=$every_ns"
+check "an empty namespaceSelector as a metrics scraper is refused" refused "networkPolicy.metrics.allowFrom: $ns_msg" \
+  -f "$here/metrics.values.yaml" --set-json "networkPolicy.metrics.allowFrom=$every_ns"
+check "an empty namespaceSelector as an API metrics scraper is refused" refused "api.metrics.allowFrom: $ns_msg" \
+  -f "$here/metrics.values.yaml" --set-json "api.metrics.allowFrom=$every_ns"
+# The other spellings of nothing: null, and each of the two keys empty.
+for nothing in 'null' '{"matchLabels":{}}' '{"matchExpressions":[]}'; do
+  check "a namespaceSelector of $nothing is refused" refused "toolProbe.to: $ns_msg" \
+    --set-json "toolProbe.to=[{\"namespaceSelector\":$nothing}]" --set-json "toolProbe.dns.to=$ns_dns"
+done
+check "an empty namespaceSelector is refused even beside a podSelector" refused "toolProbe.to: $ns_msg" \
+  --set-json 'toolProbe.to=[{"namespaceSelector":{},"podSelector":{"matchLabels":{"a":"b"}}}]' --set-json "toolProbe.dns.to=$ns_dns"
+check "an ipBlock of 0.0.0.0/0 as a registry reader is refused" refused 'networkPolicy.registry.allowFrom: an ipBlock of 0.0.0.0/0 is every address' \
+  -f "$here/leader.values.yaml" --set-json 'networkPolicy.registry.allowFrom=[{"ipBlock":{"cidr":"0.0.0.0/0"}}]'
+check "an ipBlock of 0.0.0.0/0 as a metrics scraper is refused" refused 'networkPolicy.metrics.allowFrom: an ipBlock of 0.0.0.0/0 is every address' \
+  -f "$here/metrics.values.yaml" --set-json 'networkPolicy.metrics.allowFrom=[{"ipBlock":{"cidr":"0.0.0.0/0"}}]'
+ns_labels_renders() {
+  render --set-json 'toolProbe.to=[{"namespaceSelector":{"matchLabels":{"a":"b"}}}]' --set-json "toolProbe.dns.to=$ns_dns" || return 1
+  all_of "$(op_egress_rule 3)" '^      to:' 'namespaceSelector:' 'matchLabels:' 'a: b'
+}
+check "a namespaceSelector with matchLabels alone renders, and the operator's egress rule carries the peer" ns_labels_renders
+ns_expressions_renders() {
+  render --set-json 'toolProbe.to=[{"namespaceSelector":{"matchExpressions":[{"key":"a","operator":"In","values":["b"]}]}}]' \
+    --set-json "toolProbe.dns.to=$ns_dns" || return 1
+  all_of "$(op_egress_rule 3)" '^      to:' 'namespaceSelector:' 'matchExpressions:' 'key: a' 'operator: In'
+}
+check "a namespaceSelector with matchExpressions alone renders, and the operator's egress rule carries the peer" ns_expressions_renders
+
 # ---- Tool probe (slice K3a, AD-053) ---------------------------------------------------------------------------------------
 # `toolProbe.to` is the deployment's list of the peers the operator may reach to probe a ToolProvider's MCP server (a NetworkPolicy
 # names peers, never host names: the policy is what bounds the probe). Empty (the default): off, and then not a rule of it is rendered.
