@@ -296,6 +296,15 @@ kind delete cluster --name aap-start
 Two things stay on your machine. `docker rmi aap-stub:ci` removes the local image. `operator.values.yaml`, `hello.yaml` and `registry.json`, which the
 steps wrote in the current directory, remain until you delete them.
 
+## More walk-throughs
+
+Each page below starts from a fresh cluster and says what it was adapted from and whether it was run. They go from the easiest.
+
+1. [A folder agent](get-started/folder-agent.md): an agent that is one `instructions.md`, a scripted model, a message and its answer over A2A.
+2. [A coder](get-started/coder.md): a coder with its model by reference to a Secret key, and how to read its status and Events.
+3. [The Platform API with aapctl](get-started/platform-api.md): `api.enabled`, a test issuer, `aapctl login`, `apply`, `get` and `delete`.
+4. [A tool server](get-started/tool-server.md): the catalogue's Kubernetes server, the probe, and an agent that uses it.
+
 ## Next
 
 - [Architecture §59a](architecture/10-control-plane-and-crds.md): what the operator does, slice by slice.

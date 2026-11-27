@@ -25,7 +25,13 @@ const sidebar = [
       { text: "MVP cut", link: "/mvp" },
     ],
   },
-  { text: "Get started", items: [{ text: "Get started", link: "/get-started" }] },
+  {
+    text: "Get started",
+    items: [
+      { text: "Get started", link: "/get-started" },
+      ...pages("get-started", ["folder-agent.md", "coder.md", "platform-api.md", "tool-server.md"]),
+    ],
+  },
   {
     text: "Guides",
     collapsed: true,
