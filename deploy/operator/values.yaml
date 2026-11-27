@@ -716,10 +716,14 @@ api:
     handshakeTimeoutSecs: 5
     maxHandshakesPerIp: 8
     maxConnections: 256
-    # The workloads: REQUIRED, at least one. Each `spiffeId` is the exact URI SAN (spiffe://...), once; `permissions` is `[platform:agents.own]` or empty.
+    # The workloads: REQUIRED, at least one. Each `spiffeId` is the exact URI SAN (spiffe://...), once; `permissions` is any of
+    # `platform:agents.own`, `platform:agents.read.owner`, both, or empty (AD-072: the orchestrator holds both, the staff service the
+    # read-only one; anything else is refused at render and at load).
     clients: []
     #  - spiffeId: spiffe://another/ns/another-agents/sa/orchestrator
-    #    permissions: [platform:agents.own]
+    #    permissions: [platform:agents.own, platform:agents.read.owner]
+    #  - spiffeId: spiffe://another/ns/another-agents/sa/staff
+    #    permissions: [platform:agents.read.owner]
     tls:
       # REQUIRED: a Secret of type kubernetes.io/tls (tls.crt, tls.key) the deployment makes: the server certificate the API presents, which
       # the workload checks against its own trust. Mounted at /etc/aap-api-workload/tls and re-read by the API when the file changes (30 s).
