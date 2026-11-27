@@ -1237,8 +1237,13 @@ pub trait WakerUnderTest: crate::Waker + 'static {
 
 /// An [`Upstream`](crate::Upstream) the suite can script and read back.
 pub trait UpstreamUnderTest: crate::Upstream + 'static {
-    /// From now on every agent answers `response`.
-    fn answer(&self, response: crate::UpstreamResponse) -> impl Future<Output = ()> + Send;
+    /// From now on every agent answers with this head and these body chunks, in order.
+    fn answer(
+        &self,
+        status: u16,
+        headers: Vec<(String, String)>,
+        chunks: Vec<Vec<u8>>,
+    ) -> impl Future<Output = ()> + Send;
     /// From now on no agent can be reached.
     fn break_upstream(&self) -> impl Future<Output = ()> + Send;
     /// What the agents received, in order.
@@ -1259,10 +1264,7 @@ pub trait CardsUnderTest: crate::CardSource + 'static {
 #[allow(missing_docs)] // each case is named for what it asserts
 pub mod activator {
     use super::*;
-    use crate::{
-        Card, CardError, Route, UpstreamError, UpstreamRequest, UpstreamResponse, WakeError,
-        WakeOutcome,
-    };
+    use crate::{Card, CardError, Route, UpstreamError, UpstreamRequest, WakeError, WakeOutcome};
 
     fn id() -> RuntimeId {
         RuntimeId::new(unique("ns"), unique("agent"))
@@ -1341,14 +1343,30 @@ pub mod activator {
     }
 
     pub async fn the_answer_comes_back_unchanged_whatever_its_status<U: UpstreamUnderTest>(u: U) {
-        let answer = UpstreamResponse {
-            status: 404,
-            headers: vec![("x-a".into(), "b".into())],
-            body: vec![0, 1, 2, 255],
-        };
-        u.answer(answer.clone()).await;
+        let headers = vec![("x-a".to_owned(), "b".to_owned())];
+        u.answer(404, headers.clone(), vec![vec![0, 1], vec![2, 255]])
+            .await;
         let got = u.forward(&id(), &Route::Default, request()).await.unwrap();
-        assert_eq!(got, answer, "a 4xx is an answer, not an error");
+        assert_eq!(got.status, 404, "a 4xx is an answer, not an error");
+        assert_eq!(got.headers, headers);
+        assert_eq!(
+            got.collect_body().await.unwrap(),
+            vec![0, 1, 2, 255],
+            "the body arrives unchanged"
+        );
+    }
+
+    pub async fn the_chunks_of_the_body_arrive_in_order_and_all_of_them<U: UpstreamUnderTest>(
+        u: U,
+    ) {
+        let chunks: Vec<Vec<u8>> = (0u8..6).map(|i| vec![i, i]).collect();
+        u.answer(200, Vec::new(), chunks.clone()).await;
+        let got = u.forward(&id(), &Route::Default, request()).await.unwrap();
+        assert_eq!(
+            got.collect_body().await.unwrap(),
+            chunks.concat(),
+            "a chunk is lost, doubled or out of order"
+        );
     }
 
     pub async fn each_call_is_one_forward<U: UpstreamUnderTest>(u: U) {
@@ -1429,7 +1447,7 @@ macro_rules! waker_conformance {
 #[macro_export]
 macro_rules! upstream_conformance {
     ($make:path) => {
-        $crate::upstream_conformance!(@cases $make; the_request_reaches_the_agent_unchanged, the_answer_comes_back_unchanged_whatever_its_status, each_call_is_one_forward, an_unreachable_agent_is_a_transient_error);
+        $crate::upstream_conformance!(@cases $make; the_request_reaches_the_agent_unchanged, the_answer_comes_back_unchanged_whatever_its_status, the_chunks_of_the_body_arrive_in_order_and_all_of_them, each_call_is_one_forward, an_unreachable_agent_is_a_transient_error);
     };
     (@cases $make:path; $($case:ident),* $(,)?) => {
         $(

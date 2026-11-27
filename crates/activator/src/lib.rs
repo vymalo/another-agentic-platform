@@ -25,8 +25,13 @@
 //! idempotent, and the next request would only ask again). A request that joins a wake already running shares the first
 //! request's deadline, so it may wait less than `wake_timeout`.
 //!
-//! **Known limit: no streaming.** Request and response bodies are buffered, so a streamed answer (SSE, A2A `message:stream`)
-//! arrives whole, after the agent finishes, and a stream longer than `forward_timeout` is cut. A follow-up card will cover it.
+//! **The answer is streamed, the request is buffered.** The agent's body reaches the client chunk by chunk as the [`Upstream`]
+//! produces it (SSE, A2A `message:stream`), so the activator never holds an answer whole. The request stays buffered: a wake may
+//! have to replay it, and R5 will read its metadata. Time limits: [`Settings::forward_timeout`] covers the wait for the answer's
+//! **head** (`504`); [`Settings::stream_idle_timeout`] ends a stream that stops producing chunks; an error in the agent's stream
+//! ends it too. In both cases the head has been sent, so the client sees the connection end, and the metrics count it. The
+//! `max_in_flight` permit is held until the stream ends or the client goes away.
+//!
 //!
 //! Routing by channel (AD-059, R5) will be a step between the request and [`Upstream::forward`]: [`Activator::route`] is
 //! that step and always answers [`Route::Default`] today.
@@ -49,7 +54,8 @@ use axum::extract::{Request, State};
 use axum::http::header::{CONTENT_LENGTH, CONTENT_TYPE, HOST, RETRY_AFTER};
 use axum::http::{HeaderName, HeaderValue, Method, StatusCode};
 use axum::response::Response;
-use tokio::sync::{Semaphore, watch};
+use futures::StreamExt;
+use tokio::sync::{OwnedSemaphorePermit, Semaphore, watch};
 
 pub use metrics::{ActivatorMetrics, Outcome, WakeKind};
 
@@ -66,12 +72,16 @@ pub struct Settings {
     /// The upper bound of a wake, after which the caller is told to retry. The default is 5 m, the largest value the CRD allows
     /// for `scaling.wakeTimeout`, so that the agent's own (sooner) answer is what decides. Provisional.
     pub wake_timeout: Duration,
-    /// The longest `Upstream::forward` may take; past it the answer is `504`. **After a `504` the agent may still have received
+    /// The longest the agent may take to **start** answering (`Upstream::forward` returning the head); past it the answer is `504`. **After a `504` the agent may still have received
     /// the request and be processing it**: the future is dropped, the request is not recalled. A `POST` is not idempotent, so a
     /// client that retries can run it twice. Provisional.
     pub forward_timeout: Duration,
     /// The longest reading a request body may take; past it the answer is `408`. Provisional.
     pub body_read_timeout: Duration,
+    /// The longest a streamed answer may go without a chunk. Past it the stream ends and the client sees the connection end (the
+    /// head has gone, so no status can say so); `aap_activator_requests_total{outcome="stream_idle"}` counts it, in addition to the
+    /// `forwarded` of the head. An error item of the agent's stream ends it the same way (`stream_failed`). Provisional.
+    pub stream_idle_timeout: Duration,
     /// How many non-card requests may be held or forwarded at once; past it the answer is `503` with `Retry-After` and no wake
     /// is started. Memory is bounded by this times `max_body_bytes`. Provisional.
     pub max_in_flight: usize,
@@ -91,6 +101,7 @@ impl Default for Settings {
             wake_timeout: Duration::from_secs(300),
             forward_timeout: Duration::from_secs(120),
             body_read_timeout: Duration::from_secs(30),
+            stream_idle_timeout: Duration::from_secs(120),
             max_in_flight: 256,
             host_suffix: None,
             retry_after_secs: 10,
@@ -130,7 +141,7 @@ struct Inner<W, U, C> {
     upstream: U,
     cards: C,
     settings: Settings,
-    permits: Semaphore,
+    permits: Arc<Semaphore>,
     flights: Arc<Flights>,
     metrics: Arc<ActivatorMetrics>,
 }
@@ -161,7 +172,7 @@ where
         {
             sfx.insert(0, '.');
         }
-        let permits = Semaphore::new(settings.max_in_flight);
+        let permits = Arc::new(Semaphore::new(settings.max_in_flight));
         Self {
             inner: Arc::new(Inner {
                 waker: Arc::new(waker),
@@ -396,7 +407,7 @@ where
     }
 
     // Past the limit nothing is buffered and no wake is started, so a flood of forged hosts cannot start wakes or hold memory.
-    let Ok(_permit) = a.inner.permits.try_acquire() else {
+    let Ok(permit) = Arc::clone(&a.inner.permits).try_acquire_owned() else {
         return (
             reply(
                 StatusCode::SERVICE_UNAVAILABLE,
@@ -513,10 +524,16 @@ where
                     Outcome::UpstreamFailed,
                 );
             };
-            let mut r = Response::new(Body::from(answer.body));
+            let mut r = Response::new(Body::from_stream(guarded(
+                answer.body,
+                s.stream_idle_timeout,
+                permit,
+                Arc::clone(&a.inner.metrics),
+            )));
             *r.status_mut() = status;
             for (k, v) in strip_hop_by_hop(&answer.headers) {
-                // The length is the body's own, which the server sets.
+                // No length is promised: the body is streamed, so the server chooses chunked encoding. An upstream's own length
+                // would be a second, and perhaps wrong, one.
                 if k.eq_ignore_ascii_case("content-length") {
                     continue;
                 }
@@ -553,6 +570,50 @@ fn declared_length(headers: &axum::http::HeaderMap) -> Result<Option<u64>, ()> {
         }
     }
     Ok(found)
+}
+
+/// The end of a streamed answer that did not finish: the head has gone, so the only thing left is to end the connection, which is
+/// what an `Err` item of a body does. The text names the reason and nothing the agent said.
+#[derive(Debug)]
+struct StreamEnded(&'static str);
+
+impl std::fmt::Display for StreamEnded {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.0)
+    }
+}
+
+impl std::error::Error for StreamEnded {}
+
+/// The agent's body, chunk by chunk, to the client. It ends the stream (an `Err` item, so the connection ends) when no chunk comes
+/// within `idle` or the agent's stream fails, and counts either. **The `max_in_flight` permit lives in this stream's state**: it
+/// is released when the stream ends or when the client goes away and the response body, and with it this stream, is dropped.
+fn guarded(
+    body: aap_ports::BodyStream,
+    idle: Duration,
+    permit: OwnedSemaphorePermit,
+    metrics: Arc<ActivatorMetrics>,
+) -> impl futures::Stream<Item = Result<axum::body::Bytes, StreamEnded>> + Send + 'static {
+    futures::stream::unfold(Some((body, permit)), move |state| {
+        let metrics = Arc::clone(&metrics);
+        async move {
+            let (mut body, permit) = state?;
+            match tokio::time::timeout(idle, body.next()).await {
+                Err(_) => {
+                    metrics.request(Outcome::StreamIdle);
+                    Some((Err(StreamEnded("stream idle")), None))
+                }
+                Ok(None) => None,
+                Ok(Some(Ok(chunk))) => {
+                    Some((Ok(axum::body::Bytes::from(chunk)), Some((body, permit))))
+                }
+                Ok(Some(Err(_))) => {
+                    metrics.request(Outcome::StreamFailed);
+                    Some((Err(StreamEnded("stream failed")), None))
+                }
+            }
+        }
+    })
 }
 
 enum BodyFail {

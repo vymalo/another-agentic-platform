@@ -183,12 +183,16 @@ enum UpFault {
     DuplicatesTheForward,
     OkWhenUnreachable,
     AltersTheAnswer,
+    ReordersTheChunks,
+    DropsAChunk,
 }
+
+type Answer = (u16, Vec<(String, String)>, Vec<Vec<u8>>);
 
 #[derive(Clone)]
 struct FaultyUpstream {
     fault: UpFault,
-    answer: Arc<Mutex<Option<UpstreamResponse>>>,
+    answer: Arc<Mutex<Option<Answer>>>,
     broken: Arc<Mutex<bool>>,
     seen: Arc<Mutex<Vec<(RuntimeId, UpstreamRequest)>>>,
 }
@@ -225,33 +229,39 @@ impl Upstream for FaultyUpstream {
         }
         if *self.broken.lock().unwrap() {
             return if self.fault == UpFault::OkWhenUnreachable {
-                Ok(ok())
+                Ok(UpstreamResponse::buffered(200, vec![], b"ok".to_vec()))
             } else {
                 Err(UpstreamError::Unavailable("down".into()))
             };
         }
-        let mut answer = self.answer.lock().unwrap().clone().unwrap_or_else(ok);
-        if self.fault == UpFault::ErrsOnA4xx && answer.status >= 400 {
+        let (status, headers, mut chunks) = self
+            .answer
+            .lock()
+            .unwrap()
+            .clone()
+            .unwrap_or_else(|| (200, vec![], vec![b"ok".to_vec()]));
+        if self.fault == UpFault::ErrsOnA4xx && status >= 400 {
             return Err(UpstreamError::Unavailable("4xx".into()));
         }
-        if self.fault == UpFault::AltersTheAnswer {
-            answer.body.push(b'!');
+        match self.fault {
+            UpFault::AltersTheAnswer => chunks.push(vec![b'!']),
+            UpFault::ReordersTheChunks => chunks.reverse(),
+            UpFault::DropsAChunk => {
+                chunks.pop();
+            }
+            _ => {}
         }
-        Ok(answer)
-    }
-}
-
-fn ok() -> UpstreamResponse {
-    UpstreamResponse {
-        status: 200,
-        headers: vec![],
-        body: b"ok".to_vec(),
+        Ok(UpstreamResponse {
+            status,
+            headers,
+            body: Box::pin(futures::stream::iter(chunks.into_iter().map(Ok))),
+        })
     }
 }
 
 impl UpstreamUnderTest for FaultyUpstream {
-    async fn answer(&self, response: UpstreamResponse) {
-        *self.answer.lock().unwrap() = Some(response);
+    async fn answer(&self, status: u16, headers: Vec<(String, String)>, chunks: Vec<Vec<u8>>) {
+        *self.answer.lock().unwrap() = Some((status, headers, chunks));
     }
     async fn break_upstream(&self) {
         *self.broken.lock().unwrap() = true;
@@ -285,10 +295,28 @@ async fn an_upstream_that_turns_a_4xx_into_an_error_fails_the_suite() {
 }
 
 #[tokio::test]
-#[should_panic(expected = "255, 33")]
+#[should_panic(expected = "the body arrives unchanged")]
 async fn an_upstream_that_alters_the_answer_fails_the_suite() {
     testkit::activator::the_answer_comes_back_unchanged_whatever_its_status(upstream(
         UpFault::AltersTheAnswer,
+    ))
+    .await;
+}
+
+#[tokio::test]
+#[should_panic(expected = "a chunk is lost")]
+async fn an_upstream_that_drops_a_chunk_fails_the_suite() {
+    testkit::activator::the_chunks_of_the_body_arrive_in_order_and_all_of_them(upstream(
+        UpFault::DropsAChunk,
+    ))
+    .await;
+}
+
+#[tokio::test]
+#[should_panic(expected = "a chunk is lost")]
+async fn an_upstream_that_reorders_the_chunks_fails_the_suite() {
+    testkit::activator::the_chunks_of_the_body_arrive_in_order_and_all_of_them(upstream(
+        UpFault::ReordersTheChunks,
     ))
     .await;
 }
@@ -450,6 +478,7 @@ async fn the_sound_upstream_passes_every_case() {
     let u = || upstream(UpFault::Sound);
     t::the_request_reaches_the_agent_unchanged(u()).await;
     t::the_answer_comes_back_unchanged_whatever_its_status(u()).await;
+    t::the_chunks_of_the_body_arrive_in_order_and_all_of_them(u()).await;
     t::each_call_is_one_forward(u()).await;
     t::an_unreachable_agent_is_a_transient_error(u()).await;
 }

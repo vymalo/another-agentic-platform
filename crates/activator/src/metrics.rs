@@ -29,6 +29,10 @@ pub enum Outcome {
     BodyTimeout,
     /// Over `max_in_flight`: refused with no wake.
     Shed,
+    /// A streamed answer ended because no chunk came within `stream_idle_timeout` (counted besides `Forwarded`).
+    StreamIdle,
+    /// A streamed answer ended because the agent's stream failed (counted besides `Forwarded`).
+    StreamFailed,
     /// The wake ended `TimedOut` or hit the activator's deadline.
     WakeTimeout,
     /// The wake failed or was refused.
@@ -51,6 +55,8 @@ impl Outcome {
             Self::UpstreamTimeout => "upstream_timeout",
             Self::BodyTimeout => "body_timeout",
             Self::Shed => "shed",
+            Self::StreamIdle => "stream_idle",
+            Self::StreamFailed => "stream_failed",
             Self::WakeTimeout => "wake_timeout",
             Self::WakeFailed => "wake_failed",
             Self::TooLarge => "too_large",

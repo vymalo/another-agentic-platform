@@ -29,8 +29,8 @@ pub mod memory;
 pub mod testkit;
 
 pub use activator::{
-    Card, CardError, CardSource, RefusedReason, Route, Upstream, UpstreamError, UpstreamRequest,
-    UpstreamResponse, WakeError, WakeOutcome, Waker,
+    BodyStream, Card, CardError, CardSource, RefusedReason, Route, Upstream, UpstreamError,
+    UpstreamRequest, UpstreamResponse, WakeError, WakeOutcome, Waker,
 };
 pub use activity::{Activity, ActivityError, ActivitySource};
 pub use auth::{AuthError, Authenticator, InvalidToken, Principal};
