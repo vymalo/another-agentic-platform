@@ -37,3 +37,23 @@ spec:
       targetPort: metrics
       protocol: TCP
 {{- end }}
+{{- if include "aap.api.workloadEnabled" . }}
+---
+# The workload listener (mutual TLS) on a Service of its own: the person's Service never carries it, and the NetworkPolicy opens it to
+# api.workload.from only. The edge's Ingress does not route to it: a workload is inside the cluster.
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ include "aap.api.fullname" . }}-workload
+  labels:
+    {{- include "aap.api.labels" . | nindent 4 }}
+spec:
+  type: ClusterIP
+  selector:
+    {{- include "aap.api.selectorLabels" . | nindent 4 }}
+  ports:
+    - name: workload
+      port: {{ .Values.api.workload.port }}
+      targetPort: workload
+      protocol: TCP
+{{- end }}

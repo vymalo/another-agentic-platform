@@ -12,6 +12,8 @@
 # `metrics` (tests/metrics.values.yaml: the file carries `metricsListen`, on a port that is not the binary's default) and `otel`
 # (tests/otel.values.yaml: tracing on; the file is the golden's, because tracing is not in the file, and what CI checks with it is the
 # environment the chart renders for the API, read from the render by the workflow).
+# and `workload` (tests/workload.values.yaml: the workload listener on, ANR-1011: the file carries `workloadListener` and `workloadClients`, and
+# the binary checks that a SPIFFE id, a permission and a port are ones it accepts; it reads none of the files the listener names).
 # Needs `helm` and `awk` (api-config.sh).
 set -eu
 
@@ -34,6 +36,7 @@ sh "$here/api-config.sh" "$dir/full.yaml" -f "$here/api-full.values.yaml"
 sh "$here/api-config.sh" "$dir/runpods.yaml" -f "$here/runpods.values.yaml"
 sh "$here/api-config.sh" "$dir/metrics.yaml" -f "$here/metrics.values.yaml"
 sh "$here/api-config.sh" "$dir/otel.yaml" -f "$here/otel.values.yaml"
+sh "$here/api-config.sh" "$dir/workload.yaml" -f "$here/workload.values.yaml"
 
 # Shapes the chart renders and the binary must REFUSE (`api --check` exits 1), in refused/: `clash` puts the API on 9090 with the metrics
 # port not exposed, so the file has no metricsListen and the binary's default for it (127.0.0.1:9090) is the API's own port. CI fails

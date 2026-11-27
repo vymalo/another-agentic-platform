@@ -3,7 +3,7 @@
 use std::sync::Arc;
 
 use aap_forms::{ModelEndpointForm, ToolServerForm};
-use aap_ports::{AgentObjects, Authenticator};
+use aap_ports::{AgentObjects, Authenticator, ClientAuthenticator};
 use axum::Router;
 use axum::middleware::{from_fn, from_fn_with_state};
 use axum::routing::{MethodFilter, MethodRouter};
@@ -52,13 +52,13 @@ where
 }
 
 /// The routes of the table, each with its handler, and nothing else: no layer, no fallback, no state.
-fn assemble<O, A>() -> Router<S<O, A>>
+fn assemble<O, A>(admit: impl Fn(&Route) -> bool) -> Router<S<O, A>>
 where
     O: AgentObjects + 'static,
     A: Authenticator + 'static,
 {
     let mut paths: Vec<&'static str> = Vec::new();
-    for route in &ROUTES {
+    for route in ROUTES.iter().filter(|r| admit(r)) {
         if !paths.contains(&route.path) {
             paths.push(route.path);
         }
@@ -67,7 +67,7 @@ where
     for path in paths {
         let methods = ROUTES
             .iter()
-            .filter(|r| r.path == path)
+            .filter(|r| r.path == path && admit(r))
             .fold(MethodRouter::new(), |mr, route| mount::<O, A>(mr, route));
         router = router.route(path, methods);
     }
@@ -79,7 +79,11 @@ where
 /// This is the last thing done to a router, so there is no "after": a route, a service, a nested or merged router or a
 /// fallback that is in `routes` is wrapped, and the authorization layer lets none of them run unless it is in the table
 /// ([`guard`]).
-fn guarded<O, A>(routes: Router<S<O, A>>, state: ApiState<O, A>) -> Router
+fn guarded<O, A>(
+    routes: Router<S<O, A>>,
+    state: ApiState<O, A>,
+    authorize: impl FnOnce(Router<S<O, A>>, S<O, A>) -> Router<S<O, A>>,
+) -> Router
 where
     O: AgentObjects + 'static,
     A: Authenticator + 'static,
@@ -90,7 +94,7 @@ where
     let state: S<O, A> = Arc::new(state);
     // From the inside out: the guard; CORS (which answers a preflight itself, before the guard asks for a token); the log;
     // and the headers of every answer, outside all of them, so that a preflight, a 404 and a 405 carry them too.
-    let router = routes.layer(from_fn_with_state(state.clone(), guard::<O, A>));
+    let router = authorize(routes, state.clone());
     // Outside the guard, inside CORS: a `406`, a `415` and a `401` are negotiated like an answer.
     let router = router.layer(from_fn(crate::negotiate::layer));
     let router = match cors {
@@ -115,7 +119,31 @@ where
     O: AgentObjects + 'static,
     A: Authenticator + 'static,
 {
-    guarded(assemble::<O, A>(), state)
+    guarded(assemble::<O, A>(|_| true), state, |routes, state| {
+        routes.layer(from_fn_with_state(state, guard::<O, A>))
+    })
+}
+
+/// The router of the workload listener (ANR-1011, ADR-0042): **the routes of the table that `platform:agents.own` opens, and no
+/// other**, behind [`workload_guard`](crate::workload) in place of the bearer guard. It never reads `Authorization`, and a route
+/// the workload may not use is not mounted, so it is a `404` and not a `403` that names a permission. The state's own `A` is
+/// [`NoBearer`](crate::NoBearer): this listener has no bearer authenticator to fall back to.
+pub fn workload_router<O, W>(state: ApiState<O, crate::NoBearer>, auth: W) -> Router
+where
+    O: AgentObjects + 'static,
+    W: ClientAuthenticator + 'static,
+{
+    let auth = Arc::new(auth);
+    guarded(
+        assemble::<O, crate::NoBearer>(crate::workload::opens_to_workloads),
+        state,
+        move |routes, state| {
+            routes.layer(from_fn_with_state(
+                crate::workload::Guard { state, auth },
+                crate::workload::guard::<O, W>,
+            ))
+        },
+    )
 }
 
 #[cfg(test)]
@@ -183,7 +211,7 @@ mod tests {
                 }
             }
         });
-        let routes = assemble::<Objects, Auth>()
+        let routes = assemble::<Objects, Auth>(|_| true)
             // A path nobody gave a permission, as a handler, a service, a nested router and a merged one.
             .route("/v1/stray", get(counted(ran)))
             .route_service("/v1/stray-service", service.clone())
@@ -198,7 +226,9 @@ mod tests {
             .route("/v1/agents/{name}", axum::routing::patch(counted(ran)))
             // And what answers a path that matched nothing.
             .fallback(counted(ran));
-        guarded(routes, state())
+        guarded(routes, state(), |routes, state| {
+            routes.layer(from_fn_with_state(state, guard::<Objects, Auth>))
+        })
     }
 
     #[tokio::test]
@@ -244,6 +274,57 @@ mod tests {
         assert_eq!(
             status(&app, "GET", "/v1/me", None).await,
             StatusCode::UNAUTHORIZED
+        );
+    }
+
+    /// A certificate that holds `platform:agents.own` and every other permission, whatever the bytes.
+    struct EveryPermission;
+
+    impl ClientAuthenticator for EveryPermission {
+        async fn authenticate(
+            &self,
+            _certificate: Option<&aap_ports::Certificate>,
+        ) -> Result<aap_ports::Principal, aap_ports::ClientAuthError> {
+            Ok(aap_ports::Principal::new("w", permission::ALL))
+        }
+    }
+
+    /// The workload guard serves the routes `platform:agents.own` opens and **no other route of the table**, even one that was
+    /// mounted by mistake and whose permission the workload holds: the guard is the second lock after the router's filter.
+    #[tokio::test]
+    async fn the_workload_guard_refuses_a_route_of_the_table_that_agents_own_does_not_open() {
+        let defaults = serde_json::from_value(serde_json::json!({
+            "namespace": "ns",
+            "store": { "cnpg": { "instances": 1, "storage": { "size": "1Gi" } } },
+            "a2aBearer": { "name": "a2a", "key": "TOKEN" },
+        }))
+        .unwrap();
+        let state = ApiState::new(MemoryObjects::new(), crate::NoBearer, defaults).unwrap();
+        // Every route of the table is mounted: the filter that `workload_router` applies is not there.
+        let app = guarded(
+            assemble::<Objects, crate::NoBearer>(|_| true),
+            state,
+            |routes, state| {
+                routes.layer(from_fn_with_state(
+                    crate::workload::Guard {
+                        state,
+                        auth: Arc::new(EveryPermission),
+                    },
+                    crate::workload::guard::<Objects, EveryPermission>,
+                ))
+            },
+        );
+        for path in ["/v1/agents", "/v1/me", "/v1/models", "/v1/info"] {
+            assert_eq!(
+                status(&app, "GET", path, None).await.as_u16(),
+                500,
+                "{path}"
+            );
+        }
+        assert_eq!(
+            status(&app, "GET", "/v1/owners/alice/agents", None).await,
+            StatusCode::OK,
+            "the owner routes still work through it"
         );
     }
 }

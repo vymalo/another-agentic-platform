@@ -5,7 +5,7 @@
 #   sh deploy/operator/tests/render-check.sh                    (from the repository root)
 #   UPDATE_GOLDEN=1 sh deploy/operator/tests/render-check.sh    rewrites tests/golden/*.yaml, for a deliberate change
 #
-# Seven renders are golden: the values of the Application on netcup (examples/netcup.values.yaml), the other shape those
+# Eight renders are golden (the eighth, tests/workload.values.yaml, is the Platform API with the workload listener on, ANR-1011): the values of the Application on netcup (examples/netcup.values.yaml), the other shape those
 # values do not make (tests/secret.values.yaml), the defaults, the Platform API component on (tests/api.values.yaml), run pods on
 # (tests/runpods.values.yaml), traces of both on (tests/otel.values.yaml) and two replicas with the leader election on
 # (tests/leader.values.yaml; the others have the API, run pods, traces, the election and the tool probe off, and the first three are
@@ -140,6 +140,7 @@ check "the default render equals tests/golden/default.yaml" golden default
 check "the Platform API render (tests/api.values.yaml) equals tests/golden/api.yaml" golden api -f "$here/api.values.yaml"
 check "the run pods render (tests/runpods.values.yaml) equals tests/golden/runpods.yaml" golden runpods -f "$here/runpods.values.yaml"
 check "the leader election render (tests/leader.values.yaml) equals tests/golden/leader.yaml" golden leader -f "$here/leader.values.yaml"
+check "the workload listener render (tests/workload.values.yaml) equals tests/golden/workload.yaml" golden workload -f "$here/workload.values.yaml"
 
 # ---- The configuration file the chart renders is one the operator accepts (ANR-962, AD-064) ---------------------------------
 # The chart renders the operator's file from its values; the binary refuses a key it does not have or a value it cannot work with.
@@ -963,7 +964,8 @@ check "the secretref shape renders (a Secret per agent, no policy, no Ingress)" 
 api_shapes_are_written() {
   d=$(mktemp -d) || return 1
   sh "$here/api-shapes.sh" "$d" > /dev/null 2>&1 \
-    && [ "$(find "$d" -type f | wc -l)" -eq 8 ] && [ -s "$d/golden.yaml" ] && [ -s "$d/secretref.yaml" ] && [ -s "$d/minimal.yaml" ] && [ -s "$d/runpods.yaml" ] && [ -s "$d/metrics.yaml" ] && [ -s "$d/otel.yaml" ] \
+    && [ "$(find "$d" -type f | wc -l)" -eq 9 ] && [ -s "$d/golden.yaml" ] && [ -s "$d/secretref.yaml" ] && [ -s "$d/minimal.yaml" ] && [ -s "$d/runpods.yaml" ] && [ -s "$d/metrics.yaml" ] && [ -s "$d/otel.yaml" ] && [ -s "$d/workload.yaml" ] \
+    && grep -q '^workloadListener:$' "$d/workload.yaml" && ! grep -q 'workload' "$d/golden.yaml" \
     && grep -q '^  - standard$' "$d/runpods.yaml" && ! grep -q 'runPodSizeClasses' "$d/golden.yaml" \
     && grep -q '^listen: 0.0.0.0:8443$' "$d/full.yaml" && grep -q '^healthListen: 0.0.0.0:9091$' "$d/full.yaml" \
     && grep -q '^listen: 0.0.0.0:8080$' "$d/minimal.yaml" \
@@ -973,7 +975,7 @@ api_shapes_are_written() {
   rm -rf "$d"
   return "$r"
 }
-check "api: api-shapes.sh writes the file of seven shapes and one that must be refused (golden, secretref, minimal, full, runpods, metrics, otel; refused/clash), the full one with the ports it sets, run pods alone with size classes, metrics alone with metricsListen" api_shapes_are_written
+check "api: api-shapes.sh writes the file of eight shapes and one that must be refused (golden, secretref, minimal, full, runpods, metrics, otel, workload; refused/clash), the full one with the ports it sets, run pods alone with size classes, metrics alone with metricsListen, the workload listener alone with workloadListener" api_shapes_are_written
 check "api: the shape that sets every value (tests/api-full.values.yaml) renders" renders_ok -f "$here/api-full.values.yaml"
 
 # ---- The values of the kind end-to-end of the Platform API (D7b2) ------------------------------------------------------------
@@ -2190,4 +2192,93 @@ render
 check "no usage ingest object in the default render" lacks 'usage-ingest|usageIngest'
 check "the chart has no usageIngest value and no template of it" no_usage_ingest_files
 check "a values file that still sets usageIngest is refused, by name" refused "usageIngest was removed" --set usageIngest.enabled=false
+# ---- The Platform API's workload listener (ANR-1011, ADR-0042): off by default and then not a trace; on, each object checked ------
+# Mutual TLS for the owner routes. The person's listener keeps its bearer token and its port; the workload listener is a port, a
+# Service and a NetworkPolicy rule of its own, and its files are mounts, never values of the configuration.
+render -f "$here/api.values.yaml"
+check "api.workload off (the default): not a trace of it in the API's render (no port, mount, volume, Service or rule)" \
+  lacks 'workload|8443|aap-api-workload'
+render -f "$here/workload.values.yaml"
+wl=aap-operator-api
+wl_config() { doc ConfigMap $wl | awk '/^  config.yaml: \|$/ { f = 1; next } f { print }'; }
+# (`check` runs one command: a `&&` after it would not be part of the check, so each check that needs two conditions is a function.)
+wl_service() { dhas Service $wl-workload 'port: 9443' 'targetPort: workload' 'app.kubernetes.io/component: api' && dcount Service $wl-workload '^    - name:' 1; }
+check "api.workload on: the Service $wl-workload selects the API's pods and exposes the TLS port, and nothing else" wl_service
+wl_person_service() { dhas Service $wl 'port: 8080' 'targetPort: http' && dlacks Service $wl '9443|workload'; }
+check "api.workload on: the person's Service still carries only the person's port (the workload port is never on it)" wl_person_service
+check "api.workload on: the container opens the TLS port, named workload" dhas Deployment $wl 'name: workload' 'containerPort: 9443'
+wl_mounts() {
+  dhas Deployment $wl 'name: workload-tls' 'mountPath: /etc/aap-api-workload/tls' 'name: workload-ca' 'mountPath: /etc/aap-api-workload/ca' \
+    && [ "$(doc Deployment $wl | awk '/mountPath: \/etc\/aap-api-workload/ { getline; print }' | grep -c 'readOnly: true')" -eq 2 ]
+}
+check "api.workload on: the key and the CA bundle are read-only mounts at /etc/aap-api-workload (files, never values)" wl_mounts
+check "api.workload on: the volumes are the deployment's Secret (mode 0440) and its ConfigMap, whose key is mounted as ca.crt" \
+  dhas Deployment $wl 'secretName: "aap-api-workload-tls"' 'defaultMode: 288 # 0440' 'name: "aap-api-workload-ca"' 'key: "ca-bundle.pem"' 'path: ca.crt'
+check "api.workload on: the pod's fsGroup lets the non-root user read the 0440 key" dhas Deployment $wl 'fsGroup: 65532'
+check "api.workload on: the configuration says where it listens, which files it reads and whether a certificate is required" \
+  all_of "$(wl_config)" 'workloadListener:' 'handshakeTimeoutSecs: 3' 'maxHandshakesPerIp: 4' 'maxConnections: 100' 'listen: 0.0.0.0:9443' 'certFile: /etc/aap-api-workload/tls/tls.crt' 'keyFile: /etc/aap-api-workload/tls/tls.key' \
+  'clientCaFile: /etc/aap-api-workload/ca/ca.crt'
+wl_clients() {
+  all_of "$(wl_config)" 'workloadClients:' 'spiffeId: spiffe://another/ns/another-agents/sa/orchestrator' 'spiffeId: spiffe://another/ns/another-agents/sa/watcher' 'platform:agents\.own' \
+    && none_of "$(wl_config)" 'platform:agents\.(read|write)|secrets\.pick|\*'
+}
+check "api.workload on: the configuration names each workload by its exact SPIFFE id, and grants platform:agents.own and nothing else" wl_clients
+check "api.workload on: the person's listener is as it was (the same listen, health and oidc keys)" \
+  all_of "$(wl_config)" '^    listen: 0.0.0.0:8080$' '^    healthListen: 0.0.0.0:8081$' 'issuer: https://keycloak.example.com'
+check "api.workload on: the NetworkPolicy opens the TLS port to the orchestrator's pods and to them alone" \
+  dhas NetworkPolicy $wl 'app.kubernetes.io/name: orchestrator' 'kubernetes.io/metadata.name: another-agents' 'port: 9443'
+wl_person_rule() {
+  dhas NetworkPolicy $wl 'app.kubernetes.io/name: traefik' 'port: 8080' \
+    && [ "$(doc NetworkPolicy $wl | awk '/^  ingress:$/ { i = 1; next } /^  egress:$/ { i = 0 } i && /^    - from:/ { n++ } END { print n + 0 }')" -eq 2 ]
+}
+check "api.workload on: ... and the person's rule is untouched: the edge, on the API port" wl_person_rule
+check "api.workload on: no Secret object, no key and no certificate in the render (the chart holds no PEM)" lacks '^kind: Secret$|-----BEGIN|PRIVATE KEY'
+wl_no_rights() { lacks '^kind: Cluster(Role|RoleBinding)$' && ! api_role_rules | grep -Eq '(\[|, )secrets(\]|,)'; }
+check "api.workload on: no ClusterRole, and the API's Role is what it was (no right on Secrets)" wl_no_rights
+render -f "$here/workload.values.yaml" --set api.ingress.enabled=true --set api.ingress.host=api.agents.example.com
+wl_ingress() { dhas Ingress $wl 'name: aap-operator-api$' 'name: http$' && dlacks Ingress $wl 'workload|9443'; }
+check "api.workload on with an Ingress: the edge routes to the person's Service and never to the workload's" wl_ingress
+render -f "$here/workload.values.yaml" --set api.workload.enabled=false
+check "api.workload.enabled=false with the block still set: not a trace of it (the block is inert, and nothing is half-rendered)" \
+  lacks 'workload|9443|aap-api-workload'
+render -f "$here/workload.values.yaml" --set api.networkPolicy.enabled=false --set-json 'api.workload.from=[]'
+api_policy_absent() { [ -z "$(doc NetworkPolicy $wl)" ]; }
+check "api.workload on with no NetworkPolicy: the API's policy is not rendered, so the peers list may be empty" api_policy_absent
+for t in 'api.workload.clients=[]|api.workload.clients is required' \
+         'api.workload.clients[0].spiffeId=orchestrator|must be the certificate'"'"'s exact URI SAN' \
+         'api.workload.clients[0].spiffeId=spiffe://another/ns/x y|must be the certificate'"'"'s exact URI SAN' \
+         'api.workload.clients[1].spiffeId=spiffe://another/ns/another-agents/sa/orchestrator|is named twice' \
+         'api.workload.clients[0].permissions[0]=platform:agents.read|only platform:agents.own is grantable' \
+         'api.workload.clients[0].permissions[0]=platform:secrets.pick|only platform:agents.own is grantable' \
+         'api.workload.tls.secretName=|api.workload.tls.secretName is required' \
+         'api.workload.clientCa.configMap=|api.workload.clientCa.configMap is required' \
+         'api.workload.clientCa.key=|api.workload.clientCa.key must name' \
+         'api.workload.clientAuth=required|api.workload.clientAuth is not a setting' \
+         'api.workload.clientAuth=optional|api.workload.clientAuth is not a setting' \
+         'api.workload.port=8080|must differ from api.port' \
+         'api.workload.port=8081|must differ from api.port' \
+         'api.workload.port=9090|must differ from api.port' \
+         'api.workload.port=70000|is not a port number' \
+         'api.workload.from=[]|api.workload.from is required while api.networkPolicy.enabled' \
+         'api.workload.from=[{"cidr":"10.0.0.0/8"}]|a peer needs a namespaceSelector' \
+         'api.workload.tokenSecret=x|is not a setting' \
+         'api.workload.handshakeTimeoutSecs=0|api.workload.handshakeTimeoutSecs must be a whole number from 1 to 60' \
+         'api.workload.maxHandshakesPerIp=0|api.workload.maxHandshakesPerIp must be a whole number from 1 to 1024' \
+         'api.workload.maxConnections=70000|api.workload.maxConnections must be a whole number from 1 to 65536' \
+         'api.workload.from=[{"ipBlock":{"cidr":"0.0.0.0/0"}}]|api.workload.from: an ipBlock of 0.0.0.0/0 is every address' \
+         'api.workload.clients[0].password=x|is not a setting: spiffeId or permissions' \
+         'api.extraVolumes=[{"name":"workload-tls","emptyDir":{}}]|is the chart'"'"'s volume of api.workload' ; do
+  set_=${t%%|*}; frag=${t#*|}
+  key=${set_%%=*}; val=${set_#*=}
+  case $val in
+    '['*|'{'*) check "api.workload refuses --set-json $key=$val" refused "$frag" -f "$here/workload.values.yaml" --set-json "$key=$val" ;;
+    *) check "api.workload refuses --set $key=$val" refused "$frag" -f "$here/workload.values.yaml" --set "$key=$val" ;;
+  esac
+done
+check "api.workload refuses a mount over its directory" \
+  refused "where api.workload mounts" -f "$here/workload.values.yaml" \
+  --set-json 'api.extraVolumes=[{"name":"x","emptyDir":{}}]' --set-json 'api.extraVolumeMounts=[{"name":"x","mountPath":"/etc/aap-api-workload/more"}]'
+check "api.workload refuses a block that is not a map" refused "api.workload must be a map" -f "$here/api.values.yaml" --set api.workload=yes
+render
+
 if [ "$fail" -eq 0 ]; then echo "operator chart checks passed"; else echo "operator chart checks FAILED"; exit 1; fi

@@ -17,6 +17,7 @@ path = "src/main.rs"
 [dependencies]
 aap-api.workspace = true
 aap-auth-oidc.workspace = true
+aap-auth-workload.workspace = true
 aap-forms.workspace = true
 aap-objects-kubernetes.workspace = true
 aap-platform-api.workspace = true
@@ -27,6 +28,10 @@ anyhow.workspace = true
 axum.workspace = true
 clap.workspace = true
 futures.workspace = true
+hyper.workspace = true
+hyper-util.workspace = true
+rustls.workspace = true
+rustls-pki-types.workspace = true
 kube = { workspace = true, features = ["client", "rustls-tls", "ring"] }
 serde.workspace = true
 serde_json.workspace = true
@@ -34,8 +39,10 @@ serde_yaml.workspace = true
 tokio = { workspace = true, features = ["macros", "net", "rt-multi-thread", "signal", "sync", "time"] }
 tracing.workspace = true
 tracing-subscriber.workspace = true
+tokio-rustls.workspace = true
 
 [dev-dependencies]
+aap-auth-workload = { workspace = true, features = ["testkit"] }
 aap-trace = { workspace = true, features = ["testkit"] }
 aap-trace-otlp = { workspace = true, features = ["testkit"] }
 aap-auth-oidc = { workspace = true, features = ["testkit"] }

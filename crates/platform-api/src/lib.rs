@@ -33,11 +33,13 @@ mod state;
 mod trace;
 mod traced;
 mod view;
+mod workload;
 
 pub use body::MAX_BODY_BYTES;
 pub use cors::{CorsError, CorsOrigins, PREFLIGHT_MAX_AGE};
 pub use metrics::{ApiMetrics, UNMATCHED, metric};
 pub use problem::PROBLEM_JSON;
-pub use router::router;
+pub use router::{router, workload_router};
 pub use routes::{Needs, ROUTES, Route, RouteId, Verb};
 pub use state::{ApiState, StateError};
+pub use workload::{NoBearer, PeerCertificate};

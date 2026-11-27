@@ -10,6 +10,10 @@ repository.workspace = true
 authors.workspace = true
 publish.workspace = true
 
+[features]
+# A PKI minted at run time for tests (the checked-in fixtures have no keys, so they cannot complete a handshake). Test tooling: in no image.
+testkit = ["dep:rcgen"]
+
 [dependencies]
 aap-ports.workspace = true
 rustls-pki-types.workspace = true
@@ -17,8 +21,10 @@ rustls-webpki.workspace = true
 serde.workspace = true
 thiserror.workspace = true
 x509-parser.workspace = true
+rcgen = { workspace = true, optional = true }
 
 [dev-dependencies]
+aap-auth-workload = { path = ".", features = ["testkit"] }
 aap-ports = { workspace = true, features = ["testkit"] }
 serde_yaml.workspace = true
 tokio = { workspace = true, features = ["macros", "rt"] }

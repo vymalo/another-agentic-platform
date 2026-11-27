@@ -357,6 +357,7 @@ flowchart LR
 | `api.terminationGracePeriodSeconds`, `api.preStopSleepSeconds` | `40`, `5` | [Below](#a-pod-that-leaves) |
 | `api.ingress.enabled`, `.className`, `.host`, `.path`, `.pathType`, `.annotations`, `.tls.enabled`, `.tls.secretName` | off, none, none, `/v1`, `Prefix`, none, `true`, none | The edge's route (below). `host` is required when it is on |
 | `api.networkPolicy.enabled`, `.from`, `.apiServer`, `.dns`, `.issuer` | `true`, `[]`, `443, 6443`, `kube-dns:53`, `443` | [Below](#the-networkpolicy) |
+| `api.workload.enabled`, `.port`, `.handshakeTimeoutSecs`, `.maxHandshakesPerIp`, `.maxConnections`, `.clients`, `.tls.secretName`, `.clientCa.configMap`, `.clientCa.key`, `.from` | off, `8443`, `5`, `8`, `256`, `[]`, none, none, `ca.crt`, `[]` | The mutual-TLS listener of the workloads ([below](#the-workload-listener-anr-1011)) |
 | `api.extraEnv`, `api.extraVolumes`, `api.extraVolumeMounts` | `[]` | The container's extra environment (a list of `EnvVar`), volumes (`Volume`) and mounts (`VolumeMount` of them): for an issuer behind a private CA or a proxy, [below](#an-issuer-behind-a-private-ca-or-a-proxy). Refused: the chart's own variables (`API_CONFIG_FILE`, `RUST_LOG`, `API_LISTEN_ADDR`, `HEALTH_ADDR`, `METRICS_ADDR`), a volume named `config`, a mount of a volume that is not in `extraVolumes`, and any mount at or under `/etc/aap-api`, where the configuration file is |
 | `api.logLevel`, `api.resources`, `api.podAnnotations`, `api.podLabels`, `api.priorityClassName`, `api.nodeSelector`, `api.tolerations`, `api.affinity`, `api.topologySpreadConstraints` | `info`, 50m / 64Mi requested and 256Mi limit, empty | |
 
@@ -558,6 +559,37 @@ are what makes it work on any cluster, not a restriction. A policy that is wide 
 
 The DNS rule is narrow by default (`kube-dns` in `kube-system`, port 53) and wide only if you empty `dns.to`. `helm install` prints a reminder while either
 list is empty (`templates/NOTES.txt`).
+
+### The workload listener (ANR-1011)
+
+`api.workload` is a second listener of the API, **mutual TLS**, for a service that calls it with a client certificate and not a token (the orchestrator; ADR-0042, [AD-068](../../docs/architecture/11-decisions.md)).
+**Off by default, and then not a trace of it in any render** (the goldens are what they were). It serves **only** `/v1/owners/{owner}/agents...` (`platform:agents.own`): every other path is a `404`.
+The person's listener (`api.port`) reads a bearer token and never a certificate; this one reads a certificate and never a token; neither falls back to the other.
+
+```yaml
+api:
+  workload:
+    enabled: true
+    clients:                                   # REQUIRED: the certificate's exact URI SAN; only platform:agents.own is grantable
+      - spiffeId: spiffe://another/ns/another-agents/sa/orchestrator
+        permissions: [platform:agents.own]
+    tls:
+      secretName: aap-api-workload-tls         # REQUIRED: a kubernetes.io/tls Secret you make (the chart makes none and holds no key)
+    clientCa:
+      configMap: aap-api-workload-ca           # REQUIRED: a ConfigMap whose `key` (default ca.crt) is the PEM bundle clients chain to
+    from:                                      # REQUIRED while api.networkPolicy.enabled: the orchestrator's pods
+      - namespaceSelector: {matchLabels: {kubernetes.io/metadata.name: another-agents}}
+        podSelector: {matchLabels: {app.kubernetes.io/name: orchestrator}}
+```
+
+It adds a container port `workload`, a Service `<fullname>-api-workload` (the person's Service and the Ingress never name it), a NetworkPolicy ingress rule from `from` on the TLS port, the Secret
+mounted read-only at `/etc/aap-api-workload/tls` (mode 0440; the pod's `fsGroup` lets the non-root user read it) and the CA key as `/etc/aap-api-workload/ca/ca.crt`, and `workloadListener` and
+`workloadClients` in the configuration file. `handshakeTimeoutSecs`, `maxHandshakesPerIp` and `maxConnections` bound the listener (a peer behind a NAT or a proxy that hides addresses shares one per-address allowance: raise it). A **PKI with an intermediate** works with the root alone in the CA ConfigMap: the client sends its leaf and its intermediates. **A client certificate is always required**: a peer with none does not complete the handshake (there is no `clientAuth` value any more: the owner removed it on 2026-11-27, and a values file that still says it is refused). **The server certificate and the CA bundle are both re-read when they change (within about a minute): a renewal or a CA rotation needs no restart.** The next handshake and the next request take the new bundle together, a connection already open is not cut (its next request is judged by the new bundle), and a bundle that cannot be read or holds no usable CA keeps the old one and the API warns once. **Not built: the CRL** (ADR-0042 decision 2),
+so a revoked certificate is refused only when it expires: keep the leaf short. The chart refuses a missing client, Secret or ConfigMap, a SPIFFE id that is not `spiffe://<domain>/<path>`, an identity
+twice, a permission other than `platform:agents.own`, a port that clashes with `api.port`, `api.healthPort` or `api.metrics.port`, an empty `from` while the policy is on, a `from` ipBlock that is every address (`api.networkPolicy.from` is not checked this way), an unknown key, and an
+`extraVolumes` or `extraVolumeMounts` that takes `workload-tls`, `workload-ca` or `/etc/aap-api-workload`. [`tests/workload.values.yaml`](tests/workload.values.yaml) sets every value; its render is
+`tests/golden/workload.yaml`, `api --check` reads its file (`tests/api-shapes.sh`), and `render-check.sh` holds the guarantees. *Unverified until a cluster has run it:* a kubelet mounting the Secret, a
+client reaching the port through the NetworkPolicy, and a leaf of a real PKI.
 
 ### The tool probe (K3a, K3b)
 

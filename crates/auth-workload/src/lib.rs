@@ -24,9 +24,15 @@
 
 #![warn(missing_docs)]
 
+#[cfg(feature = "testkit")]
+pub mod testkit;
+
 use std::collections::{BTreeMap, BTreeSet};
 
-use aap_ports::{Certificate, ClientAuthError, ClientAuthenticator, InvalidCertificate, Principal};
+use aap_ports::{
+    Certificate, ClientAuthError, ClientAuthenticator, InvalidCertificate, MAX_INTERMEDIATES,
+    Principal,
+};
 use rustls_pki_types::{CertificateDer, TrustAnchor, UnixTime};
 use serde::Deserialize;
 use x509_parser::prelude::{FromDer, GeneralName, X509Certificate};
@@ -228,6 +234,16 @@ impl ClientAuthenticator for WorkloadAuth {
         let leaf = CertificateDer::from(der);
         let end_entity = webpki::EndEntityCert::try_from(&leaf)
             .map_err(|_| invalid(InvalidCertificate::Malformed))?;
+        // The intermediates the peer sent are untrusted help to build the chain; trust is the configured bundle's alone. A peer that
+        // sends more than a PKI has levels is not asking to be checked.
+        if certificate.intermediates().len() > MAX_INTERMEDIATES {
+            return Err(invalid(InvalidCertificate::Malformed));
+        }
+        let intermediates: Vec<CertificateDer<'_>> = certificate
+            .intermediates()
+            .iter()
+            .map(|der| CertificateDer::from(der.as_slice()))
+            .collect();
 
         // 2-4. It chains to the configured bundle, is for client authentication, and is in its window.
         //
@@ -238,7 +254,7 @@ impl ClientAuthenticator for WorkloadAuth {
             .verify_for_usage(
                 webpki::ALL_VERIFICATION_ALGS,
                 &self.anchors,
-                &[],
+                &intermediates,
                 UnixTime::now(),
                 webpki::KeyUsage::client_auth(),
                 None,
@@ -300,6 +316,16 @@ fn reason(error: webpki::Error) -> InvalidCertificate {
 
 fn invalid(reason: InvalidCertificate) -> ClientAuthError {
     ClientAuthError::Invalid(reason)
+}
+
+/// The certificates of a PEM bundle, in DER: what [`WorkloadAuth::with_roots`] takes, and what the TLS listener builds its
+/// client-certificate verifier from, so that the two read **one** bundle in **one** way (ANR-1011).
+///
+/// # Errors
+///
+/// [`ConfigError::Bundle`] when a block cannot be read. A bundle with no block is `Ok` and empty: the callers refuse it.
+pub fn parse_bundle(bundle: &str) -> Result<Vec<CertificateDer<'static>>, ConfigError> {
+    roots_from_pem(bundle)
 }
 
 /// The certificates of a PEM bundle. Text between blocks (a comment, a header) is skipped to the next
