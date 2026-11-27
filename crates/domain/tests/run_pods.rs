@@ -1369,6 +1369,70 @@ fn each_setting_is_checked() {
 }
 
 #[test]
+fn a_key_a_rule_does_not_have_is_refused_at_every_level() {
+    // ANR-1356: `k8s-openapi`'s networking types are generated without `deny_unknown_fields`, so a misspelled key is
+    // dropped and the widening it causes is invisible. Each case below would otherwise be accepted: `too` leaves the
+    // rule with no `to` (every destination), `ipblock` leaves the peer with no field, `cidrs` leaves the block with an
+    // empty CIDR, `matchLabel` makes the selector `{}` (every namespace), `value` drops the requirement's values, and
+    // `end_port` loses the range. Every level is walked.
+    for (what, rule) in [
+        (
+            "the rule",
+            json!({"too": [{"ipBlock": {"cidr": "10.0.0.0/8"}}]}),
+        ),
+        (
+            "the peer",
+            json!({"to": [{"ipblock": {"cidr": "10.0.0.0/8"}}]}),
+        ),
+        (
+            "the ipBlock",
+            json!({"to": [{"ipBlock": {"cidrs": "10.0.0.0/8"}}]}),
+        ),
+        (
+            "the selector",
+            json!({"to": [{"namespaceSelector": {"matchLabel": {"a": "b"}}}]}),
+        ),
+        (
+            "the requirement",
+            json!({"to": [{"podSelector": {"matchExpressions": [
+                {"key": "a", "operator": "In", "value": ["b"]}
+            ]}}]}),
+        ),
+        (
+            "the port",
+            json!({"to": [{"ipBlock": {"cidr": "10.0.0.0/8"}}],
+                  "ports": [{"protocol": "TCP", "port": 443, "end_port": 8443}]}),
+        ),
+    ] {
+        let problems = refused(json!({"networkPolicy": {"extraEgress": [rule]}}));
+        assert!(
+            problems.iter().any(|p| p.contains("is not a field of it")),
+            "{what}: {problems:#?}"
+        );
+    }
+}
+
+#[test]
+fn every_field_of_an_egress_rule_is_still_accepted() {
+    // The control for ANR-1356: the allow-list is exactly the fields the rule has, at every level.
+    settings_with(json!({"networkPolicy": {"extraEgress": [{
+        "to": [
+            {"ipBlock": {"cidr": "10.0.0.0/8", "except": ["10.9.0.0/16"]}},
+            {
+                "namespaceSelector": {
+                    "matchLabels": {"a": "b"},
+                    "matchExpressions": [{"key": "c", "operator": "In", "values": ["d"]}]
+                },
+                "podSelector": {"matchLabels": {"e": "f"}}
+            }
+        ],
+        "ports": [{"protocol": "TCP", "port": 443, "endPort": 8443}]
+    }]}}))
+    .validate()
+    .expect("every field of a rule");
+}
+
+#[test]
 fn an_egress_rule_that_names_a_range_of_its_own_is_still_accepted() {
     // The control for ANR-1353: only a prefix of zero is refused, and the agent's own `access.allowFrom` is untouched
     // (it is a deployment's deliberate choice there, and a `/0` in it is still accepted).
