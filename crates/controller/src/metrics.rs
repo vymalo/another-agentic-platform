@@ -49,6 +49,27 @@ pub mod name {
     pub const METER_REFUSED: &str = "aap_meter_refused_total";
     /// Events handed to the sink whose acknowledgement never came within the backfill bound (ANR-1151): forgotten.
     pub const METER_UNACKNOWLEDGED: &str = "aap_meter_unacknowledged_total";
+    /// Tombstones written for pods found gone with minutes not known delivered (ANR-1198).
+    pub const METER_TOMBSTONES_WRITTEN: &str = "aap_meter_tombstones_written_total";
+    /// Tombstones deleted because their minutes were acknowledged (ANR-1198).
+    pub const METER_TOMBSTONES_RELEASED: &str = "aap_meter_tombstones_released_total";
+    /// Tombstones read when this replica began to lead (ANR-1198): minutes a crash or a failover left to send.
+    pub const METER_TOMBSTONES_RESTORED: &str = "aap_meter_tombstones_restored_total";
+    /// Tombstones deleted because the 24 h backfill bound passed over them (ANR-1198).
+    pub const METER_TOMBSTONES_EXPIRED: &str = "aap_meter_tombstones_expired_total";
+    /// Vanished pods that got **no** tombstone because the namespace's set is full (ANR-1198): they are still
+    /// metered, from memory only, and a crash before their minutes are acknowledged loses them.
+    pub const METER_TOMBSTONES_UNBACKED: &str = "aap_meter_tombstones_unbacked_total";
+    /// Records in the tombstone store this version could not read (a newer replica's): kept as they are (ANR-1198).
+    pub const METER_TOMBSTONES_UNREADABLE: &str = "aap_meter_tombstones_unreadable_total";
+    /// Tombstone `ConfigMap`s refused because the operator did not make them (wrong labels, name or an owner) (ANR-1198).
+    pub const METER_TOMBSTONES_REFUSED: &str = "aap_meter_tombstones_refused_total";
+    /// Records that parsed but are not valid (a text a line cannot carry, a weight off the grid): dropped (ANR-1198).
+    pub const METER_TOMBSTONES_INVALID: &str = "aap_meter_tombstones_invalid_total";
+    /// Vanished pods held in memory for want of a readable store whose minutes passed the 24 h bound (ANR-1198).
+    pub const METER_HELD_EXPIRED: &str = "aap_meter_vanished_held_expired_total";
+    /// Reads and writes of the tombstone store that failed, by `op` (`load`, `save`) (ANR-1198).
+    pub const METER_TOMBSTONE_ERRORS: &str = "aap_meter_tombstone_errors_total";
 }
 
 fn help(series: &str) -> &'static str {
@@ -75,6 +96,20 @@ fn help(series: &str) -> &'static str {
         name::METER_UNACKNOWLEDGED => {
             "Pod-minute events with no acknowledgement within the backfill bound, forgotten."
         }
+        name::METER_TOMBSTONES_WRITTEN => "Tombstones written for vanished pods.",
+        name::METER_TOMBSTONES_RELEASED => {
+            "Tombstones deleted after their minutes were acknowledged."
+        }
+        name::METER_TOMBSTONES_RESTORED => "Tombstones read when this replica began to lead.",
+        name::METER_TOMBSTONES_EXPIRED => "Tombstones deleted past the backfill bound.",
+        name::METER_TOMBSTONES_UNBACKED => {
+            "Vanished pods with no tombstone because the set is full."
+        }
+        name::METER_TOMBSTONES_UNREADABLE => "Tombstone records this version could not read, kept.",
+        name::METER_TOMBSTONES_REFUSED => "Tombstone ConfigMaps refused as not the operator's.",
+        name::METER_TOMBSTONES_INVALID => "Tombstone records that were not valid, dropped.",
+        name::METER_HELD_EXPIRED => "Vanished pods held for want of a store, past the 24 h bound.",
+        name::METER_TOMBSTONE_ERRORS => "Tombstone store calls that failed, by op.",
         _ => "",
     }
 }
