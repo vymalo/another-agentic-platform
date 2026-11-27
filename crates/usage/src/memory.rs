@@ -1,88 +1,112 @@
 use std::collections::BTreeMap;
-use std::collections::btree_map::Entry;
-use std::sync::Mutex;
+use std::sync::{Mutex, PoisonError};
 
-use crate::{Inserted, PodMinuteEvent, SpendLine, SpendQuery, UsageError, UsageStore};
+use crate::{AccountSource, AccountUnavailable, PodMinuteEvent, PodRef, UsageError, UsageSink};
 
-/// The in-memory store: passes [`crate::testkit`], and is what tests of a reader use.
+/// The in-memory sink: records what it took, in order. It passes [`crate::testkit`].
 #[derive(Default)]
-pub struct MemoryUsageStore {
-    seen: Mutex<BTreeMap<(String, String), (PodMinuteEvent, u64)>>,
+pub struct MemoryUsageSink {
+    taken: Mutex<Vec<PodMinuteEvent>>,
+    down: Mutex<bool>,
 }
 
-impl MemoryUsageStore {
-    /// An empty store.
+impl MemoryUsageSink {
+    /// An empty sink.
     pub fn new() -> Self {
         Self::default()
     }
+
+    /// Everything taken, in the order it was sent (a repeated event appears each time).
+    pub fn taken(&self) -> Vec<PodMinuteEvent> {
+        self.taken
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .clone()
+    }
+
+    /// Make the sink refuse every event as [`UsageError::Unavailable`] (or take them again).
+    pub fn set_down(&self, down: bool) {
+        *self.down.lock().unwrap_or_else(PoisonError::into_inner) = down;
+    }
 }
 
-impl UsageStore for MemoryUsageStore {
-    async fn insert(
-        &self,
-        event: PodMinuteEvent,
-        ingested_at: u64,
-    ) -> Result<Inserted, UsageError> {
+impl UsageSink for MemoryUsageSink {
+    async fn send(&self, event: PodMinuteEvent) -> Result<(), UsageError> {
+        if *self.down.lock().unwrap_or_else(PoisonError::into_inner) {
+            return Err(UsageError::Unavailable);
+        }
         event.validate()?;
-        let key = (event.source.clone(), event.id.clone());
-        let mut seen = self.seen.lock().map_err(|_| UsageError::Unavailable)?;
-        if seen.contains_key(&key) {
-            return Ok(Inserted::Duplicate);
-        }
-        seen.insert(key, (event, ingested_at));
-        Ok(Inserted::New)
+        self.taken
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .push(event);
+        Ok(())
+    }
+}
+
+#[derive(Default)]
+struct Accounts {
+    by_run: BTreeMap<(String, String), String>,
+    by_service: BTreeMap<String, String>,
+    broken: bool,
+    asked: Vec<PodRef>,
+}
+
+/// A fake [`AccountSource`]: the accounts a test sets, and a switch that makes it unavailable.
+#[derive(Default)]
+pub struct MemoryAccounts {
+    inner: Mutex<Accounts>,
+}
+
+impl MemoryAccounts {
+    /// A source that knows nobody.
+    pub fn new() -> Self {
+        Self::default()
     }
 
-    async fn insert_many(
-        &self,
-        events: Vec<PodMinuteEvent>,
-        ingested_at: u64,
-    ) -> Result<Vec<Inserted>, UsageError> {
-        for event in &events {
-            event.validate()?;
-        }
-        let mut seen = self.seen.lock().map_err(|_| UsageError::Unavailable)?;
-        Ok(events
-            .into_iter()
-            .map(
-                |event| match seen.entry((event.source.clone(), event.id.clone())) {
-                    Entry::Vacant(slot) => {
-                        slot.insert((event, ingested_at));
-                        Inserted::New
-                    }
-                    Entry::Occupied(_) => Inserted::Duplicate,
-                },
-            )
-            .collect())
+    /// The account of a run pod.
+    pub fn set_run(&self, service: &str, run: &str, account: &str) {
+        self.with(|a| {
+            a.by_run
+                .insert((service.to_owned(), run.to_owned()), account.to_owned());
+        });
     }
 
-    async fn spend(&self, query: SpendQuery) -> Result<Vec<SpendLine>, UsageError> {
-        if query.window.from >= query.window.to {
-            return Err(UsageError::EmptyWindow);
-        }
-        let seen = self.seen.lock().map_err(|_| UsageError::Unavailable)?;
-        let mut sums: BTreeMap<(String, String), u64> = BTreeMap::new();
-        for (event, at) in seen.values() {
-            if *at < query.window.from || *at >= query.window.to {
-                continue;
+    /// The account of an agent's own pods.
+    pub fn set_agent(&self, service: &str, account: &str) {
+        self.with(|a| {
+            a.by_service.insert(service.to_owned(), account.to_owned());
+        });
+    }
+
+    /// Make every answer [`AccountUnavailable`] (or answer again).
+    pub fn set_broken(&self, broken: bool) {
+        self.with(|a| a.broken = broken);
+    }
+
+    /// Every pod it was asked about, in order.
+    pub fn asked(&self) -> Vec<PodRef> {
+        self.with(|a| a.asked.clone())
+    }
+
+    fn with<T>(&self, f: impl FnOnce(&mut Accounts) -> T) -> T {
+        f(&mut self.inner.lock().unwrap_or_else(PoisonError::into_inner))
+    }
+}
+
+impl AccountSource for MemoryAccounts {
+    async fn account(&self, pod: &PodRef) -> Result<Option<String>, AccountUnavailable> {
+        self.with(|a| {
+            a.asked.push(pod.clone());
+            if a.broken {
+                return Err(AccountUnavailable);
             }
-            if query.account.as_deref().is_some_and(|a| a != event.subject) {
-                continue;
-            }
-            let sum = sums
-                .entry((event.subject.clone(), event.node_type.clone()))
-                .or_default();
-            *sum = sum
-                .checked_add(u64::from(event.weight))
-                .ok_or(UsageError::Overflow)?;
-        }
-        Ok(sums
-            .into_iter()
-            .map(|((account, node_type), weighted_minutes)| SpendLine {
-                account,
-                node_type,
-                weighted_minutes,
+            Ok(match pod {
+                PodRef::Run { service, run } => {
+                    a.by_run.get(&(service.clone(), run.clone())).cloned()
+                }
+                PodRef::Agent { service } => a.by_service.get(service).cloned(),
             })
-            .collect())
+        })
     }
 }

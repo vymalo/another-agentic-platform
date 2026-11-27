@@ -264,16 +264,6 @@ the DNS rule is required with the policy on, as the tool probe's is. */ -}}
 {{- if .Values.api.enabled -}}
 {{- include "aap.api.validate" . -}}
 {{- end -}}
-{{- /* The usage ingest: off by default, and then nothing of it is checked or rendered. */ -}}
-{{- if not (kindIs "map" .Values.usageIngest) -}}
-{{- fail "usageIngest must be a map (the usage ingest component, off by default)" -}}
-{{- end -}}
-{{- if not (kindIs "bool" .Values.usageIngest.enabled) -}}
-{{- fail "usageIngest.enabled must be true or false" -}}
-{{- end -}}
-{{- if .Values.usageIngest.enabled -}}
-{{- include "aap.usageIngest.validate" . -}}
-{{- end -}}
 {{- end -}}
 
 {{/*

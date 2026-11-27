@@ -6,7 +6,7 @@ Install first: [Install the CRDs and the operator](../deploy/install.md). With t
 
 ## Which revision
 
-The operator's images are built and pushed by CI. After a green build of a commit that changes what is built, unless a newer one has landed, a last CI job writes the new image tags into `deploy/operator/values.yaml` and pushes **one commit** with the subject `chore(deploy): bump operator, api and usage-ingest to sha-<7 hex>`. That commit is the revision to use. At it, `image.tag`, `api.image.tag` and `usageIngest.image.tag` name the images CI built and tested for the commit the subject names.
+The operator's images are built and pushed by CI. After a green build of a commit that changes what is built, unless a newer one has landed, a last CI job writes the new image tags into `deploy/operator/values.yaml` and pushes **one commit** with the subject `chore(deploy): bump operator and api to sha-<7 hex>`. That commit is the revision to use. At it, `image.tag` and `api.image.tag` name the images CI built and tested for the commit the subject names.
 
 ```sh
 git fetch origin
