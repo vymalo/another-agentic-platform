@@ -3,10 +3,10 @@
 //! person's opaque id, the one the orchestrator's broker returns for a run (never an e-mail).
 //!
 //! * **What each answer means.** The field present and on the line alphabet ([`aap_usage::is_line_text`]) is
-//!   `Ok(Some(account))`. The service gone (`404`), the field absent, or a value that is not on the alphabet is
-//!   `Ok(None)`: no line is better than a wrong one, and the meter counts the minutes as unattributed. Every other
-//!   error (`401`, `403`, `5xx`, a timeout, a body that is not the object) is [`AccountUnavailable`]: the meter holds
-//!   the minute and asks again.
+//!   `Ok(Some(account))`. The service gone (a `404` whose reason is `NotFound`), the field absent, or a value that is
+//!   not on the alphabet is `Ok(None)`: no line is better than a wrong one, and the meter counts the minutes as
+//!   unattributed. Every other error (`401`, `403`, `5xx`, any other `404` (a missing resource type, say), a timeout,
+//!   a body that is not the object) is [`AccountUnavailable`]: the meter holds the minute and asks again.
 //! * **A run pod is not this source's.** A [`PodRef::Run`] answers `None` without a request: `operator run` composes
 //!   the two sources by pod kind (a run to `aap-usage-broker`), so this source alone is not the operator's
 //!   composition.
@@ -40,7 +40,9 @@ impl AccountSource for AgentAccounts {
         let api: Api<AgentService> = Api::namespaced(self.client.clone(), namespace);
         match api.get(service).await {
             Ok(agent) => Ok(agent.spec.account.filter(|account| is_line_text(account))),
-            Err(kube::Error::Api(status)) if status.code == 404 => Ok(None),
+            Err(kube::Error::Api(status)) if status.code == 404 && status.reason == "NotFound" => {
+                Ok(None)
+            }
             Err(_) => Err(AccountUnavailable),
         }
     }

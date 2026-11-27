@@ -13,7 +13,6 @@ use aap_controller::MeterConfig;
 use aap_trace_otlp::SecretRef;
 use aap_usage::{AccountSource, AccountUnavailable, PodMinuteEvent, PodRef, UsageError, UsageSink};
 use aap_usage_broker::{BrokerAccounts, Token};
-use aap_usage_kubernetes::AgentAccounts;
 use aap_usage_otlp::OtlpUsageSink;
 use anyhow::Result;
 
@@ -64,8 +63,9 @@ impl<R: AccountSource, A: AccountSource> AccountSource for MeterAccounts<R, A> {
 pub struct Parts {
     /// The collector sink; the caller shuts it down on the way out.
     pub sink: SharedSink,
-    /// The broker for a run pod and the `AgentService` for an agent's own pod.
-    pub accounts: MeterAccounts<BrokerAccounts, AgentAccounts>,
+    /// The broker, for a run pod. The caller composes it with the agent source ([`MeterAccounts`]) once it has the cluster
+    /// client: this is built before the cluster is reached, so a bad bearer stops the start first.
+    pub accounts: BrokerAccounts,
     /// The meter's source name, node label key and period.
     pub config: MeterConfig,
 }
@@ -75,14 +75,13 @@ fn refused(setting: &str, reference: &SecretRef, why: &str) -> anyhow::Error {
 }
 
 /// The meter's parts, or `None` while `metering.enabled` is off (then no request is made and no file is read).
-/// `client` is the cluster client the agent source reads `AgentService`s with.
 ///
 /// Must run inside a Tokio runtime: the sink starts its task.
 ///
 /// # Errors
 ///
 /// The bearer cannot be read or is blank, the CA bundle cannot be read, or a client cannot be built.
-pub fn parts(metering: Option<&Metering>, client: kube::Client) -> Result<Option<Parts>> {
+pub fn parts(metering: Option<&Metering>) -> Result<Option<Parts>> {
     let Some(m) = metering else {
         return Ok(None);
     };
@@ -115,7 +114,7 @@ pub fn parts(metering: Option<&Metering>, client: kube::Client) -> Result<Option
     })?;
     Ok(Some(Parts {
         sink: SharedSink(Arc::new(sink)),
-        accounts: MeterAccounts::new(accounts, AgentAccounts::new(client)),
+        accounts,
         config: MeterConfig {
             source: m.source.clone(),
             node_type_label_key: Some(m.node_type_label_key.clone()),
@@ -130,19 +129,6 @@ mod tests {
     #![allow(clippy::unwrap_used, clippy::expect_used)]
     use super::*;
     use aap_usage::MemoryAccounts;
-
-    /// A client that never gets an answer: the parts only keep it, and these tests never read an `AgentService`.
-    fn client() -> kube::Client {
-        kube::Client::new(
-            tower::service_fn(|_: http::Request<kube::client::Body>| async {
-                std::future::pending::<
-                    Result<http::Response<kube::client::Body>, std::convert::Infallible>,
-                >()
-                .await
-            }),
-            "default",
-        )
-    }
 
     fn metering(token: &str) -> Metering {
         Metering {
@@ -160,7 +146,7 @@ mod tests {
 
     #[tokio::test]
     async fn off_builds_nothing() {
-        assert!(parts(None, client()).unwrap().is_none());
+        assert!(parts(None).unwrap().is_none());
     }
 
     #[tokio::test]
@@ -170,7 +156,7 @@ mod tests {
         let file = dir.join("token");
         std::fs::write(&file, "meter-token\n").unwrap();
         let m = metering(&format!("{{ file: {} }}", file.display()));
-        let p = parts(Some(&m), client()).unwrap().unwrap();
+        let p = parts(Some(&m)).unwrap().unwrap();
         assert_eq!(p.config.source, "m1");
         assert_eq!(p.config.period, Duration::from_secs(10));
         assert_eq!(
@@ -193,7 +179,7 @@ mod tests {
             "{ env: AAP_TEST_NO_SUCH_METER_TOKEN }".to_owned(),
         ] {
             let m = metering(&reference);
-            let Err(error) = parts(Some(&m), client()) else {
+            let Err(error) = parts(Some(&m)) else {
                 panic!("{reference}: a meter with no bearer was built");
             };
             assert!(crate::config::is_reference_refused(&error), "{reference}");
@@ -208,7 +194,7 @@ mod tests {
         let run_source = MemoryAccounts::new();
         run_source.set_run("coder", "r1", "acct-run");
         let agent_source = MemoryAccounts::new();
-        agent_source.set_agent("coder", "acct-agent");
+        agent_source.set_agent("ns", "coder", "acct-agent");
         let accounts = MeterAccounts::new(run_source, agent_source);
         let run = PodRef::Run {
             service: "coder".into(),

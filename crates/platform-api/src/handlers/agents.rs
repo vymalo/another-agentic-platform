@@ -236,10 +236,18 @@ where
     delete_inner(state.0, caller, name, tag).await
 }
 
+/// A text field of the stored `AgentService`'s spec, if there is a stored agent and it has one.
+fn spec_text<'a>(current: Option<&'a aap_ports::Agent>, key: &str) -> Option<&'a str> {
+    current
+        .and_then(|a| a.service.spec.get(key))
+        .and_then(|v| v.as_str())
+}
+
 /// Who may name the account (`spec.account`, AD-071): only a holder of `platform:agents.own`, whose form's value is
 /// written as it stands (absent clears it). For any other caller an absent `account` means "keep the stored one" and the
 /// stored value is carried over (a person's save never moves it); the stored value sent back is kept; a different value is
-/// `403` naming that permission, a create having no stored value. The value is never quoted.
+/// `403` naming that permission, a create having no stored value. **A save that changes `owner` clears the account**
+/// instead: the stored one is the old owner's person's, and a person may not name another. The value is never quoted.
 fn apply_account_rule(
     caller: &Caller,
     form: &mut AgentForm,
@@ -248,14 +256,14 @@ fn apply_account_rule(
     if caller.holds_agents_own() {
         return Ok(());
     }
-    let stored = current
-        .and_then(|a| a.service.spec.get("account"))
-        .and_then(|v| v.as_str());
-    match form.account.as_deref() {
-        None => form.account = stored.map(str::to_owned),
-        Some(sent) if Some(sent) == stored => {}
+    let stored = spec_text(current, "account");
+    let owner_changed = current.is_some() && form.owner.as_deref() != spec_text(current, "owner");
+    let sent = form.account.take();
+    form.account = match sent.as_deref() {
+        None => stored.filter(|_| !owner_changed).map(str::to_owned),
+        Some(sent) if Some(sent) == stored => stored.filter(|_| !owner_changed).map(str::to_owned),
         Some(_) => return Err(Problem::forbidden(aap_api::permission::AGENTS_OWN)),
-    }
+    };
     Ok(())
 }
 

@@ -367,12 +367,9 @@ async fn run_with(settings: crate::config::Settings, tracer: aap_trace::Tracer) 
     // Built and checked now so a bad setting stops the start; the idle controller (P2b) is what polls it.
     let activity = activity_source(&settings.activity)?;
     let token = registry_token(&settings.registry)?;
-    // The cluster client comes before the meter's parts: an agent pod's account is read from its `AgentService` (AD-071).
-    let client = kube::Client::try_default()
-        .await
-        .context("connecting to the cluster (in-cluster configuration, or KUBECONFIG)")?;
-    // The pod-minute meter (ANR-1103): off unless `metering.enabled`; on, its bearer is read now and a bad one stops the start.
-    let meter = crate::metering::parts(settings.metering.as_ref(), client.clone())?;
+    // The pod-minute meter (ANR-1103): off unless `metering.enabled`; on, its bearer is read now and a bad one stops the start,
+    // before the cluster is reached. The agent source needs the cluster client, so it is composed below, after it.
+    let meter = crate::metering::parts(settings.metering.as_ref())?;
     let options = settings.options(token.is_some(), registry_full.clone());
     if options.watch_namespaces.is_none() {
         tracing::warn!(
@@ -398,6 +395,9 @@ async fn run_with(settings: crate::config::Settings, tracer: aap_trace::Tracer) 
     );
 
     // Everything below is the composition: a Kubernetes runtime, the store, the controllers.
+    let client = kube::Client::try_default()
+        .await
+        .context("connecting to the cluster (in-cluster configuration, or KUBECONFIG)")?;
     let runtime = kubernetes_runtime(client.clone(), &options);
     // The encoding of an owner is the runtime provider's, so this is where it is made (the
     // controller never looks inside a handle).
@@ -461,8 +461,13 @@ async fn run_with(settings: crate::config::Settings, tracer: aap_trace::Tracer) 
     // The meter sends only while this replica leads (`Operator::run` gates it); the sink is kept to flush on the way out.
     let (operator, meter_sink) = match meter {
         Some(parts) => {
+            // A run pod's account is the broker's; an agent's own pod's is read from its `AgentService` (AD-071).
+            let accounts = crate::metering::MeterAccounts::new(
+                parts.accounts,
+                aap_usage_kubernetes::AgentAccounts::new(meter_client.clone()),
+            );
             let operator = operator
-                .with_meter(parts.sink.clone(), parts.accounts)
+                .with_meter(parts.sink.clone(), accounts)
                 .with_meter_config(parts.config);
             // The facts of a pod that vanished with minutes not known delivered are kept in ConfigMaps in the
             // operator's own namespace (not the tenants'), so a crash or a failover loses none (ANR-1198).

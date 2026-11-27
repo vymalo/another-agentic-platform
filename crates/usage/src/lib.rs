@@ -246,8 +246,8 @@ pub enum PodRef {
     },
     /// A pod of the agent's own workload.
     ///
-    /// **Breaking change (ANR-1100, AD-071): `namespace` is new**, so every construction and every
-    /// [`AccountSource`] that matches on this variant must be updated.
+    /// **Breaking change (ANR-1100, AD-071): `namespace` is new**, so every construction and every pattern that
+    /// names all fields must be updated (a pattern with `..` still compiles).
     Agent {
         /// The namespace of the `AgentService`: the meter merges every watched namespace, so the name alone is
         /// ambiguous.

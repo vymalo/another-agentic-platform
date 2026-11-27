@@ -198,6 +198,10 @@ struct Inner {
     deadline: Option<tokio::time::Instant>,
     /// The account of a run that is bound (it never changes), by service and run: the broker is asked once per run.
     accounts: HashMap<(String, String), String>,
+    /// The last account the source named for an agent's own pods, by namespace and service. It is only what a
+    /// tombstone carries as `subject` (AD-071): the `AgentService` may be gone by the time the pod's last minutes
+    /// are replayed, and the source then answers nothing. Dropped when the source says there is none.
+    agent_accounts: HashMap<(String, String), String>,
     /// Minutes handed to the sink and not yet acknowledged, by event id (ANR-1151). Empty when the sink reports no
     /// outcomes.
     pending: HashMap<String, Pending>,
@@ -826,9 +830,14 @@ impl Meter {
             return None;
         }
         let a = self.attribute(closed, &kind).ok()?;
-        let subject = a.run.as_ref().and_then(|run| {
-            self.with(|i| i.accounts.get(&(a.service.clone(), run.clone())).cloned())
-        });
+        let subject = match &a.run {
+            Some(run) => self.with(|i| i.accounts.get(&(a.service.clone(), run.clone())).cloned()),
+            None => self.with(|i| {
+                i.agent_accounts
+                    .get(&(a.namespace.clone(), a.service.clone()))
+                    .cloned()
+            }),
+        };
         let t = Tombstone {
             namespace: closed.namespace.clone(),
             uid: closed.uid.clone(),
@@ -1089,6 +1098,15 @@ impl Meter {
                     .end
                     .saturating_sub(due.send.start.max(self.state(&t.uid).unknown_counted));
                 self.unattributed(Unattributed::UnknownAccount, fresh);
+                if a.run.is_none() {
+                    // An agent's pod with no account is final (AD-071): a shared agent has none, and an account
+                    // it gets later is not for the minutes before it. They are given up, and counted once.
+                    self.update(&t.uid, |s| {
+                        s.unknown_counted = due.send.end;
+                        s.cursor = Some(due.send.end);
+                    });
+                    return after;
+                }
                 self.update(&t.uid, |s| s.unknown_counted = due.send.end);
                 return Progress::Held;
             }
@@ -1173,13 +1191,22 @@ impl Meter {
         let subject = match self.account_for(&attributed).await {
             Ok(Some(account)) => account,
             Ok(None) => {
-                // Not known *yet*: the cursor stays, so that an account that appears later gets its earlier
-                // minutes. They are retried every pass until they pass the backfill bound, and counted once.
                 let fresh = due
                     .send
                     .end
                     .saturating_sub(due.send.start.max(state.unknown_counted));
                 self.unattributed(Unattributed::UnknownAccount, fresh);
+                if attributed.run.is_none() {
+                    // An agent's pod with no account is final (AD-071): a shared agent has none, and an account
+                    // it gets later is not for the minutes before it. They are given up, and counted once.
+                    self.update(&pod.uid, |s| {
+                        s.unknown_counted = due.send.end;
+                        s.cursor = Some(due.send.end);
+                    });
+                    return after;
+                }
+                // A run's binding may be late: the cursor stays, so that an account that appears later gets its
+                // earlier minutes. They are retried every pass until they pass the backfill bound, and counted once.
                 self.update(&pod.uid, |s| s.unknown_counted = due.send.end);
                 return Progress::Held;
             }
@@ -1277,9 +1304,20 @@ impl Meter {
                 }
             }
         };
-        if let (Ok(Some(account)), Some(k)) = (&asked, cache_key) {
-            // A bound run's account never changes: remembered for the life of the process.
-            self.with(|i| i.accounts.insert(k, account.clone()));
+        match (&asked, cache_key) {
+            (Ok(Some(account)), Some(k)) => {
+                // A bound run's account never changes: remembered for the life of the process.
+                self.with(|i| i.accounts.insert(k, account.clone()));
+            }
+            (Ok(Some(account)), None) => {
+                let k = (a.namespace.clone(), a.service.clone());
+                self.with(|i| i.agent_accounts.insert(k, account.clone()));
+            }
+            (Ok(None), None) => {
+                let k = (a.namespace.clone(), a.service.clone());
+                self.with(|i| i.agent_accounts.remove(&k));
+            }
+            _ => {}
         }
         asked
     }
@@ -1809,5 +1847,182 @@ mod tests {
         let meter = meter.with_continue(|| false);
         assert_eq!(meter.pass(&[run_pod_facts(600)], 1_000).await, 0);
         assert_eq!(asked.load(Ordering::SeqCst), 0);
+    }
+
+    fn agent_pod_facts(namespace: &str, start: i64) -> PodFacts {
+        let mut facts = run_pod_facts(start);
+        facts.namespace = namespace.into();
+        facts.uid = "uid-agent".into();
+        facts.labels = [
+            ("app.kubernetes.io/managed-by", "aap-operator"),
+            ("app.kubernetes.io/component", "agent"),
+            ("app.kubernetes.io/instance", "coder"),
+        ]
+        .iter()
+        .map(|(k, v)| ((*k).into(), (*v).into()))
+        .collect();
+        facts.annotations = [("agents.vymalo.com/size-weight".to_owned(), "1".to_owned())].into();
+        facts
+    }
+
+    struct SinkOf(Arc<MemoryUsageSink>);
+    impl UsageSink for SinkOf {
+        async fn send(&self, e: PodMinuteEvent) -> Result<(), UsageError> {
+            self.0.send(e).await
+        }
+    }
+
+    fn agent_meter(accounts: AccountFn) -> (Meter, Arc<MemoryUsageSink>, Arc<Metrics>) {
+        let sink = Arc::new(MemoryUsageSink::new());
+        let metrics = Arc::new(Metrics::new());
+        let meter = Meter::new(
+            erase_sink(SinkOf(sink.clone())),
+            accounts,
+            MeterConfig {
+                node_type_label_key: Some("node-type".into()),
+                skew_secs: 0,
+                ..MeterConfig::default()
+            },
+            metrics.clone(),
+        );
+        (meter, sink, metrics)
+    }
+
+    #[tokio::test]
+    async fn an_agent_pods_missing_account_is_final_and_an_account_it_gets_later_is_not_for_earlier_minutes()
+     {
+        struct Late(Arc<std::sync::atomic::AtomicUsize>);
+        impl AccountSource for Late {
+            async fn account(&self, _: &PodRef) -> Result<Option<String>, AccountUnavailable> {
+                if self.0.fetch_add(1, Ordering::SeqCst) < 2 {
+                    Ok(None)
+                } else {
+                    Ok(Some("acct".into()))
+                }
+            }
+        }
+        let asked = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let (meter, sink, metrics) = agent_meter(erase_accounts(Late(asked.clone())));
+        let pod = agent_pod_facts("ns-a", 600); // first minute 10
+        // Minutes 10..16 are over: no account, so they are given up (6 of them).
+        assert_eq!(meter.pass(&[pod.clone()], 1_000).await, 0);
+        // Minute 16 is given up too (the source says none again), and the cursor does not stay behind.
+        assert_eq!(meter.pass(&[pod.clone()], 1_060).await, 0);
+        // The service now has an account: only the minutes after the ones given up are for it.
+        meter.pass(&[pod], 1_200).await;
+        let minutes: Vec<u64> = sink.taken().iter().map(|e| e.minute).collect();
+        assert_eq!(
+            minutes,
+            vec![17, 18, 19],
+            "no earlier minute is billed to a later account"
+        );
+        assert_eq!(
+            metrics.get(name::METER_UNATTRIBUTED, &[("reason", "unknown-account")]),
+            7,
+            "the minutes given up are counted once each"
+        );
+        assert_eq!(asked.load(Ordering::SeqCst), 3);
+    }
+
+    /// An account source that records what it is asked and answers `account`.
+    struct Recording(Arc<Mutex<Vec<PodRef>>>, Option<&'static str>);
+    impl AccountSource for Recording {
+        async fn account(&self, pod: &PodRef) -> Result<Option<String>, AccountUnavailable> {
+            self.0
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner)
+                .push(pod.clone());
+            Ok(self.1.map(str::to_owned))
+        }
+    }
+
+    #[tokio::test]
+    async fn the_meter_asks_for_an_agent_pod_in_the_pods_own_namespace() {
+        let asked = Arc::new(Mutex::new(Vec::new()));
+        let (meter, sink, _) = agent_meter(erase_accounts(Recording(asked.clone(), Some("acct"))));
+        meter.pass(&[agent_pod_facts("ns-b", 600)], 1_000).await;
+        let asked = asked.lock().unwrap_or_else(PoisonError::into_inner).clone();
+        let expected = PodRef::Agent {
+            namespace: "ns-b".into(),
+            service: "coder".into(),
+        };
+        assert!(!asked.is_empty());
+        assert!(asked.iter().all(|r| *r == expected), "{asked:?}");
+        assert!(!sink.taken().is_empty());
+    }
+
+    #[tokio::test]
+    async fn a_tombstone_of_an_agent_pod_is_replayed_asking_in_its_own_namespace() {
+        let asked = Arc::new(Mutex::new(Vec::new()));
+        let (meter, sink, _) = agent_meter(erase_accounts(Recording(asked.clone(), Some("acct"))));
+        let t = Tombstone {
+            namespace: "ns-b".into(),
+            uid: "uid-agent".into(),
+            service: "coder".into(),
+            run: None,
+            pod_kind: PodKind::Agent,
+            subject: None,
+            weight_quarters: 4,
+            node_type: "big".into(),
+            started_at: 600,
+            ended_at: 1_000,
+            first_minute: 10,
+            written_at: 1_000,
+        };
+        let mut sent = 0;
+        meter.replay_one(&t, 2_000, 100, &mut sent).await;
+        let asked = asked.lock().unwrap_or_else(PoisonError::into_inner).clone();
+        assert_eq!(
+            asked,
+            vec![PodRef::Agent {
+                namespace: "ns-b".into(),
+                service: "coder".into(),
+            }]
+        );
+        assert_eq!(sent, sink.taken().len());
+        assert!(sent > 0);
+    }
+
+    fn closed_agent_pod() -> PodFacts {
+        let mut closed = agent_pod_facts("ns-b", 600);
+        closed.phase = "Succeeded".into();
+        closed.finished_at = Some(2_000);
+        closed
+    }
+
+    #[tokio::test]
+    async fn the_tombstone_of_an_agent_pod_carries_the_last_account_the_source_named() {
+        let asked = Arc::new(Mutex::new(Vec::new()));
+        let (meter, _, _) = agent_meter(erase_accounts(Recording(asked, Some("acct-agent"))));
+        meter.pass(&[agent_pod_facts("ns-b", 600)], 1_000).await;
+        let t = meter
+            .tombstone_of(&closed_agent_pod(), 2_000)
+            .expect("the pod has minutes left and can be attributed");
+        assert_eq!(t.pod_kind, PodKind::Agent);
+        assert_eq!(t.namespace, "ns-b");
+        assert_eq!(t.subject.as_deref(), Some("acct-agent"));
+    }
+
+    #[tokio::test]
+    async fn the_tombstone_of_an_agent_pod_whose_account_was_cleared_has_none() {
+        struct Switch(Arc<Mutex<Option<&'static str>>>);
+        impl AccountSource for Switch {
+            async fn account(&self, _: &PodRef) -> Result<Option<String>, AccountUnavailable> {
+                Ok(self
+                    .0
+                    .lock()
+                    .unwrap_or_else(PoisonError::into_inner)
+                    .map(str::to_owned))
+            }
+        }
+        let answer = Arc::new(Mutex::new(Some("acct-agent")));
+        let (meter, _, _) = agent_meter(erase_accounts(Switch(answer.clone())));
+        meter.pass(&[agent_pod_facts("ns-b", 600)], 1_000).await;
+        *answer.lock().unwrap_or_else(PoisonError::into_inner) = None;
+        meter.pass(&[agent_pod_facts("ns-b", 600)], 1_200).await;
+        let t = meter
+            .tombstone_of(&closed_agent_pod(), 2_000)
+            .expect("the pod has minutes left and can be attributed");
+        assert_eq!(t.subject, None);
     }
 }

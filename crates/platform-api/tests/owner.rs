@@ -435,6 +435,56 @@ async fn the_orchestrator_writes_the_account_and_a_persons_save_keeps_it() {
 }
 
 #[tokio::test]
+async fn a_person_who_changes_the_owner_clears_the_account_and_cannot_name_another() {
+    let (api, _admin) = Api::seeded().await;
+    let orch = api.token("orchestrator", OWN);
+    let person = person(&api);
+
+    for sends in [None, Some("sub-alice")] {
+        let name = if sends.is_some() { "kept" } else { "dropped" };
+        let r = api
+            .put(&format!("/v1/owners/alice/agents/{name}"))
+            .token(&orch)
+            .create()
+            .json(&with_account(name, Some("sub-alice")))
+            .send()
+            .await;
+        assert_eq!(r.code(), 201, "{}", r.text());
+        assert_eq!(account_of(&r).as_deref(), Some("sub-alice"));
+        let tag = r.etag();
+
+        // The person hands the agent to bob: the stored account was alice's, so it does not stay, whether the form
+        // leaves it out or sends the stored value back.
+        let mut form = with_account(name, sends);
+        form["owner"] = json!("bob");
+        let r = api
+            .put(&format!("/v1/agents/{name}"))
+            .token(&person)
+            .replace(&tag)
+            .json(&form)
+            .send()
+            .await;
+        assert_eq!(r.code(), 200, "{}", r.text());
+        assert_eq!(account_of(&r), None, "sends {sends:?}");
+        assert_eq!(r.json()["representation"]["form"]["form"]["owner"], "bob");
+        let tag = r.etag();
+
+        // Another account is still refused for a person, and the agent is as it was.
+        let mut other = with_account(name, Some("sub-mallory"));
+        other["owner"] = json!("carol");
+        let r = api
+            .put(&format!("/v1/agents/{name}"))
+            .token(&person)
+            .replace(&tag)
+            .json(&other)
+            .send()
+            .await;
+        assert_eq!(r.code(), 403, "{}", r.text());
+        assert_eq!(r.json()["permission"], permission::AGENTS_OWN);
+    }
+}
+
+#[tokio::test]
 async fn an_account_that_is_not_an_opaque_id_is_a_422_on_the_field() {
     let (api, _admin) = Api::seeded().await;
     let orch = api.token("orchestrator", OWN);

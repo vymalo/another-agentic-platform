@@ -128,6 +128,14 @@ async fn a_service_that_is_gone_has_none() {
 }
 
 #[tokio::test]
+async fn a_404_that_is_not_a_missing_service_is_unavailable() {
+    // The API server's `404` for a resource type it does not serve (the CRD is not installed) is not "the service is
+    // gone": it holds the minute rather than giving a pod's minutes up.
+    let (accounts, _) = source(status(404, "Failure"));
+    assert_eq!(accounts.account(&agent()).await, Err(AccountUnavailable));
+}
+
+#[tokio::test]
 async fn every_other_failure_is_unavailable() {
     for code in [401, 403, 429, 500, 503] {
         let (accounts, _) = source(status(code, "Failure"));
