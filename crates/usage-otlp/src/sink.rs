@@ -1,6 +1,7 @@
 //! The sink: `send` is a `try_send` on a bounded queue; one task batches, POSTs and retries.
 
-use std::pin::pin;
+use std::future::Future;
+use std::pin::{Pin, pin};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, PoisonError};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
@@ -76,6 +77,7 @@ impl OtlpUsageSink {
             interval: settings.interval,
             backoff_min: settings.backoff_min,
             backoff_max: settings.backoff_max,
+            warn_every: settings.warn_every,
             stats: stats.clone(),
         };
         let task = tokio::spawn(worker.run());
@@ -162,14 +164,17 @@ struct Worker {
     interval: Duration,
     backoff_min: Duration,
     backoff_max: Duration,
+    warn_every: Duration,
     stats: Arc<Stats>,
 }
 
 enum Post {
     /// 2xx; the collector said it rejected this many records (usually 0).
     Accepted { rejected: u64 },
-    /// A 4xx other than 408 and 429: it will never succeed.
+    /// 400, 415 or 422: the request itself is refused and will never succeed.
     Permanent(u16),
+    /// 413: the batch is too large for the collector; it is split.
+    TooLarge,
     /// Anything else; the status, or 0 for no answer.
     Transient(u16),
 }
@@ -226,105 +231,135 @@ impl Worker {
         }
     }
 
-    /// Sends up to one batch of `buf`, leaving the rest. A batch that cannot be delivered by the deadline is counted.
+    /// Sends up to one batch of `buf`, leaving the rest. Events not delivered by the deadline are counted.
     async fn send_buf(&mut self, buf: &mut Vec<PodMinuteEvent>, fallback: Option<Instant>) {
         if buf.is_empty() {
             return;
         }
         let take = buf.len().min(self.batch);
         let chunk: Vec<PodMinuteEvent> = buf.drain(..take).collect();
-        let bytes = encode_bytes(&self.service, &chunk);
-        let n = chunk.len() as u64;
-        drop(chunk);
-        if !self.deliver(&bytes, n, fallback).await {
-            // The deadline ran out: this batch and everything still held is given up, counted.
+        let unsent = self.deliver(chunk, fallback).await;
+        if unsent > 0 {
+            // The deadline ran out: what is unsent and everything still held is given up, counted.
             let rest = buf.len() as u64;
             buf.clear();
             while self.rx.try_recv().is_ok() {}
-            Stats::add(&self.stats.unsent_at_shutdown, n + rest);
-            self.stats.resolve(n + rest);
+            Stats::add(&self.stats.unsent_at_shutdown, unsent + rest);
+            self.stats.resolve(unsent + rest);
         }
     }
 
-    /// POSTs `bytes` until the collector takes them, or refuses them for good. **A transient failure keeps the
-    /// batch** and repeats the same bytes after a capped, jittered, doubling wait; nothing else ends the loop except
-    /// the shutdown's deadline, when it returns false.
-    async fn deliver(&mut self, bytes: &[u8], n: u64, fallback: Option<Instant>) -> bool {
-        let mut backoff = self.backoff_min;
-        let mut failed_before = 0u64;
-        loop {
-            let deadline = (*self.closing.borrow()).or(fallback);
-            let limit = match deadline {
-                Some(d) => {
-                    let left = d.saturating_duration_since(Instant::now());
-                    if left.is_zero() {
-                        return false;
+    /// POSTs `events` until the collector takes them, or refuses them for good. **A transient failure keeps the
+    /// batch** and repeats the same bytes after a capped, jittered, doubling wait; 413 halves it and sends each half.
+    /// Only the shutdown's deadline ends the loop otherwise. Returns how many events it did not deliver (0 unless the
+    /// deadline ran out).
+    fn deliver(
+        &mut self,
+        events: Vec<PodMinuteEvent>,
+        fallback: Option<Instant>,
+    ) -> Pin<Box<dyn Future<Output = u64> + Send + '_>> {
+        Box::pin(async move {
+            let n = events.len() as u64;
+            let bytes = encode_bytes(&self.service, &events);
+            let mut backoff = self.backoff_min;
+            let mut attempts = 0u64;
+            let mut last_warn: Option<Instant> = None;
+            let unsent = loop {
+                let deadline = (*self.closing.borrow()).or(fallback);
+                let limit = match deadline {
+                    Some(d) => {
+                        let left = d.saturating_duration_since(Instant::now());
+                        if left.is_zero() {
+                            break n;
+                        }
+                        Some(left)
                     }
-                    Some(left)
-                }
-                None => None,
-            };
-            match self.post(bytes, limit).await {
-                Post::Accepted { rejected } => {
-                    let rejected = rejected.min(n);
-                    Stats::add(&self.stats.sent, n - rejected);
-                    Stats::add(&self.stats.refused, rejected);
-                    self.stats.resolve(n);
-                    if rejected > 0 {
-                        tracing::warn!(
-                            rejected,
-                            events = n,
-                            "the usage collector rejected records of a batch; they are not retried"
-                        );
+                    None => None,
+                };
+                match self.post(&bytes, limit).await {
+                    Post::Accepted { rejected } => {
+                        let rejected = rejected.min(n);
+                        Stats::add(&self.stats.sent, n - rejected);
+                        Stats::add(&self.stats.refused, rejected);
+                        self.stats.resolve(n);
+                        if rejected > 0 {
+                            tracing::warn!(
+                                rejected,
+                                events = n,
+                                "the usage collector rejected records of a batch; they are not retried"
+                            );
+                        }
+                        if attempts > 0 {
+                            tracing::info!(attempts, "the usage collector is taking batches again");
+                        }
+                        break 0;
                     }
-                    if failed_before > 0 {
-                        tracing::info!(
-                            retries = failed_before,
-                            "the usage collector is taking batches again"
-                        );
-                    }
-                    return true;
-                }
-                Post::Permanent(status) => {
-                    // A request the collector calls malformed will never succeed; holding it would block every later
-                    // minute behind it. Dropped and counted: the status is all that is said.
-                    Stats::add(&self.stats.refused, n);
-                    self.stats.resolve(n);
-                    tracing::warn!(
-                        status,
-                        events = n,
-                        "the usage collector refused a batch for good; it is dropped"
-                    );
-                    return true;
-                }
-                Post::Transient(status) => {
-                    Stats::add(&self.stats.retries, 1);
-                    if failed_before == 0 {
+                    Post::Permanent(status) => {
+                        // 400, 415 and 422 say the request itself is wrong and will never succeed; holding it would
+                        // block every later minute behind it. Dropped and counted: the status is all that is said.
+                        Stats::add(&self.stats.refused, n);
+                        self.stats.resolve(n);
                         tracing::warn!(
                             status,
                             events = n,
-                            "the usage collector did not take a batch; it is kept and sent again"
+                            "the usage collector refused a batch for good; it is dropped"
                         );
+                        break 0;
                     }
-                    failed_before += 1;
-                }
-            }
-            let mut nap_for = jitter(backoff);
-            if let Some(d) = deadline {
-                nap_for = nap_for.min(d.saturating_duration_since(Instant::now()));
-            }
-            let mut nap = pin!(sleep(nap_for));
-            tokio::select! {
-                () = &mut nap => {}
-                changed = self.closing.changed() => {
-                    if changed.is_err() {
-                        // The sink is gone: nothing will wake us, so just wait the backoff out.
-                        nap.await;
+                    Post::TooLarge => {
+                        if events.len() == 1 {
+                            Stats::add(&self.stats.refused, 1);
+                            self.stats.resolve(1);
+                            tracing::warn!(
+                                status = 413u16,
+                                events = 1,
+                                "the usage collector refused a single event as too large; it is dropped"
+                            );
+                            break 0;
+                        }
+                        let mut first = events;
+                        let second = first.split_off(first.len() / 2);
+                        self.stats.retrying_since.store(0, Ordering::Relaxed);
+                        let left = self.deliver(first, fallback).await;
+                        if left > 0 {
+                            break left + second.len() as u64;
+                        }
+                        return self.deliver(second, fallback).await;
+                    }
+                    Post::Transient(status) => {
+                        Stats::add(&self.stats.retries, 1);
+                        attempts += 1;
+                        self.stats.mark_retrying();
+                        if last_warn.is_none_or(|t| t.elapsed() >= self.warn_every) {
+                            last_warn = Some(Instant::now());
+                            tracing::warn!(
+                                status_class = status_class(status),
+                                attempts,
+                                events = n,
+                                "the usage collector did not take a batch; it is kept and sent again"
+                            );
+                        }
                     }
                 }
-            }
-            backoff = (backoff * 2).min(self.backoff_max);
-        }
+                let mut nap_for = jitter(backoff);
+                if let Some(d) = deadline {
+                    nap_for = nap_for.min(d.saturating_duration_since(Instant::now()));
+                }
+                let mut nap = pin!(sleep(nap_for));
+                tokio::select! {
+                    () = &mut nap => {}
+                    changed = self.closing.changed() => {
+                        if changed.is_err() {
+                            // The sink is gone: nothing will wake us, so just wait the backoff out.
+                            nap.await;
+                        }
+                    }
+                }
+                backoff = (backoff * 2).min(self.backoff_max);
+            };
+            self.stats.retrying_since.store(0, Ordering::Relaxed);
+            unsent
+        })
     }
 
     async fn post(&self, bytes: &[u8], limit: Option<Duration>) -> Post {
@@ -359,10 +394,25 @@ impl Worker {
                     rejected: rejected(&answer),
                 }
             }
-            408 | 429 => Post::Transient(status),
-            400..=499 => Post::Permanent(status),
+            400 | 415 | 422 => Post::Permanent(status),
+            413 => Post::TooLarge,
+            // 401, 403 and 404 (an auth rollout, a wrong path: a person fixes it and holding loses nothing), 408, 429,
+            // every other 4xx, 5xx and 3xx: the batch is kept.
             _ => Post::Transient(status),
         }
+    }
+}
+
+/// The class of a status, for the log: never the status itself of a transient failure, never an answer.
+fn status_class(status: u16) -> &'static str {
+    match status {
+        0 => "none",
+        100..=199 => "1xx",
+        200..=299 => "2xx",
+        300..=399 => "3xx",
+        400..=499 => "4xx",
+        500..=599 => "5xx",
+        _ => "other",
     }
 }
 

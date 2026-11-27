@@ -62,9 +62,13 @@ async fn the_logs_say_counts_and_statuses_and_never_a_subject_or_an_event_id() {
     let mut e = event("m1", "pod-secret-uid", 5);
     e.subject = "subject-SECRET-77".into();
     c.set_behaviour(Behaviour::Status(503));
-    let sink = OtlpUsageSink::start(settings(&c)).unwrap();
+    let mut cfg = settings(&c);
+    cfg.warn_every = Duration::from_millis(60);
+    cfg.backoff_max = Duration::from_millis(15);
+    let sink = OtlpUsageSink::start(cfg).unwrap();
     sink.send(e.clone()).await.unwrap();
     until("a retry", || c.raw_requests().len() >= 2).await;
+    tokio::time::sleep(Duration::from_millis(250)).await;
     c.set_behaviour(Behaviour::Status(400));
     until("a refusal", || sink.stats().snapshot().refused == 1).await;
     c.set_behaviour(Behaviour::Reject(1));
@@ -73,9 +77,20 @@ async fn the_logs_say_counts_and_statuses_and_never_a_subject_or_an_event_id() {
 
     let text = String::from_utf8(capture.0.lock().unwrap().clone()).unwrap();
     assert!(
-        text.contains("status=503"),
-        "the 503 was not logged: {text}"
+        text.contains("status_class=\"5xx\""),
+        "the class of the 503 was not logged: {text}"
     );
+    assert!(
+        !text.contains("status=503"),
+        "a transient status is a class only: {text}"
+    );
+    // While the batch is stuck the warning comes again every `warn_every`, not on every attempt.
+    let stuck = text
+        .lines()
+        .filter(|l| l.contains("is kept and sent again"))
+        .count();
+    assert!(stuck >= 2, "{text}");
+    assert!(text.contains("attempts="), "{text}");
     assert!(
         text.contains("status=400"),
         "the 400 was not logged: {text}"

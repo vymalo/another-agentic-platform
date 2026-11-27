@@ -41,6 +41,8 @@ pub struct UsageOtlpSettings {
     pub backoff_min: Duration,
     /// The longest wait between retries (default 60 s).
     pub backoff_max: Duration,
+    /// At most one warning this often while a batch is being retried (default 60 s).
+    pub warn_every: Duration,
 }
 
 impl UsageOtlpSettings {
@@ -57,6 +59,7 @@ impl UsageOtlpSettings {
             service_name: "aap-operator".into(),
             backoff_min: Duration::from_secs(1),
             backoff_max: Duration::from_secs(60),
+            warn_every: Duration::from_secs(60),
         }
     }
 
@@ -94,6 +97,9 @@ impl UsageOtlpSettings {
         }
         if self.backoff_min.is_zero() || self.backoff_max < self.backoff_min {
             return Err(bad("backoff", "min is zero or above max"));
+        }
+        if self.warn_every.is_zero() {
+            return Err(bad("warnEvery", "is zero"));
         }
         let n = &self.service_name;
         let ok = !n.is_empty()

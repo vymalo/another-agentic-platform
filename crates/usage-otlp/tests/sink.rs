@@ -75,8 +75,11 @@ async fn a_503_twice_then_200_delivers_every_event_with_the_same_bytes_and_times
 }
 
 #[tokio::test]
-async fn timeouts_408_429_closed_connections_and_redirects_are_all_retried() {
+async fn timeouts_401_403_404_408_429_closed_connections_and_redirects_are_all_retried() {
     for behaviour in [
+        Behaviour::Status(401),
+        Behaviour::Status(403),
+        Behaviour::Status(404),
         Behaviour::Status(408),
         Behaviour::Status(429),
         Behaviour::Status(500),
@@ -280,6 +283,7 @@ fn settings_are_checked() {
     bad(&|s| s.batch = 10_001, "batch");
     bad(&|s| s.interval = Duration::ZERO, "interval");
     bad(&|s| s.timeout = Duration::from_secs(9999), "timeout");
+    bad(&|s| s.warn_every = Duration::ZERO, "warnEvery");
     bad(&|s| s.backoff_max = Duration::from_millis(1), "backoff");
     bad(&|s| s.service_name = "a b".into(), "serviceName");
 }
@@ -297,4 +301,109 @@ async fn a_ca_file_that_is_missing_or_not_a_certificate_is_refused_at_start() {
     let e = OtlpUsageSink::start(s).unwrap_err();
     let _ = std::fs::remove_file(file);
     assert_eq!(e.setting, "ca");
+}
+
+#[tokio::test]
+async fn only_400_415_and_422_are_permanent() {
+    for status in [400u16, 415, 422] {
+        let c = TestCollector::start();
+        c.set_behaviour(Behaviour::Status(status));
+        let sink = OtlpUsageSink::start(settings(&c)).unwrap();
+        sink.send(event("m1", "pod-1", 1)).await.unwrap();
+        sink.send(event("m1", "pod-1", 2)).await.unwrap();
+        assert!(sink.flush(Duration::from_secs(5)).await, "{status}");
+        let s = sink.stats().snapshot();
+        assert_eq!((s.refused, s.sent, s.retries), (2, 0, 0), "{status}: {s:?}");
+        assert_eq!(c.raw_requests().len(), 1, "{status}: never sent again");
+    }
+}
+
+#[tokio::test]
+async fn a_404_is_held_not_dropped_and_goes_when_the_path_is_fixed() {
+    let c = TestCollector::start();
+    c.set_behaviour(Behaviour::Status(404));
+    let sink = OtlpUsageSink::start(settings(&c)).unwrap();
+    let sent: Vec<_> = (0..3).map(|m| event("m1", "pod-1", m)).collect();
+    for e in &sent {
+        sink.send(e.clone()).await.unwrap();
+    }
+    until("several attempts", || c.raw_requests().len() >= 4).await;
+    let s = sink.stats().snapshot();
+    assert_eq!(s.refused, 0, "{s:?}");
+    assert!(s.retries >= 3 && s.queue_depth == 3, "{s:?}");
+    c.set_behaviour(Behaviour::Accept);
+    until("delivered", || c.events().len() >= 3).await;
+    assert_eq!(ids(&c.events()), ids(&sent));
+}
+
+#[tokio::test]
+async fn a_413_halves_the_batch_down_until_the_collector_takes_every_event() {
+    let c = TestCollector::start();
+    c.set_behaviour(Behaviour::MaxRecords(2));
+    let mut cfg = settings(&c);
+    cfg.batch = 16;
+    cfg.interval = Duration::from_secs(3600);
+    let sink = OtlpUsageSink::start(cfg).unwrap();
+    let sent: Vec<_> = (0..11).map(|m| event("m1", "pod-1", m)).collect();
+    for e in &sent {
+        sink.send(e.clone()).await.unwrap();
+    }
+    assert!(sink.flush(Duration::from_secs(10)).await);
+    let got = c.events();
+    assert_eq!(ids(&got), ids(&sent), "every event, none lost");
+    assert_eq!(
+        got.len(),
+        11,
+        "and none twice: a split never resends a half that was taken"
+    );
+    let s = sink.stats().snapshot();
+    assert_eq!(
+        (s.sent, s.refused, s.retries, s.queue_depth),
+        (11, 0, 0, 0),
+        "{s:?}"
+    );
+}
+
+#[tokio::test]
+async fn a_single_event_that_is_still_too_large_is_dropped_and_counted() {
+    let c = TestCollector::start();
+    c.set_behaviour(Behaviour::MaxRecords(0));
+    let mut cfg = settings(&c);
+    cfg.interval = Duration::from_secs(3600);
+    let sink = OtlpUsageSink::start(cfg).unwrap();
+    for m in 0..4 {
+        sink.send(event("m1", "pod-1", m)).await.unwrap();
+    }
+    assert!(sink.flush(Duration::from_secs(10)).await);
+    let s = sink.stats().snapshot();
+    assert_eq!(
+        (s.refused, s.sent, s.retries, s.queue_depth),
+        (4, 0, 0, 0),
+        "{s:?}"
+    );
+    // 4 -> 2 + 2 -> four singles: 1 + 2 + 4 requests, each answered 413, none repeated.
+    assert_eq!(c.raw_requests().len(), 7);
+    // Later events still go.
+    c.set_behaviour(Behaviour::Accept);
+    let later = event("m1", "pod-1", 9);
+    sink.send(later.clone()).await.unwrap();
+    assert!(sink.flush(Duration::from_secs(5)).await);
+    assert_eq!(c.events(), vec![later]);
+}
+
+#[tokio::test]
+async fn retrying_since_says_how_long_a_batch_has_been_stuck_and_goes_back_to_zero() {
+    let c = TestCollector::start();
+    c.set_behaviour(Behaviour::Status(503));
+    let sink = OtlpUsageSink::start(settings(&c)).unwrap();
+    assert_eq!(sink.stats().snapshot().retrying_since_secs, 0);
+    sink.send(event("m1", "pod-1", 1)).await.unwrap();
+    until("stuck", || sink.stats().snapshot().retrying_since_secs >= 1).await;
+    c.set_behaviour(Behaviour::Accept);
+    until("delivered", || !c.events().is_empty()).await;
+    until("episode over", || {
+        sink.stats().snapshot().retrying_since_secs == 0
+    })
+    .await;
+    assert_eq!(sink.stats().snapshot().sent, 1);
 }

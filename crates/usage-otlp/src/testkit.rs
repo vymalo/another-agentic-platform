@@ -38,6 +38,8 @@ pub enum Behaviour {
     Redirect,
     /// `200` with `partialSuccess.rejectedLogRecords` of this, after recording the body.
     Reject(u32),
+    /// `413` to a request with more than this many records, recording nothing; `200` (recorded) otherwise.
+    MaxRecords(usize),
 }
 
 #[derive(Default)]
@@ -129,7 +131,10 @@ async fn serve(mut sock: TcpStream, s: Arc<Inner>) {
         Behaviour::Close => {}
         Behaviour::Status(n) => respond(&mut sock, n, "", "").await,
         Behaviour::Redirect => respond(&mut sock, 302, "Location: /elsewhere\r\n", "").await,
-        Behaviour::Accept | Behaviour::LoseAnswer | Behaviour::Reject(_) => {
+        Behaviour::Accept
+        | Behaviour::LoseAnswer
+        | Behaviour::Reject(_)
+        | Behaviour::MaxRecords(_) => {
             let content_type_ok = headers
                 .iter()
                 .any(|(k, v)| k == "content-type" && v == "application/json");
@@ -141,6 +146,12 @@ async fn serve(mut sock: TcpStream, s: Arc<Inner>) {
                 respond(&mut sock, 400, "", "").await;
                 return;
             };
+            if let Behaviour::MaxRecords(max) = behaviour
+                && records(&json).len() > max
+            {
+                respond(&mut sock, 413, "", "").await;
+                return;
+            }
             s.bodies
                 .lock()
                 .unwrap_or_else(PoisonError::into_inner)
