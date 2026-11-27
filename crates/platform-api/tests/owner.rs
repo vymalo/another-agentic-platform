@@ -291,3 +291,164 @@ async fn an_owner_that_is_not_a_name_is_refused_and_a_gitops_agent_is_not_delete
         .await;
     assert_eq!(r.code(), 409, "{}", r.text());
 }
+
+// ----------------------------------------------------------------- the account (AD-071)
+
+fn account_of(r: &Reply) -> Option<String> {
+    r.json()["representation"]["form"]["form"]["account"]
+        .as_str()
+        .map(str::to_owned)
+}
+
+fn with_account(name: &str, account: Option<&str>) -> serde_json::Value {
+    let mut form = folder_body(name);
+    if let Some(account) = account {
+        form["account"] = json!(account);
+    }
+    form
+}
+
+fn person(api: &Api) -> String {
+    api.token(
+        "person",
+        &[permission::AGENTS_READ, permission::AGENTS_WRITE],
+    )
+}
+
+#[tokio::test]
+async fn a_person_cannot_name_an_account_on_a_create_but_can_make_an_agent_without_one() {
+    let (api, _admin) = Api::seeded().await;
+    let person = person(&api);
+
+    let r = api
+        .put("/v1/agents/mine")
+        .token(&person)
+        .create()
+        .json(&with_account("mine", Some("sub-alice")))
+        .send()
+        .await;
+    assert_eq!(r.code(), 403, "{}", r.text());
+    assert!(r.is_problem("forbidden"));
+    assert_eq!(r.json()["permission"], permission::AGENTS_OWN);
+    assert!(!r.text().contains("sub-alice"), "the value is never quoted");
+    let r = api.get("/v1/agents/mine").token(&person).send().await;
+    assert_eq!(r.code(), 404, "a refused create makes nothing");
+
+    let r = api
+        .put("/v1/agents/mine")
+        .token(&person)
+        .create()
+        .json(&with_account("mine", None))
+        .send()
+        .await;
+    assert_eq!(r.code(), 201, "{}", r.text());
+    assert_eq!(account_of(&r), None);
+}
+
+#[tokio::test]
+async fn the_orchestrator_writes_the_account_and_a_persons_save_keeps_it() {
+    let (api, _admin) = Api::seeded().await;
+    let orch = api.token("orchestrator", OWN);
+    let person = person(&api);
+
+    let r = api
+        .put("/v1/owners/alice/agents/mine")
+        .token(&orch)
+        .create()
+        .json(&with_account("mine", Some("sub-alice")))
+        .send()
+        .await;
+    assert_eq!(r.code(), 201, "{}", r.text());
+    assert_eq!(account_of(&r).as_deref(), Some("sub-alice"));
+    let tag = r.etag();
+
+    // A person's replace that sends no account keeps the stored one.
+    let mut form = with_account("mine", None);
+    form["owner"] = json!("alice");
+    form["suspend"] = json!(true);
+    let r = api
+        .put("/v1/agents/mine")
+        .token(&person)
+        .replace(&tag)
+        .json(&form)
+        .send()
+        .await;
+    assert_eq!(r.code(), 200, "{}", r.text());
+    assert_eq!(account_of(&r).as_deref(), Some("sub-alice"));
+    assert_eq!(r.json()["suspend"], true);
+    let tag = r.etag();
+
+    // A person's replace that sends the stored one is accepted too.
+    let mut same = with_account("mine", Some("sub-alice"));
+    same["owner"] = json!("alice");
+    let r = api
+        .put("/v1/agents/mine")
+        .token(&person)
+        .replace(&tag)
+        .json(&same)
+        .send()
+        .await;
+    assert_eq!(r.code(), 200, "{}", r.text());
+    let tag = r.etag();
+
+    // A person's replace that sends another account is refused, and nothing changes.
+    let mut other = with_account("mine", Some("sub-mallory"));
+    other["owner"] = json!("alice");
+    let r = api
+        .put("/v1/agents/mine")
+        .token(&person)
+        .replace(&tag)
+        .json(&other)
+        .send()
+        .await;
+    assert_eq!(r.code(), 403, "{}", r.text());
+    assert_eq!(r.json()["permission"], permission::AGENTS_OWN);
+    assert!(!r.text().contains("sub-mallory"));
+    let r = api
+        .get("/v1/owners/alice/agents/mine")
+        .token(&orch)
+        .send()
+        .await;
+    assert_eq!(account_of(&r).as_deref(), Some("sub-alice"));
+    assert_eq!(r.etag(), tag, "a refused write moves nothing");
+
+    // The orchestrator changes it, and clears it.
+    let r = api
+        .put("/v1/owners/alice/agents/mine")
+        .token(&orch)
+        .replace(&tag)
+        .json(&with_account("mine", Some("sub-bob")))
+        .send()
+        .await;
+    assert_eq!(r.code(), 200, "{}", r.text());
+    assert_eq!(account_of(&r).as_deref(), Some("sub-bob"));
+    let tag = r.etag();
+    let r = api
+        .put("/v1/owners/alice/agents/mine")
+        .token(&orch)
+        .replace(&tag)
+        .json(&with_account("mine", None))
+        .send()
+        .await;
+    assert_eq!(r.code(), 200, "{}", r.text());
+    assert_eq!(account_of(&r), None);
+}
+
+#[tokio::test]
+async fn an_account_that_is_not_an_opaque_id_is_a_422_on_the_field() {
+    let (api, _admin) = Api::seeded().await;
+    let orch = api.token("orchestrator", OWN);
+    let r = api
+        .put("/v1/owners/alice/agents/mine")
+        .token(&orch)
+        .create()
+        .json(&with_account("mine", Some("alice@example.invalid")))
+        .send()
+        .await;
+    assert_eq!(r.code(), 422, "{}", r.text());
+    assert!(r.text().contains("account"));
+    assert!(
+        !r.text().contains("alice@example.invalid"),
+        "the value is never quoted"
+    );
+}

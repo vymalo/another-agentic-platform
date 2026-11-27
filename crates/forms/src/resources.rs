@@ -86,6 +86,7 @@ pub fn to_resources(form: &AgentForm, deployment: &Deployment, namespace: &str) 
     let service_spec = AgentServiceSpec {
         description: form.description.clone(),
         owner: form.owner.clone(),
+        account: form.account.clone(),
         config_ref: NameRef {
             name: form.name.clone(),
         },
@@ -402,6 +403,7 @@ fn extract(
         description: service.description.clone(),
         tags: service.registry.tags.clone(),
         owner: service.owner.clone(),
+        account: service.account.clone(),
         suspend: service.suspend,
         model: config.model.as_ref().map(|m| ModelChoice {
             endpoint: m

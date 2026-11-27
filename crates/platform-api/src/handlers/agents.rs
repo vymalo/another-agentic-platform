@@ -236,6 +236,27 @@ where
     delete_inner(state.0, caller, name, tag).await
 }
 
+/// Who may name the account (`spec.account`, AD-071): only a holder of `platform:agents.own`, which writes the form's
+/// value as it stands (absent is nobody's). Any other caller must send the stored value, or none when nothing is stored,
+/// and a replace writes the stored value back, so a person's save never moves it. The value is never quoted.
+fn apply_account_rule(
+    caller: &Caller,
+    form: &mut AgentForm,
+    current: Option<&aap_ports::Agent>,
+) -> Result<(), Problem> {
+    if caller.holds_agents_own() {
+        return Ok(());
+    }
+    let stored = current
+        .and_then(|a| a.service.spec.get("account"))
+        .and_then(|v| v.as_str());
+    if form.account.as_deref() != stored {
+        return Err(Problem::forbidden(aap_api::permission::AGENTS_OWN));
+    }
+    form.account = stored.map(str::to_owned);
+    Ok(())
+}
+
 async fn put_inner<O, A>(
     state: Arc<ApiState<O, A>>,
     caller: Caller,
@@ -296,6 +317,7 @@ where
             Some(agent)
         }
     };
+    apply_account_rule(&caller, &mut form, current.as_ref())?;
     let deployment = match &current {
         Some(agent) => match load_agent(agent).representation {
             Representation::Form(view) => {

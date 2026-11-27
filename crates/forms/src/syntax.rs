@@ -31,6 +31,13 @@ pub(crate) fn is_tool_server_name(s: &str) -> bool {
             .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || *c == b'-')
 }
 
+/// An account (`spec.account`): 1 to 128 bytes of `[A-Za-z0-9._:/-]`. An `@` is not in it, so an e-mail is never one.
+pub(crate) fn is_account(s: &str) -> bool {
+    (1..=128).contains(&s.len())
+        && s.bytes()
+            .all(|c| c.is_ascii_alphanumeric() || matches!(c, b'.' | b'_' | b':' | b'/' | b'-'))
+}
+
 /// A tag: 1 to 64 characters, lower-case words joined by single dashes.
 pub(crate) fn is_tag(s: &str) -> bool {
     !s.is_empty()

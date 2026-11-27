@@ -25,8 +25,9 @@ use crate::resources::{Resources, to_resources};
 use crate::secret::{OfferedKeys, SecretPick, is_secret_key_name};
 use crate::shared::{BaseUrlForm, ModelEndpointForm, ToolServerForm};
 use crate::syntax::{
-    chars, has_text, is_agent_name, is_env_name, is_github_login, is_model_name, is_scheme_prefix,
-    is_size_class, is_tag, is_tool_server_name, is_url_path, is_visible_ascii, shown,
+    chars, has_text, is_account, is_agent_name, is_env_name, is_github_login, is_model_name,
+    is_scheme_prefix, is_size_class, is_tag, is_tool_server_name, is_url_path, is_visible_ascii,
+    shown,
 };
 
 /// The image `aap-domain` is told is the operator's default when the Platform API does not know it. The
@@ -118,6 +119,12 @@ fn check_agent(
     }
     if form.tags.len() > 16 {
         e.add("tags", "at most 16 tags");
+    }
+    if form.account.as_deref().is_some_and(|a| !is_account(a)) {
+        e.add(
+            "account",
+            "is 1 to 128 characters of letters, digits and `.`, `_`, `:`, `/`, `-`: an e-mail address is not an account",
+        );
     }
     let mut seen = BTreeSet::new();
     for (i, tag) in form.tags.iter().enumerate() {
@@ -463,6 +470,7 @@ fn service_field(path: &str) -> String {
         ("spec.configRef", "name"),
         ("spec.description", "description"),
         ("spec.owner", "owner"),
+        ("spec.account", "account"),
         ("spec.suspend", "suspend"),
         ("spec.registry.title", "title"),
         ("spec.registry.tags", "tags"),
@@ -770,6 +778,7 @@ fn probe(
         description: None,
         tags: Vec::new(),
         owner: None,
+        account: None,
         suspend: false,
         model: Some(ModelChoice {
             endpoint: endpoint.to_owned(),
@@ -1045,6 +1054,7 @@ impl Defaults {
             description: None,
             tags: Vec::new(),
             owner: None,
+            account: None,
             suspend: false,
             model: Some(ModelChoice {
                 endpoint: "probe-endpoint".to_owned(),

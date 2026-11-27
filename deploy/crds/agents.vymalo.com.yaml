@@ -967,6 +967,17 @@ spec:
                     - message: 'access.audience: a value is visible ASCII characters, with no space or control character'
                       rule: self.all(a, a.matches('^[!-~]+$'))
                 type: object
+              account:
+                description: |-
+                  The account this agent's own pods' minutes are for: the person's opaque id from the identity provider (the `sub`,
+                  trimmed and lower-cased), 1 to 128 bytes of `[A-Za-z0-9._:/-]`; an `@` is never one, so an e-mail is not an account.
+                  Written only by the Platform API, for a caller that holds `platform:agents.own`. Absent: nobody's, a shared agent.
+                  Changing it never restarts the agent (it is not in the digest). It is **not** `owner`, the orchestrator's pseudonym.
+                maxLength: 128
+                minLength: 1
+                nullable: true
+                pattern: ^[A-Za-z0-9._:/-]+$
+                type: string
               configRef:
                 description: The AgentConfig, in the same namespace, this service runs.
                 properties:

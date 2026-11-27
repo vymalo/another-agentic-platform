@@ -43,6 +43,11 @@ impl Caller {
         self.0.holds(permission::AGENTS_READ)
     }
 
+    /// Whether the caller is the orchestrator: the only one that may name an agent's account (AD-071).
+    pub(crate) fn holds_agents_own(&self) -> bool {
+        self.0.holds(permission::AGENTS_OWN)
+    }
+
     /// The `403` for a write that names a secret key, when the person may not pick one.
     pub(crate) fn require_secrets_pick(&self) -> Result<(), Problem> {
         if self.0.holds(permission::SECRETS_PICK) {
