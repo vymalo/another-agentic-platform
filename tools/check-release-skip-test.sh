@@ -95,6 +95,29 @@ case "$out" in
 esac
 rm -f "$tmp/.github/workflows/commented.yml"
 
+# A workflow written as `.yaml`: GitHub Actions accepts both extensions, so a guard there is checked too.
+fail no-actor.yaml "jobs:
+  test:
+$comment
+$base && github.event.pull_request.user.login == 'vaam-apps[bot]') }}" 'lacks the actor check'
+
+# And a good `.yaml` guard is counted on its own.
+reset
+write good.yaml "jobs:
+  test:
+$comment
+$good"
+out=$(sh "$check" "$tmp") || { echo 'FAIL: a good .yaml guard was refused'; exit 1; }
+case "$out" in
+  *'1 release-PR skip guards'*) ;;
+  *) echo "FAIL: the .yaml guard was not counted: $out"; exit 1 ;;
+esac
+rm -f "$tmp/.github/workflows/good.yaml"
+write good.yml "jobs:
+  test:
+$comment
+$good"
+
 # No guard at all: the pattern changed, and the check must say it proved nothing.
 reset
 write none.yml "jobs:
@@ -106,4 +129,4 @@ case "$err" in
   *) echo "FAIL: a tree with no guard failed without saying so: $err"; exit 1 ;;
 esac
 
-echo "ok: the exact guard passes; a missing author or actor, a clause outside the !( ), || for &&, a trailing comment, a split guard, a lost comment, a comment three lines up and no guard at all fail; a comment two lines up and a commented guard are handled"
+echo "ok: the exact guard passes; a missing author or actor, a clause outside the !( ), || for &&, a trailing comment, a split guard, a lost comment, a comment three lines up, a .yaml guard and no guard at all fail; a comment two lines up, a commented guard and a good .yaml guard are handled"
