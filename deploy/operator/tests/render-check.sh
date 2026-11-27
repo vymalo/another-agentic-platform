@@ -263,6 +263,8 @@ base_rules='[agents.vymalo.com] [agentservices, agentconfigs] [get, list, watch,
 [agents.vymalo.com] [modelendpoints/status, toolproviders/status] [patch]
 [events.k8s.io] [events] [create, patch]
 [apps] [statefulsets, deployments] [get, list, watch, patch, create, delete]
+[apps] [replicasets] [get]
+[batch] [jobs] [get]
 [""] [services, configmaps, persistentvolumeclaims] [get, list, patch, create, delete]
 [networking.k8s.io] [networkpolicies] [get, list, patch, create, delete]
 [policy] [poddisruptionbudgets] [get, list, patch, create, delete]
