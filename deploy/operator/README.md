@@ -668,7 +668,7 @@ The timers are `leaderElection.{leaseSecs,renewSecs,retrySecs}` (15/10/2, the cl
 is capped at `tuning.reconcileTimeoutSecs` (4 s by default with the election on, and it must be below `lease - renew`, the
 margin between the renew deadline and the earliest takeover): a pass that started before the loss can still write until it
 ends, so the window is bounded, not zero. The MCP probe keeps 5 s of the pass for its other steps: with the election on,
-`toolProbe.timeoutSecs` needs `tuning.reconcileTimeoutSecs` of at least `timeoutSecs + 5`, or the controller would cut the probe to 1 s;
+`toolProbe.timeoutSecs` needs `tuning.reconcileTimeoutSecs` of at least `timeoutSecs + 5`, or the controller would cut the probe to `max(pass - 5, 1)` seconds;
 the chart refuses the pair (`toolProbe.timeoutSecs (...) does not fit the pass`) and names the minimum pass, the minimum
 `leaderElection.leaseSecs` (`renewSecs + pass + 1`) and one block that fits. **The defaults cannot satisfy it** (a pass of 4 s, a lease
 of 15 s): for the default 5 s probe use `leaseSecs: 21`, `renewSecs: 10`, `tuning.reconcileTimeoutSecs: 10`, or lower the probe
