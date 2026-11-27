@@ -2,7 +2,7 @@
 
 - **URI:** `https://agents.vymalo.com/a2a/extensions/release-channels/v1`
 - **Status:** draft (2026-09-28)
-- **Build status:** declared, not built, from the platform's side: the contract is written, and nothing in this repository serves it (see *Implemented by*)
+- **Build status:** nothing built in the platform: the contract is written, and nothing in this repository serves it (see *Implemented by*)
 - **Implemented by:** nothing in another-agentic-platform yet (*verified 2026-11-26*: no platform code serves it; AD-023 kept it out of v0 and [§10a](../architecture/02-domain-model.md#10a-release-channels-and-rolling-upgrades-the-plan) (AD-059) is the plan). Today only the consumer, another-agentic-system, reads it (proven against a WireMock agent), and adam agents advertise it themselves
 - **Consumed by:** any A2A client that wants to select a release — first consumer: another-agentic-system (release dropdown)
 

@@ -4,11 +4,11 @@ The platform defines two contracts that other systems read. Each is versioned by
 
 | Contract | What it is | Build status | Page |
 |---|---|---|---|
-| `agent-registry/v1` | A linkset of agent cards, read over HTTP | complete: the operator serves it and the orchestrator reads it, proven in the kind job `chain-e2e` | [Agent registry](agent-registry-v1.md) |
-| `release-channels/v1` | An A2A extension: an agent card lists its release channels and revisions | declared, not built: nothing in the platform serves it | [Release channels](release-channels-v1.md) |
+| `agent-registry/v1` | A linkset of agent cards, read over HTTP | draft; **built** (the operator serves it, the system's orchestrator reads it, proven together in the kind job `chain-e2e`) | [Agent registry](agent-registry-v1.md) |
+| `release-channels/v1` | An A2A extension: an agent card lists its release channels and revisions | draft; **nothing built in the platform** (adam agents list it themselves; the system reads it, proven against a mock agent) | [Release channels](release-channels-v1.md) |
 
-The build status uses the words of [the system's extensions index](https://vymalo.github.io/another-agentic-system/api/extensions):
-*complete*, *built on mocks*, *declared, not built* and *design only*. Read each page before relying on one.
+A status says what is built and by whom, as [the system's extensions index](https://vymalo.github.io/another-agentic-system/api/extensions) writes
+its own. The status is the page's: read the page before relying on one.
 
 ## Two kinds of contract
 
