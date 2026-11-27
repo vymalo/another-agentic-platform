@@ -54,6 +54,27 @@ fn ts(secs: i64) -> String {
         .to_string()
 }
 
+/// The annotation that carries a run pod's full id (ANR-1160).
+const RUN_ID: &str = "adam.vymalo.com/run-id";
+
+/// adam-rs's `adam-env-kubernetes` `names::run_hash` (at `e8809b4d`), copied for the fixtures: the label a coder
+/// puts on a run pod is this hash of the run id, never the id.
+fn run_hash(run: &str) -> String {
+    use sha2::{Digest, Sha256};
+    Sha256::digest(run.as_bytes())
+        .iter()
+        .take(6)
+        .map(|b| format!("{b:02x}"))
+        .collect()
+}
+
+/// Makes `pod` a pod of the run `run`, as the coder labels and annotates it.
+fn set_run(pod: &mut aap_controller::metering::PodFacts, run: &str) {
+    pod.labels
+        .insert("adam.vymalo.com/run".into(), run_hash(run));
+    pod.annotations.insert(RUN_ID.into(), run.into());
+}
+
 fn affinity(values: &[&str]) -> Value {
     json!({ "requiredDuringSchedulingIgnoredDuringExecution": { "nodeSelectorTerms": [
         { "matchExpressions": [{ "key": KEY, "operator": "In", "values": values }] }
@@ -70,9 +91,12 @@ fn finished_run(name: &str, uid: &str, run: &str, start: i64, end: i64) -> Value
                 "app.kubernetes.io/managed-by": "adam-coder",
                 "app.kubernetes.io/component": "run",
                 "app.kubernetes.io/name": "coder-run",
-                "adam.vymalo.com/run": run,
+                "adam.vymalo.com/run": run_hash(run),
             },
-            "annotations": { "agents.vymalo.com/size-weight": "2" },
+            "annotations": {
+                "agents.vymalo.com/size-weight": "2",
+                "adam.vymalo.com/run-id": run,
+            },
         },
         "spec": { "affinity": { "nodeAffinity": affinity(&["big"]) } },
         "status": {
@@ -681,15 +705,20 @@ fn facts(uid: &str, start: i64) -> PodFacts {
         ("app.kubernetes.io/managed-by", "adam-coder"),
         ("app.kubernetes.io/component", "run"),
         ("app.kubernetes.io/name", "coder-run"),
-        ("adam.vymalo.com/run", "run-1"),
     ];
+    let mut labels: std::collections::BTreeMap<String, String> = labels
+        .iter()
+        .map(|(k, v)| ((*k).into(), (*v).into()))
+        .collect();
+    labels.insert("adam.vymalo.com/run".into(), run_hash("run-1"));
     PodFacts {
         uid: uid.into(),
-        labels: labels
-            .iter()
-            .map(|(k, v)| ((*k).into(), (*v).into()))
-            .collect(),
-        annotations: [("agents.vymalo.com/size-weight".to_owned(), "1".to_owned())].into(),
+        labels,
+        annotations: [
+            ("agents.vymalo.com/size-weight".to_owned(), "1".to_owned()),
+            (RUN_ID.to_owned(), "run-1".to_owned()),
+        ]
+        .into(),
         phase: "Running".into(),
         started_at: Some(start),
         has_container_status: true,
@@ -761,12 +790,56 @@ async fn a_terminating_pod_is_not_billed_into_the_minute_its_grace_ends_in() {
 }
 
 #[tokio::test]
+async fn a_run_pod_is_asked_for_by_its_run_id_annotation_and_never_by_its_hash_label() {
+    // ANR-1160: the coder labels a run pod with the 12-digit hash of the run id and annotates it with the id; the
+    // broker binds the id, so the meter asks by the annotation and sends it on the line.
+    let id = "0f3c2a9e-1b7d-8e4a-9c21-6d5b7a8e9f10";
+    let d = direct(|_| {});
+    d.accounts.set_run("coder", id, "acct-id");
+    // A source that also knew the hash would hand it out: it must never be asked for it.
+    d.accounts.set_run("coder", &run_hash(id), "acct-hash");
+    let mut pod = facts("uid-id", 600);
+    set_run(&mut pod, id);
+    assert_ne!(pod.labels["adam.vymalo.com/run"], id);
+    d.meter.pass(&[pod], 600 + 3 * 60).await;
+    assert_eq!(minutes_of(&d, "uid-id"), vec![10, 11, 12]);
+    let lines = d.sink.taken();
+    assert!(
+        lines
+            .iter()
+            .all(|e| e.subject == "acct-id" && e.run.as_deref() == Some(id))
+    );
+    assert_eq!(
+        d.accounts.asked(),
+        vec![PodRef::Run {
+            service: "coder".into(),
+            run: id.into()
+        }]
+    );
+
+    // The hash label alone is no identity: no line, no question, the minutes counted as `no-identity`.
+    let d = direct(|_| {});
+    d.accounts.set_run("coder", &run_hash("run-1"), "acct-hash");
+    let mut only_label = facts("uid-label", 600);
+    only_label.annotations.remove(RUN_ID);
+    d.meter.pass(&[only_label], 600 + 3 * 60).await;
+    assert!(d.sink.taken().is_empty());
+    assert!(d.accounts.asked().is_empty());
+    assert_eq!(
+        d.metrics.get(
+            aap_controller::metric::METER_UNATTRIBUTED,
+            &[("reason", "no-identity")]
+        ),
+        3
+    );
+}
+
+#[tokio::test]
 async fn an_account_that_becomes_known_later_gets_the_earlier_minutes() {
     let d = direct(|_| {});
     d.accounts.set_broken(false);
     let mut pod = facts("uid-9", 600);
-    pod.labels
-        .insert("adam.vymalo.com/run".into(), "run-late".into());
+    set_run(&mut pod, "run-late");
     d.meter.pass(&[pod.clone()], 1_000).await;
     d.meter.pass(&[pod.clone()], 1_020).await;
     assert!(d.sink.taken().is_empty());
@@ -789,8 +862,7 @@ async fn an_unknown_account_is_given_up_when_its_minutes_pass_the_backfill_bound
     let d = direct(|_| {});
     let day = 24 * 60 * 60;
     let mut pod = facts("uid-9", 600);
-    pod.labels
-        .insert("adam.vymalo.com/run".into(), "run-never".into());
+    set_run(&mut pod, "run-never");
     d.meter.pass(&[pod.clone()], 1_000).await;
     d.meter.pass(&[pod], 1_000 + day + 600).await;
     assert!(d.sink.taken().is_empty());
@@ -905,9 +977,7 @@ async fn a_period_never_sends_more_than_its_cap_between_the_pass_and_the_close()
 async fn a_pod_that_sends_nothing_leaves_its_share_to_the_others() {
     let d = direct(|c| c.max_events_per_pass = 10);
     let mut stranger = facts("uid-s", 600);
-    stranger
-        .labels
-        .insert("adam.vymalo.com/run".into(), "run-unknown".into());
+    set_run(&mut stranger, "run-unknown");
     let sent = d
         .meter
         .pass(
@@ -924,8 +994,7 @@ async fn a_pod_that_sends_nothing_leaves_its_share_to_the_others() {
 async fn a_vanished_pod_whose_account_is_not_known_is_kept_until_it_is() {
     let d = direct(|_| {});
     let mut pod = facts("uid-9", 600);
-    pod.labels
-        .insert("adam.vymalo.com/run".into(), "run-late".into());
+    set_run(&mut pod, "run-late");
     d.meter.pass(std::slice::from_ref(&pod), 1_100).await;
     d.meter.close_vanished(&Default::default(), 1_300).await;
     assert!(d.sink.taken().is_empty());
