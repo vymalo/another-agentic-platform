@@ -1,6 +1,6 @@
-//! `ClientAuthenticator`: a client certificate to the workload it names (ADR-0042, ANR-1010).
+//! `ClientAuthenticator`: a client certificate to the workload it names (AD-065, ANR-1010).
 //!
-//! The Platform API has two listeners that never fall back to one another (ADR-0042 decision 5): the
+//! The Platform API has two listeners that never fall back to one another (AD-068): the
 //! person's, which reads `Authorization: Bearer` through [`Authenticator`](crate::Authenticator), and the
 //! workload's, which is mutual TLS and reads the peer's certificate through this seam. **A certificate is
 //! not a token**: nothing here is a header, an implementation never sees one, and no type of this module
@@ -166,7 +166,7 @@ impl Classify for ClientAuthError {
     }
 }
 
-/// Who a client certificate belongs to, and what it may do (ADR-0042): the URI SAN it names, mapped by
+/// Who a client certificate belongs to, and what it may do (AD-065): the URI SAN it names, mapped by
 /// the deployment's configuration to a fixed set of permissions.
 ///
 /// [`authenticate`](Self::authenticate) is the first half, *who and which permissions*; whether a route

@@ -1,6 +1,6 @@
 [package]
 name = "aap-auth-workload"
-description = "The Platform API's ClientAuthenticator for a workload certificate (ADR-0042, ANR-1010): one configured CA bundle, the client-authentication extended key usage, notAfter, and the exact URI SAN mapped to platform:agents.own and nothing else"
+description = "The Platform API's ClientAuthenticator for a workload certificate (AD-065, ANR-1010): one configured CA bundle, the client-authentication extended key usage, notAfter, and the exact URI SAN mapped to platform:agents.own and nothing else"
 readme = "README.md"
 version.workspace = true
 edition.workspace = true

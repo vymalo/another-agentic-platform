@@ -45,13 +45,13 @@ file that does not come back, with its path (`defaults.allowFrom[0].podSelectr`)
 
 ## The workload listener (ANR-1011)
 
-A second listener for a service that calls the API with a **client certificate** and not a token (the orchestrator, ADR-0042). `src/mtls.rs` is a `tokio-rustls`
+A second listener for a service that calls the API with a **client certificate** and not a token (the orchestrator, AD-068). `src/mtls.rs` is a `tokio-rustls`
 acceptor (rustls with ring, TLS 1.3 and 1.2, HTTP/1.1) served by a hyper `http1` connection of its own (a `TokioTimer`, a 15 s head timeout, a 60 s idle timeout, a connection cap; **the person's listener has none of these and is untouched**): each handshake runs in its own task under 5 s, at most 8 per source address and 256 in all (a connection that finds them taken waits 500 ms), the client certificate is
 verified against the **same CA bundle** `aap_auth_workload::WorkloadAuth` is built from, and the peer's leaf **and the intermediates it sent** are put on each of its requests as the `PeerCertificate`
 the router's guard reads. The router is `aap_platform_api::workload_router`: the owner routes of the table and no other, a `ClientAuthenticator` in place of the bearer
 guard, **no `Authorization` header read**; the person's listener (`listen`) never reads a certificate. **Neither falls back to the other.** The server certificate is
 re-read on renewal (checked at most every 30 s at a handshake; one that cannot be read keeps the one in use and warns once); **the client CA bundle is re-read the same way (inode, length, mtime), so a rotation needs no restart**: the next handshake's verifier and the authenticator take it together, a connection already open is not cut, and a bundle that cannot be used keeps the old one and warns. **A client certificate is always required** (`clientAuth` was removed on 2026-11-27: a file that still says it is refused as an unknown key).
-Not built: the CRL of ADR-0042 decision 2, so a revoked certificate is refused only when it expires. A refusal counts into `aap_api_auth_failures_total{reason}` with a
+Not built: the CRL the workload-certificate decision asks for, so a revoked certificate is refused only when it expires. A refusal counts into `aap_api_auth_failures_total{reason}` with a
 `cert_` reason of its own.
 
 ## `api openapi`
