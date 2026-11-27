@@ -122,8 +122,8 @@ struct PodState {
     cursor: Option<u64>,
     /// The end of the minutes already counted as `unknown-account` (so a retried pod is counted once).
     unknown_counted: u64,
-    /// Whether the pod's `no-end` was counted.
-    no_end_counted: bool,
+    /// Whether the pod's `no-end` or `no-start` was counted.
+    unmetered_counted: bool,
 }
 
 /// The last facts seen of a pod, and when it was last seen Running.
@@ -138,6 +138,8 @@ struct Inner {
     state: HashMap<String, PodState>,
     seen: HashMap<String, Seen>,
     rotor: usize,
+    /// What is left of the period's cap of events, shared by [`Meter::pass`] and [`Meter::close_vanished`].
+    budget: usize,
 }
 
 /// How far one pod got in a pass.
@@ -161,6 +163,10 @@ pub struct Meter {
 }
 
 impl Meter {
+    fn budget(&self) -> usize {
+        self.with(|i| i.budget)
+    }
+
     /// A meter with no cursor: its first pass sends what the pods' facts say, back to the bound.
     pub fn new(
         sink: SinkFn,
@@ -168,12 +174,16 @@ impl Meter {
         config: MeterConfig,
         metrics: Arc<Metrics>,
     ) -> Self {
+        let config_cap = config.max_events_per_pass;
         Self {
             sink,
             accounts,
             config,
             metrics,
-            inner: Mutex::new(Inner::default()),
+            inner: Mutex::new(Inner {
+                budget: config_cap,
+                ..Inner::default()
+            }),
         }
     }
 
@@ -211,8 +221,10 @@ impl Meter {
 
     /// One pass over the pods' facts at `now` (seconds since the Unix epoch). Returns how many events were sent.
     ///
-    /// The cap of events is shared **fairly**: each pod that has minutes due gets an equal share (at least one), and
-    /// the pod the pass starts with rotates, so no pod waits behind another's backlog.
+    /// The cap of events is **one budget per period**, shared by this pass and by [`close_vanished`](Self::close_vanished)
+    /// (which uses what is left): a period never sends more than `max_events_per_pass`. It is shared **fairly**: each
+    /// pod that has minutes due gets an equal part of what is left (at least one), the pod the pass starts with
+    /// rotates, and what a pod that sends nothing leaves is shared again by the others in the same pass.
     pub async fn pass(&self, pods: &[PodFacts], now: i64) -> usize {
         // Remember what was seen, before anything else: a pod that vanishes is closed from it.
         self.with(|i| {
@@ -234,25 +246,44 @@ impl Meter {
                 );
             }
         });
-        let wanting = pods
-            .iter()
-            .filter(|p| {
-                self.due_of(p, now)
-                    .is_some_and(|(_, _, d)| !d.send.is_empty())
-            })
-            .count();
-        let share = (self.config.max_events_per_pass / wanting.max(1)).max(1);
+        // A new period: a fresh budget, which `close_vanished` then shares.
+        let cap = self.config.max_events_per_pass;
         let start = self.with(|i| {
+            i.budget = cap;
             i.rotor = i.rotor.wrapping_add(1);
             i.rotor
         });
+        let n = pods.len();
+        let wants = |pod: &PodFacts| {
+            self.due_of(pod, now)
+                .is_some_and(|(_, _, d)| !d.send.is_empty())
+        };
+        let mut idle: HashSet<usize> = HashSet::new();
         let mut sent = 0usize;
-        for k in 0..pods.len() {
-            let pod = &pods[(start + k) % pods.len()];
-            if sent >= self.config.max_events_per_pass {
-                break;
+        // Rounds: what a pod gets is an equal part of what is left for the pods still to be served, and what a pod
+        // that sent nothing (an unknown account, say) leaves unspent is shared again by the pods that did send.
+        loop {
+            let before = sent;
+            let live: Vec<usize> = (0..n)
+                .map(|k| (start + k) % n)
+                .filter(|i| !idle.contains(i))
+                .collect();
+            let mut candidates = live.iter().filter(|i| wants(&pods[**i])).count();
+            for i in live {
+                let pod = &pods[i];
+                let share = (self.budget() / candidates.max(1)).max(1);
+                if wants(pod) {
+                    candidates = candidates.saturating_sub(1);
+                }
+                let sent_here = sent;
+                if self.process(pod, now, share, &mut sent).await == Progress::SinkDown {
+                    return sent;
+                }
+                if sent == sent_here {
+                    idle.insert(i);
+                }
             }
-            if self.process(pod, now, share, &mut sent).await == Progress::SinkDown {
+            if sent == before || self.budget() == 0 {
                 break;
             }
         }
@@ -271,7 +302,10 @@ impl Meter {
                 .collect()
         });
         let mut sent = 0usize;
+        let mut remaining = gone.len();
         for (uid, seen) in gone {
+            let share = (self.budget() / remaining.max(1)).max(1);
+            remaining = remaining.saturating_sub(1);
             // The end, exclusive: the finish, or one second past the last sight (the minute it was seen in counts).
             let end = match (seen.facts.finished_at, seen.last_running) {
                 (Some(f), Some(r)) => Some(f.min(r.saturating_add(1))),
@@ -288,7 +322,6 @@ impl Meter {
             facts.finished_at = Some(end);
             facts.deleted_at = None;
             facts.has_container_status = true;
-            let share = self.config.max_events_per_pass;
             match self.process(&facts, now, share, &mut sent).await {
                 Progress::Done => self.forget(&uid),
                 Progress::Held => {}
@@ -312,10 +345,14 @@ impl Meter {
             return Progress::Done;
         }
         let ran = match metering::minutes(pod, now, self.config.skew_secs) {
-            Err(metering::NoEnd) => {
-                if !self.state(&pod.uid).no_end_counted {
-                    self.unattributed(Unattributed::NoEnd, 1);
-                    self.update(&pod.uid, |s| s.no_end_counted = true);
+            Err(why) => {
+                if !self.state(&pod.uid).unmetered_counted {
+                    let reason = match why {
+                        metering::Unmetered::NoEnd => Unattributed::NoEnd,
+                        metering::Unmetered::NoStart => Unattributed::NoStart,
+                    };
+                    self.unattributed(reason, 1);
+                    self.update(&pod.uid, |s| s.unmetered_counted = true);
                 }
                 return Progress::Done;
             }
@@ -396,7 +433,7 @@ impl Meter {
             }
         };
         for minute in due.send.clone().take(share) {
-            if *sent >= self.config.max_events_per_pass {
+            if self.budget() == 0 {
                 return Progress::Held;
             }
             let event = PodMinuteEvent {
@@ -414,6 +451,7 @@ impl Meter {
                 Ok(()) => {
                     self.metrics.inc(name::METER_EVENTS, &[]);
                     self.update(&pod.uid, |s| s.cursor = Some(minute + 1));
+                    self.with(|i| i.budget = i.budget.saturating_sub(1));
                     *sent += 1;
                 }
                 Err(UsageError::Unavailable) => {
@@ -444,14 +482,11 @@ pub fn facts_of(pod: &Pod) -> Option<PodFacts> {
     let statuses = status
         .and_then(|s| s.container_statuses.as_deref())
         .unwrap_or_default();
-    let inits = status
-        .and_then(|s| s.init_container_statuses.as_deref())
-        .unwrap_or_default();
-    // The earliest start any container ever reported: a restarted container's `state` is the new run, and
+    // The earliest start any **app** container ever reported (init containers and native sidecars never set it, and
+    // neither does `status.startTime`, which includes Pending and the pull): a restarted container's `state` is the new run, and
     // `lastState` the one before it (Kubernetes keeps only that one).
     let started_at = statuses
         .iter()
-        .chain(inits)
         .flat_map(|c| {
             let state = c.state.as_ref();
             let last = c.last_state.as_ref();
@@ -502,9 +537,6 @@ pub fn facts_of(pod: &Pod) -> Option<PodFacts> {
             .collect(),
         phase: status.and_then(|s| s.phase.clone()).unwrap_or_default(),
         started_at,
-        start_time: status
-            .and_then(|s| s.start_time.as_ref())
-            .map(|t| t.0.as_second()),
         has_container_status: !statuses.is_empty(),
         finished_at,
         deleted_at: pod
@@ -555,29 +587,44 @@ async fn list_scope(client: &Client, scope: &str) -> Result<Vec<PodFacts>, kube:
     Ok(out)
 }
 
+/// One look at the pods: the clock is read **once, before the listing**, and that value stamps what the listing shows
+/// and closes what it does not. A pod listed Running was Running at some instant at or after the moment the list
+/// began, and the minute rule needs no more than that; a later time (the list can be slow) would bill a minute the
+/// pod may not have lived. `list` answers the pods and whether the listing is complete.
+pub(crate) async fn observe<F>(meter: &Meter, clock: &(dyn Fn() -> i64 + Send + Sync), list: F)
+where
+    F: Future<Output = (Vec<PodFacts>, bool)>,
+{
+    let now = clock();
+    let (all, complete) = list.await;
+    meter.pass(&all, now).await;
+    if complete {
+        // Only a complete listing says a pod is gone.
+        let listed: HashSet<String> = all.iter().map(|p| p.uid.clone()).collect();
+        meter.close_vanished(&listed, now).await;
+    }
+}
+
 /// Look at the pods every period while this replica leads, until `stop` is true. A follower lists nothing and
 /// sends nothing.
 pub(crate) async fn run(l: MeterLoop, period: Duration, mut stop: watch::Receiver<bool>) {
     loop {
         if l.leader.is_leader() {
-            let mut all = Vec::new();
-            let mut complete = true;
-            for scope in &l.scopes {
-                match list_scope(&l.client, scope).await {
-                    Ok(mut pods) => all.append(&mut pods),
-                    Err(e) => {
-                        complete = false;
-                        tracing::warn!("the meter could not list the pods of {scope:?}: {e}");
+            observe(&l.meter, &unix_now, async {
+                let mut all = Vec::new();
+                let mut complete = true;
+                for scope in &l.scopes {
+                    match list_scope(&l.client, scope).await {
+                        Ok(mut pods) => all.append(&mut pods),
+                        Err(e) => {
+                            complete = false;
+                            tracing::warn!("the meter could not list the pods of {scope:?}: {e}");
+                        }
                     }
                 }
-            }
-            let now = unix_now();
-            l.meter.pass(&all, now).await;
-            if complete {
-                // Only a complete listing says a pod is gone.
-                let listed: HashSet<String> = all.iter().map(|p| p.uid.clone()).collect();
-                l.meter.close_vanished(&listed, now).await;
-            }
+                (all, complete)
+            })
+            .await;
         }
         tokio::select! {
             () = tokio::time::sleep(period) => {}
@@ -631,39 +678,71 @@ mod tests {
         );
     }
 
+    fn at(t: &str) -> i64 {
+        t.parse::<k8s_openapi::jiff::Timestamp>()
+            .unwrap()
+            .as_second()
+    }
+
     #[test]
-    fn a_container_that_is_waiting_does_not_hide_the_one_that_runs_and_init_containers_count() {
+    fn a_container_that_is_waiting_does_not_hide_the_one_that_runs() {
         let p = pod(json!({
             "phase": "Running",
-            "startTime": "2026-11-27T09:59:00Z",
-            "initContainerStatuses": [container(
-                "sidecar", json!({ "running": { "startedAt": "2026-11-27T10:00:00Z" } }), json!(null))],
             "containerStatuses": [
                 container("a", json!({ "waiting": { "reason": "CrashLoopBackOff" } }), json!(null)),
                 container("b", json!({ "running": { "startedAt": "2026-11-27T10:05:00Z" } }), json!(null)),
             ]
         }));
         let f = facts_of(&p).unwrap();
-        let start = |t: &str| {
-            t.parse::<k8s_openapi::jiff::Timestamp>()
-                .unwrap()
-                .as_second()
-        };
-        assert_eq!(f.started_at, Some(start("2026-11-27T10:00:00Z")));
+        assert_eq!(f.started_at, Some(at("2026-11-27T10:05:00Z")));
         assert!(f.has_container_status);
-        assert_eq!(f.start_time, Some(start("2026-11-27T09:59:00Z")));
-        // Every container waiting: no container start at all, so the pod's start time is the anchor.
-        let looping = pod(json!({
+    }
+
+    #[test]
+    fn an_init_container_that_ran_while_pending_does_not_start_the_billing() {
+        // The init container ran 12:00 to 12:05 while the pod was Pending; the app container started at 12:08.
+        let p = pod(json!({
+            "phase": "Running",
+            "startTime": "2026-11-27T11:59:00Z",
+            "initContainerStatuses": [container(
+                "init",
+                json!({ "terminated": { "exitCode": 0, "startedAt": "2026-11-27T12:00:00Z", "finishedAt": "2026-11-27T12:05:00Z" } }),
+                json!(null))],
+            "containerStatuses": [container(
+                "main", json!({ "running": { "startedAt": "2026-11-27T12:08:00Z" } }), json!(null))],
+        }));
+        assert_eq!(
+            facts_of(&p).unwrap().started_at,
+            Some(at("2026-11-27T12:08:00Z"))
+        );
+    }
+
+    #[test]
+    fn a_native_sidecar_that_started_before_the_main_container_does_not_move_the_start() {
+        let p = pod(json!({
+            "phase": "Running",
+            "initContainerStatuses": [container(
+                "sidecar", json!({ "running": { "startedAt": "2026-11-27T12:01:00Z" } }), json!(null))],
+            "containerStatuses": [container(
+                "main", json!({ "running": { "startedAt": "2026-11-27T12:08:00Z" } }), json!(null))],
+        }));
+        assert_eq!(
+            facts_of(&p).unwrap().started_at,
+            Some(at("2026-11-27T12:08:00Z"))
+        );
+    }
+
+    #[test]
+    fn a_crash_loop_that_never_started_has_no_start_and_the_pod_start_time_is_not_borrowed() {
+        let p = pod(json!({
             "phase": "Running", "startTime": "2026-11-27T09:59:00Z",
             "containerStatuses": [container("a", json!({ "waiting": { "reason": "CrashLoopBackOff" } }), json!(null))]
         }));
-        let f = facts_of(&looping).unwrap();
+        let f = facts_of(&p).unwrap();
         assert_eq!(f.started_at, None);
         assert_eq!(
-            metering::minutes(&f, start("2026-11-27T10:10:00Z"), 0)
-                .unwrap()
-                .map(|r| r.range.start),
-            Some(u64::try_from(start("2026-11-27T09:59:00Z") / 60).unwrap())
+            metering::minutes(&f, at("2026-11-27T10:10:00Z"), 0),
+            Err(metering::Unmetered::NoStart)
         );
     }
 
@@ -681,5 +760,80 @@ mod tests {
         ]}));
         let f = facts_of(&p).unwrap();
         assert!(f.finished_at.unwrap() > f.started_at.unwrap());
+    }
+
+    use aap_usage::{MemoryAccounts, MemoryUsageSink};
+    use std::sync::atomic::{AtomicI64, Ordering};
+
+    fn run_pod_facts(start: i64) -> PodFacts {
+        PodFacts {
+            uid: "uid-1".into(),
+            labels: [
+                ("app.kubernetes.io/managed-by", "adam-coder"),
+                ("app.kubernetes.io/component", "run"),
+                ("app.kubernetes.io/name", "coder-run"),
+                ("adam.vymalo.com/run", "run-1"),
+            ]
+            .iter()
+            .map(|(k, v)| ((*k).into(), (*v).into()))
+            .collect(),
+            annotations: [("agents.vymalo.com/size-weight".to_owned(), "1".to_owned())].into(),
+            phase: "Running".into(),
+            started_at: Some(start),
+            has_container_status: true,
+            node_affinity: Some(json!({ "requiredDuringSchedulingIgnoredDuringExecution": {
+                "nodeSelectorTerms": [{ "matchExpressions": [
+                    { "key": "node-type", "operator": "In", "values": ["big"] }] }] } })),
+            ..PodFacts::default()
+        }
+    }
+
+    #[tokio::test]
+    async fn a_slow_listing_stamps_the_time_before_it_and_a_pod_that_vanishes_is_billed_to_that_minute()
+     {
+        let sink = Arc::new(MemoryUsageSink::new());
+        struct S(Arc<MemoryUsageSink>);
+        impl UsageSink for S {
+            async fn send(&self, e: PodMinuteEvent) -> Result<(), UsageError> {
+                self.0.send(e).await
+            }
+        }
+        struct A;
+        impl AccountSource for A {
+            async fn account(&self, _: &PodRef) -> Result<Option<String>, AccountUnavailable> {
+                Ok(Some("acct".into()))
+            }
+        }
+        let _ = MemoryAccounts::new();
+        let meter = Meter::new(
+            erase_sink(S(sink.clone())),
+            erase_accounts(A),
+            MeterConfig {
+                node_type_label_key: Some("node-type".into()),
+                skew_secs: 0,
+                ..MeterConfig::default()
+            },
+            Arc::new(Metrics::new()),
+        );
+        let clock = Arc::new(AtomicI64::new(1_020)); // minute 17
+        let c = clock.clone();
+        let read = move || c.load(Ordering::SeqCst);
+        // The list starts at 1_020 (minute 17), takes until 1_100 (minute 18), and shows the pod Running.
+        let c2 = clock.clone();
+        observe(&meter, &read, async move {
+            c2.store(1_100, Ordering::SeqCst);
+            (vec![run_pod_facts(600)], true)
+        })
+        .await;
+        // The next look sees nothing: the pod is gone. Long after, so every minute is over.
+        clock.store(5_000, Ordering::SeqCst);
+        observe(&meter, &read, async { (vec![], true) }).await;
+        let minutes: Vec<u64> = sink.taken().iter().map(|e| e.minute).collect();
+        assert_eq!(
+            minutes.last(),
+            Some(&17),
+            "billed through the minute that holds the time before the list, not the time after it: {minutes:?}"
+        );
+        assert!(!minutes.contains(&18));
     }
 }

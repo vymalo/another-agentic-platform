@@ -859,3 +859,94 @@ async fn an_invalid_event_is_dropped_counted_and_not_retried() {
     );
     let _ = metering::BACKFILL_MINUTES;
 }
+
+#[tokio::test]
+async fn a_pod_that_vanishes_while_terminating_is_billed_only_through_its_last_seen_minute() {
+    let d = direct(|_| {});
+    let mut pod = facts("uid-1", 600); // minute 10
+    pod.deleted_at = Some(5_000); // the grace period ends far ahead (minute 83)
+    d.meter.pass(std::slice::from_ref(&pod), 1_100).await; // seen Running in minute 18
+    d.meter.close_vanished(&Default::default(), 9_000).await;
+    let minutes = minutes_of(&d, "uid-1");
+    assert_eq!(
+        minutes.last(),
+        Some(&18),
+        "never to the grace end: {minutes:?}"
+    );
+}
+
+#[tokio::test]
+async fn a_period_never_sends_more_than_its_cap_between_the_pass_and_the_close() {
+    let d = direct(|c| c.max_events_per_pass = 4);
+    // B is seen once (minute 10 is over at 700), then vanishes.
+    d.meter.pass(&[facts("uid-b", 600)], 700).await;
+    assert_eq!(minutes_of(&d, "uid-b"), vec![10]);
+    let before = d.sink.taken().len();
+    // The next period: A has a backlog of 6 and takes the whole budget of 4; B's close gets nothing this period.
+    let a = facts("uid-a", 600);
+    let sent = d.meter.pass(std::slice::from_ref(&a), 1_000).await;
+    let closed = d
+        .meter
+        .close_vanished(&["uid-a".to_owned()].into_iter().collect(), 1_000)
+        .await;
+    assert_eq!((sent, closed), (4, 0));
+    assert_eq!(d.sink.taken().len() - before, 4);
+    // The period after: A's last two minutes, then what is left goes to B's close.
+    let sent = d.meter.pass(std::slice::from_ref(&a), 1_000).await;
+    let closed = d
+        .meter
+        .close_vanished(&["uid-a".to_owned()].into_iter().collect(), 1_000)
+        .await;
+    assert_eq!((sent, closed), (2, 1));
+    assert_eq!(minutes_of(&d, "uid-b"), vec![10, 11]);
+}
+
+#[tokio::test]
+async fn a_pod_that_sends_nothing_leaves_its_share_to_the_others() {
+    let d = direct(|c| c.max_events_per_pass = 10);
+    let mut stranger = facts("uid-s", 600);
+    stranger
+        .labels
+        .insert("adam.vymalo.com/run".into(), "run-unknown".into());
+    let sent = d
+        .meter
+        .pass(
+            &[stranger, facts("uid-a", 600), facts("uid-b", 600)],
+            600 + 100 * 60,
+        )
+        .await;
+    assert_eq!(sent, 10, "the whole budget is spent");
+    assert_eq!(minutes_of(&d, "uid-a").len(), 5);
+    assert_eq!(minutes_of(&d, "uid-b").len(), 5);
+}
+
+#[tokio::test]
+async fn a_vanished_pod_whose_account_is_not_known_is_kept_until_it_is() {
+    let d = direct(|_| {});
+    let mut pod = facts("uid-9", 600);
+    pod.labels
+        .insert("adam.vymalo.com/run".into(), "run-late".into());
+    d.meter.pass(std::slice::from_ref(&pod), 1_100).await;
+    d.meter.close_vanished(&Default::default(), 1_300).await;
+    assert!(d.sink.taken().is_empty());
+    d.accounts.set_run("coder", "run-late", "acct-late");
+    d.meter.close_vanished(&Default::default(), 1_400).await;
+    assert_eq!(minutes_of(&d, "uid-9"), (10..19).collect::<Vec<_>>());
+}
+
+#[tokio::test]
+async fn a_pod_whose_app_container_never_started_is_counted_as_no_start_once() {
+    let d = direct(|_| {});
+    let mut pod = facts("uid-1", 600);
+    pod.started_at = None;
+    d.meter.pass(std::slice::from_ref(&pod), 5_000).await;
+    d.meter.pass(std::slice::from_ref(&pod), 5_100).await;
+    assert!(d.sink.taken().is_empty());
+    assert_eq!(
+        d.metrics.get(
+            aap_controller::metric::METER_UNATTRIBUTED,
+            &[("reason", "no-start")]
+        ),
+        1
+    );
+}

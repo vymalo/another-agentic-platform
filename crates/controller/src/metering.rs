@@ -44,6 +44,9 @@ pub const AGENT_COMPONENTS: [&str; 3] = ["agent", "worker", "front"];
 /// Why a pod's minutes make no line. A closed set: it is the `reason` label of `aap_meter_unattributed_total`.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Unattributed {
+    /// No app container ever started although the pod is not Pending (a crash loop whose container never ran): there
+    /// is no start to bill from. Counted once per pod.
+    NoStart,
     /// A pod that finished (Succeeded or Failed) and says when nowhere: neither a container's `finishedAt` nor a
     /// deletion time. Counted once per pod.
     NoEnd,
@@ -64,6 +67,7 @@ impl Unattributed {
     pub fn as_str(self) -> &'static str {
         match self {
             Self::NoEnd => "no-end",
+            Self::NoStart => "no-start",
             Self::NoWeight => "no-weight",
             Self::UnknownNodeType => "unknown-node-type",
             Self::UnknownAccount => "unknown-account",
@@ -83,13 +87,11 @@ pub struct PodFacts {
     pub annotations: BTreeMap<String, String>,
     /// `status.phase`.
     pub phase: String,
-    /// The earliest of every container's `state.running.startedAt`, `state.terminated.startedAt` and
-    /// `lastState.terminated.startedAt` (init and sidecar containers included), in seconds since the Unix epoch.
-    /// Times have **second resolution**.
+    /// The earliest of the **app** containers' (`spec.containers`) `state.running.startedAt`,
+    /// `state.terminated.startedAt` and `lastState.terminated.startedAt`, in seconds since the Unix epoch. Init
+    /// containers and native sidecars never set it, and neither does `status.startTime` (the kubelet's, which
+    /// includes Pending and the image pull). Times have **second resolution**.
     pub started_at: Option<i64>,
-    /// `status.startTime`: the start when no container ever reported one (a crash loop in `waiting`) and the pod
-    /// is Running.
-    pub start_time: Option<i64>,
     /// Whether the pod reports any container status at all.
     pub has_container_status: bool,
     /// The latest `state.terminated.finishedAt`, when **every** container has terminated. The end is
@@ -212,32 +214,33 @@ pub struct Ran {
     pub complete: bool,
 }
 
-/// A pod that finished and says when nowhere.
+/// Why a pod makes no minutes although it is not Pending.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub struct NoEnd;
+pub enum Unmetered {
+    /// It finished (Succeeded or Failed) and says when nowhere.
+    NoEnd,
+    /// No app container ever started.
+    NoStart,
+}
 
-/// The whole minutes a pod ran in, or `None` when it never ran (Pending, or no start is known), or [`NoEnd`].
+/// The whole minutes a pod ran in, or `None` when it is Pending, or [`Unmetered`].
 ///
 /// **A minute counts if the pod was Running at any instant in it, and is sent only when it is over**: the newest
 /// minute is the one that ended at or before `now - skew` (`skew` covers the difference between this clock and the
 /// API server's). The end is **exclusive** and times have second resolution: a pod that finished at 12:03:00 did not
-/// run in 12:03. A pod ends at the `finishedAt` of its last container once every container has finished, else at its
-/// deletion time (`deletionTimestamp` is the *end* of the grace period, so it is usually in the future and the pod
-/// is counted only up to `now - skew` until it passes). **Under-billing is the rule, never over-billing.**
-pub fn minutes(p: &PodFacts, now: i64, skew: i64) -> Result<Option<Ran>, NoEnd> {
+/// run in 12:03. A pod ends at `finished_at` (the last `finishedAt`, once every app container has finished) and, when
+/// that is absent, at `deleted_at` (`deletionTimestamp` is the *end* of the grace period, so it is usually in the
+/// future, and a pod whose end is after `now - skew` is counted only up to `now - skew`). **Under-billing is the rule, never over-billing.**
+pub fn minutes(p: &PodFacts, now: i64, skew: i64) -> Result<Option<Ran>, Unmetered> {
     if p.phase == "Pending" || p.phase.is_empty() {
         return Ok(None);
     }
-    let Some(start) = p.started_at.or(if p.phase == "Running" {
-        p.start_time
-    } else {
-        None
-    }) else {
-        return Ok(None);
+    let Some(start) = p.started_at else {
+        return Err(Unmetered::NoStart);
     };
     let end = p.finished_at.or(p.deleted_at);
     if matches!(p.phase.as_str(), "Succeeded" | "Failed") && end.is_none() {
-        return Err(NoEnd);
+        return Err(Unmetered::NoEnd);
     }
     let end = end.map(|e| e.max(start));
     let first = to_minute(start);
@@ -455,7 +458,7 @@ mod tests {
         assert_eq!(mins(&p, 1_000), None);
         let mut never = running(120);
         never.started_at = None;
-        assert_eq!(mins(&never, 1_000), None);
+        assert_eq!(minutes(&never, 1_000, 0), Err(Unmetered::NoStart));
         // Started at 02:00, now 02:00:30: the minute is not over.
         assert_eq!(mins(&running(120), 150).map(|r| r.is_empty()), Some(true));
         // Now 03:00: minute 2 is over.
@@ -525,9 +528,9 @@ mod tests {
     fn a_finished_pod_that_says_when_nowhere_has_no_end() {
         let mut p = running(120);
         p.phase = "Failed".into();
-        assert_eq!(minutes(&p, 10_000, 0), Err(NoEnd));
+        assert_eq!(minutes(&p, 10_000, 0), Err(Unmetered::NoEnd));
         p.phase = "Succeeded".into();
-        assert_eq!(minutes(&p, 10_000, 0), Err(NoEnd));
+        assert_eq!(minutes(&p, 10_000, 0), Err(Unmetered::NoEnd));
     }
 
     #[test]
@@ -540,20 +543,13 @@ mod tests {
     }
 
     #[test]
-    fn a_crash_loop_in_waiting_starts_at_the_pod_start_time() {
+    fn a_pod_whose_app_containers_never_started_has_no_start_and_borrows_none() {
         let mut p = running(0);
         p.started_at = None;
-        assert_eq!(
-            mins(&p, 10_000),
-            None,
-            "no container ever started and no start time"
-        );
-        p.start_time = Some(120);
-        assert_eq!(mins(&p, 180), Some(2..3));
-        // A pod that is not Running does not borrow the start time.
-        p.phase = "Succeeded".into();
-        p.finished_at = Some(200);
-        assert_eq!(mins(&p, 10_000), None);
+        assert_eq!(minutes(&p, 10_000, 0), Err(Unmetered::NoStart));
+        // Pending is Pending, not a missing start.
+        p.phase = "Pending".into();
+        assert_eq!(minutes(&p, 10_000, 0), Ok(None));
     }
 
     #[test]

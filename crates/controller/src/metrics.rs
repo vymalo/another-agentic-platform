@@ -33,7 +33,7 @@ pub mod name {
     /// Pod-minute events the meter handed to its sink (ANR-673, AD-069).
     pub const METER_EVENTS: &str = "aap_meter_events_total";
     /// Pod-minutes the meter made no line for, by `reason` (`no-weight`, `unknown-node-type`, `unknown-account`,
-    /// `no-identity`, `no-end`): a closed set, `Unattributed::as_str`.
+    /// `no-identity`, `no-end`, `no-start`): a closed set, `Unattributed::as_str`.
     pub const METER_UNATTRIBUTED: &str = "aap_meter_unattributed_total";
     /// Pod-minutes older than the 24 h backfill bound, skipped.
     pub const METER_BACKFILL_SKIPPED: &str = "aap_meter_backfill_skipped_total";
