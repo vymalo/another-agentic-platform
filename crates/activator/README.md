@@ -49,8 +49,8 @@ ends it too. The head has gone, so no status can say so and the truncation shows
 body **with no terminating chunk**; when the agent errors right after its first chunk the client may get an **empty reply** (the
 connection closed before hyper flushed the buffered head). Both are detectable over HTTP/1.1 chunked; **a close-delimited HTTP/1.0
 client cannot detect either**. Each stream is counted once, by how it ended, in
-`aap_activator_stream_ends_total{end="complete"|"idle"|"failed"|"abandoned"}` (`abandoned`: the client went away mid-stream); the
-request is counted once, as `forwarded`. The `max_in_flight` permit is held until the stream ends or the client
+`aap_activator_stream_ends_total{end="complete"|"idle"|"failed"|"max_duration"|"abandoned"}` (`abandoned`: the client went away mid-stream); the
+request is counted once, as `forwarded`. `max_stream_duration` (`None` by default, provisional) bounds a stream's **total** time from the head, fixed once and not reset by chunks; reaching it ends the stream like an idle one (`end="max_duration"`) and frees the permit. It is off by default because a long A2A task can stream for hours, **but without it a chunk every few seconds holds a permit and a connection for ever, and on a shared front a few such streams can shed everyone else: a shared front should set it, and ANR-1068's chart should give it a deployment value.** The `max_in_flight` permit is held until the stream ends or the client
 goes away.
 
 ## Choices, and why

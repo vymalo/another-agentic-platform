@@ -71,6 +71,8 @@ pub enum StreamEnd {
     Idle,
     /// The agent's stream produced an error item.
     Failed,
+    /// The stream reached `max_stream_duration`.
+    MaxDuration,
     /// The client went away (the response body was dropped) before any of the above.
     Abandoned,
 }
@@ -81,6 +83,7 @@ impl StreamEnd {
             Self::Complete => "complete",
             Self::Idle => "idle",
             Self::Failed => "failed",
+            Self::MaxDuration => "max_duration",
             Self::Abandoned => "abandoned",
         }
     }

@@ -84,6 +84,13 @@ pub struct Settings {
     /// An error item of the agent's stream ends it the same way. Each stream is counted once by how it ended
     /// (`aap_activator_stream_ends_total{end="complete"|"idle"|"failed"|"abandoned"}`). Provisional.
     pub stream_idle_timeout: Duration,
+    /// An optional bound on a stream's **total** time from the head onward, fixed once and not reset by chunks. `None` (the default)
+    /// is off, because a long A2A task can legitimately stream for hours. **Without it, an agent that sends a chunk every less than
+    /// `stream_idle_timeout` holds its `max_in_flight` permit and the client's connection with no upper bound**, and on a front shared
+    /// by many agents a few such streams can shed everyone else. A shared front should set it, and ANR-1068's chart should give it a
+    /// deployment value. When reached the stream ends like an idle one (an error item, the truncation visible on the wire), the permit
+    /// is released and `aap_activator_stream_ends_total{end="max_duration"}` counts it. Provisional.
+    pub max_stream_duration: Option<Duration>,
     /// How many non-card requests may be held or forwarded at once; past it the answer is `503` with `Retry-After` and no wake
     /// is started. Memory is bounded by this times `max_body_bytes`. Provisional.
     pub max_in_flight: usize,
@@ -104,6 +111,7 @@ impl Default for Settings {
             forward_timeout: Duration::from_secs(120),
             body_read_timeout: Duration::from_secs(30),
             stream_idle_timeout: Duration::from_secs(120),
+            max_stream_duration: None,
             max_in_flight: 256,
             host_suffix: None,
             retry_after_secs: 10,
@@ -529,6 +537,7 @@ where
             let mut r = Response::new(Body::from_stream(guarded(
                 answer.body,
                 s.stream_idle_timeout,
+                s.max_stream_duration,
                 permit,
                 Arc::clone(&a.inner.metrics),
             )));
@@ -593,6 +602,7 @@ impl std::error::Error for StreamEnded {}
 fn guarded(
     body: aap_ports::BodyStream,
     idle: Duration,
+    max_total: Option<Duration>,
     permit: OwnedSemaphorePermit,
     metrics: Arc<ActivatorMetrics>,
 ) -> impl futures::Stream<Item = Result<axum::body::Bytes, StreamEnded>> + Send + 'static {
@@ -600,12 +610,24 @@ fn guarded(
         metrics,
         done: false,
     };
+    // One deadline, fixed when the stream starts (the head has just been returned) and never moved by a chunk.
+    let deadline = max_total.map(|d| tokio::time::Instant::now() + d);
     futures::stream::unfold(Some((body, permit, ending)), move |state| async move {
         let (mut body, permit, ending) = state?;
-        match tokio::time::timeout(idle, body.next()).await {
+        let now = tokio::time::Instant::now();
+        let wait = match deadline {
+            Some(d) => idle.min(d.saturating_duration_since(now)),
+            None => idle,
+        };
+        match tokio::time::timeout(wait, body.next()).await {
             Err(_) => {
-                ending.finish(StreamEnd::Idle);
-                Some((Err(StreamEnded("stream idle")), None))
+                if deadline.is_some_and(|d| tokio::time::Instant::now() >= d) {
+                    ending.finish(StreamEnd::MaxDuration);
+                    Some((Err(StreamEnded("stream max duration")), None))
+                } else {
+                    ending.finish(StreamEnd::Idle);
+                    Some((Err(StreamEnded("stream idle")), None))
+                }
             }
             Ok(None) => {
                 ending.finish(StreamEnd::Complete);

@@ -1041,3 +1041,75 @@ async fn each_stream_is_counted_once_by_how_it_ended_and_a_client_that_leaves_is
         "no stream outcome in the request series: {text}"
     );
 }
+
+fn ticking(n: usize) -> Scripted {
+    // A chunk now and then one every 4 s: never idle for `stream_idle_timeout`, never complete in the time the tests allow.
+    let mut steps = vec![chunk("t")];
+    for _ in 0..n {
+        steps.push(Step::Wait(Duration::from_secs(4)));
+        steps.push(chunk("t"));
+    }
+    Scripted {
+        status: 200,
+        headers: vec![],
+        steps,
+    }
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_stream_that_never_goes_idle_ends_at_max_stream_duration_and_frees_its_permit() {
+    use futures::StreamExt;
+    let r = rig(Settings {
+        max_in_flight: 1,
+        max_stream_duration: Some(Duration::from_secs(10)),
+        ..settings()
+    });
+    r.upstream.answer(ticking(100));
+    let started = tokio::time::Instant::now();
+    let res = r.app.clone().oneshot(post("/x", "{}")).await.unwrap();
+    let mut body = res.into_body().into_data_stream();
+    let mut chunks = 0;
+    while let Some(item) = body.next().await {
+        if item.is_err() {
+            break;
+        }
+        chunks += 1;
+    }
+    let took = started.elapsed();
+    assert_eq!(
+        chunks, 3,
+        "chunks at 0, 4 and 8 s; the next would be at 12 s"
+    );
+    assert!(
+        took >= Duration::from_secs(10) && took < Duration::from_secs(12),
+        "{took:?}"
+    );
+    assert_eq!(r.activator.metrics().stream_ends(StreamEnd::MaxDuration), 1);
+    assert_eq!(r.activator.metrics().stream_ends(StreamEnd::Idle), 0);
+    // The permit is free: with `max_in_flight` 1 a second request is served, not shed.
+    assert_eq!(
+        r.app
+            .clone()
+            .oneshot(post("/x", "{}"))
+            .await
+            .unwrap()
+            .status(),
+        StatusCode::OK
+    );
+}
+
+#[tokio::test(start_paused = true)]
+async fn without_max_stream_duration_the_same_stream_runs_past_ten_seconds() {
+    use futures::StreamExt;
+    let r = rig(settings());
+    assert_eq!(Settings::default().max_stream_duration, None);
+    r.upstream.answer(ticking(6));
+    let started = tokio::time::Instant::now();
+    let res = r.app.clone().oneshot(post("/x", "{}")).await.unwrap();
+    let all: Vec<_> = res.into_body().into_data_stream().collect().await;
+    assert_eq!(all.len(), 7);
+    assert!(all.iter().all(Result::is_ok));
+    assert!(started.elapsed() >= Duration::from_secs(24));
+    assert_eq!(r.activator.metrics().stream_ends(StreamEnd::Complete), 1);
+    assert_eq!(r.activator.metrics().stream_ends(StreamEnd::MaxDuration), 0);
+}
