@@ -331,9 +331,7 @@ elif grep -q "RuntimeClass $class" "$work/launch.out"; then
 else
   failed "admission: a pod with no class was refused, but not with the policy's own words: $(head -c 300 "$work/launch.out")"
 fi
-# run-pods-admission.sh's case "another runtime class" names `runc`, and the API server's own RuntimeClass admission answers "RuntimeClass runc not found"
-# before the policy is asked when the cluster has no such object (k3s makes none): the cluster here gets one, a handler its containerd has.
-printf 'apiVersion: node.k8s.io/v1\nkind: RuntimeClass\nmetadata:\n  name: runc\n  labels:\n    %s: %s\nhandler: runc\n' "$made_by_key" "$made_by" | kubectl create -f - >/dev/null
+# run-pods-admission.sh makes the `runc` RuntimeClass its cases name when the cluster has none, and removes it again (ANR-1058).
 if sh "$repo/deploy/operator/tests/run-pods-admission.sh" "$ns" "$svc" > "$work/admission.out" 2>&1; then
   record "admission (run-pods-admission.sh against this cluster): VERIFIED, $(tail -n 1 "$work/admission.out")"
 else

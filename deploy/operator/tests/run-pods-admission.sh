@@ -27,7 +27,15 @@ bad() { printf 'FAIL %s\n' "$*"; fail=1; }
 die() { printf 'FAIL %s\n' "$*" >&2; exit 1; }
 
 work=$(mktemp -d)
-trap 'rm -rf "$work"' EXIT
+# The RuntimeClass `runc` the runtime-class cases name (ensure_runc below): made only if absent, removed on any exit only if this script made it.
+made_runtime_class=0
+cleanup() {
+  rm -rf "$work"
+  if [ "$made_runtime_class" = 1 ]; then kubectl delete runtimeclass runc --ignore-not-found >/dev/null 2>&1 || true; fi
+}
+trap cleanup EXIT
+trap 'exit 130' INT
+trap 'exit 143' TERM HUP
 
 params() { kubectl -n "$ns" get configmap "$svc-run-pods-policy" -o "jsonpath={.data.$1}"; }
 template=$(kubectl -n "$ns" get configmap "$svc-run-pod" -o 'jsonpath={.data.pod\.yaml}') \
@@ -81,20 +89,24 @@ try "no priority class" denied "a run pod has the priority class $class" 'del(.s
 
 # K14a (AD-052): once the deployment names a RuntimeClass, a run pod of the agent's account has that one and no other, or none; with no
 # class named, the policy does not judge the field at all (the control below: a pod with one is admitted).
+# Both branches name a class that must exist: the API server's own RuntimeClass admission answers `RuntimeClass "runc" not found` before the
+# policy is asked when the cluster has no such object (k3s and kind make none), so the cases would fail on that and not on the rule. A
+# `RuntimeClass` with a handler nothing runs is admitted, and a dry-run never starts it. It is cluster-scoped: it is made only when absent
+# and removed on any exit only when this script made it (an existing `runc` is never touched).
+ensure_runc() {
+  if ! kubectl get runtimeclass runc >/dev/null 2>&1; then
+    printf 'apiVersion: node.k8s.io/v1\nkind: RuntimeClass\nmetadata:\n  name: runc\nhandler: runc\n' | kubectl create -f - >/dev/null \
+      || die "the RuntimeClass runc could not be made"
+    made_runtime_class=1
+  fi
+}
+ensure_runc
 if [ -n "$runtime_class" ]; then
   try "another runtime class" denied "a run pod runs under the RuntimeClass $runtime_class" '.spec.runtimeClassName = "runc"'
   try "no runtime class" denied "a run pod runs under the RuntimeClass $runtime_class" 'del(.spec.runtimeClassName)'
 else
-  # The control: with no class named the policy does not judge the field. The API server still refuses a class that does not
-  # exist (its RuntimeClass admission), so the control makes one: a `RuntimeClass` object with a handler nothing runs is
-  # admitted, and a dry-run never starts it. It is cluster-scoped and this script leaves the cluster as it found it.
-  made_runtime_class=0
-  if ! kubectl get runtimeclass runc >/dev/null 2>&1; then
-    printf 'apiVersion: node.k8s.io/v1\nkind: RuntimeClass\nmetadata:\n  name: runc\nhandler: runc\n' | kubectl create -f - >/dev/null
-    made_runtime_class=1
-  fi
+  # The control: with no class named the policy does not judge the field.
   try "a runtime class when the deployment names none" allowed "" '.spec.runtimeClassName = "runc"'
-  if [ "$made_runtime_class" = 1 ]; then kubectl delete runtimeclass runc --ignore-not-found >/dev/null 2>&1 || true; fi
 fi
 
 # What it runs: only the images the deployment allows, in every container.
