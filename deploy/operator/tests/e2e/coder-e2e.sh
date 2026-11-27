@@ -180,9 +180,12 @@ kubectl -n "$ns" wait pod/curl pod/stranger --for=condition=Ready --timeout=180s
 
 step "   the card, through the Service, from a pod"
 [ "$(req curl "$card_url")" = 200 ] || die "GET $card_url is not 200"
-[ "$(body curl | jq -r .name)" = Coder ] || die "the card does not name the agent Coder: $(body curl | head -c 300)"
+# The card's `name` is the harness's (the pinned coder serves "Adam"; it was "Coder" before adam-rs b5d1c7e), so
+# the identity is its skill, not a name this repository does not own.
+card_name=$(body curl | jq -r .name)
+[ -n "$card_name" ] && [ "$card_name" != null ] || die "the card has no name: $(body curl | head -c 300)"
 body curl | jq -e '.skills[] | select(.id == "coding-task")' >/dev/null || die "the card lists no coding-task skill"
-ok "the card answers 200 through the Service and names the Coder and its skill coding-task"
+ok "the card answers 200 through the Service, names itself ($card_name) and lists its skill coding-task"
 [ "$(req curl "http://coder.$ns.svc:8080/healthz")" = 200 ] || die "GET /healthz is not 200"
 a2a_url=$(jp agentservice/coder '{.status.endpoints.a2a}')
 refused=$(req curl -X POST -H 'Content-Type: application/json' -d '{}' "$a2a_url")
@@ -206,7 +209,7 @@ ok "the registry lists the coder (service, title, tags) with its card URL, to th
 # The card the registry lists is the card the pod serves.
 href=$(body curl | jq -r '.linkset[0].item[0].href')
 [ "$(req curl "$href")" = 200 ] || die "the card the registry lists is not served"
-[ "$(body curl | jq -r .name)" = Coder ] || die "the card the registry lists is not the coder's"
+[ "$(body curl | jq -r .name)" = "$card_name" ] || die "the card the registry lists is not the coder's: $(body curl | jq -r .name) != $card_name"
 ok "the card it lists is the card the pod serves"
 # NetworkPolicy: only the labelled pods may read the registry. kind's CNI enforces policies since kindnetd learned to; if it does
 # not, say so instead of failing (what this proves is the operator's, not the CNI's).
