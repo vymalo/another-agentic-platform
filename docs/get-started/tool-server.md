@@ -7,7 +7,7 @@ namespace. The agent's model is a scripted stand-in, so no model key and no acco
 Start with [Get started](../get-started.md) if you have not made a cluster with the operator before, and read
 [the folder agent page](folder-agent.md) first: this page reuses its model and its two A2A calls.
 
-## Where it comes from
+::: in-depth Where it comes from
 
 The commands are adapted from [`k10-e2e.sh`](../../deploy/operator/tests/e2e/k10-e2e.sh), steps 1 to 4, and use its own files:
 [`k10-support.yaml`](../../deploy/operator/tests/e2e/k10-support.yaml), [`k10-model.js`](../../deploy/operator/tests/e2e/k10-model.js),
@@ -22,6 +22,7 @@ namespace. They differ from the script in these ways:
   `mcp.json` the operator made and the agent's log;
 - the page does not check that no secret is in any log.
 
+:::
 ## What you will do
 
 ```mermaid

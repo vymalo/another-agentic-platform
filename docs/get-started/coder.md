@@ -8,7 +8,7 @@ operator makes of the objects, and how to read it.
 Start with [Get started](../get-started.md) if you have not made a cluster with the operator before. This page repeats only what
 differs.
 
-## Where it comes from
+::: in-depth Where it comes from
 
 The objects are adapted from [`examples/coder.yaml`](../../examples/coder.yaml), whose model is inline, and
 [`examples/coder-me.yaml`](../../examples/coder-me.yaml), which names a shared `ModelEndpoint` (`endpointRef`). The token variant of the
@@ -24,6 +24,7 @@ differ from those in these ways:
 - there is no web search, no Context7, no `longhorn` storage class and no audience; the claim uses kind's default storage class;
 - one namespace, `aap`, and a Postgres URI that is never opened.
 
+:::
 ## What you will do
 
 ```mermaid

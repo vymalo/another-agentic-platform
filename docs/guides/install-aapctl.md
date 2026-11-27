@@ -44,7 +44,7 @@ sudo install -m 0755 aapctl /usr/local/bin/aapctl
 aapctl --version
 ```
 
-## Verify what you downloaded
+::: in-depth Verify what you downloaded
 
 The checksum proves the download arrived whole; it does not say who built it. Two independent checks do, and both are made
 by the release's own run:
@@ -71,7 +71,8 @@ re-run runs: such an asset verifies with
 tag's own first run verifies with the stricter expression above. Neither accepts a file signed by anything but this
 repository's release workflow.
 
-## What is not provided
+:::
+::: in-depth What is not provided
 
 - **Windows.** The browser sign-in's opener there was never run, so no binary is built for it; use WSL, or build from source.
 - **Apple notarisation.** The macOS binaries are signed and attested by the release, but not notarised. A Homebrew formula
@@ -79,8 +80,11 @@ repository's release workflow.
 - **A package of the platform.** `aapctl` carries no model, no agent and no image. It reads a document, or talks to a Platform
   API you name.
 
-## Version skew
+:::
+::: in-depth Version skew
 
 `aapctl --version` prints the release it came from. Before a command writes, `apply` checks that it reads the server's forms
 whole: an object of another release is exit 5 with the member it does not know, and nothing is written. Use the `aapctl` of
 the server's release. `get`, `whoami` and `export` have no such check.
+
+:::

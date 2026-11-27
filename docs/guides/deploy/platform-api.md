@@ -103,7 +103,7 @@ TLS, a check of the JWT, and rate limits belong to the edge. **The API implement
 
 A limit per token only means something behind a check of the JWT. A limit keyed by the raw `Authorization` header is dodged by sending a new forged value each time. Keep a per-address limit as well, or verify the JWT at the edge before it counts. The edge must pass `Authorization` through unchanged, and let `OPTIONS` through to the API, which answers its own CORS preflights ([The edge](../../../deploy/operator/README.md#the-edge)). Browser origins go in `api.config.cors.allowedOrigins`, exact origins only, never a wildcard.
 
-## The request path
+::: in-depth The request path
 
 Every route is in one table, with the permission it needs. One layer over the whole router reads the table and decides before any handler runs, so a handler never decides who may call it ([`aap-platform-api`](../../../crates/platform-api/README.md#authorization-one-layer-applied-last)).
 
@@ -146,7 +146,10 @@ stateDiagram-v2
 
 A route that is not in the table is never served. The permission of each route is in the [OpenAPI document](../../reference/openapi.md) (`x-permission`).
 
+:::
 ## The API pod is not ready until it can reach the issuer
+
+::: in-depth The checks behind it
 
 `/readyz` answers `503` until the API has fetched the issuer's keys, and it also makes one call that needs the API's own rights on the cluster. So with a placeholder issuer, or when `issuer.to` or the NetworkPolicy blocks the issuer, the pod runs but never becomes ready, and `helm upgrade --wait` times out. Check:
 
@@ -157,6 +160,7 @@ kubectl -n <release-namespace> get serviceaccount   # if you changed the name, f
 
 then `api.networkPolicy.issuer.to` and `.ports`, `api.networkPolicy.dns`, and the issuer's URL. With `maxUnavailable: 0`, old pods keep serving during a failed rollout. The chart's `/readyz` behaviour is described in [The pod](../../../deploy/operator/README.md#the-pod).
 
+:::
 ## Check the file before you deploy it
 
 The chart cannot check everything the binary checks. Run the API's own `--check` on the configuration your values render. It needs no cluster and no issuer.

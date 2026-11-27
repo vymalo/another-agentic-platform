@@ -41,7 +41,7 @@ Read them in this order:
 
 `Blocked` means the operator did **not** apply the desired state and left what runs untouched. It happens when `ConfigResolved` or `StoreReady` is not `True`, or when an object the runtime needs is not the operator's (`NameConflict`). `Blocked` wins over `Suspended`.
 
-## Symptom, reason, what to check
+::: in-depth Symptom, reason, what to check
 
 Every reason below is in `crates/controller/src/derive.rs` or in the provider's status code. The last column says where it was seen. *yes* is the walk of 2026-11-27 (a kind cluster, the operator at `sha-2c16326`). *cluster test* is a CI job that asserts the reason against a real cluster: `operator-e2e` for `NameConflict` and `RegistryDisabled`, `runtime-kubernetes` for the three exit codes. *no* is read from the code only.
 
@@ -77,6 +77,7 @@ kubectl -n agents get pod -l app.kubernetes.io/instance=hello
 kubectl -n agents describe pod -l app.kubernetes.io/instance=hello
 ```
 
+:::
 ## Read the Events
 
 The operator writes one Event on the `AgentService` each time its state, or the reason on `Ready`, changes. It is `Normal` for `Reconciled`, `Provisioning`, `Suspended`, `Sleeping` and `Waking` unless the agent is `Blocked`, and `Warning` for the rest (`WakeTimedOut` among them). The message is the condition's message, cut at 1,000 characters.
@@ -98,7 +99,7 @@ Events:
 
 The second command also shows what the kubelet and the controllers said about the pod, which the conditions only summarise. For `badimage` it held `Failed to pull image "registry.invalid/none:1": ... no such host`, and for the missing Secret `Error: secret "absent-secret" not found`.
 
-### The operator's log
+::: in-depth The operator's log
 
 When the conditions and the Events say nothing, or say nothing at all, read the operator's log:
 
@@ -108,7 +109,8 @@ kubectl -n aap-system logs deploy/aap-operator
 
 With more than one replica this reads one pod, and only the leader reconciles: if that pod is a follower, read the leader's (`kubectl -n <primary namespace> get lease aap-operator` names it).
 
-### Through the Platform API
+:::
+::: in-depth Through the Platform API
 
 With the API on, `GET /v1/agents/{name}/events` gives the same Events to someone who has no `kubectl` and holds `platform:agents.read`:
 
@@ -126,7 +128,8 @@ The answer is `{ "events": [...], "incomplete": false }`. Each event is `{ type,
 - **An empty list does not mean healthy.** Kubernetes keeps Events for a limited time. The API server's default is one hour.
 - An agent that does not exist is a `404`. The API's own `Role` has `list` on `events` and nothing wider. An API whose chart is older than its image answers `503` on this route alone: move the chart and the image together.
 
-### Through `aapctl`
+:::
+::: in-depth Through aapctl
 
 ```sh
 aapctl login --server https://api.example --issuer https://issuer.example/realms/platform   # once, in a browser
@@ -136,6 +139,7 @@ aapctl get agents badimage -o json   # the whole answer: state, conditions, stat
 
 The state is lower case here: `saving`, `blocked`, `degraded`, `ready`, `suspended` or `deleting`. The `conditions` in the JSON are the ones above. Where a token comes from is on [Turn on the Platform API](../deploy/platform-api.md) (`$TOKEN` in the `curl` above is one the issuer gave you, and `aapctl login` also takes `--token-stdin`). `aapctl` has no command for Events at this commit: use the route, or `kubectl`. `aapctl` ships in no image: build it from the repository (`cargo run -q -p aap-cli -- get agents`).
 
+:::
 ## What proves it
 
 | Check | Where | What it holds |
