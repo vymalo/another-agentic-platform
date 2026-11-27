@@ -248,7 +248,7 @@ After an agent with run pods is `Ready`:
 ```sh
 sh deploy/operator/tests/run-pods-admission.sh <agent-namespace> <service>
 
-# the operator's account lives in the release namespace and is named for the release (here aap-system and aap-operator)
+# the operator's account lives in the release namespace (here aap-system) and is aap-operator, whatever the release is called
 op=system:serviceaccount:<release-namespace>:aap-operator   # the chart sets fullnameOverride: aap-operator; if you changed it, use yours
 # find it with: kubectl -n <release-namespace> get serviceaccount
 kubectl auth can-i create statefulsets --as $op -n <agent-namespace>   # yes: the control, so the next answer can mean something
