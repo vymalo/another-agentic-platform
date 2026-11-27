@@ -303,9 +303,15 @@ The four new port methods have defaults (nothing retained), so no implementer br
 
 ## Metrics
 
-`Metrics` is a few counters in Prometheus text (no client library): `aap_reconcile_total{controller,result}`,
-`aap_reconcile_errors_total{controller,class}`, `aap_reconcile_timeouts_total{controller}`, `aap_status_patches_total{controller}`,
-`aap_service_state_changes_total{state}`, `aap_runtime_signals_total`, `aap_services_deleted_total`.
+`Metrics` is a few counters in Prometheus text (no client library). **Fifteen series**, each absent until its first event:
+
+- **reconcile:** `aap_reconcile_total{controller,result}`, `aap_reconcile_errors_total{controller,class}`,
+  `aap_reconcile_timeouts_total{controller}`, `aap_status_patches_total{controller}`;
+- **services:** `aap_service_state_changes_total{state}`, `aap_runtime_signals_total`, `aap_services_deleted_total`;
+- **retention and sleep:** `aap_retention_purged_total`, `aap_agent_sleeps_total`;
+- **the pod-minute meter** (ANR-673, AD-069): `aap_meter_events_total`, `aap_meter_unattributed_total{reason}`,
+  `aap_meter_backfill_skipped_total`, `aap_meter_send_failures_total`, `aap_meter_invalid_total`,
+  `aap_meter_account_failures_total`.
 
 ## Traces (K5)
 
