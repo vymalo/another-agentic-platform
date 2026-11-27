@@ -1,5 +1,250 @@
 # Get started
 
-The first-success walk-through is planned (ANR-929). Until then, the commands to build and test are in
-[`CLAUDE.md`](../CLAUDE.md) (section *Commands*), and the operator's chart is in
-[`deploy/operator`](../deploy/operator/README.md).
+This page takes you from a laptop to one agent that is `Ready` and listed in the operator's agent registry. It runs on a
+throwaway [kind](https://kind.sigs.k8s.io/) cluster and needs no model key and no account.
+
+The steps are the ones CI runs. They come from
+[`namespaces-e2e.sh`](https://github.com/vymalo/another-agentic-platform/blob/main/deploy/operator/tests/e2e/namespaces-e2e.sh)
+(step 12b, an agent that serves A2A itself) and the operator chart's
+[README](../deploy/operator/README.md). The agent is the one in
+[`examples/a2a.yaml`](../examples/a2a.yaml), with a namespace and Secrets of its own.
+
+## What you will do
+
+```mermaid
+sequenceDiagram
+  actor You
+  participant API as Kubernetes API server
+  participant Op as Operator
+  participant K8s as Deployment and Service
+  participant Reg as Registry (:8080)
+  You->>API: helm install (CRDs, operator)
+  API-->>Op: the operator starts
+  You->>API: kubectl apply AgentService + AgentConfig
+  API-->>Op: watch event
+  Op->>API: create Deployment, Service, NetworkPolicy
+  API-->>K8s: the pod starts and passes its probes
+  Op->>API: status: Ready, Listed
+  You->>Reg: curl with the bearer token (port-forward)
+  Reg-->>You: agent-registry/v1 document
+```
+
+The agent's lifecycle, as this walk sees it. The names are the `status.state` values and the condition reasons the operator writes:
+
+```mermaid
+stateDiagram-v2
+  [*] --> Degraded: applied, the pod is not ready yet
+  [*] --> Blocked: the spec or a referenced object is refused
+  Degraded --> Ready: the pod passes its probes
+  Blocked --> Degraded: the cause is fixed
+  Ready --> Degraded: a rollout, or the pod fails
+  Ready --> [*]: kubectl delete (the operator removes what it made)
+```
+
+The walk below only passes through `Ready`: on a warm cluster it took about 4 seconds after `kubectl apply`. `Degraded` and `Blocked` are the
+states the operator writes in the other cases (see `ServiceState` in `crates/api/src/status.rs`).
+
+`Ready` means the config resolved, the store is ready and the runtime is ready. `Listed` is a separate condition. It says the agent is in the
+registry and never decides `Ready`.
+
+## Prerequisites
+
+| Tool | Used here | Why |
+|---|---|---|
+| `docker` | 29.10.0 | kind runs the node as a container; you build one tiny image |
+| `kind` | 0.33.0 | the cluster |
+| `kubectl` | 1.35.10 | talks to it |
+| `helm` | 3.16.1 | installs the two charts |
+| `git`, `curl`, `jq`, `openssl` | any | clone, query, read JSON, make a token |
+
+CI pins the kind node image to `kindest/node:v1.35.8` (with its digest). The steps below use the same one. The operator needs
+Kubernetes 1.30 or later only for run pods, which this page does not use.
+
+## 1. Get the repository and make a cluster
+
+```sh
+git clone https://github.com/vymalo/another-agentic-platform.git
+cd another-agentic-platform
+
+kind create cluster --name aap-start \
+  --image kindest/node:v1.35.8@sha256:07b2536e30b803ed61d1677a79df6115f798ce64c80f9e22f6ed45afd09323c0
+kubectl config current-context
+```
+
+The last command prints `kind-aap-start`. Every command below acts on that cluster.
+
+## 2. Make the agent's image available
+
+The operator image comes from `ghcr.io` and the chart pins it, so you build nothing for it. The **agent** needs an image that
+answers `/healthz` and serves an A2A card. CI uses a stand-in for that, a few lines of BusyBox, built from the repository. It does
+nothing else, which is why no model key is needed.
+
+```sh
+docker build -t aap-stub:ci bin/operator/tests/stub
+kind load docker-image aap-stub:ci --name aap-start
+```
+
+## 3. Install the CRDs, then the operator
+
+The CRDs are a chart of their own and go first.
+
+```sh
+helm template aap-operator-crds deploy/operator-crds | kubectl apply --server-side -f -
+kubectl wait --for=condition=Established crd/agentservices.agents.vymalo.com crd/agentconfigs.agents.vymalo.com --timeout=60s
+```
+
+The operator serves its registry only with a bearer token, and it reads the token from a Secret. Make the namespace, the token and
+the two Secrets the agent refers to. The agent's store is a **referenced Secret**: the operator is given the Postgres URI the agent
+should use and never reads it. The stand-in never opens it, so any text will do here.
+
+```sh
+kubectl create namespace aap
+
+REGISTRY_TOKEN=$(openssl rand -hex 24)
+kubectl -n aap create secret generic registry-token --from-literal=token="$REGISTRY_TOKEN"
+kubectl -n aap create secret generic hello-secrets --from-literal=A2A_BEARER_TOKENS="$(openssl rand -hex 24)"
+kubectl -n aap create secret generic hello-db --from-literal=uri=postgres://unused.invalid/hello
+```
+
+Now the operator. The chart refuses an empty `networkPolicy.registry.allowFrom` while the registry has a token, so the values say who
+may read it: any pod of the release's namespace. (`kubectl port-forward`, used below, does not go through that policy.)
+
+```sh
+cat > operator.values.yaml <<'YAML'
+registry:
+  tokenSecret:
+    name: registry-token
+    key: token
+networkPolicy:
+  registry:
+    allowFrom:
+      - podSelector: {}
+YAML
+
+helm upgrade --install aap-operator deploy/operator --namespace aap -f operator.values.yaml --wait --timeout 300s
+```
+
+The operator image is the chart's default pin, `ghcr.io/vymalo/another-agentic-platform/operator:<tag>`. The chart watches its own
+namespace unless `watchNamespaces` says otherwise. For a list of every value, see the chart's [README](../deploy/operator/README.md#values).
+
+## 4. Apply an agent
+
+An agent is two objects: an `AgentService` (what runs, its store, who may reach it, how it is listed) and an `AgentConfig` (what it is made of).
+This one is an `a2a` harness: an image that serves A2A itself, with no model.
+
+```sh
+cat > hello.yaml <<'YAML'
+apiVersion: agents.vymalo.com/v1alpha1
+kind: AgentService
+metadata:
+  name: hello
+  namespace: aap
+spec:
+  description: A stand-in agent for the Get started page.
+  configRef:
+    name: hello
+  interfaces:
+    a2a:
+      enabled: true
+      bearerTokensSecretRef:
+        name: hello-secrets
+        key: A2A_BEARER_TOKENS
+  scaling:
+    topology: combined
+    workers: 1
+  store:
+    postgres:
+      secretRef:
+        name: hello-db
+        key: uri
+  access:
+    allowFrom:
+      - namespaceSelector:
+          matchLabels:
+            kubernetes.io/metadata.name: aap
+  registry:
+    title: Hello
+    tags: [get-started]
+---
+apiVersion: agents.vymalo.com/v1alpha1
+kind: AgentConfig
+metadata:
+  name: hello
+  namespace: aap
+spec:
+  harness:
+    type: a2a
+    a2a:
+      image:
+        ref: aap-stub:ci
+      env:
+        - name: LOG_LEVEL
+          value: info
+  environment:
+    resources:
+      requests:
+        cpu: 10m
+        memory: 32Mi
+      limits:
+        memory: 64Mi
+YAML
+
+kubectl apply -f hello.yaml
+```
+
+## 5. Wait for Ready
+
+```sh
+kubectl -n aap wait agentservice/hello --for=condition=Ready --timeout=300s
+kubectl -n aap get agentservice hello
+kubectl -n aap get deployment,service,pod -l app.kubernetes.io/instance=hello
+```
+
+If it does not become `Ready`, read why. The operator writes the reason into the conditions:
+
+```sh
+kubectl -n aap get agentservice hello -o jsonpath='{range .status.conditions[*]}{.type}={.status} {.reason}{"\n"}{end}'
+```
+
+## 6. Read the registry
+
+The registry is a Service of the operator, `aap-operator-registry`, on port 8080. Forward it and ask with the token:
+
+```sh
+kubectl -n aap port-forward service/aap-operator-registry 18080:8080 >/dev/null 2>&1 &
+PF_PID=$!
+sleep 3
+
+curl -s -H "Authorization: Bearer $REGISTRY_TOKEN" -H 'Accept: application/linkset+json' \
+  http://127.0.0.1:18080/registry/v1/agents | jq .
+```
+
+The answer is an `agent-registry/v1` linkset document: one `item` per listed agent, with its `service` id, its `title` and the `href` of
+its agent card. Without the token the registry answers `401`:
+
+```sh
+curl -s -o /dev/null -w '%{http_code}\n' http://127.0.0.1:18080/registry/v1/agents
+```
+
+The same document is what an orchestrator reads to find agents. Its format is the contract
+[`agent-registry-v1`](extensions/agent-registry-v1.md).
+
+## 7. Clean up
+
+```sh
+kill "$PF_PID"
+kubectl -n aap delete agentservice hello --wait=true --timeout=120s
+kubectl -n aap delete agentconfig hello
+helm uninstall aap-operator --namespace aap
+kind delete cluster --name aap-start
+```
+
+Deleting the cluster removes everything, so the first four lines matter only if you keep the cluster.
+
+## Next
+
+- [Architecture §59a](architecture/10-control-plane-and-crds.md): what the operator does, slice by slice.
+- [The registry contract](extensions/agent-registry-v1.md): the document you just read.
+- [The operator chart](../deploy/operator/README.md): every value, the rights it holds, the Platform API and run pods.
+- [CRDs](reference/crds.md) and [the Platform API](reference/openapi.md): the objects, and the REST API over them.
+- For a real agent, replace the stand-in with a real A2A image, or use the adam-rs coder (`examples/coder.yaml`) with a model.
