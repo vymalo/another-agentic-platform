@@ -204,9 +204,11 @@ async fn every_permission_but_the_one_the_route_needs_is_403_naming_that_one() {
         // It names that permission, and no other.
         let text = r.text();
         assert!(text.contains(needed), "{verb} {template}");
+        // Quoted: one permission's name can be a prefix of another's (`platform:agents.read` of
+        // `platform:agents.read.owner`), and the one the problem names is a JSON string of its own (ANR-1118).
         for other in &others {
             assert!(
-                !text.contains(other),
+                !text.contains(&format!("\"{other}\"")),
                 "{verb} {template} names {other}: {text}"
             );
         }
