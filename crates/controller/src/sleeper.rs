@@ -43,13 +43,13 @@ pub fn erase<A: ActivitySource + 'static>(source: A) -> ActivityFn {
 }
 
 /// The closed set of kinds a failed poll is told apart by in the log: the agent refused the question (a token that does not
-/// match: 401 or 403), it answered what the operator cannot read, or it could not be reached (timeout, refused connection, a
-/// NetworkPolicy that drops the packets, a 5xx).
+/// match: 401 or 403), it answered what the operator cannot read, or it could not answer, by cause: `timeout` (a
+/// NetworkPolicy that drops the packets ends here), `connect` (a refused connection, DNS), `status 5xx` or `other`.
 fn failure_kind(e: &ActivityError) -> &'static str {
     match e {
-        ActivityError::Invalid(m) if m.contains("refused the question") => "refused",
+        ActivityError::Refused { .. } => "refused",
         ActivityError::Invalid(_) => "invalid",
-        ActivityError::Unavailable(_) => "unreachable",
+        ActivityError::Unavailable { cause, .. } => cause.as_str(),
     }
 }
 
@@ -384,6 +384,7 @@ where
 mod tests {
     #![allow(clippy::unwrap_used)]
     use super::*;
+    use aap_ports::UnavailableCause;
     use aap_ports::memory::MemoryActivity;
     use serde_json::json;
 
@@ -438,39 +439,21 @@ mod tests {
         let r = rig();
         assert!(r.sleepers.note_poll(&r.id, Some("refused")), "first");
         assert!(!r.sleepers.note_poll(&r.id, Some("refused")), "repeat");
+        assert!(r.sleepers.note_poll(&r.id, Some("timeout")), "kind changed");
+        assert!(!r.sleepers.note_poll(&r.id, Some("timeout")));
         assert!(
-            r.sleepers.note_poll(&r.id, Some("unreachable")),
-            "kind changed"
+            r.sleepers.note_poll(&r.id, Some("connect")),
+            "a new cause is a new kind"
         );
-        assert!(!r.sleepers.note_poll(&r.id, Some("unreachable")));
         assert!(!r.sleepers.note_poll(&r.id, None), "an answer is no news");
         assert!(
-            r.sleepers.note_poll(&r.id, Some("unreachable")),
+            r.sleepers.note_poll(&r.id, Some("connect")),
             "after an answer it is news again"
         );
 
         // The kinds come from the error, and `step` records them (a repeat of the recorded kind is no news).
-        assert_eq!(
-            failure_kind(&ActivityError::Invalid(
-                "the agent refused the question (401 Unauthorized)".into()
-            )),
-            "refused"
-        );
-        assert_eq!(
-            failure_kind(&ActivityError::Invalid("the answer is not JSON".into())),
-            "invalid"
-        );
-        assert_eq!(
-            failure_kind(&ActivityError::Unavailable("x".into())),
-            "unreachable"
-        );
-        let refusing: ActivityFn = Arc::new(|_| {
-            Box::pin(async {
-                Err(ActivityError::Invalid(
-                    "the agent refused the question (401 Unauthorized)".into(),
-                ))
-            })
-        });
+        let refusing: ActivityFn =
+            Arc::new(|_| Box::pin(async { Err(ActivityError::Refused { status: 401 }) }));
         let sleepers = Sleepers::default();
         let svc = service(sleepy(), false);
         step(&refusing, &sleepers, &svc, 0, MAX_AGE).await;
@@ -479,6 +462,34 @@ mod tests {
             "step recorded the first failure"
         );
         assert!(sleepers.note_poll(&r.id, Some("invalid")));
+    }
+
+    /// ANR-1303: each shape of a failed poll has its own kind, and no message holds what is underneath it (the warn
+    /// prints the kind and the message).
+    #[test]
+    fn each_failure_has_its_kind_and_its_message_holds_no_url_and_no_token() {
+        let unavailable = |cause| ActivityError::Unavailable {
+            cause,
+            source: "GET http://a.team.svc:8081/internal/activity, Bearer t0ken".into(),
+        };
+        let cases = [
+            (unavailable(UnavailableCause::Timeout), "timeout"),
+            (unavailable(UnavailableCause::Connect), "connect"),
+            (unavailable(UnavailableCause::ServerError), "status 5xx"),
+            (unavailable(UnavailableCause::Other), "other"),
+            (ActivityError::Refused { status: 401 }, "refused"),
+            (
+                ActivityError::Invalid("the answer is not JSON".into()),
+                "invalid",
+            ),
+        ];
+        for (error, kind) in cases {
+            assert_eq!(failure_kind(&error), kind, "{error:?}");
+            let message = error.to_string();
+            for secret in ["http://", "https://", "t0ken"] {
+                assert!(!message.contains(secret), "{kind}: {message}");
+            }
+        }
     }
 
     #[tokio::test]
