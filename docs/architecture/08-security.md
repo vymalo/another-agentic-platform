@@ -704,6 +704,8 @@ SLSA provenance
 
 A revision should record the exact runtime image digest.
 
+*Amended 2026-11-27 ([AD-070](11-decisions.md#ad-070--releases-release-please-cuts-vxyz-the-tested-sha-7-images-are-copied-by-digest-and-the-charts-are-published-with-the-releases-pins)):* the platform's own artifacts. A release `vX.Y.Z` publishes the operator and Platform API images as the tested `sha-<7>` digests copied to `X.Y.Z` and `X.Y` (never `latest`), each with a cosign keyless signature, an SPDX SBOM and a SLSA provenance attestation, and both charts as signed OCI artifacts whose packaged values pin the images by tag and digest. The provenance of an image is the release run's, not its build's: BuildKit's attestations exist only for a build, and the release copies the image that passed the end-to-ends instead of building another ([§59a *Releases*](10-control-plane-and-crds.md#releases-ad-070)). *Unverified* until the first tag runs it.
+
 ---
 
 ## 83. Git Integration

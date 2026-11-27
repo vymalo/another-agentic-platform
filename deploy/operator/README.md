@@ -699,6 +699,32 @@ curl -s -o /dev/null -w '%{http_code}\n' -H "Authorization: Bearer $TOKEN" \
 
 Until it answers 200, a cluster that pulls it anonymously gets `ImagePullBackOff` (or set `imagePullSecrets`).
 
+## Releases
+
+Production deploys a **release**, never a `sha-<7>` of `main` ([AD-070](../../docs/architecture/11-decisions.md#ad-070--releases-release-please-cuts-vxyz-the-tested-sha-7-images-are-copied-by-digest-and-the-charts-are-published-with-the-releases-pins), [§59a *Releases*](../../docs/architecture/10-control-plane-and-crds.md#releases-ad-070)).
+[`release-please.yml`](../../.github/workflows/release-please.yml) keeps a release pull request open on `main`; merging it tags `vX.Y.Z`, and
+[`release.yml`](../../.github/workflows/release.yml) then publishes, without building anything:
+
+- the images `operator:X.Y.Z` and `api:X.Y.Z` (and `:X.Y`, the highest patch; never `latest`): the `sha-<7>` digests `operator-image.yml` pushed for that
+  commit after its end-to-ends, copied by digest, each signed (cosign, keyless) and attested (an SPDX SBOM and a provenance);
+- this chart at `oci://ghcr.io/vymalo/another-agentic-platform/charts/aap-operator`, version `X.Y.Z`, whose packaged `values.yaml` sets `image.tag` and
+  `api.image.tag` to `X.Y.Z` and `image.digest` and `api.image.digest` to those digests ([`release-pin.sh`](release-pin.sh), on a copy: it refuses the file
+  git tracks), and the CRDs chart at `.../charts/aap-operator-crds`, both signed.
+
+```sh
+helm install aap-operator-crds oci://ghcr.io/vymalo/another-agentic-platform/charts/aap-operator-crds --version X.Y.Z
+helm install aap-operator oci://ghcr.io/vymalo/another-agentic-platform/charts/aap-operator --version X.Y.Z -n another-agentic-system -f my-values.yaml
+cosign verify ghcr.io/vymalo/another-agentic-platform/charts/aap-operator:X.Y.Z \
+  --certificate-oidc-issuer https://token.actions.githubusercontent.com \
+  --certificate-identity-regexp '^https://github.com/vymalo/another-agentic-platform/\.github/workflows/release\.yml@refs/(tags/v|heads/main$)'
+```
+
+A values file for a release must not set `image.tag`, `image.digest`, `api.image.tag` or `api.image.digest`: the package's are the release. **In git the
+tags stay `sha-<7>`**, written by `bump-tag.sh` only, so this directory at a release tag names the `sha-<7>` of the commit before it; the version of
+`Chart.yaml` is release-please's (marked `# x-release-please-version`, held to the workspace's by `tools/check-release-version.sh`), and the goldens are
+rendered at 0.1.0 whatever it says. The package leaves out `tests/` and the two scripts ([`.helmignore`](.helmignore)). The first time, each chart package
+is private until made public, as the images were (above). *Unverified* until the first tag has run it.
+
 ## The configuration file
 
 `operator run` reads **one YAML file** and no setting is an environment variable (ANR-962, AD-064; the schema and every key are
