@@ -351,6 +351,65 @@ where
     }
 }
 
+/// Compose the pod-minute meter onto the operator (ANR-1103, AD-069): `metering.enabled` off gives it nothing and no
+/// sink; on, it gets the sink, the account sources (the broker for a run pod, the `AgentService` for an agent's own pod,
+/// AD-073) and the settings, and the sink comes back to flush on the way out.
+#[cfg(feature = "runtime-kubernetes")]
+fn compose_meter<R, S>(
+    operator: aap_controller::Operator<R, S>,
+    meter: Option<crate::metering::Parts>,
+    client: kube::Client,
+    home: Option<String>,
+) -> (
+    aap_controller::Operator<R, S>,
+    Option<crate::metering::SharedSink>,
+)
+where
+    R: aap_ports::RuntimeProvider + Clone + 'static,
+    S: aap_ports::StoreProvisioner + Clone + 'static,
+{
+    match meter {
+        Some(parts) => {
+            // A run pod's account is the broker's; an agent's own pod's is read from its `AgentService` (AD-073).
+            let accounts = crate::metering::MeterAccounts::new(
+                parts.accounts,
+                aap_usage_kubernetes::AgentAccounts::new(client.clone()),
+            );
+            let operator = operator
+                .with_meter(parts.sink.clone(), accounts)
+                .with_meter_config(parts.config);
+            // The facts of a pod that vanished with minutes not known delivered are kept in ConfigMaps in the
+            // operator's own namespace (not the tenants'), so a crash or a failover loses none (ANR-1198).
+            let operator = match home {
+                Some(home) => operator
+                    .with_meter_tombstones(aap_controller::KubeTombstones::new(client, &home)),
+                None => {
+                    tracing::warn!(
+                        "watch.namespaces names none: the meter keeps the facts of vanished pods in memory only"
+                    );
+                    operator
+                }
+            };
+            (operator, Some(parts.sink))
+        }
+        None => (operator, None),
+    }
+}
+
+/// Give the pod-minute lines still queued their moment to reach the collector, and say how many did not (ANR-1103).
+#[cfg(feature = "runtime-kubernetes")]
+async fn flush_meter(sink: Option<crate::metering::SharedSink>) {
+    if let Some(sink) = sink {
+        let report = sink.0.shutdown(crate::metering::FLUSH).await;
+        if report.unsent > 0 {
+            tracing::warn!(
+                unsent = report.unsent,
+                "pod-minute lines were still queued when the operator stopped"
+            );
+        }
+    }
+}
+
 #[cfg(feature = "runtime-kubernetes")]
 async fn run_with(settings: crate::config::Settings, tracer: aap_trace::Tracer) -> Result<()> {
     use std::sync::Arc;
@@ -459,34 +518,7 @@ async fn run_with(settings: crate::config::Settings, tracer: aap_trace::Tracer) 
         activity,
     );
     // The meter sends only while this replica leads (`Operator::run` gates it); the sink is kept to flush on the way out.
-    let (operator, meter_sink) = match meter {
-        Some(parts) => {
-            // A run pod's account is the broker's; an agent's own pod's is read from its `AgentService` (AD-073).
-            let accounts = crate::metering::MeterAccounts::new(
-                parts.accounts,
-                aap_usage_kubernetes::AgentAccounts::new(meter_client.clone()),
-            );
-            let operator = operator
-                .with_meter(parts.sink.clone(), accounts)
-                .with_meter_config(parts.config);
-            // The facts of a pod that vanished with minutes not known delivered are kept in ConfigMaps in the
-            // operator's own namespace (not the tenants'), so a crash or a failover loses none (ANR-1198).
-            let operator = match meter_home {
-                Some(home) => operator.with_meter_tombstones(aap_controller::KubeTombstones::new(
-                    meter_client,
-                    &home,
-                )),
-                None => {
-                    tracing::warn!(
-                        "watch.namespaces names none: the meter keeps the facts of vanished pods in memory only"
-                    );
-                    operator
-                }
-            };
-            (operator, Some(parts.sink))
-        }
-        None => (operator, None),
-    };
+    let (operator, meter_sink) = compose_meter(operator, meter, meter_client, meter_home);
 
     #[cfg(feature = "registry")]
     let registry_server = token.map(|token| {
@@ -604,15 +636,7 @@ async fn run_with(settings: crate::config::Settings, tracer: aap_trace::Tracer) 
         .await;
     }
     // The lines still queued get their moment to reach the collector (a clean stop or not: the sink holds minutes).
-    if let Some(sink) = meter_sink {
-        let report = sink.0.shutdown(crate::metering::FLUSH).await;
-        if report.unsent > 0 {
-            tracing::warn!(
-                unsent = report.unsent,
-                "pod-minute lines were still queued when the operator stopped"
-            );
-        }
-    }
+    flush_meter(meter_sink).await;
     result
 }
 
@@ -831,6 +855,143 @@ mod tests {
             assert_eq!(result.is_err(), failed);
             assert_eq!(exporter.spans().len(), 1, "the span reached the exporter");
         }
+    }
+
+    /// A broker on a local port that knows one account, and the paths it was asked for.
+    async fn stub_broker() -> (url::Url, std::sync::Arc<std::sync::Mutex<Vec<String>>>) {
+        use axum::extract::State;
+        type Asked = std::sync::Arc<std::sync::Mutex<Vec<String>>>;
+        async fn answer(State(asked): State<Asked>, uri: axum::http::Uri) -> &'static str {
+            asked.lock().expect("a lock").push(uri.path().to_owned());
+            r#"{"accountId":"acct-1"}"#
+        }
+        let asked = Asked::default();
+        let app = axum::Router::new()
+            .fallback(answer)
+            .with_state(asked.clone());
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("a local port");
+        let address = listener.local_addr().expect("an address");
+        tokio::spawn(async move { axum::serve(listener, app).await.expect("the stub serves") });
+        let url = format!("http://{address}/").parse().expect("a URL");
+        (url, asked)
+    }
+
+    /// A metering section that points at a stub broker and a stub collector. The sink's interval is an hour, so
+    /// nothing queued reaches the collector on the timer inside a test.
+    fn metering(
+        broker_url: url::Url,
+        token: &std::path::Path,
+        collector: &aap_usage_otlp::testkit::TestCollector,
+    ) -> crate::config::Metering {
+        let mut sink = aap_usage_otlp::UsageOtlpSettings::new(collector.base_url());
+        sink.interval = std::time::Duration::from_secs(3600);
+        crate::config::Metering {
+            source: "m1".into(),
+            node_type_label_key: "example.com/node-type".into(),
+            period: std::time::Duration::from_secs(10),
+            broker_url,
+            broker_token: aap_trace_otlp::SecretRef::File(token.to_owned()),
+            broker_timeout: std::time::Duration::from_secs(5),
+            collector: sink,
+        }
+    }
+
+    /// The meter's parts for a metering section, with its bearer in a file that is gone again once it was read.
+    fn meter_parts(
+        name: &str,
+        broker_url: url::Url,
+        collector: &aap_usage_otlp::testkit::TestCollector,
+    ) -> crate::metering::Parts {
+        let dir =
+            std::env::temp_dir().join(format!("aap-compose-meter-{name}-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).expect("a directory");
+        let file = dir.join("token");
+        std::fs::write(&file, "meter-token\n").expect("write");
+        let parts = crate::metering::parts(Some(&metering(broker_url, &file, collector)))
+            .expect("the meter's parts")
+            .expect("on");
+        let _ = std::fs::remove_dir_all(&dir);
+        parts
+    }
+
+    /// An operator as `compose` makes it, with no meter yet.
+    fn unmetered()
+    -> aap_controller::Operator<aap_ports::memory::MemoryRuntime, aap_ports::memory::MemoryStore>
+    {
+        compose(
+            client(),
+            aap_ports::memory::MemoryRuntime::new(),
+            aap_ports::memory::MemoryStore::new(),
+            std::sync::Arc::new(|_| aap_ports::OwnerHandle::none()),
+            aap_controller::Options::default(),
+            &aap_trace::Tracer::off(),
+            std::sync::Arc::new(aap_ports::AlwaysLeader::default()),
+            None,
+        )
+    }
+
+    /// ANR-1193: the meter the binary builds is the one the operator is composed with, and its run pods' accounts are
+    /// asked of the broker. Delete the `with_meter` call of `compose_meter` and this fails.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn the_operator_is_composed_with_the_meter_it_was_built() {
+        use aap_usage::AccountSource;
+
+        let operator = unmetered();
+        assert!(!operator.has_meter());
+        let (operator, sink) = compose_meter(operator, None, client(), None);
+        assert!(!operator.has_meter(), "off: no meter");
+        assert!(sink.is_none(), "off: nothing to flush");
+
+        let collector = aap_usage_otlp::testkit::TestCollector::start();
+        let (broker, asked) = stub_broker().await;
+        let parts = meter_parts("composed", broker.clone(), &collector);
+        let (operator, sink) =
+            compose_meter(operator, Some(parts), client(), Some("aap".to_owned()));
+        assert!(operator.has_meter(), "on: the operator is handed the meter");
+        assert!(sink.is_some(), "on: the sink comes back to flush");
+
+        // The broker source of the parts, composed by pod kind as `compose_meter` does.
+        let parts = meter_parts("accounts", broker, &collector);
+        let accounts =
+            crate::metering::MeterAccounts::new(parts.accounts, aap_usage::MemoryAccounts::new());
+        let run = aap_usage::PodRef::Run {
+            service: "coder".into(),
+            run: "r1".into(),
+        };
+        assert_eq!(accounts.account(&run).await, Ok(Some("acct-1".to_owned())));
+        assert_eq!(
+            *asked.lock().expect("a lock"),
+            ["/internal/runs/r1/account"]
+        );
+    }
+
+    /// ANR-1193: a line still queued when the operator stops reaches the collector.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn the_meter_sink_is_flushed_on_the_way_out() {
+        use aap_usage::UsageSink;
+
+        let collector = aap_usage_otlp::testkit::TestCollector::start();
+        let (broker, _) = stub_broker().await;
+        let parts = meter_parts("flushed", broker, &collector);
+        let (_operator, sink) =
+            compose_meter(unmetered(), Some(parts), client(), Some("aap".to_owned()));
+        let sink = sink.expect("a sink");
+        // An interval's first tick is immediate: let the sink's task take it while its queue is still empty.
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+
+        let event = aap_usage::testkit::event("aap-operator", "pod-1", 100);
+        sink.send(event.clone()).await.expect("queued");
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        assert!(
+            collector.events().is_empty(),
+            "nothing is sent before the interval, so only the flush can deliver here"
+        );
+
+        flush_meter(Some(sink)).await;
+        let taken: Vec<String> = collector.events().into_iter().map(|e| e.event_id).collect();
+        assert_eq!(taken, [event.event_id]);
     }
 
     #[tokio::test]

@@ -224,6 +224,13 @@ where
         self.activity.is_some()
     }
 
+    /// Whether the pod-minute meter is on ([`with_meter`](Self::with_meter)): what a composition root's test asks,
+    /// so that a meter built and never handed over is caught.
+    #[must_use]
+    pub fn has_meter(&self) -> bool {
+        self.meter.is_some()
+    }
+
     /// Elect `leader`'s holder as the one whose passes write (K7a). The default is [`AlwaysLeader`]: one
     /// replica, and every pass writes.
     ///
