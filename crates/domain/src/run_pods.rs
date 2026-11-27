@@ -987,8 +987,9 @@ fn only_fields(value: &Value, allowed: &[&str], path: &str) -> Result<(), String
 
 /// The fields of a toleration, of a `nodeAffinity` and of every level below it. `k8s-openapi`'s types are generated
 /// without `deny_unknown_fields`, so a misspelled key is dropped and the widening is invisible: a
-/// `requiredDuringScheduling` for `requiredDuringSchedulingIgnoredDuringExecution` leaves no required affinity, and a term
-/// whose `key` is misspelled is dropped — the run pod is then schedulable on any node (ANR-1357).
+/// `requiredDuringScheduling` for `requiredDuringSchedulingIgnoredDuringExecution` leaves no required affinity, a
+/// misspelled `matchExpressions` beside `matchFields` drops that constraint, and a toleration with a misspelled `effect`
+/// tolerates every effect (ANR-1357).
 const TOLERATION_FIELDS: [&str; 5] = ["key", "operator", "value", "effect", "tolerationSeconds"];
 const NODE_AFFINITY_FIELDS: [&str; 2] = [
     "requiredDuringSchedulingIgnoredDuringExecution",

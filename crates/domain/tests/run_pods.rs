@@ -1470,6 +1470,16 @@ fn a_key_a_toleration_or_a_node_affinity_does_not_have_is_refused() {
             json!({"nodeAffinity": {"requiredDuringSchedulingIgnoredDuringExecution": {"nodeSelectorTerms": [{"matchFields": [{"key": "a", "operator": "In", "value": ["b"]}]}]}}}),
         ),
         (
+            "nodeAffinity.requiredDuringSchedulingIgnoredDuringExecution.nodeSelectorTerms[1].matchExpressions[1].value",
+            json!({"nodeAffinity": {"requiredDuringSchedulingIgnoredDuringExecution": {"nodeSelectorTerms": [
+                {"matchExpressions": []},
+                {"matchExpressions": [
+                    {"key": "a", "operator": "Exists"},
+                    {"key": "b", "operator": "In", "value": ["c"]}
+                ]}
+            ]}}}),
+        ),
+        (
             "nodeAffinity.preferredDuringSchedulingIgnoredDuringExecution[0].weigth",
             json!({"nodeAffinity": {"preferredDuringSchedulingIgnoredDuringExecution": [{"weight": 1, "weigth": 2, "preference": {}}]}}),
         ),
