@@ -91,10 +91,11 @@ impl Live {
     }
 }
 
-/// The annotations a save is about: every one but the wake path's mark. The operator's wake loop writes
-/// `agents.vymalo.com/wake-at` on a service while a person's save is in flight (ANR-1067), and that save must take the
-/// repeat-once path a status write gets, not a `412` (ANR-1183). The mark is not a save's change; **any other**
-/// annotation still is.
+/// The annotations a save is about: every one but the wake path's mark. The **activator** writes
+/// `agents.vymalo.com/wake-at` on a service when a request reaches a sleeping agent (AD-058; its writer is ANR-1068),
+/// which can be while a person's save is in flight, and that save must take the repeat-once path a status write gets,
+/// not a `412` (ANR-1183). The mark is not a save's change; **any other annotation — an Argo or `kubectl` one
+/// included — still is**.
 fn same_annotations(a: &BTreeMap<String, String>, b: &BTreeMap<String, String>) -> bool {
     fn without(m: &BTreeMap<String, String>) -> BTreeMap<&str, &str> {
         m.iter()

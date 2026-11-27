@@ -82,18 +82,20 @@ the config is already written. What happens is decided by what changed (`tests/a
 
 | The service, when its apply comes | The answer |
 |---|---|
-| Only its `resourceVersion` moved: the operator wrote its `status` (it does whenever the config changes, which the write just did) or put its finalizer on | **No answer: the apply is repeated once** with the version the service has now, and the save succeeds. The service is re-read, and has to be the object that was read (same `uid`), not being deleted, with the same `spec`, labels and annotations — **except the wake path's `agents.vymalo.com/wake-at`**, which the operator writes while a save is in flight (ANR-1183) |
-| Its `spec`, labels or another annotation changed (somebody saved it, or `kubectl edit`ed it) | `PreconditionFailed` (`412`): the person saved over a service that is no longer the one they read. The config stays written |
+| Only its `resourceVersion` moved: the operator wrote its `status` (it does whenever the config changes, which the write just did) or put its finalizer on | **No answer: the apply is repeated once** with the version the service has now, and the save succeeds. The service is re-read, and has to be the object that was read (same `uid`), not being deleted, with the same `spec`, labels and annotations — **except the wake path's `agents.vymalo.com/wake-at`**, which the activator writes when a request reaches a sleeping agent and may be written while a save is in flight (ANR-1183; the writer is ANR-1068). A person's own edit of `wake-at` during a save is not a change either: the save never writes it, so it stays |
+| Its `spec`, labels or another annotation changed (somebody saved it, or `kubectl edit`ed it; an Argo or `kubectl` annotation included) | `PreconditionFailed` (`412`): the person saved over a service that is no longer the one they read. The config stays written |
 | It is another object (deleted and made again), or gone, or made in the meantime (a create) | `PreconditionFailed` for the config, `NotFound` for a replace of the service, `AlreadyExists` for a create over it |
 | It began to be deleted | `Deleting` (`409`) |
 | A field the apply sets is owned by another manager | `Conflict` (`409`), with the server's words. A retry is refused by the dry run, with nothing written, until they let go of the field |
 | The API server fails the apply (`5xx`, a timeout) | `Unavailable` (`503`); a retry reads both again and succeeds when it is back |
 
+**The two windows this does not cover**, and does not mean to: a `wake-at` written **before the dry run** (the dry run is a `409` then, as a status write is) and one written **between the person's read and their save** (their token is a version, so it is a `412`, and their next save succeeds). The fix is the window between the two real applies, which is the one a person's save cannot see (ANR-1183).
+
 In every case but the first the **config is written and the service is not**, the next read shows both objects as they are, and a create that stopped halfway leaves a dashboard-owned config that no service
 names (an *orphan*: the next create takes it over, `list_orphans` lists it, a delete of its name removes it). A half-write is logged at `warn` by `tracing`
 (`namespace`, `name`, `written`, `failed`, and a fixed `outcome`: names and kinds, never a value of the draft and never the server's words). The same repeat-once covers the config's own apply and a shared object's.
 
-The tests show the first row failing against a mutant that does not repeat (`what_the_operator_writes_between_the_two_applies_does_not_stop_the_save`, on the fake and on a real server), and the second against one that compares
+The tests show the first row failing against a mutant that does not repeat (`what_is_written_between_the_two_applies_does_not_stop_the_save`, on the fake and on a real server), and the second against one that compares
 only the `spec`, or no label and annotation (`when_the_service_changes_between_the_two_applies_...`, `what_the_save_is_about_changing_...`).
 
 **A create is an apply of an object that must not be there.** The API server has no "only if absent" for an apply, so the create names
