@@ -17,7 +17,7 @@
 //!   bundle* needs a restart: it is the trust, and it is read at start.
 //!
 //! Not built: the CRL of ADR-0042 decision 2 (fetched at most 2 h ago, fail closed when it cannot be read). It needs a source to
-//! fetch from, which the deployment has not named, so a revoked certificate is refused only when it expires (ANR-1011, AD-067).
+//! fetch from, which the deployment has not named, so a revoked certificate is refused only when it expires (ANR-1011, AD-068).
 
 use std::collections::HashMap;
 use std::fmt;

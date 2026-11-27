@@ -66,7 +66,7 @@ checked-in CA.
 
 ## The listener, and what is still not built
 
-- **The mutual-TLS listener and the composition root** are ANR-1011 (AD-067): `bin/api/src/mtls.rs` hands each request the
+- **The mutual-TLS listener and the composition root** are ANR-1011 (AD-068): `bin/api/src/mtls.rs` hands each request the
   peer's certificate and `aap_platform_api::workload_router` serves the owner routes behind this authenticator. This crate
   stays pure: no listener, no file read, no key.
 - **The CRL check** ADR-0042 decision 2 asks for (fetched at most 2 h ago, fail closed when it cannot be read) is **still not

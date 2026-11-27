@@ -8,7 +8,7 @@ Install the operator first: [Install the CRDs and the operator](install.md).
 
 ## What you need first
 
-- **Kubernetes 1.30 or later.** That minimum is this documentation's claim: the chart's own `kubeVersion` is `>=1.29.0-0` and does not enforce it. The guard is a `ValidatingAdmissionPolicy`, which is GA from 1.30. It uses `params` in a match condition, which was *verified 2026-10-26* on v1.35.8 and **not on an older version** ([What a person must know](../../../deploy/operator/README.md#what-a-person-must-know)).
+- **Kubernetes 1.37 or later**, which is the platform's floor (AD-067) and the chart's own `kubeVersion` (`>=1.37.0-0`). The guard is a `ValidatingAdmissionPolicy`, which is GA from 1.30. It uses `params` in a match condition, which was *verified 2026-10-26* on v1.35.8; that it works on 1.37 is **unverified until CI has run `run-pods-e2e` on v1.37.0** ([What a person must know](../../../deploy/operator/README.md#what-a-person-must-know)).
 - **A CNI that enforces `NetworkPolicy`.** The run pods' network is deny by default, and a policy is only as real as the plugin behind it. On a cluster whose CNI does not enforce it, you get the proxy and no deny.
 - **A coder image that carries `adam-egress` and `adam-git-sandbox`.** See the next two sections. The chart's `defaultAgentImage` has neither. CLAUDE.md and the chart say so.
 - **With the Platform API on:** `api.config.defaults.coder.workVolume`, because run pods mount the coder's work volume. The chart refuses the render without it. The snippet is in the next section.
@@ -279,7 +279,7 @@ On 2026-11-27, on a throwaway kind cluster (Kubernetes v1.35.8), the operator ch
 - **The sandbox on a real node.** The sandbox start is proven on a container node only, with `ignore-cgroups` and unenforced limits. A real node, nodes with gVisor installed (for example by a node distribution's extension), and the cost of a real build under runsc are unproven.
 - **The agent's pods under the class.** The coder's own pod with its git sandbox, projected token, egress proxy and store's connections under `runsc` is unverified (slice K14d). That is why `agent.runtimeClassName` stays empty.
 - **`hostUsers: false` beside the class.** Untested on a real node.
-- **Kubernetes older than 1.35.** The match-condition `params` are unverified there.
+- **Kubernetes 1.37.** The match-condition `params` were verified on v1.35.8 only; `run-pods-e2e` on v1.37.0 is unverified until CI has run it.
 - **Tools other than `curl` and `npm` through the proxy.** git, cargo, pip and go are documented to read the proxy variables and are not tried.
 - **Pod Security admission, and an agent whose image lacks `adam-egress` or `adam-git-sandbox`.**
 - **What the proxy does not cover.** Domain fronting, what an allowed host accepts, DNS as a channel, and the proxy's lack of authentication (its policy says who may reach it).

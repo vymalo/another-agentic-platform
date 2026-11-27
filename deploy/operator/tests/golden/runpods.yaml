@@ -18,6 +18,7 @@ value: 0
 preemptionPolicy: Never
 globalDefault: false
 description: "Run pods of the agents of agents (aap-operator): scoped by a ResourceQuota, ranks nothing."
+
 ---
 # Source: aap-operator/templates/api-networkpolicy.yaml
 # Ingress is closed except the peers of api.networkPolicy.from (the edge) on the API port; the health port has no rule, because the
@@ -76,6 +77,7 @@ spec:
     - ports:
         - protocol: TCP
           port: 443
+
 ---
 # Source: aap-operator/templates/networkpolicy.yaml
 # Ingress is closed except what is listed: the registry to the peers of networkPolicy.registry.allowFrom, /metrics to those of
@@ -108,6 +110,7 @@ spec:
           port: 443
         - protocol: TCP
           port: 6443
+
 ---
 # Source: aap-operator/templates/api-serviceaccount.yaml
 # Its own ServiceAccount: the API's rights (the specs people edit, the ExternalSecrets that offer keys) are not the operator's.
@@ -123,6 +126,7 @@ metadata:
     app.kubernetes.io/managed-by: Helm
     app.kubernetes.io/part-of: another-agentic-platform
     helm.sh/chart: aap-operator-0.1.0
+
 ---
 # Source: aap-operator/templates/serviceaccount.yaml
 apiVersion: v1
@@ -136,6 +140,7 @@ metadata:
     app.kubernetes.io/managed-by: Helm
     app.kubernetes.io/part-of: another-agentic-platform
     helm.sh/chart: aap-operator-0.1.0
+
 ---
 # Source: aap-operator/templates/api-configmap.yaml
 # The configuration file of the Platform API (bin/api/config.example.yaml). There is no secret in it and no place for one: the API
@@ -189,6 +194,7 @@ data:
       - another-agentic
       issuer: https://keycloak.example.com/realms/another-agentic
       rolesClaim: agentic_roles
+
 ---
 # Source: aap-operator/templates/config.yaml
 apiVersion: v1
@@ -330,6 +336,7 @@ data:
       waitSecs: 600
     log:
       filter: "info"
+
 ---
 # Source: aap-operator/templates/api-role.yaml
 apiVersion: rbac.authorization.k8s.io/v1
@@ -356,6 +363,7 @@ rules:
   - apiGroups: [""]
     resources: [events]
     verbs: [list]
+
 ---
 # Source: aap-operator/templates/role.yaml
 apiVersion: rbac.authorization.k8s.io/v1
@@ -428,11 +436,12 @@ rules:
   - apiGroups: [postgresql.cnpg.io]
     resources: [clusters]
     verbs: [get, patch, create, delete]
+
 ---
 # Source: aap-operator/templates/run-pods-role.yaml
 # runPods.enabled: what an agent's account may do with pods: make, find, watch and delete them, and exec in them. Nothing else: no
 # Secret, no ConfigMap, no other kind. `get` on pods/exec as well as `create`: kube's exec is a WebSocket, which the API server
-# authorizes as a GET (and, from Kubernetes 1.35, as a create too; *unverified*). It is the coder chart's Role (adam-rs
+# authorizes as a GET (and, from Kubernetes 1.35, so at the chart's floor of 1.37, as a create too; *unverified*). It is the coder chart's Role (adam-rs
 # `run-pods-rbac.yaml`), once for each namespace the operator watches (K6a): the operator makes a RoleBinding of it for each agent that
 # asks for run pods, and holds the right to bind this Role and no right of its own to make a pod or exec. A Role cannot name the pods it
 # may exec in, so an account bound to it may exec in ANY pod of this namespace (the coder chart's Role has the same reach): README
@@ -456,6 +465,7 @@ rules:
   - apiGroups: [""]
     resources: ["pods/exec"]
     verbs: ["create", "get"]
+
 ---
 # Source: aap-operator/templates/api-rolebinding.yaml
 apiVersion: rbac.authorization.k8s.io/v1
@@ -479,6 +489,7 @@ subjects:
   - kind: ServiceAccount
     name: aap-operator-api
     namespace: another-agentic-system
+
 ---
 # Source: aap-operator/templates/rolebinding.yaml
 apiVersion: rbac.authorization.k8s.io/v1
@@ -501,6 +512,7 @@ subjects:
   - kind: ServiceAccount
     name: aap-operator
     namespace: another-agentic-system
+
 ---
 # Source: aap-operator/templates/api-service.yaml
 # The API, cluster-internal: the route from outside is the edge's (api.ingress, or the deployment's own). The health port is not exposed.
@@ -527,6 +539,7 @@ spec:
       port: 8080
       targetPort: http
       protocol: TCP
+
 ---
 # Source: aap-operator/templates/service.yaml
 apiVersion: v1
@@ -550,6 +563,7 @@ spec:
       port: 9090
       targetPort: metrics
       protocol: TCP
+
 ---
 # Source: aap-operator/templates/api-deployment.yaml
 # The Platform API (bin/api): stateless, so more than one replica is fine. A rolling update that surges and loses no pod; the pod stays in
@@ -636,7 +650,7 @@ spec:
             periodSeconds: 5
             timeoutSeconds: 4
           # The Service takes a moment to drop an endpoint: keep serving until it has. The distroless image has no `sleep` to run, so
-          # this is the kubelet's own sleep action (Kubernetes 1.30 and later, or the gate on 1.29: values.yaml).
+          # this is the kubelet's own sleep action (on from Kubernetes 1.30 and GA in 1.34; the chart's floor is 1.37: values.yaml).
           lifecycle:
             preStop:
               sleep:
@@ -661,6 +675,7 @@ spec:
         - name: config
           configMap:
             name: aap-operator-api
+
 ---
 # Source: aap-operator/templates/deployment.yaml
 # One replica and no leader election (§59a): a second reconciler would only race the first. `Recreate`, so an upgrade
@@ -767,6 +782,7 @@ spec:
           configMap:
             name: aap-operator
             defaultMode: 288 # 0440
+
 ---
 # Source: aap-operator/templates/run-pods-admission.yaml
 # runPods.enabled: the guard that lets an agent's account make pods without being able to read the namespace's other Secrets, mount
@@ -779,8 +795,8 @@ spec:
 # `parameterNotFoundAction: Allow`: a namespace in which no agent asks for run pods has no parameter, and every pod creation in it
 # would be denied by `Deny`, the operator's own among them. The cost is stated in the README ("Run pods"): an account whose parameters
 # are gone is not guarded, so the operator makes the parameters before the binding that lets the account make pods and removes the
-# binding first. Needs the v1 admission policy API (Kubernetes 1.30 or later) and `params` in a match condition, which was verified on a
-# kube-apiserver v1.35.8 only: the oldest version where it works is not known (README "Run pods").
+# binding first. Needs the v1 admission policy API (Kubernetes 1.30 or later; the chart's floor is 1.37, AD-067) and `params` in a match condition, which was verified on a
+# kube-apiserver v1.35.8 only, and on 1.37 is unverified until CI has run `run-pods-e2e` there (README "Run pods").
 apiVersion: admissionregistration.k8s.io/v1
 kind: ValidatingAdmissionPolicy
 metadata:
@@ -830,6 +846,7 @@ spec:
       message: "a run pod sets automountServiceAccountToken: false: it holds no credential for the cluster"
     - expression: "variables.containers.all(c, has(c.resources) && has(c.resources.limits) && 'memory' in c.resources.limits && 'cpu' in c.resources.limits && 'ephemeral-storage' in c.resources.limits)"
       message: "a run pod sets limits.memory, limits.cpu and limits.ephemeral-storage on every container"
+
 ---
 # Source: aap-operator/templates/run-pods-admission.yaml
 apiVersion: admissionregistration.k8s.io/v1

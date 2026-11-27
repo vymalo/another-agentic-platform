@@ -110,7 +110,7 @@ spec:
             timeoutSeconds: 4
           {{- if gt (int $api.preStopSleepSeconds) 0 }}
           # The Service takes a moment to drop an endpoint: keep serving until it has. The distroless image has no `sleep` to run, so
-          # this is the kubelet's own sleep action (Kubernetes 1.30 and later, or the gate on 1.29: values.yaml).
+          # this is the kubelet's own sleep action (on from Kubernetes 1.30 and GA in 1.34; the chart's floor is 1.37: values.yaml).
           lifecycle:
             preStop:
               sleep:

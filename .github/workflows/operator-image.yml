@@ -134,10 +134,10 @@ env:
   IMAGE: ghcr.io/vymalo/another-agentic-platform/operator
   API_IMAGE: ghcr.io/vymalo/another-agentic-platform/api
   USAGE_INGEST_IMAGE: ghcr.io/vymalo/another-agentic-platform/usage-ingest
-  HELM_VERSION: v3.19.0
+  HELM_VERSION: v4.3.2
   KUBECONFORM_VERSION: v0.7.0
   # The Kubernetes version the rendered manifests are validated against.
-  KUBERNETES_VERSION: 1.31.0
+  KUBERNETES_VERSION: 1.37.0
 
 concurrency:
   group: operator-image-${{ github.ref }}
@@ -166,9 +166,9 @@ jobs:
           helm lint deploy/operator -f deploy/operator/tests/api.values.yaml
           helm lint deploy/operator -f deploy/operator/tests/workload.values.yaml
           # tests/api-secretref.values.yaml is NOT linted: it says `cnpg: null` (to switch the store to a Secret per agent), and `helm lint`
-          # coalesces the values twice, so the second pass puts the chart's default `cnpg` back and logs ten "[INFO] Fail: ... exactly
-          # one of cnpg and secretRef" that fail nothing (reproduced with a four-line chart, helm v3.19.0: a key set to null in the values
-          # file comes back from the chart's defaults under `lint` and not under `template`). `helm template`, which is what Argo CD and
+          # coalesces the values twice, so the second pass puts the chart's default `cnpg` back and logs about fifteen `level=INFO msg="funcMap fail"` lines
+          # ("exactly one of cnpg and secretRef") that fail nothing (the quirk persists under Helm 4.3.2, AD-067, where the lines are
+          # structured: a key set to null in the values file comes back from the chart's defaults under `lint` and not under `template`). `helm template`, which is what Argo CD and
           # install run, deletes the key; render-check.sh, `api --check` and kubeconform read this shape, and that is its guard.
           helm lint deploy/operator -f deploy/operator/tests/api-full.values.yaml
           helm lint deploy/operator -f deploy/operator/tests/runpods.values.yaml
@@ -602,8 +602,9 @@ jobs:
         uses: helm/kind-action@v1
         with:
           version: v0.33.0
-          # The same node image as the jobs of operator.yml: Kubernetes v1.35.8, the digest of the index of the tag.
-          node_image: kindest/node:v1.35.8@sha256:07b2536e30b803ed61d1677a79df6115f798ce64c80f9e22f6ed45afd09323c0
+          # The same node image as the jobs of operator.yml: Kubernetes v1.37.0, the digest of the index of the tag.
+          node_image: kindest/node:v1.37.0@sha256:a1ed56cfb0e7b93589bdf97c8cd566405a265939e3620fc4f5de89adff580ae5
+          kubectl_version: v1.37.2
           cluster_name: aap-coder
           wait: 120s
       # The image that passed the smoke test, loaded into the cluster: the chart runs it with pullPolicy Never.
@@ -639,8 +640,9 @@ jobs:
         uses: helm/kind-action@v1
         with:
           version: v0.33.0
-          # The same node image as the other jobs: Kubernetes v1.35.8, the digest of the index of the tag.
-          node_image: kindest/node:v1.35.8@sha256:07b2536e30b803ed61d1677a79df6115f798ce64c80f9e22f6ed45afd09323c0
+          # The same node image as the other jobs: Kubernetes v1.37.0, the digest of the index of the tag.
+          node_image: kindest/node:v1.37.0@sha256:a1ed56cfb0e7b93589bdf97c8cd566405a265939e3620fc4f5de89adff580ae5
+          kubectl_version: v1.37.2
           cluster_name: aap-api
           wait: 120s
       # The images that passed their smoke tests, loaded into the cluster: the chart runs them with pullPolicy Never. The agent's image is the
@@ -704,8 +706,9 @@ jobs:
         uses: helm/kind-action@v1
         with:
           version: v0.33.0
-          # The same node image as the other jobs: Kubernetes v1.35.8, the digest of the index of the tag.
-          node_image: kindest/node:v1.35.8@sha256:07b2536e30b803ed61d1677a79df6115f798ce64c80f9e22f6ed45afd09323c0
+          # The same node image as the other jobs: Kubernetes v1.37.0, the digest of the index of the tag.
+          node_image: kindest/node:v1.37.0@sha256:a1ed56cfb0e7b93589bdf97c8cd566405a265939e3620fc4f5de89adff580ae5
+          kubectl_version: v1.37.2
           cluster_name: aap-chain
           wait: 120s
       # The images that passed their smoke tests, loaded into the cluster: the chart runs them with pullPolicy Never. The agent's image is the
@@ -768,9 +771,10 @@ jobs:
         uses: helm/kind-action@v1
         with:
           version: v0.33.0
-          # The same node image as the other jobs: Kubernetes v1.35.8, the digest of the index of the tag. Its network plugin, kindnet, enforces NetworkPolicies
+          # The same node image as the other jobs: Kubernetes v1.37.0, the digest of the index of the tag. Its network plugin, kindnet, enforces NetworkPolicies
           # (the end-to-end of the API relies on that), which the network policy of run pods needs to be shown.
-          node_image: kindest/node:v1.35.8@sha256:07b2536e30b803ed61d1677a79df6115f798ce64c80f9e22f6ed45afd09323c0
+          node_image: kindest/node:v1.37.0@sha256:a1ed56cfb0e7b93589bdf97c8cd566405a265939e3620fc4f5de89adff580ae5
+          kubectl_version: v1.37.2
           cluster_name: aap-runpods
           wait: 120s
       # The image that passed the smoke test, loaded into the cluster: the chart runs it with pullPolicy Never. The coder, the run image and Postgres are NOT
@@ -810,9 +814,10 @@ jobs:
         uses: helm/kind-action@v1
         with:
           version: v0.33.0
-          # The same node image as the other jobs: Kubernetes v1.35.8, the digest of the index of the tag. Its network plugin, kindnet, enforces
+          # The same node image as the other jobs: Kubernetes v1.37.0, the digest of the index of the tag. Its network plugin, kindnet, enforces
           # NetworkPolicies (the catalogue's server admits this namespace on 8080, and the operator's probe goes through its own policy).
-          node_image: kindest/node:v1.35.8@sha256:07b2536e30b803ed61d1677a79df6115f798ce64c80f9e22f6ed45afd09323c0
+          node_image: kindest/node:v1.37.0@sha256:a1ed56cfb0e7b93589bdf97c8cd566405a265939e3620fc4f5de89adff580ae5
+          kubectl_version: v1.37.2
           cluster_name: aap-k10
           wait: 120s
       # The image that passed the smoke test, loaded into the cluster: the chart runs it with pullPolicy Never. The coder's image (the agent and the
@@ -849,8 +854,9 @@ jobs:
         uses: helm/kind-action@v1
         with:
           version: v0.33.0
-          # The same node image as the other jobs: Kubernetes v1.35.8, the digest of the index of the tag.
-          node_image: kindest/node:v1.35.8@sha256:07b2536e30b803ed61d1677a79df6115f798ce64c80f9e22f6ed45afd09323c0
+          # The same node image as the other jobs: Kubernetes v1.37.0, the digest of the index of the tag.
+          node_image: kindest/node:v1.37.0@sha256:a1ed56cfb0e7b93589bdf97c8cd566405a265939e3620fc4f5de89adff580ae5
+          kubectl_version: v1.37.2
           cluster_name: aap-namespaces
           wait: 120s
       # The image that passed the smoke test, loaded into the cluster: the chart runs it with pullPolicy Never. The agent's image is the
@@ -886,8 +892,9 @@ jobs:
         uses: helm/kind-action@v1
         with:
           version: v0.33.0
-          # The same node image as the other jobs: Kubernetes v1.35.8, the digest of the index of the tag.
-          node_image: kindest/node:v1.35.8@sha256:07b2536e30b803ed61d1677a79df6115f798ce64c80f9e22f6ed45afd09323c0
+          # The same node image as the other jobs: Kubernetes v1.37.0, the digest of the index of the tag.
+          node_image: kindest/node:v1.37.0@sha256:a1ed56cfb0e7b93589bdf97c8cd566405a265939e3620fc4f5de89adff580ae5
+          kubectl_version: v1.37.2
           cluster_name: aap-leader
           wait: 120s
       # The image that passed the smoke test, loaded into the cluster: the chart runs it with pullPolicy Never. The agent's image is the

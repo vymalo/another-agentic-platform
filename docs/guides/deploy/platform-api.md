@@ -42,7 +42,7 @@ With run pods on, a third value is required: `api.config.defaults.coder.workVolu
 
 ## The values
 
-Add these to the file you used for the operator. All names are placeholders.
+Add these to the file you used for the operator, or keep them in a second file and pass both with `-f`. **Do not paste a second top-level `api:` block** into one file: YAML keeps the last, and the first is dropped without a warning. This page has two `api:` snippets, the store switch above and the values below: if you use both, they merge under **one** `api:`, or pasting both loses the store override. (A second top-level `networkPolicy:`, the install page's, at least fails loudly, on the registry `allowFrom` check.) All names are placeholders.
 
 ```yaml
 api:
@@ -210,6 +210,6 @@ On 2026-11-27 the API was also installed on a kind cluster with a placeholder is
 
 - **A real Keycloak.** The issuer in CI is the testkit's, a small program that signs test tokens. Whether a real Keycloak's keys, its roles claim (composite roles expanded), and its `aud` work as described is unverified until the realm is tried ([CLAUDE.md](../../../CLAUDE.md), slices D6 and K9b).
 - **A real edge.** TLS, a JWT check and a rate limit at the edge are not run by any job. That grouping by the `Authorization` header gives a limit per token was not tried.
-- **`preStop.sleep` under a rollout.** The pod has the hook, and nothing measures it under a rolling update. The gate behind it is alpha and off in Kubernetes 1.29, and on from 1.30 ([The pod that leaves](../../../deploy/operator/README.md#a-pod-that-leaves)).
+- **`preStop.sleep` under a rollout.** The pod has the hook, and nothing measures it under a rolling update. The gate behind it is GA from Kubernetes 1.34, so it is on at the platform's floor of 1.37 ([The pod that leaves](../../../deploy/operator/README.md#a-pod-that-leaves)).
 - **An issuer behind a private CA or a proxy.** The recipe is in the README and is unverified. `render-check.sh` holds only that the values render.
 - **The `NetworkPolicy` on a real cluster you run.** kind's CNI enforces it in `api-e2e`. Your CNI may not.

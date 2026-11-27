@@ -38,7 +38,7 @@ three first cases differed by the two keys the projection gained (`serviceAccoun
 ## K1: the cache and the tiers
 
 Slice K1 (2026-11-14) ported adam-rs's `model.extraBody`, `model.echoReasoning`, `model.contextWindow`, `coder.maxAccessTier` and
-`environment.cache.existingClaim`, and holds them by three cases rendered from the chart (*rendered 2026-11-14*, helm v3.16.3): `coder-cache` (the
+`environment.cache.existingClaim`, and holds them by three cases rendered from the chart (*rendered 2026-11-14*, helm v3.16.3; every golden was rendered again on 2026-11-27 under helm v4.3.2, AD-067, and differs from the first render by its `source.helm` field alone): `coder-cache` (the
 coder with `cache.existingClaim`), `coder-tiers` (`MAX_ACCESS_TIER` from `accessTiers.max`, and the model's three variables) and
 `coder-run-pods-cache` (run pods with the cache: the coder's mount and volume, the run pod template's, and the admission policy that admits a second claim).
 The chart's own `cache.create` (it makes a claim for the release) is **not** ported: an `AgentConfig` names a claim it does not own, and
@@ -59,7 +59,7 @@ The run pod comparison is exact except for these, each asserted and taken out in
 
 ## Regenerating them
 
-By hand; they need `helm` 3.x, `python3` with PyYAML and a clone of adam-rs that contains the revision. No
+By hand; they need `helm` 4 (AD-067), `python3` with PyYAML and a clone of adam-rs that contains the revision. No
 cluster, and no network when the clone is there:
 
 ```sh

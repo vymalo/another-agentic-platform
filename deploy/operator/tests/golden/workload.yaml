@@ -70,6 +70,7 @@ spec:
     - ports:
         - protocol: TCP
           port: 443
+
 ---
 # Source: aap-operator/templates/networkpolicy.yaml
 # Ingress is closed except what is listed: the registry to the peers of networkPolicy.registry.allowFrom, /metrics to those of
@@ -102,6 +103,7 @@ spec:
           port: 443
         - protocol: TCP
           port: 6443
+
 ---
 # Source: aap-operator/templates/api-serviceaccount.yaml
 # Its own ServiceAccount: the API's rights (the specs people edit, the ExternalSecrets that offer keys) are not the operator's.
@@ -117,6 +119,7 @@ metadata:
     app.kubernetes.io/managed-by: Helm
     app.kubernetes.io/part-of: another-agentic-platform
     helm.sh/chart: aap-operator-0.1.0
+
 ---
 # Source: aap-operator/templates/serviceaccount.yaml
 apiVersion: v1
@@ -130,6 +133,7 @@ metadata:
     app.kubernetes.io/managed-by: Helm
     app.kubernetes.io/part-of: another-agentic-platform
     helm.sh/chart: aap-operator-0.1.0
+
 ---
 # Source: aap-operator/templates/api-configmap.yaml
 # The configuration file of the Platform API (bin/api/config.example.yaml). There is no secret in it and no place for one: the API
@@ -186,6 +190,7 @@ data:
       listen: 0.0.0.0:9443
       maxConnections: 100
       maxHandshakesPerIp: 4
+
 ---
 # Source: aap-operator/templates/config.yaml
 apiVersion: v1
@@ -220,6 +225,7 @@ data:
       agentImage: "ghcr.io/vymalo/another-adam-rs/coder:sha-9a1fd4e@sha256:c3c178b7d73599f40d53f798616e510346abd3300a622b09b2bc233109f12b44"
     log:
       filter: "info"
+
 ---
 # Source: aap-operator/templates/api-role.yaml
 apiVersion: rbac.authorization.k8s.io/v1
@@ -246,6 +252,7 @@ rules:
   - apiGroups: [""]
     resources: [events]
     verbs: [list]
+
 ---
 # Source: aap-operator/templates/role.yaml
 apiVersion: rbac.authorization.k8s.io/v1
@@ -300,6 +307,7 @@ rules:
   - apiGroups: [postgresql.cnpg.io]
     resources: [clusters]
     verbs: [get, patch, create, delete]
+
 ---
 # Source: aap-operator/templates/api-rolebinding.yaml
 apiVersion: rbac.authorization.k8s.io/v1
@@ -323,6 +331,7 @@ subjects:
   - kind: ServiceAccount
     name: aap-operator-api
     namespace: another-agentic-system
+
 ---
 # Source: aap-operator/templates/rolebinding.yaml
 apiVersion: rbac.authorization.k8s.io/v1
@@ -345,6 +354,7 @@ subjects:
   - kind: ServiceAccount
     name: aap-operator
     namespace: another-agentic-system
+
 ---
 # Source: aap-operator/templates/api-service.yaml
 # The API, cluster-internal: the route from outside is the edge's (api.ingress, or the deployment's own). The health port is not exposed.
@@ -371,6 +381,7 @@ spec:
       port: 8080
       targetPort: http
       protocol: TCP
+
 ---
 # Source: aap-operator/templates/api-service.yaml
 # The workload listener (mutual TLS) on a Service of its own: the person's Service never carries it, and the NetworkPolicy opens it to
@@ -398,6 +409,7 @@ spec:
       port: 9443
       targetPort: workload
       protocol: TCP
+
 ---
 # Source: aap-operator/templates/service.yaml
 apiVersion: v1
@@ -421,6 +433,7 @@ spec:
       port: 9090
       targetPort: metrics
       protocol: TCP
+
 ---
 # Source: aap-operator/templates/api-deployment.yaml
 # The Platform API (bin/api): stateless, so more than one replica is fine. A rolling update that surges and loses no pod; the pod stays in
@@ -512,7 +525,7 @@ spec:
             periodSeconds: 5
             timeoutSeconds: 4
           # The Service takes a moment to drop an endpoint: keep serving until it has. The distroless image has no `sleep` to run, so
-          # this is the kubelet's own sleep action (Kubernetes 1.30 and later, or the gate on 1.29: values.yaml).
+          # this is the kubelet's own sleep action (on from Kubernetes 1.30 and GA in 1.34; the chart's floor is 1.37: values.yaml).
           lifecycle:
             preStop:
               sleep:
@@ -554,6 +567,7 @@ spec:
             items:
               - key: "ca-bundle.pem"
                 path: ca.crt
+
 ---
 # Source: aap-operator/templates/deployment.yaml
 # One replica and no leader election (§59a): a second reconciler would only race the first. `Recreate`, so an upgrade

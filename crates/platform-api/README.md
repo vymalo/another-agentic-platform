@@ -47,7 +47,7 @@ The table is [`routes.rs`](src/routes.rs) (`ROUTES`), which is §60a's table wri
 `HEAD` is `GET`. A method a path does not serve is `405` with `Allow`; a path that is no route is `404`. Neither asks for a token. Bodies
 are objects, never bare lists, in camelCase.
 
-### The workload router (ANR-1011, AD-067)
+### The workload router (ANR-1011, AD-068)
 
 `workload_router(state, authenticator)` is the router of the mutual-TLS listener: **the routes of the table whose permission is `platform:agents.own` (the four owner routes) and no other**, behind
 `workload.rs`'s guard in place of `authz::guard`. The state is an `ApiState<O, NoBearer>`: `NoBearer` fills the bearer seam's slot and refuses every token, so nothing on this listener can check one,

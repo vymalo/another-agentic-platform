@@ -63,7 +63,7 @@
 # reading the proxy variables (curl and npm are tried; the others are documented to), that every git command of the coder goes through the sandbox (the
 # log shows a `worktree` of C's, and adam-rs's own tests show the rest), a filter in the sandbox that cannot read the whole work volume (it can: README "The
 # git sandbox of the coder's pod"), a coder image without adam-git-sandbox (the pod would never be ready), IPv6 egress (kind is IPv4 only: the proof is the absence of a rule), a
-# Kubernetes older than the cluster's (kind's node image, v1.35.8), a CNI that has no NetworkPolicy support, Pod Security admission, a run pod on another
+# Kubernetes older than the cluster's (kind's node image, v1.37.0; v1.35.8 before AD-067), a CNI that has no NetworkPolicy support, Pod Security admission, a run pod on another
 # node than the coder's (kind has one), and a coder whose volume is shared by several workers. deploy/operator/tests/e2e/README.md says what each step shows.
 #
 # Safety. As api-e2e.sh and chain-e2e.sh: this script installs and uninstalls a Helm release (which makes and deletes cluster-scoped objects), applies
@@ -79,7 +79,7 @@
 #
 # Needs kubectl, helm, jq and openssl; a cluster that has the operator image already (kind load docker-image): OPERATOR_IMAGE_* (default operator:smoke);
 # the cluster must reach ghcr.io (the coder's image, 3 GB, and the run image, whose layers the coder's mostly are) and mirror.gcr.io (Postgres), which
-# the kubelet pulls, by digest. Kubernetes 1.30 or later (the admission policy), and a network plugin that enforces NetworkPolicy (kind's does). Every
+# the kubelet pulls, by digest. Kubernetes 1.37 or later (the chart's floor, AD-067; the admission policy is GA from 1.30), and a network plugin that enforces NetworkPolicy (kind's does). Every
 # wait is bounded; on a failure the cluster's state is printed.
 set -eu
 
@@ -577,7 +577,7 @@ ok "kubectl's context is $context; everything this script makes is in the namesp
 kubectl get nodes
 minor=$(kubectl version -o json | jq -r '.serverVersion.minor' | tr -d '+')
 case $minor in '' | *[!0-9]*) die "cannot read the cluster's Kubernetes version" ;; esac
-[ "$minor" -ge 30 ] || die "the cluster is Kubernetes 1.$minor: the admission policy of run pods needs 1.30 or later"
+[ "$minor" -ge 37 ] || die "the cluster is Kubernetes 1.$minor: the platform's floor is 1.37 (AD-067)"
 ok "the cluster is Kubernetes 1.$minor"
 
 step "1. the CRDs, the Secrets, a Postgres, and the operator's chart WITHOUT run pods"

@@ -38,6 +38,7 @@ spec:
           port: 443
         - protocol: TCP
           port: 6443
+
 ---
 # Source: aap-operator/templates/serviceaccount.yaml
 apiVersion: v1
@@ -51,6 +52,7 @@ metadata:
     app.kubernetes.io/managed-by: Helm
     app.kubernetes.io/part-of: another-agentic-platform
     helm.sh/chart: aap-operator-0.1.0
+
 ---
 # Source: aap-operator/templates/config.yaml
 apiVersion: v1
@@ -90,6 +92,7 @@ data:
       agentImage: "ghcr.io/vymalo/another-adam-rs/coder:sha-9a1fd4e@sha256:c3c178b7d73599f40d53f798616e510346abd3300a622b09b2bc233109f12b44"
     log:
       filter: "info"
+
 ---
 # Source: aap-operator/templates/role.yaml
 apiVersion: rbac.authorization.k8s.io/v1
@@ -144,6 +147,7 @@ rules:
   - apiGroups: [postgresql.cnpg.io]
     resources: [clusters]
     verbs: [get, patch, create, delete]
+
 ---
 # Source: aap-operator/templates/rolebinding.yaml
 apiVersion: rbac.authorization.k8s.io/v1
@@ -166,6 +170,7 @@ subjects:
   - kind: ServiceAccount
     name: aap-operator
     namespace: another-agentic-system
+
 ---
 # Source: aap-operator/templates/service.yaml
 # The agent registry (agent-registry/v1), cluster-internal only: no Ingress, and a bearer token on every request.
@@ -190,6 +195,7 @@ spec:
       port: 8080
       targetPort: registry
       protocol: TCP
+
 ---
 # Source: aap-operator/templates/service.yaml
 apiVersion: v1
@@ -213,6 +219,7 @@ spec:
       port: 9090
       targetPort: metrics
       protocol: TCP
+
 ---
 # Source: aap-operator/templates/deployment.yaml
 # One replica and no leader election (§59a): a second reconciler would only race the first. `Recreate`, so an upgrade
@@ -332,6 +339,7 @@ spec:
             items:
               - key: token
                 path: token
+
 ---
 # Source: aap-operator/templates/externalsecret.yaml
 # The registry's bearer token lives in AWS Secrets Manager (`prod/another-agentic/env`, one JSON property per value) and is copied into

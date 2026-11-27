@@ -37,7 +37,7 @@
   "source": {
     "chart": "deploy/coder",
     "generatedBy": "tools/adam-parity/regen.sh",
-    "helm": "v3.16.3+gcfd0749",
+    "helm": "v4.3.2+g8346aaa",
     "namespace": "another-agentic-system",
     "release": "coder",
     "repository": "https://github.com/vymalo/another-adam-rs",
