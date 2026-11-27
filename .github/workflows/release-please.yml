@@ -96,10 +96,19 @@ jobs:
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           ref: ${{ fromJSON(steps.release.outputs.pr).headBranchName }}
-          # The same App token, so the push below raises an event and the release pull request gets its CI.
+          # The same App token, so the push below raises an event: the release pull request's remaining checks (scripts, governance,
+          # commit-lint) run on the new head, while ANR-1206's predicate skips the heavy jobs.
           token: ${{ steps.app-token.outputs.token }}
           # The token is never written into .git/config; the push below names it on the remote URL.
           persist-credentials: false
+
+      # ANR-1326: between release-please's force-push and this checkout, a writer can put a commit of their own on the branch. The lock
+      # commit below would then land on top of it, its author would be the App, and the final pull_request run would skip every guarded
+      # job (ANR-1302) — the person's code would merge with no pull-request CI. Refuse a top commit that is not release-please's. A forged
+      # author passes this; a repository ruleset that lets only the release App push to `release-please--**` is the complete fix.
+      - name: The release branch still holds release-please's commit
+        if: steps.release.outputs.prs_created == 'true'
+        run: sh tools/check-release-branch-author.sh
 
       # No dependency cache in this job, on purpose: a restored cache in a job that commits is a supply-chain surface.
       - name: Refresh Cargo.lock and the version checks

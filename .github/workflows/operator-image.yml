@@ -297,7 +297,11 @@ jobs:
     steps:
       - uses: actions/checkout@v7
       - name: shellcheck
-        run: shellcheck deploy/operator/bump-tag.sh deploy/operator/release-pin.sh tools/check-release-version.sh deploy/operator/tests/*.sh deploy/operator/tests/e2e/*.sh
+        run: shellcheck deploy/operator/bump-tag.sh deploy/operator/release-pin.sh tools/check-release-version.sh tools/check-release-branch-author.sh tools/check-release-branch-author-test.sh deploy/operator/tests/*.sh deploy/operator/tests/e2e/*.sh
+      # ANR-1326: release-please.yml refuses a release branch whose top commit is not release-please's before it adds the lock commit.
+      # This proves the guard accepts the two identities release-please uses and refuses a person's commit.
+      - name: the release branch guard accepts release-please and refuses a person
+        run: sh tools/check-release-branch-author-test.sh
       # The scripted model of the run pods end-to-end (a Node script the coder's image runs in the cluster): its turns, its probe (valid shell, run for real), and its two
       # shapes of answer, with no cluster and no coder. Node 18 or later (the runner's) for fetch and node:test.
       - name: the scripted model of the run pods end-to-end
