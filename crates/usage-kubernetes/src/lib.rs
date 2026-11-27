@@ -48,8 +48,7 @@ impl AccountSource for AgentAccounts {
                 if status.code == 404
                     && status.reason == "NotFound"
                     && status.details.as_ref().is_some_and(|d| {
-                        d.name.as_deref() == Some(service)
-                            && d.kind.as_deref() == Some("agentservices")
+                        d.name.as_str() == service.as_str() && d.kind == "agentservices"
                     }) =>
             {
                 Ok(None)
