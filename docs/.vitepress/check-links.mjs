@@ -49,7 +49,13 @@ for (const [url, page] of pages) {
     }
     if (frag) {
       fragments++;
-      const id = decodeURIComponent(frag);
+      let id;
+      try {
+        id = decodeURIComponent(frag);
+      } catch {
+        broken.push(`${url}: malformed fragment #${frag} (${href})`);
+        continue;
+      }
       if (!t.ids.has(id)) broken.push(`${url}: no id #${id} on ${key} (${href})`);
     }
   }
