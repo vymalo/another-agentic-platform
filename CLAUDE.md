@@ -39,6 +39,7 @@ layout table and the root `README.md`.
 
 | Path | What |
 |---|---|
+| `docs/.vitepress/`, `docs/package.json` | The documentation site, https://vymalo.github.io/another-agentic-platform/ (ANR-823): VitePress 1.6.4 with `@vaam-apps/vitepress-md3`, the seven sections of `docs/.vitepress/STRUCTURE.md` (copied verbatim from the system; `config.ts` maps the existing files into them and moves none). Build: `npm --prefix docs ci && npm --prefix docs run build` (Node 24, as CI); the workflow is `.github/workflows/docs-site.yml` and the build fails on a dead link (only links to files outside `docs/` pass). A link to a folder's `README.md` is rewritten to its index |
 | `docs/architecture/README.md` | Index: status, revision history, contents, and the `§N` → file section map |
 | `CONTRIBUTING.md`, `SECURITY.md` | How to contribute (claim an issue, build, test, open a pull request) and how to report a vulnerability privately. The product roadmap is `ROADMAP.md` in another-agentic-system: https://github.com/vymalo/another-agentic-system/blob/main/ROADMAP.md |
 | `docs/architecture/01-…12-*.md` | The architecture, split by topic; sections keep their original numbers |

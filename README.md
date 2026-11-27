@@ -27,6 +27,8 @@ flowchart TB
 
 ## Documents
 
+The documentation site: <https://vymalo.github.io/another-agentic-platform/> (built from `docs/`, see `docs/.vitepress/STRUCTURE.md`).
+
 | Document | What it covers |
 |---|---|
 | [Architecture](docs/architecture/README.md) | The full design in 12 topic files: overview, domain model, interfaces, workflows, runtime, environments & storage, tools, security, operations, control plane & CRDs, decisions, summary |
