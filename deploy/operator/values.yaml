@@ -323,7 +323,8 @@ networkPolicy:
 # operator may reach (NetworkPolicyPeers: namespaceSelector, podSelector, ipBlock). A NetworkPolicy names peers and never host names, so
 # the policy is what bounds a probe: the chart opens the operator's egress to exactly these peers on `ports`, plus DNS, and a probe to a
 # server that is not covered has no route. The operator still reads no Secret (AD-024). A rule always has a `to`: an ipBlock
-# whose CIDR has a `/0` prefix, or that has no cidr, is refused (for `to` and for `dns.to`). NOTE: the API server's own egress rule is separate and, with `networkPolicy.apiServer.cidrs` empty,
+# whose CIDR has a `/0` prefix, or that has no cidr, is refused (for `to` and for `dns.to`). In this and every other list of peers, an
+# empty `namespaceSelector` selects every namespace and is refused: name `matchLabels` or `matchExpressions`. NOTE: the API server's own egress rule is separate and, with `networkPolicy.apiServer.cidrs` empty,
 # already allows any address on 443 and 6443; an https probe on 443 is therefore bounded by `toolProbe.to` only once that list names the API
 # server's addresses. Narrow it in a deployment that probes https servers.
 # ANR-770: what the operator does with the database and volumes a deleted agent left behind (deletionPolicy: Retain), the file's
@@ -414,7 +415,8 @@ metering:
 
 toolProbe:
   # Who the operator may reach. Empty: no probe, and not a trace of it in any render. The peers of an in-cluster MCP server (a
-  # namespaceSelector or a podSelector) or its addresses (an ipBlock).
+  # namespaceSelector or a podSelector) or its addresses (an ipBlock). An empty `namespaceSelector` selects every namespace and is
+  # refused: name `matchLabels` or `matchExpressions`.
   to: []
   # The ports a probe may use, as the provider's URL names them: 443 for an https server, 80 or the port of an in-cluster server.
   ports: [80, 443]
