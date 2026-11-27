@@ -152,6 +152,8 @@ permissions:
 
 jobs:
   chart:
+    # ANR-1206: the release pull request only moves version strings and main's own push run already tested this code; skipped here to spare the shared runner queue (a skipped job satisfies a required check).
+    if: ${{ !(startsWith(github.head_ref, 'release-please--') && github.event.pull_request.head.repo.full_name == github.repository) }}
     name: helm lint, render checks and kubeconform
     runs-on: ubuntu-latest
     env:
@@ -257,6 +259,8 @@ jobs:
           exit 1
 
   dockerfile:
+    # ANR-1206: the release pull request only moves version strings and main's own push run already tested this code; skipped here to spare the shared runner queue (a skipped job satisfies a required check).
+    if: ${{ !(startsWith(github.head_ref, 'release-please--') && github.event.pull_request.head.repo.full_name == github.repository) }}
     name: lint Dockerfile
     runs-on: ubuntu-latest
     steps:
@@ -266,6 +270,8 @@ jobs:
           dockerfile: docker/operator/Dockerfile
 
   dockerfile-api:
+    # ANR-1206: the release pull request only moves version strings and main's own push run already tested this code; skipped here to spare the shared runner queue (a skipped job satisfies a required check).
+    if: ${{ !(startsWith(github.head_ref, 'release-please--') && github.event.pull_request.head.repo.full_name == github.repository) }}
     name: lint the API's Dockerfile
     runs-on: ubuntu-latest
     steps:
@@ -275,6 +281,7 @@ jobs:
           dockerfile: docker/api/Dockerfile
 
   scripts:
+    # ANR-1206: kept on the release pull request: it holds the release version check (tools/check-release-version.sh), which is what that pull request needs.
     name: shell scripts and the bump
     runs-on: ubuntu-latest
     steps:
@@ -296,10 +303,15 @@ jobs:
       # on the release pull request too.
       - name: one version for the workspace and both charts
         run: sh tools/check-release-version.sh
+      # ANR-1206: operator.yml (built with --locked) is skipped on the release pull request, so this is where a stale Cargo.lock
+      # after a version bump fails before the merge. `cargo metadata` resolves the lock file and builds nothing.
+      - name: the lock file matches the workspace (cargo metadata --locked)
+        run: cargo metadata --locked --format-version 1 > /dev/null
 
   bump-dry-run:
     name: show the tag bump
-    if: github.event_name == 'pull_request'
+    # ANR-1206: the release pull request only moves version strings and main's own push run already tested this code; skipped here to spare the shared runner queue (a skipped job satisfies a required check).
+    if: ${{ !(startsWith(github.head_ref, 'release-please--') && github.event.pull_request.head.repo.full_name == github.repository) && (github.event_name == 'pull_request') }}
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
@@ -321,6 +333,8 @@ jobs:
           } | tee -a "$GITHUB_STEP_SUMMARY"
 
   image:
+    # ANR-1206: the release pull request only moves version strings and main's own push run already tested this code; skipped here to spare the shared runner queue (a skipped job satisfies a required check).
+    if: ${{ !(startsWith(github.head_ref, 'release-please--') && github.event.pull_request.head.repo.full_name == github.repository) }}
     name: build and smoke-test the image
     runs-on: ubuntu-latest
     timeout-minutes: 45
@@ -401,6 +415,8 @@ jobs:
           if-no-files-found: error
 
   api-image:
+    # ANR-1206: the release pull request only moves version strings and main's own push run already tested this code; skipped here to spare the shared runner queue (a skipped job satisfies a required check).
+    if: ${{ !(startsWith(github.head_ref, 'release-please--') && github.event.pull_request.head.repo.full_name == github.repository) }}
     name: build and smoke-test the API image
     runs-on: ubuntu-latest
     timeout-minutes: 45
@@ -521,6 +537,8 @@ jobs:
           if-no-files-found: error
 
   operator-coder-e2e:
+    # ANR-1206: the release pull request only moves version strings and main's own push run already tested this code; skipped here to spare the shared runner queue (a skipped job satisfies a required check).
+    if: ${{ !(startsWith(github.head_ref, 'release-please--') && github.event.pull_request.head.repo.full_name == github.repository) }}
     name: operator-coder-e2e
     needs: image
     runs-on: ubuntu-latest
@@ -562,6 +580,8 @@ jobs:
         run: sh deploy/operator/tests/e2e/coder-e2e.sh
 
   api-e2e:
+    # ANR-1206: the release pull request only moves version strings and main's own push run already tested this code; skipped here to spare the shared runner queue (a skipped job satisfies a required check).
+    if: ${{ !(startsWith(github.head_ref, 'release-please--') && github.event.pull_request.head.repo.full_name == github.repository) }}
     name: api-e2e
     needs: [image, api-image]
     runs-on: ubuntu-latest
@@ -628,6 +648,8 @@ jobs:
           sh deploy/operator/tests/e2e/api-e2e.sh
 
   chain-e2e:
+    # ANR-1206: the release pull request only moves version strings and main's own push run already tested this code; skipped here to spare the shared runner queue (a skipped job satisfies a required check).
+    if: ${{ !(startsWith(github.head_ref, 'release-please--') && github.event.pull_request.head.repo.full_name == github.repository) }}
     name: chain-e2e
     needs: [image, api-image]
     runs-on: ubuntu-latest
@@ -690,6 +712,8 @@ jobs:
           sh deploy/operator/tests/e2e/chain-e2e.sh
 
   run-pods-e2e:
+    # ANR-1206: the release pull request only moves version strings and main's own push run already tested this code; skipped here to spare the shared runner queue (a skipped job satisfies a required check).
+    if: ${{ !(startsWith(github.head_ref, 'release-please--') && github.event.pull_request.head.repo.full_name == github.repository) }}
     name: run-pods-e2e
     needs: image
     runs-on: ubuntu-latest
@@ -733,6 +757,8 @@ jobs:
         run: sh deploy/operator/tests/e2e/run-pods-e2e.sh
 
   k10-e2e:
+    # ANR-1206: the release pull request only moves version strings and main's own push run already tested this code; skipped here to spare the shared runner queue (a skipped job satisfies a required check).
+    if: ${{ !(startsWith(github.head_ref, 'release-please--') && github.event.pull_request.head.repo.full_name == github.repository) }}
     name: k10-e2e
     needs: image
     runs-on: ubuntu-latest
@@ -779,6 +805,8 @@ jobs:
         run: sh deploy/operator/tests/e2e/k10-e2e.sh
 
   namespaces-e2e:
+    # ANR-1206: the release pull request only moves version strings and main's own push run already tested this code; skipped here to spare the shared runner queue (a skipped job satisfies a required check).
+    if: ${{ !(startsWith(github.head_ref, 'release-please--') && github.event.pull_request.head.repo.full_name == github.repository) }}
     name: namespaces-e2e
     needs: image
     runs-on: ubuntu-latest
@@ -817,6 +845,8 @@ jobs:
         run: sh deploy/operator/tests/e2e/namespaces-e2e.sh
 
   leader-e2e:
+    # ANR-1206: the release pull request only moves version strings and main's own push run already tested this code; skipped here to spare the shared runner queue (a skipped job satisfies a required check).
+    if: ${{ !(startsWith(github.head_ref, 'release-please--') && github.event.pull_request.head.repo.full_name == github.repository) }}
     name: leader-e2e
     needs: image
     runs-on: ubuntu-latest
@@ -864,7 +894,8 @@ jobs:
     # reason to look, not to withhold the operator's release (owner decisions, §60a D13 and D15b; to flip one, add it to this list). The new
     # namespaces-e2e and leader-e2e pull only the curl image api-e2e already pulls, and nothing else outside this repository.
     needs: [chart, dockerfile, dockerfile-api, scripts, image, api-image, operator-coder-e2e, api-e2e, namespaces-e2e, leader-e2e]
-    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    # ANR-1206: the release pull request only moves version strings and main's own push run already tested this code; skipped here to spare the shared runner queue (a skipped job satisfies a required check).
+    if: ${{ !(startsWith(github.head_ref, 'release-please--') && github.event.pull_request.head.repo.full_name == github.repository) && (github.event_name == 'push' && github.ref == 'refs/heads/main') }}
     runs-on: ubuntu-latest
     # One push at a time, so the check below and the push of `latest` are not interleaved with another run's.
     concurrency:
@@ -929,6 +960,8 @@ jobs:
   # commit, one retry loop for both tags: a second workflow with a bump of its own would race this one on `git push` and, because the
   # "has main moved on?" test below reads the subjects of the commits that follow, take the other's bump for a newer build.
   bump:
+    # ANR-1206: the release pull request only moves version strings and main's own push run already tested this code; skipped here to spare the shared runner queue (a skipped job satisfies a required check).
+    if: ${{ !(startsWith(github.head_ref, 'release-please--') && github.event.pull_request.head.repo.full_name == github.repository) }}
     name: bump the tags in the chart
     needs: push
     runs-on: ubuntu-latest
