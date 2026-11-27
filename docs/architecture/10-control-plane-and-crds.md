@@ -725,6 +725,58 @@ Each item is additive later, and the third column says how it stays so.
 - **The image** is built on Debian 13, not on the `rust` image of adam-rs, and pushed as `sha-<7>` and `latest`; the tag the chart pins is `sha-<7>` and is written by `bump-tag.sh` only. A new GHCR package is private until made public (owner step, in the chart's README).
 - **Metrics and ServiceMonitors (K4, 2026-11-14).** The chart can make a Prometheus Operator `ServiceMonitor` (`monitoring.coreos.com/v1`) for the operator's `/metrics` (`metrics.serviceMonitor.{enabled, interval, labels}`) and for the Platform API's (`api.metrics.{port, allowFrom, serviceMonitor.{enabled, interval, labels}}`): off by default, and then the four goldens are byte for byte what they were. The API's metrics are in §48. The chart exposes the API's metrics port only to the peers of `api.metrics.allowFrom` (one more ingress rule of its NetworkPolicy, a Service `<fullname>-api-metrics` of its own, `metricsListen` in the file, written only while the port is exposed) and refuses a `ServiceMonitor` whose `allowFrom` is empty while the NetworkPolicy is on, because the policy would drop the scrape. Proven by `render-check.sh` (each new check broken on purpose) and kubeconform against a vendored schema; *unverified* against a real Prometheus.
 
+### Releases (AD-070)
+
+*Added 2026-11-27 (ANR-1155, [AD-070](11-decisions.md#ad-070--releases-release-please-cuts-vxyz-the-tested-sha-7-images-are-copied-by-digest-and-the-charts-are-published-with-the-releases-pins)).* Development follows `main`: every green build pushes `sha-<7>` and bumps the chart in git, as above. A **release** is a fixed version that production deploys: `vX.Y.Z`, cut by release-please from the Conventional Commits since the last one, the flow of vaam-apps/vpay.
+
+| What | Where | Tags |
+|---|---|---|
+| The operator image | `ghcr.io/vymalo/another-agentic-platform/operator` | `X.Y.Z`, `X.Y` (the highest patch); never `latest` |
+| The Platform API image | `ghcr.io/vymalo/another-agentic-platform/api` | `X.Y.Z`, `X.Y` |
+| The operator chart | `oci://ghcr.io/vymalo/another-agentic-platform/charts/aap-operator` | `X.Y.Z`, with `image.tag` and `api.image.tag` `X.Y.Z` and both digests pinned |
+| The CRDs chart | `oci://ghcr.io/vymalo/another-agentic-platform/charts/aap-operator-crds` | `X.Y.Z` |
+
+```mermaid
+sequenceDiagram
+  participant M as main
+  participant RP as release-please.yml
+  participant OI as operator-image.yml
+  participant R as release.yml
+  participant G as ghcr.io
+  M->>RP: a push (a merged pull request)
+  RP->>M: opens or updates the release pull request (versions, CHANGELOG, Cargo.lock)
+  Note over M: the owner merges it
+  M->>OI: the release commit (Cargo.toml and the charts changed)
+  M->>RP: the same push
+  RP->>M: tag vX.Y.Z and a GitHub release (App token)
+  M->>R: the tag
+  OI->>G: sha-<7> of both images, after the gating end-to-ends
+  OI->>M: chore(deploy): bump operator and api to sha-<7>
+  R->>G: waits for sha-<7>, checks the revision label
+  R->>G: X.Y.Z and X.Y by digest, signature, SBOM, provenance
+  R->>G: both charts at X.Y.Z (the images pinned in the package), signed
+```
+
+```mermaid
+stateDiagram-v2
+  [*] --> Unreleased: commits on main
+  Unreleased --> Proposed: release-please opens the pull request
+  Proposed --> Proposed: more commits, the pull request is updated
+  Proposed --> Tagged: merged, vX.Y.Z cut
+  Tagged --> Waiting: release.yml starts
+  Waiting --> Published: sha-<7> of both images found, revision checked
+  Waiting --> Failed: operator-image.yml ended without pushing, or 160 min passed
+  Failed --> Waiting: its jobs re-run, then release.yml dispatched with the tag
+  Published --> [*]
+```
+
+- **The version.** One for the workspace and both charts (`version` and `appVersion`), on the lines marked `# x-release-please-version`; `tools/check-release-version.sh` holds them equal (in `operator-image.yml`'s `scripts` job, and in `release.yml` against the tag). The manifest starts at 0.1.0, never tagged: the first release is 0.2.0 after a `feat`, else 0.1.1.
+- **The images are the tested ones.** The release commit changes `Cargo.toml`, so `operator-image.yml` builds it, runs its end-to-ends and pushes `sha-<7>` like any commit (the binaries then report `X.Y.Z`). `release.yml` copies those digests; it builds nothing. Its proofs are a cosign keyless signature, an SPDX SBOM (syft) and a SLSA provenance attestation per digest; the provenance is the release run's, since BuildKit's own attestations exist only for a build.
+- **git keeps `sha-<7>`.** `deploy/operator/release-pin.sh` sets the release's tag and digests in a copy that is packaged, and refuses the file git tracks; `bump-tag.sh` stays the only writer of the tags in git, and main's bump commit is unchanged. So the chart in git at a release tag still names the `sha-<7>` of the commit before it, and the published chart names `X.Y.Z`.
+- **The goldens hold still.** The chart's labels carry its version (`helm.sh/chart`, `app.kubernetes.io/version`), so `render-check.sh` renders the goldens from a copy at 0.1.0, as it renders the tags at `sha-0000000`; the markers are comments and change no render (*verified 2026-11-27*: the renders of both charts at `755872d` and with the markers are byte for byte the same, and the goldens pass with every version moved to 0.2.0).
+- **For the owner:** a GitHub App installed on this repository with `contents: write` and `pull-requests: write`, and the secrets `RELEASE_PLEASE_APP_CLIENT_ID` (its Client ID) and `RELEASE_PLEASE_APP_PRIVATE_KEY`; until then `release-please.yml` fails at its first step and nothing is released. The two chart packages are private until made public, as the images were. `aapctl` has no release: [P-041](11-decisions.md#p-041--a-release-also-builds-aapctl-binaries).
+- ***Unverified* until the first tag runs it:** the App token and the tag's event, the release pull request's `Cargo.lock` step, the wait on `operator-image.yml` (`gh run list --commit`), the copy on GHCR (`--prefer-index=false` was verified 2026-11-27 with buildx v0.38.1 against a local registry only), cosign, the SBOM and the attestations pushed to GHCR (`push-to-registry`) for both images and both charts, `helm push` to GHCR, and a cluster installing the published chart. A release pull request also needs a body the `AI Governance` check accepts, which release-please does not write. What CI runs before a tag: the dry run of `release.yml` on a pull request (the version, the pins, lint, render and package with placeholder digests), `release-pin-test.sh` and `render-check.sh`.
+
 ### Rollout on netcup
 
 Next to the existing charts, one step at a time. The coder stays on its Helm chart until M3.
