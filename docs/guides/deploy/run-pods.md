@@ -90,7 +90,7 @@ helm upgrade --install aap-operator deploy/operator --namespace aap-system \
 
 `values.yaml` is [the install page's](install.md#the-values), `api.values.yaml` is [the Platform API page's](platform-api.md#the-values), and `run-pods.values.yaml` is the block above, `workVolume` included. The API pod is not ready until it can fetch the issuer's keys, so `--wait` fails if the issuer is not reachable ([the Platform API page](platform-api.md#the-api-pod-is-not-ready-until-it-can-reach-the-issuer)). This combination was rendered with `helm template`, checked with kubeconform, and its API file was read by `api --check`: see the proof below, and [What was walked](#what-was-walked).
 
-## What the operator makes for an agent
+::: in-depth What the operator makes for an agent
 
 The chart makes these once: the settings `ConfigMap` the operator reads (in the release's namespace), the `PriorityClass` (unless you name one), the admission policy and its binding over every watched namespace, and the `Role` run pods use (one in each watched namespace). For each agent that sets `sizeClass`, the operator makes the rest. The egress proxy's `PodDisruptionBudget` exists only when `egressProxy.replicas` is above 1.
 
@@ -140,7 +140,8 @@ While `Unguarded`, the account can make any pod: the policy's binding allows a p
 
 **Turning `runPods.enabled` off clears nothing.** Without the settings the operator does not look for the objects, so a coder keeps its run-pod objects and its right to make pods until `coder.runPods` is removed from its `AgentConfig`, or the agent is deleted. Remove `coder.runPods` from the configs first, wait for the objects to go, then turn the value off.
 
-## A run pod, from request to deletion
+:::
+::: in-depth A run pod, from request to deletion
 
 ```mermaid
 sequenceDiagram
@@ -176,7 +177,8 @@ stateDiagram-v2
 
 The files stay on the volume when the pod goes. A pod that no command used for `idleSecs` is deleted; `0` keeps it until its run ends.
 
-## The egress proxy
+:::
+::: in-depth The egress proxy
 
 A run pod reaches the internet through one proxy, or not at all. The network policy of a run pod has no ingress and only three egress targets: DNS, the proxy's pods on port 3128, and `runPods.networkPolicy.extraEgress`. There is no switch to turn it off: `runPods.networkPolicy.enabled: false` is refused.
 
@@ -190,6 +192,7 @@ The operator makes one proxy per agent with run pods: a `Deployment`, `Service`,
 kubectl -n <namespace> get pods -l app.kubernetes.io/component=egress-proxy
 ```
 
+:::
 ## The git sandbox
 
 With run pods, the coder's pod gets a second container, `git-sandbox`, and the coder sends its local `git` commands to it over a Unix socket. A repository's own configuration can name a program for git to run (a `filter` or an `fsmonitor`), and the run writes those repositories. In the sandbox that program can read none of the coder's token, key or model key. The sandbox has no Secret, no service-account token, a read-only root file system and a `/tmp` of its own. The coder container alone mounts the account's token. Commands that carry a credential (`fetch`, `push`, `ls-remote`) stay in the coder.

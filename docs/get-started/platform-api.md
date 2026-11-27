@@ -6,7 +6,7 @@ token from it, and then makes, reads, exports and deletes a model and an agent t
 Start with [Get started](../get-started.md) if you have not made a cluster with the operator before. This page repeats only what
 differs. It needs a Rust toolchain: `aapctl` and the issuer ship in no image.
 
-## Where it comes from
+::: in-depth Where it comes from
 
 The commands are adapted from [`api-e2e.sh`](../../deploy/operator/tests/e2e/api-e2e.sh), steps 1 to 4 (the issuer, the Secrets, the
 chart with the API on, the port-forward, the model and the agent made through the API) and step 6b (`aapctl`), with its
@@ -24,6 +24,7 @@ from the script in these ways:
 - the agent is made with one `curl` call and a JSON form (the API takes forms, not custom resources), then exported by `aapctl`,
   deleted and made again from the export, as step 6b does.
 
+:::
 ## What you will do
 
 ```mermaid

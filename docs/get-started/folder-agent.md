@@ -6,7 +6,7 @@ reads its answer. The agent's model is a scripted stand-in that runs inside the 
 Start with [Get started](../get-started.md) if you have not made a cluster with the operator before. This page repeats only what
 differs.
 
-## Where it comes from
+::: in-depth Where it comes from
 
 The commands are adapted from [`k10-e2e.sh`](../../deploy/operator/tests/e2e/k10-e2e.sh) (steps 1, 3 and 4), with its
 [`k10-support.yaml`](../../deploy/operator/tests/e2e/k10-support.yaml) (a throwaway Postgres and the scripted model) and
@@ -20,6 +20,7 @@ The commands are adapted from [`k10-e2e.sh`](../../deploy/operator/tests/e2e/k10
 - the agent's model is a `ModelEndpoint` named by reference, as in the script, and `examples/chat.yaml` names the model inline;
 - the message is sent from inside the agent's own pod, as the script does, so no `NetworkPolicy` has to admit your terminal.
 
+:::
 ## What you will do
 
 ```mermaid

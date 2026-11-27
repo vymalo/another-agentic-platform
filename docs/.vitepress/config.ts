@@ -2,7 +2,8 @@ import { readFileSync } from "node:fs";
 import { dirname, join, posix } from "node:path";
 import { fileURLToPath } from "node:url";
 import { defineMd3Config } from "@vaam-apps/vitepress-md3/config";
-import { withMermaid } from "vitepress-plugin-mermaid";
+import { groupIconMdPlugin, groupIconVitePlugin } from "vitepress-plugin-group-icons";
+import { inDepth } from "./theme/in-depth";
 
 const root = join(dirname(fileURLToPath(import.meta.url)), "..");
 
@@ -109,60 +110,79 @@ export function githubSlug(s: string): string {
   return s.trim().toLowerCase().replace(/[^\p{L}\p{M}\p{N}_ -]/gu, "").replace(/ /g, "-");
 }
 
-export default withMermaid(
-  defineMd3Config({
-    title: "another-agentic-platform",
-    description: "A Kubernetes-native platform for durable, versioned AI agent services on disposable compute.",
-    base: process.env.DOCS_BASE ?? "/another-agentic-platform/",
-    cleanUrls: true,
-    // VitePress serves index.md; these READMEs are the folders' own index pages and stay where they are.
-    rewrites: { "architecture/README.md": "architecture/index.md", "api/README.md": "api/index.md" },
-    // Links that leave docs/ are rewritten to GitHub below, so every dead link left fails the build.
-    srcExclude: ["**/node_modules/**"],
-    themeConfig: {
-      md3: { style: "expressive", seed: "#0f766e" },
-      nav: [
-        { text: "Overview", link: "/" },
-        { text: "Get started", link: "/get-started" },
-        { text: "Reference", link: "/reference/" },
-        { text: "Architecture", link: "/architecture/" },
-        { text: "Decisions", link: "/architecture/11-decisions" },
-      ],
-      sidebar,
-      outline: { level: [2, 3] },
-      search: { provider: "local" },
-      editLink: { pattern: "https://github.com/vymalo/another-agentic-platform/edit/main/docs/:path" },
-    },
-    markdown: {
-      // GitHub's heading ids, so a `#59a-...` or `#ad-053--...` link written for GitHub lands here too: VitePress would
-      // prefix `_` to an id that starts with a digit and keep the em dash. Repeats become -1, -2 (the anchor plugin does that).
-      anchor: { slugify: githubSlug },
-      config: (md: any) => {
-        escapeUnknownTags(md);
-        // The rewrites above serve a folder's README.md as its index; a link written to the file (which tools/docs-check
-        // resolves) must land on that index, not on a page that does not exist.
-        md.core.ruler.push("readme-links", (state: any) => {
-          const repo = "https://github.com/vymalo/another-agentic-platform";
-          const from = posix.dirname(state.env?.relativePath ?? "index.md");
-          for (const block of state.tokens)
-            for (const t of block.children ?? [])
-              if (t.type === "link_open") {
-                const href = t.attrGet("href");
-                if (!href || href.startsWith("#") || href.startsWith("/") || /^[a-z][a-z0-9+.-]*:/i.test(href)) continue;
-                const [, path, rest = ""] = href.match(/^([^#?]*)(.*)$/)!;
-                const resolved = posix.normalize(posix.join(from, decodeURI(path)));
-                const isDir = path.endsWith("/") || posix.extname(resolved) === "";
-                const outside = resolved === ".." || resolved.startsWith("../");
-                // A link out of docs/, or to a file in docs/ that is not a page (json, yaml, images): the file on GitHub.
-                if (outside || (posix.extname(resolved) !== "" && posix.extname(resolved) !== ".md")) {
-                  const repoPath = outside ? posix.normalize(resolved.replace(/^(\.\.\/)/, "")) : `docs/${resolved}`;
-                  t.attrSet("href", `${repo}/${isDir ? "tree" : "blob"}/main/${repoPath.replace(/\/$/, "")}${rest}`);
-                  continue;
-                }
-                t.attrSet("href", href.replace(/(^|\/)README\.md(?=#|$)/, "$1index.md"));
+export default defineMd3Config({
+  title: "another-agentic-platform",
+  description: "A Kubernetes-native platform for durable, versioned AI agent services on disposable compute.",
+  base: process.env.DOCS_BASE ?? "/another-agentic-platform/",
+  cleanUrls: true,
+  // VitePress serves index.md; these READMEs are the folders' own index pages and stay where they are.
+  rewrites: { "architecture/README.md": "architecture/index.md", "api/README.md": "api/index.md" },
+  // Links that leave docs/ are rewritten to GitHub below, so every dead link left fails the build.
+  srcExclude: ["**/node_modules/**"],
+  themeConfig: {
+    md3: { style: "expressive", seed: "#0f766e" },
+    nav: [
+      { text: "Overview", link: "/" },
+      { text: "Get started", link: "/get-started" },
+      { text: "Reference", link: "/reference/" },
+      { text: "Architecture", link: "/architecture/" },
+      { text: "Decisions", link: "/architecture/11-decisions" },
+    ],
+    sidebar,
+    outline: { level: [2, 3] },
+    search: { provider: "local" },
+    editLink: { pattern: "https://github.com/vymalo/another-agentic-platform/edit/main/docs/:path" },
+  },
+  markdown: {
+    // GitHub's heading ids, so a `#59a-...` or `#ad-053--...` link written for GitHub lands here too: VitePress would
+    // prefix `_` to an id that starts with a digit and keep the em dash. Repeats become -1, -2 (the anchor plugin does that).
+    anchor: { slugify: githubSlug },
+    config: (md: any) => {
+      // STRUCTURE.md v3: the `::: in-depth` container, and the icons before a titled fence.
+      md.use(inDepth);
+      md.use(groupIconMdPlugin);
+      escapeUnknownTags(md);
+      // The rewrites above serve a folder's README.md as its index; a link written to the file (which tools/docs-check
+      // resolves) must land on that index, not on a page that does not exist.
+      md.core.ruler.push("readme-links", (state: any) => {
+        const repo = "https://github.com/vymalo/another-agentic-platform";
+        const from = posix.dirname(state.env?.relativePath ?? "index.md");
+        for (const block of state.tokens)
+          for (const t of block.children ?? [])
+            if (t.type === "link_open") {
+              const href = t.attrGet("href");
+              if (!href || href.startsWith("#") || href.startsWith("/") || /^[a-z][a-z0-9+.-]*:/i.test(href)) continue;
+              const [, path, rest = ""] = href.match(/^([^#?]*)(.*)$/)!;
+              const resolved = posix.normalize(posix.join(from, decodeURI(path)));
+              const isDir = path.endsWith("/") || posix.extname(resolved) === "";
+              const outside = resolved === ".." || resolved.startsWith("../");
+              // A link out of docs/, or to a file in docs/ that is not a page (json, yaml, images): the file on GitHub.
+              if (outside || (posix.extname(resolved) !== "" && posix.extname(resolved) !== ".md")) {
+                const repoPath = outside ? posix.normalize(resolved.replace(/^(\.\.\/)/, "")) : `docs/${resolved}`;
+                t.attrSet("href", `${repo}/${isDir ? "tree" : "blob"}/main/${repoPath.replace(/\/$/, "")}${rest}`);
+                continue;
               }
-        });
-      },
+              t.attrSet("href", href.replace(/(^|\/)README\.md(?=#|$)/, "$1index.md"));
+            }
+      });
     },
-  }),
-);
+  },
+  // The icons of the titled fences come from the bundled sets; nothing is fetched at build time (STRUCTURE.md v3).
+  vite: {
+    plugins: [
+      groupIconVitePlugin({
+        customIcon: {
+          terminal: "vscode-icons:file-type-shell",
+          sh: "vscode-icons:file-type-shell",
+          docker: "logos:docker-icon",
+          compose: "logos:docker-icon",
+          helm: "vscode-icons:file-type-helm",
+          kubectl: "logos:kubernetes",
+          kubernetes: "logos:kubernetes",
+          cargo: "vscode-icons:file-type-cargo",
+          rust: "vscode-icons:file-type-rust",
+        },
+      }),
+    ],
+  },
+});

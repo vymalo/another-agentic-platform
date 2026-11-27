@@ -32,7 +32,7 @@ With more than one replica, the chart changes five things:
 
 The `Lease` is named `aap-operator` and lives in the **primary** namespace: the first of `watchNamespaces`. Every pod campaigns for the same one.
 
-## What each replica does
+::: in-depth What each replica does
 
 | | The leader | A follower |
 |---|---|---|
@@ -44,7 +44,8 @@ The `Lease` is named `aap-operator` and lives in the **primary** namespace: the 
 
 The registry stays up through a failover because each replica builds it from its own caches.
 
-## How the election works
+:::
+::: in-depth How the election works
 
 Every `retrySecs`, a follower and the leader alike read the `Lease` and act on it. The leader renews at that pace, so one failed renewal is retried. `renewSecs` is not a period: it is the deadline after which a leader that could not write demotes itself. The rules are in [`aap-leader-kubernetes`](../../../crates/leader-kubernetes/README.md#the-loop):
 
@@ -94,6 +95,7 @@ stateDiagram-v2
 
 These two follow `leader-e2e.sh` and the crate's README. The state diagram is the one [the install page](../deploy/install.md#replicas) used to carry, which now links here.
 
+:::
 ## Look at it
 
 ```sh
@@ -103,7 +105,7 @@ kubectl -n agents get lease aap-operator -o jsonpath='{.spec.holderIdentity} {.s
 
 The second line names the leader's pod, 15, and how many times the `Lease` changed hands. Replace `agents` with your primary namespace. A healthy first line shows **both pods `1/1`**: a follower is ready too, so ready does not say which one writes.
 
-## How long a failover takes
+::: in-depth How long a failover takes
 
 There are two ways a leader goes, and they differ by about 15 seconds.
 
@@ -133,6 +135,7 @@ On the walk, in each of the 12 samples taken in the 13 s after the kill (about o
 
 One `helm upgrade` that changed `logLevel` on two replicas, read on the walk: it took about 6 s by the sampling loop. The new pod became ready before an old one stopped (that is `maxSurge: 1`), the pods were replaced one at a time, and the `Lease` changed hands once (`leaseTransitions` 3 to 4), without waiting for an expiry.
 
+:::
 ## What this does not give you
 
 - **One writer, not two.** The `Lease` is the mechanism, and the crate's tests and the cluster suite hold it. A pass that began before the leader lost the `Lease` can still write until it ends. So the overlap is bounded by the pass timeout, which the chart keeps below `leaseSecs - renewSecs`. It is not zero.

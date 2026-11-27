@@ -58,7 +58,7 @@ helm upgrade --install aap-operator deploy/operator --namespace aap-system \
 
 The collector rule is narrow, but the policy as a whole is not: the operator's rule for the Kubernetes API server is on ports 443 and 6443 with no `to` until you set `networkPolicy.apiServer.cidrs`.
 
-## Headers and a private CA
+::: in-depth Headers and a private CA
 
 Headers need an `https` endpoint. A token is never sent in clear. They come from a **Secret mounted as a file** at `/var/run/secrets/aap/otel`, never from a variable. The two components read the key in different shapes:
 
@@ -122,7 +122,8 @@ The certificate is the exporter's **only** trust, not an addition to the system'
 
 **Upgrading an old install.** Before the operator's settings moved into one configuration file, the operator's key held `name=value,...`. It now holds the value alone. A key that still has the old shape turns the operator's tracing off, with one warning, and the operator keeps running. Rewrite the Secret's key before you upgrade ([the chart's README](../../../deploy/operator/README.md#traces-k5)).
 
-## The settings the binaries accept
+:::
+::: in-depth The settings the binaries accept
 
 The API reads the standard variables, as a strict subset. The operator reads the same settings from its file. These are refused:
 
@@ -138,7 +139,8 @@ The API reads the standard variables, as a strict subset. The operator reads the
 - **The API at start.** It logs one warning and runs with tracing off. `api --check` is stricter: it exits 1.
 - **The operator at start.** A `telemetry.otlp` section that the exporter cannot use is refused **with the file**: `operator run` exits 78, and `--check` says so. A file the section names that cannot be read (a header file) is the soft case: one warning, tracing off, and the operator goes on.
 
-## What the chart refuses
+:::
+::: in-depth What the chart refuses
 
 Each row was run with `helm template`. Every refusal prints `templates/servicemonitor.yaml:1:4` as its location. Ignore it: the checks are in `_validate.tpl`.
 
@@ -166,6 +168,7 @@ The binaries refuse more than the chart can see. Both checks need no cluster and
 
 Their controls: the file and the variables the chart renders for the full setting above pass both checks, exit 0. The binaries are the ones in the published images at the chart's pin (`sha-2c16326` when this was written), taken out with `docker create` and `docker cp`.
 
+:::
 ## Is it working?
 
 With tracing on, `/metrics` of each component says so:

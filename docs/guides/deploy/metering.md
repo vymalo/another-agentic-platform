@@ -49,7 +49,7 @@ Apply it, which rolls the operator pods:
 helm upgrade --install aap-operator deploy/operator --namespace aap-system -f values.yaml --wait
 ```
 
-## What it does
+::: in-depth What it does
 
 The leading replica looks at the pods every `metering.periodSecs` (30 by default). For each run pod it asks the broker whose run it is, with the run id as exactly one percent-encoded path segment, and queues one line per whole minute the pod was running. A follower sends nothing ([Run two replicas](../operate/replicas.md)).
 
@@ -62,6 +62,7 @@ The leading replica looks at the pods every `metering.periodSecs` (30 by default
 
 A pod of an agent makes no line either: only run pods carry the size-weight annotation, so an agent pod stops at `no-weight` (its account comes from `AgentService.spec.account`, AD-073; its weight is ANR-1045). **An agent pod is attributed by its owner chain** (ANR-1327): the operator reads the pod's `ownerReferences` and the objects they name (a `ReplicaSet`, the `Deployment` above it, a `StatefulSet`, or a `Job` of a split worker), by name and by uid, until it reaches the pod's `AgentService`; the labels the pod carries are not its identity. **The `AgentService` is read by uid too**, so a pod cannot name one directly; a pod that copies a genuine pod's `ReplicaSet` name and uid is still attributed to that agent (an admission policy would close it, not built). A pod that copies the labels with no chain that ends at an `AgentService` makes no line and counts its minutes as `no-identity`; a chain the API server cannot answer for holds the minutes (`aap_meter_owner_failures_total`). If every run pod's minutes are `unknown-account`, check the meter's identity at the broker (the bearer, the base path): that is what a wrong identity looks like only when the broker says `run_not_bound`, so also watch `aap_meter_account_failures_total`. The broker's answer for a run is asked once per run and remembered for the life of the operator process. The series are in [Scrape metrics](../operate/metrics.md#what-the-operator-exports).
 
+:::
 ## Check it
 
 `operator run --check --config <file>` refuses an incomplete section before anything starts, and `helm template` refuses it earlier. At start the operator reads the bearer: a missing or empty file stops it with exit 78. After that, read `/metrics` on the leading replica: `aap_meter_events_total` should grow once a run pod has run a whole minute, and `aap_meter_account_failures_total` should stay still.

@@ -99,7 +99,7 @@ A template error fails before any new revision exists, so there is nothing to ro
 
 6. **Check.** `kubectl -n aap-system get pod`, and `kubectl get agentservice -A`. Every agent that was `Ready` should be. If one is not, read [Find why an agent is not Ready](not-ready.md).
 
-## If it goes wrong
+::: in-depth If it goes wrong
 
 A `--wait` that times out leaves the release `failed`, and the old pods may still be serving. Read, in this order:
 
@@ -119,7 +119,8 @@ Fix the cause and run `helm upgrade` again.
 
 ([The CRDs chart's README](../../../deploy/operator-crds/README.md#upgrading) has both.)
 
-## Why the CRDs go first
+:::
+::: in-depth Why the CRDs go first
 
 An operator from slice D2 on expects all four kinds. Reasons the chart's README gives:
 
@@ -131,7 +132,8 @@ The CRDs chart is **additive for what is stored**. The `kind` job of [`operator.
 
 **Never delete the CRDs release to upgrade it.** Deleting the CRDs deletes every `AgentService`, `AgentConfig`, `ModelEndpoint` and `ToolProvider` with them, and the operator's finalizers no longer run ([the CRDs chart's README](../../../deploy/operator-crds/README.md#removing-it)).
 
-## How the pods roll
+:::
+::: in-depth How the pods roll
 
 | | One replica (the default) | `replicas` above 1 |
 |---|---|---|
@@ -143,12 +145,14 @@ The **Platform API** is a separate `Deployment`. It always uses `RollingUpdate` 
 
 Any change to the operator's rendered file rolls its pods: the pod template carries a checksum of it. A change in what an agent is made from can roll that agent too. `agent.runtimeClassName` rolls every agent once, and a new `defaultAgentImage` rolls the agents that name no image of their own, and no other.
 
-## What a change of `v1alpha1` can be
+:::
+::: in-depth What a change of v1alpha1 can be
 
 The CRDs are `agents.vymalo.com/v1alpha1`, served and stored, with **no conversion webhook**. [§62](../../architecture/10-control-plane-and-crds.md#62-api--crd-versioning) plans the path `v1alpha1`, then `v1beta1`, then `v1`, with a conversion webhook where one is needed. The record is plain about where that leaves you today: breaking changes are made while no deployment is proven, and a conversion path comes with `v1beta1` ([§59a's risk table](../../architecture/10-control-plane-and-crds.md)).
 
 So read it this way. A change today is meant to be additive: a new optional field, a new rule that old objects pass. The `kind` job holds that for the stored examples. A breaking change would be a new version and a conversion path. Before any upgrade, read the diff of `deploy/crds/agents.vymalo.com.yaml` for the rules your objects must pass.
 
+:::
 ## What proves it
 
 | CI job | Workflow | What it runs |
