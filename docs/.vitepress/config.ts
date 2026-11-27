@@ -1,5 +1,5 @@
 import { readFileSync } from "node:fs";
-import { dirname, join } from "node:path";
+import { dirname, join, posix } from "node:path";
 import { fileURLToPath } from "node:url";
 import { defineMd3Config } from "@vaam-apps/vitepress-md3/config";
 import { withMermaid } from "vitepress-plugin-mermaid";
@@ -89,6 +89,11 @@ export function escapeUnknownTags(md: any) {
   }
 }
 
+// GitHub's slug: lowercase, drop everything but letters, digits, marks, space, `-` and `_`, each space becomes `-`.
+export function githubSlug(s: string): string {
+  return s.trim().toLowerCase().replace(/[^\p{L}\p{M}\p{N}_ -]/gu, "").replace(/ /g, "-");
+}
+
 export default withMermaid(
   defineMd3Config({
     title: "another-agentic-platform",
@@ -97,8 +102,7 @@ export default withMermaid(
     cleanUrls: true,
     // VitePress serves index.md; these READMEs are the folders' own index pages and stay where they are.
     rewrites: { "architecture/README.md": "architecture/index.md", "api/README.md": "api/index.md" },
-    // Pages link to source files outside docs/ (checked by tools/docs-check); every other dead link fails the build.
-    ignoreDeadLinks: [/^\.\/(\.\.\/)+/, /(^|\/)\.agents\//],
+    // Links that leave docs/ are rewritten to GitHub below, so every dead link left fails the build.
     srcExclude: ["**/node_modules/**"],
     themeConfig: {
       md3: { style: "expressive", seed: "#0f766e" },
@@ -115,16 +119,32 @@ export default withMermaid(
       editLink: { pattern: "https://github.com/vymalo/another-agentic-platform/edit/main/docs/:path" },
     },
     markdown: {
+      // GitHub's heading ids, so a `#59a-...` or `#ad-053--...` link written for GitHub lands here too: VitePress would
+      // prefix `_` to an id that starts with a digit and keep the em dash. Repeats become -1, -2 (the anchor plugin does that).
+      anchor: { slugify: githubSlug },
       config: (md: any) => {
         escapeUnknownTags(md);
         // The rewrites above serve a folder's README.md as its index; a link written to the file (which tools/docs-check
         // resolves) must land on that index, not on a page that does not exist.
         md.core.ruler.push("readme-links", (state: any) => {
+          const repo = "https://github.com/vymalo/another-agentic-platform";
+          const from = posix.dirname(state.env?.relativePath ?? "index.md");
           for (const block of state.tokens)
             for (const t of block.children ?? [])
               if (t.type === "link_open") {
                 const href = t.attrGet("href");
-                if (href && !/^[a-z][a-z0-9+.-]*:/i.test(href)) t.attrSet("href", href.replace(/(^|\/)README\.md(?=#|$)/, "$1index.md"));
+                if (!href || href.startsWith("#") || href.startsWith("/") || /^[a-z][a-z0-9+.-]*:/i.test(href)) continue;
+                const [, path, rest = ""] = href.match(/^([^#?]*)(.*)$/)!;
+                const resolved = posix.normalize(posix.join(from, decodeURI(path)));
+                const isDir = path.endsWith("/") || posix.extname(resolved) === "";
+                const outside = resolved === ".." || resolved.startsWith("../");
+                // A link out of docs/, or to a file in docs/ that is not a page (json, yaml, images): the file on GitHub.
+                if (outside || (posix.extname(resolved) !== "" && posix.extname(resolved) !== ".md")) {
+                  const repoPath = outside ? posix.normalize(resolved.replace(/^(\.\.\/)/, "")) : `docs/${resolved}`;
+                  t.attrSet("href", `${repo}/${isDir ? "tree" : "blob"}/main/${repoPath.replace(/\/$/, "")}${rest}`);
+                  continue;
+                }
+                t.attrSet("href", href.replace(/(^|\/)README\.md(?=#|$)/, "$1index.md"));
               }
         });
       },
