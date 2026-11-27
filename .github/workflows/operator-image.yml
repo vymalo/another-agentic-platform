@@ -134,6 +134,8 @@ on:
       - "deploy/operator-crds/**"
       - "deploy/crds/**"
       - ".github/workflows/operator-image.yml"
+  # The recovery path of release.yml: run this on the release tag when its commit's run was replaced or failed, then re-run release.yml.
+  workflow_dispatch:
 
 env:
   IMAGE: ghcr.io/vymalo/another-agentic-platform/operator
@@ -143,8 +145,15 @@ env:
   # The Kubernetes version the rendered manifests are validated against.
   KUBERNETES_VERSION: 1.37.0
 
+# A pull request run is replaced by the next push to its branch. A manual dispatch and the release commit (release-please's squash,
+# "chore: release main (#N)") each have a group of their own, their sha. Every other push to main shares one group and skips to the
+# newest. A group holds one running and one pending run, and a newer pending run cancels the older pending one even with
+# cancel-in-progress false (verified 2026-11-27, https://docs.github.com/en/actions/using-jobs/using-concurrency): that is how a burst
+# of merges can replace the release commit's run, and release.yml waits for the images that run pushes (ANR-1196, AD-070 amended
+# 2026-11-27; the same fix as vymalo/another-adam-rs#493). Every merge getting a group of its own would run the end-to-ends of each
+# one in parallel. A tag's commit is reached by its main push, or by a dispatch on the tag (which pushes the images, see `push`).
 concurrency:
-  group: operator-image-${{ github.ref }}
+  group: "operator-image-${{ github.event_name == 'pull_request' && github.ref || (github.event_name == 'workflow_dispatch' || startsWith(github.event.head_commit.message, 'chore: release')) && github.sha || github.ref }}"
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 permissions:
@@ -895,11 +904,14 @@ jobs:
     # namespaces-e2e and leader-e2e pull only the curl image api-e2e already pulls, and nothing else outside this repository.
     needs: [chart, dockerfile, dockerfile-api, scripts, image, api-image, operator-coder-e2e, api-e2e, namespaces-e2e, leader-e2e]
     # ANR-1206: the release pull request only moves version strings and main's own push run already tested this code; skipped here to spare the shared runner queue (a skipped job satisfies a required check).
-    if: ${{ !(startsWith(github.head_ref, 'release-please--') && github.event.pull_request.head.repo.full_name == github.repository) && (github.event_name == 'push' && github.ref == 'refs/heads/main') }}
+    # Main, or a dispatch on a release tag (release.yml's recovery path: the tag's commit is on main, `latest` follows only the newest).
+    if: ${{ !(startsWith(github.head_ref, 'release-please--') && github.event.pull_request.head.repo.full_name == github.repository) && ((github.event_name == 'push' && github.ref == 'refs/heads/main') || (github.event_name == 'workflow_dispatch' && startsWith(github.ref, 'refs/tags/v'))) }}
     runs-on: ubuntu-latest
-    # One push at a time, so the check below and the push of `latest` are not interleaved with another run's.
+    # One push at a time, so the check below and the push of `latest` are not interleaved with another run's. The release commit and a
+    # dispatch have a group of their own, as at the top of the file: a pending push job replaced by a newer one would leave no
+    # `sha-<7>` for release.yml, the very failure the workflow's group avoids (the `newer` check below keeps `latest` from moving back).
     concurrency:
-      group: operator-push
+      group: "operator-push-${{ (github.event_name == 'workflow_dispatch' || startsWith(github.event.head_commit.message, 'chore: release')) && github.sha || 'main' }}"
       cancel-in-progress: false
     permissions:
       contents: read
@@ -961,13 +973,13 @@ jobs:
   # "has main moved on?" test below reads the subjects of the commits that follow, take the other's bump for a newer build.
   bump:
     # ANR-1206: the release pull request only moves version strings and main's own push run already tested this code; skipped here to spare the shared runner queue (a skipped job satisfies a required check).
-    if: ${{ !(startsWith(github.head_ref, 'release-please--') && github.event.pull_request.head.repo.full_name == github.repository) }}
+    # Pushes only: a dispatch on a tag publishes the images and leaves the chart's pin to main's own runs.
+    if: ${{ !(startsWith(github.head_ref, 'release-please--') && github.event.pull_request.head.repo.full_name == github.repository) && github.event_name == 'push' }}
     name: bump the tags in the chart
     needs: push
     runs-on: ubuntu-latest
-    concurrency:
-      group: operator-bump
-      cancel-in-progress: false
+    # No concurrency group: a queue ordered by finish time lets an older commit's pending bump cancel the newest one's and then skip
+    # (ANR-1196, as in another-adam-rs#493). The `newer` check below (only the newest build writes) and the retry keep it safe.
     permissions:
       contents: write
     steps:
