@@ -716,13 +716,16 @@ Until it answers 200, a cluster that pulls it anonymously gets `ImagePullBackOff
 
 Production deploys a **release**, never a `sha-<7>` of `main` ([AD-070](../../docs/architecture/11-decisions.md#ad-070--releases-release-please-cuts-vxyz-the-tested-sha-7-images-are-copied-by-digest-and-the-charts-are-published-with-the-releases-pins), [§59a *Releases*](../../docs/architecture/10-control-plane-and-crds.md#releases-ad-070)).
 [`release-please.yml`](../../.github/workflows/release-please.yml) keeps a release pull request open on `main`; merging it tags `vX.Y.Z`, and
-[`release.yml`](../../.github/workflows/release.yml) then publishes, without building anything:
+[`release.yml`](../../.github/workflows/release.yml) then publishes, without building the images or the charts (the command line is built, AD-071):
 
 - the images `operator:X.Y.Z` and `api:X.Y.Z` (and `:X.Y`, the highest patch; never `latest`): the `sha-<7>` digests `operator-image.yml` pushed for that
   commit after its end-to-ends, copied by digest, each signed (cosign, keyless) and attested (an SPDX SBOM and a provenance);
 - this chart at `oci://ghcr.io/vymalo/another-agentic-platform/charts/aap-operator`, version `X.Y.Z`, whose packaged `values.yaml` sets `image.tag` and
   `api.image.tag` to `X.Y.Z` and `image.digest` and `api.image.digest` to those digests ([`release-pin.sh`](release-pin.sh), on a copy: it refuses the file
-  git tracks), and the CRDs chart at `.../charts/aap-operator-crds`, both signed.
+  git tracks), and the CRDs chart at `.../charts/aap-operator-crds`, both signed;
+- the command line `aapctl`, built here for linux x86_64/aarch64 (static, musl) and darwin x86_64/arm64: the four tarballs and a `SHA256SUMS` on the
+  release, each with a cosign `.bundle` and a provenance attestation, and a Homebrew formula proposed in `vymalo/homebrew-tap`
+  ([install](../../docs/guides/install-aapctl.md), [AD-071](../../docs/architecture/11-decisions.md#ad-071--a-release-also-publishes-aapctl-four-signed-binaries-and-the-formula-in-the-tap)).
 
 ```sh
 helm install aap-operator-crds oci://ghcr.io/vymalo/another-agentic-platform/charts/aap-operator-crds --version X.Y.Z
