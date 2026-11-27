@@ -87,6 +87,16 @@ fn status(code: u16, reason: &str) -> (u16, Value) {
     )
 }
 
+/// The API server's `404` for a missing object: `NotFound` and the details that name it.
+fn gone(name: &str) -> (u16, Value) {
+    (
+        404,
+        json!({"apiVersion": "v1", "kind": "Status", "status": "Failure", "metadata": {},
+               "message": "the fake says so", "reason": "NotFound", "code": 404,
+               "details": {"name": name, "group": "agents.vymalo.com", "kind": "agentservices"}}),
+    )
+}
+
 fn agent() -> PodRef {
     PodRef::Agent {
         namespace: "ns".into(),
@@ -123,16 +133,23 @@ async fn a_value_off_the_alphabet_is_no_account() {
 
 #[tokio::test]
 async fn a_service_that_is_gone_has_none() {
-    let (accounts, _) = source(status(404, "NotFound"));
+    let (accounts, _) = source(gone("coder"));
     assert_eq!(accounts.account(&agent()).await, Ok(None));
 }
 
 #[tokio::test]
-async fn a_404_that_is_not_a_missing_service_is_unavailable() {
-    // The API server's `404` for a resource type it does not serve (the CRD is not installed) is not "the service is
-    // gone": it holds the minute rather than giving a pod's minutes up.
-    let (accounts, _) = source(status(404, "Failure"));
-    assert_eq!(accounts.account(&agent()).await, Err(AccountUnavailable));
+async fn a_404_that_does_not_name_the_service_is_unavailable() {
+    // A `404` for a resource type the API server does not serve (the CRD is not installed) carries no details, and one
+    // that names another object is not this pod's service: neither is "the service is gone", so the minute is held
+    // rather than given up.
+    for answer in [
+        status(404, "Failure"),
+        status(404, "NotFound"),
+        gone("another"),
+    ] {
+        let (accounts, _) = source(answer);
+        assert_eq!(accounts.account(&agent()).await, Err(AccountUnavailable));
+    }
 }
 
 #[tokio::test]

@@ -20,8 +20,8 @@ trimmed and lower-cased; never an e-mail), the same value the orchestrator's bro
 | Answer | Result |
 |---|---|
 | `spec.account` present and on the line alphabet (`aap_usage::is_line_text`: `[A-Za-z0-9._:/-]`, 1 to 128 bytes) | `Ok(Some(account))` |
-| a `404` whose reason is `NotFound` (the service is gone), `spec.account` absent (a shared agent), or a value off the alphabet | `Ok(None)`: no line is better than a wrong one; the meter counts the minutes as unattributed, and for an agent pod that is final (AD-071) |
-| any other error: `401`, `403`, `429`, `5xx`, any other `404` (a missing resource type), a timeout, a body that is not the object | `Err(AccountUnavailable)`: the meter holds the minute and asks again |
+| a `404` whose reason is `NotFound` **and whose `details` name the service and the `agentservices` resource** (the service is gone), `spec.account` absent (a shared agent), or a value off the alphabet | `Ok(None)`: no line is better than a wrong one; the meter counts the minutes as unattributed, and for an agent pod that is final (AD-071) |
+| any other error: `401`, `403`, `429`, `5xx`, a `404` without those details (a missing resource type, say), a timeout, a body that is not the object | `Err(AccountUnavailable)`: the meter holds the minute and asks again |
 | any `PodRef::Run` | `Ok(None)` with no request: runs are the broker's, so **this source alone is not the operator's composition** |
 
 The object is read as the typed `AgentService`, so a schema drift (a body the type refuses) holds the minutes rather than

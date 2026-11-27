@@ -178,6 +178,11 @@ struct PodState {
     unknown_counted: u64,
     /// Whether the pod's `no-end` or `no-start` was counted.
     unmetered_counted: bool,
+    /// The last account the source named for **this pod**, for its tombstone (AD-071): the `AgentService` may be
+    /// gone by the time the pod's last minutes are replayed, and the source then answers nothing. Cleared when the
+    /// source says the pod has none. Kept per pod uid, never per service: a service deleted and re-created with
+    /// another account must not give the old pod's minutes to the new account.
+    last_account: Option<String>,
 }
 
 /// The last facts seen of a pod, and when it was last seen Running.
@@ -198,10 +203,6 @@ struct Inner {
     deadline: Option<tokio::time::Instant>,
     /// The account of a run that is bound (it never changes), by service and run: the broker is asked once per run.
     accounts: HashMap<(String, String), String>,
-    /// The last account the source named for an agent's own pods, by namespace and service. It is only what a
-    /// tombstone carries as `subject` (AD-071): the `AgentService` may be gone by the time the pod's last minutes
-    /// are replayed, and the source then answers nothing. Dropped when the source says there is none.
-    agent_accounts: HashMap<(String, String), String>,
     /// Minutes handed to the sink and not yet acknowledged, by event id (ANR-1151). Empty when the sink reports no
     /// outcomes.
     pending: HashMap<String, Pending>,
@@ -832,11 +833,9 @@ impl Meter {
         let a = self.attribute(closed, &kind).ok()?;
         let subject = match &a.run {
             Some(run) => self.with(|i| i.accounts.get(&(a.service.clone(), run.clone())).cloned()),
-            None => self.with(|i| {
-                i.agent_accounts
-                    .get(&(a.namespace.clone(), a.service.clone()))
-                    .cloned()
-            }),
+            // The pod's own last account, never the service's: a service deleted and re-created with another
+            // account must not give this pod's minutes to the new account (AD-071).
+            None => self.state(&closed.uid).last_account,
         };
         let t = Tombstone {
             namespace: closed.namespace.clone(),
@@ -1189,8 +1188,13 @@ impl Meter {
             }
         };
         let subject = match self.account_for(&attributed).await {
-            Ok(Some(account)) => account,
+            Ok(Some(account)) => {
+                // The pod's own last account, for its tombstone (AD-071).
+                self.update(&pod.uid, |s| s.last_account = Some(account.clone()));
+                account
+            }
             Ok(None) => {
+                self.update(&pod.uid, |s| s.last_account = None);
                 let fresh = due
                     .send
                     .end
@@ -1304,20 +1308,10 @@ impl Meter {
                 }
             }
         };
-        match (&asked, cache_key) {
-            (Ok(Some(account)), Some(k)) => {
-                // A bound run's account never changes: remembered for the life of the process.
-                self.with(|i| i.accounts.insert(k, account.clone()));
-            }
-            (Ok(Some(account)), None) => {
-                let k = (a.namespace.clone(), a.service.clone());
-                self.with(|i| i.agent_accounts.insert(k, account.clone()));
-            }
-            (Ok(None), None) => {
-                let k = (a.namespace.clone(), a.service.clone());
-                self.with(|i| i.agent_accounts.remove(&k));
-            }
-            _ => {}
+        if let (Ok(Some(account)), Some(k)) = (&asked, cache_key) {
+            // A bound run's account never changes: remembered for the life of the process. An agent pod's last
+            // account is kept per pod uid by its caller, for the tombstone (AD-071).
+            self.with(|i| i.accounts.insert(k, account.clone()));
         }
         asked
     }
@@ -2003,6 +1997,41 @@ mod tests {
         assert_eq!(t.subject.as_deref(), Some("acct-agent"));
     }
 
+    #[tokio::test]
+    async fn a_tombstone_keeps_the_pods_own_account_not_the_services_latest() {
+        struct Switch(Arc<Mutex<&'static str>>);
+        impl AccountSource for Switch {
+            async fn account(&self, _: &PodRef) -> Result<Option<String>, AccountUnavailable> {
+                let answer = *self.0.lock().unwrap_or_else(PoisonError::into_inner);
+                Ok(Some(answer.to_owned()))
+            }
+        }
+        let answer = Arc::new(Mutex::new("acct-a"));
+        let (meter, _, _) = agent_meter(erase_accounts(Switch(answer.clone())));
+        let mut first = agent_pod_facts("ns-b", 600);
+        first.uid = "uid-a".into();
+        meter.pass(&[first.clone()], 1_000).await;
+        // The service is re-created with another account and a new pod of the same name is seen first in the next
+        // pass: the old pod's minutes must still be the old account's.
+        *answer.lock().unwrap_or_else(PoisonError::into_inner) = "acct-b";
+        let mut second = agent_pod_facts("ns-b", 600);
+        second.uid = "uid-b".into();
+        meter.pass(&[second], 1_000).await;
+        let mut closed = first;
+        closed.phase = "Succeeded".into();
+        closed.finished_at = Some(2_000);
+        let t = meter
+            .tombstone_of(&closed, 2_000)
+            .expect("the pod has minutes left and can be attributed");
+        assert_eq!(
+            t.subject.as_deref(),
+            Some("acct-a"),
+            "the pod's own account, not the service's latest"
+        );
+    }
+
+    /// The positive test above is the one that fails on the code before the remediation (the subject was always
+    /// `None`); this one guards the clear, which the old code could not tell from "never known".
     #[tokio::test]
     async fn the_tombstone_of_an_agent_pod_whose_account_was_cleared_has_none() {
         struct Switch(Arc<Mutex<Option<&'static str>>>);
