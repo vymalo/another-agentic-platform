@@ -1,0 +1,7 @@
+# What `helm package` leaves out of the published chart (AD-070, .github/workflows/release.yml): the tests (goldens, end-to-end
+# scripts, vendored schemas) and the scripts that write the values in git (bump-tag.sh) and in a release's copy (release-pin.sh).
+# `helm template` and `helm install` of this directory read the same files minus these; no template reads any of them.
+tests/
+bump-tag.sh
+release-pin.sh
+*.tgz

@@ -128,9 +128,25 @@ shared_status_is_patched_only() {
 # main after every build and no workflow checks the bump commit, so a golden that held the real tags would be stale (and this
 # script red) after every bump. That the real tags are sha-<7 hex> tags of the operator and api packages is checked on the
 # renders below, which do not set them.
+# The same holds for the chart's own version (AD-070): release-please moves `version` and `appVersion` of Chart.yaml on every release,
+# and both are in every object's labels (`helm.sh/chart`, `app.kubernetes.io/version`), so the goldens are rendered from a copy of the
+# chart whose Chart.yaml says 0.1.0, the version they were written at, whatever the real one says. Nothing else of the copy differs
+# (checked below), and that the real Chart.yaml carries one version, the workspace's, is tools/check-release-version.sh's.
+golden_chart=$(mktemp -d)
+trap 'rm -rf "$out" "$err" "$notes_chart" "$golden_chart"' EXIT
+cp -r "$chart/." "$golden_chart/"
+sed -e 's/^version: [0-9][0-9.]*\( #.*\)\{0,1\}$/version: 0.1.0\1/' -e 's/^appVersion: "[0-9][0-9.]*"\( #.*\)\{0,1\}$/appVersion: "0.1.0"\1/' \
+  "$chart/Chart.yaml" > "$golden_chart/Chart.yaml"
+golden_chart_differs_only_in_version() {
+  [ "$(grep -c '^version: 0\.1\.0' "$golden_chart/Chart.yaml")" -eq 1 ] && [ "$(grep -c '^appVersion: "0\.1\.0"' "$golden_chart/Chart.yaml")" -eq 1 ] \
+    && [ "$(diff "$chart/Chart.yaml" "$golden_chart/Chart.yaml" | grep -c '^[<>]')" -le 4 ] \
+    && ! diff "$chart/Chart.yaml" "$golden_chart/Chart.yaml" | grep '^[<>]' | grep -Evq '^[<>] (version: |appVersion: ")[0-9][0-9.]*"? # x-release-please-version$' \
+    && diff -r -x Chart.yaml "$chart" "$golden_chart" > /dev/null
+}
+check "the goldens' copy of the chart differs from it in version and appVersion alone (AD-070)" golden_chart_differs_only_in_version
 golden() { # golden <name> <helm args>: the render equals tests/golden/<name>.yaml (or rewrites it)
   name=$1; shift
-  render "$@" --set image.tag=sha-0000000 --set api.image.tag=sha-0000000
+  helm template aap-operator "$golden_chart" --namespace "$ns" "$@" --set image.tag=sha-0000000 --set api.image.tag=sha-0000000 > "$out"
   if [ "${UPDATE_GOLDEN:-}" = 1 ]; then cp "$out" "$here/golden/$name.yaml"; echo "wrote tests/golden/$name.yaml" >&2; return 0; fi
   cmp -s "$out" "$here/golden/$name.yaml"
 }
@@ -2279,6 +2295,46 @@ check "api.workload refuses a mount over its directory" \
   refused "where api.workload mounts" -f "$here/workload.values.yaml" \
   --set-json 'api.extraVolumes=[{"name":"x","emptyDir":{}}]' --set-json 'api.extraVolumeMounts=[{"name":"x","mountPath":"/etc/aap-api-workload/more"}]'
 check "api.workload refuses a block that is not a map" refused "api.workload must be a map" -f "$here/api.values.yaml" --set api.workload=yes
+render
+
+# ---- A release (AD-070): the packaged chart pins both images by the release's tag AND digest; git keeps sha-<7> -----------------
+# release.yml pins a copy with release-pin.sh and packages it; here the same script on a copy, and what that copy renders. The
+# defaults render the operator; tests/api.values.yaml turns the API on (and sets no image of its own).
+pin_chart=$(mktemp -d)
+cp -r "$chart/." "$pin_chart/"
+rel_op=sha256:1111111111111111111111111111111111111111111111111111111111111111
+rel_api=sha256:2222222222222222222222222222222222222222222222222222222222222222
+pinned_renders() {
+  sh "$chart/release-pin.sh" "$pin_chart/values.yaml" 9.8.7 "$rel_op" "$rel_api" > /dev/null || return 1
+  helm template aap-operator "$pin_chart" --namespace "$ns" > "$out" || return 1
+  dhas Deployment aap-operator "^          image: \"ghcr.io/vymalo/another-agentic-platform/operator:9\\.8\\.7@$rel_op\"\$" || return 1
+  helm template aap-operator "$pin_chart" --namespace "$ns" -f "$here/api.values.yaml" > "$out" || return 1
+  dhas Deployment aap-operator-api "^          image: \"ghcr.io/vymalo/another-agentic-platform/api:9\\.8\\.7@$rel_api\"\$"
+}
+check "a copy pinned by release-pin.sh renders the operator and the API as repository:X.Y.Z@digest" pinned_renders
+pinned_differs_only_in_images() {
+  [ "$(diff "$chart/values.yaml" "$pin_chart/values.yaml" | grep -c '^>')" -eq 4 ] && diff -r -x values.yaml "$chart" "$pin_chart" > /dev/null
+}
+check "and the copy differs from the chart in those four lines of values.yaml alone" pinned_differs_only_in_images
+check "release-pin.sh refuses the chart's own values.yaml, which git tracks (the tags in git are bump-tag.sh's)" \
+  fails sh "$chart/release-pin.sh" "$chart/values.yaml" 9.8.7 "$rel_op" "$rel_api"
+check "and the image tags in git are still sha-<7 hex>" grep -Eq '^  tag: sha-[0-9a-f]{7}$' "$chart/values.yaml"
+# The package holds the chart and not its tests (.helmignore): what Argo CD or `helm install` pulls is templates, values and README.
+pkg_dir=$(mktemp -d)
+packaged_contents() {
+  helm package "$pin_chart" --destination "$pkg_dir" > /dev/null || return 1
+  tar -tzf "$pkg_dir"/aap-operator-[0-9]*.tgz > "$err" || return 1
+  grep -qx 'aap-operator/Chart.yaml' "$err" && grep -qx 'aap-operator/values.yaml' "$err" && grep -q '^aap-operator/templates/' "$err" \
+    && ! grep -Eq '^aap-operator/tests/|^aap-operator/(bump-tag|release-pin)\.sh$|\.tgz$' "$err"
+}
+check "the packaged chart holds Chart.yaml, values.yaml and templates/, and no tests/ and no script (.helmignore)" packaged_contents
+crds_packaged_contents() {
+  helm package "$crds_chart" --destination "$pkg_dir" > /dev/null || return 1
+  tar -tzf "$pkg_dir"/aap-operator-crds-*.tgz > "$err" || return 1
+  grep -qx 'aap-operator-crds/files/agents.vymalo.com.yaml' "$err" && grep -qx 'aap-operator-crds/templates/crds.yaml' "$err"
+}
+check "the packaged CRDs chart holds its files/ copy of the CRDs and its template" crds_packaged_contents
+rm -rf "$pin_chart" "$pkg_dir"
 render
 
 if [ "$fail" -eq 0 ]; then echo "operator chart checks passed"; else echo "operator chart checks FAILED"; exit 1; fi

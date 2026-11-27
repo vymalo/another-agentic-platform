@@ -2,8 +2,8 @@ apiVersion: v2
 name: aap-operator
 description: "The another-agentic-platform operator (§59a): one or more replicas that reconcile AgentService and AgentConfig in every namespace of watchNamespaces (the first is the primary), and serves the agent registry; off by default, the Platform API (api.enabled), the dashboard's REST API, as a Deployment of its own. The CRDs are the chart deploy/operator-crds; the agents are custom resources, not part of this chart."
 type: application
-version: 0.1.0
-appVersion: "0.1.0"
+version: 0.1.0 # x-release-please-version
+appVersion: "0.1.0" # x-release-please-version
 # Kubernetes 1.37 is the floor (AD-067): below it the platform is unsupported, not merely untested, and Helm refuses the install. The `-0` lets
 # a vendor suffix (`v1.37.2-k3s1`, `v1.37.0-gke.1`) through.
 kubeVersion: ">=1.37.0-0"

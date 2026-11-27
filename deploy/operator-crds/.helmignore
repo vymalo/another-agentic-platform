@@ -1,0 +1,3 @@
+# What `helm package` leaves out of the published chart (AD-070, .github/workflows/release.yml). files/ is the chart's own copy of
+# the CRDs and is packaged; nothing else here is a test.
+*.tgz
