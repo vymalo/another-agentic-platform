@@ -59,8 +59,8 @@ fn failure_kind(e: &ActivityError) -> &'static str {
 pub(crate) enum Claim {
     /// The pass's mark, claimed for the first time: the record is written, and the sleep counted once it succeeded.
     New,
-    /// The same mark, claimed by an **earlier** pass: the record is written again (idempotent), and not counted. A pass
-    /// for one object runs alone, so this is a lagging cache or a pass cut off after its claim, not a second pass now.
+    /// The same mark, claimed by an **earlier** pass whose write succeeded: this pass's cache is behind. The record is
+    /// written again (idempotent) and not counted; a pass for one object runs alone, so this is never a second pass now.
     Already,
     /// The mark is gone, or another one replaced it: there is no record to write.
     Gone,

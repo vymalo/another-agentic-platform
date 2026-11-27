@@ -438,9 +438,7 @@ where
     };
     if let Some(record) = &planned {
         if previous.sleep.is_none() {
-            if let Err(e) = persist_sleep(svc, ctx, &previous, record).await {
-                return Err(e);
-            }
+            persist_sleep(svc, ctx, &previous, record).await?;
             guard.armed = false;
             if new_claim {
                 ctx.metrics.inc(name::SLEEPS, &[]);
@@ -451,7 +449,6 @@ where
             agent.runtime.suspend = true;
         }
     }
-    guard.armed = false;
     obs.sleep = planned;
     match step(
         Step::RuntimeEnsure,
@@ -524,8 +521,6 @@ async fn endpoints<R: RuntimeProvider, S>(
     })
 }
 
-/// Write the sleep record, with the rest of the status as it stands, before the workload is scaled to zero. Same
-/// field manager and same body shape as [`finish`], so there is still one writer of the status.
 /// Claim the mark a pass planned from, before its record is written (ANR-1199): `true` when this pass claimed it
 /// (`Claim::New`, the only case that counts the sleep), `false` when it was already claimed or when there is no record
 /// to write. A mark that is **gone or replaced** between the plan and the claim drops the plan, so the pass writes no
@@ -576,6 +571,8 @@ impl Drop for Unclaim<'_> {
     }
 }
 
+/// Write the sleep record, with the rest of the status as it stands, before the workload is scaled to zero. Same
+/// field manager and same body shape as [`finish`], so there is still one writer of the status.
 async fn persist_sleep<R, S>(
     svc: &AgentService,
     ctx: &Context<R, S>,
@@ -905,6 +902,50 @@ mod tests {
         assert!(planned.is_some());
         // The mark is untouched: the next pass that writes it claims it.
         assert_eq!(sleepers.claim(&id(), 600), Claim::New);
+    }
+
+    #[test]
+    fn a_pass_with_no_plan_claims_nothing() {
+        // `plan` answers `None` (no mark, or one too old): the mark is not spent by a pass that will write nothing.
+        let sleepers = Sleepers::default();
+        sleepers.put_to_sleep(&id(), mark(600));
+        let mut planned = None;
+        assert!(!claim_planned(
+            &sleepers,
+            &id(),
+            Some(&mark(600)),
+            false,
+            &mut planned
+        ));
+        assert_eq!(
+            sleepers.claim(&id(), 600),
+            Claim::New,
+            "the mark is still free for the pass that does write"
+        );
+    }
+
+    #[test]
+    fn a_disarmed_guard_gives_nothing_back() {
+        let sleepers = Sleepers::default();
+        sleepers.put_to_sleep(&id(), mark(600));
+        assert!(claim_planned(
+            &sleepers,
+            &id(),
+            Some(&mark(600)),
+            false,
+            &mut Some(record())
+        ));
+        drop(Unclaim {
+            sleepers: &sleepers,
+            id: &id(),
+            made_at: Some(600),
+            armed: false,
+        });
+        assert_eq!(
+            sleepers.claim(&id(), 600),
+            Claim::Already,
+            "a write that succeeded keeps its claim"
+        );
     }
 
     #[test]
