@@ -1,0 +1,27 @@
+[package]
+name = "aap-auth-workload"
+description = "The Platform API's ClientAuthenticator for a workload certificate (ADR-0042, ANR-1010): one configured CA bundle, the client-authentication extended key usage, notAfter, and the exact URI SAN mapped to platform:agents.own and nothing else"
+readme = "README.md"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+publish.workspace = true
+
+[dependencies]
+aap-ports.workspace = true
+rustls-pki-types.workspace = true
+rustls-webpki.workspace = true
+serde.workspace = true
+thiserror.workspace = true
+x509-parser.workspace = true
+
+[dev-dependencies]
+aap-ports = { workspace = true, features = ["testkit"] }
+serde_yaml.workspace = true
+tokio = { workspace = true, features = ["macros", "rt"] }
+
+[lints]
+workspace = true

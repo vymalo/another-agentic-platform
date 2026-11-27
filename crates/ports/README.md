@@ -4,7 +4,7 @@ The provider seams of the v0 operator ([§59a](../../docs/architecture/10-contro
 [§22](../../docs/architecture/05-runtime.md#22-runtimeprovider), AD-020): three traits and the neutral
 types that cross them; and the two seams of the admin dashboard's Platform API
 ([§60a](../../docs/architecture/10-control-plane-and-crds.md#the-platform-api-ad-025-ad-027), slice D4): `AgentObjects` and
-`Authenticator`; and, for several replicas of the operator (K7a), `LeaderElection`.
+`Authenticator`, and, since AD-065, `ClientAuthenticator` for a workload certificate; and, for several replicas of the operator (K7a), `LeaderElection`.
 
 | Trait | Does | Implemented by (later slices) |
 |---|---|---|
@@ -13,6 +13,7 @@ types that cross them; and the two seams of the admin dashboard's Platform API
 | `AgentDirectory` | lists the agents the platform runs, for the registry | the controller's reflector (S5), read by `aap-registry` (S7); `MemoryDirectory` here |
 | `AgentObjects` | the dashboard's custom resources: apply, get, list and delete an agent (`AgentService` + `AgentConfig`), a `ModelEndpoint`, a `ToolProvider`; list the offered secret references (D4) | [`objects-kubernetes`](../objects-kubernetes/README.md) (D5); `MemoryObjects` here |
 | `Authenticator` | a bearer token to a `Principal`: the subject and the values of the roles claim (D4) | [`auth-oidc`](../auth-oidc/README.md) (D6); `MemoryAuthenticator` here |
+| `ClientAuthenticator` | a **client certificate** to a `Principal`: the chain to one configured CA bundle, the client-authentication EKU, the validity window, and the exact URI SAN mapped to a fixed set of permissions (AD-065, ANR-1010) | [`auth-workload`](../auth-workload/README.md); no `Memory` implementation — the suite hands its own certificates, and the trust is a bundle |
 | `ActivitySource` | what an agent says about its own work: runs held and the next schedule; an error is **never** idleness (AD-058, P2a) | none yet (the HTTP source is P2c); `MemoryActivity` here, suite `activity_source_conformance!` |
 | `Waker` | asks the operator to wake an agent and says when it is `Ready` or gave up (AD-058, P3b); the activator's one call to the operator | none yet (ANR-1067, ANR-1068); `MemoryWaker` here, suite `waker_conformance!` |
 | `Upstream` | forwards one buffered request to a `Ready` agent, once, by a `Route`, and returns the answer's head and its body as a `BodyStream` of byte chunks (ANR-1069), so a streamed answer is never held whole (today only `Default`; AD-059 channels will add variants) | none yet (ANR-1068); `MemoryUpstream` here, suite `upstream_conformance!` |
@@ -326,6 +327,7 @@ operator holds one `Arc<dyn LeaderElection>` and names no implementation.
 | `DirectoryEntry` | the directory entry type for the registry: scope, name, title, description, tags, **audience (D3)**, card URL, `a2a_enabled`, `blocked`. A public struct built with a literal: **the field `audience` broke every `DirectoryEntry { .. }` literal** (an implementer of `AgentDirectory` that builds its own entries; the literals in this repository are updated: the controller's `entry()`, the testkit's `entry()`, `tests/contract.rs` and the registry crate's test helpers; `MemoryDirectory` builds none, it keeps the entries it is given), and it is `#[serde(default)]`, so a stored entry from before reads as having none |
 | `DeletionPolicy::{Retain, Delete}` | the neutral form of `aap_api::DeletionPolicy` |
 | `Kind`, `SharedKind`, `Stored`, `Agent`, `AgentDraft`, `SharedDraft`, `Precondition`, `ResourceVersion`, `ETag`, `Owner`, `OfferedSecret`, `FieldError`, `ObjectsError`, `Principal`, `AuthError` | the vocabulary of `AgentObjects` and `Authenticator` (D4): [above](#what-crosses-agentobjects) |
+| `Certificate`, `InvalidCertificate`, `ClientAuthError` | the vocabulary of `ClientAuthenticator` (AD-065): a certificate whose `Debug` says only how long it is, the six words a refusal has (`Malformed`, `BadChain`, `WrongUse`, `Expired`, `UnknownIdentity`, `NoIdentity`), and the error (`Missing`, `Invalid`, `Unavailable`) |
 
 Choices worth knowing, because §59a does not say:
 
@@ -376,7 +378,10 @@ Off by default (the controller and the providers depend on the traits only). Wit
   same backend made unreachable) and `refused_spec` (a `spec` the backend refuses; a backend with rules of its own, the CEL of the
   CRDs, gives one that breaks one, and the case checks that the 422 names its field). `AuthenticatorUnderTest` is `issue(subject,
   permissions)` (a token the authenticator accepts) and, with a default, `without_keys` (the same kind of authenticator that cannot fetch its keys, and a
-  token it would have to verify with them).
+  token it would have to verify with them). `ClientAuthenticatorUnderTest` (AD-065) is `accepted()` (a certificate, the identity it names and the
+  permissions the table maps it to), `another_ca`, `wrong_use`, `expired`, `unknown_identity`, `no_eku` (a leaf with no extended key usage at all),
+  `no_identity` (a DNS SAN and no URI SAN) and `two_identities`; its suite is `client_authenticator_conformance!`, and its cases are
+  `testkit::client_auth::cases`.
 * `sample_agent`, `sample_agent_using` and `sample_shared`: bodies of the real shape (a test reads them through the CRD types), with
   Secret names that carry the sentinel. `SECRET_VALUE` is what the cases plant as a Secret's content.
 * `sample_spec_with_run_pods(id)`: `sample_spec` with run pods on (D15a).
@@ -411,6 +416,8 @@ aap_ports::runtime_provider_conformance!(make);
   that materialises a secret, a `watch` that never speaks), the adoption guard, a forced status, an
   unreachable backend, a missing CloudNativePG API, `DirectoryEntry::listed`, a directory that has not
   synced.
+* `tests/client_auth.rs` (AD-065): every `InvalidCertificate` is one word of a fixed set (an exhaustive `match`, lowercase ASCII), every
+  `ClientAuthError` has its class (`Missing`/`Invalid` → `Invalid`, `Unavailable` → `Transient`), and a `Certificate`'s `Debug` holds none of its bytes.
 * `tests/objects.rs` (D4): every `ObjectsError` has one status and a class (an exhaustive `match`); the ownership rule as a table
   (the label's value is compared whole; Argo's annotation beats the label); the token is made of every version, and of the kind and name of
   each object, and no two units spell one; the references of a config read from JSON; **the samples of the testkit are the shape of the real CRDs** (they are
