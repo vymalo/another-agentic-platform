@@ -7,6 +7,8 @@
     "build": "vitepress build",
     "preview": "vitepress preview",
     "check-links": "node .vitepress/check-links.mjs",
+    "crds": "node .vitepress/crds/generate.mjs",
+    "check-crds": "node .vitepress/crds/check.mjs",
     "test:in-depth": "node --test .vitepress/theme/in-depth.test.mjs"
   },
   "devDependencies": {
@@ -16,6 +18,7 @@
     "vitepress-mermaid-renderer": "1.2.3",
     "vitepress-openapi": "0.2.21",
     "vitepress-plugin-group-icons": "1.8.2",
-    "vue": "3.5.13"
+    "vue": "3.5.13",
+    "yaml": "2.8.1"
   }
 }
