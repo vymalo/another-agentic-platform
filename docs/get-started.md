@@ -16,7 +16,7 @@ image, the kind node image pin and the chart with that CI job. They differ from 
 - the agent `hello` has one plain environment variable and no `secretKeyRef`.
 
 The agent is adapted from [`examples/a2a.yaml`](../examples/a2a.yaml). It differs in the namespace, the Secret names, the defaults left
-out, the `API_TOKEN` entry dropped and the title.
+out, the `API_TOKEN` entry dropped, and the object name, the description, the title and the tags.
 
 ## What you will do
 
@@ -45,10 +45,11 @@ stateDiagram-v2
   [*] --> Ready
   [*] --> Degraded
   [*] --> Blocked
+  [*] --> Suspended
   Degraded --> Ready: the pod is ready
   Ready --> Degraded: a rollout, or the pod fails
   Ready --> Suspended: spec.suspend, or sleeping
-  Degraded --> Suspended: spec.suspend
+  Degraded --> Suspended: spec.suspend, or sleeping
   Suspended --> Ready: resumed
   Suspended --> Degraded: resumed, pod not ready yet
   Ready --> Blocked: ConfigResolved or StoreReady not True, or a name conflict
@@ -56,10 +57,12 @@ stateDiagram-v2
   Suspended --> Blocked: same
   Blocked --> Ready: the cause is fixed
   Blocked --> Degraded: the cause is fixed
+  Blocked --> Suspended: the cause is fixed, and suspended
   Ready --> [*]: kubectl delete
 ```
 
-`Blocked` means the operator did not apply the desired state and left what runs untouched. `Suspended` is healthy. `Ready` needs the
+The diagram draws only the delete this walk makes: an agent can be deleted from any state. `Blocked` is tested first, so it wins over
+`Suspended`. `Blocked` means the operator did not apply the desired state and left what runs untouched. `Suspended` is healthy. `Ready` needs the
 config resolved, the store ready and the runtime ready. `Listed` is a separate condition: it says the agent is in the registry and never
 decides `Ready`. This walk goes only `[*] --> Ready` (observed 2026-11-27 on one run on a warm cluster, about 4 seconds after
 `kubectl apply`; not a guarantee). The other states are read from `crates/controller/src/derive.rs` and were not seen here.
@@ -240,14 +243,22 @@ The registry is a Service of the operator, `aap-operator-registry`, on port 8080
 kubectl -n aap port-forward service/aap-operator-registry 18080:8080 >/dev/null 2>&1 &
 PF_PID=$!
 for i in $(seq 1 30); do curl -s -o /dev/null http://127.0.0.1:18080/ && break; sleep 1; done
+curl -s -o /dev/null http://127.0.0.1:18080/ || echo "port-forward not up" >&2
 
-curl -s -H "Authorization: Bearer $REGISTRY_TOKEN" -H 'Accept: application/linkset+json' \
-  http://127.0.0.1:18080/registry/v1/agents | jq .
+STATUS=$(curl -s -o registry.json -w '%{http_code}' -H "Authorization: Bearer $REGISTRY_TOKEN" -H 'Accept: application/linkset+json' \
+  http://127.0.0.1:18080/registry/v1/agents)
+echo "status: $STATUS"
+jq . registry.json
 ```
 
-The loop waits up to 30 seconds for the forwarded port. If it ends and the next command prints nothing, the port-forward is not up: run it
-without the redirect to see why. A `401` there means the token is wrong or empty. In a new shell, read it back with
-`REGISTRY_TOKEN=$(kubectl -n aap get secret registry-token -o jsonpath='{.data.token}' | base64 -d)`.
+The loop waits up to 30 seconds for the forwarded port and says `port-forward not up` if it never opened. The status line tells you what
+went wrong if there is no document:
+
+- `status: 200`: the document follows.
+- `status: 000`: no connection, so the port-forward is down. Run it again without the `>/dev/null 2>&1` to see why.
+- `status: 401`: the token is wrong or empty. In a new shell, read it back with
+  `REGISTRY_TOKEN=$(kubectl -n aap get secret registry-token -o jsonpath='{.data.token}' | base64 -d)` (older macOS spells it `base64 -D`).
+- `status: 503`: the registry is not ready yet. Wait a few seconds and run the `curl` again.
 
 The answer is an `agent-registry/v1` linkset document: one `item` per listed agent, with its `service` id, its `title` and the `href` of
 its agent card. Without the token the registry answers `401`:
@@ -265,7 +276,7 @@ If you keep the cluster, remove what you made in this order. The operator's fina
 still runs, and the CRDs last:
 
 ```sh
-kill "$PF_PID"
+[ -n "${PF_PID:-}" ] && kill "$PF_PID"
 kubectl -n aap delete agentservice hello --wait=true --timeout=120s
 kubectl -n aap delete agentconfig hello
 helm uninstall aap-operator --namespace aap
@@ -279,7 +290,7 @@ Then remove the cluster. This alone removes everything inside it:
 kind delete cluster --name aap-start
 ```
 
-Two things stay on your machine. `docker rmi aap-stub:ci` removes the local image. `operator.values.yaml` and `hello.yaml`, which the
+Two things stay on your machine. `docker rmi aap-stub:ci` removes the local image. `operator.values.yaml`, `hello.yaml` and `registry.json`, which the
 steps wrote in the current directory, remain until you delete them.
 
 ## Next
