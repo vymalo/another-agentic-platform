@@ -9,7 +9,8 @@
 mod common;
 
 use aap_api::permission::{
-    AGENTS_OWN, AGENTS_READ, AGENTS_WRITE, ALL, MODELS_WRITE, SECRETS_PICK, TOOLPROVIDERS_WRITE,
+    AGENTS_OWN, AGENTS_READ, AGENTS_READ_OWNER, AGENTS_WRITE, ALL, MODELS_WRITE, SECRETS_PICK,
+    TOOLPROVIDERS_WRITE,
 };
 use aap_platform_api::{Needs, ROUTES};
 use axum::http::Method;
@@ -25,8 +26,12 @@ const EXPECTED: [(&str, &str, Option<&str>); 22] = [
     ("DELETE", "/v1/agents/{name}", Some(AGENTS_WRITE)),
     ("GET", "/v1/agents/{name}/yaml", Some(AGENTS_READ)),
     ("GET", "/v1/agents/{name}/events", Some(AGENTS_READ)),
-    ("GET", "/v1/owners/{owner}/agents", Some(AGENTS_OWN)),
-    ("GET", "/v1/owners/{owner}/agents/{name}", Some(AGENTS_OWN)),
+    ("GET", "/v1/owners/{owner}/agents", Some(AGENTS_READ_OWNER)),
+    (
+        "GET",
+        "/v1/owners/{owner}/agents/{name}",
+        Some(AGENTS_READ_OWNER),
+    ),
     ("PUT", "/v1/owners/{owner}/agents/{name}", Some(AGENTS_OWN)),
     (
         "DELETE",

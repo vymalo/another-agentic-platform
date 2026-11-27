@@ -1917,7 +1917,8 @@ The cost is a second image and a second Deployment. The registry stays in the op
 | none beyond a valid token | `GET /v1/me` |
 | `platform:agents.read` | every `GET` of `/v1/info`, `/v1/agents`, `/v1/models` and `/v1/tool-servers`, `GET /v1/agents/{name}/yaml`, `GET /v1/agents/{name}/events` and `GET /v1/openapi.json` (K8) |
 | `platform:agents.write` | `PUT` and `DELETE` of `/v1/agents/{name}`, which includes `spec.suspend` and `spec.access.audience` |
-| `platform:agents.own` | **ANR-661.** The four routes under `/v1/owners/{owner}/agents`: read, create, replace (suspend and resume included) and delete the agents whose `spec.owner` is the owner in the path. It is **scoped by data**, not by route, so it is the orchestrator's alone and never a person's role |
+| `platform:agents.own` | **ANR-661.** `PUT` and `DELETE` under `/v1/owners/{owner}/agents/{name}`: create, replace (suspend and resume included) and delete the agents whose `spec.owner` is the owner in the path. It is **scoped by data**, not by route, so it is the orchestrator's and never a person's role |
+| `platform:agents.read.owner` | **AD-072.** The two `GET`s under `/v1/owners/{owner}/agents`: read, and nothing else. It is the staff service's; the orchestrator holds it beside `platform:agents.own`, because the two reads moved to it, and a person's role holds neither |
 | `platform:models.write` | `PUT` and `DELETE` of `/v1/models/{name}` |
 | `platform:toolproviders.write` | `PUT` and `DELETE` of `/v1/tool-servers/{name}` |
 | `platform:secrets.pick` | `GET /v1/secret-keys`, **and any write whose body names a secret key** (a model's API key, a tool server's header, a coder's GitHub App key), in addition to the write's own permission |
@@ -2113,7 +2114,8 @@ The owner, 2026-10-05, asked *"can we break down into permissions and let roles 
 |---|---|
 | `platform:agents.read` | Read the dashboard: agents, models, tool servers, deployment defaults, View YAML. Draws `/admin` |
 | `platform:agents.write` | Create, edit, suspend, resume and delete agents, including their audience |
-| `platform:agents.own` | Read, make, replace, suspend and delete the agents whose `spec.owner` is the owner named in the path of `/v1/owners/{owner}/agents`, and no other (ANR-661). The orchestrator's |
+| `platform:agents.own` | Make, replace, suspend and delete the agents whose `spec.owner` is the owner named in the path of `/v1/owners/{owner}/agents/{name}`, and no other (ANR-661). The orchestrator's |
+| `platform:agents.read.owner` | Read the agents whose `spec.owner` is the owner named in the path, and nothing else (AD-072). The staff service's; the orchestrator holds it beside `platform:agents.own` |
 | `platform:models.write` | Create, edit and delete `ModelEndpoint`s |
 | `platform:toolproviders.write` | Create, edit and delete `ToolProvider`s |
 | `platform:secrets.pick` | See the offered Secret keys and name one in a write (AD-030) |

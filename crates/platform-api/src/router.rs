@@ -124,8 +124,8 @@ where
     })
 }
 
-/// The router of the workload listener (ANR-1011, AD-068): **the routes of the table that `platform:agents.own` opens, and no
-/// other**, behind [`workload_guard`](crate::workload) in place of the bearer guard. It never reads `Authorization`, and a route
+/// The router of the workload listener (ANR-1011, AD-068; AD-072): **the routes of the table that `platform:agents.own` or
+/// `platform:agents.read.owner` opens, and no other**, behind [`workload_guard`](crate::workload) in place of the bearer guard. It never reads `Authorization`, and a route
 /// the workload may not use is not mounted, so it is a `404` and not a `403` that names a permission. The state's own `A` is
 /// [`NoBearer`](crate::NoBearer): this listener has no bearer authenticator to fall back to.
 pub fn workload_router<O, W>(state: ApiState<O, crate::NoBearer>, auth: W) -> Router
@@ -277,7 +277,7 @@ mod tests {
         );
     }
 
-    /// A certificate that holds `platform:agents.own` and every other permission, whatever the bytes.
+    /// A certificate that holds every permission, whatever the bytes.
     struct EveryPermission;
 
     impl ClientAuthenticator for EveryPermission {
@@ -289,10 +289,11 @@ mod tests {
         }
     }
 
-    /// The workload guard serves the routes `platform:agents.own` opens and **no other route of the table**, even one that was
-    /// mounted by mistake and whose permission the workload holds: the guard is the second lock after the router's filter.
+    /// The workload guard serves the routes the workload permissions open and **no other route of the table**, even one that
+    /// was mounted by mistake and whose permission the workload holds: the guard is the second lock after the router's filter.
     #[tokio::test]
-    async fn the_workload_guard_refuses_a_route_of_the_table_that_agents_own_does_not_open() {
+    async fn the_workload_guard_refuses_a_route_of_the_table_that_the_workload_permissions_do_not_open()
+     {
         let defaults = serde_json::from_value(serde_json::json!({
             "namespace": "ns",
             "store": { "cnpg": { "instances": 1, "storage": { "size": "1Gi" } } },

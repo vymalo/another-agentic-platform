@@ -19,7 +19,7 @@ fn one(identity: &str, permissions: &[&str]) -> WorkloadClients {
 }
 
 #[test]
-fn only_platform_agents_own_is_grantable() {
+fn only_the_workload_permissions_are_grantable() {
     let refused = one(
         "spiffe://another/ns/test/sa/orchestrator",
         &["platform:agents.read"],
@@ -29,12 +29,14 @@ fn only_platform_agents_own_is_grantable() {
         matches!(err, ConfigError::NotGrantable { index: 0, .. }),
         "{err}"
     );
-    // The one that is grantable loads.
-    let allowed = one(
-        "spiffe://another/ns/test/sa/orchestrator",
-        &["platform:agents.own"],
-    );
-    assert!(WorkloadAuth::new(CA, &allowed).is_ok());
+    // Both workload permissions load: the orchestrator's, and the staff service's read-only one (AD-072).
+    for granted in ["platform:agents.own", "platform:agents.read.owner"] {
+        let allowed = one("spiffe://another/ns/test/sa/orchestrator", &[granted]);
+        assert!(
+            WorkloadAuth::new(CA, &allowed).is_ok(),
+            "{granted} is not grantable"
+        );
+    }
 }
 
 #[test]

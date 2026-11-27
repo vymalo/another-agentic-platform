@@ -572,16 +572,18 @@ list is empty (`templates/NOTES.txt`).
 ### The workload listener (ANR-1011)
 
 `api.workload` is a second listener of the API, **mutual TLS**, for a service that calls it with a client certificate and not a token (the orchestrator; [AD-068](../../docs/architecture/11-decisions.md)).
-**Off by default, and then not a trace of it in any render** (the goldens are what they were). It serves **only** `/v1/owners/{owner}/agents...` (`platform:agents.own`): every other path is a `404`.
+**Off by default, and then not a trace of it in any render** (the goldens are what they were). It serves **only** `/v1/owners/{owner}/agents...` (`platform:agents.own` or `platform:agents.read.owner`): every other path is a `404`.
 The person's listener (`api.port`) reads a bearer token and never a certificate; this one reads a certificate and never a token; neither falls back to the other.
 
 ```yaml
 api:
   workload:
     enabled: true
-    clients:                                   # REQUIRED: the certificate's exact URI SAN; only platform:agents.own is grantable
+    clients:                                   # REQUIRED: the certificate's exact URI SAN; only platform:agents.own and platform:agents.read.owner are grantable
       - spiffeId: spiffe://another/ns/another-agents/sa/orchestrator
-        permissions: [platform:agents.own]
+        permissions: [platform:agents.own, platform:agents.read.owner]
+      - spiffeId: spiffe://another/ns/another-agents/sa/staff
+        permissions: [platform:agents.read.owner]
     tls:
       secretName: aap-api-workload-tls         # REQUIRED: a kubernetes.io/tls Secret you make (the chart makes none and holds no key)
     clientCa:
@@ -595,7 +597,7 @@ It adds a container port `workload`, a Service `<fullname>-api-workload` (the pe
 mounted read-only at `/etc/aap-api-workload/tls` (mode 0440; the pod's `fsGroup` lets the non-root user read it) and the CA key as `/etc/aap-api-workload/ca/ca.crt`, and `workloadListener` and
 `workloadClients` in the configuration file. `handshakeTimeoutSecs`, `maxHandshakesPerIp` and `maxConnections` bound the listener (a peer behind a NAT or a proxy that hides addresses shares one per-address allowance: raise it). A **PKI with an intermediate** works with the root alone in the CA ConfigMap: the client sends its leaf and its intermediates. **A client certificate is always required**: a peer with none does not complete the handshake (there is no `clientAuth` value any more: the owner removed it on 2026-11-27, and a values file that still says it is refused). **The server certificate and the CA bundle are both re-read when they change (within about a minute): a renewal or a CA rotation needs no restart.** The next handshake and the next request take the new bundle together, a connection already open is not cut (its next request is judged by the new bundle), and a bundle that cannot be read or holds no usable CA keeps the old one and the API warns once. **Not built: the CRL** that the workload-certificate decision asks for,
 so a revoked certificate is refused only when it expires: keep the leaf short. The chart refuses a missing client, Secret or ConfigMap, a SPIFFE id that is not `spiffe://<domain>/<path>`, an identity
-twice, a permission other than `platform:agents.own`, a port that clashes with `api.port`, `api.healthPort` or `api.metrics.port`, an empty `from` while the policy is on, a `from` ipBlock that is every address (`api.networkPolicy.from` is not checked this way), an unknown key, and an
+twice, a permission outside the two workload ones, a port that clashes with `api.port`, `api.healthPort` or `api.metrics.port`, an empty `from` while the policy is on, a `from` ipBlock that is every address (`api.networkPolicy.from` is not checked this way), an unknown key, and an
 `extraVolumes` or `extraVolumeMounts` that takes `workload-tls`, `workload-ca` or `/etc/aap-api-workload`. [`tests/workload.values.yaml`](tests/workload.values.yaml) sets every value; its render is
 `tests/golden/workload.yaml`, `api --check` reads its file (`tests/api-shapes.sh`), and `render-check.sh` holds the guarantees. *Unverified until a cluster has run it:* a kubelet mounting the Secret, a
 client reaching the port through the NetworkPolicy, and a leaf of a real PKI.

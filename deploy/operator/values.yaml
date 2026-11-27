@@ -692,8 +692,10 @@ api:
   # The workload listener (ANR-1011, AD-068): a second listener of the API, **mutual TLS**, for a service that calls it with a client
   # certificate and not a token (the orchestrator). OFF by default, and then not a trace of it in any render. The person's listener
   # (`port`) reads a bearer token and never a certificate; this one reads a certificate and never a token; neither falls back to the
-  # other. It serves ONLY the owner routes (`/v1/owners/{owner}/agents...`, `platform:agents.own`): every other path is a 404.
-  # The workload's identity is its certificate's exact URI SAN (a SPIFFE id) and only `platform:agents.own` is grantable.
+  # other. It serves ONLY the owner routes (`/v1/owners/{owner}/agents...`, `platform:agents.own` or `platform:agents.read.owner`):
+  # every other path is a 404. The workload's identity is its certificate's exact URI SAN (a SPIFFE id) and only
+  # `platform:agents.own` and `platform:agents.read.owner` are grantable (AD-072: the orchestrator holds both, the staff service
+  # only the read-only one).
   # Not built: the CRL the workload-certificate decision asks for (no source to fetch it from has been named): a revoked certificate is refused only when it expires.
   workload:
     enabled: false
