@@ -672,7 +672,7 @@ async fn a_pod_labelled_as_an_agent_whose_chain_ends_nowhere_makes_no_line() {
     // A real run pod beside them, so that "no line" is not "the meter did not run".
     fake.put_pod(finished_run("r1", "uid-run", "run-1", start, (m0 + 1) * 60));
     let rig = start_rig(&fake).await;
-    eventually("the run pod's lines", || rig.sink.taken().len() >= 1).await;
+    eventually("the run pod's lines", || !rig.sink.taken().is_empty()).await;
     passes(4).await;
     let got = rig.sink.taken();
     assert!(
