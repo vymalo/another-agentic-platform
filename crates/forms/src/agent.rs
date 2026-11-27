@@ -54,6 +54,12 @@ pub struct AgentForm {
     /// Absent: nobody's. Set by the orchestrator through the owner-scoped routes; an administrator may set it too.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub owner: Option<String>,
+    /// The account the agent's own pods' minutes are for (`spec.account`): the person's opaque id from the identity
+    /// provider (the `sub`, trimmed and lower-cased), 1 to 128 bytes of `[A-Za-z0-9._:/-]`. An e-mail is never one.
+    /// Absent: nobody's, a shared agent. Only a caller that holds `platform:agents.own` (the orchestrator) may
+    /// name or change it (AD-073); a person's save carries the stored value over.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub account: Option<String>,
     /// Scale to zero (`spec.suspend`): the Suspend and Resume actions.
     #[serde(default)]
     pub suspend: bool,

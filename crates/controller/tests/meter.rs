@@ -205,7 +205,7 @@ fn agent_pod(
 fn accounts() -> Arc<MemoryAccounts> {
     let accounts = Arc::new(MemoryAccounts::new());
     accounts.set_run("coder", "run-1", "acct-1");
-    accounts.set_agent("coder", "acct-agent");
+    accounts.set_agent(NS, "coder", "acct-agent");
     accounts
 }
 
@@ -610,7 +610,7 @@ async fn an_agent_pod_is_billed_to_the_agent_service_its_owner_chain_ends_at() {
         ));
     }
     let accounts = accounts();
-    accounts.set_agent("other", "acct-other");
+    accounts.set_agent(NS, "other", "acct-other");
     let rig = start_with(&fake, None, accounts).await;
     eventually("four lines, two per pod", || rig.sink.taken().len() >= 4).await;
     passes(3).await;
@@ -625,6 +625,7 @@ async fn an_agent_pod_is_billed_to_the_agent_service_its_owner_chain_ends_at() {
     );
     assert!(
         rig.accounts.asked().contains(&PodRef::Agent {
+            namespace: NS.into(),
             service: "other".into()
         }),
         "{:?}",
@@ -632,6 +633,7 @@ async fn an_agent_pod_is_billed_to_the_agent_service_its_owner_chain_ends_at() {
     );
     assert!(
         !rig.accounts.asked().contains(&PodRef::Agent {
+            namespace: NS.into(),
             service: "coder".into()
         }),
         "the label's instance is never asked for"
@@ -704,6 +706,7 @@ async fn a_pod_labelled_as_an_agent_whose_chain_ends_nowhere_makes_no_line() {
     assert!(
         rig.accounts.asked().iter().all(|p| p
             != &PodRef::Agent {
+                namespace: NS.into(),
                 service: "coder".into()
             }),
         "{:?}",
@@ -753,7 +756,7 @@ async fn a_job_owned_pod_and_a_statefulset_owned_pod_are_attributed() {
         Some(("StatefulSet", "coder", "uid-sts-coder")),
     ));
     let accounts = accounts();
-    accounts.set_agent("split", "acct-split");
+    accounts.set_agent(NS, "split", "acct-split");
     let rig = start_with(&fake, None, accounts).await;
     eventually("one line per pod", || rig.sink.taken().len() >= 2).await;
     passes(3).await;
@@ -1756,8 +1759,8 @@ async fn a_crash_loses_no_minute_of_a_vanished_pod() {
         (10..=16).collect::<Vec<_>>(),
         "every minute from the first one not acknowledged, none lost"
     );
-    // Repeats are only by event id: the same event (a run's account is recorded in the tombstone; an agent pod's is
-    // asked again).
+    // Repeats are only by event id: the same event (a run's account is recorded in the tombstone; an agent pod's is the
+    // last one its source named, or asked again when it named none).
     let before = sink.taken();
     for e in lost.taken() {
         let same = before

@@ -1,5 +1,6 @@
-//! The pod-minute meter's composition (ANR-1103, AD-069): the sink that carries a line to the collector, the broker source that
-//! says whose minute it is, and the meter's settings, built from `metering` of the file.
+//! The pod-minute meter's composition (ANR-1103, AD-069): the sink that carries a line to the collector, the sources that
+//! say whose minute it is (the broker for a run pod, the `AgentService` for an agent's own pod: AD-073), and the meter's
+//! settings, built from `metering` of the file.
 //!
 //! **Fail closed.** The bearer is read now: a missing or empty file, an unset or empty variable is a refusal of the file
 //! ([`ReferenceRefused`](crate::config::ReferenceRefused), exit 78), never a meter that asks with no bearer. A CA bundle that
@@ -10,7 +11,7 @@ use std::time::Duration;
 
 use aap_controller::MeterConfig;
 use aap_trace_otlp::SecretRef;
-use aap_usage::{PodMinuteEvent, UsageError, UsageSink};
+use aap_usage::{AccountSource, AccountUnavailable, PodMinuteEvent, PodRef, UsageError, UsageSink};
 use aap_usage_broker::{BrokerAccounts, Token};
 use aap_usage_otlp::OtlpUsageSink;
 use anyhow::Result;
@@ -35,11 +36,35 @@ impl UsageSink for SharedSink {
     }
 }
 
+/// The two account sources, composed by pod kind (AD-073): a run pod is the `run` source's to answer, an agent's own pod
+/// the `agent` source's, and neither is asked about the other kind.
+pub struct MeterAccounts<R, A> {
+    run: R,
+    agent: A,
+}
+
+impl<R, A> MeterAccounts<R, A> {
+    /// Routes a [`PodRef::Run`] to `run` and a [`PodRef::Agent`] to `agent`.
+    pub fn new(run: R, agent: A) -> Self {
+        Self { run, agent }
+    }
+}
+
+impl<R: AccountSource, A: AccountSource> AccountSource for MeterAccounts<R, A> {
+    async fn account(&self, pod: &PodRef) -> Result<Option<String>, AccountUnavailable> {
+        match pod {
+            PodRef::Run { .. } => self.run.account(pod).await,
+            PodRef::Agent { .. } => self.agent.account(pod).await,
+        }
+    }
+}
+
 /// What the operator hands to `Operator::with_meter` and `with_meter_config`.
 pub struct Parts {
     /// The collector sink; the caller shuts it down on the way out.
     pub sink: SharedSink,
-    /// The broker source.
+    /// The broker, for a run pod. The caller composes it with the agent source ([`MeterAccounts`]) once it has the cluster
+    /// client: this is built before the cluster is reached, so a bad bearer stops the start first.
     pub accounts: BrokerAccounts,
     /// The meter's source name, node label key and period.
     pub config: MeterConfig,
@@ -103,6 +128,7 @@ pub fn parts(metering: Option<&Metering>) -> Result<Option<Parts>> {
 mod tests {
     #![allow(clippy::unwrap_used, clippy::expect_used)]
     use super::*;
+    use aap_usage::MemoryAccounts;
 
     fn metering(token: &str) -> Metering {
         Metering {
@@ -161,5 +187,32 @@ mod tests {
             assert!(text.contains("metering.broker.token"), "{text}");
         }
         std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[tokio::test]
+    async fn a_run_goes_to_the_run_source_and_an_agent_to_the_agent_source() {
+        let run_source = MemoryAccounts::new();
+        run_source.set_run("coder", "r1", "acct-run");
+        let agent_source = MemoryAccounts::new();
+        agent_source.set_agent("ns", "coder", "acct-agent");
+        let accounts = MeterAccounts::new(run_source, agent_source);
+        let run = PodRef::Run {
+            service: "coder".into(),
+            run: "r1".into(),
+        };
+        let agent = PodRef::Agent {
+            namespace: "ns".into(),
+            service: "coder".into(),
+        };
+        assert_eq!(
+            accounts.account(&run).await,
+            Ok(Some("acct-run".to_owned()))
+        );
+        assert_eq!(
+            accounts.account(&agent).await,
+            Ok(Some("acct-agent".to_owned()))
+        );
+        assert_eq!(accounts.run.asked(), vec![run]);
+        assert_eq!(accounts.agent.asked(), vec![agent]);
     }
 }

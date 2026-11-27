@@ -33,6 +33,7 @@ aap-trace.workspace = true
 aap-trace-otlp.workspace = true
 aap-usage.workspace = true
 aap-usage-broker.workspace = true
+aap-usage-kubernetes.workspace = true
 aap-usage-otlp.workspace = true
 aap-registry = { workspace = true, optional = true }
 aap-activity-http.workspace = true
@@ -56,6 +57,7 @@ tracing-subscriber.workspace = true
 [dev-dependencies]
 aap-ports = { workspace = true, features = ["testkit"] }
 aap-trace = { workspace = true, features = ["testkit"] }
+aap-usage = { workspace = true, features = ["testkit"] }
 http = "1"
 k8s-openapi.workspace = true
 tokio = { workspace = true, features = ["io-util"] }

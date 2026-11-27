@@ -107,7 +107,7 @@ impl UsageSink for MemoryUsageSink {
 #[derive(Default)]
 struct Accounts {
     by_run: BTreeMap<(String, String), String>,
-    by_service: BTreeMap<String, String>,
+    by_agent: BTreeMap<(String, String), String>,
     broken: bool,
     asked: Vec<PodRef>,
 }
@@ -132,10 +132,14 @@ impl MemoryAccounts {
         });
     }
 
-    /// The account of an agent's own pods.
-    pub fn set_agent(&self, service: &str, account: &str) {
+    /// The account of an agent's own pods. The fake keys it by **namespace and service**, as the real source reads
+    /// the `AgentService` in the pod's own namespace: a [`PodRef::Agent`] with another namespace gets `None`.
+    pub fn set_agent(&self, namespace: &str, service: &str, account: &str) {
         self.with(|a| {
-            a.by_service.insert(service.to_owned(), account.to_owned());
+            a.by_agent.insert(
+                (namespace.to_owned(), service.to_owned()),
+                account.to_owned(),
+            );
         });
     }
 
@@ -165,7 +169,10 @@ impl AccountSource for MemoryAccounts {
                 PodRef::Run { service, run } => {
                     a.by_run.get(&(service.clone(), run.clone())).cloned()
                 }
-                PodRef::Agent { service } => a.by_service.get(service).cloned(),
+                PodRef::Agent { namespace, service } => a
+                    .by_agent
+                    .get(&(namespace.clone(), service.clone()))
+                    .cloned(),
             })
         })
     }

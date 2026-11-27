@@ -141,23 +141,35 @@ async fn a_down_sink_is_unavailable_and_takes_nothing() {
 async fn the_account_fake_answers_by_run_and_by_service() {
     let a = MemoryAccounts::new();
     a.set_run("coder", "r1", "acct-1");
-    a.set_agent("coder", "acct-2");
+    a.set_agent("ns", "coder", "acct-2");
     let run = PodRef::Run {
         service: "coder".into(),
         run: "r1".into(),
     };
     let agent = PodRef::Agent {
+        namespace: "ns".into(),
         service: "coder".into(),
     };
     assert_eq!(a.account(&run).await.unwrap().as_deref(), Some("acct-1"));
     assert_eq!(a.account(&agent).await.unwrap().as_deref(), Some("acct-2"));
     assert_eq!(
         a.account(&PodRef::Agent {
+            namespace: "ns".into(),
             service: "other".into()
         })
         .await
         .unwrap(),
         None
+    );
+    assert_eq!(
+        a.account(&PodRef::Agent {
+            namespace: "elsewhere".into(),
+            service: "coder".into()
+        })
+        .await
+        .unwrap(),
+        None,
+        "an agent is known by its namespace and its service"
     );
     a.set_broken(true);
     assert!(a.account(&run).await.is_err());

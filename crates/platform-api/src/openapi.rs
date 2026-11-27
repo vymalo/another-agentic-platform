@@ -462,6 +462,8 @@ fn schemas() -> Value {
             "tags": { "type": "array", "maxItems": 16, "items": { "type": "string" } },
             "owner": { "type": ["string", "null"],
                        "description": "Who the agent belongs to (`spec.owner`): 1 to 63 characters of lower-case letters, digits, `-` and `_`. null: nobody's, and no route under `/v1/owners/{owner}/agents` can touch it. On those routes it is the owner in the path or absent (any other value is 422 on `owner`); on `/v1/agents/{name}` it is set or cleared like any field." },
+            "account": { "type": ["string", "null"],
+                         "description": "The account the agent's own pods' minutes are for (`spec.account`, AD-073): the person's opaque id from the identity provider (the `sub`, trimmed and lower-cased), 1 to 128 bytes of `[A-Za-z0-9._:/-]`; an `@` is never one, so an e-mail is not an account (422 on `account`). null or absent: for a caller that holds `platform:agents.own`, nobody's (a shared agent); for any other caller, the stored one is kept. Only a caller that holds platform:agents.own may name or change it: for any other caller an absent account keeps the stored one (a replace carries it over), the stored value sent back is accepted, a different value is 403 naming that permission, and a save that changes `owner` clears it." },
             "suspend": { "type": "boolean" },
             "model": { "oneOf": [schema("ModelChoice"), { "type": "null" }],
                        "description": "The model: an endpoint and an alias. Required of a coder and of a folder agent; null only for an A2A image, which gets none from the platform (AD-054)." },
@@ -471,7 +473,7 @@ fn schemas() -> Value {
             "audience": { "type": ["array", "null"], "maxItems": 32, "items": { "type": "string", "pattern": "^[!-~]{1,64}$" },
                           "description": "Who may use the agent: the values of a person's roles claim that admit them, by convention `agent.use:<name>`; `[\"*\"]` admits everyone and is only allowed alone. 1 to 64 visible ASCII characters each, at most 32. null and `[]` are the same: administrators only." },
             "agent": { "oneOf": [schema("CoderSettings"), schema("FolderSettings"), schema("A2aSettings")], "description": "What is particular to the kind, discriminated by `kind`." },
-        }), &["description", "owner", "tags", "suspend", "model", "toolServers", "allowInsecureHttp", "image", "audience"]),
+        }), &["description", "owner", "account", "tags", "suspend", "model", "toolServers", "allowInsecureHttp", "image", "audience"]),
         "ModelEndpointForm": object(json!({
             "name": { "type": "string", "pattern": "^[a-z][a-z0-9-]{0,62}$", "description": "Fixed after the create." },
             "title": { "type": "string", "minLength": 1, "maxLength": 128 },

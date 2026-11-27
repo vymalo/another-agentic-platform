@@ -653,6 +653,7 @@ status:
 - **References only (AD-024).** A custom resource names a Secret and a key; the operator copies a reference into the pod spec as a `secretKeyRef`, and never reads or writes a value. It has no RBAC on Secrets and creates no ExternalSecret. The conformance macros include "no secret value ever materialises": no `RuntimeSpec`, status, Event, log line or ConfigMap holds one.
 - **Two store modes** behind the `StoreProvisioner` seam (AD-020): `secretRef` (a Secret someone else owns) and operator-owned `cnpg` (a `Cluster` `<svc>-db` per service, owned by it, data kept by `Retain`). "A `Database` in someone else's Cluster" is deferred: server-side-apply co-ownership of that Cluster's `managed.roles` is *unverified*, and the operator must not fight the Cluster's owner for the field.
 - **`store` sits on `AgentService`, not on `AgentConfig`** (owner question in §93): a config can be shared by services, and two services must not share a ledger. adam keys a run by the agent's name, and several processes with the same name are replicas of one agent (*verified 2026-10-04*, `bin/adam-agent/README.md`, "Several agents, one database").
+- **`account` sits on `AgentService` too (ANR-1100, [AD-073](11-decisions.md#ad-073--an-agents-pod-minutes-are-for-the-account-recorded-on-its-agentservice-and-only-the-orchestrator-may-name-it)):** `spec.account` is the person's opaque id (the identity provider's `sub`, trimmed and lower-cased; `[A-Za-z0-9._:/-]`, 1 to 128 bytes, never an e-mail) that the meter bills the agent's own pods' minutes to; it is not `spec.owner`, not in the digest, and read by the meter through the `AgentService` and by nothing that makes a pod.
 
 ### Registry in v0
 
@@ -1917,7 +1918,7 @@ The cost is a second image and a second Deployment. The registry stays in the op
 | none beyond a valid token | `GET /v1/me` |
 | `platform:agents.read` | every `GET` of `/v1/info`, `/v1/agents`, `/v1/models` and `/v1/tool-servers`, `GET /v1/agents/{name}/yaml`, `GET /v1/agents/{name}/events` and `GET /v1/openapi.json` (K8) |
 | `platform:agents.write` | `PUT` and `DELETE` of `/v1/agents/{name}`, which includes `spec.suspend` and `spec.access.audience` |
-| `platform:agents.own` | **ANR-661.** `PUT` and `DELETE` under `/v1/owners/{owner}/agents/{name}`: create, replace (suspend and resume included) and delete the agents whose `spec.owner` is the owner in the path. It is **scoped by data**, not by route, so it is the orchestrator's and never a person's role |
+| `platform:agents.own` | **ANR-661.** `PUT` and `DELETE` under `/v1/owners/{owner}/agents/{name}`: create, replace (suspend and resume included) and delete the agents whose `spec.owner` is the owner in the path. It is **scoped by data**, not by route, so it is the orchestrator's and never a person's role **Only this permission may name or change an agent's `spec.account`** (ANR-1100, [AD-073](11-decisions.md#ad-072--an-agents-pod-minutes-are-for-the-account-recorded-on-its-agentservice-and-only-the-orchestrator-may-name-it)): any other caller's save carries the stored account over (a save that changes `owner` clears it), and a different one is `403` |
 | `platform:agents.read.owner` | **AD-072.** The two `GET`s under `/v1/owners/{owner}/agents`: read, and nothing else. It is the staff service's; the orchestrator holds it beside `platform:agents.own`, because the two reads moved to it, and a person's role holds neither |
 | `platform:models.write` | `PUT` and `DELETE` of `/v1/models/{name}` |
 | `platform:toolproviders.write` | `PUT` and `DELETE` of `/v1/tool-servers/{name}` |
@@ -2114,7 +2115,7 @@ The owner, 2026-10-05, asked *"can we break down into permissions and let roles 
 |---|---|
 | `platform:agents.read` | Read the dashboard: agents, models, tool servers, deployment defaults, View YAML. Draws `/admin` |
 | `platform:agents.write` | Create, edit, suspend, resume and delete agents, including their audience |
-| `platform:agents.own` | Make, replace, suspend and delete the agents whose `spec.owner` is the owner named in the path of `/v1/owners/{owner}/agents/{name}`, and no other (ANR-661). The orchestrator's |
+| `platform:agents.own` | Make, replace, suspend and delete the agents whose `spec.owner` is the owner named in the path of `/v1/owners/{owner}/agents/{name}`, and no other (ANR-661). The orchestrator's and the only one that may name or change an agent's `spec.account` ([AD-073](11-decisions.md#ad-072--an-agents-pod-minutes-are-for-the-account-recorded-on-its-agentservice-and-only-the-orchestrator-may-name-it)) |
 | `platform:agents.read.owner` | Read the agents whose `spec.owner` is the owner named in the path, and nothing else (AD-072). The staff service's; the orchestrator holds it beside `platform:agents.own` |
 | `platform:models.write` | Create, edit and delete `ModelEndpoint`s |
 | `platform:toolproviders.write` | Create, edit and delete `ToolProvider`s |
