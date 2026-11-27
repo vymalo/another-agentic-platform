@@ -2,7 +2,9 @@
 # ANR-1323: prove tools/check-release-skip.sh accepts the exact guard and fails on every way one can drift.
 set -eu
 
-here=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
+# `unset CDPATH`, not `CDPATH= cd`: shellcheck reads the latter as SC1007 (an assignment with a space), and a
+# set CDPATH would make `cd` print the directory into this assignment.
+here=$(unset CDPATH; cd -- "$(dirname -- "$0")" && pwd)
 check="$here/check-release-skip.sh"
 
 tmp=$(mktemp -d)

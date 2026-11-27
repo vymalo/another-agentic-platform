@@ -953,9 +953,81 @@ fn cidr_prefix(cidr: &str) -> Option<u8> {
     cidr.rsplit_once('/')?.1.parse().ok()
 }
 
+/// The fields a `NetworkPolicy` egress rule may have, at each level. `k8s-openapi`'s networking types are generated
+/// **without** `deny_unknown_fields`, so a misspelled key is dropped and the widening it causes is invisible: `port:`
+/// for `ports:` opens every port, `matchLabel:` for `matchLabels:` makes the selector `{}`, which is every namespace
+/// (ANR-1356). Every level is therefore walked against its list before the rule is read.
+const EGRESS_RULE_FIELDS: [&str; 2] = ["to", "ports"];
+const PEER_FIELDS: [&str; 3] = ["ipBlock", "namespaceSelector", "podSelector"];
+const IP_BLOCK_FIELDS: [&str; 2] = ["cidr", "except"];
+const SELECTOR_FIELDS: [&str; 2] = ["matchLabels", "matchExpressions"];
+const REQUIREMENT_FIELDS: [&str; 3] = ["key", "operator", "values"];
+const PORT_FIELDS: [&str; 3] = ["protocol", "port", "endPort"];
+
+/// Refuse a key that is not one of `allowed` at `path`. A value that is not an object is left to the deserialiser,
+/// which names it already.
+fn only_fields(value: &Value, allowed: &[&str], path: &str) -> Result<(), String> {
+    let Some(object) = value.as_object() else {
+        return Ok(());
+    };
+    if let Some(key) = object.keys().find(|k| !allowed.contains(&k.as_str())) {
+        return Err(format!(
+            "{path}.{key} is not a field of it: the fields are {}",
+            allowed.join(", ")
+        ));
+    }
+    Ok(())
+}
+
+/// Walk every level of a rule against its allow-list: the rule, each peer, its `ipBlock`, its two selectors and their
+/// requirements, and each port.
+fn only_known_fields(value: &Value) -> Result<(), String> {
+    only_fields(value, &EGRESS_RULE_FIELDS, "the rule")?;
+    if let Some(peers) = value.get("to").and_then(Value::as_array) {
+        for (i, peer) in peers.iter().enumerate() {
+            let path = format!("to[{i}]");
+            only_fields(peer, &PEER_FIELDS, &path)?;
+            if let Some(block) = peer.get("ipBlock") {
+                only_fields(block, &IP_BLOCK_FIELDS, &format!("{path}.ipBlock"))?;
+            }
+            for key in ["namespaceSelector", "podSelector"] {
+                let Some(selector) = peer.get(key) else {
+                    continue;
+                };
+                let path = format!("{path}.{key}");
+                only_fields(selector, &SELECTOR_FIELDS, &path)?;
+                for (j, e) in selector
+                    .get("matchExpressions")
+                    .and_then(Value::as_array)
+                    .into_iter()
+                    .flatten()
+                    .enumerate()
+                {
+                    only_fields(
+                        e,
+                        &REQUIREMENT_FIELDS,
+                        &format!("{path}.matchExpressions[{j}]"),
+                    )?;
+                }
+            }
+        }
+    }
+    for (i, port) in value
+        .get("ports")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .enumerate()
+    {
+        only_fields(port, &PORT_FIELDS, &format!("ports[{i}]"))?;
+    }
+    Ok(())
+}
+
 /// A `NetworkPolicy` egress entry of the settings as a neutral rule. Named ports are refused: the neutral
 /// port is a number.
 fn egress_rule(value: &Value) -> Result<EgressRule, String> {
+    only_known_fields(value)?;
     let rule: NetworkPolicyEgressRule = serde_json::from_value(value.clone())
         .map_err(|e| format!("not a NetworkPolicy egress rule ({e})"))?;
     // Kubernetes reads a rule with no `to` as **every** destination: that is the whole internet, which is what this
