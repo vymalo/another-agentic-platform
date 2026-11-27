@@ -37,6 +37,7 @@ mod service;
 mod shared;
 pub mod sleep;
 mod sleeper;
+pub mod wake;
 mod watches;
 
 pub use config::{config_error_policy, reconcile_config};

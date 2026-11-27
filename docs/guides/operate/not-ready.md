@@ -60,7 +60,9 @@ Every reason below is in `crates/controller/src/derive.rs` or in the provider's 
 | `Degraded`, `container X exited with code 69: a dependency of the agent is unreachable` | `RuntimeReady=False` `DependencyUnavailable` | The agent's log says which dependency | cluster test |
 | `Degraded`, `a rollout is in progress` | `RuntimeReady=False` `Provisioning` | Wait, then look at the pod ([find the pod](#find-the-pod)). Look for a pod that stays `Pending`, a `FailedScheduling` event, a volume claim that does not bind, or a quota that refuses the pod. The same reason is used when the runtime cannot get ready and the provider gave no reason | seen in the Events |
 | `Suspended`, `scaled to zero on purpose (spec.suspend)` | `RuntimeReady=False` `Suspended` | `spec.suspend` is `true`. `Ready` is `False` for it, and the state is healthy | yes |
-| `Suspended`, `scaled to zero because the agent reported no work` | `RuntimeReady=False` `Sleeping` | The idle timeout (`scaling.idleTimeout`) scaled it to zero | no |
+| `Suspended`, `scaled to zero because the agent reported no work` | `RuntimeReady=False` `Sleeping` | The idle timeout (`scaling.idleTimeout`) scaled it to zero. `status.sleep` says since when and what wakes it (`wakeAtSeen`, `nextDueAt`) | no |
+| `Degraded`, `woken, and scaling back up` | `RuntimeReady=False` `Waking` | The agent was woken (`status.sleep.waking.cause`: `Request` for the `agents.vymalo.com/wake-at` annotation, `Schedule` for a due schedule) and its runtime is not `Ready` yet. Wait, then look at the pod as for `Provisioning` | no |
+| `Degraded`, `woken, and not ready within scaling.wakeTimeout; still waking` | `RuntimeReady=False` `WakeTimedOut` | The wake has lasted past `scaling.wakeTimeout` (60 s when absent). The operator keeps waking and never puts the agent back to sleep for it: look at the pod as for `Provisioning` | no |
 | Ready, but `Listed=False` `RegistryDisabled` | `Listed=False` | The operator serves no registry: no registry token is set. See [Install](../deploy/install.md#the-registry-token) | cluster test |
 | `Blocked`, `spec.interfaces.a2a.enabled: false` | `ConfigResolved=False` `ConfigInvalid`, and at the same time `Listed=False` `A2ADisabled` | `a2a.enabled: false` is a validation error: v0 serves A2A and nothing else. Set it to `true`. `Ready` says `ConfigInvalid`; `Listed` says `A2ADisabled`, and only while the registry is on: with no registry token `Listed` is `RegistryDisabled` | yes |
 | `Listed=False` `ServiceBlocked` | `Listed=False` | The service is `Blocked`: fix that first | yes |
@@ -77,7 +79,7 @@ kubectl -n agents describe pod -l app.kubernetes.io/instance=hello
 
 ## Read the Events
 
-The operator writes one Event on the `AgentService` each time its state, or the reason on `Ready`, changes. It is `Normal` for `Reconciled`, `Provisioning`, `Suspended` and `Sleeping` unless the agent is `Blocked`, and `Warning` for the rest. The message is the condition's message, cut at 1,000 characters.
+The operator writes one Event on the `AgentService` each time its state, or the reason on `Ready`, changes. It is `Normal` for `Reconciled`, `Provisioning`, `Suspended`, `Sleeping` and `Waking` unless the agent is `Blocked`, and `Warning` for the rest (`WakeTimedOut` among them). The message is the condition's message, cut at 1,000 characters.
 
 ```sh
 kubectl -n agents describe agentservice badimage     # Events are at the bottom

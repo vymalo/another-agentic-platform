@@ -288,7 +288,10 @@ where
     let mut obs = Observed {
         generation: svc.metadata.generation,
         suspend: svc.spec.suspend,
-        sleeping: false,
+        // A pass that stops before the runtime step leaves the record as it was: what is asleep stays asleep.
+        sleep: previous.sleep.clone(),
+        wake_timed_out: false,
+        sleep_recheck: None,
         a2a_enabled: svc.spec.interfaces.a2a.enabled,
         registry: ctx.options.registry,
         registry_full: ctx
@@ -351,16 +354,71 @@ where
         return finish(svc, ctx, &previous, obs).await;
     }
 
-    // 4. The runtime. An agent the idle loop put to sleep stays at zero until something wakes it (AD-058): an
-    // `ensure` of the plain spec would scale it up again at once. A person's `suspend` and a removed
-    // `scaling.idleTimeout` end the sleep.
+    // 4. The runtime. A sleeping agent is held at zero by `status.sleep`, which this pass reads back: an operator
+    // that restarted, or a new leader, has no memory of what the idle loop did and needs none (AD-058, P3a-1). The
+    // loop only proposes (a mark); the record is written **before** the scale-down, so a crash between the two
+    // leaves the agent asleep on the record. A person's `suspend` and a removed `scaling.idleTimeout` end the sleep.
     let mut agent = agent;
-    if crate::sleep::SleepPolicy::from_scaling(&svc.spec.scaling).is_none() || svc.spec.suspend {
-        ctx.sleepers.forget(&id);
-    } else if ctx.sleepers.is_sleeping(&id) {
-        agent.runtime.suspend = true;
-        obs.sleeping = true;
+    let policy = crate::sleep::SleepPolicy::from_scaling(&svc.spec.scaling);
+    let now = (ctx.clock)().0.as_second();
+    let held = ctx.sleepers.mark(&id);
+    let mark = held.as_ref().map(|(m, _)| m);
+    let input = crate::wake::PlanInput {
+        record: previous.sleep.as_ref(),
+        mark,
+        mark_claimed: held.as_ref().is_some_and(|(_, claimed)| *claimed),
+        policy: policy.as_ref(),
+        suspend: svc.spec.suspend,
+        wake_at: svc
+            .annotations()
+            .get(aap_api::WAKE_AT_ANNOTATION)
+            .map(String::as_str),
+        now,
+        mark_max_age: crate::wake::mark_max_age(ctx.options.sleep_poll, ctx.options.pass_timeout),
+    };
+    let planned = crate::wake::plan(&input);
+    // A mark that made no record (too old, or the sleep would have been born waking) is spent: the loop polls again.
+    if crate::wake::stale_or_stillborn(&input, &planned)
+        && let Some(mark) = mark
+    {
+        let old = !input.mark_claimed
+            && now.saturating_sub(mark.made_at)
+                > i64::try_from(input.mark_max_age.as_secs()).unwrap_or(i64::MAX);
+        tracing::debug!(
+            service = %id.name(),
+            reason = if old { "stale" } else { "stillborn" },
+            "a mark was dropped without a record"
+        );
+        // Only the mark this pass read: the loop may have made a newer one since.
+        ctx.sleepers.drop_mark(&id, mark.made_at);
     }
+    // Forget only what a person ended. A pass that merely found no record must leave the idle loop's mark alone: the
+    // loop may have made it since this pass read it.
+    if policy.is_none() || svc.spec.suspend {
+        ctx.sleepers.forget(&id);
+    }
+    if let Some(record) = &planned {
+        if previous.sleep.is_none() {
+            // Claim first, so a lap of the idle loop that runs while the write is in flight cannot age the mark away
+            // and poll an agent whose record is not visible yet. A failed write gives the claim back (the mark then
+            // ages like any other: a retry long after the poll is not acted on).
+            let first = ctx.sleepers.claim(&id);
+            if let Err(e) = persist_sleep(svc, ctx, &previous, record).await {
+                if first {
+                    ctx.sleepers.unclaim(&id);
+                }
+                return Err(e);
+            }
+            if first {
+                ctx.metrics.inc(name::SLEEPS, &[]);
+                tracing::info!(service = %id.name(), "asleep: the record is written, scaling to zero");
+            }
+        }
+        if record.waking.is_none() {
+            agent.runtime.suspend = true;
+        }
+    }
+    obs.sleep = planned;
     match step(
         Step::RuntimeEnsure,
         ctx.runtime.ensure(&id, &agent.runtime),
@@ -370,6 +428,17 @@ where
     {
         Ok(status) => {
             obs.config_status = Some(config);
+            // A wake is over when the runtime says it is ready: the record goes, and the idle clock starts afresh.
+            if status.phase == Phase::Ready
+                && obs.sleep.as_ref().is_some_and(|s| s.waking.is_some())
+            {
+                obs.sleep = None;
+                ctx.sleepers.wake(&id);
+            }
+            if let (Some(record), Some(policy)) = (&obs.sleep, &policy) {
+                obs.wake_timed_out = crate::wake::timed_out(record, policy, now);
+                obs.sleep_recheck = crate::wake::recheck(record, policy, now);
+            }
             obs.runtime = Some(status);
         }
         // The provider refused a spec the domain accepted (Kubernetes says a StatefulSet's claim
@@ -419,6 +488,42 @@ async fn endpoints<R: RuntimeProvider, S>(
         a2a: one(Surface::A2a).await?,
         agent_card: one(Surface::AgentCard).await?,
     })
+}
+
+/// Write the sleep record, with the rest of the status as it stands, before the workload is scaled to zero. Same
+/// field manager and same body shape as [`finish`], so there is still one writer of the status.
+async fn persist_sleep<R, S>(
+    svc: &AgentService,
+    ctx: &Context<R, S>,
+    previous: &AgentServiceStatus,
+    record: &aap_api::SleepStatus,
+) -> Result<(), Error> {
+    let name = svc.name_any();
+    let api: Api<AgentService> = Api::namespaced(
+        ctx.client.clone(),
+        &svc.namespace().ok_or(Error::Malformed("no namespace"))?,
+    );
+    let mut status = previous.clone();
+    status.sleep = Some(record.clone());
+    let body = json!({
+        "apiVersion": AgentService::api_version(&()),
+        "kind": AgentService::kind(&()),
+        "metadata": { "name": name },
+        "status": status,
+    });
+    step(
+        Step::StatusPatch,
+        api.patch_status(
+            &name,
+            &PatchParams::apply(FIELD_MANAGER).force(),
+            &Patch::Apply(&body),
+        ),
+        kube_class_of,
+    )
+    .await?;
+    ctx.metrics
+        .inc(name::STATUS_PATCHES, &[("controller", CONTROLLER)]);
+    Ok(())
 }
 
 /// Write the status when it changed, say so when the state did, and decide when to look again.
@@ -482,7 +587,7 @@ async fn announce<R, S>(
     }
     let calm = matches!(
         reason,
-        "Reconciled" | "Provisioning" | "Suspended" | "Sleeping"
+        "Reconciled" | "Provisioning" | "Suspended" | "Sleeping" | "Waking"
     );
     let event = KubeEvent {
         type_: if calm && state != ServiceState::Blocked {
@@ -508,7 +613,7 @@ fn period<R, S>(
     obs: &Observed,
 ) -> std::time::Duration {
     let r = &ctx.options.resync;
-    match status.state {
+    let base = match status.state {
         Some(ServiceState::Ready | ServiceState::Suspended) => r.settled,
         Some(ServiceState::Blocked) => {
             if matches!(obs.store, StoreOutcome::NotInstalled { .. }) {
@@ -525,7 +630,9 @@ fn period<R, S>(
             }
         }
         Some(ServiceState::Degraded) | None => r.pending,
-    }
+    };
+    // A sleeping agent is woken by a schedule, and a wake is judged late, at moments no event brings.
+    obs.sleep_recheck.map_or(base, |at| base.min(at))
 }
 
 fn config_is_the_problem(conditions: &[Condition]) -> bool {

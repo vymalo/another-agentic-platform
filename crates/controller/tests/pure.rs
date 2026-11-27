@@ -28,7 +28,9 @@ fn observed() -> Observed {
     Observed {
         generation: Some(3),
         suspend: false,
-        sleeping: false,
+        sleep: None,
+        wake_timed_out: false,
+        sleep_recheck: None,
         a2a_enabled: true,
         registry: RegistryMode::Disabled,
         registry_full: false,
@@ -861,7 +863,7 @@ fn a_runtime_the_idle_loop_scaled_to_zero_is_sleeping_not_suspended() {
         replicas: 0,
         issues: vec![],
     });
-    sleeping.sleeping = true;
+    sleeping.sleep = Some(asleep());
     let status = derive(&sleeping, &[], &now);
     assert_eq!(
         status.runtime.as_ref().unwrap().phase,
@@ -875,7 +877,7 @@ fn a_runtime_the_idle_loop_scaled_to_zero_is_sleeping_not_suspended() {
 
     // A person's suspend stays a Suspended, with its own reason.
     let mut suspended = sleeping.clone();
-    suspended.sleeping = false;
+    suspended.sleep = None;
     suspended.suspend = true;
     let status = derive(&suspended, &[], &now);
     assert_eq!(
@@ -883,4 +885,101 @@ fn a_runtime_the_idle_loop_scaled_to_zero_is_sleeping_not_suspended() {
         aap_api::RuntimePhase::Suspended
     );
     assert!(types(&status).contains(&("Ready", "False", "Suspended")));
+}
+
+fn asleep() -> aap_api::SleepStatus {
+    aap_api::SleepStatus {
+        since: at("2026-10-05T09:00:00Z"),
+        next_due_at: None,
+        wake_at_seen: None,
+        waking: None,
+    }
+}
+
+fn waking() -> aap_api::SleepStatus {
+    aap_api::SleepStatus {
+        waking: Some(aap_api::WakingStatus {
+            since: at("2026-10-05T10:00:00Z"),
+            cause: aap_api::WakeCause::Request,
+        }),
+        ..asleep()
+    }
+}
+
+fn runtime_in(phase: Phase) -> Option<RuntimeStatus> {
+    Some(RuntimeStatus {
+        phase,
+        replicas: 0,
+        issues: vec![],
+    })
+}
+
+#[test]
+fn a_woken_runtime_that_is_not_ready_is_waking_and_a_late_one_says_so() {
+    let now = at("2026-10-05T10:00:30Z");
+    for phase in [Phase::Provisioning, Phase::Suspended] {
+        let mut o = observed();
+        o.runtime = runtime_in(phase);
+        o.sleep = Some(waking());
+        let status = derive(&o, &[], &now);
+        assert_eq!(
+            status.runtime.as_ref().unwrap().phase,
+            aap_api::RuntimePhase::Waking
+        );
+        assert!(
+            types(&status).contains(&("Ready", "False", "Waking")),
+            "{:?}",
+            types(&status)
+        );
+        assert_eq!(status.state, Some(aap_api::ServiceState::Degraded));
+        assert_eq!(
+            status.sleep,
+            Some(waking()),
+            "the record is written as it is"
+        );
+
+        o.wake_timed_out = true;
+        let status = derive(&o, &[], &now);
+        assert!(types(&status).contains(&("Ready", "False", "WakeTimedOut")));
+        assert_eq!(
+            status.runtime.as_ref().unwrap().phase,
+            aap_api::RuntimePhase::Waking
+        );
+    }
+}
+
+#[test]
+fn a_sleeping_record_is_sleeping_only_while_the_workload_is_at_zero() {
+    let now = at("2026-10-05T10:00:30Z");
+    let mut o = observed();
+    o.sleep = Some(asleep());
+    o.runtime = runtime_in(Phase::Suspended);
+    assert_eq!(
+        derive(&o, &[], &now).state,
+        Some(aap_api::ServiceState::Suspended)
+    );
+    // A Ready runtime with a waking record is over: the reconcile removes the record, derive reports Ready.
+    let mut o = observed();
+    o.sleep = None;
+    assert_eq!(derive(&o, &[], &now).sleep, None);
+    assert_eq!(
+        derive(&o, &[], &now).state,
+        Some(aap_api::ServiceState::Ready)
+    );
+}
+
+#[test]
+fn the_sleep_record_round_trips_in_the_status_with_its_camel_case_names() {
+    let mut o = observed();
+    o.sleep = Some(waking());
+    let status = derive(&o, &[], &at("2026-10-05T10:00:30Z"));
+    let json = serde_json::to_value(&status).unwrap();
+    assert_eq!(json["sleep"]["waking"]["cause"], "Request");
+    assert!(json["sleep"]["since"].is_string());
+    let back: aap_api::AgentServiceStatus = serde_json::from_value(json).unwrap();
+    assert_eq!(back, status);
+    // None is no field at all: an awake agent's status is what it always was.
+    o.sleep = None;
+    let json = serde_json::to_value(derive(&o, &[], &at("2026-10-05T10:00:30Z"))).unwrap();
+    assert!(json.get("sleep").is_none());
 }

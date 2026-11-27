@@ -1,6 +1,6 @@
 //! The status of `AgentService` and `AgentConfig`, and the condition types and reasons the controller writes.
 
-use k8s_openapi::apimachinery::pkg::apis::meta::v1::Condition;
+use k8s_openapi::apimachinery::pkg::apis::meta::v1::{Condition, Time};
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
@@ -28,9 +28,62 @@ pub struct AgentServiceStatus {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub endpoints: Option<Endpoints>,
 
+    /// Present only while the agent is asleep or waking (AD-058, P3a-1). The operator writes it (the idle loop only
+    /// proposes; the reconcile is its one writer) and **reads it back after a restart**, so an operator that is
+    /// restarted, or a leader that fails over, does not wake a sleeping agent.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sleep: Option<SleepStatus>,
+
     /// `ConfigResolved`, `StoreReady`, `RuntimeReady`, `Listed` and `Ready`.
     #[serde(default)]
     pub conditions: Vec<Condition>,
+}
+
+/// The annotation that wakes a sleeping agent (AD-058, ANR-Q134). Its value is an RFC 3339 instant, written by
+/// whatever receives a request for the agent. The decision never parses it: **any value that differs from
+/// `status.sleep.wakeAtSeen`** (the value when the agent fell asleep) is a wake request. It is level-triggered, the
+/// operator never removes it, and an awake agent ignores it.
+pub const WAKE_AT_ANNOTATION: &str = "agents.vymalo.com/wake-at";
+
+/// Why an agent is at zero, and, once it is waking, why (AD-058, P3a-1; the field names accepted by the owner,
+/// ANR-Q140, 2026-11-27).
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct SleepStatus {
+    /// When the agent was scaled to zero.
+    pub since: Time,
+    /// When the agent it asked has work due, as the idle loop's confirmed poll said: the operator wakes it
+    /// `scaling.wakeAhead` earlier.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub next_due_at: Option<Time>,
+    /// The value of the `agents.vymalo.com/wake-at` annotation when the agent fell asleep. A value that differs
+    /// from it is a request to wake. At most 64 bytes of the value as it was; a longer one is stored as
+    /// `sha256:<hex>` (71 characters), so an annotation of any size cannot grow the status.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schemars(length(max = 71))]
+    pub wake_at_seen: Option<String>,
+    /// Present from the moment the agent is woken until its runtime is ready.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub waking: Option<WakingStatus>,
+}
+
+/// A wake in progress.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct WakingStatus {
+    /// When the operator lifted the scale to zero.
+    pub since: Time,
+    /// What woke it.
+    pub cause: WakeCause,
+}
+
+/// What woke a sleeping agent.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub enum WakeCause {
+    /// The `agents.vymalo.com/wake-at` annotation changed.
+    Request,
+    /// `nextDueAt` minus `scaling.wakeAhead` came.
+    Schedule,
 }
 
 /// The state of a service. `Suspended` is healthy.
@@ -87,6 +140,8 @@ pub enum RuntimePhase {
     /// Scaled to zero because the agent reported no work (AD-058); a request or a due schedule wakes it.
     /// Distinct from `Suspended`, which is a person's choice.
     Sleeping,
+    /// Woken (AD-058, P3a-1): the scale to zero is lifted and the runtime is not ready yet.
+    Waking,
     /// Failed.
     Failed,
 }
@@ -231,6 +286,10 @@ pub mod reason {
     pub const SUSPENDED: &str = "Suspended";
     /// `RuntimeReady` false: scaled to zero because the agent reported no work (AD-058).
     pub const SLEEPING: &str = "Sleeping";
+    /// `RuntimeReady` false: woken, the runtime is scaling back up (AD-058, P3a-1).
+    pub const WAKING: &str = "Waking";
+    /// `RuntimeReady` false: still waking after `scaling.wakeTimeout`. The operator keeps waking and says so (ANR-Q141).
+    pub const WAKE_TIMED_OUT: &str = "WakeTimedOut";
     /// `RuntimeReady` false: a referenced Secret or key does not exist.
     pub const MISSING_SECRET: &str = "MissingSecret";
     /// `RuntimeReady` false: the agent process refused its configuration (exit 78).

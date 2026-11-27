@@ -20,7 +20,7 @@ Install the operator first: [Install the CRDs and the operator](../deploy/instal
 | `aap_runtime_signals_total` | none | Ids heard from the runtime provider's watch |
 | `aap_services_deleted_total` | none | Agents whose workload and store the finalizer released |
 | `aap_retention_purged_total` | none | Retained databases and volumes the retention sweep deleted |
-| `aap_agent_sleeps_total` | none | Agents scaled to zero because they reported no work |
+| `aap_agent_sleeps_total` | none | Agents scaled to zero because they reported no work. Counted when the record `status.sleep` is written, just before the scale-down (it can undercount by one if the write reaches the server and the pass then times out) |
 
 With the pod-minute meter on ([Turn on the pod-minute meter](../deploy/metering.md)), six more series appear, in the same place:
 

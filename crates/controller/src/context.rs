@@ -125,7 +125,8 @@ impl<R, S> Context<R, S> {
         }
     }
 
-    /// Share the idle loop's state (AD-058): what it put to sleep stays at zero, and its status says `Sleeping`.
+    /// Share the idle loop's proposals (AD-058, P3a-1): its marks are what this reconcile turns into `status.sleep`, and
+    /// the one place it forgets them. Who is asleep is the object's status, not this.
     #[must_use]
     pub fn with_sleepers(mut self, sleepers: Arc<crate::Sleepers>) -> Self {
         self.sleepers = sleepers;

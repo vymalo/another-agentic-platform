@@ -2337,6 +2337,10 @@
             "description": "The runtime as the provider reports it: provider, phase, replicas.",
             "type": "object"
           },
+          "sleep": {
+            "description": "Present only while the agent is asleep or waking: since, nextDueAt, wakeAtSeen, waking{since,cause} (AD-058).",
+            "type": "object"
+          },
           "state": {
             "enum": [
               "Ready",

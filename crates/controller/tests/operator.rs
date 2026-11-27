@@ -155,6 +155,17 @@ async fn start_with_activity(
     ready: impl Fn(&Fake) -> bool,
     activity: Option<aap_ports::memory::MemoryActivity>,
 ) -> Running {
+    start_with_clock(fake, options, ready, activity, None).await
+}
+
+/// As [`start_with_activity`], with the time of every pass taken from `clock` when it is given.
+async fn start_with_clock(
+    fake: Fake,
+    options: Options,
+    ready: impl Fn(&Fake) -> bool,
+    activity: Option<aap_ports::memory::MemoryActivity>,
+    clock: Option<aap_controller::Clock>,
+) -> Running {
     let runtime = Scripted::new();
     let owner: OwnerOf = Arc::new(|_| OwnerHandle::none());
     let mut operator = Operator::new(
@@ -166,6 +177,9 @@ async fn start_with_activity(
     );
     if let Some(source) = activity {
         operator = operator.with_activity(source);
+    }
+    if let Some(clock) = clock {
+        operator = operator.with_clock(clock);
     }
     let directory = operator.directory();
     let readiness = operator.readiness();
@@ -1415,5 +1429,520 @@ async fn an_idle_agent_sleeps_and_a_removed_policy_wakes_it() {
         phase_of(&r, "team", "chat").as_deref() == Some("Ready")
     })
     .await;
+    r.stop().await;
+}
+
+// ---- The wake path (AD-058, P3a-1) ----
+
+/// The options of the sleep cases: far-away timers, so what is asserted arrives by a trigger or not at all, and
+/// an idle loop that looks every 50 ms.
+fn sleepy_options() -> Options {
+    Options {
+        watch_namespaces: Some(vec!["team".to_owned()]),
+        resync: Resync {
+            settled: Duration::from_secs(3600),
+            pending: Duration::from_secs(3600),
+            not_installed: Duration::from_secs(3600),
+        },
+        default_agent_image: Some(DEFAULT_IMAGE.to_owned()),
+        sleep_poll: Duration::from_millis(50),
+        // With the poll, the age a mark may reach before it is ignored: five seconds.
+        pass_timeout: Duration::from_secs(5),
+        ..Options::default()
+    }
+}
+
+fn busy() -> aap_ports::Activity {
+    aap_ports::Activity {
+        busy: 1,
+        next_due_at: None,
+    }
+}
+
+fn chat_id() -> RuntimeId {
+    RuntimeId::new("team", "chat")
+}
+
+/// A clock a test moves: the real time plus an offset, so an idle stretch still takes real time and `set` jumps.
+#[derive(Clone)]
+struct TestClock(Arc<std::sync::atomic::AtomicI64>);
+
+fn real_unix() -> i64 {
+    i64::try_from(
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_secs(),
+    )
+    .unwrap()
+}
+
+impl TestClock {
+    fn now() -> Self {
+        Self(Arc::new(std::sync::atomic::AtomicI64::new(0)))
+    }
+
+    fn set(&self, seconds: i64) {
+        self.0
+            .store(seconds - real_unix(), std::sync::atomic::Ordering::SeqCst);
+    }
+
+    fn get(&self) -> i64 {
+        real_unix() + self.0.load(std::sync::atomic::Ordering::SeqCst)
+    }
+
+    fn clock(&self) -> aap_controller::Clock {
+        let clock = self.clone();
+        Arc::new(move || {
+            k8s_openapi::apimachinery::pkg::apis::meta::v1::Time(
+                k8s_openapi::jiff::Timestamp::from_second(clock.get()).unwrap(),
+            )
+        })
+    }
+}
+
+/// A `chat` service in `team` that sleeps after one second idle (the fake runs no CEL, so a second stands for ten
+/// minutes), with `scaling` extended by `extra`.
+fn sleepy_chat(extra: Value, annotations: Value) -> (Value, Value) {
+    let (mut service, config) = example("chat", "team");
+    service["spec"]["scaling"]["idleTimeout"] = json!("1s");
+    if let Some(extra) = extra.as_object() {
+        for (k, v) in extra {
+            service["spec"]["scaling"][k] = v.clone();
+        }
+    }
+    if !annotations.is_null() {
+        service["metadata"]["annotations"] = annotations;
+    }
+    (service, config)
+}
+
+/// The operator on a fresh fake with the activity `source`, the `service` and its `config` applied and `Ready`.
+async fn running_sleepy(
+    fake: Fake,
+    source: &aap_ports::memory::MemoryActivity,
+    clock: Option<aap_controller::Clock>,
+    service: &Value,
+    config: &Value,
+) -> Running {
+    let r = start_with_clock(
+        fake,
+        sleepy_options(),
+        |f| f.watchers_in(SERVICES, "team") >= 1 && f.watchers_in(CONFIGS, "team") >= 2,
+        Some(source.clone()),
+        clock,
+    )
+    .await;
+    eventually("the caches to sync", || r.readiness.is_ready()).await;
+    r.fake.put(CONFIGS, config.clone());
+    r.fake.put(SERVICES, service.clone());
+    eventually("the service to be Ready", || {
+        r.state("team", "chat").as_deref() == Some("Ready")
+    })
+    .await;
+    r
+}
+
+fn sleep_of(r: &Running) -> Option<Value> {
+    r.fake
+        .get(SERVICES, "team", "chat")?
+        .pointer("/status/sleep")
+        .cloned()
+}
+
+fn ready_reason(r: &Running) -> Option<String> {
+    r.fake
+        .get(SERVICES, "team", "chat")?
+        .pointer("/status/conditions")?
+        .as_array()?
+        .iter()
+        .find(|c| c["type"] == "Ready")?["reason"]
+        .as_str()
+        .map(str::to_owned)
+}
+
+/// Let the idle loop put the (idle) agent to sleep, and wait for the record and the phase.
+async fn until_asleep(r: &Running, source: &aap_ports::memory::MemoryActivity, due: Option<i64>) {
+    source.set(
+        &chat_id(),
+        aap_ports::Activity {
+            busy: 0,
+            next_due_at: due,
+        },
+    );
+    within(Duration::from_secs(15), "the agent to sleep", || {
+        phase_of(r, "team", "chat").as_deref() == Some("Sleeping") && sleep_of(r).is_some()
+    })
+    .await;
+}
+
+fn provisioning() -> RuntimeStatus {
+    RuntimeStatus {
+        phase: Phase::Provisioning,
+        replicas: 0,
+        issues: vec![],
+    }
+}
+
+fn annotate(service: &Value, value: &str) -> Value {
+    let mut service = service.clone();
+    service["metadata"]["annotations"] = json!({ "agents.vymalo.com/wake-at": value });
+    service
+}
+
+#[tokio::test]
+async fn a_wake_at_annotation_wakes_a_sleeping_agent_through_waking_to_ready() {
+    let source = aap_ports::memory::MemoryActivity::new();
+    source.set(&chat_id(), busy());
+    let (service, config) = sleepy_chat(json!({}), Value::Null);
+    let r = running_sleepy(Fake::new(), &source, None, &service, &config).await;
+
+    until_asleep(&r, &source, None).await;
+    let record = sleep_of(&r).unwrap();
+    assert!(record["since"].is_string(), "{record}");
+    assert!(
+        record.get("waking").is_none(),
+        "asleep, not waking: {record}"
+    );
+    assert_eq!(r.state("team", "chat").as_deref(), Some("Suspended"));
+    assert_eq!(
+        r.metrics.get(aap_controller::metric::SLEEPS, &[]),
+        1,
+        "slept once"
+    );
+
+    // Woken while the workload takes its time: Waking, with its cause, and the loop never asks it (a poll would
+    // go through the activator and wake it).
+    r.runtime.script(Some(provisioning()));
+    let asked = source.asked().len();
+    r.fake
+        .put(SERVICES, annotate(&service, "2026-11-27T10:00:00Z"));
+    within(Duration::from_secs(15), "the agent to be waking", || {
+        phase_of(&r, "team", "chat").as_deref() == Some("Waking")
+    })
+    .await;
+    let record = sleep_of(&r).unwrap();
+    assert_eq!(record["waking"]["cause"], "Request", "{record}");
+    assert_eq!(ready_reason(&r).as_deref(), Some("Waking"));
+    assert_eq!(r.state("team", "chat").as_deref(), Some("Degraded"));
+    assert!(
+        !r.runtime.inner.spec(&chat_id()).unwrap().suspend,
+        "the scale to zero is lifted"
+    );
+    tokio::time::sleep(Duration::from_millis(400)).await;
+    assert_eq!(source.asked().len(), asked, "a waking agent is not polled");
+
+    // Ready: the record goes, and the agent is a plain Ready one (busy, so the loop leaves it up).
+    source.set(&chat_id(), busy());
+    r.runtime.script(None);
+    r.runtime.signal(&chat_id());
+    within(Duration::from_secs(15), "the agent to be Ready", || {
+        phase_of(&r, "team", "chat").as_deref() == Some("Ready")
+    })
+    .await;
+    assert!(sleep_of(&r).is_none(), "{:?}", sleep_of(&r));
+    assert_eq!(r.state("team", "chat").as_deref(), Some("Ready"));
+    r.stop().await;
+}
+
+#[tokio::test]
+async fn a_scheduled_wake_fires_at_next_due_at_minus_wake_ahead() {
+    let source = aap_ports::memory::MemoryActivity::new();
+    source.set(&chat_id(), busy());
+    let clock = TestClock::now();
+    let t0 = clock.get();
+    // The default wakeAhead is two minutes.
+    let due = t0 + 3600;
+    let (service, config) = sleepy_chat(json!({}), Value::Null);
+    let r = running_sleepy(Fake::new(), &source, Some(clock.clock()), &service, &config).await;
+    until_asleep(&r, &source, Some(due)).await;
+    let record = sleep_of(&r).unwrap();
+    assert!(
+        record["nextDueAt"].is_string(),
+        "the schedule is kept: {record}"
+    );
+
+    // Three seconds before the moment (the clock is real time plus an offset in whole seconds, so the margin keeps
+    // this assertion off the edge; the exact `>=` is held by `wake.rs`): asleep.
+    clock.set(due - 120 - 3);
+    r.runtime.signal(&chat_id());
+    tokio::time::sleep(Duration::from_millis(500)).await;
+    assert_eq!(phase_of(&r, "team", "chat").as_deref(), Some("Sleeping"));
+    assert!(sleep_of(&r).unwrap().get("waking").is_none());
+
+    // At nextDueAt - wakeAhead exactly: woken, by the schedule.
+    r.runtime.script(Some(provisioning()));
+    clock.set(due - 120);
+    r.runtime.signal(&chat_id());
+    within(Duration::from_secs(15), "the agent to be waking", || {
+        phase_of(&r, "team", "chat").as_deref() == Some("Waking")
+    })
+    .await;
+    assert_eq!(sleep_of(&r).unwrap()["waking"]["cause"], "Schedule");
+    r.stop().await;
+}
+
+#[tokio::test]
+async fn an_operator_restart_keeps_a_sleeping_agent_asleep() {
+    let source = aap_ports::memory::MemoryActivity::new();
+    source.set(&chat_id(), busy());
+    let (service, config) = sleepy_chat(json!({}), Value::Null);
+    let first = running_sleepy(Fake::new(), &source, None, &service, &config).await;
+    until_asleep(&first, &source, None).await;
+    let fake = first.fake.clone();
+    first.stop().await;
+
+    // A new operator with a new runtime and no memory of what the first did.
+    let asked = source.asked().len();
+    let second = start_with_clock(
+        fake,
+        sleepy_options(),
+        |f| f.watchers_in(SERVICES, "team") >= 1 && f.watchers_in(CONFIGS, "team") >= 2,
+        Some(source.clone()),
+        None,
+    )
+    .await;
+    eventually("the caches to sync", || second.readiness.is_ready()).await;
+    eventually("the new runtime to hold the agent at zero", || {
+        second
+            .runtime
+            .inner
+            .spec(&chat_id())
+            .is_some_and(|spec| spec.suspend)
+    })
+    .await;
+    // Many polls of the idle loop go by (it looks every 50 ms): it never asks a sleeping agent.
+    tokio::time::sleep(Duration::from_millis(700)).await;
+    assert_eq!(
+        source.asked().len(),
+        asked,
+        "the idle loop polled a sleeping agent"
+    );
+    assert_eq!(
+        phase_of(&second, "team", "chat").as_deref(),
+        Some("Sleeping")
+    );
+    assert!(sleep_of(&second).is_some());
+    assert!(second.runtime.inner.spec(&chat_id()).unwrap().suspend);
+    second.stop().await;
+}
+
+#[tokio::test]
+async fn a_stale_wake_at_from_before_the_sleep_does_not_wake() {
+    let source = aap_ports::memory::MemoryActivity::new();
+    source.set(&chat_id(), busy());
+    let (service, config) = sleepy_chat(
+        json!({}),
+        json!({ "agents.vymalo.com/wake-at": "2026-11-01T00:00:00Z" }),
+    );
+    let r = running_sleepy(Fake::new(), &source, None, &service, &config).await;
+    until_asleep(&r, &source, None).await;
+    assert_eq!(sleep_of(&r).unwrap()["wakeAtSeen"], "2026-11-01T00:00:00Z");
+
+    // Passes go by: still asleep. An annotation that was there before the sleep is not a request.
+    for _ in 0..3 {
+        r.runtime.signal(&chat_id());
+        tokio::time::sleep(Duration::from_millis(200)).await;
+    }
+    assert_eq!(phase_of(&r, "team", "chat").as_deref(), Some("Sleeping"));
+    assert!(sleep_of(&r).unwrap().get("waking").is_none());
+
+    // The same annotation removed is no request either; a new value is.
+    r.fake.put(SERVICES, sleepy_chat(json!({}), Value::Null).0);
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    assert_eq!(phase_of(&r, "team", "chat").as_deref(), Some("Sleeping"));
+    r.runtime.script(Some(provisioning()));
+    r.fake
+        .put(SERVICES, annotate(&service, "2026-11-27T10:00:00Z"));
+    within(Duration::from_secs(15), "the new value to wake it", || {
+        phase_of(&r, "team", "chat").as_deref() == Some("Waking")
+    })
+    .await;
+    r.stop().await;
+}
+
+#[tokio::test]
+async fn suspend_while_waking_clears_the_record() {
+    let source = aap_ports::memory::MemoryActivity::new();
+    source.set(&chat_id(), busy());
+    let (service, config) = sleepy_chat(json!({}), Value::Null);
+    let r = running_sleepy(Fake::new(), &source, None, &service, &config).await;
+    until_asleep(&r, &source, None).await;
+    r.runtime.script(Some(provisioning()));
+    r.fake
+        .put(SERVICES, annotate(&service, "2026-11-27T10:00:00Z"));
+    within(Duration::from_secs(15), "the agent to be waking", || {
+        phase_of(&r, "team", "chat").as_deref() == Some("Waking")
+    })
+    .await;
+
+    // A person's suspend wins: the record goes and the agent is Suspended, not Sleeping.
+    r.runtime.script(None);
+    let mut suspended = annotate(&service, "2026-11-27T10:00:00Z");
+    suspended["spec"]["suspend"] = json!(true);
+    r.fake.put(SERVICES, suspended);
+    within(Duration::from_secs(15), "the agent to be suspended", || {
+        phase_of(&r, "team", "chat").as_deref() == Some("Suspended")
+    })
+    .await;
+    assert!(sleep_of(&r).is_none(), "{:?}", sleep_of(&r));
+    assert_eq!(r.state("team", "chat").as_deref(), Some("Suspended"));
+    assert_eq!(ready_reason(&r).as_deref(), Some("Suspended"));
+    r.stop().await;
+}
+
+#[tokio::test]
+async fn waking_past_wake_timeout_keeps_waking_and_says_so() {
+    let source = aap_ports::memory::MemoryActivity::new();
+    source.set(&chat_id(), busy());
+    let clock = TestClock::now();
+    let (service, config) = sleepy_chat(json!({ "wakeTimeout": "5s" }), Value::Null);
+    let r = running_sleepy(Fake::new(), &source, Some(clock.clock()), &service, &config).await;
+    until_asleep(&r, &source, None).await;
+    r.runtime.script(Some(provisioning()));
+    r.fake
+        .put(SERVICES, annotate(&service, "2026-11-27T10:00:00Z"));
+    within(Duration::from_secs(15), "the agent to be waking", || {
+        phase_of(&r, "team", "chat").as_deref() == Some("Waking")
+    })
+    .await;
+    assert_eq!(ready_reason(&r).as_deref(), Some("Waking"));
+
+    // Three seconds before the timeout (off the edge, which `wake.rs` holds exactly): not late. Then past it: late,
+    // said, and still waking.
+    clock.set(clock.get() + 2);
+    r.runtime.signal(&chat_id());
+    tokio::time::sleep(Duration::from_millis(400)).await;
+    assert_eq!(ready_reason(&r).as_deref(), Some("Waking"));
+    clock.set(clock.get() + 4);
+    r.runtime.signal(&chat_id());
+    within(Duration::from_secs(15), "the wake to be late", || {
+        ready_reason(&r).as_deref() == Some("WakeTimedOut")
+    })
+    .await;
+    assert_eq!(phase_of(&r, "team", "chat").as_deref(), Some("Waking"));
+    assert!(sleep_of(&r).unwrap().get("waking").is_some());
+    assert!(
+        !r.runtime.inner.spec(&chat_id()).unwrap().suspend,
+        "late is not back to sleep"
+    );
+    within(Duration::from_secs(15), "an Event to say so", || {
+        r.fake
+            .events()
+            .iter()
+            .any(|e| e["reason"] == "WakeTimedOut")
+    })
+    .await;
+
+    // It does get ready in the end.
+    r.runtime.script(None);
+    r.runtime.signal(&chat_id());
+    within(Duration::from_secs(15), "the agent to be Ready", || {
+        phase_of(&r, "team", "chat").as_deref() == Some("Ready")
+    })
+    .await;
+    assert!(sleep_of(&r).is_none());
+    r.stop().await;
+}
+
+/// Block the service by taking its config away, and wait for `Blocked`.
+async fn block(r: &Running, config: &Value) {
+    let _ = config;
+    r.fake.delete(CONFIGS, "team", "chat");
+    within(Duration::from_secs(15), "the service to be blocked", || {
+        r.state("team", "chat").as_deref() == Some("Blocked")
+    })
+    .await;
+}
+
+/// Let the idle loop make its mark while the service is blocked (a second idle on the loop's clock, and margin).
+async fn let_the_loop_mark(source: &aap_ports::memory::MemoryActivity) {
+    source.set(&chat_id(), aap_ports::Activity::IDLE);
+    tokio::time::sleep(Duration::from_millis(2500)).await;
+}
+
+#[tokio::test]
+async fn a_mark_left_by_a_blocked_pass_never_sleeps_a_busy_agent() {
+    let source = aap_ports::memory::MemoryActivity::new();
+    source.set(&chat_id(), busy());
+    let clock = TestClock::now();
+    let (service, config) = sleepy_chat(json!({}), Value::Null);
+    let r = running_sleepy(Fake::new(), &source, Some(clock.clock()), &service, &config).await;
+
+    // Blocked: the pass that the mark asks for cannot consume it, and the old workload goes on serving.
+    block(&r, &config).await;
+    let_the_loop_mark(&source).await;
+    assert!(
+        sleep_of(&r).is_none(),
+        "a blocked service is not put to sleep"
+    );
+
+    // It becomes busy, and a long time passes: the proposal is old.
+    source.set(&chat_id(), busy());
+    clock.set(clock.get() + 60);
+
+    // Unblocked: the old proposal must not put a busy agent to sleep.
+    r.fake.put(CONFIGS, config.clone());
+    eventually("the service to be Ready again", || {
+        r.state("team", "chat").as_deref() == Some("Ready")
+    })
+    .await;
+    tokio::time::sleep(Duration::from_millis(800)).await;
+    assert!(sleep_of(&r).is_none(), "{:?}", sleep_of(&r));
+    assert_eq!(phase_of(&r, "team", "chat").as_deref(), Some("Ready"));
+    assert!(!r.runtime.inner.spec(&chat_id()).unwrap().suspend);
+    assert_eq!(r.metrics.get(aap_controller::metric::SLEEPS, &[]), 0);
+    r.stop().await;
+}
+
+#[tokio::test]
+async fn a_mark_whose_wake_came_before_the_sleep_is_dropped_not_recorded() {
+    let source = aap_ports::memory::MemoryActivity::new();
+    source.set(&chat_id(), busy());
+    let (service, config) = sleepy_chat(json!({}), Value::Null);
+    let r = running_sleepy(Fake::new(), &source, None, &service, &config).await;
+
+    block(&r, &config).await;
+    let_the_loop_mark(&source).await;
+    // A request for the agent arrives after the decision and before the sleep took effect, and the work is back.
+    r.fake
+        .put(SERVICES, annotate(&service, "2026-11-27T10:00:00Z"));
+    source.set(&chat_id(), busy());
+    r.fake.put(CONFIGS, config.clone());
+    eventually("the service to be Ready again", || {
+        r.state("team", "chat").as_deref() == Some("Ready")
+    })
+    .await;
+    tokio::time::sleep(Duration::from_millis(800)).await;
+    // No sleep happened: no record, no count, nothing suspended.
+    assert!(sleep_of(&r).is_none(), "{:?}", sleep_of(&r));
+    assert_eq!(r.metrics.get(aap_controller::metric::SLEEPS, &[]), 0);
+    assert!(!r.runtime.inner.spec(&chat_id()).unwrap().suspend);
+    assert_eq!(phase_of(&r, "team", "chat").as_deref(), Some("Ready"));
+    r.stop().await;
+}
+
+#[tokio::test]
+async fn an_agent_with_three_workers_wakes_to_three_replicas_not_one() {
+    let source = aap_ports::memory::MemoryActivity::new();
+    source.set(&chat_id(), busy());
+    let (mut service, config) = sleepy_chat(json!({ "workers": 3 }), Value::Null);
+    service["spec"]["scaling"]["workers"] = json!(3);
+    let r = running_sleepy(Fake::new(), &source, None, &service, &config).await;
+    assert_eq!(
+        r.runtime.inner.spec(&chat_id()).unwrap().worker_replicas(),
+        3
+    );
+    until_asleep(&r, &source, None).await;
+    r.runtime.script(Some(provisioning()));
+    r.fake
+        .put(SERVICES, annotate(&service, "2026-11-27T10:00:00Z"));
+    within(Duration::from_secs(15), "the agent to be waking", || {
+        phase_of(&r, "team", "chat").as_deref() == Some("Waking")
+    })
+    .await;
+    let spec = r.runtime.inner.spec(&chat_id()).unwrap();
+    assert!(!spec.suspend);
+    assert_eq!(spec.worker_replicas(), 3, "the spec's replicas, not one");
     r.stop().await;
 }

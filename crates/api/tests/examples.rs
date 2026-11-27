@@ -664,8 +664,14 @@ fn pointer_of(path: &str) -> String {
 
 /// Every size bound of the four CRDs, and every bound of the two kinds of the dashboard, must be
 /// in the table: a new one fails here until it has an example.
+///
+/// **A bound of a `status` is exempt** (`status.sleep.wakeAtSeen`, ANR-1067): only the operator writes a status, through
+/// the subresource, and an API server drops the `status` of an object that is created, so no invalid example could
+/// be refused (the `kind` job would find it admitted). The operator's own tests hold such a bound
+/// (`wake::seen_of`).
 fn needs_an_example(site: &Site) -> bool {
-    site.2 != "minLength" || ["ModelEndpoint", "ToolProvider"].contains(&site.0.as_str())
+    !site.1.starts_with("status.")
+        && (site.2 != "minLength" || ["ModelEndpoint", "ToolProvider"].contains(&site.0.as_str()))
 }
 
 #[test]
