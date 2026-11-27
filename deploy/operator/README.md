@@ -608,7 +608,7 @@ and run its conformance suite under: `render-check.sh` reads that file and compa
 
 ## The usage ingest is removed (AD-069)
 
-The chart had a `usageIngest` component (AD-060). It is gone, with `bin/usage-ingest`, its image and its CI jobs: the platform provides OpenTelemetry only, and the OpenTelemetry Collector routes, prices and dedupes. A values file that still sets `usageIngest` is not read by anything (Helm ignores an unknown top-level key), so remove it. The image already pushed to ghcr stays where it is, and `bump-tag.sh` no longer knows the component (`usage-ingest` is refused, exit 2).
+The chart had a `usageIngest` component (AD-060). It is gone, with `bin/usage-ingest`, its image and its CI jobs: the platform provides OpenTelemetry only, and the OpenTelemetry Collector routes, enriches and dedupes. **The chart refuses a values file that still sets `usageIngest`** ("usageIngest was removed (AD-069) ... delete the key"), so an old file fails at render and does not silently deploy nothing. The image already pushed to ghcr stays where it is, and `bump-tag.sh` no longer knows the component (`usage-ingest` is refused, exit 2).
 
 ## Leader election (K7)
 

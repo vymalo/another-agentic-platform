@@ -945,7 +945,7 @@ jobs:
             fi
             sh deploy/operator/bump-tag.sh deploy/operator/values.yaml "$tag" operator
             sh deploy/operator/bump-tag.sh deploy/operator/values.yaml "$tag" api
-              if git diff --quiet -- deploy/operator/values.yaml; then
+            if git diff --quiet -- deploy/operator/values.yaml; then
               echo "both tags are current"
               exit 0
             fi

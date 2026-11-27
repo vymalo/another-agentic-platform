@@ -2189,4 +2189,5 @@ no_usage_ingest_files() { ! grep -q '^usageIngest:' "$here/../values.yaml" && [ 
 render
 check "no usage ingest object in the default render" lacks 'usage-ingest|usageIngest'
 check "the chart has no usageIngest value and no template of it" no_usage_ingest_files
+check "a values file that still sets usageIngest is refused, by name" refused "usageIngest was removed" --set usageIngest.enabled=false
 if [ "$fail" -eq 0 ]; then echo "operator chart checks passed"; else echo "operator chart checks FAILED"; exit 1; fi

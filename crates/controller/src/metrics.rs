@@ -33,12 +33,14 @@ pub mod name {
     /// Pod-minute events the meter handed to its sink (ANR-673, AD-069).
     pub const METER_EVENTS: &str = "aap_meter_events_total";
     /// Pod-minutes the meter made no line for, by `reason` (`no-weight`, `unknown-node-type`, `unknown-account`,
-    /// `no-identity`): a closed set, `Unattributed::as_str`.
+    /// `no-identity`, `no-end`): a closed set, `Unattributed::as_str`.
     pub const METER_UNATTRIBUTED: &str = "aap_meter_unattributed_total";
     /// Pod-minutes older than the 24 h backfill bound, skipped.
     pub const METER_BACKFILL_SKIPPED: &str = "aap_meter_backfill_skipped_total";
     /// Events the sink refused; the minute is held and sent again (unless the event itself was invalid).
     pub const METER_SEND_FAILURES: &str = "aap_meter_send_failures_total";
+    /// Events the meter made that its sink called invalid (a bug: dropped, never retried).
+    pub const METER_INVALID: &str = "aap_meter_invalid_total";
     /// Times the account source could not answer; the pod's minutes are held for the next pass.
     pub const METER_ACCOUNT_FAILURES: &str = "aap_meter_account_failures_total";
 }
@@ -60,6 +62,7 @@ fn help(series: &str) -> &'static str {
         name::METER_UNATTRIBUTED => "Pod-minutes with no line, by reason.",
         name::METER_BACKFILL_SKIPPED => "Pod-minutes older than the backfill bound, skipped.",
         name::METER_SEND_FAILURES => "Pod-minute events the usage sink refused.",
+        name::METER_INVALID => "Pod-minute events the sink called invalid, dropped.",
         name::METER_ACCOUNT_FAILURES => "Account lookups that failed, the minutes held.",
         _ => "",
     }

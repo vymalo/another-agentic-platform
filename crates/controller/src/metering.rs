@@ -44,6 +44,9 @@ pub const AGENT_COMPONENTS: [&str; 3] = ["agent", "worker", "front"];
 /// Why a pod's minutes make no line. A closed set: it is the `reason` label of `aap_meter_unattributed_total`.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Unattributed {
+    /// A pod that finished (Succeeded or Failed) and says when nowhere: neither a container's `finishedAt` nor a
+    /// deletion time. Counted once per pod.
+    NoEnd,
     /// The pod has no size weight (an agent pod has none yet, AD-069; a run pod whose annotation the coder did
     /// not carry over, or that is off the grid).
     NoWeight,
@@ -60,6 +63,7 @@ impl Unattributed {
     /// The label value.
     pub fn as_str(self) -> &'static str {
         match self {
+            Self::NoEnd => "no-end",
             Self::NoWeight => "no-weight",
             Self::UnknownNodeType => "unknown-node-type",
             Self::UnknownAccount => "unknown-account",
@@ -79,10 +83,17 @@ pub struct PodFacts {
     pub annotations: BTreeMap<String, String>,
     /// `status.phase`.
     pub phase: String,
-    /// The earliest `state.running.startedAt` or `state.terminated.startedAt` of the pod's containers, in
-    /// seconds since the Unix epoch.
+    /// The earliest of every container's `state.running.startedAt`, `state.terminated.startedAt` and
+    /// `lastState.terminated.startedAt` (init and sidecar containers included), in seconds since the Unix epoch.
+    /// Times have **second resolution**.
     pub started_at: Option<i64>,
-    /// The latest `state.terminated.finishedAt`, when **every** container has terminated.
+    /// `status.startTime`: the start when no container ever reported one (a crash loop in `waiting`) and the pod
+    /// is Running.
+    pub start_time: Option<i64>,
+    /// Whether the pod reports any container status at all.
+    pub has_container_status: bool,
+    /// The latest `state.terminated.finishedAt`, when **every** container has terminated. The end is
+    /// **exclusive**: a pod that finished at 12:03:00 did not run in the minute 12:03.
     pub finished_at: Option<i64>,
     /// `metadata.deletionTimestamp`.
     pub deleted_at: Option<i64>,
@@ -191,27 +202,60 @@ pub fn node_type(affinity: Option<&Value>, label_key: &str) -> Option<String> {
     }
 }
 
-/// The whole minutes a pod ran in, as the half-open range `first..end` of minutes since the Unix epoch, or
-/// `None` when it never ran (Pending, or no container ever started).
+/// The minutes a pod ran in, and whether that is all of them.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Ran {
+    /// The half-open range of minutes since the Unix epoch that are over (see [`minutes`]).
+    pub range: std::ops::Range<u64>,
+    /// Whether the range reaches the pod's end: the pod is over and so is its last minute. A pod that is still
+    /// running, or whose last minute is not over yet, is not complete.
+    pub complete: bool,
+}
+
+/// A pod that finished and says when nowhere.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct NoEnd;
+
+/// The whole minutes a pod ran in, or `None` when it never ran (Pending, or no start is known), or [`NoEnd`].
 ///
-/// A running pod's range stops at the last minute that is over at `now`; a pod that is over counts through the
-/// minute of its end (a pod that ended on a minute's boundary did not run in the minute after it).
-pub fn minutes(p: &PodFacts, now: i64) -> Option<std::ops::Range<u64>> {
+/// **A minute counts if the pod was Running at any instant in it, and is sent only when it is over**: the newest
+/// minute is the one that ended at or before `now - skew` (`skew` covers the difference between this clock and the
+/// API server's). The end is **exclusive** and times have second resolution: a pod that finished at 12:03:00 did not
+/// run in 12:03. A pod ends at the `finishedAt` of its last container once every container has finished, else at its
+/// deletion time (`deletionTimestamp` is the *end* of the grace period, so it is usually in the future and the pod
+/// is counted only up to `now - skew` until it passes). **Under-billing is the rule, never over-billing.**
+pub fn minutes(p: &PodFacts, now: i64, skew: i64) -> Result<Option<Ran>, NoEnd> {
     if p.phase == "Pending" || p.phase.is_empty() {
-        return None;
+        return Ok(None);
     }
-    let start = p.started_at?;
-    let end: Option<i64> = match p.phase.as_str() {
-        "Succeeded" | "Failed" => Some(p.finished_at.or(p.deleted_at).unwrap_or(start)),
-        _ => p.deleted_at.map(|d| p.finished_at.unwrap_or(d)),
-    }
-    .map(|e| e.max(start));
-    let first = to_minute(start);
-    let end_exclusive = match end {
-        Some(e) => to_minute(e.saturating_sub(1)).max(first) + 1,
-        None => to_minute(now), // the minutes that are over: the current one is not
+    let Some(start) = p.started_at.or(if p.phase == "Running" {
+        p.start_time
+    } else {
+        None
+    }) else {
+        return Ok(None);
     };
-    (first < end_exclusive).then_some(first..end_exclusive)
+    let end = p.finished_at.or(p.deleted_at);
+    if matches!(p.phase.as_str(), "Succeeded" | "Failed") && end.is_none() {
+        return Err(NoEnd);
+    }
+    let end = end.map(|e| e.max(start));
+    let first = to_minute(start);
+    let over = to_minute(now.saturating_sub(skew));
+    let closed_at = match end {
+        Some(e) if e <= now.saturating_sub(skew) => {
+            Some(to_minute(e.saturating_sub(1)).max(first) + 1)
+        }
+        _ => None,
+    };
+    let end_exclusive = closed_at.map_or(over, |c| c.min(over));
+    let complete = closed_at.is_some_and(|c| c <= over);
+    let range = if first < end_exclusive {
+        first..end_exclusive
+    } else {
+        first..first
+    };
+    Ok(Some(Ran { range, complete }))
 }
 
 fn to_minute(secs: i64) -> u64 {
@@ -399,49 +443,117 @@ mod tests {
         assert_eq!(node_type(Some(&json!({})), "node-type"), None);
     }
 
-    #[test]
-    fn pending_never_counts_and_idle_running_does() {
-        let mut p = running(120);
-        p.phase = "Pending".into();
-        assert_eq!(minutes(&p, 1_000), None);
-        let mut never = running(120);
-        never.started_at = None;
-        assert_eq!(minutes(&never, 1_000), None);
-        // Started at 02:00, now 02:00:30: the minute is not over.
-        assert_eq!(minutes(&running(120), 150), None);
-        // Now 03:00: minute 2 is over.
-        assert_eq!(minutes(&running(120), 180), Some(2..3));
-        // Started at 02:59 (second 179), now 03:05: minute 2 was run in, for a second.
-        assert_eq!(minutes(&running(179), 185), Some(2..3));
+    fn mins(p: &PodFacts, now: i64) -> Option<std::ops::Range<u64>> {
+        minutes(p, now, 0).unwrap().map(|r| r.range)
     }
 
     #[test]
-    fn a_finished_pod_ends_at_its_last_finish() {
+    fn pending_never_counts_and_idle_running_does() {
+        // A Pending pod whose container reports a start (a pod that is still being set up) still never counts.
+        let mut p = running(120);
+        p.phase = "Pending".into();
+        assert_eq!(mins(&p, 1_000), None);
+        let mut never = running(120);
+        never.started_at = None;
+        assert_eq!(mins(&never, 1_000), None);
+        // Started at 02:00, now 02:00:30: the minute is not over.
+        assert_eq!(mins(&running(120), 150).map(|r| r.is_empty()), Some(true));
+        // Now 03:00: minute 2 is over.
+        assert_eq!(mins(&running(120), 180), Some(2..3));
+        // Started at 02:59 (second 179), now 03:05: minute 2 was run in, for a second.
+        assert_eq!(mins(&running(179), 185), Some(2..3));
+    }
+
+    #[test]
+    fn a_minute_that_is_not_over_is_never_sent_and_the_skew_holds_the_edge() {
+        let p = running(120);
+        // Now 03:00:03 with a 5 s skew: minute 2 ended 3 s ago on this clock, which may be ahead: not yet.
+        assert_eq!(minutes(&p, 183, 5).unwrap().unwrap().range, 2..2);
+        assert_eq!(minutes(&p, 185, 5).unwrap().unwrap().range, 2..3);
+        // A finished pod waits for its last minute to be over too, and is then complete.
+        let mut done = running(120);
+        done.phase = "Succeeded".into();
+        done.finished_at = Some(130);
+        let early = minutes(&done, 150, 5).unwrap().unwrap();
+        assert_eq!((early.range, early.complete), (2..2, false));
+        let late = minutes(&done, 185, 5).unwrap().unwrap();
+        assert_eq!((late.range, late.complete), (2..3, true));
+    }
+
+    #[test]
+    fn a_terminating_pod_is_not_billed_into_the_minute_its_grace_ends_in() {
+        // Deleted: the grace ends at 04:30 (second 270), in the future. Now is 03:20 (200).
+        let mut p = running(120);
+        p.has_container_status = true;
+        p.deleted_at = Some(270);
+        let r = minutes(&p, 200, 5).unwrap().unwrap();
+        assert_eq!(
+            r.range,
+            2..3,
+            "minute 3 is not over, and the grace end is not the end"
+        );
+        assert!(!r.complete);
+        // Once the grace end is in the past it is the end: minutes 2, 3 and 4 (second 270 is in minute 4).
+        let r = minutes(&p, 400, 5).unwrap().unwrap();
+        assert_eq!(r.range, 2..5);
+        assert!(r.complete);
+        // Every container finished: the last finishedAt wins over the deletion time.
+        p.finished_at = Some(190);
+        let r = minutes(&p, 400, 5).unwrap().unwrap();
+        assert_eq!(r.range, 2..4);
+    }
+
+    #[test]
+    fn a_finished_pod_ends_at_its_last_finish_and_the_end_is_exclusive() {
         let mut p = running(120);
         p.phase = "Succeeded".into();
         p.finished_at = Some(300);
         // 02:00 to 05:00 exactly: minutes 2, 3 and 4; not 5.
-        assert_eq!(minutes(&p, 10_000), Some(2..5));
+        assert_eq!(mins(&p, 10_000), Some(2..5));
         p.finished_at = Some(301);
-        assert_eq!(minutes(&p, 10_000), Some(2..6));
+        assert_eq!(mins(&p, 10_000), Some(2..6));
         // Finished in the minute it started: that minute counts.
         p.finished_at = Some(125);
-        assert_eq!(minutes(&p, 10_000), Some(2..3));
-        // No status of an end: deletion time, then the start.
+        assert_eq!(mins(&p, 10_000), Some(2..3));
+        // No finish: the deletion time.
         p.finished_at = None;
         p.deleted_at = Some(250);
-        assert_eq!(minutes(&p, 10_000), Some(2..5));
-        p.deleted_at = None;
-        assert_eq!(minutes(&p, 10_000), Some(2..3));
+        assert_eq!(mins(&p, 10_000), Some(2..5));
+    }
+
+    #[test]
+    fn a_finished_pod_that_says_when_nowhere_has_no_end() {
+        let mut p = running(120);
+        p.phase = "Failed".into();
+        assert_eq!(minutes(&p, 10_000, 0), Err(NoEnd));
+        p.phase = "Succeeded".into();
+        assert_eq!(minutes(&p, 10_000, 0), Err(NoEnd));
     }
 
     #[test]
     fn a_deleted_pod_with_no_status_ends_at_its_deletion() {
         let mut p = running(120);
         p.deleted_at = Some(250);
-        assert_eq!(minutes(&p, 10_000), Some(2..5));
+        assert_eq!(mins(&p, 10_000), Some(2..5));
         p.finished_at = Some(200);
-        assert_eq!(minutes(&p, 10_000), Some(2..4));
+        assert_eq!(mins(&p, 10_000), Some(2..4));
+    }
+
+    #[test]
+    fn a_crash_loop_in_waiting_starts_at_the_pod_start_time() {
+        let mut p = running(0);
+        p.started_at = None;
+        assert_eq!(
+            mins(&p, 10_000),
+            None,
+            "no container ever started and no start time"
+        );
+        p.start_time = Some(120);
+        assert_eq!(mins(&p, 180), Some(2..3));
+        // A pod that is not Running does not borrow the start time.
+        p.phase = "Succeeded".into();
+        p.finished_at = Some(200);
+        assert_eq!(mins(&p, 10_000), None);
     }
 
     #[test]
@@ -464,6 +576,6 @@ mod tests {
     #[test]
     fn the_same_facts_give_the_same_minutes() {
         let p = running(1_234_567);
-        assert_eq!(minutes(&p, 2_000_000), minutes(&p.clone(), 2_000_000));
+        assert_eq!(minutes(&p, 2_000_000, 5), minutes(&p.clone(), 2_000_000, 5));
     }
 }

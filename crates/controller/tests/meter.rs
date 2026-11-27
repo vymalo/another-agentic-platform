@@ -117,6 +117,7 @@ fn config() -> MeterConfig {
         source: "meter-test".to_owned(),
         node_type_label_key: Some(KEY.to_owned()),
         period: Duration::from_millis(20),
+        ..MeterConfig::default()
     }
 }
 
@@ -252,8 +253,10 @@ async fn a_running_run_pod_gives_a_line_for_each_minute_that_is_over() {
 #[tokio::test]
 async fn a_pending_pod_gives_no_line() {
     let fake = Fake::new();
+    // A Pending pod whose container nevertheless reports a start: only the Pending rule keeps it out.
+    let started = (now() / 60 - 10) * 60;
     let mut pod = finished_run("r1", "uid-1", "run-1", 0, 0);
-    pod["status"] = json!({ "phase": "Pending" });
+    pod["status"] = json!({ "phase": "Pending", "containerStatuses": running_container(started) });
     fake.put_pod(pod);
     let rig = start_rig(&fake).await;
     passes(5).await;
@@ -636,4 +639,223 @@ async fn nothing_is_asked_of_pods_the_meter_does_not_select() {
         "{selectors:?}"
     );
     rig.stop().await;
+}
+
+// ---- the meter driven directly, at times of the case's own choosing
+
+use aap_controller::metering::{self, PodFacts};
+use aap_controller::{Meter, Metrics, erase_accounts, erase_sink};
+
+struct Direct {
+    sink: Arc<MemoryUsageSink>,
+    accounts: Arc<MemoryAccounts>,
+    metrics: Arc<Metrics>,
+    meter: Meter,
+}
+
+fn direct(configure: impl FnOnce(&mut MeterConfig)) -> Direct {
+    let sink = Arc::new(MemoryUsageSink::new());
+    let accounts = Arc::new(MemoryAccounts::new());
+    accounts.set_run("coder", "run-1", "acct-1");
+    let metrics = Arc::new(Metrics::new());
+    let mut cfg = config();
+    cfg.skew_secs = 0;
+    configure(&mut cfg);
+    let meter = Meter::new(
+        erase_sink(Shared(sink.clone())),
+        erase_accounts(Shared(accounts.clone())),
+        cfg,
+        metrics.clone(),
+    );
+    Direct {
+        sink,
+        accounts,
+        metrics,
+        meter,
+    }
+}
+
+/// A run pod's facts, Running since `start`.
+fn facts(uid: &str, start: i64) -> PodFacts {
+    let labels = [
+        ("app.kubernetes.io/managed-by", "adam-coder"),
+        ("app.kubernetes.io/component", "run"),
+        ("app.kubernetes.io/name", "coder-run"),
+        ("adam.vymalo.com/run", "run-1"),
+    ];
+    PodFacts {
+        uid: uid.into(),
+        labels: labels
+            .iter()
+            .map(|(k, v)| ((*k).into(), (*v).into()))
+            .collect(),
+        annotations: [("agents.vymalo.com/size-weight".to_owned(), "1".to_owned())].into(),
+        phase: "Running".into(),
+        started_at: Some(start),
+        has_container_status: true,
+        node_affinity: Some(affinity(&["big"])),
+        ..PodFacts::default()
+    }
+}
+
+fn minutes_of(d: &Direct, uid: &str) -> Vec<u64> {
+    d.sink
+        .taken()
+        .iter()
+        .filter(|e| e.event_id == event_id(uid, e.minute))
+        .map(|e| e.minute)
+        .collect()
+}
+
+#[tokio::test]
+async fn a_pod_that_vanishes_is_closed_through_the_minute_it_was_last_seen_running() {
+    let d = direct(|_| {});
+    let pod = facts("uid-1", 600); // minute 10
+    d.meter.pass(std::slice::from_ref(&pod), 1_000).await; // minute 16: 10..=15 are over
+    assert_eq!(minutes_of(&d, "uid-1"), (10..16).collect::<Vec<_>>());
+    d.meter.pass(&[pod], 1_100).await; // seen Running in minute 18 (second 1100); 16 and 17 are over
+    assert_eq!(minutes_of(&d, "uid-1"), (10..18).collect::<Vec<_>>());
+    // Gone from a complete listing, at 1_300 (minute 21): closed through minute 18, the one it was last seen in.
+    let n = d.meter.close_vanished(&Default::default(), 1_300).await;
+    assert_eq!(n, 1);
+    assert_eq!(minutes_of(&d, "uid-1"), (10..19).collect::<Vec<_>>());
+    // Closed once: nothing more, however often it is asked.
+    assert_eq!(d.meter.close_vanished(&Default::default(), 1_400).await, 0);
+    d.meter.pass(&[], 1_500).await;
+    assert_eq!(minutes_of(&d, "uid-1"), (10..19).collect::<Vec<_>>());
+}
+
+#[tokio::test]
+async fn a_vanished_pod_whose_last_minute_is_not_over_waits_for_it() {
+    let d = direct(|_| {});
+    d.meter.pass(&[facts("uid-1", 600)], 1_100).await; // last seen in minute 18
+    // Vanished at 1_110, still inside minute 18: that minute is not over, so it is not billed yet.
+    assert_eq!(d.meter.close_vanished(&Default::default(), 1_110).await, 0);
+    assert_eq!(minutes_of(&d, "uid-1").last(), Some(&17));
+    // Once it is over, it is.
+    assert_eq!(d.meter.close_vanished(&Default::default(), 1_141).await, 1);
+    assert_eq!(minutes_of(&d, "uid-1").last(), Some(&18));
+}
+
+#[tokio::test]
+async fn a_pod_still_listed_is_not_closed() {
+    let d = direct(|_| {});
+    let pod = facts("uid-1", 600);
+    d.meter.pass(std::slice::from_ref(&pod), 1_100).await;
+    let listed = ["uid-1".to_owned()].into_iter().collect();
+    assert_eq!(d.meter.close_vanished(&listed, 1_300).await, 0);
+    assert_eq!(minutes_of(&d, "uid-1").last(), Some(&17));
+}
+
+#[tokio::test]
+async fn a_terminating_pod_is_not_billed_into_the_minute_its_grace_ends_in() {
+    let d = direct(|c| c.skew_secs = 5);
+    let mut pod = facts("uid-1", 120); // minute 2
+    pod.deleted_at = Some(270); // the grace ends in minute 4
+    d.meter.pass(&[pod.clone()], 200).await; // minute 3 is under way
+    assert_eq!(minutes_of(&d, "uid-1"), vec![2]);
+    d.meter.pass(&[pod.clone()], 250).await; // minute 4 is under way, the grace end is still ahead
+    assert_eq!(minutes_of(&d, "uid-1"), vec![2, 3]);
+    d.meter.pass(&[pod], 400).await; // the grace end has passed: it ended in minute 4
+    assert_eq!(minutes_of(&d, "uid-1"), vec![2, 3, 4]);
+}
+
+#[tokio::test]
+async fn an_account_that_becomes_known_later_gets_the_earlier_minutes() {
+    let d = direct(|_| {});
+    d.accounts.set_broken(false);
+    let mut pod = facts("uid-9", 600);
+    pod.labels
+        .insert("adam.vymalo.com/run".into(), "run-late".into());
+    d.meter.pass(&[pod.clone()], 1_000).await;
+    d.meter.pass(&[pod.clone()], 1_020).await;
+    assert!(d.sink.taken().is_empty());
+    // Counted once, however many passes retried it.
+    assert_eq!(
+        d.metrics.get(
+            aap_controller::metric::METER_UNATTRIBUTED,
+            &[("reason", "unknown-account")]
+        ),
+        7
+    );
+    d.accounts.set_run("coder", "run-late", "acct-late");
+    d.meter.pass(&[pod], 1_040).await;
+    assert_eq!(minutes_of(&d, "uid-9"), (10..17).collect::<Vec<_>>());
+    assert!(d.sink.taken().iter().all(|e| e.subject == "acct-late"));
+}
+
+#[tokio::test]
+async fn an_unknown_account_is_given_up_when_its_minutes_pass_the_backfill_bound() {
+    let d = direct(|_| {});
+    let day = 24 * 60 * 60;
+    let mut pod = facts("uid-9", 600);
+    pod.labels
+        .insert("adam.vymalo.com/run".into(), "run-never".into());
+    d.meter.pass(&[pod.clone()], 1_000).await;
+    d.meter.pass(&[pod], 1_000 + day + 600).await;
+    assert!(d.sink.taken().is_empty());
+    assert!(
+        d.metrics
+            .get(aap_controller::metric::METER_BACKFILL_SKIPPED, &[])
+            >= 6
+    );
+}
+
+#[tokio::test]
+async fn two_pods_with_big_backlogs_both_progress_in_one_pass() {
+    let d = direct(|c| c.max_events_per_pass = 10);
+    let (a, b) = (facts("uid-a", 600), facts("uid-b", 600));
+    let sent = d.meter.pass(&[a, b], 600 + 100 * 60).await; // 100 minutes each
+    assert_eq!(sent, 10);
+    assert_eq!(minutes_of(&d, "uid-a").len(), 5);
+    assert_eq!(minutes_of(&d, "uid-b").len(), 5);
+}
+
+#[tokio::test]
+async fn a_finished_pod_that_says_when_nowhere_gives_no_line_once_counted() {
+    let d = direct(|_| {});
+    let mut pod = facts("uid-1", 600);
+    pod.phase = "Failed".into();
+    d.meter.pass(&[pod.clone()], 5_000).await;
+    d.meter.pass(&[pod], 5_100).await;
+    assert!(d.sink.taken().is_empty());
+    assert_eq!(
+        d.metrics.get(
+            aap_controller::metric::METER_UNATTRIBUTED,
+            &[("reason", "no-end")]
+        ),
+        1
+    );
+}
+
+#[tokio::test]
+async fn an_invalid_event_is_dropped_counted_and_not_retried() {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    let calls = Arc::new(AtomicUsize::new(0));
+    let metrics = Arc::new(Metrics::new());
+    let counter = calls.clone();
+    let sink: aap_controller::SinkFn = Arc::new(move |_e| {
+        counter.fetch_add(1, Ordering::SeqCst);
+        Box::pin(async { Err(UsageError::Invalid { field: "subject" }) })
+    });
+    let accounts = Arc::new(MemoryAccounts::new());
+    accounts.set_run("coder", "run-1", "acct-1");
+    let mut cfg = config();
+    cfg.skew_secs = 0;
+    let meter = Meter::new(sink, erase_accounts(Shared(accounts)), cfg, metrics.clone());
+    let pod = facts("uid-1", 600);
+    meter.pass(std::slice::from_ref(&pod), 1_000).await;
+    assert_eq!(calls.load(Ordering::SeqCst), 6);
+    meter.pass(&[pod], 1_000).await;
+    assert_eq!(
+        calls.load(Ordering::SeqCst),
+        6,
+        "an invalid minute is never retried"
+    );
+    assert_eq!(metrics.get(aap_controller::metric::METER_INVALID, &[]), 6);
+    assert_eq!(
+        metrics.get(aap_controller::metric::METER_SEND_FAILURES, &[]),
+        0
+    );
+    let _ = metering::BACKFILL_MINUTES;
 }

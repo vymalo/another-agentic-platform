@@ -18,6 +18,10 @@ Included from deployment.yaml, which every render has, so they always run.
 {{- end -}}
 {{- /* The operator's traces (slice K5): off by default, and then the block is only checked to be a block. */ -}}
 {{- include "aap.otel.validate" (dict "what" "otel" "block" .Values.otel "policy" .Values.networkPolicy.enabled "dns" true "headersInConfig" true) -}}
+{{- /* AD-069: the usage ingest component is gone; a values file that still has it is an old one. */ -}}
+{{- if hasKey .Values "usageIngest" -}}
+{{- fail "usageIngest was removed (AD-069): the platform provides OpenTelemetry only; delete the key" -}}
+{{- end -}}
 {{- /* K7: the replica count is `replicas`; `replicaCount` is the Helm idiom this chart never had. */ -}}
 {{- if hasKey .Values "replicaCount" -}}
 {{- fail "the operator's replica count is `replicas`, not `replicaCount`" -}}

@@ -2,7 +2,7 @@
 //!
 //! The platform **provides OTel only** (AD-069): the operator's meter turns pods into [`PodMinuteEvent`]s and hands
 //! each to a [`UsageSink`]; an adapter (the OTLP/HTTP JSON logs exporter, a later slice) carries it to the
-//! OpenTelemetry Collector, which routes, prices and dedupes. This crate holds no ledger, no sum and no rate.
+//! OpenTelemetry Collector, which routes, enriches and dedupes. This crate holds no ledger, no sum and no rate.
 //!
 //! **Breaking change: `UsageStore` is gone** (`insert`, `insert_many`, `spend`, `Window`, `SpendQuery`,
 //! `SpendLine` and `Inserted` with it). A sink takes events; it answers nothing about them.
