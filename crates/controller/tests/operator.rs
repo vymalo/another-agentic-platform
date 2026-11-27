@@ -1918,6 +1918,15 @@ async fn a_pass_cut_off_while_writing_the_sleep_record_gives_its_mark_back() {
     })
     .await;
     assert!(sleep_of(&r).is_none(), "nothing was written");
+    // The stall took the sleep record's own write, not an earlier status patch: the body it held carries `sleep`.
+    assert!(
+        r.fake.calls().iter().any(|c| c.method == "PATCH"
+            && c.path.ends_with("/agentservices/chat/status")
+            && c.body
+                .as_ref()
+                .is_some_and(|b| b.pointer("/status/sleep").is_some())),
+        "the cut-off write is the sleep record's"
+    );
 
     // The agent is busy again, and the proposal grows older than the age bound while the retry waits.
     source.set(&chat_id(), busy());
