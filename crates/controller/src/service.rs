@@ -28,6 +28,8 @@ use kube::api::{Patch, PatchParams};
 use kube::runtime::controller::Action;
 use kube::runtime::events::{Event as KubeEvent, EventType};
 use kube::runtime::finalizer::{Event, finalizer};
+
+use crate::sleeper::Claim;
 use kube::{Api, Resource, ResourceExt};
 use serde_json::json;
 
@@ -397,7 +399,7 @@ where
         now,
         mark_max_age: crate::wake::mark_max_age(ctx.options.sleep_poll, ctx.options.pass_timeout),
     };
-    let planned = crate::wake::plan(&input);
+    let mut planned = crate::wake::plan(&input);
     // A mark that made no record (too old, or the sleep would have been born waking) is spent: the loop polls again.
     if crate::wake::stale_or_stillborn(&input, &planned)
         && let Some(mark) = mark
@@ -418,19 +420,35 @@ where
     if policy.is_none() || svc.spec.suspend {
         ctx.sleepers.forget(&id);
     }
+    // Claim first, so a lap of the idle loop that runs while the write is in flight cannot age the mark away and poll
+    // an agent whose record is not visible yet. The claim names the mark the plan used: a mark another lap dropped as
+    // stale in between is `Gone`, and its record is **not** written (ANR-1199). A failed write gives a new claim back
+    // (the mark then ages like any other: a retry long after the poll is not acted on).
+    let claim = if planned.is_some() && previous.sleep.is_none() {
+        mark.map(|m| ctx.sleepers.claim(&id, m.made_at))
+    } else {
+        None
+    };
+    if planned.is_some()
+        && previous.sleep.is_none()
+        && !matches!(claim, Some(Claim::New) | Some(Claim::Already))
+    {
+        tracing::debug!(
+            service = %id.name(),
+            "a mark was dropped before its claim: no record"
+        );
+        planned = None;
+    }
     if let Some(record) = &planned {
         if previous.sleep.is_none() {
-            // Claim first, so a lap of the idle loop that runs while the write is in flight cannot age the mark away
-            // and poll an agent whose record is not visible yet. A failed write gives the claim back (the mark then
-            // ages like any other: a retry long after the poll is not acted on).
-            let first = ctx.sleepers.claim(&id);
+            let claim = claim.expect("a planned sleep was claimed");
             if let Err(e) = persist_sleep(svc, ctx, &previous, record).await {
-                if first {
+                if claim == Claim::New {
                     ctx.sleepers.unclaim(&id);
                 }
                 return Err(e);
             }
-            if first {
+            if claim == Claim::New {
                 ctx.metrics.inc(name::SLEEPS, &[]);
                 tracing::info!(service = %id.name(), "asleep: the record is written, scaling to zero");
             }
