@@ -2,8 +2,8 @@
 //! own, works out with [`crate::metering`] the whole minutes each ran that have not been sent, and hands one
 //! [`PodMinuteEvent`] per minute to a [`UsageSink`], for the account an [`AccountSource`] names.
 //!
-//! **Not wired into `operator run` yet** (a later slice, AD-069): [`Operator::with_meter`](crate::Operator::with_meter) turns it
-//! on, and nothing calls it from the binary.
+//! [`Operator::with_meter`](crate::Operator::with_meter) turns it on, and `operator run` calls it only when the file's
+//! `metering.enabled` is true (ANR-1103; off by default).
 //!
 //! The cursor of each pod (the first minute not sent) and the last facts seen of each pod are **in memory**. A
 //! restart, a new leader and a second replica therefore re-derive the same minutes from the pod's facts, with the
@@ -25,8 +25,8 @@ use std::time::Duration;
 
 use aap_ports::LeaderElection;
 use aap_usage::{
-    AccountSource, AccountUnavailable, PodKind, PodMinuteEvent, PodRef, UsageError, UsageSink,
-    event_id,
+    AccountSource, AccountUnavailable, Fate, Outcome, PodKind, PodMinuteEvent, PodRef, UsageError,
+    UsageSink, event_id,
 };
 use k8s_openapi::api::core::v1::Pod;
 use kube::api::ListParams;
@@ -60,6 +60,9 @@ pub type SinkFn = Arc<
         + Sync,
 >;
 
+/// What a sink says became of the events it took (ANR-1151), behind a pointer; `None`: it cannot say.
+pub type OutcomesFn = Arc<dyn Fn() -> Option<Vec<Outcome>> + Send + Sync>;
+
 /// An [`AccountSource`] behind a pointer.
 pub type AccountFn = Arc<
     dyn Fn(
@@ -77,6 +80,17 @@ pub fn erase_sink<S: UsageSink + 'static>(sink: S) -> SinkFn {
         let sink = sink.clone();
         Box::pin(async move { sink.send(event).await })
     })
+}
+
+/// Erase the type of `sink`, keeping its acknowledgements ([`UsageSink::outcomes`]): what the operator uses.
+pub fn erase_sink_with_outcomes<S: UsageSink + 'static>(sink: S) -> (SinkFn, OutcomesFn) {
+    let sink = Arc::new(sink);
+    let reader = sink.clone();
+    let send: SinkFn = Arc::new(move |event| {
+        let sink = sink.clone();
+        Box::pin(async move { sink.send(event).await })
+    });
+    (send, Arc::new(move || reader.outcomes()))
 }
 
 /// Erase the type of `accounts`.
@@ -151,6 +165,21 @@ struct Inner {
     deadline: Option<tokio::time::Instant>,
     /// The account of a run that is bound (it never changes), by service and run: the broker is asked once per run.
     accounts: HashMap<(String, String), String>,
+    /// Minutes handed to the sink and not yet acknowledged, by event id (ANR-1151). Empty when the sink reports no
+    /// outcomes.
+    pending: HashMap<String, Pending>,
+    /// Set the first time the sink answers `None` to [`UsageSink::outcomes`]: it reports nothing, so nothing is
+    /// tracked from then on (taking an event is the delivery) and `pending` is empty.
+    untracked: bool,
+}
+
+/// A minute the sink took and the collector has not acknowledged.
+#[derive(Clone, Debug)]
+struct Pending {
+    uid: String,
+    minute: u64,
+    /// When it was handed over (seconds since the Unix epoch), so that an acknowledgement that never comes expires.
+    at: i64,
 }
 
 /// How far one pod got in a pass.
@@ -173,9 +202,79 @@ pub struct Meter {
     inner: Mutex<Inner>,
     /// Asked between pods: false stops the pass (this replica lost the lease).
     keep_going: Option<Arc<dyn Fn() -> bool + Send + Sync>>,
+    /// Where the sink says what became of what it took; none: taking an event is delivering it.
+    outcomes: Option<OutcomesFn>,
 }
 
 impl Meter {
+    /// Track the sink's acknowledgements (ANR-1151): which minutes handed over the collector has acknowledged or
+    /// refused. **This observes; it does not hold anything back:** the cursor that decides what is sent still moves
+    /// when the sink takes the event. It is the groundwork of the durable part (ANR-1198), which needs to know what
+    /// is safe to drop. A sink that answers `None` to its outcomes is detected at the first settle and tracking stops.
+    #[must_use]
+    pub fn with_outcomes(mut self, f: OutcomesFn) -> Self {
+        self.outcomes = Some(f);
+        self
+    }
+
+    /// How many minutes of `uid` the sink took and the collector has not yet acknowledged.
+    pub fn unacknowledged(&self, uid: &str) -> usize {
+        self.with(|i| i.pending.values().filter(|p| p.uid == uid).count())
+    }
+
+    /// The first minute of `uid` that is **not known delivered**: the oldest unacknowledged minute, or, when none
+    /// is pending, the cursor of what was handed over. It moves only on the collector's acknowledgement (it is
+    /// **not** the cursor that decides what is sent).
+    pub fn acknowledged_through(&self, uid: &str) -> Option<u64> {
+        self.with(|i| {
+            i.pending
+                .values()
+                .filter(|p| p.uid == uid)
+                .map(|p| p.minute)
+                .min()
+                .or_else(|| i.state.get(uid).and_then(|s| s.cursor))
+        })
+    }
+
+    /// Read what the sink says became of its events at `now`: an acknowledged or refused minute stops being
+    /// pending, and a minute unacknowledged past the backfill bound is forgotten (counted), so a lost
+    /// acknowledgement cannot keep a minute pending for ever.
+    pub fn settle(&self, now: i64) {
+        let Some(read) = self.outcomes.clone() else {
+            return;
+        };
+        let Some(outcomes) = read() else {
+            // The sink reports nothing, and never will: stop tracking, free what was kept.
+            self.with(|i| {
+                i.untracked = true;
+                i.pending.clear();
+            });
+            return;
+        };
+        let (mut delivered, mut refused) = (0u64, 0u64);
+        let mut expired = 0u64;
+        self.with(|i| {
+            for Outcome { event_id, fate } in outcomes {
+                if i.pending.remove(&event_id).is_some() {
+                    match fate {
+                        Fate::Delivered => delivered += 1,
+                        Fate::Refused => refused += 1,
+                    }
+                }
+            }
+            let bound = i64::try_from(metering::BACKFILL_MINUTES * 60).unwrap_or(i64::MAX);
+            let before = i.pending.len();
+            i.pending.retain(|_, p| now.saturating_sub(p.at) <= bound);
+            expired = (before - i.pending.len()) as u64;
+        });
+        self.metrics.add(name::METER_DELIVERED, &[], delivered);
+        self.metrics.add(name::METER_REFUSED, &[], refused);
+        self.metrics.add(name::METER_UNACKNOWLEDGED, &[], expired);
+        if refused > 0 {
+            tracing::warn!(refused, "the collector refused pod-minute events for good");
+        }
+    }
+
     /// Stop a pass between two pods when `f` says false (for example, when this replica no longer leads).
     #[must_use]
     pub fn with_continue(mut self, f: impl Fn() -> bool + Send + Sync + 'static) -> Self {
@@ -212,6 +311,7 @@ impl Meter {
                 ..Inner::default()
             }),
             keep_going: None,
+            outcomes: None,
         }
     }
 
@@ -254,6 +354,7 @@ impl Meter {
     /// pod that has minutes due gets an equal part of what is left (at least one), the pod the pass starts with
     /// rotates, and what a pod that sends nothing leaves is shared again by the others in the same pass.
     pub async fn pass(&self, pods: &[PodFacts], now: i64) -> usize {
+        self.settle(now);
         // Remember what was seen, before anything else: a pod that vanishes is closed from it.
         self.with(|i| {
             for pod in pods {
@@ -326,6 +427,7 @@ impl Meter {
     /// of every scope: each is sent through the minute that contains `min(last finishedAt seen, last time it was
     /// seen Running)`, as soon as that minute is over, and then forgotten. Returns how many events were sent.
     pub async fn close_vanished(&self, listed: &HashSet<String>, now: i64) -> usize {
+        self.settle(now);
         let gone: Vec<(String, Seen)> = self.with(|i| {
             i.seen
                 .iter()
@@ -508,6 +610,19 @@ impl Meter {
                 Ok(()) => {
                     self.metrics.inc(name::METER_EVENTS, &[]);
                     self.update(&pod.uid, |s| s.cursor = Some(minute + 1));
+                    if self.outcomes.is_some() && !self.with(|i| i.untracked) {
+                        let id = event_id(&pod.uid, minute);
+                        self.with(|i| {
+                            i.pending.insert(
+                                id,
+                                Pending {
+                                    uid: pod.uid.clone(),
+                                    minute,
+                                    at: now,
+                                },
+                            );
+                        });
+                    }
                     self.with(|i| i.budget = i.budget.saturating_sub(1));
                     *sent += 1;
                 }
@@ -666,6 +781,8 @@ where
 /// sends nothing.
 pub(crate) async fn run(l: MeterLoop, period: Duration, mut stop: watch::Receiver<bool>) {
     loop {
+        // Acknowledgements keep arriving whoever leads: a follower drains them (nothing is listed or sent).
+        l.meter.settle(unix_now());
         if l.leader.is_leader() {
             observe(&l.meter, &unix_now, async {
                 let mut all = Vec::new();

@@ -4,7 +4,7 @@ The operator can count the minutes its pods run and send one usage line per pod 
 
 The meter is **off by default**. With `metering.enabled: false`, nothing of it is rendered or checked: no key in the operator's file, no volume, no network rule.
 
-> **Do not turn it on in a deployment yet.** The meter moves its cursor when a line is queued, and the queue is in memory. A crash, a restart or a failover loses the lines queued at that moment, and a batch the collector refuses for good is lost. ANR-1151 designs the fix. Until it lands, or the owner accepts that loss in writing, this page is for a test cluster.
+> **Do not turn it on in a deployment yet.** The meter moves its cursor when a line is queued, and the queue is in memory. A crash, a restart or a failover loses the lines queued at that moment, and a batch the collector refuses for good is lost. ANR-1198 builds the fix (ANR-1151 only tracks acknowledgements). Until it lands, or the owner accepts that loss in writing, this page is for a test cluster.
 
 Install the operator first: [Install the CRDs and the operator](install.md). The meter needs run pods: [Turn on run pods](run-pods.md).
 

@@ -360,7 +360,7 @@ activity:
 # orchestrator's broker names for the run (`broker`). It needs run pods with `runPods.nodeType` admitting exactly ONE value (the node type
 # of a run pod is read from its node affinity: the meter reads no Node, so it needs no ClusterRole). Every address is a NetworkPolicy peer
 # the chart requires (`to`), never open egress; `port` is the PODS' port (a NetworkPolicy sees it after the Service). The broker's bearer is
-# a Secret key, mounted as a file and read once at start. DO NOT TURN IT ON before ANR-1151 (durable delivery) lands or the owner accepts,
+# a Secret key, mounted as a file and read once at start. DO NOT TURN IT ON before ANR-1198 (durable delivery) lands or the owner accepts,
 # in writing, that the minutes queued in memory are lost with the process.
 metering:
   enabled: false

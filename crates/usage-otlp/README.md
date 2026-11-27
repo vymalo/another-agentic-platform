@@ -61,10 +61,19 @@ commit: re-vendor it, never edit it) and to the attribute list above.
   `event_id`s, and the collector dedupes them), and any batch dropped on a `400`, `415` or `422`. Making delivery durable is
   a later slice.
 
+## Acknowledgements (ANR-1151)
+
+`UsageSink::outcomes()` drains, once each: a `2xx` says every event of its batch `Delivered` (a `partialSuccess`
+rejection says how many and not which, so they are counted in `refused` and still reported delivered); `400`, `415`,
+`422` and a single event too large say `Refused`. A batch that is being retried says **nothing**, so a collector that is
+down leaves the meter's minutes pending; a batch the shutdown deadline gave up says nothing either. At most 65 536 are held;
+past it the oldest are dropped and counted in `outcomes_dropped` (never, while a meter drains every pass).
+Nothing is persisted: a crash loses the queue (AD-069, amended).
+
 ## Counters (`Stats::snapshot`)
 
 `queued`, `sent`, `dropped_queue_full`, `refused`, `retries`, `unsent_at_shutdown`, `queue_depth` (events taken and not yet
-sent, refused or given up) and `retrying_since_secs`. Counts and seconds only.
+sent, refused or given up), `outcomes_dropped` and `retrying_since_secs`. Counts and seconds only.
 
 ## Never logged
 
