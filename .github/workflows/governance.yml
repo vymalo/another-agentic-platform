@@ -17,6 +17,11 @@ on:
   pull_request:
     types: [opened, edited, synchronize, reopened]
 
+# ANR-1206: opened and edited each start a run; only the newest per pull request matters, so an older one is cancelled.
+concurrency:
+  group: governance-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+
 jobs:
   governance:
     # ADORSYS-GIS/ai-governance @ v1.0.0

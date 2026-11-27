@@ -41,6 +41,8 @@ env:
 
 jobs:
   gvisor-k3d:
+    # ANR-1206: the release pull request only moves version strings and main's own push run already tested this code; skipped here to spare the shared runner queue (a skipped job satisfies a required check).
+    if: ${{ !startsWith(github.head_ref, 'release-please--') }}
     name: gvisor-k3d
     runs-on: ubuntu-latest
     timeout-minutes: 60
