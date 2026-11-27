@@ -69,6 +69,8 @@ async fn a_503_twice_then_200_delivers_every_event_with_the_same_bytes_and_times
         raw.iter().all(|r| *r == raw[0]),
         "the same bytes every time"
     );
+    // The collector keeps the events before its answer reaches the sink, so the counters move a moment later.
+    until("counted as sent", || sink.stats().snapshot().sent >= 5).await;
     let s = sink.stats().snapshot();
     assert!(s.retries >= 2, "{s:?}");
     assert_eq!((s.sent, s.refused, s.queue_depth), (5, 0, 0), "{s:?}");
