@@ -43,6 +43,7 @@ const SENTINEL_TITLE: &str = "title-sentinel-4477";
 const SENTINEL_EVENT: &str = "event-message-sentinel-62d0";
 const SENTINEL_REASON: &str = "ReasonSentinel71aa";
 const SENTINEL_OBJECT: &str = "object-name-sentinel-3b9e";
+const SENTINEL_ACCOUNT: &str = "account-sentinel-d5c2";
 
 #[tokio::test]
 async fn nothing_the_api_logs_holds_a_token_a_body_a_path_or_a_secret_key() {
@@ -83,6 +84,19 @@ async fn nothing_the_api_logs_holds_a_token_a_body_a_path_or_a_secret_key() {
         .token(&admin)
         .create()
         .json(&coder)
+        .send()
+        .await;
+    assert_eq!(r.code(), 201, "{}", r.text());
+    // An account (AD-073) written by a caller that may name it (the administrator holds `platform:agents.own`): the
+    // value is not logged.
+    let mut accounted = coder.clone();
+    accounted["name"] = json!("coder-acct");
+    accounted["account"] = json!(SENTINEL_ACCOUNT);
+    let r = api
+        .put("/v1/agents/coder-acct")
+        .token(&admin)
+        .create()
+        .json(&accounted)
         .send()
         .await;
     assert_eq!(r.code(), 201, "{}", r.text());
@@ -216,6 +230,7 @@ async fn nothing_the_api_logs_holds_a_token_a_body_a_path_or_a_secret_key() {
         ("an event's message", SENTINEL_EVENT),
         ("an event's reason", SENTINEL_REASON),
         ("an event's object name", SENTINEL_OBJECT),
+        ("an agent's account", SENTINEL_ACCOUNT),
     ] {
         assert!(!log.contains(sentinel), "{what} is in the log:\n{log}");
     }

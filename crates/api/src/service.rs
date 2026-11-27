@@ -51,6 +51,15 @@ pub struct AgentServiceSpec {
     #[schemars(length(min = 1, max = 63), regex(pattern = r"^[a-z0-9][a-z0-9_-]*$"))]
     pub owner: Option<String>,
 
+    /// The account this agent's own pods' minutes are for: the person's opaque id from the identity provider (the `sub`,
+    /// trimmed and lower-cased), 1 to 128 bytes of `[A-Za-z0-9._:/-]`; an `@` is never one, so an e-mail is not an account.
+    /// The Platform API writes it only for a caller that holds `platform:agents.own`; write access to the `AgentService`
+    /// itself is the trust boundary. Absent: nobody's, a shared agent.
+    /// Changing it never restarts the agent (it is not in the digest). It is **not** `owner`, the orchestrator's pseudonym.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schemars(length(min = 1, max = 128), regex(pattern = r"^[A-Za-z0-9._:/-]+$"))]
+    pub account: Option<String>,
+
     /// The AgentConfig, in the same namespace, this service runs.
     pub config_ref: NameRef,
 

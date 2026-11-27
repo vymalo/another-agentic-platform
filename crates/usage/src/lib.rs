@@ -245,7 +245,13 @@ pub enum PodRef {
         run: String,
     },
     /// A pod of the agent's own workload.
+    ///
+    /// **Breaking change (ANR-1100, AD-073): `namespace` is new**, so every construction and every pattern that
+    /// names all fields must be updated (a pattern with `..` still compiles).
     Agent {
+        /// The namespace of the `AgentService`: the meter merges every watched namespace, so the name alone is
+        /// ambiguous.
+        namespace: String,
         /// The agent service.
         service: String,
     },
@@ -256,7 +262,12 @@ pub enum PodRef {
 #[error("the account source is unavailable")]
 pub struct AccountUnavailable;
 
-/// Says which account a pod's minutes are for. The broker for a run is `aap-usage-broker`; the source for an agent pod is not built (ANR-1100).
+/// Says which account a pod's minutes are for. The source for a run pod is `aap-usage-broker` (it asks the
+/// orchestrator's broker); the source for an agent pod is `aap-usage-kubernetes` (it reads `AgentService.spec.account`,
+/// AD-073). `operator run` composes the two by pod kind.
+///
+/// **Breaking change (ANR-1100): [`PodRef::Agent`] gained a `namespace`**, which every implementer that matches on it
+/// must now handle.
 pub trait AccountSource: Send + Sync {
     /// The account's opaque id, `None` when the pod belongs to no known account (no line is made, and a metric
     /// counts it), or [`AccountUnavailable`] when the source cannot answer now (the meter holds the minute and

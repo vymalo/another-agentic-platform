@@ -191,7 +191,7 @@ fn agent_pod(
 fn accounts() -> Arc<MemoryAccounts> {
     let accounts = Arc::new(MemoryAccounts::new());
     accounts.set_run("coder", "run-1", "acct-1");
-    accounts.set_agent("coder", "acct-agent");
+    accounts.set_agent(NS, "coder", "acct-agent");
     accounts
 }
 
@@ -1687,8 +1687,8 @@ async fn a_crash_loses_no_minute_of_a_vanished_pod() {
         (10..=16).collect::<Vec<_>>(),
         "every minute from the first one not acknowledged, none lost"
     );
-    // Repeats are only by event id: the same event (a run's account is recorded in the tombstone; an agent pod's is
-    // asked again).
+    // Repeats are only by event id: the same event (a run's account is recorded in the tombstone; an agent pod's is the
+    // last one its source named, or asked again when it named none).
     let before = sink.taken();
     for e in lost.taken() {
         let same = before

@@ -154,6 +154,7 @@ pub fn coder_form(name: &str) -> AgentForm {
         description: Some("Coding task to verified pull request.".to_owned()),
         tags: vec!["coding".to_owned(), "git".to_owned()],
         owner: None,
+        account: None,
         suspend: false,
         model: Some(ModelChoice {
             endpoint: "gateway".to_owned(),
@@ -190,6 +191,7 @@ pub fn folder_form(name: &str) -> AgentForm {
         description: None,
         tags: vec!["chat".to_owned()],
         owner: None,
+        account: None,
         suspend: false,
         model: Some(ModelChoice {
             endpoint: "gateway".to_owned(),
@@ -224,6 +226,7 @@ pub fn a2a_form(name: &str) -> AgentForm {
         description: Some("An image that serves A2A itself.".to_owned()),
         tags: vec!["a2a".to_owned()],
         owner: None,
+        account: None,
         suspend: false,
         model: None,
         tool_servers: BTreeSet::new(),
@@ -634,6 +637,7 @@ pub fn arb_agent_form() -> impl Strategy<Value = AgentForm> {
         (
             prop::collection::btree_set("[a-z][a-z0-9]{0,6}(-[a-z0-9]{1,3}){0,2}", 0..4),
             any::<bool>(),
+            prop::option::of("[a-z0-9._:/-]{1,128}"),
         ),
         (
             ident(),
@@ -653,7 +657,7 @@ pub fn arb_agent_form() -> impl Strategy<Value = AgentForm> {
         .prop_map(
             |(
                 (name, title, description),
-                (tags, suspend),
+                (tags, suspend, account),
                 (
                     endpoint,
                     model,
@@ -676,6 +680,7 @@ pub fn arb_agent_form() -> impl Strategy<Value = AgentForm> {
                     description,
                     tags: tags.into_iter().collect(),
                     owner: None,
+                    account,
                     suspend,
                     model: (!a2a).then_some(ModelChoice {
                         endpoint,

@@ -1104,6 +1104,41 @@ fn an_error_never_quotes_the_address_it_refuses() {
     }
 }
 
+#[test]
+fn an_account_is_an_opaque_id_and_an_error_never_quotes_it() {
+    let accepted = [
+        "a".to_owned(),
+        "sub-123".to_owned(),
+        "kc:user/1.2_3".to_owned(),
+        "a".repeat(128),
+    ];
+    for account in accepted {
+        let mut form = coder_form("agent");
+        form.account = Some(account.clone());
+        assert!(check(&form).is_ok(), "{account} was refused");
+    }
+    let refused = [
+        String::new(),
+        "a".repeat(129),
+        format!("{SENTINEL}@example.invalid"),
+        format!("has space {SENTINEL}"),
+        format!("{SENTINEL}\u{e9}"),
+    ];
+    for account in refused {
+        let mut form = coder_form("agent");
+        form.account = Some(account);
+        let errors = check(&form).unwrap_err();
+        assert_eq!(
+            errors.iter().map(|e| e.field.as_str()).collect::<Vec<_>>(),
+            ["account"]
+        );
+        for e in errors {
+            assert!(!format!("{e} {e:?}").contains(SENTINEL), "{e}");
+        }
+    }
+    assert!(check(&coder_form("agent")).is_ok());
+}
+
 // ----------------------------------------------------------------- the image
 
 fn with_image(

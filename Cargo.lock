@@ -246,6 +246,7 @@ dependencies = [
  "aap-trace-otlp",
  "aap-usage",
  "aap-usage-broker",
+ "aap-usage-kubernetes",
  "aap-usage-otlp",
  "anyhow",
  "axum",
@@ -449,6 +450,19 @@ dependencies = [
  "thiserror 2.0.21",
  "tokio",
  "url",
+]
+
+[[package]]
+name = "aap-usage-kubernetes"
+version = "0.2.0"
+dependencies = [
+ "aap-api",
+ "aap-usage",
+ "http",
+ "kube",
+ "serde_json",
+ "tokio",
+ "tower",
 ]
 
 [[package]]

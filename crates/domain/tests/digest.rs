@@ -107,6 +107,10 @@ fn what_is_only_applied_does_not_roll_the_pods() {
             Box::new(|s, _| set(s, "/spec/registry", json!({"title": "New", "tags": ["x"]}))),
         ),
         (
+            "account",
+            Box::new(|s, _| set(s, "/spec/account", json!("sub-1"))),
+        ),
+        (
             "who may reach it",
             Box::new(|s, _| remove(s, "/spec/access/allowFrom")),
         ),
