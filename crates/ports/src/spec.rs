@@ -359,8 +359,6 @@ impl RuntimeSpec {
         if let Some(cache) = &rp.guard.cache_claim {
             empty("the cache claim", cache)?;
         }
-        empty("the name of the model key's Secret", &rp.guard.secret.name)?;
-        empty("the key of the model key's Secret", &rp.guard.secret.key)?;
         if rp.quota.pods == 0 {
             return bad("run pods: the quota allows no pod".into());
         }
@@ -962,10 +960,11 @@ pub enum Protocol {
     Sctp,
 }
 
-/// What the guard lets a pod made by the run-pods account be: the guard refuses any other. The images,
-/// the claim and the one Secret key are the agent's; the rest of the guard (not privileged, not root, no
-/// host namespace, no `hostPath`, no Secret volume, no token) is the same for every agent and is the
-/// provider's.
+/// What the guard lets a pod made by the run-pods account be: the guard refuses any other. The images and
+/// the claims are the agent's; the rest of the guard (not privileged, not root, no host namespace, no
+/// `hostPath`, **no Secret a container can read** — no Secret volume, no `secretKeyRef`, no `envFrom` — and
+/// no token) is the same for every agent and is the provider's. adam-rs ADR 0038: a run pod holds no model
+/// key either.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct RunPodGuard {
     /// The images a container of a pod may have, spelled as the pod spells them.
@@ -975,6 +974,4 @@ pub struct RunPodGuard {
     /// The package cache's claim (K1, [`VolumeSource::ExistingClaim`]), the second claim a pod may mount. Absent: none.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub cache_claim: Option<String>,
-    /// The one Secret key a pod may reference, as one variable: the model key.
-    pub secret: SecretRef,
 }

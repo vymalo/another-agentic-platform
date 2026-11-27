@@ -41,7 +41,7 @@ registry:
 defaults:
   # The image of an agent that names none (AD-029): the coder image, by tag and digest. Absent: no default, and such a
   # config is `ConfigInvalid`. A new value rolls every agent that names none, and no other.
-  agentImage: ghcr.io/vymalo/another-adam-rs/coder:sha-9a1fd4e@sha256:c3c178b7d73599f40d53f798616e510346abd3300a622b09b2bc233109f12b44
+  agentImage: ghcr.io/vymalo/another-adam-rs/coder:sha-b5d1c7e@sha256:5de41376a08d8452ae0c59314e0e34d35da0aae495cdbc72ad6144a9c4235d45
   # The RuntimeClass of every agent's own pod (K14a, AD-052), the name of an object the administrator made. Empty: none.
   agentRuntimeClass: ""
   # The claims an agent may name as its package cache (K1). Empty: no agent may have one.

@@ -35,8 +35,6 @@ pub mod env {
     pub const MODEL_ECHO_REASONING: &str = "MODEL_ECHO_REASONING";
     /// The model's context window, in tokens: what each usage report says as its window.
     pub const MODEL_CONTEXT_WINDOW: &str = "MODEL_CONTEXT_WINDOW";
-    /// The alias OpenCode uses.
-    pub const OPENCODE_MODEL: &str = "OPENCODE_MODEL";
     /// Runs advanced at once, per process.
     pub const WORKERS: &str = "WORKERS";
     /// Failed checks before the coder stops.
@@ -108,7 +106,6 @@ pub mod env {
         MODEL_EXTRA_BODY,
         MODEL_ECHO_REASONING,
         MODEL_CONTEXT_WINDOW,
-        OPENCODE_MODEL,
         WORKERS,
         MAX_CHECK_CYCLES,
         CHECK_TIMEOUT_SECS,
@@ -298,8 +295,9 @@ pub mod front {
 /// proxy, slice D15c, adam-rs ADR 0042, at `7598255`, *verified 2026-10-27*: `deploy/coder/templates/_runpods.tpl` and
 /// `run-pods-egress-*.yaml`, `bin/adam-egress/README.md`; the git sandbox, slice D15d, adam-rs ADR 0041 open decision 6, at
 /// `581aeed`, *verified 2026-10-27*: `deploy/coder/templates/statefulset.yaml` and `_runpods.tpl`,
-/// `crates/adam-git-sandbox/README.md`). The parity goldens (`tests/golden/coder-run-pods*.json`) hold it equal to what the
-/// chart renders.
+/// `crates/adam-git-sandbox/README.md`; adam-rs ADR 0038 at `b5d1c7e`, *verified 2026-11-27*: a run pod reads no Secret at all
+/// (no `secretKeyRef`, no `MODEL_API_KEY`) and names no pull secret, the wait for a slot is 1020 s and the init container copies
+/// `adam-exec` alone). The parity goldens (`tests/golden/coder-run-pods*.json`) hold it equal to what the chart renders.
 pub mod run_pods {
     /// `local` or `kubernetes`.
     pub const RUN_ENVIRONMENT: &str = "RUN_ENVIRONMENT";
@@ -452,9 +450,6 @@ pub mod run_pods {
         format!("{service}-run")
     }
 
-    /// The model key's variable in the run container (the one Secret reference a run pod may have).
-    pub const MODEL_API_KEY: &str = super::env::MODEL_API_KEY;
-
     /// The init container that copies the coder's tools into the directory the run container mounts.
     pub const TOOLS_CONTAINER: &str = "tools";
     /// The volume of those tools, and where the init container mounts it.
@@ -467,7 +462,7 @@ pub mod run_pods {
     pub const TOOLS_COMMAND: [&str; 3] = [
         "sh",
         "-c",
-        "cp -L /opt/adam/bin/adam-exec /opt/adam/bin/opencode /tools/ && chmod 0755 /tools/adam-exec /tools/opencode",
+        "cp -L /opt/adam/bin/adam-exec /tools/ && chmod 0755 /tools/adam-exec",
     ];
     /// What the run container runs: `tini` reaps what a killed command leaves; the commands are `exec`ed into the
     /// container.

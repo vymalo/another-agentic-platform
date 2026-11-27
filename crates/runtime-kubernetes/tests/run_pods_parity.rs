@@ -885,7 +885,7 @@ fn the_policy_with_the_parameters_is_the_coder_charts(adam: Value, docs: Vec<Val
     let ours = policy["spec"]["validations"].as_array().unwrap();
     let theirs = adam["admissionPolicy"]["validations"].as_array().unwrap();
     // AD-061: the operator chart's policy has one rule more than the coder chart's, the last: every container of a run pod sets a
-    // memory, a CPU and an ephemeral-storage limit. It is asserted as that and held apart; the nine before it are the coder chart's.
+    // memory, a CPU and an ephemeral-storage limit. It is asserted as that and held apart; the ten before it are the coder chart's.
     assert_eq!(
         ours.len(),
         theirs.len() + 1,
@@ -914,6 +914,19 @@ fn the_policy_with_the_parameters_is_the_coder_charts(adam: Value, docs: Vec<Val
             "the rule: {}",
             chart_rule["message"]
         );
+        // adam-rs ADR 0038's rule about pull secrets: the expression is the chart's, and the words say what ours sets. The coder chart's
+        // parenthetical names its own `imagePullSecrets` values (empty by default, and they are the run pods' when set); the operator's
+        // names its template, which carries none, because the chart's `imagePullSecrets` is the operator's and the API's pods' alone.
+        if chart_rule["message"]
+            .as_str()
+            .is_some_and(|m| m.contains("names no pull secret"))
+        {
+            assert_eq!(
+                mine["message"],
+                "a run pod names no pull secret: the operator's template carries none"
+            );
+            continue;
+        }
         assert_eq!(
             message(mine, &params),
             chart_rule["message"].as_str().unwrap()

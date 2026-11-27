@@ -37,7 +37,7 @@
     "namespace": "another-agentic-system",
     "release": "coder",
     "repository": "https://github.com/vymalo/another-adam-rs",
-    "revision": "4bc6742deca699a5e25fb07d892b5ce7d4a42e25",
+    "revision": "b5d1c7eb56e6162348ac94495be1ba400b7a54eb",
     "values": "tools/adam-parity/cases/coder-cache.yaml"
   },
   "workloads": {
@@ -68,10 +68,6 @@
           {
             "literal": "coding-model",
             "name": "MODEL"
-          },
-          {
-            "literal": "coding-model",
-            "name": "OPENCODE_MODEL"
           },
           {
             "literal": "4",

@@ -561,7 +561,6 @@ pub fn sample_spec_with_run_pods(id: &RuntimeId) -> RuntimeSpec {
             images: vec!["registry.invalid/run:1".to_owned()],
             claim: "work-sample-0".to_owned(),
             cache_claim: Some("package-cache".to_owned()),
-            secret: SecretRef::new(format!("{SENTINEL}-key"), "MODEL_API_KEY"),
         },
     });
     spec

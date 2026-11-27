@@ -760,10 +760,13 @@ fn the_policys_parameters_are_what_the_guard_checks() {
         params["claims"], "work-coder-0",
         "no cache: the work claim alone"
     );
-    assert_eq!(params["secretName"], "coder-secrets");
-    assert_eq!(params["secretKey"], "MODEL_API_KEY");
     assert_eq!(params["images"], rp.guard.images.join("\n"));
-    assert_eq!(params.as_object().unwrap().len(), 9, "{params}");
+    assert_eq!(
+        params.as_object().unwrap().len(),
+        7,
+        "and no Secret name or key: a run pod reads no Secret (adam-rs ADR 0038): {params}"
+    );
+    assert!(params.get("secretName").is_none() && params.get("secretKey").is_none());
 }
 
 // ---------------------------------------------------------------- they agree with the workloads

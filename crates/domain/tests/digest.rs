@@ -18,7 +18,7 @@ type Change = Box<dyn Fn(&mut Value, &mut Value)>;
 /// changes, and a change is a rollout of every agent the operator runs, so it is made on purpose:
 /// update these with the change that causes it, and say so in the commit.
 const CODER_DIGEST: &str =
-    "sha256:44cca34ad3aa96dd0b257c7d802d5c6abe4b5885b249608a493510a2a0008ee2";
+    "sha256:8a1a94173833a215f4f98130d623a08eed78ee670724c4d47512071932cb850a";
 
 fn digest_of(name: &str, change: impl FnOnce(&mut Value, &mut Value)) -> String {
     must_resolve(name, change).digest

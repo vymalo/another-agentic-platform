@@ -1361,9 +1361,9 @@ check "run pods on: the PriorityClass has value 0, never preempts and is not the
 run_pods_policy() {
   dhas ValidatingAdmissionPolicy aap-operator-agents-run-pods 'failurePolicy: Fail' 'paramKind:' 'kind: ConfigMap' 'operations: \["CREATE"\]' 'resources: \["pods"\]' \
     'request.userInfo.username == params.data.serviceAccount' \
-    && [ "$(doc ValidatingAdmissionPolicy aap-operator-agents-run-pods | grep -c '^    - expression:')" -eq 10 ]
+    && [ "$(doc ValidatingAdmissionPolicy aap-operator-agents-run-pods | grep -c '^    - expression:')" -eq 11 ]
 }
-check "run pods on: the policy fails closed, takes a ConfigMap of parameters, judges the pods CREATED by the account its parameters name, and has ten rules (the coder chart's nine and AD-061's limits rule)" run_pods_policy
+check "run pods on: the policy fails closed, takes a ConfigMap of parameters, judges the pods CREATED by the account its parameters name, and has eleven rules (the coder chart's ten, ADR 0038's pull-secret rule among them, and AD-061's limits rule)" run_pods_policy
 run_pods_binding() {
   dhas ValidatingAdmissionPolicyBinding aap-operator-agents-run-pods 'policyName: aap-operator-agents-run-pods' 'validationActions: \["Deny"\]' \
     'agents.vymalo.com/run-pods-policy: "true"' 'parameterNotFoundAction: Allow' 'key: kubernetes.io/metadata.name' 'operator: In' '- agents' \
@@ -1384,7 +1384,7 @@ check "run pods on: the policy asks for no Secret and the binding for no namespa
 policy_rules_are_the_scripts() {
   # Every rule the admission test (run-pods-admission.sh) expects a message of is in the policy.
   for frag in 'a run pod carries the labels' 'a run pod has the priority class' 'a run pod uses only the images' 'a run pod mounts only emptyDir volumes and the ' \
-    'a run pod references no Secret but the key' 'a run pod is not privileged' 'allowPrivilegeEscalation: false on every container' 'a run pod does not run as root' \
+    'a run pod references no Secret a container can read' 'a run pod names no pull secret' 'a run pod is not privileged' 'allowPrivilegeEscalation: false on every container' 'a run pod does not run as root' \
     'a run pod uses its own network, PID and IPC namespaces' 'a run pod sets automountServiceAccountToken: false' \
     'a run pod sets limits.memory, limits.cpu and limits.ephemeral-storage on every container'; do
     doc ValidatingAdmissionPolicy aap-operator-agents-run-pods | grep -qF -- "$frag" || { echo "no rule says: $frag" >&2; return 1; }
@@ -1409,16 +1409,16 @@ check "the admission test is a shell script sh can read" sh -n "$here/run-pods-a
 # Off (the goldens, and run pods on with no node type): no key in the settings, no variable, no eleventh rule, no parameter name in any object.
 render -f "$here/runpods.values.yaml"
 check "no node type named: not a trace of nodeType in the settings or the policy" lacks 'nodeType|nodeTypeKey|nodeTypeAdmitted|admittedNodeTypes'
-check "no node type named: the policy keeps its ten rules" run_pods_policy
+check "no node type named: the policy keeps its eleven rules" run_pods_policy
 render -f "$here/runpods.values.yaml" --set runPods.nodeType.labelKey=example.com/node-type --set 'runPods.nodeType.admitted={a,b}'
 nodetype_on() {
   dhas ConfigMap aap-operator '^      nodeType:$' '^        labelKey: example.com/node-type$' '^        - a$' '^        - b$' \
     && dhas ValidatingAdmissionPolicy aap-operator-agents-run-pods 'name: admittedNodeTypes' "params.data.nodeTypeAdmitted.split" \
       "has\\(params.data.nodeTypeKey\\) \\? params.data.nodeTypeKey : 'example.com/node-type'" "\\['a', 'b'\\]" \
       '^    - expression: "!has\(object.spec.nodeName\) && ' "e.operator == 'In'" 'a run pod is pinned to the node types' \
-    && [ "$(doc ValidatingAdmissionPolicy aap-operator-agents-run-pods | grep -c '^    - expression:')" -eq 11 ]
+    && [ "$(doc ValidatingAdmissionPolicy aap-operator-agents-run-pods | grep -c '^    - expression:')" -eq 12 ]
 }
-check "nodeType named: the settings carry it, and the policy has eleven rules, the node-type rule last and reading the parameters' key and values" nodetype_on
+check "nodeType named: the settings carry it, and the policy has twelve rules, the node-type rule last and reading the parameters' key and values" nodetype_on
 nodetype_rule_is_last() {
   last=$(doc ValidatingAdmissionPolicy aap-operator-agents-run-pods | grep '^    - expression:' | tail -n 1)
   printf '%s\n' "$last" | grep -qF 'variables.nodeTypeKey' \
@@ -1491,9 +1491,9 @@ k14a_class_checks() {
       'variables.runtimeClass' \
       'object.spec.runtimeClassName == variables.runtimeClass' \
       'a run pod runs under the RuntimeClass' \
-    && [ "$(doc ValidatingAdmissionPolicy aap-operator-agents-run-pods | grep -c '^    - expression:')" -eq 11 ]
+    && [ "$(doc ValidatingAdmissionPolicy aap-operator-agents-run-pods | grep -c '^    - expression:')" -eq 12 ]
 }
-check "runPods.runtimeClassName: the settings name the class, the policy has eleven rules and requires it" k14a_class_checks
+check "runPods.runtimeClassName: the settings name the class, the policy has twelve rules and requires it" k14a_class_checks
 check "the class is never an object: the chart renders no RuntimeClass, as the administrator makes it" lacks '^kind: RuntimeClass$'
 check "refused: a run class that is not the name of a RuntimeClass" refused "runPods.runtimeClassName must be the name of a RuntimeClass" --set runPods.enabled=true --set 'runPods.runtimeClassName=Not A Class'
 check "refused: an agent class that is not the name of a RuntimeClass" refused "agent.runtimeClassName must be the name of a RuntimeClass" --set 'agent.runtimeClassName=Not A Class'
@@ -1507,7 +1507,7 @@ anr402_class_only() {
       "has\\(params.data.runtimeClassName\\) \\? params.data.runtimeClassName : ''" \
       "variables.runtimeClass == '' \\|\\| \\(has\\(object.spec.runtimeClassName\\)" \
       'its size class sandboxes run pods' \
-    && [ "$(doc ValidatingAdmissionPolicy aap-operator-agents-run-pods | grep -c '^    - expression:')" -eq 11 ]
+    && [ "$(doc ValidatingAdmissionPolicy aap-operator-agents-run-pods | grep -c '^    - expression:')" -eq 12 ]
 }
 check "runPodClasses.<name>.runtimeClassName alone: the settings carry it under the class, the deployment's key is absent, and the policy judges only a pod whose parameters name a class" anr402_class_only
 render -f "$here/runpods.values.yaml" --set runPods.runtimeClassName=gvisor --set runPodClasses.large.runtimeClassName=gvisor-large
@@ -1573,7 +1573,7 @@ check "refused: runPods.enabled that is not a boolean" refused "runPods.enabled 
 check "refused: a container name that is none" refused "runPods.container must be a container name" --set runPods.enabled=true --set runPods.container=Run_Container
 check "refused: a negative idle time" refused "runPods.idleSecs must be a whole number, 0 or more" --set runPods.enabled=true --set runPods.idleSecs=-1
 check "refused: no time to be ready" refused "runPods.readyTimeoutSecs must be a whole number, 1 or more" --set runPods.enabled=true --set runPods.readyTimeoutSecs=0
-check "refused: a variable the operator sets itself (the model key)" refused "runPods.extraEnv.MODEL_API_KEY: the operator sets this variable itself" --set runPods.enabled=true --set runPods.extraEnv.MODEL_API_KEY=x
+check "refused: the model key in a run pod, which holds none (adam-rs ADR 0038)" refused "runPods.extraEnv.MODEL_API_KEY: a run pod holds no model key" --set runPods.enabled=true --set runPods.extraEnv.MODEL_API_KEY=x
 check "refused: a variable the operator sets itself (the build jobs)" refused "runPods.extraEnv.CARGO_BUILD_JOBS: the operator sets this variable itself" --set runPods.enabled=true --set runPods.extraEnv.CARGO_BUILD_JOBS=8
 check "refused: a variable that is a number and not a text" refused "runPods.extraEnv.JOBS must be a text" --set runPods.enabled=true --set runPods.extraEnv.JOBS=2
 check "refused: a CIDR that is none" refused "is not an IPv4 CIDR" --set runPods.enabled=true --set 'runPods.networkPolicy.clusterCIDRs[0]=10.0.0.0/33'
@@ -1678,11 +1678,18 @@ rp_pin() {
   grep -Eq '^ +ref: ghcr\.io/vymalo/another-adam-rs/coder:sha-[0-9a-f]{7}@sha256:[0-9a-f]{64}$' "$fixtures" || return 1
   pin_digest=$(sed -n 's/^ *ref: ghcr\.io\/vymalo\/another-adam-rs\/coder:[^@]*@\(sha256:[0-9a-f]*\)$/\1/p' "$fixtures" | sort -u)
   [ -n "$pin_digest" ] && [ "$(grep -cF "$pin_digest" "$fixtures")" -eq 2 ] || return 1
-  # The digest is in this one file of deploy/ and .github/ (the script reads the pin from it, the model's manifest gets it from the script), and the
-  # coder's image of the kind end-to-end of the coder (S9) and the chart's default agent image are pins of their own.
-  [ "$(grep -rlF "$pin_digest" "$chart/.." "$chart/../../.github" | wc -l)" -eq 1 ]
+  # The digest is in this file of deploy/ and .github/ (the script reads the pin from it, the model's manifest gets it from the script) and in three
+  # others, and no more: the chart's `defaultAgentImage`, which is the same image since ANR-1200 (the default coder is the one this end-to-end
+  # proves), the coder of S9's end-to-end (a test holds it equal to that default) and the README that documents both. The chart's golden renders
+  # carry it because they render that default, so they are left out of the count.
+  found=$(grep -rlF "$pin_digest" "$chart/.." "$chart/../../.github" | grep -v '/tests/golden/')
+  [ "$(printf '%s\n' "$found" | wc -l)" -eq 4 ] || return 1
+  for f in '/values\.yaml$' '/tests/e2e/run-pods\.yaml$' '/tests/e2e/coder\.yaml$' '/README\.md$'; do
+    printf '%s\n' "$found" | grep -Eq "$f" || return 1
+  done
+  grep -Eq "^defaultAgentImage: ghcr\.io/vymalo/another-adam-rs/coder:sha-[0-9a-f]{7}@$pin_digest\$" "$chart/values.yaml"
 }
-check "run pods e2e: the coder is pinned by tag and digest, on two lines of run-pods.yaml that are one pin, and its digest is in no other file of deploy/ or .github/" rp_pin
+check "run pods e2e: the coder is pinned by tag and digest, on two lines of run-pods.yaml that are one pin, and its digest is in no file of deploy/ or .github/ but run-pods.yaml, the chart's defaultAgentImage, S9's coder and the README" rp_pin
 rp_support() {
   support="$here/e2e/run-pods-support.yaml"
   [ "$(grep -c '^          image: __CODER_IMAGE__$' "$support")" -eq 1 ] || return 1

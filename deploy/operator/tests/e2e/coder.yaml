@@ -48,8 +48,9 @@ spec:
     mcpServers: {}
   environment:
     image:
-      # The newest main image of adam-rs at the time (sha-9a1fd4e, read from ghcr.io on 2026-10-05, anonymously): tag and digest.
-      ref: ghcr.io/vymalo/another-adam-rs/coder:sha-9a1fd4e@sha256:c3c178b7d73599f40d53f798616e510346abd3300a622b09b2bc233109f12b44
+      # The coder image of the parity goldens and of the chart's default (sha-b5d1c7e, read from ghcr.io on 2026-11-27, anonymously):
+      # tag and digest. render-check.sh holds it equal to `defaultAgentImage`.
+      ref: ghcr.io/vymalo/another-adam-rs/coder:sha-b5d1c7e@sha256:5de41376a08d8452ae0c59314e0e34d35da0aae495cdbc72ad6144a9c4235d45
     resources: # e2e: a runner, not netcup
       requests:
         cpu: 100m

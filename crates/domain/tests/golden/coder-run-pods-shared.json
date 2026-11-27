@@ -62,7 +62,7 @@
           "message": "a run pod has the priority class coder-run, which the quota is scoped to"
         },
         {
-          "expression": "variables.containers.all(c, c.image in ['ghcr.io/vymalo/another-agentic-images/workspace:1.98.1-e6a528f@sha256:d2aae762ecad2c13bb697332507d236a75d8233d061f38cc97dc9227192b0797', 'ghcr.io/vymalo/another-adam-rs/coder:sha-0391809'])",
+          "expression": "variables.containers.all(c, c.image in ['ghcr.io/vymalo/another-agentic-images/workspace:1.98.1-8c297d3@sha256:b465808bfb8a1baae5e59a429bf292726b021e3b37322f759dbda3ee2c57ed67', 'ghcr.io/vymalo/another-adam-rs/coder:sha-0391809'])",
           "message": "a run pod uses only the images the chart allows"
         },
         {
@@ -70,8 +70,12 @@
           "message": "a run pod mounts only emptyDir volumes and the claim coder-work: no hostPath, no Secret, no other claim"
         },
         {
-          "expression": "variables.containers.all(c, (!has(c.env) || c.env.all(e, !has(e.valueFrom) || !has(e.valueFrom.secretKeyRef) || (e.valueFrom.secretKeyRef.name == 'coder-secrets' && e.valueFrom.secretKeyRef.key == 'MODEL_API_KEY'))) && (!has(c.envFrom) || c.envFrom.all(f, !has(f.secretRef))))",
-          "message": "a run pod references no Secret but the key MODEL_API_KEY of coder-secrets (as one variable): no Secret volume, no envFrom, no other key"
+          "expression": "variables.containers.all(c, (!has(c.env) || c.env.all(e, !has(e.valueFrom) || !has(e.valueFrom.secretKeyRef))) && (!has(c.envFrom) || c.envFrom.all(f, !has(f.secretRef))))",
+          "message": "a run pod references no Secret a container can read: no Secret volume, no secretKeyRef, no envFrom"
+        },
+        {
+          "expression": "!has(object.spec.imagePullSecrets) || size(object.spec.imagePullSecrets) == 0",
+          "message": "a run pod names no pull secret: the chart sets none (values imagePullSecrets is empty)"
         },
         {
           "expression": "variables.containers.all(c, has(c.securityContext) && has(c.securityContext.allowPrivilegeEscalation) && c.securityContext.allowPrivilegeEscalation == false && (!has(c.securityContext.privileged) || c.securityContext.privileged == false))",
@@ -568,18 +572,9 @@
                 {
                   "name": "no_proxy",
                   "value": "localhost,127.0.0.1"
-                },
-                {
-                  "name": "MODEL_API_KEY",
-                  "valueFrom": {
-                    "secretKeyRef": {
-                      "key": "MODEL_API_KEY",
-                      "name": "coder-secrets"
-                    }
-                  }
                 }
               ],
-              "image": "ghcr.io/vymalo/another-agentic-images/workspace:1.98.1-e6a528f@sha256:d2aae762ecad2c13bb697332507d236a75d8233d061f38cc97dc9227192b0797",
+              "image": "ghcr.io/vymalo/another-agentic-images/workspace:1.98.1-8c297d3@sha256:b465808bfb8a1baae5e59a429bf292726b021e3b37322f759dbda3ee2c57ed67",
               "imagePullPolicy": "IfNotPresent",
               "name": "run",
               "resources": {
@@ -619,7 +614,7 @@
               "command": [
                 "sh",
                 "-c",
-                "cp -L /opt/adam/bin/adam-exec /opt/adam/bin/opencode /tools/ && chmod 0755 /tools/adam-exec /tools/opencode"
+                "cp -L /opt/adam/bin/adam-exec /tools/ && chmod 0755 /tools/adam-exec"
               ],
               "image": "ghcr.io/vymalo/another-adam-rs/coder:sha-0391809",
               "imagePullPolicy": "IfNotPresent",
@@ -689,7 +684,7 @@
     "namespace": "another-agentic-system",
     "release": "coder",
     "repository": "https://github.com/vymalo/another-adam-rs",
-    "revision": "4bc6742deca699a5e25fb07d892b5ce7d4a42e25",
+    "revision": "b5d1c7eb56e6162348ac94495be1ba400b7a54eb",
     "values": "tools/adam-parity/cases/coder-run-pods-shared.yaml"
   },
   "workloads": {
@@ -725,10 +720,6 @@
           {
             "literal": "coding-model",
             "name": "MODEL"
-          },
-          {
-            "literal": "coding-model",
-            "name": "OPENCODE_MODEL"
           },
           {
             "literal": "4",
@@ -807,7 +798,7 @@
             "name": "RUN_POD_IDLE_SECS"
           },
           {
-            "literal": "600",
+            "literal": "1020",
             "name": "RUN_POD_WAIT_SECS"
           },
           {

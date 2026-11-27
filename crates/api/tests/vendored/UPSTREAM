@@ -1,11 +1,12 @@
 adam-rs's former copy of the operator's CRDs, vendored read-only for `crd_is_superset_of_adam_rs` (K1).
 
 repository: vymalo/another-adam-rs (on GitHub)
-revision:   4bc6742deca699a5e25fb07d892b5ce7d4a42e25 (4bc6742: the revision of the parity goldens; the file is the same as at bec3e32)
+revision:   4bc6742deca699a5e25fb07d892b5ce7d4a42e25 (4bc6742: the last revision that carried the file; the file is the same as at bec3e32)
 file:       deploy/crds/agents.vymalo.com.yaml
 vendored:   2026-11-14
 
 historical: the file was removed from adam-rs `main` by its pull request 143 (ADR 0046) on 2026-11-14; never re-vendor.
-The pin `4bc6742` stays: it is the revision the test, the parity goldens and this copy agree on.
+The pin `4bc6742` stays: it is the revision this copy is. The parity goldens have been read at later revisions since (b5d1c7e
+now), which no longer have the file, so this copy and the goldens are two pins and the test holds this one alone.
 
 Do not edit it.

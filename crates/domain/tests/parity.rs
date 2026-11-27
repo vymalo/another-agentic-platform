@@ -987,7 +987,7 @@ fn the_goldens_say_where_they_came_from() {
         let g = golden(case);
         let s = &g["source"];
         assert_eq!(s["repository"], "https://github.com/vymalo/another-adam-rs");
-        assert_eq!(s["revision"], "4bc6742deca699a5e25fb07d892b5ce7d4a42e25");
+        assert_eq!(s["revision"], "b5d1c7eb56e6162348ac94495be1ba400b7a54eb");
         assert_eq!(s["chart"], "deploy/coder");
         assert!(
             repo_root().join(s["values"].as_str().unwrap()).is_file(),

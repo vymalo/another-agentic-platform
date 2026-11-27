@@ -263,14 +263,6 @@ fn check_names_the_broken_invariant_of_run_pods() {
             }),
         ),
         (
-            "the name of the model key's Secret is empty",
-            Box::new(|s| s.run_pods.as_mut().unwrap().guard.secret = SecretRef::new("", "k")),
-        ),
-        (
-            "the key of the model key's Secret is empty",
-            Box::new(|s| s.run_pods.as_mut().unwrap().guard.secret = SecretRef::new("n", "")),
-        ),
-        (
             "the guard allows no image",
             Box::new(|s| s.run_pods.as_mut().unwrap().guard.images.clear()),
         ),

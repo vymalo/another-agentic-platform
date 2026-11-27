@@ -102,7 +102,7 @@ fn run_pods_set_the_variables_and_mount_the_template_in_the_workers_pod() {
     assert_eq!(env("RUN_POD_CONTAINER"), lit("run"));
     assert_eq!(env("RUN_POD_READY_TIMEOUT_SECS"), lit("600"));
     assert_eq!(env("RUN_POD_IDLE_SECS"), lit("300"));
-    assert_eq!(env("RUN_POD_WAIT_SECS"), lit("600"));
+    assert_eq!(env("RUN_POD_WAIT_SECS"), lit("1020"));
     assert_eq!(
         env("WORKER_ID"),
         Some(EnvValue::PodName),
@@ -497,15 +497,11 @@ fn the_neutral_spec_holds_what_the_provider_makes() {
         (rp.pods.managed_by.as_str(), rp.pods.run_label.as_str()),
         ("adam-coder", "adam.vymalo.com/run")
     );
-    // The guard: the run image, the coder's own, the claim of the first worker, the model key.
+    // The guard: the run image, the coder's own, the claim of the first worker. A run pod reads no Secret (adam-rs ADR 0038).
     assert_eq!(rp.guard.images.len(), 2);
     assert!(rp.guard.images[0].starts_with("ghcr.io/vymalo/another-agentic-images/workspace:"));
     assert!(rp.guard.images[1].starts_with("ghcr.io/vymalo/another-adam-rs/coder:"));
     assert_eq!(rp.guard.claim, "work-coder-0");
-    assert_eq!(
-        (rp.guard.secret.name.as_str(), rp.guard.secret.key.as_str()),
-        ("coder-secrets", "MODEL_API_KEY")
-    );
     // Deny by default, with the egress proxy as the one way out (D15c).
     let net = &rp.network;
     assert_eq!(net.proxy.deny_cidrs.len(), 5);
@@ -1347,9 +1343,9 @@ fn unknown_keys_of_the_file_are_refused() {
 // ---------------------------------------------------------------- secrets stay references
 
 #[test]
-fn the_template_names_the_model_key_by_reference_and_holds_no_other_secret() {
-    // The one Secret reference a run pod may have, in the template, as the guard allows it: nothing else of any
-    // Secret is in the file, whatever the config holds.
+fn the_template_references_no_secret_at_all() {
+    // adam-rs ADR 0038: a run pod reads no Secret a container can read, so the template carries no `secretKeyRef` and no
+    // `MODEL_API_KEY`, whatever the config holds; the guard refuses any it would name.
     let r = must_resolve_with("coder", &externals(), |s, c| {
         on(s, c);
         set(
@@ -1381,26 +1377,26 @@ fn the_template_names_the_model_key_by_reference_and_holds_no_other_secret() {
             .as_array()
             .unwrap()
             .iter()
-            .filter(|e| e["valueFrom"]["secretKeyRef"].is_object())
+            .filter(|e| e["valueFrom"].is_object())
             .count(),
-        1,
-        "one reference to a Secret in the run container"
+        0,
+        "no variable of the run container comes from anywhere"
     );
     for forbidden in [
+        "SENTINEL-model",
+        "SENTINEL_KEY",
+        "MODEL_API_KEY",
         "SENTINEL-app",
         "SENTINEL_APP",
         "SENTINEL-db",
         "SENTINEL_DB",
         "envFrom",
+        "secretKeyRef",
+        "imagePullSecrets",
         "\"secret\":",
     ] {
         assert!(!text.contains(forbidden), "{forbidden} is in the template");
     }
-    let guard = &r.runtime.run_pods.as_ref().unwrap().guard;
-    assert_eq!(
-        (guard.secret.name.as_str(), guard.secret.key.as_str()),
-        ("SENTINEL-model", "SENTINEL_KEY")
-    );
     // The init container has none.
     assert!(pod["spec"]["initContainers"][0].get("env").is_none());
 }
