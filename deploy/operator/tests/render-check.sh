@@ -2192,7 +2192,7 @@ render
 check "no usage ingest object in the default render" lacks 'usage-ingest|usageIngest'
 check "the chart has no usageIngest value and no template of it" no_usage_ingest_files
 check "a values file that still sets usageIngest is refused, by name" refused "usageIngest was removed" --set usageIngest.enabled=false
-# ---- The Platform API's workload listener (ANR-1011, ADR-0042): off by default and then not a trace; on, each object checked ------
+# ---- The Platform API's workload listener (ANR-1011, AD-068): off by default and then not a trace; on, each object checked ------
 # Mutual TLS for the owner routes. The person's listener keeps its bearer token and its port; the workload listener is a port, a
 # Service and a NetworkPolicy rule of its own, and its files are mounts, never values of the configuration.
 render -f "$here/api.values.yaml"

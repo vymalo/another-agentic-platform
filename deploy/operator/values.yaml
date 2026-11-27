@@ -632,12 +632,12 @@ api:
     to: []
     ports: [4318]
 
-  # The workload listener (ANR-1011, ADR-0042): a second listener of the API, **mutual TLS**, for a service that calls it with a client
+  # The workload listener (ANR-1011, AD-068): a second listener of the API, **mutual TLS**, for a service that calls it with a client
   # certificate and not a token (the orchestrator). OFF by default, and then not a trace of it in any render. The person's listener
   # (`port`) reads a bearer token and never a certificate; this one reads a certificate and never a token; neither falls back to the
   # other. It serves ONLY the owner routes (`/v1/owners/{owner}/agents...`, `platform:agents.own`): every other path is a 404.
   # The workload's identity is its certificate's exact URI SAN (a SPIFFE id) and only `platform:agents.own` is grantable.
-  # Not built: the CRL of ADR-0042 decision 2 (no source to fetch it from has been named): a revoked certificate is refused only when it expires.
+  # Not built: the CRL the workload-certificate decision asks for (no source to fetch it from has been named): a revoked certificate is refused only when it expires.
   workload:
     enabled: false
     # The TLS port of the pod and of the Service `<fullname>-api-workload`. A port of its own: not `port`, `healthPort` or `metrics.port`.

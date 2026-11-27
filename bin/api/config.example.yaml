@@ -28,7 +28,7 @@ cors:
     - https://agents.example.com
     - tauri://localhost
 
-# The workload listener (ANR-1011, ADR-0042): mutual TLS, for a service that calls the API with a certificate and not a token (the
+# The workload listener (ANR-1011, AD-068): mutual TLS, for a service that calls the API with a certificate and not a token (the
 # orchestrator). OFF unless both keys below are present, and then it is a fourth port of its own: the person's listener above reads a
 # bearer token and never a certificate, this one reads a certificate and never a token, and neither falls back to the other. It serves
 # ONLY the owner routes (/v1/owners/{owner}/agents...); every other path is a 404. The three files are mounted by the deployment: the

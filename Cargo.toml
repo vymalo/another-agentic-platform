@@ -77,7 +77,7 @@ proptest = "1"
 # Only `aapctl`'s safe read of its 0600 file: `geteuid` and `O_NOFOLLOW` without `unsafe` (already in the lock file through tempfile).
 rustix = { version = "1", default-features = false, features = ["std", "fs", "process"] }
 reqwest = { version = "0.12", default-features = false, features = ["rustls-tls-native-roots"] }
-# The workload authenticator (ANR-1010, ADR-0042): rustls-webpki is already in the lock through rustls,
+# The workload authenticator (ANR-1010, AD-065): rustls-webpki is already in the lock through rustls,
 # with ring as its provider, so this adds no TLS stack; x509-parser reads the URI SAN, which webpki does not expose.
 rustls-pki-types = "1"
 rustls-webpki = { version = "0.103", default-features = false, features = ["std", "ring"] }
