@@ -760,7 +760,10 @@ check "replicas: a fraction is refused" refused 'replicas must be a whole number
 # `--set-json`, is a float, and only the whole-number check refuses that one. Both must be refused: the second is the
 # shape that would render `replicas: 2.5` and leave the Deployment to the API server.
 check "replicas: a fraction that is a float, as a values file gives it, is refused too" refused 'replicas must be a whole number' --set-json 'replicas=2.5'
-check "leaderElection: a retry of 0 is refused (the loop's retry is at least a second)" refused 'each at least 1' --set replicas=2 --set leaderElection.retrySecs=0
+check "leaderElection: a retry of 0 is refused (the loop's retry is at least a second)" refused 'leaderElection.retrySecs must be a whole number of seconds, at least 1' --set replicas=2 --set leaderElection.retrySecs=0
+check "leaderElection: a fraction is refused (the file's three are u64, so the operator would refuse it at start)" refused 'whole number of seconds' --set replicas=2 --set-json 'leaderElection={"leaseSecs":15.5}'
+render --set replicas=2 --set-json 'leaderElection={"leaseSecs":15.0}'
+check "leaderElection: a whole float renders as the integer the file needs" has 'leaseSecs: 15$'
 check "with the election on, a pass that could outlive the lease margin is refused" refused 'reconcileTimeoutSecs must be below leaseSecs - renewSecs' --set replicas=2 --set tuning.reconcileTimeoutSecs=5
 check "with the election on, the probe's budget must fit the pass" refused 'does not fit the pass' --set replicas=2 \
   --set-json 'toolProbe.to=[{"namespaceSelector":{"matchLabels":{"a":"b"}}}]' \
@@ -840,6 +843,9 @@ check "a registry.publicUrl with credentials is refused" refused 'registry.publi
 check "no API server port is refused" refused 'networkPolicy.apiServer.ports must name at least one port' --set 'networkPolicy.apiServer.ports=null'
 check "a tuning key that is not a setting is refused" refused 'is not a setting' --set tuning.foo=1
 check "a tuning value below 1 is refused" refused 'at least 1' --set tuning.concurrency=0
+check "a tuning value that is not a whole number is refused (the operator's file has u64)" refused 'whole number' --set-json 'tuning={"reconcileTimeoutSecs":10.5}'
+render --set-json 'tuning={"reconcileTimeoutSecs":10.0}'
+check "a tuning value written as a whole float renders as the integer the file needs" has 'timeoutSecs: 10$'
 check "storeCnpg must be a boolean" refused 'storeCnpg must be true or false' --set storeCnpg=yes
 check "a missing service account name is refused when none is created" refused 'serviceAccount.name is required' --set serviceAccount.create=false
 
