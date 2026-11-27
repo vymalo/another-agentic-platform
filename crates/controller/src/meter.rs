@@ -967,7 +967,8 @@ impl Meter {
         }
         let a = match self.attribute(closed, &kind).await {
             Attribution::Line(a) => a,
-            // A refusal (no identity, no weight) and a chain that could not be read: the in-memory close counts it.
+            // A refusal (no identity, no weight) is counted by the in-memory close; a chain that could not be read is
+            // **held**: the pod stays, its cursor is kept, and the chain is read again at the next pass.
             Attribution::Refused(_) | Attribution::Unavailable => return None,
         };
         let subject = match &a.run {
