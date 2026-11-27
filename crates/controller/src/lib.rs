@@ -26,6 +26,8 @@ mod context;
 pub mod derive;
 mod directory;
 mod error;
+mod meter;
+pub mod metering;
 mod metrics;
 mod operator;
 mod options;
@@ -43,6 +45,10 @@ pub use context::{
 };
 pub use directory::ReflectorDirectory;
 pub use error::Error;
+pub use meter::{
+    AccountFn, DEFAULT_PERIOD as METER_PERIOD, DEFAULT_SKEW_SECS, MAX_EVENTS_PER_PASS, Meter,
+    MeterConfig, SinkFn, erase_accounts, erase_sink, facts_of,
+};
 pub use metrics::{Metrics, name as metric};
 pub use operator::{FOLLOWER_RECHECK, Operator, Readiness};
 pub use options::{Options, Probe, RegistryMode, Resync};

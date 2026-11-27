@@ -1,12 +1,18 @@
-//! The usage ingest's port (AD-060): a pod-minute event, taken in **once**, and what the ledger reads back.
+//! The usage port (AD-060, amended by AD-069): a pod-minute event, and the two seams around it.
 //!
-//! The meter reports one [`PodMinuteEvent`] per pod and minute. [`UsageStore::insert`] takes it idempotently on
-//! `(source, id)` and says whether it was new. [`UsageStore::spend`] answers, per account and node type, the
-//! weighted pod-minutes **ingested** in a half-open window `[from, to)`. The store records no amount and
-//! knows no rate: pricing is the reader's.
+//! The platform **provides OTel only** (AD-069): the operator's meter turns pods into [`PodMinuteEvent`]s and hands
+//! each to a [`UsageSink`]; an adapter (the OTLP/HTTP JSON logs exporter, a later slice) carries it to the
+//! OpenTelemetry Collector, which routes, enriches and dedupes. This crate holds no ledger, no sum and no rate.
 //!
-//! With the feature `testkit` this crate also has [`testkit`], the conformance suite every adapter must pass, and
-//! [`MemoryUsageStore`], the fake that passes it.
+//! **Breaking change: `UsageStore` is gone** (`insert`, `insert_many`, `spend`, `Window`, `SpendQuery`,
+//! `SpendLine` and `Inserted` with it). A sink takes events; it answers nothing about them.
+//!
+//! * [`UsageSink::send`] takes one event and **never waits on a network**: the queue is the adapter's.
+//! * [`AccountSource`] says which account a pod's minutes are for. The account is an **opaque id from the
+//!   broker**, never an e-mail: [`PodMinuteEvent::validate`] keeps a closed alphabet that has no `@`.
+//!
+//! With the feature `testkit` this crate also has [`testkit`], the conformance suite of a sink, and the fakes
+//! [`MemoryUsageSink`] and [`MemoryAccounts`].
 
 use std::future::Future;
 
@@ -18,54 +24,100 @@ pub mod testkit;
 #[cfg(feature = "testkit")]
 mod memory;
 #[cfg(feature = "testkit")]
-pub use memory::MemoryUsageStore;
+pub use memory::{MemoryAccounts, MemoryUsageSink};
 
-/// The CloudEvents `type` of a pod-minute event.
+/// The `type` of a pod-minute event, a log attribute of the OTLP record (AD-069).
 pub const EVENT_TYPE: &str = "com.vymalo.agents.pod-minute.v1";
+
+/// The weights an event may carry, in quarter-units: 1 is 0.25 of a unit (1 vCPU or 2 GiB), 32 is 8. It is
+/// `aap_domain::SizeWeight::GRID` (AD-066); the controller's tests hold the two equal.
+pub const WEIGHT_GRID: [u32; 6] = [1, 2, 4, 8, 16, 32];
 
 const MAX_TEXT: usize = 128;
 
-/// One pod, one minute of it. Fields are what the contract (`docs/api/usage-ingest-v1.md`) calls them.
+/// What a pod was.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum PodKind {
+    /// A run pod, made by a coder for one run: it carries a run id.
+    Run,
+    /// A pod of an agent's own workload: it carries no run.
+    Agent,
+}
+
+impl PodKind {
+    /// The wire value of `podKind`.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Run => "run",
+            Self::Agent => "agent",
+        }
+    }
+}
+
+/// One pod, one minute of it. The names of the fields in the messages are the attributes' (AD-069).
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct PodMinuteEvent {
-    /// The meter instance that reported it (CloudEvents `source`).
+    /// The meter instance that reports it: a deployment constant (`source`).
     pub source: String,
-    /// [`event_id`] of the pod's uid and the minute (CloudEvents `id`); with `source`, the idempotency key.
-    pub id: String,
-    /// The account the minute is for (CloudEvents `subject`).
+    /// [`event_id`] of the pod's uid and the minute (`event_id`); the key the collector dedupes on.
+    pub event_id: String,
+    /// The minute, in whole minutes since the Unix epoch. The event's time is the **end** of it
+    /// ([`end_unix_nanos`](Self::end_unix_nanos)), so a restart and a second replica give the same one.
+    pub minute: u64,
+    /// The account the minute is for (`subject`): an opaque id from the broker.
     pub subject: String,
-    /// Weighted units of this minute (`data.weight`), at least 1.
-    pub weight: u32,
-    /// The node type the pod ran on (`data.nodeType`).
+    /// Weighted units of this minute, in quarter-units (`weightQuarters`): one of [`WEIGHT_GRID`].
+    pub weight_quarters: u32,
+    /// The node type the pod ran on (`nodeType`).
     pub node_type: String,
-    /// What the pod was (`data.podKind`), for example `agent` or `run`.
-    pub pod_kind: String,
-    /// The agent service it belongs to (`data.agentService`).
+    /// What the pod was (`podKind`).
+    pub pod_kind: PodKind,
+    /// The agent service it belongs to (`agentService`).
     pub agent_service: String,
-    /// The run it served, when it served one (`data.run`).
+    /// The run it served (`run`): present for a run pod and for no other.
     pub run: Option<String>,
 }
 
 impl PodMinuteEvent {
-    /// Checks every field against the contract: a closed alphabet (`[A-Za-z0-9._:/-]`), at most 128 bytes, no
-    /// empty text and a weight of at least 1, so free text and personal data cannot pass.
+    /// The end of the minute, in nanoseconds since the Unix epoch (`timeUnixNano` and `observedTimeUnixNano`).
+    pub fn end_unix_nanos(&self) -> u64 {
+        self.minute
+            .saturating_add(1)
+            .saturating_mul(60)
+            .saturating_mul(1_000_000_000)
+    }
+
+    /// Checks every field: a closed alphabet (`[A-Za-z0-9._:/-]`, so an `@` is refused), at most 128 bytes, no
+    /// empty text, an `event_id` that is 64 lower-case hex digits, a weight on the grid, and a run that is
+    /// present exactly when the pod was a run pod. The error names the field, never its value.
     pub fn validate(&self) -> Result<(), UsageError> {
-        let texts: [(&'static str, &str); 6] = [
+        let texts: [(&'static str, &str); 5] = [
             ("source", &self.source),
-            ("id", &self.id),
             ("subject", &self.subject),
             ("nodeType", &self.node_type),
-            ("podKind", &self.pod_kind),
             ("agentService", &self.agent_service),
+            ("eventId", &self.event_id),
         ];
         for (field, value) in texts {
             check_text(field, value)?;
         }
-        if let Some(run) = &self.run {
-            check_text("run", run)?;
+        let hex = self.event_id.len() == 64
+            && self
+                .event_id
+                .bytes()
+                .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b));
+        if !hex {
+            return Err(UsageError::Invalid { field: "eventId" });
         }
-        if self.weight == 0 {
-            return Err(UsageError::Invalid { field: "weight" });
+        if !WEIGHT_GRID.contains(&self.weight_quarters) {
+            return Err(UsageError::Invalid {
+                field: "weightQuarters",
+            });
+        }
+        match (&self.run, self.pod_kind) {
+            (Some(run), PodKind::Run) => check_text("run", run)?,
+            (None, PodKind::Agent) => {}
+            _ => return Err(UsageError::Invalid { field: "run" }),
         }
         Ok(())
     }
@@ -98,88 +150,58 @@ pub fn event_id(pod_uid: &str, minute: u64) -> String {
         .collect()
 }
 
-/// Whether [`UsageStore::insert`] stored the event or had it already.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum Inserted {
-    /// First time `(source, id)` was seen: it counts.
-    New,
-    /// Seen before: nothing changed, the first copy stands.
-    Duplicate,
-}
-
-/// A half-open window of **ingestion** time in seconds since the Unix epoch: `from <= ingested_at < to`.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub struct Window {
-    /// First second inside the window.
-    pub from: u64,
-    /// First second after the window.
-    pub to: u64,
-}
-
-/// What a reader asks of [`UsageStore::spend`].
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct SpendQuery {
-    /// The ingestion window.
-    pub window: Window,
-    /// Only this account, or every account.
-    pub account: Option<String>,
-}
-
-/// Weighted pod-minutes of one account on one node type.
-#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
-pub struct SpendLine {
-    /// The account.
-    pub account: String,
-    /// The node type.
-    pub node_type: String,
-    /// The sum of the events' weights.
-    pub weighted_minutes: u64,
-}
-
-/// Why a store call failed.
+/// Why a call failed.
 #[derive(Debug, thiserror::Error, PartialEq, Eq)]
 pub enum UsageError {
     /// The event breaks the contract; the field is named, its value never.
     #[error("the event's `{field}` is not valid")]
     Invalid {
-        /// The contract's name of the field.
+        /// The name of the field, as the attribute is called.
         field: &'static str,
     },
-    /// The window is empty or reversed.
-    #[error("the window is empty")]
-    EmptyWindow,
-    /// The sum does not fit; a reader must narrow the window.
-    #[error("the sum overflows")]
-    Overflow,
-    /// The store could not answer.
-    #[error("the store is unavailable")]
+    /// The sink could not take the event now (its queue is full, or it is closed). The caller keeps the minute
+    /// and sends it again.
+    #[error("the sink is unavailable")]
     Unavailable,
 }
 
-/// The store behind the ingest. An adapter is a separate crate; none appears in a signature here.
-pub trait UsageStore: Send + Sync {
-    /// Takes the event once. `ingested_at` is the second the ingest received it; a duplicate keeps the first
-    /// copy and its time. An invalid event is [`UsageError::Invalid`] and stores nothing.
-    fn insert(
-        &self,
-        event: PodMinuteEvent,
-        ingested_at: u64,
-    ) -> impl Future<Output = Result<Inserted, UsageError>> + Send;
+/// Where the meter puts what it measured. An adapter is a separate crate; none appears in a signature here.
+pub trait UsageSink: Send + Sync {
+    /// Takes the event. An invalid event is [`UsageError::Invalid`] and nothing is taken. The same event twice is
+    /// two calls that both succeed: the sink does not dedupe, the collector does on `event_id`. It **never
+    /// waits on a network**: an adapter queues, and answers [`UsageError::Unavailable`] when it cannot.
+    fn send(&self, event: PodMinuteEvent) -> impl Future<Output = Result<(), UsageError>> + Send;
+}
 
-    /// Takes a batch at one `ingested_at`, in one round trip where the store can. The answer has one entry per
-    /// event, in order: the first copy of a `(source, id)` is `New` (also against an earlier call), a copy of it
-    /// later in the batch is `Duplicate`. An invalid event is [`UsageError::Invalid`] and the whole batch stores
-    /// nothing. An empty batch answers an empty list.
-    fn insert_many(
-        &self,
-        events: Vec<PodMinuteEvent>,
-        ingested_at: u64,
-    ) -> impl Future<Output = Result<Vec<Inserted>, UsageError>> + Send;
+/// The pod an account is asked for. A run pod is known by its run id, an agent pod by its agent service.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum PodRef {
+    /// A run pod: the agent service that made it and the run.
+    Run {
+        /// The agent service.
+        service: String,
+        /// The run id (the label the coder puts on the pod).
+        run: String,
+    },
+    /// A pod of the agent's own workload.
+    Agent {
+        /// The agent service.
+        service: String,
+    },
+}
 
-    /// Weighted minutes per account and node type ingested in the window, sorted by account then node type,
-    /// with no line of zero. An empty or reversed window is [`UsageError::EmptyWindow`].
-    fn spend(
+/// Why an account could not be told now.
+#[derive(Debug, thiserror::Error, PartialEq, Eq)]
+#[error("the account source is unavailable")]
+pub struct AccountUnavailable;
+
+/// Says which account a pod's minutes are for. The real sources (the broker for a run, another for an agent) are later slices.
+pub trait AccountSource: Send + Sync {
+    /// The account's opaque id, `None` when the pod belongs to no known account (no line is made, and a metric
+    /// counts it), or [`AccountUnavailable`] when the source cannot answer now (the meter holds the minute and
+    /// asks again).
+    fn account(
         &self,
-        query: SpendQuery,
-    ) -> impl Future<Output = Result<Vec<SpendLine>, UsageError>> + Send;
+        pod: &PodRef,
+    ) -> impl Future<Output = Result<Option<String>, AccountUnavailable>> + Send;
 }

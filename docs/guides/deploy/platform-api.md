@@ -178,7 +178,7 @@ helm upgrade --install aap-operator deploy/operator --namespace aap-system -f va
 
 ## What the chart and the binary refuse
 
-Each row was run, with the values above and one change. Every chart refusal prints `templates/usage-ingest.yaml:1:4` as its location. Ignore it: the checks live in `_validate.tpl`, which that template includes, and the message after it is the one that matters.
+Each row was run, with the values above and one change. Every chart refusal prints `templates/servicemonitor.yaml:1:4` as its location. Ignore it: the checks live in `_validate.tpl`, which that template includes, and the message after it is the one that matters.
 
 | Change | Who refuses | Message |
 |---|---|---|

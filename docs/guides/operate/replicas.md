@@ -151,7 +151,7 @@ Each row was run with `helm template`, with `replicas: 2` and one change:
 | `tuning.reconcileTimeoutSecs: 6` | 1 | `tuning.reconcileTimeoutSecs must be below leaseSecs - renewSecs while replicas > 1: the margin between the renew deadline and the earliest takeover, or a pass could write after losing the lease` |
 | `replicas: 0` | 1 | `replicas must be a whole number of at least 1, got 0` |
 
-Every refusal prints `templates/usage-ingest.yaml:1:4` as its location. Ignore it. The control is the values block above, which renders and passes kubeconform. With one replica, the `leaderElection` keys are not read: `retrySecs: 99` at one replica renders, exit 0.
+Every refusal prints `templates/servicemonitor.yaml:1:4` as its location. Ignore it. The control is the values block above, which renders and passes kubeconform. With one replica, the `leaderElection` keys are not read: `retrySecs: 99` at one replica renders, exit 0.
 
 ## What proves it
 

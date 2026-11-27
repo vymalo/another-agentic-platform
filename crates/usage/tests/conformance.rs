@@ -1,226 +1,164 @@
 #![allow(clippy::unwrap_used, clippy::expect_used)]
-//! The fake passes the kit, and the kit fails a store that breaks each rule.
+//! The fake passes the kit, and the kit fails a sink that breaks each rule.
 
 use std::sync::Mutex;
 
-use aap_usage::testkit::{self, event};
-use aap_usage::{
-    Inserted, MemoryUsageStore, PodMinuteEvent, SpendLine, SpendQuery, UsageError, UsageStore,
-    event_id,
-};
+use aap_usage::testkit::{self, Observed, event};
+use aap_usage::{AccountSource, PodRef};
+use aap_usage::{MemoryAccounts, MemoryUsageSink, PodMinuteEvent, UsageError, UsageSink};
 
 #[tokio::test]
 async fn the_fake_passes_every_rule() {
-    testkit::run(MemoryUsageStore::new).await.unwrap();
+    testkit::run(MemoryUsageSink::new).await.unwrap();
 }
 
 /// Each variant breaks one rule of the kit.
 #[derive(Clone, Copy)]
 enum Fault {
-    AlwaysNew,
-    LastCopyStands,
-    IdAloneIsTheKey,
-    NoSumming,
-    WindowClosedAtTheEnd,
-    IgnoresAccount,
     AcceptsInvalid,
-    EmptyWindowIsEmpty,
-    BatchAllNew,
-    BatchKeepsTheValidPart,
+    NamesTheWrongField,
+    DropsEverything,
+    RefusesTheRepeat,
+    Reverses,
 }
 
 struct Broken {
-    inner: MemoryUsageStore,
+    taken: Mutex<Vec<PodMinuteEvent>>,
     fault: Fault,
-    log: Mutex<Vec<(PodMinuteEvent, u64)>>,
 }
 
 impl Broken {
     fn new(fault: Fault) -> Self {
         Self {
-            inner: MemoryUsageStore::new(),
+            taken: Mutex::new(Vec::new()),
             fault,
-            log: Mutex::new(Vec::new()),
         }
     }
 }
 
-impl UsageStore for Broken {
-    async fn insert(&self, mut e: PodMinuteEvent, at: u64) -> Result<Inserted, UsageError> {
+impl UsageSink for Broken {
+    async fn send(&self, e: PodMinuteEvent) -> Result<(), UsageError> {
+        let mut taken = self.taken.lock().unwrap();
         match self.fault {
-            Fault::AlwaysNew => {
-                self.inner.insert(e, at).await?;
-                Ok(Inserted::New)
-            }
-            Fault::LastCopyStands => {
-                // Stores the later copy under a key of its own, so it counts again at its own time.
-                let first = self.inner.insert(e.clone(), at).await?;
-                if first == Inserted::Duplicate {
-                    e.source = format!("{}-late", e.source);
-                    self.inner.insert(e, at).await?;
-                }
-                Ok(first)
-            }
-            Fault::IdAloneIsTheKey => {
-                e.source = "same".into();
-                self.inner.insert(e, at).await
-            }
             Fault::AcceptsInvalid => {
-                if e.validate().is_err() {
-                    return Ok(Inserted::New);
+                taken.push(e);
+                Ok(())
+            }
+            Fault::NamesTheWrongField => {
+                e.validate()
+                    .map_err(|_| UsageError::Invalid { field: "source" })?;
+                taken.push(e);
+                Ok(())
+            }
+            Fault::DropsEverything => {
+                e.validate()?;
+                Ok(())
+            }
+            Fault::RefusesTheRepeat => {
+                e.validate()?;
+                if taken.iter().any(|t| t.event_id == e.event_id) {
+                    return Err(UsageError::Unavailable);
                 }
-                self.inner.insert(e, at).await
+                taken.push(e);
+                Ok(())
             }
-            _ => self.inner.insert(e, at).await,
-        }
-    }
-
-    async fn insert_many(
-        &self,
-        events: Vec<PodMinuteEvent>,
-        at: u64,
-    ) -> Result<Vec<Inserted>, UsageError> {
-        match self.fault {
-            Fault::BatchAllNew => {
-                let n = events.len();
-                self.inner.insert_many(events, at).await?;
-                Ok(vec![Inserted::New; n])
+            Fault::Reverses => {
+                e.validate()?;
+                // Newest minute first (a stable sort: events of one minute keep their order).
+                taken.push(e);
+                taken.sort_by(|a, b| b.minute.cmp(&a.minute));
+                Ok(())
             }
-            Fault::BatchKeepsTheValidPart => {
-                let mut out = Vec::new();
-                for e in events {
-                    out.push(self.inner.insert(e, at).await?);
-                }
-                Ok(out)
-            }
-            _ => self.inner.insert_many(events, at).await,
-        }
-    }
-
-    async fn spend(&self, mut q: SpendQuery) -> Result<Vec<SpendLine>, UsageError> {
-        let _ = &self.log;
-        match self.fault {
-            Fault::NoSumming => {
-                let mut lines = self.inner.spend(q).await?;
-                for l in &mut lines {
-                    l.weighted_minutes = l.weighted_minutes.min(1);
-                }
-                Ok(lines)
-            }
-            Fault::WindowClosedAtTheEnd => {
-                q.window.to += 1;
-                self.inner.spend(q).await
-            }
-            Fault::IgnoresAccount => {
-                q.account = None;
-                self.inner.spend(q).await
-            }
-            Fault::EmptyWindowIsEmpty => {
-                if q.window.from >= q.window.to {
-                    return Ok(Vec::new());
-                }
-                self.inner.spend(q).await
-            }
-            _ => self.inner.spend(q).await,
         }
     }
 }
 
-async fn named<F, Fut>(fault: Fault, check: F, rule: &str)
-where
-    F: Fn(Broken) -> Fut,
-    Fut: std::future::Future<Output = Result<(), String>>,
-{
-    let msg = check(Broken::new(fault))
+impl Observed for Broken {
+    fn taken(&self) -> Vec<PodMinuteEvent> {
+        self.taken.lock().unwrap().clone()
+    }
+}
+
+async fn names(fault: Fault, rule: &str) {
+    let msg = testkit::run(|| Broken::new(fault))
         .await
-        .expect_err("the rule must fail a store with this fault");
+        .expect_err("the kit must fail a sink with this fault");
     assert!(msg.starts_with(rule), "wanted `{rule}`, got `{msg}`");
 }
 
 #[tokio::test]
-async fn each_rule_is_broken_once_and_named() {
-    named(
-        Fault::AlwaysNew,
-        |s| async move { testkit::check_idempotent(&s).await },
-        "idempotent",
-    )
-    .await;
-    named(
-        Fault::LastCopyStands,
-        |s| async move { testkit::check_first_copy_stands(&s).await },
-        "first copy",
-    )
-    .await;
-    named(
-        Fault::IdAloneIsTheKey,
-        |s| async move { testkit::check_source_scopes_id(&s).await },
-        "source",
-    )
-    .await;
-    named(
-        Fault::NoSumming,
-        |s| async move { testkit::check_sums_and_order(&s).await },
-        "sums",
-    )
-    .await;
-    named(
-        Fault::WindowClosedAtTheEnd,
-        |s| async move { testkit::check_window_half_open(&s).await },
-        "window",
-    )
-    .await;
-    named(
-        Fault::IgnoresAccount,
-        |s| async move { testkit::check_account_filter(&s).await },
-        "filter",
-    )
-    .await;
-    named(
-        Fault::AcceptsInvalid,
-        |s| async move { testkit::check_invalid_refused(&s).await },
-        "invalid",
-    )
-    .await;
-    named(
-        Fault::EmptyWindowIsEmpty,
-        |s| async move { testkit::check_empty_window(&s).await },
-        "empty window",
-    )
-    .await;
-    for fault in [Fault::BatchAllNew, Fault::BatchKeepsTheValidPart] {
-        named(
-            fault,
-            |s| async move { testkit::check_batch(&s).await },
-            "batch",
-        )
-        .await;
-    }
+async fn a_sink_that_takes_an_invalid_event_fails_the_kit() {
+    names(Fault::AcceptsInvalid, "refuses-invalid").await;
 }
 
 #[tokio::test]
-async fn the_whole_suite_fails_every_broken_store() {
-    for fault in [
-        Fault::AlwaysNew,
-        Fault::LastCopyStands,
-        Fault::IdAloneIsTheKey,
-        Fault::NoSumming,
-        Fault::WindowClosedAtTheEnd,
-        Fault::IgnoresAccount,
-        Fault::AcceptsInvalid,
-        Fault::EmptyWindowIsEmpty,
-        Fault::BatchAllNew,
-        Fault::BatchKeepsTheValidPart,
-    ] {
-        assert!(testkit::run(|| Broken::new(fault)).await.is_err());
-    }
+async fn a_sink_that_names_the_wrong_field_fails_the_kit() {
+    names(Fault::NamesTheWrongField, "refuses-invalid").await;
+}
+
+#[tokio::test]
+async fn a_sink_that_takes_nothing_fails_the_kit() {
+    names(Fault::DropsEverything, "accepts-valid").await;
+}
+
+#[tokio::test]
+async fn a_sink_that_refuses_a_repeat_fails_the_kit() {
+    names(Fault::RefusesTheRepeat, "same-twice").await;
+}
+
+#[tokio::test]
+async fn a_sink_that_reorders_fails_the_kit() {
+    names(Fault::Reverses, "order").await;
 }
 
 #[test]
-fn the_event_id_is_stable_and_separates_pod_and_minute() {
-    assert_eq!(event_id("pod", 1), event_id("pod", 1));
-    assert_ne!(event_id("pod", 1), event_id("pod", 2));
-    // The separator keeps ("a1", 2) apart from ("a", 12).
-    assert_ne!(event_id("a1", 2), event_id("a", 12));
-    assert_eq!(event_id("pod", 1).len(), 64);
-    assert_eq!(event("m", "pod", 1).id, event_id("pod", 1));
+fn an_email_is_not_an_account() {
+    let mut e = event("m1", "p", 1);
+    e.subject = "someone@example.com".into();
+    assert_eq!(e.validate(), Err(UsageError::Invalid { field: "subject" }));
+    e.subject = "acct:7f3a-opaque/01".into();
+    assert_eq!(e.validate(), Ok(()));
+}
+
+#[test]
+fn the_time_is_the_end_of_the_minute() {
+    let e = event("m1", "p", 3);
+    assert_eq!(e.end_unix_nanos(), 4 * 60 * 1_000_000_000);
+}
+
+#[tokio::test]
+async fn a_down_sink_is_unavailable_and_takes_nothing() {
+    let s = MemoryUsageSink::new();
+    s.set_down(true);
+    assert_eq!(
+        s.send(event("m", "p", 1)).await,
+        Err(UsageError::Unavailable)
+    );
+    assert!(s.taken().is_empty());
+}
+
+#[tokio::test]
+async fn the_account_fake_answers_by_run_and_by_service() {
+    let a = MemoryAccounts::new();
+    a.set_run("coder", "r1", "acct-1");
+    a.set_agent("coder", "acct-2");
+    let run = PodRef::Run {
+        service: "coder".into(),
+        run: "r1".into(),
+    };
+    let agent = PodRef::Agent {
+        service: "coder".into(),
+    };
+    assert_eq!(a.account(&run).await.unwrap().as_deref(), Some("acct-1"));
+    assert_eq!(a.account(&agent).await.unwrap().as_deref(), Some("acct-2"));
+    assert_eq!(
+        a.account(&PodRef::Agent {
+            service: "other".into()
+        })
+        .await
+        .unwrap(),
+        None
+    );
+    a.set_broken(true);
+    assert!(a.account(&run).await.is_err());
 }

@@ -16,6 +16,7 @@ aap-domain.workspace = true
 aap-ports.workspace = true
 aap-tool-probe.workspace = true
 aap-trace.workspace = true
+aap-usage.workspace = true
 futures.workspace = true
 k8s-openapi.workspace = true
 # `unstable-runtime` is for `Controller::reconcile_on`: it is how the ids of `RuntimeProvider::watch()` reach the
@@ -30,6 +31,7 @@ tracing.workspace = true
 [dev-dependencies]
 aap-trace-otlp = { workspace = true, features = ["testkit"] }
 aap-trace = { workspace = true, features = ["testkit"] }
+aap-usage = { workspace = true, features = ["testkit"] }
 aap-tool-probe = { workspace = true, features = ["testkit"] }
 aap-ports = { workspace = true, features = ["testkit"] }
 bytes = "1"

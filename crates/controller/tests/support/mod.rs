@@ -74,6 +74,9 @@ struct State {
     stalls: Vec<Stall>,
     /// Requests of a path that fails, with the code they are answered.
     failures: Vec<Failing>,
+    /// The core `Pod`s (ANR-673), by `<namespace>/<name>`: only listed, never watched, and never written by the
+    /// controller.
+    pods: BTreeMap<String, Value>,
 }
 
 /// A path that fails, as a `Role` that does not allow a namespace, or a kind the API server refuses there.
@@ -132,6 +135,7 @@ impl Fake {
                 absent: BTreeSet::new(),
                 stalls: Vec::new(),
                 failures: Vec::new(),
+                pods: BTreeMap::new(),
             })),
             changes: broadcast::channel(1024).0,
         }
@@ -214,6 +218,19 @@ impl Fake {
         let out = object.clone();
         drop(s);
         self.announce("MODIFIED", plural, &out);
+    }
+
+    /// Create or replace a core `Pod` (the meter lists them, by label selector, in a namespace or in all).
+    pub fn put_pod(&self, pod: Value) {
+        let ns = pod["metadata"]["namespace"].as_str().unwrap_or("default");
+        let name = pod["metadata"]["name"].as_str().unwrap_or_default();
+        let key = format!("{ns}/{name}");
+        lock(&self.state).pods.insert(key, pod);
+    }
+
+    /// Remove a core `Pod`, as its deletion completing does.
+    pub fn remove_pod(&self, ns: &str, name: &str) {
+        lock(&self.state).pods.remove(&format!("{ns}/{name}"));
     }
 
     pub fn get(&self, plural: &str, ns: &str, name: &str) -> Option<Value> {
@@ -373,6 +390,50 @@ impl Fake {
                 s.events.push(body.clone());
             }
             return respond(201, call.body.as_ref().unwrap_or(&json!({})));
+        }
+
+        // `/api/v1/[namespaces/<ns>/]pods`: a list, filtered by `labelSelector` (equality terms only).
+        if call.method == "GET"
+            && let Some(rest) = call.path.strip_prefix("/api/v1/")
+        {
+            let in_ns = match rest.split('/').collect::<Vec<_>>().as_slice() {
+                ["pods"] => Some(None),
+                ["namespaces", ns, "pods"] => Some(Some((*ns).to_owned())),
+                _ => None,
+            };
+            let Some(in_ns) = in_ns else {
+                return failure(404, "not a path of the fake");
+            };
+            let wanted: Vec<(String, String)> = call
+                .query
+                .split('&')
+                .find_map(|p| p.strip_prefix("labelSelector="))
+                .map(percent_decode)
+                .unwrap_or_default()
+                .split(',')
+                .filter_map(|t| t.split_once('='))
+                .map(|(k, v)| (k.to_owned(), v.to_owned()))
+                .collect();
+            let items: Vec<&Value> = s
+                .pods
+                .iter()
+                .filter(|(key, _)| {
+                    in_ns
+                        .as_ref()
+                        .is_none_or(|ns| key.starts_with(&format!("{ns}/")))
+                })
+                .map(|(_, p)| p)
+                .filter(|p| {
+                    wanted.iter().all(|(k, v)| {
+                        p["metadata"]["labels"][k.as_str()].as_str() == Some(v.as_str())
+                    })
+                })
+                .collect();
+            return respond(
+                200,
+                &json!({"apiVersion": "v1", "kind": "PodList",
+                        "metadata": {"resourceVersion": s.version.to_string()}, "items": items}),
+            );
         }
 
         // `/apis/agents.vymalo.com/v1alpha1/[namespaces/<ns>/]<plural>[/<name>[/status]]`
@@ -553,6 +614,35 @@ fn json_patch(object: &mut Value, ops: &Value) -> Result<(), String> {
         }
     }
     Ok(())
+}
+
+fn percent_decode(text: &str) -> String {
+    let bytes = text.as_bytes();
+    let mut out = Vec::with_capacity(bytes.len());
+    let mut i = 0;
+    while i < bytes.len() {
+        match bytes[i] {
+            b'%' if i + 2 < bytes.len() => {
+                let hex = std::str::from_utf8(&bytes[i + 1..i + 3]).unwrap_or("");
+                if let Ok(b) = u8::from_str_radix(hex, 16) {
+                    out.push(b);
+                    i += 3;
+                    continue;
+                }
+                out.push(b'%');
+                i += 1;
+            }
+            b'+' => {
+                out.push(b' ');
+                i += 1;
+            }
+            b => {
+                out.push(b);
+                i += 1;
+            }
+        }
+    }
+    String::from_utf8_lossy(&out).into_owned()
 }
 
 fn respond(code: u16, body: &Value) -> Resp {

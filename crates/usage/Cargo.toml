@@ -1,6 +1,6 @@
 [package]
 name = "aap-usage"
-description = "The usage ingest's port (ANR-728, AD-060): the pod-minute event, the UsageStore seam that takes each event once and answers spend per account by ingestion window, its conformance testkit and an in-memory fake"
+description = "The usage port (ANR-673, AD-069): the pod-minute event, the UsageSink seam an adapter implements (the OTLP exporter comes later), the AccountSource seam, a conformance testkit and in-memory fakes"
 readme = "README.md"
 version.workspace = true
 edition.workspace = true
@@ -11,7 +11,7 @@ authors.workspace = true
 publish.workspace = true
 
 [features]
-# The conformance suite and `MemoryUsageStore`, for every adapter's tests. Off by default.
+# The conformance suite and the in-memory fakes, for every adapter's tests. Off by default.
 testkit = []
 
 [dependencies]

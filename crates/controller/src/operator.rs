@@ -129,6 +129,9 @@ pub struct Operator<R, S> {
     /// Where the idle loop asks what work an agent holds (AD-058); none: no agent sleeps.
     activity: Option<crate::ActivityFn>,
     sleepers: Arc<crate::Sleepers>,
+    /// The pod-minute meter's sink and account source (ANR-673); none: no meter.
+    meter: Option<(crate::SinkFn, crate::AccountFn)>,
+    meter_config: crate::MeterConfig,
 }
 
 impl<R, S> Operator<R, S>
@@ -162,7 +165,29 @@ where
             shards,
             activity: None,
             sleepers: Arc::new(crate::Sleepers::default()),
+            meter: None,
+            meter_config: crate::MeterConfig::default(),
         }
+    }
+
+    /// Turn the pod-minute meter on (ANR-673, AD-069): while this replica leads, it sends one event per pod and
+    /// whole minute to `sink`, for the account `accounts` names. **Off without it**, and `operator run` does not
+    /// call it yet (a later slice, AD-069).
+    #[must_use]
+    pub fn with_meter<K, A>(mut self, sink: K, accounts: A) -> Self
+    where
+        K: aap_usage::UsageSink + 'static,
+        A: aap_usage::AccountSource + 'static,
+    {
+        self.meter = Some((crate::erase_sink(sink), crate::erase_accounts(accounts)));
+        self
+    }
+
+    /// The meter's source name, node label key and period (see [`MeterConfig`](crate::MeterConfig)).
+    #[must_use]
+    pub fn with_meter_config(mut self, config: crate::MeterConfig) -> Self {
+        self.meter_config = config;
+        self
     }
 
     /// Let agents that set `scaling.idleTimeout` sleep (AD-058, P2b): the idle loop asks `source` what each holds
@@ -328,6 +353,25 @@ where
                 self.options.retention,
                 self.leader.clone(),
                 metrics.clone(),
+                stopped.clone(),
+            )));
+        }
+
+        if let (Some((sink, accounts)), false) = (self.meter.clone(), scopes_for_sleep.is_empty()) {
+            let period = self.meter_config.period;
+            running.push(Box::pin(crate::meter::run(
+                crate::meter::MeterLoop {
+                    client: self.client.clone(),
+                    meter: Arc::new(crate::Meter::new(
+                        sink,
+                        accounts,
+                        self.meter_config.clone(),
+                        metrics.clone(),
+                    )),
+                    scopes: scopes_for_sleep.clone(),
+                    leader: self.leader.clone(),
+                },
+                period,
                 stopped.clone(),
             )));
         }

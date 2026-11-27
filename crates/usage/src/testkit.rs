@@ -1,282 +1,127 @@
-//! The conformance suite of [`UsageStore`]: one `check_*` per rule, and [`run`] for all of them. Each returns the
-//! rule it saw broken, so an adapter's test (and this crate's own, against stores broken on purpose) can say which.
+//! The conformance suite of [`UsageSink`]: one `check_*` per rule, and [`run`] for all of them. Each returns the
+//! rule it saw broken, so an adapter's test (and this crate's own, against sinks broken on purpose) can say which.
+//!
+//! A sink cannot be read back, so an adapter's test hands [`run`] a [`Observed`] wrapper that says what its sink
+//! took (the OTLP adapter's: what its test collector received).
 
-use crate::{
-    Inserted, PodMinuteEvent, SpendLine, SpendQuery, UsageError, UsageStore, Window, event_id,
-};
+use crate::{PodKind, PodMinuteEvent, UsageError, UsageSink, event_id};
 
-/// An event of a valid shape: account `acct-a`, node type `std`, weight 1.
+/// A [`UsageSink`] that can say what it has taken, in order.
+pub trait Observed: UsageSink {
+    /// Every event taken, in order, a repeated event each time.
+    fn taken(&self) -> Vec<PodMinuteEvent>;
+}
+
+impl Observed for crate::MemoryUsageSink {
+    fn taken(&self) -> Vec<PodMinuteEvent> {
+        crate::MemoryUsageSink::taken(self)
+    }
+}
+
+/// An event of a valid shape: account `acct-a`, node type `std`, weight 4 (one unit), a run pod's.
 pub fn event(source: &str, pod: &str, minute: u64) -> PodMinuteEvent {
     PodMinuteEvent {
         source: source.into(),
-        id: event_id(pod, minute),
+        event_id: event_id(pod, minute),
+        minute,
         subject: "acct-a".into(),
-        weight: 1,
+        weight_quarters: 4,
         node_type: "std".into(),
-        pod_kind: "agent".into(),
+        pod_kind: PodKind::Run,
         agent_service: "coder".into(),
-        run: None,
-    }
-}
-
-fn q(from: u64, to: u64, account: Option<&str>) -> SpendQuery {
-    SpendQuery {
-        window: Window { from, to },
-        account: account.map(String::from),
-    }
-}
-
-fn line(account: &str, node_type: &str, weighted_minutes: u64) -> SpendLine {
-    SpendLine {
-        account: account.into(),
-        node_type: node_type.into(),
-        weighted_minutes,
+        run: Some("run-1".into()),
     }
 }
 
 fn err<E: std::fmt::Debug>(rule: &str, e: E) -> String {
-    format!("{rule}: the store failed: {e:?}")
+    format!("{rule}: the sink failed: {e:?}")
 }
 
-/// Rule 1: the first insert is `New`, the same `(source, id)` again is `Duplicate`.
-pub async fn check_idempotent<S: UsageStore>(s: &S) -> Result<(), String> {
+/// Rule 1: a valid event is accepted, and is taken as it was sent.
+pub async fn check_accepts_valid<S: Observed>(s: &S) -> Result<(), String> {
     let e = event("m1", "pod-1", 10);
-    let first = s
-        .insert(e.clone(), 100)
+    s.send(e.clone())
         .await
-        .map_err(|x| err("idempotent", x))?;
-    let again = s.insert(e, 100).await.map_err(|x| err("idempotent", x))?;
-    if first != Inserted::New || again != Inserted::Duplicate {
-        return Err(format!(
-            "idempotent: got {first:?} then {again:?}, want New then Duplicate"
-        ));
+        .map_err(|x| err("accepts-valid", x))?;
+    let mut agent = event("m1", "pod-2", 10);
+    agent.pod_kind = PodKind::Agent;
+    agent.run = None;
+    s.send(agent.clone())
+        .await
+        .map_err(|x| err("accepts-valid", x))?;
+    if s.taken() != vec![e, agent] {
+        return Err("accepts-valid: the sink did not take what it was sent".into());
     }
     Ok(())
 }
 
-/// Rule 2: a duplicate counts once, even when sent later with other data: the first copy and its time stand.
-pub async fn check_first_copy_stands<S: UsageStore>(s: &S) -> Result<(), String> {
-    let mut e = event("m1", "pod-1", 10);
-    e.weight = 2;
-    s.insert(e.clone(), 100)
-        .await
-        .map_err(|x| err("first copy", x))?;
-    e.weight = 9;
-    s.insert(e, 500).await.map_err(|x| err("first copy", x))?;
-    let early = s
-        .spend(q(0, 200, None))
-        .await
-        .map_err(|x| err("first copy", x))?;
-    let late = s
-        .spend(q(200, 1000, None))
-        .await
-        .map_err(|x| err("first copy", x))?;
-    if early != vec![line("acct-a", "std", 2)] || !late.is_empty() {
-        return Err(format!("first copy: early {early:?}, late {late:?}"));
-    }
-    Ok(())
-}
-
-/// Rule 3: the same id from another source is another event.
-pub async fn check_source_scopes_id<S: UsageStore>(s: &S) -> Result<(), String> {
-    let a = s
-        .insert(event("m1", "pod-1", 10), 100)
-        .await
-        .map_err(|x| err("source", x))?;
-    let b = s
-        .insert(event("m2", "pod-1", 10), 100)
-        .await
-        .map_err(|x| err("source", x))?;
-    let got = s
-        .spend(q(0, 200, None))
-        .await
-        .map_err(|x| err("source", x))?;
-    if a != Inserted::New || b != Inserted::New || got != vec![line("acct-a", "std", 2)] {
-        return Err(format!("source: {a:?}, {b:?}, spend {got:?}"));
-    }
-    Ok(())
-}
-
-/// Rule 4: spend sums weights per account and node type, sorted by account then node type.
-pub async fn check_sums_and_order<S: UsageStore>(s: &S) -> Result<(), String> {
-    let put = |pod: &str, acct: &str, node: &str, w: u32| {
-        let mut e = event("m1", pod, 1);
-        e.subject = acct.into();
-        e.node_type = node.into();
-        e.weight = w;
-        e
-    };
-    for e in [
-        put("p1", "acct-b", "big", 4),
-        put("p2", "acct-a", "std", 1),
-        put("p3", "acct-a", "std", 2),
-        put("p4", "acct-a", "big", 8),
-    ] {
-        s.insert(e, 50).await.map_err(|x| err("sums", x))?;
-    }
-    let got = s.spend(q(0, 100, None)).await.map_err(|x| err("sums", x))?;
-    let want = vec![
-        line("acct-a", "big", 8),
-        line("acct-a", "std", 3),
-        line("acct-b", "big", 4),
+/// Rule 2: an invalid event is refused, naming the field, and nothing is taken.
+pub async fn check_refuses_invalid<S: Observed>(s: &S) -> Result<(), String> {
+    type Break = fn(&mut PodMinuteEvent);
+    let cases: [(&str, Break); 8] = [
+        ("subject", |e| e.subject = "a@example.com".into()),
+        ("subject", |e| e.subject = String::new()),
+        ("source", |e| e.source = "x".repeat(129)),
+        ("nodeType", |e| e.node_type = "with space".into()),
+        ("eventId", |e| e.event_id = "abc".into()),
+        ("weightQuarters", |e| e.weight_quarters = 3),
+        ("weightQuarters", |e| e.weight_quarters = 0),
+        ("run", |e| e.run = None),
     ];
-    if got != want {
-        return Err(format!("sums: got {got:?}, want {want:?}"));
-    }
-    Ok(())
-}
-
-/// Rule 5: the window is half-open on ingestion time: `from` is in, `to` is out.
-pub async fn check_window_half_open<S: UsageStore>(s: &S) -> Result<(), String> {
-    for (pod, at) in [("p1", 99), ("p2", 100), ("p3", 199), ("p4", 200)] {
-        s.insert(event("m1", pod, 1), at)
-            .await
-            .map_err(|x| err("window", x))?;
-    }
-    let got = s
-        .spend(q(100, 200, None))
-        .await
-        .map_err(|x| err("window", x))?;
-    if got != vec![line("acct-a", "std", 2)] {
-        return Err(format!("window: [100, 200) got {got:?}, want 2 minutes"));
-    }
-    Ok(())
-}
-
-/// Rule 6: asking for one account returns that account alone.
-pub async fn check_account_filter<S: UsageStore>(s: &S) -> Result<(), String> {
-    let mut other = event("m1", "p2", 1);
-    other.subject = "acct-b".into();
-    s.insert(event("m1", "p1", 1), 50)
-        .await
-        .map_err(|x| err("filter", x))?;
-    s.insert(other, 50).await.map_err(|x| err("filter", x))?;
-    let got = s
-        .spend(q(0, 100, Some("acct-b")))
-        .await
-        .map_err(|x| err("filter", x))?;
-    if got != vec![line("acct-b", "std", 1)] {
-        return Err(format!("filter: got {got:?}"));
-    }
-    let none = s
-        .spend(q(0, 100, Some("acct-z")))
-        .await
-        .map_err(|x| err("filter", x))?;
-    if !none.is_empty() {
-        return Err(format!("filter: an account with no events got {none:?}"));
-    }
-    Ok(())
-}
-
-/// Rule 7: an event that breaks the contract is refused with the field's name and stores nothing.
-pub async fn check_invalid_refused<S: UsageStore>(s: &S) -> Result<(), String> {
-    let mut zero = event("m1", "p1", 1);
-    zero.weight = 0;
-    let mut spaced = event("m1", "p2", 1);
-    spaced.subject = "someone@example.com".into();
-    let mut empty = event("m1", "p3", 1);
-    empty.node_type.clear();
-    let mut long = event("m1", "p4", 1);
-    long.agent_service = "a".repeat(129);
-    for (bad, field) in [
-        (zero, "weight"),
-        (spaced, "subject"),
-        (empty, "nodeType"),
-        (long, "agentService"),
-    ] {
-        match s.insert(bad, 50).await {
-            Err(UsageError::Invalid { field: f }) if f == field => {}
-            other => return Err(format!("invalid: want Invalid({field}), got {other:?}")),
+    for (field, make_bad) in cases {
+        let mut bad = event("m1", "pod-1", 10);
+        make_bad(&mut bad);
+        match s.send(bad).await {
+            Err(UsageError::Invalid { field: got }) if got == field => {}
+            other => {
+                return Err(format!(
+                    "refuses-invalid: want Invalid({field}), got {other:?}"
+                ));
+            }
         }
     }
-    let got = s
-        .spend(q(0, 100, None))
-        .await
-        .map_err(|x| err("invalid", x))?;
-    if !got.is_empty() {
-        return Err(format!("invalid: a refused event was stored: {got:?}"));
+    let mut agent_with_run = event("m1", "pod-1", 10);
+    agent_with_run.pod_kind = PodKind::Agent;
+    match s.send(agent_with_run).await {
+        Err(UsageError::Invalid { field: "run" }) => {}
+        other => return Err(format!("refuses-invalid: want Invalid(run), got {other:?}")),
+    }
+    if !s.taken().is_empty() {
+        return Err("refuses-invalid: a refused event was taken".into());
     }
     Ok(())
 }
 
-/// Rule 8: an empty or reversed window is `EmptyWindow`, not an empty answer.
-pub async fn check_empty_window<S: UsageStore>(s: &S) -> Result<(), String> {
-    for (from, to) in [(5, 5), (6, 5)] {
-        match s.spend(q(from, to, None)).await {
-            Err(UsageError::EmptyWindow) => {}
-            other => return Err(format!("empty window: [{from}, {to}) got {other:?}")),
-        }
+/// Rule 3: the same event twice is accepted both times (the collector dedupes, not the sink).
+pub async fn check_same_event_twice<S: Observed>(s: &S) -> Result<(), String> {
+    let e = event("m1", "pod-1", 10);
+    s.send(e.clone()).await.map_err(|x| err("same-twice", x))?;
+    s.send(e).await.map_err(|x| err("same-twice", x))?;
+    if s.taken().len() != 2 {
+        return Err(format!("same-twice: took {} of 2 sends", s.taken().len()));
     }
     Ok(())
 }
 
-/// Rule 9: a batch answers one entry per event in order: a first copy is `New` (a copy stored by an earlier call
-/// is `Duplicate`, and so is a repeat inside the batch), the first copy's time stands, and a batch with an invalid
-/// event stores nothing.
-pub async fn check_batch<S: UsageStore>(s: &S) -> Result<(), String> {
-    s.insert(event("m1", "old", 1), 10)
-        .await
-        .map_err(|x| err("batch", x))?;
-    let got = s
-        .insert_many(
-            vec![
-                event("m1", "p1", 1),
-                event("m1", "old", 1),
-                event("m1", "p2", 1),
-                event("m1", "p1", 1),
-            ],
-            100,
-        )
-        .await
-        .map_err(|x| err("batch", x))?;
-    let want = vec![
-        Inserted::New,
-        Inserted::Duplicate,
-        Inserted::New,
-        Inserted::Duplicate,
-    ];
-    if got != want {
-        return Err(format!("batch: got {got:?}, want {want:?}"));
+/// Rule 4: events are taken in the order they were sent.
+pub async fn check_order<S: Observed>(s: &S) -> Result<(), String> {
+    let sent: Vec<PodMinuteEvent> = [5u64, 3, 9, 1, 7]
+        .iter()
+        .map(|m| event("m1", "pod-1", *m))
+        .collect();
+    for e in &sent {
+        s.send(e.clone()).await.map_err(|x| err("order", x))?;
     }
-    let at_100 = s
-        .spend(q(100, 101, None))
-        .await
-        .map_err(|x| err("batch", x))?;
-    if at_100 != vec![line("acct-a", "std", 2)] {
-        return Err(format!("batch: ingested at 100 got {at_100:?}, want 2"));
-    }
-    let empty = s
-        .insert_many(Vec::new(), 100)
-        .await
-        .map_err(|x| err("batch", x))?;
-    if !empty.is_empty() {
-        return Err(format!("batch: an empty batch answered {empty:?}"));
-    }
-    let mut bad = event("m1", "p3", 1);
-    bad.weight = 0;
-    match s.insert_many(vec![event("m1", "p4", 1), bad], 200).await {
-        Err(UsageError::Invalid { field: "weight" }) => {}
-        other => return Err(format!("batch: want Invalid(weight), got {other:?}")),
-    }
-    let after = s
-        .spend(q(200, 201, None))
-        .await
-        .map_err(|x| err("batch", x))?;
-    if !after.is_empty() {
-        return Err(format!("batch: a refused batch stored {after:?}"));
+    if s.taken() != sent {
+        return Err("order: the sink took the events in another order".into());
     }
     Ok(())
 }
 
-/// Runs every rule, each on a store `make` returns fresh. The first broken rule is the error.
-pub async fn run<S: UsageStore, F: Fn() -> S>(make: F) -> Result<(), String> {
-    check_idempotent(&make()).await?;
-    check_first_copy_stands(&make()).await?;
-    check_source_scopes_id(&make()).await?;
-    check_sums_and_order(&make()).await?;
-    check_window_half_open(&make()).await?;
-    check_account_filter(&make()).await?;
-    check_invalid_refused(&make()).await?;
-    check_empty_window(&make()).await?;
-    check_batch(&make()).await
+/// Runs every rule, each on a sink `make` returns fresh. The first broken rule is the error.
+pub async fn run<S: Observed, F: Fn() -> S>(make: F) -> Result<(), String> {
+    check_accepts_valid(&make()).await?;
+    check_refuses_invalid(&make()).await?;
+    check_same_event_twice(&make()).await?;
+    check_order(&make()).await
 }

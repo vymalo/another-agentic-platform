@@ -36,7 +36,7 @@ The operator reads **one configuration file**, and its traces are the `telemetry
 (`Deserialize`, camelCase, `deny_unknown_fields`) is that section; `OtlpSection::validate()` says whether the exporter could
 use it **without reading any file it names** (`--check` runs it), and `OtlpSection::settings(default_service, lookup)` returns
 the `TraceSettings`, reading each header from its reference. `start_section(service, version, section)` is `start` for a
-section. `TraceSettings::from_env` stays: `bin/api` and `bin/usage-ingest` still read variables.
+section. `TraceSettings::from_env` stays: `bin/api` still reads variables.
 
 | Key | Rule |
 |---|---|

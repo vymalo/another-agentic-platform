@@ -2,6 +2,8 @@
 
 What the pod meter sends and what the ledger reads. Decided in [AD-060](../architecture/11-decisions.md); the port is [`aap-usage`](../../crates/usage/README.md). The ingest records **weighted pod-minutes** only: it holds no rate and no amount, and the reader gives them meaning. A breaking change is `v2` and a new file.
 
+> **Amended 2026-11-27 ([AD-069](../architecture/11-decisions.md)): the HTTP ingest is gone.** The platform provides OpenTelemetry only, and `bin/usage-ingest`, its Postgres adapter and the spend query below are **removed**; the OpenTelemetry Collector routes, enriches and dedupes. The event's **fields now travel as OTLP log attributes** (OTLP/HTTP JSON, `/v1/logs`), one log record per pod-minute: `type`, `event_id` (this page's `id`), `source`, `subject`, `weightQuarters`, `nodeType`, `podKind`, `agentService` and `run`; `timeUnixNano` and `observedTimeUnixNano` are the **end of the minute**. Changes of meaning against the table below: `data.weight` is **`weightQuarters`**, an integer count of quarter-units, one of 1, 2, 4, 8, 16, 32 (AD-066's `SizeWeight`); `podKind` is `run` or `agent`, and `run` is present only for a run pod; `subject` is an **opaque account id from the broker, never an e-mail** (the closed alphabet has no `@`). The port is `UsageSink` in [`aap-usage`](../../crates/usage/README.md). **The sections "Once" and "The spend query" describe the removed ingest and are kept as history** (AD-060): idempotency is now the Collector's, on `event_id`, and there is no query.
+
 ## The event
 
 A [CloudEvents 1.0](https://github.com/cloudevents/spec/blob/v1.0.2/cloudevents/formats/json-format.md) structured-JSON event, `Content-Type: application/cloudevents+json`.

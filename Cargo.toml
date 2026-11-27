@@ -22,10 +22,8 @@ members = [
     "crates/activity-http",
     "crates/activator",
     "crates/usage",
-    "crates/usage-postgres",
     "bin/operator",
     "bin/api",
-    "bin/usage-ingest",
     "bin/cli",
 ]
 

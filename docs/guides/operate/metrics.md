@@ -144,7 +144,7 @@ The API's port is **not exposed by default**. The file then has no `metricsListe
 
 ## What the chart refuses
 
-Each row was run with `helm template`, with one change to the values above. Every chart refusal prints `templates/usage-ingest.yaml:1:4` as its location. Ignore it: the checks live in `_validate.tpl`, which that template includes.
+Each row was run with `helm template`, with one change to the values above. Every chart refusal prints `templates/servicemonitor.yaml:1:4` as its location. Ignore it: the checks live in `_validate.tpl`, which that template includes.
 
 | Change | Exit | The chart says |
 |---|---|---|

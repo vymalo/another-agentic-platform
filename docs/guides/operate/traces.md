@@ -140,7 +140,7 @@ The API reads the standard variables, as a strict subset. The operator reads the
 
 ## What the chart refuses
 
-Each row was run with `helm template`. Every refusal prints `templates/usage-ingest.yaml:1:4` as its location. Ignore it: the checks are in `_validate.tpl`.
+Each row was run with `helm template`. Every refusal prints `templates/servicemonitor.yaml:1:4` as its location. Ignore it: the checks are in `_validate.tpl`.
 
 | Change | Exit | The chart says |
 |---|---|---|
