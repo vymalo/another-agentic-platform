@@ -298,9 +298,9 @@ jobs:
       - uses: actions/checkout@v7
       - name: shellcheck
         run: shellcheck deploy/operator/bump-tag.sh deploy/operator/release-pin.sh tools/check-release-version.sh tools/check-release-branch-author.sh tools/check-release-branch-author-test.sh tools/check-release-skip.sh tools/check-release-skip-test.sh deploy/operator/tests/*.sh deploy/operator/tests/e2e/*.sh
-      # ANR-1323: the 26 release-PR skip guards are copies (a job-level `if:` cannot read `env`); this fails when one drifts — a missing
-      # author or actor check, a lost ANR-1206 comment, or no guard at all (the pattern changed and the check proved nothing).
-      - name: the release-PR skip guards carry the author and actor checks
+      # ANR-1323: the release-PR skip guards are copies (a job-level `if:` cannot read `env`); this fails when one drifts — a clause
+      # outside the !( ), `||` for `&&`, a missing author or actor check, a lost ANR-1206 comment, a split guard, or no guard at all.
+      - name: the release-PR skip guards are the exact guard
         run: |
           sh tools/check-release-skip.sh
           sh tools/check-release-skip-test.sh

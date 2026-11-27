@@ -1,36 +1,43 @@
 #!/usr/bin/env sh
-# Every job-level skip for the release pull request must require the release App twice: as the pull request's author and as the run's
-# actor. ANR-1302 added both to all 26 guards; they are copies, because a job-level `if:` cannot read `env`, so an edit to one copy can
-# drift from the rest and nobody notices (ANR-1323).
+# Every job-level skip for the release pull request must be the exact guard ANR-1302 added: the App as the pull request's author and as
+# the run's actor, inside the `!( … )`, so the job runs for everything else. They are copies, because a job-level `if:` cannot read
+# `env`, so an edit to one copy can drift from the rest and nobody notices (ANR-1323).
 #
-# It also requires the ANR-1206 comment on the line above each guard, so the reason for the skip stays next to it.
+# The check compares the guard's text exactly, not just the presence of the two clauses: moving a clause outside the `!( … )`, turning
+# its `&&` into `||`, or putting it in a trailing YAML comment all change what the guard does and must fail. It also requires the
+# ANR-1206 comment on one of the two lines above the guard, and fails when it finds no guard at all (the pattern changed, so the check
+# proved nothing).
 #
 # Usage: check-release-skip.sh [dir]   (default: the current directory)
 set -eu
 
 dir=${1:-.}
+canon="\${{ !(startsWith(github.head_ref, 'release-please--') && github.event.pull_request.head.repo.full_name == github.repository && github.event.pull_request.user.login == 'vaam-apps[bot]' && github.actor == 'vaam-apps[bot]')"
 status=0
 found=0
 
 for file in "$dir"/.github/workflows/*.yml; do
   [ -f "$file" ] || continue
-  count=$(awk -v file="$file" '
+  count=$(awk -v file="$file" -v canon="$canon" '
     function bad(msg) { printf "%s:%d: %s\n", file, FNR, msg > "/dev/stderr"; status = 1 }
     {
       # A YAML comment at the end of the line must not satisfy a check: match the line without it.
       line = $0
       sub(/[[:space:]]+#.*$/, "", line)
-      # A job-level `if:` that names the release branch. Comments and run blocks are not anchored this way.
-      if (line ~ /^[[:space:]]*if:.*release-please--/) {
+      # Any line that names the release branch in the skip expression, so a guard split over several lines is found and refused.
+      if (line ~ /startsWith\(github\.head_ref, .release-please--.\)/) {
         found++
-        if (line !~ /github\.event\.pull_request\.user\.login == .vaam-apps\[bot\]/) {
-          bad("the release-PR skip guard lacks the author check (github.event.pull_request.user.login == '"'"'vaam-apps[bot]'"'"')")
-        }
-        if (line !~ /github\.actor == .vaam-apps\[bot\]/) {
-          bad("the release-PR skip guard lacks the actor check (github.actor == '"'"'vaam-apps[bot]'"'"')")
+        if (line !~ /^[[:space:]]*if:/ || index(line, canon) == 0) {
+          if (line !~ /github\.event\.pull_request\.user\.login == .vaam-apps\[bot\]/) {
+            bad("the release-PR skip guard lacks the author check (github.event.pull_request.user.login == '"'"'vaam-apps[bot]'"'"')")
+          } else if (line !~ /github\.actor == .vaam-apps\[bot\]/) {
+            bad("the release-PR skip guard lacks the actor check (github.actor == '"'"'vaam-apps[bot]'"'"')")
+          } else {
+            bad("the release-PR skip guard is not the exact guard: both checks must sit inside the !( ... ) of one `if:` line")
+          }
         }
         if (prev !~ /ANR-1206/ && prev2 !~ /ANR-1206/) {
-          bad("the release-PR skip guard lost its ANR-1206 comment on the line above")
+          bad("the release-PR skip guard lost its ANR-1206 comment on one of the two lines above")
         }
       }
       prev2 = prev; prev = $0
@@ -50,4 +57,4 @@ if [ "$status" -ne 0 ]; then
   exit 1
 fi
 
-printf '%d release-PR skip guards carry the author check, the actor check and the ANR-1206 comment\n' "$found"
+printf '%d release-PR skip guards are the exact guard, with the ANR-1206 comment\n' "$found"
