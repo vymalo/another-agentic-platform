@@ -6,9 +6,16 @@
 //! `metering.enabled` is true (ANR-1103; off by default).
 //!
 //! The cursor of each pod (the first minute not sent) and the last facts seen of each pod are **in memory**. A
-//! restart, a new leader and a second replica therefore re-derive the same minutes from the pod's facts, with the
-//! same `event_id`s and the same end-of-minute times, and the collector dedupes them: the backfill bound (24 h)
-//! limits the repeat.
+//! restart, a new leader and a second replica therefore re-derive the same minutes of a pod that is still listed
+//! from the pod's facts, with the same `event_id`s and the same end-of-minute times, and the collector dedupes them:
+//! the backfill bound (24 h) limits the repeat.
+//!
+//! **A pod that has vanished is the one the API server no longer remembers**, so its facts are persisted
+//! (ANR-1198, AD-069 amended): when [`Meter::close_vanished`] finds a pod gone with minutes that are not known
+//! delivered, it writes one [`Tombstone`] (before it sends anything), and deletes it when those minutes are
+//! acknowledged or the 24 h bound has passed. A new leader reads the tombstones ([`Meter::restore`]) and sends the
+//! minutes again, **repeating only by `event_id`**. Nothing is written for a pod that is still listed, and nothing
+//! per period.
 //!
 //! **A vanished pod is closed** ([`Meter::close_vanished`]): a pod missing from a complete listing is sent through
 //! the minute that contains `min(last finishedAt seen, last time it was seen Running)`. **The residual loss** is the
@@ -17,7 +24,7 @@
 //! outage or a failover gap: the facts are in memory). `now` is this replica's clock: [`MeterConfig::skew_secs`]
 //! keeps a minute that is not over on the API server's clock from being sent.
 
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::future::Future;
 use std::pin::Pin;
 use std::sync::{Arc, Mutex, PoisonError};
@@ -25,8 +32,9 @@ use std::time::Duration;
 
 use aap_ports::LeaderElection;
 use aap_usage::{
-    AccountSource, AccountUnavailable, Fate, Outcome, PodKind, PodMinuteEvent, PodRef, UsageError,
-    UsageSink, event_id,
+    AccountSource, AccountUnavailable, Fate, Loaded, MAX_TOMBSTONES, Outcome, PodKind,
+    PodMinuteEvent, PodRef, Tombstone, TombstoneError, TombstoneStore, UsageError, UsageSink,
+    event_id, is_line_text,
 };
 use k8s_openapi::api::core::v1::Pod;
 use kube::api::ListParams;
@@ -72,6 +80,31 @@ pub type AccountFn = Arc<
         + Send
         + Sync,
 >;
+
+type TombstoneFuture<T> = Pin<Box<dyn Future<Output = Result<T, TombstoneError>> + Send>>;
+
+/// A [`TombstoneStore`] behind pointers, so the operator is not generic over it.
+#[derive(Clone)]
+pub struct TombstonesFn {
+    load: Arc<dyn Fn(String) -> TombstoneFuture<Loaded> + Send + Sync>,
+    save: Arc<dyn Fn(String, Vec<Tombstone>) -> TombstoneFuture<()> + Send + Sync>,
+}
+
+/// Erase the type of `store`.
+pub fn erase_tombstones<T: TombstoneStore + 'static>(store: T) -> TombstonesFn {
+    let store = Arc::new(store);
+    let reader = store.clone();
+    TombstonesFn {
+        load: Arc::new(move |scope| {
+            let store = reader.clone();
+            Box::pin(async move { store.load(&scope).await })
+        }),
+        save: Arc::new(move |namespace, set| {
+            let store = store.clone();
+            Box::pin(async move { store.save(&namespace, &set).await })
+        }),
+    }
+}
 
 /// Erase the type of `sink`.
 pub fn erase_sink<S: UsageSink + 'static>(sink: S) -> SinkFn {
@@ -171,6 +204,28 @@ struct Inner {
     /// Set the first time the sink answers `None` to [`UsageSink::outcomes`]: it reports nothing, so nothing is
     /// tracked from then on (taking an event is the delivery) and `pending` is empty.
     untracked: bool,
+    /// The tombstones of vanished pods, by pod uid (ANR-1198): what is persisted, plus what is about to be.
+    tombs: HashMap<String, Tombstone>,
+    /// The namespaces whose set differs from what the store holds, so the next flush writes them.
+    tomb_dirty: BTreeSet<String>,
+    /// The scopes (a namespace, or the empty scope for every one) whose set was **read at the start of this pass**.
+    /// Nothing of a namespace is written before it is, and a stale writer is found when the set is read again each
+    /// pass: a write replaces the set, so one made unread would delete what another leader left.
+    restored: HashSet<String>,
+    /// The scopes the store is forbidden for (no right to the `ConfigMap`): memory only for the rest of the term.
+    memory_only: HashSet<String>,
+    /// The pods whose tombstone is known to be in the store (read or written).
+    persisted: HashSet<String>,
+    /// Whether this term already looked for the sets of namespaces that are no longer watched.
+    swept: bool,
+}
+
+/// The most vanished pods the meter holds in memory because their namespace's store cannot be read or written; the
+/// excess is sent from memory like any pod with no tombstone (counted as unbacked).
+const MAX_HELD: usize = 2_048;
+
+fn scope_has(set: &HashSet<String>, namespace: &str) -> bool {
+    set.contains("") || set.contains(namespace)
 }
 
 /// A minute the sink took and the collector has not acknowledged.
@@ -180,6 +235,25 @@ struct Pending {
     minute: u64,
     /// When it was handed over (seconds since the Unix epoch), so that an acknowledgement that never comes expires.
     at: i64,
+}
+
+/// What a pod is for a line, once its facts say so.
+struct Attributed {
+    pod_kind: PodKind,
+    service: String,
+    run: Option<String>,
+    weight_quarters: u32,
+    node_type: String,
+}
+
+/// How [`Meter::emit`] ended.
+enum Emit {
+    /// Every minute asked for was handled.
+    Finished,
+    /// The period's budget ran out: the rest waits.
+    BudgetOut,
+    /// The sink is down: stop the pass.
+    SinkDown,
 }
 
 /// How far one pod got in a pass.
@@ -204,17 +278,202 @@ pub struct Meter {
     keep_going: Option<Arc<dyn Fn() -> bool + Send + Sync>>,
     /// Where the sink says what became of what it took; none: taking an event is delivering it.
     outcomes: Option<OutcomesFn>,
+    /// Where the facts of vanished pods are kept (ANR-1198); none: they are in memory only.
+    tombstones: Option<TombstonesFn>,
 }
 
 impl Meter {
     /// Track the sink's acknowledgements (ANR-1151): which minutes handed over the collector has acknowledged or
     /// refused. **This observes; it does not hold anything back:** the cursor that decides what is sent still moves
-    /// when the sink takes the event. It is the groundwork of the durable part (ANR-1198), which needs to know what
-    /// is safe to drop. A sink that answers `None` to its outcomes is detected at the first settle and tracking stops.
+    /// when the sink takes the event. It tells the tombstones (ANR-1198) what is safe to drop. A sink that answers `None` to its
+    /// outcomes is detected at the first settle and tracking stops.
     #[must_use]
     pub fn with_outcomes(mut self, f: OutcomesFn) -> Self {
         self.outcomes = Some(f);
         self
+    }
+
+    /// Keep the facts of vanished pods in `store` (ANR-1198): a pod found gone with minutes not known delivered gets a
+    /// tombstone before anything is sent, and a replica that begins to lead reads them ([`restore`](Self::restore)).
+    /// Without a store the facts are in memory only and a crash or a failover loses those minutes.
+    #[must_use]
+    pub fn with_tombstones(mut self, store: TombstonesFn) -> Self {
+        self.tombstones = Some(store);
+        self
+    }
+
+    /// How many tombstones of `namespace` the meter holds (written, or about to be).
+    pub fn tombstones_held(&self, namespace: &str) -> usize {
+        self.with(|i| {
+            i.tombs
+                .values()
+                .filter(|t| t.namespace == namespace)
+                .count()
+        })
+    }
+
+    /// This replica no longer leads: the next term reads the store again before it writes.
+    pub fn lose_leadership(&self) {
+        self.with(|i| {
+            i.restored.clear();
+            i.memory_only.clear();
+            i.swept = false;
+        });
+    }
+
+    fn leading(&self) -> bool {
+        self.keep_going.as_ref().is_none_or(|f| f())
+    }
+
+    /// Whether the set of `namespace` was read at the start of this pass (so a write over it is not a blind one).
+    fn can_write(&self, namespace: &str) -> bool {
+        self.with(|i| scope_has(&i.restored, namespace))
+    }
+
+    /// Whether the store may not be used for `namespace` at all in this term (forbidden).
+    fn memory_only(&self, namespace: &str) -> bool {
+        self.with(|i| scope_has(&i.memory_only, namespace))
+    }
+
+    /// Read the tombstone sets of `scopes` (an empty scope is every namespace) and take what they hold as the facts
+    /// of pods that are gone: their minutes are sent again from the first one not known delivered, with the same
+    /// `event_id`s. **Called at the start of every pass while leading**, not only when a term begins: an overlapping
+    /// leader that wrote after the last read is found by the next one (one `get` per namespace), and a tombstone the
+    /// other leader released is let go. Each scope is read **on its own**: one that fails is not written or
+    /// replayed this pass and the others go on, and one the store is forbidden for is memory-only for the term.
+    /// Returns whether every scope was read.
+    pub async fn restore(&self, scopes: &[String]) -> bool {
+        let Some(store) = self.tombstones.clone() else {
+            return true;
+        };
+        let mut all_read = true;
+        let mut read = HashSet::new();
+        for scope in scopes {
+            if self.with(|i| i.memory_only.contains(scope)) {
+                continue;
+            }
+            match (store.load)(scope.clone()).await {
+                Ok(loaded) => {
+                    self.merge(scope, loaded);
+                    read.insert(scope.clone());
+                }
+                Err(TombstoneError::Forbidden) => {
+                    self.with(|i| i.memory_only.insert(scope.clone()));
+                    self.metrics
+                        .inc(name::METER_TOMBSTONE_ERRORS, &[("op", "load")]);
+                    tracing::warn!(
+                        "the meter may not read its tombstones of a scope: vanished pods there are metered from memory only"
+                    );
+                }
+                Err(_) => {
+                    all_read = false;
+                    self.metrics
+                        .inc(name::METER_TOMBSTONE_ERRORS, &[("op", "load")]);
+                    tracing::warn!(
+                        "the meter could not read its tombstones of a scope: nothing of it is written or replayed this pass"
+                    );
+                }
+            }
+        }
+        self.with(|i| i.restored = read);
+        if all_read {
+            self.sweep(scopes).await;
+        }
+        all_read
+    }
+
+    /// Take what the store holds for `scope` into memory.
+    fn merge(&self, scope: &str, loaded: Loaded) {
+        self.metrics
+            .add(name::METER_TOMBSTONES_UNREADABLE, &[], loaded.unreadable);
+        self.metrics
+            .add(name::METER_TOMBSTONES_REFUSED, &[], loaded.refused);
+        let (mut restored, mut invalid) = (0u64, 0u64);
+        self.with(|i| {
+            let in_scope = |ns: &str| scope.is_empty() || ns == scope;
+            let on_disk: HashSet<String> =
+                loaded.tombstones.iter().map(|t| t.uid.clone()).collect();
+            for t in loaded.tombstones {
+                if !tombstone_is_valid(&t) {
+                    // Left out of the next write (the set is replaced whole) and counted.
+                    i.tomb_dirty.insert(t.namespace.clone());
+                    invalid += 1;
+                    continue;
+                }
+                i.persisted.insert(t.uid.clone());
+                if i.tombs.contains_key(&t.uid) {
+                    continue;
+                }
+                // From the first minute not known delivered: what is acknowledged again is a repeat by event id.
+                i.state.entry(t.uid.clone()).or_default().cursor = Some(t.first_minute);
+                i.seen.remove(&t.uid);
+                i.tombs.insert(t.uid.clone(), t);
+                restored += 1;
+            }
+            // One that was in the store and no longer is was released by another leader (its minutes were acknowledged
+            // there): let it go, unless this replica has a change of its own waiting to be written.
+            let released: Vec<String> = i
+                .tombs
+                .values()
+                .filter(|t| {
+                    in_scope(&t.namespace)
+                        && i.persisted.contains(&t.uid)
+                        && !on_disk.contains(&t.uid)
+                        && !i.tomb_dirty.contains(&t.namespace)
+                })
+                .map(|t| t.uid.clone())
+                .collect();
+            for uid in released {
+                i.tombs.remove(&uid);
+                i.persisted.remove(&uid);
+            }
+            // What this replica holds and the store does not is written at the next flush.
+            let ahead: Vec<String> = i
+                .tombs
+                .values()
+                .filter(|t| in_scope(&t.namespace) && !on_disk.contains(&t.uid))
+                .map(|t| t.namespace.clone())
+                .collect();
+            i.tomb_dirty.extend(ahead);
+        });
+        self.metrics
+            .add(name::METER_TOMBSTONES_RESTORED, &[], restored);
+        self.metrics
+            .add(name::METER_TOMBSTONES_INVALID, &[], invalid);
+    }
+
+    /// Once a term: the set of a namespace that is no longer watched, every record of which is past the 24 h bound, is
+    /// deleted (so a namespace taken out of `watch.namespaces` leaves nothing behind for ever).
+    async fn sweep(&self, scopes: &[String]) {
+        let Some(store) = self.tombstones.clone() else {
+            return;
+        };
+        if self.with(|i| i.swept) || scopes.iter().any(String::is_empty) || !self.leading() {
+            return;
+        }
+        let now = unix_now();
+        let bound = i64::try_from(metering::BACKFILL_MINUTES * 60).unwrap_or(i64::MAX);
+        match (store.load)(String::new()).await {
+            Ok(all) => {
+                let mut by_ns: BTreeMap<String, Vec<Tombstone>> = BTreeMap::new();
+                for t in all.tombstones {
+                    if !scopes.contains(&t.namespace) {
+                        by_ns.entry(t.namespace.clone()).or_default().push(t);
+                    }
+                }
+                for (namespace, set) in by_ns {
+                    if set.iter().all(|t| now.saturating_sub(t.written_at) > bound)
+                        && (store.save)(namespace, Vec::new()).await.is_ok()
+                    {
+                        self.metrics
+                            .add(name::METER_TOMBSTONES_EXPIRED, &[], set.len() as u64);
+                    }
+                }
+                self.with(|i| i.swept = true);
+            }
+            Err(TombstoneError::Forbidden) => self.with(|i| i.swept = true),
+            Err(_) => {}
+        }
     }
 
     /// How many minutes of `uid` the sink took and the collector has not yet acknowledged.
@@ -312,6 +571,7 @@ impl Meter {
             }),
             keep_going: None,
             outcomes: None,
+            tombstones: None,
         }
     }
 
@@ -426,6 +686,12 @@ impl Meter {
     /// Close the pods that are in the meter's memory and not in `listed`, which must be a **complete** listing
     /// of every scope: each is sent through the minute that contains `min(last finishedAt seen, last time it was
     /// seen Running)`, as soon as that minute is over, and then forgotten. Returns how many events were sent.
+    ///
+    /// With a tombstone store (ANR-1198) a pod that still has minutes to send, or minutes not known delivered, is
+    /// first written as one tombstone (a batch per namespace, **before** anything is sent) and then sent from it by
+    /// [`replay`](Self::replay), so a crash or a failover in between loses nothing. A pod whose tombstone could not
+    /// be written because the store is down is **held** (it stays in memory and is tried next pass); one whose
+    /// namespace is full, or that cannot be attributed, is sent from memory as without a store.
     pub async fn close_vanished(&self, listed: &HashSet<String>, now: i64) -> usize {
         self.settle(now);
         let gone: Vec<(String, Seen)> = self.with(|i| {
@@ -435,11 +701,14 @@ impl Meter {
                 .map(|(uid, s)| (uid.clone(), s.clone()))
                 .collect()
         });
-        let mut sent = 0usize;
-        let mut remaining = gone.len();
+        let durable = self.tombstones.is_some();
+        if durable && !self.leading() {
+            // A replica that lost the lease writes nothing and closes nothing: the leader reads the store again.
+            return 0;
+        }
+        // The end, exclusive, and the facts of each pod as a pod that has finished.
+        let mut closed: Vec<(String, PodFacts)> = Vec::new();
         for (uid, seen) in gone {
-            let share = (self.budget() / remaining.max(1)).max(1);
-            remaining = remaining.saturating_sub(1);
             // The end, exclusive: the finish, or one second past the last sight (the minute it was seen in counts).
             let end = match (seen.facts.finished_at, seen.last_running) {
                 (Some(f), Some(r)) => Some(f.min(r.saturating_add(1))),
@@ -456,13 +725,392 @@ impl Meter {
             facts.finished_at = Some(end);
             facts.deleted_at = None;
             facts.has_container_status = true;
+            closed.push((uid, facts));
+        }
+        let mut held: HashSet<String> = HashSet::new();
+        if durable {
+            let mut candidates = Vec::new();
+            for (uid, facts) in &closed {
+                if self.memory_only(&facts.namespace) {
+                    // The store is forbidden for this namespace: from memory, as without a store (counted at load).
+                    continue;
+                }
+                if !self.can_write(&facts.namespace) {
+                    // Its set was not read this pass: nothing of it is written, and the pod waits in memory.
+                    held.insert(uid.clone());
+                    continue;
+                }
+                // A pod with nothing outstanding, or that is not attributable, gets none: the in-memory close below
+                // counts it and forgets it. So does a pod the store has no room for (`unbacked`).
+                candidates.extend(self.tombstone_of(facts, now));
+            }
+            let (backed, _unbacked, down) = self.persist(candidates).await;
+            self.with(|i| {
+                for uid in &backed {
+                    // The tombstone is the pod's facts from here on; its cursor stays in `state`.
+                    i.seen.remove(uid);
+                }
+            });
+            held.extend(down);
+            closed.retain(|(uid, _)| !backed.contains(uid));
+            self.bound_held(&mut held, &mut closed, now);
+        }
+        let mut sent = 0usize;
+        let mut remaining = closed.len();
+        for (uid, facts) in closed {
+            if held.contains(&uid) {
+                continue;
+            }
+            let share = (self.budget() / remaining.max(1)).max(1);
+            remaining = remaining.saturating_sub(1);
             match self.process(&facts, now, share, &mut sent).await {
                 Progress::Done => self.forget(&uid),
                 Progress::Held => {}
                 Progress::SinkDown => break,
             }
         }
+        sent + self.replay(now).await
+    }
+
+    /// What is held for want of a store is bounded: a pod whose minutes are all past the 24 h bound is forgotten
+    /// (counted), and past [`MAX_HELD`] the excess is let go to the in-memory close like a pod with no tombstone.
+    fn bound_held(
+        &self,
+        held: &mut HashSet<String>,
+        closed: &mut Vec<(String, PodFacts)>,
+        now: i64,
+    ) {
+        let bound = i64::try_from(metering::BACKFILL_MINUTES * 60).unwrap_or(i64::MAX);
+        let mut expired = Vec::new();
+        for (uid, facts) in closed.iter() {
+            if held.contains(uid)
+                && facts
+                    .finished_at
+                    .is_some_and(|end| now.saturating_sub(end) > bound)
+            {
+                expired.push(uid.clone());
+            }
+        }
+        for uid in &expired {
+            held.remove(uid);
+            self.forget(uid);
+        }
+        closed.retain(|(uid, _)| !expired.contains(uid));
+        self.metrics
+            .add(name::METER_HELD_EXPIRED, &[], expired.len() as u64);
+        if held.len() > MAX_HELD {
+            let mut ordered: Vec<String> = held.iter().cloned().collect();
+            ordered.sort();
+            let excess = ordered.split_off(MAX_HELD);
+            self.metrics
+                .add(name::METER_TOMBSTONES_UNBACKED, &[], excess.len() as u64);
+            for uid in excess {
+                held.remove(&uid);
+            }
+        }
+    }
+
+    /// The tombstone of a pod found gone, if it needs one: it has minutes still to send or minutes not known
+    /// delivered, its facts attribute it to an account's line, and every text of it is one a line may carry.
+    fn tombstone_of(&self, closed: &PodFacts, now: i64) -> Option<Tombstone> {
+        let kind = metering::classify(closed);
+        let started_at = closed.started_at?;
+        let ended_at = closed.finished_at?;
+        let outstanding = self.with(|i| i.pending.values().any(|p| p.uid == closed.uid))
+            || self
+                .due_of(closed, now)
+                .is_some_and(|(_, ran, due)| !due.send.is_empty() || !ran.complete);
+        if !outstanding {
+            return None;
+        }
+        let a = self.attribute(closed, &kind).ok()?;
+        let subject = a.run.as_ref().and_then(|run| {
+            self.with(|i| i.accounts.get(&(a.service.clone(), run.clone())).cloned())
+        });
+        let t = Tombstone {
+            namespace: closed.namespace.clone(),
+            uid: closed.uid.clone(),
+            service: a.service,
+            run: a.run,
+            pod_kind: a.pod_kind,
+            subject,
+            weight_quarters: a.weight_quarters,
+            node_type: a.node_type,
+            started_at,
+            ended_at: ended_at.max(started_at),
+            first_minute: self
+                .acknowledged_through(&closed.uid)
+                .unwrap_or_else(|| metering::to_minute(started_at)),
+            written_at: now,
+        };
+        tombstone_is_valid(&t).then_some(t)
+    }
+
+    /// Write `new` (grouped by namespace, one write each) and say what became of each: **backed** (written: send
+    /// from the tombstone), **unbacked** (no room: send from memory, counted) or **down** (the store could not be
+    /// written: hold the pod).
+    async fn persist(
+        &self,
+        new: Vec<Tombstone>,
+    ) -> (HashSet<String>, HashSet<String>, HashSet<String>) {
+        let (mut backed, mut unbacked, mut down) = (HashSet::new(), HashSet::new(), HashSet::new());
+        let mut groups: BTreeMap<String, Vec<Tombstone>> = BTreeMap::new();
+        for t in new {
+            groups.entry(t.namespace.clone()).or_default().push(t);
+        }
+        for (namespace, group) in groups {
+            let room = MAX_TOMBSTONES.saturating_sub(self.tombstones_held(&namespace));
+            let (fit, over): (Vec<_>, Vec<_>) =
+                group.into_iter().enumerate().partition(|(k, _)| *k < room);
+            let fit: Vec<Tombstone> = fit.into_iter().map(|(_, t)| t).collect();
+            if !over.is_empty() {
+                self.metrics
+                    .add(name::METER_TOMBSTONES_UNBACKED, &[], over.len() as u64);
+                tracing::warn!(
+                    namespace,
+                    "the meter's tombstone set is full: pods that vanish now are metered from memory only"
+                );
+                unbacked.extend(over.into_iter().map(|(_, t)| t.uid));
+            }
+            if fit.is_empty() {
+                continue;
+            }
+            let was_dirty = self.with(|i| {
+                let was = i.tomb_dirty.contains(&namespace);
+                for t in &fit {
+                    i.tombs.insert(t.uid.clone(), t.clone());
+                }
+                i.tomb_dirty.insert(namespace.clone());
+                was
+            });
+            let result = self.save_namespace(&namespace).await;
+            if result.is_ok() {
+                self.metrics
+                    .add(name::METER_TOMBSTONES_WRITTEN, &[], fit.len() as u64);
+                self.with(|i| i.persisted.extend(fit.iter().map(|t| t.uid.clone())));
+                backed.extend(fit.into_iter().map(|t| t.uid));
+                continue;
+            }
+            // Nothing was written: the memory goes back to what the store holds.
+            self.with(|i| {
+                for t in &fit {
+                    i.tombs.remove(&t.uid);
+                }
+                if !was_dirty {
+                    i.tomb_dirty.remove(&namespace);
+                }
+            });
+            if matches!(
+                result,
+                Err(TombstoneError::TooLarge | TombstoneError::Forbidden)
+            ) {
+                self.metrics
+                    .add(name::METER_TOMBSTONES_UNBACKED, &[], fit.len() as u64);
+                unbacked.extend(fit.into_iter().map(|t| t.uid));
+            } else {
+                down.extend(fit.into_iter().map(|t| t.uid));
+            }
+        }
+        (backed, unbacked, down)
+    }
+
+    /// Write the whole set of `namespace`. **Only while this replica still leads**, checked right before the write: a
+    /// stale leader's write would succeed (its version is current) and a replica that read the set earlier would
+    /// never see it.
+    async fn save_namespace(&self, namespace: &str) -> Result<(), TombstoneError> {
+        let Some(store) = self.tombstones.clone() else {
+            return Ok(());
+        };
+        if !self.leading() {
+            return Err(TombstoneError::Unavailable);
+        }
+        let set: Vec<Tombstone> = self.with(|i| {
+            let mut v: Vec<Tombstone> = i
+                .tombs
+                .values()
+                .filter(|t| t.namespace == namespace)
+                .cloned()
+                .collect();
+            v.sort_by(|a, b| a.uid.cmp(&b.uid));
+            v
+        });
+        match (store.save)(namespace.to_owned(), set).await {
+            Ok(()) => {
+                self.with(|i| i.tomb_dirty.remove(namespace));
+                Ok(())
+            }
+            Err(e) => {
+                self.metrics
+                    .inc(name::METER_TOMBSTONE_ERRORS, &[("op", "save")]);
+                tracing::warn!("the meter could not write its tombstones of a namespace");
+                match e {
+                    TombstoneError::Conflict => {
+                        // Another writer, or the object is gone: this namespace is read again before the next write.
+                        self.with(|i| {
+                            i.restored.remove(namespace);
+                            i.restored.remove("");
+                        });
+                    }
+                    TombstoneError::Forbidden => {
+                        self.with(|i| i.memory_only.insert(namespace.to_owned()));
+                    }
+                    _ => {}
+                }
+                Err(e)
+            }
+        }
+    }
+
+    /// Send what the tombstones say is not sent, and delete each tombstone whose minutes are all sent **and**
+    /// acknowledged (or when the 24 h bound has passed since it was written). One write per namespace that
+    /// changed, at the end. Returns how many events were sent. Does nothing until [`restore`](Self::restore) read
+    /// the store.
+    pub async fn replay(&self, now: i64) -> usize {
+        if self.tombstones.is_none() {
+            return 0;
+        }
+        self.settle(now);
+        if !self.leading() {
+            return 0;
+        }
+        // A namespace whose set was not read this pass waits for the next one (nothing of it is sent or deleted).
+        let mut tombs: Vec<Tombstone> = self.with(|i| {
+            i.tombs
+                .values()
+                .filter(|t| scope_has(&i.restored, &t.namespace))
+                .cloned()
+                .collect()
+        });
+        tombs.sort_by(|a, b| a.uid.cmp(&b.uid));
+        let bound = i64::try_from(metering::BACKFILL_MINUTES * 60).unwrap_or(i64::MAX);
+        let mut sent = 0usize;
+        let mut remaining = tombs.len();
+        for t in tombs {
+            if self.must_stop() {
+                break;
+            }
+            if now.saturating_sub(t.written_at) > bound {
+                // Every minute of it is past the backfill bound by now, and so is every acknowledgement.
+                self.metrics.inc(name::METER_TOMBSTONES_EXPIRED, &[]);
+                self.release(&t);
+                continue;
+            }
+            let share = (self.budget() / remaining.max(1)).max(1);
+            remaining = remaining.saturating_sub(1);
+            match self.replay_one(&t, now, share, &mut sent).await {
+                Progress::SinkDown => break,
+                Progress::Held => {}
+                Progress::Done => {
+                    if self.unacknowledged(&t.uid) == 0 {
+                        self.metrics.inc(name::METER_TOMBSTONES_RELEASED, &[]);
+                        self.release(&t);
+                    }
+                }
+            }
+        }
+        // The deletions of this pass, batched: one write per namespace that changed.
+        let dirty: Vec<String> = self.with(|i| {
+            i.tomb_dirty
+                .iter()
+                .filter(|ns| scope_has(&i.restored, ns))
+                .cloned()
+                .collect()
+        });
+        for namespace in dirty {
+            let _ = self.save_namespace(&namespace).await;
+        }
         sent
+    }
+
+    fn release(&self, t: &Tombstone) {
+        self.with(|i| {
+            i.tombs.remove(&t.uid);
+            i.persisted.remove(&t.uid);
+            i.state.remove(&t.uid);
+            i.tomb_dirty.insert(t.namespace.clone());
+        });
+    }
+
+    /// One tombstone: the minutes it still owes, from its own facts.
+    async fn replay_one(
+        &self,
+        t: &Tombstone,
+        now: i64,
+        share: usize,
+        sent: &mut usize,
+    ) -> Progress {
+        let closed = PodFacts {
+            uid: t.uid.clone(),
+            phase: "Succeeded".to_owned(),
+            started_at: Some(t.started_at),
+            finished_at: Some(t.ended_at),
+            has_container_status: true,
+            ..PodFacts::default()
+        };
+        let ran = match metering::minutes(&closed, now, self.config.skew_secs) {
+            Ok(Some(ran)) => ran,
+            // A tombstone is only written for a pod that ran and ended: nothing more to wait for.
+            _ => return Progress::Done,
+        };
+        let after = if ran.complete {
+            Progress::Done
+        } else {
+            Progress::Held
+        };
+        let cursor = self.state(&t.uid).cursor.or(Some(t.first_minute));
+        let due = metering::due(&ran.range, cursor, now);
+        self.update(&t.uid, |s| s.cursor = Some(due.send.start));
+        if due.skipped > 0 {
+            self.metrics
+                .add(name::METER_BACKFILL_SKIPPED, &[], due.skipped);
+        }
+        if due.send.is_empty() {
+            return after;
+        }
+        let a = Attributed {
+            pod_kind: t.pod_kind,
+            service: t.service.clone(),
+            run: t.run.clone(),
+            weight_quarters: t.weight_quarters,
+            node_type: t.node_type.clone(),
+        };
+        let asked = match &t.subject {
+            Some(subject) => Ok(Some(subject.clone())),
+            None => self.account_for(&a).await,
+        };
+        let subject = match asked {
+            Ok(Some(subject)) => subject,
+            Ok(None) => {
+                let fresh = due
+                    .send
+                    .end
+                    .saturating_sub(due.send.start.max(self.state(&t.uid).unknown_counted));
+                self.unattributed(Unattributed::UnknownAccount, fresh);
+                self.update(&t.uid, |s| s.unknown_counted = due.send.end);
+                return Progress::Held;
+            }
+            Err(AccountUnavailable) => {
+                self.metrics.inc(name::METER_ACCOUNT_FAILURES, &[]);
+                return Progress::Held;
+            }
+        };
+        match self
+            .emit(&t.uid, &a, &subject, due.send.clone(), share, now, sent)
+            .await
+        {
+            Emit::SinkDown => return Progress::SinkDown,
+            Emit::BudgetOut => return Progress::Held,
+            Emit::Finished => {}
+        }
+        if self
+            .state(&t.uid)
+            .cursor
+            .is_some_and(|c| c >= ran.range.end)
+        {
+            after
+        } else {
+            Progress::Held
+        }
     }
 
     fn forget(&self, uid: &str) {
@@ -510,25 +1158,72 @@ impl Meter {
             return after;
         }
         let count = due.send.end - due.send.start;
-        let (pod_kind, service, run) = match kind {
-            Kind::Run { service, run } => (PodKind::Run, service, run),
-            Kind::Agent { service } => (PodKind::Agent, service, None),
-            Kind::Skip => return Progress::Done,
-        };
         // Configuration, not a passing condition: the minutes are given up, and counted.
-        let give_up = |reason: Unattributed| {
-            self.unattributed(reason, count);
-            self.update(&pod.uid, |s| s.cursor = Some(due.send.end));
-            after
+        let attributed = match self.attribute(pod, &kind) {
+            Ok(a) => a,
+            Err(reason) => {
+                self.unattributed(reason, count);
+                self.update(&pod.uid, |s| s.cursor = Some(due.send.end));
+                return after;
+            }
+        };
+        let subject = match self.account_for(&attributed).await {
+            Ok(Some(account)) => account,
+            Ok(None) => {
+                // Not known *yet*: the cursor stays, so that an account that appears later gets its earlier
+                // minutes. They are retried every pass until they pass the backfill bound, and counted once.
+                let fresh = due
+                    .send
+                    .end
+                    .saturating_sub(due.send.start.max(state.unknown_counted));
+                self.unattributed(Unattributed::UnknownAccount, fresh);
+                self.update(&pod.uid, |s| s.unknown_counted = due.send.end);
+                return Progress::Held;
+            }
+            Err(AccountUnavailable) => {
+                // Transient: the cursor stays, the next pass asks again. The bound is the backfill's.
+                self.metrics.inc(name::METER_ACCOUNT_FAILURES, &[]);
+                return Progress::Held;
+            }
+        };
+        match self
+            .emit(
+                &pod.uid,
+                &attributed,
+                &subject,
+                due.send.clone(),
+                share,
+                now,
+                sent,
+            )
+            .await
+        {
+            Emit::SinkDown => return Progress::SinkDown,
+            Emit::BudgetOut => return Progress::Held,
+            Emit::Finished => {}
+        }
+        let reached = self
+            .state(&pod.uid)
+            .cursor
+            .is_some_and(|c| c >= ran.range.end);
+        if reached { after } else { Progress::Held }
+    }
+
+    /// What a pod is for a line: its kind, service, run, weight and node type, or why it has none.
+    fn attribute(&self, pod: &PodFacts, kind: &Kind) -> Result<Attributed, Unattributed> {
+        let (pod_kind, service, run) = match kind {
+            Kind::Run { service, run } => (PodKind::Run, service.clone(), run.clone()),
+            Kind::Agent { service } => (PodKind::Agent, service.clone(), None),
+            Kind::Skip => return Err(Unattributed::NoIdentity),
         };
         let Some(service) = service else {
-            return give_up(Unattributed::NoIdentity);
+            return Err(Unattributed::NoIdentity);
         };
         if pod_kind == PodKind::Run && run.is_none() {
-            return give_up(Unattributed::NoIdentity);
+            return Err(Unattributed::NoIdentity);
         }
         let Some(weight_quarters) = metering::weight_quarters(&pod.annotations) else {
-            return give_up(Unattributed::NoWeight);
+            return Err(Unattributed::NoWeight);
         };
         let Some(node_type) = self
             .config
@@ -536,18 +1231,29 @@ impl Meter {
             .as_deref()
             .and_then(|key| metering::node_type(pod.node_affinity.as_ref(), key))
         else {
-            return give_up(Unattributed::UnknownNodeType);
+            return Err(Unattributed::UnknownNodeType);
         };
-        let pod_ref = match &run {
+        Ok(Attributed {
+            pod_kind,
+            service,
+            run,
+            weight_quarters,
+            node_type,
+        })
+    }
+
+    /// The account of an attributed pod: the cache of bound runs, or the source, cut at the pass deadline.
+    async fn account_for(&self, a: &Attributed) -> Result<Option<String>, AccountUnavailable> {
+        let pod_ref = match &a.run {
             Some(run) => PodRef::Run {
-                service: service.clone(),
+                service: a.service.clone(),
                 run: run.clone(),
             },
             None => PodRef::Agent {
-                service: service.clone(),
+                service: a.service.clone(),
             },
         };
-        let cache_key = run.as_ref().map(|run| (service.clone(), run.clone()));
+        let cache_key = a.run.as_ref().map(|run| (a.service.clone(), run.clone()));
         let cached = cache_key
             .as_ref()
             .and_then(|k| self.with(|i| i.accounts.get(k).cloned()));
@@ -566,57 +1272,52 @@ impl Meter {
                 }
             }
         };
-        let subject = match asked {
-            Ok(Some(account)) => {
-                // A bound run's account never changes: remembered for the life of the process.
-                if let Some(k) = cache_key {
-                    self.with(|i| i.accounts.insert(k, account.clone()));
-                }
-                account
-            }
-            Ok(None) => {
-                // Not known *yet*: the cursor stays, so that an account that appears later gets its earlier
-                // minutes. They are retried every pass until they pass the backfill bound, and counted once.
-                let fresh = due
-                    .send
-                    .end
-                    .saturating_sub(due.send.start.max(state.unknown_counted));
-                self.unattributed(Unattributed::UnknownAccount, fresh);
-                self.update(&pod.uid, |s| s.unknown_counted = due.send.end);
-                return Progress::Held;
-            }
-            Err(AccountUnavailable) => {
-                // Transient: the cursor stays, the next pass asks again. The bound is the backfill's.
-                self.metrics.inc(name::METER_ACCOUNT_FAILURES, &[]);
-                return Progress::Held;
-            }
-        };
-        for minute in due.send.clone().take(share) {
+        if let (Ok(Some(account)), Some(k)) = (&asked, cache_key) {
+            // A bound run's account never changes: remembered for the life of the process.
+            self.with(|i| i.accounts.insert(k, account.clone()));
+        }
+        asked
+    }
+
+    /// Hand the sink the events of `minutes` (at most `share` of them), moving the pod's cursor and recording each
+    /// as pending when the sink reports acknowledgements.
+    #[allow(clippy::too_many_arguments)]
+    async fn emit(
+        &self,
+        uid: &str,
+        a: &Attributed,
+        subject: &str,
+        minutes: std::ops::Range<u64>,
+        share: usize,
+        now: i64,
+        sent: &mut usize,
+    ) -> Emit {
+        for minute in minutes.take(share) {
             if self.budget() == 0 {
-                return Progress::Held;
+                return Emit::BudgetOut;
             }
             let event = PodMinuteEvent {
                 source: self.config.source.clone(),
-                event_id: event_id(&pod.uid, minute),
+                event_id: event_id(uid, minute),
                 minute,
-                subject: subject.clone(),
-                weight_quarters,
-                node_type: node_type.clone(),
-                pod_kind,
-                agent_service: service.clone(),
-                run: run.clone(),
+                subject: subject.to_owned(),
+                weight_quarters: a.weight_quarters,
+                node_type: a.node_type.clone(),
+                pod_kind: a.pod_kind,
+                agent_service: a.service.clone(),
+                run: a.run.clone(),
             };
             match (self.sink)(event).await {
                 Ok(()) => {
                     self.metrics.inc(name::METER_EVENTS, &[]);
-                    self.update(&pod.uid, |s| s.cursor = Some(minute + 1));
+                    self.update(uid, |s| s.cursor = Some(minute + 1));
                     if self.outcomes.is_some() && !self.with(|i| i.untracked) {
-                        let id = event_id(&pod.uid, minute);
+                        let id = event_id(uid, minute);
                         self.with(|i| {
                             i.pending.insert(
                                 id,
                                 Pending {
-                                    uid: pod.uid.clone(),
+                                    uid: uid.to_owned(),
                                     minute,
                                     at: now,
                                 },
@@ -629,22 +1330,31 @@ impl Meter {
                 Err(UsageError::Unavailable) => {
                     // The sink is down for everyone: hold this minute and every later one, try next pass.
                     self.metrics.inc(name::METER_SEND_FAILURES, &[]);
-                    return Progress::SinkDown;
+                    return Emit::SinkDown;
                 }
                 Err(UsageError::Invalid { field }) => {
                     // A bug, not a transient: never retried for ever. The field is named, not its value.
                     self.metrics.inc(name::METER_INVALID, &[]);
                     tracing::warn!(field, "the meter made an invalid event and dropped it");
-                    self.update(&pod.uid, |s| s.cursor = Some(minute + 1));
+                    self.update(uid, |s| s.cursor = Some(minute + 1));
                 }
             }
         }
-        let reached = self
-            .state(&pod.uid)
-            .cursor
-            .is_some_and(|c| c >= ran.range.end);
-        if reached { after } else { Progress::Held }
+        Emit::Finished
     }
+}
+
+/// Whether a tombstone read from the store (or about to be written) is one the meter can send a line from.
+fn tombstone_is_valid(t: &Tombstone) -> bool {
+    !t.namespace.is_empty()
+        && !t.uid.is_empty()
+        && t.uid.len() <= 128
+        && is_line_text(&t.service)
+        && is_line_text(&t.node_type)
+        && t.run.as_deref().is_none_or(is_line_text)
+        && t.subject.as_deref().is_none_or(is_line_text)
+        && aap_usage::WEIGHT_GRID.contains(&t.weight_quarters)
+        && (t.pod_kind == PodKind::Run) == t.run.is_some()
 }
 
 /// What a pod's facts are, from the Kubernetes object.
@@ -692,6 +1402,7 @@ pub fn facts_of(pod: &Pod) -> Option<PodFacts> {
         finished.into_iter().flatten().max()
     };
     Some(PodFacts {
+        namespace: pod.metadata.namespace.clone().unwrap_or_default(),
         uid,
         labels: pod
             .metadata
@@ -771,9 +1482,12 @@ where
     let (all, complete) = list.await;
     meter.pass(&all, now).await;
     if complete {
-        // Only a complete listing says a pod is gone.
+        // Only a complete listing says a pod is gone. It also replays the tombstones.
         let listed: HashSet<String> = all.iter().map(|p| p.uid.clone()).collect();
         meter.close_vanished(&listed, now).await;
+    } else {
+        // What the tombstones owe does not depend on the listing.
+        meter.replay(now).await;
     }
 }
 
@@ -783,7 +1497,13 @@ pub(crate) async fn run(l: MeterLoop, period: Duration, mut stop: watch::Receive
     loop {
         // Acknowledgements keep arriving whoever leads: a follower drains them (nothing is listed or sent).
         l.meter.settle(unix_now());
-        if l.leader.is_leader() {
+        if !l.leader.is_leader() {
+            // The next term reads the tombstones again before it writes any.
+            l.meter.lose_leadership();
+        } else {
+            // Read the tombstones a crash or a failover left. Until they are read nothing is written or replayed,
+            // and a pod that vanishes waits in memory; the live pods are metered all the same.
+            l.meter.restore(&l.scopes).await;
             observe(&l.meter, &unix_now, async {
                 let mut all = Vec::new();
                 let mut complete = true;

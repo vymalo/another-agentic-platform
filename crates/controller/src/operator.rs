@@ -134,6 +134,8 @@ pub struct Operator<R, S> {
     /// The pod-minute meter's sink and account source (ANR-673); none: no meter.
     meter: Option<(crate::SinkFn, crate::OutcomesFn, crate::AccountFn)>,
     meter_config: crate::MeterConfig,
+    /// Where the meter keeps the facts of vanished pods (ANR-1198); none: in memory only.
+    meter_tombstones: Option<crate::TombstonesFn>,
 }
 
 impl<R, S> Operator<R, S>
@@ -170,6 +172,7 @@ where
             clock: None,
             meter: None,
             meter_config: crate::MeterConfig::default(),
+            meter_tombstones: None,
         }
     }
 
@@ -184,6 +187,18 @@ where
     {
         let (send, outcomes) = crate::erase_sink_with_outcomes(sink);
         self.meter = Some((send, outcomes, crate::erase_accounts(accounts)));
+        self
+    }
+
+    /// Keep the meter's facts of vanished pods in `store` (ANR-1198), so a crash or a failover loses no minute of a
+    /// pod that is gone. [`KubeTombstones`](crate::KubeTombstones) is the one for a cluster. Without it the facts
+    /// are in memory only. Has no effect unless [`with_meter`](Self::with_meter) is called.
+    #[must_use]
+    pub fn with_meter_tombstones<T: aap_usage::TombstoneStore + 'static>(
+        mut self,
+        store: T,
+    ) -> Self {
+        self.meter_tombstones = Some(crate::erase_tombstones(store));
         self
     }
 
@@ -382,14 +397,18 @@ where
                     client: self.client.clone(),
                     meter: Arc::new({
                         let leader = self.leader.clone();
-                        crate::Meter::new(
+                        let meter = crate::Meter::new(
                             sink,
                             accounts,
                             self.meter_config.clone(),
                             metrics.clone(),
                         )
                         .with_outcomes(outcomes)
-                        .with_continue(move || leader.is_leader())
+                        .with_continue(move || leader.is_leader());
+                        match self.meter_tombstones.clone() {
+                            Some(store) => meter.with_tombstones(store),
+                            None => meter,
+                        }
                     }),
                     scopes: scopes_for_sleep.clone(),
                     leader: self.leader.clone(),

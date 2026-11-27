@@ -77,6 +77,9 @@ struct State {
     /// The core `Pod`s (ANR-673), by `<namespace>/<name>`: only listed, never watched, and never written by the
     /// controller.
     pods: BTreeMap<String, Value>,
+    /// The core `ConfigMap`s (ANR-1198), by `<namespace>/<name>`: get, list, create and a merge patch, with the
+    /// `resourceVersion` check and the 1 MiB limit of a real API server.
+    configmaps: BTreeMap<String, Value>,
 }
 
 /// A path that fails, as a `Role` that does not allow a namespace, or a kind the API server refuses there.
@@ -136,6 +139,7 @@ impl Fake {
                 stalls: Vec::new(),
                 failures: Vec::new(),
                 pods: BTreeMap::new(),
+                configmaps: BTreeMap::new(),
             })),
             changes: broadcast::channel(1024).0,
         }
@@ -231,6 +235,30 @@ impl Fake {
     /// Remove a core `Pod`, as its deletion completing does.
     pub fn remove_pod(&self, ns: &str, name: &str) {
         lock(&self.state).pods.remove(&format!("{ns}/{name}"));
+    }
+
+    /// A core `ConfigMap` as the fake holds it.
+    pub fn configmap(&self, ns: &str, name: &str) -> Option<Value> {
+        lock(&self.state)
+            .configmaps
+            .get(&format!("{ns}/{name}"))
+            .cloned()
+    }
+
+    /// Put a core `ConfigMap` in the fake, as it is found after a crash (a new `resourceVersion`).
+    pub fn put_configmap(&self, mut object: Value) {
+        let ns = object["metadata"]["namespace"]
+            .as_str()
+            .unwrap_or("default")
+            .to_owned();
+        let name = object["metadata"]["name"]
+            .as_str()
+            .unwrap_or_default()
+            .to_owned();
+        let mut s = lock(&self.state);
+        s.version += 1;
+        object["metadata"]["resourceVersion"] = json!(s.version.to_string());
+        s.configmaps.insert(format!("{ns}/{name}"), object);
     }
 
     pub fn get(&self, plural: &str, ns: &str, name: &str) -> Option<Value> {
@@ -390,6 +418,12 @@ impl Fake {
                 s.events.push(body.clone());
             }
             return respond(201, call.body.as_ref().unwrap_or(&json!({})));
+        }
+
+        if let Some(rest) = call.path.strip_prefix("/api/v1/")
+            && let Some(resp) = configmaps(&mut s, &call, rest)
+        {
+            return resp;
         }
 
         // `/api/v1/[namespaces/<ns>/]pods`: a list, filtered by `labelSelector` (equality terms only).
@@ -688,9 +722,154 @@ fn not_served() -> Resp {
         .unwrap_or_else(|_| failure(404, "not served"))
 }
 
+/// The most a real API server lets a `ConfigMap`'s data hold.
+const CONFIGMAP_LIMIT: usize = 1024 * 1024;
+
+fn configmap_size(object: &Value) -> usize {
+    object["data"].as_object().map_or(0, |d| {
+        d.iter()
+            .map(|(k, v)| k.len() + v.as_str().map_or(0, str::len))
+            .sum()
+    })
+}
+
+/// `/api/v1/[namespaces/<ns>/]configmaps[/<name>]`: what the meter's tombstones use. `None`: not this resource.
+fn configmaps(s: &mut State, call: &Call, rest: &str) -> Option<Resp> {
+    let parts: Vec<&str> = rest.split('/').collect();
+    let (ns, name) = match parts.as_slice() {
+        ["configmaps"] => (None, None),
+        ["namespaces", ns, "configmaps"] => (Some(*ns), None),
+        ["namespaces", ns, "configmaps", name] => (Some(*ns), Some(*name)),
+        _ => return None,
+    };
+    Some(match (call.method.as_str(), ns, name) {
+        ("GET", ns, None) => {
+            let wanted: Vec<(String, String)> = call
+                .query
+                .split('&')
+                .find_map(|p| p.strip_prefix("labelSelector="))
+                .map(percent_decode)
+                .unwrap_or_default()
+                .split(',')
+                .filter_map(|t| t.split_once('='))
+                .map(|(k, v)| (k.to_owned(), v.to_owned()))
+                .collect();
+            let items: Vec<&Value> = s
+                .configmaps
+                .iter()
+                .filter(|(key, _)| ns.is_none_or(|ns| key.starts_with(&format!("{ns}/"))))
+                .map(|(_, o)| o)
+                .filter(|o| {
+                    wanted.iter().all(|(k, v)| {
+                        o["metadata"]["labels"][k.as_str()].as_str() == Some(v.as_str())
+                    })
+                })
+                .collect();
+            respond(
+                200,
+                &json!({"apiVersion": "v1", "kind": "ConfigMapList",
+                        "metadata": {"resourceVersion": s.version.to_string()}, "items": items}),
+            )
+        }
+        ("GET", Some(ns), Some(name)) => match s.configmaps.get(&format!("{ns}/{name}")) {
+            Some(o) => respond(200, o),
+            None => failure(404, &format!("configmaps \"{name}\" not found")),
+        },
+        ("POST", Some(ns), None) => {
+            let Some(mut object) = call.body.clone() else {
+                return Some(failure(400, "no body"));
+            };
+            let name = object["metadata"]["name"]
+                .as_str()
+                .unwrap_or_default()
+                .to_owned();
+            let key = format!("{ns}/{name}");
+            if s.configmaps.contains_key(&key) {
+                return Some(failure(
+                    409,
+                    &format!("configmaps \"{name}\" already exists"),
+                ));
+            }
+            if configmap_size(&object) > CONFIGMAP_LIMIT {
+                return Some(failure(413, "Request entity too large: limit is 3145728"));
+            }
+            s.version += 1;
+            object["metadata"]["namespace"] = json!(ns);
+            object["metadata"]["resourceVersion"] = json!(s.version.to_string());
+            s.configmaps.insert(key, object.clone());
+            respond(201, &object)
+        }
+        ("PATCH", Some(ns), Some(name)) if call.content_type.contains("merge-patch") => {
+            let key = format!("{ns}/{name}");
+            let Some(patch) = call.body.clone() else {
+                return Some(failure(400, "no body"));
+            };
+            let Some(current) = s.configmaps.get(&key).cloned() else {
+                return Some(failure(404, &format!("configmaps \"{name}\" not found")));
+            };
+            if let Some(rv) = patch["metadata"]["resourceVersion"].as_str()
+                && current["metadata"]["resourceVersion"].as_str() != Some(rv)
+            {
+                return Some(failure(
+                    409,
+                    "Operation cannot be fulfilled: the object has been modified",
+                ));
+            }
+            let mut object = current;
+            if let Some(changes) = patch["data"].as_object() {
+                let data = object["data"].take();
+                let mut data = data.as_object().cloned().unwrap_or_default();
+                for (k, v) in changes {
+                    if v.is_null() {
+                        data.remove(k);
+                    } else {
+                        data.insert(k.clone(), v.clone());
+                    }
+                }
+                object["data"] = Value::Object(data);
+            }
+            if configmap_size(&object) > CONFIGMAP_LIMIT {
+                return Some(failure(
+                    422,
+                    "ConfigMap is invalid: Too long: must have at most 1048576 bytes",
+                ));
+            }
+            s.version += 1;
+            object["metadata"]["resourceVersion"] = json!(s.version.to_string());
+            s.configmaps.insert(key, object.clone());
+            respond(200, &object)
+        }
+        ("DELETE", Some(ns), Some(name)) => {
+            let key = format!("{ns}/{name}");
+            let Some(current) = s.configmaps.get(&key) else {
+                return Some(failure(404, &format!("configmaps \"{name}\" not found")));
+            };
+            if let Some(rv) = call
+                .body
+                .as_ref()
+                .and_then(|b| b["preconditions"]["resourceVersion"].as_str())
+                && current["metadata"]["resourceVersion"].as_str() != Some(rv)
+            {
+                return Some(failure(
+                    409,
+                    "Operation cannot be fulfilled: the object has been modified",
+                ));
+            }
+            s.configmaps.remove(&key);
+            respond(
+                200,
+                &json!({"apiVersion": "v1", "kind": "Status", "status": "Success", "metadata": {}}),
+            )
+        }
+        _ => failure(405, "not served by the fake"),
+    })
+}
+
 fn failure(code: u16, message: &str) -> Resp {
     let reason = match code {
         404 => "NotFound",
+        409 => "Conflict",
+        413 => "RequestEntityTooLarge",
         422 => "Invalid",
         403 => "Forbidden",
         503 => "ServiceUnavailable",
