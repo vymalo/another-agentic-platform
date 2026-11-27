@@ -93,7 +93,13 @@ const sidebar = [
     ],
   },
   { text: "Decisions", items: pages("architecture", ["11-decisions.md"]) },
-  { text: "Contributing", items: [{ text: "How to contribute", link: "/contributing" }] },
+  {
+    text: "Contributing",
+    items: [
+      { text: "How to contribute", link: "/contributing" },
+      { text: "Writing docs", link: "/writing-docs" },
+    ],
+  },
 ];
 
 // Prose writes <agent> or <ThreadShare> meaning a placeholder; Vue would read it as a component and fail the build.
