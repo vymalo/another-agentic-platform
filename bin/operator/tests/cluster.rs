@@ -368,12 +368,40 @@ struct OperatorProc {
     registry: u16,
 }
 
-fn free_port() -> u16 {
-    std::net::TcpListener::bind("127.0.0.1:0")
-        .unwrap()
-        .local_addr()
-        .unwrap()
-        .port()
+/// Three ports no listener holds. All three are bound **before** any is released: two  calls in a row can be
+/// handed the same port, and the operator child then fails to bind its second listener and exits — a failure that has
+/// nothing to do with the operator (ANR-1358; the same mechanism as ANR-1065's `trace_env`).
+fn free_ports() -> (u16, u16, u16) {
+    let held: Vec<std::net::TcpListener> = (0..3)
+        .map(|_| std::net::TcpListener::bind("127.0.0.1:0").unwrap())
+        .collect();
+    let at = |i: usize| held[i].local_addr().unwrap().port();
+    (at(0), at(1), at(2))
+}
+
+/// A suffix for a file name of this process, distinct per call: a port is no name, and two calls can be handed the same.
+fn unique() -> u64 {
+    static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+}
+
+/// The invariant the operator child depends on: it binds all three of its listeners before it serves any, so the three
+/// ports a case is given must all be bindable **at once**. The guarantee is `free_ports`' construction — three listeners
+/// held before any is released; this is the smoke test over it, and it runs without a cluster (ANR-1358).
+#[test]
+fn the_three_ports_a_case_is_given_can_all_be_bound_at_once() {
+    for _ in 0..256 {
+        let (health, metrics, registry) = free_ports();
+        assert!(
+            health != metrics && metrics != registry && health != registry,
+            "{health} {metrics} {registry}"
+        );
+        // The child binds all three before it serves any: holding them at once is exactly what it does.
+        let _held: Vec<std::net::TcpListener> = [health, metrics, registry]
+            .into_iter()
+            .map(|p| std::net::TcpListener::bind(("127.0.0.1", p)).expect("a distinct port"))
+            .collect();
+    }
 }
 
 impl OperatorProc {
@@ -383,8 +411,8 @@ impl OperatorProc {
     /// `namespaces`: the ones it watches (`watch.namespaces`, K6b); the first is the primary.
     fn spawn(cluster: &Cluster, namespaces: &[&str], registry_token: Option<&str>) -> Self {
         let namespace = namespaces.first().copied().unwrap_or_default();
-        let log = std::env::temp_dir().join(format!("aap-e2e-{namespace}-{}.log", free_port()));
-        let (health, metrics, registry) = (free_port(), free_port(), free_port());
+        let log = std::env::temp_dir().join(format!("aap-e2e-{namespace}-{}.log", unique()));
+        let (health, metrics, registry) = free_ports();
         // The file `operator run` reads (ANR-962): the chart's, written here for this case.
         let mut config = format!(
             "version: 1\n\
@@ -406,7 +434,7 @@ impl OperatorProc {
             ));
         }
         let config_file =
-            std::env::temp_dir().join(format!("aap-e2e-{namespace}-{}.yaml", free_port()));
+            std::env::temp_dir().join(format!("aap-e2e-{namespace}-{}.yaml", unique()));
         std::fs::write(&config_file, config).unwrap();
         let child = Command::new(env!("CARGO_BIN_EXE_operator"))
             .arg("run")
