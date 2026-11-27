@@ -67,6 +67,8 @@ const ACCOUNT_VOLUME_MODE: i32 = 420;
 
 /// The name of the container port every agent serves.
 pub const PORT_NAME: &str = "http";
+/// The name of the activity listener's container port and Service port (AD-058, ANR-1030a).
+pub const ACTIVITY_PORT_NAME: &str = "activity";
 
 /// The workload of a spec, as the object that runs it.
 #[derive(Clone, Debug, PartialEq)]
@@ -112,6 +114,9 @@ pub struct Rendered {
     pub disruption_budgets: Vec<PodDisruptionBudget>,
     /// Only when someone is allowed from.
     pub network_policy: Option<net::NetworkPolicy>,
+    /// The policy guards an activity listener (ANR-1030a): it must be applied before the workloads, so that no pod
+    /// serves the listener before the policy that keeps it to the operator exists.
+    pub policy_first: bool,
     /// Only with run pods: what the account that makes them, and what they, may do.
     pub run_pods: Option<RunPodObjects>,
 }
@@ -307,6 +312,7 @@ pub fn render(id: &RuntimeId, spec: &RuntimeSpec) -> Result<Rendered, Error> {
         workloads,
         disruption_budgets,
         network_policy: cx.network_policy(),
+        policy_first: spec.network.activity.is_some(),
         run_pods: spec.run_pods.as_ref().map(|r| cx.run_pods(r)).transpose()?,
     })
 }
@@ -405,6 +411,7 @@ impl Cx<'_> {
             port,
             selects,
             card_path,
+            activity,
             ..
         } = &self.spec.network;
         let mut metadata = self.meta(self.id.name(), service_labels(self.id), true, false);
@@ -419,13 +426,24 @@ impl Cx<'_> {
             spec: Some(core::ServiceSpec {
                 type_: Some("ClusterIP".to_owned()),
                 selector: Some(names::selector_labels(selects, self.id)),
-                ports: Some(vec![core::ServicePort {
-                    name: Some(PORT_NAME.to_owned()),
-                    port: i32::from(*port),
-                    target_port: Some(IntOrString::String(PORT_NAME.to_owned())),
-                    protocol: Some("TCP".to_owned()),
-                    ..core::ServicePort::default()
-                }]),
+                ports: Some(
+                    std::iter::once(core::ServicePort {
+                        name: Some(PORT_NAME.to_owned()),
+                        port: i32::from(*port),
+                        target_port: Some(IntOrString::String(PORT_NAME.to_owned())),
+                        protocol: Some("TCP".to_owned()),
+                        ..core::ServicePort::default()
+                    })
+                    // The activity listener (AD-058): a port of its own, which the policy opens to the operator alone.
+                    .chain(activity.iter().map(|a| core::ServicePort {
+                        name: Some(ACTIVITY_PORT_NAME.to_owned()),
+                        port: i32::from(a.port),
+                        target_port: Some(IntOrString::String(ACTIVITY_PORT_NAME.to_owned())),
+                        protocol: Some("TCP".to_owned()),
+                        ..core::ServicePort::default()
+                    }))
+                    .collect(),
+                ),
                 ..core::ServiceSpec::default()
             }),
             ..core::Service::default()
@@ -436,10 +454,33 @@ impl Cx<'_> {
     /// the model gateway and registries.
     fn network_policy(&self) -> Option<net::NetworkPolicy> {
         let network = &self.spec.network;
-        if network.allow_from.is_empty() {
+        // No peers and no activity listener: nobody is restricted. With the listener, a policy is needed to keep it to the
+        // operator, and then the A2A rule stays as open as it was without a policy (no `from`).
+        if network.allow_from.is_empty() && network.activity.is_none() {
             return None;
         }
-        let peers = network.allow_from.iter().map(peer).collect();
+        let a2a_peers = (!network.allow_from.is_empty())
+            .then(|| network.allow_from.iter().map(peer).collect::<Vec<_>>());
+        let mut ingress = vec![net::NetworkPolicyIngressRule {
+            from: a2a_peers,
+            ports: Some(vec![net::NetworkPolicyPort {
+                protocol: Some("TCP".to_owned()),
+                port: Some(IntOrString::Int(i32::from(network.port))),
+                end_port: None,
+            }]),
+        }];
+        if let Some(a) = &network.activity {
+            // One entry holding both selectors: two entries would be an OR, and any pod of the operator's namespace
+            // (or any pod with its labels) would reach the listener.
+            ingress.push(net::NetworkPolicyIngressRule {
+                from: Some(vec![peer(&a.from)]),
+                ports: Some(vec![net::NetworkPolicyPort {
+                    protocol: Some("TCP".to_owned()),
+                    port: Some(IntOrString::Int(i32::from(a.port))),
+                    end_port: None,
+                }]),
+            });
+        }
         Some(net::NetworkPolicy {
             metadata: self.meta(self.id.name(), service_labels(self.id), true, false),
             spec: Some(net::NetworkPolicySpec {
@@ -455,14 +496,7 @@ impl Cx<'_> {
                     match_expressions: None,
                 }),
                 policy_types: Some(vec!["Ingress".to_owned()]),
-                ingress: Some(vec![net::NetworkPolicyIngressRule {
-                    from: Some(peers),
-                    ports: Some(vec![net::NetworkPolicyPort {
-                        protocol: Some("TCP".to_owned()),
-                        port: Some(IntOrString::Int(i32::from(network.port))),
-                        end_port: None,
-                    }]),
-                }]),
+                ingress: Some(ingress),
                 ..net::NetworkPolicySpec::default()
             }),
         })
@@ -679,6 +713,7 @@ impl Cx<'_> {
             probes: aap_ports::Probes::default(),
             resources: p.resources.clone(),
             read_only_root_filesystem: false,
+            activity_port: None,
         })?;
         let container = core::Container {
             image_pull_policy: Some("IfNotPresent".to_owned()),
@@ -1265,14 +1300,21 @@ fn container(c: &Container) -> Result<core::Container, Error> {
         command: (!c.command.is_empty()).then(|| c.command.clone()),
         args: (!c.args.is_empty()).then(|| c.args.clone()),
         env: (!env.is_empty()).then_some(env),
-        ports: c.port.map(|p| {
-            vec![core::ContainerPort {
-                name: Some(PORT_NAME.to_owned()),
-                container_port: i32::from(p),
-                protocol: Some("TCP".to_owned()),
-                ..core::ContainerPort::default()
-            }]
-        }),
+        ports: {
+            let ports: Vec<core::ContainerPort> = c
+                .port
+                .map(|p| (PORT_NAME, p))
+                .into_iter()
+                .chain(c.activity_port.map(|p| (ACTIVITY_PORT_NAME, p)))
+                .map(|(name, p)| core::ContainerPort {
+                    name: Some(name.to_owned()),
+                    container_port: i32::from(p),
+                    protocol: Some("TCP".to_owned()),
+                    ..core::ContainerPort::default()
+                })
+                .collect();
+            (!ports.is_empty()).then_some(ports)
+        },
         volume_mounts: (!c.mounts.is_empty()).then(|| {
             c.mounts
                 .iter()

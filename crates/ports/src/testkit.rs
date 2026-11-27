@@ -356,6 +356,7 @@ pub fn sample_spec(id: &RuntimeId) -> RuntimeSpec {
                 },
                 resources: Resources { requests, limits },
                 read_only_root_filesystem: false,
+                activity_port: None,
             },
             sidecars: vec![Container {
                 name: "helper".to_owned(),
@@ -379,6 +380,7 @@ pub fn sample_spec(id: &RuntimeId) -> RuntimeSpec {
                 },
                 resources: Resources::default(),
                 read_only_root_filesystem: false,
+                activity_port: None,
             }],
             volumes: vec![
                 VolumeSpec {
@@ -426,6 +428,7 @@ pub fn sample_spec(id: &RuntimeId) -> RuntimeSpec {
             selects: name,
             allow_from: Vec::new(),
             card_path: None,
+            activity: None,
         },
         run_pods: None,
     }

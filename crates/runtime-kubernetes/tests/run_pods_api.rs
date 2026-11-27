@@ -11,7 +11,7 @@ mod support;
 
 use aap_ports::{IssueReason, RuntimeProvider};
 use aap_runtime_kubernetes::KubernetesRuntime;
-use common::{resolved, resolved_run_pods, resolved_run_pods_with};
+use common::{resolved, resolved_activity, resolved_run_pods, resolved_run_pods_with};
 use serde_json::{Value, json};
 use support::{Call, Fake, K};
 
@@ -1020,4 +1020,38 @@ async fn the_class_of_a_size_class_reaches_the_template_and_the_guards_parameter
     assert_eq!(inherited, (Some("sandbox".into()), Some("sandbox".into())));
     // Neither: no class in the template and no parameter, as before the field existed.
     assert_eq!(runtime_class_on_the_server(|_| {}).await, (None, None));
+}
+
+#[tokio::test]
+async fn the_policy_of_an_activity_listener_is_applied_before_any_workload_and_otherwise_stays_after()
+ {
+    // ANR-1030a: a listener must never be served before the policy that keeps it to the operator exists.
+    let (fake, runtime) = setup();
+    let with = resolved_activity("coder", 8081, |s, _| {
+        common::set(s, "/spec/scaling/idleTimeout", json!("15m"));
+        common::set(s, "/spec/access/allowFrom", json!([]));
+    });
+    runtime.ensure(&with.id, &with.runtime).await.unwrap();
+    let applied = writes(&fake.calls(), "PATCH");
+    let at = |kind: K, name: &str| {
+        applied
+            .iter()
+            .position(|(k, n)| *k == kind && n == name)
+            .unwrap_or_else(|| panic!("{name} was not applied: {applied:?}"))
+    };
+    assert!(at(K::NetworkPolicy, "coder") < at(K::StatefulSet, "coder"));
+    assert!(at(K::NetworkPolicy, "coder") < at(K::Service, "coder"));
+
+    // Without a listener nothing moves: the policy comes after the workloads, as it always did.
+    let (fake, runtime) = setup();
+    let plain = resolved("coder", |_, _| {});
+    runtime.ensure(&plain.id, &plain.runtime).await.unwrap();
+    let applied = writes(&fake.calls(), "PATCH");
+    let at = |kind: K, name: &str| {
+        applied
+            .iter()
+            .position(|(k, n)| *k == kind && n == name)
+            .unwrap()
+    };
+    assert!(at(K::StatefulSet, "coder") < at(K::NetworkPolicy, "coder"));
 }

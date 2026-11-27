@@ -15,7 +15,7 @@ use aap_runtime_kubernetes::names::{
     DELETION_POLICY_ANNOTATION, DIGEST_ANNOTATION, MANAGED_BY_LABEL, MANAGED_BY_VALUE,
 };
 use aap_runtime_kubernetes::{Rendered, WorkloadObject, render};
-use common::{example, resolved, set};
+use common::{example, resolved, resolved_activity, set};
 use serde_json::{Value, json};
 
 fn golden_path(name: &str) -> PathBuf {
@@ -91,6 +91,19 @@ fn the_coder_combined() {
 #[test]
 fn the_coder_split() {
     assert_golden("coder-split", &rendered(&split()));
+}
+
+/// A coder that sleeps, with the deployment's activity listener (AD-058, ANR-1030a).
+fn coder_activity() -> (RuntimeId, RuntimeSpec) {
+    let r = resolved_activity("coder", 8081, |s, _| {
+        set(s, "/spec/scaling/idleTimeout", json!("15m"));
+    });
+    (r.id, r.runtime)
+}
+
+#[test]
+fn the_coder_with_an_activity_listener() {
+    assert_golden("coder-activity", &rendered(&coder_activity()));
 }
 
 #[test]
@@ -833,4 +846,105 @@ fn the_agents_runtime_class_is_on_every_workload_and_nowhere_when_the_spec_names
         }
         assert_eq!(seen, named.workloads.len(), "{name}: every workload");
     }
+}
+
+// ------------------------------------------------------- the activity listener (AD-058, ANR-1030a)
+
+#[test]
+fn an_agent_without_the_listener_has_no_activity_port_anywhere() {
+    for spec in [coder(), chat(), a2a(), split()] {
+        let text = yaml(&rendered(&spec));
+        assert!(!text.contains("activity"), "{text}");
+    }
+}
+
+#[test]
+fn the_listener_is_a_container_port_and_a_service_port_and_nothing_else_moves() {
+    let docs = rendered(&coder_activity()).documents();
+    let svc = find(&docs, "Service", "coder");
+    assert_eq!(
+        svc["spec"]["ports"],
+        json!([
+            {"name": "http", "port": 8080, "protocol": "TCP", "targetPort": "http"},
+            {"name": "activity", "port": 8081, "protocol": "TCP", "targetPort": "activity"},
+        ])
+    );
+    let ss = find(&docs, "StatefulSet", "coder");
+    let container = &ss["spec"]["template"]["spec"]["containers"][0];
+    assert_eq!(
+        container["ports"],
+        json!([
+            {"name": "http", "containerPort": 8080, "protocol": "TCP"},
+            {"name": "activity", "containerPort": 8081, "protocol": "TCP"},
+        ])
+    );
+    let env = container["env"].as_array().unwrap();
+    let tokens = env
+        .iter()
+        .find(|e| e["name"] == "ACTIVITY_BEARER_TOKENS")
+        .unwrap();
+    assert_eq!(
+        tokens["valueFrom"]["secretKeyRef"],
+        json!({"name": "aap-activity", "key": "tokens"})
+    );
+    assert!(tokens.get("value").is_none(), "never a literal");
+    let addr = env
+        .iter()
+        .find(|e| e["name"] == "ACTIVITY_LISTEN_ADDR")
+        .unwrap();
+    assert_eq!(addr["value"], "0.0.0.0:8081");
+}
+
+#[test]
+fn the_policy_keeps_the_a2a_rule_and_adds_one_for_the_operator_alone() {
+    let plain = rendered(&coder()).documents();
+    let with = rendered(&coder_activity()).documents();
+    let before = find(&plain, "NetworkPolicy", "coder");
+    let after = find(&with, "NetworkPolicy", "coder");
+    let (b, a) = (
+        before["spec"]["ingress"].as_array().unwrap(),
+        after["spec"]["ingress"].as_array().unwrap(),
+    );
+    assert_eq!(b.len(), 1);
+    assert_eq!(a.len(), 2, "exactly one rule more");
+    assert_eq!(a[0], b[0], "rule 1 is byte for byte today's");
+    // One `from` entry, with both selectors: two entries would be an OR.
+    assert_eq!(
+        a[1],
+        json!({
+            "from": [{
+                "namespaceSelector": {"matchLabels": {"kubernetes.io/metadata.name": "aap-system"}},
+                "podSelector": {"matchLabels": {"app.kubernetes.io/name": "aap-operator"}},
+            }],
+            "ports": [{"protocol": "TCP", "port": 8081}],
+        })
+    );
+    // Everything else of the policy is as it was, the digest the pods carry aside (the listener is in it).
+    let (mut b2, mut a2) = (before.clone(), after.clone());
+    for d in [&mut b2, &mut a2] {
+        d["spec"]["ingress"] = Value::Null;
+        d["metadata"]["annotations"] = Value::Null;
+    }
+    assert_eq!(a2, b2);
+}
+
+#[test]
+fn with_no_allow_from_the_listener_still_gets_a_policy_and_the_a2a_rule_stays_open() {
+    let (id, mut spec) = coder_activity();
+    spec.network.allow_from.clear();
+    let docs = render(&id, &spec).unwrap().documents();
+    let np = find(&docs, "NetworkPolicy", "coder");
+    let ingress = np["spec"]["ingress"].as_array().unwrap();
+    assert_eq!(ingress.len(), 2);
+    assert_eq!(
+        ingress[0],
+        json!({"ports": [{"protocol": "TCP", "port": 8080}]}),
+        "no `from`: open, as with no policy"
+    );
+    assert_eq!(
+        ingress[1]["ports"],
+        json!([{"protocol": "TCP", "port": 8081}])
+    );
+    assert_eq!(ingress[1]["from"].as_array().unwrap().len(), 1);
+    assert_eq!(np["spec"]["policyTypes"], json!(["Ingress"]));
 }

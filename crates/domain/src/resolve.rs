@@ -6,16 +6,16 @@ use std::collections::BTreeMap;
 
 use aap_api::{AgentConfig, AgentService, Binary, Coder, FsGroupChangePolicy, Github, Topology};
 use aap_ports::{
-    CnpgSpec, Container, DeletionPolicy, EnvValue, EnvVar, FileSet, Mount, Network, OwnerHandle,
-    PersistentVolume, Probe, ProbeAction, Probes, Resources, Role, RuntimeId, RuntimeSpec,
-    SecretRef, Security, Sharing, StoreId, StoreKind, StoreSpec, VolumeSource, VolumeSpec,
-    Workload, cnpg_connection,
+    CnpgSpec, Container, DeletionPolicy, EnvValue, EnvVar, FileSet, Mount, Network,
+    NetworkActivity, OwnerHandle, Peer, PersistentVolume, Probe, ProbeAction, Probes, Resources,
+    Role, RuntimeId, RuntimeSpec, SecretRef, Security, Selector, Sharing, StoreId, StoreKind,
+    StoreSpec, VolumeSource, VolumeSpec, Workload, cnpg_connection,
 };
 use serde_json::json;
 
 use crate::contract::{self, env, probes, run_pods as rp, sidecar};
 use crate::digest::{files_hash8, spec_digest};
-use crate::externals::Externals;
+use crate::externals::{ActivityExternals, Externals};
 use crate::refs::{Origins, materialize};
 use crate::run_pods::{ForService, RunPodClass, RunPodSettings};
 use crate::validate::{ConfigIssue, check_all};
@@ -134,6 +134,10 @@ pub fn resolve(
             // Only an A2A image says where its card is; an adam process serves it at the fixed path
             // (the provider's default), so no existing digest moves.
             card_path: plan::a2a(config).map(|a| a.card_path.clone()),
+            activity: cx.activity.map(|a| NetworkActivity {
+                port: a.port(),
+                from: operator_peer(a),
+            }),
         },
         run_pods: cx.run_pods_spec().map_err(|issue| vec![issue])?,
     };
@@ -152,6 +156,25 @@ pub fn resolve(
         digest,
         public_url: cx.public_url,
     })
+}
+
+/// The one peer that may reach the activity listener: the operator's pods, in the operator's namespace, as a **single**
+/// entry that holds both selectors (two entries would let either through).
+fn operator_peer(a: &ActivityExternals) -> Peer {
+    Peer {
+        namespaces: Some(Selector {
+            match_labels: BTreeMap::from([(
+                "kubernetes.io/metadata.name".to_owned(),
+                a.operator_peer().namespace.clone(),
+            )]),
+            match_expressions: Vec::new(),
+        }),
+        pods: Some(Selector {
+            match_labels: a.operator_peer().pod_labels.clone(),
+            match_expressions: Vec::new(),
+        }),
+        cidr: None,
+    }
 }
 
 fn lit(name: &str, value: impl Into<String>) -> EnvVar {
@@ -191,6 +214,8 @@ struct Cx<'a> {
     max_tier: aap_api::AccessTierCap,
     /// The `RuntimeClass` of every agent's pod (K14a, AD-052): the deployment's, empty for none.
     agent_runtime_class: Option<String>,
+    /// The activity listener this agent gets, when it gets one (AD-058, ANR-1030a; see [`plan::activity`]).
+    activity: Option<&'a ActivityExternals>,
 }
 
 /// What the config asks of run pods and the deployment gives: the settings, and the class chosen.
@@ -219,6 +244,7 @@ impl<'a> Cx<'a> {
         Self {
             max_tier: externals.max_access_tier,
             agent_runtime_class: externals.agent_runtime_class.clone(),
+            activity: plan::activity(service, config, externals),
             service,
             config,
             origins,
@@ -461,6 +487,8 @@ impl<'a> Cx<'a> {
             },
             resources: convert::resources(spec.environment.resources.as_ref()).0,
             read_only_root_filesystem: false,
+            // An A2A image never gets the listener: it never sleeps (AD-058).
+            activity_port: None,
         };
         Ok(Workload {
             name: self.name.to_owned(),
@@ -751,6 +779,12 @@ impl<'a> Cx<'a> {
             },
             resources,
             read_only_root_filesystem: false,
+            // The selected workload's agent container alone: the one that serves A2A (the front with `split`,
+            // the one process otherwise), never a worker of a split service and never a sidecar.
+            activity_port: self
+                .activity
+                .filter(|_| role != Role::Worker)
+                .map(ActivityExternals::port),
         };
 
         // The sidecars of every process that runs workers: the git sandbox first (run pods), then the GitHub MCP server
@@ -800,6 +834,7 @@ impl<'a> Cx<'a> {
                         )]),
                     },
                     read_only_root_filesystem: false,
+                    activity_port: None,
                 }]
             }
             _ => Vec::new(),
@@ -1074,6 +1109,19 @@ impl<'a> Cx<'a> {
             e.push(EnvVar::secret(
                 env::A2A_BEARER_TOKENS,
                 SecretRef::new(&r.name, &r.key),
+            ));
+        }
+        // The activity listener (AD-058, ANR-1030a), on the process that serves A2A alone: the tokens are a reference to
+        // the deployment's Secret, never a value (the operator reads no Secret), and the address is on every interface so
+        // the operator, not only the pod, reaches it.
+        if serves_a2a && let Some(a) = self.activity {
+            e.push(lit(
+                env::ACTIVITY_LISTEN_ADDR,
+                format!("0.0.0.0:{}", a.port()),
+            ));
+            e.push(EnvVar::secret(
+                env::ACTIVITY_BEARER_TOKENS,
+                SecretRef::new(&a.tokens_secret().name, &a.tokens_secret().key),
             ));
         }
         Ok(e)

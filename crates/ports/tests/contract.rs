@@ -12,7 +12,7 @@ use aap_ports::{
     Phase, RuntimeError, RuntimeId, RuntimeProvider, RuntimeSpec, RuntimeStatus, SecretRef,
     StoreError, StoreId, StoreKind, StoreProvisioner, StoreSpec, Surface, VolumeSource,
 };
-use aap_ports::{Mount, ScratchVolume};
+use aap_ports::{Mount, NetworkActivity, Peer, ScratchVolume, Selector};
 use futures::StreamExt;
 use futures::stream::BoxStream;
 
@@ -76,6 +76,95 @@ fn check_names_the_broken_invariant() {
     ];
     for (needle, break_it) in broken {
         let mut spec = base.clone();
+        break_it(&mut spec);
+        let err = spec.check().unwrap_err();
+        assert_eq!(err.class(), ErrorClass::Invalid);
+        assert!(err.to_string().contains(needle), "{needle}: {err}");
+    }
+}
+
+/// The sample spec with an activity listener (ANR-1030a) on the selected workload.
+fn with_activity() -> RuntimeSpec {
+    let mut s = sample_spec(&id());
+    s.network.activity = Some(NetworkActivity {
+        port: 8081,
+        from: Peer {
+            namespaces: Some(Selector {
+                match_labels: [("kubernetes.io/metadata.name".to_owned(), "ops".to_owned())].into(),
+                match_expressions: Vec::new(),
+            }),
+            pods: Some(Selector {
+                match_labels: [("app".to_owned(), "operator".to_owned())].into(),
+                match_expressions: Vec::new(),
+            }),
+            cidr: None,
+        },
+    });
+    let selects = s.network.selects.clone();
+    for w in &mut s.workloads {
+        if w.name == selects {
+            w.container.activity_port = Some(8081);
+        }
+    }
+    s
+}
+
+#[test]
+fn the_sample_spec_with_activity_is_valid() {
+    with_activity().check().unwrap();
+}
+
+#[test]
+fn check_names_the_broken_invariant_of_the_activity_listener() {
+    let broken: Vec<(&str, Break)> = vec![
+        (
+            "the activity port is 0",
+            Box::new(|s| s.network.activity.as_mut().unwrap().port = 0),
+        ),
+        (
+            "is the network port",
+            Box::new(|s| {
+                let p = s.network.port;
+                s.network.activity.as_mut().unwrap().port = p;
+                for w in &mut s.workloads {
+                    w.container.activity_port = Some(p);
+                }
+            }),
+        ),
+        (
+            "does not listen on the activity port",
+            Box::new(|s| {
+                let i = s
+                    .workloads
+                    .iter()
+                    .position(|w| w.name == s.network.selects)
+                    .unwrap();
+                s.workloads[i].container.activity_port = None;
+            }),
+        ),
+        (
+            "not the network's",
+            Box::new(|s| s.workloads[0].container.activity_port = Some(9999)),
+        ),
+        (
+            "no activity listener",
+            Box::new(|s| {
+                s.network.activity = None;
+            }),
+        ),
+        (
+            "names nothing",
+            Box::new(|s| s.network.activity.as_mut().unwrap().from = Peer::default()),
+        ),
+        (
+            "empty selector",
+            Box::new(|s| {
+                s.network.activity.as_mut().unwrap().from.pods = Some(Selector::default());
+            }),
+        ),
+    ];
+    for (needle, break_it) in broken {
+        let mut spec = with_activity();
         break_it(&mut spec);
         let err = spec.check().unwrap_err();
         assert_eq!(err.class(), ErrorClass::Invalid);

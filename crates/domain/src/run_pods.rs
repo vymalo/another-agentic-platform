@@ -1299,6 +1299,7 @@ impl ForService<'_> {
                 limits: s.resources.limits.clone(),
             },
             read_only_root_filesystem: true,
+            activity_port: None,
         }
     }
 

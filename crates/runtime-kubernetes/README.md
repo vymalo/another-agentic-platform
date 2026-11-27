@@ -32,8 +32,8 @@ else: the provider has no right on Secrets, never reads one, and copies no kubel
 | `StatefulSet` | the workload's name (`<svc>`, `<svc>-front`) | `Workload::stable_identity`: a per-replica volume, or a pod name that is a worker's identity (`affinity`, `isolated`) |
 | `Deployment` | the same | otherwise |
 | `PodDisruptionBudget` | the workload's name | `Workload::min_available` is set (`aap-domain`: a front of more than one replica) |
-| `Service` | `<svc>` | always: ClusterIP, port `http` to the named container port, selecting `Network::selects` |
-| `NetworkPolicy` | `<svc>` | `Network::allow_from` is not empty: ingress on the container port from those peers, **no egress rule**. An empty list makes no policy (and deletes one an earlier spec made) |
+| `Service` | `<svc>` | always: ClusterIP, port `http` to the named container port, selecting `Network::selects`; with `Network::activity` also port `activity` to the container port of that name (ANR-1030a) |
+| `NetworkPolicy` | `<svc>` | `Network::allow_from` is not empty: ingress on the container port from those peers, **no egress rule**. An empty list makes no policy (and deletes one an earlier spec made), **unless `Network::activity` is set** (ANR-1030a): then a policy always, rule 1 as above (with no `from` when the list is empty), and rule 2 the activity port from one peer entry that holds both the operator's namespace and pod selectors |
 | `ConfigMap` | the `FileSet`'s name | one per file set. A path with `/` is a key by an injective encoding (`skills/review/SKILL.md` is `skills_sreview_sSKILL.md`) and is mounted at its path through `items` |
 | `PersistentVolumeClaim` | `<svc>-<volume>` | a `Shared` persistent volume: one ReadWriteMany claim for every replica |
 | `ServiceAccount` | the account `RunPods::service_account` names | `RuntimeSpec::run_pods` is set ([run pods](#run-pods-d15a)): `automountServiceAccountToken: false`; the workers' pods run as it and carry its token as a volume of the coder container alone ([the git sandbox](#the-git-sandbox-d15d)) |
@@ -44,11 +44,13 @@ else: the provider has no right on Secrets, never reads one, and copies no kubel
 | `ConfigMap` | `<svc>-run-pods-policy` | run pods: the parameters of the deployment's admission policy, labelled `agents.vymalo.com/run-pods-policy: "true"`. **With node types (ANR-660, AD-066) two more keys, `nodeTypeKey` and `nodeTypeAdmitted` (one value per line), only when `RunPods::node_type` is set; the chart's policy falls back to its own values when they are absent.**
 | (the StatefulSet's `volumeClaimTemplates`) | `<volume>`, claims `<volume>-<workload>-<n>` | a `PerReplica` volume: ReadWriteOnce, one per replica |
 
+**Apply order of the agent's policy (ANR-1030a).** The policy comes after the workloads, as it always did, **except when the spec has an activity listener (`Rendered::policy_first`): then it is applied before the Service and the workloads**, so no pod serves the listener before the policy that keeps it to the operator exists (a policy that only admits peers is fail-closed before its pods are there; `tests/run_pods_api.rs` asserts both orders). Removal is unchanged: a policy an earlier spec made is deleted in the same pass, right after the workloads are re-applied without the listener, **without waiting for the rollout**. So when activity is turned off for an agent with an empty `allowFrom`, the old pods still serve the listener with no policy until they are replaced, guarded by the bearer token alone. Nothing reaches this until ANR-1030b turns activity on, and the fix (keep a stale policy until the rollout is done) is part of ANR-1030b.
+
 **The pod template** is the adam-rs chart's `statefulset.yaml`: no service-account token, `runAsNonRoot` with the ids of
 `Security`, `seccompProfile: RuntimeDefault`, every container drops all capabilities and refuses privilege escalation,
 the probes of the spec on the named port, `WORKER_ID` from the downward API, and the sidecars as **native sidecars**
 (init containers with `restartPolicy: Always`). `tests/render.rs` states each of these, and the goldens in
-[`tests/golden`](tests/golden) hold the whole of `examples/coder.yaml` (combined and split) and `examples/chat.yaml`.
+[`tests/golden`](tests/golden) hold the whole of `examples/coder.yaml` (combined and split) and `examples/chat.yaml`, and `coder-activity.yaml` the coder with the activity listener (ANR-1030a).
 
 ### Labels, annotations, ownership
 
@@ -250,7 +252,7 @@ AAP_TEST_KUBECONFIG=$HOME/.kube/config cargo test -p aap-runtime-kubernetes --te
 | File | What |
 |---|---|
 | `src/*` unit tests | the key encoding, the error classes, the status mapping from crafted Pods (every row of the issue table, the phases, the rollout checks), the plain-text audit |
-| `tests/render.rs` | golden YAML of `examples/coder.yaml` (combined and split) and `examples/chat.yaml`, and each rule stated: labels, digest, owner (compute has one, data has none), the chart's pod template, the policy, the budget, shared claims, suspend, no Secret name in plain text, what is refused |
+| `tests/render.rs` | golden YAML of `examples/coder.yaml` (combined and split), `examples/chat.yaml` and `coder-activity.yaml`, and each rule stated: labels, digest, owner (compute has one, data has none), the chart's pod template, the policy, the budget, shared claims, suspend, no Secret name in plain text, what is refused |
 | `tests/run_pods.rs`, `tests/run_pods_api.rs`, `tests/run_pods_parity.rs` | run pods (D15a, D15c, D15d): the objects and their golden; the git sandbox and the account's credentials as the coder chart renders them; the requests, their order and the removals against the fake API server (the egress proxy applied before the policy that names it, cleared before the run pods' policy, never taken for stale, a foreign object of its names blocking); parity with the coder chart's quota, network policy, binding, account, Role, `PriorityClass`, admission policy and egress proxy |
 | `tests/api.rs` | the provider against a **fake API server** (`tests/support`): the real requests of a real `kube::Client` against an in-memory store. The order of calls (reads before writes), `fieldManager` and `force`, the guard (no write at all), stale objects, `suspend`, both deletion policies and their order, status from seeded pods, endpoints, failures by class. It is not an API server: no controllers, no validation, no garbage collection |
 | `tests/watch.rs` (K6b) | `watch()` against the same fake, on its list requests: one namespaced watch of each kind per namespace given and **no list of the whole cluster** (the `Api::all` a namespaced `Role` cannot allow), and no namespace named is one list per kind with no namespace in its path |
