@@ -40,7 +40,7 @@ api:
             app.kubernetes.io/name: opentelemetry-collector
 ```
 
-`otel` is the operator's block. `api.otel` is the API's, and it does nothing unless `api.enabled` is true. Add them to the file you used to install, or keep them in a second file and pass both. **Do not paste a second top-level `api:` block into one file.** YAML keeps the last one and drops the first without a warning: with the Platform API's values above it, the pasted `api:` replaces them, `helm template` still exits 0, and the render has no `aap-operator-api`. Merge the keys under your existing `api:`, or use the second-file form:
+`otel` is the operator's block. `api.otel` is the API's, and it does nothing unless `api.enabled` is true. Add them to the file you used to install, or keep them in a second file and pass both. **Do not paste a second top-level `api:` block into one file.** YAML keeps the last one and drops the first without a warning: with the `api:` block already in your file, the pasted `api:` replaces it, `helm template` still exits 0, and the render has no `aap-operator-api` object. Merge the keys under your existing `api:`, or use the second-file form:
 
 ```sh
 helm upgrade --install aap-operator deploy/operator --namespace aap-system \
@@ -131,7 +131,7 @@ The API reads the standard variables, as a strict subset. The operator reads the
 | `OTEL_EXPORTER_OTLP_PROTOCOL` other than `http/json` | `grpc` and `http/protobuf` are not spoken. A collector converts. BuildKit injects `grpc` into its `RUN` steps |
 | `OTEL_EXPORTER_OTLP_HEADERS` | A header is a file, not a variable |
 | A header with an `http` endpoint | A token would travel in clear |
-| A sampler other than the three above | |
+| A sampler other than the three above, or (for the binaries only) their `parentbased_` forms. The chart refuses `parentbased_*` | |
 
 **A refused setting never stops a running process.** That is a rule of the code: a tracing setting must not take the service down. What a process does depends on which one it is:
 

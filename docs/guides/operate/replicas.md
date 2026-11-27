@@ -28,7 +28,7 @@ With more than one replica, the chart changes five things:
 | `PodDisruptionBudget` `aap-operator` | `maxUnavailable: 1`. At one replica there is none, because a budget of 1 of 1 would block every drain |
 | The operator's file | `leaderElection.enabled: true`, with the `Lease`'s name and namespace and the three timers |
 | The `Role` in the primary namespace | `get` and `update` on the `Lease` named `aap-operator`, and `create` on `leases`. No `delete`, and no `list` |
-| The pass timeout | 4 s, unless `tuning.reconcileTimeoutSecs` says otherwise. With `toolProbe.to` set, `toolProbe.timeoutSecs` must be at most the pass timeout minus 5, and the chart refuses it otherwise (`with the election on, toolProbe.timeoutSecs (...) needs to be at most tuning.reconcileTimeoutSecs - 5 (...)`). With the default 4 s pass timeout it is always refused, because 4 minus 5 is negative. A render that passes (run): `leaseSecs: 30`, `tuning.reconcileTimeoutSecs: 10`, `toolProbe.timeoutSecs: 5` |
+| The pass timeout | 4 s, unless `tuning.reconcileTimeoutSecs` says otherwise. With `toolProbe.to` set, `toolProbe.timeoutSecs` must be at most the pass timeout minus 5, and the chart refuses it otherwise (`with the election on, toolProbe.timeoutSecs (...) needs to be at most tuning.reconcileTimeoutSecs - 5 (...)`). **The chart's defaults cannot satisfy both rules:** with the default 4 s pass timeout it is always refused, because 4 minus 5 is negative. A render that passes (run): `leaseSecs: 30`, `tuning.reconcileTimeoutSecs: 10`, `toolProbe.timeoutSecs: 5` |
 
 The `Lease` is named `aap-operator` and lives in the **primary** namespace: the first of `watchNamespaces`. Every pod campaigns for the same one.
 
@@ -109,7 +109,7 @@ There are two ways a leader goes, and they differ by about 15 seconds.
 
 - **A crash or a lost node.** The pod leaves no word. The `Lease` keeps its name until it expires, `leaseSecs` after the last renewal, so nothing writes for about that long. Agents keep running, because each is a `Deployment` of its own. Only reconciling pauses. This is for a pod that is gone. A container that the kubelet restarts inside the same pod finds the `Lease` under its own name and renews it, so there is no failover (a comment in `leader-e2e.sh` says so; it was not run here).
 - **A clean stop** (SIGTERM, a drain, a rolling update). The leader clears `holderIdentity` and the next pod takes it on its next try.
-- **Then the agents catch up.** A replica that is not the leader asks again every 30 s whether it has become one (`FOLLOWER_RECHECK`, in `crates/controller/src/operator.rs`). So an agent that was applied while nobody wrote, a parked one, is reconciled by the new leader up to 30 s after the takeover. That is why the parked agent in the table below was `Ready` 21 s after the takeover and not at once.
+- **Then the agents catch up.** A replica that is not the leader asks again every 30 s whether it has become one (`FOLLOWER_RECHECK`, in `crates/controller/src/operator.rs`). So an agent that was applied while nobody wrote, a parked one, is reconciled by the new leader up to 30 s after the takeover. That is consistent with the parked agent in the table below being `Ready` 21 s after the takeover and not at once. No run isolated the cause: the recheck gives an upper bound of 30 s, not the figure.
 
 What was measured, as dated records:
 

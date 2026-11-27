@@ -105,7 +105,7 @@ api:
         release: kube-prometheus-stack
 ```
 
-**Do not paste a second top-level `api:` or `networkPolicy:` block into the file.** YAML keeps the last one, so the first is dropped without a warning. With the Platform API's values above it, the pasted `api:` replaces the whole API block: `helm template` still exits 0, and the render has no `aap-operator-api` at all (checked: 0 objects, against 29 with the form below). Merge the keys under the `api:` and `networkPolicy:` you already have, or put them in a second file and pass both. Helm merges the maps. It replaces a list whole, so a list in the second file (`allowFrom`) replaces the first file's:
+**Do not paste a second top-level `api:` or `networkPolicy:` block into the file.** YAML keeps the last one, so the first is dropped without a warning. With the `api:` block already in your file, the pasted `api:` replaces it: `helm template` still exits 0, and the render has no `aap-operator-api` object (run on 2026-11-27: 11 objects and none from `templates/api-*`, against 21 objects, 10 of them from `templates/api-*`, with the form below). Merge the keys under the `api:` and `networkPolicy:` you already have, or put them in a second file and pass both. Helm merges the maps. It replaces a list whole, so a list in the second file (`allowFrom`) replaces the first file's:
 
 ```sh
 helm upgrade --install aap-operator deploy/operator --namespace aap-system \

@@ -62,7 +62,7 @@ Every reason below is in `crates/controller/src/derive.rs` or in the provider's 
 | `Suspended`, `scaled to zero on purpose (spec.suspend)` | `RuntimeReady=False` `Suspended` | `spec.suspend` is `true`. `Ready` is `False` for it, and the state is healthy | yes |
 | `Suspended`, `scaled to zero because the agent reported no work` | `RuntimeReady=False` `Sleeping` | The idle timeout (`scaling.idleTimeout`) scaled it to zero | no |
 | Ready, but `Listed=False` `RegistryDisabled` | `Listed=False` | The operator serves no registry: no registry token is set. See [Install](../deploy/install.md#the-registry-token) | cluster test |
-| `Blocked`, `spec.interfaces.a2a.enabled: false` | `ConfigResolved=False` `ConfigInvalid`, and at the same time `Listed=False` `A2ADisabled` | `a2a.enabled: false` is a validation error: v0 serves A2A and nothing else. Set it to `true`. `Ready` says `ConfigInvalid`; `Listed` says `A2ADisabled` | yes |
+| `Blocked`, `spec.interfaces.a2a.enabled: false` | `ConfigResolved=False` `ConfigInvalid`, and at the same time `Listed=False` `A2ADisabled` | `a2a.enabled: false` is a validation error: v0 serves A2A and nothing else. Set it to `true`. `Ready` says `ConfigInvalid`; `Listed` says `A2ADisabled`, and only while the registry is on: with no registry token `Listed` is `RegistryDisabled` | yes |
 | `Listed=False` `ServiceBlocked` | `Listed=False` | The service is `Blocked`: fix that first | yes |
 | `Listed=False` `RegistryFull` | `Listed=False` | The registry would pass 500 items or 1 MiB and lists nothing rather than truncate | no |
 

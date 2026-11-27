@@ -42,7 +42,7 @@ With run pods on, a third value is required: `api.config.defaults.coder.workVolu
 
 ## The values
 
-Add these to the file you used for the operator, or keep them in a second file and pass both with `-f`. **Do not paste a second top-level `api:` or `networkPolicy:` block** into one file: YAML keeps the last, and the first is dropped without a warning. All names are placeholders.
+Add these to the file you used for the operator, or keep them in a second file and pass both with `-f`. **Do not paste a second top-level `api:` block** into one file: YAML keeps the last, and the first is dropped without a warning. This page has two `api:` snippets, the store switch above and the values below: if you use both, they merge under **one** `api:`, or pasting both loses the store override. (A second top-level `networkPolicy:`, the install page's, at least fails loudly, on the registry `allowFrom` check.) All names are placeholders.
 
 ```yaml
 api:

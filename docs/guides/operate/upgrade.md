@@ -67,6 +67,8 @@ stateDiagram-v2
   NewDeployed --> [*]
 ```
 
+A template error fails before any new revision exists, so there is nothing to roll. After a successful upgrade the old revision becomes `superseded`.
+
 1. **Read what changed.** The charts are the diff of one path. Your own values may name a value that moved or went:
 
    ```sh
@@ -110,8 +112,8 @@ Fix the cause and run `helm upgrade` again.
 
 **There is no supported rollback.** None was run. `helm rollback` reverts the operator's release, and it does **not** undo the CRDs: `kubectl apply` owns them, outside any release. So a rollback of the operator can leave it over newer CRDs.
 
-- **The safe case,** in the CRDs README's words: the CRDs over an older operator are safe as long as nobody has stored a reference (`endpointRef`, `providerRef`). An operator from before D1 reads every object written before it.
-- **The unsafe case:** never run an operator older than D1 against CRDs that store a reference. It types `baseUrl` as required and cannot decode such an `AgentConfig`.
+- **The only documented bound** is the CRDs README's pre-D1 rule: the CRDs over an operator older than D1 are safe as long as nobody has stored a reference (`endpointRef`, `providerRef`), and an operator older than D1 must never run against CRDs that store one (it types `baseUrl` as required and cannot decode such an `AgentConfig`). That README also says the Platform API "is not built", which is stale.
+- **Unverified:** rolling back one bump across a CRD change, for example K11a (`model` optional, `harness.type: a2a`), over objects stored under the newer CRDs. Nothing shows that an older operator decodes those objects.
 
 ([The CRDs chart's README](../../../deploy/operator-crds/README.md#upgrading) has both.)
 
