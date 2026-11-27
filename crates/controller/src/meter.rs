@@ -772,12 +772,17 @@ mod tests {
                 ("app.kubernetes.io/managed-by", "adam-coder"),
                 ("app.kubernetes.io/component", "run"),
                 ("app.kubernetes.io/name", "coder-run"),
-                ("adam.vymalo.com/run", "run-1"),
+                // The coder's hash label; the run is the annotation.
+                ("adam.vymalo.com/run", "0123456789ab"),
             ]
             .iter()
             .map(|(k, v)| ((*k).into(), (*v).into()))
             .collect(),
-            annotations: [("agents.vymalo.com/size-weight".to_owned(), "1".to_owned())].into(),
+            annotations: [
+                ("agents.vymalo.com/size-weight".to_owned(), "1".to_owned()),
+                ("adam.vymalo.com/run-id".to_owned(), "run-1".to_owned()),
+            ]
+            .into(),
             phase: "Running".into(),
             started_at: Some(start),
             has_container_status: true,
