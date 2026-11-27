@@ -1,6 +1,6 @@
 # Parity goldens
 
-What the adam-rs chart [`deploy/coder`](https://github.com/vymalo/another-adam-rs/tree/581aeed75e56f903b2a9f59217ea9dcd449c8466/deploy/coder)
+What the adam-rs chart [`deploy/coder`](https://github.com/vymalo/another-adam-rs/tree/b5d1c7eb56e6162348ac94495be1ba400b7a54eb/deploy/coder)
 renders, projected onto the shape `tests/parity.rs` reads, so that `aap-domain` can be held equal to it
 (§59a, "Testing", and the risk "adam's env contract is copied into `aap-domain`").
 
@@ -19,7 +19,18 @@ renders, projected onto the shape `tests/parity.rs` reads, so that `aap-domain` 
 | `chat-env.json` | `adam-agent` for `examples/chat.yaml`. **Written by hand, not rendered**: the chart renders `adam-coder` only. Derived from `bin/adam-agent/README.md` and `docker/coder/Dockerfile`; *verified 2026-10-05 by reading them, not by running the binary* | |
 
 Each rendered file records where it came from (`source`: repository, full revision, chart, values file,
-helm version). Revision: `4bc6742deca699a5e25fb07d892b5ce7d4a42e25` (`4bc6742`, adam-rs `main` on 2026-11-14, the last commit of its history to touch `deploy/coder`, a bump of the image tag, after `3eca052`). The goldens were at `581aeed` (adam-rs `main` on 2026-10-27: the coder's local git runs
+helm version). Revision: `b5d1c7eb56e6162348ac94495be1ba400b7a54eb` (`b5d1c7e`, adam-rs `main` on 2026-11-27, ADR 0038's
+run pod: `OPENCODE_MODEL` is gone from the coder's environment, a run pod reads no Secret at all (`MODEL_API_KEY` out of the
+template, and the admission policy refuses any `secretKeyRef`), the policy gains a rule that a run pod names no pull secret, the
+workspace image is `1.98.1-8c297d3`, the init container copies `adam-exec` alone, and `RUN_POD_WAIT_SECS` is 1020).
+*Verified 2026-11-27*: the diff from the goldens at `4bc6742` is, in the five cases **without** run pods, the revision and the
+removal of `OPENCODE_MODEL` from the coder's environment alone, **so nothing else of a coder with run pods off moved**; in the
+five **with** them it is the revision, `OPENCODE_MODEL`, `RUN_POD_WAIT_SECS` (600 -> 1020), the run container's
+`MODEL_API_KEY` (gone: the pod holds no secret), the workspace image, the init container's command, and the admission policy's
+Secret rule rewritten to refuse any `secretKeyRef` with the pull-secret rule added after it.
+
+Before it the goldens were at `4bc6742deca699a5e25fb07d892b5ce7d4a42e25` (`4bc6742`, adam-rs `main` on 2026-11-14, the last
+commit of its history to touch `deploy/coder`, a bump of the image tag, after `3eca052`). The goldens were at `581aeed` (adam-rs `main` on 2026-10-27: the coder's local git runs
 in a sidecar with no secret, adam-rs [#136](https://github.com/vymalo/another-adam-rs/pull/136) (the binaries) and
 [#137](https://github.com/vymalo/another-adam-rs/pull/137) (the chart), its ADR 0041, open decision 6; `deploy/coder` did not change after it until the revision above, K1's), and
 at `7598255` (run pods reach the internet only through the egress proxy,
@@ -56,6 +67,9 @@ The run pod comparison is exact except for these, each asserted and taken out in
   and `requests.memory` / 2 GiB, on the grid 0.25, 0.5, 1, 2, 4, 8); the coder chart's has none. With `runPods.nodeType` set the template also carries the required
   node affinity and the policy an eleventh rule, last (`!has(params.data.nodeTypeKey) || ...`), neither of which exists in the coder chart, and neither of which is in
   any golden here: nothing renders them while `nodeType` is empty.
+- **ADR 0038, the pull-secret rule's words:** the expression is the coder chart's (`!has(object.spec.imagePullSecrets) || size(...) == 0`); the message says the
+  operator's run pod template carries none, where the coder chart's names its own `imagePullSecrets` values (which are the run pods' there and the operator's and
+  the API's pods' here). `run_pods_parity.rs` holds the expression equal and the words as ours.
 
 ## Regenerating them
 

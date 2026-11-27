@@ -45,13 +45,11 @@ managed_by=$(params managedBy)
 run_label=$(params runLabel)
 claim=$(params claim)
 claims=$(params claims)
-secret=$(params secretName)
-key=$(params secretKey)
 class=$(params priorityClass)
 runtime_class=$(params runtimeClassName)
 node_key=$(params nodeTypeKey)
 node_admitted=$(params nodeTypeAdmitted)
-if [ -z "$account" ] || [ -z "$managed_by" ] || [ -z "$run_label" ] || [ -z "$claim" ] || [ -z "$claims" ] || [ -z "$secret" ] || [ -z "$key" ] || [ -z "$class" ]; then
+if [ -z "$account" ] || [ -z "$managed_by" ] || [ -z "$run_label" ] || [ -z "$claim" ] || [ -z "$claims" ] || [ -z "$class" ]; then
   die "the parameters of the guard are incomplete: $(kubectl -n "$ns" get configmap "$svc-run-pods-policy" -o 'jsonpath={.data}')"
 fi
 
@@ -117,16 +115,19 @@ try "an extra container" denied "a run pod uses only the images" '.spec.containe
 # What it mounts: empty directories and the claim of the work volume (and, when the agent has a package cache, its claim, which the pod of the
 # template mounts: the control above is the proof that the policy admits it).
 try "a hostPath volume" denied "a run pod mounts only emptyDir volumes and the $claims_words" '.spec.volumes += [{name: "host", hostPath: {path: "/"}}]'
-try "a Secret volume" denied "a run pod mounts only emptyDir volumes" ".spec.volumes += [{name: \"s\", secret: {secretName: \"$secret\"}}]"
+try "a Secret volume" denied "a run pod mounts only emptyDir volumes" '.spec.volumes += [{name: "s", secret: {secretName: "the-agents-secret"}}]'
 try "a ConfigMap volume" denied "a run pod mounts only emptyDir volumes" '.spec.volumes += [{name: "c", configMap: {name: "kube-root-ca.crt"}}]'
 try "another claim" denied "a run pod mounts only emptyDir volumes" '.spec.volumes[0].persistentVolumeClaim.claimName = "another-claim"'
 try "a third claim beside the agent's" denied "a run pod mounts only emptyDir volumes" '.spec.volumes += [{name: "third", persistentVolumeClaim: {claimName: "another-claim"}}]'
 
-# Which Secret key it references: the model key, as one variable, and nothing else.
-try "envFrom a Secret" denied "a run pod references no Secret but the key $key of $secret" ".spec.containers[0].envFrom = [{secretRef: {name: \"$secret\"}}]"
-try "another Secret's key" denied "a run pod references no Secret but the key $key of $secret" '.spec.containers[0].env += [{name: "X", valueFrom: {secretKeyRef: {name: "github-app", key: "private-key.pem"}}}]'
-try "another key of the same Secret" denied "a run pod references no Secret but the key $key of $secret" ".spec.containers[0].env += [{name: \"X\", valueFrom: {secretKeyRef: {name: \"$secret\", key: \"GITHUB_TOKEN\"}}}]"
-try "a Secret reference in the init container" denied "a run pod references no Secret but the key $key of $secret" ".spec.initContainers[0].env = [{name: \"X\", valueFrom: {secretKeyRef: {name: \"$secret\", key: \"GITHUB_TOKEN\"}}}]"
+# Which Secret it references: none at all (adam-rs ADR 0038: a run pod reads no Secret, the model key included), and no pull secret either.
+no_secret="a run pod references no Secret a container can read"
+try "envFrom a Secret" denied "$no_secret" '.spec.containers[0].envFrom = [{secretRef: {name: "the-agents-secret"}}]'
+try "another Secret's key" denied "$no_secret" '.spec.containers[0].env += [{name: "X", valueFrom: {secretKeyRef: {name: "github-app", key: "private-key.pem"}}}]'
+try "a key of the agent's own Secret" denied "$no_secret" '.spec.containers[0].env += [{name: "X", valueFrom: {secretKeyRef: {name: "the-agents-secret", key: "GITHUB_TOKEN"}}}]'
+try "the model key" denied "$no_secret" '.spec.containers[0].env += [{name: "MODEL_API_KEY", valueFrom: {secretKeyRef: {name: "the-agents-secret", key: "MODEL_API_KEY"}}}]'
+try "a Secret reference in the init container" denied "$no_secret" '.spec.initContainers[0].env = [{name: "X", valueFrom: {secretKeyRef: {name: "the-agents-secret", key: "GITHUB_TOKEN"}}}]'
+try "a pull secret" denied "a run pod names no pull secret" '.spec.imagePullSecrets = [{name: "ghcr-pull"}]'
 
 # What it may be: not privileged, not root, in its own namespaces, with no token.
 # (privileged with allowPrivilegeEscalation false is refused by the API server's own validation before any policy sees it.)

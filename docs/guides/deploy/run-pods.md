@@ -1,6 +1,6 @@
 # Turn on run pods
 
-A coder can run the commands of a run (`run_command`, `run_checks`, OpenCode) in a pod of their own, instead of in its own container. The coder holds the model key and the GitHub App's private key. A repository's commands should not be able to read them. With run pods on, each run's commands go to a pod that sees only its own run.
+A coder can run the commands of a run (`run_command`, `run_checks`) in a pod of their own, instead of in its own container. The coder holds the model key and the GitHub App's private key. A repository's commands should not be able to read them. With run pods on, each run's commands go to a pod that sees only its own run.
 
 Run pods are **off by default**. With `runPods.enabled: false`, nothing of them is rendered or checked, and an `AgentConfig` that asks for them is `ConfigInvalid`, saying the operator has no run pods. This page turns them on.
 
@@ -56,7 +56,7 @@ The upgrade changes the operator's configuration file, so it **rolls the operato
 
 The values not shown (the run image, the idle and ready timeouts, node placement, `nodeType`) keep their defaults. They are in the chart's [Run pods](../../../deploy/operator/README.md#run-pods) section and in [`values.yaml`](../../../deploy/operator/values.yaml). The run image is pinned by tag and digest, and `latest` is refused.
 
-An agent then asks for them by naming a class. This is a **fragment** of an `AgentConfig`, not a whole one: a coder also needs `binary: adam-coder`, `agent.embedded`, its model, its GitHub settings and the rest. The agent also needs a work volume, and an image from the right adam-rs revision (below). The repository proves `sha-581aeed` in [`run-pods.yaml`](../../../deploy/operator/tests/e2e/run-pods.yaml); read the digest from that file, not from this page.
+An agent then asks for them by naming a class. This is a **fragment** of an `AgentConfig`, not a whole one: a coder also needs `binary: adam-coder`, `agent.embedded`, its model, its GitHub settings and the rest. The agent also needs a work volume, and an image from the right adam-rs revision (below). The repository proves `sha-b5d1c7e` in [`run-pods.yaml`](../../../deploy/operator/tests/e2e/run-pods.yaml); read the digest from that file, not from this page.
 
 ```yaml
 kind: AgentConfig
@@ -72,7 +72,7 @@ spec:
           sizeClass: standard
   environment:
     image:
-      ref: ghcr.io/vymalo/another-adam-rs/coder:sha-581aeed@sha256:<digest, from run-pods.yaml>
+      ref: ghcr.io/vymalo/another-adam-rs/coder:sha-b5d1c7e@sha256:<digest, from run-pods.yaml>
     volumes:
       - { name: work, scope: agent, mountPath: /work, source: { persistent: { size: 20Gi, perReplica: true } } }
 ```

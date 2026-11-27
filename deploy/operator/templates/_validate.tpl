@@ -446,8 +446,11 @@ the CIDRs, a toleration or an egress rule, which the operator checks at start an
 {{- if not (regexMatch `^[A-Za-z_][A-Za-z0-9_]*$` $k) -}}
 {{- fail (printf "runPods.extraEnv: %q is not the name of a variable" $k) -}}
 {{- end -}}
-{{- if has $k (list "MODEL_API_KEY" "CARGO_BUILD_JOBS") -}}
-{{- fail (printf "runPods.extraEnv.%s: the operator sets this variable itself (a secret is never a setting: the model key comes from the agent's Secret)" $k) -}}
+{{- if eq $k "MODEL_API_KEY" -}}
+{{- fail "runPods.extraEnv.MODEL_API_KEY: a run pod holds no model key (adam-rs ADR 0038), and a secret is never a setting" -}}
+{{- end -}}
+{{- if eq $k "CARGO_BUILD_JOBS" -}}
+{{- fail "runPods.extraEnv.CARGO_BUILD_JOBS: the operator sets this variable itself (cargoBuildJobs)" -}}
 {{- end -}}
 {{- if has $k (list "HTTPS_PROXY" "https_proxy" "HTTP_PROXY" "http_proxy" "NO_PROXY" "no_proxy") -}}
 {{- fail (printf "runPods.extraEnv.%s: the operator sets the proxy variables of a run pod from runPods.egressProxy (the egress proxy is the only way out, adam-rs ADR 0042); to add names that bypass it, use runPods.egressProxy.extraNoProxy" $k) -}}

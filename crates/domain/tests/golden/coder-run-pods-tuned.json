@@ -85,8 +85,12 @@
           "message": "a run pod mounts only emptyDir volumes and the claim work-coder-0: no hostPath, no Secret, no other claim"
         },
         {
-          "expression": "variables.containers.all(c, (!has(c.env) || c.env.all(e, !has(e.valueFrom) || !has(e.valueFrom.secretKeyRef) || (e.valueFrom.secretKeyRef.name == 'coder-secrets' && e.valueFrom.secretKeyRef.key == 'MODEL_API_KEY'))) && (!has(c.envFrom) || c.envFrom.all(f, !has(f.secretRef))))",
-          "message": "a run pod references no Secret but the key MODEL_API_KEY of coder-secrets (as one variable): no Secret volume, no envFrom, no other key"
+          "expression": "variables.containers.all(c, (!has(c.env) || c.env.all(e, !has(e.valueFrom) || !has(e.valueFrom.secretKeyRef))) && (!has(c.envFrom) || c.envFrom.all(f, !has(f.secretRef))))",
+          "message": "a run pod references no Secret a container can read: no Secret volume, no secretKeyRef, no envFrom"
+        },
+        {
+          "expression": "!has(object.spec.imagePullSecrets) || size(object.spec.imagePullSecrets) == 0",
+          "message": "a run pod names no pull secret: the chart sets none (values imagePullSecrets is empty)"
         },
         {
           "expression": "variables.containers.all(c, has(c.securityContext) && has(c.securityContext.allowPrivilegeEscalation) && c.securityContext.allowPrivilegeEscalation == false && (!has(c.securityContext.privileged) || c.securityContext.privileged == false))",
@@ -655,15 +659,6 @@
                 {
                   "name": "NPM_CONFIG_REGISTRY",
                   "value": "https://npm.example.com/"
-                },
-                {
-                  "name": "MODEL_API_KEY",
-                  "valueFrom": {
-                    "secretKeyRef": {
-                      "key": "MODEL_API_KEY",
-                      "name": "coder-secrets"
-                    }
-                  }
                 }
               ],
               "image": "registry.example.com/team/workspace:2.0.0-abc1234@sha256:1111111111111111111111111111111111111111111111111111111111111111",
@@ -706,7 +701,7 @@
               "command": [
                 "sh",
                 "-c",
-                "cp -L /opt/adam/bin/adam-exec /opt/adam/bin/opencode /tools/ && chmod 0755 /tools/adam-exec /tools/opencode"
+                "cp -L /opt/adam/bin/adam-exec /tools/ && chmod 0755 /tools/adam-exec"
               ],
               "image": "ghcr.io/vymalo/another-adam-rs/coder:sha-0391809",
               "imagePullPolicy": "IfNotPresent",
@@ -787,7 +782,7 @@
     "namespace": "another-agentic-system",
     "release": "coder",
     "repository": "https://github.com/vymalo/another-adam-rs",
-    "revision": "4bc6742deca699a5e25fb07d892b5ce7d4a42e25",
+    "revision": "b5d1c7eb56e6162348ac94495be1ba400b7a54eb",
     "values": "tools/adam-parity/cases/coder-run-pods-tuned.yaml"
   },
   "workloads": {
@@ -822,10 +817,6 @@
           {
             "literal": "coding-model",
             "name": "MODEL"
-          },
-          {
-            "literal": "coding-model",
-            "name": "OPENCODE_MODEL"
           },
           {
             "literal": "4",

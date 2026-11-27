@@ -451,7 +451,7 @@ The field-to-environment contract. It is the only place in the operator that kno
 | `…coder.allowedRepoHosts`, `githubApiUrl`, `prDraft` | `ALLOWED_REPO_HOSTS` (comma-joined), `GITHUB_API_URL`, `PR_DRAFT` | |
 | `…coder.gitAuthor` | `GIT_AUTHOR_NAME`, `GIT_AUTHOR_EMAIL` | |
 | `…coder.createRepoOwners` | `CREATE_REPO_OWNERS` (comma-joined) | Not set when empty: the tool stays off |
-| `…coder.opencodeModel` | `OPENCODE_MODEL` | |
+| `…coder.opencodeModel` | *nothing since adam-rs ADR 0038* (`b5d1c7e`): the coder no longer uses OpenCode, so the field is read and renders no variable (and changes no digest). It stays in the CRD until a schema change removes it | |
 | `…coder.maxAccessTier` (K1) | `MAX_ACCESS_TIER` (`plan`, `edits`, `auto`, `bypass`) | Every role of a coder reads it. Not set when absent: the coder's own default is `auto` |
 | `…coder.runPods.sizeClass` (D15a) | `RUN_ENVIRONMENT=kubernetes` and seven `RUN_POD_*` variables, **since D15d the git sandbox: `GIT_SANDBOX_SOCKET`, a `git-sandbox` native sidecar, two `emptyDir`s and the account's credentials as a projected volume of the coder container alone (the pod automounts no token any more)**, the template (a ConfigMap `<svc>-run-pod` mounted at `/etc/adam/run-pod`, `RUN_POD_TEMPLATE_FILE`), the account the workers run as with its token, a `ResourceQuota`, a `NetworkPolicy` (deny by default since D15c) and a `RoleBinding` `<svc>-run-pods`, a ConfigMap `<svc>-run-pods-policy` for the chart's admission policy, and since D15c **the egress proxy** (a `Deployment`, `Service`, `ServiceAccount`, `PodDisruptionBudget`, `NetworkPolicy` `<svc>-egress` and a ConfigMap `<svc>-egress-allow`) and the template's six proxy variables | Absent: none of it, and the digest does not move. The class is a key of the operator chart's `runPodClasses`; the rest is the deployment's (*D15a built*) |
 | `…coder.github.app.id`, `owners`, `installationId` | `GITHUB_APP_ID`, `GITHUB_APP_OWNERS`, `GITHUB_APP_INSTALLATION_ID` | Exactly one of the last two |
@@ -1768,6 +1768,24 @@ runtime status
 >
 > **Unverified, still:** **a native sidecar on a cluster older than 1.29** (*amended 2026-11-27, AD-067: such a cluster is below the floor of 1.37 and unsupported; the sidecar is GA there*; the feature is beta and on by default from 1.29, GA in 1.33; run pods need 1.30 for the admission policy, and the GitHub server's sidecar already needed it, but an agent with `githubMcp.sidecar: false` did not; *unverified* on every version but 1.35.8); what the sandbox does not do, and adam-rs's ADR 0041 says it does not: **a filter in the sandbox still sees the whole work volume, every run's files**, as the coder's git did, and can write the shared mirrors (the coder puts a mirror's configuration back before a network command), the socket authenticates nobody (its mode and its directory decide), and the coder's other commands are no safer for it; and local mode (run pods off) stays unprotected, as before. **D15 stays open until the job has run green with these checks.**
 
+> **The pin moves to adam-rs `b5d1c7e` (ANR-1200, 2026-11-27): ADR 0038's run pod.** adam-rs's `main` of 2026-11-27 ports its ADR 0038
+> and the operator follows, because the goldens are what the chart renders: **the coder no longer uses OpenCode** (`OPENCODE_MODEL` is gone from
+> its environment; `coder.opencodeModel` is still a field of the CRD and now renders no variable and changes no digest), **a run pod reads no
+> Secret at all** (`MODEL_API_KEY` is out of the run pod template, and the admission policy refuses **any** `secretKeyRef` where it allowed that
+> one key of the agent's Secret), the policy **gains a rule that a run pod names no pull secret**, the run container's image is the `workspace`
+> image `1.98.1-8c297d3`, the init container copies `adam-exec` alone, and a run waits **1020 s** for a slot. [`aap-ports`](../../crates/ports/README.md)
+> loses `RunPodGuard::secret` (a field, so every literal of the guard moves), [`aap-domain`](../../crates/domain/README.md) stops emitting the
+> model key in the template and refuses `MODEL_API_KEY` in `runPods.extraEnv` for the reason ADR 0038 gives, and [`aap-runtime-kubernetes`](../../crates/runtime-kubernetes/README.md)
+> stops writing the guard's `secretName` and `secretKey` parameters. The operator chart's policy says the same, and its run image, its
+> `waitSecs` and its `defaultAgentImage` move with the coder (`sha-b5d1c7e`); the coder pin of `tests/e2e/run-pods.yaml` moves too, and
+> `defaultAgentImage` now **has** `adam-egress` and `adam-git-sandbox`, which supersedes D15c's and D15d's "it has neither". **Verified
+> 2026-11-27**: `tools/adam-parity/regen.sh --check` at `b5d1c7e` with helm 4.3.2 (the goldens are what the chart renders; the diff from
+> `4bc6742` is the revision and `OPENCODE_MODEL` alone in the five cases without run pods), the two pins by anonymous manifest requests to
+> `ghcr.io`, and `render-check.sh` (743 checks; the twelve that hand the rendered file to `operator run --check` need the built binary and did not run). **Unverified until CI has run it**: `run-pods-admission.sh`'s rewritten Secret cases and its pull-secret
+> case on a real API server, and `run-pods-e2e` with the new pin. The `crates/runtime-kubernetes` goldens and `crates/domain/tests/digest.rs`'s
+> `CODER_DIGEST` are regenerated by `cargo test` (`AAP_UPDATE_GOLDENS=1`), which the slice did not run (the owner's rule of 2026-11-27
+> forbids a heavy job on the host where it was written): **they are stale until someone runs it**, and the failures name them.
+>
 > **K14a built (2026-11-19):** the half of K14 (AD-052) that needs no cluster: a sandboxed `RuntimeClass` for **run pods** and for **the agents' own pods**, named by the deployment, empty by default and then **not a trace in any render**. gVisor's handler is `runsc`, not `runsc-kvm` (AD-052 decision 5: the nodes are virtual machines), and the `RuntimeClass` object is the **administrator's**, never the operator's (decision 4): the chart names it and makes none.
 >
 > | What | Where | Proven by |

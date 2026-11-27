@@ -226,7 +226,7 @@ data:
         - "agents"
     defaults:
       # AD-029: the image of an agent whose AgentConfig names none. A new value rolls those agents, and no other.
-      agentImage: "ghcr.io/vymalo/another-adam-rs/coder:sha-9a1fd4e@sha256:c3c178b7d73599f40d53f798616e510346abd3300a622b09b2bc233109f12b44"
+      agentImage: "ghcr.io/vymalo/another-adam-rs/coder:sha-b5d1c7e@sha256:5de41376a08d8452ae0c59314e0e34d35da0aae495cdbc72ad6144a9c4235d45"
     # Run pods (slice D15a): the size classes, the run image, the quota, the network policy, the egress proxy and the git sandbox,
     # and the names of the cluster-scoped objects this chart made. No secret: the model key is the agent's.
     runPods:
@@ -295,10 +295,10 @@ data:
         tmpSize: 128Mi
       idleSecs: 300
       image:
-        digest: sha256:d2aae762ecad2c13bb697332507d236a75d8233d061f38cc97dc9227192b0797
+        digest: sha256:b465808bfb8a1baae5e59a429bf292726b021e3b37322f759dbda3ee2c57ed67
         pullPolicy: IfNotPresent
         repository: ghcr.io/vymalo/another-agentic-images/workspace
-        tag: 1.98.1-e6a528f
+        tag: 1.98.1-8c297d3
       networkPolicy:
         blockedCIDRs:
         - 10.0.0.0/8
@@ -333,7 +333,7 @@ data:
         key: workload
         operator: Equal
         value: runs
-      waitSecs: 600
+      waitSecs: 1020
     log:
       filter: "info"
 
@@ -706,7 +706,7 @@ spec:
         app.kubernetes.io/instance: aap-operator
       annotations:
         # The configuration file is read once, at start: a changed file is a new pod (ANR-962).
-        checksum/config: 62ad96fa600910fd988d1f1f282dba1cb7bfc8bb1a5c820f007e2a6b1f21b59a
+        checksum/config: b5a8da702fa783f27f590515a4f8288f4d721b7f3978c328e0f70272444ab22e
     spec:
       serviceAccountName: aap-operator
       # The API token is the operator's way in.
@@ -788,7 +788,7 @@ spec:
 # runPods.enabled: the guard that lets an agent's account make pods without being able to read the namespace's other Secrets, mount
 # the host or run anything privileged. It is the coder chart's policy (adam-rs `run-pods-admission.yaml`) with what differs per agent
 # read from a parameter: a ConfigMap of the agent's, labelled agents.vymalo.com/run-pods-policy, which the operator makes for each agent
-# that asks for run pods (the account it is for, the images, the claims, the one Secret key). It applies to the pods CREATED BY
+# that asks for run pods (the account it is for, the images, the claims). It applies to the pods CREATED BY
 # that account (the match condition, once per parameter object), and refuses any that is not the intended run pod. Without it the RBAC
 # alone would let the account make any pod in its namespace. The policy and its binding are cluster-scoped and made here: the operator
 # is namespaced, and writes only the parameters, which the account cannot (its Role has pods and nothing else).
@@ -834,8 +834,10 @@ spec:
       message: "a run pod uses only the images the chart allows"
     - expression: "!has(object.spec.volumes) || object.spec.volumes.all(v, has(v.emptyDir) || (has(v.persistentVolumeClaim) && v.persistentVolumeClaim.claimName in (has(params.data.claims) ? params.data.claims.split('\\n') : [params.data.claim])))"
       messageExpression: "'a run pod mounts only emptyDir volumes and the ' + ((has(params.data.claims) ? params.data.claims.split('\\n') : [params.data.claim]).size() > 1 ? 'claims ' : 'claim ') + (has(params.data.claims) ? params.data.claims.split('\\n') : [params.data.claim]).join(' and ') + ': no hostPath, no Secret, no other claim'"
-    - expression: "variables.containers.all(c, (!has(c.env) || c.env.all(e, !has(e.valueFrom) || !has(e.valueFrom.secretKeyRef) || (e.valueFrom.secretKeyRef.name == params.data.secretName && e.valueFrom.secretKeyRef.key == params.data.secretKey))) && (!has(c.envFrom) || c.envFrom.all(f, !has(f.secretRef))))"
-      messageExpression: "'a run pod references no Secret but the key ' + params.data.secretKey + ' of ' + params.data.secretName + ' (as one variable): no Secret volume, no envFrom, no other key'"
+    - expression: "variables.containers.all(c, (!has(c.env) || c.env.all(e, !has(e.valueFrom) || !has(e.valueFrom.secretKeyRef))) && (!has(c.envFrom) || c.envFrom.all(f, !has(f.secretRef))))"
+      message: "a run pod references no Secret a container can read: no Secret volume, no secretKeyRef, no envFrom"
+    - expression: "!has(object.spec.imagePullSecrets) || size(object.spec.imagePullSecrets) == 0"
+      message: "a run pod names no pull secret: the operator's template carries none"
     - expression: "variables.containers.all(c, has(c.securityContext) && has(c.securityContext.allowPrivilegeEscalation) && c.securityContext.allowPrivilegeEscalation == false && (!has(c.securityContext.privileged) || c.securityContext.privileged == false))"
       message: "a run pod is not privileged and sets allowPrivilegeEscalation: false on every container"
     - expression: "variables.containers.all(c, (has(c.securityContext) && has(c.securityContext.runAsUser) ? c.securityContext.runAsUser : (has(object.spec.securityContext) && has(object.spec.securityContext.runAsUser) ? object.spec.securityContext.runAsUser : 0)) != 0 && (has(c.securityContext) && has(c.securityContext.runAsNonRoot) ? c.securityContext.runAsNonRoot : (has(object.spec.securityContext) && has(object.spec.securityContext.runAsNonRoot) ? object.spec.securityContext.runAsNonRoot : false)))"

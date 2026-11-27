@@ -1,6 +1,6 @@
 //! K1: the platform's CRDs read everything adam-rs's former operator (removed, its ADR 0046) accepted, except the listed differences (§59a, "K1"). The adam-rs
-//! copy is vendored in `tests/vendored/` (its revision is in `UPSTREAM`, and is the revision of the parity goldens: a test holds
-//! them equal). For every property path of its two kinds, ours has the path; and for each keyword that bounds what a value may be,
+//! copy is vendored in `tests/vendored/` (its revision is in `UPSTREAM`: `4bc6742`, the last revision that had the file, which adam-rs then
+//! removed; the parity goldens have been read at later revisions since, so a test holds the copy at that revision alone). For every property path of its two kinds, ours has the path; and for each keyword that bounds what a value may be,
 //! ours is **never stricter**: the same `type`; a `minimum`, `minLength` or `minItems` no higher, a `maximum`, `maxLength`,
 //! `maxItems` or `maxProperties` no lower, a set of `required` properties that is a subset, and the enum values a superset. A
 //! bound that ours has and theirs lacks is stricter, and is in [`INTENDED`] with its reason, or the test fails.
@@ -236,9 +236,12 @@ fn crd_reads_everything_adam_rs_accepts_except_the_listed_differences() {
     );
 }
 
+/// The vendored CRD is historical. adam-rs removed the file from `main` in its pull request 143 (ADR 0046) on 2026-11-14, and the copy
+/// here is the one from `4bc6742`, the last revision that had it; the parity goldens have been read at later revisions since (they are
+/// read from a revision that no longer has the file), so the two pins can no longer be the same. This holds the copy where it is, so
+/// that a move of the goldens does not silently claim the copy is newer than it is.
 #[test]
-fn the_vendored_crd_is_at_the_revision_of_the_parity_goldens() {
-    let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+fn the_vendored_crd_stays_at_the_revision_adam_rs_removed_it() {
     let upstream = std::fs::read_to_string(
         Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/vendored/UPSTREAM"),
     )
@@ -248,15 +251,9 @@ fn the_vendored_crd_is_at_the_revision_of_the_parity_goldens() {
         .find_map(|l| l.strip_prefix("revision:"))
         .and_then(|l| l.split_whitespace().next())
         .expect("a revision line");
-    let regen = std::fs::read_to_string(root.join("tools/adam-parity/regen.sh")).expect("regen.sh");
-    let golden_rev = regen
-        .lines()
-        .find_map(|l| l.strip_prefix("ADAM_RS_REV=\""))
-        .and_then(|l| l.strip_suffix('"'))
-        .expect("ADAM_RS_REV");
     assert_eq!(
-        vendored_rev, golden_rev,
-        "one pin of adam-rs: the vendored CRD and the parity goldens are read at the same revision"
+        vendored_rev, "4bc6742deca699a5e25fb07d892b5ce7d4a42e25",
+        "the vendored CRD is the file adam-rs had at 4bc6742, the last revision that carried it"
     );
 }
 

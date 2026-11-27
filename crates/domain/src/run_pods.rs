@@ -8,7 +8,6 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 
-use aap_api::SecretKeyRef;
 use aap_ports::{
     Container, EgressPort, EgressProxy, EgressRule, EnvVar, FileSet, Mount, Peer, Probe,
     ProbeAction, Probes, Protocol, Resources, RunPodGuard, RunPodLabels, RunPodNetwork,
@@ -450,7 +449,7 @@ impl RunPodSettings {
             },
             idle_secs: 900,
             ready_timeout_secs: 600,
-            wait_secs: 600,
+            wait_secs: 1020,
             node_selector: BTreeMap::new(),
             node_type: NodeTypeSettings::default(),
             tolerations: Vec::new(),
@@ -624,14 +623,14 @@ impl RunPodSettings {
                 bad(format!(
                     "extraEnv.{name}: the operator sets the proxy variables of a run pod from egressProxy (the egress proxy is the only way out); to add names that bypass it, use egressProxy.extraNoProxy"
                 ));
-            } else if name == contract::env::MODEL_API_KEY || name == "CARGO_BUILD_JOBS" {
+            } else if name == contract::env::MODEL_API_KEY {
+                // adam-rs ADR 0038: a run pod reads no Secret, so it holds no model key, and a secret is never a setting.
                 bad(format!(
-                    "extraEnv.{name}: the operator sets this variable itself ({})",
-                    if name == "CARGO_BUILD_JOBS" {
-                        "cargoBuildJobs"
-                    } else {
-                        "a secret is never a setting: the model key comes from the agent's Secret"
-                    }
+                    "extraEnv.{name}: a run pod holds no model key (adam-rs ADR 0038), and a secret is never a setting"
+                ));
+            } else if name == "CARGO_BUILD_JOBS" {
+                bad(format!(
+                    "extraEnv.{name}: the operator sets this variable itself (cargoBuildJobs)"
                 ));
             }
             let _ = value;
@@ -1015,7 +1014,6 @@ pub(crate) struct ForService<'a> {
     pub cache_claim: Option<&'a str>,
     /// The claim is `ReadWriteOnce` and the coder's: the pod must go where the coder is.
     pub beside_the_coder: bool,
-    pub model_key: &'a SecretKeyRef,
 }
 
 impl ForService<'_> {
@@ -1068,10 +1066,6 @@ impl ForService<'_> {
         for (name, value) in &s.extra_env {
             env.push(json!({ "name": name, "value": value }));
         }
-        env.push(json!({
-            "name": rp::MODEL_API_KEY,
-            "valueFrom": { "secretKeyRef": { "name": self.model_key.name, "key": self.model_key.key } },
-        }));
 
         let mut affinity = serde_json::Map::new();
         if self.beside_the_coder {
@@ -1420,7 +1414,6 @@ impl ForService<'_> {
                 images: self.allowed_images(),
                 claim: self.claim.clone(),
                 cache_claim: self.cache_claim.map(str::to_owned),
-                secret: aap_ports::SecretRef::new(&self.model_key.name, &self.model_key.key),
             },
         }
     }

@@ -525,23 +525,13 @@ impl<'a> Cx<'a> {
                     "no image, and no default was applied",
                 )
             })?;
-        // `validate` refused run pods with no work volume, and a model with no key.
+        // `validate` refused run pods with no work volume.
         let work = plan::work_volume(self.config).ok_or_else(|| {
             refused(
                 "AgentConfig spec.environment.volumes",
                 "run pods need the coder's work volume",
             )
         })?;
-        let model_key = spec
-            .model
-            .as_ref()
-            .and_then(|m| m.api_key_secret_ref.as_ref())
-            .ok_or_else(|| {
-                refused(
-                    "AgentConfig spec.model.apiKeySecretRef",
-                    "no key: the ModelEndpoint it names was not read",
-                )
-            })?;
         // The claim a run pod mounts: the shared claim of a ReadWriteMany volume, or the claim the StatefulSet makes
         // for the first worker (`<volume>-<workload>-0`), which only that worker's node has attached.
         let per_replica = work.source.persistent.per_replica;
@@ -566,7 +556,6 @@ impl<'a> Cx<'a> {
                 .as_ref()
                 .map(|c| c.existing_claim.as_str()),
             beside_the_coder: per_replica,
-            model_key,
         })
     }
 
@@ -976,9 +965,6 @@ impl<'a> Cx<'a> {
                 e.push(lit(env::MODEL_CONTEXT_WINDOW, window.to_string()));
             }
             if let Some(c) = self.coder {
-                if let Some(m) = &c.opencode_model {
-                    e.push(lit(env::OPENCODE_MODEL, m));
-                }
                 for (name, value) in [
                     (env::WORKERS, c.workers.map(i64::from)),
                     (env::MAX_CHECK_CYCLES, c.max_check_cycles.map(i64::from)),

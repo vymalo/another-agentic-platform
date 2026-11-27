@@ -112,7 +112,7 @@ fn the_netcup_coder() {
     assert_eq!(lit(w, env::PR_DRAFT), "true");
     assert_eq!(lit(w, env::GIT_AUTHOR_NAME), "bored-giant-panda[bot]");
     unset(w, env::CREATE_REPO_OWNERS); // empty: the tool stays off
-    assert_eq!(lit(w, env::OPENCODE_MODEL), "coding-model");
+    unset(w, "OPENCODE_MODEL"); // adam-rs ADR 0038: the coder no longer uses OpenCode
     // the GitHub App: the key is a file
     assert_eq!(lit(w, env::GITHUB_APP_ID), "Iv23li4m1ZrQ8wdwjnQH");
     assert_eq!(lit(w, env::GITHUB_APP_OWNERS), "vymalo");
@@ -553,7 +553,6 @@ fn a_fields_left_out_is_not_set_so_the_binarys_default_applies() {
         env::PR_DRAFT,
         env::GIT_AUTHOR_NAME,
         env::GIT_AUTHOR_EMAIL,
-        env::OPENCODE_MODEL,
         env::ALLOWED_REPO_HOSTS,
     ] {
         unset(w, name);

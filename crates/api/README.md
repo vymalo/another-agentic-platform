@@ -121,7 +121,7 @@ Slice K1 (2026-11-14) added what adam-rs's former operator (removed, its ADR 004
 (1 to `MAX_CONTEXT_WINDOW`, 2^53 - 1), `coder.maxAccessTier` (`plan` | `edits` | `auto` | `bypass`, `AccessTierCap`),
 `environment.cache.existingClaim` (`Cache`), and on `A2aInterface` the default `enabled: true` of a written `a2a` and the rule above.
 They are optional, so an object that does not set them is what it was. **Nothing here validates them**: `aap-domain` refuses an `extraBody`
-that sets a member the runtime owns and a bad claim name. `tests/superset.rs` (`crd_reads_everything_adam_rs_accepts_except_the_listed_differences`) holds every property path of adam-rs's two kinds in ours and, for each, our schema never stricter (type, minimum, maximum, minLength, maxLength, minItems, maxItems, maxProperties, required, enum, default), with the differences listed in the test and §59a *K1*, against its CRD file vendored in `tests/vendored/` (`UPSTREAM` names the revision, `4bc6742`, which a test holds equal to the parity goldens'); to move it, re-vendor the file
+that sets a member the runtime owns and a bad claim name. `tests/superset.rs` (`crd_reads_everything_adam_rs_accepts_except_the_listed_differences`) holds every property path of adam-rs's two kinds in ours and, for each, our schema never stricter (type, minimum, maximum, minLength, maxLength, minItems, maxItems, maxProperties, required, enum, default), with the differences listed in the test and §59a *K1*, against its CRD file vendored in `tests/vendored/` (`UPSTREAM` names the revision, `4bc6742`, the last one that carried the file, which a test holds); to move it, re-vendor the file
 and read the failures.
 
 ## CEL rules (`x-kubernetes-validations`)
