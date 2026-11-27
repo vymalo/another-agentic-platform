@@ -87,7 +87,7 @@ async fn nothing_the_api_logs_holds_a_token_a_body_a_path_or_a_secret_key() {
         .send()
         .await;
     assert_eq!(r.code(), 201, "{}", r.text());
-    // An account (AD-072) written by a caller that may name it (the administrator holds `platform:agents.own`): the
+    // An account (AD-073) written by a caller that may name it (the administrator holds `platform:agents.own`): the
     // value is not logged.
     let mut accounted = coder.clone();
     accounted["name"] = json!("coder-acct");

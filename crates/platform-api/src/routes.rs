@@ -187,14 +187,14 @@ pub const ROUTES: [Route; 22] = [
         RouteId::ListOwnerAgents,
         Verb::Get,
         "/v1/owners/{owner}/agents",
-        Needs::Permission(permission::AGENTS_OWN),
+        Needs::Permission(permission::AGENTS_READ_OWNER),
         false,
     ),
     route(
         RouteId::GetOwnerAgent,
         Verb::Get,
         "/v1/owners/{owner}/agents/{name}",
-        Needs::Permission(permission::AGENTS_OWN),
+        Needs::Permission(permission::AGENTS_READ_OWNER),
         false,
     ),
     route(

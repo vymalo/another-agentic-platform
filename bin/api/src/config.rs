@@ -57,8 +57,9 @@ pub struct ApiConfig {
     pub cors: CorsSection,
     /// What a new agent gets besides what its form sets; its `namespace` is the API's.
     pub defaults: Defaults,
-    /// The workloads the mutual-TLS listener accepts (ANR-1011): each a SPIFFE id and what it may do, of which only
-    /// `platform:agents.own` is grantable. Absent or empty with no `workloadListener`: there is no such listener.
+    /// The workloads the mutual-TLS listener accepts (ANR-1011): each a SPIFFE id and what it may do, of which only the two workload
+    /// permissions are grantable (`platform:agents.own` and `platform:agents.read.owner`, AD-072). Absent or empty with no
+    /// `workloadListener`: there is no such listener.
     #[serde(default)]
     pub workload_clients: Vec<WorkloadClient>,
     /// The mutual-TLS listener of the workloads (ANR-1011). Absent: no workload can call the API, and the person's listener is
@@ -136,7 +137,7 @@ pub struct Settings {
 pub struct WorkloadSettings {
     /// Where it listens, and the files it reads.
     pub listener: WorkloadListener,
-    /// The identities it accepts, validated (`platform:agents.own` only).
+    /// The identities it accepts, validated (the two workload permissions only).
     pub clients: WorkloadClients,
 }
 
@@ -231,7 +232,7 @@ fn workload(
             "workloadListener is set and workloadClients is empty: a listener that accepts no workload is a mistake (name the workloads, or remove the listener)"
         );
     }
-    // The identities and permissions: a permission that is not `platform:agents.own`, a duplicate or an empty id is refused here,
+    // The identities and permissions: a permission outside the two workload ones, a duplicate or an empty id is refused here,
     // at load, with the entry it is in.
     clients.table().context("workloadClients")?;
     for (key, path) in [

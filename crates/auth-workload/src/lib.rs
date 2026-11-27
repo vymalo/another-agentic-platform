@@ -14,8 +14,9 @@
 //! 4. it is inside its validity window (`Expired`);
 //! 5. it carries a URI SAN (`NoIdentity`), and the configuration names that exact URI (`UnknownIdentity`).
 //!
-//! **Only `platform:agents.own` is grantable this way**, and a permission outside that set is refused when
-//! the configuration is loaded, not when a request arrives. A certificate for another use is never
+//! **Only `platform:agents.own` and `platform:agents.read.owner` are grantable this way** (AD-072: the
+//! orchestrator holds both, the staff service the read-only one), and a permission outside that set is
+//! refused when the configuration is loaded, not when a request arrives. A certificate for another use is never
 //! accepted for this one: the extended key usage is checked, so the prompt-signing leaf of the same PKI
 //! cannot call the Platform API.
 //!
@@ -37,8 +38,11 @@ use rustls_pki_types::{CertificateDer, TrustAnchor, UnixTime};
 use serde::Deserialize;
 use x509_parser::prelude::{FromDer, GeneralName, X509Certificate};
 
-/// The one permission a workload certificate may carry (AD-065).
-pub const GRANTABLE: &[&str] = &["platform:agents.own"];
+/// The permissions a workload certificate may carry (AD-065; AD-072 adds the read-only owner permission).
+///
+/// A workload is a service, not a person: it may act on the agents of one owner, and the staff service may only read them. Nothing
+/// else is grantable this way, whatever the configuration says.
+pub const GRANTABLE: &[&str] = &["platform:agents.own", "platform:agents.read.owner"];
 
 /// The `workloadClients` block of the Platform API's configuration file.
 #[derive(Debug, Clone, Default, Deserialize)]
@@ -91,7 +95,7 @@ pub enum ConfigError {
     },
     /// A permission a workload may not carry.
     #[error(
-        "workloadClients.clients[{index}].permissions names {permission:?}, which a workload certificate may not carry: only platform:agents.own is grantable this way"
+        "workloadClients.clients[{index}].permissions names {permission:?}, which a workload certificate may not carry: only platform:agents.own and platform:agents.read.owner are grantable this way"
     )]
     NotGrantable {
         /// The entry's position.

@@ -1,4 +1,4 @@
-//! The workload router (ANR-1011, AD-068): the routes `platform:agents.own` opens, behind a certificate and not a token. The
+//! The workload router (ANR-1011, AD-068; AD-072): the routes the workload permissions open, behind a certificate and not a token. The
 //! listener of `bin/api` puts the certificate on the request; here a header stands for it, so that every case is the router's
 //! own and none depends on a TLS stack.
 #![allow(clippy::unwrap_used, clippy::expect_used, missing_docs)]
@@ -26,7 +26,12 @@ impl ClientAuthenticator for Names {
         match certificate.as_der() {
             b"orchestrator" => Ok(Principal::new(
                 "spiffe://another/ns/t/sa/orchestrator",
-                ["platform:agents.own"],
+                ["platform:agents.own", "platform:agents.read.owner"],
+            )),
+            // The staff service (AD-072): the read-only owner permission alone.
+            b"staff" => Ok(Principal::new(
+                "spiffe://another/ns/t/sa/staff",
+                ["platform:agents.read.owner"],
             )),
             // A workload that is known and holds nothing.
             b"nothing" => Ok(Principal::new(
@@ -87,6 +92,52 @@ async fn the_owner_routes_work_for_the_orchestrator_certificate() {
         .await;
     assert_eq!(r.code(), 200, "{}", r.text());
     assert_eq!(r.json()["agents"].as_array().unwrap().len(), 1);
+}
+
+/// AD-072: the staff service's certificate reads one owner's agents and no write, and the listener mounts no route that is not
+/// owner-scoped.
+#[tokio::test]
+async fn the_staff_certificate_reads_and_cannot_write() {
+    let (person, _) = Api::seeded().await;
+    let api = over(person.objects.clone());
+    let r = api
+        .put("/v1/owners/alice/agents/mine")
+        .header("x-test-cert", "orchestrator")
+        .create()
+        .json(&folder_body("mine"))
+        .send()
+        .await;
+    assert_eq!(r.code(), 201, "{}", r.text());
+
+    let r = api
+        .get("/v1/owners/alice/agents")
+        .header("x-test-cert", "staff")
+        .send()
+        .await;
+    assert_eq!(r.code(), 200, "{}", r.text());
+    let r = api
+        .get("/v1/owners/alice/agents/mine")
+        .header("x-test-cert", "staff")
+        .send()
+        .await;
+    assert_eq!(r.code(), 200, "{}", r.text());
+    let tag = r.etag();
+
+    let r = api
+        .put("/v1/owners/alice/agents/mine")
+        .header("x-test-cert", "staff")
+        .replace(&tag)
+        .json(&folder_body("mine"))
+        .send()
+        .await;
+    assert_eq!(r.code(), 403, "{}", r.text());
+    assert_eq!(r.json()["permission"], "platform:agents.own");
+
+    // A route the listener does not mount is a 404, not a 403 that names a permission.
+    for path in ["/v1/agents", "/v1/me", "/v1/models"] {
+        let r = api.get(path).header("x-test-cert", "staff").send().await;
+        assert_eq!(r.code(), 404, "{path}: {}", r.text());
+    }
 }
 
 #[tokio::test]

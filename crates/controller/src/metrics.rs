@@ -43,6 +43,8 @@ pub mod name {
     pub const METER_INVALID: &str = "aap_meter_invalid_total";
     /// Times the account source could not answer; the pod's minutes are held for the next pass.
     pub const METER_ACCOUNT_FAILURES: &str = "aap_meter_account_failures_total";
+    /// Times an agent pod's owner chain could not be read (ANR-1327); the pod's minutes are held for the next pass.
+    pub const METER_OWNER_FAILURES: &str = "aap_meter_owner_failures_total";
     /// Events the sink said the collector acknowledged (ANR-1151).
     pub const METER_DELIVERED: &str = "aap_meter_delivered_total";
     /// Events the sink said the collector refused for good (ANR-1151): never sent again.
@@ -91,6 +93,7 @@ fn help(series: &str) -> &'static str {
         name::METER_SEND_FAILURES => "Pod-minute events the usage sink refused.",
         name::METER_INVALID => "Pod-minute events the sink called invalid, dropped.",
         name::METER_ACCOUNT_FAILURES => "Account lookups that failed, the minutes held.",
+        name::METER_OWNER_FAILURES => "Owner-chain lookups that failed, the minutes held.",
         name::METER_DELIVERED => "Pod-minute events the collector acknowledged.",
         name::METER_REFUSED => "Pod-minute events the collector refused for good.",
         name::METER_UNACKNOWLEDGED => {

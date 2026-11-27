@@ -1031,7 +1031,7 @@ compares it with the `iss` of a token; the JWKS URL (.query true) may have them.
 
 {{/*
 api.workload (ANR-1011): what the chart can refuse of the mutual-TLS listener, and what the binary refuses at start all the same (a
-SPIFFE id that is not one, a permission that is not platform:agents.own, a clash of ports). Off, nothing is checked and nothing is rendered.
+SPIFFE id that is not one, a permission that is neither platform:agents.own nor platform:agents.read.owner, a clash of ports). Off, nothing is checked and nothing is rendered.
 */}}
 {{- define "aap.api.workload.validate" -}}
 {{- $api := .Values.api -}}
@@ -1081,8 +1081,8 @@ SPIFFE id that is not one, a permission that is not platform:agents.own, a clash
 {{- fail (printf "api.workload.clients[%d].permissions must be a list" $i) -}}
 {{- end -}}
 {{- range $p := (default (list) $c.permissions) -}}
-{{- if ne (toString $p) "platform:agents.own" -}}
-{{- fail (printf "api.workload.clients[%d].permissions names %q, which a workload certificate may not carry: only platform:agents.own is grantable this way" $i (toString $p)) -}}
+{{- if not (has (toString $p) (list "platform:agents.own" "platform:agents.read.owner")) -}}
+{{- fail (printf "api.workload.clients[%d].permissions names %q, which a workload certificate may not carry: only platform:agents.own and platform:agents.read.owner are grantable this way" $i (toString $p)) -}}
 {{- end -}}
 {{- end -}}
 {{- end -}}

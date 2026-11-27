@@ -16,7 +16,7 @@
 //!   does not accept, so a wrong identity or base path must not look like "no account"), `400`, `401`, `403`, `429`,
 //!   `5xx`, a redirect, a connection that fails, a body that is too long or not what the contract says.
 //! * **An agent pod is not this source's**: it answers `None`. An agent pod's account is `aap-usage-kubernetes`'s
-//!   (`AgentService.spec.account`, AD-072), and `operator run` composes the two by pod kind, so this source is asked
+//!   (`AgentService.spec.account`, AD-073), and `operator run` composes the two by pod kind, so this source is asked
 //!   about run pods only.
 
 use std::fmt;

@@ -37,8 +37,9 @@ use aap_usage::{
     event_id, is_line_text,
 };
 use k8s_openapi::api::core::v1::Pod;
-use kube::api::ListParams;
-use kube::{Api, Client};
+use k8s_openapi::apimachinery::pkg::apis::meta::v1::ObjectMeta;
+use kube::Client;
+use kube::api::{Api, ApiResource, DynamicObject, ListParams};
 use tokio::sync::watch;
 
 use crate::metering::{
@@ -46,6 +47,14 @@ use crate::metering::{
     Unattributed,
 };
 use crate::metrics::{Metrics, name};
+
+/// How far one owner chain is walked (ANR-1327): a pod's `ReplicaSet`, its `Deployment` and the `AgentService` above
+/// it, with one hop to spare. A chain longer than this ends nowhere.
+pub const MAX_OWNER_DEPTH: usize = 4;
+
+/// The most owner objects the meter remembers between passes: an owner's own references never change, so a uid once
+/// read is never read again. A namespace of N agents pays one `get` per distinct owner, not one per pod.
+const MAX_OWNER_CACHE: usize = 4_096;
 
 /// How often the loop looks at the pods when [`MeterConfig::period`] is left alone: well under a minute, so a
 /// short run pod is seen.
@@ -80,6 +89,95 @@ pub type AccountFn = Arc<
         + Send
         + Sync,
 >;
+
+/// What a lookup of one owner object found (ANR-1327).
+#[derive(Clone, Debug)]
+pub enum OwnerObject {
+    /// The object, with its own `metadata.ownerReferences`.
+    Found(Vec<metering::OwnerRef>),
+    /// No object of that reference's uid: the chain ends here (a `404`, or the name now holds another object).
+    Missing,
+    /// The API server could not answer: the pod's minutes are held for the next pass, never counted.
+    Unavailable,
+}
+
+/// A lookup of one owner object by the reference a pod or another owner carries, in a namespace.
+pub type OwnerFn = Arc<
+    dyn Fn(String, metering::OwnerRef) -> Pin<Box<dyn Future<Output = OwnerObject> + Send>>
+        + Send
+        + Sync,
+>;
+
+/// The group, version and plural of the kinds a chain walks, and of no other: a `ReplicaSet` and the `Deployment`
+/// above it, a `StatefulSet`, and a `Job` (a split worker).
+fn owner_resource(kind: &str) -> Option<(&'static str, &'static str, &'static str)> {
+    match kind {
+        "ReplicaSet" => Some(("apps", "v1", "replicasets")),
+        "Deployment" => Some(("apps", "v1", "deployments")),
+        "StatefulSet" => Some(("apps", "v1", "statefulsets")),
+        "Job" => Some(("batch", "v1", "jobs")),
+        _ => None,
+    }
+}
+
+/// The lookup a cluster gives (ANR-1327): one `get` of the object the reference names, in `namespace`, and only if it
+/// still has the `uid` the reference names (a name made again is another object, and the chain ends). A kind the chain
+/// does not walk, or an object of another group than its kind's, ends it too.
+pub fn kube_owners(client: Client) -> OwnerFn {
+    Arc::new(move |namespace, r| {
+        let client = client.clone();
+        Box::pin(async move {
+            let Some((group, version, plural)) = owner_resource(&r.kind) else {
+                return OwnerObject::Missing;
+            };
+            if r.api_version.split('/').next() != Some(group) {
+                return OwnerObject::Missing;
+            }
+            let api: Api<DynamicObject> = Api::namespaced_with(
+                client,
+                &namespace,
+                &ApiResource {
+                    group: group.to_owned(),
+                    version: version.to_owned(),
+                    api_version: format!("{group}/{version}"),
+                    kind: r.kind.clone(),
+                    plural: plural.to_owned(),
+                },
+            );
+            match api.get(&r.name).await {
+                Ok(o) if o.metadata.uid.as_deref() == Some(r.uid.as_str()) => {
+                    OwnerObject::Found(owner_refs(&o.metadata))
+                }
+                Ok(_) => OwnerObject::Missing,
+                Err(kube::Error::Api(e)) if e.code == 404 => OwnerObject::Missing,
+                Err(_) => OwnerObject::Unavailable,
+            }
+        })
+    })
+}
+
+/// The owner references of an object, as the meter's neutral type.
+fn owner_refs(meta: &ObjectMeta) -> Vec<metering::OwnerRef> {
+    meta.owner_references
+        .as_deref()
+        .unwrap_or_default()
+        .iter()
+        .map(|r| metering::OwnerRef {
+            api_version: r.api_version.clone(),
+            kind: r.kind.clone(),
+            name: r.name.clone(),
+            uid: r.uid.clone(),
+            controller: r.controller.unwrap_or(false),
+        })
+        .collect()
+}
+
+/// The references a chain tries first: the controller's, then the others (Kubernetes sets one controller at most).
+fn controller_first(refs: &[metering::OwnerRef]) -> Vec<metering::OwnerRef> {
+    let mut v = refs.to_vec();
+    v.sort_by_key(|r| !r.controller);
+    v
+}
 
 type TombstoneFuture<T> = Pin<Box<dyn Future<Output = Result<T, TombstoneError>> + Send>>;
 
@@ -178,7 +276,7 @@ struct PodState {
     unknown_counted: u64,
     /// Whether the pod's `no-end` or `no-start` was counted.
     unmetered_counted: bool,
-    /// The last account the source named for **this pod**, for its tombstone (AD-072): the `AgentService` may be
+    /// The last account the source named for **this pod**, for its tombstone (AD-073): the `AgentService` may be
     /// gone by the time the pod's last minutes are replayed, and the source then answers nothing. Cleared when the
     /// source says the pod has none. Kept per pod uid, never per service: a service deleted and re-created with
     /// another account must not give the old pod's minutes to the new account.
@@ -223,6 +321,9 @@ struct Inner {
     persisted: HashSet<String>,
     /// Whether this term already looked for the sets of namespaces that are no longer watched.
     swept: bool,
+    /// The owner references of the owner objects a chain walked, by the uid the reference names (ANR-1327): an
+    /// owner's own references never change, so a uid once read is never read again. `Missing` is kept too.
+    owners: HashMap<String, OwnerObject>,
 }
 
 /// The most vanished pods the meter holds in memory because their namespace's store cannot be read or written; the
@@ -245,12 +346,32 @@ struct Pending {
 /// What a pod is for a line, once its facts say so.
 struct Attributed {
     pod_kind: PodKind,
-    /// The pod's namespace: an agent pod's account is read from the `AgentService` there (AD-072).
+    /// The pod's namespace: an agent pod's account is read from the `AgentService` there (AD-073).
     namespace: String,
     service: String,
     run: Option<String>,
     weight_quarters: u32,
     node_type: String,
+}
+
+/// What [`Meter::attribute`] found (ANR-1327).
+enum Attribution {
+    /// The pod's line.
+    Line(Attributed),
+    /// No line, and the minutes are given up at once (counted under the reason).
+    Refused(Unattributed),
+    /// Not known yet: the API server did not answer, so the minutes are held and asked again.
+    Unavailable,
+}
+
+/// Where an agent pod's owner chain ended (ANR-1327).
+enum Chain {
+    /// At an `AgentService` of that name.
+    Service(String),
+    /// Nowhere: no reference, an object that is not there, a kind the chain does not walk, or a chain too long.
+    Nowhere,
+    /// The API server could not answer.
+    Unavailable,
 }
 
 /// How [`Meter::emit`] ended.
@@ -287,6 +408,8 @@ pub struct Meter {
     outcomes: Option<OutcomesFn>,
     /// Where the facts of vanished pods are kept (ANR-1198); none: they are in memory only.
     tombstones: Option<TombstonesFn>,
+    /// Where an agent pod's owner chain is read (ANR-1327); none: no chain resolves and the pod's minutes are held.
+    owners: Option<OwnerFn>,
 }
 
 impl Meter {
@@ -306,6 +429,15 @@ impl Meter {
     #[must_use]
     pub fn with_tombstones(mut self, store: TombstonesFn) -> Self {
         self.tombstones = Some(store);
+        self
+    }
+
+    /// Read an agent pod's identity from its **owner chain** (ANR-1327): `owners` answers the owner references of the
+    /// object a reference names, by uid. Without it an agent pod makes no line and its minutes are held, never
+    /// counted: its labels are not an identity. `Operator::with_meter` installs [`kube_owners`].
+    #[must_use]
+    pub fn with_owners(mut self, owners: OwnerFn) -> Self {
+        self.owners = Some(owners);
         self
     }
 
@@ -579,6 +711,7 @@ impl Meter {
             keep_going: None,
             outcomes: None,
             tombstones: None,
+            owners: None,
         }
     }
 
@@ -749,7 +882,7 @@ impl Meter {
                 }
                 // A pod with nothing outstanding, or that is not attributable, gets none: the in-memory close below
                 // counts it and forgets it. So does a pod the store has no room for (`unbacked`).
-                candidates.extend(self.tombstone_of(facts, now));
+                candidates.extend(self.tombstone_of(facts, now).await);
             }
             let (backed, _unbacked, down) = self.persist(candidates).await;
             self.with(|i| {
@@ -819,7 +952,7 @@ impl Meter {
 
     /// The tombstone of a pod found gone, if it needs one: it has minutes still to send or minutes not known
     /// delivered, its facts attribute it to an account's line, and every text of it is one a line may carry.
-    fn tombstone_of(&self, closed: &PodFacts, now: i64) -> Option<Tombstone> {
+    async fn tombstone_of(&self, closed: &PodFacts, now: i64) -> Option<Tombstone> {
         let kind = metering::classify(closed);
         let started_at = closed.started_at?;
         let ended_at = closed.finished_at?;
@@ -830,11 +963,15 @@ impl Meter {
         if !outstanding {
             return None;
         }
-        let a = self.attribute(closed, &kind).ok()?;
+        let a = match self.attribute(closed, &kind).await {
+            Attribution::Line(a) => a,
+            // A refusal (no identity, no weight) and a chain that could not be read: the in-memory close counts it.
+            Attribution::Refused(_) | Attribution::Unavailable => return None,
+        };
         let subject = match &a.run {
             Some(run) => self.with(|i| i.accounts.get(&(a.service.clone(), run.clone())).cloned()),
             // The pod's own last account, never the service's: a service deleted and re-created with another
-            // account must not give this pod's minutes to the new account (AD-072).
+            // account must not give this pod's minutes to the new account (AD-073).
             None => self.state(&closed.uid).last_account,
         };
         let t = Tombstone {
@@ -1098,7 +1235,7 @@ impl Meter {
                     .saturating_sub(due.send.start.max(self.state(&t.uid).unknown_counted));
                 self.unattributed(Unattributed::UnknownAccount, fresh);
                 if a.run.is_none() {
-                    // An agent's pod with no account is final (AD-072): a shared agent has none, and an account
+                    // An agent's pod with no account is final (AD-073): a shared agent has none, and an account
                     // it gets later is not for the minutes before it. They are given up, and counted once.
                     self.update(&t.uid, |s| {
                         s.unknown_counted = due.send.end;
@@ -1179,17 +1316,22 @@ impl Meter {
         }
         let count = due.send.end - due.send.start;
         // Configuration, not a passing condition: the minutes are given up, and counted.
-        let attributed = match self.attribute(pod, &kind) {
-            Ok(a) => a,
-            Err(reason) => {
+        let attributed = match self.attribute(pod, &kind).await {
+            Attribution::Line(a) => a,
+            Attribution::Refused(reason) => {
                 self.unattributed(reason, count);
                 self.update(&pod.uid, |s| s.cursor = Some(due.send.end));
                 return after;
             }
+            Attribution::Unavailable => {
+                // Not a refusal: the chain may be readable at the next pass, so the cursor stays.
+                self.metrics.inc(name::METER_OWNER_FAILURES, &[]);
+                return Progress::Held;
+            }
         };
         let subject = match self.account_for(&attributed).await {
             Ok(Some(account)) => {
-                // The pod's own last account, for its tombstone (AD-072).
+                // The pod's own last account, for its tombstone (AD-073).
                 self.update(&pod.uid, |s| s.last_account = Some(account.clone()));
                 account
             }
@@ -1201,7 +1343,7 @@ impl Meter {
                     .saturating_sub(due.send.start.max(state.unknown_counted));
                 self.unattributed(Unattributed::UnknownAccount, fresh);
                 if attributed.run.is_none() {
-                    // An agent's pod with no account is final (AD-072): a shared agent has none, and an account
+                    // An agent's pod with no account is final (AD-073): a shared agent has none, and an account
                     // it gets later is not for the minutes before it. They are given up, and counted once.
                     self.update(&pod.uid, |s| {
                         s.unknown_counted = due.send.end;
@@ -1244,20 +1386,27 @@ impl Meter {
     }
 
     /// What a pod is for a line: its kind, service, run, weight and node type, or why it has none.
-    fn attribute(&self, pod: &PodFacts, kind: &Kind) -> Result<Attributed, Unattributed> {
+    ///
+    /// **A run pod's identity is its labels and its run-id annotation; an agent pod's is the `AgentService` its owner
+    /// chain ends at** (ANR-1327), never the labels it carries.
+    async fn attribute(&self, pod: &PodFacts, kind: &Kind) -> Attribution {
         let (pod_kind, service, run) = match kind {
             Kind::Run { service, run } => (PodKind::Run, service.clone(), run.clone()),
-            Kind::Agent { service } => (PodKind::Agent, service.clone(), None),
-            Kind::Skip => return Err(Unattributed::NoIdentity),
+            Kind::Agent => match self.chain(pod).await {
+                Chain::Service(service) => (PodKind::Agent, Some(service), None),
+                Chain::Nowhere => return Attribution::Refused(Unattributed::NoIdentity),
+                Chain::Unavailable => return Attribution::Unavailable,
+            },
+            Kind::Skip => return Attribution::Refused(Unattributed::NoIdentity),
         };
         let Some(service) = service else {
-            return Err(Unattributed::NoIdentity);
+            return Attribution::Refused(Unattributed::NoIdentity);
         };
         if pod_kind == PodKind::Run && run.is_none() {
-            return Err(Unattributed::NoIdentity);
+            return Attribution::Refused(Unattributed::NoIdentity);
         }
         let Some(weight_quarters) = metering::weight_quarters(&pod.annotations) else {
-            return Err(Unattributed::NoWeight);
+            return Attribution::Refused(Unattributed::NoWeight);
         };
         let Some(node_type) = self
             .config
@@ -1265,9 +1414,9 @@ impl Meter {
             .as_deref()
             .and_then(|key| metering::node_type(pod.node_affinity.as_ref(), key))
         else {
-            return Err(Unattributed::UnknownNodeType);
+            return Attribution::Refused(Unattributed::UnknownNodeType);
         };
-        Ok(Attributed {
+        Attribution::Line(Attributed {
             pod_kind,
             namespace: pod.namespace.clone(),
             service,
@@ -1275,6 +1424,74 @@ impl Meter {
             weight_quarters,
             node_type,
         })
+    }
+
+    /// Walk `pod`'s owner chain to the `AgentService` it ends at (ANR-1327): the pod's owner references, then the
+    /// owner references of each object they name (a `ReplicaSet`'s `Deployment`, a `StatefulSet`, a `Job`), at most
+    /// [`MAX_OWNER_DEPTH`] hops and **by uid**: a name that now holds another object ends the chain, and so does a
+    /// reference of a kind the chain does not walk. One `get` per distinct owner, cached for the life of the meter.
+    async fn chain(&self, pod: &PodFacts) -> Chain {
+        let Some(owners) = self.owners.clone() else {
+            return Chain::Unavailable;
+        };
+        let mut frontier = controller_first(&pod.owner_references);
+        let mut walked: HashSet<String> = HashSet::new();
+        for _ in 0..MAX_OWNER_DEPTH {
+            let mut next = Vec::new();
+            for r in frontier {
+                if let Some(service) = metering::agent_service(&r) {
+                    return Chain::Service(service.to_owned());
+                }
+                if owner_resource(&r.kind).is_none() || !walked.insert(r.uid.clone()) {
+                    continue;
+                }
+                match self.owner_object(&pod.namespace, &r, &owners).await {
+                    OwnerObject::Found(refs) => next.extend(controller_first(&refs)),
+                    OwnerObject::Missing => {}
+                    OwnerObject::Unavailable => return Chain::Unavailable,
+                }
+            }
+            if next.is_empty() {
+                return Chain::Nowhere;
+            }
+            frontier = next;
+        }
+        Chain::Nowhere
+    }
+
+    /// The owner references of the object `r` names, from the cache by uid or from `owners`. A lookup that could not
+    /// answer is never cached: it is asked again at the next pass. The question is cut at the pass deadline, as a
+    /// question to the account source is.
+    async fn owner_object(
+        &self,
+        namespace: &str,
+        r: &metering::OwnerRef,
+        owners: &OwnerFn,
+    ) -> OwnerObject {
+        if let Some(cached) = self.with(|i| i.owners.get(&r.uid).cloned()) {
+            return cached;
+        }
+        let left = self
+            .with(|i| i.deadline)
+            .map_or(self.config.pass_deadline, |d| {
+                d.saturating_duration_since(tokio::time::Instant::now())
+            });
+        let found =
+            match tokio::time::timeout(left, (*owners)(namespace.to_owned(), r.clone())).await {
+                Ok(found) => found,
+                // The pass ran out of time in the question: held like any failure to answer.
+                Err(_) => OwnerObject::Unavailable,
+            };
+        if matches!(found, OwnerObject::Unavailable) {
+            return found;
+        }
+        self.with(|i| {
+            if i.owners.len() >= MAX_OWNER_CACHE {
+                i.owners.clear();
+            }
+            i.owners.insert(r.uid.clone(), found.clone());
+        });
+        found
     }
 
     /// The account of an attributed pod: the cache of bound runs, or the source, cut at the pass deadline.
@@ -1310,7 +1527,7 @@ impl Meter {
         };
         if let (Ok(Some(account)), Some(k)) = (&asked, cache_key) {
             // A bound run's account never changes: remembered for the life of the process. An agent pod's last
-            // account is kept per pod uid by its caller, for the tombstone (AD-072).
+            // account is kept per pod uid by its caller, for the tombstone (AD-073).
             self.with(|i| i.accounts.insert(k, account.clone()));
         }
         asked
@@ -1464,6 +1681,7 @@ pub fn facts_of(pod: &Pod) -> Option<PodFacts> {
             .deletion_timestamp
             .as_ref()
             .map(|t| t.0.as_second()),
+        owner_references: owner_refs(&pod.metadata),
         node_affinity: pod
             .spec
             .as_ref()
@@ -1856,6 +2074,14 @@ mod tests {
         .map(|(k, v)| ((*k).into(), (*v).into()))
         .collect();
         facts.annotations = [("agents.vymalo.com/size-weight".to_owned(), "1".to_owned())].into();
+        // The chain ends at the AgentService at its first hop, so no owner object is read (ANR-1327).
+        facts.owner_references = vec![metering::OwnerRef {
+            api_version: "agents.vymalo.com/v1alpha1".into(),
+            kind: "AgentService".into(),
+            name: "coder".into(),
+            uid: "svc-coder".into(),
+            controller: true,
+        }];
         facts
     }
 
@@ -1878,7 +2104,9 @@ mod tests {
                 ..MeterConfig::default()
             },
             metrics.clone(),
-        );
+        )
+        // The fixtures' agent pods name their AgentService as their own owner, so this is never asked.
+        .with_owners(Arc::new(|_, _| Box::pin(async { OwnerObject::Missing })));
         (meter, sink, metrics)
     }
 
@@ -1991,6 +2219,7 @@ mod tests {
         meter.pass(&[agent_pod_facts("ns-b", 600)], 1_000).await;
         let t = meter
             .tombstone_of(&closed_agent_pod(), 2_000)
+            .await
             .expect("the pod has minutes left and can be attributed");
         assert_eq!(t.pod_kind, PodKind::Agent);
         assert_eq!(t.namespace, "ns-b");
@@ -2022,6 +2251,7 @@ mod tests {
         closed.finished_at = Some(2_000);
         let t = meter
             .tombstone_of(&closed, 2_000)
+            .await
             .expect("the pod has minutes left and can be attributed");
         assert_eq!(
             t.subject.as_deref(),
@@ -2051,6 +2281,7 @@ mod tests {
         meter.pass(&[agent_pod_facts("ns-b", 600)], 1_200).await;
         let t = meter
             .tombstone_of(&closed_agent_pod(), 2_000)
+            .await
             .expect("the pod has minutes left and can be attributed");
         assert_eq!(t.subject, None);
     }

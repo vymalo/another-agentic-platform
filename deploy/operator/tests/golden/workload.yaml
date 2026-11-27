@@ -178,7 +178,11 @@ data:
     workloadClients:
     - permissions:
       - platform:agents.own
+      - platform:agents.read.owner
       spiffeId: spiffe://another/ns/another-agents/sa/orchestrator
+    - permissions:
+      - platform:agents.read.owner
+      spiffeId: spiffe://another/ns/another-agents/sa/staff
     - permissions: []
       spiffeId: spiffe://another/ns/another-agents/sa/watcher
     workloadListener:
@@ -290,6 +294,15 @@ rules:
   - apiGroups: [apps]
     resources: [statefulsets, deployments]
     verbs: [get, list, watch, patch, create, delete]
+  # aap-controller, ANR-1327: the owner chain of an agent's pod, walked to its AgentService (a pod's ReplicaSet, the
+  # Deployment above it, a StatefulSet, or a Job). `get` alone, by name: no list and no watch. A StatefulSet's `get`
+  # is in the rule above already.
+  - apiGroups: [apps]
+    resources: [replicasets]
+    verbs: [get]
+  - apiGroups: [batch]
+    resources: [jobs]
+    verbs: [get]
   - apiGroups: [""]
     resources: [services, configmaps, persistentvolumeclaims]
     verbs: [get, list, patch, create, delete]
@@ -469,7 +482,7 @@ spec:
         app.kubernetes.io/component: api
       annotations:
         # A change of the configuration rolls the pods (the file is read once, at start).
-        checksum/config: 30e402574933e43902af2e93a60629fcac32204c0b656403c58f3344b8632e3b
+        checksum/config: c0d991a897203ccd43d87ba9708bf5f471a14fad8ed372d5fc27714640db3d4a
     spec:
       serviceAccountName: aap-operator-api
       # The API token is the API's way to the cluster.

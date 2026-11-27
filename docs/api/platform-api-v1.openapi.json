@@ -1055,7 +1055,7 @@
         "additionalProperties": false,
         "properties": {
           "account": {
-            "description": "The account the agent's own pods' minutes are for (`spec.account`, AD-072): the person's opaque id from the identity provider (the `sub`, trimmed and lower-cased), 1 to 128 bytes of `[A-Za-z0-9._:/-]`; an `@` is never one, so an e-mail is not an account (422 on `account`). null or absent: for a caller that holds `platform:agents.own`, nobody's (a shared agent); for any other caller, the stored one is kept. Only a caller that holds platform:agents.own may name or change it: for any other caller an absent account keeps the stored one (a replace carries it over), the stored value sent back is accepted, a different value is 403 naming that permission, and a save that changes `owner` clears it.",
+            "description": "The account the agent's own pods' minutes are for (`spec.account`, AD-073): the person's opaque id from the identity provider (the `sub`, trimmed and lower-cased), 1 to 128 bytes of `[A-Za-z0-9._:/-]`; an `@` is never one, so an e-mail is not an account (422 on `account`). null or absent: for a caller that holds `platform:agents.own`, nobody's (a shared agent); for any other caller, the stored one is kept. Only a caller that holds platform:agents.own may name or change it: for any other caller an absent account keeps the stored one (a replace carries it over), the stored value sent back is accepted, a different value is 403 naming that permission, and a save that changes `owner` clears it.",
             "type": [
               "string",
               "null"
@@ -4891,7 +4891,7 @@
     },
     "/v1/owners/{owner}/agents": {
       "get": {
-        "description": "Only the agents whose `spec.owner` is the owner in the path, ordered by name; other agents, and agents with no owner, are not in the answer. Needs `platform:agents.own`, which the orchestrator holds and a person's role must not.",
+        "description": "Only the agents whose `spec.owner` is the owner in the path, ordered by name; other agents, and agents with no owner, are not in the answer. Needs `platform:agents.read.owner`: the orchestrator holds it beside `platform:agents.own`, the staff service holds it alone, and a person's role must hold neither.",
         "operationId": "listOwnerAgents",
         "parameters": [
           {
@@ -4999,7 +4999,7 @@
         "tags": [
           "agents"
         ],
-        "x-permission": "platform:agents.own"
+        "x-permission": "platform:agents.read.owner"
       }
     },
     "/v1/owners/{owner}/agents/{name}": {
@@ -5133,7 +5133,7 @@
         "x-permission": "platform:agents.own"
       },
       "get": {
-        "description": "As `GET /v1/agents/{name}`, for an agent whose `spec.owner` is the owner in the path. Any other agent, one with no owner included, is 404 `not-found`: the answer does not tell them apart.",
+        "description": "As `GET /v1/agents/{name}`, for an agent whose `spec.owner` is the owner in the path. Any other agent, one with no owner included, is 404 `not-found`: the answer does not tell them apart. Needs `platform:agents.read.owner`, as the list does.",
         "operationId": "getOwnerAgent",
         "parameters": [
           {
@@ -5390,7 +5390,7 @@
         "tags": [
           "agents"
         ],
-        "x-permission": "platform:agents.own"
+        "x-permission": "platform:agents.read.owner"
       },
       "put": {
         "description": "As `PUT /v1/agents/{name}`, and the agent belongs to the owner in the path: `owner` in the form is that owner or absent (another value is 422 on `owner`). A replace, which is also how the agent is suspended (`suspend`) or resumed, of an agent that is not that owner's is 404 `not-found`. A body that names a secret key needs `platform:secrets.pick` as well.",

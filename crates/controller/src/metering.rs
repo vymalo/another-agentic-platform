@@ -9,6 +9,10 @@
 //!
 //! **Determinism.** Everything here is a function of the facts and `now`, so a restart and a second replica
 //! derive the same minutes, and (with `aap_usage::event_id`) the same ids and end-of-minute times.
+//!
+//! **Identity.** A run pod's is its labels and its run-id annotation. An agent pod's is the `AgentService` its
+//! **owner chain** ends at (ANR-1327), which [`crate::Meter`] resolves by `get`: its labels say only what the pod
+//! claims to be, and a chain that ends nowhere is `no-identity`.
 
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -48,6 +52,37 @@ pub const SIZE_WEIGHT_ANNOTATION: &str = "agents.vymalo.com/size-weight";
 /// The components of an agent's own workload (`aap_runtime_kubernetes::names::component`). The egress proxy's
 /// (`egress-proxy`) is deliberately not among them: it is no agent's work.
 pub const AGENT_COMPONENTS: [&str; 3] = ["agent", "worker", "front"];
+/// The API group of the custom resources (`aap_runtime_kubernetes::names::OWNER_GROUP`): an owner reference to it,
+/// with the kind [`AGENT_SERVICE_KIND`], is the end of an agent pod's chain (ANR-1327).
+pub const OWNER_GROUP: &str = "agents.vymalo.com";
+/// The kind of the agent's own service in an owner reference.
+pub const AGENT_SERVICE_KIND: &str = "AgentService";
+
+/// One `metadata.ownerReferences` entry, the fields the meter reads.
+#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct OwnerRef {
+    /// `apiVersion`: a group and a version (`apps/v1`), or a version alone.
+    pub api_version: String,
+    /// `kind`.
+    pub kind: String,
+    /// `name`.
+    pub name: String,
+    /// `uid`: the identity of the object, never its name alone (a name made again is another object).
+    pub uid: String,
+    /// `controller`: Kubernetes sets it on the one owner that manages the object, at most.
+    pub controller: bool,
+}
+
+/// The agent service an owner reference names, when it is one: the group [`OWNER_GROUP`], the kind
+/// [`AGENT_SERVICE_KIND`], a `uid` (the identity) and a name a line can carry. `None` otherwise, and a chain that
+/// reaches no such reference ends nowhere.
+pub fn agent_service(r: &OwnerRef) -> Option<&str> {
+    (r.kind == AGENT_SERVICE_KIND
+        && r.api_version.split('/').next() == Some(OWNER_GROUP)
+        && !r.uid.is_empty()
+        && is_line_text(&r.name))
+    .then_some(r.name.as_str())
+}
 
 /// Why a pod's minutes make no line. A closed set: it is the `reason` label of `aap_meter_unattributed_total`.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -66,8 +101,10 @@ pub enum Unattributed {
     UnknownNodeType,
     /// The account source does not know the pod.
     UnknownAccount,
-    /// A run pod without its run-id annotation ([`RUN_ID_ANNOTATION`]; the hash label alone is not an identity),
-    /// or a pod without its agent service.
+    /// The pod has no identity: a run pod without its run-id annotation ([`RUN_ID_ANNOTATION`], the hash label alone
+    /// is not an identity), or a pod labelled as an agent whose owner chain does not end at an `AgentService`
+    /// (ANR-1327: no owner reference, an owner that is not there, an owner of a kind the chain does not walk, or a
+    /// chain longer than [`crate::MAX_OWNER_DEPTH`]).
     NoIdentity,
 }
 
@@ -110,6 +147,9 @@ pub struct PodFacts {
     pub finished_at: Option<i64>,
     /// `metadata.deletionTimestamp`.
     pub deleted_at: Option<i64>,
+    /// `metadata.ownerReferences`: the chain the meter walks to an agent's `AgentService` (ANR-1327). A run pod's
+    /// is not read.
+    pub owner_references: Vec<OwnerRef>,
     /// `spec.affinity.nodeAffinity`, as written.
     pub node_affinity: Option<Value>,
 }
@@ -126,15 +166,15 @@ pub enum Kind {
         /// The run id, from the annotation [`RUN_ID_ANNOTATION`], if the pod carries it.
         run: Option<String>,
     },
-    /// An agent's own pod: its agent service, if known.
-    Agent {
-        /// The agent service.
-        service: Option<String>,
-    },
+    /// An agent's own pod. Its service is **not** read from its labels: it is the `AgentService` its owner chain ends
+    /// at (ANR-1327), which [`crate::Meter`] resolves.
+    Agent,
 }
 
 /// Tells what a pod is from its labels: a run pod is `managed-by=adam-coder` and `component=run`; an agent pod is
 /// `managed-by=aap-operator` and a workload component. Everything else, the egress proxy included, is skipped.
+/// **The labels say what a pod claims to be; an agent pod's identity is its owner chain** (ANR-1327), which is read
+/// by the meter and never here.
 pub fn classify(p: &PodFacts) -> Kind {
     let label = |k: &str| p.labels.get(k).map(String::as_str);
     match (label(MANAGED_BY_LABEL), label(COMPONENT_LABEL)) {
@@ -158,11 +198,7 @@ pub fn classify(p: &PodFacts) -> Kind {
                 .filter(|r| is_line_text(r))
                 .map(str::to_owned),
         },
-        (Some(AGENT_MANAGED_BY), Some(c)) if AGENT_COMPONENTS.contains(&c) => Kind::Agent {
-            service: label(INSTANCE_LABEL)
-                .filter(|s| !s.is_empty())
-                .map(str::to_owned),
-        },
+        (Some(AGENT_MANAGED_BY), Some(c)) if AGENT_COMPONENTS.contains(&c) => Kind::Agent,
         _ => Kind::Skip,
     }
 }
@@ -323,6 +359,37 @@ mod tests {
     }
 
     #[test]
+    fn the_agent_service_is_the_group_the_kind_the_uid_and_a_name_a_line_can_carry() {
+        let r = |api: &str, kind: &str, name: &str, uid: &str| OwnerRef {
+            api_version: api.into(),
+            kind: kind.into(),
+            name: name.into(),
+            uid: uid.into(),
+            controller: true,
+        };
+        let ours = "agents.vymalo.com/v1alpha1";
+        assert_eq!(
+            agent_service(&r(ours, "AgentService", "coder", "uid-1")),
+            Some("coder")
+        );
+        // No uid is no identity (a name alone is not one), another group is not ours, another kind is not the
+        // service, and a name a line cannot carry is none.
+        assert_eq!(agent_service(&r(ours, "AgentService", "coder", "")), None);
+        assert_eq!(
+            agent_service(&r("v1", "AgentService", "coder", "uid-1")),
+            None
+        );
+        assert_eq!(
+            agent_service(&r(ours, "AgentConfig", "coder", "uid-1")),
+            None
+        );
+        assert_eq!(
+            agent_service(&r(ours, "AgentService", "co der", "uid-1")),
+            None
+        );
+    }
+
+    #[test]
     fn a_run_pod_an_agent_pod_and_the_egress_proxy() {
         let run = PodFacts {
             labels: labels(&[
@@ -349,12 +416,7 @@ mod tests {
             ]),
             ..PodFacts::default()
         };
-        assert_eq!(
-            classify(&agent),
-            Kind::Agent {
-                service: Some("coder".into())
-            }
-        );
+        assert_eq!(classify(&agent), Kind::Agent);
         let proxy = PodFacts {
             labels: labels(&[
                 (MANAGED_BY_LABEL, "aap-operator"),

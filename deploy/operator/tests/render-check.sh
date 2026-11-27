@@ -263,6 +263,8 @@ base_rules='[agents.vymalo.com] [agentservices, agentconfigs] [get, list, watch,
 [agents.vymalo.com] [modelendpoints/status, toolproviders/status] [patch]
 [events.k8s.io] [events] [create, patch]
 [apps] [statefulsets, deployments] [get, list, watch, patch, create, delete]
+[apps] [replicasets] [get]
+[batch] [jobs] [get]
 [""] [services, configmaps, persistentvolumeclaims] [get, list, patch, create, delete]
 [networking.k8s.io] [networkpolicies] [get, list, patch, create, delete]
 [policy] [poddisruptionbudgets] [get, list, patch, create, delete]
@@ -2343,10 +2345,10 @@ check "api.workload on: the configuration says where it listens, which files it 
   all_of "$(wl_config)" 'workloadListener:' 'handshakeTimeoutSecs: 3' 'maxHandshakesPerIp: 4' 'maxConnections: 100' 'listen: 0.0.0.0:9443' 'certFile: /etc/aap-api-workload/tls/tls.crt' 'keyFile: /etc/aap-api-workload/tls/tls.key' \
   'clientCaFile: /etc/aap-api-workload/ca/ca.crt'
 wl_clients() {
-  all_of "$(wl_config)" 'workloadClients:' 'spiffeId: spiffe://another/ns/another-agents/sa/orchestrator' 'spiffeId: spiffe://another/ns/another-agents/sa/watcher' 'platform:agents\.own' \
-    && none_of "$(wl_config)" 'platform:agents\.(read|write)|secrets\.pick|\*'
+  all_of "$(wl_config)" 'workloadClients:' 'spiffeId: spiffe://another/ns/another-agents/sa/orchestrator' 'spiffeId: spiffe://another/ns/another-agents/sa/staff' 'spiffeId: spiffe://another/ns/another-agents/sa/watcher' 'platform:agents\.own' 'platform:agents\.read\.owner' \
+    && none_of "$(wl_config)" 'platform:agents\.read$' 'platform:agents\.write$' 'secrets\.pick' '\*'
 }
-check "api.workload on: the configuration names each workload by its exact SPIFFE id, and grants platform:agents.own and nothing else" wl_clients
+check "api.workload on: the configuration names each workload by its exact SPIFFE id, and grants only the two workload permissions" wl_clients
 check "api.workload on: the person's listener is as it was (the same listen, health and oidc keys)" \
   all_of "$(wl_config)" '^    listen: 0.0.0.0:8080$' '^    healthListen: 0.0.0.0:8081$' 'issuer: https://keycloak.example.com'
 check "api.workload on: the NetworkPolicy opens the TLS port to the orchestrator's pods and to them alone" \
@@ -2359,6 +2361,8 @@ check "api.workload on: ... and the person's rule is untouched: the edge, on the
 check "api.workload on: no Secret object, no key and no certificate in the render (the chart holds no PEM)" lacks '^kind: Secret$|-----BEGIN|PRIVATE KEY'
 wl_no_rights() { lacks '^kind: Cluster(Role|RoleBinding)$' && ! api_role_rules | grep -Eq '(\[|, )secrets(\]|,)'; }
 check "api.workload on: no ClusterRole, and the API's Role is what it was (no right on Secrets)" wl_no_rights
+check "api.workload accepts a client with only platform:agents.read.owner (AD-072)" \
+  renders_ok -f "$here/workload.values.yaml" --set-json 'api.workload.clients[0].permissions=["platform:agents.read.owner"]'
 render -f "$here/workload.values.yaml" --set api.ingress.enabled=true --set api.ingress.host=api.agents.example.com
 wl_ingress() { dhas Ingress $wl 'name: aap-operator-api$' 'name: http$' && dlacks Ingress $wl 'workload|9443'; }
 check "api.workload on with an Ingress: the edge routes to the person's Service and never to the workload's" wl_ingress
@@ -2372,8 +2376,8 @@ for t in 'api.workload.clients=[]|api.workload.clients is required' \
          'api.workload.clients[0].spiffeId=orchestrator|must be the certificate'"'"'s exact URI SAN' \
          'api.workload.clients[0].spiffeId=spiffe://another/ns/x y|must be the certificate'"'"'s exact URI SAN' \
          'api.workload.clients[1].spiffeId=spiffe://another/ns/another-agents/sa/orchestrator|is named twice' \
-         'api.workload.clients[0].permissions[0]=platform:agents.read|only platform:agents.own is grantable' \
-         'api.workload.clients[0].permissions[0]=platform:secrets.pick|only platform:agents.own is grantable' \
+         'api.workload.clients[0].permissions[0]=platform:agents.read|are grantable this way' \
+         'api.workload.clients[0].permissions[0]=platform:secrets.pick|are grantable this way' \
          'api.workload.tls.secretName=|api.workload.tls.secretName is required' \
          'api.workload.clientCa.configMap=|api.workload.clientCa.configMap is required' \
          'api.workload.clientCa.key=|api.workload.clientCa.key must name' \

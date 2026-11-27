@@ -14,7 +14,7 @@ A [CloudEvents 1.0](https://github.com/cloudevents/spec/blob/v1.0.2/cloudevents/
 | `type` | `com.vymalo.agents.pod-minute.v1` |
 | `source` | The meter instance that reports it. |
 | `id` | Lower-case hex of `sha256(pod uid, 0x00, minute)`, `minute` being whole minutes since the Unix epoch in decimal. Same pod and minute, same id, from whichever replica reports it. |
-| `subject` | The account the minute is for. For a run pod it is the broker's answer for the run (`aap-usage-broker`); for an agent's own pod it is `AgentService.spec.account` (`aap-usage-kubernetes`, AD-072), which only a caller with `platform:agents.own` writes. |
+| `subject` | The account the minute is for. For a run pod it is the broker's answer for the run (`aap-usage-broker`); for an agent's own pod it is `AgentService.spec.account` (`aap-usage-kubernetes`, AD-073), which only a caller with `platform:agents.own` writes. |
 | `time` | The end of the minute, RFC 3339. Informational: spend is counted by **ingestion** time. |
 | `data.weight` | Integer, at least 1: the weighted units of this minute. |
 | `data.nodeType` | The node type the pod ran on. |

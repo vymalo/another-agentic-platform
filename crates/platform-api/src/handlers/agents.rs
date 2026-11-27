@@ -243,7 +243,7 @@ fn spec_text<'a>(current: Option<&'a aap_ports::Agent>, key: &str) -> Option<&'a
         .and_then(|v| v.as_str())
 }
 
-/// Who may name the account (`spec.account`, AD-072): only a holder of `platform:agents.own`, whose form's value is
+/// Who may name the account (`spec.account`, AD-073): only a holder of `platform:agents.own`, whose form's value is
 /// written as it stands (absent clears it). For any other caller an absent `account` means "keep the stored one" and the
 /// stored value is carried over (a person's save never moves it); the stored value sent back is kept; a different value is
 /// `403` naming that permission, a create having no stored value. **A save that changes `owner` clears the account**

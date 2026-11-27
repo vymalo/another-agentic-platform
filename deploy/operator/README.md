@@ -135,6 +135,7 @@ one in each namespace of `watchNamespaces`, each with a `RoleBinding` to the rel
 | `modelendpoints/status`, `toolproviders/status` | `patch` (K2: the status of the shared kinds, in a rule of its own with that verb alone; `render-check.sh` holds it, and that the kinds themselves stay read-only) |
 | `events` (`events.k8s.io`) | `create patch` |
 | `statefulsets`, `deployments` (`apps`) | `get list watch patch create delete` |
+| `replicasets` (`apps`), `jobs` (`batch`) | `get` (ANR-1327: an agent pod's owner chain, by name and by uid; a `StatefulSet`'s `get` is the runtime row's. No list, no watch) |
 | `services`, `configmaps`, `persistentvolumeclaims` | `get list patch create delete` |
 | `networkpolicies` (`networking.k8s.io`), `poddisruptionbudgets` (`policy`) | `get list patch create delete` |
 | `pods` | `list watch` |
@@ -572,16 +573,18 @@ list is empty (`templates/NOTES.txt`).
 ### The workload listener (ANR-1011)
 
 `api.workload` is a second listener of the API, **mutual TLS**, for a service that calls it with a client certificate and not a token (the orchestrator; [AD-068](../../docs/architecture/11-decisions.md)).
-**Off by default, and then not a trace of it in any render** (the goldens are what they were). It serves **only** `/v1/owners/{owner}/agents...` (`platform:agents.own`): every other path is a `404`.
+**Off by default, and then not a trace of it in any render** (the goldens are what they were). It serves **only** `/v1/owners/{owner}/agents...` (`platform:agents.own` or `platform:agents.read.owner`): every other path is a `404`.
 The person's listener (`api.port`) reads a bearer token and never a certificate; this one reads a certificate and never a token; neither falls back to the other.
 
 ```yaml
 api:
   workload:
     enabled: true
-    clients:                                   # REQUIRED: the certificate's exact URI SAN; only platform:agents.own is grantable
+    clients:                                   # REQUIRED: the certificate's exact URI SAN; only platform:agents.own and platform:agents.read.owner are grantable
       - spiffeId: spiffe://another/ns/another-agents/sa/orchestrator
-        permissions: [platform:agents.own]
+        permissions: [platform:agents.own, platform:agents.read.owner]
+      - spiffeId: spiffe://another/ns/another-agents/sa/staff
+        permissions: [platform:agents.read.owner]
     tls:
       secretName: aap-api-workload-tls         # REQUIRED: a kubernetes.io/tls Secret you make (the chart makes none and holds no key)
     clientCa:
@@ -595,7 +598,7 @@ It adds a container port `workload`, a Service `<fullname>-api-workload` (the pe
 mounted read-only at `/etc/aap-api-workload/tls` (mode 0440; the pod's `fsGroup` lets the non-root user read it) and the CA key as `/etc/aap-api-workload/ca/ca.crt`, and `workloadListener` and
 `workloadClients` in the configuration file. `handshakeTimeoutSecs`, `maxHandshakesPerIp` and `maxConnections` bound the listener (a peer behind a NAT or a proxy that hides addresses shares one per-address allowance: raise it). A **PKI with an intermediate** works with the root alone in the CA ConfigMap: the client sends its leaf and its intermediates. **A client certificate is always required**: a peer with none does not complete the handshake (there is no `clientAuth` value any more: the owner removed it on 2026-11-27, and a values file that still says it is refused). **The server certificate and the CA bundle are both re-read when they change (within about a minute): a renewal or a CA rotation needs no restart.** The next handshake and the next request take the new bundle together, a connection already open is not cut (its next request is judged by the new bundle), and a bundle that cannot be read or holds no usable CA keeps the old one and the API warns once. **Not built: the CRL** that the workload-certificate decision asks for,
 so a revoked certificate is refused only when it expires: keep the leaf short. The chart refuses a missing client, Secret or ConfigMap, a SPIFFE id that is not `spiffe://<domain>/<path>`, an identity
-twice, a permission other than `platform:agents.own`, a port that clashes with `api.port`, `api.healthPort` or `api.metrics.port`, an empty `from` while the policy is on, a `from` ipBlock that is every address (`api.networkPolicy.from` is not checked this way), an unknown key, and an
+twice, a permission outside the two workload ones, a port that clashes with `api.port`, `api.healthPort` or `api.metrics.port`, an empty `from` while the policy is on, a `from` ipBlock that is every address (`api.networkPolicy.from` is not checked this way), an unknown key, and an
 `extraVolumes` or `extraVolumeMounts` that takes `workload-tls`, `workload-ca` or `/etc/aap-api-workload`. [`tests/workload.values.yaml`](tests/workload.values.yaml) sets every value; its render is
 `tests/golden/workload.yaml`, `api --check` reads its file (`tests/api-shapes.sh`), and `render-check.sh` holds the guarantees. *Unverified until a cluster has run it:* a kubelet mounting the Secret, a
 client reaching the port through the NetworkPolicy, and a leaf of a real PKI.
@@ -649,7 +652,7 @@ and run its conformance suite under: `render-check.sh` reads that file and compa
 
 ## The pod-minute meter (ANR-1103, AD-069)
 
-`metering` is **off by default**, and then not a trace of it is in any render (every golden but `tests/golden/metering.yaml` is unmoved). On, the chart renders the file's `metering` section, mounts the broker's bearer (`metering.broker.tokenSecret`) as the file `/var/run/secrets/aap/metering/broker-token`, and adds to the operator's NetworkPolicy DNS and exactly the peers of `metering.broker.to` and `metering.collector.to`, each on its own port. It refuses at render time what the binary would refuse at start: no run pods, a `runPods.nodeType` that does not admit exactly one value, a peer list that is empty or is every address, a URL with credentials or a query, a missing Secret, bounds out of range. Operator, collector and broker are described in [Turn on the pod-minute meter](../../docs/guides/deploy/metering.md). **It may be enabled once the OpenTelemetry Collector's dedupe on `event_id` spans at least 24 h (ANR-1101).** Since ANR-1198 the facts of a pod that vanished with minutes not acknowledged are kept in `ConfigMap`s `aap-meter-tombstones-<namespace>` in the operator's own namespace, which the Role's existing `configmaps` verbs `get list patch create delete` there already allow (no verb was added); they have no owner, so `kubectl -n <operator namespace> delete configmap -l app.kubernetes.io/component=meter-tombstones` removes them on uninstall. `tests/metering.values.yaml` is its golden render, and `render-check.sh` holds each guarantee (each broken once on purpose). Not proven: a kind cluster with a real broker and collector.
+`metering` is **off by default**, and then not a trace of it is in any render (every golden but `tests/golden/metering.yaml` is unmoved). On, the chart renders the file's `metering` section, mounts the broker's bearer (`metering.broker.tokenSecret`) as the file `/var/run/secrets/aap/metering/broker-token`, and adds to the operator's NetworkPolicy DNS and exactly the peers of `metering.broker.to` and `metering.collector.to`, each on its own port. It refuses at render time what the binary would refuse at start: no run pods, a `runPods.nodeType` that does not admit exactly one value, a peer list that is empty or is every address, a URL with credentials or a query, a missing Secret, bounds out of range. Operator, collector and broker are described in [Turn on the pod-minute meter](../../docs/guides/deploy/metering.md). **It may be enabled once the OpenTelemetry Collector's dedupe on `event_id` spans at least 24 h (ANR-1101).** Since ANR-1198 the facts of a pod that vanished with minutes not acknowledged are kept in `ConfigMap`s `aap-meter-tombstones-<namespace>` in the operator's own namespace, which the Role's existing `configmaps` verbs `get list patch create delete` there already allow (no verb was added); they have no owner, so `kubectl -n <operator namespace> delete configmap -l app.kubernetes.io/component=meter-tombstones` removes them on uninstall. **Since ANR-1327 an agent pod is attributed by its owner chain**, so the meter reads the `ReplicaSet`, `Deployment`, `StatefulSet` and `Job` of a pod with a `get` by name (the Role's rows above), never by parsing a name; a chain that ends nowhere bills nothing (`no-identity`). `tests/metering.values.yaml` is its golden render, and `render-check.sh` holds each guarantee (each broken once on purpose). Not proven: a kind cluster with a real broker and collector.
 
 ## The usage ingest is removed (AD-069)
 

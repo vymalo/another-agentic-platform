@@ -43,7 +43,7 @@ impl Caller {
         self.0.holds(permission::AGENTS_READ)
     }
 
-    /// Whether the caller is the orchestrator: the only one that may name an agent's account (AD-072).
+    /// Whether the caller is the orchestrator: the only one that may name an agent's account (AD-073).
     pub(crate) fn holds_agents_own(&self) -> bool {
         self.0.holds(permission::AGENTS_OWN)
     }
