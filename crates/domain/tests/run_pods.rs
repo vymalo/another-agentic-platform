@@ -1319,6 +1319,65 @@ fn each_setting_is_checked() {
         ),
         "not TCP, UDP or SCTP",
     );
+    // ANR-1353: a rule with no `to` allows every destination, which is the internet the deny-by-default policy exists
+    // to close; a range whose prefix is zero is the same widening. Each case fails on the code before the change
+    // (the rule was accepted), and the path of the rule is named.
+    says(
+        &refused(json!({"networkPolicy": {"extraEgress": [{"ports": [{"port": 443}]}]}})),
+        "networkPolicy.extraEgress[0]",
+    );
+    says(
+        &refused(json!({"networkPolicy": {"extraEgress": [{"ports": [{"port": 443}]}]}})),
+        "needs a `to`",
+    );
+    says(
+        &refused(json!({"networkPolicy": {"extraEgress": [{"to": []}]}})),
+        "needs a `to`",
+    );
+    says(
+        &refused(json!({"networkPolicy": {"extraEgress": [
+            {"to": [{"ipBlock": {"cidr": "0.0.0.0/0"}}]}
+        ]}})),
+        "covers every address",
+    );
+    says(
+        &refused(json!({"networkPolicy": {"extraEgress": [
+            {"to": [{"ipBlock": {"cidr": "::/0"}}]}
+        ]}})),
+        "covers every address",
+    );
+    // Every peer is checked, not only the first; a zero written `00` is a zero; and the shape of the old internet rule
+    // (`0.0.0.0/0` with an `except`) is refused too.
+    says(
+        &refused(json!({"networkPolicy": {"extraEgress": [
+            {"to": [{"ipBlock": {"cidr": "10.0.0.0/8"}}, {"ipBlock": {"cidr": "0.0.0.0/0"}}]}
+        ]}})),
+        "covers every address",
+    );
+    says(
+        &refused(json!({"networkPolicy": {"extraEgress": [
+            {"to": [{"ipBlock": {"cidr": "0.0.0.0/00"}}]}
+        ]}})),
+        "covers every address",
+    );
+    says(
+        &refused(json!({"networkPolicy": {"extraEgress": [
+            {"to": [{"ipBlock": {"cidr": "0.0.0.0/0", "except": ["10.0.0.0/8"]}}]}
+        ]}})),
+        "covers every address",
+    );
+}
+
+#[test]
+fn an_egress_rule_that_names_a_range_of_its_own_is_still_accepted() {
+    // The control for ANR-1353: only a prefix of zero is refused, and the agent's own `access.allowFrom` is untouched
+    // (it is a deployment's deliberate choice there, and a `/0` in it is still accepted).
+    settings_with(json!({"networkPolicy": {"extraEgress": [
+        {"to": [{"ipBlock": {"cidr": "10.0.0.0/8"}}], "ports": [{"port": 443}]},
+        {"to": [{"ipBlock": {"cidr": "10.9.0.5/32"}}]}
+    ]}}))
+    .validate()
+    .expect("a range of the deployment's own");
 }
 
 #[test]
