@@ -6,6 +6,7 @@
 //! (`EX_CONFIG`) when it is refused, and 1 for anything else.
 
 mod config;
+mod metering;
 mod run;
 #[cfg(feature = "runtime-kubernetes")]
 mod serve;

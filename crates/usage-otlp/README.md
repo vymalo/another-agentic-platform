@@ -18,7 +18,7 @@ ring): **no SDK and no new package**.
   NetworkPolicy). `http` is allowed; an `https` endpoint may name a CA bundle that is then the **only** trust. No
   redirect is followed and no proxy is used.
 * `flush(within)` and `shutdown(deadline)` (see below). `stats()` gives the counters for the operator to render
-  (ANR-1103 wires it).
+  (`operator run` builds the sink since ANR-1103, with `metering.enabled`, and does not export these counters as metrics yet).
 
 ## The wire (AD-069)
 
@@ -81,5 +81,5 @@ judges the real adapter.
 
 ## Not here
 
-No YAML, no binary wiring and no meter in `operator run` (ANR-1103); the collector's pipeline and dedupe (ANR-1101).
+No YAML (the operator's file, `metering.collector`, ANR-1103, builds the settings); the collector's pipeline and dedupe (ANR-1101).
 *Unverified:* a real OpenTelemetry Collector accepting this end to end.

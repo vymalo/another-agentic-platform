@@ -93,6 +93,32 @@ leaderElection:
   renewSecs: 10
   retrySecs: 2
 
+# The pod-minute meter (ANR-1103, AD-069). OFF by default: nothing below is read or asked while `enabled` is false. On, it
+# sends one usage line per pod and whole minute to the OpenTelemetry Collector, for the account the orchestrator's broker names
+# for the run. It needs `runPods.nodeType` with exactly one admitted value (the node type of a run pod is read from its node
+# affinity). The broker's bearer is a reference, never a value.
+metering:
+  enabled: false
+  # The `source` of every line: a constant of the deployment, the same on every replica. [A-Za-z0-9._:/-], at most 128.
+  source: aap-operator
+  # How often the pods are looked at, in seconds (5 to 300).
+  periodSecs: 30
+  broker:
+    # `GET <url>/internal/runs/<run>/account` answers { accountId }. http or https, no credentials, query or fragment.
+    url: http://orchestrator-broker.agents.svc:8080
+    token:
+      file: /var/run/secrets/aap/metering/broker-token
+    timeoutSecs: 5
+  collector:
+    # OTLP/HTTP JSON logs go to `<endpoint>/v1/logs`.
+    endpoint: http://usage-collector.observability.svc:4318
+    # A PEM bundle that is the only trust for an https endpoint.
+    # caFile: /etc/aap/metering/ca/ca.pem
+    queue: 4096
+    batch: 512
+    intervalSecs: 5
+    timeoutSecs: 10
+
 # A `tracing` filter. `info` when absent.
 log:
   filter: info

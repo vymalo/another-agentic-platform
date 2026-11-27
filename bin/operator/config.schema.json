@@ -24,6 +24,10 @@
       "description": "The log.",
       "$ref": "#/$defs/LogSection"
     },
+    "metering": {
+      "description": "The pod-minute meter (ANR-1103, AD-069): off by default.",
+      "$ref": "#/$defs/MeteringSection"
+    },
     "reconcile": {
       "description": "The timers of a pass and the number of passes at once.",
       "$ref": "#/$defs/ReconcileSection"
@@ -352,6 +356,122 @@
           "description": "A `tracing` filter, such as `info,kube=warn,aap_controller=debug`. `info` when absent.",
           "type": "string",
           "default": "info"
+        }
+      },
+      "additionalProperties": false
+    },
+    "MeteringBrokerSection": {
+      "description": "`metering.broker`: the route `GET <url>/internal/runs/<run>/account`.",
+      "type": "object",
+      "properties": {
+        "timeoutSecs": {
+          "description": "One question's time limit, in seconds (1 to 60).",
+          "type": "integer",
+          "format": "uint64",
+          "default": 5,
+          "minimum": 0
+        },
+        "token": {
+          "description": "The meter's bearer, by reference (a mounted Secret key). Read once at start, never logged.",
+          "anyOf": [
+            {
+              "$ref": "#/$defs/SecretRef"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "url": {
+          "description": "The broker's base URL (`http://broker.ns.svc:8080`): `http` or `https`, no credentials, query or fragment.",
+          "type": [
+            "string",
+            "null"
+          ],
+          "default": null
+        }
+      },
+      "additionalProperties": false
+    },
+    "MeteringCollectorSection": {
+      "description": "`metering.collector`: the OTLP/HTTP endpoint (`<endpoint>/v1/logs`) and the sink's bounds.",
+      "type": "object",
+      "properties": {
+        "batch": {
+          "description": "Lines in one POST (1 to 10000).",
+          "type": "integer",
+          "format": "uint",
+          "default": 512,
+          "minimum": 0
+        },
+        "caFile": {
+          "description": "A PEM bundle that is the only trust for an `https` endpoint. Absent: the platform roots.",
+          "type": [
+            "string",
+            "null"
+          ],
+          "default": null
+        },
+        "endpoint": {
+          "description": "The collector's base URL (`http://collector.ns.svc:4318`). `http` is allowed: it is in the cluster behind a NetworkPolicy.",
+          "type": [
+            "string",
+            "null"
+          ],
+          "default": null
+        },
+        "intervalSecs": {
+          "description": "How long a part batch waits before it is sent, in seconds (1 to 3600).",
+          "type": "integer",
+          "format": "uint64",
+          "default": 5,
+          "minimum": 0
+        },
+        "queue": {
+          "description": "Lines the queue holds before the meter is told to wait (1 to 1000000).",
+          "type": "integer",
+          "format": "uint",
+          "default": 4096,
+          "minimum": 0
+        },
+        "timeoutSecs": {
+          "description": "One POST's time limit, in seconds (1 to 300).",
+          "type": "integer",
+          "format": "uint64",
+          "default": 10,
+          "minimum": 0
+        }
+      },
+      "additionalProperties": false
+    },
+    "MeteringSection": {
+      "description": "`metering`: the pod-minute meter (ANR-1103, AD-069). **Off by default**, and then nothing here is read or asked.\n\nOn, the operator sends one usage line per pod and whole minute to the OpenTelemetry Collector, for the account the\norchestrator's broker names for the run. The file holds no secret: the broker's bearer is a reference.",
+      "type": "object",
+      "properties": {
+        "broker": {
+          "description": "The orchestrator's broker, which says which account a run belongs to.",
+          "$ref": "#/$defs/MeteringBrokerSection"
+        },
+        "collector": {
+          "description": "The OpenTelemetry Collector the lines go to (OTLP/HTTP JSON logs).",
+          "$ref": "#/$defs/MeteringCollectorSection"
+        },
+        "enabled": {
+          "description": "Run the meter. On, `broker` and `collector` are required and `runPods.nodeType` must admit exactly one value.",
+          "type": "boolean",
+          "default": false
+        },
+        "periodSecs": {
+          "description": "How often the meter looks at the pods, in seconds (5 to 300).",
+          "type": "integer",
+          "format": "uint64",
+          "default": 30,
+          "minimum": 0
+        },
+        "source": {
+          "description": "The `source` of every line: a constant of the deployment, the same on every replica (`[A-Za-z0-9._:/-]`, at most 128).",
+          "type": "string",
+          "default": "aap-operator"
         }
       },
       "additionalProperties": false

@@ -31,6 +31,9 @@ aap-domain.workspace = true
 aap-ports.workspace = true
 aap-trace.workspace = true
 aap-trace-otlp.workspace = true
+aap-usage.workspace = true
+aap-usage-broker.workspace = true
+aap-usage-otlp.workspace = true
 aap-registry = { workspace = true, optional = true }
 aap-activity-http.workspace = true
 aap-leader-kubernetes = { workspace = true, optional = true }
@@ -45,6 +48,7 @@ serde.workspace = true
 schemars.workspace = true
 serde_json.workspace = true
 serde_yaml.workspace = true
+url.workspace = true
 tokio = { workspace = true, features = ["macros", "net", "rt-multi-thread", "signal", "sync", "time"] }
 tracing.workspace = true
 tracing-subscriber.workspace = true

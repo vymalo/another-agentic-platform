@@ -1,0 +1,599 @@
+---
+# Source: aap-operator/templates/run-pods-priorityclass.yaml
+# runPods.enabled: the priority class of run pods. It exists to be scoped by: a ResourceQuota cannot select pods by label, but it can
+# by priority class. Value 0 and preemptionPolicy Never: it ranks nothing and evicts nobody. Cluster-scoped (so the operator, which
+# is namespaced, does not make it), and shared by the run pods of the namespace: two agents here share the tighter of their quotas.
+apiVersion: scheduling.k8s.io/v1
+kind: PriorityClass
+metadata:
+  name: aap-operator-another-agentic-system-run
+  labels:
+    app.kubernetes.io/name: aap-operator
+    app.kubernetes.io/instance: aap-operator
+    app.kubernetes.io/version: "0.1.0"
+    app.kubernetes.io/managed-by: Helm
+    app.kubernetes.io/part-of: another-agentic-platform
+    helm.sh/chart: aap-operator-0.1.0
+value: 0
+preemptionPolicy: Never
+globalDefault: false
+description: "Run pods of the agents of another-agentic-system (aap-operator): scoped by a ResourceQuota, ranks nothing."
+
+---
+# Source: aap-operator/templates/networkpolicy.yaml
+# Ingress is closed except what is listed: the registry to the peers of networkPolicy.registry.allowFrom, /metrics to those of
+# networkPolicy.metrics.allowFrom. Probes come from the node, which a NetworkPolicy never blocks. Egress goes to the API server and,
+# when the deployment asks for them, the traces collector and the tool probe's peers, and nothing else: the operator reads and writes
+# the API and calls no other service.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: aap-operator
+  labels:
+    app.kubernetes.io/name: aap-operator
+    app.kubernetes.io/instance: aap-operator
+    app.kubernetes.io/version: "0.1.0"
+    app.kubernetes.io/managed-by: Helm
+    app.kubernetes.io/part-of: another-agentic-platform
+    helm.sh/chart: aap-operator-0.1.0
+spec:
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/name: aap-operator
+      app.kubernetes.io/instance: aap-operator
+  policyTypes:
+    - Ingress
+    - Egress
+  ingress: []
+  egress:
+    - ports:
+        - protocol: TCP
+          port: 443
+        - protocol: TCP
+          port: 6443
+    - ports:
+        - protocol: UDP
+          port: 53
+        - protocol: TCP
+          port: 53
+      to:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: kube-system
+          podSelector:
+            matchLabels:
+              k8s-app: kube-dns
+    - ports:
+        - protocol: TCP
+          port: 8080
+      to:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: agents
+          podSelector:
+            matchLabels:
+              app.kubernetes.io/name: orchestrator
+    - ports:
+        - protocol: TCP
+          port: 4318
+      to:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: observability
+          podSelector:
+            matchLabels:
+              app.kubernetes.io/name: usage-collector
+
+---
+# Source: aap-operator/templates/serviceaccount.yaml
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: aap-operator
+  labels:
+    app.kubernetes.io/name: aap-operator
+    app.kubernetes.io/instance: aap-operator
+    app.kubernetes.io/version: "0.1.0"
+    app.kubernetes.io/managed-by: Helm
+    app.kubernetes.io/part-of: another-agentic-platform
+    helm.sh/chart: aap-operator-0.1.0
+
+---
+# Source: aap-operator/templates/config.yaml
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: aap-operator
+  namespace: another-agentic-system
+  labels:
+    app.kubernetes.io/name: aap-operator
+    app.kubernetes.io/instance: aap-operator
+    app.kubernetes.io/version: "0.1.0"
+    app.kubernetes.io/managed-by: Helm
+    app.kubernetes.io/part-of: another-agentic-platform
+    helm.sh/chart: aap-operator-0.1.0
+data:
+  config.yaml: |
+    # The configuration of `operator run` (ANR-962, AD-064), rendered by the chart from its values. A typo is refused by the
+    # binary at start, and `render-check.sh` runs `operator run --check` on every golden render. THERE IS NO SECRET IN IT: the
+    # registry's token and the traces' headers are mounted files this file names, and an agent's secret is a reference.
+    version: 1
+    listen:
+      health: 0.0.0.0:8081
+      metrics: 0.0.0.0:9090
+      registry: 0.0.0.0:8080
+    watch:
+      # K6b: every namespace the operator watches, the first being the primary (the API's defaults.namespace, the run pods'
+      # cluster-scoped names). Quoted: a namespace YAML would read as a boolean or a number is still a name.
+      namespaces:
+        - "another-agentic-system"
+    defaults:
+      # AD-029: the image of an agent whose AgentConfig names none. A new value rolls those agents, and no other.
+      agentImage: "ghcr.io/vymalo/another-adam-rs/coder:sha-9a1fd4e@sha256:c3c178b7d73599f40d53f798616e510346abd3300a622b09b2bc233109f12b44"
+    # Run pods (slice D15a): the size classes, the run image, the quota, the network policy, the egress proxy and the git sandbox,
+    # and the names of the cluster-scoped objects this chart made. No secret: the model key is the agent's.
+    runPods:
+      cargoBuildJobs: 2
+      classes:
+        standard:
+          limits:
+            cpu: "2"
+            ephemeral-storage: 4Gi
+            memory: 2Gi
+          requests:
+            cpu: 250m
+            ephemeral-storage: 1Gi
+            memory: 512Mi
+      container: run
+      egressProxy:
+        allow:
+        - registry.npmjs.org
+        - pypi.org
+        - files.pythonhosted.org
+        - crates.io
+        - index.crates.io
+        - static.crates.io
+        - proxy.golang.org
+        - sum.golang.org
+        - github.com
+        - codeload.github.com
+        - objects.githubusercontent.com
+        - release-assets.githubusercontent.com
+        - pub.dev
+        extraAllow: []
+        extraNoProxy: []
+        ports:
+        - 443
+        replicas: 2
+        resources:
+          limits:
+            memory: 256Mi
+          requests:
+            cpu: 25m
+            memory: 32Mi
+      extraAllowedImages: []
+      extraEnv: {}
+      gitSandbox:
+        maxCommands: 64
+        resources:
+          limits:
+            memory: 1Gi
+          requests:
+            cpu: 100m
+            memory: 128Mi
+        tmpSize: 64Mi
+      idleSecs: 300
+      image:
+        digest: sha256:d2aae762ecad2c13bb697332507d236a75d8233d061f38cc97dc9227192b0797
+        pullPolicy: IfNotPresent
+        repository: ghcr.io/vymalo/another-agentic-images/workspace
+        tag: 1.98.1-e6a528f
+      networkPolicy:
+        blockedCIDRs:
+        - 10.0.0.0/8
+        - 172.16.0.0/12
+        - 192.168.0.0/16
+        - 169.254.0.0/16
+        - 100.64.0.0/10
+        clusterCIDRs: []
+        dnsNamespace: kube-system
+        dnsPodLabels:
+          k8s-app: kube-dns
+        extraEgress: []
+      nodeAffinity: {}
+      nodeSelector: {}
+      nodeType:
+        admitted:
+        - standard
+        labelKey: example.com/node-type
+      priorityClass: aap-operator-another-agentic-system-run
+      quota:
+        limitsMemory: 8Gi
+        pods: 4
+      readyTimeoutSecs: 600
+      role: aap-operator-run-pods
+      tolerations: []
+      waitSecs: 600
+    # ANR-1103 (AD-069): the pod-minute meter. The broker's bearer is the mounted Secret's file, read once at start.
+    metering:
+      enabled: true
+      source: "example-operator"
+      periodSecs: 20
+      broker:
+        url: "http://orchestrator.agents.svc:8080"
+        timeoutSecs: 4
+        token:
+          file: /var/run/secrets/aap/metering/broker-token
+      collector:
+        endpoint: "http://usage-collector.observability.svc:4318"
+        queue: 2048
+        batch: 256
+        intervalSecs: 3
+        timeoutSecs: 8
+    log:
+      filter: "info"
+
+---
+# Source: aap-operator/templates/role.yaml
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: aap-operator
+  namespace: another-agentic-system
+  labels:
+    app.kubernetes.io/name: aap-operator
+    app.kubernetes.io/instance: aap-operator
+    app.kubernetes.io/version: "0.1.0"
+    app.kubernetes.io/managed-by: Helm
+    app.kubernetes.io/part-of: another-agentic-platform
+    helm.sh/chart: aap-operator-0.1.0
+rules:
+  # aap-controller: the two kinds (patch also writes metadata.finalizers), their status, and Events.
+  - apiGroups: [agents.vymalo.com]
+    resources: [agentservices, agentconfigs]
+    verbs: [get, list, watch, patch]
+  # aap-controller: the shared objects of the dashboard (AD-029) are read, to resolve a reference and to watch it, and never written (their status is, below).
+  - apiGroups: [agents.vymalo.com]
+    resources: [modelendpoints, toolproviders]
+    verbs: [get, list, watch]
+  - apiGroups: [agents.vymalo.com]
+    resources: [agentservices/status, agentconfigs/status]
+    verbs: [patch]
+  # aap-controller, K2: the status of the shared kinds (who uses them, whether they are valid, whether their agents are Ready), written
+  # by server-side apply and nothing more: `patch` on the status subresource only. The two kinds themselves stay read-only (the rule above).
+  - apiGroups: [agents.vymalo.com]
+    resources: [modelendpoints/status, toolproviders/status]
+    verbs: [patch]
+  - apiGroups: [events.k8s.io]
+    resources: [events]
+    verbs: [create, patch]
+  # aap-runtime-kubernetes: the objects an agent is made of.
+  - apiGroups: [apps]
+    resources: [statefulsets, deployments]
+    verbs: [get, list, watch, patch, create, delete]
+  - apiGroups: [""]
+    resources: [services, configmaps, persistentvolumeclaims]
+    verbs: [get, list, patch, create, delete]
+  - apiGroups: [networking.k8s.io]
+    resources: [networkpolicies]
+    verbs: [get, list, patch, create, delete]
+  - apiGroups: [policy]
+    resources: [poddisruptionbudgets]
+    verbs: [get, list, patch, create, delete]
+  - apiGroups: [""]
+    resources: [pods]
+    verbs: [list, watch]
+  # aap-runtime-kubernetes, run pods (slice D15a): the account an agent's workers run as, what its run pods may use, and the binding of
+  # the account to the Role made for run pods (run-pods-role.yaml). The operator makes no Role: it holds the right to BIND that one, by
+  # name, and no right of its own to make a pod or exec, which Kubernetes would require of it to make a Role with those verbs itself
+  # (verified 2026-10-26 on a kube-apiserver v1.35.8). `delete` on pods is for clearing the run pods of a service that stops making
+  # them or goes (the coder that swept them is gone), found by the labels the service's policy parameters name.
+  - apiGroups: [""]
+    resources: [serviceaccounts, resourcequotas]
+    verbs: [get, list, patch, create, delete]
+  - apiGroups: [rbac.authorization.k8s.io]
+    resources: [rolebindings]
+    verbs: [get, list, patch, create, delete]
+  - apiGroups: [rbac.authorization.k8s.io]
+    resources: [roles]
+    verbs: [bind]
+    resourceNames: [aap-operator-run-pods]
+  - apiGroups: [""]
+    resources: [pods]
+    verbs: [delete]
+  # aap-store-cnpg: the Cluster of a service that asks for one. None on databases, poolers or clusters/status.
+  - apiGroups: [postgresql.cnpg.io]
+    resources: [clusters]
+    verbs: [get, patch, create, delete]
+
+---
+# Source: aap-operator/templates/run-pods-role.yaml
+# runPods.enabled: what an agent's account may do with pods: make, find, watch and delete them, and exec in them. Nothing else: no
+# Secret, no ConfigMap, no other kind. `get` on pods/exec as well as `create`: kube's exec is a WebSocket, which the API server
+# authorizes as a GET (and, from Kubernetes 1.35, so at the chart's floor of 1.37, as a create too; *unverified*). It is the coder chart's Role (adam-rs
+# `run-pods-rbac.yaml`), once for each namespace the operator watches (K6a): the operator makes a RoleBinding of it for each agent that
+# asks for run pods, and holds the right to bind this Role and no right of its own to make a pod or exec. A Role cannot name the pods it
+# may exec in, so an account bound to it may exec in ANY pod of this namespace (the coder chart's Role has the same reach): README
+# "Run pods".
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: aap-operator-run-pods
+  namespace: another-agentic-system
+  labels:
+    app.kubernetes.io/name: aap-operator
+    app.kubernetes.io/instance: aap-operator
+    app.kubernetes.io/version: "0.1.0"
+    app.kubernetes.io/managed-by: Helm
+    app.kubernetes.io/part-of: another-agentic-platform
+    helm.sh/chart: aap-operator-0.1.0
+rules:
+  - apiGroups: [""]
+    resources: ["pods"]
+    verbs: ["create", "delete", "get", "list", "watch"]
+  - apiGroups: [""]
+    resources: ["pods/exec"]
+    verbs: ["create", "get"]
+
+---
+# Source: aap-operator/templates/rolebinding.yaml
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: aap-operator
+  namespace: another-agentic-system
+  labels:
+    app.kubernetes.io/name: aap-operator
+    app.kubernetes.io/instance: aap-operator
+    app.kubernetes.io/version: "0.1.0"
+    app.kubernetes.io/managed-by: Helm
+    app.kubernetes.io/part-of: another-agentic-platform
+    helm.sh/chart: aap-operator-0.1.0
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: aap-operator
+subjects:
+  - kind: ServiceAccount
+    name: aap-operator
+    namespace: another-agentic-system
+
+---
+# Source: aap-operator/templates/service.yaml
+apiVersion: v1
+kind: Service
+metadata:
+  name: aap-operator-metrics
+  labels:
+    app.kubernetes.io/name: aap-operator
+    app.kubernetes.io/instance: aap-operator
+    app.kubernetes.io/version: "0.1.0"
+    app.kubernetes.io/managed-by: Helm
+    app.kubernetes.io/part-of: another-agentic-platform
+    helm.sh/chart: aap-operator-0.1.0
+spec:
+  type: ClusterIP
+  selector:
+    app.kubernetes.io/name: aap-operator
+    app.kubernetes.io/instance: aap-operator
+  ports:
+    - name: metrics
+      port: 9090
+      targetPort: metrics
+      protocol: TCP
+
+---
+# Source: aap-operator/templates/deployment.yaml
+# One replica and no leader election (§59a): a second reconciler would only race the first. `Recreate`, so an upgrade
+# never runs two at once; the cost is a short gap in reconciling, and a running agent is not touched by it.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: aap-operator
+  labels:
+    app.kubernetes.io/name: aap-operator
+    app.kubernetes.io/instance: aap-operator
+    app.kubernetes.io/version: "0.1.0"
+    app.kubernetes.io/managed-by: Helm
+    app.kubernetes.io/part-of: another-agentic-platform
+    helm.sh/chart: aap-operator-0.1.0
+spec:
+  replicas: 1
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: aap-operator
+      app.kubernetes.io/instance: aap-operator
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: aap-operator
+        app.kubernetes.io/instance: aap-operator
+      annotations:
+        # The configuration file is read once, at start: a changed file is a new pod (ANR-962).
+        checksum/config: 0e99b17751e1ee6c29908fb8f8df650f5450e619d6ad84a69ea56e91d9ececce
+    spec:
+      serviceAccountName: aap-operator
+      # The API token is the operator's way in.
+      automountServiceAccountToken: true
+      # SIGTERM lets the passes in flight finish.
+      terminationGracePeriodSeconds: 30
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 65532
+        runAsGroup: 65532
+        # So the mounted token file (mode 0440) is readable by the non-root user.
+        fsGroup: 65532
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: operator
+          image: "ghcr.io/vymalo/another-agentic-platform/operator:sha-0000000"
+          imagePullPolicy: IfNotPresent
+          # The file is the only way in (ANR-962): no setting is an environment variable any more.
+          args: [run, --config, /etc/aap-operator/config.yaml]
+          env:
+            # The downward API's identity of this replica (the reporting instance of Events and the lease's holderIdentity).
+            - name: POD_NAME
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.name
+          ports:
+            - name: health
+              containerPort: 8081
+              protocol: TCP
+            - name: metrics
+              containerPort: 9090
+              protocol: TCP
+          startupProbe:
+            httpGet:
+              path: /healthz
+              port: health
+            periodSeconds: 2
+            failureThreshold: 30
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: health
+            periodSeconds: 15
+            timeoutSeconds: 3
+            failureThreshold: 4
+          # Ready once both controllers' caches have listed the cluster.
+          readinessProbe:
+            httpGet:
+              path: /readyz
+              port: health
+            periodSeconds: 5
+            timeoutSeconds: 3
+          resources:
+            limits:
+              memory: 256Mi
+            requests:
+              cpu: 50m
+              memory: 64Mi
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            runAsNonRoot: true
+            capabilities:
+              drop: [ALL]
+          volumeMounts:
+            # The configuration file (ANR-962), read once at start.
+            - name: config
+              mountPath: /etc/aap-operator
+              readOnly: true
+            - name: metering-token
+              mountPath: /var/run/secrets/aap/metering
+              readOnly: true
+      volumes:
+        - name: config
+          configMap:
+            name: aap-operator
+            defaultMode: 288 # 0440
+        - name: metering-token
+          secret:
+            secretName: meter-broker-token
+            defaultMode: 288 # 0440
+            items:
+              - key: bearer
+                path: broker-token
+
+---
+# Source: aap-operator/templates/run-pods-admission.yaml
+# runPods.enabled: the guard that lets an agent's account make pods without being able to read the namespace's other Secrets, mount
+# the host or run anything privileged. It is the coder chart's policy (adam-rs `run-pods-admission.yaml`) with what differs per agent
+# read from a parameter: a ConfigMap of the agent's, labelled agents.vymalo.com/run-pods-policy, which the operator makes for each agent
+# that asks for run pods (the account it is for, the images, the claims, the one Secret key). It applies to the pods CREATED BY
+# that account (the match condition, once per parameter object), and refuses any that is not the intended run pod. Without it the RBAC
+# alone would let the account make any pod in its namespace. The policy and its binding are cluster-scoped and made here: the operator
+# is namespaced, and writes only the parameters, which the account cannot (its Role has pods and nothing else).
+# `parameterNotFoundAction: Allow`: a namespace in which no agent asks for run pods has no parameter, and every pod creation in it
+# would be denied by `Deny`, the operator's own among them. The cost is stated in the README ("Run pods"): an account whose parameters
+# are gone is not guarded, so the operator makes the parameters before the binding that lets the account make pods and removes the
+# binding first. Needs the v1 admission policy API (Kubernetes 1.30 or later; the chart's floor is 1.37, AD-067) and `params` in a match condition, which was verified on a
+# kube-apiserver v1.35.8 only, and on 1.37 is unverified until CI has run `run-pods-e2e` there (README "Run pods").
+apiVersion: admissionregistration.k8s.io/v1
+kind: ValidatingAdmissionPolicy
+metadata:
+  name: aap-operator-another-agentic-system-run-pods
+  labels:
+    app.kubernetes.io/name: aap-operator
+    app.kubernetes.io/instance: aap-operator
+    app.kubernetes.io/version: "0.1.0"
+    app.kubernetes.io/managed-by: Helm
+    app.kubernetes.io/part-of: another-agentic-platform
+    helm.sh/chart: aap-operator-0.1.0
+spec:
+  failurePolicy: Fail
+  paramKind:
+    apiVersion: v1
+    kind: ConfigMap
+  matchConstraints:
+    resourceRules:
+      - apiGroups: [""]
+        apiVersions: ["v1"]
+        operations: ["CREATE"]
+        resources: ["pods"]
+  matchConditions:
+    - name: made-by-the-coder
+      expression: "request.userInfo.username == params.data.serviceAccount"
+  variables:
+    - name: containers
+      expression: "object.spec.containers + (has(object.spec.initContainers) ? object.spec.initContainers : [])"
+    - name: nodeTypeKey
+      expression: "has(params.data.nodeTypeKey) ? params.data.nodeTypeKey : 'example.com/node-type'"
+    - name: admittedNodeTypes
+      expression: "has(params.data.nodeTypeAdmitted) ? params.data.nodeTypeAdmitted.split('\\n') : ['standard']"
+  validations:
+    - expression: "has(object.metadata.labels) && params.data.runLabel in object.metadata.labels && 'app.kubernetes.io/managed-by' in object.metadata.labels && object.metadata.labels['app.kubernetes.io/managed-by'] == params.data.managedBy"
+      messageExpression: "'a run pod carries the labels app.kubernetes.io/managed-by=' + params.data.managedBy + ' and ' + params.data.runLabel"
+    - expression: "has(object.spec.priorityClassName) && object.spec.priorityClassName == params.data.priorityClass"
+      messageExpression: "'a run pod has the priority class ' + params.data.priorityClass + ', which the quota is scoped to'"
+    - expression: "variables.containers.all(c, c.image in params.data.images.split('\\n'))"
+      message: "a run pod uses only the images the chart allows"
+    - expression: "!has(object.spec.volumes) || object.spec.volumes.all(v, has(v.emptyDir) || (has(v.persistentVolumeClaim) && v.persistentVolumeClaim.claimName in (has(params.data.claims) ? params.data.claims.split('\\n') : [params.data.claim])))"
+      messageExpression: "'a run pod mounts only emptyDir volumes and the ' + ((has(params.data.claims) ? params.data.claims.split('\\n') : [params.data.claim]).size() > 1 ? 'claims ' : 'claim ') + (has(params.data.claims) ? params.data.claims.split('\\n') : [params.data.claim]).join(' and ') + ': no hostPath, no Secret, no other claim'"
+    - expression: "variables.containers.all(c, (!has(c.env) || c.env.all(e, !has(e.valueFrom) || !has(e.valueFrom.secretKeyRef) || (e.valueFrom.secretKeyRef.name == params.data.secretName && e.valueFrom.secretKeyRef.key == params.data.secretKey))) && (!has(c.envFrom) || c.envFrom.all(f, !has(f.secretRef))))"
+      messageExpression: "'a run pod references no Secret but the key ' + params.data.secretKey + ' of ' + params.data.secretName + ' (as one variable): no Secret volume, no envFrom, no other key'"
+    - expression: "variables.containers.all(c, has(c.securityContext) && has(c.securityContext.allowPrivilegeEscalation) && c.securityContext.allowPrivilegeEscalation == false && (!has(c.securityContext.privileged) || c.securityContext.privileged == false))"
+      message: "a run pod is not privileged and sets allowPrivilegeEscalation: false on every container"
+    - expression: "variables.containers.all(c, (has(c.securityContext) && has(c.securityContext.runAsUser) ? c.securityContext.runAsUser : (has(object.spec.securityContext) && has(object.spec.securityContext.runAsUser) ? object.spec.securityContext.runAsUser : 0)) != 0 && (has(c.securityContext) && has(c.securityContext.runAsNonRoot) ? c.securityContext.runAsNonRoot : (has(object.spec.securityContext) && has(object.spec.securityContext.runAsNonRoot) ? object.spec.securityContext.runAsNonRoot : false)))"
+      message: "a run pod does not run as root: a runAsUser other than 0 and runAsNonRoot: true on every container"
+    - expression: "(!has(object.spec.hostNetwork) || !object.spec.hostNetwork) && (!has(object.spec.hostPID) || !object.spec.hostPID) && (!has(object.spec.hostIPC) || !object.spec.hostIPC)"
+      message: "a run pod uses its own network, PID and IPC namespaces"
+    - expression: "has(object.spec.automountServiceAccountToken) && object.spec.automountServiceAccountToken == false"
+      message: "a run pod sets automountServiceAccountToken: false: it holds no credential for the cluster"
+    - expression: "variables.containers.all(c, has(c.resources) && has(c.resources.limits) && 'memory' in c.resources.limits && 'cpu' in c.resources.limits && 'ephemeral-storage' in c.resources.limits)"
+      message: "a run pod sets limits.memory, limits.cpu and limits.ephemeral-storage on every container"
+    - expression: "!has(object.spec.nodeName) && ((has(object.spec.nodeSelector) && variables.nodeTypeKey in object.spec.nodeSelector && object.spec.nodeSelector[variables.nodeTypeKey] in variables.admittedNodeTypes) || (has(object.spec.affinity) && has(object.spec.affinity.nodeAffinity) && has(object.spec.affinity.nodeAffinity.requiredDuringSchedulingIgnoredDuringExecution) && object.spec.affinity.nodeAffinity.requiredDuringSchedulingIgnoredDuringExecution.nodeSelectorTerms.size() > 0 && object.spec.affinity.nodeAffinity.requiredDuringSchedulingIgnoredDuringExecution.nodeSelectorTerms.all(t, has(t.matchExpressions) && t.matchExpressions.exists(e, e.key == variables.nodeTypeKey && e.operator == 'In' && has(e.values) && e.values.size() > 0 && e.values.all(v, v in variables.admittedNodeTypes)))))"
+      messageExpression: "'a run pod is pinned to the node types ' + variables.admittedNodeTypes.join(', ') + ' (' + variables.nodeTypeKey + ' In those values, by nodeSelector or by required node affinity in every term) and sets no nodeName'"
+
+---
+# Source: aap-operator/templates/run-pods-admission.yaml
+apiVersion: admissionregistration.k8s.io/v1
+kind: ValidatingAdmissionPolicyBinding
+metadata:
+  name: aap-operator-another-agentic-system-run-pods
+  labels:
+    app.kubernetes.io/name: aap-operator
+    app.kubernetes.io/instance: aap-operator
+    app.kubernetes.io/version: "0.1.0"
+    app.kubernetes.io/managed-by: Helm
+    app.kubernetes.io/part-of: another-agentic-platform
+    helm.sh/chart: aap-operator-0.1.0
+spec:
+  policyName: aap-operator-another-agentic-system-run-pods
+  validationActions: ["Deny"]
+  paramRef:
+    selector:
+      matchLabels:
+        agents.vymalo.com/run-pods-policy: "true"
+    parameterNotFoundAction: Allow
+  matchResources:
+    namespaceSelector:
+      matchExpressions:
+        - key: kubernetes.io/metadata.name
+          operator: In
+          values:
+            - another-agentic-system

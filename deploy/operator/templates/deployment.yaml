@@ -137,6 +137,11 @@ spec:
               mountPath: /var/run/secrets/aap/activity
               readOnly: true
             {{- end }}
+            {{- if include "aap.metering" . }}
+            - name: metering-token
+              mountPath: /var/run/secrets/aap/metering
+              readOnly: true
+            {{- end }}
             {{- if include "aap.otel.on" . }}
             {{- include "aap.otel.mounts" (dict "block" .Values.otel) | nindent 12 }}
             {{- end }}
@@ -162,6 +167,15 @@ spec:
             items:
               - key: {{ .Values.activity.tokenSecret.key }}
                 path: token
+        {{- end }}
+        {{- if include "aap.metering" . }}
+        - name: metering-token
+          secret:
+            secretName: {{ .Values.metering.broker.tokenSecret.name }}
+            defaultMode: 288 # 0440
+            items:
+              - key: {{ .Values.metering.broker.tokenSecret.key }}
+                path: broker-token
         {{- end }}
         {{- if include "aap.otel.on" . }}
         {{- include "aap.otel.volumes" (dict "block" .Values.otel) | nindent 8 }}

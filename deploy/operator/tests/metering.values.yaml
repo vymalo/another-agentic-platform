@@ -1,0 +1,40 @@
+# The ninth golden render (ANR-1103): the pod-minute meter on, with run pods that admit exactly one node type. The default render is
+# the other eight, and the meter is not a trace of any of them.
+runPods:
+  enabled: true
+  nodeType:
+    labelKey: example.com/node-type
+    admitted: [standard]
+
+metering:
+  enabled: true
+  source: example-operator
+  periodSecs: 20
+  broker:
+    url: http://orchestrator.agents.svc:8080
+    port: 8080
+    timeoutSecs: 4
+    to:
+      - namespaceSelector:
+          matchLabels:
+            kubernetes.io/metadata.name: agents
+        podSelector:
+          matchLabels:
+            app.kubernetes.io/name: orchestrator
+    tokenSecret:
+      name: meter-broker-token
+      key: bearer
+  collector:
+    endpoint: http://usage-collector.observability.svc:4318
+    port: 4318
+    queue: 2048
+    batch: 256
+    intervalSecs: 3
+    timeoutSecs: 8
+    to:
+      - namespaceSelector:
+          matchLabels:
+            kubernetes.io/metadata.name: observability
+        podSelector:
+          matchLabels:
+            app.kubernetes.io/name: usage-collector

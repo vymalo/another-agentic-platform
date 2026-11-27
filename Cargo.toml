@@ -23,6 +23,7 @@ members = [
     "crates/activator",
     "crates/usage",
     "crates/usage-otlp",
+    "crates/usage-broker",
     "bin/operator",
     "bin/api",
     "bin/cli",
@@ -56,6 +57,7 @@ aap-platform-client = { path = "crates/platform-client" }
 aap-trace = { path = "crates/trace" }
 aap-usage = { path = "crates/usage" }
 aap-usage-otlp = { path = "crates/usage-otlp" }
+aap-usage-broker = { path = "crates/usage-broker" }
 aap-trace-otlp = { path = "crates/trace-otlp" }
 aap-tool-probe = { path = "crates/tool-probe" }
 aap-activity-http = { path = "crates/activity-http" }
