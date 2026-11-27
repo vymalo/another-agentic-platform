@@ -8,11 +8,13 @@
 //!   the answer is `None`, no account.
 //! * **Nothing is logged here**, and no error holds the run id, the account, the URL or the token: the meter's metrics are
 //!   how an operator learns what happened.
-//! * **What each answer means.** `200` with a valid `accountId` is the account. `404` (a run the broker does not know, or
-//!   forgot after its 24 h), `400` and `422` (`account_not_opaque`: the person has no opaque account) are `None`: they can
-//!   never succeed for this run, so the meter counts the minutes as unattributed instead of asking for ever. Everything a
-//!   person can fix or time can heal (`401`, `403`, `429`, `5xx`, a redirect, a connection that fails, a body that is too
-//!   long or not what the contract says) is [`AccountUnavailable`]: the meter holds the minute and asks again.
+//! * **What each answer means.** `200` with a valid `accountId` is the account. A `404` whose body `code` is
+//!   `run_not_bound` (a run the broker does not know, or forgot after its 24 h) and a `422` whose `code` is
+//!   `account_not_opaque` (the person has no opaque account) are `None`: the minutes are counted as unattributed. The
+//!   meter asks again on every pass until the minutes pass its backfill bound. Every other answer is
+//!   [`AccountUnavailable`] and the minute is held: any other `404` or `422` (the broker answers 404 to every caller it
+//!   does not accept, so a wrong identity or base path must not look like "no account"), `400`, `401`, `403`, `429`,
+//!   `5xx`, a redirect, a connection that fails, a body that is too long or not what the contract says.
 //! * **An agent pod has no source yet** (ANR-1100): it answers `None`.
 
 use std::fmt;
@@ -163,11 +165,10 @@ impl AccountSource for BrokerAccounts {
             .send()
             .await
             .map_err(|_| AccountUnavailable)?;
-        let status = response.status();
-        match status.as_u16() {
-            200 => {}
-            400 | 404 | 422 => return Ok(None),
-            _ => return Err(AccountUnavailable),
+        let status = response.status().as_u16();
+        if !matches!(status, 200 | 404 | 422) {
+            // Every other answer, 400 included, is a fault to be seen (a wrong path, a wrong identity): held.
+            return Err(AccountUnavailable);
         }
         let mut body = Vec::new();
         while let Some(chunk) = response.chunk().await.map_err(|_| AccountUnavailable)? {
@@ -178,6 +179,15 @@ impl AccountSource for BrokerAccounts {
         }
         let value: serde_json::Value =
             serde_json::from_slice(&body).map_err(|_| AccountUnavailable)?;
+        if status != 200 {
+            // The broker answers 404 `run_not_bound` for an unknown run and also for every other caller: only
+            // the two codes that say "no account for this run" are no account; any other 404 or 422 is held.
+            let code = value.get("code").and_then(serde_json::Value::as_str);
+            return match (status, code) {
+                (404, Some("run_not_bound")) | (422, Some("account_not_opaque")) => Ok(None),
+                _ => Err(AccountUnavailable),
+            };
+        }
         let account = value
             .get("accountId")
             .and_then(serde_json::Value::as_str)

@@ -2091,6 +2091,7 @@ check "an ipBlock of 0.0.0.0/0 as an activity peer is refused" refused 'is every
 # `metering.enabled` is off by default and then not a trace of it in any render: no key of the file, no volume, no mount, no egress rule
 # (every golden but tests/golden/metering.yaml is the proof that nothing moved). On, the file's `metering` section, the broker's bearer as a
 # mounted file, and DNS plus exactly the listed broker and collector peers, each on its own port. Incomplete is refused at render time.
+met_refused() { frag=$1; shift; refused "$frag" -f "$here/metering.values.yaml" "$@"; }
 met_on() { render -f "$here/metering.values.yaml" "$@"; }
 metering_off() {
   render || return 1
@@ -2120,11 +2121,19 @@ metering_ports_follow_the_values() {
   all_of "$(op_egress_rule 3)" 'port: 9000$' && all_of "$(op_egress_rule 4)" 'port: 4000$'
 }
 check "metering on: each egress port is the one its value says" metering_ports_follow_the_values
-metering_no_token_in_render() { met_on --set metering.broker.tokenSecret.key=other-key || return 1; lacks 'hunter2' && has 'key: other-key' && dlacks ConfigMap aap-operator 'other-key|tokenSecret'; }
-check "metering on: the Secret's key is the one named, and no value or key name is in the file" metering_no_token_in_render
+# The chart never holds a token value: a value set where only a reference belongs is refused as no setting, and nothing of the Secret's name
+# or key is in the operator's file (only the mounted path).
+metering_no_token_in_render() {
+  met_on --set metering.broker.tokenSecret.key=other-key || return 1
+  has 'key: other-key' && dlacks ConfigMap aap-operator 'other-key|meter-broker-token|tokenSecret' || return 1
+  refused 'metering.broker.tokenSecret.value is not a setting' -f "$here/metering.values.yaml" --set metering.broker.tokenSecret.value=hunter2
+}
+check "metering on: the Secret's key is the one named, no key or name is in the file, and a token value has no place" metering_no_token_in_render
+check "metering.collector.caFile is refused until the chart supports it" met_refused 'metering.collector.caFile is not a setting' --set metering.collector.caFile=/x.pem
+check "metering.broker: a key that is not a setting is refused" met_refused 'metering.broker.foo is not a setting' --set metering.broker.foo=1
+check "metering.dns: a key that is not a setting is refused" met_refused 'metering.dns.foo is not a setting' --set metering.dns.foo=1
 metering_without_the_policy() { met_on --set networkPolicy.enabled=false --set-json 'metering.dns=null' || return 1; ! doc NetworkPolicy aap-operator | grep -q .; }
 check "metering on with the NetworkPolicy off needs no DNS peers and renders no policy" metering_without_the_policy
-met_refused() { frag=$1; shift; refused "$frag" -f "$here/metering.values.yaml" "$@"; }
 check "metering.enabled without run pods is refused" met_refused 'metering.enabled needs runPods.enabled and runPods.nodeType.admitted with exactly one value' --set runPods.enabled=false
 check "metering.enabled with two admitted node types is refused" met_refused 'with exactly one value' --set-json 'runPods.nodeType.admitted=["a","b"]'
 check "metering.enabled with no admitted node type is refused" met_refused 'metering.enabled needs runPods.enabled' --set runPods.nodeType.labelKey= --set-json 'runPods.nodeType.admitted=[]'

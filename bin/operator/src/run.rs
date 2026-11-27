@@ -563,7 +563,7 @@ async fn run_with(settings: crate::config::Settings, tracer: aap_trace::Tracer) 
         )
         .await;
     }
-    // The lines still queued get their moment to reach the collector (a clean stop or not: the sink holds money).
+    // The lines still queued get their moment to reach the collector (a clean stop or not: the sink holds minutes).
     if let Some(sink) = meter_sink {
         let report = sink.0.shutdown(crate::metering::FLUSH).await;
         if report.unsent > 0 {

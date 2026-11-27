@@ -56,10 +56,11 @@ The leading replica looks at the pods every `metering.periodSecs` (30 by default
 | The broker answers | The meter |
 |---|---|
 | `200` with an `accountId` | makes the lines for that account |
-| `404`, `400`, `422` | makes no line and counts the minutes in `aap_meter_unattributed_total{reason="unknown-account"}` |
+| `404` with `code` `run_not_bound`, or `422` with `code` `account_not_opaque` | makes no line and counts the minutes in `aap_meter_unattributed_total{reason="unknown-account"}`; it asks again on every pass until the minutes pass its 24 h backfill bound |
+| any other `404` or `422`, a `400` | holds the minutes like a failure and counts `aap_meter_account_failures_total`: the broker answers 404 to every caller it does not accept, so a wrong identity or base path must be seen, not read as "no account" |
 | `401`, `403`, a `5xx`, a timeout | holds the minutes and asks again next pass, counted in `aap_meter_account_failures_total` |
 
-A pod of an agent has no account source yet (ANR-1100): its minutes count as `unknown-account` and make no line. The series are in [Scrape metrics](../operate/metrics.md#what-the-operator-exports).
+A pod of an agent makes no line either: only run pods carry the size-weight annotation, so an agent pod stops at `no-weight` (ANR-1100 adds its account source later). If every run pod's minutes are `unknown-account`, check the meter's identity at the broker (the bearer, the base path): that is what a wrong identity looks like only when the broker says `run_not_bound`, so also watch `aap_meter_account_failures_total`. The broker's answer for a run is asked once per run and remembered for the life of the operator process. The series are in [Scrape metrics](../operate/metrics.md#what-the-operator-exports).
 
 ## Check it
 

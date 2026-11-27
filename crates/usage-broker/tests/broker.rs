@@ -104,11 +104,35 @@ async fn an_agent_pod_has_no_source_yet() {
 }
 
 #[tokio::test]
-async fn an_answer_that_can_never_succeed_is_no_account() {
+async fn only_the_two_codes_that_say_no_account_are_no_account() {
     let (source, stub) = start(Duration::from_secs(5)).await;
-    for status in [400, 404, 422] {
-        set(&stub, status, r#"{"error":"account_not_opaque"}"#);
+    for (status, code) in [(404, "run_not_bound"), (422, "account_not_opaque")] {
+        set(&stub, status, &format!(r#"{{"code":"{code}"}}"#));
         assert_eq!(source.account(&run("r")).await, Ok(None), "{status}");
+    }
+}
+
+#[tokio::test]
+async fn any_other_404_422_or_400_is_held_so_a_wrong_identity_is_seen() {
+    let (source, stub) = start(Duration::from_secs(5)).await;
+    let cases = [
+        (404, r#"{"code":"account_not_opaque"}"#),
+        (404, r#"{"code":"forbidden"}"#),
+        (404, r#"{"error":"run_not_bound"}"#),
+        (404, "not json"),
+        (404, ""),
+        (422, r#"{"code":"run_not_bound"}"#),
+        (422, r#"{"code":"other"}"#),
+        (400, r#"{"code":"run_not_bound"}"#),
+        (400, r#"{"code":"account_not_opaque"}"#),
+    ];
+    for (status, body) in cases {
+        set(&stub, status, body);
+        assert_eq!(
+            source.account(&run("r")).await,
+            Err(AccountUnavailable),
+            "{status} {body}"
+        );
     }
 }
 

@@ -250,6 +250,25 @@ chart refuses it first), the peers are a NetworkPolicy's and never every address
 {{- fail (printf "metering.%s is not a setting: enabled, source, periodSecs, broker, collector or dns" $k) -}}
 {{- end -}}
 {{- end -}}
+{{- range $sect, $allowed := dict "broker" (list "url" "to" "port" "timeoutSecs" "tokenSecret") "collector" (list "endpoint" "to" "port" "queue" "batch" "intervalSecs" "timeoutSecs") "dns" (list "to" "ports") -}}
+{{- $blk := get $mt $sect -}}
+{{- if kindIs "map" $blk -}}
+{{- range $k, $_ := $blk -}}
+{{- if not (has $k $allowed) -}}
+{{- fail (printf "metering.%s.%s is not a setting: %s (collector.caFile is not a chart value yet)" $sect $k (join ", " $allowed)) -}}
+{{- end -}}
+{{- end -}}
+{{- end -}}
+{{- end -}}
+{{- if kindIs "map" $mt.broker -}}
+{{- if kindIs "map" $mt.broker.tokenSecret -}}
+{{- range $k, $_ := $mt.broker.tokenSecret -}}
+{{- if not (has $k (list "name" "key")) -}}
+{{- fail (printf "metering.broker.tokenSecret.%s is not a setting: name or key" $k) -}}
+{{- end -}}
+{{- end -}}
+{{- end -}}
+{{- end -}}
 {{- if not (has (toString $mt.enabled) (list "true" "false")) -}}
 {{- fail "metering.enabled must be true or false" -}}
 {{- end -}}
