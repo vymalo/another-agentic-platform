@@ -946,7 +946,7 @@ fn describe(id: RouteId) -> Op {
         RouteId::ListOwnerAgents => Op {
             id: "listOwnerAgents",
             summary: "The agents of one owner",
-            description: "Only the agents whose `spec.owner` is the owner in the path, ordered by name; other agents, and agents with no owner, are not in the answer. Needs `platform:agents.own`, which the orchestrator holds and a person's role must not.",
+            description: "Only the agents whose `spec.owner` is the owner in the path, ordered by name; other agents, and agents with no owner, are not in the answer. Needs `platform:agents.read.owner`: the orchestrator holds it beside `platform:agents.own`, the staff service holds it alone, and a person's role must hold neither.",
             name: false,
             request: None,
             ok: vec![ok(
@@ -960,7 +960,7 @@ fn describe(id: RouteId) -> Op {
         RouteId::GetOwnerAgent => Op {
             id: "getOwnerAgent",
             summary: "One agent of an owner",
-            description: "As `GET /v1/agents/{name}`, for an agent whose `spec.owner` is the owner in the path. Any other agent, one with no owner included, is 404 `not-found`: the answer does not tell them apart.",
+            description: "As `GET /v1/agents/{name}`, for an agent whose `spec.owner` is the owner in the path. Any other agent, one with no owner included, is 404 `not-found`: the answer does not tell them apart. Needs `platform:agents.read.owner`, as the list does.",
             name: true,
             request: None,
             ok: vec![ok(

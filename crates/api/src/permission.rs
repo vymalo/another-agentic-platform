@@ -28,6 +28,11 @@ pub const AGENTS_WRITE: &str = "platform:agents.write";
 /// one coder per person, and must never be granted to a person's own role.
 pub const AGENTS_OWN: &str = "platform:agents.own";
 
+/// Read, and only read, **the agents whose `spec.owner` is the owner named in the path**. Guards the two `GET`s under
+/// `/v1/owners/{owner}/agents` and no other route: never a create, replace or delete. It is the staff service's, mapped to its
+/// workload certificate (AD-072); a person's role must hold neither it nor [`AGENTS_OWN`], and the orchestrator holds both.
+pub const AGENTS_READ_OWNER: &str = "platform:agents.read.owner";
+
 /// Create, edit and delete `ModelEndpoint`s. Guards `PUT` and `DELETE` of `/v1/models/{name}`.
 pub const MODELS_WRITE: &str = "platform:models.write";
 
@@ -39,10 +44,11 @@ pub const TOOLPROVIDERS_WRITE: &str = "platform:toolproviders.write";
 pub const SECRETS_PICK: &str = "platform:secrets.pick";
 
 /// Every permission of the dashboard, in the order of the table of AD-032.
-pub const ALL: [&str; 6] = [
+pub const ALL: [&str; 7] = [
     AGENTS_READ,
     AGENTS_WRITE,
     AGENTS_OWN,
+    AGENTS_READ_OWNER,
     MODELS_WRITE,
     TOOLPROVIDERS_WRITE,
     SECRETS_PICK,

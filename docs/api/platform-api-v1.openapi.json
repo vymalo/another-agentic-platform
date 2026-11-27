@@ -4884,7 +4884,7 @@
     },
     "/v1/owners/{owner}/agents": {
       "get": {
-        "description": "Only the agents whose `spec.owner` is the owner in the path, ordered by name; other agents, and agents with no owner, are not in the answer. Needs `platform:agents.own`, which the orchestrator holds and a person's role must not.",
+        "description": "Only the agents whose `spec.owner` is the owner in the path, ordered by name; other agents, and agents with no owner, are not in the answer. Needs `platform:agents.read.owner`: the orchestrator holds it beside `platform:agents.own`, the staff service holds it alone, and a person's role must hold neither.",
         "operationId": "listOwnerAgents",
         "parameters": [
           {
@@ -4992,7 +4992,7 @@
         "tags": [
           "agents"
         ],
-        "x-permission": "platform:agents.own"
+        "x-permission": "platform:agents.read.owner"
       }
     },
     "/v1/owners/{owner}/agents/{name}": {
@@ -5126,7 +5126,7 @@
         "x-permission": "platform:agents.own"
       },
       "get": {
-        "description": "As `GET /v1/agents/{name}`, for an agent whose `spec.owner` is the owner in the path. Any other agent, one with no owner included, is 404 `not-found`: the answer does not tell them apart.",
+        "description": "As `GET /v1/agents/{name}`, for an agent whose `spec.owner` is the owner in the path. Any other agent, one with no owner included, is 404 `not-found`: the answer does not tell them apart. Needs `platform:agents.read.owner`, as the list does.",
         "operationId": "getOwnerAgent",
         "parameters": [
           {
@@ -5383,7 +5383,7 @@
         "tags": [
           "agents"
         ],
-        "x-permission": "platform:agents.own"
+        "x-permission": "platform:agents.read.owner"
       },
       "put": {
         "description": "As `PUT /v1/agents/{name}`, and the agent belongs to the owner in the path: `owner` in the form is that owner or absent (another value is 422 on `owner`). A replace, which is also how the agent is suspended (`suspend`) or resumed, of an agent that is not that owner's is 404 `not-found`. A body that names a secret key needs `platform:secrets.pick` as well.",

@@ -1,4 +1,4 @@
-//! The owner-scoped routes (`/v1/owners/{owner}/agents`, ANR-661): a token that holds only `platform:agents.own` acts on an
+//! The owner-scoped routes (`/v1/owners/{owner}/agents`, ANR-661; AD-072 moves the two reads to `platform:agents.read.owner`): a token acts on an
 //! agent when its `spec.owner` is the owner in the path, and on no other; every other agent is answered as one that does not
 //! exist. The positive cases matter as much as the refusals, or a route that always refuses reads as green.
 #![allow(clippy::unwrap_used, clippy::expect_used, missing_docs)]
@@ -11,7 +11,8 @@ use aap_ports::testkit::Foreign;
 use common::*;
 use serde_json::json;
 
-const OWN: &[&str] = &[permission::AGENTS_OWN];
+/// The orchestrator's identity (AD-072): it reads and writes one owner's agents, so it holds both permissions.
+const OWN: &[&str] = &[permission::AGENTS_OWN, permission::AGENTS_READ_OWNER];
 
 async fn make(api: &Api, token: &str, owner: &str, name: &str) -> Reply {
     api.put(&format!("/v1/owners/{owner}/agents/{name}"))
@@ -168,6 +169,63 @@ async fn it_cannot_read_replace_suspend_or_delete_another_owners_agent_nor_one_w
         .send()
         .await;
     assert_eq!(other.code(), missing.code());
+}
+
+/// The staff service's identity (AD-072): `platform:agents.read.owner` alone lists and reads one owner's agents, and every write
+/// is refused naming `platform:agents.own`; the routes that are not owner-scoped are refused too.
+#[tokio::test]
+async fn the_staff_identity_reads_one_owners_agents_and_no_write() {
+    let (api, _admin) = Api::seeded().await;
+    let orch = api.token("orchestrator", OWN);
+    assert_eq!(make(&api, &orch, "alice", "mine").await.code(), 201);
+    let staff = api.token("staff", &[permission::AGENTS_READ_OWNER]);
+
+    let r = api
+        .get("/v1/owners/alice/agents")
+        .token(&staff)
+        .send()
+        .await;
+    assert_eq!(r.code(), 200, "{}", r.text());
+    let r = api
+        .get("/v1/owners/alice/agents/mine")
+        .token(&staff)
+        .send()
+        .await;
+    assert_eq!(r.code(), 200, "{}", r.text());
+    let tag = r.etag();
+
+    let mut form = folder_body("mine");
+    form["suspend"] = json!(true);
+    let r = api
+        .put("/v1/owners/alice/agents/mine")
+        .token(&staff)
+        .replace(&tag)
+        .json(&form)
+        .send()
+        .await;
+    assert_eq!(r.code(), 403, "{}", r.text());
+    assert_eq!(r.json()["permission"], "platform:agents.own");
+    let r = api
+        .delete("/v1/owners/alice/agents/mine")
+        .token(&staff)
+        .replace(&tag)
+        .send()
+        .await;
+    assert_eq!(r.code(), 403, "{}", r.text());
+    assert_eq!(r.json()["permission"], "platform:agents.own");
+    let r = api
+        .put("/v1/owners/alice/agents/new")
+        .token(&staff)
+        .create()
+        .json(&folder_body("new"))
+        .send()
+        .await;
+    assert_eq!(r.code(), 403, "{}", r.text());
+
+    for path in ["/v1/agents", "/v1/agents/mine", "/v1/models", "/v1/info"] {
+        let r = api.get(path).token(&staff).send().await;
+        assert_eq!(r.code(), 403, "{path}: {}", r.text());
+    }
 }
 
 #[tokio::test]

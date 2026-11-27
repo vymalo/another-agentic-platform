@@ -42,9 +42,10 @@ impl Authenticator for NoBearer {
 #[derive(Clone, Debug)]
 pub struct PeerCertificate(pub Option<Certificate>);
 
-/// The routes the workload listener mounts: the table's, whose permission is `platform:agents.own`, and no other.
+/// The routes the workload listener mounts: the table's, whose permission is `platform:agents.own` or
+/// `platform:agents.read.owner` (AD-072: the orchestrator holds both, the staff service the read-only one), and no other.
 pub(crate) fn opens_to_workloads(route: &Route) -> bool {
-    matches!(route.needs, Needs::Permission(p) if p == permission::AGENTS_OWN)
+    matches!(route.needs, Needs::Permission(p) if p == permission::AGENTS_OWN || p == permission::AGENTS_READ_OWNER)
 }
 
 /// What the guard shares: the state (for the counters) and the authenticator.
@@ -94,7 +95,7 @@ where
                 tracing::error!(
                     method = %request.method(),
                     route = %template,
-                    "a route of the workload listener is not one that platform:agents.own opens: refused"
+                    "a route of the workload listener is not one the workload permissions open: refused"
                 );
                 Problem::internal().into_response()
             }
