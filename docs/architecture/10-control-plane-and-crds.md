@@ -162,9 +162,7 @@ The latter belongs in Restate.
 
 ## 59a. Operator v0: adam-rs agents
 
-> **Status: design only (2026-10-04); slices S1 to S9 are built (2026-10-05).** Slice S0 is this text.
-
-> **S1 to S9 are built (2026-10-05).** What each slice made, what it proves, what is still *unverified* until CI has run it, and the revision each fact was read at are in [the agent page](../../.agents/docs/architecture/10-control-plane-and-crds.md#59a-operator-v0-adam-rs-agents).
+> **Status: design only (2026-10-04); slices S1 to S9 are built (2026-10-05).** Slice S0 is this text. What each slice made, what it proves, what is still *unverified* until CI has run it, and the revision each fact was read at are in [the agent page](../../.agents/docs/architecture/10-control-plane-and-crds.md#59a-operator-v0-adam-rs-agents).
 
 The first operator the platform ships. It is smaller than the design of §59 on purpose: it manages **adam-rs agents** (AD-022) from two CRDs, `AgentService` and `AgentConfig`, on native Kubernetes (AD-023), and it keeps secrets out of the custom resources (AD-024). Since K11a it also runs **an image that serves A2A itself** (`harness.type: a2a`, AD-054) with the same objects, pod hardening, store and registry entry, and invents no variable for it.
 
