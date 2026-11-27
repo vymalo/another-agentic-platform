@@ -24,7 +24,7 @@ is never asked and answers no account. No redirect is followed and no proxy is u
 | `200` with a valid `accountId` (the line alphabet: no `@`, at most 128 bytes) | `Ok(Some(account))` |
 | `404` with body `code` `run_not_bound`, `422` with `code` `account_not_opaque` | `Ok(None)`: the minutes are counted as unattributed; the meter asks again every pass until they pass its backfill bound |
 | any other `404` or `422`, `400`, `401`, `403`, `429`, `5xx`, a redirect, a failed connection, a timeout, a body over 4 KiB or not the contract, an e-mail as the id | `Err(AccountUnavailable)`: the meter holds the minute and asks again |
-| any `PodRef::Agent` | `Ok(None)`: an agent pod has no source until ANR-1100 |
+| any `PodRef::Agent` | `Ok(None)`: an agent pod's account is `aap-usage-kubernetes`'s (AD-071); `operator run` routes by pod kind, so this source is asked about run pods only |
 
 **Nothing is logged here**, and no error holds the run id, the account, the URL or the token.
 

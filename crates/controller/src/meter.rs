@@ -240,6 +240,8 @@ struct Pending {
 /// What a pod is for a line, once its facts say so.
 struct Attributed {
     pod_kind: PodKind,
+    /// The pod's namespace: an agent pod's account is read from the `AgentService` there (AD-071).
+    namespace: String,
     service: String,
     run: Option<String>,
     weight_quarters: u32,
@@ -1069,6 +1071,7 @@ impl Meter {
         }
         let a = Attributed {
             pod_kind: t.pod_kind,
+            namespace: t.namespace.clone(),
             service: t.service.clone(),
             run: t.run.clone(),
             weight_quarters: t.weight_quarters,
@@ -1235,6 +1238,7 @@ impl Meter {
         };
         Ok(Attributed {
             pod_kind,
+            namespace: pod.namespace.clone(),
             service,
             run,
             weight_quarters,
@@ -1250,6 +1254,7 @@ impl Meter {
                 run: run.clone(),
             },
             None => PodRef::Agent {
+                namespace: a.namespace.clone(),
                 service: a.service.clone(),
             },
         };

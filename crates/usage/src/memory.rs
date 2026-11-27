@@ -132,7 +132,8 @@ impl MemoryAccounts {
         });
     }
 
-    /// The account of an agent's own pods.
+    /// The account of an agent's own pods. The fake keys it by the service name and **ignores the namespace** of the
+    /// [`PodRef::Agent`] it is asked about.
     pub fn set_agent(&self, service: &str, account: &str) {
         self.with(|a| {
             a.by_service.insert(service.to_owned(), account.to_owned());
@@ -165,7 +166,7 @@ impl AccountSource for MemoryAccounts {
                 PodRef::Run { service, run } => {
                     a.by_run.get(&(service.clone(), run.clone())).cloned()
                 }
-                PodRef::Agent { service } => a.by_service.get(service).cloned(),
+                PodRef::Agent { service, .. } => a.by_service.get(service).cloned(),
             })
         })
     }

@@ -94,9 +94,10 @@ async fn a_run_id_that_cannot_be_a_segment_is_not_asked() {
 }
 
 #[tokio::test]
-async fn an_agent_pod_has_no_source_yet() {
+async fn an_agent_pod_is_not_this_sources() {
     let (source, stub) = start(Duration::from_secs(5)).await;
     let agent = PodRef::Agent {
+        namespace: "ns".into(),
         service: "coder".into(),
     };
     assert_eq!(source.account(&agent).await, Ok(None));

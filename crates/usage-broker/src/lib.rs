@@ -15,7 +15,9 @@
 //!   [`AccountUnavailable`] and the minute is held: any other `404` or `422` (the broker answers 404 to every caller it
 //!   does not accept, so a wrong identity or base path must not look like "no account"), `400`, `401`, `403`, `429`,
 //!   `5xx`, a redirect, a connection that fails, a body that is too long or not what the contract says.
-//! * **An agent pod has no source yet** (ANR-1100): it answers `None`.
+//! * **An agent pod is not this source's**: it answers `None`. An agent pod's account is `aap-usage-kubernetes`'s
+//!   (`AgentService.spec.account`, AD-071), and `operator run` composes the two by pod kind, so this source is asked
+//!   about run pods only.
 
 use std::fmt;
 use std::time::Duration;
@@ -152,7 +154,7 @@ impl AccountSource for BrokerAccounts {
     async fn account(&self, pod: &PodRef) -> Result<Option<String>, AccountUnavailable> {
         let run = match pod {
             PodRef::Run { run, .. } => run,
-            // ANR-1100: no account source for an agent's own pod yet.
+            // An agent pod's account is `aap-usage-kubernetes`'s (ANR-1100); the operator routes by pod kind.
             PodRef::Agent { .. } => return Ok(None),
         };
         let Some(url) = self.url(run) else {
