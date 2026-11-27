@@ -64,6 +64,7 @@ const sidebar = [
     text: "Architecture",
     collapsed: true,
     items: [
+      { text: "Concepts", link: "/concepts" },
       { text: "Index", link: "/architecture/" },
       ...pages("architecture", [
         "01-overview.md",
