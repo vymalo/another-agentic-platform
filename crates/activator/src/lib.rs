@@ -517,7 +517,7 @@ where
             *r.status_mut() = status;
             for (k, v) in strip_hop_by_hop(&answer.headers) {
                 // The length is the body's own, which the server sets.
-                if k == "content-length" {
+                if k.eq_ignore_ascii_case("content-length") {
                     continue;
                 }
                 if let (Ok(k), Ok(v)) = (HeaderName::try_from(k), HeaderValue::try_from(v)) {

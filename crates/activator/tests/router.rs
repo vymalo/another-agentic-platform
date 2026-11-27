@@ -820,3 +820,20 @@ async fn a_chunked_body_exactly_at_the_cap_passes() {
     assert!(status.contains("200"), "{status}");
     assert_eq!(r.upstream.seen()[0].request.body, b"01234567");
 }
+
+#[tokio::test(start_paused = true)]
+async fn an_upstream_content_length_is_dropped_whatever_its_case_and_the_servers_own_is_the_only_one()
+ {
+    let r = rig(settings());
+    for spelling in ["Content-Length", "CONTENT-LENGTH", "content-length"] {
+        r.upstream.answer(UpstreamResponse {
+            status: 200,
+            headers: vec![(spelling.to_owned(), "999".to_owned())],
+            body: b"ok".to_vec(),
+        });
+        let res = r.app.clone().oneshot(post("/x", "{}")).await.unwrap();
+        let lengths: Vec<_> = res.headers().get_all("content-length").iter().collect();
+        assert_eq!(lengths.len(), 1, "{spelling}: {lengths:?}");
+        assert_eq!(lengths[0], "2", "{spelling}");
+    }
+}
