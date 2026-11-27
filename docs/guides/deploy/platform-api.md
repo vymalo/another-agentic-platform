@@ -210,6 +210,6 @@ On 2026-11-27 the API was also installed on a kind cluster with a placeholder is
 
 - **A real Keycloak.** The issuer in CI is the testkit's, a small program that signs test tokens. Whether a real Keycloak's keys, its roles claim (composite roles expanded), and its `aud` work as described is unverified until the realm is tried ([CLAUDE.md](../../../CLAUDE.md), slices D6 and K9b).
 - **A real edge.** TLS, a JWT check and a rate limit at the edge are not run by any job. That grouping by the `Authorization` header gives a limit per token was not tried.
-- **`preStop.sleep` under a rollout.** The pod has the hook, and nothing measures it under a rolling update. The gate behind it is alpha and off in Kubernetes 1.29, and on from 1.30 ([The pod that leaves](../../../deploy/operator/README.md#a-pod-that-leaves)).
+- **`preStop.sleep` under a rollout.** The pod has the hook, and nothing measures it under a rolling update. The gate behind it is GA from Kubernetes 1.34, so it is on at the platform's floor of 1.37 ([The pod that leaves](../../../deploy/operator/README.md#a-pod-that-leaves)).
 - **An issuer behind a private CA or a proxy.** The recipe is in the README and is unverified. `render-check.sh` holds only that the values render.
 - **The `NetworkPolicy` on a real cluster you run.** kind's CNI enforces it in `api-e2e`. Your CNI may not.

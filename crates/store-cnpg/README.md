@@ -123,6 +123,12 @@ not ready. The controller does not apply the agent while the store is not ready 
   instances in the cluster"); the operator is `ghcr.io/cloudnative-pg/cloudnative-pg:1.30.1` in `cnpg-system`.
 * *Verified 2026-10-05*, <https://cloudnative-pg.io/docs/devel/supported_releases>: 1.30.x supports Kubernetes 1.34, 1.35
   and 1.36 (kind's node image here is 1.35.8) and PostgreSQL 14 to 18.
+* **The pin moved on 2026-11-27 (AD-067), by the owner's ruling, to CloudNativePG `1.31.0-rc1`, a PREVIEW (release candidate) release**, because the
+  platform's floor is Kubernetes 1.37 and 1.30.x stops at 1.36. *Verified 2026-11-27*: <https://cloudnative-pg.io/docs/devel/supported_releases> says 1.31.x
+  supports Kubernetes 1.35 to 1.37; the manifest `cnpg-1.31.0-rc1.yaml` (sha256 `83638d85e4e43746bde8a74fc7fce5fd97fc2d6abb3c3b2954ce11fea97769ab`, from
+  <https://github.com/cloudnative-pg/cloudnative-pg/releases/download/v1.31.0-rc1/cnpg-1.31.0-rc1.yaml>) holds the CRD `clusters.postgresql.cnpg.io` and the operator
+  `ghcr.io/cloudnative-pg/cloudnative-pg:1.31.0-rc1` in `cnpg-system`. That the cluster tests pass against it is *unverified* until the `store-cnpg` job has run; moving
+  to a GA 1.31 is ANR-1081.
 * **Not read in the source, *unverified* until CI has run it**: that `"Cluster in healthy state"` is the exact string of a
   healthy phase. It is what `kubectl get cluster` shows in the documentation's examples and in third-party write-ups (a web
   search on 2026-10-05); the CloudNativePG constant was not read. The `store-cnpg` job waits for `ClusterReady` of a real

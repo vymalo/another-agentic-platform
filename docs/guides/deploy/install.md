@@ -6,8 +6,8 @@ To try the operator on a laptop first, use [Get started](../../get-started.md). 
 
 ## Before you start
 
-- A Kubernetes cluster. The operator chart asks for `>=1.29.0-0`. Every kind job in CI runs Kubernetes v1.35.8, and the `gvisor-k3d` workflow runs k3s v1.35.5. No older version is tested. Run pods need 1.30 or later (see [Turn on run pods](run-pods.md)).
-- `kubectl` and Helm 3, with the repository checked out. Nothing publishes either chart: you install them from their paths. The chart's own note says so ([Known limitations](../../../deploy/operator/README.md#known-limitations)).
+- A Kubernetes cluster. Kubernetes 1.37 or later is the floor: both charts say `kubeVersion: ">=1.37.0-0"` and Helm refuses an install on an older cluster, so below 1.37 the platform is unsupported, not merely untested. Every kind job in CI runs Kubernetes v1.37.0, and the `gvisor-k3d` workflow runs k3s v1.37.2.
+- `kubectl` and Helm 4 (Helm 3 is not supported), with the repository checked out. Nothing publishes either chart: you install them from their paths. The chart's own note says so ([Known limitations](../../../deploy/operator/README.md#known-limitations)).
 - Namespaces for the agents. The operator is namespaced and has no `ClusterRole`. The chart makes a `Role` in each namespace you list, so each one must exist before you install.
 
 ## The order
@@ -125,11 +125,11 @@ The election, what a follower does, and how long a failover takes are on [Run tw
 
 | CI job | Workflow | What it runs |
 |---|---|---|
-| `operator-e2e` | [`operator.yml`](../../../.github/workflows/operator.yml) | The operator binary against a kind cluster (Kubernetes v1.35.8): its cluster tests, and the leader election's own cases against a real API server |
+| `operator-e2e` | [`operator.yml`](../../../.github/workflows/operator.yml) | The operator binary against a kind cluster (Kubernetes v1.37.0): its cluster tests, and the leader election's own cases against a real API server |
 | `operator-coder-e2e` | [`operator-image.yml`](../../../.github/workflows/operator-image.yml) | Installs both charts in kind and runs the real coder image. `push` needs it |
 | `namespaces-e2e` | `operator-image.yml` | Two watched namespaces: one `Role` and `RoleBinding` in each and no `ClusterRole`, an agent `Ready` in each, a service id shared by two namespaces listed for neither. `push` needs it |
 | `leader-e2e` | `operator-image.yml` | Two replicas and one `Lease`: a killed holder is replaced only after the lease, a stopped one releases it at once, and the survivor serves the registry throughout. `push` needs it |
-| `store-cnpg` | `operator.yml` | The CloudNativePG store against a kind cluster with CloudNativePG 1.30.1 installed |
+| `store-cnpg` | `operator.yml` | The CloudNativePG store against a kind cluster with CloudNativePG 1.31.0-rc1 installed (a preview release, until a GA 1.31 replaces it) |
 
 Where the chart is concerned, [`render-check.sh`](../../../deploy/operator/tests/render-check.sh) holds the `Role` rule by rule, the absence of a `ClusterRole`, and every refusal above, each broken on purpose. It runs in the `chart` job of `operator-image.yml`.
 
@@ -143,7 +143,7 @@ On 2026-11-27, on a throwaway kind cluster (Kubernetes v1.35.8), the commands of
 
 - **Argo CD.** An Argo CD that tracks this repository's chart paths and installs both charts on a real cluster (slice S10) is unverified ([CLAUDE.md](../../../CLAUDE.md)). That Argo CD syncs the CRDs before the operator is unverified too ([What is not proven](../../../deploy/operator/README.md#what-is-not-proven)).
 - **Recovering a failed release** after a missing namespace: the fix is expected, not tried.
-- **Kubernetes other than v1.35.8 and v1.35.5.** The chart's floor is 1.29. CI's kind jobs run v1.35.8 and `gvisor-k3d` runs k3s v1.35.5.
+- **Kubernetes other than v1.37.0 and k3s v1.37.2.** The chart's floor is 1.37 (AD-067). CI's kind jobs run v1.37.0 and `gvisor-k3d` runs k3s v1.37.2; those runs are unverified until CI has run them on the pull request that moved the floor.
 - **Leader election.** `leader-e2e` does not prove that two writers never overlap, and it does not prove the budget under a real drain.
 - **The registry token from External Secrets** (`externalSecrets.enabled`). The chart renders it, but no job is written down that installs External Secrets and reads the registry through it.
-- **CloudNativePG.** The job installs one version, 1.30.1. A production install of it is not covered.
+- **CloudNativePG.** The job installs one version, 1.31.0-rc1, a preview release that supports Kubernetes 1.35 to 1.37. A production install of it is not covered.

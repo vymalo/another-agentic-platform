@@ -141,8 +141,10 @@ jobs:
         uses: helm/kind-action@v1
         with:
           version: v0.33.0
-          # Kubernetes v1.35.8; the digest is the index of the tag, read from Docker Hub on 2026-10-05.
-          node_image: kindest/node:v1.35.8@sha256:07b2536e30b803ed61d1677a79df6115f798ce64c80f9e22f6ed45afd09323c0
+          # Kubernetes v1.37.0 (AD-067: the platform's floor); the digest is the index of the tag, read from Docker Hub on 2026-11-27.
+          # kubectl is v1.37.2 because the action's default is 1.35.0, two minors off the cluster.
+          node_image: kindest/node:v1.37.0@sha256:a1ed56cfb0e7b93589bdf97c8cd566405a265939e3620fc4f5de89adff580ae5
+          kubectl_version: v1.37.2
           cluster_name: aap
           wait: 120s
       # The CRDs change in place (Argo CD syncs them over the ones installed), and the objects stored under the old ones
@@ -242,8 +244,9 @@ jobs:
         uses: helm/kind-action@v1
         with:
           version: v0.33.0
-          # The same node image as the `kind` job: Kubernetes v1.35.8, the digest of the index of the tag.
-          node_image: kindest/node:v1.35.8@sha256:07b2536e30b803ed61d1677a79df6115f798ce64c80f9e22f6ed45afd09323c0
+          # The same node image as the `kind` job: Kubernetes v1.37.0, the digest of the index of the tag.
+          node_image: kindest/node:v1.37.0@sha256:a1ed56cfb0e7b93589bdf97c8cd566405a265939e3620fc4f5de89adff580ae5
+          kubectl_version: v1.37.2
           cluster_name: aap-runtime
           wait: 120s
       - name: Install Rust
@@ -300,18 +303,20 @@ jobs:
         uses: helm/kind-action@v1
         with:
           version: v0.33.0
-          # The same node image as the other jobs: Kubernetes v1.35.8, the digest of the index of the tag.
-          node_image: kindest/node:v1.35.8@sha256:07b2536e30b803ed61d1677a79df6115f798ce64c80f9e22f6ed45afd09323c0
+          # The same node image as the other jobs: Kubernetes v1.37.0, the digest of the index of the tag.
+          node_image: kindest/node:v1.37.0@sha256:a1ed56cfb0e7b93589bdf97c8cd566405a265939e3620fc4f5de89adff580ae5
+          kubectl_version: v1.37.2
           cluster_name: aap-cnpg
           wait: 120s
       - name: Install CloudNativePG
         env:
-          # The release manifest of CloudNativePG 1.30.1 (1.30.x supports Kubernetes 1.34 to 1.36: verified 2026-10-05,
-          # https://cloudnative-pg.io/docs/devel/supported_releases). The checksum is that of the file read on
-          # 2026-10-05, identical from the release asset and from the release-1.30 branch. The manifest names its
-          # operator image by tag (ghcr.io/cloudnative-pg/cloudnative-pg:1.30.1), not by digest.
-          CNPG_URL: https://github.com/cloudnative-pg/cloudnative-pg/releases/download/v1.30.1/cnpg-1.30.1.yaml
-          CNPG_SHA256: 37237f145d8138256ea25ae830f87759255665ff08f8d552fdd8224a5ec032fb
+          # The release manifest of CloudNativePG 1.31.0-rc1, a PREVIEW (release candidate) release, the owner's ruling of 2026-11-27
+          # (AD-067): 1.31.x supports Kubernetes 1.35 to 1.37 (verified 2026-11-27, https://cloudnative-pg.io/docs/devel/supported_releases)
+          # and 1.30.x, the pin until now, stops at 1.36, below the platform's floor of 1.37. Moving to a GA 1.31 is ANR-1081. The checksum
+          # is that of the file downloaded on 2026-11-27. The manifest names its operator image by tag
+          # (ghcr.io/cloudnative-pg/cloudnative-pg:1.31.0-rc1), not by digest.
+          CNPG_URL: https://github.com/cloudnative-pg/cloudnative-pg/releases/download/v1.31.0-rc1/cnpg-1.31.0-rc1.yaml
+          CNPG_SHA256: 83638d85e4e43746bde8a74fc7fce5fd97fc2d6abb3c3b2954ce11fea97769ab
         run: |
           curl -fsSL -o "$RUNNER_TEMP/cnpg.yaml" "$CNPG_URL"
           echo "$CNPG_SHA256  $RUNNER_TEMP/cnpg.yaml" | sha256sum -c -
@@ -353,8 +358,9 @@ jobs:
         uses: helm/kind-action@v1
         with:
           version: v0.33.0
-          # The same node image as the other jobs: Kubernetes v1.35.8, the digest of the index of the tag.
-          node_image: kindest/node:v1.35.8@sha256:07b2536e30b803ed61d1677a79df6115f798ce64c80f9e22f6ed45afd09323c0
+          # The same node image as the other jobs: Kubernetes v1.37.0, the digest of the index of the tag.
+          node_image: kindest/node:v1.37.0@sha256:a1ed56cfb0e7b93589bdf97c8cd566405a265939e3620fc4f5de89adff580ae5
+          kubectl_version: v1.37.2
           cluster_name: aap-objects
           wait: 120s
       # The kinds the Role names, so `auth can-i` below can resolve them (kubectl answers "no" for a resource the
@@ -419,8 +425,9 @@ jobs:
         uses: helm/kind-action@v1
         with:
           version: v0.33.0
-          # The same node image as the other jobs: Kubernetes v1.35.8, the digest of the index of the tag.
-          node_image: kindest/node:v1.35.8@sha256:07b2536e30b803ed61d1677a79df6115f798ce64c80f9e22f6ed45afd09323c0
+          # The same node image as the other jobs: Kubernetes v1.37.0, the digest of the index of the tag.
+          node_image: kindest/node:v1.37.0@sha256:a1ed56cfb0e7b93589bdf97c8cd566405a265939e3620fc4f5de89adff580ae5
+          kubectl_version: v1.37.2
           cluster_name: aap-operator
           wait: 120s
       - name: Install the CRDs

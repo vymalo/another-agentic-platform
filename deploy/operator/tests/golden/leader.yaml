@@ -37,6 +37,7 @@ spec:
           port: 443
         - protocol: TCP
           port: 6443
+
 ---
 # Source: aap-operator/templates/poddisruptionbudget.yaml
 apiVersion: policy/v1
@@ -58,6 +59,7 @@ spec:
     matchLabels:
       app.kubernetes.io/name: aap-operator
       app.kubernetes.io/instance: aap-operator
+
 ---
 # Source: aap-operator/templates/serviceaccount.yaml
 apiVersion: v1
@@ -71,6 +73,7 @@ metadata:
     app.kubernetes.io/managed-by: Helm
     app.kubernetes.io/part-of: another-agentic-platform
     helm.sh/chart: aap-operator-0.1.0
+
 ---
 # Source: aap-operator/templates/config.yaml
 apiVersion: v1
@@ -121,6 +124,7 @@ data:
       retrySecs: 2
     log:
       filter: "info"
+
 ---
 # Source: aap-operator/templates/role.yaml
 apiVersion: rbac.authorization.k8s.io/v1
@@ -184,6 +188,7 @@ rules:
   - apiGroups: [coordination.k8s.io]
     resources: [leases]
     verbs: [create]
+
 ---
 # Source: aap-operator/templates/rolebinding.yaml
 apiVersion: rbac.authorization.k8s.io/v1
@@ -206,6 +211,7 @@ subjects:
   - kind: ServiceAccount
     name: aap-operator
     namespace: another-agentic-system
+
 ---
 # Source: aap-operator/templates/service.yaml
 # The agent registry (agent-registry/v1), cluster-internal only: no Ingress, and a bearer token on every request.
@@ -230,6 +236,7 @@ spec:
       port: 8080
       targetPort: registry
       protocol: TCP
+
 ---
 # Source: aap-operator/templates/service.yaml
 apiVersion: v1
@@ -253,6 +260,7 @@ spec:
       port: 9090
       targetPort: metrics
       protocol: TCP
+
 ---
 # Source: aap-operator/templates/deployment.yaml
 # K7: more than one replica is a rolling update whose replicas campaign for a Lease in the primary namespace, and only its

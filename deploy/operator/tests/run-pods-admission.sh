@@ -9,7 +9,7 @@
 # guard (`<service>-run-pods-policy`), builds the pod the coder would build from the template, and creates it AS THE SERVICE'S ACCOUNT with
 # `--dry-run=server`: the request goes through authentication, authorization and admission and nothing is stored, so nothing is left behind
 # and no pod needs a node. Each mutation of that pod breaks one rule, and the message the API server answers must be that rule's. Needs
-# kubectl (impersonating, so as a user who may: an administrator's) and jq; the cluster needs Kubernetes 1.30 or later, the operator's chart
+# kubectl (impersonating, so as a user who may: an administrator's) and jq; the cluster needs Kubernetes 1.37 or later (the chart's floor, AD-067; the policy API is GA from 1.30), the operator's chart
 # with `runPods.enabled`, and the service with `coder.runPods`. Run it against a throwaway cluster: it makes no object, but it impersonates.
 #
 # What it does NOT prove: that a kubelet starts the pod, the quota's accounting (a dry run is counted by no controller), the NetworkPolicy's

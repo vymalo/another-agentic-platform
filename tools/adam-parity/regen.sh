@@ -2,7 +2,7 @@
 # Regenerate the parity goldens of `aap-domain` (crates/domain/tests/golden/*.json) from what the
 # adam-rs chart `deploy/coder` renders, or check that the checked-in ones are what it renders.
 #
-# Run by hand: it needs `helm` (3.x), `python3` with PyYAML, and a clone of
+# Run by hand: it needs `helm` 4 (AD-067: Helm 4 only; the goldens' `source.helm` says which), `python3` with PyYAML, and a clone of
 # https://github.com/vymalo/another-adam-rs that contains the revision below. It needs no cluster,
 # and no network when the clone is there. CI does not run it (the chart is in another repository).
 #

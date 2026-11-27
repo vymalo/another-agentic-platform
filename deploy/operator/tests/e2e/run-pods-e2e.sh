@@ -79,7 +79,7 @@
 #
 # Needs kubectl, helm, jq and openssl; a cluster that has the operator image already (kind load docker-image): OPERATOR_IMAGE_* (default operator:smoke);
 # the cluster must reach ghcr.io (the coder's image, 3 GB, and the run image, whose layers the coder's mostly are) and mirror.gcr.io (Postgres), which
-# the kubelet pulls, by digest. Kubernetes 1.30 or later (the admission policy), and a network plugin that enforces NetworkPolicy (kind's does). Every
+# the kubelet pulls, by digest. Kubernetes 1.37 or later (the chart's floor, AD-067; the admission policy is GA from 1.30), and a network plugin that enforces NetworkPolicy (kind's does). Every
 # wait is bounded; on a failure the cluster's state is printed.
 set -eu
 

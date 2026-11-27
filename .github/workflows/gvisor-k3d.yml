@@ -30,14 +30,14 @@ concurrency:
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 env:
-  HELM_VERSION: v3.19.0
+  HELM_VERSION: v4.3.2
   # k3d is pinned by version and by the SHA-256 of its release binary (checksums.txt of the release, *verified 2026-11-26* with a local copy of the same file).
   K3D_VERSION: v5.9.0
   K3D_SHA256: 06d8f25bc3a971c4eb29e0ff08429b180402db0f4dec838c9eac427e296800a0
-  # kubectl is pinned the same way, to the version the script was run with locally (v1.35.5); the checksum is the one dl.k8s.io publishes beside the binary
-  # (kubectl.sha256) and is the one of the binary the local run used, *verified 2026-11-26*.
-  KUBECTL_VERSION: v1.35.5
-  KUBECTL_SHA256: 90f75ea6ecc9ea5633262e1c0b83a40560003b30fc94a04cb099404fcef0c224
+  # kubectl is pinned the same way, to v1.37.2, the client of the cluster's Kubernetes minor (the platform's floor is 1.37: AD-067); the checksum is the one dl.k8s.io
+  # publishes beside the binary (kubectl.sha256), *verified 2026-11-27*.
+  KUBECTL_VERSION: v1.37.2
+  KUBECTL_SHA256: c04487523e7aa7d1493f7808174c899db93d7a9cf57531420cd76b9bd415f8f4
 
 jobs:
   gvisor-k3d:
