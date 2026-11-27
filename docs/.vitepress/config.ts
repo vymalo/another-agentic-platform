@@ -32,6 +32,7 @@ const sidebar = [
     items: [
       { text: "Guides", link: "/guides/" },
       { text: "Deploy", items: pages("guides/deploy", ["install.md", "platform-api.md", "run-pods.md"]) },
+      { text: "Operate", items: pages("guides/operate", ["metrics.md", "traces.md", "not-ready.md", "replicas.md", "upgrade.md"]) },
     ],
   },
   {
