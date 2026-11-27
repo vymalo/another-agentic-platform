@@ -174,17 +174,17 @@ jobs:
               --json databaseId,status,conclusion --jq '.[] | "\(.databaseId) \(.status) \(.conclusion)"')
             if [ -z "$runs" ]; then
               if [ $((now - started)) -gt 1200 ]; then
-                echo "::error::no run of operator-image.yml on $SHA after 20 minutes: run operator-image.yml with workflow_dispatch on the tag $TAG (it pushes $short), then re-run this workflow."
+                echo "::error::no run of operator-image.yml on $SHA after 20 minutes: re-run the failed jobs of its run if there is one, else run operator-image.yml with workflow_dispatch on the tag $TAG (it pushes $short), then re-run this workflow."
                 exit 1
               fi
             else
               pending=""
-              while read -r id run_status run_conclusion; do
+              while read -r _ run_status _; do
                 [ "$run_status" = completed ] || pending=1
               done <<< "$runs"
               if [ -z "$pending" ]; then
                 both && break
-                echo "::error::every operator-image.yml run on $SHA has ended and $short is not in the registry for both images ($(cat "$err")); runs (id status conclusion): $(tr '\n' ';' <<< "$runs"). Run operator-image.yml with workflow_dispatch on the tag $TAG (it pushes $short), then re-run this workflow."
+                echo "::error::every operator-image.yml run on $SHA has ended and $short is not in the registry for both images ($(cat "$err")); runs (id status conclusion): $(tr '\n' ';' <<< "$runs"). Re-run the failed jobs of the operator-image.yml run first; if that cannot work, run operator-image.yml with workflow_dispatch on the tag $TAG (it pushes $short). Then re-run this workflow."
                 exit 1
               fi
             fi

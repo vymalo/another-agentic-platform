@@ -765,8 +765,8 @@ stateDiagram-v2
   Proposed --> Tagged: merged, vX.Y.Z cut
   Tagged --> Waiting: release.yml starts
   Waiting --> Published: sha-<7> of both images found, revision checked
-  Waiting --> Failed: operator-image.yml ended without pushing, or 160 min passed
-  Failed --> Waiting: its jobs re-run, then release.yml dispatched with the tag
+  Waiting --> Failed: every operator-image.yml run on the commit ended without pushing, or 160 min passed
+  Failed --> Waiting: its jobs re-run, or operator-image.yml dispatched on the tag, then release.yml re-run
   Published --> [*]
 ```
 
