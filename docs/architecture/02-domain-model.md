@@ -342,7 +342,7 @@ No rebuilding is required.
 
 ## 10a. Release channels and rolling upgrades: the plan
 
-*(2026-11-25, ANR-269; documentation only, nothing here is built. The decision is [AD-059](11-decisions.md#ad-059--a-revision-is-a-workload-of-its-own-and-an-old-one-stays-until-its-runs-end).)*
+*(2026-11-25, ANR-269; documentation only, nothing here is built. The decision is [AD-059](11-decisions.md#ad-059--a-revision-is-a-workload-of-its-own-and-an-old-one-stays-until-its-runs-end), **accepted by the owner on 2026-11-26** (row 113 of `decisions-2026-11-26.md`), with the four questions at the end of this section answered as recommended.)*
 
 ### What is built, and what is not (read at plat `main`, 2026-11-25)
 
@@ -443,6 +443,8 @@ One row per pull request, one repository per row. "plat" is another-agentic-plat
 | R7 | plat | Docs: AD-059 confirmed or amended, `extensions/release-channels-v1.md` status line, §10's blockquote, the registry contract unchanged | `docs-check` passes | R5 |
 
 ### Questions for the owner
+
+**Decided 2026-11-26 (row 113 of `decisions-2026-11-26.md`): all four recommendations below were accepted**, so A1 waits for adam's ADR 0076 ruling and R1 and R2 can start.
 
 | # | Question | Recommendation |
 |---|---|---|
