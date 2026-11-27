@@ -23,12 +23,13 @@ let metrics = activator.metrics();          // `render()` is Prometheus text
 | Anything else | buffered, then **one wake per agent** (concurrent requests share the single `Waker::wake` call), then forwarded **once** |
 | Wake ends `TimedOut`, or `wake_timeout` (5 m) passes | `503` + `Retry-After: retry_after_secs` (10) |
 | `Waker` cannot be reached | `503` + `Retry-After` |
-| `Waker` refuses: unknown agent / suspended agent | `404` / `409`, no `Retry-After`: retrying will not help |
+| `Waker` refuses: unknown agent / suspended agent / a reason added later | `404` / `409` / `409 agent_refused`, no `Retry-After`: retrying will not help |
+| `Content-Length` that is not digits only, or fields and list elements that differ (RFC 9110 §8.6) | `400`; leading zeros are read as the number |
 | Agent unreachable after the wake, or an invalid status in its answer | `502`; the request is never forwarded twice |
-| Agent does not answer within `forward_timeout` (120 s) | `504` |
+| Agent does not answer within `forward_timeout` (120 s) | `504`. **The agent may still have received the request and be processing it**; a `POST` is not idempotent, so a client that retries can run it twice |
 
 Error bodies are `{"error":"<fixed word>"}`; no agent name, path or header is echoed or logged. Hop-by-hop headers
-(RFC 9110 §7.6.1, and the ones `Connection` names) are dropped in both directions; every other header and the body reach the
+(RFC 9110 §7.6.1, and the ones `Connection` names, matched without regard to case) are dropped in both directions; every other header and the body reach the
 `Upstream` unchanged. A header whose value is not UTF-8 is `400`.
 
 ## Read this before deploying
@@ -51,7 +52,7 @@ when the agent finishes, and one longer than `forward_timeout` is cut. A follow-
   deadline fires the wake future is dropped, so `Waker::wake` must be cancel-safe. *Provisional.*
 * **A wake is not cancelled when its waiters leave.** Asking the operator to wake is idempotent; cancelling would only make the
   next request ask again. The flight entry is removed when the task ends, by a panic too.
-* **The agent comes from the `Host` header, provisional pending ANR-Q135.** Both labels must be DNS-1123 labels. Without
+* **The agent comes from the `Host` header, provisional pending ANR-Q135.** Both labels must be DNS-1123 labels. The host is lower-cased (and so is `host_suffix`) and one trailing dot is dropped before the match, so `CODER.team-a.` is `coder.team-a`; everything else that is refused stays refused. Without
   `host_suffix` only `<name>.<namespace>` is accepted (a port is ignored); with `host_suffix` (for example `.svc.cluster.local`)
   the host must be `<name>.<namespace>` followed by exactly that suffix, so another suffix is `400`.
 * **The routing seam** is `Activator::route`, which always answers `Route::Default`. AD-059 (R5) will read a channel there; no

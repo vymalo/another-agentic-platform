@@ -62,7 +62,7 @@ fn post(path: &str, body: &'static str) -> Request<Body> {
         .unwrap()
 }
 
-#[tokio::test]
+#[tokio::test(start_paused = true)]
 async fn a_request_while_asleep_is_forwarded_once_after_the_wake() {
     let r = rig(settings());
     r.waker
@@ -87,7 +87,7 @@ async fn a_request_while_asleep_is_forwarded_once_after_the_wake() {
     );
 }
 
-#[tokio::test]
+#[tokio::test(start_paused = true)]
 async fn a_second_concurrent_request_shares_the_one_wake() {
     let r = rig(settings());
     r.waker
@@ -113,7 +113,7 @@ async fn a_second_concurrent_request_shares_the_one_wake() {
     );
 }
 
-#[tokio::test]
+#[tokio::test(start_paused = true)]
 async fn a_wake_that_never_completes_is_503_with_retry_after() {
     let r = rig(settings());
     r.waker.script(&agent(), WakeScript::Never);
@@ -133,7 +133,7 @@ async fn a_wake_that_never_completes_is_503_with_retry_after() {
     assert_eq!(r.activator.metrics().requests(Outcome::WakeTimeout), 1);
 }
 
-#[tokio::test]
+#[tokio::test(start_paused = true)]
 async fn the_card_is_answered_with_no_wake() {
     let r = rig(settings());
     r.waker.script(&agent(), WakeScript::Never);
@@ -159,7 +159,7 @@ async fn the_card_is_answered_with_no_wake() {
     assert_eq!(r.upstream.calls(), 0);
 }
 
-#[tokio::test]
+#[tokio::test(start_paused = true)]
 async fn a_body_over_the_cap_is_413_and_wakes_nothing() {
     let r = rig(Settings {
         max_body_bytes: 8,
@@ -180,7 +180,7 @@ async fn a_body_over_the_cap_is_413_and_wakes_nothing() {
     assert_eq!(r.upstream.calls(), 0);
 }
 
-#[tokio::test]
+#[tokio::test(start_paused = true)]
 async fn body_and_headers_reach_the_upstream_unchanged_and_hop_by_hop_headers_do_not() {
     let r = rig(settings());
     let req = Request::post("/a2a/v1/message:send?x=1")
@@ -213,7 +213,7 @@ async fn body_and_headers_reach_the_upstream_unchanged_and_hop_by_hop_headers_do
     }
 }
 
-#[tokio::test]
+#[tokio::test(start_paused = true)]
 async fn the_agents_answer_comes_back_with_its_status_and_headers() {
     let r = rig(settings());
     r.upstream.answer(UpstreamResponse {
@@ -231,7 +231,7 @@ async fn the_agents_answer_comes_back_with_its_status_and_headers() {
     assert_eq!(to_bytes(res.into_body(), 1024).await.unwrap(), "accepted");
 }
 
-#[tokio::test]
+#[tokio::test(start_paused = true)]
 async fn a_wake_that_ends_timed_out_is_503_with_retry_after() {
     let r = rig(settings());
     r.waker.script(&agent(), WakeScript::TimedOut);
@@ -240,7 +240,7 @@ async fn a_wake_that_ends_timed_out_is_503_with_retry_after() {
     assert_eq!(res.headers()["retry-after"], "7");
 }
 
-#[tokio::test]
+#[tokio::test(start_paused = true)]
 async fn an_unreachable_operator_is_503() {
     let r = rig(settings());
     r.waker.script(&agent(), WakeScript::Fail);
@@ -250,7 +250,7 @@ async fn an_unreachable_operator_is_503() {
     assert_eq!(r.upstream.calls(), 0);
 }
 
-#[tokio::test]
+#[tokio::test(start_paused = true)]
 async fn an_unreachable_agent_after_the_wake_is_502() {
     let r = rig(settings());
     r.upstream.break_upstream();
@@ -259,7 +259,7 @@ async fn an_unreachable_agent_after_the_wake_is_502() {
     assert_eq!(r.upstream.calls(), 1, "a failed forward is not retried");
 }
 
-#[tokio::test]
+#[tokio::test(start_paused = true)]
 async fn a_request_after_the_wake_ended_asks_again_and_other_agents_wake_apart() {
     let r = rig(settings());
     r.app.clone().oneshot(post("/x", "{}")).await.unwrap();
@@ -274,7 +274,7 @@ async fn a_request_after_the_wake_ended_asks_again_and_other_agents_wake_apart()
     assert_eq!(r.waker.calls_for(&RuntimeId::new("team-a", "agent2")), 1);
 }
 
-#[tokio::test]
+#[tokio::test(start_paused = true)]
 async fn a_request_that_names_no_agent_is_400() {
     let r = rig(settings());
     let req = Request::post("/x").body(Body::empty()).unwrap();
@@ -293,7 +293,7 @@ async fn a_request_that_names_no_agent_is_400() {
     assert_eq!(r.waker.calls(), 0);
 }
 
-#[tokio::test]
+#[tokio::test(start_paused = true)]
 async fn an_unknown_card_is_404_and_a_post_to_the_card_path_is_not_a_card() {
     let r = rig(settings());
     let req = Request::get("/.well-known/agent-card.json")
@@ -315,7 +315,7 @@ async fn an_unknown_card_is_404_and_a_post_to_the_card_path_is_not_a_card() {
     assert_eq!(r.waker.calls(), 1, "only GET and HEAD are cards");
 }
 
-#[tokio::test]
+#[tokio::test(start_paused = true)]
 async fn an_unreadable_card_source_is_503_with_retry_after() {
     let r = rig(settings());
     r.cards.break_source();
@@ -328,7 +328,7 @@ async fn an_unreadable_card_source_is_503_with_retry_after() {
     assert_eq!(res.headers()["retry-after"], "7");
 }
 
-#[tokio::test]
+#[tokio::test(start_paused = true)]
 async fn a_refused_wake_is_404_for_an_unknown_agent_and_409_for_a_suspended_one_with_no_retry_after()
  {
     let r = rig(settings());
@@ -347,13 +347,13 @@ async fn a_refused_wake_is_404_for_an_unknown_agent_and_409_for_a_suspended_one_
     assert_eq!(r.upstream.calls(), 0);
 }
 
-#[tokio::test]
+#[tokio::test(start_paused = true)]
 async fn the_default_wake_deadline_is_the_crds_maximum() {
     // `scaling.wakeTimeout` is at most 5m (crates/api/src/service.rs): the router's cap must not cut an agent short.
     assert_eq!(Settings::default().wake_timeout, Duration::from_secs(300));
 }
 
-#[tokio::test]
+#[tokio::test(start_paused = true)]
 async fn the_forward_comes_after_the_wake_completes_and_the_wake_after_the_request_arrived() {
     let r = rig(settings());
     r.waker
@@ -378,7 +378,7 @@ fn host_req(host: &str) -> Request<Body> {
         .unwrap()
 }
 
-#[tokio::test]
+#[tokio::test(start_paused = true)]
 async fn without_a_suffix_only_name_dot_namespace_is_an_agent() {
     let r = rig(settings());
     assert_eq!(
@@ -405,7 +405,7 @@ async fn without_a_suffix_only_name_dot_namespace_is_an_agent() {
     assert_eq!(r.waker.calls(), 1);
 }
 
-#[tokio::test]
+#[tokio::test(start_paused = true)]
 async fn with_a_suffix_the_host_must_end_exactly_with_it() {
     let r = rig(Settings {
         host_suffix: Some("svc.cluster.local".into()),
@@ -434,7 +434,7 @@ async fn with_a_suffix_the_host_must_end_exactly_with_it() {
 
 // ---- the in-flight limit
 
-#[tokio::test]
+#[tokio::test(start_paused = true)]
 async fn past_max_in_flight_a_request_is_503_with_retry_after_and_starts_no_wake() {
     let r = rig(Settings {
         max_in_flight: 1,
@@ -477,7 +477,7 @@ async fn past_max_in_flight_a_request_is_503_with_retry_after_and_starts_no_wake
 
 // ---- timeouts
 
-#[tokio::test]
+#[tokio::test(start_paused = true)]
 async fn an_upstream_that_never_answers_is_504_at_the_forward_timeout() {
     let r = rig(Settings {
         forward_timeout: Duration::from_millis(100),
@@ -497,17 +497,18 @@ async fn an_upstream_that_never_answers_is_504_at_the_forward_timeout() {
     assert_eq!(r.activator.metrics().requests(Outcome::UpstreamTimeout), 1);
 }
 
-/// One request over a real socket, so that the body can be slow or chunked. Returns the status line.
-async fn raw(app: Router, request: &[u8], then_wait: Duration) -> String {
+/// One request over a real socket, so that the body can be slow or chunked. Returns the status line. It waits for the server's
+/// answer and does not sleep: the only clock is the generous bound (10 s, against the tens of milliseconds the settings of the
+/// tests use) that keeps a bug from hanging the test.
+async fn raw(app: Router, request: &[u8]) -> String {
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = listener.local_addr().unwrap();
     tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
     let mut s = tokio::net::TcpStream::connect(addr).await.unwrap();
     s.write_all(request).await.unwrap();
-    tokio::time::sleep(then_wait).await;
     let mut buf = vec![0u8; 512];
-    let n = tokio::time::timeout(Duration::from_secs(3), s.read(&mut buf))
+    let n = tokio::time::timeout(Duration::from_secs(10), s.read(&mut buf))
         .await
         .unwrap()
         .unwrap();
@@ -521,14 +522,13 @@ async fn raw(app: Router, request: &[u8], then_wait: Duration) -> String {
 #[tokio::test]
 async fn a_body_that_stalls_is_408_at_the_body_read_timeout() {
     let r = rig(Settings {
-        body_read_timeout: Duration::from_millis(100),
+        body_read_timeout: Duration::from_millis(200),
         ..settings()
     });
     // Ten bytes are promised, three are sent.
     let status = raw(
         r.app.clone(),
         b"POST /x HTTP/1.1\r\nHost: coder.team-a\r\nContent-Length: 10\r\n\r\nabc",
-        Duration::from_millis(300),
     )
     .await;
     assert!(status.contains("408"), "{status}");
@@ -537,7 +537,7 @@ async fn a_body_that_stalls_is_408_at_the_body_read_timeout() {
 
 // ---- the cap, both paths
 
-#[tokio::test]
+#[tokio::test(start_paused = true)]
 async fn a_declared_content_length_over_the_cap_is_413_before_anything_is_read() {
     let r = rig(Settings {
         max_body_bytes: 8,
@@ -572,8 +572,7 @@ async fn a_body_over_the_cap_with_no_content_length_is_413() {
     });
     let status = raw(
         r.app.clone(),
-        b"POST /x HTTP/1.1\r\nHost: coder.team-a\r\nTransfer-Encoding: chunked\r\n\r\n14\r\n01234567890123456789\r\n0\r\n\r\n",
-        Duration::from_millis(100),
+        b"POST /x HTTP/1.1\r\nHost: coder.team-a\r\nTransfer-Encoding: chunked\r\n\r\n14\r\n01234567890123456789\r\n0\r\n\r\n"
     )
     .await;
     assert!(status.contains("413"), "{status}");
@@ -582,7 +581,7 @@ async fn a_body_over_the_cap_with_no_content_length_is_413() {
 
 // ---- metrics and status
 
-#[tokio::test]
+#[tokio::test(start_paused = true)]
 async fn a_card_source_error_has_its_own_outcome_and_an_invalid_upstream_status_is_502() {
     let r = rig(settings());
     r.cards.break_source();
@@ -607,4 +606,217 @@ async fn a_card_source_error_has_its_own_outcome_and_an_invalid_upstream_status_
     });
     let res = r.app.clone().oneshot(post("/x", "{}")).await.unwrap();
     assert_eq!(res.status(), StatusCode::BAD_GATEWAY);
+}
+
+// ---- headers are matched without regard to case, in both directions
+
+#[tokio::test(start_paused = true)]
+async fn hop_by_hop_headers_are_dropped_from_the_answer_whatever_their_case() {
+    let r = rig(settings());
+    let h = |k: &str, v: &str| (k.to_owned(), v.to_owned());
+    r.upstream.answer(UpstreamResponse {
+        status: 200,
+        headers: vec![
+            h("Connection", " X-Secret , keep-alive"),
+            h("X-Secret", "s"),
+            h("Transfer-Encoding", "chunked"),
+            h("Keep-Alive", "timeout=5"),
+            h("Upgrade", "h2c"),
+            h("X-Kept", "y"),
+        ],
+        body: b"ok".to_vec(),
+    });
+    let res = r.app.clone().oneshot(post("/x", "{}")).await.unwrap();
+    for gone in [
+        "connection",
+        "x-secret",
+        "transfer-encoding",
+        "keep-alive",
+        "upgrade",
+    ] {
+        assert!(
+            res.headers().get(gone).is_none(),
+            "{gone} reached the client: {:?}",
+            res.headers()
+        );
+    }
+    assert_eq!(res.headers()["x-kept"], "y");
+}
+
+#[tokio::test(start_paused = true)]
+async fn the_tokens_a_request_connection_header_names_are_trimmed_and_dropped() {
+    let r = rig(settings());
+    let req = Request::post("/x")
+        .header("host", HOST)
+        .header("Connection", "  X-Private ,Keep-Alive")
+        .header("X-Private", "1")
+        .header("x-kept", "y")
+        .body(Body::empty())
+        .unwrap();
+    r.app.clone().oneshot(req).await.unwrap();
+    let seen = r.upstream.seen();
+    let names: Vec<&str> = seen[0]
+        .request
+        .headers
+        .iter()
+        .map(|(k, _)| k.as_str())
+        .collect();
+    assert!(
+        !names.contains(&"x-private") && !names.contains(&"connection"),
+        "{names:?}"
+    );
+    assert!(names.contains(&"x-kept"));
+}
+
+// ---- Content-Length as RFC 9110 §8.6 has it
+
+fn with_lengths(values: &[&str]) -> Request<Body> {
+    let mut b = Request::post("/x").header("host", HOST);
+    for v in values {
+        b = b.header("content-length", *v);
+    }
+    b.body(Body::empty()).unwrap()
+}
+
+#[tokio::test(start_paused = true)]
+async fn content_length_is_read_strictly() {
+    let r = rig(Settings {
+        max_body_bytes: 8,
+        ..settings()
+    });
+    let status = |values: &'static [&'static str]| {
+        let app = r.app.clone();
+        async move { app.oneshot(with_lengths(values)).await.unwrap().status() }
+    };
+    assert_eq!(
+        status(&["8", "99"]).await,
+        StatusCode::BAD_REQUEST,
+        "two different fields"
+    );
+    assert_eq!(
+        status(&["8, 99"]).await,
+        StatusCode::BAD_REQUEST,
+        "a list that differs"
+    );
+    assert_eq!(status(&["+9"]).await, StatusCode::BAD_REQUEST);
+    assert_eq!(status(&["-1"]).await, StatusCode::BAD_REQUEST);
+    assert_eq!(status(&["1 2"]).await, StatusCode::BAD_REQUEST);
+    assert_eq!(status(&[""]).await, StatusCode::BAD_REQUEST);
+    assert_eq!(
+        status(&["0009"]).await,
+        StatusCode::PAYLOAD_TOO_LARGE,
+        "leading zeros are read as 9"
+    );
+    assert_eq!(
+        status(&["99999999999999999999999"]).await,
+        StatusCode::PAYLOAD_TOO_LARGE,
+        "beyond u64"
+    );
+    assert_eq!(
+        status(&["9", "9"]).await,
+        StatusCode::PAYLOAD_TOO_LARGE,
+        "identical fields"
+    );
+    assert_eq!(r.waker.calls(), 0, "none of them wakes anything");
+}
+
+// ---- Host case and the root dot
+
+#[tokio::test(start_paused = true)]
+async fn host_case_and_one_trailing_dot_are_normalised() {
+    let r = rig(settings());
+    for ok in ["CODER.team-a", "coder.team-a.", "Coder.Team-A:8080"] {
+        assert_eq!(
+            r.app.clone().oneshot(host_req(ok)).await.unwrap().status(),
+            StatusCode::OK,
+            "{ok}"
+        );
+    }
+    assert_eq!(
+        r.waker.calls_for(&agent()),
+        3,
+        "all three are the one agent"
+    );
+    assert_eq!(
+        r.app
+            .clone()
+            .oneshot(host_req("coder.team-a.."))
+            .await
+            .unwrap()
+            .status(),
+        StatusCode::BAD_REQUEST
+    );
+
+    let sfx = rig(Settings {
+        host_suffix: Some(".SVC.Cluster.Local".into()),
+        ..settings()
+    });
+    for ok in [
+        "Coder.team-a.svc.cluster.local",
+        "coder.team-a.SVC.CLUSTER.LOCAL.",
+        "coder.team-a.svc.cluster.local",
+    ] {
+        assert_eq!(
+            sfx.app
+                .clone()
+                .oneshot(host_req(ok))
+                .await
+                .unwrap()
+                .status(),
+            StatusCode::OK,
+            "{ok}"
+        );
+    }
+    assert_eq!(
+        sfx.app
+            .clone()
+            .oneshot(host_req("coder.team-a.evil.example"))
+            .await
+            .unwrap()
+            .status(),
+        StatusCode::BAD_REQUEST
+    );
+}
+
+// ---- a body exactly at the cap passes, on both paths
+
+#[tokio::test(start_paused = true)]
+async fn a_body_exactly_at_the_cap_passes_with_a_content_length() {
+    let r = rig(Settings {
+        max_body_bytes: 8,
+        ..settings()
+    });
+    let req = Request::post("/x")
+        .header("host", HOST)
+        .header("content-length", "8")
+        .body(Body::from("01234567"))
+        .unwrap();
+    assert_eq!(
+        r.app.clone().oneshot(req).await.unwrap().status(),
+        StatusCode::OK
+    );
+    assert_eq!(r.upstream.seen()[0].request.body, b"01234567");
+    let over = Request::post("/x")
+        .header("host", HOST)
+        .body(Body::from("012345678"))
+        .unwrap();
+    assert_eq!(
+        r.app.clone().oneshot(over).await.unwrap().status(),
+        StatusCode::PAYLOAD_TOO_LARGE
+    );
+}
+
+#[tokio::test]
+async fn a_chunked_body_exactly_at_the_cap_passes() {
+    let r = rig(Settings {
+        max_body_bytes: 8,
+        ..settings()
+    });
+    let status = raw(
+        r.app.clone(),
+        b"POST /x HTTP/1.1\r\nHost: coder.team-a\r\nTransfer-Encoding: chunked\r\n\r\n8\r\n01234567\r\n0\r\n\r\n",
+    )
+    .await;
+    assert!(status.contains("200"), "{status}");
+    assert_eq!(r.upstream.seen()[0].request.body, b"01234567");
 }

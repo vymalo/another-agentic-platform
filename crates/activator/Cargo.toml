@@ -18,7 +18,7 @@ tokio = { workspace = true, features = ["rt", "sync", "time"] }
 
 [dev-dependencies]
 aap-ports = { workspace = true, features = ["testkit"] }
-tokio = { workspace = true, features = ["macros", "rt", "rt-multi-thread", "time", "net", "io-util"] }
+tokio = { workspace = true, features = ["macros", "rt", "rt-multi-thread", "time", "net", "io-util", "test-util"] }
 tower = { workspace = true, features = ["util"] }
 
 [lints]

@@ -66,7 +66,9 @@ pub struct Settings {
     /// The upper bound of a wake, after which the caller is told to retry. The default is 5 m, the largest value the CRD allows
     /// for `scaling.wakeTimeout`, so that the agent's own (sooner) answer is what decides. Provisional.
     pub wake_timeout: Duration,
-    /// The longest `Upstream::forward` may take; past it the answer is `504`. Provisional.
+    /// The longest `Upstream::forward` may take; past it the answer is `504`. **After a `504` the agent may still have received
+    /// the request and be processing it**: the future is dropped, the request is not recalled. A `POST` is not idempotent, so a
+    /// client that retries can run it twice. Provisional.
     pub forward_timeout: Duration,
     /// The longest reading a request body may take; past it the answer is `408`. Provisional.
     pub body_read_timeout: Duration,
@@ -261,6 +263,12 @@ fn dns_label(l: &str) -> bool {
 /// `<name>.<namespace>` followed by exactly `suffix` (or by nothing when there is none), with an optional port. Anything else
 /// names no agent: a further label, another suffix, an upper-case or malformed label.
 fn agent_from_host(host: &str, suffix: Option<&str>) -> Option<RuntimeId> {
+    // Host names are case-insensitive (RFC 9110 §7.2) and may end in the root dot: both are normalised before the DNS-1123
+    // rules, which stay as strict as they were (one trailing dot only; an upper-case suffix setting is lower-cased too).
+    let host = host.to_ascii_lowercase();
+    let suffix = suffix.map(str::to_ascii_lowercase);
+    let suffix = suffix.as_deref();
+    let host = host.as_str();
     let host = host.rsplit_once(':').map_or(host, |(h, p)| {
         if !p.is_empty() && p.bytes().all(|b| b.is_ascii_digit()) {
             h
@@ -268,6 +276,7 @@ fn agent_from_host(host: &str, suffix: Option<&str>) -> Option<RuntimeId> {
             host
         }
     });
+    let host = host.strip_suffix('.').unwrap_or(host);
     let rest = match suffix {
         Some(sfx) => host.strip_suffix(sfx)?,
         None => host,
@@ -290,14 +299,21 @@ const HOP_BY_HOP: [&str; 8] = [
 ];
 
 fn strip_hop_by_hop(headers: &[(String, String)]) -> Vec<(String, String)> {
+    // Names are compared in lower case: hyper lower-cases a request's, but an `Upstream` adapter hands back whatever case the
+    // agent wrote, and header names are case-insensitive (RFC 9110 §5.1). The tokens `Connection` names are trimmed and
+    // lower-cased for the same reason.
     let named: Vec<String> = headers
         .iter()
-        .filter(|(k, _)| k == "connection")
+        .filter(|(k, _)| k.eq_ignore_ascii_case("connection"))
         .flat_map(|(_, v)| v.split(',').map(|t| t.trim().to_ascii_lowercase()))
+        .filter(|t| !t.is_empty())
         .collect();
     headers
         .iter()
-        .filter(|(k, _)| !HOP_BY_HOP.contains(&k.as_str()) && !named.contains(k))
+        .filter(|(k, _)| {
+            let k = k.to_ascii_lowercase();
+            !HOP_BY_HOP.contains(&k.as_str()) && !named.contains(&k)
+        })
         .cloned()
         .collect()
 }
@@ -363,17 +379,14 @@ where
     }
 
     // A request that declares a body over the cap is refused before anything is held or woken.
-    let declared = match request.headers().get(CONTENT_LENGTH) {
-        None => None,
-        Some(v) => match v.to_str().ok().and_then(|v| v.trim().parse::<u64>().ok()) {
-            Some(n) => Some(n),
-            None => {
-                return (
-                    reply(StatusCode::BAD_REQUEST, "bad_content_length", None),
-                    Outcome::BadRequest,
-                );
-            }
-        },
+    let declared = match declared_length(request.headers()) {
+        Ok(n) => n,
+        Err(()) => {
+            return (
+                reply(StatusCode::BAD_REQUEST, "bad_content_length", None),
+                Outcome::BadRequest,
+            );
+        }
     };
     if declared.is_some_and(|n| n > s.max_body_bytes as u64) {
         return (
@@ -457,9 +470,17 @@ where
                 Outcome::WakeFailed,
             );
         }
-        Flight::Refused(_) => {
+        Flight::Refused(RefusedReason::Unknown) => {
             return (
                 reply(StatusCode::NOT_FOUND, "agent_unknown", None),
+                Outcome::WakeFailed,
+            );
+        }
+        // A reason added to the `#[non_exhaustive]` enum later: refused, and not worth a retry, but not known to be "unknown".
+        // `409 agent_refused` says that and claims nothing else.
+        Flight::Refused(_) => {
+            return (
+                reply(StatusCode::CONFLICT, "agent_refused", None),
                 Outcome::WakeFailed,
             );
         }
@@ -512,6 +533,28 @@ where
     }
 }
 
+/// The declared body length, read as RFC 9110 §8.6 has it: every `Content-Length` field and every element of a comma-separated
+/// list is digits only (so no `+`, `-` or inner space), leading zeros are fine, and they must all be the same number, or the
+/// request is ambiguous and refused. A number too large for `u64` is read as `u64::MAX`, which is over any cap.
+fn declared_length(headers: &axum::http::HeaderMap) -> Result<Option<u64>, ()> {
+    let mut found: Option<u64> = None;
+    for value in headers.get_all(CONTENT_LENGTH) {
+        let text = value.to_str().map_err(|_| ())?;
+        for element in text.split(',') {
+            let element = element.trim_matches(|c| c == ' ' || c == '\t');
+            if element.is_empty() || !element.bytes().all(|b| b.is_ascii_digit()) {
+                return Err(());
+            }
+            let n = element.parse::<u64>().unwrap_or(u64::MAX);
+            match found {
+                Some(prev) if prev != n => return Err(()),
+                _ => found = Some(n),
+            }
+        }
+    }
+    Ok(found)
+}
+
 enum BodyFail {
     TooLarge,
     Timeout,
@@ -561,7 +604,14 @@ mod tests {
             "no further label without a suffix"
         );
         assert_eq!(agent_from_host("localhost", None), None);
-        assert_eq!(agent_from_host("Coder.team-a", None), None);
+        // Case and one root dot are normalised; anything else that was refused still is.
+        assert_eq!(agent_from_host("Coder.TEAM-a", None), id("team-a", "coder"));
+        assert_eq!(
+            agent_from_host("coder.team-a.", None),
+            id("team-a", "coder")
+        );
+        assert_eq!(agent_from_host("coder.team-a..", None), None);
+        assert_eq!(agent_from_host("coder_x.team-a", None), None);
         assert_eq!(agent_from_host(".team-a", None), None);
         assert_eq!(agent_from_host("a b.c", None), None);
         assert_eq!(agent_from_host("-a.b", None), None);

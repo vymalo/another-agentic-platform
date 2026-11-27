@@ -113,7 +113,7 @@ impl WakerUnderTest for FaultyWaker {
 }
 
 #[tokio::test]
-#[should_panic]
+#[should_panic(expected = "left: Ready")]
 async fn a_waker_that_reports_ready_for_a_give_up_fails_the_suite() {
     testkit::activator::a_wake_that_gives_up_is_timed_out_not_an_error(waker(
         WakeFault::ReadyWhenTimedOut,
@@ -122,7 +122,7 @@ async fn a_waker_that_reports_ready_for_a_give_up_fails_the_suite() {
 }
 
 #[tokio::test]
-#[should_panic]
+#[should_panic(expected = "gave up")]
 async fn a_waker_that_errs_on_a_give_up_fails_the_suite() {
     testkit::activator::a_wake_that_gives_up_is_timed_out_not_an_error(waker(
         WakeFault::ErrOnGiveUp,
@@ -131,7 +131,7 @@ async fn a_waker_that_errs_on_a_give_up_fails_the_suite() {
 }
 
 #[tokio::test]
-#[should_panic]
+#[should_panic(expected = "on an `Ok` value: Ready")]
 async fn a_waker_that_is_ready_when_the_operator_is_unreachable_fails_the_suite() {
     testkit::activator::an_unreachable_operator_is_a_transient_error(waker(
         WakeFault::ReadyWhenUnreachable,
@@ -140,13 +140,13 @@ async fn a_waker_that_is_ready_when_the_operator_is_unreachable_fails_the_suite(
 }
 
 #[tokio::test]
-#[should_panic]
+#[should_panic(expected = "w.wake(&one).await.is_err()")]
 async fn a_waker_with_one_answer_for_every_agent_fails_the_suite() {
     testkit::activator::agents_do_not_mix(waker(WakeFault::OneAnswerForEveryAgent)).await;
 }
 
 #[tokio::test]
-#[should_panic]
+#[should_panic(expected = "Unavailable(\"second\")")]
 async fn a_waker_that_fails_the_second_wake_fails_the_suite() {
     testkit::activator::waking_an_agent_that_is_awake_is_ready_and_repeatable(waker(
         WakeFault::FailsTheSecondWake,
@@ -155,7 +155,7 @@ async fn a_waker_that_fails_the_second_wake_fails_the_suite() {
 }
 
 #[tokio::test]
-#[should_panic]
+#[should_panic(expected = "Refused(Unknown)")]
 async fn a_waker_that_loses_the_refusal_reason_fails_the_suite() {
     testkit::activator::a_refusal_carries_its_reason_and_is_not_retryable(waker(
         WakeFault::RefusalLosesItsReason,
@@ -164,7 +164,7 @@ async fn a_waker_that_loses_the_refusal_reason_fails_the_suite() {
 }
 
 #[tokio::test]
-#[should_panic]
+#[should_panic(expected = "Unavailable(\"refused\")")]
 async fn a_waker_that_makes_a_refusal_retryable_fails_the_suite() {
     testkit::activator::a_refusal_carries_its_reason_and_is_not_retryable(waker(
         WakeFault::RefusalIsRetryable,
@@ -262,21 +262,21 @@ impl UpstreamUnderTest for FaultyUpstream {
 }
 
 #[tokio::test]
-#[should_panic]
+#[should_panic(expected = "headers: [(\"content-type\", \"application/json\")], body: [123")]
 async fn an_upstream_that_drops_a_header_fails_the_suite() {
     testkit::activator::the_request_reaches_the_agent_unchanged(upstream(UpFault::DropsAHeader))
         .await;
 }
 
 #[tokio::test]
-#[should_panic]
+#[should_panic(expected = "body: [] })]")]
 async fn an_upstream_that_drops_the_body_fails_the_suite() {
     testkit::activator::the_request_reaches_the_agent_unchanged(upstream(UpFault::DropsTheBody))
         .await;
 }
 
 #[tokio::test]
-#[should_panic]
+#[should_panic(expected = "Unavailable(\"4xx\")")]
 async fn an_upstream_that_turns_a_4xx_into_an_error_fails_the_suite() {
     testkit::activator::the_answer_comes_back_unchanged_whatever_its_status(upstream(
         UpFault::ErrsOnA4xx,
@@ -285,7 +285,7 @@ async fn an_upstream_that_turns_a_4xx_into_an_error_fails_the_suite() {
 }
 
 #[tokio::test]
-#[should_panic]
+#[should_panic(expected = "255, 33")]
 async fn an_upstream_that_alters_the_answer_fails_the_suite() {
     testkit::activator::the_answer_comes_back_unchanged_whatever_its_status(upstream(
         UpFault::AltersTheAnswer,
@@ -294,13 +294,13 @@ async fn an_upstream_that_alters_the_answer_fails_the_suite() {
 }
 
 #[tokio::test]
-#[should_panic]
+#[should_panic(expected = "left: 4")]
 async fn an_upstream_that_duplicates_a_forward_fails_the_suite() {
     testkit::activator::each_call_is_one_forward(upstream(UpFault::DuplicatesTheForward)).await;
 }
 
 #[tokio::test]
-#[should_panic]
+#[should_panic(expected = "on an `Ok` value: UpstreamResponse")]
 async fn an_upstream_that_is_ok_when_unreachable_fails_the_suite() {
     testkit::activator::an_unreachable_agent_is_a_transient_error(upstream(
         UpFault::OkWhenUnreachable,
@@ -385,20 +385,20 @@ impl CardsUnderTest for FaultyCards {
 }
 
 #[tokio::test]
-#[should_panic]
+#[should_panic(expected = "bytes: [125, 34, 120")]
 async fn a_card_source_that_mutates_the_bytes_fails_the_suite() {
     testkit::activator::a_card_is_served_as_published(cards(CardFault::MutatesTheBytes)).await;
 }
 
 #[tokio::test]
-#[should_panic]
+#[should_panic(expected = "charset=x")]
 async fn a_card_source_that_mutates_the_content_type_fails_the_suite() {
     testkit::activator::a_card_is_served_as_published(cards(CardFault::MutatesTheContentType))
         .await;
 }
 
 #[tokio::test]
-#[should_panic]
+#[should_panic(expected = "Unavailable(\"missing\")")]
 async fn a_card_source_that_errs_for_a_missing_card_fails_the_suite() {
     testkit::activator::an_agent_with_no_card_is_none_not_an_error(cards(
         CardFault::ErrsForAMissingCard,
@@ -407,13 +407,13 @@ async fn a_card_source_that_errs_for_a_missing_card_fails_the_suite() {
 }
 
 #[tokio::test]
-#[should_panic]
+#[should_panic(expected = "right: None")]
 async fn a_card_source_with_one_card_for_every_agent_fails_the_suite() {
     testkit::activator::cards_do_not_mix(cards(CardFault::OneCardForEveryAgent)).await;
 }
 
 #[tokio::test]
-#[should_panic]
+#[should_panic(expected = "on an `Ok` value: Some(Card")]
 async fn a_card_source_that_never_errors_fails_the_suite() {
     testkit::activator::an_unreadable_source_is_an_error_then_recovers(cards(
         CardFault::NeverErrors,
@@ -422,7 +422,7 @@ async fn a_card_source_that_never_errors_fails_the_suite() {
 }
 
 #[tokio::test]
-#[should_panic]
+#[should_panic(expected = "still down")]
 async fn a_card_source_that_never_recovers_fails_the_suite() {
     testkit::activator::an_unreadable_source_is_an_error_then_recovers(cards(
         CardFault::NeverRecovers,
