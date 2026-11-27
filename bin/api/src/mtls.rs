@@ -1,4 +1,4 @@
-//! The workload listener's TLS (ANR-1011, ADR-0042): a TCP listener whose connections are TLS 1.2 or 1.3 with a **client
+//! The workload listener's TLS (ANR-1011, AD-068): a TCP listener whose connections are TLS 1.2 or 1.3 with a **client
 //! certificate**, handed to axum as a [`Listener`], and the certificate each request came with.
 //!
 //! * **One trust.** Client certificates are verified at the handshake against the CA bundle of `workloadListener.clientCaFile`,
@@ -18,7 +18,7 @@
 //!   connection already established is not cut, and its next request is judged by the new bundle. A file that cannot be read, or a
 //!   bundle that holds no usable CA, keeps the one in use and warns once.
 //!
-//! Not built: the CRL of ADR-0042 decision 2 (fetched at most 2 h ago, fail closed when it cannot be read). It needs a source to
+//! Not built: the CRL the workload-certificate decision asks for (fetched at most 2 h ago, fail closed when it cannot be read). It needs a source to
 //! fetch from, which the deployment has not named, so a revoked certificate is refused only when it expires (ANR-1011, AD-068).
 
 use std::collections::HashMap;

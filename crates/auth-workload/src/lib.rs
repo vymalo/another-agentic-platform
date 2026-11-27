@@ -1,5 +1,5 @@
 //! `aap-auth-workload`: the Platform API's [`ClientAuthenticator`] for a workload certificate
-//! (ADR-0042, ANR-1010).
+//! (AD-065, ANR-1010).
 //!
 //! The orchestrator calls the Platform API over mutual TLS with a leaf from the OpenBao PKI, under a role
 //! of its own (`platform-caller`), and the Platform API maps that leaf's **exact URI SAN** (its SPIFFE id)
@@ -37,7 +37,7 @@ use rustls_pki_types::{CertificateDer, TrustAnchor, UnixTime};
 use serde::Deserialize;
 use x509_parser::prelude::{FromDer, GeneralName, X509Certificate};
 
-/// The one permission a workload certificate may carry (ADR-0042 decision 3).
+/// The one permission a workload certificate may carry (AD-065).
 pub const GRANTABLE: &[&str] = &["platform:agents.own"];
 
 /// The `workloadClients` block of the Platform API's configuration file.

@@ -124,7 +124,7 @@ where
     })
 }
 
-/// The router of the workload listener (ANR-1011, ADR-0042): **the routes of the table that `platform:agents.own` opens, and no
+/// The router of the workload listener (ANR-1011, AD-068): **the routes of the table that `platform:agents.own` opens, and no
 /// other**, behind [`workload_guard`](crate::workload) in place of the bearer guard. It never reads `Authorization`, and a route
 /// the workload may not use is not mounted, so it is a `404` and not a `403` that names a permission. The state's own `A` is
 /// [`NoBearer`](crate::NoBearer): this listener has no bearer authenticator to fall back to.

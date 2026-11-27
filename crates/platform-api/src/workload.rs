@@ -1,6 +1,6 @@
-//! The workload listener's guard (ANR-1011, ADR-0042).
+//! The workload listener's guard (ANR-1011, AD-068).
 //!
-//! The Platform API has two listeners that **never fall back to one another** (ADR-0042 decision 5). The person's reads
+//! The Platform API has two listeners that **never fall back to one another** (AD-068). The person's reads
 //! `Authorization: Bearer` ([`guard`](crate::authz)); this one reads the peer's client certificate through a
 //! [`ClientAuthenticator`] and **never reads `Authorization`**: a request that carries a bearer token here is judged by its
 //! certificate alone, and a request with a certificate on the person's listener is judged by its token alone.

@@ -1,6 +1,6 @@
 # aap-auth-workload
 
-The Platform API's `ClientAuthenticator` for a **workload certificate** (ADR-0042, ANR-1010).
+The Platform API's `ClientAuthenticator` for a **workload certificate** (AD-065, ANR-1010).
 
 The orchestrator calls the Platform API over mutual TLS with a leaf from the OpenBao PKI, under a role of
 its own (`platform-caller`), and this crate maps that leaf's **exact URI SAN** — its SPIFFE id — to a fixed
@@ -69,7 +69,7 @@ checked-in CA.
 - **The mutual-TLS listener and the composition root** are ANR-1011 (AD-068): `bin/api/src/mtls.rs` hands each request the
   peer's certificate and `aap_platform_api::workload_router` serves the owner routes behind this authenticator. This crate
   stays pure: no listener, no file read, no key.
-- **The CRL check** ADR-0042 decision 2 asks for (fetched at most 2 h ago, fail closed when it cannot be read) is **still not
+- **The CRL check** the workload-certificate decision asks for (fetched at most 2 h ago, fail closed when it cannot be read) is **still not
   built**: it needs a source to fetch from, which the deployment has not named. Until it is, a revoked certificate is refused
   only when it expires, so keep the leaf's lifetime short.
 

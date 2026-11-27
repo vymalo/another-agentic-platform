@@ -1,4 +1,4 @@
-//! The workload router (ANR-1011, ADR-0042): the routes `platform:agents.own` opens, behind a certificate and not a token. The
+//! The workload router (ANR-1011, AD-068): the routes `platform:agents.own` opens, behind a certificate and not a token. The
 //! listener of `bin/api` puts the certificate on the request; here a header stands for it, so that every case is the router's
 //! own and none depends on a TLS stack.
 #![allow(clippy::unwrap_used, clippy::expect_used, missing_docs)]
