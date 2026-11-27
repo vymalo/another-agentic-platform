@@ -165,7 +165,7 @@ jobs:
           helm lint deploy/operator -f deploy/operator/tests/secret.values.yaml
           helm lint deploy/operator -f deploy/operator/tests/api.values.yaml
           # tests/api-secretref.values.yaml is NOT linted: it says `cnpg: null` (to switch the store to a Secret per agent), and `helm lint`
-          # coalesces the values twice, so the second pass puts the chart's default `cnpg` back and logs ten `level=INFO msg="funcMap fail"` lines
+          # coalesces the values twice, so the second pass puts the chart's default `cnpg` back and logs about fifteen `level=INFO msg="funcMap fail"` lines
           # ("exactly one of cnpg and secretRef") that fail nothing (the quirk persists under Helm 4.3.2, AD-067, where the lines are
           # structured: a key set to null in the values file comes back from the chart's defaults under `lint` and not under `template`). `helm template`, which is what Argo CD and
           # install run, deletes the key; render-check.sh, `api --check` and kubeconform read this shape, and that is its guard.

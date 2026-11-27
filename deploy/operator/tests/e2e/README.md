@@ -517,7 +517,7 @@ stateDiagram-v2
 ### What it does not prove
 
 * **A real model, GitHub, a pull request.** The model is a script that makes the same three calls for every task; the App's id is made up and its key is generated (the coder parses it at start and never uses it); no task edits files. The coder's work with a real model is `operator-coder-e2e`'s up to its startup checks, and the shipped system's.
-* **Another Kubernetes, another network plugin, Pod Security admission, a second node.** kind's node image (v1.35.8), kindnet, no Pod Security labels on the namespace, one node (a run pod on another node than the coder's, and a work volume shared by several workers, are not exercised).
+* **Another Kubernetes, another network plugin, Pod Security admission, a second node.** kind's node image (v1.37.0, v1.35.8 before AD-067), kindnet, no Pod Security labels on the namespace, one node (a run pod on another node than the coder's, and a work volume shared by several workers, are not exercised).
 * **OpenCode, Podman, devcontainers** in the run pod, and a coder whose image is not the pin. **git, cargo, pip and go reading the proxy variables** (curl and npm are tried; the others are documented to), **IPv6 egress** (kind is IPv4 only; the proof is the absence of a rule), domain fronting and what an allowed host accepts (adam-rs ADR 0042, "What is not covered"), and **an agent whose image has no `adam-egress`** (the default agent image, `sha-9a1fd4e`, is one: the operator cannot tell, §60a D15c decision 2)
 * **The Platform API and the dashboard**: `agent.runPodSizeClass` is proven by the API's tests; this script makes the objects by `kubectl`.
 * **A deployment**: netcup, Argo CD, External Secrets.
@@ -669,7 +669,7 @@ stateDiagram-v2
 * **The server's writes.** The example runs it `read_only` with the `view` account, and the catalogue's test holds the switch; this script shows
   the read path, not a refused write.
 * **A NetworkPolicy on a plugin that does not enforce it.** The probe would still answer, and the policy would prove nothing.
-* **A Kubernetes older than the cluster's** (kind's node image, 1.35.8), and **the other namespaces' catalogues** (one namespace, one server).
+* **A Kubernetes older than the cluster's** (kind's node image, 1.37.0, 1.35.8 before AD-067), and **the other namespaces' catalogues** (one namespace, one server).
 
 ### What ran, and what is unverified
 

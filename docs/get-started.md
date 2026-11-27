@@ -69,13 +69,16 @@ decides `Ready`. This walk goes only `[*] --> Ready` (observed 2026-11-27 on one
 
 ## Prerequisites
 
-| Tool | Used here | Why |
-|---|---|---|
-| `docker` | 29.10.0 | kind runs the node as a container; you build one tiny image |
-| `kind` | 0.33.0 | the cluster |
-| `kubectl` | 1.37.2 | talks to it |
-| `helm` | 4.3.2 | installs the two charts (Helm 4 only; Helm 3 is not supported) |
-| `git`, `curl`, `jq`, `openssl` | any | clone, query, read JSON, make a token |
+| Tool | Required | Used in the walk of 2026-11-27 | Why |
+|---|---|---|---|
+| `docker` | any recent | 29.10.0 | kind runs the node as a container; you build one tiny image |
+| `kind` | 0.33.0 | 0.33.0 | the cluster |
+| `kubectl` | 1.37.x | 1.35.10 | talks to it |
+| `helm` | 4.3.2 or a later 4.x (Helm 3 is not supported) | 3.16.1 | installs the two charts |
+| `git`, `curl`, `jq`, `openssl` | any | any | clone, query, read JSON, make a token |
+
+The "Used in the walk" column is a record: that walk ran on `kindest/node:v1.35.8` with Helm 3.16.1, before AD-067 moved the floor. The commands were
+since run on `kindest/node:v1.37.0` with Helm 4.3.2 (and a kubectl 1.35.10 client, which is outside the supported skew of 1.37), to the same `Ready` agent; that is not a re-walk of the page.
 
 The platform supports Kubernetes 1.37 and later, and Helm 4 only. Both charts say so (`kubeVersion: ">=1.37.0-0"`), and Helm refuses an
 install on an older cluster. CI pins the kind node image to `kindest/node:v1.37.0` (with its digest). The steps below use the same one.

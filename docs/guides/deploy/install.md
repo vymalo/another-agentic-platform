@@ -6,7 +6,7 @@ To try the operator on a laptop first, use [Get started](../../get-started.md). 
 
 ## Before you start
 
-- A Kubernetes cluster. Kubernetes 1.37 or later is the floor: both charts say `kubeVersion: ">=1.37.0-0"` and Helm refuses an install on an older cluster, so below 1.37 the platform is unsupported, not merely untested. Every kind job in CI runs Kubernetes v1.37.0, and the `gvisor-k3d` workflow runs k3s v1.37.2.
+- A Kubernetes cluster. Kubernetes 1.37 or later is the floor: both charts say `kubeVersion: ">=1.37.0-0"` and Helm refuses an install on an older cluster, so below 1.37 the platform is unsupported, not merely untested. CI is configured to run every kind job on Kubernetes v1.37.0 and the `gvisor-k3d` workflow on k3s v1.37.2; that is unverified until CI has run it (see [What is unverified](#what-is-unverified)).
 - `kubectl` and Helm 4 (Helm 3 is not supported), with the repository checked out. Nothing publishes either chart: you install them from their paths. The chart's own note says so ([Known limitations](../../../deploy/operator/README.md#known-limitations)).
 - Namespaces for the agents. The operator is namespaced and has no `ClusterRole`. The chart makes a `Role` in each namespace you list, so each one must exist before you install.
 
@@ -125,7 +125,7 @@ The election, what a follower does, and how long a failover takes are on [Run tw
 
 | CI job | Workflow | What it runs |
 |---|---|---|
-| `operator-e2e` | [`operator.yml`](../../../.github/workflows/operator.yml) | The operator binary against a kind cluster (Kubernetes v1.37.0): its cluster tests, and the leader election's own cases against a real API server |
+| `operator-e2e` | [`operator.yml`](../../../.github/workflows/operator.yml) | The operator binary against a kind cluster (configured for Kubernetes v1.37.0, unverified until CI has run it): its cluster tests, and the leader election's own cases against a real API server |
 | `operator-coder-e2e` | [`operator-image.yml`](../../../.github/workflows/operator-image.yml) | Installs both charts in kind and runs the real coder image. `push` needs it |
 | `namespaces-e2e` | `operator-image.yml` | Two watched namespaces: one `Role` and `RoleBinding` in each and no `ClusterRole`, an agent `Ready` in each, a service id shared by two namespaces listed for neither. `push` needs it |
 | `leader-e2e` | `operator-image.yml` | Two replicas and one `Lease`: a killed holder is replaced only after the lease, a stopped one releases it at once, and the survivor serves the registry throughout. `push` needs it |
