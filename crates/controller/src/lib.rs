@@ -28,6 +28,10 @@ mod directory;
 mod error;
 mod meter;
 pub mod metering;
+mod tombstones;
+pub use tombstones::{
+    CONFIGMAP as TOMBSTONE_CONFIGMAP, KubeTombstones, MAX_BYTES as TOMBSTONE_MAX_BYTES,
+};
 mod metrics;
 mod operator;
 mod options;
@@ -48,8 +52,8 @@ pub use directory::ReflectorDirectory;
 pub use error::Error;
 pub use meter::{
     AccountFn, DEFAULT_PERIOD as METER_PERIOD, DEFAULT_SKEW_SECS, MAX_EVENTS_PER_PASS, Meter,
-    MeterConfig, OutcomesFn, SinkFn, erase_accounts, erase_sink, erase_sink_with_outcomes,
-    facts_of,
+    MeterConfig, OutcomesFn, SinkFn, TombstonesFn, erase_accounts, erase_sink,
+    erase_sink_with_outcomes, erase_tombstones, facts_of,
 };
 pub use metrics::{Metrics, name as metric};
 pub use operator::{FOLLOWER_RECHECK, Operator, Readiness};

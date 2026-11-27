@@ -428,6 +428,7 @@ async fn run_with(settings: crate::config::Settings, tracer: aap_trace::Tracer) 
             Arc::new(aap_ports::AlwaysLeader::new(candidate))
         }
     };
+    let meter_client = client.clone();
     let operator = compose(
         client,
         runtime,
@@ -442,6 +443,9 @@ async fn run_with(settings: crate::config::Settings, tracer: aap_trace::Tracer) 
         Some(parts) => (
             operator
                 .with_meter(parts.sink.clone(), parts.accounts)
+                // The facts of a pod that vanished with minutes not known delivered are kept in a ConfigMap of its
+                // namespace, so a crash or a failover loses none (ANR-1198).
+                .with_meter_tombstones(aap_controller::KubeTombstones::new(meter_client))
                 .with_meter_config(parts.config),
             Some(parts.sink),
         ),

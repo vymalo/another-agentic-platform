@@ -11,3 +11,15 @@ The usage port (ANR-673, AD-069; first AD-060, ANR-728): the pod-minute event, t
 * Feature `testkit`: `testkit::run(make)` (five rules, the fifth, both halves of the outcomes contract: a sink that reports names no event it was not sent, no more outcomes than acceptances (a repeat is two), and gives every accepted event a fate within a bound, polled for an adapter that reports from a task; accepts a valid event, refuses an invalid one naming the field, takes the same event twice, keeps order; the sink is wrapped in `testkit::Observed` so the kit can read what it took), `MemoryUsageSink` (with `hold_outcomes(fate)` and `settle(count)` to play a collector that has not answered) and `MemoryAccounts`.
 
 Tests: `cargo test -p aap-usage`. The fake passes the kit; five sinks each break one rule and the kit names it.
+
+## `TombstoneStore` (ANR-1198)
+
+The meter's durable facts. A `Tombstone` is what the meter knew of a pod that vanished while some of its minutes were not
+known delivered (uid, namespace, service, run, kind, account when known, weight, node type, start, end, the first minute not
+known delivered, when it was written); `TombstoneStore` keeps **one set per namespace**: `load(scope)` (a namespace, or every
+one when the scope is empty) and `save(namespace, set)`, which replaces the whole set atomically and answers `Unavailable`,
+`TooLarge` (the set does not fit, nothing changed) or `Conflict` (the stored set changed since it was read, nothing changed).
+`MAX_TOMBSTONES` (512) is the most the meter keeps in a namespace. The adapter for a `ConfigMap` is `aap_controller::KubeTombstones`.
+With the feature `testkit`: `MemoryTombstones` (with switches for a store that is down, small, or that conflicts once) and
+`testkit::tombstones::run`, whose three rules (round trip, replace, independent namespaces) a store must pass; three stores
+broken on purpose fail it in `tests/conformance.rs`. `Tombstone`'s `Debug` prints the account as `<redacted>`.

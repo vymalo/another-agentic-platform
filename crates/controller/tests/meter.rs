@@ -715,6 +715,7 @@ fn facts(uid: &str, start: i64) -> PodFacts {
         .collect();
     labels.insert("adam.vymalo.com/run".into(), run_hash("run-1"));
     PodFacts {
+        namespace: NS.into(),
         uid: uid.into(),
         labels,
         annotations: [
@@ -1187,4 +1188,579 @@ async fn acknowledgements_that_arrive_while_no_pass_runs_are_drained_by_settle_a
     assert_eq!(metrics.get(aap_controller::metric::METER_DELIVERED, &[]), 6);
     meter.pass(&[facts("uid-1", 600)], 1_010).await;
     assert_eq!(sink.taken().len(), 6);
+}
+
+// ---- the facts of a vanished pod are persisted (ANR-1198)
+
+use aap_usage::{MemoryTombstones, Tombstone, TombstoneError, TombstoneStore};
+
+/// A tombstone store the case keeps a handle on while the meter owns the other.
+struct SharedStore(Arc<MemoryTombstones>);
+impl TombstoneStore for SharedStore {
+    async fn load(&self, scope: &str) -> Result<Vec<Tombstone>, TombstoneError> {
+        self.0.load(scope).await
+    }
+    async fn save(&self, namespace: &str, set: &[Tombstone]) -> Result<(), TombstoneError> {
+        self.0.save(namespace, set).await
+    }
+}
+
+fn scopes() -> Vec<String> {
+    vec![NS.to_owned()]
+}
+
+/// A meter that reports acknowledgements and keeps tombstones in `store`; `skew` is zero so times are the case's.
+fn durable(
+    sink: &Arc<MemoryUsageSink>,
+    store: &Arc<MemoryTombstones>,
+    metrics: &Arc<Metrics>,
+) -> Meter {
+    acked(sink, metrics)
+        .with_tombstones(aap_controller::erase_tombstones(SharedStore(store.clone())))
+}
+
+fn minutes_on(sink: &MemoryUsageSink, uid: &str) -> Vec<u64> {
+    let mut m: Vec<u64> = sink
+        .taken()
+        .iter()
+        .filter(|e| e.event_id == event_id(uid, e.minute))
+        .map(|e| e.minute)
+        .collect();
+    m.sort_unstable();
+    m.dedup();
+    m
+}
+
+/// A pod seen Running at 1_000, listed no more at 1_100, whose minutes 10..=16 are handed over and not acknowledged.
+async fn vanish(meter: &Meter, uid: &str) {
+    let pod = facts(uid, 600);
+    meter.pass(std::slice::from_ref(&pod), 1_000).await;
+    meter.close_vanished(&HashSet::new(), 1_100).await;
+}
+
+use std::collections::HashSet;
+
+#[tokio::test]
+async fn a_vanished_pod_is_written_down_before_its_minutes_are_sent() {
+    // The collector is down: nothing is taken. The tombstone is there all the same, and a crash now loses nothing.
+    let (sink, store, metrics) = (
+        Arc::new(MemoryUsageSink::new()),
+        Arc::new(MemoryTombstones::new()),
+        Arc::new(Metrics::new()),
+    );
+    let meter = durable(&sink, &store, &metrics);
+    assert!(meter.restore(&scopes()).await);
+    let pod = facts("uid-1", 600);
+    meter.pass(std::slice::from_ref(&pod), 1_000).await; // 10..16 taken
+    sink.set_down(true);
+    meter.close_vanished(&HashSet::new(), 1_100).await; // minute 16 cannot be sent
+    let stored = store.stored(NS);
+    assert_eq!(stored.len(), 1, "one tombstone");
+    let t = &stored[0];
+    assert_eq!(
+        (t.uid.as_str(), t.namespace.as_str(), t.subject.as_deref()),
+        ("uid-1", NS, Some("acct-1"))
+    );
+    // The collector acknowledged 10..16 at once, so the first minute not known delivered is the one still to send.
+    assert_eq!((t.started_at, t.ended_at, t.first_minute), (600, 1_001, 16));
+    assert_eq!(
+        (t.weight_quarters, t.pod_kind, t.node_type.as_str()),
+        (4, PodKind::Run, "big")
+    );
+    assert_eq!(
+        metrics.get(aap_controller::metric::METER_TOMBSTONES_WRITTEN, &[]),
+        1
+    );
+}
+
+#[tokio::test]
+async fn a_crash_loses_no_minute_of_a_vanished_pod() {
+    let (sink, store, metrics) = (
+        Arc::new(MemoryUsageSink::new()),
+        Arc::new(MemoryTombstones::new()),
+        Arc::new(Metrics::new()),
+    );
+    sink.hold_outcomes(aap_usage::Fate::Delivered); // the collector has acknowledged nothing
+    let first = durable(&sink, &store, &metrics);
+    first.restore(&scopes()).await;
+    vanish(&first, "uid-1").await;
+    assert_eq!(minutes_on(&sink, "uid-1"), (10..=16).collect::<Vec<_>>());
+    assert_eq!(store.stored(NS).len(), 1);
+    // The operator dies with those minutes in its queue: the queue, the cursors and the meter are gone.
+    drop(first);
+    let lost = Arc::new(MemoryUsageSink::new()); // what the restarted operator's own sink holds: nothing
+    let second_metrics = Arc::new(Metrics::new());
+    let second = durable(&lost, &store, &second_metrics);
+    assert!(second.restore(&scopes()).await);
+    assert_eq!(
+        second_metrics.get(aap_controller::metric::METER_TOMBSTONES_RESTORED, &[]),
+        1
+    );
+    second.replay(1_200).await;
+    assert_eq!(
+        minutes_on(&lost, "uid-1"),
+        (10..=16).collect::<Vec<_>>(),
+        "every minute from the first one not acknowledged, none lost"
+    );
+    // Repeats are only by event id: the same event, byte for byte.
+    let before = sink.taken();
+    for e in lost.taken() {
+        let same = before
+            .iter()
+            .find(|b| b.event_id == e.event_id)
+            .expect("a repeat of an id");
+        assert_eq!(same, &e);
+    }
+}
+
+#[tokio::test]
+async fn a_failover_loses_no_minute_and_the_old_leader_writes_nothing_more() {
+    let (sink, store, metrics) = (
+        Arc::new(MemoryUsageSink::new()),
+        Arc::new(MemoryTombstones::new()),
+        Arc::new(Metrics::new()),
+    );
+    sink.hold_outcomes(aap_usage::Fate::Delivered);
+    let old = durable(&sink, &store, &metrics);
+    old.restore(&scopes()).await;
+    vanish(&old, "uid-1").await;
+    // The lease moves: the old leader is a follower now, and a pod that vanishes in its memory is not written.
+    old.lose_leadership();
+    let other = facts("uid-2", 600);
+    old.pass(std::slice::from_ref(&other), 1_000).await;
+    let before = store.stored(NS);
+    assert_eq!(old.close_vanished(&HashSet::new(), 1_100).await, 0);
+    assert_eq!(
+        store.stored(NS),
+        before,
+        "a replica that does not lead, or has not read the store, writes nothing"
+    );
+    // The new leader reads the set and sends what the old one's queue took with it.
+    let fresh = Arc::new(MemoryUsageSink::new());
+    let new = durable(&fresh, &store, &Arc::new(Metrics::new()));
+    new.restore(&scopes()).await;
+    new.replay(1_200).await;
+    assert_eq!(minutes_on(&fresh, "uid-1"), (10..=16).collect::<Vec<_>>());
+    assert!(
+        minutes_on(&fresh, "uid-2").is_empty(),
+        "uid-2 was never written down"
+    );
+}
+
+#[tokio::test]
+async fn a_tombstone_is_deleted_when_its_minutes_are_acknowledged() {
+    let (sink, store, metrics) = (
+        Arc::new(MemoryUsageSink::new()),
+        Arc::new(MemoryTombstones::new()),
+        Arc::new(Metrics::new()),
+    );
+    sink.hold_outcomes(aap_usage::Fate::Delivered);
+    let meter = durable(&sink, &store, &metrics);
+    meter.restore(&scopes()).await;
+    vanish(&meter, "uid-1").await;
+    assert_eq!(store.stored(NS).len(), 1);
+    meter.replay(1_200).await;
+    assert_eq!(
+        store.stored(NS).len(),
+        1,
+        "unacknowledged: the tombstone stays"
+    );
+    sink.settle(Some(3));
+    meter.replay(1_300).await;
+    assert_eq!(
+        store.stored(NS).len(),
+        1,
+        "three of seven acknowledged is not all"
+    );
+    sink.settle(None);
+    meter.replay(1_400).await;
+    assert!(
+        store.stored(NS).is_empty(),
+        "acknowledged: the tombstone is deleted"
+    );
+    assert_eq!(meter.tombstones_held(NS), 0);
+    assert_eq!(
+        metrics.get(aap_controller::metric::METER_TOMBSTONES_RELEASED, &[]),
+        1
+    );
+}
+
+#[tokio::test]
+async fn a_refusal_for_good_also_releases_the_tombstone() {
+    let (sink, store, metrics) = (
+        Arc::new(MemoryUsageSink::new()),
+        Arc::new(MemoryTombstones::new()),
+        Arc::new(Metrics::new()),
+    );
+    sink.hold_outcomes(aap_usage::Fate::Refused);
+    let meter = durable(&sink, &store, &metrics);
+    meter.restore(&scopes()).await;
+    vanish(&meter, "uid-1").await;
+    sink.settle(None);
+    meter.replay(1_400).await;
+    assert!(store.stored(NS).is_empty());
+}
+
+#[tokio::test]
+async fn a_pod_with_nothing_outstanding_gets_no_tombstone_and_no_write() {
+    let (sink, store, metrics) = (
+        Arc::new(MemoryUsageSink::new()),
+        Arc::new(MemoryTombstones::new()),
+        Arc::new(Metrics::new()),
+    );
+    let meter = durable(&sink, &store, &metrics);
+    meter.restore(&scopes()).await;
+    // Everything is sent and acknowledged (the sink answers at once) before the pod is gone: nothing to remember.
+    let pod = facts("uid-1", 600);
+    meter.pass(std::slice::from_ref(&pod), 1_000).await;
+    let mut finished = pod.clone();
+    finished.phase = "Succeeded".into();
+    finished.finished_at = Some(960);
+    meter.pass(&[finished], 1_030).await; // all of it handed over, in one more pass
+    meter.close_vanished(&HashSet::new(), 1_100).await;
+    assert_eq!(store.calls().0, 0, "no write at all");
+    assert!(store.stored(NS).is_empty());
+}
+
+#[tokio::test]
+async fn a_tombstone_older_than_the_backfill_bound_is_deleted_without_a_line() {
+    let (sink, store, metrics) = (
+        Arc::new(MemoryUsageSink::new()),
+        Arc::new(MemoryTombstones::new()),
+        Arc::new(Metrics::new()),
+    );
+    let now: i64 = 10_000_000;
+    let mut t = aap_usage::testkit::tombstones::tombstone(NS, "uid-old");
+    t.written_at = now - 24 * 3600 - 1;
+    t.started_at = now - 25 * 3600;
+    t.ended_at = now - 24 * 3600;
+    t.first_minute = u64::try_from(t.started_at / 60).unwrap();
+    store.seed(NS, vec![t]);
+    let meter = durable(&sink, &store, &metrics);
+    assert!(meter.restore(&scopes()).await);
+    meter.replay(now).await;
+    assert!(sink.taken().is_empty());
+    assert!(store.stored(NS).is_empty());
+    assert_eq!(
+        metrics.get(aap_controller::metric::METER_TOMBSTONES_EXPIRED, &[]),
+        1
+    );
+}
+
+#[tokio::test]
+async fn a_full_namespace_keeps_metering_from_memory_and_counts_what_has_no_tombstone() {
+    let (sink, store, metrics) = (
+        Arc::new(MemoryUsageSink::new()),
+        Arc::new(MemoryTombstones::new()),
+        Arc::new(Metrics::new()),
+    );
+    sink.hold_outcomes(aap_usage::Fate::Delivered);
+    let meter = durable(&sink, &store, &metrics);
+    meter.restore(&scopes()).await;
+    let n = aap_usage::MAX_TOMBSTONES + 1;
+    let pods: Vec<PodFacts> = (0..n).map(|i| facts(&format!("uid-{i:04}"), 600)).collect();
+    meter.pass(&pods, 1_000).await;
+    meter.close_vanished(&HashSet::new(), 1_100).await;
+    assert_eq!(
+        store.stored(NS).len(),
+        aap_usage::MAX_TOMBSTONES,
+        "the set stops at the bound"
+    );
+    assert_eq!(
+        metrics.get(aap_controller::metric::METER_TOMBSTONES_UNBACKED, &[]),
+        1
+    );
+    for i in 0..n {
+        assert_eq!(
+            minutes_on(&sink, &format!("uid-{i:04}")),
+            (10..=16).collect::<Vec<_>>(),
+            "pod {i} is metered whether or not it has a tombstone"
+        );
+    }
+}
+
+#[tokio::test]
+async fn a_store_that_cannot_hold_the_set_leaves_the_pods_metered_from_memory() {
+    let (sink, store, metrics) = (
+        Arc::new(MemoryUsageSink::new()),
+        Arc::new(MemoryTombstones::new()),
+        Arc::new(Metrics::new()),
+    );
+    sink.hold_outcomes(aap_usage::Fate::Delivered);
+    store.set_capacity(Some(1));
+    let meter = durable(&sink, &store, &metrics);
+    meter.restore(&scopes()).await;
+    let pods = [facts("uid-1", 600), facts("uid-2", 600)];
+    meter.pass(&pods, 1_000).await;
+    meter.close_vanished(&HashSet::new(), 1_100).await;
+    assert!(
+        store.stored(NS).is_empty(),
+        "a refused write changes nothing"
+    );
+    assert_eq!(
+        metrics.get(aap_controller::metric::METER_TOMBSTONES_UNBACKED, &[]),
+        2
+    );
+    assert_eq!(minutes_on(&sink, "uid-1"), (10..=16).collect::<Vec<_>>());
+    assert_eq!(minutes_on(&sink, "uid-2"), (10..=16).collect::<Vec<_>>());
+}
+
+#[tokio::test]
+async fn a_store_that_is_down_holds_the_pod_until_it_is_written() {
+    let (sink, store, metrics) = (
+        Arc::new(MemoryUsageSink::new()),
+        Arc::new(MemoryTombstones::new()),
+        Arc::new(Metrics::new()),
+    );
+    sink.hold_outcomes(aap_usage::Fate::Delivered);
+    let meter = durable(&sink, &store, &metrics);
+    meter.restore(&scopes()).await;
+    let pod = facts("uid-1", 600);
+    meter.pass(std::slice::from_ref(&pod), 1_000).await; // 10..16
+    store.set_down(true);
+    meter.close_vanished(&HashSet::new(), 1_100).await;
+    assert_eq!(
+        minutes_on(&sink, "uid-1"),
+        (10..16).collect::<Vec<_>>(),
+        "minute 16 waits: nothing is sent unwritten"
+    );
+    assert!(
+        metrics.get(
+            aap_controller::metric::METER_TOMBSTONE_ERRORS,
+            &[("op", "save")]
+        ) >= 1
+    );
+    store.set_down(false);
+    meter.close_vanished(&HashSet::new(), 1_160).await;
+    assert_eq!(store.stored(NS).len(), 1);
+    assert_eq!(minutes_on(&sink, "uid-1"), (10..=16).collect::<Vec<_>>());
+}
+
+#[tokio::test]
+async fn nothing_is_written_before_the_store_was_read_and_a_conflict_makes_it_read_again() {
+    let (sink, store, metrics) = (
+        Arc::new(MemoryUsageSink::new()),
+        Arc::new(MemoryTombstones::new()),
+        Arc::new(Metrics::new()),
+    );
+    sink.hold_outcomes(aap_usage::Fate::Delivered);
+    // Another leader's tombstone is in the store; this meter has not read it.
+    let theirs = aap_usage::testkit::tombstones::tombstone(NS, "uid-theirs");
+    store.seed(NS, vec![theirs]);
+    let meter = durable(&sink, &store, &metrics);
+    let pod = facts("uid-1", 600);
+    meter.pass(std::slice::from_ref(&pod), 1_000).await;
+    assert_eq!(meter.close_vanished(&HashSet::new(), 1_100).await, 0);
+    assert_eq!(
+        store.stored(NS).len(),
+        1,
+        "unread: not a byte written over theirs"
+    );
+    // A write that finds the set changed asks to read again, and the next pass does.
+    assert!(meter.restore(&scopes()).await);
+    store.fail_next_save(TombstoneError::Conflict);
+    meter.close_vanished(&HashSet::new(), 1_100).await;
+    assert_eq!(store.stored(NS).len(), 1, "the conflict wrote nothing");
+    assert!(meter.restore(&scopes()).await, "it reads again");
+    meter.close_vanished(&HashSet::new(), 1_160).await;
+    let uids: Vec<String> = store.stored(NS).into_iter().map(|t| t.uid).collect();
+    assert_eq!(uids, ["uid-1", "uid-theirs"], "both are kept");
+}
+
+// ---- the same, through the operator and the fake API server's ConfigMaps
+
+use aap_controller::KubeTombstones;
+
+const TOMBS: &str = "aap-meter-tombstones";
+
+/// An operator with the meter and a ConfigMap store, over `fake`, on `sink`.
+async fn start_durable(fake: &Fake, sink: Arc<MemoryUsageSink>) -> Rig {
+    let accounts = Arc::new(MemoryAccounts::new());
+    accounts.set_run("coder", "run-1", "acct-1");
+    let owner: OwnerOf = Arc::new(|_| OwnerHandle::none());
+    let operator = Operator::new(
+        fake.client(),
+        Scripted::new(),
+        MemoryStore::new(),
+        owner,
+        options(),
+    )
+    .with_meter(Shared(sink.clone()), Shared(accounts.clone()))
+    .with_meter_tombstones(KubeTombstones::new(fake.client()))
+    .with_meter_config(config());
+    let metrics = operator.metrics();
+    let (stop, stopped) = oneshot::channel::<()>();
+    let done = tokio::spawn(operator.run(async move {
+        let _ = stopped.await;
+    }));
+    Rig {
+        fake: fake.clone(),
+        sink,
+        accounts,
+        metrics,
+        stop,
+        done,
+    }
+}
+
+fn tombstone_keys(fake: &Fake) -> Vec<String> {
+    fake.configmap(NS, TOMBS)
+        .and_then(|cm| cm["data"].as_object().cloned())
+        .map(|d| d.keys().cloned().collect())
+        .unwrap_or_default()
+}
+
+#[tokio::test]
+async fn a_crash_and_a_failover_with_queued_minutes_of_a_vanished_pod_lose_none() {
+    let fake = Fake::new();
+    let m0 = now() / 60 - 30;
+    fake.put_pod(finished_run("r1", "uid-1", "run-1", m0 * 60, (m0 + 5) * 60));
+    // The first operator hands the five minutes over; the collector acknowledges none of them.
+    let queue = Arc::new(MemoryUsageSink::new());
+    queue.hold_outcomes(aap_usage::Fate::Delivered);
+    let first = start_durable(&fake, queue.clone()).await;
+    eventually("the five minutes handed over", || queue.taken().len() >= 5).await;
+    // The pod's object goes (the coder's own cleanup), while its minutes are still queued.
+    fake.remove_pod(NS, "r1");
+    eventually("the tombstone", || tombstone_keys(&fake) == ["uid-1"]).await;
+    // It dies with its queue (nothing is stopped gracefully: the sink is simply never read again), and a second
+    // operator, another replica that wins the lease, has an empty sink of its own.
+    first.stop().await;
+    let fresh = Arc::new(MemoryUsageSink::new());
+    let second = start_durable(&fake, fresh.clone()).await;
+    eventually("the minutes sent again", || fresh.taken().len() >= 5).await;
+    let want: Vec<u64> = (m0..m0 + 5).map(|m| m as u64).collect();
+    assert_eq!(
+        minutes_on(&fresh, "uid-1"),
+        want,
+        "no minute of the vanished pod is lost"
+    );
+    // The same events, byte for byte: the collector dedupes them by `event_id`.
+    for e in fresh.taken() {
+        let before = queue
+            .taken()
+            .into_iter()
+            .find(|b| b.event_id == e.event_id)
+            .unwrap();
+        assert_eq!(before, e);
+    }
+    // The fresh sink acknowledges at once, so the tombstone goes.
+    eventually("the tombstone is deleted", || {
+        tombstone_keys(&fake).is_empty()
+    })
+    .await;
+    second.stop().await;
+}
+
+#[tokio::test]
+async fn the_meter_uses_only_the_verbs_the_operators_role_holds_on_configmaps() {
+    let fake = Fake::new();
+    let m0 = now() / 60 - 30;
+    fake.put_pod(finished_run("r1", "uid-1", "run-1", m0 * 60, (m0 + 3) * 60));
+    let queue = Arc::new(MemoryUsageSink::new());
+    queue.hold_outcomes(aap_usage::Fate::Delivered);
+    let rig = start_durable(&fake, queue.clone()).await;
+    eventually("the minutes", || queue.taken().len() >= 3).await;
+    fake.remove_pod(NS, "r1");
+    eventually("the tombstone", || tombstone_keys(&fake) == ["uid-1"]).await;
+    queue.settle(None);
+    eventually("the tombstone is deleted", || {
+        tombstone_keys(&fake).is_empty()
+    })
+    .await;
+    rig.stop().await;
+    let calls = fake.calls();
+    let on_configmaps: std::collections::BTreeSet<String> = calls
+        .iter()
+        .filter(|c| c.path.contains("/configmaps"))
+        .map(|c| c.method.clone())
+        .collect();
+    assert!(!on_configmaps.is_empty());
+    // The Role: get, list, patch, create, delete. This adapter needs get, create and patch, and never update.
+    assert!(
+        on_configmaps.is_subset(&["GET", "POST", "PATCH"].map(String::from).into()),
+        "{on_configmaps:?}"
+    );
+    assert!(
+        !calls.iter().any(|c| c.path.contains("/secrets")),
+        "and no Secret is touched"
+    );
+    // One write per change of the set, never one per pod per period: a tombstone in, a tombstone out.
+    let writes = calls
+        .iter()
+        .filter(|c| c.path.contains("/configmaps") && c.method != "GET")
+        .count();
+    assert_eq!(
+        writes, 2,
+        "{writes} writes for one pod's life: created with the tombstone, patched when it went"
+    );
+}
+
+#[tokio::test]
+async fn two_writers_cannot_lose_each_others_tombstones() {
+    let fake = Fake::new();
+    let a = KubeTombstones::new(fake.client());
+    let b = KubeTombstones::new(fake.client());
+    let t = |uid: &str| aap_usage::testkit::tombstones::tombstone(NS, uid);
+    assert!(a.load(NS).await.unwrap().is_empty());
+    assert!(b.load(NS).await.unwrap().is_empty());
+    a.save(NS, &[t("uid-a")]).await.unwrap();
+    // B never saw A's ConfigMap: its create finds one there.
+    assert_eq!(
+        b.save(NS, &[t("uid-b")]).await,
+        Err(TombstoneError::Conflict)
+    );
+    // B reads, then writes over what it read.
+    assert_eq!(b.load(NS).await.unwrap().len(), 1);
+    b.save(NS, &[t("uid-a"), t("uid-b")]).await.unwrap();
+    // A's next write is over a version that moved.
+    assert_eq!(a.save(NS, &[]).await, Err(TombstoneError::Conflict));
+    assert_eq!(
+        tombstone_keys(&fake),
+        ["uid-a", "uid-b"],
+        "nothing was lost"
+    );
+    // And the whole set of a namespace is one ConfigMap, found by its label across namespaces.
+    assert_eq!(
+        KubeTombstones::new(fake.client())
+            .load("")
+            .await
+            .unwrap()
+            .len(),
+        2
+    );
+}
+
+#[tokio::test]
+async fn a_set_that_does_not_fit_in_a_configmap_is_refused_and_changes_nothing() {
+    let fake = Fake::new();
+    let store = KubeTombstones::new(fake.client());
+    store.load(NS).await.unwrap();
+    let t = aap_usage::testkit::tombstones::tombstone(NS, "uid-0");
+    store.save(NS, std::slice::from_ref(&t)).await.unwrap();
+    // Far past what the meter ever holds (MAX_TOMBSTONES): the byte bound is the second fence.
+    let many: Vec<Tombstone> = (0..4_000)
+        .map(|i| aap_usage::testkit::tombstones::tombstone(NS, &format!("{i:064}")))
+        .collect();
+    assert_eq!(store.save(NS, &many).await, Err(TombstoneError::TooLarge));
+    assert_eq!(tombstone_keys(&fake), ["uid-0"]);
+    // And at the meter's own bound the set is well under the 1 MiB the API server enforces.
+    let at_bound: Vec<Tombstone> = (0..aap_usage::MAX_TOMBSTONES)
+        .map(|i| {
+            let mut t = aap_usage::testkit::tombstones::tombstone(NS, &format!("{i:036}"));
+            t.service = "s".repeat(128);
+            t.node_type = "n".repeat(128);
+            t.subject = Some("a".repeat(128));
+            t.run = Some("r".repeat(128));
+            t
+        })
+        .collect();
+    store.save(NS, &at_bound).await.unwrap();
+    let size: usize = fake.configmap(NS, TOMBS).unwrap()["data"]
+        .as_object()
+        .unwrap()
+        .values()
+        .map(|v| v.as_str().unwrap().len())
+        .sum();
+    assert!(size < aap_controller::TOMBSTONE_MAX_BYTES, "{size}");
 }

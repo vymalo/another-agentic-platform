@@ -360,8 +360,9 @@ activity:
 # orchestrator's broker names for the run (`broker`). It needs run pods with `runPods.nodeType` admitting exactly ONE value (the node type
 # of a run pod is read from its node affinity: the meter reads no Node, so it needs no ClusterRole). Every address is a NetworkPolicy peer
 # the chart requires (`to`), never open egress; `port` is the PODS' port (a NetworkPolicy sees it after the Service). The broker's bearer is
-# a Secret key, mounted as a file and read once at start. DO NOT TURN IT ON before ANR-1198 (durable delivery) lands or the owner accepts,
-# in writing, that the minutes queued in memory are lost with the process.
+# a Secret key, mounted as a file and read once at start. Since ANR-1198 the facts of a pod that vanished with minutes not yet
+# acknowledged are kept in a ConfigMap (aap-meter-tombstones, in the pod's namespace; the Role already allows it), so it may be
+# turned on; the Collector must dedupe on event_id for at least 24 h (docs/guides/deploy/metering.md says what is still lost).
 metering:
   enabled: false
   # The `source` of every line: a constant of the deployment, the same on every replica ([A-Za-z0-9._:/-], at most 128).

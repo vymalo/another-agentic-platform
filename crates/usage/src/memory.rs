@@ -170,3 +170,106 @@ impl AccountSource for MemoryAccounts {
         })
     }
 }
+
+/// The in-memory [`TombstoneStore`](crate::TombstoneStore): what a test keeps a handle on while the meter owns the
+/// other. Switches make it unavailable, or too small, as a `ConfigMap` that cannot be written or that is full.
+#[derive(Default)]
+pub struct MemoryTombstones {
+    inner: Mutex<Tombstones>,
+}
+
+#[derive(Default)]
+struct Tombstones {
+    sets: BTreeMap<String, Vec<crate::Tombstone>>,
+    down: bool,
+    capacity: Option<usize>,
+    fail_next_save: Option<crate::TombstoneError>,
+    saves: usize,
+    loads: usize,
+}
+
+impl MemoryTombstones {
+    /// An empty store.
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Make every call [`TombstoneError::Unavailable`](crate::TombstoneError::Unavailable) (or work again).
+    pub fn set_down(&self, down: bool) {
+        self.with(|t| t.down = down);
+    }
+
+    /// Hold at most `n` tombstones in a namespace: a larger set is [`TombstoneError::TooLarge`](crate::TombstoneError::TooLarge).
+    pub fn set_capacity(&self, n: Option<usize>) {
+        self.with(|t| t.capacity = n);
+    }
+
+    /// The next `save` fails with `error` and changes nothing (once).
+    pub fn fail_next_save(&self, error: crate::TombstoneError) {
+        self.with(|t| t.fail_next_save = Some(error));
+    }
+
+    /// The set of `namespace` as stored, sorted by uid.
+    pub fn stored(&self, namespace: &str) -> Vec<crate::Tombstone> {
+        self.with(|t| t.sets.get(namespace).cloned().unwrap_or_default())
+    }
+
+    /// Put `set` in the store as it is found after a crash (no checks).
+    pub fn seed(&self, namespace: &str, set: Vec<crate::Tombstone>) {
+        self.with(|t| {
+            t.sets.insert(namespace.to_owned(), set);
+        });
+    }
+
+    /// How many times `save` was called, and how many times `load`.
+    pub fn calls(&self) -> (usize, usize) {
+        self.with(|t| (t.saves, t.loads))
+    }
+
+    fn with<T>(&self, f: impl FnOnce(&mut Tombstones) -> T) -> T {
+        f(&mut self.inner.lock().unwrap_or_else(PoisonError::into_inner))
+    }
+}
+
+impl crate::TombstoneStore for MemoryTombstones {
+    async fn load(&self, scope: &str) -> Result<Vec<crate::Tombstone>, crate::TombstoneError> {
+        self.with(|t| {
+            t.loads += 1;
+            if t.down {
+                return Err(crate::TombstoneError::Unavailable);
+            }
+            Ok(t.sets
+                .iter()
+                .filter(|(ns, _)| scope.is_empty() || ns.as_str() == scope)
+                .flat_map(|(_, v)| v.clone())
+                .collect())
+        })
+    }
+
+    async fn save(
+        &self,
+        namespace: &str,
+        set: &[crate::Tombstone],
+    ) -> Result<(), crate::TombstoneError> {
+        self.with(|t| {
+            t.saves += 1;
+            if t.down {
+                return Err(crate::TombstoneError::Unavailable);
+            }
+            if let Some(e) = t.fail_next_save.take() {
+                return Err(e);
+            }
+            if t.capacity.is_some_and(|c| set.len() > c) {
+                return Err(crate::TombstoneError::TooLarge);
+            }
+            let mut sorted = set.to_vec();
+            sorted.sort_by(|a, b| a.uid.cmp(&b.uid));
+            if sorted.is_empty() {
+                t.sets.remove(namespace);
+            } else {
+                t.sets.insert(namespace.to_owned(), sorted);
+            }
+            Ok(())
+        })
+    }
+}

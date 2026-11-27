@@ -21,13 +21,16 @@ use std::future::Future;
 
 use sha2::{Digest, Sha256};
 
+mod tombstone;
+pub use tombstone::{MAX_TOMBSTONES, Tombstone, TombstoneError, TombstoneStore};
+
 #[cfg(feature = "testkit")]
 pub mod testkit;
 
 #[cfg(feature = "testkit")]
 mod memory;
 #[cfg(feature = "testkit")]
-pub use memory::{MemoryAccounts, MemoryUsageSink};
+pub use memory::{MemoryAccounts, MemoryTombstones, MemoryUsageSink};
 
 /// The `type` of a pod-minute event, a log attribute of the OTLP record (AD-069).
 pub const EVENT_TYPE: &str = "com.vymalo.agents.pod-minute.v1";

@@ -170,3 +170,128 @@ pub async fn run<S: Observed, F: Fn() -> S>(make: F) -> Result<(), String> {
     check_order(&make()).await?;
     check_outcomes(&make(), OUTCOMES_WITHIN).await
 }
+
+/// The conformance suite of [`TombstoneStore`](crate::TombstoneStore): one `check_*` per rule, and [`run`](tombstones::run).
+pub mod tombstones {
+    use crate::{PodKind, Tombstone, TombstoneStore};
+
+    /// A tombstone of a run pod in `namespace`.
+    pub fn tombstone(namespace: &str, uid: &str) -> Tombstone {
+        Tombstone {
+            namespace: namespace.into(),
+            uid: uid.into(),
+            service: "coder".into(),
+            run: Some("run-1".into()),
+            pod_kind: PodKind::Run,
+            subject: Some("acct-a".into()),
+            weight_quarters: 4,
+            node_type: "std".into(),
+            started_at: 600,
+            ended_at: 900,
+            first_minute: 10,
+            written_at: 1_000,
+        }
+    }
+
+    fn sorted(mut v: Vec<Tombstone>) -> Vec<Tombstone> {
+        v.sort_by(|a, b| a.uid.cmp(&b.uid));
+        v
+    }
+
+    /// Rule 1: nothing stored is an empty set, and what is saved reads back whole.
+    pub async fn check_round_trip<S: TombstoneStore>(s: &S) -> Result<(), String> {
+        if !s
+            .load("ns-a")
+            .await
+            .map_err(|e| format!("round-trip: {e}"))?
+            .is_empty()
+        {
+            return Err("round-trip: a fresh store is not empty".into());
+        }
+        let mut b = tombstone("ns-a", "uid-b");
+        b.subject = None;
+        b.run = None;
+        b.pod_kind = PodKind::Agent;
+        let set = vec![tombstone("ns-a", "uid-a"), b];
+        s.save("ns-a", &set)
+            .await
+            .map_err(|e| format!("round-trip: {e}"))?;
+        let got = s
+            .load("ns-a")
+            .await
+            .map_err(|e| format!("round-trip: {e}"))?;
+        if sorted(got) != sorted(set) {
+            return Err("round-trip: what was saved is not what was read".into());
+        }
+        Ok(())
+    }
+
+    /// Rule 2: a save **replaces** the set (a tombstone left out is gone), and an empty set clears it.
+    pub async fn check_replaces<S: TombstoneStore>(s: &S) -> Result<(), String> {
+        s.save(
+            "ns-a",
+            &[tombstone("ns-a", "uid-a"), tombstone("ns-a", "uid-b")],
+        )
+        .await
+        .map_err(|e| format!("replaces: {e}"))?;
+        s.save("ns-a", &[tombstone("ns-a", "uid-b")])
+            .await
+            .map_err(|e| format!("replaces: {e}"))?;
+        let got = s.load("ns-a").await.map_err(|e| format!("replaces: {e}"))?;
+        if got.len() != 1 || got[0].uid != "uid-b" {
+            return Err("replaces: a tombstone left out of a save is still there".into());
+        }
+        s.save("ns-a", &[])
+            .await
+            .map_err(|e| format!("replaces: {e}"))?;
+        if !s
+            .load("ns-a")
+            .await
+            .map_err(|e| format!("replaces: {e}"))?
+            .is_empty()
+        {
+            return Err("replaces: an empty save did not clear the set".into());
+        }
+        Ok(())
+    }
+
+    /// Rule 3: namespaces are independent, and the empty scope reads every one.
+    pub async fn check_namespaces<S: TombstoneStore>(s: &S) -> Result<(), String> {
+        s.save("ns-a", &[tombstone("ns-a", "uid-a")])
+            .await
+            .map_err(|e| format!("namespaces: {e}"))?;
+        s.save("ns-b", &[tombstone("ns-b", "uid-b")])
+            .await
+            .map_err(|e| format!("namespaces: {e}"))?;
+        s.save("ns-a", &[])
+            .await
+            .map_err(|e| format!("namespaces: {e}"))?;
+        let b = s
+            .load("ns-b")
+            .await
+            .map_err(|e| format!("namespaces: {e}"))?;
+        if b.len() != 1 || b[0].namespace != "ns-b" {
+            return Err("namespaces: a save in one namespace changed another".into());
+        }
+        let all = s.load("").await.map_err(|e| format!("namespaces: {e}"))?;
+        if all.len() != 1 {
+            return Err("namespaces: the empty scope does not read every namespace".into());
+        }
+        if !s
+            .load("ns-a")
+            .await
+            .map_err(|e| format!("namespaces: {e}"))?
+            .is_empty()
+        {
+            return Err("namespaces: a load returned a tombstone of another namespace".into());
+        }
+        Ok(())
+    }
+
+    /// Runs every rule, each on a store `make` returns fresh. The first broken rule is the error.
+    pub async fn run<S: TombstoneStore, F: Fn() -> S>(make: F) -> Result<(), String> {
+        check_round_trip(&make()).await?;
+        check_replaces(&make()).await?;
+        check_namespaces(&make()).await
+    }
+}

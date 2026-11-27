@@ -88,6 +88,8 @@ impl Unattributed {
 /// What the meter reads of a pod. Built from the Kubernetes object by [`crate::meter`]; tests build it by hand.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct PodFacts {
+    /// `metadata.namespace`: where a tombstone of the pod is kept (ANR-1198).
+    pub namespace: String,
     /// `metadata.uid`.
     pub uid: String,
     /// `metadata.labels`.
@@ -275,7 +277,7 @@ pub fn minutes(p: &PodFacts, now: i64, skew: i64) -> Result<Option<Ran>, Unmeter
     Ok(Some(Ran { range, complete }))
 }
 
-fn to_minute(secs: i64) -> u64 {
+pub(crate) fn to_minute(secs: i64) -> u64 {
     u64::try_from(secs.div_euclid(60)).unwrap_or(0)
 }
 
