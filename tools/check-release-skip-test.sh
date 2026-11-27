@@ -39,6 +39,10 @@ fail no-actor.yml "jobs:
   test:
 $comment
     $guard && github.event.pull_request.user.login == 'vaam-apps[bot]') }}" 'a guard without the actor check'
+fail trailing.yml "jobs:
+  test:
+$comment
+    $guard && github.event.pull_request.user.login == 'vaam-apps[bot]') }} # github.actor == 'vaam-apps[bot]'" 'a guard whose actor check is only a YAML comment'
 fail no-author.yml "jobs:
   test:
 $comment
@@ -61,4 +65,4 @@ write none.yml "jobs:
     runs-on: ubuntu-latest"
 if sh "$check" "$tmp" >/dev/null 2>&1; then echo 'FAIL: a tree with no guard passed'; exit 1; fi
 
-echo "ok: the real guard passes; a missing author, actor or comment fails; a comment that names the branch is ignored; no guard at all fails"
+echo "ok: the real guard passes; a missing author, actor or comment fails, a check only in a YAML comment fails, a comment that names the branch is ignored, no guard at all fails"

@@ -17,13 +17,16 @@ for file in "$dir"/.github/workflows/*.yml; do
   count=$(awk -v file="$file" '
     function bad(msg) { printf "%s:%d: %s\n", file, FNR, msg > "/dev/stderr"; status = 1 }
     {
+      # A YAML comment at the end of the line must not satisfy a check: match the line without it.
+      line = $0
+      sub(/[[:space:]]+#.*$/, "", line)
       # A job-level `if:` that names the release branch. Comments and run blocks are not anchored this way.
-      if ($0 ~ /^[[:space:]]*if:.*release-please--/) {
+      if (line ~ /^[[:space:]]*if:.*release-please--/) {
         found++
-        if ($0 !~ /github\.event\.pull_request\.user\.login == .vaam-apps\[bot\]/) {
+        if (line !~ /github\.event\.pull_request\.user\.login == .vaam-apps\[bot\]/) {
           bad("the release-PR skip guard lacks the author check (github.event.pull_request.user.login == '"'"'vaam-apps[bot]'"'"')")
         }
-        if ($0 !~ /github\.actor == .vaam-apps\[bot\]/) {
+        if (line !~ /github\.actor == .vaam-apps\[bot\]/) {
           bad("the release-PR skip guard lacks the actor check (github.actor == '"'"'vaam-apps[bot]'"'"')")
         }
         if (prev !~ /ANR-1206/ && prev2 !~ /ANR-1206/) {
