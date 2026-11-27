@@ -167,6 +167,8 @@ runPods:
     # More egress rules for a run pod, as NetworkPolicy `egress` entries: an in-cluster target the proxy cannot serve (it connects to
     # public IPv4 addresses only), such as a model gateway in the cluster. Add its host to `egressProxy.extraNoProxy` too, or the tools
     # send the request to the proxy, which refuses it.
+    # Each rule needs a `to` (no `to` allows every destination) and no `ipBlock` may be a /0: the operator
+    # refuses both in the file it reads (ANR-1353). The chart does not check them yet.
     extraEgress: []
   # The only way out of a run pod to the internet (adam-rs ADR 0042): `adam-egress`, an HTTPS-only forward proxy, one Deployment per
   # agent that has run pods, from THE AGENT'S OWN CODER IMAGE (`tini -- adam-egress`; no other image to pin). It accepts `CONNECT host:443`
@@ -323,7 +325,8 @@ networkPolicy:
 # operator may reach (NetworkPolicyPeers: namespaceSelector, podSelector, ipBlock). A NetworkPolicy names peers and never host names, so
 # the policy is what bounds a probe: the chart opens the operator's egress to exactly these peers on `ports`, plus DNS, and a probe to a
 # server that is not covered has no route. The operator still reads no Secret (AD-024). A rule always has a `to`: an ipBlock
-# whose CIDR has a `/0` prefix, or that has no cidr, is refused (for `to` and for `dns.to`). NOTE: the API server's own egress rule is separate and, with `networkPolicy.apiServer.cidrs` empty,
+# whose CIDR has a `/0` prefix, or that has no cidr, is refused (for `to` and for `dns.to`). In this and every other list of peers, an
+# empty `namespaceSelector` selects every namespace and is refused: name `matchLabels` or `matchExpressions`. NOTE: the API server's own egress rule is separate and, with `networkPolicy.apiServer.cidrs` empty,
 # already allows any address on 443 and 6443; an https probe on 443 is therefore bounded by `toolProbe.to` only once that list names the API
 # server's addresses. Narrow it in a deployment that probes https servers.
 # ANR-770: what the operator does with the database and volumes a deleted agent left behind (deletionPolicy: Retain), the file's
@@ -414,7 +417,8 @@ metering:
 
 toolProbe:
   # Who the operator may reach. Empty: no probe, and not a trace of it in any render. The peers of an in-cluster MCP server (a
-  # namespaceSelector or a podSelector) or its addresses (an ipBlock).
+  # namespaceSelector or a podSelector) or its addresses (an ipBlock). An empty `namespaceSelector` selects every namespace and is
+  # refused: name `matchLabels` or `matchExpressions`.
   to: []
   # The ports a probe may use, as the provider's URL names them: 443 for an https server, 80 or the port of an in-cluster server.
   ports: [80, 443]
@@ -716,10 +720,14 @@ api:
     handshakeTimeoutSecs: 5
     maxHandshakesPerIp: 8
     maxConnections: 256
-    # The workloads: REQUIRED, at least one. Each `spiffeId` is the exact URI SAN (spiffe://...), once; `permissions` is `[platform:agents.own]` or empty.
+    # The workloads: REQUIRED, at least one. Each `spiffeId` is the exact URI SAN (spiffe://...), once; `permissions` is any of
+    # `platform:agents.own`, `platform:agents.read.owner`, both, or empty (AD-072: the orchestrator holds both, the staff service the
+    # read-only one; anything else is refused at render and at load).
     clients: []
     #  - spiffeId: spiffe://another/ns/another-agents/sa/orchestrator
-    #    permissions: [platform:agents.own]
+    #    permissions: [platform:agents.own, platform:agents.read.owner]
+    #  - spiffeId: spiffe://another/ns/another-agents/sa/staff
+    #    permissions: [platform:agents.read.owner]
     tls:
       # REQUIRED: a Secret of type kubernetes.io/tls (tls.crt, tls.key) the deployment makes: the server certificate the API presents, which
       # the workload checks against its own trust. Mounted at /etc/aap-api-workload/tls and re-read by the API when the file changes (30 s).

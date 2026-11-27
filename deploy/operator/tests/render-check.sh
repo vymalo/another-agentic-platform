@@ -760,7 +760,10 @@ check "replicas: a fraction is refused" refused 'replicas must be a whole number
 # `--set-json`, is a float, and only the whole-number check refuses that one. Both must be refused: the second is the
 # shape that would render `replicas: 2.5` and leave the Deployment to the API server.
 check "replicas: a fraction that is a float, as a values file gives it, is refused too" refused 'replicas must be a whole number' --set-json 'replicas=2.5'
-check "leaderElection: a retry of 0 is refused (the loop's retry is at least a second)" refused 'each at least 1' --set replicas=2 --set leaderElection.retrySecs=0
+check "leaderElection: a retry of 0 is refused (the loop's retry is at least a second)" refused 'leaderElection.retrySecs must be a whole number of seconds, at least 1' --set replicas=2 --set leaderElection.retrySecs=0
+check "leaderElection: a fraction is refused (the file's three are u64, so the operator would refuse it at start)" refused 'whole number of seconds' --set replicas=2 --set-json 'leaderElection={"leaseSecs":15.5}'
+render --set replicas=2 --set-json 'leaderElection={"leaseSecs":15.0}'
+check "leaderElection: a whole float renders as the integer the file needs" has 'leaseSecs: 15$'
 check "with the election on, a pass that could outlive the lease margin is refused" refused 'reconcileTimeoutSecs must be below leaseSecs - renewSecs' --set replicas=2 --set tuning.reconcileTimeoutSecs=5
 check "with the election on, the probe's budget must fit the pass" refused 'does not fit the pass' --set replicas=2 \
   --set-json 'toolProbe.to=[{"namespaceSelector":{"matchLabels":{"a":"b"}}}]' \
@@ -847,6 +850,9 @@ check "a registry.publicUrl with credentials is refused" refused 'registry.publi
 check "no API server port is refused" refused 'networkPolicy.apiServer.ports must name at least one port' --set 'networkPolicy.apiServer.ports=null'
 check "a tuning key that is not a setting is refused" refused 'is not a setting' --set tuning.foo=1
 check "a tuning value below 1 is refused" refused 'at least 1' --set tuning.concurrency=0
+check "a tuning value that is not a whole number is refused (the operator's file has u64)" refused 'whole number' --set-json 'tuning={"reconcileTimeoutSecs":10.5}'
+render --set-json 'tuning={"reconcileTimeoutSecs":10.0}'
+check "a tuning value written as a whole float renders as the integer the file needs" has 'timeoutSecs: 10$'
 check "storeCnpg must be a boolean" refused 'storeCnpg must be true or false' --set storeCnpg=yes
 check "a missing service account name is refused when none is created" refused 'serviceAccount.name is required' --set serviceAccount.create=false
 
@@ -2274,6 +2280,51 @@ check "metering.dns.to emptied is refused while the policy is on" met_refused 'm
 check "metering: a key that is not a setting is refused" refused 'metering.foo is not a setting' --set metering.foo=1
 check "metering must be a map" refused 'metering must be a map' --set metering=null
 check "an ipBlock of 0.0.0.0/0 as a collector peer is refused" met_refused 'is every address' --set-json 'metering.collector.to=[{"ipBlock":{"cidr":"0.0.0.0/0"}}]'
+
+# ---- An empty namespaceSelector is every namespace (ANR-1191) ------------------------------------------------------------------
+# `namespaceSelector: {}` selects every namespace in a NetworkPolicy, so every list of peers refuses a namespaceSelector that has no
+# matchLabels and no matchExpressions; one with either renders.
+every_ns='[{"namespaceSelector":{}}]'
+ns_msg='a namespaceSelector with no matchLabels and no matchExpressions selects every namespace'
+ns_dns='[{"namespaceSelector":{"matchLabels":{"a":"b"}}}]'
+check "an empty namespaceSelector as a toolProbe peer is refused" refused "toolProbe.to: $ns_msg" \
+  --set-json "toolProbe.to=$every_ns" --set-json "toolProbe.dns.to=$ns_dns"
+check "an empty namespaceSelector as an activity peer is refused" refused "activity.to: $ns_msg" \
+  --set-json "activity.to=$every_ns" --set activity.tokenSecret.name=agent-bearer --set-json "activity.dns.to=$ns_dns"
+check "an empty namespaceSelector as a traces collector peer is refused" refused "otel.to: $ns_msg" \
+  -f "$here/otel.values.yaml" --set-json "otel.to=$every_ns"
+check "an empty namespaceSelector as a metering broker peer is refused" refused "metering.broker.to: $ns_msg" \
+  -f "$here/metering.values.yaml" --set-json "metering.broker.to=$every_ns"
+check "an empty namespaceSelector as a registry reader is refused" refused "networkPolicy.registry.allowFrom: $ns_msg" \
+  -f "$here/leader.values.yaml" --set-json "networkPolicy.registry.allowFrom=$every_ns"
+check "an empty namespaceSelector as a metrics scraper is refused" refused "networkPolicy.metrics.allowFrom: $ns_msg" \
+  -f "$here/metrics.values.yaml" --set-json "networkPolicy.metrics.allowFrom=$every_ns"
+check "an empty namespaceSelector as an API metrics scraper is refused" refused "api.metrics.allowFrom: $ns_msg" \
+  -f "$here/metrics.values.yaml" --set-json "api.metrics.allowFrom=$every_ns"
+check "an empty namespaceSelector as an API ingress peer is refused" refused "api.networkPolicy.from: $ns_msg" \
+  -f "$here/metrics.values.yaml" --set-json "api.networkPolicy.from=$every_ns"
+# The other spellings of nothing: null, and each of the two keys empty.
+for nothing in 'null' '{"matchLabels":{}}' '{"matchExpressions":[]}'; do
+  check "a namespaceSelector of $nothing is refused" refused "toolProbe.to: $ns_msg" \
+    --set-json "toolProbe.to=[{\"namespaceSelector\":$nothing}]" --set-json "toolProbe.dns.to=$ns_dns"
+done
+check "an empty namespaceSelector is refused even beside a podSelector" refused "toolProbe.to: $ns_msg" \
+  --set-json 'toolProbe.to=[{"namespaceSelector":{},"podSelector":{"matchLabels":{"a":"b"}}}]' --set-json "toolProbe.dns.to=$ns_dns"
+check "an ipBlock of 0.0.0.0/0 as a registry reader is refused" refused 'networkPolicy.registry.allowFrom: an ipBlock of 0.0.0.0/0 is every address' \
+  -f "$here/leader.values.yaml" --set-json 'networkPolicy.registry.allowFrom=[{"ipBlock":{"cidr":"0.0.0.0/0"}}]'
+check "an ipBlock of 0.0.0.0/0 as a metrics scraper is refused" refused 'networkPolicy.metrics.allowFrom: an ipBlock of 0.0.0.0/0 is every address' \
+  -f "$here/metrics.values.yaml" --set-json 'networkPolicy.metrics.allowFrom=[{"ipBlock":{"cidr":"0.0.0.0/0"}}]'
+ns_labels_renders() {
+  render --set-json 'toolProbe.to=[{"namespaceSelector":{"matchLabels":{"probe":"mcp"}}}]' --set-json "toolProbe.dns.to=$ns_dns" || return 1
+  all_of "$(op_egress_rule 3)" '^      to:' 'namespaceSelector:' 'matchLabels:' 'probe: mcp'
+}
+check "a namespaceSelector with matchLabels alone renders, and the operator's egress rule carries the peer" ns_labels_renders
+ns_expressions_renders() {
+  render --set-json 'toolProbe.to=[{"namespaceSelector":{"matchExpressions":[{"key":"a","operator":"In","values":["b"]}]}}]' \
+    --set-json "toolProbe.dns.to=$ns_dns" || return 1
+  all_of "$(op_egress_rule 3)" '^      to:' 'namespaceSelector:' 'matchExpressions:' 'key: a' 'operator: In'
+}
+check "a namespaceSelector with matchExpressions alone renders, and the operator's egress rule carries the peer" ns_expressions_renders
 
 # ---- Tool probe (slice K3a, AD-053) ---------------------------------------------------------------------------------------
 # `toolProbe.to` is the deployment's list of the peers the operator may reach to probe a ToolProvider's MCP server (a NetworkPolicy

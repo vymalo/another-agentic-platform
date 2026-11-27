@@ -16,8 +16,8 @@
 //!
 //! | The service, when its apply comes | The answer | A retry |
 //! |---|---|---|
-//! | only its `resourceVersion` moved (the operator wrote its `status`, or put its finalizer on) | none: the apply is repeated **once** with the version it has now, and the save succeeds | not needed |
-//! | its `spec`, labels or annotations changed, or it was made again (another `uid`), or it is gone | `PreconditionFailed` (`NotFound` for a replace of a service that is gone, `AlreadyExists` for a create over one) | reads both again, succeeds |
+//! | only its `resourceVersion` moved (the operator wrote its `status` or put its finalizer on, or the activator wrote `wake-at`) | none: the apply is repeated **once** with the version it has now, and the save succeeds | not needed |
+//! | its `spec`, labels or an annotation other than `agents.vymalo.com/wake-at` changed, or it was made again (another `uid`), or it is gone | `PreconditionFailed` (`NotFound` for a replace of a service that is gone, `AlreadyExists` for a create over one) | reads both again, succeeds |
 //! | it began to be deleted | `Deleting` | after it is gone, as a create |
 //! | a field the apply sets is owned by another manager | `Conflict`, with the server's words | refused by the dry run, with nothing written, until they let go of the field |
 //! | the API server fails the apply (`5xx`, `429`, a timeout) | `Unavailable` | reads both again, succeeds when it is back |
@@ -293,8 +293,9 @@ impl KubernetesObjects {
     /// A `409` about the version of an object that was read is looked into **once**: the operator writes the `status`
     /// of a service when its config changes (and the status of the config when it has resolved it), which gives the
     /// object a new `resourceVersion` between the dry run and this apply without changing anything the person's save is
-    /// about. When the object is the one that was read, with the same `spec`, labels and annotations, and is not being
-    /// deleted, the apply is repeated once with the version it has now. Anything else is a lost race.
+    /// about. When the object is the one that was read, with the same `spec`, labels and annotations (but the activator's
+    /// `wake-at`), and is not being deleted, the apply is repeated once with the version it has now. Anything else is a
+    /// lost race.
     async fn apply_for_real(&self, write: &Write<'_>) -> Result<Live, ObjectsError> {
         let failure = match self.apply(write, false).await {
             Ok(live) => return Ok(live),

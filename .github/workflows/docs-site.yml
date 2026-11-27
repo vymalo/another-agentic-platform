@@ -5,10 +5,10 @@ name: Docs site
 # A pull request builds the site and uploads the artifact (that is its proof) but never deploys.
 on:
   pull_request:
-    paths: ["docs/**", ".github/workflows/docs-site.yml"]
+    paths: ["docs/**", "deploy/crds/**", "bin/cli/README.md", ".github/workflows/docs-site.yml"]
   push:
     branches: [main]
-    paths: ["docs/**", ".github/workflows/docs-site.yml"]
+    paths: ["docs/**", "deploy/crds/**", "bin/cli/README.md", ".github/workflows/docs-site.yml"]
   workflow_dispatch:
 
 permissions:
@@ -32,8 +32,10 @@ jobs:
           cache-dependency-path: docs/package-lock.json
       - name: Install the pinned site dependencies
         run: npm --prefix docs ci --no-fund --no-audit
-      - name: The `::: in-depth` block's rule
+      - name: "The `::: in-depth` block's rule"
         run: npm --prefix docs run test:in-depth
+      - name: The CRD pages are what the CRDs say
+        run: npm --prefix docs run check-crds
       - name: Build the site
         run: npm --prefix docs run build
       - name: Check every internal link and fragment of the built site

@@ -29,9 +29,9 @@ Included from deployment.yaml, which every render has, so they always run.
 {{- if not (and (or (kindIs "float64" .Values.replicas) (kindIs "int" .Values.replicas) (kindIs "int64" .Values.replicas)) (ge (int .Values.replicas) 1) (eq (toString (int .Values.replicas)) (toString .Values.replicas))) -}}
 {{- fail (printf "replicas must be a whole number of at least 1, got %v" .Values.replicas) -}}
 {{- end -}}
-{{- range $k, $v := .Values.leaderElection }}{{ if not (has $k (list "leaseSecs" "renewSecs" "retrySecs")) }}{{ fail (printf "leaderElection.%s is not a setting: leaseSecs, renewSecs or retrySecs" $k) }}{{ end }}{{ end -}}
-{{- if and (ge (int .Values.replicas) 2) (not (and (lt (int .Values.leaderElection.renewSecs) (int .Values.leaderElection.leaseSecs)) (lt (int .Values.leaderElection.retrySecs) (int .Values.leaderElection.renewSecs)) (ge (int .Values.leaderElection.retrySecs) 1))) -}}
-{{- fail "leaderElection needs retrySecs < renewSecs < leaseSecs, each at least 1" -}}
+{{- range $k, $v := .Values.leaderElection }}{{ if not (has $k (list "leaseSecs" "renewSecs" "retrySecs")) }}{{ fail (printf "leaderElection.%s is not a setting: leaseSecs, renewSecs or retrySecs" $k) }}{{ end }}{{ if not (and (include "aap.isWholeNumber" $v) (ge (int $v) 1)) }}{{ fail (printf "leaderElection.%s must be a whole number of seconds, at least 1, got %v" $k $v) }}{{ end }}{{ end -}}
+{{- if and (ge (int .Values.replicas) 2) (not (and (lt (int .Values.leaderElection.renewSecs) (int .Values.leaderElection.leaseSecs)) (lt (int .Values.leaderElection.retrySecs) (int .Values.leaderElection.renewSecs)))) -}}
+{{- fail "leaderElection needs retrySecs < renewSecs < leaseSecs" -}}
 {{- end -}}
 {{- /* The image: a tag nothing moves under it. */ -}}
 {{- if not .Values.image.repository -}}
@@ -335,7 +335,7 @@ chart refuses it first), the peers are a NetworkPolicy's and never every address
 {{- if not (has $k (list "concurrency" "resyncSecs" "resyncPendingSecs" "reconcileTimeoutSecs")) -}}
 {{- fail (printf "tuning.%s is not a setting: concurrency, resyncSecs, resyncPendingSecs or reconcileTimeoutSecs" $k) -}}
 {{- end -}}
-{{- if not (and (or (kindIs "float64" $v) (kindIs "int" $v) (kindIs "int64" $v)) (ge (int $v) 1)) -}}
+{{- if not (and (include "aap.isWholeNumber" $v) (ge (int $v) 1)) -}}
 {{- fail (printf "tuning.%s must be a whole number of at least 1, got %v" $k $v) -}}
 {{- end -}}
 {{- end -}}
@@ -989,6 +989,12 @@ for each tested shape (tests/api-shapes.sh) to find such a value before it is de
 {{- range $peer := .peers -}}
 {{- if not (and (kindIs "map" $peer) (or (hasKey $peer "namespaceSelector") (hasKey $peer "podSelector") (hasKey $peer "ipBlock"))) -}}
 {{- fail (printf "%s: a peer needs a namespaceSelector, a podSelector or an ipBlock, got %s" $what (toJson $peer)) -}}
+{{- end -}}
+{{- if hasKey $peer "namespaceSelector" -}}
+{{- $ns := $peer.namespaceSelector -}}
+{{- if or (not (kindIs "map" $ns)) (not (or $ns.matchLabels $ns.matchExpressions)) -}}
+{{- fail (printf "%s: a namespaceSelector with no matchLabels and no matchExpressions selects every namespace: name the namespaces" $what) -}}
+{{- end -}}
 {{- end -}}
 {{- end -}}
 {{- end -}}

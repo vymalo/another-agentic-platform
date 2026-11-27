@@ -1895,6 +1895,68 @@ async fn a_mark_left_by_a_blocked_pass_never_sleeps_a_busy_agent() {
     r.stop().await;
 }
 
+/// ANR-1199: a pass cut off while it writes the sleep record must give its claim back. The mark is claimed before the
+/// write so aging cannot drop it in flight; a claim that outlived a cut-off pass would never age (`is_fresh` accepts a
+/// claimed mark whatever its age), so a retry would sleep the agent on a poll older than the bound.
+#[tokio::test]
+async fn a_pass_cut_off_while_writing_the_sleep_record_gives_its_mark_back() {
+    let source = aap_ports::memory::MemoryActivity::new();
+    source.set(&chat_id(), busy());
+    let clock = TestClock::now();
+    let (service, config) = sleepy_chat(json!({}), Value::Null);
+    let r = running_sleepy(Fake::new(), &source, Some(clock.clock()), &service, &config).await;
+
+    // The sleep record's patch is received and never answered: the pass is cut off at its time limit, after it claimed
+    // the mark and before anything was written.
+    r.fake.stall_next("PATCH", "/agentservices/chat/status", 1);
+    let_the_loop_mark(&source).await;
+    within(Duration::from_secs(60), "the pass to be cut off", || {
+        r.metrics.get(
+            aap_controller::metric::PASS_TIMEOUTS,
+            &[("controller", "agentservice")],
+        ) >= 1
+    })
+    .await;
+    assert!(sleep_of(&r).is_none(), "nothing was written");
+    // The stall took the sleep record's own write, not an earlier status patch: the body it held carries `sleep`.
+    assert!(
+        r.fake.calls().iter().any(|c| c.method == "PATCH"
+            && c.path.ends_with("/agentservices/chat/status")
+            && c.body
+                .as_ref()
+                .is_some_and(|b| b.pointer("/status/sleep").is_some())),
+        "the cut-off write is the sleep record's"
+    );
+
+    // The agent is busy again, and the proposal grows older than the age bound while the retry waits.
+    source.set(&chat_id(), busy());
+    clock.set(clock.get() + 120);
+    let before = r.reconciles();
+
+    // The retry must drop the old proposal: the claim was given back, so it ages out. A claim left behind by the
+    // cut-off pass would make `is_fresh` accept it for ever and sleep a busy agent on a poll of two minutes ago.
+    within(Duration::from_secs(15), "the retry to run", || {
+        r.reconciles() > before
+    })
+    .await;
+    tokio::time::sleep(Duration::from_millis(800)).await;
+    assert!(sleep_of(&r).is_none(), "{:?}", sleep_of(&r));
+    assert_eq!(r.metrics.get(aap_controller::metric::SLEEPS, &[]), 0);
+    assert!(!r.runtime.inner.spec(&chat_id()).unwrap().suspend);
+    assert_eq!(phase_of(&r, "team", "chat").as_deref(), Some("Ready"));
+
+    // The control: a fresh proposal still sleeps the agent, so the pipeline the cut-off interrupted works.
+    let_the_loop_mark(&source).await;
+    within(
+        Duration::from_secs(15),
+        "the agent to sleep on a fresh mark",
+        || sleep_of(&r).is_some(),
+    )
+    .await;
+    assert_eq!(r.metrics.get(aap_controller::metric::SLEEPS, &[]), 1);
+    r.stop().await;
+}
+
 #[tokio::test]
 async fn a_mark_whose_wake_came_before_the_sleep_is_dropped_not_recorded() {
     let source = aap_ports::memory::MemoryActivity::new();

@@ -947,13 +947,35 @@ fn is_ipv4_cidr(s: &str) -> bool {
         && bits.parse::<u8>().is_ok_and(|b| b <= 32)
 }
 
+/// The prefix length of a CIDR (`10.0.0.0/8` is 8, `::/0` is 0), when it has one this file can read. The address
+/// itself is the API server's to judge; this is only what the run pods' policy cannot allow.
+fn cidr_prefix(cidr: &str) -> Option<u8> {
+    cidr.rsplit_once('/')?.1.parse().ok()
+}
+
 /// A `NetworkPolicy` egress entry of the settings as a neutral rule. Named ports are refused: the neutral
 /// port is a number.
 fn egress_rule(value: &Value) -> Result<EgressRule, String> {
     let rule: NetworkPolicyEgressRule = serde_json::from_value(value.clone())
         .map_err(|e| format!("not a NetworkPolicy egress rule ({e})"))?;
+    // Kubernetes reads a rule with no `to` as **every** destination: that is the whole internet, which is what this
+    // policy is deny-by-default about (ANR-1353). A rule must name at least one peer.
+    if rule.to.as_ref().is_none_or(|to| to.is_empty()) {
+        return Err("the rule needs a `to`: with none it allows every destination".to_owned());
+    }
     let mut to = Vec::new();
     for p in rule.to.iter().flatten() {
+        // A range whose prefix is zero covers every address of its family: `0.0.0.0/0` is the same widening as no
+        // `to` at all. Refused here rather than in `convert::peers`, which also reads the agent's own
+        // `access.allowFrom`, where a wide range is a deployment's deliberate choice (ANR-1353).
+        if let Some(block) = &p.ip_block
+            && cidr_prefix(&block.cidr) == Some(0)
+        {
+            return Err(format!(
+                "the ipBlock {:?} covers every address of its family: name the range it may reach",
+                block.cidr
+            ));
+        }
         let (mut peers, problems) = crate::convert::peers(std::slice::from_ref(p));
         if let Some((_, message)) = problems.into_iter().next() {
             return Err(message);

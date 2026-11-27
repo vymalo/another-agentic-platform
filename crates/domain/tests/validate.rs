@@ -589,6 +589,22 @@ fn the_coder_rules() {
 }
 
 #[test]
+fn a_wide_range_is_still_the_deployments_choice_for_the_agent_itself() {
+    // ANR-1353 scopes the run-pods `/0` refusal to `networkPolicy.extraEgress`. `access.allowFrom` is the agent's own
+    // ingress: a deployment that publishes an agent may name `0.0.0.0/0` on purpose, and that stays accepted.
+    let ext = shared_objects("coder-me").with_default_image("registry.invalid/agent:tag");
+    let (raw_s, raw_c) = example("coder-me");
+    let mut s = raw_s;
+    set(
+        &mut s,
+        "/spec/access/allowFrom",
+        json!([{"ipBlock": {"cidr": "0.0.0.0/0"}}]),
+    );
+    let (s, c) = typed(&s, &raw_c);
+    validate(&s, &c, &ext).expect("the agent's own ingress may be open");
+}
+
+#[test]
 fn the_folder_rules() {
     let cases: Vec<(Change, &str, &str)> = vec![
         (
