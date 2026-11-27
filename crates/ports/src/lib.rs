@@ -25,6 +25,7 @@ mod spec;
 mod store;
 
 #[cfg(feature = "testkit")]
+pub mod annotations;
 pub mod memory;
 #[cfg(feature = "testkit")]
 pub mod testkit;
