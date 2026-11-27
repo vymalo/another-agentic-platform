@@ -399,6 +399,11 @@ where
                     sleepers: self.sleepers.clone(),
                     scopes: scopes_for_sleep,
                     period: self.options.sleep_poll,
+                    mark_max_age: crate::wake::mark_max_age(
+                        self.options.sleep_poll,
+                        self.options.pass_timeout,
+                    ),
+                    clock: self.clock.clone().unwrap_or_else(crate::system_clock),
                     leader: self.leader.clone(),
                 },
                 self.runtime.clone(),

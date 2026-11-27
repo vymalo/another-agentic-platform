@@ -1446,6 +1446,8 @@ fn sleepy_options() -> Options {
         },
         default_agent_image: Some(DEFAULT_IMAGE.to_owned()),
         sleep_poll: Duration::from_millis(50),
+        // With the poll, the age a mark may reach before it is ignored: five seconds.
+        pass_timeout: Duration::from_secs(5),
         ..Options::default()
     }
 }
@@ -1461,37 +1463,39 @@ fn chat_id() -> RuntimeId {
     RuntimeId::new("team", "chat")
 }
 
-/// A clock a test moves, in seconds since the Unix epoch.
+/// A clock a test moves: the real time plus an offset, so an idle stretch still takes real time and `set` jumps.
 #[derive(Clone)]
 struct TestClock(Arc<std::sync::atomic::AtomicI64>);
 
-impl TestClock {
-    fn now() -> Self {
-        let now = std::time::SystemTime::now()
+fn real_unix() -> i64 {
+    i64::try_from(
+        std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .unwrap()
-            .as_secs();
-        Self(Arc::new(std::sync::atomic::AtomicI64::new(
-            i64::try_from(now).unwrap(),
-        )))
+            .as_secs(),
+    )
+    .unwrap()
+}
+
+impl TestClock {
+    fn now() -> Self {
+        Self(Arc::new(std::sync::atomic::AtomicI64::new(0)))
     }
 
     fn set(&self, seconds: i64) {
-        self.0.store(seconds, std::sync::atomic::Ordering::SeqCst);
+        self.0
+            .store(seconds - real_unix(), std::sync::atomic::Ordering::SeqCst);
     }
 
     fn get(&self) -> i64 {
-        self.0.load(std::sync::atomic::Ordering::SeqCst)
+        real_unix() + self.0.load(std::sync::atomic::Ordering::SeqCst)
     }
 
     fn clock(&self) -> aap_controller::Clock {
-        let seconds = self.0.clone();
+        let clock = self.clone();
         Arc::new(move || {
             k8s_openapi::apimachinery::pkg::apis::meta::v1::Time(
-                k8s_openapi::jiff::Timestamp::from_second(
-                    seconds.load(std::sync::atomic::Ordering::SeqCst),
-                )
-                .unwrap(),
+                k8s_openapi::jiff::Timestamp::from_second(clock.get()).unwrap(),
             )
         })
     }
@@ -1836,5 +1840,107 @@ async fn waking_past_wake_timeout_keeps_waking_and_says_so() {
     })
     .await;
     assert!(sleep_of(&r).is_none());
+    r.stop().await;
+}
+
+/// Block the service by taking its config away, and wait for `Blocked`.
+async fn block(r: &Running, config: &Value) {
+    let _ = config;
+    r.fake.delete(CONFIGS, "team", "chat");
+    within(Duration::from_secs(15), "the service to be blocked", || {
+        r.state("team", "chat").as_deref() == Some("Blocked")
+    })
+    .await;
+}
+
+/// Let the idle loop make its mark while the service is blocked (a second idle on the loop's clock, and margin).
+async fn let_the_loop_mark(source: &aap_ports::memory::MemoryActivity) {
+    source.set(&chat_id(), aap_ports::Activity::IDLE);
+    tokio::time::sleep(Duration::from_millis(2500)).await;
+}
+
+#[tokio::test]
+async fn a_mark_left_by_a_blocked_pass_never_sleeps_a_busy_agent() {
+    let source = aap_ports::memory::MemoryActivity::new();
+    source.set(&chat_id(), busy());
+    let clock = TestClock::now();
+    let (service, config) = sleepy_chat(json!({}), Value::Null);
+    let r = running_sleepy(Fake::new(), &source, Some(clock.clock()), &service, &config).await;
+
+    // Blocked: the pass that the mark asks for cannot consume it, and the old workload goes on serving.
+    block(&r, &config).await;
+    let_the_loop_mark(&source).await;
+    assert!(
+        sleep_of(&r).is_none(),
+        "a blocked service is not put to sleep"
+    );
+
+    // It becomes busy, and a long time passes: the proposal is old.
+    source.set(&chat_id(), busy());
+    clock.set(clock.get() + 60);
+
+    // Unblocked: the old proposal must not put a busy agent to sleep.
+    r.fake.put(CONFIGS, config.clone());
+    eventually("the service to be Ready again", || {
+        r.state("team", "chat").as_deref() == Some("Ready")
+    })
+    .await;
+    tokio::time::sleep(Duration::from_millis(800)).await;
+    assert!(sleep_of(&r).is_none(), "{:?}", sleep_of(&r));
+    assert_eq!(phase_of(&r, "team", "chat").as_deref(), Some("Ready"));
+    assert!(!r.runtime.inner.spec(&chat_id()).unwrap().suspend);
+    assert_eq!(r.metrics.get(aap_controller::metric::SLEEPS, &[]), 0);
+    r.stop().await;
+}
+
+#[tokio::test]
+async fn a_mark_whose_wake_came_before_the_sleep_is_dropped_not_recorded() {
+    let source = aap_ports::memory::MemoryActivity::new();
+    source.set(&chat_id(), busy());
+    let (service, config) = sleepy_chat(json!({}), Value::Null);
+    let r = running_sleepy(Fake::new(), &source, None, &service, &config).await;
+
+    block(&r, &config).await;
+    let_the_loop_mark(&source).await;
+    // A request for the agent arrives after the decision and before the sleep took effect, and the work is back.
+    r.fake
+        .put(SERVICES, annotate(&service, "2026-11-27T10:00:00Z"));
+    source.set(&chat_id(), busy());
+    r.fake.put(CONFIGS, config.clone());
+    eventually("the service to be Ready again", || {
+        r.state("team", "chat").as_deref() == Some("Ready")
+    })
+    .await;
+    tokio::time::sleep(Duration::from_millis(800)).await;
+    // No sleep happened: no record, no count, nothing suspended.
+    assert!(sleep_of(&r).is_none(), "{:?}", sleep_of(&r));
+    assert_eq!(r.metrics.get(aap_controller::metric::SLEEPS, &[]), 0);
+    assert!(!r.runtime.inner.spec(&chat_id()).unwrap().suspend);
+    assert_eq!(phase_of(&r, "team", "chat").as_deref(), Some("Ready"));
+    r.stop().await;
+}
+
+#[tokio::test]
+async fn an_agent_with_three_workers_wakes_to_three_replicas_not_one() {
+    let source = aap_ports::memory::MemoryActivity::new();
+    source.set(&chat_id(), busy());
+    let (mut service, config) = sleepy_chat(json!({ "workers": 3 }), Value::Null);
+    service["spec"]["scaling"]["workers"] = json!(3);
+    let r = running_sleepy(Fake::new(), &source, None, &service, &config).await;
+    assert_eq!(
+        r.runtime.inner.spec(&chat_id()).unwrap().worker_replicas(),
+        3
+    );
+    until_asleep(&r, &source, None).await;
+    r.runtime.script(Some(provisioning()));
+    r.fake
+        .put(SERVICES, annotate(&service, "2026-11-27T10:00:00Z"));
+    within(Duration::from_secs(15), "the agent to be waking", || {
+        phase_of(&r, "team", "chat").as_deref() == Some("Waking")
+    })
+    .await;
+    let spec = r.runtime.inner.spec(&chat_id()).unwrap();
+    assert!(!spec.suspend);
+    assert_eq!(spec.worker_replicas(), 3, "the spec's replicas, not one");
     r.stop().await;
 }

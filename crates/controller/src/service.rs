@@ -361,9 +361,10 @@ where
     let mut agent = agent;
     let policy = crate::sleep::SleepPolicy::from_scaling(&svc.spec.scaling);
     let now = (ctx.clock)().0.as_second();
-    let planned = crate::wake::plan(&crate::wake::PlanInput {
+    let mark = ctx.sleepers.mark(&id);
+    let input = crate::wake::PlanInput {
         record: previous.sleep.as_ref(),
-        mark: ctx.sleepers.mark(&id).as_ref(),
+        mark: mark.as_ref(),
         policy: policy.as_ref(),
         suspend: svc.spec.suspend,
         wake_at: svc
@@ -371,7 +372,13 @@ where
             .get(aap_api::WAKE_AT_ANNOTATION)
             .map(String::as_str),
         now,
-    });
+        mark_max_age: crate::wake::mark_max_age(ctx.options.sleep_poll, ctx.options.pass_timeout),
+    };
+    let planned = crate::wake::plan(&input);
+    // A mark that made no record (too old, or the sleep would have been born waking) is spent: the loop polls again.
+    if crate::wake::stale_or_stillborn(&input, &planned) {
+        ctx.sleepers.wake(&id);
+    }
     // Forget only what a person ended. A pass that merely found no record must leave the idle loop's mark alone: the
     // loop may have made it since this pass read it.
     if policy.is_none() || svc.spec.suspend {

@@ -75,9 +75,27 @@ impl Sleepers {
         rx
     }
 
-    /// Whether the loop has proposed to put this agent to sleep and the reconcile has not yet finished with it.
-    pub fn is_marked(&self, id: &RuntimeId) -> bool {
-        self.with(|i| i.marks.contains_key(&key(id)))
+    /// Whether the loop has proposed to put this agent to sleep and the reconcile has not yet finished with it. A mark
+    /// older than `max_age` at `now` is **removed** and does not count: the agent is polled again.
+    pub fn is_marked(&self, id: &RuntimeId, now: i64, max_age: Duration) -> bool {
+        self.with(|i| {
+            let k = key(id);
+            let stale = i.marks.get(&k).is_some_and(|(m, recorded)| {
+                !recorded
+                    && now.saturating_sub(m.made_at)
+                        > i64::try_from(max_age.as_secs()).unwrap_or(i64::MAX)
+            });
+            if stale {
+                i.marks.remove(&k);
+            }
+            i.marks.contains_key(&k)
+        })
+    }
+
+    /// Drop every proposal: this replica is not the leader (any longer), and what it proposed while it was is no
+    /// statement about an agent it no longer watches over.
+    pub fn clear_marks(&self) {
+        self.with(|i| i.marks.clear());
     }
 
     /// The loop's proposal for this agent.
@@ -133,12 +151,6 @@ impl Sleepers {
     }
 }
 
-fn unix_now() -> i64 {
-    std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map_or(0, |d| i64::try_from(d.as_secs()).unwrap_or(i64::MAX))
-}
-
 /// What one step did to one agent.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Outcome {
@@ -160,6 +172,7 @@ pub async fn step(
     sleepers: &Sleepers,
     service: &AgentService,
     now: i64,
+    mark_max_age: Duration,
 ) -> Outcome {
     let Some(ns) = service.namespace() else {
         return Outcome::Stayed;
@@ -172,7 +185,9 @@ pub async fn step(
         sleepers.forget(&id);
         return Outcome::Stayed;
     };
-    if sleepers.is_marked(&id) || service.status.as_ref().is_some_and(|s| s.sleep.is_some()) {
+    if sleepers.is_marked(&id, now, mark_max_age)
+        || service.status.as_ref().is_some_and(|s| s.sleep.is_some())
+    {
         return Outcome::Stayed;
     }
     let polled = activity(id.clone()).await;
@@ -196,12 +211,13 @@ pub async fn step(
     let wake_at_seen = service
         .annotations()
         .get(aap_api::WAKE_AT_ANNOTATION)
-        .cloned();
+        .map(|v| crate::wake::seen_of(v));
     sleepers.put_to_sleep(
         &id,
         Mark {
             next_due_at,
             wake_at_seen,
+            made_at: now,
         },
     );
     tracing::info!(service = %id.name(), "idle for {:?}, proposed for sleep", policy.idle_timeout);
@@ -215,7 +231,19 @@ pub(crate) struct IdleLoop {
     pub sleepers: Arc<Sleepers>,
     pub scopes: Vec<String>,
     pub period: Duration,
+    /// How old a mark may be and still count ([`crate::wake::mark_max_age`]).
+    pub mark_max_age: Duration,
+    /// The clock the reconcile uses, so a mark's age means the same in both.
+    pub clock: crate::Clock,
     pub leader: Arc<dyn LeaderElection>,
+}
+
+/// What the loop does with its marks on each lap: a replica that is not the leader holds none. Done on every lap
+/// that is not led (so it is the false edge and every lap after it), before anything is polled.
+pub(crate) fn on_leadership(sleepers: &Sleepers, is_leader: bool) {
+    if !is_leader {
+        sleepers.clear_marks();
+    }
 }
 
 /// Poll every service of `scopes` every `period` while this replica leads, until `stop` is true.
@@ -228,7 +256,9 @@ where
         return;
     }
     loop {
-        if l.leader.is_leader() {
+        let led = l.leader.is_leader();
+        on_leadership(&l.sleepers, led);
+        if led {
             for scope in &l.scopes {
                 let api: Api<AgentService> = if scope.is_empty() {
                     Api::all(l.client.clone())
@@ -238,7 +268,14 @@ where
                 match api.list(&Default::default()).await {
                     Ok(list) => {
                         for service in &list.items {
-                            step(&l.activity, &l.sleepers, service, unix_now()).await;
+                            step(
+                                &l.activity,
+                                &l.sleepers,
+                                service,
+                                (l.clock)().0.as_second(),
+                                l.mark_max_age,
+                            )
+                            .await;
                         }
                     }
                     Err(e) => tracing::warn!("idle loop could not list services of {scope:?}: {e}"),
@@ -260,6 +297,7 @@ mod tests {
     use serde_json::json;
 
     const NS: &str = "team";
+    const MAX_AGE: Duration = Duration::from_secs(90);
 
     fn service(scaling: serde_json::Value, suspend: bool) -> AgentService {
         serde_json::from_value(json!({
@@ -295,7 +333,7 @@ mod tests {
 
     impl Rig {
         async fn at(&self, svc: &AgentService, now: i64) -> Outcome {
-            step(&self.activity, &self.sleepers, svc, now).await
+            step(&self.activity, &self.sleepers, svc, now, MAX_AGE).await
         }
     }
 
@@ -310,9 +348,9 @@ mod tests {
         let svc = service(sleepy(), false);
         assert_eq!(r.at(&svc, 0).await, Outcome::Stayed, "the clock starts");
         assert_eq!(r.at(&svc, 599).await, Outcome::Stayed);
-        assert!(!r.sleepers.is_marked(&r.id));
+        assert!(!r.sleepers.is_marked(&r.id, 0, MAX_AGE));
         assert_eq!(r.at(&svc, 600).await, Outcome::Marked);
-        assert!(r.sleepers.is_marked(&r.id));
+        assert!(r.sleepers.is_marked(&r.id, 0, MAX_AGE));
         assert_eq!(
             nudges.try_recv().unwrap(),
             r.id,
@@ -320,7 +358,7 @@ mod tests {
         );
         // Marked: not asked again, not proposed again.
         let asked = r.source.asked().len();
-        assert_eq!(r.at(&svc, 9_999).await, Outcome::Stayed);
+        assert_eq!(r.at(&svc, 650).await, Outcome::Stayed);
         assert_eq!(r.source.asked().len(), asked);
     }
 
@@ -349,6 +387,7 @@ mod tests {
             Some(Mark {
                 next_due_at: Some(50_000),
                 wake_at_seen: Some("2026-01-01T00:00:00Z".to_owned()),
+                made_at: 600,
             })
         );
     }
@@ -401,7 +440,7 @@ mod tests {
         for now in [0, 600, 6_000, 600_000] {
             assert_eq!(r.at(&svc, now).await, Outcome::Stayed);
         }
-        assert!(!r.sleepers.is_marked(&r.id));
+        assert!(!r.sleepers.is_marked(&r.id, 0, MAX_AGE));
     }
 
     #[tokio::test]
@@ -454,9 +493,9 @@ mod tests {
                 inner(i)
             }) as ActivityFn
         };
-        let out = step(&flip, &r.sleepers, &svc, 600).await;
+        let out = step(&flip, &r.sleepers, &svc, 600, MAX_AGE).await;
         assert_eq!(out, Outcome::Stayed);
-        assert!(!r.sleepers.is_marked(&r.id));
+        assert!(!r.sleepers.is_marked(&r.id, 0, MAX_AGE));
     }
 
     #[tokio::test]
@@ -469,7 +508,7 @@ mod tests {
             assert_eq!(r.at(&never, now).await, Outcome::Stayed);
         }
         assert!(r.source.asked().is_empty(), "no policy, nothing asked");
-        assert!(!r.sleepers.is_marked(&r.id));
+        assert!(!r.sleepers.is_marked(&r.id, 0, MAX_AGE));
     }
 
     #[tokio::test]
@@ -478,8 +517,42 @@ mod tests {
         let svc = service(sleepy(), false);
         r.at(&svc, 0).await;
         r.at(&svc, 600).await;
-        assert!(r.sleepers.is_marked(&r.id));
+        assert!(r.sleepers.is_marked(&r.id, 0, MAX_AGE));
         r.at(&service(json!({}), false), 601).await;
-        assert!(!r.sleepers.is_marked(&r.id));
+        assert!(!r.sleepers.is_marked(&r.id, 0, MAX_AGE));
+    }
+
+    #[tokio::test]
+    async fn a_mark_older_than_the_bound_is_dropped_and_the_agent_is_polled_again() {
+        let r = rig();
+        let svc = service(sleepy(), false);
+        r.at(&svc, 0).await;
+        r.at(&svc, 600).await;
+        assert!(r.sleepers.is_marked(&r.id, 600, MAX_AGE));
+        assert!(
+            r.sleepers.is_marked(&r.id, 690, MAX_AGE),
+            "at the bound it stands"
+        );
+        let asked = r.source.asked().len();
+        assert!(!r.sleepers.is_marked(&r.id, 691, MAX_AGE), "past it, gone");
+        // The loop polls it again, with a clock that starts afresh.
+        r.at(&svc, 700).await;
+        assert!(r.source.asked().len() > asked);
+    }
+
+    #[tokio::test]
+    async fn losing_leadership_drops_the_marks() {
+        let r = rig();
+        let svc = service(sleepy(), false);
+        r.at(&svc, 0).await;
+        r.at(&svc, 600).await;
+        assert!(r.sleepers.is_marked(&r.id, 600, MAX_AGE));
+        on_leadership(&r.sleepers, true);
+        assert!(
+            r.sleepers.is_marked(&r.id, 600, MAX_AGE),
+            "the leader keeps its marks"
+        );
+        on_leadership(&r.sleepers, false);
+        assert!(!r.sleepers.is_marked(&r.id, 600, MAX_AGE));
     }
 }

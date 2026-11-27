@@ -305,6 +305,7 @@ fn schemas() -> Value {
                 "config": { "type": "object", "description": "The AgentConfig it was resolved from: name, observedGeneration, digest." },
                 "runtime": { "type": "object", "description": "The runtime as the provider reports it: provider, phase, replicas." },
                 "endpoints": { "type": "object", "description": "Where the agent can be reached: a2a, agentCard." },
+                "sleep": { "type": "object", "description": "Present only while the agent is asleep or waking: since, nextDueAt, wakeAtSeen, waking{since,cause} (AD-058)." },
                 "conditions": { "type": "array", "items": schema("Condition") }
             }
         },

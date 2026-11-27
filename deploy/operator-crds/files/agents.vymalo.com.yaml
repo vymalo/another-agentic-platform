@@ -1404,7 +1404,9 @@ spec:
                   wakeAtSeen:
                     description: |-
                       The value of the `agents.vymalo.com/wake-at` annotation when the agent fell asleep. A value that differs
-                      from it is a request to wake.
+                      from it is a request to wake. At most 64 bytes of the value as it was; a longer one is stored as
+                      `sha256:<hex>` (71 characters), so an annotation of any size cannot grow the status.
+                    maxLength: 71
                     nullable: true
                     type: string
                   waking:

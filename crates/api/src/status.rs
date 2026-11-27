@@ -57,8 +57,10 @@ pub struct SleepStatus {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub next_due_at: Option<Time>,
     /// The value of the `agents.vymalo.com/wake-at` annotation when the agent fell asleep. A value that differs
-    /// from it is a request to wake.
+    /// from it is a request to wake. At most 64 bytes of the value as it was; a longer one is stored as
+    /// `sha256:<hex>` (71 characters), so an annotation of any size cannot grow the status.
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schemars(length(max = 71))]
     pub wake_at_seen: Option<String>,
     /// Present from the moment the agent is woken until its runtime is ready.
     #[serde(default, skip_serializing_if = "Option::is_none")]
