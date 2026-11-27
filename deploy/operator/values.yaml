@@ -330,14 +330,21 @@ networkPolicy:
 retention: {}
 #  afterDeleteDays: 90
 
-# AD-058 P2c: the operator asks each agent service what work it holds (`GET /internal/activity`), for the idle controller. Empty `to`: off,
-# and not a trace of it in any render. `to` is who the operator may reach: the pods of the agents (a namespaceSelector and a podSelector).
-# The agents refuse a question without their bearer, so `tokenSecret` is required while `to` is set; the operator reads the file the Secret
-# is mounted as and never the Secret through the API.
+# AD-058 P2c, ANR-1030b: the operator asks each agent service what work it holds (`GET /internal/activity`), so an idle adam agent that sets
+# `scaling.idleTimeout` can sleep. Empty `to`: off, and not a trace of it in any render. `to` is who the operator may reach: the pods of the
+# agents (a namespaceSelector and a podSelector). ONE bearer for the whole deployment (ANR-Q142): the operator reads it from the file the
+# Secret `tokenSecret` is mounted as (never the Secret through the API; it must not contain a comma), and every agent's pod reads the same
+# value from the Secret `agentTokensSecret`, which must EXIST under that name in every namespace the operator watches (a copy, e.g. an
+# ExternalSecret: the chart makes none). Turning it on rolls every adam agent that sets `idleTimeout` once; an a2a agent never sleeps. The
+# agents' NetworkPolicy admits the listener to the operator's pods only: the chart gives their namespace (the release's) and selector labels.
 activity:
   to: []
-  # The port the agents serve /internal/activity on (their LISTEN_ADDR).
-  port: 8080
+  # The port the agents serve /internal/activity on: 1024 to 65535, never 8080 (the A2A port).
+  port: 8081
+  # The Secret key the AGENTS' pods read the bearer from (their ACTIVITY_BEARER_TOKENS). Empty: the same as `tokenSecret`.
+  agentTokensSecret:
+    name: ""
+    key: ""
   # How long one question may take, in seconds (1 to 30). An agent that does not answer by then counts as busy.
   timeoutSecs: 3
   tokenSecret:

@@ -18,6 +18,8 @@ pub struct Settings {
     pub default_image: Option<String>,
     /// `--run-pods-file` (the file's `runPods` block), read and checked.
     pub run_pods: Option<RunPodSettings>,
+    /// `--activity-file` (the file's `activity` block), checked as the operator checks it: `None` while it is off.
+    pub activity: Option<aap_domain::ActivityExternals>,
     /// `--cache-allowed-claims` (`defaults.cacheAllowedClaims`).
     pub cache_claims: Vec<String>,
     /// `--max-access-tier` (`defaults.maxAccessTier`).
@@ -283,6 +285,9 @@ pub fn check(objects: &[Object], settings: &Settings, allow_missing: bool) -> Ou
         }
         if let Some(run_pods) = &settings.run_pods {
             externals = externals.with_run_pods(run_pods.clone());
+        }
+        if let Some(activity) = &settings.activity {
+            externals = externals.with_activity(activity.clone());
         }
         let refs = aap_domain::references(&config.typed);
         for name in refs.model_endpoint.iter() {

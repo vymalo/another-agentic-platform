@@ -270,6 +270,16 @@ async fn the_policy_of_the_agent_and_the_policy_of_its_run_pods_do_not_delete_ea
     let with = resolved_run_pods(|_, _| {});
     runtime.ensure(&with.id, &with.runtime).await.unwrap();
     runtime.ensure(&r.id, &r.runtime).await.unwrap();
+    // The agent's own policy waits for the rollout (ANR-1030b), then goes.
+    assert!(fake.get(K::NetworkPolicy, NS, "coder").is_some());
+    fake.set_status(
+        K::StatefulSet,
+        NS,
+        "coder",
+        json!({"observedGeneration": 1, "replicas": 1, "readyReplicas": 1,
+               "updatedReplicas": 1, "currentRevision": "a", "updateRevision": "a"}),
+    );
+    runtime.ensure(&r.id, &r.runtime).await.unwrap();
     assert!(
         fake.get(K::NetworkPolicy, NS, "coder").is_none(),
         "the agent's own policy goes"
@@ -1054,4 +1064,50 @@ async fn the_policy_of_an_activity_listener_is_applied_before_any_workload_and_o
             .unwrap()
     };
     assert!(at(K::StatefulSet, "coder") < at(K::NetworkPolicy, "coder"));
+}
+
+#[tokio::test]
+async fn turning_the_activity_listener_off_keeps_the_agents_policy_until_the_rollout_is_done() {
+    // ANR-1030b (the 1030a review): the agent's own policy is what keeps the listener to the operator. An agent with an empty
+    // `allowFrom` has none once the listener is off, but the old pods still serve it until they are replaced: the policy goes
+    // when the workload is Ready, not in the pass that re-applies the workloads.
+    let (fake, runtime) = setup();
+    let on = resolved_activity("coder", 8081, |s, _| {
+        common::set(s, "/spec/scaling/idleTimeout", json!("15m"));
+        common::set(s, "/spec/access/allowFrom", json!([]));
+    });
+    runtime.ensure(&on.id, &on.runtime).await.unwrap();
+    assert!(fake.get(K::NetworkPolicy, NS, "coder").is_some());
+
+    let off = resolved("coder", |s, _| {
+        common::set(s, "/spec/access/allowFrom", json!([]));
+    });
+    assert!(off.runtime.network.activity.is_none());
+    fake.clear_calls();
+    let status = runtime.ensure(&off.id, &off.runtime).await.unwrap();
+    assert_ne!(status.phase, aap_ports::Phase::Ready);
+    assert!(
+        fake.get(K::NetworkPolicy, NS, "coder").is_some(),
+        "the policy was deleted while old pods may still serve the listener"
+    );
+    assert!(
+        writes(&fake.calls(), "DELETE")
+            .iter()
+            .all(|(k, _)| *k != K::NetworkPolicy)
+    );
+
+    // The rollout finished: the next pass removes it.
+    fake.set_status(
+        K::StatefulSet,
+        NS,
+        "coder",
+        json!({"observedGeneration": 1, "replicas": 1, "readyReplicas": 1,
+               "updatedReplicas": 1, "currentRevision": "a", "updateRevision": "a"}),
+    );
+    let status = runtime.ensure(&off.id, &off.runtime).await.unwrap();
+    assert_eq!(status.phase, aap_ports::Phase::Ready);
+    assert!(
+        fake.get(K::NetworkPolicy, NS, "coder").is_none(),
+        "the stale policy stays after the rollout"
+    );
 }

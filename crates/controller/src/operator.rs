@@ -217,6 +217,13 @@ where
         self
     }
 
+    /// Whether the idle loop has an activity source ([`with_activity`](Self::with_activity)): what a composition root's
+    /// test asks, so that a source built and never handed over is caught.
+    #[must_use]
+    pub fn has_activity(&self) -> bool {
+        self.activity.is_some()
+    }
+
     /// Elect `leader`'s holder as the one whose passes write (K7a). The default is [`AlwaysLeader`]: one
     /// replica, and every pass writes.
     ///

@@ -194,6 +194,9 @@ check_config "tests/api-full.values.yaml" -f "$here/api-full.values.yaml"
 check_config "tests/metrics.values.yaml" -f "$here/metrics.values.yaml"
 check_config "tests/metering.values.yaml" -f "$here/metering.values.yaml"
 check_config "tests/e2e/run-pods.values.yaml" -f "$here/e2e/run-pods.values.yaml"
+# ANR-1030b: with the activity source on, the file holds agentTokensSecret and operatorPod, which the binary requires while enabled.
+check_config "the activity source on (ANR-1030b)" --set activity.tokenSecret.name=agent-bearer \
+  --set-json 'activity.to=[{"namespaceSelector":{"matchLabels":{"kubernetes.io/metadata.name":"agents"}},"podSelector":{"matchLabels":{"app":"agent"}}}]'
 
 # ---- The default render: no registry, nothing a secret could be in --------------------------------------------------------
 render
@@ -2077,6 +2080,34 @@ activity_on() {
   none_of "$(op_egress_rule 3)" 'port: 53|ipBlock|0\.0\.0\.0/0'
 }
 check "activity on: the file's activity section, the bearer file from the named Secret, DNS and the listed peers on the agents' port, nothing else" activity_on
+# ANR-1030b: the agents' pods get the same bearer from a Secret of their own (default: the operator's tokenSecret), and an agent's policy is
+# told where the operator is: its namespace and its own selector labels, which the API's pod does not carry (its `name` label differs).
+activity_agent_wiring() {
+  act_on || return 1
+  dhas ConfigMap aap-operator '^      agentTokensSecret:$' '^        name: "agent-bearer"$' '^        key: "token"$' \
+    '^      operatorPod:$' "^        namespace: \"$ns\"\$" '^          app.kubernetes.io/name: aap-operator$' '^          app.kubernetes.io/instance: aap-operator$' || return 1
+  none_of "$(doc ConfigMap aap-operator)" 'aap-operator-api'
+}
+check "activity on: the agents' Secret defaults to the operator's own, and operatorPod is the release namespace and the operator's selector labels alone" activity_agent_wiring
+activity_agent_secret_override() {
+  act_on --set activity.agentTokensSecret.name=copy-of-bearer --set activity.agentTokensSecret.key=other || return 1
+  dhas ConfigMap aap-operator '^        name: "copy-of-bearer"$' '^        key: "other"$' && has 'secretName: agent-bearer'
+}
+check "activity on: agentTokensSecret overrides the agents' Secret and not the operator's own mount" activity_agent_secret_override
+activity_off_has_no_agent_keys() { render --set activity.agentTokensSecret.name=x || return 1; lacks 'agentTokensSecret' && lacks 'operatorPod'; }
+check "activity off: an agentTokensSecret alone renders nothing" activity_off_has_no_agent_keys
+check "activity.port 8080 (the A2A port) is refused" refused 'activity.port: 8080 is not usable' --set-json "activity.to=$act_peer" --set activity.tokenSecret.name=x --set activity.port=8080
+check "activity.port below 1024 is refused" refused 'activity.port: 1023 is not usable' --set-json "activity.to=$act_peer" --set activity.tokenSecret.name=x --set activity.port=1023
+check "activity.port 8080 is refused even while the source is off" refused 'activity.port: 8080 is not usable' --set activity.port=8080
+# R2 (ANR-1030b): several watched namespaces and no explicit agentTokensSecret would leave the agents of the extra ones with a Secret that is not there.
+check "activity on with several watched namespaces and no agentTokensSecret.name is refused" refused 'activity.agentTokensSecret.name is required while activity.to is set and watchNamespaces lists more than one namespace' \
+  --set-json "activity.to=$act_peer" --set activity.tokenSecret.name=agent-bearer --set-json 'watchNamespaces=["team-a","team-b"]'
+activity_several_namespaces_named() {
+  act_on --set-json 'watchNamespaces=["team-a","team-b"]' --set activity.agentTokensSecret.name=copy-in-each || return 1
+  dhas ConfigMap aap-operator '^        name: "copy-in-each"$'
+}
+check "activity on with several watched namespaces and agentTokensSecret.name set renders" activity_several_namespaces_named
+check "activity on with one watchNamespaces entry needs no agentTokensSecret.name" render --set-json "activity.to=$act_peer" --set activity.tokenSecret.name=agent-bearer --set-json 'watchNamespaces=["team-a"]'
 activity_no_token_in_render() { act_on --set activity.tokenSecret.key=bearer-key || return 1; lacks 'hunter2' && has 'key: bearer-key'; }
 check "activity on: the Secret's key is the one named, and no value of it is rendered" activity_no_token_in_render
 check "activity.to without a bearer Secret is refused" refused 'activity.tokenSecret.name and activity.tokenSecret.key are required' --set-json "activity.to=$act_peer"

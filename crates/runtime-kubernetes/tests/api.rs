@@ -297,8 +297,9 @@ async fn what_the_spec_no_longer_asks_for_is_deleted_and_file_sets_wait_for_the_
     let status = runtime.ensure(&id(), &spec).await.unwrap();
     assert_eq!(status.phase, Phase::Provisioning);
     let deleted = kinds_written(&fake.calls(), "DELETE");
+    // The agent's own policy waits for the rollout like the file sets (ANR-1030b): old pods may still serve a listener it guards.
     assert!(
-        deleted.contains(&(K::NetworkPolicy, "rt".to_owned())),
+        !deleted.contains(&(K::NetworkPolicy, "rt".to_owned())),
         "{deleted:?}"
     );
     assert!(
@@ -320,6 +321,10 @@ async fn what_the_spec_no_longer_asks_for_is_deleted_and_file_sets_wait_for_the_
     assert_eq!(status.phase, Phase::Ready);
     assert_eq!(status.replicas, 2);
     assert!(fake.get(K::ConfigMap, NS, "rt-agent-00000000").is_none());
+    assert!(
+        fake.get(K::NetworkPolicy, NS, "rt").is_none(),
+        "the stale agent policy goes with the rollout"
+    );
     assert!(fake.get(K::ConfigMap, NS, "rt-agent-0a1b2c3d").is_some());
     assert!(
         fake.get(K::ConfigMap, NS, "unrelated").is_some(),

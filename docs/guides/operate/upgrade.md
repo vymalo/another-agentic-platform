@@ -2,6 +2,8 @@
 
 You upgrade by moving the repository to a newer revision, then applying two charts from it: the CRDs first, then the operator. Nothing publishes either chart, so a new version is a new commit of this repository.
 
+If you turn on the activity source (`activity.to`, ANR-1030b), read [Activity](../../../deploy/operator/README.md#upgrading) (the paragraph "Activity (ANR-1030b)") in the chart's upgrade notes first.
+
 Install first: [Install the CRDs and the operator](../deploy/install.md). With the Platform API on, it is upgraded by the same command.
 
 ## Which revision

@@ -42,6 +42,17 @@ pub fn erase<A: ActivitySource + 'static>(source: A) -> ActivityFn {
     })
 }
 
+/// The closed set of kinds a failed poll is told apart by in the log: the agent refused the question (a token that does not
+/// match: 401 or 403), it answered what the operator cannot read, or it could not be reached (timeout, refused connection, a
+/// NetworkPolicy that drops the packets, a 5xx).
+fn failure_kind(e: &ActivityError) -> &'static str {
+    match e {
+        ActivityError::Invalid(m) if m.contains("refused the question") => "refused",
+        ActivityError::Invalid(_) => "invalid",
+        ActivityError::Unavailable(_) => "unreachable",
+    }
+}
+
 /// What the loop and the reconciler share about sleep. Cheap to share in an `Arc`.
 ///
 /// It holds the idle clock of each agent and the loop's **proposals** (a [`Mark`]). It does not hold who is asleep:
@@ -57,6 +68,10 @@ pub struct Sleepers {
 struct Inner {
     idle: HashMap<String, IdleState>,
     marks: HashMap<String, (Mark, bool)>,
+    /// Agents that ask to sleep and have no activity listener (the a2a harness): the loop never polls them.
+    listenerless: std::collections::HashSet<String>,
+    /// The kind of the last failed poll of each agent, while it keeps failing the same way (to warn once per kind).
+    poll_failures: HashMap<String, &'static str>,
 }
 
 fn key(id: &RuntimeId) -> String {
@@ -141,11 +156,42 @@ impl Sleepers {
         });
     }
 
+    /// Record whether an agent asks to sleep (`scaling.idleTimeout`) but has **no activity listener**: an A2A image says nothing
+    /// of how busy it is, so it never sleeps and the loop does not ask it. True when this call **changed** the answer to
+    /// "yes", which is when the reconcile says so, once, rather than on every pass.
+    pub(crate) fn set_listenerless(&self, id: &RuntimeId, listenerless: bool) -> bool {
+        self.with(|i| {
+            if listenerless {
+                i.listenerless.insert(key(id))
+            } else {
+                i.listenerless.remove(&key(id));
+                false
+            }
+        })
+    }
+
+    /// Record the outcome of a poll: `Some(kind)` for a failure, `None` for an answer. True when the failure is **news**: a
+    /// kind this agent was not already failing with. A success clears it, so the next failure is news again.
+    pub(crate) fn note_poll(&self, id: &RuntimeId, failure: Option<&'static str>) -> bool {
+        self.with(|i| match failure {
+            Some(kind) => i.poll_failures.insert(key(id), kind) != Some(kind),
+            None => {
+                i.poll_failures.remove(&key(id));
+                false
+            }
+        })
+    }
+
+    fn is_listenerless(&self, id: &RuntimeId) -> bool {
+        self.with(|i| i.listenerless.contains(&key(id)))
+    }
+
     /// Forget everything about an agent: it was deleted, suspended by a person, or no longer asks to sleep.
     pub fn forget(&self, id: &RuntimeId) {
         self.with(|i| {
             i.idle.remove(&key(id));
             i.marks.remove(&key(id));
+            i.poll_failures.remove(&key(id));
         });
     }
 
@@ -219,9 +265,25 @@ pub async fn step(
     {
         return Outcome::Stayed;
     }
+    if sleepers.is_listenerless(&id) {
+        // Nothing to ask: the agent's pod serves no listener, and a refused connection would count as busy for ever.
+        return Outcome::Stayed;
+    }
     let polled = activity(id.clone()).await;
-    if let Err(e) = &polled {
-        tracing::debug!(service = %id.name(), "activity poll failed, counted as busy: {e}");
+    // A failed poll counts as busy, so a wrong token, a missing Secret or a `activity.to` that misses the agents' namespace
+    // would keep every agent awake in silence: the first failure of each kind says so, once, at `warn`.
+    let failure = polled.as_ref().err().map(failure_kind);
+    if let (Err(e), Some(kind)) = (&polled, failure) {
+        if sleepers.note_poll(&id, Some(kind)) {
+            tracing::warn!(
+                service = %id.name(), namespace = %id.scope(), kind,
+                "activity poll failed, counted as busy: {e} (the agent stays awake until polls succeed; logged once per kind)"
+            );
+        } else {
+            tracing::debug!(service = %id.name(), kind, "activity poll failed again, counted as busy: {e}");
+        }
+    } else {
+        sleepers.note_poll(&id, None);
     }
     let step = decide(&policy, sleepers.idle_state(&id), false, &polled, now);
     sleepers.set_idle(&id, step.state);
@@ -368,6 +430,55 @@ mod tests {
 
     fn sleepy() -> serde_json::Value {
         json!({ "idleTimeout": "10m", "wakeAhead": "2m" })
+    }
+
+    /// R1 (ANR-1030b): a failing poll is news once per kind, not on every lap, and an answer ends the run of failures.
+    #[tokio::test]
+    async fn a_failed_poll_is_news_once_per_kind_until_an_answer() {
+        let r = rig();
+        assert!(r.sleepers.note_poll(&r.id, Some("refused")), "first");
+        assert!(!r.sleepers.note_poll(&r.id, Some("refused")), "repeat");
+        assert!(
+            r.sleepers.note_poll(&r.id, Some("unreachable")),
+            "kind changed"
+        );
+        assert!(!r.sleepers.note_poll(&r.id, Some("unreachable")));
+        assert!(!r.sleepers.note_poll(&r.id, None), "an answer is no news");
+        assert!(
+            r.sleepers.note_poll(&r.id, Some("unreachable")),
+            "after an answer it is news again"
+        );
+
+        // The kinds come from the error, and `step` records them (a repeat of the recorded kind is no news).
+        assert_eq!(
+            failure_kind(&ActivityError::Invalid(
+                "the agent refused the question (401 Unauthorized)".into()
+            )),
+            "refused"
+        );
+        assert_eq!(
+            failure_kind(&ActivityError::Invalid("the answer is not JSON".into())),
+            "invalid"
+        );
+        assert_eq!(
+            failure_kind(&ActivityError::Unavailable("x".into())),
+            "unreachable"
+        );
+        let refusing: ActivityFn = Arc::new(|_| {
+            Box::pin(async {
+                Err(ActivityError::Invalid(
+                    "the agent refused the question (401 Unauthorized)".into(),
+                ))
+            })
+        });
+        let sleepers = Sleepers::default();
+        let svc = service(sleepy(), false);
+        step(&refusing, &sleepers, &svc, 0, MAX_AGE).await;
+        assert!(
+            !sleepers.note_poll(&r.id, Some("refused")),
+            "step recorded the first failure"
+        );
+        assert!(sleepers.note_poll(&r.id, Some("invalid")));
     }
 
     #[tokio::test]

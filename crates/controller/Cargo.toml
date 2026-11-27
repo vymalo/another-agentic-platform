@@ -30,6 +30,7 @@ tokio = { workspace = true, features = ["rt", "sync", "time"] }
 tracing.workspace = true
 
 [dev-dependencies]
+aap-activity-http.workspace = true
 aap-trace-otlp = { workspace = true, features = ["testkit"] }
 aap-trace = { workspace = true, features = ["testkit"] }
 aap-usage = { workspace = true, features = ["testkit"] }

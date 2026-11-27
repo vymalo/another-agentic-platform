@@ -253,15 +253,45 @@ pub struct ActivitySection {
     /// without their bearer.
     #[serde(default)]
     pub enabled: bool,
-    /// The port agents serve `/internal/activity` on (their `LISTEN_ADDR`).
+    /// The port agents serve `/internal/activity` on: 1024 to 65535, never 8080 (the A2A port). 8081 by default.
     #[serde(default = "default_activity_port")]
     pub port: u16,
     /// How long one question may take, in seconds (1 to 30). An agent that does not answer by then counts as busy.
     #[serde(default = "default_activity_timeout")]
     pub timeout_secs: u64,
-    /// The bearer the agents accept, by reference (a mounted Secret key). Read once at start, never logged.
+    /// The bearer the agents accept, by reference (a mounted Secret key). Read once at start, never logged. **One token for the
+    /// whole deployment** (ANR-Q142): it must not contain a comma, because an agent splits its list of bearers on commas.
     #[serde(default, deserialize_with = "token_ref")]
     pub token: Option<SecretRef>,
+    /// The Secret key the **agents' pods** read the same bearer from (`ACTIVITY_BEARER_TOKENS`). The operator never reads a
+    /// Secret (AD-024): a Secret of this name must exist in every namespace it watches, with this key. Required while
+    /// `enabled`, refused otherwise.
+    #[serde(default)]
+    pub agent_tokens_secret: Option<AgentTokensSecret>,
+    /// Where the operator's own pods are, so an agent's NetworkPolicy lets exactly them reach the listener. Required while
+    /// `enabled`, refused otherwise.
+    #[serde(default)]
+    pub operator_pod: Option<OperatorPod>,
+}
+
+/// `activity.agentTokensSecret`: a key of a Secret, by name.
+#[derive(Debug, Deserialize, schemars::JsonSchema)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct AgentTokensSecret {
+    /// The Secret's name.
+    pub name: String,
+    /// The key that holds the bearer.
+    pub key: String,
+}
+
+/// `activity.operatorPod`: the operator's pods, as an agent's NetworkPolicy names them.
+#[derive(Debug, Deserialize, schemars::JsonSchema)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct OperatorPod {
+    /// The operator's namespace.
+    pub namespace: String,
+    /// Labels every one of the operator's pods carries. Never empty: an empty selector admits every pod of the namespace.
+    pub labels: std::collections::BTreeMap<String, String>,
 }
 
 impl Default for ActivitySection {
@@ -271,12 +301,14 @@ impl Default for ActivitySection {
             port: default_activity_port(),
             timeout_secs: default_activity_timeout(),
             token: None,
+            agent_tokens_secret: None,
+            operator_pod: None,
         }
     }
 }
 
 fn default_activity_port() -> u16 {
-    8080
+    8081
 }
 
 fn default_activity_timeout() -> u64 {
@@ -592,6 +624,8 @@ pub struct Activity {
     pub port: u16,
     pub timeout: Duration,
     pub token: Option<SecretRef>,
+    /// What the agents' specs carry (port, Secret key, the operator's pods): `Some` exactly when `enabled`.
+    pub externals: Option<aap_domain::ActivityExternals>,
 }
 
 /// The meter's settings, checked: only built when `metering.enabled` is true.
@@ -725,9 +759,7 @@ impl Config {
             );
         }
 
-        if self.activity.port == 0 {
-            bail!("activity.port: 0 is not a port");
-        }
+        let activity_externals = Self::activity_externals(&self.activity)?;
         if !(1..=30).contains(&self.activity.timeout_secs) {
             bail!(
                 "activity.timeoutSecs: {} is not a whole number of seconds from 1 to 30",
@@ -826,6 +858,7 @@ impl Config {
                 port: self.activity.port,
                 timeout: Duration::from_secs(self.activity.timeout_secs),
                 token: self.activity.token,
+                externals: activity_externals,
             },
             leader: Leader {
                 enabled: leader.enabled,
@@ -838,6 +871,70 @@ impl Config {
             metering,
             log_filter: self.log.filter,
             telemetry: self.telemetry.otlp,
+        })
+    }
+
+    /// The activity listener's settings as the agents' specs carry them: `None` while `activity.enabled` is off, and then
+    /// `agentTokensSecret` and `operatorPod` are refused (they would say nothing). On, every part is required and
+    /// `aap_domain` judges it (port, empty selector, empty names), the error naming the key.
+    fn activity_externals(a: &ActivitySection) -> Result<Option<aap_domain::ActivityExternals>> {
+        // Whatever `enabled` says: a port the agents could not bind, or the A2A port, is a mistake to catch now.
+        if a.port < 1024 {
+            bail!(
+                "activity.port: {} is below 1024: a non-root container cannot bind it",
+                a.port
+            );
+        }
+        if a.port == 8080 {
+            bail!(
+                "activity.port: 8080 is the A2A port: the activity listener needs a port of its own"
+            );
+        }
+        if !a.enabled {
+            if a.agent_tokens_secret.is_some() || a.operator_pod.is_some() {
+                bail!(
+                    "activity.agentTokensSecret and activity.operatorPod are set but activity.enabled is not: they would do nothing"
+                );
+            }
+            return Ok(None);
+        }
+        let Some(secret) = &a.agent_tokens_secret else {
+            bail!(
+                "activity.agentTokensSecret: required while activity.enabled is true: the agents' pods read the bearer from a Secret of that name"
+            );
+        };
+        let Some(pod) = &a.operator_pod else {
+            bail!(
+                "activity.operatorPod: required while activity.enabled is true: an agent's NetworkPolicy admits only the operator's pods"
+            );
+        };
+        if pod.labels.is_empty() {
+            bail!(
+                "activity.operatorPod.labels: empty: an empty selector admits every pod of the operator's namespace"
+            );
+        }
+        if pod.namespace.trim().is_empty() {
+            bail!("activity.operatorPod.namespace: empty");
+        }
+        if secret.name.trim().is_empty() || secret.key.trim().is_empty() {
+            bail!("activity.agentTokensSecret: name and key are required");
+        }
+        aap_domain::ActivityExternals::new(
+            a.port,
+            aap_domain::ActivitySecret {
+                name: secret.name.trim().to_owned(),
+                key: secret.key.trim().to_owned(),
+            },
+            aap_domain::OperatorPeer {
+                namespace: pod.namespace.trim().to_owned(),
+                pod_labels: pod.labels.clone(),
+            },
+        )
+        .map(Some)
+        .map_err(|e| {
+            anyhow::anyhow!(
+                "activity.port / activity.agentTokensSecret / activity.operatorPod: {e}"
+            )
         })
     }
 
@@ -1089,6 +1186,78 @@ mod tests {
                 .and_then(Config::validate)
                 .expect_err("a configuration the operator cannot work with")
         )
+    }
+
+    /// An `activity` block that is enabled and complete, with `change` applied to it.
+    fn with_activity(change: impl FnOnce(&mut serde_json::Value)) -> String {
+        let mut activity = serde_json::json!({
+            "enabled": true,
+            "token": { "file": "/t" },
+            "agentTokensSecret": { "name": "aap-activity", "key": "token" },
+            "operatorPod": { "namespace": "aap", "labels": { "app": "op" } },
+        });
+        change(&mut activity);
+        serde_json::to_string(&serde_json::json!({ "version": 1, "activity": activity }))
+            .expect("JSON")
+    }
+
+    /// ANR-1030b (ANR-Q143): 8081 by default; 8080 and below 1024 are refused, enabled or not; the new keys are required while
+    /// enabled and meaningless otherwise; an empty selector is refused, naming the key.
+    #[test]
+    fn the_activity_listener_settings_are_judged_at_load() {
+        let off = settings(&minimal());
+        assert_eq!(off.activity.port, 8081);
+        assert!(off.activity.externals.is_none());
+
+        let on = settings(&with_activity(|_| {}));
+        let e = on.activity.externals.expect("enabled builds the externals");
+        assert_eq!(e.port(), 8081);
+        assert_eq!(e.tokens_secret().name, "aap-activity");
+        assert_eq!(e.operator_peer().namespace, "aap");
+
+        for port in [8080, 1023, 0] {
+            let text = refused(&with_activity(|a| a["port"] = port.into()));
+            assert!(text.contains("activity.port"), "{port}: {text}");
+            let text = refused(&format!("version: 1\nactivity:\n  port: {port}\n"));
+            assert!(text.contains("activity.port"), "off, {port}: {text}");
+        }
+        assert_eq!(
+            settings(&with_activity(|a| a["port"] = 1024.into()))
+                .activity
+                .port,
+            1024
+        );
+
+        for key in ["agentTokensSecret", "operatorPod"] {
+            let text = refused(&with_activity(|a| {
+                a.as_object_mut().expect("map").remove(key);
+            }));
+            assert!(text.contains(key) && text.contains("required"), "{text}");
+            // Set but not enabled: it would do nothing, so it is refused.
+            let text = refused(&with_activity(|a| a["enabled"] = false.into()));
+            assert!(text.contains("activity.enabled"), "{text}");
+        }
+        for (change, needle) in [
+            (
+                (|a: &mut serde_json::Value| a["operatorPod"]["labels"] = serde_json::json!({}))
+                    as fn(&mut serde_json::Value),
+                "labels",
+            ),
+            (|a| a["operatorPod"]["namespace"] = "".into(), "namespace"),
+            (
+                |a| a["agentTokensSecret"]["name"] = "".into(),
+                "agentTokensSecret",
+            ),
+            (
+                |a| a["agentTokensSecret"]["key"] = " ".into(),
+                "agentTokensSecret",
+            ),
+        ] {
+            let text = refused(&with_activity(change));
+            assert!(text.contains(needle), "{needle}: {text}");
+        }
+        // An unknown key inside the new blocks is refused too.
+        refused(&with_activity(|a| a["operatorPod"]["pods"] = "x".into()));
     }
 
     /// The least a deployment must say: a version, and nothing else.
