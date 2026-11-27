@@ -13,11 +13,15 @@
 # the diff of the goldens (that diff is the change of the env contract), and fix `aap-domain`.
 set -eu
 
-# adam-rs `main` at the revision K1 read (4bc6742, 2026-11-14: the chart gained the package cache, the access tier cap and the model's three variables; D15d read 581aeed: the coder's local git runs in a sidecar with no secret, #136 and #137, ADR 0041
+# adam-rs `main` at b5d1c7e (2026-11-27: ADR 0038's run pod — `OPENCODE_MODEL` gone everywhere, `MODEL_API_KEY` out of
+# the run pod, the admission rule refuses a `secretKeyRef`, an `imagePullSecrets` rule, the workspace pin e6a528f → 8c297d3,
+# no `opencode` copied, `RUN_POD_WAIT_SECS` 600 → 1020, #474's activity listener; the newest image that has #474 but not
+# adam's PostgreSQL 18 floor). Before it, the goldens were at 4bc6742 (2026-11-14, the last commit of adam-rs's history to
+# touch `deploy/coder`: a bump of the image tag, after `3eca052`), and before that K1 read (4bc6742, 2026-11-14: the chart gained the package cache, the access tier cap and the model's three variables; D15d read 581aeed: the coder's local git runs in a sidecar with no secret, #136 and #137, ADR 0041
 # open decision 6; `deploy/coder` did not change after it; 7598255 was D15c's: run pods reach the internet only through the egress
 # proxy, #134 and #135, ADR 0042; 3f714d0 was D15a's, the coder refuses a GitHub App key file beside local commands, #131; §59a cites
 # 0391809, the revision of the goldens before). Full hash read from git.
-ADAM_RS_REV="4bc6742deca699a5e25fb07d892b5ce7d4a42e25"
+ADAM_RS_REV="b5d1c7eb56e6162348ac94495be1ba400b7a54eb"
 NAMESPACE="another-agentic-system"
 
 here=$(cd "$(dirname "$0")" && pwd)

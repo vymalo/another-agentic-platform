@@ -24,7 +24,7 @@ data:
 kind: ConfigMap
 metadata:
   annotations:
-    agents.vymalo.com/config-digest: sha256:6c029e3ba81a1d6e2e4959bf16c0426492a4bb57f8099f00ad744c264bfa3efb
+    agents.vymalo.com/config-digest: sha256:dcf952e1862c3ad47a3fad42f258bdb8b57b5a929ad732824ba9bc449cc67320
   labels:
     app.kubernetes.io/instance: coder
     app.kubernetes.io/managed-by: aap-operator
@@ -106,18 +106,9 @@ data:
               {
                 "name": "no_proxy",
                 "value": "localhost,127.0.0.1"
-              },
-              {
-                "name": "MODEL_API_KEY",
-                "valueFrom": {
-                  "secretKeyRef": {
-                    "key": "MODEL_API_KEY",
-                    "name": "coder-secrets"
-                  }
-                }
               }
             ],
-            "image": "ghcr.io/vymalo/another-agentic-images/workspace:1.98.1-e6a528f@sha256:d2aae762ecad2c13bb697332507d236a75d8233d061f38cc97dc9227192b0797",
+            "image": "ghcr.io/vymalo/another-agentic-images/workspace:1.98.1-8c297d3@sha256:b465808bfb8a1baae5e59a429bf292726b021e3b37322f759dbda3ee2c57ed67",
             "imagePullPolicy": "IfNotPresent",
             "name": "run",
             "resources": {
@@ -160,7 +151,7 @@ data:
             "command": [
               "sh",
               "-c",
-              "cp -L /opt/adam/bin/adam-exec /opt/adam/bin/opencode /tools/ && chmod 0755 /tools/adam-exec /tools/opencode"
+              "cp -L /opt/adam/bin/adam-exec /tools/ && chmod 0755 /tools/adam-exec"
             ],
             "image": "ghcr.io/vymalo/another-adam-rs/coder:sha-0391809@sha256:814d8ee329a5e4d8634e8a82532c035999c4be27aac086508b742a635449ea40",
             "imagePullPolicy": "IfNotPresent",
@@ -222,7 +213,7 @@ data:
 kind: ConfigMap
 metadata:
   annotations:
-    agents.vymalo.com/config-digest: sha256:6c029e3ba81a1d6e2e4959bf16c0426492a4bb57f8099f00ad744c264bfa3efb
+    agents.vymalo.com/config-digest: sha256:dcf952e1862c3ad47a3fad42f258bdb8b57b5a929ad732824ba9bc449cc67320
   labels:
     app.kubernetes.io/instance: coder
     app.kubernetes.io/managed-by: aap-operator
@@ -241,18 +232,16 @@ data:
   claim: work-coder-0
   claims: work-coder-0
   images: |-
-    ghcr.io/vymalo/another-agentic-images/workspace:1.98.1-e6a528f@sha256:d2aae762ecad2c13bb697332507d236a75d8233d061f38cc97dc9227192b0797
+    ghcr.io/vymalo/another-agentic-images/workspace:1.98.1-8c297d3@sha256:b465808bfb8a1baae5e59a429bf292726b021e3b37322f759dbda3ee2c57ed67
     ghcr.io/vymalo/another-adam-rs/coder:sha-0391809@sha256:814d8ee329a5e4d8634e8a82532c035999c4be27aac086508b742a635449ea40
   managedBy: adam-coder
   priorityClass: coder-run
   runLabel: adam.vymalo.com/run
-  secretKey: MODEL_API_KEY
-  secretName: coder-secrets
   serviceAccount: system:serviceaccount:another-agentic-system:coder
 kind: ConfigMap
 metadata:
   annotations:
-    agents.vymalo.com/config-digest: sha256:6c029e3ba81a1d6e2e4959bf16c0426492a4bb57f8099f00ad744c264bfa3efb
+    agents.vymalo.com/config-digest: sha256:dcf952e1862c3ad47a3fad42f258bdb8b57b5a929ad732824ba9bc449cc67320
   labels:
     agents.vymalo.com/run-pods-policy: 'true'
     app.kubernetes.io/instance: coder
@@ -272,7 +261,7 @@ automountServiceAccountToken: false
 kind: ServiceAccount
 metadata:
   annotations:
-    agents.vymalo.com/config-digest: sha256:6c029e3ba81a1d6e2e4959bf16c0426492a4bb57f8099f00ad744c264bfa3efb
+    agents.vymalo.com/config-digest: sha256:dcf952e1862c3ad47a3fad42f258bdb8b57b5a929ad732824ba9bc449cc67320
   labels:
     app.kubernetes.io/instance: coder
     app.kubernetes.io/managed-by: aap-operator
@@ -290,7 +279,7 @@ apiVersion: v1
 kind: ResourceQuota
 metadata:
   annotations:
-    agents.vymalo.com/config-digest: sha256:6c029e3ba81a1d6e2e4959bf16c0426492a4bb57f8099f00ad744c264bfa3efb
+    agents.vymalo.com/config-digest: sha256:dcf952e1862c3ad47a3fad42f258bdb8b57b5a929ad732824ba9bc449cc67320
   labels:
     app.kubernetes.io/instance: coder
     app.kubernetes.io/managed-by: aap-operator
@@ -334,7 +323,7 @@ data:
 kind: ConfigMap
 metadata:
   annotations:
-    agents.vymalo.com/config-digest: sha256:6c029e3ba81a1d6e2e4959bf16c0426492a4bb57f8099f00ad744c264bfa3efb
+    agents.vymalo.com/config-digest: sha256:dcf952e1862c3ad47a3fad42f258bdb8b57b5a929ad732824ba9bc449cc67320
   labels:
     app.kubernetes.io/component: egress-proxy
     app.kubernetes.io/instance: coder
@@ -354,7 +343,7 @@ automountServiceAccountToken: false
 kind: ServiceAccount
 metadata:
   annotations:
-    agents.vymalo.com/config-digest: sha256:6c029e3ba81a1d6e2e4959bf16c0426492a4bb57f8099f00ad744c264bfa3efb
+    agents.vymalo.com/config-digest: sha256:dcf952e1862c3ad47a3fad42f258bdb8b57b5a929ad732824ba9bc449cc67320
   labels:
     app.kubernetes.io/component: egress-proxy
     app.kubernetes.io/instance: coder
@@ -373,7 +362,7 @@ apiVersion: apps/v1
 kind: Deployment
 metadata:
   annotations:
-    agents.vymalo.com/config-digest: sha256:6c029e3ba81a1d6e2e4959bf16c0426492a4bb57f8099f00ad744c264bfa3efb
+    agents.vymalo.com/config-digest: sha256:dcf952e1862c3ad47a3fad42f258bdb8b57b5a929ad732824ba9bc449cc67320
   labels:
     app.kubernetes.io/component: egress-proxy
     app.kubernetes.io/instance: coder
@@ -483,7 +472,7 @@ apiVersion: v1
 kind: Service
 metadata:
   annotations:
-    agents.vymalo.com/config-digest: sha256:6c029e3ba81a1d6e2e4959bf16c0426492a4bb57f8099f00ad744c264bfa3efb
+    agents.vymalo.com/config-digest: sha256:dcf952e1862c3ad47a3fad42f258bdb8b57b5a929ad732824ba9bc449cc67320
   labels:
     app.kubernetes.io/component: egress-proxy
     app.kubernetes.io/instance: coder
@@ -513,7 +502,7 @@ apiVersion: policy/v1
 kind: PodDisruptionBudget
 metadata:
   annotations:
-    agents.vymalo.com/config-digest: sha256:6c029e3ba81a1d6e2e4959bf16c0426492a4bb57f8099f00ad744c264bfa3efb
+    agents.vymalo.com/config-digest: sha256:dcf952e1862c3ad47a3fad42f258bdb8b57b5a929ad732824ba9bc449cc67320
   labels:
     app.kubernetes.io/component: egress-proxy
     app.kubernetes.io/instance: coder
@@ -539,7 +528,7 @@ apiVersion: networking.k8s.io/v1
 kind: NetworkPolicy
 metadata:
   annotations:
-    agents.vymalo.com/config-digest: sha256:6c029e3ba81a1d6e2e4959bf16c0426492a4bb57f8099f00ad744c264bfa3efb
+    agents.vymalo.com/config-digest: sha256:dcf952e1862c3ad47a3fad42f258bdb8b57b5a929ad732824ba9bc449cc67320
   labels:
     app.kubernetes.io/component: egress-proxy
     app.kubernetes.io/instance: coder
@@ -604,7 +593,7 @@ apiVersion: networking.k8s.io/v1
 kind: NetworkPolicy
 metadata:
   annotations:
-    agents.vymalo.com/config-digest: sha256:6c029e3ba81a1d6e2e4959bf16c0426492a4bb57f8099f00ad744c264bfa3efb
+    agents.vymalo.com/config-digest: sha256:dcf952e1862c3ad47a3fad42f258bdb8b57b5a929ad732824ba9bc449cc67320
   labels:
     app.kubernetes.io/instance: coder
     app.kubernetes.io/managed-by: aap-operator
@@ -656,7 +645,7 @@ apiVersion: rbac.authorization.k8s.io/v1
 kind: RoleBinding
 metadata:
   annotations:
-    agents.vymalo.com/config-digest: sha256:6c029e3ba81a1d6e2e4959bf16c0426492a4bb57f8099f00ad744c264bfa3efb
+    agents.vymalo.com/config-digest: sha256:dcf952e1862c3ad47a3fad42f258bdb8b57b5a929ad732824ba9bc449cc67320
   labels:
     app.kubernetes.io/instance: coder
     app.kubernetes.io/managed-by: aap-operator
@@ -682,7 +671,7 @@ apiVersion: v1
 kind: Service
 metadata:
   annotations:
-    agents.vymalo.com/config-digest: sha256:6c029e3ba81a1d6e2e4959bf16c0426492a4bb57f8099f00ad744c264bfa3efb
+    agents.vymalo.com/config-digest: sha256:dcf952e1862c3ad47a3fad42f258bdb8b57b5a929ad732824ba9bc449cc67320
   labels:
     app.kubernetes.io/instance: coder
     app.kubernetes.io/managed-by: aap-operator
@@ -710,7 +699,7 @@ apiVersion: apps/v1
 kind: StatefulSet
 metadata:
   annotations:
-    agents.vymalo.com/config-digest: sha256:6c029e3ba81a1d6e2e4959bf16c0426492a4bb57f8099f00ad744c264bfa3efb
+    agents.vymalo.com/config-digest: sha256:dcf952e1862c3ad47a3fad42f258bdb8b57b5a929ad732824ba9bc449cc67320
     agents.vymalo.com/deletion-policy: Retain
   labels:
     app.kubernetes.io/component: agent
@@ -739,7 +728,7 @@ spec:
   template:
     metadata:
       annotations:
-        agents.vymalo.com/config-digest: sha256:6c029e3ba81a1d6e2e4959bf16c0426492a4bb57f8099f00ad744c264bfa3efb
+        agents.vymalo.com/config-digest: sha256:dcf952e1862c3ad47a3fad42f258bdb8b57b5a929ad732824ba9bc449cc67320
       labels:
         app.kubernetes.io/component: agent
         app.kubernetes.io/instance: coder
@@ -765,8 +754,6 @@ spec:
               key: MODEL_BASE_URL
               name: coder-secrets
         - name: MODEL
-          value: coding-model
-        - name: OPENCODE_MODEL
           value: coding-model
         - name: WORKERS
           value: '4'
@@ -817,7 +804,7 @@ spec:
         - name: RUN_POD_IDLE_SECS
           value: '300'
         - name: RUN_POD_WAIT_SECS
-          value: '600'
+          value: '1020'
         - name: GIT_SANDBOX_SOCKET
           value: /run/git-sandbox/git.sock
         - name: DATABASE_URL
@@ -1065,7 +1052,7 @@ apiVersion: networking.k8s.io/v1
 kind: NetworkPolicy
 metadata:
   annotations:
-    agents.vymalo.com/config-digest: sha256:6c029e3ba81a1d6e2e4959bf16c0426492a4bb57f8099f00ad744c264bfa3efb
+    agents.vymalo.com/config-digest: sha256:dcf952e1862c3ad47a3fad42f258bdb8b57b5a929ad732824ba9bc449cc67320
   labels:
     app.kubernetes.io/instance: coder
     app.kubernetes.io/managed-by: aap-operator

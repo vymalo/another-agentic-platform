@@ -24,7 +24,7 @@ data:
 kind: ConfigMap
 metadata:
   annotations:
-    agents.vymalo.com/config-digest: sha256:e85bb4670e2e9058904882426084388d59928364173d71e96f11612841db3d03
+    agents.vymalo.com/config-digest: sha256:c844f02d3fd5575171bccc444c47bcc55fdb2fda781ca1940cace69bba864f47
   labels:
     app.kubernetes.io/instance: coder
     app.kubernetes.io/managed-by: aap-operator
@@ -42,7 +42,7 @@ apiVersion: v1
 kind: Service
 metadata:
   annotations:
-    agents.vymalo.com/config-digest: sha256:e85bb4670e2e9058904882426084388d59928364173d71e96f11612841db3d03
+    agents.vymalo.com/config-digest: sha256:c844f02d3fd5575171bccc444c47bcc55fdb2fda781ca1940cace69bba864f47
   labels:
     app.kubernetes.io/instance: coder
     app.kubernetes.io/managed-by: aap-operator
@@ -70,7 +70,7 @@ apiVersion: apps/v1
 kind: StatefulSet
 metadata:
   annotations:
-    agents.vymalo.com/config-digest: sha256:e85bb4670e2e9058904882426084388d59928364173d71e96f11612841db3d03
+    agents.vymalo.com/config-digest: sha256:c844f02d3fd5575171bccc444c47bcc55fdb2fda781ca1940cace69bba864f47
     agents.vymalo.com/deletion-policy: Retain
   labels:
     app.kubernetes.io/component: worker
@@ -99,7 +99,7 @@ spec:
   template:
     metadata:
       annotations:
-        agents.vymalo.com/config-digest: sha256:e85bb4670e2e9058904882426084388d59928364173d71e96f11612841db3d03
+        agents.vymalo.com/config-digest: sha256:c844f02d3fd5575171bccc444c47bcc55fdb2fda781ca1940cace69bba864f47
       labels:
         app.kubernetes.io/component: worker
         app.kubernetes.io/instance: coder
@@ -127,8 +127,6 @@ spec:
               key: MODEL_BASE_URL
               name: coder-secrets
         - name: MODEL
-          value: coding-model
-        - name: OPENCODE_MODEL
           value: coding-model
         - name: WORKERS
           value: '4'
@@ -311,7 +309,7 @@ apiVersion: apps/v1
 kind: Deployment
 metadata:
   annotations:
-    agents.vymalo.com/config-digest: sha256:e85bb4670e2e9058904882426084388d59928364173d71e96f11612841db3d03
+    agents.vymalo.com/config-digest: sha256:c844f02d3fd5575171bccc444c47bcc55fdb2fda781ca1940cace69bba864f47
     agents.vymalo.com/deletion-policy: Retain
   labels:
     app.kubernetes.io/component: front
@@ -335,7 +333,7 @@ spec:
   template:
     metadata:
       annotations:
-        agents.vymalo.com/config-digest: sha256:e85bb4670e2e9058904882426084388d59928364173d71e96f11612841db3d03
+        agents.vymalo.com/config-digest: sha256:c844f02d3fd5575171bccc444c47bcc55fdb2fda781ca1940cace69bba864f47
       labels:
         app.kubernetes.io/component: front
         app.kubernetes.io/instance: coder
@@ -411,7 +409,7 @@ apiVersion: policy/v1
 kind: PodDisruptionBudget
 metadata:
   annotations:
-    agents.vymalo.com/config-digest: sha256:e85bb4670e2e9058904882426084388d59928364173d71e96f11612841db3d03
+    agents.vymalo.com/config-digest: sha256:c844f02d3fd5575171bccc444c47bcc55fdb2fda781ca1940cace69bba864f47
   labels:
     app.kubernetes.io/instance: coder
     app.kubernetes.io/managed-by: aap-operator
@@ -435,7 +433,7 @@ apiVersion: networking.k8s.io/v1
 kind: NetworkPolicy
 metadata:
   annotations:
-    agents.vymalo.com/config-digest: sha256:e85bb4670e2e9058904882426084388d59928364173d71e96f11612841db3d03
+    agents.vymalo.com/config-digest: sha256:c844f02d3fd5575171bccc444c47bcc55fdb2fda781ca1940cace69bba864f47
   labels:
     app.kubernetes.io/instance: coder
     app.kubernetes.io/managed-by: aap-operator

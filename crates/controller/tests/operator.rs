@@ -1946,3 +1946,238 @@ async fn an_agent_with_three_workers_wakes_to_three_replicas_not_one() {
     assert_eq!(spec.worker_replicas(), 3, "the spec's replicas, not one");
     r.stop().await;
 }
+
+// ---- The activity source over HTTP, and the a2a agent that cannot sleep (ANR-1030b) ----
+
+/// A stub agent: answers `GET /internal/activity` with `answer` to whoever asks, counts the questions and keeps the head of each.
+async fn stub_agent(answer: &'static str) -> (u16, Arc<std::sync::Mutex<Vec<String>>>) {
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let port = listener.local_addr().unwrap().port();
+    let heads = Arc::new(std::sync::Mutex::new(Vec::new()));
+    let kept = heads.clone();
+    tokio::spawn(async move {
+        loop {
+            let Ok((mut stream, _)) = listener.accept().await else {
+                return;
+            };
+            let kept = kept.clone();
+            tokio::spawn(async move {
+                let mut buf = [0u8; 4096];
+                let n = stream.read(&mut buf).await.unwrap_or(0);
+                kept.lock()
+                    .unwrap()
+                    .push(String::from_utf8_lossy(&buf[..n]).into_owned());
+                let _ = stream
+                    .write_all(
+                        format!(
+                            "HTTP/1.1 200 OK\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{answer}",
+                            answer.len()
+                        )
+                        .as_bytes(),
+                    )
+                    .await;
+            });
+        }
+    });
+    (port, heads)
+}
+
+fn activity_externals() -> aap_domain::ActivityExternals {
+    aap_domain::ActivityExternals::new(
+        8081,
+        aap_domain::ActivitySecret {
+            name: "aap-activity".to_owned(),
+            key: "token".to_owned(),
+        },
+        aap_domain::OperatorPeer {
+            namespace: "aap".to_owned(),
+            pod_labels: [("app".to_owned(), "operator".to_owned())].into(),
+        },
+    )
+    .unwrap()
+}
+
+/// The operator on a fake API server whose idle loop asks `resolve`'s URL over HTTP with `HttpActivity` carrying `token`, as the
+/// binary composes it, with the deployment's activity externals in its options.
+async fn operator_asking_over_http(
+    resolve: impl Fn(&RuntimeId) -> String + Send + Sync + 'static,
+    token: &str,
+) -> Running {
+    let source = aap_activity_http::HttpActivity::with_resolver(
+        resolve,
+        Duration::from_millis(500),
+        aap_activity_http::Token::new(token).ok(),
+    )
+    .unwrap();
+    let options = Options {
+        activity: Some(activity_externals()),
+        ..sleepy_options()
+    };
+    let r = start_with_activity_source(options, source).await;
+    eventually("the caches to sync", || r.readiness.is_ready()).await;
+    r
+}
+
+async fn start_with_activity_source(
+    options: Options,
+    source: aap_activity_http::HttpActivity,
+) -> Running {
+    let runtime = Scripted::new();
+    let owner: OwnerOf = Arc::new(|_| OwnerHandle::none());
+    let fake = Fake::new();
+    let operator = Operator::new(
+        fake.client(),
+        runtime.clone(),
+        MemoryStore::new(),
+        owner,
+        options,
+    )
+    .with_activity(source);
+    assert!(operator.has_activity());
+    let directory = operator.directory();
+    let readiness = operator.readiness();
+    let metrics = operator.metrics();
+    let (stop, stopped) = oneshot::channel::<()>();
+    let operator_done = tokio::spawn(operator.run(async move {
+        let _ = stopped.await;
+    }));
+    eventually("the controllers' watches", || {
+        fake.watchers_in(SERVICES, "team") >= 1 && fake.watchers_in(CONFIGS, "team") >= 2
+    })
+    .await;
+    Running {
+        fake,
+        runtime,
+        operator_done,
+        stop,
+        directory,
+        readiness,
+        metrics,
+    }
+}
+
+async fn put_sleepy_chat(r: &Running) {
+    let (service, config) = sleepy_chat(json!({}), Value::Null);
+    r.fake.put(CONFIGS, config);
+    r.fake.put(SERVICES, service);
+    eventually("the service to be Ready", || {
+        r.state("team", "chat").as_deref() == Some("Ready")
+    })
+    .await;
+}
+
+/// The source the binary builds, asked over HTTP, reports no run held and the agent sleeps after its timeout: and the stub got
+/// exactly the activity bearer, and the agent's spec carries the listener the operator polls.
+#[tokio::test]
+async fn an_agent_that_answers_over_http_that_it_holds_no_run_sleeps_and_was_asked_with_the_bearer()
+{
+    let (port, heads) = stub_agent("{\"busy\":0}").await;
+    let r = operator_asking_over_http(
+        move |_| format!("http://127.0.0.1:{port}/internal/activity"),
+        "the-activity-token",
+    )
+    .await;
+    put_sleepy_chat(&r).await;
+    let id = RuntimeId::new("team", "chat");
+    within(Duration::from_secs(15), "the agent to sleep", || {
+        r.runtime.signal(&id);
+        phase_of(&r, "team", "chat").as_deref() == Some("Sleeping")
+    })
+    .await;
+    assert_eq!(r.state("team", "chat").as_deref(), Some("Suspended"));
+    assert_eq!(r.metrics.get(aap_controller::metric::SLEEPS, &[]), 1);
+    let heads = heads.lock().unwrap().clone();
+    assert!(!heads.is_empty(), "the stub was asked");
+    for head in &heads {
+        let lower = head.to_ascii_lowercase();
+        assert!(head.starts_with("GET /internal/activity "), "{head}");
+        assert_eq!(
+            lower.matches("authorization:").count(),
+            1,
+            "exactly one Authorization header: {head}"
+        );
+        assert!(
+            lower.contains("authorization: bearer the-activity-token\r\n"),
+            "{head}"
+        );
+    }
+    // The spec the runtime was given has the listener, from the options (`read_externals`).
+    let spec = r.runtime.inner.spec(&id).expect("ensured");
+    assert_eq!(spec.network.activity.as_ref().map(|a| a.port), Some(8081));
+    r.stop().await;
+}
+
+/// An activity endpoint that cannot be reached counts as busy, so the agent stays awake (and is asked again).
+#[tokio::test]
+async fn an_agent_whose_activity_endpoint_is_unreachable_stays_awake() {
+    let closed = {
+        let l = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        l.local_addr().unwrap().port()
+    };
+    let r = operator_asking_over_http(
+        move |_| format!("http://127.0.0.1:{closed}/internal/activity"),
+        "bearer",
+    )
+    .await;
+    put_sleepy_chat(&r).await;
+    let id = RuntimeId::new("team", "chat");
+    for _ in 0..8 {
+        r.runtime.signal(&id);
+        tokio::time::sleep(Duration::from_millis(400)).await;
+    }
+    assert_eq!(r.state("team", "chat").as_deref(), Some("Ready"));
+    assert_ne!(phase_of(&r, "team", "chat").as_deref(), Some("Sleeping"));
+    assert_eq!(r.metrics.get(aap_controller::metric::SLEEPS, &[]), 0);
+    r.stop().await;
+}
+
+/// An a2a agent that sets `scaling.idleTimeout` has no listener: the idle loop never asks it (the stub, which would say idle, is
+/// never reached and the agent stays up) and the person is told once, by one Event, however many passes follow.
+#[tokio::test]
+async fn an_a2a_agent_with_an_idle_timeout_is_never_asked_and_is_told_once() {
+    let (port, heads) = stub_agent("{\"busy\":0}").await;
+    let r = operator_asking_over_http(
+        move |_| format!("http://127.0.0.1:{port}/internal/activity"),
+        "bearer",
+    )
+    .await;
+    let (mut service, config) = example("a2a", "team");
+    service["spec"]["scaling"]["idleTimeout"] = json!("1s");
+    let name = service["metadata"]["name"].as_str().unwrap().to_owned();
+    r.fake.put(CONFIGS, config);
+    r.fake.put(SERVICES, service);
+    eventually("the service to be Ready", || {
+        r.state("team", &name).as_deref() == Some("Ready")
+    })
+    .await;
+    let id = RuntimeId::new("team", name.clone());
+    within(Duration::from_secs(15), "the Event", || {
+        r.fake.events().iter().any(|e| e["reason"] == "NeverSleeps")
+    })
+    .await;
+    // Several idle timeouts, several passes (the runtime signals each): still up, still never asked, still one Event.
+    for _ in 0..8 {
+        r.runtime.signal(&id);
+        tokio::time::sleep(Duration::from_millis(300)).await;
+    }
+    assert_eq!(r.state("team", &name).as_deref(), Some("Ready"));
+    assert!(
+        heads.lock().unwrap().is_empty(),
+        "an agent with no listener was asked"
+    );
+    let told: Vec<_> = r
+        .fake
+        .events()
+        .into_iter()
+        .filter(|e| e["reason"] == "NeverSleeps")
+        .collect();
+    assert_eq!(told.len(), 1, "once, not on every pass: {told:?}");
+    assert!(
+        told[0]["note"].as_str().unwrap().contains("a2a harness"),
+        "{told:?}"
+    );
+    let spec = r.runtime.inner.spec(&id).expect("ensured");
+    assert!(spec.network.activity.is_none());
+    r.stop().await;
+}

@@ -253,8 +253,9 @@ impl RuntimeSpec {
         self.check_run_pods()
     }
 
-    /// The invariants of the activity listener (ANR-1030a): the Service's port and the selected workload's container
-    /// port are the same number, no other container has one, and the one peer that may reach it names something (a
+    /// The invariants of the activity listener (ANR-1030a, ANR-1030b): the Service's port and the selected workload's container
+    /// port are the same number, no other container has one (no sidecar, and no container of a workload the Service does not
+    /// select, whatever its role), and the one peer that may reach it names something (a
     /// peer with no selector renders `from: [{}]`, which the API refuses, and an empty selector admits every pod).
     fn check_activity(&self) -> Result<(), RuntimeError> {
         let bad = |what: String| Err(RuntimeError::InvalidSpec(what));
@@ -278,24 +279,26 @@ impl RuntimeSpec {
             return bad("the activity port is the network port".into());
         }
         for w in &self.workloads {
-            for c in std::iter::once(&w.container).chain(&w.sidecars) {
-                if c.activity_port.is_some_and(|p| p != a.port) {
-                    return bad(format!(
-                        "workload {}: container {} has an activity port that is not the network's",
-                        w.name, c.name
-                    ));
-                }
-            }
             let selected = w.name == self.network.selects;
-            if selected && w.container.activity_port != Some(a.port) {
+            // Only the selected workload's agent container listens: not a sidecar, whatever its port, and not a container of
+            // any other workload, whatever its role (a workload the Service does not select would serve a listener that
+            // nothing in the policy was written for).
+            if let Some(c) = w.sidecars.iter().find(|c| c.activity_port.is_some()) {
                 return bad(format!(
-                    "workload {}: the selected workload's agent container does not listen on the activity port",
-                    w.name
+                    "workload {}: sidecar {} has an activity port; only the agent container listens",
+                    w.name, c.name
                 ));
             }
-            if !selected && (w.container.activity_port.is_some()) && w.role == Role::Worker {
+            if selected {
+                if w.container.activity_port != Some(a.port) {
+                    return bad(format!(
+                        "workload {}: the selected workload's agent container does not listen on the activity port",
+                        w.name
+                    ));
+                }
+            } else if w.container.activity_port.is_some() {
                 return bad(format!(
-                    "workload {}: a worker has an activity port, and the Service does not select it",
+                    "workload {}: has an activity port, and the Service does not select it",
                     w.name
                 ));
             }
@@ -356,8 +359,6 @@ impl RuntimeSpec {
         if let Some(cache) = &rp.guard.cache_claim {
             empty("the cache claim", cache)?;
         }
-        empty("the name of the model key's Secret", &rp.guard.secret.name)?;
-        empty("the key of the model key's Secret", &rp.guard.secret.key)?;
         if rp.quota.pods == 0 {
             return bad("run pods: the quota allows no pod".into());
         }
@@ -959,10 +960,11 @@ pub enum Protocol {
     Sctp,
 }
 
-/// What the guard lets a pod made by the run-pods account be: the guard refuses any other. The images,
-/// the claim and the one Secret key are the agent's; the rest of the guard (not privileged, not root, no
-/// host namespace, no `hostPath`, no Secret volume, no token) is the same for every agent and is the
-/// provider's.
+/// What the guard lets a pod made by the run-pods account be: the guard refuses any other. The images and
+/// the claims are the agent's; the rest of the guard (not privileged, not root, no host namespace, no
+/// `hostPath`, **no Secret a container can read** — no Secret volume, no `secretKeyRef`, no `envFrom` — and
+/// no token) is the same for every agent and is the provider's. adam-rs ADR 0038: a run pod holds no model
+/// key either.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct RunPodGuard {
     /// The images a container of a pod may have, spelled as the pod spells them.
@@ -972,6 +974,4 @@ pub struct RunPodGuard {
     /// The package cache's claim (K1, [`VolumeSource::ExistingClaim`]), the second claim a pod may mount. Absent: none.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub cache_claim: Option<String>,
-    /// The one Secret key a pod may reference, as one variable: the model key.
-    pub secret: SecretRef,
 }

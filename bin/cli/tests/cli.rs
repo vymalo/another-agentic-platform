@@ -94,6 +94,67 @@ fn render_matches_the_run_pods_golden() {
     );
 }
 
+/// ANR-1030b: `--activity-file` gives `render` the operator's setting, so it renders what the operator applies: the coder that
+/// sleeps is the provider's `coder-activity` golden byte for byte, and without the flag it has no listener.
+#[test]
+fn render_matches_the_activity_golden_and_the_flag_is_what_adds_the_listener() {
+    let dir = scratch("activity-golden");
+    let mut docs = read_docs(&example("coder.yaml"));
+    for d in &mut docs {
+        if d["kind"] == "AgentService" {
+            set(d, "/spec/scaling/idleTimeout", json!("15m"));
+        }
+    }
+    let file = dir.join("coder.yaml");
+    write_docs(&file, &docs);
+    let activity = dir.join("activity.yaml");
+    std::fs::write(
+        &activity,
+        "enabled: true\nport: 8081\nagentTokensSecret: { name: aap-activity, key: tokens }\noperatorPod:\n  namespace: aap-system\n  labels: { app.kubernetes.io/name: aap-operator }\ntoken: { file: /ignored }\ntimeoutSecs: 3\n",
+    )
+    .unwrap();
+    let with = aapctl(
+        &[
+            "render",
+            "-f",
+            s(&file),
+            "--activity-file",
+            s(&activity),
+            "--owner-uid",
+            GOLDEN_UID,
+        ],
+        None,
+    );
+    assert_eq!(with.code, 0, "{}", with.stderr);
+    assert!(
+        after_the_leading_comment(&with.stdout) == golden("coder-activity"),
+        "differs from the golden coder-activity:\n{}",
+        with.stdout
+    );
+    let without = aapctl(&["render", "-f", s(&file), "--owner-uid", GOLDEN_UID], None);
+    assert_eq!(without.code, 0, "{}", without.stderr);
+    assert!(!without.stdout.contains("activity"), "{}", without.stdout);
+
+    // The operator's refusals are the flag's: 8080 is the A2A port, and an enabled block needs its peer.
+    std::fs::write(&activity, "enabled: true\nport: 8080\nagentTokensSecret: { name: a, key: k }\noperatorPod: { namespace: n, labels: { a: b } }\n").unwrap();
+    let bad = aapctl(
+        &["render", "-f", s(&file), "--activity-file", s(&activity)],
+        None,
+    );
+    assert_eq!(bad.code, 2, "{}", bad.stderr);
+    std::fs::write(
+        &activity,
+        "enabled: true\nagentTokensSecret: { name: a, key: k }\n",
+    )
+    .unwrap();
+    let bad = aapctl(
+        &["render", "-f", s(&file), "--activity-file", s(&activity)],
+        None,
+    );
+    assert_eq!(bad.code, 2, "{}", bad.stderr);
+    assert!(bad.stderr.contains("operatorPod"), "{}", bad.stderr);
+}
+
 #[test]
 fn render_prints_no_secret_value() {
     // Every example, rendered: the operator makes no Secret and holds no value of one, and nor does the CLI.

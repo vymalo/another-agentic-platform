@@ -556,12 +556,14 @@ check_pod() {
     (proxy | length) == 6 and proxy == ($tpl[0] | proxy)
     and ([proxy[] | select(.name | test("^(HTTPS?|https?)_proxy$"; "i")) | .value] | unique) == [$url]
     and ([proxy[] | select(.name | test("^no_proxy$"; "i")) | .value] | unique) == ["localhost,127.0.0.1"]'
-  # No Secret reaches a run pod but the model key as one variable, and no token: the pod is the template, and the template is narrow.
+  # No Secret reaches a run pod at all, and no token: the pod is the template, and the template is narrow (adam-rs ADR 0038: a run pod
+  # holds no model key either, and names no pull secret).
   jqok "$work/pod-$3.json" "$1 has a Secret, a token or a variable it should not have" '
     ([.spec.volumes[]? | select(.secret != null or .projected != null or .configMap != null or .hostPath != null)] | length) == 0
     and ([.spec.containers[].env[]? | select(.value == null and .valueFrom.secretKeyRef == null)] | length) == 0
-    and ([.spec.containers[].env[]? | select(.valueFrom.secretKeyRef != null) | .name]) == ["MODEL_API_KEY"]
-    and ([.spec.containers[].envFrom[]?] | length) == 0'
+    and ([.spec.containers[].env[]? | select(.valueFrom.secretKeyRef != null)] | length) == 0
+    and ([.spec.containers[].envFrom[]?] | length) == 0
+    and (has(.spec.imagePullSecrets) | not)'
 }
 # work_mounts <pod json>: the mounts of the pod's work volume of the run container, as "<rw|ro> <path> <- <subPath>" lines, sorted.
 work_mounts() { jq -r '.spec.containers[0].volumeMounts[] | select(.name == "work") | "\(if .readOnly == true then "ro" else "rw" end) \(.mountPath) <- \(.subPath // "")"' "$1" | sort; }
@@ -734,8 +736,8 @@ jqok "$work/netpol.json" "the network policy is not: no ingress, DNS and the egr
   and ([.. | objects | select(has("ipBlock"))] | length) == 0'
 jqok "$work/rolebinding.json" "the binding does not give $coder's account the Role $run_role" --arg svc "$coder" --arg role "$run_role" --arg ns "$ns" \
   '.roleRef.name == $role and .roleRef.kind == "Role" and .subjects == [{"kind": "ServiceAccount", "name": $svc, "namespace": $ns}]'
-jqok "$work/params-cm.json" "the guard's parameters are not the agent's account, the class and the model key" --arg svc "$coder" --arg class "$class" --arg ns "$ns" \
-  '.metadata.labels["agents.vymalo.com/run-pods-policy"] == "true" and .data.serviceAccount == ("system:serviceaccount:" + $ns + ":" + $svc) and .data.priorityClass == $class and .data.secretName == "e2e-secrets" and .data.secretKey == "MODEL_API_KEY" and .data.managedBy == "adam-coder"'
+jqok "$work/params-cm.json" "the guard's parameters are not the agent's account, the class and the claims" --arg svc "$coder" --arg class "$class" --arg ns "$ns" \
+  '.metadata.labels["agents.vymalo.com/run-pods-policy"] == "true" and .data.serviceAccount == ("system:serviceaccount:" + $ns + ":" + $svc) and .data.priorityClass == $class and .data.managedBy == "adam-coder" and (.data | has("secretName") | not) and (.data | has("secretKey") | not)'
 jqok "$work/statefulset.json" "the coder's pod is not given the account, the template and the variables of run pods (and no automounted token: it is a volume of the coder container alone, 4b)" --arg svc "$coder" '
   .spec.template.spec.serviceAccountName == $svc and .spec.template.spec.automountServiceAccountToken == false
   and ([.spec.template.spec.containers[] | select(.name == "agent") | .env[] | select(.name == "RUN_ENVIRONMENT") | .value] == ["kubernetes"])

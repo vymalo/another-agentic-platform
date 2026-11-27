@@ -290,8 +290,27 @@ impl KubernetesRuntime {
         ) {
             // The rollout is done: no pod mounts a superseded file set any more.
             self.remove_stale_config_maps(id, &rendered).await?;
+            self.remove_stale_agent_policy(id, &rendered).await?;
         }
         Ok(status)
+    }
+
+    /// The agent's own policy `<svc>` when the spec no longer renders one (no peers listed, and the activity listener gone).
+    /// It waits for the rollout like the superseded ConfigMaps: until every pod is the new one, an old pod may still serve
+    /// the listener, and this policy is the only thing that keeps it to the operator.
+    async fn remove_stale_agent_policy(&self, id: &RuntimeId, r: &Rendered) -> Result<()> {
+        if r.network_policy.is_some() {
+            return Ok(());
+        }
+        let ours = self.list_ours::<NetworkPolicy>(id).await?;
+        if ours
+            .iter()
+            .any(|p| p.metadata.name.as_deref() == Some(id.name()))
+        {
+            self.delete_named::<NetworkPolicy>(id.scope(), id.name())
+                .await?;
+        }
+        Ok(())
     }
 
     /// Every object the spec needs whose name is held by something that is not ours, as a
@@ -541,6 +560,9 @@ impl KubernetesRuntime {
             .into_iter()
             .filter_map(|p| p.metadata.name)
             .filter(|name| !wanted_policies.contains(name.as_str()))
+            // The agent's own policy is not removed here: while old pods still serve the activity listener it is what keeps
+            // that listener to the operator, so it goes only once the rollout is done (`remove_stale_agent_policy`).
+            .filter(|name| name != id.name())
             .collect();
         order_run_pods_policy_last(&mut stale, &run_pods_policy);
         for name in stale {

@@ -102,6 +102,15 @@ data:
       timeoutSecs: {{ .Values.activity.timeoutSecs | int }}
       token:
         file: /var/run/secrets/aap/activity/token
+      # The Secret the agents' pods read the same bearer from, in every watched namespace (the operator reads none).
+      agentTokensSecret:
+        name: {{ include "aap.activityAgentSecretName" . | quote }}
+        key: {{ include "aap.activityAgentSecretKey" . | quote }}
+      # The operator's own pods: the one peer an agent's NetworkPolicy admits to the listener.
+      operatorPod:
+        namespace: {{ .Release.Namespace | quote }}
+        labels:
+          {{- include "aap.selectorLabels" . | nindent 10 }}
     {{- end }}
     {{- if include "aap.metering" . }}
     {{- $m := .Values.metering }}

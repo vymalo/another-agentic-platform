@@ -207,9 +207,20 @@ the DNS rule is required with the policy on, as the tool probe's is. */ -}}
 {{- end -}}
 {{- $ac := .Values.activity -}}
 {{- range $k, $_ := $ac -}}
-{{- if not (has $k (list "to" "port" "timeoutSecs" "tokenSecret" "dns")) -}}
-{{- fail (printf "activity.%s is not a setting: to, port, timeoutSecs, tokenSecret or dns" $k) -}}
+{{- if not (has $k (list "to" "port" "timeoutSecs" "tokenSecret" "agentTokensSecret" "dns")) -}}
+{{- fail (printf "activity.%s is not a setting: to, port, timeoutSecs, tokenSecret, agentTokensSecret or dns" $k) -}}
 {{- end -}}
+{{- end -}}
+{{- /* The port is judged whatever `to` says, as the operator judges its own file (ANR-Q143): below 1024 a non-root container cannot bind it, and
+8080 is the A2A port. */ -}}
+{{- if not (include "aap.isPort" $ac.port) -}}
+{{- fail (printf "activity.port: %v is not a port number" $ac.port) -}}
+{{- end -}}
+{{- if or (lt (int $ac.port) 1024) (eq (int $ac.port) 8080) -}}
+{{- fail (printf "activity.port: %v is not usable: 1024 to 65535, and never 8080 (the A2A port)" $ac.port) -}}
+{{- end -}}
+{{- if not (kindIs "map" $ac.agentTokensSecret) -}}
+{{- fail "activity.agentTokensSecret must be a map with a name and a key (empty: the same as tokenSecret)" -}}
 {{- end -}}
 {{- if not (kindIs "slice" (default (list) $ac.to)) -}}
 {{- fail "activity.to must be a list of NetworkPolicy peers" -}}
@@ -217,14 +228,16 @@ the DNS rule is required with the policy on, as the tool probe's is. */ -}}
 {{- include "aap.checkPeers" (dict "what" "activity.to" "peers" (default (list) $ac.to)) -}}
 {{- include "aap.checkIpBlocks" (dict "what" "activity.to" "peers" (default (list) $ac.to)) -}}
 {{- if $ac.to -}}
-{{- if not (include "aap.isPort" $ac.port) -}}
-{{- fail (printf "activity.port: %v is not a port number" $ac.port) -}}
-{{- end -}}
 {{- if not (and (include "aap.isWholeNumber" $ac.timeoutSecs) (ge (int $ac.timeoutSecs) 1) (le (int $ac.timeoutSecs) 30)) -}}
 {{- fail (printf "activity.timeoutSecs must be a whole number of seconds from 1 to 30, got %v" $ac.timeoutSecs) -}}
 {{- end -}}
 {{- if not (and (kindIs "map" $ac.tokenSecret) $ac.tokenSecret.name $ac.tokenSecret.key) -}}
 {{- fail "activity.tokenSecret.name and activity.tokenSecret.key are required while activity.to is set: the agents refuse a question with no bearer" -}}
+{{- end -}}
+{{- /* More than one watched namespace: the agents' pods there reference a Secret of that name in THEIR namespace, and the chart makes none.
+Defaulting it to the operator's own would leave them in CreateContainerConfigError, so the deployment must say it has made the copies. */ -}}
+{{- if and (kindIs "slice" .Values.watchNamespaces) (gt (len .Values.watchNamespaces) 1) (not (and (kindIs "map" $ac.agentTokensSecret) $ac.agentTokensSecret.name)) -}}
+{{- fail "activity.agentTokensSecret.name is required while activity.to is set and watchNamespaces lists more than one namespace: the agents' pods read the bearer from a Secret of that name in their own namespace, which this chart does not make. Create a copy in every watched namespace (an ExternalSecret, for one) and name it here" -}}
 {{- end -}}
 {{- if .Values.networkPolicy.enabled -}}
 {{- if not (and (kindIs "map" $ac.dns) (kindIs "slice" $ac.dns.ports) $ac.dns.ports $ac.dns.to) -}}
@@ -446,8 +459,11 @@ the CIDRs, a toleration or an egress rule, which the operator checks at start an
 {{- if not (regexMatch `^[A-Za-z_][A-Za-z0-9_]*$` $k) -}}
 {{- fail (printf "runPods.extraEnv: %q is not the name of a variable" $k) -}}
 {{- end -}}
-{{- if has $k (list "MODEL_API_KEY" "CARGO_BUILD_JOBS") -}}
-{{- fail (printf "runPods.extraEnv.%s: the operator sets this variable itself (a secret is never a setting: the model key comes from the agent's Secret)" $k) -}}
+{{- if eq $k "MODEL_API_KEY" -}}
+{{- fail "runPods.extraEnv.MODEL_API_KEY: a run pod holds no model key (adam-rs ADR 0038), and a secret is never a setting" -}}
+{{- end -}}
+{{- if eq $k "CARGO_BUILD_JOBS" -}}
+{{- fail "runPods.extraEnv.CARGO_BUILD_JOBS: the operator sets this variable itself (cargoBuildJobs)" -}}
 {{- end -}}
 {{- if has $k (list "HTTPS_PROXY" "https_proxy" "HTTP_PROXY" "http_proxy" "NO_PROXY" "no_proxy") -}}
 {{- fail (printf "runPods.extraEnv.%s: the operator sets the proxy variables of a run pod from runPods.egressProxy (the egress proxy is the only way out, adam-rs ADR 0042); to add names that bypass it, use runPods.egressProxy.extraNoProxy" $k) -}}

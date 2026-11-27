@@ -105,16 +105,38 @@
       "description": "`activity`: the HTTP activity source (AD-058 P2c), which asks each agent `GET /internal/activity` for the idle controller.",
       "type": "object",
       "properties": {
+        "agentTokensSecret": {
+          "description": "The Secret key the **agents' pods** read the same bearer from (`ACTIVITY_BEARER_TOKENS`). The operator never reads a\nSecret (AD-024): a Secret of this name must exist in every namespace it watches, with this key. Required while\n`enabled`, refused otherwise.",
+          "anyOf": [
+            {
+              "$ref": "#/$defs/AgentTokensSecret"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
         "enabled": {
           "description": "Build the source. **Off by default**: no request is made. On, `token` is required, because the agents refuse a request\nwithout their bearer.",
           "type": "boolean",
           "default": false
         },
+        "operatorPod": {
+          "description": "Where the operator's own pods are, so an agent's NetworkPolicy lets exactly them reach the listener. Required while\n`enabled`, refused otherwise.",
+          "anyOf": [
+            {
+              "$ref": "#/$defs/OperatorPod"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
         "port": {
-          "description": "The port agents serve `/internal/activity` on (their `LISTEN_ADDR`).",
+          "description": "The port agents serve `/internal/activity` on: 1024 to 65535, never 8080 (the A2A port). 8081 by default.",
           "type": "integer",
           "format": "uint16",
-          "default": 8080,
+          "default": 8081,
           "maximum": 65535,
           "minimum": 0
         },
@@ -126,7 +148,7 @@
           "minimum": 0
         },
         "token": {
-          "description": "The bearer the agents accept, by reference (a mounted Secret key). Read once at start, never logged.",
+          "description": "The bearer the agents accept, by reference (a mounted Secret key). Read once at start, never logged. **One token for the\nwhole deployment** (ANR-Q142): it must not contain a comma, because an agent splits its list of bearers on commas.",
           "anyOf": [
             {
               "$ref": "#/$defs/SecretRef"
@@ -138,6 +160,25 @@
         }
       },
       "additionalProperties": false
+    },
+    "AgentTokensSecret": {
+      "description": "`activity.agentTokensSecret`: a key of a Secret, by name.",
+      "type": "object",
+      "properties": {
+        "key": {
+          "description": "The key that holds the bearer.",
+          "type": "string"
+        },
+        "name": {
+          "description": "The Secret's name.",
+          "type": "string"
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "name",
+        "key"
+      ]
     },
     "ContainerResources": {
       "description": "The resources of a container the operator makes beside the agent's: the egress proxy's, the git sandbox's.",
@@ -495,6 +536,28 @@
         }
       },
       "additionalProperties": false
+    },
+    "OperatorPod": {
+      "description": "`activity.operatorPod`: the operator's pods, as an agent's NetworkPolicy names them.",
+      "type": "object",
+      "properties": {
+        "labels": {
+          "description": "Labels every one of the operator's pods carries. Never empty: an empty selector admits every pod of the namespace.",
+          "type": "object",
+          "additionalProperties": {
+            "type": "string"
+          }
+        },
+        "namespace": {
+          "description": "The operator's namespace.",
+          "type": "string"
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "namespace",
+        "labels"
+      ]
     },
     "OtlpSection": {
       "description": "The `telemetry.otlp` section of a configuration file (ANR-962, AD-064): the settings the `OTEL_*` variables carry,\nwritten as YAML. Absent: tracing is off, exactly as with no variable.\n\nThe file names the headers by reference (a mounted file per header, or a variable) and the certificate by path; none\nof them is read by [`validate`](Self::validate), which is what `--check` runs.",

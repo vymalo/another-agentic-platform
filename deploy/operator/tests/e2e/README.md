@@ -64,7 +64,7 @@ stateDiagram-v2
 | File | What |
 |---|---|
 | [`coder-e2e.sh`](coder-e2e.sh) | the script: every step bounded, every assertion named, the cluster's state printed on a failure |
-| [`coder.yaml`](coder.yaml) | [`examples/coder.yaml`](../../../../examples/coder.yaml) adapted: the real image by tag and digest (`sha-9a1fd4e`, the newest `main` image of adam-rs on 2026-10-05, read anonymously from ghcr.io; **it is also the chart's `defaultAgentImage`**, the operator's default for an agent that names no image (AD-029), and `render-check.sh` and `cargo test -p aap-operator --test e2e_fixture` fail when the two differ), the token variant with a dummy token, a Postgres by `secretRef`, no web search, a 1 GiB claim on kind's default storage class. Each difference is marked `# e2e:` |
+| [`coder.yaml`](coder.yaml) | [`examples/coder.yaml`](../../../../examples/coder.yaml) adapted: the real image by tag and digest (`sha-b5d1c7e`, adam-rs `main` on 2026-11-27, read anonymously from ghcr.io; **it is also the chart's `defaultAgentImage`**, the operator's default for an agent that names no image (AD-029), and `render-check.sh` and `cargo test -p aap-operator --test e2e_fixture` fail when the two differ), the token variant with a dummy token, a Postgres by `secretRef`, no web search, a 1 GiB claim on kind's default storage class. Each difference is marked `# e2e:` |
 | [`postgres.yaml`](postgres.yaml) | a throwaway Postgres 17.9 (Alpine 3.23, pinned by digest, from the public ECR mirror of Docker Hub) with no volume |
 | [`operator.values.yaml`](operator.values.yaml) | the operator chart's values: an existing Secret for the registry's token, and only the pods labelled `aap-e2e/client` may read the registry |
 | `../../../../bin/operator/tests/e2e_fixture.rs` | `cargo test`, no cluster: `coder.yaml` passes `aap_domain::resolve`, runs the pinned image with its sidecar on the token variant, and names the Secrets the script makes |
@@ -91,7 +91,7 @@ stateDiagram-v2
 ## What it does not prove
 
 * **No model.** `MODEL_BASE_URL` is `http://model.invalid/v1`: the coder opens no connection to its model at startup (*verified by reading only, 2026-10-05*: a search of `bin/adam-coder/src`, `crates/adam-service/src` and the model crates
-  of adam-rs at `588e9b5`, one commit past the image's `9a1fd4e`, finds no model call at startup), and no task is sent, so nothing ever asks it.
+  of adam-rs at `588e9b5`, one commit past the `9a1fd4e` this pin replaced, finds no model call at startup), and no task is sent, so nothing ever asks it.
 * **No GitHub.** `GITHUB_TOKEN` is a dummy and the GitHub App variant is not run (a real key would be a real credential): the GitHub MCP server
   of the pod is only asked for its tool list, which makes no request to GitHub (*verified 2026-10-03* by adam-rs). No clone, branch, push or pull request.
 * **No run.** No A2A task reaches the coder: no journal, lease, worker or tool is exercised beyond startup. That the operator's variables make
@@ -417,7 +417,7 @@ but the Collector, and a collector that is down (the unit and crate tests do tha
 
 ## The kind end-to-end of run pods (D15b)
 
-The operator, installed from its chart **with `runPods.enabled`**, runs **the real adam-rs coder** (the image at or after adam-rs [#136](https://github.com/vymalo/another-adam-rs/pull/136), `05cda7f`, which has `adam-egress` and `adam-git-sandbox`; pinned at `581aeed`, which contains #131 and #117, ADR 0041, and #137) with
+The operator, installed from its chart **with `runPods.enabled`**, runs **the real adam-rs coder** (the image at or after adam-rs [#136](https://github.com/vymalo/another-adam-rs/pull/136), `05cda7f`, which has `adam-egress` and `adam-git-sandbox`; pinned at `b5d1c7e`, which contains #131 and #117 (ADR 0041), #137 and ADR 0038's run pod) with
 `coder.runPods`. A task makes the coder run a command **in a pod of its own** that the operator's template describes; the pod sees only its own run; the quota counts it and refuses one past the limit (the coder waits); the network of the pod is deny by default and the egress proxy the operator made is its one way out (D15c); the coder's own git runs in a sidecar of its pod that holds no token, key or Secret (D15d); the admission policy and the Roles do what they say under the real RBAC of a real API server; a deleted service leaves nothing, run pods included; and an agent without run pods is as it was. This is the job `run-pods-e2e` of
 [`operator-image.yml`](../../../../.github/workflows/operator-image.yml) (it needs the job `image`, whose operator image it runs, and **`push` does not need it**: it pulls a 3 GB image and the run pods are off by default, so a red run is a reason to look
 and does not put a broken default into the release; an owner decision, §60a D15b, one line to flip). The script [`run-pods-e2e.sh`](run-pods-e2e.sh) is all of it and runs against any kind cluster that has the operator image:
@@ -518,7 +518,7 @@ stateDiagram-v2
 
 * **A real model, GitHub, a pull request.** The model is a script that makes the same three calls for every task; the App's id is made up and its key is generated (the coder parses it at start and never uses it); no task edits files. The coder's work with a real model is `operator-coder-e2e`'s up to its startup checks, and the shipped system's.
 * **Another Kubernetes, another network plugin, Pod Security admission, a second node.** kind's node image (v1.37.0, v1.35.8 before AD-067), kindnet, no Pod Security labels on the namespace, one node (a run pod on another node than the coder's, and a work volume shared by several workers, are not exercised).
-* **OpenCode, Podman, devcontainers** in the run pod, and a coder whose image is not the pin. **git, cargo, pip and go reading the proxy variables** (curl and npm are tried; the others are documented to), **IPv6 egress** (kind is IPv4 only; the proof is the absence of a rule), domain fronting and what an allowed host accepts (adam-rs ADR 0042, "What is not covered"), and **an agent whose image has no `adam-egress`** (the default agent image, `sha-9a1fd4e`, is one: the operator cannot tell, §60a D15c decision 2)
+* **OpenCode, Podman, devcontainers** in the run pod, and a coder whose image is not the pin. **git, cargo, pip and go reading the proxy variables** (curl and npm are tried; the others are documented to), **IPv6 egress** (kind is IPv4 only; the proof is the absence of a rule), domain fronting and what an allowed host accepts (adam-rs ADR 0042, "What is not covered"), and **an agent whose image has no `adam-egress`** (the default agent image, `sha-b5d1c7e`, has it now; the operator still cannot tell, §60a D15c decision 2)
 * **The Platform API and the dashboard**: `agent.runPodSizeClass` is proven by the API's tests; this script makes the objects by `kubectl`.
 * **A deployment**: netcup, Argo CD, External Secrets.
 

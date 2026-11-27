@@ -394,8 +394,11 @@ one writer of the status: it writes `status.sleep` first, then ensures the spec 
 restart. `wake.rs` is pure (`plan`, `timed_out`, `recheck`): a record wakes when the annotation `agents.vymalo.com/wake-at` differs
 from `wakeAtSeen` or `now >= nextDueAt - wakeAhead`, shows `runtime.phase: Waking` until the runtime is `Ready`, and past
 `scaling.wakeTimeout` says `WakeTimedOut` and keeps waking. `Operator::with_clock` fixes the time of a pass for a test. Counter:
-`aap_agent_sleeps_total`. The operator binary builds the P2c source but does not hand it to `with_activity` yet (ANR-1030), and nothing
-writes `wake-at` until ANR-1068.
+`aap_agent_sleeps_total`. Since ANR-1030b the operator binary hands its source to `with_activity` (`Operator::has_activity` says so;
+`Options::activity` carries the `ActivityExternals` the agents' specs are resolved with, and `read_externals` sets them). An agent with
+`scaling.idleTimeout` whose resolved spec has **no activity listener** (the a2a harness) never sleeps: the reconcile records it in
+`Sleepers` (`set_listenerless`), the loop skips it without asking, and one Event `NeverSleeps` says so on the change, not on every pass.
+Nothing writes `wake-at` until ANR-1068.
 
 ## The pod-minute meter (ANR-673, AD-069)
 

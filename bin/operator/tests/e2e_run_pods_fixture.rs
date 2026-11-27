@@ -141,7 +141,7 @@ fn the_coder_with_run_pods_is_refused_by_an_operator_that_has_none_and_resolves_
         !env.iter().any(|(n, _)| n == "GITHUB_TOKEN"),
         "the App variant, not the token: {env:?}"
     );
-    // The template: a container `run`, an init container `tools`, the claim of the coder's work volume, and the one Secret key a run pod may reference.
+    // The template: a container `run`, an init container `tools`, the claim of the coder's work volume, and no Secret at all.
     let template = resolved
         .runtime
         .file_sets
@@ -157,13 +157,20 @@ fn the_coder_with_run_pods_is_refused_by_an_operator_that_has_none_and_resolves_
         "work-e2e-coder-0"
     );
     let template_env = pod["spec"]["containers"][0]["env"].as_array().expect("env");
-    let model_key = template_env
-        .iter()
-        .find(|e| e["name"] == "MODEL_API_KEY")
-        .expect("the model key");
-    assert_eq!(
-        model_key["valueFrom"]["secretKeyRef"],
-        serde_json::json!({"name": "e2e-secrets", "key": "MODEL_API_KEY"})
+    // adam-rs ADR 0038: a run pod reads no Secret at all, so the template holds no `MODEL_API_KEY` and no other `secretKeyRef`.
+    assert!(
+        !template_env
+            .iter()
+            .any(|e| e["valueFrom"]["secretKeyRef"].is_object()),
+        "the run pod template references a Secret: {template_env:?}"
+    );
+    assert!(
+        !template_env.iter().any(|e| e["name"] == "MODEL_API_KEY"),
+        "the run pod template holds the model key: {template_env:?}"
+    );
+    assert!(
+        pod["spec"].get("imagePullSecrets").is_none(),
+        "the run pod template names a pull secret: {pod:?}"
     );
     // The egress proxy (D15c): the script expects it named `<service>-egress`, to run the coder's own image (the pin of the fixture, which has
     // `adam-egress`), and the run pod's variables to name its Service.

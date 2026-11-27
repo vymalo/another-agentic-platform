@@ -41,7 +41,7 @@ registry:
 defaults:
   # The image of an agent that names none (AD-029): the coder image, by tag and digest. Absent: no default, and such a
   # config is `ConfigInvalid`. A new value rolls every agent that names none, and no other.
-  agentImage: ghcr.io/vymalo/another-adam-rs/coder:sha-9a1fd4e@sha256:c3c178b7d73599f40d53f798616e510346abd3300a622b09b2bc233109f12b44
+  agentImage: ghcr.io/vymalo/another-adam-rs/coder:sha-b5d1c7e@sha256:5de41376a08d8452ae0c59314e0e34d35da0aae495cdbc72ad6144a9c4235d45
   # The RuntimeClass of every agent's own pod (K14a, AD-052), the name of an object the administrator made. Empty: none.
   agentRuntimeClass: ""
   # The claims an agent may name as its package cache (K1). Empty: no agent may have one.
@@ -71,16 +71,25 @@ toolProbe:
 retention:
   afterDeleteDays: 90
 
-# Ask each agent what work it holds (AD-058 P2c): `GET /internal/activity`, the source the idle controller polls. Off: no
-# request is made. On, `token` is required (the agents refuse a request without their bearer), read once at start.
+# Ask each agent what work it holds (AD-058): `GET /internal/activity`, the source the idle controller polls so that an
+# adam agent with `scaling.idleTimeout` can sleep. Off: no request is made, and no agent gets a listener, a port or a policy rule
+# for one. ONE bearer for the whole deployment: the operator reads it from `token` (a mounted file; it must not contain a comma),
+# and every agent's pod reads the same value from `agentTokensSecret`, a Secret of that name in each watched namespace (the
+# operator never reads a Secret). Enabling it rolls every adam agent that sets `idleTimeout` once. An a2a agent never sleeps.
 activity:
   enabled: false
-  # The port the agents serve /internal/activity on.
-  port: 8080
+  # The port the agents serve /internal/activity on: 1024 to 65535, never 8080 (the A2A port).
+  port: 8081
   # 1 to 30 seconds; an agent that does not answer by then counts as busy.
   timeoutSecs: 3
+  # Required while enabled, refused otherwise:
   # token:
   #   file: /var/run/secrets/aap/activity/token
+  # agentTokensSecret: { name: aap-operator-activity, key: token }
+  # The operator's own pods: the only peer an agent's NetworkPolicy lets reach the listener. Labels are never empty.
+  # operatorPod:
+  #   namespace: another-agentic-system
+  #   labels: { app.kubernetes.io/name: aap-operator, app.kubernetes.io/instance: aap-operator }
 
 # Elect one replica to write (K7a), with a coordination.k8s.io/v1 Lease. Every replica keeps its caches and serves; only the
 # holder's passes write. Off: this replica is the only one. `retrySecs < renewSecs < leaseSecs`, each at least 1.

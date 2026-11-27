@@ -113,7 +113,7 @@ data:
         file: /var/run/secrets/aap/registry/token
     defaults:
       # AD-029: the image of an agent whose AgentConfig names none. A new value rolls those agents, and no other.
-      agentImage: "ghcr.io/vymalo/another-adam-rs/coder:sha-9a1fd4e@sha256:c3c178b7d73599f40d53f798616e510346abd3300a622b09b2bc233109f12b44"
+      agentImage: "ghcr.io/vymalo/another-adam-rs/coder:sha-b5d1c7e@sha256:5de41376a08d8452ae0c59314e0e34d35da0aae495cdbc72ad6144a9c4235d45"
     # K7: the lease every replica campaigns for; the holder reconciles, the others keep their caches and serve the registry.
     leaderElection:
       enabled: true
@@ -295,7 +295,7 @@ spec:
         app.kubernetes.io/instance: aap-operator
       annotations:
         # The configuration file is read once, at start: a changed file is a new pod (ANR-962).
-        checksum/config: 4960e100021e5bf75999e01068764a2ec8a6b9af6886cf0a9346fdc41b242c0f
+        checksum/config: 10fa0f602e3257917559dbc3ee2ac0c219a17209d49e13b00a1c96df8700d7a9
     spec:
       serviceAccountName: aap-operator
       # The API token is the operator's way in.

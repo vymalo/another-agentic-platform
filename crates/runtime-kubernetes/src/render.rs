@@ -527,8 +527,6 @@ impl Cx<'_> {
                     .collect::<Vec<_>>()
                     .join("\n"),
             ),
-            ("secretName".to_owned(), r.guard.secret.name.clone()),
-            ("secretKey".to_owned(), r.guard.secret.key.clone()),
         ]);
         // K14a (AD-052): the RuntimeClass the policy requires, only when the deployment names one. The policy falls back to
         // the chart's value while an operator that predates it has not written this key.

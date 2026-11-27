@@ -44,7 +44,7 @@ watchNamespace: ""
 # no agent that pins its own. It is NOT moved by bump-tag.sh (that is the operator's own `image.tag`): move it by hand, or from the
 # GitOps repository's values, after reading the digest from ghcr.io (README "The default agent image"). This pin is the one the kind
 # end-to-end of the coder runs (tests/e2e/coder.yaml), and `cargo test -p aap-operator` fails when the two differ.
-defaultAgentImage: ghcr.io/vymalo/another-adam-rs/coder:sha-9a1fd4e@sha256:c3c178b7d73599f40d53f798616e510346abd3300a622b09b2bc233109f12b44
+defaultAgentImage: ghcr.io/vymalo/another-adam-rs/coder:sha-b5d1c7e@sha256:5de41376a08d8452ae0c59314e0e34d35da0aae495cdbc72ad6144a9c4235d45
 
 # K1: the package caches an agent may have (the file's defaults.cacheAllowedClaims). An AgentConfig's `environment.cache.existingClaim` names a claim of its namespace, which
 # the pod mounts read-write and which a run pod may mount too: any claim, another agent's data included, unless the deployment says which.
@@ -94,17 +94,18 @@ agent:
 runPods:
   enabled: false
   # The run container's image: the workspace image of another-agentic-images (the toolchains, user 10001, /work), by tag AND digest
-  # (*verified 2026-10-11*, as in the coder chart: an anonymous ghcr.io token and a manifest request for the tag returned this digest).
+  # (*verified 2026-11-27*, as in the coder chart: an anonymous ghcr.io token and a manifest request for the tag returned this digest).
   image:
     repository: ghcr.io/vymalo/another-agentic-images/workspace
-    tag: 1.98.1-e6a528f
-    digest: sha256:d2aae762ecad2c13bb697332507d236a75d8233d061f38cc97dc9227192b0797
+    tag: 1.98.1-8c297d3
+    digest: sha256:b465808bfb8a1baae5e59a429bf292726b021e3b37322f759dbda3ee2c57ed67
     pullPolicy: IfNotPresent
   # The container of the template the commands run in (RUN_POD_CONTAINER).
   container: run
   # A Rust build is limited to two jobs so that it stays inside the 2Gi of `runPodClasses.standard`.
   cargoBuildJobs: 2
-  # More variables of the run container, a name -> value map (never a secret: the model key is the only one, and it is the agent's).
+  # More variables of the run container, a name -> value map (never a secret: a run pod reads no Secret at all, adam-rs ADR 0038, and the
+  # model key is one it never gets).
   extraEnv: {}
   # Empty: the chart renders a PriorityClass <fullname>-<namespace>-run (value 0, preemptionPolicy Never) and the quota and the
   # admission policy use it. A name: a class you manage (the chart renders none).
@@ -127,7 +128,7 @@ runPods:
   # How long a pod may take to be ready (scheduling, the first pull of the image on a node).
   readyTimeoutSecs: 600
   # How long a run waits for a slot when the quota (or the nodes) cannot give one now.
-  waitSecs: 600
+  waitSecs: 1020
   # Where run pods may be scheduled, on top of what the volume needs.
   nodeSelector: {}
   # ANR-660 (AD-066): the node types run pods are pinned to. `labelKey` is the key of a node label and `admitted` the values of it that
@@ -330,14 +331,21 @@ networkPolicy:
 retention: {}
 #  afterDeleteDays: 90
 
-# AD-058 P2c: the operator asks each agent service what work it holds (`GET /internal/activity`), for the idle controller. Empty `to`: off,
-# and not a trace of it in any render. `to` is who the operator may reach: the pods of the agents (a namespaceSelector and a podSelector).
-# The agents refuse a question without their bearer, so `tokenSecret` is required while `to` is set; the operator reads the file the Secret
-# is mounted as and never the Secret through the API.
+# AD-058 P2c, ANR-1030b: the operator asks each agent service what work it holds (`GET /internal/activity`), so an idle adam agent that sets
+# `scaling.idleTimeout` can sleep. Empty `to`: off, and not a trace of it in any render. `to` is who the operator may reach: the pods of the
+# agents (a namespaceSelector and a podSelector). ONE bearer for the whole deployment (ANR-Q142): the operator reads it from the file the
+# Secret `tokenSecret` is mounted as (never the Secret through the API; it must not contain a comma), and every agent's pod reads the same
+# value from the Secret `agentTokensSecret`, which must EXIST under that name in every namespace the operator watches (a copy, e.g. an
+# ExternalSecret: the chart makes none). Turning it on rolls every adam agent that sets `idleTimeout` once; an a2a agent never sleeps. The
+# agents' NetworkPolicy admits the listener to the operator's pods only: the chart gives their namespace (the release's) and selector labels.
 activity:
   to: []
-  # The port the agents serve /internal/activity on (their LISTEN_ADDR).
-  port: 8080
+  # The port the agents serve /internal/activity on: 1024 to 65535, never 8080 (the A2A port).
+  port: 8081
+  # The Secret key the AGENTS' pods read the bearer from (their ACTIVITY_BEARER_TOKENS). Empty: the same as `tokenSecret`.
+  agentTokensSecret:
+    name: ""
+    key: ""
   # How long one question may take, in seconds (1 to 30). An agent that does not answer by then counts as busy.
   timeoutSecs: 3
   tokenSecret:

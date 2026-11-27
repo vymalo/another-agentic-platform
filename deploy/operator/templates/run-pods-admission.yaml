@@ -3,7 +3,7 @@
 # runPods.enabled: the guard that lets an agent's account make pods without being able to read the namespace's other Secrets, mount
 # the host or run anything privileged. It is the coder chart's policy (adam-rs `run-pods-admission.yaml`) with what differs per agent
 # read from a parameter: a ConfigMap of the agent's, labelled {{ include "aap.runPodsPolicyLabel" . }}, which the operator makes for each agent
-# that asks for run pods (the account it is for, the images, the claims, the one Secret key). It applies to the pods CREATED BY
+# that asks for run pods (the account it is for, the images, the claims). It applies to the pods CREATED BY
 # that account (the match condition, once per parameter object), and refuses any that is not the intended run pod. Without it the RBAC
 # alone would let the account make any pod in its namespace. The policy and its binding are cluster-scoped and made here: the operator
 # is namespaced, and writes only the parameters, which the account cannot (its Role has pods and nothing else).
@@ -78,8 +78,13 @@ spec:
       message: "a run pod uses only the images the chart allows"
     - expression: "!has(object.spec.volumes) || object.spec.volumes.all(v, has(v.emptyDir) || (has(v.persistentVolumeClaim) && v.persistentVolumeClaim.claimName in (has(params.data.claims) ? params.data.claims.split('\\n') : [params.data.claim])))"
       messageExpression: "'a run pod mounts only emptyDir volumes and the ' + ((has(params.data.claims) ? params.data.claims.split('\\n') : [params.data.claim]).size() > 1 ? 'claims ' : 'claim ') + (has(params.data.claims) ? params.data.claims.split('\\n') : [params.data.claim]).join(' and ') + ': no hostPath, no Secret, no other claim'"
-    - expression: "variables.containers.all(c, (!has(c.env) || c.env.all(e, !has(e.valueFrom) || !has(e.valueFrom.secretKeyRef) || (e.valueFrom.secretKeyRef.name == params.data.secretName && e.valueFrom.secretKeyRef.key == params.data.secretKey))) && (!has(c.envFrom) || c.envFrom.all(f, !has(f.secretRef))))"
-      messageExpression: "'a run pod references no Secret but the key ' + params.data.secretKey + ' of ' + params.data.secretName + ' (as one variable): no Secret volume, no envFrom, no other key'"
+    - expression: "variables.containers.all(c, (!has(c.env) || c.env.all(e, !has(e.valueFrom) || !has(e.valueFrom.secretKeyRef))) && (!has(c.envFrom) || c.envFrom.all(f, !has(f.secretRef))))"
+      message: "a run pod references no Secret a container can read: no Secret volume, no secretKeyRef, no envFrom"
+    {{- /* adam-rs ADR 0038: a run pod reads no Secret, so it names no pull secret either; the operator's run pod template carries none (its
+       `imagePullSecrets` value is the operator's and the API's pods', never a run pod's). The coder chart renders the same rule for its own
+       values, which are empty unless the deployment names some. */}}
+    - expression: "!has(object.spec.imagePullSecrets) || size(object.spec.imagePullSecrets) == 0"
+      message: "a run pod names no pull secret: the operator's template carries none"
     - expression: "variables.containers.all(c, has(c.securityContext) && has(c.securityContext.allowPrivilegeEscalation) && c.securityContext.allowPrivilegeEscalation == false && (!has(c.securityContext.privileged) || c.securityContext.privileged == false))"
       message: "a run pod is not privileged and sets allowPrivilegeEscalation: false on every container"
     - expression: "variables.containers.all(c, (has(c.securityContext) && has(c.securityContext.runAsUser) ? c.securityContext.runAsUser : (has(object.spec.securityContext) && has(object.spec.securityContext.runAsUser) ? object.spec.securityContext.runAsUser : 0)) != 0 && (has(c.securityContext) && has(c.securityContext.runAsNonRoot) ? c.securityContext.runAsNonRoot : (has(object.spec.securityContext) && has(object.spec.securityContext.runAsNonRoot) ? object.spec.securityContext.runAsNonRoot : false)))"
