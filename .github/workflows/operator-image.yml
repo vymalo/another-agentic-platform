@@ -122,6 +122,9 @@ on:
       - "release-please-config.json"
       - ".release-please-manifest.json"
       - "tools/check-release-version.sh"
+      # The aapctl release's tap tooling (AD-071): its `scripts` job checks it, and nothing of it is in an image, so a push to
+      # main does not need to rebuild them for it.
+      - "tools/release/**"
   push:
     branches: [main]
     paths:
@@ -297,7 +300,14 @@ jobs:
     steps:
       - uses: actions/checkout@v7
       - name: shellcheck
-        run: shellcheck deploy/operator/bump-tag.sh deploy/operator/release-pin.sh tools/check-release-version.sh tools/check-release-branch-author.sh tools/check-release-branch-author-test.sh deploy/operator/tests/*.sh deploy/operator/tests/e2e/*.sh
+        run: shellcheck deploy/operator/bump-tag.sh deploy/operator/release-pin.sh tools/check-release-version.sh tools/check-release-branch-author.sh tools/check-release-branch-author-test.sh deploy/operator/tests/*.sh deploy/operator/tests/e2e/*.sh tools/release/homebrew-smoke.sh
+      # The release's tap tooling (AD-071): two Node programs and a shell script that CI never runs against a release, so its
+      # syntax and its own tests are what is checked here; `render-check.sh` and the release workflow do the rest.
+      - name: the tap tooling parses, and its tests pass
+        run: |
+          node --check tools/release/write-aapctl-formula.mjs
+          node --check tools/release/update-homebrew-tap.mjs
+          node --test tools/release/release.test.mjs
       # ANR-1326: release-please.yml refuses a release branch whose top commit is not release-please's before it adds the lock commit.
       # This proves the guard accepts the two identities release-please uses and refuses a person's commit.
       - name: the release branch guard accepts release-please and refuses a person

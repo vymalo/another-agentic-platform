@@ -4,10 +4,12 @@ The platform's command line. **Phase 1 is offline** (`validate`, `render`): it n
 environment and no Secret. **Phase 2 (K9b) talks to the Platform API** (`get`, `apply`, `delete`, `export`, `whoami`,
 `logout`, and `login`, in a browser or with `--token-stdin`) and holds no right the API does not give the person. Design:
 [§60b](../../docs/architecture/10-control-plane-and-crds.md#60b-cli), decisions
-[P-028](../../docs/architecture/11-decisions.md) and P-030 to P-036. `aapctl` ships in no image.
+[P-028](../../docs/architecture/11-decisions.md) and P-030 to P-036. `aapctl` ships in no image: a release's four binaries are
+its assets, signed and attested ([install](../../docs/guides/install-aapctl.md), [AD-071](../../docs/architecture/11-decisions.md#ad-071--a-release-also-publishes-aapctl-four-signed-binaries-and-the-formula-in-the-tap)).
 
 ```sh
-cargo run -q -p aap-cli -- validate -f examples/coder.yaml
+brew install --formula vymalo/tap/aapctl      # macOS or Linux, from the release
+cargo run -q -p aap-cli -- validate -f examples/coder.yaml   # or from this checkout
 cargo run -q -p aap-cli -- render -f examples/ --default-agent-image ghcr.io/example/coder:sha-1234567
 ```
 
