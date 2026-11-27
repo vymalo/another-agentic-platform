@@ -300,7 +300,13 @@ jobs:
     steps:
       - uses: actions/checkout@v7
       - name: shellcheck
-        run: shellcheck deploy/operator/bump-tag.sh deploy/operator/release-pin.sh tools/check-release-version.sh tools/check-release-branch-author.sh tools/check-release-branch-author-test.sh deploy/operator/tests/*.sh deploy/operator/tests/e2e/*.sh tools/release/homebrew-smoke.sh
+        run: shellcheck deploy/operator/bump-tag.sh deploy/operator/release-pin.sh tools/check-release-version.sh tools/check-release-branch-author.sh tools/check-release-branch-author-test.sh tools/check-release-skip.sh tools/check-release-skip-test.sh deploy/operator/tests/*.sh deploy/operator/tests/e2e/*.sh tools/release/homebrew-smoke.sh
+      # ANR-1323: the release-PR skip guards are copies (a job-level `if:` cannot read `env`); this fails when one drifts — a clause
+      # outside the !( ), `||` for `&&`, a missing author or actor check, a lost ANR-1206 comment, a split guard, or no guard at all.
+      - name: the release-PR skip guards are the exact guard
+        run: |
+          sh tools/check-release-skip.sh
+          sh tools/check-release-skip-test.sh
       # The release's tap tooling (AD-071): two Node programs and a shell script that CI never runs against a release, so its
       # syntax and its own tests are what is checked here; `render-check.sh` and the release workflow do the rest.
       - name: the tap tooling parses, and its tests pass
