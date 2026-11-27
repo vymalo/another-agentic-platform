@@ -834,6 +834,13 @@ check "a token Secret and an ExternalSecret together are refused" \
 check "a registry with no one allowed to read it is refused" refused 'networkPolicy.registry.allowFrom is required' --set registry.tokenSecret.name=t
 check "a peer that names nothing is refused" refused 'a peer needs a namespaceSelector' \
   --set registry.tokenSecret.name=t --set 'networkPolicy.registry.allowFrom[0].foo=bar'
+# ANR-1339: the operator's two peer lists are checked as every other peer list's (a list, never a map; an ipBlock of every address refused).
+check "networkPolicy.registry.allowFrom as a map is refused (a peer list is a list)" refused 'networkPolicy.registry.allowFrom must be a list of NetworkPolicy peers' \
+  --set-json 'networkPolicy.registry.allowFrom={"namespaceSelector":{}}'
+check "an ipBlock of 0.0.0.0/0 among the registry's readers is refused" refused 'networkPolicy.registry.allowFrom: an ipBlock of 0.0.0.0/0 is every address' \
+  --set registry.tokenSecret.name=t --set-json 'networkPolicy.registry.allowFrom=[{"ipBlock":{"cidr":"0.0.0.0/0"}}]'
+check "an ipBlock of 0.0.0.0/0 among the metrics peers is refused" refused 'networkPolicy.metrics.allowFrom: an ipBlock of 0.0.0.0/0 is every address' \
+  --set-json 'networkPolicy.metrics.allowFrom=[{"ipBlock":{"cidr":"0.0.0.0/0"}}]'
 check "an ExternalSecret with no property is refused" \
   refused 'externalSecrets.properties.registryToken is required' --set externalSecrets.enabled=true --set externalSecrets.properties.registryToken= \
   --set networkPolicy.enabled=false
@@ -951,6 +958,20 @@ check "a peer that names nothing is refused" refused_api 'a peer needs a namespa
 check "a DNS peer that names nothing is refused" refused_api 'api.networkPolicy.dns.to: a peer needs' --set-json 'api.networkPolicy.dns.to=[{"foo":"bar"}]'
 check "no API server port is refused" refused_api 'api.networkPolicy.apiServer.ports must name at least one port' --set api.networkPolicy.apiServer.ports=null
 check "an issuer peer that names nothing is refused" refused_api 'api.networkPolicy.issuer.to: a peer needs' --set-json 'api.networkPolicy.issuer.to=[{"foo":"bar"}]'
+# ANR-1339: the API's five peer lists go through the same helper as every other peer list's (a list, never a map; a peer that says
+# who; an ipBlock of every address refused).
+check "an ipBlock of 0.0.0.0/0 among the API's ingress peers is refused" refused_api 'api.networkPolicy.from: an ipBlock of 0.0.0.0/0 is every address' --set-json 'api.networkPolicy.from=[{"ipBlock":{"cidr":"0.0.0.0/0"}}]'
+check "an ipBlock of 0.0.0.0/0 among the API's DNS peers is refused" refused_api 'api.networkPolicy.dns.to: an ipBlock of 0.0.0.0/0 is every address' --set-json 'api.networkPolicy.dns.to=[{"ipBlock":{"cidr":"0.0.0.0/0"}}]'
+check "an ipBlock of 0.0.0.0/0 among the issuer's peers is refused" refused_api 'api.networkPolicy.issuer.to: an ipBlock of 0.0.0.0/0 is every address' --set-json 'api.networkPolicy.issuer.to=[{"ipBlock":{"cidr":"0.0.0.0/0"}}]'
+check "an ipBlock of 0.0.0.0/0 among the API's metrics peers is refused" refused 'api.metrics.allowFrom: an ipBlock of 0.0.0.0/0 is every address' -f "$here/metrics.values.yaml" --set-json 'api.metrics.allowFrom=[{"ipBlock":{"cidr":"0.0.0.0/0"}}]'
+check "an ipBlock of 0.0.0.0/0 among the dashboard's default peers is refused" refused_api 'api.config.defaults.allowFrom: an ipBlock of 0.0.0.0/0 is every address' --set-json 'api.config.defaults.allowFrom=[{"ipBlock":{"cidr":"0.0.0.0/0"}}]'
+check "the API's ingress peers as a map are refused (a peer list is a list)" refused_api 'api.networkPolicy.from must be a list of NetworkPolicy peers' --set-json 'api.networkPolicy.from={"namespaceSelector":{}}'
+check "the API's five peer lists with a real ipBlock each render" renders_ok -f "$here/api.values.yaml" \
+  --set-json 'api.networkPolicy.from=[{"ipBlock":{"cidr":"10.0.0.0/8"}}]' \
+  --set-json 'api.networkPolicy.dns.to=[{"ipBlock":{"cidr":"10.0.0.0/8"}}]' \
+  --set-json 'api.networkPolicy.issuer.to=[{"ipBlock":{"cidr":"10.0.0.0/8"}}]' \
+  --set-json 'api.metrics.allowFrom=[{"ipBlock":{"cidr":"10.0.0.0/8"}}]' \
+  --set-json 'api.config.defaults.allowFrom=[{"ipBlock":{"cidr":"10.0.0.0/8"}}]'
 # api.extraEnv, api.extraVolumes and api.extraVolumeMounts: the chart's own names and paths are not for sale.
 ca_volume='api.extraVolumes=[{"name":"ca","configMap":{"name":"aap-api-ca"}}]'
 check "extraEnv: RUST_LOG is refused (it is api.logLevel)" refused_api 'api.extraEnv: RUST_LOG is the chart' --set-json 'api.extraEnv=[{"name":"RUST_LOG","value":"debug"}]'
@@ -1630,6 +1651,21 @@ check "refused: a variable the operator sets itself (the build jobs)" refused "r
 check "refused: a variable that is a number and not a text" refused "runPods.extraEnv.JOBS must be a text" --set runPods.enabled=true --set runPods.extraEnv.JOBS=2
 check "refused: a CIDR that is none" refused "is not an IPv4 CIDR" --set runPods.enabled=true --set 'runPods.networkPolicy.clusterCIDRs[0]=10.0.0.0/33'
 check "refused: no label of the DNS pods" refused "runPods.networkPolicy.dnsPodLabels must name at least one label" --set runPods.enabled=true --set runPods.networkPolicy.dnsPodLabels=null
+# ANR-1339: an extraEgress rule is a map, and its `to` is checked as every other peer list's (a list, never a map; a peer that says
+# who; an ipBlock of every address refused), because run pods are deny by default and a peer of every address would be the policy's
+# whole point lost. The rule's `ports` are not validated here: the operator's binary judges them at start.
+check "refused: an extraEgress rule that is not a map" refused "runPods.networkPolicy.extraEgress[0] must be a NetworkPolicy egress rule" -f "$here/runpods.values.yaml" --set-json 'runPods.networkPolicy.extraEgress=["open"]'
+check "refused: an extraEgress rule's peers as a map (a peer list is a list)" refused "runPods.networkPolicy.extraEgress[0].to must be a list of NetworkPolicy peers" -f "$here/runpods.values.yaml" --set-json 'runPods.networkPolicy.extraEgress=[{"to":{"namespaceSelector":{}}}]'
+check "refused: an extraEgress peer ipBlock of every address" refused "runPods.networkPolicy.extraEgress[0].to: an ipBlock of 0.0.0.0/0 is every address" -f "$here/runpods.values.yaml" --set-json 'runPods.networkPolicy.extraEgress=[{"to":[{"ipBlock":{"cidr":"0.0.0.0/0"}}]}]'
+check "refused: an extraEgress rule with no peer (a rule with no to is every destination)" refused "runPods.networkPolicy.extraEgress[0].to is required" -f "$here/runpods.values.yaml" --set-json 'runPods.networkPolicy.extraEgress=[{"ports":[{"protocol":"TCP","port":443}]}]'
+check "refused: an extraEgress rule with an empty peers list (the same rule)" refused "runPods.networkPolicy.extraEgress[0].to is required" -f "$here/runpods.values.yaml" --set-json 'runPods.networkPolicy.extraEgress=[{"to":[],"ports":[{"protocol":"TCP","port":443}]}]'
+extra_egress_reaches_the_settings() {
+  render -f "$here/runpods.values.yaml" --set-json 'runPods.networkPolicy.extraEgress=[{"to":[{"ipBlock":{"cidr":"10.0.0.0/8","except":["10.1.0.0/16"]}}],"ports":[{"port":443,"protocol":"TCP"}]}]' || return 1
+  # The chart makes no NetworkPolicy of a run pod (the operator makes one per agent at runtime): the rule reaches the operator's
+  # settings, which is what the operator renders that policy from.
+  dhas ConfigMap aap-operator '^        extraEgress:$' 'ipBlock' 'cidr: 10.0.0.0/8' 'except' '10.1.0.0/16' '- port: 443' 'protocol: TCP' && dlacks ConfigMap aap-operator 'namespaceSelector'
+}
+check "a valid extraEgress with an ipBlock renders, and the rule reaches the operator's settings (the operator renders a run pod's NetworkPolicy from them)" extra_egress_reaches_the_settings
 # The egress proxy (D15c): the checks of the coder chart's _validate.tpl, which RunPodSettings::validate repeats.
 check "refused: an allow-list of no host" refused "hold no host" --set runPods.enabled=true --set-json 'runPods.egressProxy.allow=[]'
 check "refused: an allow-list entry that is a URL" refused "is not a host name" --set runPods.enabled=true --set 'runPods.egressProxy.extraAllow[0]=https://example.com'
