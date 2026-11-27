@@ -57,6 +57,7 @@ did not apply the desired state, and it names the cause in a condition.
 Steps 1 to 3 of [Get started](../get-started.md), minus the registry token, and with all four CRDs awaited:
 
 ```sh
+# Ran this before? Run `kind delete cluster --name aap-start` first.
 kind create cluster --name aap-start \
   --image kindest/node:v1.37.0@sha256:a1ed56cfb0e7b93589bdf97c8cd566405a265939e3620fc4f5de89adff580ae5
 
@@ -190,8 +191,10 @@ kubectl -n aap get agentservice coder \
   -o jsonpath='{range .status.conditions[*]}{.type}={.status} {.reason}: {.message}{"\n"}{end}'
 ```
 
-Expect the state `Blocked` and a condition `ConfigResolved` that is not `True` and names the missing `gateway`. The operator's design says
-a missing referent is `ConfigInvalid` and names it; the exact reason and message text were not seen on a run for this page.
+Expect the state `Blocked` and a condition `ConfigResolved` that is not `True`. The operator's code
+([`crates/domain/src/refs.rs`](../../crates/domain/src/refs.rs)) words a missing referent as
+`ModelEndpoint "gateway" was not found in namespace "aap": create it, or ...`, ending in what to do instead. That text was read from the
+source, not seen on a run for this page.
 Nothing is made for the agent while it is `Blocked`: `kubectl -n aap get statefulset,service,pod` lists nothing of the coder.
 
 ## 4. Apply the model and wait for Ready
@@ -266,13 +269,14 @@ rm -f coder.yaml gateway.yaml
   [Install](../guides/deploy/install.md).
 - A CloudNativePG store (`store.postgres.cnpg`): it needs CloudNativePG installed.
 
-## Tested on
+## Run status
 
 **Not run end to end.** The machine this page was written on had Docker but no `kind`, `kubectl` or `helm`, and under 2 GB of free
 disk. The objects are the ones of [`coder-e2e.sh`](../../deploy/operator/tests/e2e/coder-e2e.sh) at `275a01c` (the real image) and of the
 stand-in `coder` fixture of `bin/operator/tests/cluster.rs` (the stand-in), joined by hand. The first passed in CI as the job
-`operator-coder-e2e` (run 37307542288, *verified 2026-10-15* with `gh run view`); the second is the kind suite of the `kind` job of
-`operator.yml`. Whether this exact join, with a `ModelEndpoint` applied after the config, becomes `Ready`, and what the `Blocked`
+`operator-coder-e2e` (run 37307542288, *verified 2026-10-15* with `gh run view`), which is older than Helm 4 and Kubernetes 1.37 (AD-067).
+The second is covered by the `kind` job of `operator.yml`, which passed on `main`: job 140420663650 of run 45973874487 at `36ca2e0`,
+*verified 2026-11-27* in the job's log. Whether this exact join, with a `ModelEndpoint` applied after the config, becomes `Ready`, and what the `Blocked`
 state says, was not run.
 
 ## Next

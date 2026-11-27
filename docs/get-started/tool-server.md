@@ -49,7 +49,7 @@ The conditions of a `ToolProvider` are `Accepted` (the object is valid), `Reacha
 
 A provider whose server needs a header (the GitHub entry) is `Reachable` `Unknown` with the reason `NeedsHeader`, because the operator
 reads no Secret to send one. No state diagram is drawn here: the probe's moves between `True`, `False` and `Unknown` were seen in CI
-only as `Probed` and `NeedsHeader`.
+only as `Probed` and `NeedsHeader`. A diagram of moves nobody observed would be a guess, so there is none.
 
 ## Prerequisites
 
@@ -66,6 +66,7 @@ The probe is **off by default**. It is turned on by naming, in the chart, the pe
 operator's `NetworkPolicy` then opens exactly those, plus DNS. Here the peer is the catalogue's pods, in the release's namespace, on 8080.
 
 ```sh
+# Ran this before? Run `kind delete cluster --name aap-start` first.
 kind create cluster --name aap-start \
   --image kindest/node:v1.37.0@sha256:a1ed56cfb0e7b93589bdf97c8cd566405a265939e3620fc4f5de89adff580ae5
 
@@ -168,10 +169,11 @@ TASK=$(a2a "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"SendMessage\",\"params\":
 for i in $(seq 1 40); do
   a2a "{\"jsonrpc\":\"2.0\",\"id\":2,\"method\":\"GetTask\",\"params\":{\"id\":\"$TASK\"}}" > task.json
   STATE=$(jq -r '.result.status.state' task.json)
-  case $STATE in TASK_STATE_COMPLETED|TASK_STATE_FAILED|TASK_STATE_CANCELED|TASK_STATE_REJECTED) break ;; esac
+  case $STATE in TASK_STATE_COMPLETED|TASK_STATE_FAILED|TASK_STATE_CANCELED|TASK_STATE_REJECTED|TASK_STATE_INPUT_REQUIRED) break ;; esac
   sleep 3
 done
 echo "$STATE"
+case $STATE in TASK_STATE_COMPLETED) ;; *) echo "the task did not complete (state: ${STATE:-none}); see the agent's log" >&2 ;; esac
 jq -r '.result.status.message.parts[0].text' task.json
 echo "pod: $POD"
 ```
@@ -184,7 +186,7 @@ model. Read the model's journal to see that it did, twice:
 kubectl -n aap exec "pod/$POD" -c agent -- curl -s -m 20 http://k10-model:8080/journal | jq 'map({step, results})'
 ```
 
-Step 1 is the model asked, with no tool result, and answering with a call to the tool; step 2 is the request that carries the server's
+Entries with `step: -1` are requests that carry no marker (a title, a summary) and were answered plainly; ignore them. Step 1 is the model asked, with no tool result, and answering with a call to the tool; step 2 is the request that carries the server's
 answer, which holds the pod's name and the namespace.
 
 ## 6. Clean up
@@ -216,7 +218,7 @@ so it is not removed with the namespace; deleting the cluster would remove it an
 - Production policy: the example's egress to the API server is open on 443 and 6443, and `view` is cluster-wide. Narrow both for a real
   deployment, as the example's own comments say.
 
-## Tested on
+## Run status
 
 **Not run end to end.** The machine this page was written on had Docker but no `kind`, `kubectl` or `helm`, and under 2 GB of free
 disk, so no cluster was made and no image was pulled. The commands are copied from

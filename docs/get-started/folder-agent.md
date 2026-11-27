@@ -51,6 +51,7 @@ Do steps 1 and 3 of [Get started](../get-started.md), with two changes: wait for
 values file. This page reads no registry, so it needs no registry token. From the repository root:
 
 ```sh
+# Ran this before? Run `kind delete cluster --name aap-start` first.
 kind create cluster --name aap-start \
   --image kindest/node:v1.37.0@sha256:a1ed56cfb0e7b93589bdf97c8cd566405a265939e3620fc4f5de89adff580ae5
 
@@ -207,16 +208,17 @@ echo "task: $TASK"
 for i in $(seq 1 40); do
   a2a "{\"jsonrpc\":\"2.0\",\"id\":2,\"method\":\"GetTask\",\"params\":{\"id\":\"$TASK\"}}" > task.json
   STATE=$(jq -r '.result.status.state' task.json)
-  case $STATE in TASK_STATE_COMPLETED|TASK_STATE_FAILED|TASK_STATE_CANCELED|TASK_STATE_REJECTED) break ;; esac
+  case $STATE in TASK_STATE_COMPLETED|TASK_STATE_FAILED|TASK_STATE_CANCELED|TASK_STATE_REJECTED|TASK_STATE_INPUT_REQUIRED) break ;; esac
   sleep 3
 done
 echo "$STATE"
+case $STATE in TASK_STATE_COMPLETED) ;; *) echo "the task did not complete (state: ${STATE:-none}); see the agent's log" >&2 ;; esac
 jq -r '.result.status.message.parts[0].text' task.json
 ```
 
 The script treats `TASK_STATE_COMPLETED` as a finished task, and the model's header says a message with no markers is answered
 `Nothing to do.`. That is what you should read: `TASK_STATE_COMPLETED` and then `Nothing to do.`. Neither was seen on a run for this
-page (see *Tested on*).
+page (see *Run status*).
 
 To see what the agent asked the model, read the model's journal from the agent's pod. It keeps the tool results of each request and
 no header, so the model key is not in it:
@@ -249,7 +251,7 @@ The agent goes first so that the operator, which is still running, completes its
 - The registry, and a caller other than `kubectl exec`: the agent's `NetworkPolicy` admits the namespace `aap` only.
 - Streaming, `SubscribeToTask`, the card, files and the A2A extensions.
 
-## Tested on
+## Run status
 
 **Not run end to end.** The machine this page was written on had Docker but no `kind`, `kubectl` or `helm`, and under 2 GB of free
 disk, so no cluster was made and no image was pulled. The commands are copied from

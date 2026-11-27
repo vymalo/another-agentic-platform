@@ -53,9 +53,9 @@ a write is conditional (`If-None-Match: *` creates, `If-Match` replaces and dele
 | Tool | Version | Why |
 |---|---|---|
 | `docker`, `kind`, `kubectl`, `helm`, `git`, `curl`, `jq`, `openssl` | as in [Get started](../get-started.md#prerequisites) | the cluster, the charts, the token |
-| `cargo` and a Rust toolchain | the one in `rust-toolchain.toml`, if the repository has it | builds `aapctl` and the test issuer |
+| `cargo` and a Rust toolchain | Rust 1.94 or later (`rust-version` in `Cargo.toml`) | builds `aapctl` and the test issuer |
 
-The first `cargo build` compiles a large workspace. The operator and the API images are pulled by the kubelet from `ghcr.io`.
+The first `cargo build` compiles a large workspace, and its `target/` directory needs several GB of disk, more than the cluster itself. This page is for **Linux**: step 2 finds your machine's address on kind's Docker network, and on Docker Desktop (macOS, Windows) a pod cannot reach it, so `helm --wait` would time out. The operator and the API images are pulled by the kubelet from `ghcr.io`.
 
 ## 1. A cluster, the stand-in image and the CRDs
 
@@ -63,6 +63,7 @@ The agent runs the stand-in image, which the API admits because its registry is 
 the offered Secret keys from an `ExternalSecret`, so its CRD goes in too.
 
 ```sh
+# Ran this before? Run `kind delete cluster --name aap-start` first.
 kind create cluster --name aap-start \
   --image kindest/node:v1.37.0@sha256:a1ed56cfb0e7b93589bdf97c8cd566405a265939e3620fc4f5de89adff580ae5
 
@@ -94,7 +95,8 @@ echo "$HOST_ADDR"
 target/debug/examples/test-issuer --bind 0.0.0.0:0 --public-host "$HOST_ADDR" \
   --audience aap-start-api --roles-claim agentic_roles > issuer.log 2>&1 &
 ISSUER_PID=$!
-until grep -qx ready issuer.log; do sleep 1; done
+for i in $(seq 1 30); do grep -qx ready issuer.log && break; sleep 1; done
+grep -qx ready issuer.log || { echo "the issuer did not start" >&2; cat issuer.log >&2; }
 cat issuer.log
 
 ISSUER=$(sed -n 's/^issuer=//p' issuer.log)
@@ -103,7 +105,7 @@ ISSUER_PORT=${ISSUER##*:}
 ```
 
 If `HOST_ADDR` is empty, the Docker network is not called `kind` on your machine. Set `HOST_ADDR` to an address of your machine that
-a container can reach. `issuer.log` ends with `ready` and names the issuer, the audience, the roles claim and the control address.
+a container can reach. A host firewall (firewalld, ufw) can block the issuer's port from the pod; if `helm --wait` times out in step 4 and the API's log says it could not fetch the keys, open that port to the Docker network. `issuer.log` ends with `ready` and names the issuer, the audience, the roles claim and the control address.
 
 ## 3. The Secrets and the offer
 
@@ -174,18 +176,23 @@ curl -s -o /dev/null -w '%{http_code}\n' http://127.0.0.1:18081/v1/me     # 401:
 PERMS=platform:agents.read,platform:agents.write,platform:models.write,platform:secrets.pick
 tok() { curl -sSf --noproxy '*' -G --data-urlencode "sub=$1" --data-urlencode "roles=$2" "$CONTROL/token"; }
 
+# ctl mints a fresh token for every call, as api-e2e.sh does: the issuer's tokens last five minutes and have no refresh token.
 ctl() {
   env -u HTTPS_PROXY -u https_proxy -u HTTP_PROXY -u http_proxy -u ALL_PROXY -u all_proxy NO_PROXY=127.0.0.1,localhost \
+    AAPCTL_TOKEN="$(tok alice "$PERMS")" \
     target/debug/aapctl "$@" --server http://127.0.0.1:18081 --config ./aapctl.yaml
 }
 
-tok alice "$PERMS" | ctl login --token-stdin
+# Signing in once keeps a token in the file (it expires in five minutes); the calls below use their own.
+tok alice "$PERMS" | env -u HTTPS_PROXY -u https_proxy -u HTTP_PROXY -u http_proxy -u ALL_PROXY -u all_proxy \
+  NO_PROXY=127.0.0.1,localhost AAPCTL_TOKEN= \
+  target/debug/aapctl login --token-stdin --server http://127.0.0.1:18081 --config ./aapctl.yaml
 ctl whoami
 ls -l aapctl.yaml
 ```
 
 `aapctl` keeps the token in `aapctl.yaml`, mode `0600`, and refuses a file others can read. `whoami` lists the four permissions.
-**The token lasts five minutes.** After that `aapctl` answers `401` and exits 4; sign in again with the same line. The proxy variables
+**The token lasts five minutes** and the issuer gives no refresh token, so the saved one stops working after that (exit 4). That is why `ctl` passes a fresh token in `AAPCTL_TOKEN` on every call. The proxy variables
 are dropped because `aapctl` sends a plain-`http` request to a loopback address only without a proxy, and `kubectl port-forward` is one.
 
 ## 6. A model, from a file
@@ -275,6 +282,8 @@ running, completes its finalizer.
 
 ```sh
 ctl delete agent e2e-chat --wait --timeout 120
+# A delete the API answered with 202 leaves the AgentConfig behind as an orphan: remove it before the model, as api-e2e.sh does.
+kubectl -n aap delete agentconfig e2e-chat --ignore-not-found
 ctl delete model e2e-gateway
 ctl logout
 kill "$PF_PID"
@@ -297,7 +306,7 @@ rm -f issuer.log aapctl.yaml aapctl.yaml.lock api-start.values.yaml model.yaml a
   cover them.
 - Production values: `apiServer.cidrs`, `issuer.to` as a real peer, the allowed registries, CORS and the ingress.
 
-## Tested on
+## Run status
 
 **Not run end to end.** The machine this page was written on had Docker but no `kind`, `kubectl`, `helm` or built binaries, and under
 2 GB of free disk, so nothing was built or applied. The commands are copied from [`api-e2e.sh`](../../deploy/operator/tests/e2e/api-e2e.sh)
