@@ -59,7 +59,8 @@ fn failure_kind(e: &ActivityError) -> &'static str {
 pub(crate) enum Claim {
     /// The pass's mark, claimed for the first time: the record is written, and the sleep counted once it succeeded.
     New,
-    /// The same mark, already claimed by another pass: the record is written again (idempotent), and not counted.
+    /// The same mark, claimed by an **earlier** pass: the record is written again (idempotent), and not counted. A pass
+    /// for one object runs alone, so this is a lagging cache or a pass cut off after its claim, not a second pass now.
     Already,
     /// The mark is gone, or another one replaced it: there is no record to write.
     Gone,
@@ -152,11 +153,14 @@ impl Sleepers {
         })
     }
 
-    /// Give a claim back because the write failed: the mark ages again, so a retry a long time later is no longer
-    /// acted on (the safe choice: a failing write must not keep an old poll alive for ever).
-    pub(crate) fn unclaim(&self, id: &RuntimeId) {
+    /// Give a claim back because the write failed or the pass was cut off: the mark ages again, so a retry a long time
+    /// later is no longer acted on (the safe choice: a failing write must not keep an old poll alive for ever). Only
+    /// the mark this pass claimed (`made_at`), as [`drop_mark`](Self::drop_mark) does: a newer one keeps its own claim.
+    pub(crate) fn unclaim(&self, id: &RuntimeId, made_at: i64) {
         self.with(|i| {
-            if let Some((_, claimed)) = i.marks.get_mut(&key(id)) {
+            if let Some((mark, claimed)) = i.marks.get_mut(&key(id))
+                && mark.made_at == made_at
+            {
                 *claimed = false;
             }
         });
@@ -738,7 +742,7 @@ mod tests {
             "a record is being written for it"
         );
         // A failed write gives the claim back: it ages again.
-        r.sleepers.unclaim(&r.id);
+        r.sleepers.unclaim(&r.id, 600);
         assert!(!r.sleepers.is_marked(&r.id, 600 + 10_000, MAX_AGE));
     }
 

@@ -28,8 +28,6 @@ use kube::api::{Patch, PatchParams};
 use kube::runtime::controller::Action;
 use kube::runtime::events::{Event as KubeEvent, EventType};
 use kube::runtime::finalizer::{Event, finalizer};
-
-use crate::sleeper::Claim;
 use kube::{Api, Resource, ResourceExt};
 use serde_json::json;
 
@@ -38,6 +36,7 @@ use crate::derive::{ConfigOutcome, Observed, StoreOutcome, derive, ready_summary
 use crate::error::Error;
 use crate::metrics::name;
 use crate::pass::{bounded, class_of, kube_class_of, record_state};
+use crate::sleeper::{Claim, Sleepers};
 use aap_trace::{Step, step};
 
 const CONTROLLER: &str = "agentservice";
@@ -421,34 +420,29 @@ where
         ctx.sleepers.forget(&id);
     }
     // Claim first, so a lap of the idle loop that runs while the write is in flight cannot age the mark away and poll
-    // an agent whose record is not visible yet. The claim names the mark the plan used: a mark another lap dropped as
-    // stale in between is `Gone`, and its record is **not** written (ANR-1199). A failed write gives a new claim back
-    // (the mark then ages like any other: a retry long after the poll is not acted on).
-    let claim = if planned.is_some() && previous.sleep.is_none() {
-        mark.map(|m| ctx.sleepers.claim(&id, m.made_at))
-    } else {
-        None
+    // an agent whose record is not visible yet (ANR-1199). The claim names the mark the plan used, so a mark another
+    // lap dropped or replaced in between writes no record. A claim that does not reach its write — a failed write, or a
+    // pass cut off by its timeout — is given back by the guard, or the mark would stay claimed for ever.
+    let new_claim = claim_planned(
+        &ctx.sleepers,
+        &id,
+        mark,
+        previous.sleep.is_some(),
+        &mut planned,
+    );
+    let mut guard = Unclaim {
+        sleepers: &ctx.sleepers,
+        id: &id,
+        made_at: mark.map(|m| m.made_at),
+        armed: new_claim,
     };
-    if planned.is_some()
-        && previous.sleep.is_none()
-        && !matches!(claim, Some(Claim::New) | Some(Claim::Already))
-    {
-        tracing::debug!(
-            service = %id.name(),
-            "a mark was dropped before its claim: no record"
-        );
-        planned = None;
-    }
     if let Some(record) = &planned {
         if previous.sleep.is_none() {
-            let claim = claim.expect("a planned sleep was claimed");
             if let Err(e) = persist_sleep(svc, ctx, &previous, record).await {
-                if claim == Claim::New {
-                    ctx.sleepers.unclaim(&id);
-                }
                 return Err(e);
             }
-            if claim == Claim::New {
+            guard.armed = false;
+            if new_claim {
                 ctx.metrics.inc(name::SLEEPS, &[]);
                 tracing::info!(service = %id.name(), "asleep: the record is written, scaling to zero");
             }
@@ -457,6 +451,7 @@ where
             agent.runtime.suspend = true;
         }
     }
+    guard.armed = false;
     obs.sleep = planned;
     match step(
         Step::RuntimeEnsure,
@@ -531,6 +526,56 @@ async fn endpoints<R: RuntimeProvider, S>(
 
 /// Write the sleep record, with the rest of the status as it stands, before the workload is scaled to zero. Same
 /// field manager and same body shape as [`finish`], so there is still one writer of the status.
+/// Claim the mark a pass planned from, before its record is written (ANR-1199): `true` when this pass claimed it
+/// (`Claim::New`, the only case that counts the sleep), `false` when it was already claimed or when there is no record
+/// to write. A mark that is **gone or replaced** between the plan and the claim drops the plan, so the pass writes no
+/// record, suspends nothing and counts nothing.
+fn claim_planned(
+    sleepers: &Sleepers,
+    id: &RuntimeId,
+    mark: Option<&crate::wake::Mark>,
+    recorded: bool,
+    planned: &mut Option<aap_api::SleepStatus>,
+) -> bool {
+    if planned.is_none() || recorded {
+        return false;
+    }
+    match mark.map(|m| sleepers.claim(id, m.made_at)) {
+        Some(Claim::New) => true,
+        Some(Claim::Already) => false,
+        Some(Claim::Gone) | None => {
+            tracing::debug!(
+                service = %id.name(),
+                reason = "gone",
+                "a mark was dropped before its claim: no record"
+            );
+            *planned = None;
+            false
+        }
+    }
+}
+
+/// Gives a new claim back if the pass does not reach its write. A drop guard because a pass cut off by `bounded`'s
+/// timeout drops this future in the middle of the `await`: the `Err` branch never runs, and the mark would stay claimed
+/// for ever — never aged, so never polled again, and a retry at any later time would start a sleep from an old poll
+/// (ANR-1199, the review).
+struct Unclaim<'a> {
+    sleepers: &'a Sleepers,
+    id: &'a RuntimeId,
+    made_at: Option<i64>,
+    armed: bool,
+}
+
+impl Drop for Unclaim<'_> {
+    fn drop(&mut self) {
+        if self.armed
+            && let Some(made_at) = self.made_at
+        {
+            self.sleepers.unclaim(self.id, made_at);
+        }
+    }
+}
+
 async fn persist_sleep<R, S>(
     svc: &AgentService,
     ctx: &Context<R, S>,
@@ -758,4 +803,156 @@ where
         tracing::warn!(service = %svc.name_any(), "could not publish an Event: {e}");
     }
     Ok(Action::await_change())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::wake::{Mark, time_of};
+
+    fn id() -> RuntimeId {
+        RuntimeId::new("team", "a")
+    }
+
+    fn mark(made_at: i64) -> Mark {
+        Mark {
+            next_due_at: None,
+            wake_at_seen: None,
+            made_at,
+        }
+    }
+
+    fn record() -> aap_api::SleepStatus {
+        aap_api::SleepStatus {
+            since: time_of(1_000),
+            next_due_at: None,
+            wake_at_seen: None,
+            waking: None,
+        }
+    }
+
+    #[test]
+    fn a_mark_dropped_before_the_claim_writes_no_record() {
+        // A lap of the idle loop aged the mark away between the plan and the claim: the plan is dropped, so the pass
+        // writes no record, suspends nothing and counts nothing (ANR-1199).
+        let sleepers = Sleepers::default();
+        sleepers.put_to_sleep(&id(), mark(600));
+        sleepers.drop_mark(&id(), 600);
+        let mut planned = Some(record());
+        assert!(!claim_planned(
+            &sleepers,
+            &id(),
+            Some(&mark(600)),
+            false,
+            &mut planned
+        ));
+        assert!(planned.is_none(), "no record is written for a gone mark");
+    }
+
+    #[test]
+    fn a_mark_replaced_before_the_claim_is_gone_and_leaves_the_new_one_untouched() {
+        let sleepers = Sleepers::default();
+        sleepers.put_to_sleep(&id(), mark(600));
+        sleepers.put_to_sleep(&id(), mark(700));
+        let mut planned = Some(record());
+        assert!(!claim_planned(
+            &sleepers,
+            &id(),
+            Some(&mark(600)),
+            false,
+            &mut planned
+        ));
+        assert!(planned.is_none());
+        // The newer mark was not claimed by the stale pass, so it is still the one that counts.
+        assert_eq!(sleepers.claim(&id(), 700), Claim::New);
+    }
+
+    #[test]
+    fn a_new_mark_counts_and_an_already_claimed_one_does_not() {
+        let sleepers = Sleepers::default();
+        sleepers.put_to_sleep(&id(), mark(600));
+        let mut planned = Some(record());
+        assert!(claim_planned(
+            &sleepers,
+            &id(),
+            Some(&mark(600)),
+            false,
+            &mut planned
+        ));
+        assert!(planned.is_some(), "the record is written");
+        assert!(!claim_planned(
+            &sleepers,
+            &id(),
+            Some(&mark(600)),
+            false,
+            &mut planned
+        ));
+        assert!(planned.is_some(), "an idempotent re-write still writes it");
+    }
+
+    #[test]
+    fn a_pass_that_already_has_a_record_claims_nothing() {
+        let sleepers = Sleepers::default();
+        sleepers.put_to_sleep(&id(), mark(600));
+        let mut planned = Some(record());
+        assert!(!claim_planned(
+            &sleepers,
+            &id(),
+            Some(&mark(600)),
+            true,
+            &mut planned
+        ));
+        assert!(planned.is_some());
+        // The mark is untouched: the next pass that writes it claims it.
+        assert_eq!(sleepers.claim(&id(), 600), Claim::New);
+    }
+
+    #[test]
+    fn a_claim_that_never_writes_is_given_back_by_the_guard() {
+        // The guard stands for a pass cut off mid-write: the mark ages again, so it is not held for ever (ANR-1199).
+        let sleepers = Sleepers::default();
+        sleepers.put_to_sleep(&id(), mark(600));
+        assert!(claim_planned(
+            &sleepers,
+            &id(),
+            Some(&mark(600)),
+            false,
+            &mut Some(record())
+        ));
+        assert_eq!(sleepers.claim(&id(), 600), Claim::Already);
+        drop(Unclaim {
+            sleepers: &sleepers,
+            id: &id(),
+            made_at: Some(600),
+            armed: true,
+        });
+        assert_eq!(sleepers.claim(&id(), 600), Claim::New);
+    }
+
+    #[test]
+    fn the_guard_does_not_unclaim_a_newer_mark() {
+        let sleepers = Sleepers::default();
+        sleepers.put_to_sleep(&id(), mark(600));
+        assert!(claim_planned(
+            &sleepers,
+            &id(),
+            Some(&mark(600)),
+            false,
+            &mut Some(record())
+        ));
+        // Another lap replaced the mark and claimed it before this pass's guard dropped.
+        sleepers.put_to_sleep(&id(), mark(700));
+        assert_eq!(sleepers.claim(&id(), 700), Claim::New);
+        drop(Unclaim {
+            sleepers: &sleepers,
+            id: &id(),
+            made_at: Some(600),
+            armed: true,
+        });
+        assert_eq!(
+            sleepers.claim(&id(), 700),
+            Claim::Already,
+            "the newer mark keeps its own claim"
+        );
+    }
 }
