@@ -5,30 +5,38 @@
 # write access can push a commit of their own onto the branch. The lock-file commit then lands on top of it, its author is the App, and
 # the final pull_request run skips every guarded job (ANR-1302) — so the person's code merges without pull-request CI (ANR-1326).
 #
-# This script refuses a branch whose top commit was not authored by release-please. Run it on the checked-out branch, before the lock
-# commit. It is a best effort: a git author is text, so someone who forges the identity passes. A repository ruleset that lets only the
-# release App push to `release-please--**` is the complete fix, and it is an owner setting, not code.
+# This script is the local half of the guard: it names the top commit and refuses an author that is not release-please's. It must run
+# from the workflow's own checkout, never from the release branch's tree, or a writer's commit could replace it with `exit 0`
+# (release-please.yml checks the release branch out into `release/` for exactly that reason). The decisive half is the GitHub API check
+# in release-please.yml: release-please's commit is created through the API, so GitHub signs it, and a person cannot forge that. A
+# repository ruleset that lets only the release App push to `release-please--**` is the complete fix, and it is an owner setting.
+#
+# Usage: check-release-branch-author.sh [dir]   (default: the current directory)
 set -eu
 
-# release-please's own commit (pushed with the App token) is authored by the App; the lock commit this workflow makes is authored by
-# release-please[bot]. Accept both; anything else is a foreign commit.
-name=$(git log -1 --format=%an)
-email=$(git log -1 --format=%ae)
+dir=${1:-.}
+bot=${RELEASE_BOT:-'vaam-apps[bot]'}
+name=$(git -C "$dir" log -1 --format=%an)
+email=$(git -C "$dir" log -1 --format=%ae)
+short=$(git -C "$dir" log -1 --format=%h)
 
-case "$name" in
-  'vaam-apps[bot]' | 'release-please[bot]') ;;
-  *)
-    printf '::error::the release branch does not hold release-please'"'"'s commit: top author is %s <%s>\n' "$name" "$email" >&2
-    exit 1
-    ;;
-esac
+fail() {
+  printf '::error::the release branch does not hold release-please'"'"'s commit: top author is %s <%s> (%s)\n' "$name" "$email" "$short" >&2
+  exit 1
+}
 
-case "$email" in
-  *"${name}@users.noreply.github.com") ;;
-  *)
-    printf '::error::the release branch does not hold release-please'"'"'s commit: top author is %s <%s>\n' "$name" "$email" >&2
-    exit 1
-    ;;
-esac
+# The action's commit is authored by the App: `<id>+<slug>[bot]@users.noreply.github.com`, the id being the App's numeric user id.
+# The lock commit this workflow makes is authored by release-please[bot] with a plain noreply address. Nothing else is accepted; the
+# workflow's API check then requires GitHub's signature on the top commit, which is what a forged author cannot produce.
+if [ "$name" = "$bot" ]; then
+  case "$email" in
+    *"+${bot}@users.noreply.github.com") ;;
+    *) fail ;;
+  esac
+elif [ "$name" = 'release-please[bot]' ]; then
+  [ "$email" = 'release-please[bot]@users.noreply.github.com' ] || fail
+else
+  fail
+fi
 
-printf 'the release branch holds release-please'"'"'s commit (%s, %s)\n' "$(git log -1 --format=%h)" "$name"
+printf 'the release branch holds release-please'"'"'s commit (%s, %s)\n' "$short" "$name"

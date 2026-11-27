@@ -91,11 +91,19 @@ jobs:
 
       # `prs_created` is true for an UPDATED release pull request as well as a new one, which matters: release-please force-pushes
       # that branch on every run and drops the lock-file commit of the run before.
+      # ANR-1326: the guard below must run from THIS checkout, never from the release branch's tree — a writer's commit could otherwise
+      # replace the script with `exit 0`. This checkout is the event's commit (main for a push); the release branch goes into `release/`,
+      # and every step that touches it works there.
+      - name: Check out this workflow's own tree
+        if: steps.release.outputs.prs_created == 'true'
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
       - name: Check out the release branch
         if: steps.release.outputs.prs_created == 'true'
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           ref: ${{ fromJSON(steps.release.outputs.pr).headBranchName }}
+          path: release
           # The same App token, so the push below raises an event: the release pull request's remaining checks (scripts, governance,
           # commit-lint) run on the new head, while ANR-1206's predicate skips the heavy jobs.
           token: ${{ steps.app-token.outputs.token }}
@@ -104,15 +112,31 @@ jobs:
 
       # ANR-1326: between release-please's force-push and this checkout, a writer can put a commit of their own on the branch. The lock
       # commit below would then land on top of it, its author would be the App, and the final pull_request run would skip every guarded
-      # job (ANR-1302) — the person's code would merge with no pull-request CI. Refuse a top commit that is not release-please's. A forged
-      # author passes this; a repository ruleset that lets only the release App push to `release-please--**` is the complete fix.
-      - name: The release branch still holds release-please's commit
+      # job (ANR-1302) — the person's code would merge with no pull-request CI. Two checks: the local one names the author, and the API
+      # one is decisive — release-please's commit is created through the API, so GitHub signs it, and a person cannot forge that. A
+      # repository ruleset that lets only the release App push to `release-please--**` is the complete fix, an owner setting.
+      - name: The release branch still holds a commit GitHub signed for release-please
         if: steps.release.outputs.prs_created == 'true'
-        run: sh tools/check-release-branch-author.sh
+        env:
+          # The App's login comes from the token step, so a renamed or replaced App fails here instead of silently matching.
+          RELEASE_BOT: ${{ steps.app-token.outputs.app-slug }}[bot]
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          sh tools/check-release-branch-author.sh release
+          sha=$(git -C release rev-parse HEAD)
+          verified=$(gh api "repos/${GITHUB_REPOSITORY}/commits/${sha}" --jq '.commit.verification.verified')
+          author=$(gh api "repos/${GITHUB_REPOSITORY}/commits/${sha}" --jq '.author.login // ""')
+          if [ "$verified" != "true" ] || [ "$author" != "$RELEASE_BOT" ]; then
+            echo "::error::the release branch's top commit ${sha} is not a commit GitHub signed for ${RELEASE_BOT} (verified=${verified}, author=${author})"
+            exit 1
+          fi
+          echo "the release branch's top commit ${sha} is signed by GitHub for ${RELEASE_BOT}"
 
       # No dependency cache in this job, on purpose: a restored cache in a job that commits is a supply-chain surface.
       - name: Refresh Cargo.lock and the version checks
         if: steps.release.outputs.prs_created == 'true'
+        working-directory: release
         run: |
           set -euo pipefail
           rustup toolchain install "$RUST_TOOLCHAIN" --profile minimal --no-self-update
@@ -126,6 +150,7 @@ jobs:
 
       - name: Commit the lock file, if the version bump moved it
         if: steps.release.outputs.prs_created == 'true'
+        working-directory: release
         env:
           TOKEN: ${{ steps.app-token.outputs.token }}
           HEAD_REF: ${{ fromJSON(steps.release.outputs.pr || '{}').headBranchName }}
