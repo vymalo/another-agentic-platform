@@ -362,8 +362,18 @@ chart refuses it first), the peers are a NetworkPolicy's and never every address
 {{- if and (ge (int .Values.replicas) 2) (ge (int (default 4 $tuning.reconcileTimeoutSecs)) (sub (int .Values.leaderElection.leaseSecs) (int .Values.leaderElection.renewSecs))) -}}
 {{- fail "tuning.reconcileTimeoutSecs must be below leaseSecs - renewSecs while replicas > 1: the margin between the renew deadline and the earliest takeover, or a pass could write after losing the lease" -}}
 {{- end -}}
-{{- if and (ge (int .Values.replicas) 2) .Values.toolProbe.to (gt (int .Values.toolProbe.timeoutSecs) (sub (int (default 4 $tuning.reconcileTimeoutSecs)) 5)) -}}
-{{- fail (printf "with the election on, toolProbe.timeoutSecs (%d) needs to be at most tuning.reconcileTimeoutSecs - 5 (%d): the pass keeps 5 s for its other steps; raise leaderElection.leaseSecs/renewSecs or lower the probe" (int .Values.toolProbe.timeoutSecs) (sub (int (default 4 $tuning.reconcileTimeoutSecs)) 5)) -}}
+{{- /* K3b/K7a: the probe runs inside a pass, which keeps 5 s for its other steps, so a probe longer than
+`tuning.reconcileTimeoutSecs - 5` is cut by the controller. With the election on the pass must also stay below
+`leaseSecs - renewSecs`. Refuse the pair and name the values that make it fit. */ -}}
+{{- if and (ge (int .Values.replicas) 2) .Values.toolProbe.to -}}
+{{- $probe := int .Values.toolProbe.timeoutSecs -}}
+{{- $pass := int (default 4 $tuning.reconcileTimeoutSecs) -}}
+{{- $needPass := add $probe 5 -}}
+{{- $renew := int .Values.leaderElection.renewSecs -}}
+{{- $needLease := add (add $renew $needPass) 1 -}}
+{{- if lt $pass $needPass -}}
+{{- fail (printf "toolProbe.timeoutSecs (%d) does not fit the pass: the pass keeps 5 s for its other steps, so the probe needs tuning.reconcileTimeoutSecs of at least %d, but the pass is %d s and the controller would cut the probe to 1 s. With the election on the pass must stay below leaderElection.leaseSecs - leaderElection.renewSecs, so that needs leaderElection.leaseSecs of at least %d (renewSecs is %d): for example leaseSecs: %d, renewSecs: %d, tuning.reconcileTimeoutSecs: %d. Or lower toolProbe.timeoutSecs." $probe $needPass $pass $needLease $renew $needLease $renew $needPass) -}}
+{{- end -}}
 {{- end -}}
 {{- /* Run pods (slice D15a): off by default, and then nothing of them is checked or rendered. */ -}}
 {{- include "aap.runPods.validate" . -}}
