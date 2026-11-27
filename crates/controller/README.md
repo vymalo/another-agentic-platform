@@ -387,10 +387,15 @@ the runtime reports and sends the signals of `watch()` itself.
 ## Idle loop (ANR-851, AD-058 P2b)
 
 `sleeper.rs`: `Operator::with_activity(source)` turns it on (off without a source). Every `Options::sleep_poll` the leader polls each
-service that sets `scaling.idleTimeout` (and not `spec.suspend`) through the `ActivitySource`, decides with `sleep::decide`, asks once
-more before scaling down (the drain check) and calls `RuntimeProvider::suspend`. `Sleepers` (shared with the service reconciler) keeps the
-idle clocks and the set of sleeping agents in memory; a sleeping agent is ensured with `suspend: true` and shows `runtime.phase: Sleeping`,
-`Ready` False, reason `Sleeping`. Counter: `aap_agent_sleeps_total`. Waking is P3; the operator binary builds the P2c source but does not hand it to `with_activity` yet.
+service that sets `scaling.idleTimeout` (and not `spec.suspend`, and with no `status.sleep`) through the `ActivitySource`, decides with
+`sleep::decide` and asks once more (the drain check). It then only **proposes**: `Sleepers::put_to_sleep` keeps a `wake::Mark` (the
+confirmed poll's `nextDueAt`, the `wake-at` annotation as read) and nudges the services controller. The `AgentService` reconcile is the
+one writer of the status: it writes `status.sleep` first, then ensures the spec with `suspend: true`, and reads the record back after a
+restart. `wake.rs` is pure (`plan`, `timed_out`, `recheck`): a record wakes when the annotation `agents.vymalo.com/wake-at` differs
+from `wakeAtSeen` or `now >= nextDueAt - wakeAhead`, shows `runtime.phase: Waking` until the runtime is `Ready`, and past
+`scaling.wakeTimeout` says `WakeTimedOut` and keeps waking. `Operator::with_clock` fixes the time of a pass for a test. Counter:
+`aap_agent_sleeps_total`. The operator binary builds the P2c source but does not hand it to `with_activity` yet (ANR-1030), and nothing
+writes `wake-at` until ANR-1068.
 
 ## The pod-minute meter (ANR-673, AD-069)
 

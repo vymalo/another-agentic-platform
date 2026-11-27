@@ -189,7 +189,7 @@ The stable service continues to exist while runtime compute is absent.
 
 ## 21a. Sleep when idle: the plan
 
-*(2026-11-24, ANR-255; documentation only, nothing here is built. The decision is [AD-058](11-decisions.md#ad-058--an-agent-sleeps-when-the-agent-says-it-is-idle-and-an-activator-wakes-it).)*
+*(2026-11-24, ANR-255; written as a plan. Built since: P1, P2a to P2c, P3b and, 2026-11-27, **P3a-1, the operator's wake path** (ANR-1067), as each row below says; the rows the text of the plan still says are unbuilt are the ones it has no "as built" paragraph for. **No running operator puts an agent to sleep until ANR-1030 hands the activity source to `Operator::with_activity`, and nothing writes the wake annotation until ANR-1068.** The decision is [AD-058](11-decisions.md#ad-058--an-agent-sleeps-when-the-agent-says-it-is-idle-and-an-activator-wakes-it).)*
 
 ### What is built, and what is not (read at plat `main`, 2026-11-24)
 
@@ -237,13 +237,16 @@ stateDiagram-v2
     [*] --> Running
     Running --> Draining: idle for idleTimeout
     Draining --> Sleeping: workload at zero
-    Sleeping --> Waking: request, due schedule or push
+    Sleeping --> Waking: wake-at differs from wakeAtSeen, or now >= nextDueAt - wakeAhead
     Waking --> Running: Ready
-    Waking --> Sleeping: wakeTimeout, caller told to retry
+    Waking --> Waking: past wakeTimeout, still waking (said, never back to sleep)
     Running --> Suspended: spec.suspend
     Sleeping --> Suspended: spec.suspend
+    Waking --> Suspended: spec.suspend
     Suspended --> Running: suspend cleared
 ```
+
+(As built by P3a-1 below, the operator is the one that goes to `Waking`; the activator only writes the annotation and answers `503` with `Retry-After` at its own deadline. The earlier arrow "wakeTimeout, caller told to retry" back to `Sleeping` is gone: the operator does not put a waking agent back to sleep.)
 
 | Question | Answer (AD-058) |
 |---|---|
@@ -278,6 +281,39 @@ P2b as built (2026-11-26, ANR-851): the idle loop (`crates/controller/src/sleepe
 P1 as built: `scaling.idleTimeout` (`1m` to `24h`), `scaling.wakeAhead` (`10s` to `1h`) and `scaling.wakeTimeout` (`5s` to `5m`) are duration strings with CEL bounds; the last two need `idleTimeout`. All three are absent by default, so an agent never sleeps and nothing renders differently. `status.runtime.phase` gains `Sleeping`; nothing sets it until P2. The defaults the CRD documents when a field is absent (2m for `wakeAhead`, 60s for `wakeTimeout`) are P2's and P3's to apply; the activator's own `wake_timeout` (300 s) is only an upper bound over the per-agent value (P3b). The owner confirmed `idleTimeout: 10m` as the value of the hosted deployment (2026-11-25); the fields stay off by default in the CRD.
 
 P3b as built (2026-11-27, ANR-762): the activator **as a library**, `crates/activator` (`aap-activator`) over three new ports in `aap-ports` (`Waker`, `Upstream`, `CardSource`, each with a `Memory` fake, a conformance macro and negative tests that the suites fail broken fakes): the four tests of the row pass over the `Memory` ports. The operator's wake path is ANR-1067 and the binary, image, chart and Kubernetes adapters ANR-1068; nothing wakes a real agent yet. Two premises of the row, corrected: **the registry holds no card body** (it lists each agent's card `href`), so "the card is answered from the registry the operator already serves" is false and the `CardSource` is its own seam, an adapter keeping what the agent last served; and **a scheduled wake needs a persisted `nextDueAt`**, because the operator keeps its sleep mark in memory (P2b) and a restart forgets it; that is ANR-1067. What §21a leaves open stays open (ANR-Q134 to Q137). **Provisional choices** (every default is provisional and set by the deployment): the router's `wake_timeout` is an upper bound whose default is 5 m, the CRD's maximum for `scaling.wakeTimeout`, so an adapter answering `TimedOut` at the agent's own value decides and a request joining a wake in flight shares the first request's deadline; **the agent is named by the `Host` header (`<name>.<namespace>`, optionally ending in a configured suffix), provisional pending ANR-Q135**; **the activator has no authentication and is safe only behind a NetworkPolicy that admits only the callers that may reach the agents, which is a requirement on ANR-1068's chart**; `max_in_flight` bounds held requests, `forward_timeout` gives `504`, `body_read_timeout` `408`, an unknown agent `404`, a suspended one `409`. **Streaming (ANR-1069, 2026-11-27): the answer streams** (the `Upstream` returns the head and a `BodyStream`; SSE and `message:stream` reach the client chunk by chunk, with no `Content-Length`), the request stays buffered (a wake may replay it, R5 reads its metadata); `forward_timeout` covers the head (`504`), `stream_idle_timeout` (120 s, provisional), an optional `max_stream_duration` (off by default, provisional: a shared front should set it, the chart of ANR-1068 gives it a value) and an error in the stream end it with the connection, counted in `stream_ends_total` as `idle` / `max_duration` / `failed` / `abandoned`, and the `max_in_flight` permit is held until the stream ends or the client leaves.
+
+P3a-1 as built (2026-11-27, ANR-1067, AD-058 amended; `crates/controller/src/wake.rs`, `sleeper.rs`, `service.rs`): the operator's wake path. **Sleep is stored in the object**, as `status.sleep` (`since`, `nextDueAt`, `wakeAtSeen`, `waking{since, cause}`), present only while the agent is asleep or waking, so a restart or a failover keeps a sleeping agent asleep (the defect P2b documented). The idle loop no longer scales: its confirmed poll makes a *mark* (the poll's `nextDueAt` and the `wake-at` annotation as it read it), asks for a pass, and the reconcile, the one writer of the status, **writes the record first and scales second**; after a restart it reads the record back, and the loop skips every agent whose record is present (a poll goes through the activator and would wake it).
+
+```mermaid
+sequenceDiagram
+    participant L as Idle loop
+    participant R as AgentService reconcile
+    participant API as API server (status.sleep)
+    participant W as Workload
+    L->>R: mark (nextDueAt, wake-at as read) and a pass
+    R->>API: status.sleep = {since, nextDueAt, wakeAtSeen}
+    R->>W: ensure with suspend (replicas 0)
+    Note over R,W: operator restarts: no mark, the record is read back and the agent stays at zero
+    R->>R: wake-at differs from wakeAtSeen, or now >= nextDueAt - wakeAhead
+    R->>API: status.sleep.waking = {since, cause}
+    R->>W: ensure the spec's replicas
+    W-->>R: Ready
+    R->>API: status.sleep removed, phase Ready
+```
+
+```mermaid
+stateDiagram-v2
+    [*] --> Awake
+    Awake --> Sleeping: confirmed idle poll, then the record is written, then replicas 0
+    Sleeping --> Waking: wake-at differs from wakeAtSeen (Request), or now >= nextDueAt - wakeAhead (Schedule)
+    Waking --> Awake: runtime Ready, record removed
+    Waking --> Waking: past wakeTimeout, reason WakeTimedOut, never back to sleep
+    Sleeping --> Suspended: spec.suspend, record removed
+    Waking --> Suspended: spec.suspend, record removed
+    Sleeping --> Awake: scaling.idleTimeout removed, record removed
+```
+
+The signal is the annotation `agents.vymalo.com/wake-at`: an RFC 3339 instant, **level-triggered**, never removed by the operator, ignored by an awake agent. The decision does not parse it: **any value that differs from `wakeAtSeen`** is a request (so a value that was there before the sleep is not one, and a removed annotation is not one, which is a proposal of this slice). A scheduled wake needs no event: the pass is requeued at `min(settled, max(1 s, nextDueAt - wakeAhead - now))` from the status, again at each pass. Scaling up restores the spec's replicas (`workers`, a split front), and `runtime.phase: Waking` (reason `Waking`, `state` Degraded, no new state) lasts until the runtime is `Ready`. `scaling.wakeTimeout` (60 s when absent) is read here for the first time: past it the operator **keeps waking and says so** (reason `WakeTimedOut`, a Warning Event) and never goes back to sleep (ANR-Q141, option A, decided by the owner 2026-11-27). The field names of `status.sleep` and `RuntimePhase::Waking` were accepted by the owner on 2026-11-27 (ANR-Q140) and sit in `crates/api/src/status.rs` only. Tests: `crates/controller/tests/operator.rs` (the six decisive cases on the fake API server, each broken on purpose), `tests/pure.rs` and `wake.rs`. **Unverified:** a real cluster (P4); two near-simultaneous passes can read a status a little behind the write, which re-writes the same record with a later `since` and is harmless; a wake request that arrives while the idle loop's mark is being made is kept (the annotation is read at the decision). **Not built:** the writer of `wake-at` and the activator's binary (ANR-1068), the Service switch (ANR-1182), the source in the binary (ANR-1030).
 
 ### The seam the sys ADR for live connections needs
 
@@ -564,6 +600,8 @@ sequenceDiagram
 ```
 
 For background execution, the HTTP response can end while a Restate workflow continues renewing the lease.
+
+> **Superseded (AD-058, 2026-11-27):** this lease-based flow is not what is built or planned. An agent reports its own activity, the operator scales it to zero and records that in `status.sleep`, and a front (the activator) wakes it through the annotation `agents.vymalo.com/wake-at`. See [§21a](#21a-sleep-when-idle-the-plan), *P3a-1 as built*.
 
 ---
 

@@ -2,14 +2,12 @@
 //! to zero.
 //!
 //! [`sleep`](crate::sleep) decides; this module asks, remembers and acts. [`Sleepers`] is what the loop and the
-//! service reconciler share: the idle clock of each agent and the set of agents put to sleep. The reconciler reads
-//! the set, so that its next `ensure` keeps a sleeping agent at zero (an `ensure` of the plain spec would wake it
-//! at once) and the status says `Sleeping`, not `Suspended`.
+//! service reconciler share: the idle clock of each agent and the proposals to sleep.
 //!
-//! Sleeping is **not stored**: a restart of the operator forgets the set, the agent is woken by the next pass and
-//! sleeps again after another `idleTimeout`. Waking on a request, a due schedule or a push is P3.
+//! Sleeping is **stored** (P3a-1): the loop only proposes (a [`Mark`]); the reconcile writes `status.sleep`, then
+//! holds the workload at zero, and reads the record back after a restart. Waking is [`wake`](crate::wake).
 
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 use std::future::Future;
 use std::pin::Pin;
 use std::sync::{Arc, Mutex, PoisonError};
@@ -17,14 +15,13 @@ use std::time::Duration;
 
 use aap_api::AgentService;
 use aap_ports::{
-    Activity, ActivityError, ActivitySource, LeaderElection, RuntimeError, RuntimeId,
-    RuntimeProvider,
+    Activity, ActivityError, ActivitySource, LeaderElection, RuntimeId, RuntimeProvider,
 };
 use kube::{Api, Client, ResourceExt};
-use tokio::sync::watch;
+use tokio::sync::{mpsc, watch};
 
-use crate::metrics::{Metrics, name};
 use crate::sleep::{Decision, IdleState, SleepPolicy, decide};
+use crate::wake::Mark;
 
 /// How often the loop polls when [`Options::sleep_poll`](crate::Options) is left alone.
 pub const DEFAULT_POLL: Duration = Duration::from_secs(30);
@@ -46,15 +43,20 @@ pub fn erase<A: ActivitySource + 'static>(source: A) -> ActivityFn {
 }
 
 /// What the loop and the reconciler share about sleep. Cheap to share in an `Arc`.
+///
+/// It holds the idle clock of each agent and the loop's **proposals** (a [`Mark`]). It does not hold who is asleep:
+/// that is `status.sleep` of the object, written by the reconcile and read back after a restart (P3a-1).
 #[derive(Debug, Default)]
 pub struct Sleepers {
     inner: Mutex<Inner>,
+    /// Where the loop says "reconcile this one now" (set by the operator when it runs).
+    nudge: Mutex<Option<mpsc::UnboundedSender<RuntimeId>>>,
 }
 
 #[derive(Debug, Default)]
 struct Inner {
     idle: HashMap<String, IdleState>,
-    sleeping: HashSet<String>,
+    marks: HashMap<String, (Mark, bool)>,
 }
 
 fn key(id: &RuntimeId) -> String {
@@ -66,31 +68,57 @@ impl Sleepers {
         f(&mut self.inner.lock().unwrap_or_else(PoisonError::into_inner))
     }
 
-    /// Whether the loop has put this agent to sleep.
-    pub fn is_sleeping(&self, id: &RuntimeId) -> bool {
-        self.with(|i| i.sleeping.contains(&key(id)))
+    /// The channel on which the loop asks for a pass of the reconciler. One reader: the operator's.
+    pub(crate) fn nudges(&self) -> mpsc::UnboundedReceiver<RuntimeId> {
+        let (tx, rx) = mpsc::unbounded_channel();
+        *self.nudge.lock().unwrap_or_else(PoisonError::into_inner) = Some(tx);
+        rx
+    }
+
+    /// Whether the loop has proposed to put this agent to sleep and the reconcile has not yet finished with it.
+    pub fn is_marked(&self, id: &RuntimeId) -> bool {
+        self.with(|i| i.marks.contains_key(&key(id)))
+    }
+
+    /// The loop's proposal for this agent.
+    pub(crate) fn mark(&self, id: &RuntimeId) -> Option<Mark> {
+        self.with(|i| i.marks.get(&key(id)).map(|(m, _)| m.clone()))
+    }
+
+    /// Say the proposal was written to the status: true the first time only (so the metric counts one sleep).
+    pub(crate) fn note_recorded(&self, id: &RuntimeId) -> bool {
+        self.with(|i| {
+            i.marks
+                .get_mut(&key(id))
+                .is_some_and(|(_, recorded)| !std::mem::replace(recorded, true))
+        })
     }
 
     /// Forget everything about an agent: it was deleted, suspended by a person, or no longer asks to sleep.
     pub fn forget(&self, id: &RuntimeId) {
         self.with(|i| {
             i.idle.remove(&key(id));
-            i.sleeping.remove(&key(id));
+            i.marks.remove(&key(id));
         });
     }
 
-    /// Mark an agent as asleep (for the reconciler to keep it at zero).
-    pub fn put_to_sleep(&self, id: &RuntimeId) {
+    /// Propose that an agent sleep, and ask the reconciler for a pass. The reconcile writes `status.sleep` first and
+    /// scales second, so a crash in between leaves the agent asleep on the record, never awake by accident.
+    pub fn put_to_sleep(&self, id: &RuntimeId, mark: Mark) {
         self.with(|i| {
             i.idle.remove(&key(id));
-            i.sleeping.insert(key(id));
+            i.marks.insert(key(id), (mark, false));
         });
+        if let Some(tx) = &*self.nudge.lock().unwrap_or_else(PoisonError::into_inner) {
+            // A reader that has stopped is the operator stopping.
+            let _ = tx.send(id.clone());
+        }
     }
 
-    /// Wake an agent: the next pass ensures it running. (P3 calls this on a request; P2b on a failed scale-down.)
+    /// The agent is awake again (or never slept): drop the proposal, so the next pass does not put it back.
     pub fn wake(&self, id: &RuntimeId) {
         self.with(|i| {
-            i.sleeping.remove(&key(id));
+            i.marks.remove(&key(id));
         });
     }
 
@@ -114,24 +142,24 @@ fn unix_now() -> i64 {
 /// What one step did to one agent.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Outcome {
-    /// Nothing changed: no policy, a person's suspend, busy, not idle long enough, or already asleep.
+    /// Nothing changed: no policy, a person's suspend, busy, not idle long enough, or already asleep or waking.
     Stayed,
-    /// The agent was scaled to zero.
-    Slept,
+    /// The agent was proposed for sleep: the reconcile writes the record and scales it to zero.
+    Marked,
 }
 
 /// One pass of the idle loop over one service at `now` (seconds since the Unix epoch).
 ///
-/// The agent is asked twice before it is scaled down: once to run the idle clock, and again right before the
-/// scale-down (the drain: a run claimed in between keeps the agent up, and so does an error). Whatever
-/// `ActivitySource` says, `spec.suspend` and a missing policy win.
-pub async fn step<R: RuntimeProvider>(
-    runtime: &R,
+/// The agent is asked twice before it is proposed for sleep: once to run the idle clock, and again right before (the
+/// drain: a run claimed in between keeps the agent up, and so does an error). Whatever `ActivitySource` says,
+/// `spec.suspend` and a missing policy win. **An agent whose `status.sleep` is present is never asked**, asleep or
+/// waking: a poll goes through the activator, and would wake it (P3a-1). The loop does not scale and does not write
+/// the status: the reconcile does both, from the mark (the status has one writer, because it applies the whole).
+pub async fn step(
     activity: &ActivityFn,
     sleepers: &Sleepers,
     service: &AgentService,
     now: i64,
-    metrics: &Metrics,
 ) -> Outcome {
     let Some(ns) = service.namespace() else {
         return Outcome::Stayed;
@@ -144,7 +172,7 @@ pub async fn step<R: RuntimeProvider>(
         sleepers.forget(&id);
         return Outcome::Stayed;
     };
-    if sleepers.is_sleeping(&id) {
+    if sleepers.is_marked(&id) || service.status.as_ref().is_some_and(|s| s.sleep.is_some()) {
         return Outcome::Stayed;
     }
     let polled = activity(id.clone()).await;
@@ -163,22 +191,21 @@ pub async fn step<R: RuntimeProvider>(
     if confirmed.decision != Decision::Sleep {
         return Outcome::Stayed;
     }
-    // Mark first: a pass that runs from here on ensures the agent at zero, never running again.
-    sleepers.put_to_sleep(&id);
-    match runtime.suspend(&id).await {
-        Ok(_) => {
-            metrics.inc(name::SLEEPS, &[]);
-            tracing::info!(service = %id.name(), "idle for {:?}, scaled to zero", policy.idle_timeout);
-            Outcome::Slept
-        }
-        Err(e) => {
-            sleepers.wake(&id);
-            if !matches!(e, RuntimeError::NotFound(_)) {
-                tracing::warn!(service = %id.name(), "could not scale to zero: {e}");
-            }
-            Outcome::Stayed
-        }
-    }
+    // The schedule the confirmed poll named is what a scheduled wake is later due by.
+    let next_due_at = again.as_ref().ok().and_then(|a| a.next_due_at);
+    let wake_at_seen = service
+        .annotations()
+        .get(aap_api::WAKE_AT_ANNOTATION)
+        .cloned();
+    sleepers.put_to_sleep(
+        &id,
+        Mark {
+            next_due_at,
+            wake_at_seen,
+        },
+    );
+    tracing::info!(service = %id.name(), "idle for {:?}, proposed for sleep", policy.idle_timeout);
+    Outcome::Marked
 }
 
 /// What the idle loop is made of.
@@ -189,7 +216,6 @@ pub(crate) struct IdleLoop {
     pub scopes: Vec<String>,
     pub period: Duration,
     pub leader: Arc<dyn LeaderElection>,
-    pub metrics: Arc<Metrics>,
 }
 
 /// Poll every service of `scopes` every `period` while this replica leads, until `stop` is true.
@@ -212,15 +238,7 @@ where
                 match api.list(&Default::default()).await {
                     Ok(list) => {
                         for service in &list.items {
-                            step(
-                                &runtime,
-                                &l.activity,
-                                &l.sleepers,
-                                service,
-                                unix_now(),
-                                &l.metrics,
-                            )
-                            .await;
+                            step(&l.activity, &l.sleepers, service, unix_now()).await;
                         }
                     }
                     Err(e) => tracing::warn!("idle loop could not list services of {scope:?}: {e}"),
@@ -238,8 +256,7 @@ where
 mod tests {
     #![allow(clippy::unwrap_used)]
     use super::*;
-    use aap_ports::memory::{MemoryActivity, MemoryRuntime};
-    use aap_ports::testkit::sample_spec;
+    use aap_ports::memory::MemoryActivity;
     use serde_json::json;
 
     const NS: &str = "team";
@@ -260,40 +277,25 @@ mod tests {
     }
 
     struct Rig {
-        runtime: MemoryRuntime,
         source: MemoryActivity,
         activity: ActivityFn,
         sleepers: Sleepers,
-        metrics: Metrics,
         id: RuntimeId,
     }
 
-    async fn rig() -> Rig {
-        let runtime = MemoryRuntime::new();
-        let id = RuntimeId::new(NS, "a");
-        runtime.ensure(&id, &sample_spec(&id)).await.unwrap();
+    fn rig() -> Rig {
         let source = MemoryActivity::new();
         Rig {
             activity: erase(source.clone()),
-            runtime,
             source,
             sleepers: Sleepers::default(),
-            metrics: Metrics::new(),
-            id,
+            id: RuntimeId::new(NS, "a"),
         }
     }
 
     impl Rig {
         async fn at(&self, svc: &AgentService, now: i64) -> Outcome {
-            step(
-                &self.runtime,
-                &self.activity,
-                &self.sleepers,
-                svc,
-                now,
-                &self.metrics,
-            )
-            .await
+            step(&self.activity, &self.sleepers, svc, now).await
         }
     }
 
@@ -302,28 +304,75 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn idle_for_the_timeout_scales_to_zero_once() {
-        let r = rig().await;
+    async fn idle_for_the_timeout_proposes_a_sleep_once_and_touches_nothing_else() {
+        let r = rig();
+        let mut nudges = r.sleepers.nudges();
         let svc = service(sleepy(), false);
         assert_eq!(r.at(&svc, 0).await, Outcome::Stayed, "the clock starts");
         assert_eq!(r.at(&svc, 599).await, Outcome::Stayed);
-        assert!(!r.sleepers.is_sleeping(&r.id));
-        assert_eq!(r.at(&svc, 600).await, Outcome::Slept);
-        assert!(r.sleepers.is_sleeping(&r.id));
+        assert!(!r.sleepers.is_marked(&r.id));
+        assert_eq!(r.at(&svc, 600).await, Outcome::Marked);
+        assert!(r.sleepers.is_marked(&r.id));
         assert_eq!(
-            r.runtime.status(&r.id).await.unwrap().phase,
-            aap_ports::Phase::Suspended
+            nudges.try_recv().unwrap(),
+            r.id,
+            "the reconcile is asked for"
         );
-        // Asleep: not asked again, not slept again.
+        // Marked: not asked again, not proposed again.
         let asked = r.source.asked().len();
         assert_eq!(r.at(&svc, 9_999).await, Outcome::Stayed);
         assert_eq!(r.source.asked().len(), asked);
-        assert_eq!(r.metrics.get(name::SLEEPS, &[]), 1);
+    }
+
+    #[tokio::test]
+    async fn the_confirmed_polls_schedule_and_the_annotation_are_in_the_mark() {
+        let r = rig();
+        let mut svc = service(sleepy(), false);
+        svc.metadata.annotations = Some(
+            [(
+                aap_api::WAKE_AT_ANNOTATION.to_owned(),
+                "2026-01-01T00:00:00Z".to_owned(),
+            )]
+            .into(),
+        );
+        r.source.set(
+            &r.id,
+            Activity {
+                busy: 0,
+                next_due_at: Some(50_000),
+            },
+        );
+        r.at(&svc, 0).await;
+        r.at(&svc, 600).await;
+        assert_eq!(
+            r.sleepers.mark(&r.id),
+            Some(Mark {
+                next_due_at: Some(50_000),
+                wake_at_seen: Some("2026-01-01T00:00:00Z".to_owned()),
+            })
+        );
+    }
+
+    #[tokio::test]
+    async fn an_agent_whose_status_holds_a_sleep_record_is_never_asked() {
+        let r = rig();
+        let mut svc = service(sleepy(), false);
+        svc.status = Some(
+            serde_json::from_value(json!({
+                "sleep": { "since": "2026-01-01T00:00:00Z" },
+                "conditions": [],
+            }))
+            .unwrap(),
+        );
+        for now in [0, 600, 6_000] {
+            assert_eq!(r.at(&svc, now).await, Outcome::Stayed);
+        }
+        assert!(r.source.asked().is_empty());
     }
 
     #[tokio::test]
     async fn a_busy_agent_restarts_the_clock() {
-        let r = rig().await;
+        let r = rig();
         let svc = service(sleepy(), false);
         r.at(&svc, 0).await;
         r.source.set(
@@ -341,27 +390,23 @@ mod tests {
             "idle since 700, not 0"
         );
         assert_eq!(r.at(&svc, 1299).await, Outcome::Stayed);
-        assert_eq!(r.at(&svc, 1300).await, Outcome::Slept);
+        assert_eq!(r.at(&svc, 1300).await, Outcome::Marked);
     }
 
     #[tokio::test]
-    async fn a_failed_poll_never_scales_down() {
-        let r = rig().await;
+    async fn a_failed_poll_never_proposes_a_sleep() {
+        let r = rig();
         let svc = service(sleepy(), false);
         r.source.break_source(&r.id);
         for now in [0, 600, 6_000, 600_000] {
             assert_eq!(r.at(&svc, now).await, Outcome::Stayed);
         }
-        assert!(!r.sleepers.is_sleeping(&r.id));
-        assert_eq!(
-            r.runtime.status(&r.id).await.unwrap().phase,
-            aap_ports::Phase::Ready
-        );
+        assert!(!r.sleepers.is_marked(&r.id));
     }
 
     #[tokio::test]
-    async fn a_schedule_inside_wake_ahead_never_scales_down() {
-        let r = rig().await;
+    async fn a_schedule_inside_wake_ahead_never_proposes_a_sleep() {
+        let r = rig();
         let svc = service(sleepy(), false);
         r.source.set(
             &r.id,
@@ -381,13 +426,13 @@ mod tests {
             },
         );
         r.at(&svc, 10_001).await;
-        assert_eq!(r.at(&svc, 10_601).await, Outcome::Slept);
+        assert_eq!(r.at(&svc, 10_601).await, Outcome::Marked);
     }
 
     #[tokio::test]
     async fn a_run_claimed_between_the_two_asks_keeps_the_agent_up() {
-        // The first answer is idle, the second (the drain check) is busy: the loop asks twice before it scales.
-        let r = rig().await;
+        // The first answer is idle, the second (the drain check) is busy: the loop asks twice before it proposes.
+        let r = rig();
         let svc = service(sleepy(), false);
         r.at(&svc, 0).await;
         let calls = Arc::new(std::sync::atomic::AtomicU32::new(0));
@@ -409,18 +454,14 @@ mod tests {
                 inner(i)
             }) as ActivityFn
         };
-        let out = step(&r.runtime, &flip, &r.sleepers, &svc, 600, &r.metrics).await;
+        let out = step(&flip, &r.sleepers, &svc, 600).await;
         assert_eq!(out, Outcome::Stayed);
-        assert!(!r.sleepers.is_sleeping(&r.id));
-        assert_eq!(
-            r.runtime.status(&r.id).await.unwrap().phase,
-            aap_ports::Phase::Ready
-        );
+        assert!(!r.sleepers.is_marked(&r.id));
     }
 
     #[tokio::test]
     async fn suspend_and_a_missing_policy_win() {
-        let r = rig().await;
+        let r = rig();
         let suspended = service(sleepy(), true);
         let never = service(json!({}), false);
         for now in [0, 600, 6_000] {
@@ -428,27 +469,17 @@ mod tests {
             assert_eq!(r.at(&never, now).await, Outcome::Stayed);
         }
         assert!(r.source.asked().is_empty(), "no policy, nothing asked");
-        assert!(!r.sleepers.is_sleeping(&r.id));
+        assert!(!r.sleepers.is_marked(&r.id));
     }
 
     #[tokio::test]
-    async fn removing_the_policy_wakes_a_sleeping_agent() {
-        let r = rig().await;
+    async fn removing_the_policy_forgets_the_proposal() {
+        let r = rig();
         let svc = service(sleepy(), false);
         r.at(&svc, 0).await;
         r.at(&svc, 600).await;
-        assert!(r.sleepers.is_sleeping(&r.id));
+        assert!(r.sleepers.is_marked(&r.id));
         r.at(&service(json!({}), false), 601).await;
-        assert!(!r.sleepers.is_sleeping(&r.id));
-    }
-
-    #[tokio::test]
-    async fn a_provider_that_fails_to_suspend_leaves_the_agent_running() {
-        let r = rig().await;
-        r.runtime.set_unavailable(true);
-        let svc = service(sleepy(), false);
-        r.at(&svc, 0).await;
-        assert_eq!(r.at(&svc, 600).await, Outcome::Stayed);
-        assert!(!r.sleepers.is_sleeping(&r.id), "the mark is undone");
+        assert!(!r.sleepers.is_marked(&r.id));
     }
 }

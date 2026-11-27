@@ -19,6 +19,9 @@ use aap_ports::{Activity, ActivityError};
 /// `scaling.wakeAhead` when absent (AD-058).
 pub const DEFAULT_WAKE_AHEAD: Duration = Duration::from_secs(2 * 60);
 
+/// `scaling.wakeTimeout` when absent (AD-058, ANR-Q141).
+pub const DEFAULT_WAKE_TIMEOUT: Duration = Duration::from_secs(60);
+
 /// What `scaling` asks of the idle controller. Absent when the agent never sleeps.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct SleepPolicy {
@@ -26,6 +29,8 @@ pub struct SleepPolicy {
     pub idle_timeout: Duration,
     /// A schedule due within this long keeps the agent awake.
     pub wake_ahead: Duration,
+    /// How long a wake may take before the operator says it is late (it never goes back to sleep for it).
+    pub wake_timeout: Duration,
 }
 
 impl SleepPolicy {
@@ -38,9 +43,14 @@ impl SleepPolicy {
             Some(text) => parse_duration(text)?,
             None => DEFAULT_WAKE_AHEAD,
         };
+        let wake_timeout = match scaling.wake_timeout.as_deref() {
+            Some(text) => parse_duration(text)?,
+            None => DEFAULT_WAKE_TIMEOUT,
+        };
         Some(Self {
             idle_timeout,
             wake_ahead,
+            wake_timeout,
         })
     }
 }
@@ -137,6 +147,7 @@ mod tests {
     const POLICY: SleepPolicy = SleepPolicy {
         idle_timeout: Duration::from_secs(600),
         wake_ahead: Duration::from_secs(120),
+        wake_timeout: Duration::from_secs(60),
     };
 
     fn busy(n: u32) -> Result<Activity, ActivityError> {
@@ -295,9 +306,16 @@ mod tests {
             SleepPolicy::from_scaling(&scaling),
             Some(SleepPolicy {
                 idle_timeout: Duration::from_secs(900),
-                wake_ahead: DEFAULT_WAKE_AHEAD
+                wake_ahead: DEFAULT_WAKE_AHEAD,
+                wake_timeout: DEFAULT_WAKE_TIMEOUT,
             })
         );
+        scaling.wake_timeout = Some("5m".into());
+        assert_eq!(
+            SleepPolicy::from_scaling(&scaling).unwrap().wake_timeout,
+            Duration::from_secs(300)
+        );
+        scaling.wake_timeout = None;
         scaling.wake_ahead = Some("30s".into());
         assert_eq!(
             SleepPolicy::from_scaling(&scaling).unwrap().wake_ahead,

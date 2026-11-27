@@ -2,8 +2,8 @@
 //! the state diagram of "Reconciliation"). Pure: no clock (the time is an argument), no I/O.
 
 use aap_api::{
-    AgentServiceStatus, ConfigStatus, Endpoints, RuntimePhase, ServiceState, condition_type as ty,
-    reason,
+    AgentServiceStatus, ConfigStatus, Endpoints, RuntimePhase, ServiceState, SleepStatus,
+    condition_type as ty, reason,
 };
 use aap_ports::{Issue, IssueReason, Phase, RuntimeStatus, StoreState};
 use k8s_openapi::apimachinery::pkg::apis::meta::v1::{Condition, Time};
@@ -59,8 +59,13 @@ pub struct Observed {
     pub generation: Option<i64>,
     /// `spec.suspend`.
     pub suspend: bool,
-    /// The idle loop scaled the agent to zero (AD-058): `Suspended` from the provider is then `Sleeping`.
-    pub sleeping: bool,
+    /// `status.sleep` as this pass holds it (AD-058, P3a-1): the agent is asleep, or waking if `waking` is set.
+    /// `Suspended` from the provider is then `Sleeping`, and a runtime that is not ready is `Waking`.
+    pub sleep: Option<SleepStatus>,
+    /// A wake that has lasted past `scaling.wakeTimeout`: said in the reason, never acted on (ANR-Q141).
+    pub wake_timed_out: bool,
+    /// When the sleep record next needs a look no event brings (see [`crate::wake::recheck`]).
+    pub sleep_recheck: Option<std::time::Duration>,
     /// `spec.interfaces.a2a.enabled`.
     pub a2a_enabled: bool,
     /// Whether this operator serves a registry.
@@ -87,7 +92,7 @@ pub struct Observed {
 pub fn derive(obs: &Observed, previous: &[Condition], now: &Time) -> AgentServiceStatus {
     let config = config_condition(&obs.config);
     let store = store_condition(&obs.store);
-    let runtime = runtime_condition(obs.runtime.as_ref(), obs.sleeping);
+    let runtime = runtime_condition(obs.runtime.as_ref(), obs.view());
 
     let state = state(obs, &config, &store, &runtime);
     let listed = listed_condition(obs, state);
@@ -110,11 +115,35 @@ pub fn derive(obs: &Observed, previous: &[Condition], now: &Time) -> AgentServic
         config: obs.config_status.clone(),
         runtime: obs.runtime.as_ref().map(|r| aap_api::RuntimeStatus {
             provider: obs.provider.to_owned(),
-            phase: phase(r.phase, obs.sleeping),
+            phase: phase(r.phase, obs.view()),
             replicas: i32::try_from(r.replicas).unwrap_or(i32::MAX),
         }),
         endpoints: obs.endpoints.clone(),
+        sleep: obs.sleep.clone(),
         conditions,
+    }
+}
+
+/// How the sleep record reads a runtime.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum SleepView {
+    /// No record.
+    Awake,
+    /// Held at zero by the idle loop's decision.
+    Asleep,
+    /// Woken and not ready yet; `late` is past `scaling.wakeTimeout`.
+    Waking { late: bool },
+}
+
+impl Observed {
+    pub(crate) fn view(&self) -> SleepView {
+        match &self.sleep {
+            None => SleepView::Awake,
+            Some(s) if s.waking.is_none() => SleepView::Asleep,
+            Some(_) => SleepView::Waking {
+                late: self.wake_timed_out,
+            },
+        }
     }
 }
 
@@ -249,7 +278,7 @@ fn issue_reason(reason: &IssueReason) -> &'static str {
     }
 }
 
-fn runtime_condition(runtime: Option<&RuntimeStatus>, sleeping: bool) -> Draft {
+fn runtime_condition(runtime: Option<&RuntimeStatus>, view: SleepView) -> Draft {
     let Some(rt) = runtime else {
         return Draft::new(
             Truth::Unknown,
@@ -274,7 +303,19 @@ fn runtime_condition(runtime: Option<&RuntimeStatus>, sleeping: bool) -> Draft {
             reason::READY,
             format!("{} replicas ready", rt.replicas),
         ),
-        Phase::Suspended if sleeping => Draft::new(
+        Phase::Provisioning | Phase::Suspended
+            if matches!(view, SleepView::Waking { late: true }) =>
+        {
+            Draft::new(
+                Truth::False,
+                reason::WAKE_TIMED_OUT,
+                "woken, and not ready within scaling.wakeTimeout; still waking",
+            )
+        }
+        Phase::Provisioning | Phase::Suspended if matches!(view, SleepView::Waking { .. }) => {
+            Draft::new(Truth::False, reason::WAKING, "woken, and scaling back up")
+        }
+        Phase::Suspended if view == SleepView::Asleep => Draft::new(
             Truth::False,
             reason::SLEEPING,
             "scaled to zero because the agent reported no work (scaling.idleTimeout)",
@@ -308,7 +349,9 @@ fn state(obs: &Observed, config: &Draft, store: &Draft, runtime: &Draft) -> Serv
         return ServiceState::Blocked;
     }
     match obs.runtime.as_ref().map(|r| r.phase) {
-        Some(Phase::Suspended) if obs.suspend || obs.sleeping => ServiceState::Suspended,
+        Some(Phase::Suspended) if obs.suspend || obs.view() == SleepView::Asleep => {
+            ServiceState::Suspended
+        }
         Some(Phase::Ready) if runtime.status == Truth::True => ServiceState::Ready,
         _ => ServiceState::Degraded,
     }
@@ -374,12 +417,15 @@ fn ready_condition(first_three: [&Draft; 3]) -> Draft {
     }
 }
 
-fn phase(p: Phase, sleeping: bool) -> RuntimePhase {
+fn phase(p: Phase, view: SleepView) -> RuntimePhase {
     match p {
+        Phase::Provisioning | Phase::Suspended if matches!(view, SleepView::Waking { .. }) => {
+            RuntimePhase::Waking
+        }
         Phase::Absent => RuntimePhase::Absent,
         Phase::Provisioning => RuntimePhase::Provisioning,
         Phase::Ready => RuntimePhase::Ready,
-        Phase::Suspended if sleeping => RuntimePhase::Sleeping,
+        Phase::Suspended if view == SleepView::Asleep => RuntimePhase::Sleeping,
         Phase::Suspended => RuntimePhase::Suspended,
         Phase::Failed => RuntimePhase::Failed,
     }

@@ -129,6 +129,8 @@ pub struct Operator<R, S> {
     /// Where the idle loop asks what work an agent holds (AD-058); none: no agent sleeps.
     activity: Option<crate::ActivityFn>,
     sleepers: Arc<crate::Sleepers>,
+    /// The time of a pass, when a test fixes it.
+    clock: Option<crate::Clock>,
     /// The pod-minute meter's sink and account source (ANR-673); none: no meter.
     meter: Option<(crate::SinkFn, crate::AccountFn)>,
     meter_config: crate::MeterConfig,
@@ -165,6 +167,7 @@ where
             shards,
             activity: None,
             sleepers: Arc::new(crate::Sleepers::default()),
+            clock: None,
             meter: None,
             meter_config: crate::MeterConfig::default(),
         }
@@ -229,6 +232,14 @@ where
         &self.tracer
     }
 
+    /// Take the time of every `AgentService` pass from `clock` (a scheduled wake is judged by it). The real clock by
+    /// default; this is for a test that travels in time.
+    #[must_use]
+    pub fn with_clock(mut self, clock: crate::Clock) -> Self {
+        self.clock = Some(clock);
+        self
+    }
+
     /// The counters, for `/metrics`.
     pub fn metrics(&self) -> Arc<Metrics> {
         self.metrics.clone()
@@ -278,6 +289,8 @@ where
                         id
                     }
                 });
+                // The idle loop's proposals to sleep ask for a pass of the reconcile, which writes the record.
+                let counted = futures::stream::select(counted, received(self.sleepers.nudges()));
                 let (feed, signals) = fan_out(counted, shards.len());
                 (Box::pin(feed), signals)
             };
@@ -297,18 +310,20 @@ where
             .graceful_shutdown_on(signal(stopped.clone()));
             service_caches.push(shard.services.store());
             config_caches.push(configs_controller.store());
-            let ctx = Arc::new(
-                Context::new(
-                    self.client.clone(),
-                    self.runtime.clone(),
-                    self.store.clone(),
-                    self.owner.clone(),
-                    self.options.clone(),
-                )
-                .with_metrics(metrics.clone())
-                .with_tracer(self.tracer.clone())
-                .with_sleepers(self.sleepers.clone()),
-            );
+            let mut context = Context::new(
+                self.client.clone(),
+                self.runtime.clone(),
+                self.store.clone(),
+                self.owner.clone(),
+                self.options.clone(),
+            )
+            .with_metrics(metrics.clone())
+            .with_tracer(self.tracer.clone())
+            .with_sleepers(self.sleepers.clone());
+            if let Some(clock) = &self.clock {
+                context = context.with_clock(clock.clone());
+            }
+            let ctx = Arc::new(context);
             let config_ctx = Arc::new(
                 ConfigContext::new(self.client.clone(), metrics.clone())
                     .with_pass_timeout(self.options.pass_timeout)
@@ -385,7 +400,6 @@ where
                     scopes: scopes_for_sleep,
                     period: self.options.sleep_poll,
                     leader: self.leader.clone(),
-                    metrics: metrics.clone(),
                 },
                 self.runtime.clone(),
                 stopped.clone(),
