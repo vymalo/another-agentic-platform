@@ -1764,6 +1764,27 @@ mod tests {
             assert_eq!(error.exit_code(), 78, "{name}");
             assert!(error.to_string().contains(fragment), "{name}: {error}");
         }
+        // ANR-1353: the run pods' egress rules are the operator's own check, so a hand-written file cannot reopen the
+        // network the policy closes — and each is the refusal of the file, exit 78, naming the rule.
+        for rule in [
+            serde_json::json!({"ports": [{"port": 443}]}),
+            serde_json::json!({"to": [{"ipBlock": {"cidr": "0.0.0.0/0"}}]}),
+        ] {
+            let text = with_run_pods(|run_pods| {
+                run_pods["networkPolicy"]["extraEgress"] = serde_json::json!([rule]);
+            });
+            let file = dir.join("egress.yaml");
+            std::fs::write(&file, text).unwrap();
+            let error = load(&file).unwrap_err();
+            assert!(matches!(error, LoadError::Refused(_)), "{error}");
+            assert_eq!(error.exit_code(), 78, "{error}");
+            assert!(
+                error
+                    .to_string()
+                    .contains("runPods.networkPolicy.extraEgress[0]"),
+                "{error}"
+            );
+        }
         // Not UTF-8: read, and refused for its content.
         let binary = dir.join("binary.yaml");
         std::fs::write(&binary, b"version: 1\n# \xff\xfe\n").unwrap();
