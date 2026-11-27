@@ -2,7 +2,9 @@
 # ANR-1323: prove tools/check-release-skip.sh accepts the exact guard and fails on every way one can drift.
 set -eu
 
-here=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
+# `unset CDPATH`, not `CDPATH= cd`: shellcheck reads the latter as SC1007 (an assignment with a space), and a
+# set CDPATH would make `cd` print the directory into this assignment.
+here=$(unset CDPATH; cd -- "$(dirname -- "$0")" && pwd)
 check="$here/check-release-skip.sh"
 
 tmp=$(mktemp -d)
@@ -13,9 +15,10 @@ mkdir -p "$tmp/.github/workflows"
 canon="\${{ !(startsWith(github.head_ref, 'release-please--') && github.event.pull_request.head.repo.full_name == github.repository && github.event.pull_request.user.login == 'vaam-apps[bot]' && github.actor == 'vaam-apps[bot]')"
 comment='    # ANR-1206: the release pull request only moves version strings and main'"'"'s own push run already tested this code.'
 good="    if: $canon }}"
+expr="\${{ !(startsWith(github.head_ref, 'release-please--') && github.event.pull_request.head.repo.full_name == github.repository"
 
 write() { printf '%s\n' "$2" > "$tmp/.github/workflows/$1"; }
-reset() { rm -f "$tmp"/.github/workflows/*.yml; }
+reset() { rm -f "$tmp"/.github/workflows/*.yml "$tmp"/.github/workflows/*.yaml; }
 
 # The good shape: the comment above, the exact guard.
 write good.yml "jobs:
@@ -59,11 +62,19 @@ fail trailing.yml "jobs:
   test:
 $comment
 $base && github.event.pull_request.user.login == 'vaam-apps[bot]') }} # github.actor == 'vaam-apps[bot]'" 'lacks the actor check'
-fail split.yml "jobs:
+# A guard folded over lines is still the guard: it is read as one construct and must carry the same clauses.
+write split.yml "jobs:
   test:
 $comment
     if: >-
-      $canon }}" 'is not the exact guard'
+      $canon }}"
+sh "$check" "$tmp" >/dev/null || { echo 'FAIL: a folded guard with the exact clauses was refused'; exit 1; }
+rm -f "$tmp/.github/workflows/split.yml"
+fail split-no-actor.yml "jobs:
+  test:
+$comment
+    if: >-
+      $expr && github.event.pull_request.user.login == 'vaam-apps[bot]' }}" 'lacks the actor check'
 fail no-comment.yml "jobs:
   test:
 $good" 'lost its ANR-1206 comment'
@@ -95,6 +106,29 @@ case "$out" in
 esac
 rm -f "$tmp/.github/workflows/commented.yml"
 
+# A workflow written as `.yaml`: GitHub Actions accepts both extensions, so a guard there is checked too.
+fail no-actor.yaml "jobs:
+  test:
+$comment
+$base && github.event.pull_request.user.login == 'vaam-apps[bot]') }}" 'lacks the actor check'
+
+# And a good `.yaml` guard is counted on its own.
+reset
+write good.yaml "jobs:
+  test:
+$comment
+$good"
+out=$(sh "$check" "$tmp") || { echo 'FAIL: a good .yaml guard was refused'; exit 1; }
+case "$out" in
+  *'1 release-PR skip guards'*) ;;
+  *) echo "FAIL: the .yaml guard was not counted: $out"; exit 1 ;;
+esac
+rm -f "$tmp/.github/workflows/good.yaml"
+write good.yml "jobs:
+  test:
+$comment
+$good"
+
 # No guard at all: the pattern changed, and the check must say it proved nothing.
 reset
 write none.yml "jobs:
@@ -106,4 +140,4 @@ case "$err" in
   *) echo "FAIL: a tree with no guard failed without saying so: $err"; exit 1 ;;
 esac
 
-echo "ok: the exact guard passes; a missing author or actor, a clause outside the !( ), || for &&, a trailing comment, a split guard, a lost comment, a comment three lines up and no guard at all fail; a comment two lines up and a commented guard are handled"
+echo "ok: the exact guard passes; a missing author or actor, a clause outside the !( ), || for &&, a trailing comment, a split guard missing a clause, a lost comment, a comment three lines up, a .yaml guard and no guard at all fail; a comment two lines up, a commented guard, a good .yaml guard and a split guard with the exact clauses are handled"

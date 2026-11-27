@@ -7,7 +7,9 @@
 set -eu
 unset GIT_DIR GIT_WORK_TREE GIT_INDEX_FILE
 
-here=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
+# `unset CDPATH`, not `CDPATH= cd`: shellcheck reads the latter as SC1007 (an assignment with a space), and a
+# set CDPATH would make `cd` print the directory into this assignment.
+here=$(unset CDPATH; cd -- "$(dirname -- "$0")" && pwd)
 guard="$here/check-release-branch-author.sh"
 
 tmp=$(mktemp -d)
