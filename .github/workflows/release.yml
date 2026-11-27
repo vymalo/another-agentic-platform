@@ -1,0 +1,459 @@
+name: release
+
+# On a `v*` tag (cut by release-please.yml when its pull request merges), publish the release (AD-070):
+#
+#   ghcr.io/vymalo/another-agentic-platform/operator:X.Y.Z and :X.Y      the operator image
+#   ghcr.io/vymalo/another-agentic-platform/api:X.Y.Z and :X.Y           the Platform API image
+#   oci://ghcr.io/vymalo/another-agentic-platform/charts/aap-operator       the operator chart, X.Y.Z
+#   oci://ghcr.io/vymalo/another-agentic-platform/charts/aap-operator-crds  the CRDs chart, X.Y.Z
+#
+# Never `latest`. `:X.Y` moves only to the highest patch of its minor. A deployment pins `X.Y.Z` (and the chart pins the digests).
+#
+# The images are NOT rebuilt. operator-image.yml already built, smoke-tested and end-to-end-tested both images for the commit the tag
+# names (a release commit changes Cargo.toml and both Chart.yaml files, which are in its paths), and pushed them as `sha-<7>` only after
+# every job that gates its push passed. This workflow waits for those two tags, checks that their revision label is the tag's commit,
+# and copies each by digest (`imagetools create --prefer-index=false`: a carbon copy, the digest unchanged). If that commit's run did
+# not push (a red gating job, or a run cancelled by a newer push to main), nothing is published: re-run its failed jobs, then run this
+# workflow again with `workflow_dispatch` and the tag. There is no fallback build: a release is an image that passed the end-to-ends.
+#
+# Because the images are copied and not built here, BuildKit's `provenance: mode=max` and `sbom: true` (vaam-apps/vpay's release.yml,
+# which builds) cannot be attached to them. Instead each digest gets: a cosign keyless signature, an SPDX SBOM made by syft from the
+# image and attested with actions/attest, and a SLSA build provenance attestation by actions/attest. That provenance is of THIS run (the
+# workflow that published the digest at the tag); the run of operator-image.yml that built it is named in the step summary. The charts
+# are packaged here, so their provenance is their build's. Verify (the identity is this workflow at a tag, or on main for a re-run):
+#
+#   cosign verify ghcr.io/vymalo/another-agentic-platform/operator:X.Y.Z \
+#     --certificate-oidc-issuer https://token.actions.githubusercontent.com \
+#     --certificate-identity-regexp '^https://github.com/vymalo/another-agentic-platform/\.github/workflows/release\.yml@refs/(tags/v|heads/main$)'
+#   gh attestation verify oci://ghcr.io/vymalo/another-agentic-platform/operator:X.Y.Z -R vymalo/another-agentic-platform
+#
+# The charts: a COPY of deploy/operator has `image.tag` and `api.image.tag` set to X.Y.Z and both digests set by
+# deploy/operator/release-pin.sh, and is packaged; git keeps `sha-<7>`, written by bump-tag.sh only, and main's bump commit is unchanged.
+#
+# On a pull request that touches what a release reads, the `version` and `charts` jobs run as a dry run (placeholder digests, nothing
+# pushed or signed), so a broken marker, version or pin is found before a tag. Every action is pinned by full commit SHA; the tag in the
+# comment is the one that SHA was read from (git ls-remote, 2026-11-27).
+
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "The release tag to publish (again), vX.Y.Z: after operator-image.yml was re-run for its commit, or after a failed publish"
+        required: true
+        type: string
+  pull_request:
+    paths:
+      - "release-please-config.json"
+      - ".release-please-manifest.json"
+      - "Cargo.toml"
+      - "deploy/operator/**"
+      - "deploy/operator-crds/**"
+      - "deploy/crds/**"
+      - "tools/check-release-version.sh"
+      - ".github/workflows/release.yml"
+      - ".github/workflows/release-please.yml"
+
+concurrency:
+  group: release-${{ inputs.tag || github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+env:
+  IMAGE: ghcr.io/vymalo/another-agentic-platform/operator
+  API_IMAGE: ghcr.io/vymalo/another-agentic-platform/api
+  CHARTS: ghcr.io/vymalo/another-agentic-platform/charts
+  HELM_VERSION: v4.3.2
+
+permissions:
+  contents: read
+
+jobs:
+  version:
+    name: the version, and one version everywhere
+    runs-on: ubuntu-latest
+    outputs:
+      tag: ${{ steps.v.outputs.tag }}
+      version: ${{ steps.v.outputs.version }}
+      minor: ${{ steps.v.outputs.minor }}
+      sha: ${{ steps.v.outputs.sha }}
+      move_minor: ${{ steps.v.outputs.move_minor }}
+      dry_run: ${{ steps.v.outputs.dry_run }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          # Every branch and tag: the tag's commit must be on main, and `:X.Y` moves only for the highest vX.Y.* tag.
+          fetch-depth: 0
+          ref: ${{ inputs.tag || '' }}
+          persist-credentials: false
+      - id: v
+        name: read the tag and refuse what contradicts it
+        env:
+          EVENT: ${{ github.event_name }}
+          REF: ${{ github.ref }}
+          REF_NAME: ${{ github.ref_name }}
+          INPUT_TAG: ${{ inputs.tag }}
+        run: |
+          set -euo pipefail
+          if [ "$EVENT" = pull_request ]; then
+            # A dry run: the version the manifest holds, and every manifest must hold it too.
+            sh tools/check-release-version.sh
+            version=$(sed -n 's/^ *"\." *: *"\([^"]*\)".*$/\1/p' .release-please-manifest.json)
+            {
+              echo "tag=v$version"; echo "version=$version"; echo "minor=${version%.*}"; echo "sha=$GITHUB_SHA"
+              echo "move_minor=false"; echo "dry_run=true"
+            } >> "$GITHUB_OUTPUT"
+            echo "dry run for v$version: nothing is pushed, signed or attested" >> "$GITHUB_STEP_SUMMARY"
+            exit 0
+          fi
+          if [ "$EVENT" = workflow_dispatch ]; then
+            [ "$REF" = refs/heads/main ] || { echo "::error::run this workflow from main (the signing identity is release.yml on main or at a tag), not $REF"; exit 1; }
+            tag=$INPUT_TAG
+          else
+            tag=$REF_NAME
+          fi
+          printf '%s\n' "$tag" | grep -Eqx 'v[0-9]+\.[0-9]+\.[0-9]+' || { echo "::error::'$tag' is not a release tag (vX.Y.Z)"; exit 1; }
+          version=${tag#v}
+          sha=$(git rev-parse "refs/tags/$tag^{commit}") || { echo "::error::no tag $tag"; exit 1; }
+          git merge-base --is-ancestor "$sha" origin/main || { echo "::error::$tag ($sha) is not on main: nothing is released from another branch"; exit 1; }
+          # The tag, the manifest, Cargo.toml and both charts say one version (release-please wrote them all in the release commit).
+          sh tools/check-release-version.sh "$version"
+          minor=${version%.*}
+          highest=$(git tag -l "v$minor.*" | grep -Ex "v$minor\.[0-9]+" | sort -V | tail -1)
+          move_minor=false
+          [ "$highest" = "$tag" ] && move_minor=true
+          {
+            echo "tag=$tag"; echo "version=$version"; echo "minor=$minor"; echo "sha=$sha"
+            echo "move_minor=$move_minor"; echo "dry_run=false"
+          } >> "$GITHUB_OUTPUT"
+          echo "release $tag at $sha; :$minor moves: $move_minor (the highest v$minor.* tag is $highest)" >> "$GITHUB_STEP_SUMMARY"
+
+  images:
+    name: the images operator-image.yml tested for that commit
+    needs: version
+    if: needs.version.outputs.dry_run == 'false'
+    runs-on: ubuntu-latest
+    # operator-image.yml's longest gating job is 60 minutes after a 45-minute build; the wait below gives up at 160.
+    timeout-minutes: 180
+    permissions:
+      contents: read
+      actions: read
+      packages: read
+    outputs:
+      operator_digest: ${{ steps.find.outputs.operator_digest }}
+      api_digest: ${{ steps.find.outputs.api_digest }}
+      run_id: ${{ steps.find.outputs.run_id }}
+    steps:
+      - uses: docker/login-action@8aa5831fb8d48d8f76594c7ddde61ae58019f550 # v4.8.0
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
+      - id: find
+        name: wait for sha-<7> of both images, and check their revision
+        env:
+          GH_TOKEN: ${{ github.token }}
+          SHA: ${{ needs.version.outputs.sha }}
+          TAG: ${{ needs.version.outputs.tag }}
+        run: |
+          set -euo pipefail
+          short="sha-${SHA:0:7}"
+          err="$RUNNER_TEMP/inspect.err"
+          digest_of() { docker buildx imagetools inspect "$1" --format '{{json .Manifest}}' 2> "$err" | jq -er .digest; }
+          both() { op=$(digest_of "$IMAGE:$short") && api=$(digest_of "$API_IMAGE:$short"); }
+          started=$(date +%s)
+          run_id=""
+          while ! both; do
+            now=$(date +%s)
+            run=$(gh run list --repo "$GITHUB_REPOSITORY" --workflow operator-image.yml --commit "$SHA" --event push --limit 1 \
+              --json databaseId,status,conclusion --jq '.[0] | select(.) | "\(.databaseId) \(.status) \(.conclusion)"')
+            if [ -z "$run" ]; then
+              if [ $((now - started)) -gt 1200 ]; then
+                echo "::error::no run of operator-image.yml on a push of $SHA after 20 minutes: start it (re-run, or push), then run this workflow with tag=$TAG"
+                exit 1
+              fi
+            else
+              read -r run_id run_status run_conclusion <<< "$run"
+              if [ "$run_status" = completed ]; then
+                both && break
+                echo "::error::operator-image.yml run $run_id for $SHA ended '$run_conclusion' and $short is not in the registry for both images ($(cat "$err")). Re-run its failed jobs; once it has pushed, run this workflow with workflow_dispatch and tag=$TAG."
+                exit 1
+              fi
+            fi
+            if [ $((now - started)) -gt 9600 ]; then echo "::error::$short did not appear within 160 minutes"; exit 1; fi
+            echo "waiting for $short (operator-image.yml: ${run:-no run yet})"
+            sleep 60
+          done
+          # The run that pushed them, for the summary (when they were there before this job asked).
+          if [ -z "$run_id" ]; then
+            run_id=$(gh run list --repo "$GITHUB_REPOSITORY" --workflow operator-image.yml --commit "$SHA" --event push --limit 1 \
+              --json databaseId --jq '.[0].databaseId // empty' || true)
+          fi
+          # The label operator-image.yml sets (org.opencontainers.image.revision) must be the tag's commit: a seven-digit tag names a
+          # commit, it does not prove one. A multi-platform index is read through its first image.
+          revision_of() {
+            docker buildx imagetools inspect "$1" --format '{{json .Image}}' \
+              | jq -r 'if has("config") then .config.Labels["org.opencontainers.image.revision"] // "" else ([.[]][0].config.Labels["org.opencontainers.image.revision"] // "") end'
+          }
+          for pair in "$IMAGE@$op" "$API_IMAGE@$api"; do
+            rev=$(revision_of "$pair")
+            [ "$rev" = "$SHA" ] || { echo "::error::$pair says revision '$rev', not $SHA: it is not the build of this commit"; exit 1; }
+          done
+          {
+            echo "operator_digest=$op"; echo "api_digest=$api"; echo "run_id=$run_id"
+          } >> "$GITHUB_OUTPUT"
+          {
+            echo "### The images that passed for $SHA"
+            echo
+            echo "- \`$IMAGE:$short\` = \`$op\`"
+            echo "- \`$API_IMAGE:$short\` = \`$api\`"
+            echo "- built, smoke-tested and end-to-end-tested by operator-image.yml${run_id:+ run $GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$run_id}"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+  charts:
+    name: package both charts, the images pinned in the copy
+    needs: [version, images]
+    # On a pull request `images` is skipped and the digests are placeholders: the packaging is exercised, nothing leaves the job.
+    if: >-
+      ${{ !cancelled() && needs.version.result == 'success'
+      && (needs.images.result == 'success' || (needs.images.result == 'skipped' && needs.version.outputs.dry_run == 'true')) }}
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ needs.version.outputs.sha }}
+          persist-credentials: false
+      - uses: azure/setup-helm@2f5e7bc67f1f9972ab16657bb795f36d8f04de0e # v5.1.0
+        with:
+          version: ${{ env.HELM_VERSION }}
+      - name: pin, lint, render and package
+        env:
+          VERSION: ${{ needs.version.outputs.version }}
+          DRY_RUN: ${{ needs.version.outputs.dry_run }}
+          OP: ${{ needs.images.outputs.operator_digest }}
+          API: ${{ needs.images.outputs.api_digest }}
+        run: |
+          set -euo pipefail
+          if [ "$DRY_RUN" = true ]; then
+            OP=sha256:0000000000000000000000000000000000000000000000000000000000000000
+            API=sha256:0000000000000000000000000000000000000000000000000000000000000001
+          fi
+          [ -n "$OP" ] && [ -n "$API" ] || { echo "::error::no digests for a release"; exit 1; }
+          stage="$RUNNER_TEMP/stage"; pkg="$RUNNER_TEMP/charts"; ns=another-agentic-system
+          mkdir -p "$stage" "$pkg"
+          cp -R deploy/operator "$stage/operator"
+          cp -R deploy/operator-crds "$stage/operator-crds"
+          # The copy only: release-pin.sh refuses a file git tracks.
+          sh deploy/operator/release-pin.sh "$stage/operator/values.yaml" "$VERSION" "$OP" "$API"
+          helm lint "$stage/operator"
+          helm lint "$stage/operator" -f deploy/operator/tests/api.values.yaml
+          helm lint "$stage/operator-crds"
+          helm template aap-operator "$stage/operator" --namespace "$ns" > "$RUNNER_TEMP/operator.yaml"
+          helm template aap-operator "$stage/operator" --namespace "$ns" -f deploy/operator/tests/api.values.yaml > "$RUNNER_TEMP/api.yaml"
+          grep -Fqx "          image: \"$IMAGE:$VERSION@$OP\"" "$RUNNER_TEMP/operator.yaml" || { echo "::error::the packaged chart does not run $IMAGE:$VERSION@$OP"; exit 1; }
+          grep -Fqx "          image: \"$API_IMAGE:$VERSION@$API\"" "$RUNNER_TEMP/api.yaml" || { echo "::error::the packaged chart does not run $API_IMAGE:$VERSION@$API"; exit 1; }
+          if grep -Eq "(operator|api):sha-[0-9a-f]{7}" "$RUNNER_TEMP/operator.yaml" "$RUNNER_TEMP/api.yaml"; then echo "::error::a sha-<7> tag is left in the packaged chart"; exit 1; fi
+          helm package "$stage/operator" --destination "$pkg"
+          helm package "$stage/operator-crds" --destination "$pkg"
+          op_tgz="$pkg/aap-operator-$VERSION.tgz"; crds_tgz="$pkg/aap-operator-crds-$VERSION.tgz"
+          [ -f "$op_tgz" ] && [ -f "$crds_tgz" ] || { echo "::error::the packages are not at version $VERSION:"; ls "$pkg"; exit 1; }
+          # No tests and no script in the package (.helmignore), the pins in its values.yaml, and the CRDs it carries are deploy/crds.
+          if tar -tzf "$op_tgz" | grep -Eq '^aap-operator/tests/|\.sh$'; then echo "::error::the operator package holds tests or scripts"; exit 1; fi
+          [ "$(tar -xOzf "$op_tgz" aap-operator/values.yaml | grep -Ec "^ *(tag: \"$VERSION\"|digest: \"($OP|$API)\")\$")" -eq 4 ] \
+            || { echo "::error::the packaged values.yaml does not hold the four pins"; exit 1; }
+          tar -xOzf "$crds_tgz" aap-operator-crds/files/agents.vymalo.com.yaml | cmp - deploy/crds/agents.vymalo.com.yaml
+          {
+            if [ "$DRY_RUN" = true ]; then echo "### Charts packaged (dry run: placeholder digests, nothing pushed)"; else echo "### Charts packaged"; fi
+            echo
+            echo "- \`aap-operator-$VERSION.tgz\`: \`$IMAGE:$VERSION@$OP\`, \`$API_IMAGE:$VERSION@$API\`"
+            echo "- \`aap-operator-crds-$VERSION.tgz\`"
+          } >> "$GITHUB_STEP_SUMMARY"
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: charts
+          path: ${{ runner.temp }}/charts/*.tgz
+          retention-days: 1
+          if-no-files-found: error
+
+  # The one job that writes to the registry and signs (`id-token: write` is here and nowhere else). It checks out no code: it runs
+  # pinned actions and the CLIs of the runner on the digests the jobs above found and the packages they made.
+  publish:
+    name: publish, sign and attest
+    needs: [version, images, charts]
+    if: needs.version.outputs.dry_run == 'false'
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    permissions:
+      contents: read
+      packages: write
+      id-token: write
+      attestations: write
+    env:
+      TAG: ${{ needs.version.outputs.tag }}
+      VERSION: ${{ needs.version.outputs.version }}
+      MINOR: ${{ needs.version.outputs.minor }}
+      MOVE_MINOR: ${{ needs.version.outputs.move_minor }}
+      OP: ${{ needs.images.outputs.operator_digest }}
+      API: ${{ needs.images.outputs.api_digest }}
+      ISSUER: https://token.actions.githubusercontent.com
+      IDENTITY: ^https://github\.com/vymalo/another-agentic-platform/\.github/workflows/release\.yml@refs/(tags/v|heads/main$)
+    steps:
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: charts
+          path: ${{ runner.temp }}/charts
+      - uses: docker/login-action@8aa5831fb8d48d8f76594c7ddde61ae58019f550 # v4.8.0
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
+      - uses: azure/setup-helm@2f5e7bc67f1f9972ab16657bb795f36d8f04de0e # v5.1.0
+        with:
+          version: ${{ env.HELM_VERSION }}
+      - uses: sigstore/cosign-installer@7e8b541eb2e61bf99390e1afd4be13a184e9ebc5 # v3.10.1
+
+      - name: tag the tested images X.Y.Z (and X.Y), by digest
+        run: |
+          set -euo pipefail
+          digest_of() { docker buildx imagetools inspect "$1" --format '{{json .Manifest}}' 2> /dev/null | jq -er .digest; }
+          for pair in "$IMAGE=$OP" "$API_IMAGE=$API"; do
+            img=${pair%%=*}; digest=${pair#*=}
+            # A release tag never moves: one that exists must already be this digest (a re-run), or nothing is done.
+            if existing=$(digest_of "$img:$VERSION"); then
+              [ "$existing" = "$digest" ] || { echo "::error::$img:$VERSION is already $existing, not $digest: a release tag is never moved"; exit 1; }
+            fi
+            names=("$VERSION")
+            [ "$MOVE_MINOR" = true ] && names+=("$MINOR")
+            tags=()
+            for t in "${names[@]}"; do tags+=(-t "$img:$t"); done
+            # --prefer-index=false: a carbon copy of the manifest, so the new tags have the tested digest (the default would wrap it
+            # in a new index with a digest of its own; verified 2026-11-27 with buildx v0.38.1 against a local registry).
+            docker buildx imagetools create --prefer-index=false "${tags[@]}" "$img@$digest"
+            for t in "${names[@]}"; do
+              got=$(digest_of "$img:$t")
+              [ "$got" = "$digest" ] || { echo "::error::$img:$t is $got after the copy, not $digest"; exit 1; }
+              echo "- \`$img:$t\` = \`$digest\`" >> "$GITHUB_STEP_SUMMARY"
+            done
+          done
+
+      - name: cosign sign the images (keyless, GitHub OIDC)
+        run: |
+          set -euo pipefail
+          cosign sign --yes "$IMAGE@$OP"
+          cosign sign --yes "$API_IMAGE@$API"
+
+      - name: SBOM of the operator image
+        uses: anchore/sbom-action@dfcb83b97731532d72be422cbc51ee64adb6fd56 # v0.24.4
+        with:
+          image: ${{ env.IMAGE }}@${{ env.OP }}
+          registry-username: ${{ github.actor }}
+          registry-password: ${{ secrets.GITHUB_TOKEN }}
+          format: spdx-json
+          output-file: ${{ runner.temp }}/sbom-operator.spdx.json
+          upload-artifact: false
+          upload-release-assets: false
+      - name: SBOM of the API image
+        uses: anchore/sbom-action@dfcb83b97731532d72be422cbc51ee64adb6fd56 # v0.24.4
+        with:
+          image: ${{ env.API_IMAGE }}@${{ env.API }}
+          registry-username: ${{ github.actor }}
+          registry-password: ${{ secrets.GITHUB_TOKEN }}
+          format: spdx-json
+          output-file: ${{ runner.temp }}/sbom-api.spdx.json
+          upload-artifact: false
+          upload-release-assets: false
+      - name: attest the operator image's SBOM
+        uses: actions/attest@1e69f48acb82d1966a394da916b4c1698aa569d6 # v4.2.2
+        with:
+          subject-name: ${{ env.IMAGE }}
+          subject-digest: ${{ env.OP }}
+          sbom-path: ${{ runner.temp }}/sbom-operator.spdx.json
+          push-to-registry: true
+          create-storage-record: false
+      - name: attest the API image's SBOM
+        uses: actions/attest@1e69f48acb82d1966a394da916b4c1698aa569d6 # v4.2.2
+        with:
+          subject-name: ${{ env.API_IMAGE }}
+          subject-digest: ${{ env.API }}
+          sbom-path: ${{ runner.temp }}/sbom-api.spdx.json
+          push-to-registry: true
+          create-storage-record: false
+      - name: attest the operator image's provenance (this run, which published the digest)
+        uses: actions/attest@1e69f48acb82d1966a394da916b4c1698aa569d6 # v4.2.2
+        with:
+          subject-name: ${{ env.IMAGE }}
+          subject-digest: ${{ env.OP }}
+          push-to-registry: true
+          create-storage-record: false
+      - name: attest the API image's provenance (this run, which published the digest)
+        uses: actions/attest@1e69f48acb82d1966a394da916b4c1698aa569d6 # v4.2.2
+        with:
+          subject-name: ${{ env.API_IMAGE }}
+          subject-digest: ${{ env.API }}
+          push-to-registry: true
+          create-storage-record: false
+
+      - id: charts
+        name: push and cosign sign both charts (OCI)
+        env:
+          GHCR_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          ACTOR: ${{ github.actor }}
+        run: |
+          set -euo pipefail
+          helm registry login ghcr.io --username "$ACTOR" --password-stdin <<< "$GHCR_TOKEN"
+          pkg="$RUNNER_TEMP/charts"
+          for name in aap-operator aap-operator-crds; do
+            ref="oci://$CHARTS/$name"; img="$CHARTS/$name"; tgz="$pkg/$name-$VERSION.tgz"
+            if out=$(helm show chart "$ref" --version "$VERSION" 2>&1); then
+              # Published already (a re-run): never pushed over. It must be this release's chart, the same pins, or this run stops.
+              digest=$(sed -n 's/^Digest: \(sha256:[0-9a-f]\{64\}\)$/\1/p' <<< "$out" | head -1)
+              [ -n "$digest" ] || { echo "::error::$img:$VERSION is published but helm printed no digest for it: $out"; exit 1; }
+              mkdir -p "$RUNNER_TEMP/published"
+              helm pull "$ref" --version "$VERSION" --destination "$RUNNER_TEMP/published"
+              if ! cmp -s <(tar -xOzf "$RUNNER_TEMP/published/$name-$VERSION.tgz" "$name/values.yaml") <(tar -xOzf "$tgz" "$name/values.yaml"); then
+                echo "::error::$img:$VERSION is published with other values than this release's: a published chart is never replaced"; exit 1
+              fi
+              echo "$img:$VERSION is published ($digest) with the same values: signing it again, not pushing"
+            elif grep -q 'not found' <<< "$out"; then
+              helm push "$tgz" "oci://$CHARTS" 2>&1 | tee "$RUNNER_TEMP/push.log"
+              digest=$(sed -n 's/^Digest: \(sha256:[0-9a-f]\{64\}\)$/\1/p' "$RUNNER_TEMP/push.log" | head -1)
+              [ -n "$digest" ] || { echo "::error::helm push printed no digest; nothing to sign"; exit 1; }
+            else
+              echo "::error::cannot tell whether $img:$VERSION is published (helm failed for a reason that is not 'not found'): $out"; exit 1
+            fi
+            cosign sign --yes "$img@$digest"
+            key=${name//-/_}
+            echo "${key}=${digest}" >> "$GITHUB_OUTPUT"
+            echo "- \`oci://$img:$VERSION\` = \`$digest\`" >> "$GITHUB_STEP_SUMMARY"
+          done
+      - name: attest the operator chart's provenance
+        uses: actions/attest@1e69f48acb82d1966a394da916b4c1698aa569d6 # v4.2.2
+        with:
+          subject-name: ${{ env.CHARTS }}/aap-operator
+          subject-digest: ${{ steps.charts.outputs.aap_operator }}
+          push-to-registry: true
+          create-storage-record: false
+      - name: attest the CRDs chart's provenance
+        uses: actions/attest@1e69f48acb82d1966a394da916b4c1698aa569d6 # v4.2.2
+        with:
+          subject-name: ${{ env.CHARTS }}/aap-operator-crds
+          subject-digest: ${{ steps.charts.outputs.aap_operator_crds }}
+          push-to-registry: true
+          create-storage-record: false
+
+      - name: every signature verifies, as a consumer would check it
+        env:
+          OP_CHART: ${{ steps.charts.outputs.aap_operator }}
+          CRDS_CHART: ${{ steps.charts.outputs.aap_operator_crds }}
+        run: |
+          set -euo pipefail
+          for ref in "$IMAGE@$OP" "$API_IMAGE@$API" "$CHARTS/aap-operator@$OP_CHART" "$CHARTS/aap-operator-crds@$CRDS_CHART"; do
+            cosign verify "$ref" --certificate-oidc-issuer "$ISSUER" --certificate-identity-regexp "$IDENTITY" > /dev/null
+            echo "verified $ref"
+          done
+          {
+            echo
+            echo "A new GHCR package is private until it is made public (deploy/operator/README.md, \"Releases\"): the two chart packages, the first time."
+          } >> "$GITHUB_STEP_SUMMARY"

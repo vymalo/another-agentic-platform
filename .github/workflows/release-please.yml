@@ -1,0 +1,137 @@
+name: release-please
+
+# Proposes the next release as a pull request, and cuts the tag when that pull request merges (AD-070). `release.yml` owns
+# everything downstream of the tag. The flow of vaam-apps/vpay (its release-please.yml at master, read 2026-11-27), adapted.
+#
+# ---------------------------------------------------------------------------
+# What it bumps
+# ---------------------------------------------------------------------------
+# ONE version for the workspace and both charts, the lines marked `# x-release-please-version` in the `extra-files` of
+# release-please-config.json:
+#
+#   Cargo.toml                       [workspace.package] version (every crate says `version.workspace = true`)
+#   deploy/operator/Chart.yaml       version and appVersion
+#   deploy/operator-crds/Chart.yaml  version and appVersion
+#
+# and `.release-please-manifest.json` and CHANGELOG.md. tools/check-release-version.sh (operator-image.yml, job `scripts`, on the
+# release pull request too) fails when a marker is gone or the versions differ. The internal dependencies are path-only, so no pin
+# moves with them. NOT bumped, on purpose: `image.tag` and `api.image.tag` in deploy/operator/values.yaml. They stay `sha-<7>` in
+# git, written by deploy/operator/bump-tag.sh only (operator-image.yml, job `bump`, unchanged); a release pins `X.Y.Z` and the
+# digests in the packaged chart only (release.yml, deploy/operator/release-pin.sh).
+#
+# Cargo.lock records every first-party crate at the workspace version and cannot be marked (it is generated, and a third-party crate
+# can sit at the same version string), so the step below refreshes it on the release branch: operator.yml builds with --locked, and a
+# stale lock file would make the release pull request red. Only the versions of the workspace's own crates may move; the step
+# checks that and fails otherwise.
+#
+# ---------------------------------------------------------------------------
+# Why a GitHub App token and not GITHUB_TOKEN
+# ---------------------------------------------------------------------------
+# GitHub raises no workflow events for what is done with the default GITHUB_TOKEN. release.yml runs on `push: tags: ["v*"]`, so with
+# GITHUB_TOKEN the tag would be created and NO image or chart would ever be published, and nothing would fail to say so; the release
+# pull request would get no CI either. There is no fallback, on purpose: a fallback is exactly that silent release of nothing.
+#
+# The App needs, on this repository only: `contents: write` and `pull-requests: write`. Secrets (the names vpay uses):
+# RELEASE_PLEASE_APP_CLIENT_ID (the App's Client ID, `Iv23li...`, not its numeric App ID) and RELEASE_PLEASE_APP_PRIVATE_KEY. Which
+# App is the owner's choice; until both secrets are set this workflow fails at its first step, and nothing is released.
+#
+# ---------------------------------------------------------------------------
+# The first release
+# ---------------------------------------------------------------------------
+# `bootstrap-sha` is main's HEAD when this was adopted (755872d). The manifest seeds 0.1.0, the version every manifest already carried
+# and that was never tagged. The first release is therefore 0.2.0 if a `feat` landed since (bump-minor-pre-major: a breaking change
+# moves the minor while the version is 0.x), or 0.1.1 for fixes and the rest alone; never 1.0.0 by itself. A commit footer
+# `Release-As: X.Y.Z` forces another version (release-please honours it); that is the owner's call.
+#
+# The bump commits of operator-image.yml (`chore(deploy): bump operator and api to sha-<7>`) are on main, so they are listed under
+# "Chores" in the changelog. They raise no event (GITHUB_TOKEN) and so never run this workflow themselves.
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch: {}
+
+# Never cancel a run that may be force-pushing the release branch and then pushing the lock file onto it.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: false
+
+# The App token carries every write below; the workflow's own GITHUB_TOKEN reads a checkout and nothing else.
+permissions:
+  contents: read
+
+env:
+  # The toolchain of operator.yml (the workspace's), so `cargo` writes the lock file in the format it already has.
+  RUST_TOOLCHAIN: "1.94.1"
+
+jobs:
+  release-please:
+    name: propose the next release
+    runs-on: ubuntu-latest
+    steps:
+      - name: Mint a GitHub App token
+        id: app-token
+        uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1 # v3.2.0
+        with:
+          # `client-id`, not the deprecated `app-id`: they are different values on the App's page.
+          client-id: ${{ secrets.RELEASE_PLEASE_APP_CLIENT_ID }}
+          private-key: ${{ secrets.RELEASE_PLEASE_APP_PRIVATE_KEY }}
+          # Only what release-please needs (open and update the pull request, push its branch, create the tag), not every
+          # permission the installation holds.
+          permission-contents: write
+          permission-pull-requests: write
+
+      - name: Open or update the release pull request
+        id: release
+        uses: googleapis/release-please-action@45996ed1f6d02564a971a2fa1b5860e934307cf7 # v5.0.0
+        with:
+          token: ${{ steps.app-token.outputs.token }}
+          config-file: release-please-config.json
+          manifest-file: .release-please-manifest.json
+
+      # `prs_created` is true for an UPDATED release pull request as well as a new one, which matters: release-please force-pushes
+      # that branch on every run and drops the lock-file commit of the run before.
+      - name: Check out the release branch
+        if: steps.release.outputs.prs_created == 'true'
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ fromJSON(steps.release.outputs.pr).headBranchName }}
+          # The same App token, so the push below raises an event and the release pull request gets its CI.
+          token: ${{ steps.app-token.outputs.token }}
+          # The token is never written into .git/config; the push below names it on the remote URL.
+          persist-credentials: false
+
+      # No dependency cache in this job, on purpose: a restored cache in a job that commits is a supply-chain surface.
+      - name: Refresh Cargo.lock and the version checks
+        if: steps.release.outputs.prs_created == 'true'
+        run: |
+          set -euo pipefail
+          rustup toolchain install "$RUST_TOOLCHAIN" --profile minimal --no-self-update
+          # Only the workspace's own crates move: `--workspace` updates no dependency.
+          cargo "+$RUST_TOOLCHAIN" update --workspace
+          cargo "+$RUST_TOOLCHAIN" metadata --locked --format-version 1 > /dev/null
+          # Every changed line of the lock file is a `version = ` line: a dependency that moved would be a bug of this step.
+          moved=$(git diff -U0 -- Cargo.lock | grep -E '^[-+][^-+]' | grep -Ev '^[-+]version = "' || true)
+          if [ -n "$moved" ]; then echo "::error::the lock file changed beyond the workspace's versions:"; echo "$moved"; exit 1; fi
+          sh tools/check-release-version.sh
+
+      - name: Commit the lock file, if the version bump moved it
+        if: steps.release.outputs.prs_created == 'true'
+        env:
+          TOKEN: ${{ steps.app-token.outputs.token }}
+          HEAD_REF: ${{ fromJSON(steps.release.outputs.pr || '{}').headBranchName }}
+        run: |
+          set -euo pipefail
+          if git diff --quiet -- Cargo.lock; then
+            echo "Cargo.lock is current: nothing to push"
+            exit 0
+          fi
+          git config user.name 'release-please[bot]'
+          git config user.email 'release-please[bot]@users.noreply.github.com'
+          git add -- Cargo.lock
+          git commit -m 'chore: sync Cargo.lock with the release version'
+          git push "https://x-access-token:${TOKEN}@github.com/${GITHUB_REPOSITORY}.git" "HEAD:refs/heads/${HEAD_REF}"
+          {
+            echo "### Cargo.lock synced"
+            git diff --stat HEAD~1 -- Cargo.lock
+          } >> "$GITHUB_STEP_SUMMARY"

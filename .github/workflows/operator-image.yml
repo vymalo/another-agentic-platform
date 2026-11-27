@@ -11,7 +11,10 @@ name: Operator and API images
 # chart:       helm lint of both charts, the render checks of deploy/operator (goldens, RBAC, refusals, the CRDs chart against
 #              deploy/crds, the API's Role against the objects crate's rbac.yaml), and kubeconform in strict mode over the renders,
 #              the Platform API's included.
-# scripts:     shellcheck, and bump-tag.sh is idempotent and edits only the tag it was asked for (image.tag, or api.image.tag).
+# scripts:     shellcheck, and bump-tag.sh is idempotent and edits only the tag it was asked for (image.tag, or api.image.tag); release-pin.sh
+#              pins only a copy (AD-070), and tools/check-release-version.sh holds one version for the workspace and both charts.
+#              Releases (`v*` tags, X.Y.Z images and charts) are release.yml's, which copies by digest the images THIS workflow pushed as
+#              sha-<7> for the tag's commit; nothing here changes for a release, and the bump below still writes sha-<7> only.
 # dockerfile:  hadolint (the operator's Dockerfile, and in dockerfile-api the API's).
 # image:       builds the image on pull requests too (no push) and smoke-tests it: the user, the binary starts, `crdgen` prints the
 #              checked-in CRDs, `run` without a cluster says so, and there is no shell. The image is kept as an artifact: the jobs
@@ -114,6 +117,10 @@ on:
       - "deploy/operator-crds/**"
       - "deploy/crds/**"
       - ".github/workflows/operator-image.yml"
+      # One version for the workspace and both charts (AD-070): a pull request that moves a marker or the manifest is checked here.
+      - "release-please-config.json"
+      - ".release-please-manifest.json"
+      - "tools/check-release-version.sh"
   push:
     branches: [main]
     paths:
@@ -273,7 +280,7 @@ jobs:
     steps:
       - uses: actions/checkout@v7
       - name: shellcheck
-        run: shellcheck deploy/operator/bump-tag.sh deploy/operator/tests/*.sh deploy/operator/tests/e2e/*.sh
+        run: shellcheck deploy/operator/bump-tag.sh deploy/operator/release-pin.sh tools/check-release-version.sh deploy/operator/tests/*.sh deploy/operator/tests/e2e/*.sh
       # The scripted model of the run pods end-to-end (a Node script the coder's image runs in the cluster): its turns, its probe (valid shell, run for real), and its two
       # shapes of answer, with no cluster and no coder. Node 18 or later (the runner's) for fetch and node:test.
       - name: the scripted model of the run pods end-to-end
@@ -282,6 +289,13 @@ jobs:
           node --test deploy/operator/tests/e2e/run-pods-model.test.js
       - name: bump-tag.sh is idempotent and edits only the tag it was asked for (image.tag, or api.image.tag)
         run: sh deploy/operator/tests/bump-tag-test.sh
+      # AD-070: a release pins X.Y.Z and the digests in a copy of the chart only (release.yml), never in the file git tracks.
+      - name: release-pin.sh pins the four keys of a copy and refuses the tracked values.yaml
+        run: sh deploy/operator/tests/release-pin-test.sh
+      # AD-070: release-please moves one version (the manifest, Cargo.toml, both Chart.yaml); a lost marker or a version that differs fails here,
+      # on the release pull request too.
+      - name: one version for the workspace and both charts
+        run: sh tools/check-release-version.sh
 
   bump-dry-run:
     name: show the tag bump
