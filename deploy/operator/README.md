@@ -53,8 +53,10 @@ helm upgrade --install aap-operator deploy/operator --namespace another-agentic-
 ```
 
 On netcup an Argo CD Application does this (`helm.valuesObject`, the contents of
-[`examples/netcup.values.yaml`](examples/netcup.values.yaml)), and CI bumps `image.tag` ([below](#the-image)). The image tag is
-`sha-0000000` until the first build of `main` bumps it: **a render of the chart before that deploys an image that does not exist**.
+[`examples/netcup.values.yaml`](examples/netcup.values.yaml)), and CI bumps `image.tag` ([below](#the-image)). The chart's
+`image.tag` is a real pin, written by `bump-tag.sh` on every green build of `main`; a deployment that follows this chart keeps it,
+and one that pins a release sets `image.tag` and `image.digest` itself. New to the platform? [Get started](../../docs/get-started.md)
+walks a cluster from nothing, and [Install the CRDs and the operator](../../docs/guides/deploy/install.md) explains the values.
 
 ### Upgrading
 
@@ -80,7 +82,7 @@ sequence them with the CRDs first (a sync wave, or their Application first). **K
 
 | Value | Default | What |
 |---|---|---|
-| `image.repository`, `image.tag`, `image.digest`, `image.pullPolicy` | `ghcr.io/vymalo/another-agentic-platform/operator`, `sha-0000000`, none, `IfNotPresent` | The tag is **written by CI only** (`bump-tag.sh`), never by hand. `latest` and a malformed digest are refused |
+| `image.repository`, `image.tag`, `image.digest`, `image.pullPolicy` | `ghcr.io/vymalo/another-agentic-platform/operator`, the chart's pin (`sha-<7 hex>`), none, `IfNotPresent` | The tag is **written by CI only** (`bump-tag.sh`), never by hand. `latest` and a malformed digest are refused |
 | `imagePullSecrets` | `[]` | For a private package ([below](#the-image)). **Never a run pod**: a run pod names no pull secret (adam-rs ADR 0038), so `runPods.image` must be publicly pullable |
 | `replicas` | `1` | **K7:** the operator's replicas. One: no leader election, `Recreate`. More: a rolling update, the replicas campaign for a `Lease` in the primary namespace and only its holder reconciles; a `PodDisruptionBudget` of one keeps the lease through a drain. `replicaCount` is refused |
 | `leaderElection.leaseSecs`, `.renewSecs`, `.retrySecs` | `15`, `10`, `2` | **K7:** the lease's timers, in seconds, the client-go defaults. Read only when `replicas > 1`; refused unless `retrySecs < renewSecs < leaseSecs`, each at least 1 |
@@ -175,7 +177,7 @@ sequenceDiagram
   P->>K: the config stops asking, or the service is deleted
   O->>K: delete the RoleBinding first, then the run pods
   O->>K: apply the workers without the account (and null both names it has for it)
-  O->>K: delete the egress proxy and its policy, the run pods' policy last of the policies, then the quota, the parameters, the template, and the accounts last
+  O->>K: delete the quota, then the egress proxy and its policy (the run pods' policy last of the policies), then the parameters and the template, and the accounts last
 ```
 
 ```mermaid
@@ -273,12 +275,14 @@ The operator makes nothing cluster-scoped and has **no `ClusterRole`**; the char
 # After an agent with run pods is Ready: the pod the coder would build from the operator's template is admitted, and 25 mutations are
 # refused with the message of the rule each breaks (it creates nothing: --dry-run=server, as the agent's account; needs kubectl and jq).
 sh deploy/operator/tests/run-pods-admission.sh <namespace> <service>
-kubectl auth can-i create pods --as system:serviceaccount:<namespace>:aap-operator -n <namespace>     # no
-kubectl auth can-i create pods --as system:serviceaccount:<namespace>:<service> -n <namespace>        # yes
-kubectl auth can-i get secrets --as system:serviceaccount:<namespace>:<service> -n <namespace>        # no
+# The operator's account is in the release namespace (`aap-operator` is the chart's fullname there); the agent's is in the agent's.
+kubectl auth can-i create pods --as system:serviceaccount:<release-namespace>:aap-operator -n <agent-namespace>   # no
+kubectl auth can-i create statefulsets --as system:serviceaccount:<release-namespace>:aap-operator -n <agent-namespace>   # yes: the control that the question is asked
+kubectl auth can-i create pods --as system:serviceaccount:<agent-namespace>:<service> -n <agent-namespace>   # yes
+kubectl auth can-i get secrets --as system:serviceaccount:<agent-namespace>:<service> -n <agent-namespace>   # no
 ```
 
-`run-pods-admission.sh` was run against a real API server (a bare kube-apiserver v1.35.8, no controller) with the objects this chart and the operator make, and against the coder chart's own policy with the same table. What a bare server cannot show is what D15b's kind end-to-end ([`tests/e2e/run-pods-e2e.sh`](tests/e2e/README.md#the-kind-end-to-end-of-run-pods-d15b), the job `run-pods-e2e`) shows: that a kubelet starts the pod, that the quota counts it, that the network policy is enforced, that the coder reads the mounted template and runs a command in the pod, that the pod sees only its own run, and that a deleted service leaves nothing. It has not run in CI yet (see *What is not proven*).
+`run-pods-admission.sh` was run against a real API server (a bare kube-apiserver v1.35.8, no controller) with the objects this chart and the operator make, and against the coder chart's own policy with the same table. What a bare server cannot show is what D15b's kind end-to-end ([`tests/e2e/run-pods-e2e.sh`](tests/e2e/README.md#the-kind-end-to-end-of-run-pods-d15b), the job `run-pods-e2e`) shows: that a kubelet starts the pod, that the quota counts it, that the network policy is enforced, that the coder reads the mounted template and runs a command in the pod, that the pod sees only its own run, and that a deleted service leaves nothing. It has run green in CI (job `run-pods-e2e` of `operator-image.yml`, run 40435825771 at `0b5a67f` on 2026-10-27, and job 140423711689 of run 45973874969 at `36ca2e0` on 2026-11-27, *verified* in the jobs' logs).
 
 ## The sandboxed runtime (K14a)
 
@@ -356,7 +360,7 @@ flowchart LR
 | Value | Default | What |
 |---|---|---|
 | `api.enabled` | `false` | |
-| `api.image.repository`, `.tag`, `.digest`, `.pullPolicy` | `ghcr.io/vymalo/another-agentic-platform/api`, `sha-0000000`, none, `IfNotPresent` | The tag is **written by CI only** (`bump-tag.sh <file> <tag> api`), in step with `image.tag` ([below](#the-image)); `sha-0000000` is a placeholder no image has. `latest` and a malformed digest are refused. `imagePullSecrets` (top level) apply to both images |
+| `api.image.repository`, `.tag`, `.digest`, `.pullPolicy` | `ghcr.io/vymalo/another-agentic-platform/api`, the chart's pin (`sha-<7 hex>`), none, `IfNotPresent` | The tag is **written by CI only** (`bump-tag.sh <file> <tag> api`), in step with `image.tag` ([below](#the-image)). `latest` and a malformed digest are refused. `imagePullSecrets` (top level) apply to both images |
 | `api.replicas` | `1` | The API is stateless; two are fine. The operator's count is `replicas` (top-level), not `replicaCount`: this is the API's |
 | `api.port`, `api.healthPort` | `8080`, `8081` | The API, and `/healthz` and `/readyz`. The chart writes both into the file (`listen`, `healthListen`), so the probes, the Service and the file cannot disagree; they are not keys of `api.config` |
 | `api.metrics.port`, `.allowFrom`, `.serviceMonitor.enabled`, `.serviceMonitor.interval`, `.serviceMonitor.labels` | `9090`, `[]`, off, `30s`, `{}` | The API's `/metrics` and its `ServiceMonitor` (K4): [below](#metrics-and-servicemonitors). The chart writes `port` into the file (`metricsListen`) only while the port is exposed; it is not a key of `api.config` |
@@ -803,7 +807,7 @@ helm lint deploy/operator && helm lint deploy/operator-crds
 sh deploy/operator/tests/render-check.sh                    # needs helm
 UPDATE_GOLDEN=1 sh deploy/operator/tests/render-check.sh    # after a deliberate change: rewrites tests/golden
 sh deploy/operator/tests/bump-tag-test.sh
-# the configuration the chart renders for the API in each of its five shapes, read by the binary (cargo build -p aap-api-server first)
+# the configuration the chart renders for the API in each of its eight shapes (tests/api-shapes.sh lists them), read by the binary (cargo build -p aap-api-server first)
 sh deploy/operator/tests/api-shapes.sh /tmp/api-config && for f in /tmp/api-config/*.yaml; do target/debug/api --config "$f" --check; done
 ```
 
@@ -843,11 +847,12 @@ CI also runs kubeconform in strict mode over ten renders (the defaults, netcup, 
   API, `Ready` and listed, replaced and deleted. (The hardening of its logs and diagnostics that D13's review gave `chain-e2e.sh` was then ported to the script: *unverified* until CI has run it.) **Still not proven now that it has**: a real Keycloak (the issuer is the testkit's), the edge (TLS, a JWT check, rate limits), that `preStop.sleep` and the grace period do what is described under a rolling update (the pod has the hook; nothing measures it, and what 1.29 does without its
   gate is not tried), two replicas, and a coder or a tool server made through the API.
 
-* The chart has been rendered, linted and checked with kubeconform; **it has not been installed on a cluster by hand**. The first
-  install is the `operator-coder-e2e` job of `operator-image.yml` (*unverified* until CI has run it), which installs this chart
-  into kind and runs the real coder under it. In particular *unverified*: that a read-only root filesystem is enough for the
-  binary, that the NetworkPolicy's egress is enough on a cluster that enforces it (kind's does), and that `list` without `watch` on
-  `services`, `configmaps` and `persistentvolumeclaims`, as the runtime README lists them, is what the provider needs.
+* The chart has been rendered, linted and checked with kubeconform; **it is installed by the kind jobs** (`operator-coder-e2e`,
+  `api-e2e`, `chain-e2e`, `run-pods-e2e`, `namespaces-e2e`, `leader-e2e` and `k10-e2e` of `operator-image.yml`), green on `main` at
+  `36ca2e0` (run 45973874969, *verified* 2026-11-27 in the jobs' logs), which install it into kind and run the real coder and the
+  Platform API under it. **Not proven by them:** that a person's own `helm install` on a production cluster behaves the same, and
+  an Argo CD sync (below). The read-only root filesystem, the NetworkPolicy's egress on a cluster that enforces it (kind's does) and
+  the `list`-without-`watch` rights of the provider are exercised there and by the provider's cluster suite.
 * That Argo CD syncs the CRDs of `deploy/operator-crds` and this chart in that order (its sync waves, or two Applications) and leaves
   an agent's objects alone while it does. The order is the one rule of [Upgrading](#upgrading); what an operator does when it is not
   kept (the watches of the shared kinds fail, and an agent that references them says so) is proven against the fake API server, and
