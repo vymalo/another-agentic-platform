@@ -26,7 +26,14 @@ const sidebar = [
     ],
   },
   { text: "Get started", items: [{ text: "Get started", link: "/get-started" }] },
-  { text: "Guides", collapsed: true, items: [{ text: "Guides", link: "/guides/" }] },
+  {
+    text: "Guides",
+    collapsed: true,
+    items: [
+      { text: "Guides", link: "/guides/" },
+      { text: "Deploy", items: pages("guides/deploy", ["install.md", "platform-api.md", "run-pods.md"]) },
+    ],
+  },
   {
     text: "Reference",
     collapsed: true,
