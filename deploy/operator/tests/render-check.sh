@@ -5,7 +5,7 @@
 #   sh deploy/operator/tests/render-check.sh                    (from the repository root)
 #   UPDATE_GOLDEN=1 sh deploy/operator/tests/render-check.sh    rewrites tests/golden/*.yaml, for a deliberate change
 #
-# Eight renders are golden (the eighth, tests/workload.values.yaml, is the Platform API with the workload listener on, ANR-1011): the values of the Application on netcup (examples/netcup.values.yaml), the other shape those
+# Nine renders are golden (the ninth, tests/metering.values.yaml, is the pod-minute meter on, ANR-1103; the eighth, tests/workload.values.yaml, is the Platform API with the workload listener on, ANR-1011): the values of the Application on netcup (examples/netcup.values.yaml), the other shape those
 # values do not make (tests/secret.values.yaml), the defaults, the Platform API component on (tests/api.values.yaml), run pods on
 # (tests/runpods.values.yaml), traces of both on (tests/otel.values.yaml) and two replicas with the leader election on
 # (tests/leader.values.yaml; the others have the API, run pods, traces, the election and the tool probe off, and the first three are
@@ -157,6 +157,7 @@ check "the Platform API render (tests/api.values.yaml) equals tests/golden/api.y
 check "the run pods render (tests/runpods.values.yaml) equals tests/golden/runpods.yaml" golden runpods -f "$here/runpods.values.yaml"
 check "the leader election render (tests/leader.values.yaml) equals tests/golden/leader.yaml" golden leader -f "$here/leader.values.yaml"
 check "the workload listener render (tests/workload.values.yaml) equals tests/golden/workload.yaml" golden workload -f "$here/workload.values.yaml"
+check "the pod-minute meter render (tests/metering.values.yaml) equals tests/golden/metering.yaml" golden metering -f "$here/metering.values.yaml"
 
 # ---- The configuration file the chart renders is one the operator accepts (ANR-962, AD-064) ---------------------------------
 # The chart renders the operator's file from its values; the binary refuses a key it does not have or a value it cannot work with.
@@ -191,6 +192,7 @@ check_config "tests/otel.values.yaml" -f "$here/otel.values.yaml"
 check_config "tests/leader.values.yaml" -f "$here/leader.values.yaml"
 check_config "tests/api-full.values.yaml" -f "$here/api-full.values.yaml"
 check_config "tests/metrics.values.yaml" -f "$here/metrics.values.yaml"
+check_config "tests/metering.values.yaml" -f "$here/metering.values.yaml"
 check_config "tests/e2e/run-pods.values.yaml" -f "$here/e2e/run-pods.values.yaml"
 
 # ---- The default render: no registry, nothing a secret could be in --------------------------------------------------------
@@ -2084,6 +2086,65 @@ check "activity.dns.to emptied is refused while the policy is on" refused 'activ
 check "activity: a key that is not a setting is refused" refused 'activity.foo is not a setting' --set activity.foo=1
 check "activity must be a map" refused 'activity must be a map' --set activity=null
 check "an ipBlock of 0.0.0.0/0 as an activity peer is refused" refused 'is every address' --set activity.tokenSecret.name=x --set-json 'activity.to=[{"ipBlock":{"cidr":"0.0.0.0/0"}}]'
+
+# ---- The pod-minute meter (ANR-1103, AD-069) -------------------------------------------------------------------------------
+# `metering.enabled` is off by default and then not a trace of it in any render: no key of the file, no volume, no mount, no egress rule
+# (every golden but tests/golden/metering.yaml is the proof that nothing moved). On, the file's `metering` section, the broker's bearer as a
+# mounted file, and DNS plus exactly the listed broker and collector peers, each on its own port. Incomplete is refused at render time.
+met_on() { render -f "$here/metering.values.yaml" "$@"; }
+metering_off() {
+  render || return 1
+  lacks 'metering' && lacks 'broker-token' && [ "$(op_egress_rules)" -eq 1 ]
+}
+check "metering off (the default): no key of the file, volume, mount or egress rule of it" metering_off
+metering_on() {
+  met_on || return 1
+  dhas ConfigMap aap-operator '^    metering:$' '^      enabled: true$' '^      source: "example-operator"$' '^      periodSecs: 20$' \
+    '^        url: "http://orchestrator.agents.svc:8080"$' '^        timeoutSecs: 4$' '^          file: /var/run/secrets/aap/metering/broker-token$' \
+    '^        endpoint: "http://usage-collector.observability.svc:4318"$' '^        queue: 2048$' '^        batch: 256$' '^        intervalSecs: 3$' '^        timeoutSecs: 8$' || return 1
+  has 'name: metering-token' && has 'secretName: meter-broker-token' && has 'mountPath: /var/run/secrets/aap/metering' && has 'key: bearer' && has 'path: broker-token' || return 1
+  dhas Deployment aap-operator 'name: metering-token' || return 1
+}
+check "metering on: the file's metering section, and the broker's bearer as a file from the named Secret key" metering_on
+metering_egress() {
+  met_on || return 1
+  [ "$(op_egress_rules)" -eq 4 ] || return 1
+  all_of "$(op_egress_rule 2)" 'port: 53' 'k8s-app: kube-dns' || return 1
+  all_of "$(op_egress_rule 3)" 'port: 8080$' '^      to:' 'kubernetes.io/metadata.name: agents' 'app.kubernetes.io/name: orchestrator' || return 1
+  all_of "$(op_egress_rule 4)" 'port: 4318$' '^      to:' 'kubernetes.io/metadata.name: observability' 'app.kubernetes.io/name: usage-collector' || return 1
+  none_of "$(op_egress_rule 3)" 'port: 53|port: 4318|ipBlock|0\.0\.0\.0/0' && none_of "$(op_egress_rule 4)" 'port: 53|port: 8080|ipBlock|0\.0\.0\.0/0'
+}
+check "metering on: egress is DNS, the broker's peers on the broker's port and the collector's peers on the collector's, nothing wider" metering_egress
+metering_ports_follow_the_values() {
+  met_on --set metering.broker.port=9000 --set metering.collector.port=4000 || return 1
+  all_of "$(op_egress_rule 3)" 'port: 9000$' && all_of "$(op_egress_rule 4)" 'port: 4000$'
+}
+check "metering on: each egress port is the one its value says" metering_ports_follow_the_values
+metering_no_token_in_render() { met_on --set metering.broker.tokenSecret.key=other-key || return 1; lacks 'hunter2' && has 'key: other-key' && dlacks ConfigMap aap-operator 'other-key|tokenSecret'; }
+check "metering on: the Secret's key is the one named, and no value or key name is in the file" metering_no_token_in_render
+metering_without_the_policy() { met_on --set networkPolicy.enabled=false --set-json 'metering.dns=null' || return 1; ! doc NetworkPolicy aap-operator | grep -q .; }
+check "metering on with the NetworkPolicy off needs no DNS peers and renders no policy" metering_without_the_policy
+met_refused() { frag=$1; shift; refused "$frag" -f "$here/metering.values.yaml" "$@"; }
+check "metering.enabled without run pods is refused" met_refused 'metering.enabled needs runPods.enabled and runPods.nodeType.admitted with exactly one value' --set runPods.enabled=false
+check "metering.enabled with two admitted node types is refused" met_refused 'with exactly one value' --set-json 'runPods.nodeType.admitted=["a","b"]'
+check "metering.enabled with no admitted node type is refused" met_refused 'metering.enabled needs runPods.enabled' --set runPods.nodeType.labelKey= --set-json 'runPods.nodeType.admitted=[]'
+check "metering.broker.to emptied is refused" met_refused 'metering.broker.to is required while metering.enabled is true' --set-json 'metering.broker.to=[]'
+check "metering.collector.to emptied is refused" met_refused 'metering.collector.to is required while metering.enabled is true' --set-json 'metering.collector.to=[]'
+check "metering.broker.url unset is refused" met_refused 'metering.broker.url must be an http or https URL' --set metering.broker.url=
+check "a broker URL with credentials is refused" met_refused 'metering.broker.url must be an http or https URL' --set metering.broker.url=http://user:pass@broker:8080
+check "a broker URL with a query is refused" met_refused 'metering.broker.url must be an http or https URL' --set 'metering.broker.url=http://broker:8080/?a=1'
+check "a collector endpoint that is not http or https is refused" met_refused 'metering.collector.endpoint must be an http or https URL' --set metering.collector.endpoint=ftp://c:4318
+check "metering without the bearer's Secret is refused" met_refused 'metering.broker.tokenSecret.name and metering.broker.tokenSecret.key are required' --set metering.broker.tokenSecret.name=
+check "metering.periodSecs below 5 is refused" met_refused 'metering.periodSecs must be a whole number of seconds from 5 to 300' --set metering.periodSecs=4
+check "metering.source with a space is refused" met_refused 'metering.source must be 1 to 128 of' --set 'metering.source=has space'
+check "metering.broker.port 0 is refused" met_refused 'metering.broker.port: 0 is not a port number' --set metering.broker.port=0
+check "metering.collector.queue 0 is refused" met_refused 'metering.collector.queue must be a whole number from 1 to 1000000' --set metering.collector.queue=0
+check "metering.collector.batch above 10000 is refused" met_refused 'metering.collector.batch must be a whole number from 1 to 10000' --set metering.collector.batch=10001
+check "metering.broker.timeoutSecs above 60 is refused" met_refused 'metering.broker.timeoutSecs must be a whole number of seconds from 1 to 60' --set metering.broker.timeoutSecs=61
+check "metering.dns.to emptied is refused while the policy is on" met_refused 'metering.dns.to and metering.dns.ports are required' --set-json 'metering.dns.to=[]'
+check "metering: a key that is not a setting is refused" refused 'metering.foo is not a setting' --set metering.foo=1
+check "metering must be a map" refused 'metering must be a map' --set metering=null
+check "an ipBlock of 0.0.0.0/0 as a collector peer is refused" met_refused 'is every address' --set-json 'metering.collector.to=[{"ipBlock":{"cidr":"0.0.0.0/0"}}]'
 
 # ---- Tool probe (slice K3a, AD-053) ---------------------------------------------------------------------------------------
 # `toolProbe.to` is the deployment's list of the peers the operator may reach to probe a ToolProvider's MCP server (a NetworkPolicy

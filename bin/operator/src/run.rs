@@ -354,6 +354,8 @@ async fn run_with(settings: crate::config::Settings, tracer: aap_trace::Tracer) 
     // Built and checked now so a bad setting stops the start; the idle controller (P2b) is what polls it.
     let activity = activity_source(&settings.activity)?;
     let token = registry_token(&settings.registry)?;
+    // The pod-minute meter (ANR-1103): off unless `metering.enabled`; on, its bearer is read now and a bad one stops the start.
+    let meter = crate::metering::parts(settings.metering.as_ref())?;
     let options = settings.options(token.is_some(), registry_full.clone());
     if options.watch_namespaces.is_none() {
         tracing::warn!(
@@ -373,6 +375,7 @@ async fn run_with(settings: crate::config::Settings, tracer: aap_trace::Tracer) 
             .map_or_else(|| "(no run pods)".to_owned(), |s| s.class_names().join(",")),
         tool_probe = options.probe.enabled,
         activity = activity.is_some(),
+        metering = meter.is_some(),
         "starting the operator {}",
         env!("CARGO_PKG_VERSION")
     );
@@ -434,6 +437,16 @@ async fn run_with(settings: crate::config::Settings, tracer: aap_trace::Tracer) 
         &tracer,
         election.clone(),
     );
+    // The meter sends only while this replica leads (`Operator::run` gates it); the sink is kept to flush on the way out.
+    let (operator, meter_sink) = match meter {
+        Some(parts) => (
+            operator
+                .with_meter(parts.sink.clone(), parts.accounts)
+                .with_meter_config(parts.config),
+            Some(parts.sink),
+        ),
+        None => (operator, None),
+    };
 
     #[cfg(feature = "registry")]
     let registry_server = token.map(|token| {
@@ -549,6 +562,16 @@ async fn run_with(settings: crate::config::Settings, tracer: aap_trace::Tracer) 
             &mut controllers,
         )
         .await;
+    }
+    // The lines still queued get their moment to reach the collector (a clean stop or not: the sink holds money).
+    if let Some(sink) = meter_sink {
+        let report = sink.0.shutdown(crate::metering::FLUSH).await;
+        if report.unsent > 0 {
+            tracing::warn!(
+                unsent = report.unsent,
+                "pod-minute lines were still queued when the operator stopped"
+            );
+        }
     }
     result
 }

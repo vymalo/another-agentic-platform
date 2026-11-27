@@ -1,7 +1,7 @@
 //! The usage port (AD-060, amended by AD-069): a pod-minute event, and the two seams around it.
 //!
 //! The platform **provides OTel only** (AD-069): the operator's meter turns pods into [`PodMinuteEvent`]s and hands
-//! each to a [`UsageSink`]; an adapter (the OTLP/HTTP JSON logs exporter, a later slice) carries it to the
+//! each to a [`UsageSink`]; an adapter (the OTLP/HTTP JSON logs exporter, `aap-usage-otlp`) carries it to the
 //! OpenTelemetry Collector, which routes, enriches and dedupes. This crate holds no ledger, no sum and no rate.
 //!
 //! **Breaking change: `UsageStore` is gone** (`insert`, `insert_many`, `spend`, `Window`, `SpendQuery`,
@@ -222,7 +222,7 @@ pub enum PodRef {
 #[error("the account source is unavailable")]
 pub struct AccountUnavailable;
 
-/// Says which account a pod's minutes are for. The real sources (the broker for a run, another for an agent) are later slices.
+/// Says which account a pod's minutes are for. The broker for a run is `aap-usage-broker`; the source for an agent pod is not built (ANR-1100).
 pub trait AccountSource: Send + Sync {
     /// The account's opaque id, `None` when the pod belongs to no known account (no line is made, and a metric
     /// counts it), or [`AccountUnavailable`] when the source cannot answer now (the meter holds the minute and

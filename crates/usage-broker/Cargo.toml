@@ -1,0 +1,28 @@
+[package]
+name = "aap-usage-broker"
+description = "The HTTP AccountSource of the pod-minute meter (ANR-1103, AD-069): asks the orchestrator's broker which account a run belongs to, with a bearer, one percent-encoded path segment, and no run id or account in any log"
+readme = "README.md"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+publish.workspace = true
+
+[dependencies]
+aap-usage.workspace = true
+# reqwest 0.12 with rustls and ring, as every HTTP client of the workspace (see crates/auth-oidc/README.md). No new package.
+reqwest.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+tokio = { workspace = true, features = ["time"] }
+url.workspace = true
+
+[dev-dependencies]
+aap-usage = { workspace = true, features = ["testkit"] }
+axum = { workspace = true, features = ["json", "tokio", "http1"] }
+tokio = { workspace = true, features = ["macros", "rt", "rt-multi-thread", "net", "time", "sync"] }
+
+[lints]
+workspace = true

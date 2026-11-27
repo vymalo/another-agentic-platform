@@ -239,6 +239,83 @@ the DNS rule is required with the policy on, as the tool probe's is. */ -}}
 {{- include "aap.checkIpBlocks" (dict "what" "activity.dns.to" "peers" $ac.dns.to) -}}
 {{- end -}}
 {{- end -}}
+{{- /* The pod-minute meter (ANR-1103, AD-069): off by default. On, every part is required (the operator refuses an incomplete section at start, and the
+chart refuses it first), the peers are a NetworkPolicy's and never every address, and the node type of a run pod must be readable. */ -}}
+{{- if not (kindIs "map" .Values.metering) -}}
+{{- fail "metering must be a map (the defaults of values.yaml are its keys; a null removes them)" -}}
+{{- end -}}
+{{- $mt := .Values.metering -}}
+{{- range $k, $_ := $mt -}}
+{{- if not (has $k (list "enabled" "source" "periodSecs" "broker" "collector" "dns")) -}}
+{{- fail (printf "metering.%s is not a setting: enabled, source, periodSecs, broker, collector or dns" $k) -}}
+{{- end -}}
+{{- end -}}
+{{- if not (has (toString $mt.enabled) (list "true" "false")) -}}
+{{- fail "metering.enabled must be true or false" -}}
+{{- end -}}
+{{- if eq (toString $mt.enabled) "true" -}}
+{{- if not (and (kindIs "string" $mt.source) (regexMatch `^[A-Za-z0-9._:/-]{1,128}$` $mt.source)) -}}
+{{- fail "metering.source must be 1 to 128 of [A-Za-z0-9._:/-]" -}}
+{{- end -}}
+{{- if not (and (include "aap.isWholeNumber" $mt.periodSecs) (ge (int $mt.periodSecs) 5) (le (int $mt.periodSecs) 300)) -}}
+{{- fail (printf "metering.periodSecs must be a whole number of seconds from 5 to 300, got %v" $mt.periodSecs) -}}
+{{- end -}}
+{{- if not (and (include "aap.runPods" .) (kindIs "map" .Values.runPods.nodeType) (kindIs "slice" .Values.runPods.nodeType.admitted) (eq (len .Values.runPods.nodeType.admitted) 1)) -}}
+{{- fail "metering.enabled needs runPods.enabled and runPods.nodeType.admitted with exactly one value: the node type of a run pod is read from its node affinity (the meter reads no Node), and with none or several it is not known" -}}
+{{- end -}}
+{{- range $part := list "broker" "collector" -}}
+{{- $b := get $mt $part -}}
+{{- if not (kindIs "map" $b) -}}
+{{- fail (printf "metering.%s must be a map" $part) -}}
+{{- end -}}
+{{- if not (kindIs "slice" (default (list) $b.to)) -}}
+{{- fail (printf "metering.%s.to must be a list of NetworkPolicy peers" $part) -}}
+{{- end -}}
+{{- if not $b.to -}}
+{{- fail (printf "metering.%s.to is required while metering.enabled is true: the operator's egress goes to exactly the peers listed, never to anywhere" $part) -}}
+{{- end -}}
+{{- include "aap.checkPeers" (dict "what" (printf "metering.%s.to" $part) "peers" $b.to) -}}
+{{- include "aap.checkIpBlocks" (dict "what" (printf "metering.%s.to" $part) "peers" $b.to) -}}
+{{- if not (include "aap.isPort" $b.port) -}}
+{{- fail (printf "metering.%s.port: %v is not a port number" $part $b.port) -}}
+{{- end -}}
+{{- $url := toString (default "" (ternary $b.url $b.endpoint (eq $part "broker"))) -}}
+{{- if not (regexMatch `^https?://[A-Za-z0-9.-]+(:[0-9]+)?(/[^?#@ ]*)?$` $url) -}}
+{{- fail (printf "metering.%s.%s must be an http or https URL with a host, and no credentials, query or fragment" $part (ternary "url" "endpoint" (eq $part "broker"))) -}}
+{{- end -}}
+{{- end -}}
+{{- if not (and (kindIs "map" $mt.broker.tokenSecret) $mt.broker.tokenSecret.name $mt.broker.tokenSecret.key) -}}
+{{- fail "metering.broker.tokenSecret.name and metering.broker.tokenSecret.key are required while metering.enabled is true: the broker refuses a question with no bearer" -}}
+{{- end -}}
+{{- if not (and (include "aap.isWholeNumber" $mt.broker.timeoutSecs) (ge (int $mt.broker.timeoutSecs) 1) (le (int $mt.broker.timeoutSecs) 60)) -}}
+{{- fail (printf "metering.broker.timeoutSecs must be a whole number of seconds from 1 to 60, got %v" $mt.broker.timeoutSecs) -}}
+{{- end -}}
+{{- $c := $mt.collector -}}
+{{- if not (and (include "aap.isWholeNumber" $c.queue) (ge (int $c.queue) 1) (le (int $c.queue) 1000000)) -}}
+{{- fail (printf "metering.collector.queue must be a whole number from 1 to 1000000, got %v" $c.queue) -}}
+{{- end -}}
+{{- if not (and (include "aap.isWholeNumber" $c.batch) (ge (int $c.batch) 1) (le (int $c.batch) 10000)) -}}
+{{- fail (printf "metering.collector.batch must be a whole number from 1 to 10000, got %v" $c.batch) -}}
+{{- end -}}
+{{- if not (and (include "aap.isWholeNumber" $c.intervalSecs) (ge (int $c.intervalSecs) 1) (le (int $c.intervalSecs) 3600)) -}}
+{{- fail (printf "metering.collector.intervalSecs must be a whole number of seconds from 1 to 3600, got %v" $c.intervalSecs) -}}
+{{- end -}}
+{{- if not (and (include "aap.isWholeNumber" $c.timeoutSecs) (ge (int $c.timeoutSecs) 1) (le (int $c.timeoutSecs) 300)) -}}
+{{- fail (printf "metering.collector.timeoutSecs must be a whole number of seconds from 1 to 300, got %v" $c.timeoutSecs) -}}
+{{- end -}}
+{{- if .Values.networkPolicy.enabled -}}
+{{- if not (and (kindIs "map" $mt.dns) (kindIs "slice" $mt.dns.ports) $mt.dns.ports $mt.dns.to) -}}
+{{- fail "metering.dns.to and metering.dns.ports are required while metering.enabled is true and the NetworkPolicy is enabled: the operator's policy has no DNS rule otherwise, and a rule with ports and no `to` is port 53 to anywhere" -}}
+{{- end -}}
+{{- range $p := $mt.dns.ports -}}
+{{- if not (include "aap.isPort" $p) -}}
+{{- fail (printf "metering.dns.ports: %v is not a port number" $p) -}}
+{{- end -}}
+{{- end -}}
+{{- include "aap.checkPeers" (dict "what" "metering.dns.to" "peers" $mt.dns.to) -}}
+{{- include "aap.checkIpBlocks" (dict "what" "metering.dns.to" "peers" $mt.dns.to) -}}
+{{- end -}}
+{{- end -}}
 {{- /* Settings that have a default: a number, above zero. */ -}}
 {{- $tuning := default (dict) .Values.tuning -}}
 {{- range $k, $v := $tuning -}}

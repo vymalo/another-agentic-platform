@@ -64,6 +64,9 @@ pub struct Config {
     /// The `Lease` of a leader election (K7a).
     #[serde(default)]
     pub leader_election: LeaderElectionSection,
+    /// The pod-minute meter (ANR-1103, AD-069): off by default.
+    #[serde(default)]
+    pub metering: MeteringSection,
     /// The log.
     #[serde(default)]
     pub log: LogSection,
@@ -280,6 +283,132 @@ fn default_activity_timeout() -> u64 {
     3
 }
 
+/// `metering`: the pod-minute meter (ANR-1103, AD-069). **Off by default**, and then nothing here is read or asked.
+///
+/// On, the operator sends one usage line per pod and whole minute to the OpenTelemetry Collector, for the account the
+/// orchestrator's broker names for the run. The file holds no secret: the broker's bearer is a reference.
+#[derive(Debug, Deserialize, schemars::JsonSchema)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct MeteringSection {
+    /// Run the meter. On, `broker` and `collector` are required and `runPods.nodeType` must admit exactly one value.
+    #[serde(default)]
+    pub enabled: bool,
+    /// The `source` of every line: a constant of the deployment, the same on every replica (`[A-Za-z0-9._:/-]`, at most 128).
+    #[serde(default = "default_metering_source")]
+    pub source: String,
+    /// How often the meter looks at the pods, in seconds (5 to 300).
+    #[serde(default = "default_metering_period")]
+    pub period_secs: u64,
+    /// The orchestrator's broker, which says which account a run belongs to.
+    #[serde(default)]
+    pub broker: MeteringBrokerSection,
+    /// The OpenTelemetry Collector the lines go to (OTLP/HTTP JSON logs).
+    #[serde(default)]
+    pub collector: MeteringCollectorSection,
+}
+
+impl Default for MeteringSection {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            source: default_metering_source(),
+            period_secs: default_metering_period(),
+            broker: MeteringBrokerSection::default(),
+            collector: MeteringCollectorSection::default(),
+        }
+    }
+}
+
+fn default_metering_source() -> String {
+    "aap-operator".to_owned()
+}
+
+fn default_metering_period() -> u64 {
+    30
+}
+
+/// `metering.broker`: the route `GET <url>/internal/runs/<run>/account`.
+#[derive(Debug, Deserialize, schemars::JsonSchema)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct MeteringBrokerSection {
+    /// The broker's base URL (`http://broker.ns.svc:8080`): `http` or `https`, no credentials, query or fragment.
+    #[serde(default)]
+    pub url: Option<String>,
+    /// The meter's bearer, by reference (a mounted Secret key). Read once at start, never logged.
+    #[serde(default, deserialize_with = "token_ref")]
+    pub token: Option<SecretRef>,
+    /// One question's time limit, in seconds (1 to 60).
+    #[serde(default = "default_broker_timeout")]
+    pub timeout_secs: u64,
+}
+
+impl Default for MeteringBrokerSection {
+    fn default() -> Self {
+        Self {
+            url: None,
+            token: None,
+            timeout_secs: default_broker_timeout(),
+        }
+    }
+}
+
+fn default_broker_timeout() -> u64 {
+    5
+}
+
+/// `metering.collector`: the OTLP/HTTP endpoint (`<endpoint>/v1/logs`) and the sink's bounds.
+#[derive(Debug, Deserialize, schemars::JsonSchema)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct MeteringCollectorSection {
+    /// The collector's base URL (`http://collector.ns.svc:4318`). `http` is allowed: it is in the cluster behind a NetworkPolicy.
+    #[serde(default)]
+    pub endpoint: Option<String>,
+    /// A PEM bundle that is the only trust for an `https` endpoint. Absent: the platform roots.
+    #[serde(default)]
+    pub ca_file: Option<String>,
+    /// Lines the queue holds before the meter is told to wait (1 to 1000000).
+    #[serde(default = "default_collector_queue")]
+    pub queue: usize,
+    /// Lines in one POST (1 to 10000).
+    #[serde(default = "default_collector_batch")]
+    pub batch: usize,
+    /// How long a part batch waits before it is sent, in seconds (1 to 3600).
+    #[serde(default = "default_collector_interval")]
+    pub interval_secs: u64,
+    /// One POST's time limit, in seconds (1 to 300).
+    #[serde(default = "default_collector_timeout")]
+    pub timeout_secs: u64,
+}
+
+impl Default for MeteringCollectorSection {
+    fn default() -> Self {
+        Self {
+            endpoint: None,
+            ca_file: None,
+            queue: default_collector_queue(),
+            batch: default_collector_batch(),
+            interval_secs: default_collector_interval(),
+            timeout_secs: default_collector_timeout(),
+        }
+    }
+}
+
+fn default_collector_queue() -> usize {
+    4096
+}
+
+fn default_collector_batch() -> usize {
+    512
+}
+
+fn default_collector_interval() -> u64 {
+    5
+}
+
+fn default_collector_timeout() -> u64 {
+    10
+}
+
 /// `retention`: what a deleted agent leaves behind.
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
@@ -408,6 +537,8 @@ pub struct Settings {
     pub activity: Activity,
     /// The election.
     pub leader: Leader,
+    /// The pod-minute meter, when `metering.enabled` is set.
+    pub metering: Option<Metering>,
     /// The `tracing` filter.
     pub log_filter: String,
     /// The traces, as the section says them (no header read yet).
@@ -463,6 +594,25 @@ pub struct Activity {
     pub token: Option<SecretRef>,
 }
 
+/// The meter's settings, checked: only built when `metering.enabled` is true.
+#[derive(Clone, Debug)]
+pub struct Metering {
+    /// The `source` of every line.
+    pub source: String,
+    /// The node label whose value is the node type (`runPods.nodeType.labelKey`).
+    pub node_type_label_key: String,
+    /// How often the pods are looked at.
+    pub period: Duration,
+    /// The broker's base URL.
+    pub broker_url: url::Url,
+    /// The broker's bearer, by reference.
+    pub broker_token: SecretRef,
+    /// One question's time limit.
+    pub broker_timeout: Duration,
+    /// The collector, with the sink's bounds.
+    pub collector: aap_usage_otlp::UsageOtlpSettings,
+}
+
 /// The election, with the timings still as the file gave them (the provider's `Timings` needs the runtime feature).
 #[derive(Clone, Debug)]
 pub struct Leader {
@@ -499,6 +649,7 @@ impl Config {
             );
         }
         check_listeners(&self.listen, self.registry.token.is_some())?;
+        let metering = self.metering_settings()?;
 
         let mut namespaces: Vec<String> = Vec::new();
         for name in &self.watch.namespaces {
@@ -684,9 +835,94 @@ impl Config {
                 renew_secs: leader.renew_secs,
                 retry_secs: leader.retry_secs,
             },
+            metering,
             log_filter: self.log.filter,
             telemetry: self.telemetry.otlp,
         })
+    }
+
+    /// `metering`: nothing while it is off; on, every part of it, checked. **Incomplete is refused**, so that a meter that
+    /// would run blind never starts: no broker, no token, no collector, a node type the meter cannot tell.
+    pub(crate) fn metering_settings(&self) -> Result<Option<Metering>> {
+        let m = &self.metering;
+        if !m.enabled {
+            return Ok(None);
+        }
+        if !aap_usage::is_line_text(&m.source) {
+            bail!("metering.source: 1 to 128 of [A-Za-z0-9._:/-]");
+        }
+        if !(5..=300).contains(&m.period_secs) {
+            bail!(
+                "metering.periodSecs: {} is not a whole number of seconds from 5 to 300",
+                m.period_secs
+            );
+        }
+        // The node type of a run pod is read from the node affinity the operator wrote into it, which names the admitted
+        // values: with one, that is the type; with several the pod's type is not known, and a line with no type is refused.
+        let node_type = self.run_pods.as_ref().map(|r| &r.node_type);
+        let Some(node_type) = node_type.filter(|n| n.admitted.len() == 1) else {
+            bail!(
+                "metering.enabled: needs runPods.nodeType with exactly one admitted value, because the node type of a run pod is read from the node affinity (the meter reads no Node): without it, or with several values, no run pod's node type is known"
+            );
+        };
+        let Some(url) = m
+            .broker
+            .url
+            .as_deref()
+            .map(str::trim)
+            .filter(|u| !u.is_empty())
+        else {
+            bail!("metering.broker.url: required while metering.enabled is true");
+        };
+        let broker_url =
+            url::Url::parse(url).map_err(|_| anyhow::anyhow!("metering.broker.url: not a URL"))?;
+        aap_usage_broker::check_base(&broker_url)
+            .map_err(|why| anyhow::anyhow!("metering.broker.url: {why}"))?;
+        let Some(token) = m.broker.token.clone() else {
+            bail!(
+                "metering.broker.token: required while metering.enabled is true: the broker refuses a request with no bearer"
+            );
+        };
+        if !(1..=60).contains(&m.broker.timeout_secs) {
+            bail!(
+                "metering.broker.timeoutSecs: {} is not a whole number of seconds from 1 to 60",
+                m.broker.timeout_secs
+            );
+        }
+        let c = &m.collector;
+        let Some(endpoint) = c
+            .endpoint
+            .as_deref()
+            .map(str::trim)
+            .filter(|u| !u.is_empty())
+        else {
+            bail!("metering.collector.endpoint: required while metering.enabled is true");
+        };
+        let endpoint = url::Url::parse(endpoint)
+            .map_err(|_| anyhow::anyhow!("metering.collector.endpoint: not a URL"))?;
+        let mut collector = aap_usage_otlp::UsageOtlpSettings::new(endpoint);
+        collector.ca = c
+            .ca_file
+            .as_deref()
+            .map(str::trim)
+            .filter(|f| !f.is_empty())
+            .map(std::path::PathBuf::from);
+        collector.queue = c.queue;
+        collector.batch = c.batch;
+        collector.interval = Duration::from_secs(c.interval_secs);
+        collector.timeout = Duration::from_secs(c.timeout_secs);
+        collector
+            .validate()
+            .map_err(|why| anyhow::anyhow!("metering.collector: {why}"))?;
+        Ok(Some(Metering {
+            source: m.source.clone(),
+            node_type_label_key: node_type.label_key.clone(),
+            period: Duration::from_secs(m.period_secs),
+            broker_url,
+            broker_token: token,
+            broker_timeout: Duration::from_secs(m.broker.timeout_secs),
+            collector,
+        }))
     }
 }
 
@@ -891,6 +1127,120 @@ mod tests {
             serde_yaml::from_str(&minimal()).expect("the minimal file");
         document["runPods"] = run_pods;
         serde_yaml::to_string(&document).expect("YAML")
+    }
+
+    /// A deployment with the chart's run pods admitting `admitted` of one node label, and `metering` (the body of an enabled
+    /// `metering:` block) after `enabled: true`.
+    fn metering_file(admitted: &[&str], metering: &str) -> String {
+        let text = with_run_pods(|run_pods| {
+            run_pods["nodeType"] = serde_json::json!({
+                "labelKey": "example.com/node-type",
+                "admitted": admitted,
+            });
+        });
+        format!("{text}metering:\n  enabled: true\n{metering}")
+    }
+
+    const COMPLETE_METERING: &str = "  broker:\n    url: http://broker.ns.svc:8080\n    token: { env: METER_TOKEN }\n  collector:\n    endpoint: http://collector.ns.svc:4318\n";
+
+    #[test]
+    fn the_meter_is_off_by_default_and_the_example_is_off() {
+        assert!(settings(&minimal()).metering.is_none());
+        assert!(settings(EXAMPLE).metering.is_none());
+        // Off: a half-written section is not looked at.
+        assert!(
+            settings("version: 1\nmetering:\n  broker:\n    url: ftp://x\n")
+                .metering
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn a_complete_meter_carries_the_settings() {
+        let m = settings(&metering_file(&["standard"], COMPLETE_METERING))
+            .metering
+            .expect("on");
+        assert_eq!(m.source, "aap-operator");
+        assert_eq!(m.node_type_label_key, "example.com/node-type");
+        assert_eq!(m.period, Duration::from_secs(30));
+        assert_eq!(m.broker_url.as_str(), "http://broker.ns.svc:8080/");
+        assert!(matches!(m.broker_token, SecretRef::Env(ref n) if n == "METER_TOKEN"));
+        assert_eq!(m.collector.queue, 4096);
+        assert_eq!(m.collector.batch, 512);
+    }
+
+    #[test]
+    fn an_incomplete_meter_is_refused_naming_the_setting() {
+        let on = |admitted: &[&str], rest: &str| refused(&metering_file(admitted, rest));
+        let no_broker_url =
+            "  broker:\n    token: { env: T }\n  collector:\n    endpoint: http://c:4318\n";
+        assert!(on(&["standard"], no_broker_url).contains("metering.broker.url"));
+        let no_token =
+            "  broker:\n    url: http://b:8080\n  collector:\n    endpoint: http://c:4318\n";
+        assert!(on(&["standard"], no_token).contains("metering.broker.token"));
+        let no_collector = "  broker:\n    url: http://b:8080\n    token: { env: T }\n";
+        assert!(on(&["standard"], no_collector).contains("metering.collector.endpoint"));
+        assert!(on(&["standard"], "").contains("metering.broker.url"));
+        // A URL with credentials, a query or another scheme is not a broker.
+        for url in ["http://u:p@b:8080", "http://b:8080/?a=1", "ftp://b"] {
+            let rest = format!(
+                "  broker:\n    url: \"{url}\"\n    token: {{ env: T }}\n  collector:\n    endpoint: http://c:4318\n"
+            );
+            assert!(
+                on(&["standard"], &rest).contains("metering.broker.url"),
+                "{url}"
+            );
+        }
+        // A collector the sink would refuse.
+        for bound in ["queue: 0", "batch: 0", "intervalSecs: 0", "timeoutSecs: 0"] {
+            let rest = format!("{COMPLETE_METERING}    {bound}\n");
+            assert!(
+                on(&["standard"], &rest).contains("metering.collector"),
+                "{bound}"
+            );
+        }
+        for (key, value) in [
+            ("source", "has space"),
+            ("periodSecs", "4"),
+            ("periodSecs", "301"),
+        ] {
+            let rest = format!("  {key}: {value:?}\n{COMPLETE_METERING}");
+            assert!(
+                on(&["standard"], &rest).contains(&format!("metering.{key}")),
+                "{key}"
+            );
+        }
+    }
+
+    #[test]
+    fn the_node_type_must_be_one_the_meter_can_read() {
+        let refuse = |text: String| refused(&text);
+        // Several values: a run pod's type is not known from its affinity.
+        assert!(
+            refuse(metering_file(&["a", "b"], COMPLETE_METERING))
+                .contains("exactly one admitted value")
+        );
+        assert!(
+            refuse(metering_file(&[], COMPLETE_METERING)).contains("exactly one admitted value")
+        );
+        // No run pods at all.
+        let none = format!("version: 1\nmetering:\n  enabled: true\n{COMPLETE_METERING}");
+        assert!(refuse(none).contains("runPods.nodeType"));
+    }
+
+    #[test]
+    fn the_metering_section_refuses_an_unknown_key_at_every_level() {
+        for text in [
+            "version: 1\nmetering:\n  nope: 1\n",
+            "version: 1\nmetering:\n  broker:\n    nope: 1\n",
+            "version: 1\nmetering:\n  collector:\n    nope: 1\n",
+        ] {
+            assert!(Config::parse(text).is_err(), "{text}");
+        }
+        // A string where a reference belongs may be the token itself: the message never quotes it.
+        let text = "version: 1\nmetering:\n  broker:\n    token: s3cret-value\n";
+        let message = format!("{:#}", Config::parse(text).expect_err("not a reference"));
+        assert!(!message.contains("s3cret-value"), "{message}");
     }
 
     #[test]

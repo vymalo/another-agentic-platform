@@ -103,6 +103,12 @@ plain otherwise. A DNS label may be any of those, and `namespace: on` is the boo
 {{- if and (kindIs "map" $a) $a.to -}}true{{- end -}}
 {{- end -}}
 
+{{/* The pod-minute meter (ANR-1103): "true" or nothing. Off by default, and then nothing of it is rendered. */}}
+{{- define "aap.metering" -}}
+{{- $m := .Values.metering -}}
+{{- if and (kindIs "map" $m) (eq (toString $m.enabled) "true") -}}true{{- end -}}
+{{- end -}}
+
 {{/*
 Run pods (values `runPods`, `runPodClasses`; slice D15a): "true" or nothing. Off by default, and then nothing of them is rendered,
 checked or given a right.

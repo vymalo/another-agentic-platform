@@ -56,6 +56,15 @@ of this replica (the `reportingInstance` of Events, the lease's `holderIdentity`
 | `activity.port` | 8080 | The port agents serve `/internal/activity` on |
 | `activity.timeoutSecs` | 3 | How long one question may take, 1 to 30 s; no answer by then counts as busy |
 | `activity.token` | none | The bearer the agents accept, by reference (a mounted Secret key); read once, never logged |
+| `metering.enabled` | `false` | **ANR-1103, AD-069:** run the pod-minute meter. **Off by default**, and then nothing under `metering` is read or asked. On, `metering.broker` and `metering.collector` are required and `runPods.nodeType.admitted` must have **exactly one** value (the node type of a run pod is read from its node affinity); an incomplete section is refused (78). Do not enable it in a deployment before ANR-1151 (durable delivery) lands |
+| `metering.source` | `aap-operator` | The `source` of every line: a constant of the deployment, the same on every replica (`[A-Za-z0-9._:/-]`, at most 128) |
+| `metering.periodSecs` | 30 | How often the pods are looked at, 5 to 300 s |
+| `metering.broker.url` | none | The orchestrator's broker, base URL: `GET <url>/internal/runs/<run>/account` ([`aap-usage-broker`](../../crates/usage-broker/README.md)). `http` or `https`, no credentials, query or fragment |
+| `metering.broker.token` | none | The meter's bearer, by reference (`{ file }` or `{ env }`); read once at start (a missing or blank one is 78), never logged |
+| `metering.broker.timeoutSecs` | 5 | One question's time limit, 1 to 60 s |
+| `metering.collector.endpoint` | none | The collector's base URL: lines go to `<endpoint>/v1/logs` as OTLP/HTTP JSON ([`aap-usage-otlp`](../../crates/usage-otlp/README.md)) |
+| `metering.collector.caFile` | none | A PEM bundle that is the only trust for an `https` endpoint. The chart does not set it yet |
+| `metering.collector.queue`, `batch`, `intervalSecs`, `timeoutSecs` | 4096, 512, 5, 10 | The sink's bounds: the queue (lines), lines per POST, the wait for a part batch (1 to 3600 s) and one POST's limit (1 to 300 s) |
 | `retention.afterDeleteDays` | 90 | **ANR-770:** days the database and volumes of a deleted agent (`deletionPolicy: Retain`) are kept before they are deleted. `0` keeps them for ever and turns the sweep off |
 | `leaderElection.enabled` | `false` | **K7a:** elect one replica to write, with a `coordination.k8s.io/v1` `Lease`. Off: this replica is the only one, and every pass writes (`AlwaysLeader`) |
 | `leaderElection.name` | `aap-operator` | The name of the `Lease`; the election is `<namespace>/<name>`. A DNS label |
