@@ -620,7 +620,7 @@ in a deployment that probes https servers; the chart cannot know the addresses.
 
 | Value | Default | What |
 |---|---|---|
-| `toolProbe.to` | `[]` | The peers the operator may reach. Empty: no probe, and not a trace of it in any render. A peer needs a `namespaceSelector`, a `podSelector` or an `ipBlock`; in this and every other list of peers, an empty `namespaceSelector` selects every namespace and is refused (name `matchLabels` or `matchExpressions`); an `ipBlock` without a `cidr`, or whose CIDR has a `/0` prefix (`0.0.0.0/0`, `::/0`, `0::/0`), is refused |
+| `toolProbe.to` | `[]` | The peers the operator may reach. Empty: no probe, and not a trace of it in any render. A peer needs a `namespaceSelector`, a `podSelector` or an `ipBlock`; in this and every other list of peers, an empty `namespaceSelector` selects every namespace and is refused (name `matchLabels` or `matchExpressions`); in this list and in `dns.to`, an `ipBlock` without a `cidr`, or whose CIDR has a `/0` prefix (`0.0.0.0/0`, `::/0`, `0::/0`), is refused |
 | `toolProbe.ports` | `[80, 443]` | The ports a probe may use, as the provider's URL names them: 443 for an https server, 80 or the port of an in-cluster server. At least one while `to` is set |
 | `toolProbe.timeoutSecs` | `5` | How long one probe may take, 1 to 60 s. A server that does not answer by then is `Reachable: False`, reason `Timeout`; the operator cuts it to five seconds under the pass's own deadline, so the pass is never dropped with no status |
 | `toolProbe.dns.to`, `dns.ports` | kube-dns, `[53]` | The operator's policy has no DNS rule, so with a probe it gets one. `dns.to` is required while `to` is set and `networkPolicy.enabled`; the same `ipBlock` rule applies |

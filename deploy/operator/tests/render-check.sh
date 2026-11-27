@@ -2259,6 +2259,8 @@ check "an empty namespaceSelector as a metrics scraper is refused" refused "netw
   -f "$here/metrics.values.yaml" --set-json "networkPolicy.metrics.allowFrom=$every_ns"
 check "an empty namespaceSelector as an API metrics scraper is refused" refused "api.metrics.allowFrom: $ns_msg" \
   -f "$here/metrics.values.yaml" --set-json "api.metrics.allowFrom=$every_ns"
+check "an empty namespaceSelector as an API ingress peer is refused" refused "api.networkPolicy.from: $ns_msg" \
+  -f "$here/metrics.values.yaml" --set-json "api.networkPolicy.from=$every_ns"
 # The other spellings of nothing: null, and each of the two keys empty.
 for nothing in 'null' '{"matchLabels":{}}' '{"matchExpressions":[]}'; do
   check "a namespaceSelector of $nothing is refused" refused "toolProbe.to: $ns_msg" \
@@ -2271,8 +2273,8 @@ check "an ipBlock of 0.0.0.0/0 as a registry reader is refused" refused 'network
 check "an ipBlock of 0.0.0.0/0 as a metrics scraper is refused" refused 'networkPolicy.metrics.allowFrom: an ipBlock of 0.0.0.0/0 is every address' \
   -f "$here/metrics.values.yaml" --set-json 'networkPolicy.metrics.allowFrom=[{"ipBlock":{"cidr":"0.0.0.0/0"}}]'
 ns_labels_renders() {
-  render --set-json 'toolProbe.to=[{"namespaceSelector":{"matchLabels":{"a":"b"}}}]' --set-json "toolProbe.dns.to=$ns_dns" || return 1
-  all_of "$(op_egress_rule 3)" '^      to:' 'namespaceSelector:' 'matchLabels:' 'a: b'
+  render --set-json 'toolProbe.to=[{"namespaceSelector":{"matchLabels":{"probe":"mcp"}}}]' --set-json "toolProbe.dns.to=$ns_dns" || return 1
+  all_of "$(op_egress_rule 3)" '^      to:' 'namespaceSelector:' 'matchLabels:' 'probe: mcp'
 }
 check "a namespaceSelector with matchLabels alone renders, and the operator's egress rule carries the peer" ns_labels_renders
 ns_expressions_renders() {
