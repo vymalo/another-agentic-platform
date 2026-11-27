@@ -1346,6 +1346,26 @@ fn each_setting_is_checked() {
         ]}})),
         "covers every address",
     );
+    // Every peer is checked, not only the first; a zero written `00` is a zero; and the shape of the old internet rule
+    // (`0.0.0.0/0` with an `except`) is refused too.
+    says(
+        &refused(json!({"networkPolicy": {"extraEgress": [
+            {"to": [{"ipBlock": {"cidr": "10.0.0.0/8"}}, {"ipBlock": {"cidr": "0.0.0.0/0"}}]}
+        ]}})),
+        "covers every address",
+    );
+    says(
+        &refused(json!({"networkPolicy": {"extraEgress": [
+            {"to": [{"ipBlock": {"cidr": "0.0.0.0/00"}}]}
+        ]}})),
+        "covers every address",
+    );
+    says(
+        &refused(json!({"networkPolicy": {"extraEgress": [
+            {"to": [{"ipBlock": {"cidr": "0.0.0.0/0", "except": ["10.0.0.0/8"]}}]}
+        ]}})),
+        "covers every address",
+    );
 }
 
 #[test]
