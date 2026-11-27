@@ -1244,6 +1244,13 @@ pub trait UpstreamUnderTest: crate::Upstream + 'static {
         headers: Vec<(String, String)>,
         chunks: Vec<Vec<u8>>,
     ) -> impl Future<Output = ()> + Send;
+    /// From now on every agent answers this head and these chunks, and then its body **fails** (an error item, no clean end).
+    fn answer_then_fail(
+        &self,
+        status: u16,
+        headers: Vec<(String, String)>,
+        chunks: Vec<Vec<u8>>,
+    ) -> impl Future<Output = ()> + Send;
     /// From now on no agent can be reached.
     fn break_upstream(&self) -> impl Future<Output = ()> + Send;
     /// What the agents received, in order.
@@ -1369,6 +1376,32 @@ pub mod activator {
         );
     }
 
+    pub async fn a_failure_after_the_head_is_an_error_item_after_the_chunks_before_it<
+        U: UpstreamUnderTest,
+    >(
+        u: U,
+    ) {
+        use futures::StreamExt;
+        let chunks = vec![vec![1u8], vec![2, 3]];
+        u.answer_then_fail(200, Vec::new(), chunks.clone()).await;
+        let got = u.forward(&id(), &Route::Default, request()).await.unwrap();
+        let mut body = got.body;
+        let mut seen = Vec::new();
+        let mut failed = false;
+        while let Some(item) = body.next().await {
+            match item {
+                Ok(c) => seen.push(c),
+                Err(e) => {
+                    assert!(e.class().is_retryable());
+                    failed = true;
+                    break;
+                }
+            }
+        }
+        assert_eq!(seen, chunks, "the chunks before the failure arrive");
+        assert!(failed, "the failure is an error item, not a clean end");
+    }
+
     pub async fn each_call_is_one_forward<U: UpstreamUnderTest>(u: U) {
         let a = id();
         u.forward(&a, &Route::Default, request()).await.unwrap();
@@ -1447,7 +1480,7 @@ macro_rules! waker_conformance {
 #[macro_export]
 macro_rules! upstream_conformance {
     ($make:path) => {
-        $crate::upstream_conformance!(@cases $make; the_request_reaches_the_agent_unchanged, the_answer_comes_back_unchanged_whatever_its_status, the_chunks_of_the_body_arrive_in_order_and_all_of_them, each_call_is_one_forward, an_unreachable_agent_is_a_transient_error);
+        $crate::upstream_conformance!(@cases $make; the_request_reaches_the_agent_unchanged, the_answer_comes_back_unchanged_whatever_its_status, the_chunks_of_the_body_arrive_in_order_and_all_of_them, a_failure_after_the_head_is_an_error_item_after_the_chunks_before_it, each_call_is_one_forward, an_unreachable_agent_is_a_transient_error);
     };
     (@cases $make:path; $($case:ident),* $(,)?) => {
         $(

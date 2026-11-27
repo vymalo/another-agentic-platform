@@ -168,7 +168,8 @@ impl std::fmt::Debug for UpstreamResponse {
 /// Why a request could not be forwarded.
 #[derive(Debug, thiserror::Error)]
 pub enum UpstreamError {
-    /// The agent could not be reached or did not answer. The activator answers `502`.
+    /// The agent could not be reached or did not answer (the activator answers `502`), **or** its body failed after the head: then
+    /// this is the error item of the [`BodyStream`], and the answer ends there (the activator can only end the connection).
     #[error("the agent could not be reached")]
     Unavailable(#[source] BoxError),
 }

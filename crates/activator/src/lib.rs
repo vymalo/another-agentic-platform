@@ -32,7 +32,6 @@
 //! ends it too. In both cases the head has been sent, so the client sees the connection end, and the metrics count it. The
 //! `max_in_flight` permit is held until the stream ends or the client goes away.
 //!
-//!
 //! Routing by channel (AD-059, R5) will be a step between the request and [`Upstream::forward`]: [`Activator::route`] is
 //! that step and always answers [`Route::Default`] today.
 
@@ -57,7 +56,7 @@ use axum::response::Response;
 use futures::StreamExt;
 use tokio::sync::{OwnedSemaphorePermit, Semaphore, watch};
 
-pub use metrics::{ActivatorMetrics, Outcome, WakeKind};
+pub use metrics::{ActivatorMetrics, Outcome, StreamEnd, WakeKind};
 
 /// The A2A card's path, and the older name of it, answered without a wake.
 pub const DEFAULT_CARD_PATHS: [&str; 2] =
@@ -78,9 +77,12 @@ pub struct Settings {
     pub forward_timeout: Duration,
     /// The longest reading a request body may take; past it the answer is `408`. Provisional.
     pub body_read_timeout: Duration,
-    /// The longest a streamed answer may go without a chunk. Past it the stream ends and the client sees the connection end (the
-    /// head has gone, so no status can say so); `aap_activator_requests_total{outcome="stream_idle"}` counts it, in addition to the
-    /// `forwarded` of the head. An error item of the agent's stream ends it the same way (`stream_failed`). Provisional.
+    /// The longest a streamed answer may go without a chunk. Past it the stream ends. The head has gone, so no status can say so,
+    /// and the truncation shows on the wire only: on idle the client gets a chunked body **with no terminating chunk**; when the
+    /// agent errors right after its first chunk the client may get an **empty reply** (the connection closed before the buffered
+    /// head was flushed). Both are detectable over HTTP/1.1 chunked; **a close-delimited HTTP/1.0 client cannot detect either**.
+    /// An error item of the agent's stream ends it the same way. Each stream is counted once by how it ended
+    /// (`aap_activator_stream_ends_total{end="complete"|"idle"|"failed"|"abandoned"}`). Provisional.
     pub stream_idle_timeout: Duration,
     /// How many non-card requests may be held or forwarded at once; past it the answer is `503` with `Retry-After` and no wake
     /// is started. Memory is bounded by this times `max_body_bytes`. Provisional.
@@ -594,26 +596,53 @@ fn guarded(
     permit: OwnedSemaphorePermit,
     metrics: Arc<ActivatorMetrics>,
 ) -> impl futures::Stream<Item = Result<axum::body::Bytes, StreamEnded>> + Send + 'static {
-    futures::stream::unfold(Some((body, permit)), move |state| {
-        let metrics = Arc::clone(&metrics);
-        async move {
-            let (mut body, permit) = state?;
-            match tokio::time::timeout(idle, body.next()).await {
-                Err(_) => {
-                    metrics.request(Outcome::StreamIdle);
-                    Some((Err(StreamEnded("stream idle")), None))
-                }
-                Ok(None) => None,
-                Ok(Some(Ok(chunk))) => {
-                    Some((Ok(axum::body::Bytes::from(chunk)), Some((body, permit))))
-                }
-                Ok(Some(Err(_))) => {
-                    metrics.request(Outcome::StreamFailed);
-                    Some((Err(StreamEnded("stream failed")), None))
-                }
+    let ending = Ending {
+        metrics,
+        done: false,
+    };
+    futures::stream::unfold(Some((body, permit, ending)), move |state| async move {
+        let (mut body, permit, ending) = state?;
+        match tokio::time::timeout(idle, body.next()).await {
+            Err(_) => {
+                ending.finish(StreamEnd::Idle);
+                Some((Err(StreamEnded("stream idle")), None))
+            }
+            Ok(None) => {
+                ending.finish(StreamEnd::Complete);
+                None
+            }
+            Ok(Some(Ok(chunk))) => Some((
+                Ok(axum::body::Bytes::from(chunk)),
+                Some((body, permit, ending)),
+            )),
+            Ok(Some(Err(_))) => {
+                ending.finish(StreamEnd::Failed);
+                Some((Err(StreamEnded("stream failed")), None))
             }
         }
     })
+}
+
+/// Counts how a stream ended. If it is dropped without [`finish`](Self::finish), the client went away first (or never started to
+/// read), which is `abandoned`: dropping the response body drops the stream and with it this guard.
+struct Ending {
+    metrics: Arc<ActivatorMetrics>,
+    done: bool,
+}
+
+impl Ending {
+    fn finish(mut self, end: StreamEnd) {
+        self.done = true;
+        self.metrics.stream_end(end);
+    }
+}
+
+impl Drop for Ending {
+    fn drop(&mut self) {
+        if !self.done {
+            self.metrics.stream_end(StreamEnd::Abandoned);
+        }
+    }
 }
 
 enum BodyFail {

@@ -185,6 +185,7 @@ enum UpFault {
     AltersTheAnswer,
     ReordersTheChunks,
     DropsAChunk,
+    FailureBecomesACleanEnd,
 }
 
 type Answer = (u16, Vec<(String, String)>, Vec<Vec<u8>>);
@@ -193,6 +194,7 @@ type Answer = (u16, Vec<(String, String)>, Vec<Vec<u8>>);
 struct FaultyUpstream {
     fault: UpFault,
     answer: Arc<Mutex<Option<Answer>>>,
+    then_fail: Arc<Mutex<bool>>,
     broken: Arc<Mutex<bool>>,
     seen: Arc<Mutex<Vec<(RuntimeId, UpstreamRequest)>>>,
 }
@@ -201,6 +203,7 @@ fn upstream(fault: UpFault) -> FaultyUpstream {
     FaultyUpstream {
         fault,
         answer: Arc::default(),
+        then_fail: Arc::default(),
         broken: Arc::default(),
         seen: Arc::default(),
     }
@@ -251,10 +254,14 @@ impl Upstream for FaultyUpstream {
             }
             _ => {}
         }
+        let mut items: Vec<Result<Vec<u8>, UpstreamError>> = chunks.into_iter().map(Ok).collect();
+        if *self.then_fail.lock().unwrap() && self.fault != UpFault::FailureBecomesACleanEnd {
+            items.push(Err(UpstreamError::Unavailable("stream failed".into())));
+        }
         Ok(UpstreamResponse {
             status,
             headers,
-            body: Box::pin(futures::stream::iter(chunks.into_iter().map(Ok))),
+            body: Box::pin(futures::stream::iter(items)),
         })
     }
 }
@@ -262,6 +269,15 @@ impl Upstream for FaultyUpstream {
 impl UpstreamUnderTest for FaultyUpstream {
     async fn answer(&self, status: u16, headers: Vec<(String, String)>, chunks: Vec<Vec<u8>>) {
         *self.answer.lock().unwrap() = Some((status, headers, chunks));
+    }
+    async fn answer_then_fail(
+        &self,
+        status: u16,
+        headers: Vec<(String, String)>,
+        chunks: Vec<Vec<u8>>,
+    ) {
+        *self.answer.lock().unwrap() = Some((status, headers, chunks));
+        *self.then_fail.lock().unwrap() = true;
     }
     async fn break_upstream(&self) {
         *self.broken.lock().unwrap() = true;
@@ -318,6 +334,15 @@ async fn an_upstream_that_reorders_the_chunks_fails_the_suite() {
     testkit::activator::the_chunks_of_the_body_arrive_in_order_and_all_of_them(upstream(
         UpFault::ReordersTheChunks,
     ))
+    .await;
+}
+
+#[tokio::test]
+#[should_panic(expected = "the failure is an error item, not a clean end")]
+async fn an_upstream_that_turns_a_stream_failure_into_a_clean_end_fails_the_suite() {
+    testkit::activator::a_failure_after_the_head_is_an_error_item_after_the_chunks_before_it(
+        upstream(UpFault::FailureBecomesACleanEnd),
+    )
     .await;
 }
 
@@ -479,6 +504,7 @@ async fn the_sound_upstream_passes_every_case() {
     t::the_request_reaches_the_agent_unchanged(u()).await;
     t::the_answer_comes_back_unchanged_whatever_its_status(u()).await;
     t::the_chunks_of_the_body_arrive_in_order_and_all_of_them(u()).await;
+    t::a_failure_after_the_head_is_an_error_item_after_the_chunks_before_it(u()).await;
     t::each_call_is_one_forward(u()).await;
     t::an_unreachable_agent_is_a_transient_error(u()).await;
 }

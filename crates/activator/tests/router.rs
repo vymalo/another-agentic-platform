@@ -6,7 +6,7 @@
 
 use std::time::Duration;
 
-use aap_activator::{Activator, Outcome, Settings};
+use aap_activator::{Activator, Outcome, Settings, StreamEnd};
 use aap_ports::memory::{
     MemoryCards, MemoryUpstream, MemoryWaker, Scripted, Sequence, Step, WakeScript,
 };
@@ -902,7 +902,7 @@ async fn a_stalled_stream_ends_at_the_idle_timeout_and_is_counted() {
     assert_eq!(body.next().await.unwrap().unwrap(), "a");
     assert!(body.next().await.unwrap().is_err(), "the connection ends");
     assert!(body.next().await.is_none());
-    assert_eq!(r.activator.metrics().requests(Outcome::StreamIdle), 1);
+    assert_eq!(r.activator.metrics().stream_ends(StreamEnd::Idle), 1);
     assert_eq!(
         r.activator.metrics().requests(Outcome::Forwarded),
         1,
@@ -924,7 +924,7 @@ async fn an_error_in_the_stream_ends_it_and_is_counted() {
     assert_eq!(body.next().await.unwrap().unwrap(), "a");
     assert!(body.next().await.unwrap().is_err());
     assert!(body.next().await.is_none(), "nothing after the error");
-    assert_eq!(r.activator.metrics().requests(Outcome::StreamFailed), 1);
+    assert_eq!(r.activator.metrics().stream_ends(StreamEnd::Failed), 1);
 }
 
 #[tokio::test(start_paused = true)]
@@ -975,5 +975,69 @@ async fn the_permit_is_released_when_the_stream_ends() {
             .unwrap()
             .status(),
         StatusCode::OK
+    );
+}
+
+/// The first test above cannot tell a lazy body from a pump that reads ahead into a channel, because its `Wait(10s)` stalls the
+/// pump too. Back-to-back chunks can: a pump would have produced all three before the client asked for the second.
+#[tokio::test(start_paused = true)]
+async fn nothing_is_read_ahead_of_the_client_even_when_the_chunks_are_ready() {
+    use futures::StreamExt;
+    let r = rig(settings());
+    r.upstream.answer(Scripted::chunks(&[b"a", b"b", b"c"]));
+    let res = r.app.clone().oneshot(post("/x", "{}")).await.unwrap();
+    let mut body = res.into_body().into_data_stream();
+    assert_eq!(body.next().await.unwrap().unwrap(), "a");
+    for _ in 0..8 {
+        tokio::task::yield_now().await;
+    }
+    assert_eq!(
+        r.upstream.produced().len(),
+        1,
+        "a reader ahead of the client would have produced b and c"
+    );
+    assert_eq!(body.next().await.unwrap().unwrap(), "b");
+    for _ in 0..8 {
+        tokio::task::yield_now().await;
+    }
+    assert_eq!(r.upstream.produced().len(), 2);
+}
+
+#[tokio::test(start_paused = true)]
+async fn each_stream_is_counted_once_by_how_it_ended_and_a_client_that_leaves_is_abandoned() {
+    use futures::StreamExt;
+    let r = rig(settings());
+    let m = r.activator.metrics();
+    // complete
+    r.upstream.answer(Scripted::chunks(&[b"a"]));
+    let res = r.app.clone().oneshot(post("/x", "{}")).await.unwrap();
+    assert_eq!(to_bytes(res.into_body(), 16).await.unwrap(), "a");
+    assert_eq!(m.stream_ends(StreamEnd::Complete), 1);
+    // abandoned after chunk 1
+    r.upstream.answer(Scripted {
+        status: 200,
+        headers: vec![],
+        steps: vec![chunk("a"), Step::Never],
+    });
+    let res = r.app.clone().oneshot(post("/x", "{}")).await.unwrap();
+    let mut body = res.into_body().into_data_stream();
+    assert_eq!(body.next().await.unwrap().unwrap(), "a");
+    assert_eq!(m.stream_ends(StreamEnd::Abandoned), 0, "still being read");
+    drop(body);
+    assert_eq!(m.stream_ends(StreamEnd::Abandoned), 1);
+    // a request is `forwarded` once each, whatever its stream did
+    assert_eq!(m.requests(Outcome::Forwarded), 2);
+    let text = m.render();
+    assert!(
+        text.contains("aap_activator_stream_ends_total{end=\"complete\"} 1"),
+        "{text}"
+    );
+    assert!(
+        text.contains("aap_activator_stream_ends_total{end=\"abandoned\"} 1"),
+        "{text}"
+    );
+    assert!(
+        !text.contains("stream_idle"),
+        "no stream outcome in the request series: {text}"
     );
 }

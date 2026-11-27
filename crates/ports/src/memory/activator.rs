@@ -408,6 +408,24 @@ impl crate::testkit::UpstreamUnderTest for MemoryUpstream {
         );
     }
 
+    async fn answer_then_fail(
+        &self,
+        status: u16,
+        headers: Vec<(String, String)>,
+        chunks: Vec<Vec<u8>>,
+    ) {
+        let mut steps: Vec<Step> = chunks.into_iter().map(Step::Chunk).collect();
+        steps.push(Step::Fail);
+        Self::answer(
+            self,
+            Scripted {
+                status,
+                headers,
+                steps,
+            },
+        );
+    }
+
     async fn break_upstream(&self) {
         Self::break_upstream(self);
     }

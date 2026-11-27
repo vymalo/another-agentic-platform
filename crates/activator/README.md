@@ -45,8 +45,12 @@ prevent it.
 `Upstream` yields it, with no `Content-Length` (the server chooses chunked encoding) and nothing held whole. The request stays
 buffered because a wake may have to replay it and R5 will read its metadata. `forward_timeout` covers the wait for the answer's head
 (`504`); `stream_idle_timeout` (120 s, provisional) ends a stream that stops producing chunks, and an error item in the agent's stream
-ends it too: the head has gone, so the client sees the connection end, and `aap_activator_requests_total{outcome="stream_idle"}` or
-`stream_failed` counts it (besides the `forwarded` of the head). The `max_in_flight` permit is held until the stream ends or the client
+ends it too. The head has gone, so no status can say so and the truncation shows on the wire only: on idle the client gets a chunked
+body **with no terminating chunk**; when the agent errors right after its first chunk the client may get an **empty reply** (the
+connection closed before hyper flushed the buffered head). Both are detectable over HTTP/1.1 chunked; **a close-delimited HTTP/1.0
+client cannot detect either**. Each stream is counted once, by how it ended, in
+`aap_activator_stream_ends_total{end="complete"|"idle"|"failed"|"abandoned"}` (`abandoned`: the client went away mid-stream); the
+request is counted once, as `forwarded`. The `max_in_flight` permit is held until the stream ends or the client
 goes away.
 
 ## Choices, and why

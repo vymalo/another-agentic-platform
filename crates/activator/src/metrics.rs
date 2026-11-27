@@ -7,6 +7,8 @@ use std::sync::{Mutex, PoisonError};
 
 /// The name of the series.
 pub const REQUESTS: &str = "aap_activator_requests_total";
+/// The name of the stream-end series.
+pub const STREAM_ENDS: &str = "aap_activator_stream_ends_total";
 /// The name of the wake series.
 pub const WAKES: &str = "aap_activator_wakes_total";
 
@@ -29,10 +31,6 @@ pub enum Outcome {
     BodyTimeout,
     /// Over `max_in_flight`: refused with no wake.
     Shed,
-    /// A streamed answer ended because no chunk came within `stream_idle_timeout` (counted besides `Forwarded`).
-    StreamIdle,
-    /// A streamed answer ended because the agent's stream failed (counted besides `Forwarded`).
-    StreamFailed,
     /// The wake ended `TimedOut` or hit the activator's deadline.
     WakeTimeout,
     /// The wake failed or was refused.
@@ -55,12 +53,35 @@ impl Outcome {
             Self::UpstreamTimeout => "upstream_timeout",
             Self::BodyTimeout => "body_timeout",
             Self::Shed => "shed",
-            Self::StreamIdle => "stream_idle",
-            Self::StreamFailed => "stream_failed",
             Self::WakeTimeout => "wake_timeout",
             Self::WakeFailed => "wake_failed",
             Self::TooLarge => "too_large",
             Self::BadRequest => "bad_request",
+        }
+    }
+}
+
+/// How a streamed answer ended: the closed set of the `end` label. Each stream is counted once, by how it ended; the request
+/// itself is counted once as `forwarded`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
+pub enum StreamEnd {
+    /// The agent's stream finished.
+    Complete,
+    /// No chunk came within `stream_idle_timeout`.
+    Idle,
+    /// The agent's stream produced an error item.
+    Failed,
+    /// The client went away (the response body was dropped) before any of the above.
+    Abandoned,
+}
+
+impl StreamEnd {
+    const fn label(self) -> &'static str {
+        match self {
+            Self::Complete => "complete",
+            Self::Idle => "idle",
+            Self::Failed => "failed",
+            Self::Abandoned => "abandoned",
         }
     }
 }
@@ -79,6 +100,7 @@ pub enum WakeKind {
 pub struct ActivatorMetrics {
     requests: Mutex<BTreeMap<Outcome, u64>>,
     wakes: Mutex<BTreeMap<WakeKind, u64>>,
+    ends: Mutex<BTreeMap<StreamEnd, u64>>,
 }
 
 impl ActivatorMetrics {
@@ -89,6 +111,25 @@ impl ActivatorMetrics {
             .unwrap_or_else(PoisonError::into_inner)
             .entry(outcome)
             .or_default() += 1;
+    }
+
+    pub(crate) fn stream_end(&self, end: StreamEnd) {
+        *self
+            .ends
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .entry(end)
+            .or_default() += 1;
+    }
+
+    /// The count of streams that ended `end`.
+    pub fn stream_ends(&self, end: StreamEnd) -> u64 {
+        self.ends
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .get(&end)
+            .copied()
+            .unwrap_or(0)
     }
 
     pub(crate) fn wake(&self, kind: WakeKind) {
@@ -123,6 +164,17 @@ impl ActivatorMetrics {
             .iter()
         {
             out.push_str(&format!("{REQUESTS}{{outcome=\"{}\"}} {n}\n", o.label()));
+        }
+        out.push_str(&format!(
+            "# HELP {STREAM_ENDS} Streamed answers, by how they ended.\n# TYPE {STREAM_ENDS} counter\n"
+        ));
+        for (e, n) in self
+            .ends
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .iter()
+        {
+            out.push_str(&format!("{STREAM_ENDS}{{end=\"{}\"}} {n}\n", e.label()));
         }
         out.push_str(&format!(
             "# HELP {WAKES} Waiting requests, by whether they made the wake call or shared one.\n# TYPE {WAKES} counter\n"
