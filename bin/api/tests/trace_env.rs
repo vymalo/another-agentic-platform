@@ -40,6 +40,9 @@ fn api() -> Command {
             cmd.env_remove(name);
         }
     }
+    // A developer's or a runner's `RUST_LOG` is no business of these tests: it would change what the child logs (the
+    // BuildKit test reads a WARN line) and could fill the piped stderr while the test polls.
+    cmd.env_remove("RUST_LOG");
     cmd
 }
 
@@ -128,11 +131,86 @@ fn check_refuses_a_url_with_a_password_without_printing_it() {
     );
 }
 
-fn free_addr() -> SocketAddr {
-    TcpListener::bind("127.0.0.1:0")
-        .unwrap()
-        .local_addr()
-        .unwrap()
+/// Three addresses no listener holds. All three are bound **before** any is released: two `bind(0)` calls in a row can
+/// be handed the same port, and a child that cannot bind its second listener exits — one way this test flaked (ANR-1065).
+fn free_addrs() -> (SocketAddr, SocketAddr, SocketAddr) {
+    let held: Vec<TcpListener> = (0..3)
+        .map(|_| TcpListener::bind("127.0.0.1:0").unwrap())
+        .collect();
+    let at = |i: usize| held[i].local_addr().unwrap();
+    (at(0), at(1), at(2))
+}
+
+/// Start the API and wait for `/metrics`. A child that **exits** before it serves is retried on three fresh addresses,
+/// but **only** when it says the port was taken (`Address already in use`): `free_addrs()` cannot reserve a port, so
+/// another process can take one before the child binds it — and any other exit is the test's answer, not a flake, so a
+/// refused variable or a panic is never hidden by a retry. Every failure says what the child wrote to stderr; the old
+/// shape sent it to `null` and reported only "the API did not come up" (ANR-1065).
+fn serve_metrics(tag: &str, env: &[(&str, &str)]) -> (Killed, String) {
+    // The two running tests start in parallel, and each releases its ports before its child binds them: without this,
+    // one test's child can be answered by the other's API on a port it never bound (the review of ANR-1065).
+    static START: std::sync::Mutex<()> = std::sync::Mutex::new(());
+    let _starting = START
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let mut why = String::new();
+    for attempt in 1..=3 {
+        let (listen, health, metrics) = free_addrs();
+        let kube = kubeconfig(tag);
+        let mut child = Killed(
+            api()
+                .args(["--config", &config()])
+                .args(["--listen", &listen.to_string()])
+                .args(["--health-addr", &health.to_string()])
+                .args(["--metrics-addr", &metrics.to_string()])
+                .env("KUBECONFIG", &kube)
+                .env_remove("KUBERNETES_SERVICE_HOST")
+                .envs(env.iter().copied())
+                .stdout(Stdio::null())
+                .stderr(Stdio::piped())
+                .spawn()
+                .unwrap(),
+        );
+        let deadline = Instant::now() + Duration::from_secs(20);
+        loop {
+            if let Some(text) = http_get(metrics, "/metrics")
+                && text.starts_with("HTTP/1.1 200")
+            {
+                return (child, text);
+            }
+            if let Some(status) = child.0.try_wait().unwrap() {
+                let tail = stderr_of(&mut child);
+                let said = format!("attempt {attempt}: the API exited ({status}): {tail}");
+                assert!(tail.contains("Address already in use"), "{said}");
+                if !why.is_empty() {
+                    why.push_str("; ");
+                }
+                why.push_str(&said);
+                eprintln!("{said}; retrying on fresh ports");
+                break;
+            }
+            if Instant::now() >= deadline {
+                let tail = stderr_of(&mut child);
+                panic!(
+                    "the API did not come up in 20 s on {listen}, {health} and {metrics}: {tail}"
+                );
+            }
+            std::thread::sleep(Duration::from_millis(50));
+        }
+    }
+    panic!("the API never came up: {why}");
+}
+
+/// Kill the child, reap it, and answer what it wrote to stderr. Called once it has exited or been killed, so the read
+/// cannot block; the bytes are read rather than a `String`, so a message that is not UTF-8 still reaches the failure.
+fn stderr_of(child: &mut Killed) -> String {
+    let _ = child.0.kill();
+    let _ = child.0.wait();
+    let mut bytes = Vec::new();
+    if let Some(mut err) = child.0.stderr.take() {
+        let _ = err.read_to_end(&mut bytes);
+    }
+    String::from_utf8_lossy(&bytes).into_owned()
 }
 
 /// A kubeconfig that names a server nobody answers: the client is built (the API connects lazily), nothing is reachable.
@@ -174,47 +252,10 @@ impl Drop for Killed {
 /// which variable was refused and not what it held.
 #[test]
 fn run_with_buildkits_variables_starts_warns_once_and_serves() {
-    let (listen, health, metrics) = (free_addr(), free_addr(), free_addr());
-    let kube = kubeconfig("run");
-    let mut child = Killed(
-        api()
-            .args(["--config", &config()])
-            .args(["--listen", &listen.to_string()])
-            .args(["--health-addr", &health.to_string()])
-            .args(["--metrics-addr", &metrics.to_string()])
-            .env("KUBECONFIG", &kube)
-            .env_remove("KUBERNETES_SERVICE_HOST")
-            .envs(BUILDKIT)
-            .stdout(Stdio::null())
-            .stderr(Stdio::piped())
-            .spawn()
-            .unwrap(),
-    );
-    let deadline = Instant::now() + Duration::from_secs(20);
-    let text = loop {
-        if let Some(t) = http_get(metrics, "/metrics")
-            && t.starts_with("HTTP/1.1 200")
-        {
-            break t;
-        }
-        assert!(
-            child.0.try_wait().unwrap().is_none(),
-            "the API stopped for a tracing setting"
-        );
-        assert!(Instant::now() < deadline, "the API did not come up");
-        std::thread::sleep(Duration::from_millis(50));
-    };
+    let (mut child, text) = serve_metrics("run", &BUILDKIT);
     assert!(text.contains("aap_trace_enabled 0\n"), "{text}");
     assert!(!text.contains("aap_trace_spans"), "{text}");
-    let _ = child.0.kill();
-    let mut stderr = String::new();
-    child
-        .0
-        .stderr
-        .take()
-        .unwrap()
-        .read_to_string(&mut stderr)
-        .unwrap();
+    let stderr = stderr_of(&mut child);
     let warnings: Vec<&str> = stderr
         .lines()
         .filter(|l| l.contains("tracing is off"))
@@ -234,31 +275,6 @@ fn run_with_buildkits_variables_starts_warns_once_and_serves() {
 /// With no tracing variable at all the metrics text has no trace line: it is what K4 prints.
 #[test]
 fn run_with_no_tracing_variable_has_no_trace_text_on_metrics() {
-    let (listen, health, metrics) = (free_addr(), free_addr(), free_addr());
-    let kube = kubeconfig("plain");
-    let child = Killed(
-        api()
-            .args(["--config", &config()])
-            .args(["--listen", &listen.to_string()])
-            .args(["--health-addr", &health.to_string()])
-            .args(["--metrics-addr", &metrics.to_string()])
-            .env("KUBECONFIG", &kube)
-            .env_remove("KUBERNETES_SERVICE_HOST")
-            .stdout(Stdio::null())
-            .stderr(Stdio::null())
-            .spawn()
-            .unwrap(),
-    );
-    let deadline = Instant::now() + Duration::from_secs(20);
-    let text = loop {
-        if let Some(t) = http_get(metrics, "/metrics")
-            && t.starts_with("HTTP/1.1 200")
-        {
-            break t;
-        }
-        assert!(Instant::now() < deadline, "the API did not come up");
-        std::thread::sleep(Duration::from_millis(50));
-    };
-    drop(child);
+    let (_child, text) = serve_metrics("plain", &[]);
     assert!(!text.contains("aap_trace_"), "{text}");
 }
