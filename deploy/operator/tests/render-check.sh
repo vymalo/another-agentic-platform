@@ -762,9 +762,53 @@ check "replicas: a fraction is refused" refused 'replicas must be a whole number
 check "replicas: a fraction that is a float, as a values file gives it, is refused too" refused 'replicas must be a whole number' --set-json 'replicas=2.5'
 check "leaderElection: a retry of 0 is refused (the loop's retry is at least a second)" refused 'each at least 1' --set replicas=2 --set leaderElection.retrySecs=0
 check "with the election on, a pass that could outlive the lease margin is refused" refused 'reconcileTimeoutSecs must be below leaseSecs - renewSecs' --set replicas=2 --set tuning.reconcileTimeoutSecs=5
-check "with the election on, the probe's budget must fit the pass" refused 'toolProbe.timeoutSecs' --set replicas=2 \
+check "with the election on, the probe's budget must fit the pass" refused 'does not fit the pass' --set replicas=2 \
   --set-json 'toolProbe.to=[{"namespaceSelector":{"matchLabels":{"a":"b"}}}]' \
   --set-json 'toolProbe.dns.to=[{"namespaceSelector":{"matchLabels":{"a":"b"}}}]' --set toolProbe.timeoutSecs=5
+check "with the election on, the refusal names the pass the probe needs" refused 'tuning.reconcileTimeoutSecs of at least 10' --set replicas=2 \
+  --set-json 'toolProbe.to=[{"namespaceSelector":{"matchLabels":{"a":"b"}}}]' \
+  --set-json 'toolProbe.dns.to=[{"namespaceSelector":{"matchLabels":{"a":"b"}}}]' --set toolProbe.timeoutSecs=5
+check "with the election on, the refusal names the lease the pass needs" refused 'leaderElection.leaseSecs of at least 21' --set replicas=2 \
+  --set-json 'toolProbe.to=[{"namespaceSelector":{"matchLabels":{"a":"b"}}}]' \
+  --set-json 'toolProbe.dns.to=[{"namespaceSelector":{"matchLabels":{"a":"b"}}}]' --set toolProbe.timeoutSecs=5
+check "with the election on, the refusal gives one block that fits" refused 'for example leaseSecs: 21, renewSecs: 10, tuning.reconcileTimeoutSecs: 10' --set replicas=2 \
+  --set-json 'toolProbe.to=[{"namespaceSelector":{"matchLabels":{"a":"b"}}}]' \
+  --set-json 'toolProbe.dns.to=[{"namespaceSelector":{"matchLabels":{"a":"b"}}}]' --set toolProbe.timeoutSecs=5
+check "with the election on, the refusal offers a shorter probe" refused 'Or lower toolProbe.timeoutSecs' --set replicas=2 \
+  --set-json 'toolProbe.to=[{"namespaceSelector":{"matchLabels":{"a":"b"}}}]' \
+  --set-json 'toolProbe.dns.to=[{"namespaceSelector":{"matchLabels":{"a":"b"}}}]' --set toolProbe.timeoutSecs=5
+render --set replicas=2 --set leaderElection.leaseSecs=21 --set tuning.reconcileTimeoutSecs=10 \
+  --set-json 'toolProbe.to=[{"namespaceSelector":{"matchLabels":{"a":"b"}}}]' \
+  --set-json 'toolProbe.dns.to=[{"namespaceSelector":{"matchLabels":{"a":"b"}}}]' --set toolProbe.timeoutSecs=5
+check "with the election on, the refusal's block renders: probe 5 s, pass 10 s, lease 21 s" \
+  dhas ConfigMap aap-operator '^    toolProbe:$' '^      enabled: true$' '^      timeoutSecs: 5$' '^    reconcile:$' '^      timeoutSecs: 10$' '^      leaseSecs: 21$'
+render --set replicas=2 --set leaderElection.leaseSecs=17 --set tuning.reconcileTimeoutSecs=6 \
+  --set-json 'toolProbe.to=[{"namespaceSelector":{"matchLabels":{"a":"b"}}}]' \
+  --set-json 'toolProbe.dns.to=[{"namespaceSelector":{"matchLabels":{"a":"b"}}}]' --set toolProbe.timeoutSecs=1
+check "with the election on, a probe of 1 s fits a pass of 6 s and a lease of 17 s" \
+  dhas ConfigMap aap-operator '^    toolProbe:$' '^      enabled: true$' '^      timeoutSecs: 1$' '^    reconcile:$' '^      timeoutSecs: 6$' '^      leaseSecs: 17$'
+check "with the election on, a renew of 15 s moves the lease the refusal names (renew + pass + 1, not pass twice)" refused 'for example leaseSecs: 81, renewSecs: 15, tuning.reconcileTimeoutSecs: 65' --set replicas=2 \
+  --set leaderElection.leaseSecs=30 --set leaderElection.renewSecs=15 \
+  --set-json 'toolProbe.to=[{"namespaceSelector":{"matchLabels":{"a":"b"}}}]' \
+  --set-json 'toolProbe.dns.to=[{"namespaceSelector":{"matchLabels":{"a":"b"}}}]' --set toolProbe.timeoutSecs=60
+render --set replicas=2 --set leaderElection.leaseSecs=81 --set leaderElection.renewSecs=15 --set tuning.reconcileTimeoutSecs=65 \
+  --set-json 'toolProbe.to=[{"namespaceSelector":{"matchLabels":{"a":"b"}}}]' \
+  --set-json 'toolProbe.dns.to=[{"namespaceSelector":{"matchLabels":{"a":"b"}}}]' --set toolProbe.timeoutSecs=60
+check "with the election on, the renew-15 block renders: probe 60 s, pass 65 s, lease 81 s, renew 15 s" \
+  dhas ConfigMap aap-operator '^    toolProbe:$' '^      enabled: true$' '^      timeoutSecs: 60$' '^    reconcile:$' '^      timeoutSecs: 65$' '^      leaseSecs: 81$' '^      renewSecs: 15$'
+check "with the election on, a probe timeout set to null is the default 5 s, as the file writes it" refused 'toolProbe.timeoutSecs (5) does not fit the pass: the pass keeps 5 s for its other steps, so the probe needs tuning.reconcileTimeoutSecs of at least 10' --set replicas=2 \
+  --set-json 'toolProbe.to=[{"namespaceSelector":{"matchLabels":{"a":"b"}}}]' \
+  --set-json 'toolProbe.dns.to=[{"namespaceSelector":{"matchLabels":{"a":"b"}}}]' --set toolProbe.timeoutSecs=null
+check "with the election on, the refusal says the time the controller gives (min(probe, pass - 5), not always 1 s)" refused 'give the probe 5 s' --set replicas=2 \
+  --set leaderElection.leaseSecs=21 --set tuning.reconcileTimeoutSecs=10 \
+  --set-json 'toolProbe.to=[{"namespaceSelector":{"matchLabels":{"a":"b"}}}]' \
+  --set-json 'toolProbe.dns.to=[{"namespaceSelector":{"matchLabels":{"a":"b"}}}]' --set toolProbe.timeoutSecs=30
+check "with the election on, a probe of 1 s is still refused at a pass of 4 s, and nothing is cut (the controller gives it 1 s)" refused 'give the probe 1 s' --set replicas=2 \
+  --set-json 'toolProbe.to=[{"namespaceSelector":{"matchLabels":{"a":"b"}}}]' \
+  --set-json 'toolProbe.dns.to=[{"namespaceSelector":{"matchLabels":{"a":"b"}}}]' --set toolProbe.timeoutSecs=1
+check "with the election on, that refusal names the pass of 6 s a 1 s probe needs" refused 'tuning.reconcileTimeoutSecs of at least 6' --set replicas=2 \
+  --set-json 'toolProbe.to=[{"namespaceSelector":{"matchLabels":{"a":"b"}}}]' \
+  --set-json 'toolProbe.dns.to=[{"namespaceSelector":{"matchLabels":{"a":"b"}}}]' --set toolProbe.timeoutSecs=1
 render --set replicas=2 --set tuning=null
 check "tuning: null is the defaults, not a nil dereference" dhas ConfigMap aap-operator '^      timeoutSecs: 4$'
 render

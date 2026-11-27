@@ -419,7 +419,11 @@ toolProbe:
   # The ports a probe may use, as the provider's URL names them: 443 for an https server, 80 or the port of an in-cluster server.
   ports: [80, 443]
   # How long one probe may take, in seconds (1 to 60). A server that does not answer by then is `Reachable: False`, reason
-  # `Timeout`.
+  # `Timeout`. The probe runs inside a reconcile pass that keeps 5 s for its other steps, so a probe needs
+  # `tuning.reconcileTimeoutSecs` of at least `timeoutSecs + 5`, or the controller gives it `min(probe, max(pass - 5, 1))` seconds. With `replicas` above 1 the pass must
+  # also stay below `leaderElection.leaseSecs - renewSecs`, and the chart refuses a pair that does not fit and names the values that
+  # do. The defaults cannot hold any probe (a pass of 4 s; the lease rule holds at 15 s, 4 < 15 - 10); with the default `renewSecs: 10` the smallest block for the default 5 s probe is
+  # `leaseSecs: 21, renewSecs: 10, tuning.reconcileTimeoutSecs: 10, toolProbe.timeoutSecs: 5`.
   timeoutSecs: 5
   # How the operator resolves the server's name. REQUIRED while `to` is set and networkPolicy is enabled: without it the operator's
   # policy has no DNS rule, and a rule with ports and no `to` would be port 53 to anywhere. The cluster's DNS, as for traces.
@@ -501,7 +505,9 @@ logLevel: info
 # left out keeps the binary's default.
 tuning: {}
   # concurrency: 4          # services reconciled at once, per controller and per watched namespace
-  # reconcileTimeoutSecs: 4 # the longest one pass may take; with replicas > 1 it is 4 by default and must be below leaseSecs - renewSecs
+  # reconcileTimeoutSecs: 4 # the longest one pass may take; with replicas > 1 it is 4 by default and must be below leaseSecs - renewSecs.
+  #                         # A tool probe needs at least toolProbe.timeoutSecs + 5 (10 for the default probe, so leaseSecs: 21 with
+  #                         # renewSecs: 10); the chart refuses a pair that does not fit and names the values that do.
   # resyncSecs: 300         # timer of a service that is Ready or Suspended
   # resyncPendingSecs: 15   # timer of one that is rolling out, unwell or held by a foreign object
 
