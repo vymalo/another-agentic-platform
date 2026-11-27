@@ -20,7 +20,9 @@ mod syntax;
 mod validate;
 
 pub use digest::{canonical_json, digest_json, spec_digest};
-pub use externals::{Externals, References, references};
+pub use externals::{
+    ActivityExternals, ActivitySecret, Externals, OperatorPeer, References, references,
+};
 pub use resolve::{ResolvedAgent, resolve};
 pub use run_pods::{
     ContainerResources, EgressProxySettings, EgressResources, GitSandboxSettings, NodeTypeSettings,

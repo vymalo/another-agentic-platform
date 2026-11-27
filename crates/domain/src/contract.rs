@@ -88,6 +88,12 @@ pub mod env {
     /// `GITHUB_HOST` of the sidecar (GitHub Enterprise).
     pub const GITHUB_HOST: &str = "GITHUB_HOST";
 
+    /// Where the activity listener binds (adam-rs ADR 0083, ANR-1030a). Only on that address: the A2A server refuses
+    /// the activity tokens and the listener refuses the A2A ones.
+    pub const ACTIVITY_LISTEN_ADDR: &str = "ACTIVITY_LISTEN_ADDR";
+    /// Comma-separated bearer tokens of the activity listener (a Secret), a list of its own.
+    pub const ACTIVITY_BEARER_TOKENS: &str = "ACTIVITY_BEARER_TOKENS";
+
     /// Every variable the operator can set on an agent container. `extraEnv` may name none of them,
     /// whether or not the operator sets it for this agent.
     pub const OPERATOR_SET: &[&str] = &[
@@ -127,6 +133,8 @@ pub mod env {
         PR_DRAFT,
         GIT_AUTHOR_NAME,
         GIT_AUTHOR_EMAIL,
+        ACTIVITY_LISTEN_ADDR,
+        ACTIVITY_BEARER_TOKENS,
     ];
 }
 

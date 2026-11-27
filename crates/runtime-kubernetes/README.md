@@ -32,8 +32,8 @@ else: the provider has no right on Secrets, never reads one, and copies no kubel
 | `StatefulSet` | the workload's name (`<svc>`, `<svc>-front`) | `Workload::stable_identity`: a per-replica volume, or a pod name that is a worker's identity (`affinity`, `isolated`) |
 | `Deployment` | the same | otherwise |
 | `PodDisruptionBudget` | the workload's name | `Workload::min_available` is set (`aap-domain`: a front of more than one replica) |
-| `Service` | `<svc>` | always: ClusterIP, port `http` to the named container port, selecting `Network::selects` |
-| `NetworkPolicy` | `<svc>` | `Network::allow_from` is not empty: ingress on the container port from those peers, **no egress rule**. An empty list makes no policy (and deletes one an earlier spec made) |
+| `Service` | `<svc>` | always: ClusterIP, port `http` to the named container port, selecting `Network::selects`; with `Network::activity` also port `activity` to the container port of that name (ANR-1030a) |
+| `NetworkPolicy` | `<svc>` | `Network::allow_from` is not empty: ingress on the container port from those peers, **no egress rule**. An empty list makes no policy (and deletes one an earlier spec made), **unless `Network::activity` is set** (ANR-1030a): then a policy always, rule 1 as above (with no `from` when the list is empty), and rule 2 the activity port from one peer entry that holds both the operator's namespace and pod selectors |
 | `ConfigMap` | the `FileSet`'s name | one per file set. A path with `/` is a key by an injective encoding (`skills/review/SKILL.md` is `skills_sreview_sSKILL.md`) and is mounted at its path through `items` |
 | `PersistentVolumeClaim` | `<svc>-<volume>` | a `Shared` persistent volume: one ReadWriteMany claim for every replica |
 | `ServiceAccount` | the account `RunPods::service_account` names | `RuntimeSpec::run_pods` is set ([run pods](#run-pods-d15a)): `automountServiceAccountToken: false`; the workers' pods run as it and carry its token as a volume of the coder container alone ([the git sandbox](#the-git-sandbox-d15d)) |

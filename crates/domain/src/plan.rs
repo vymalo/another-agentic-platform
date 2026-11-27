@@ -3,7 +3,9 @@
 
 use std::collections::BTreeMap;
 
-use aap_api::{AgentConfig, Binary, HarnessType, RunPods, SecretKeyRef, Tools, Volume};
+use aap_api::{
+    AgentConfig, AgentService, Binary, HarnessType, RunPods, SecretKeyRef, Tools, Volume,
+};
 
 /// The adam-rs settings of a config, when its harness is adam-rs.
 pub fn adam(config: &AgentConfig) -> Option<&aap_api::Adam> {
@@ -87,6 +89,20 @@ pub fn header_vars(tools: &Tools) -> BTreeMap<&str, Vec<&SecretKeyRef>> {
         }
     }
     vars
+}
+
+/// The deployment's activity listener, when this agent gets one (AD-058, ANR-1030a): the deployment names the
+/// listener, the service sets `scaling.idleTimeout` and the harness is adam-rs. An A2A image never gets one: it
+/// never sleeps, because nothing of it says how busy it is.
+pub fn activity<'e>(
+    service: &AgentService,
+    config: &AgentConfig,
+    externals: &'e crate::externals::Externals,
+) -> Option<&'e crate::externals::ActivityExternals> {
+    externals
+        .activity
+        .as_ref()
+        .filter(|_| service.spec.scaling.idle_timeout.is_some() && adam(config).is_some())
 }
 
 /// The default address of the service: `http://<name>.<namespace>.svc:<port>/`.

@@ -1061,7 +1061,13 @@ fn every_variable_of_the_contract_is_covered_by_a_golden_or_a_test() {
         .collect();
     assert_eq!(
         unseen,
-        vec![&"ADAM_AGENT_DIR", &"GITHUB_APP_INSTALLATION_ID"],
+        // The two ACTIVITY_* names are adam-rs's ADR 0083, newer than the revision the goldens are at: tests/activity.rs sets them.
+        vec![
+            &"ADAM_AGENT_DIR",
+            &"GITHUB_APP_INSTALLATION_ID",
+            &"ACTIVITY_LISTEN_ADDR",
+            &"ACTIVITY_BEARER_TOKENS"
+        ],
         "the contract names a variable no golden sets: cover it in tests/examples.rs"
     );
 }

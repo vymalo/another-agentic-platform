@@ -84,6 +84,39 @@ pub fn resolved(name: &str, change: impl FnOnce(&mut Value, &mut Value)) -> Reso
     })
 }
 
+/// An example with changes, resolved with the deployment's activity listener (AD-058, ANR-1030a).
+pub fn resolved_activity(
+    name: &str,
+    port: u16,
+    change: impl FnOnce(&mut Value, &mut Value),
+) -> ResolvedAgent {
+    let externals = fixture_externals().with_activity(aap_domain::ActivityExternals {
+        port,
+        tokens_secret: aap_domain::ActivitySecret {
+            name: "aap-activity".to_owned(),
+            key: "tokens".to_owned(),
+        },
+        operator_peer: aap_domain::OperatorPeer {
+            namespace: "aap-system".to_owned(),
+            pod_labels: std::collections::BTreeMap::from([(
+                "app.kubernetes.io/name".to_owned(),
+                "aap-operator".to_owned(),
+            )]),
+        },
+    });
+    let (mut service, mut config) = example(name);
+    change(&mut service, &mut config);
+    let service: AgentService = serde_json::from_value(service).unwrap();
+    let config: AgentConfig = serde_json::from_value(config).unwrap();
+    let owner = owner_handle(
+        "agents.vymalo.com/v1alpha1",
+        "AgentService",
+        service.metadata.name.clone().unwrap(),
+        "0b1f3c5e-1111-4222-8333-444455556666",
+    );
+    aap_domain::resolve(&service, &config, &externals, owner).expect("the example resolves")
+}
+
 // ------------------------------------------------------------------------------------ run pods
 
 /// `deploy/operator/values.yaml`, parsed.

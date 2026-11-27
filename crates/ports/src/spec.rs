@@ -422,6 +422,11 @@ pub struct Container {
     /// then not in the serialised spec, so the digest of a spec that never sets it is what it was.
     #[serde(default, skip_serializing_if = "is_false")]
     pub read_only_root_filesystem: bool,
+    /// The port of a second listener, named `activity`: where the operator polls how busy the agent is
+    /// (AD-058, ANR-1030a). Off unless set, and then not in the serialised spec, so the digest of a spec that
+    /// never sets it is what it was.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub activity_port: Option<u16>,
 }
 
 fn is_false(b: &bool) -> bool {
@@ -670,6 +675,23 @@ pub struct Network {
     /// spec, so the digest of a spec that never sets it is what it was.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub card_path: Option<String>,
+    /// The activity listener of the agent (AD-058, ANR-1030a): a second Service port and a second ingress
+    /// rule that only the operator may use. Off unless set, and then not in the serialised spec, so the
+    /// digest and the objects of a spec that never sets it are what they were.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub activity: Option<NetworkActivity>,
+}
+
+/// The activity listener's side of [`Network`]: its port, and who may reach it.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct NetworkActivity {
+    /// The port the Service exposes (as `activity`) and the container's `activity` port listens on. In the
+    /// digest: a pod that listens elsewhere is a different pod.
+    pub port: u16,
+    /// The one peer that may reach it: the operator's pods, as a single entry that names both the namespace
+    /// and the pods (two entries would be an OR). Set aside by the digest, as `allow_from` is: moving the
+    /// operator must not roll the agents.
+    pub from: Peer,
 }
 
 /// One peer of an ingress rule: what a Kubernetes `NetworkPolicyPeer` says, in neutral terms. At

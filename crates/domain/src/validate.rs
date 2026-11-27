@@ -177,6 +177,7 @@ fn check_deployment_limits(
             );
         }
     }
+    check_activity(v, service, cfg, externals);
     if let Some(asked) = plan::adam(cfg)
         .and_then(|a| a.coder.as_ref())
         .and_then(|c| c.max_access_tier)
@@ -188,6 +189,41 @@ fn check_deployment_limits(
                 "{:?} is above the ceiling of this operator, {:?} (its `maxAccessTier`, the file key `defaults.maxAccessTier`): ask for that tier or a lower one",
                 asked.as_str(),
                 externals.max_access_tier.as_str()
+            ),
+        );
+    }
+}
+
+/// The activity listener's port must not be a port the pod already serves (AD-058, ANR-1030a): adam exits 78 when it shares
+/// `LISTEN_ADDR`'s, and the GitHub sidecar binds its own on the same network namespace. Only for an agent that gets a listener.
+fn check_activity(
+    v: &mut Issues,
+    service: &AgentService,
+    cfg: &AgentConfig,
+    externals: &Externals,
+) {
+    let Some(activity) = plan::activity(service, cfg, externals) else {
+        return;
+    };
+    let at = "AgentService spec.scaling.idleTimeout";
+    if activity.port == 0 || activity.port == crate::contract::PORT {
+        v.add(
+            at,
+            format!(
+                "this operator's activity listener port is {}, which is not usable: it is neither 0 nor the A2A port {} (the file's activity settings)",
+                activity.port,
+                crate::contract::PORT
+            ),
+        );
+    }
+    if let Some(g) = cfg.spec.tools.github_mcp.as_ref().filter(|g| g.sidecar)
+        && i64::from(g.port) == i64::from(activity.port)
+    {
+        v.add(
+            "AgentConfig spec.tools.githubMcp.port",
+            format!(
+                "{} is the port of this operator's activity listener, which an agent with scaling.idleTimeout binds in the same pod: choose another port",
+                g.port
             ),
         );
     }

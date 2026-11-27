@@ -42,9 +42,53 @@ pub struct Externals {
     /// serialises exactly as it did before the field existed. **Named, it is part of the digest**, so naming it rolls the
     /// agents once, as a new image would.
     pub agent_runtime_class: Option<String>,
+    /// How the operator polls an agent's activity (AD-058, ANR-1030a). `None` (the default): the operator does not,
+    /// and an agent gets no listener, no port and no rule for it, whatever its `scaling.idleTimeout`.
+    pub activity: Option<ActivityExternals>,
+}
+
+/// What the deployment says about the activity listener of the agents that may sleep (AD-058, ANR-1030a).
+///
+/// One token for the whole deployment: the operator never reads a Secret (AD-024), so the agent's pod takes the
+/// listener's tokens from a key of a Secret that has this name in every namespace the operator watches, and the
+/// operator sends the same value as its bearer. Pending the owner's confirmation (ANR-Q142).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ActivityExternals {
+    /// The port the listener binds, on every interface of the pod. It is neither the A2A port, nor the GitHub
+    /// sidecar's, nor 0; `validate` refuses an agent it would collide with, naming the field.
+    pub port: u16,
+    /// The Secret key holding the bearer tokens of the listener (`ACTIVITY_BEARER_TOKENS`), by reference only.
+    pub tokens_secret: ActivitySecret,
+    /// The only peer that may reach the listener: the operator's pods.
+    pub operator_peer: OperatorPeer,
+}
+
+/// A key of a Secret, by name.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ActivitySecret {
+    /// The Secret's name.
+    pub name: String,
+    /// The key.
+    pub key: String,
+}
+
+/// Where the operator's pods are: one namespace and the labels of its pods.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct OperatorPeer {
+    /// The operator's namespace (matched by `kubernetes.io/metadata.name`).
+    pub namespace: String,
+    /// Labels of the operator's pods; every one must match.
+    pub pod_labels: BTreeMap<String, String>,
 }
 
 impl Externals {
+    /// The deployment's activity listener (AD-058, ANR-1030a).
+    #[must_use]
+    pub fn with_activity(mut self, activity: ActivityExternals) -> Self {
+        self.activity = Some(activity);
+        self
+    }
+
     /// The default image of the operator.
     #[must_use]
     pub fn with_default_image(mut self, image: impl Into<String>) -> Self {
