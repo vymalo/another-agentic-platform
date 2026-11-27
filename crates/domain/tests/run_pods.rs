@@ -102,7 +102,7 @@ fn run_pods_set_the_variables_and_mount_the_template_in_the_workers_pod() {
     assert_eq!(env("RUN_POD_CONTAINER"), lit("run"));
     assert_eq!(env("RUN_POD_READY_TIMEOUT_SECS"), lit("600"));
     assert_eq!(env("RUN_POD_IDLE_SECS"), lit("300"));
-    assert_eq!(env("RUN_POD_WAIT_SECS"), lit("600"));
+    assert_eq!(env("RUN_POD_WAIT_SECS"), lit("1020"));
     assert_eq!(
         env("WORKER_ID"),
         Some(EnvValue::PodName),
