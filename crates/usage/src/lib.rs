@@ -142,13 +142,19 @@ impl PodMinuteEvent {
     }
 }
 
-fn check_text(field: &'static str, value: &str) -> Result<(), UsageError> {
-    let ok = !value.is_empty()
+/// Whether `value` is a text field of a line: not empty, at most 128 bytes, and only `[A-Za-z0-9._:/-]`. It is
+/// the one copy of the rule [`PodMinuteEvent::validate`] applies to each text field, so a producer (the meter, for
+/// a run id it reads from a pod) can refuse a value before it builds a line.
+pub fn is_line_text(value: &str) -> bool {
+    !value.is_empty()
         && value.len() <= MAX_TEXT
         && value
             .bytes()
-            .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'.' | b'_' | b':' | b'/' | b'-'));
-    if ok {
+            .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'.' | b'_' | b':' | b'/' | b'-'))
+}
+
+fn check_text(field: &'static str, value: &str) -> Result<(), UsageError> {
+    if is_line_text(value) {
         Ok(())
     } else {
         Err(UsageError::Invalid { field })

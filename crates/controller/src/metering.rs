@@ -12,7 +12,7 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 
-use aap_usage::WEIGHT_GRID;
+use aap_usage::{WEIGHT_GRID, is_line_text};
 use serde_json::Value;
 
 /// How far back a minute is still sent: 24 h. An older one is skipped and counted
@@ -147,12 +147,13 @@ pub fn classify(p: &PodFacts) -> Kind {
                         .map(str::to_owned)
                 })
                 .filter(|s| !s.is_empty()),
-            // The full id is the annotation; the label is its hash and is never read as the id.
+            // The full id is the annotation; the label is its hash and is never read as the id. An id the line
+            // could not carry (empty, whitespace, outside `[A-Za-z0-9._:/-]`, over 128 bytes) is no id at all.
             run: p
                 .annotations
                 .get(RUN_ID_ANNOTATION)
                 .map(String::as_str)
-                .filter(|r| !r.is_empty())
+                .filter(|r| is_line_text(r))
                 .map(str::to_owned),
         },
         (Some(AGENT_MANAGED_BY), Some(c)) if AGENT_COMPONENTS.contains(&c) => Kind::Agent {
@@ -426,6 +427,44 @@ mod tests {
                 },
                 "annotation {annotations}"
             );
+        }
+    }
+
+    #[test]
+    fn a_run_id_the_line_cannot_carry_is_no_identity() {
+        let pod = |id: &str| PodFacts {
+            labels: labels(&[
+                (MANAGED_BY_LABEL, "adam-coder"),
+                (COMPONENT_LABEL, "run"),
+                (NAME_LABEL, "coder-run"),
+                (RUN_LABEL, &run_hash(id)),
+            ]),
+            annotations: labels(&[(RUN_ID_ANNOTATION, id)]),
+            ..PodFacts::default()
+        };
+        let run_of = |id: &str| match classify(&pod(id)) {
+            Kind::Run { run, .. } => run,
+            other => panic!("not a run pod: {other:?}"),
+        };
+        // Whitespace, a character outside the alphabet, and one byte too many: each is no run.
+        let too_long = "a".repeat(129);
+        for bad in [
+            " ",
+            "\t",
+            "\n",
+            "run 1",
+            " run1",
+            "run1 ",
+            "run@example",
+            "run\u{e9}",
+            too_long.as_str(),
+        ] {
+            assert_eq!(run_of(bad), None, "{bad:?}");
+        }
+        // The edges that stay: 128 bytes, and every punctuation the line admits.
+        let longest = "a".repeat(128);
+        for good in [longest.as_str(), "ctx:1/task-2_3.4"] {
+            assert_eq!(run_of(good).as_deref(), Some(good), "{good:?}");
         }
     }
 
