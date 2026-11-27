@@ -231,7 +231,8 @@ impl TestCollector {
             .clone()
     }
 
-    /// The raw bytes of **every** request that reached `/v1/logs`, whatever it was answered.
+    /// The raw bytes of **every** request the collector received on any path but `/elsewhere`, before the path is
+    /// checked and whatever it was answered: a request to a wrong path is recorded here too.
     #[must_use]
     pub fn raw_requests(&self) -> Vec<Vec<u8>> {
         self.inner
