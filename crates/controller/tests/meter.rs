@@ -34,6 +34,9 @@ impl<T: UsageSink> UsageSink for Shared<T> {
     async fn send(&self, e: PodMinuteEvent) -> Result<(), UsageError> {
         self.0.send(e).await
     }
+    fn outcomes(&self) -> Option<Vec<aap_usage::Outcome>> {
+        self.0.outcomes()
+    }
 }
 impl<T: AccountSource> AccountSource for Shared<T> {
     async fn account(&self, p: &PodRef) -> Result<Option<String>, AccountUnavailable> {
@@ -1017,5 +1020,126 @@ async fn a_pod_whose_app_container_never_started_is_counted_as_no_start_once() {
             &[("reason", "no-start")]
         ),
         1
+    );
+}
+
+// ---- delivery survives a restart (ANR-1151): the cursor that is known delivered moves on the collector's answer
+
+/// A meter that tracks the sink's acknowledgements, over a sink the case keeps a handle on.
+fn acked(sink: &Arc<MemoryUsageSink>, metrics: &Arc<Metrics>) -> Meter {
+    let accounts = Arc::new(MemoryAccounts::new());
+    accounts.set_run("coder", "run-1", "acct-1");
+    let mut cfg = config();
+    cfg.skew_secs = 0;
+    let (send, outcomes) = aap_controller::erase_sink_with_outcomes(Shared(sink.clone()));
+    Meter::new(send, erase_accounts(Shared(accounts)), cfg, metrics.clone()).with_outcomes(outcomes)
+}
+
+fn ids(from: u64, to: u64) -> Vec<String> {
+    (from..to).map(|m| event_id("uid-1", m)).collect()
+}
+
+#[tokio::test]
+async fn a_collector_that_is_down_holds_the_cursor() {
+    let sink = Arc::new(MemoryUsageSink::new());
+    sink.hold_outcomes(aap_usage::Fate::Delivered); // taken, not acknowledged
+    let metrics = Arc::new(Metrics::new());
+    let meter = acked(&sink, &metrics);
+    meter.pass(&[facts("uid-1", 600)], 1_000).await; // minutes 10..16 are over and handed over
+    assert_eq!(sink.taken().len(), 6);
+    // Nothing was acknowledged: the first minute not known delivered is still the first.
+    assert_eq!(meter.acknowledged_through("uid-1"), Some(10));
+    assert_eq!(meter.unacknowledged("uid-1"), 6);
+    // Passes go by with the collector still silent: the cursor does not move, and nothing is sent twice.
+    meter.pass(&[facts("uid-1", 600)], 1_010).await;
+    meter.settle(1_020);
+    assert_eq!(meter.acknowledged_through("uid-1"), Some(10));
+    assert_eq!(sink.taken().len(), 6);
+    assert_eq!(metrics.get(aap_controller::metric::METER_DELIVERED, &[]), 0);
+}
+
+#[tokio::test]
+async fn an_acknowledgement_moves_the_cursor() {
+    let sink = Arc::new(MemoryUsageSink::new());
+    sink.hold_outcomes(aap_usage::Fate::Delivered);
+    let metrics = Arc::new(Metrics::new());
+    let meter = acked(&sink, &metrics);
+    meter.pass(&[facts("uid-1", 600)], 1_000).await;
+    assert_eq!(sink.settle(Some(2)), 2); // a 200 for the first two
+    meter.settle(1_001);
+    assert_eq!(meter.acknowledged_through("uid-1"), Some(12));
+    assert_eq!(sink.settle(None), 4); // and for the rest
+    meter.settle(1_002);
+    assert_eq!(meter.acknowledged_through("uid-1"), Some(16));
+    assert_eq!(meter.unacknowledged("uid-1"), 0);
+    assert_eq!(metrics.get(aap_controller::metric::METER_DELIVERED, &[]), 6);
+}
+
+#[tokio::test]
+async fn a_refusal_for_good_is_counted_and_never_sent_again() {
+    let sink = Arc::new(MemoryUsageSink::new());
+    sink.hold_outcomes(aap_usage::Fate::Refused);
+    let metrics = Arc::new(Metrics::new());
+    let meter = acked(&sink, &metrics);
+    meter.pass(&[facts("uid-1", 600)], 1_000).await;
+    sink.settle(None);
+    meter.settle(1_001);
+    assert_eq!(meter.unacknowledged("uid-1"), 0);
+    assert_eq!(metrics.get(aap_controller::metric::METER_REFUSED, &[]), 6);
+    meter.pass(&[facts("uid-1", 600)], 1_002).await;
+    assert_eq!(sink.taken().len(), 6, "a refused minute is not sent again");
+}
+
+#[tokio::test]
+async fn a_restart_in_the_middle_of_a_batch_loses_no_minute_and_repeats_only_by_id() {
+    // The collector keeps what it was given across the operator's restart; the operator does not.
+    let sink = Arc::new(MemoryUsageSink::new());
+    sink.hold_outcomes(aap_usage::Fate::Delivered);
+    let first = acked(&sink, &Arc::new(Metrics::new()));
+    let pod = facts("uid-1", 600);
+    first.pass(std::slice::from_ref(&pod), 1_000).await; // minutes 10..16 handed over
+    sink.settle(Some(3)); // three acknowledged, then the operator dies with three in flight
+    drop(first);
+    // The restarted operator has no cursor; the pod is still listed, so it re-derives its minutes.
+    let second = acked(&sink, &Arc::new(Metrics::new()));
+    second.pass(&[pod], 1_100).await; // minutes 10..18
+    let taken = sink.taken();
+    let mut by_id: std::collections::BTreeMap<String, PodMinuteEvent> = Default::default();
+    for e in &taken {
+        // A repeat is the same event, byte for byte: the collector dedupes it on its id.
+        if let Some(before) = by_id.insert(e.event_id.clone(), e.clone()) {
+            assert_eq!(&before, e);
+        }
+    }
+    let mut want = ids(10, 18);
+    want.sort();
+    assert_eq!(by_id.keys().cloned().collect::<Vec<_>>(), want, "no gap");
+    assert!(taken.len() > by_id.len(), "the restart repeated minutes");
+}
+
+#[tokio::test]
+async fn a_vanished_pod_is_kept_until_its_minutes_are_acknowledged() {
+    let sink = Arc::new(MemoryUsageSink::new());
+    sink.hold_outcomes(aap_usage::Fate::Delivered);
+    let meter = acked(&sink, &Arc::new(Metrics::new()));
+    meter.pass(&[facts("uid-1", 600)], 1_100).await; // last seen in minute 18
+    let gone = Default::default();
+    assert_eq!(meter.close_vanished(&gone, 1_300).await, 1);
+    // Everything is handed over, nothing is acknowledged: the pod is still remembered.
+    assert_eq!(meter.acknowledged_through("uid-1"), Some(10));
+    meter.close_vanished(&gone, 1_310).await;
+    assert!(meter.unacknowledged("uid-1") > 0);
+    assert!(
+        meter.remembers("uid-1"),
+        "its facts are held while it is unacknowledged"
+    );
+    sink.settle(None);
+    meter.close_vanished(&gone, 1_320).await;
+    assert!(!meter.remembers("uid-1"), "and let go once it is");
+    assert_eq!(meter.unacknowledged("uid-1"), 0);
+    assert_eq!(
+        meter.acknowledged_through("uid-1"),
+        None,
+        "forgotten once acknowledged"
     );
 }

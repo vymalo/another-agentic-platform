@@ -25,8 +25,8 @@ use std::time::Duration;
 
 use aap_ports::LeaderElection;
 use aap_usage::{
-    AccountSource, AccountUnavailable, PodKind, PodMinuteEvent, PodRef, UsageError, UsageSink,
-    event_id,
+    AccountSource, AccountUnavailable, Fate, Outcome, PodKind, PodMinuteEvent, PodRef, UsageError,
+    UsageSink, event_id,
 };
 use k8s_openapi::api::core::v1::Pod;
 use kube::api::ListParams;
@@ -60,6 +60,9 @@ pub type SinkFn = Arc<
         + Sync,
 >;
 
+/// What a sink says became of the events it took (ANR-1151), behind a pointer; `None`: it cannot say.
+pub type OutcomesFn = Arc<dyn Fn() -> Option<Vec<Outcome>> + Send + Sync>;
+
 /// An [`AccountSource`] behind a pointer.
 pub type AccountFn = Arc<
     dyn Fn(
@@ -77,6 +80,17 @@ pub fn erase_sink<S: UsageSink + 'static>(sink: S) -> SinkFn {
         let sink = sink.clone();
         Box::pin(async move { sink.send(event).await })
     })
+}
+
+/// Erase the type of `sink`, keeping its acknowledgements ([`UsageSink::outcomes`]): what the operator uses.
+pub fn erase_sink_with_outcomes<S: UsageSink + 'static>(sink: S) -> (SinkFn, OutcomesFn) {
+    let sink = Arc::new(sink);
+    let reader = sink.clone();
+    let send: SinkFn = Arc::new(move |event| {
+        let sink = sink.clone();
+        Box::pin(async move { sink.send(event).await })
+    });
+    (send, Arc::new(move || reader.outcomes()))
 }
 
 /// Erase the type of `accounts`.
@@ -151,6 +165,18 @@ struct Inner {
     deadline: Option<tokio::time::Instant>,
     /// The account of a run that is bound (it never changes), by service and run: the broker is asked once per run.
     accounts: HashMap<(String, String), String>,
+    /// Minutes handed to the sink and not yet acknowledged, by event id (ANR-1151). Empty when the sink reports no
+    /// outcomes.
+    pending: HashMap<String, Pending>,
+}
+
+/// A minute the sink took and the collector has not acknowledged.
+#[derive(Clone, Debug)]
+struct Pending {
+    uid: String,
+    minute: u64,
+    /// When it was handed over (seconds since the Unix epoch), so that an acknowledgement that never comes expires.
+    at: i64,
 }
 
 /// How far one pod got in a pass.
@@ -173,9 +199,75 @@ pub struct Meter {
     inner: Mutex<Inner>,
     /// Asked between pods: false stops the pass (this replica lost the lease).
     keep_going: Option<Arc<dyn Fn() -> bool + Send + Sync>>,
+    /// Where the sink says what became of what it took; none: taking an event is delivering it.
+    outcomes: Option<OutcomesFn>,
 }
 
 impl Meter {
+    /// Track the sink's acknowledgements (ANR-1151): a pod's minutes are **delivered** when the collector says so,
+    /// not when they are queued, and a pod that vanished is not forgotten while a minute of it is unacknowledged.
+    #[must_use]
+    pub fn with_outcomes(mut self, f: OutcomesFn) -> Self {
+        self.outcomes = Some(f);
+        self
+    }
+
+    /// How many minutes of `uid` the sink took and the collector has not yet acknowledged.
+    pub fn unacknowledged(&self, uid: &str) -> usize {
+        self.with(|i| i.pending.values().filter(|p| p.uid == uid).count())
+    }
+
+    /// Whether the meter still holds the last facts it saw of `uid` (a vanished pod's are held until its minutes
+    /// are acknowledged).
+    pub fn remembers(&self, uid: &str) -> bool {
+        self.with(|i| i.seen.contains_key(uid))
+    }
+
+    /// The first minute of `uid` that is **not known delivered**: the oldest unacknowledged minute, or, when none
+    /// is pending, the cursor of what was handed over. It moves only on the collector's acknowledgement.
+    pub fn acknowledged_through(&self, uid: &str) -> Option<u64> {
+        self.with(|i| {
+            i.pending
+                .values()
+                .filter(|p| p.uid == uid)
+                .map(|p| p.minute)
+                .min()
+                .or_else(|| i.state.get(uid).and_then(|s| s.cursor))
+        })
+    }
+
+    /// Read what the sink says became of its events at `now`: an acknowledged or refused minute stops being
+    /// pending, and a minute unacknowledged past the backfill bound is forgotten (counted), so a lost
+    /// acknowledgement cannot keep a vanished pod for ever.
+    pub fn settle(&self, now: i64) {
+        let Some(read) = self.outcomes.clone() else {
+            return;
+        };
+        let outcomes = read().unwrap_or_default();
+        let (mut delivered, mut refused) = (0u64, 0u64);
+        let mut expired = 0u64;
+        self.with(|i| {
+            for Outcome { event_id, fate } in outcomes {
+                if i.pending.remove(&event_id).is_some() {
+                    match fate {
+                        Fate::Delivered => delivered += 1,
+                        Fate::Refused => refused += 1,
+                    }
+                }
+            }
+            let bound = i64::try_from(metering::BACKFILL_MINUTES * 60).unwrap_or(i64::MAX);
+            let before = i.pending.len();
+            i.pending.retain(|_, p| now.saturating_sub(p.at) <= bound);
+            expired = (before - i.pending.len()) as u64;
+        });
+        self.metrics.add(name::METER_DELIVERED, &[], delivered);
+        self.metrics.add(name::METER_REFUSED, &[], refused);
+        self.metrics.add(name::METER_UNACKNOWLEDGED, &[], expired);
+        if refused > 0 {
+            tracing::warn!(refused, "the collector refused pod-minute events for good");
+        }
+    }
+
     /// Stop a pass between two pods when `f` says false (for example, when this replica no longer leads).
     #[must_use]
     pub fn with_continue(mut self, f: impl Fn() -> bool + Send + Sync + 'static) -> Self {
@@ -212,6 +304,7 @@ impl Meter {
                 ..Inner::default()
             }),
             keep_going: None,
+            outcomes: None,
         }
     }
 
@@ -254,6 +347,7 @@ impl Meter {
     /// pod that has minutes due gets an equal part of what is left (at least one), the pod the pass starts with
     /// rotates, and what a pod that sends nothing leaves is shared again by the others in the same pass.
     pub async fn pass(&self, pods: &[PodFacts], now: i64) -> usize {
+        self.settle(now);
         // Remember what was seen, before anything else: a pod that vanishes is closed from it.
         self.with(|i| {
             for pod in pods {
@@ -326,6 +420,7 @@ impl Meter {
     /// of every scope: each is sent through the minute that contains `min(last finishedAt seen, last time it was
     /// seen Running)`, as soon as that minute is over, and then forgotten. Returns how many events were sent.
     pub async fn close_vanished(&self, listed: &HashSet<String>, now: i64) -> usize {
+        self.settle(now);
         let gone: Vec<(String, Seen)> = self.with(|i| {
             i.seen
                 .iter()
@@ -355,8 +450,10 @@ impl Meter {
             facts.deleted_at = None;
             facts.has_container_status = true;
             match self.process(&facts, now, share, &mut sent).await {
-                Progress::Done => self.forget(&uid),
-                Progress::Held => {}
+                // Everything is handed over, but a vanished pod's facts are kept until the collector has acknowledged
+                // its minutes: a refusal or a lost batch is then still a minute the meter can account for.
+                Progress::Done if self.unacknowledged(&uid) == 0 => self.forget(&uid),
+                Progress::Done | Progress::Held => {}
                 Progress::SinkDown => break,
             }
         }
@@ -508,6 +605,19 @@ impl Meter {
                 Ok(()) => {
                     self.metrics.inc(name::METER_EVENTS, &[]);
                     self.update(&pod.uid, |s| s.cursor = Some(minute + 1));
+                    if self.outcomes.is_some() {
+                        let id = event_id(&pod.uid, minute);
+                        self.with(|i| {
+                            i.pending.insert(
+                                id,
+                                Pending {
+                                    uid: pod.uid.clone(),
+                                    minute,
+                                    at: now,
+                                },
+                            );
+                        });
+                    }
                     self.with(|i| i.budget = i.budget.saturating_sub(1));
                     *sent += 1;
                 }

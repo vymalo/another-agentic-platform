@@ -451,3 +451,55 @@ async fn shutdown_counts_every_event_it_gives_up_including_those_still_in_the_ch
     assert_eq!(s.sent + s.refused + s.unsent_at_shutdown, 10);
     assert!(c.events().is_empty());
 }
+
+// ---- acknowledgements (ANR-1151)
+
+fn fates(sink: &OtlpUsageSink) -> Vec<(String, aap_usage::Fate)> {
+    sink.outcomes()
+        .unwrap()
+        .into_iter()
+        .map(|o| (o.event_id, o.fate))
+        .collect()
+}
+
+#[tokio::test]
+async fn a_down_collector_reports_no_outcome_and_a_200_reports_every_event_delivered() {
+    let c = TestCollector::start();
+    c.set_behaviour(Behaviour::Status(503));
+    let sink = OtlpUsageSink::start(settings(&c)).unwrap();
+    let sent: Vec<_> = (0..4).map(|m| event("m1", "pod-1", 100 + m)).collect();
+    for e in &sent {
+        sink.send(e.clone()).await.unwrap();
+    }
+    until("two refused attempts", || c.raw_requests().len() >= 2).await;
+    // Taken and retried, never acknowledged: the meter's cursor must not move on this.
+    assert!(fates(&sink).is_empty());
+    c.set_behaviour(Behaviour::Accept);
+    until("delivered", || c.events().len() >= 4).await;
+    let mut got = Vec::new();
+    until("acknowledged", || {
+        got.extend(fates(&sink));
+        got.len() >= 4
+    })
+    .await;
+    assert!(got.iter().all(|(_, f)| *f == aap_usage::Fate::Delivered));
+    let got_ids: BTreeSet<String> = got.into_iter().map(|(id, _)| id).collect();
+    assert_eq!(got_ids, ids(&sent));
+    assert!(fates(&sink).is_empty(), "each outcome is said once");
+}
+
+#[tokio::test]
+async fn a_permanent_refusal_reports_the_batch_refused() {
+    let c = TestCollector::start();
+    c.set_behaviour(Behaviour::Status(400));
+    let sink = OtlpUsageSink::start(settings(&c)).unwrap();
+    let e = event("m1", "pod-1", 7);
+    sink.send(e.clone()).await.unwrap();
+    let mut got = Vec::new();
+    until("refused", || {
+        got.extend(fates(&sink));
+        !got.is_empty()
+    })
+    .await;
+    assert_eq!(got, vec![(e.event_id, aap_usage::Fate::Refused)]);
+}

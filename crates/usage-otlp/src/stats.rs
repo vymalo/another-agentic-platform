@@ -12,6 +12,7 @@ pub struct Stats {
     pub(crate) retries: AtomicU64,
     pub(crate) unsent_at_shutdown: AtomicU64,
     pub(crate) depth: AtomicU64,
+    pub(crate) outcomes_dropped: AtomicU64,
     /// Unix seconds at which the current episode of retries began; 0 when not retrying.
     pub(crate) retrying_since: AtomicU64,
 }
@@ -34,6 +35,8 @@ pub struct StatsSnapshot {
     pub unsent_at_shutdown: u64,
     /// Events taken and not yet sent, refused or given up: the queue and the batch in flight.
     pub queue_depth: u64,
+    /// Acknowledgements dropped because the meter did not drain them (never, while a meter runs).
+    pub outcomes_dropped: u64,
     /// Seconds a batch has been retried without being taken (at least 1 while it is); 0 when not retrying. Alert on it.
     pub retrying_since_secs: u64,
 }
@@ -51,6 +54,7 @@ impl Stats {
             retries: g(&self.retries),
             unsent_at_shutdown: g(&self.unsent_at_shutdown),
             queue_depth: g(&self.depth),
+            outcomes_dropped: g(&self.outcomes_dropped),
             retrying_since_secs: match g(&self.retrying_since) {
                 0 => 0,
                 t => now_secs().saturating_sub(t).max(1),

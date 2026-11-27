@@ -6,7 +6,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, PoisonError};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
-use aap_usage::{PodMinuteEvent, UsageError, UsageSink};
+use aap_usage::{Fate, Outcome, PodMinuteEvent, UsageError, UsageSink};
 use reqwest::Client;
 use reqwest::header::CONTENT_TYPE;
 use serde_json::Value as Json;
@@ -26,6 +26,29 @@ const DROP_GRACE: Duration = Duration::from_secs(5);
 
 struct Flush(oneshot::Sender<()>);
 
+/// The most outcomes held for the meter to drain. The meter drains every pass and sends at most a few thousand
+/// events between two, so this is a bound that is never met by a meter that runs; past it the oldest are dropped
+/// and counted, and the meter's pending minute expires by age instead (a minute sent again is deduped).
+const MAX_OUTCOMES: usize = 65_536;
+
+#[derive(Default)]
+struct Outcomes(Mutex<Vec<Outcome>>);
+
+impl Outcomes {
+    fn push(&self, events: &[PodMinuteEvent], fate: Fate, stats: &Stats) {
+        let mut held = self.0.lock().unwrap_or_else(PoisonError::into_inner);
+        held.extend(events.iter().map(|e| Outcome {
+            event_id: e.event_id.clone(),
+            fate,
+        }));
+        if held.len() > MAX_OUTCOMES {
+            let over = held.len() - MAX_OUTCOMES;
+            held.drain(..over);
+            Stats::add(&stats.outcomes_dropped, over as u64);
+        }
+    }
+}
+
 /// What `shutdown` found.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct ShutdownReport {
@@ -39,6 +62,7 @@ pub struct OtlpUsageSink {
     ctl: mpsc::Sender<Flush>,
     closing: watch::Sender<Option<Instant>>,
     stats: Arc<Stats>,
+    outcomes: Arc<Outcomes>,
     task: Mutex<Option<JoinHandle<()>>>,
 }
 
@@ -66,6 +90,7 @@ impl OtlpUsageSink {
         let (ctl, ctl_rx) = mpsc::channel(8);
         let (closing, closing_rx) = watch::channel(None);
         let stats = Arc::new(Stats::default());
+        let outcomes = Arc::new(Outcomes::default());
         let worker = Worker {
             rx,
             ctl_rx,
@@ -79,6 +104,7 @@ impl OtlpUsageSink {
             backoff_max: settings.backoff_max,
             warn_every: settings.warn_every,
             stats: stats.clone(),
+            outcomes: outcomes.clone(),
         };
         let task = tokio::spawn(worker.run());
         Ok(Self {
@@ -86,6 +112,7 @@ impl OtlpUsageSink {
             ctl,
             closing,
             stats,
+            outcomes,
             task: Mutex::new(Some(task)),
         })
     }
@@ -151,6 +178,20 @@ impl UsageSink for OtlpUsageSink {
             Err(mpsc::error::TrySendError::Closed(_)) => Err(UsageError::Unavailable),
         }
     }
+
+    /// The acknowledgements (ANR-1151): a 2xx answer says every event of its batch **Delivered** (a
+    /// `partialSuccess` count says how many records were rejected and not which, so those are counted in
+    /// `refused` and still reported delivered); a request refused for good says **Refused**. A batch the shutdown
+    /// deadline gave up says nothing.
+    fn outcomes(&self) -> Option<Vec<Outcome>> {
+        Some(std::mem::take(
+            &mut *self
+                .outcomes
+                .0
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner),
+        ))
+    }
 }
 
 struct Worker {
@@ -166,6 +207,7 @@ struct Worker {
     backoff_max: Duration,
     warn_every: Duration,
     stats: Arc<Stats>,
+    outcomes: Arc<Outcomes>,
 }
 
 enum Post {
@@ -285,6 +327,7 @@ impl Worker {
                         Stats::add(&self.stats.sent, n - rejected);
                         Stats::add(&self.stats.refused, rejected);
                         self.stats.resolve(n);
+                        self.outcomes.push(&events, Fate::Delivered, &self.stats);
                         if rejected > 0 {
                             tracing::warn!(
                                 rejected,
@@ -302,6 +345,7 @@ impl Worker {
                         // block every later minute behind it. Dropped and counted: the status is all that is said.
                         Stats::add(&self.stats.refused, n);
                         self.stats.resolve(n);
+                        self.outcomes.push(&events, Fate::Refused, &self.stats);
                         tracing::warn!(
                             status,
                             events = n,
@@ -313,6 +357,7 @@ impl Worker {
                         if events.len() == 1 {
                             Stats::add(&self.stats.refused, 1);
                             self.stats.resolve(1);
+                            self.outcomes.push(&events, Fate::Refused, &self.stats);
                             tracing::warn!(
                                 status = 413u16,
                                 events = 1,

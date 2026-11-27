@@ -1,13 +1,19 @@
 use std::collections::BTreeMap;
 use std::sync::{Mutex, PoisonError};
 
-use crate::{AccountSource, AccountUnavailable, PodMinuteEvent, PodRef, UsageError, UsageSink};
+use crate::{
+    AccountSource, AccountUnavailable, Fate, Outcome, PodMinuteEvent, PodRef, UsageError, UsageSink,
+};
 
 /// The in-memory sink: records what it took, in order. It passes [`crate::testkit`].
 #[derive(Default)]
 pub struct MemoryUsageSink {
     taken: Mutex<Vec<PodMinuteEvent>>,
     down: Mutex<bool>,
+    /// Outcomes not yet drained by [`UsageSink::outcomes`], and the ids whose outcome is held back.
+    settled: Mutex<Vec<Outcome>>,
+    held: Mutex<Option<Fate>>,
+    unsettled: Mutex<Vec<String>>,
 }
 
 impl MemoryUsageSink {
@@ -24,6 +30,34 @@ impl MemoryUsageSink {
             .clone()
     }
 
+    /// Hold every outcome back, as a collector that has not answered yet (or is down): events are taken and
+    /// no [`Outcome`] is reported until [`settle`](Self::settle). `fate` is what [`settle`](Self::settle) will say.
+    pub fn hold_outcomes(&self, fate: Fate) {
+        *self.held.lock().unwrap_or_else(PoisonError::into_inner) = Some(fate);
+    }
+
+    /// Report the held events: the first `count` of them (all when `None`) get the held [`Fate`], in the order they
+    /// were taken. Returns how many were settled.
+    pub fn settle(&self, count: Option<usize>) -> usize {
+        let fate = self
+            .held
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .unwrap_or(Fate::Delivered);
+        let mut waiting = self
+            .unsettled
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
+        let n = count.unwrap_or(waiting.len()).min(waiting.len());
+        let mut out = self.settled.lock().unwrap_or_else(PoisonError::into_inner);
+        out.extend(
+            waiting
+                .drain(..n)
+                .map(|event_id| Outcome { event_id, fate }),
+        );
+        n
+    }
+
     /// Make the sink refuse every event as [`UsageError::Unavailable`] (or take them again).
     pub fn set_down(&self, down: bool) {
         *self.down.lock().unwrap_or_else(PoisonError::into_inner) = down;
@@ -36,11 +70,37 @@ impl UsageSink for MemoryUsageSink {
             return Err(UsageError::Unavailable);
         }
         event.validate()?;
+        let id = event.event_id.clone();
         self.taken
             .lock()
             .unwrap_or_else(PoisonError::into_inner)
             .push(event);
+        let held = self
+            .held
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .is_some();
+        if held {
+            self.unsettled
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner)
+                .push(id);
+        } else {
+            self.settled
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner)
+                .push(Outcome {
+                    event_id: id,
+                    fate: Fate::Delivered,
+                });
+        }
         Ok(())
+    }
+
+    fn outcomes(&self) -> Option<Vec<Outcome>> {
+        Some(std::mem::take(
+            &mut *self.settled.lock().unwrap_or_else(PoisonError::into_inner),
+        ))
     }
 }
 

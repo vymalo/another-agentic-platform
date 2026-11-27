@@ -130,7 +130,7 @@ pub struct Operator<R, S> {
     activity: Option<crate::ActivityFn>,
     sleepers: Arc<crate::Sleepers>,
     /// The pod-minute meter's sink and account source (ANR-673); none: no meter.
-    meter: Option<(crate::SinkFn, crate::AccountFn)>,
+    meter: Option<(crate::SinkFn, crate::OutcomesFn, crate::AccountFn)>,
     meter_config: crate::MeterConfig,
 }
 
@@ -179,7 +179,8 @@ where
         K: aap_usage::UsageSink + 'static,
         A: aap_usage::AccountSource + 'static,
     {
-        self.meter = Some((crate::erase_sink(sink), crate::erase_accounts(accounts)));
+        let (send, outcomes) = crate::erase_sink_with_outcomes(sink);
+        self.meter = Some((send, outcomes, crate::erase_accounts(accounts)));
         self
     }
 
@@ -357,7 +358,9 @@ where
             )));
         }
 
-        if let (Some((sink, accounts)), false) = (self.meter.clone(), scopes_for_sleep.is_empty()) {
+        if let (Some((sink, outcomes, accounts)), false) =
+            (self.meter.clone(), scopes_for_sleep.is_empty())
+        {
             let period = self.meter_config.period;
             running.push(Box::pin(crate::meter::run(
                 crate::meter::MeterLoop {
@@ -370,6 +373,7 @@ where
                             self.meter_config.clone(),
                             metrics.clone(),
                         )
+                        .with_outcomes(outcomes)
                         .with_continue(move || leader.is_leader())
                     }),
                     scopes: scopes_for_sleep.clone(),
