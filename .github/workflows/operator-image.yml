@@ -14,7 +14,8 @@ name: Operator and API images
 # scripts:     shellcheck, and bump-tag.sh is idempotent and edits only the tag it was asked for (image.tag, or api.image.tag); release-pin.sh
 #              pins only a copy (AD-070), and tools/check-release-version.sh holds one version for the workspace and both charts.
 #              Releases (`v*` tags, X.Y.Z images and charts) are release.yml's, which copies by digest the images THIS workflow pushed as
-#              sha-<7> for the tag's commit; nothing here changes for a release, and the bump below still writes sha-<7> only.
+#              sha-<7> for the tag's commit; the release commit's run has a concurrency group of its own, a dispatch on a release tag pushes `sha-<7>`
+#              too (ANR-1196), and the bump below still writes sha-<7> only.
 # dockerfile:  hadolint (the operator's Dockerfile, and in dockerfile-api the API's).
 # image:       builds the image on pull requests too (no push) and smoke-tests it: the user, the binary starts, `crdgen` prints the
 #              checked-in CRDs, `run` without a cluster says so, and there is no shell. The image is kept as an artifact: the jobs
@@ -88,7 +89,7 @@ name: Operator and API images
 #              with `leaseTransitions` one more, the parked agent Ready within 60 s, a SIGTERM passing the Lease to another pod within 10 s (the
 #              release, not the 15 s expiry), and no secret value in the logs read or the answers. deploy/operator/tests/e2e/README.md says
 #              what it proves and what it does not. It gates the push: it pins nothing outside this repository.
-# push:        main only, after every job above but chain-e2e and run-pods-e2e: `sha-<7>` and `latest` of both images (the same tag). One red job of either
+# push:        main (or a dispatch on a `v*` tag, never `latest`), after every job above but chain-e2e and run-pods-e2e: `sha-<7>` and `latest` of both images (the same tag). One red job of either
 #              image (the API's included) means no image is pushed and no tag bumped: a decision for the owner (deploy/operator/README.md,
 #              "The image").
 # bump:        main only, after the push: `deploy/operator/bump-tag.sh` sets `image.tag` and, with `api`, `api.image.tag` in
@@ -137,6 +138,8 @@ on:
       - "deploy/operator-crds/**"
       - "deploy/crds/**"
       - ".github/workflows/operator-image.yml"
+  # The recovery path of release.yml: run this on the release tag when its commit's run was replaced or failed, then re-run release.yml.
+  workflow_dispatch:
 
 env:
   IMAGE: ghcr.io/vymalo/another-agentic-platform/operator
@@ -146,8 +149,15 @@ env:
   # The Kubernetes version the rendered manifests are validated against.
   KUBERNETES_VERSION: 1.37.0
 
+# A pull request run is replaced by the next push to its branch. A manual dispatch and the release commit (release-please's squash,
+# "chore: release main (#N)") each have a group of their own, their sha. Every other push to main shares one group and skips to the
+# newest. A group holds one running and one pending run, and a newer pending run cancels the older pending one even with
+# cancel-in-progress false (verified 2026-11-27, https://docs.github.com/en/actions/using-jobs/using-concurrency): that is how a burst
+# of merges can replace the release commit's run, and release.yml waits for the images that run pushes (ANR-1196, AD-070 amended
+# 2026-11-27; the same fix as vymalo/another-adam-rs#493). Every merge getting a group of its own would run the end-to-ends of each
+# one in parallel. A tag's commit is reached by its main push, or by a dispatch on the tag (which pushes the images, see `push`).
 concurrency:
-  group: operator-image-${{ github.ref }}
+  group: "operator-image-${{ github.event_name == 'pull_request' && github.ref || (github.event_name == 'workflow_dispatch' || startsWith(github.event.head_commit.message, 'chore: release')) && github.sha || github.ref }}"
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 permissions:
@@ -156,7 +166,7 @@ permissions:
 jobs:
   chart:
     # ANR-1206: the release pull request only moves version strings and main's own push run already tested this code; skipped here to spare the shared runner queue (a skipped job satisfies a required check).
-    if: ${{ !(startsWith(github.head_ref, 'release-please--') && github.event.pull_request.head.repo.full_name == github.repository) }}
+    if: ${{ !(startsWith(github.head_ref, 'release-please--') && github.event.pull_request.head.repo.full_name == github.repository && github.event.pull_request.user.login == 'vaam-apps[bot]' && github.actor == 'vaam-apps[bot]') }}
     name: helm lint, render checks and kubeconform
     runs-on: ubuntu-latest
     env:
@@ -263,7 +273,7 @@ jobs:
 
   dockerfile:
     # ANR-1206: the release pull request only moves version strings and main's own push run already tested this code; skipped here to spare the shared runner queue (a skipped job satisfies a required check).
-    if: ${{ !(startsWith(github.head_ref, 'release-please--') && github.event.pull_request.head.repo.full_name == github.repository) }}
+    if: ${{ !(startsWith(github.head_ref, 'release-please--') && github.event.pull_request.head.repo.full_name == github.repository && github.event.pull_request.user.login == 'vaam-apps[bot]' && github.actor == 'vaam-apps[bot]') }}
     name: lint Dockerfile
     runs-on: ubuntu-latest
     steps:
@@ -274,7 +284,7 @@ jobs:
 
   dockerfile-api:
     # ANR-1206: the release pull request only moves version strings and main's own push run already tested this code; skipped here to spare the shared runner queue (a skipped job satisfies a required check).
-    if: ${{ !(startsWith(github.head_ref, 'release-please--') && github.event.pull_request.head.repo.full_name == github.repository) }}
+    if: ${{ !(startsWith(github.head_ref, 'release-please--') && github.event.pull_request.head.repo.full_name == github.repository && github.event.pull_request.user.login == 'vaam-apps[bot]' && github.actor == 'vaam-apps[bot]') }}
     name: lint the API's Dockerfile
     runs-on: ubuntu-latest
     steps:
@@ -321,7 +331,7 @@ jobs:
   bump-dry-run:
     name: show the tag bump
     # ANR-1206: the release pull request only moves version strings and main's own push run already tested this code; skipped here to spare the shared runner queue (a skipped job satisfies a required check).
-    if: ${{ !(startsWith(github.head_ref, 'release-please--') && github.event.pull_request.head.repo.full_name == github.repository) && (github.event_name == 'pull_request') }}
+    if: ${{ !(startsWith(github.head_ref, 'release-please--') && github.event.pull_request.head.repo.full_name == github.repository && github.event.pull_request.user.login == 'vaam-apps[bot]' && github.actor == 'vaam-apps[bot]') && (github.event_name == 'pull_request') }}
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
@@ -344,7 +354,7 @@ jobs:
 
   image:
     # ANR-1206: the release pull request only moves version strings and main's own push run already tested this code; skipped here to spare the shared runner queue (a skipped job satisfies a required check).
-    if: ${{ !(startsWith(github.head_ref, 'release-please--') && github.event.pull_request.head.repo.full_name == github.repository) }}
+    if: ${{ !(startsWith(github.head_ref, 'release-please--') && github.event.pull_request.head.repo.full_name == github.repository && github.event.pull_request.user.login == 'vaam-apps[bot]' && github.actor == 'vaam-apps[bot]') }}
     name: build and smoke-test the image
     runs-on: ubuntu-latest
     timeout-minutes: 45
@@ -426,7 +436,7 @@ jobs:
 
   api-image:
     # ANR-1206: the release pull request only moves version strings and main's own push run already tested this code; skipped here to spare the shared runner queue (a skipped job satisfies a required check).
-    if: ${{ !(startsWith(github.head_ref, 'release-please--') && github.event.pull_request.head.repo.full_name == github.repository) }}
+    if: ${{ !(startsWith(github.head_ref, 'release-please--') && github.event.pull_request.head.repo.full_name == github.repository && github.event.pull_request.user.login == 'vaam-apps[bot]' && github.actor == 'vaam-apps[bot]') }}
     name: build and smoke-test the API image
     runs-on: ubuntu-latest
     timeout-minutes: 45
@@ -548,7 +558,7 @@ jobs:
 
   operator-coder-e2e:
     # ANR-1206: the release pull request only moves version strings and main's own push run already tested this code; skipped here to spare the shared runner queue (a skipped job satisfies a required check).
-    if: ${{ !(startsWith(github.head_ref, 'release-please--') && github.event.pull_request.head.repo.full_name == github.repository) }}
+    if: ${{ !(startsWith(github.head_ref, 'release-please--') && github.event.pull_request.head.repo.full_name == github.repository && github.event.pull_request.user.login == 'vaam-apps[bot]' && github.actor == 'vaam-apps[bot]') }}
     name: operator-coder-e2e
     needs: image
     runs-on: ubuntu-latest
@@ -591,7 +601,7 @@ jobs:
 
   api-e2e:
     # ANR-1206: the release pull request only moves version strings and main's own push run already tested this code; skipped here to spare the shared runner queue (a skipped job satisfies a required check).
-    if: ${{ !(startsWith(github.head_ref, 'release-please--') && github.event.pull_request.head.repo.full_name == github.repository) }}
+    if: ${{ !(startsWith(github.head_ref, 'release-please--') && github.event.pull_request.head.repo.full_name == github.repository && github.event.pull_request.user.login == 'vaam-apps[bot]' && github.actor == 'vaam-apps[bot]') }}
     name: api-e2e
     needs: [image, api-image]
     runs-on: ubuntu-latest
@@ -659,7 +669,7 @@ jobs:
 
   chain-e2e:
     # ANR-1206: the release pull request only moves version strings and main's own push run already tested this code; skipped here to spare the shared runner queue (a skipped job satisfies a required check).
-    if: ${{ !(startsWith(github.head_ref, 'release-please--') && github.event.pull_request.head.repo.full_name == github.repository) }}
+    if: ${{ !(startsWith(github.head_ref, 'release-please--') && github.event.pull_request.head.repo.full_name == github.repository && github.event.pull_request.user.login == 'vaam-apps[bot]' && github.actor == 'vaam-apps[bot]') }}
     name: chain-e2e
     needs: [image, api-image]
     runs-on: ubuntu-latest
@@ -723,7 +733,7 @@ jobs:
 
   run-pods-e2e:
     # ANR-1206: the release pull request only moves version strings and main's own push run already tested this code; skipped here to spare the shared runner queue (a skipped job satisfies a required check).
-    if: ${{ !(startsWith(github.head_ref, 'release-please--') && github.event.pull_request.head.repo.full_name == github.repository) }}
+    if: ${{ !(startsWith(github.head_ref, 'release-please--') && github.event.pull_request.head.repo.full_name == github.repository && github.event.pull_request.user.login == 'vaam-apps[bot]' && github.actor == 'vaam-apps[bot]') }}
     name: run-pods-e2e
     needs: image
     runs-on: ubuntu-latest
@@ -768,7 +778,7 @@ jobs:
 
   k10-e2e:
     # ANR-1206: the release pull request only moves version strings and main's own push run already tested this code; skipped here to spare the shared runner queue (a skipped job satisfies a required check).
-    if: ${{ !(startsWith(github.head_ref, 'release-please--') && github.event.pull_request.head.repo.full_name == github.repository) }}
+    if: ${{ !(startsWith(github.head_ref, 'release-please--') && github.event.pull_request.head.repo.full_name == github.repository && github.event.pull_request.user.login == 'vaam-apps[bot]' && github.actor == 'vaam-apps[bot]') }}
     name: k10-e2e
     needs: image
     runs-on: ubuntu-latest
@@ -816,7 +826,7 @@ jobs:
 
   namespaces-e2e:
     # ANR-1206: the release pull request only moves version strings and main's own push run already tested this code; skipped here to spare the shared runner queue (a skipped job satisfies a required check).
-    if: ${{ !(startsWith(github.head_ref, 'release-please--') && github.event.pull_request.head.repo.full_name == github.repository) }}
+    if: ${{ !(startsWith(github.head_ref, 'release-please--') && github.event.pull_request.head.repo.full_name == github.repository && github.event.pull_request.user.login == 'vaam-apps[bot]' && github.actor == 'vaam-apps[bot]') }}
     name: namespaces-e2e
     needs: image
     runs-on: ubuntu-latest
@@ -856,7 +866,7 @@ jobs:
 
   leader-e2e:
     # ANR-1206: the release pull request only moves version strings and main's own push run already tested this code; skipped here to spare the shared runner queue (a skipped job satisfies a required check).
-    if: ${{ !(startsWith(github.head_ref, 'release-please--') && github.event.pull_request.head.repo.full_name == github.repository) }}
+    if: ${{ !(startsWith(github.head_ref, 'release-please--') && github.event.pull_request.head.repo.full_name == github.repository && github.event.pull_request.user.login == 'vaam-apps[bot]' && github.actor == 'vaam-apps[bot]') }}
     name: leader-e2e
     needs: image
     runs-on: ubuntu-latest
@@ -905,11 +915,14 @@ jobs:
     # namespaces-e2e and leader-e2e pull only the curl image api-e2e already pulls, and nothing else outside this repository.
     needs: [chart, dockerfile, dockerfile-api, scripts, image, api-image, operator-coder-e2e, api-e2e, namespaces-e2e, leader-e2e]
     # ANR-1206: the release pull request only moves version strings and main's own push run already tested this code; skipped here to spare the shared runner queue (a skipped job satisfies a required check).
-    if: ${{ !(startsWith(github.head_ref, 'release-please--') && github.event.pull_request.head.repo.full_name == github.repository) && (github.event_name == 'push' && github.ref == 'refs/heads/main') }}
+    # Main, or a dispatch on a release tag (release.yml's recovery path: the tag's commit is on main, `latest` follows only the newest).
+    if: ${{ !(startsWith(github.head_ref, 'release-please--') && github.event.pull_request.head.repo.full_name == github.repository && github.event.pull_request.user.login == 'vaam-apps[bot]' && github.actor == 'vaam-apps[bot]') && ((github.event_name == 'push' && github.ref == 'refs/heads/main') || (github.event_name == 'workflow_dispatch' && startsWith(github.ref, 'refs/tags/v'))) }}
     runs-on: ubuntu-latest
-    # One push at a time, so the check below and the push of `latest` are not interleaved with another run's.
+    # One push at a time, so the check below and the push of `latest` are not interleaved with another run's. The release commit and a
+    # dispatch have a group of their own, as at the top of the file: a pending push job replaced by a newer one would leave no
+    # `sha-<7>` for release.yml, the very failure the workflow's group avoids (the `newer` check below keeps `latest` from moving back).
     concurrency:
-      group: operator-push
+      group: "operator-push-${{ (github.event_name == 'workflow_dispatch' || startsWith(github.event.head_commit.message, 'chore: release')) && github.sha || 'main' }}"
       cancel-in-progress: false
     permissions:
       contents: read
@@ -941,6 +954,21 @@ jobs:
         run: |
           set -eu
           tag="sha-$(printf '%s' "$GITHUB_SHA" | cut -c1-7)"
+          if [ "$GITHUB_EVENT_NAME" = workflow_dispatch ]; then
+            # The recovery for release.yml: only a commit of main, never over a published `sha-<7>` (the chart pins it and X.Y.Z was
+            # copied from it), and never `latest`.
+            git fetch origin main
+            git merge-base --is-ancestor "$GITHUB_SHA" origin/main || { echo "::error::$GITHUB_SHA is not on main: nothing is pushed from another commit"; exit 1; }
+            if docker buildx imagetools inspect "$IMAGE:$tag" > /dev/null 2>&1 && docker buildx imagetools inspect "$API_IMAGE:$tag" > /dev/null 2>&1; then
+              {
+                echo "### Not pushed"
+                echo
+                echo "\`$IMAGE:$tag\` and \`$API_IMAGE:$tag\` are already published; a published tag is never overwritten."
+              } >> "$GITHUB_STEP_SUMMARY"
+              echo "both $tag tags exist: nothing to push"
+              exit 0
+            fi
+          fi
           docker tag operator:smoke "$IMAGE:$tag"
           docker push "$IMAGE:$tag"
           docker tag api:smoke "$API_IMAGE:$tag"
@@ -948,7 +976,9 @@ jobs:
           # `latest` follows the newest build only: image jobs can finish out of order, and an older run must not move it back
           # (the same rule as the bump below; the bump commits themselves, old subject and new, do not count).
           newer="$(git log --format=%s "$GITHUB_SHA..origin/main" -- crates bin Cargo.toml Cargo.lock docker/operator docker/api deploy/operator deploy/operator-crds deploy/crds .github/workflows/operator-image.yml | grep -Ev '^chore\(deploy\): bump (operator|operator and api|operator, api and usage-ingest) to ' || true)"
-          if [ -n "$newer" ]; then
+          if [ "$GITHUB_EVENT_NAME" = workflow_dispatch ]; then
+            pushed="\`$IMAGE:$tag\` and \`$API_IMAGE:$tag\` (not \`latest\`: a dispatch never pushes it)."
+          elif [ -n "$newer" ]; then
             pushed="\`$IMAGE:$tag\` and \`$API_IMAGE:$tag\` (not \`latest\`: main has moved on since this commit, the newer build pushes it)."
           else
             docker tag operator:smoke "$IMAGE:latest"
@@ -971,13 +1001,13 @@ jobs:
   # "has main moved on?" test below reads the subjects of the commits that follow, take the other's bump for a newer build.
   bump:
     # ANR-1206: the release pull request only moves version strings and main's own push run already tested this code; skipped here to spare the shared runner queue (a skipped job satisfies a required check).
-    if: ${{ !(startsWith(github.head_ref, 'release-please--') && github.event.pull_request.head.repo.full_name == github.repository) }}
+    # Pushes only: a dispatch on a tag publishes the images and leaves the chart's pin to main's own runs.
+    if: ${{ !(startsWith(github.head_ref, 'release-please--') && github.event.pull_request.head.repo.full_name == github.repository && github.event.pull_request.user.login == 'vaam-apps[bot]' && github.actor == 'vaam-apps[bot]') && github.event_name == 'push' }}
     name: bump the tags in the chart
     needs: push
     runs-on: ubuntu-latest
-    concurrency:
-      group: operator-bump
-      cancel-in-progress: false
+    # No concurrency group: a queue ordered by finish time lets an older commit's pending bump cancel the newest one's and then skip
+    # (ANR-1196, as in another-adam-rs#493). The `newer` check below (only the newest build writes) and the retry keep it safe.
     permissions:
       contents: write
     steps:
