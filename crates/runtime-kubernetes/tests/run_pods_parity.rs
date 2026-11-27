@@ -885,7 +885,7 @@ fn the_policy_with_the_parameters_is_the_coder_charts(adam: Value, docs: Vec<Val
     let ours = policy["spec"]["validations"].as_array().unwrap();
     let theirs = adam["admissionPolicy"]["validations"].as_array().unwrap();
     // AD-061: the operator chart's policy has one rule more than the coder chart's, the last: every container of a run pod sets a
-    // memory, a CPU and an ephemeral-storage limit. It is asserted as that and held apart; the nine before it are the coder chart's.
+    // memory, a CPU and an ephemeral-storage limit. It is asserted as that and held apart; the ten before it are the coder chart's.
     assert_eq!(
         ours.len(),
         theirs.len() + 1,
