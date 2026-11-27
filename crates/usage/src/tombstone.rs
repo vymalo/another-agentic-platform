@@ -66,6 +66,18 @@ impl std::fmt::Debug for Tombstone {
     }
 }
 
+/// What [`TombstoneStore::load`] found: the tombstones it understood, and what it set aside.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct Loaded {
+    /// The tombstones read.
+    pub tombstones: Vec<Tombstone>,
+    /// Records the store could not read (a newer replica's, say). They are **kept** as they are: a write never
+    /// deletes a record the store did not understand.
+    pub unreadable: u64,
+    /// Sets the store refused to trust (not made by the operator: wrong label or an owner it did not set).
+    pub refused: u64,
+}
+
 /// Why a store call failed.
 #[derive(Debug, thiserror::Error, PartialEq, Eq)]
 pub enum TombstoneError {
@@ -75,6 +87,10 @@ pub enum TombstoneError {
     /// The set is more than the store can hold. Nothing changed.
     #[error("the tombstones do not fit in the store")]
     TooLarge,
+    /// The store may not be used at all (no right to it): retrying cannot help, so the meter keeps the namespace in
+    /// memory for the rest of the leadership term and counts it.
+    #[error("the tombstone store is forbidden")]
+    Forbidden,
     /// The stored set changed since the caller read it (another writer, or it was deleted). Nothing changed; the
     /// caller reads again before it writes.
     #[error("the stored tombstones changed since they were read")]
@@ -83,17 +99,14 @@ pub enum TombstoneError {
 
 /// Where the meter keeps its tombstones. One **set** per namespace; the meter writes only from the leader, and a
 /// store must refuse a write made over a set that changed since it was read (an overlapping writer), as
-/// [`TombstoneError::Conflict`], so that the meter reads again.
+/// [`TombstoneError::Conflict`], so that the meter reads again (the conformance suite's rule 4).
 pub trait TombstoneStore: Send + Sync {
     /// The tombstones of `scope`: one namespace, or every namespace when `scope` is empty. Never a tombstone of
     /// another namespace; an absent set is empty.
-    fn load(
-        &self,
-        scope: &str,
-    ) -> impl Future<Output = Result<Vec<Tombstone>, TombstoneError>> + Send;
+    fn load(&self, scope: &str) -> impl Future<Output = Result<Loaded, TombstoneError>> + Send;
 
-    /// Replace the whole set of `namespace` with `set` (an empty set clears it). Atomic: on an error the stored set
-    /// is what it was. The caller has read the set in this leadership term, so a replacement does not lose what
+    /// Replace the set of `namespace` with `set` (an empty set clears it). A record in the store that was **not
+    /// understood** by [`load`](Self::load) is never removed. Atomic: on an error the stored set is what it was. The caller has read the set in this leadership term, so a replacement does not lose what
     /// another leader wrote.
     fn save(
         &self,

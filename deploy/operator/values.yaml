@@ -360,9 +360,10 @@ activity:
 # orchestrator's broker names for the run (`broker`). It needs run pods with `runPods.nodeType` admitting exactly ONE value (the node type
 # of a run pod is read from its node affinity: the meter reads no Node, so it needs no ClusterRole). Every address is a NetworkPolicy peer
 # the chart requires (`to`), never open egress; `port` is the PODS' port (a NetworkPolicy sees it after the Service). The broker's bearer is
-# a Secret key, mounted as a file and read once at start. Since ANR-1198 the facts of a pod that vanished with minutes not yet
-# acknowledged are kept in a ConfigMap (aap-meter-tombstones, in the pod's namespace; the Role already allows it), so it may be
-# turned on; the Collector must dedupe on event_id for at least 24 h (docs/guides/deploy/metering.md says what is still lost).
+# a Secret key, mounted as a file and read once at start. May be enabled once the OpenTelemetry Collector's dedupe on event_id spans at
+# least 24 h (verified in ANR-1101): since ANR-1198 the facts of a pod that vanished with minutes not yet acknowledged are kept in
+# ConfigMaps aap-meter-tombstones-<namespace> in the operator's own namespace (the Role already allows it). The guide
+# (docs/guides/deploy/metering.md) lists what is still lost and how to remove the ConfigMaps on uninstall.
 metering:
   enabled: false
   # The `source` of every line: a constant of the deployment, the same on every replica ([A-Za-z0-9._:/-], at most 128).

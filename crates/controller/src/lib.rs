@@ -31,6 +31,7 @@ pub mod metering;
 mod tombstones;
 pub use tombstones::{
     CONFIGMAP as TOMBSTONE_CONFIGMAP, KubeTombstones, MAX_BYTES as TOMBSTONE_MAX_BYTES,
+    name_for as tombstone_configmap_name,
 };
 mod metrics;
 mod operator;

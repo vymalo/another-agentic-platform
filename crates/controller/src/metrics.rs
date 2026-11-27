@@ -60,6 +60,14 @@ pub mod name {
     /// Vanished pods that got **no** tombstone because the namespace's set is full (ANR-1198): they are still
     /// metered, from memory only, and a crash before their minutes are acknowledged loses them.
     pub const METER_TOMBSTONES_UNBACKED: &str = "aap_meter_tombstones_unbacked_total";
+    /// Records in the tombstone store this version could not read (a newer replica's): kept as they are (ANR-1198).
+    pub const METER_TOMBSTONES_UNREADABLE: &str = "aap_meter_tombstones_unreadable_total";
+    /// Tombstone `ConfigMap`s refused because the operator did not make them (wrong labels, name or an owner) (ANR-1198).
+    pub const METER_TOMBSTONES_REFUSED: &str = "aap_meter_tombstones_refused_total";
+    /// Records that parsed but are not valid (a text a line cannot carry, a weight off the grid): dropped (ANR-1198).
+    pub const METER_TOMBSTONES_INVALID: &str = "aap_meter_tombstones_invalid_total";
+    /// Vanished pods held in memory for want of a readable store whose minutes passed the 24 h bound (ANR-1198).
+    pub const METER_HELD_EXPIRED: &str = "aap_meter_vanished_held_expired_total";
     /// Reads and writes of the tombstone store that failed, by `op` (`load`, `save`) (ANR-1198).
     pub const METER_TOMBSTONE_ERRORS: &str = "aap_meter_tombstone_errors_total";
 }
@@ -97,6 +105,10 @@ fn help(series: &str) -> &'static str {
         name::METER_TOMBSTONES_UNBACKED => {
             "Vanished pods with no tombstone because the set is full."
         }
+        name::METER_TOMBSTONES_UNREADABLE => "Tombstone records this version could not read, kept.",
+        name::METER_TOMBSTONES_REFUSED => "Tombstone ConfigMaps refused as not the operator's.",
+        name::METER_TOMBSTONES_INVALID => "Tombstone records that were not valid, dropped.",
+        name::METER_HELD_EXPIRED => "Vanished pods held for want of a store, past the 24 h bound.",
         name::METER_TOMBSTONE_ERRORS => "Tombstone store calls that failed, by op.",
         _ => "",
     }

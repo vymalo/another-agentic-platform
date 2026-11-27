@@ -250,39 +250,48 @@ async fn a_repeated_event_gets_two_outcomes_from_the_fake() {
 
 #[tokio::test]
 async fn the_tombstone_fake_passes_every_rule() {
-    aap_usage::testkit::tombstones::run(aap_usage::MemoryTombstones::new)
-        .await
-        .unwrap();
+    aap_usage::testkit::tombstones::run(|| {
+        let a = aap_usage::MemoryTombstones::new();
+        let b = a.another();
+        (a, b)
+    })
+    .await
+    .unwrap();
 }
 
 /// A store broken on purpose: each variant breaks one rule of the tombstone kit.
 mod broken_tombstones {
-    use std::sync::Mutex;
+    use std::sync::{Arc, Mutex};
 
     use aap_usage::testkit::tombstones;
-    use aap_usage::{Tombstone, TombstoneError, TombstoneStore};
+    use aap_usage::{Loaded, Tombstone, TombstoneError, TombstoneStore};
 
     #[derive(Clone, Copy)]
     enum Fault {
         MergesInsteadOfReplacing,
         IgnoresTheNamespace,
         LosesTheSubject,
+        NeverConflicts,
     }
 
     struct Broken {
-        held: Mutex<Vec<Tombstone>>,
+        held: Arc<Mutex<Vec<Tombstone>>>,
         fault: Fault,
     }
 
     impl TombstoneStore for Broken {
-        async fn load(&self, scope: &str) -> Result<Vec<Tombstone>, TombstoneError> {
+        async fn load(&self, scope: &str) -> Result<Loaded, TombstoneError> {
             let held = self.held.lock().unwrap().clone();
-            Ok(match self.fault {
+            let tombstones = match self.fault {
                 Fault::IgnoresTheNamespace => held,
                 _ => held
                     .into_iter()
                     .filter(|t| scope.is_empty() || t.namespace == scope)
                     .collect(),
+            };
+            Ok(Loaded {
+                tombstones,
+                ..Loaded::default()
             })
         }
         async fn save(&self, namespace: &str, set: &[Tombstone]) -> Result<(), TombstoneError> {
@@ -303,9 +312,15 @@ mod broken_tombstones {
     }
 
     async fn fails(fault: Fault, rule: &str) {
-        let err = tombstones::run(|| Broken {
-            held: Mutex::new(Vec::new()),
-            fault,
+        let err = tombstones::run(|| {
+            let held = Arc::new(Mutex::new(Vec::new()));
+            (
+                Broken {
+                    held: held.clone(),
+                    fault,
+                },
+                Broken { held, fault },
+            )
         })
         .await
         .expect_err("the kit must fail a broken store");
@@ -325,5 +340,10 @@ mod broken_tombstones {
     #[tokio::test]
     async fn a_store_that_loses_a_field_fails_the_round_trip() {
         fails(Fault::LosesTheSubject, "round-trip").await;
+    }
+
+    #[tokio::test]
+    async fn a_store_that_never_conflicts_fails_the_conflict_rule() {
+        fails(Fault::NeverConflicts, "conflict").await;
     }
 }

@@ -17,9 +17,13 @@ Tests: `cargo test -p aap-usage`. The fake passes the kit; five sinks each break
 The meter's durable facts. A `Tombstone` is what the meter knew of a pod that vanished while some of its minutes were not
 known delivered (uid, namespace, service, run, kind, account when known, weight, node type, start, end, the first minute not
 known delivered, when it was written); `TombstoneStore` keeps **one set per namespace**: `load(scope)` (a namespace, or every
-one when the scope is empty) and `save(namespace, set)`, which replaces the whole set atomically and answers `Unavailable`,
-`TooLarge` (the set does not fit, nothing changed) or `Conflict` (the stored set changed since it was read, nothing changed).
-`MAX_TOMBSTONES` (512) is the most the meter keeps in a namespace. The adapter for a `ConfigMap` is `aap_controller::KubeTombstones`.
-With the feature `testkit`: `MemoryTombstones` (with switches for a store that is down, small, or that conflicts once) and
-`testkit::tombstones::run`, whose three rules (round trip, replace, independent namespaces) a store must pass; three stores
-broken on purpose fail it in `tests/conformance.rs`. `Tombstone`'s `Debug` prints the account as `<redacted>`.
+one when the scope is empty) answers a `Loaded` (the tombstones, how many records it could not read and **kept**, how many sets
+it refused to trust) and `save(namespace, set)` replaces the set atomically and never removes a record it did not understand.
+It answers `Unavailable`, `TooLarge` (the set does not fit, nothing changed), `Forbidden` (no right to the store: retrying cannot
+help) or `Conflict` (the stored set changed since it was read, nothing changed). `MAX_TOMBSTONES` (512) is the most the meter keeps
+in a namespace. The adapter for a `ConfigMap` is `aap_controller::KubeTombstones`. With the feature `testkit`: `MemoryTombstones`
+(a **version per namespace**, `another()` for a second handle that plays an overlapping writer, and switches for a store that is
+down, forbidden or small) and `testkit::tombstones::run`, which takes a **pair of handles on one backing store** and checks four
+rules: round trip, replace, independent namespaces and **conflict** (a write over a set that changed since it was read is
+refused). Four stores broken on purpose fail it in `tests/conformance.rs`, and the `ConfigMap` adapter passes it on the fake API
+server. `Tombstone`'s `Debug` prints the account as `<redacted>`.

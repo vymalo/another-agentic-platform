@@ -22,7 +22,7 @@ use std::future::Future;
 use sha2::{Digest, Sha256};
 
 mod tombstone;
-pub use tombstone::{MAX_TOMBSTONES, Tombstone, TombstoneError, TombstoneStore};
+pub use tombstone::{Loaded, MAX_TOMBSTONES, Tombstone, TombstoneError, TombstoneStore};
 
 #[cfg(feature = "testkit")]
 pub mod testkit;

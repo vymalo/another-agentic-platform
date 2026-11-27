@@ -429,6 +429,11 @@ async fn run_with(settings: crate::config::Settings, tracer: aap_trace::Tracer) 
         }
     };
     let meter_client = client.clone();
+    // The operator's own namespace, where its `Role` is: the first namespace it watches (the chart's primary).
+    let meter_home = options
+        .watch_namespaces
+        .as_ref()
+        .and_then(|n| n.first().cloned());
     let operator = compose(
         client,
         runtime,
@@ -440,15 +445,26 @@ async fn run_with(settings: crate::config::Settings, tracer: aap_trace::Tracer) 
     );
     // The meter sends only while this replica leads (`Operator::run` gates it); the sink is kept to flush on the way out.
     let (operator, meter_sink) = match meter {
-        Some(parts) => (
-            operator
+        Some(parts) => {
+            let operator = operator
                 .with_meter(parts.sink.clone(), parts.accounts)
-                // The facts of a pod that vanished with minutes not known delivered are kept in a ConfigMap of its
-                // namespace, so a crash or a failover loses none (ANR-1198).
-                .with_meter_tombstones(aap_controller::KubeTombstones::new(meter_client))
-                .with_meter_config(parts.config),
-            Some(parts.sink),
-        ),
+                .with_meter_config(parts.config);
+            // The facts of a pod that vanished with minutes not known delivered are kept in ConfigMaps in the
+            // operator's own namespace (not the tenants'), so a crash or a failover loses none (ANR-1198).
+            let operator = match meter_home {
+                Some(home) => operator.with_meter_tombstones(aap_controller::KubeTombstones::new(
+                    meter_client,
+                    &home,
+                )),
+                None => {
+                    tracing::warn!(
+                        "watch.namespaces names none: the meter keeps the facts of vanished pods in memory only"
+                    );
+                    operator
+                }
+            };
+            (operator, Some(parts.sink))
+        }
         None => (operator, None),
     };
 

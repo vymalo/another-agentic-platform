@@ -839,6 +839,28 @@ fn configmaps(s: &mut State, call: &Call, rest: &str) -> Option<Resp> {
             s.configmaps.insert(key, object.clone());
             respond(200, &object)
         }
+        ("DELETE", Some(ns), Some(name)) => {
+            let key = format!("{ns}/{name}");
+            let Some(current) = s.configmaps.get(&key) else {
+                return Some(failure(404, &format!("configmaps \"{name}\" not found")));
+            };
+            if let Some(rv) = call
+                .body
+                .as_ref()
+                .and_then(|b| b["preconditions"]["resourceVersion"].as_str())
+                && current["metadata"]["resourceVersion"].as_str() != Some(rv)
+            {
+                return Some(failure(
+                    409,
+                    "Operation cannot be fulfilled: the object has been modified",
+                ));
+            }
+            s.configmaps.remove(&key);
+            respond(
+                200,
+                &json!({"apiVersion": "v1", "kind": "Status", "status": "Success", "metadata": {}}),
+            )
+        }
         _ => failure(405, "not served by the fake"),
     })
 }

@@ -172,8 +172,11 @@ pub async fn run<S: Observed, F: Fn() -> S>(make: F) -> Result<(), String> {
 }
 
 /// The conformance suite of [`TombstoneStore`](crate::TombstoneStore): one `check_*` per rule, and [`run`](tombstones::run).
+///
+/// A store is tested through **a pair of handles on one backing store** (`make` returns them): the fourth rule needs
+/// a second writer.
 pub mod tombstones {
-    use crate::{PodKind, Tombstone, TombstoneStore};
+    use crate::{PodKind, Tombstone, TombstoneError, TombstoneStore};
 
     /// A tombstone of a run pod in `namespace`.
     pub fn tombstone(namespace: &str, uid: &str) -> Tombstone {
@@ -198,14 +201,20 @@ pub mod tombstones {
         v
     }
 
+    async fn read<S: TombstoneStore>(
+        s: &S,
+        scope: &str,
+        rule: &str,
+    ) -> Result<Vec<Tombstone>, String> {
+        s.load(scope)
+            .await
+            .map(|l| l.tombstones)
+            .map_err(|e| format!("{rule}: {e}"))
+    }
+
     /// Rule 1: nothing stored is an empty set, and what is saved reads back whole.
     pub async fn check_round_trip<S: TombstoneStore>(s: &S) -> Result<(), String> {
-        if !s
-            .load("ns-a")
-            .await
-            .map_err(|e| format!("round-trip: {e}"))?
-            .is_empty()
-        {
+        if !read(s, "ns-a", "round-trip").await?.is_empty() {
             return Err("round-trip: a fresh store is not empty".into());
         }
         let mut b = tombstone("ns-a", "uid-b");
@@ -216,11 +225,7 @@ pub mod tombstones {
         s.save("ns-a", &set)
             .await
             .map_err(|e| format!("round-trip: {e}"))?;
-        let got = s
-            .load("ns-a")
-            .await
-            .map_err(|e| format!("round-trip: {e}"))?;
-        if sorted(got) != sorted(set) {
+        if sorted(read(s, "ns-a", "round-trip").await?) != sorted(set) {
             return Err("round-trip: what was saved is not what was read".into());
         }
         Ok(())
@@ -228,6 +233,7 @@ pub mod tombstones {
 
     /// Rule 2: a save **replaces** the set (a tombstone left out is gone), and an empty set clears it.
     pub async fn check_replaces<S: TombstoneStore>(s: &S) -> Result<(), String> {
+        read(s, "ns-a", "replaces").await?;
         s.save(
             "ns-a",
             &[tombstone("ns-a", "uid-a"), tombstone("ns-a", "uid-b")],
@@ -237,19 +243,14 @@ pub mod tombstones {
         s.save("ns-a", &[tombstone("ns-a", "uid-b")])
             .await
             .map_err(|e| format!("replaces: {e}"))?;
-        let got = s.load("ns-a").await.map_err(|e| format!("replaces: {e}"))?;
+        let got = read(s, "ns-a", "replaces").await?;
         if got.len() != 1 || got[0].uid != "uid-b" {
             return Err("replaces: a tombstone left out of a save is still there".into());
         }
         s.save("ns-a", &[])
             .await
             .map_err(|e| format!("replaces: {e}"))?;
-        if !s
-            .load("ns-a")
-            .await
-            .map_err(|e| format!("replaces: {e}"))?
-            .is_empty()
-        {
+        if !read(s, "ns-a", "replaces").await?.is_empty() {
             return Err("replaces: an empty save did not clear the set".into());
         }
         Ok(())
@@ -257,6 +258,7 @@ pub mod tombstones {
 
     /// Rule 3: namespaces are independent, and the empty scope reads every one.
     pub async fn check_namespaces<S: TombstoneStore>(s: &S) -> Result<(), String> {
+        read(s, "", "namespaces").await?;
         s.save("ns-a", &[tombstone("ns-a", "uid-a")])
             .await
             .map_err(|e| format!("namespaces: {e}"))?;
@@ -266,32 +268,57 @@ pub mod tombstones {
         s.save("ns-a", &[])
             .await
             .map_err(|e| format!("namespaces: {e}"))?;
-        let b = s
-            .load("ns-b")
-            .await
-            .map_err(|e| format!("namespaces: {e}"))?;
+        let b = read(s, "ns-b", "namespaces").await?;
         if b.len() != 1 || b[0].namespace != "ns-b" {
             return Err("namespaces: a save in one namespace changed another".into());
         }
-        let all = s.load("").await.map_err(|e| format!("namespaces: {e}"))?;
-        if all.len() != 1 {
+        if read(s, "", "namespaces").await?.len() != 1 {
             return Err("namespaces: the empty scope does not read every namespace".into());
         }
-        if !s
-            .load("ns-a")
-            .await
-            .map_err(|e| format!("namespaces: {e}"))?
-            .is_empty()
-        {
+        if !read(s, "ns-a", "namespaces").await?.is_empty() {
             return Err("namespaces: a load returned a tombstone of another namespace".into());
         }
         Ok(())
     }
 
-    /// Runs every rule, each on a store `make` returns fresh. The first broken rule is the error.
-    pub async fn run<S: TombstoneStore, F: Fn() -> S>(make: F) -> Result<(), String> {
-        check_round_trip(&make()).await?;
-        check_replaces(&make()).await?;
-        check_namespaces(&make()).await
+    /// Rule 4: a write over a set that **changed since it was read** is refused as `Conflict` and changes nothing,
+    /// and so is a write over a set that exists and was never read. After a read, the write is accepted.
+    pub async fn check_conflict<S: TombstoneStore>(a: &S, b: &S) -> Result<(), String> {
+        read(a, "ns-a", "conflict").await?;
+        read(b, "ns-a", "conflict").await?;
+        a.save("ns-a", &[tombstone("ns-a", "uid-a")])
+            .await
+            .map_err(|e| format!("conflict: {e}"))?;
+        // B read the empty set, and A has written since.
+        if b.save("ns-a", &[tombstone("ns-a", "uid-b")]).await != Err(TombstoneError::Conflict) {
+            return Err(
+                "conflict: a write over a set that changed since it was read was accepted".into(),
+            );
+        }
+        let got = read(a, "ns-a", "conflict").await?;
+        if got.len() != 1 || got[0].uid != "uid-a" {
+            return Err("conflict: a refused write changed the set".into());
+        }
+        // A third handle that never read a set that exists is refused too.
+        read(b, "ns-a", "conflict").await?;
+        b.save(
+            "ns-a",
+            &[tombstone("ns-a", "uid-a"), tombstone("ns-a", "uid-b")],
+        )
+        .await
+        .map_err(|e| format!("conflict: a write after a read was refused: {e}"))?;
+        if a.save("ns-a", &[]).await != Err(TombstoneError::Conflict) {
+            return Err("conflict: the first writer overwrote a set it had not re-read".into());
+        }
+        Ok(())
+    }
+
+    /// Runs every rule, each on a pair of handles `make` returns fresh. The first broken rule is the error.
+    pub async fn run<S: TombstoneStore, F: Fn() -> (S, S)>(make: F) -> Result<(), String> {
+        check_round_trip(&make().0).await?;
+        check_replaces(&make().0).await?;
+        check_namespaces(&make().0).await?;
+        let (a, b) = make();
+        check_conflict(&a, &b).await
     }
 }
