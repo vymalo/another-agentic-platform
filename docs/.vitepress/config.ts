@@ -48,7 +48,7 @@ const sidebar = [
         ],
       },
       { text: "CRDs", items: [{ text: "Custom resources", link: "/reference/crds" }] },
-      { text: "Extensions", items: pages("extensions", ["release-channels-v1.md", "agent-registry-v1.md"]) },
+      { text: "Extensions", items: [{ text: "Extensions", link: "/extensions/" }, ...pages("extensions", ["release-channels-v1.md", "agent-registry-v1.md"])] },
     ],
   },
   {
