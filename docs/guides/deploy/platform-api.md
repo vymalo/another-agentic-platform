@@ -20,7 +20,7 @@ No secret value is configured. The API reads the issuer's public keys, and the t
 
 Two more defaults need your attention, because they work only if you act:
 
-- **`defaults.a2aBearer`** defaults to the Secret `agent-a2a-bearer`, key `AGENT_REGISTRY_AGENT_TOKEN`. **You must create that Secret**, holding the orchestrator's `AGENT_REGISTRY_AGENT_TOKEN`. Without it the orchestrator lists an agent and cannot call it.
+- **`defaults.a2aBearer`** defaults to the Secret `agent-a2a-bearer`, key `AGENT_REGISTRY_AGENT_TOKEN`. **You must create that Secret in each namespace an agent is made in**, holding the orchestrator's `AGENT_REGISTRY_AGENT_TOKEN`. Without it the orchestrator lists an agent and cannot call it.
 - **`defaults.store`** defaults to `cnpg`, an operator-owned CloudNativePG `Cluster` per agent. **Without CloudNativePG installed, every agent made through the API is `StoreReady: False`, reason `CNPGNotInstalled`.** To use a Secret per agent instead, switch the store; exactly one of `cnpg` and `secretRef` may be set, so null the first:
 
 ```yaml
@@ -33,6 +33,8 @@ api:
           name: "{name}-db-app"   # {name} is required: a name without it would share one ledger
           key: uri
 ```
+
+With `secretRef` you create the Secret `<agent>-db-app`, with the key `uri`, yourself, for each agent. The name only mimics CloudNativePG's; nothing makes the Secret for you.
 
 With run pods on, a third value is required: `api.config.defaults.coder.workVolume`. See [Turn on run pods](run-pods.md#the-values).
 
@@ -82,7 +84,7 @@ api:
 
 ### The issuer, the audiences and the roles claim
 
-The API checks a bearer token against the keys of your issuer. The `iss` must equal `issuer` exactly, as a string. A trailing slash is accepted when you deploy, and then every token is refused with `401`. Copy `issuer` from the `issuer` field of the issuer's `/.well-known/openid-configuration`. `aud` must hold one of `audiences`. The values of the `rolesClaim` are the person's permissions. The algorithms accepted are RS256, RS384, ES256 and EdDSA ([§60a, slice D6](../../architecture/10-control-plane-and-crds.md#60a-admin-dashboard-v0)). Run `GET /v1/me` to see what a token grants: it lists the claim's values that start with `platform:`.
+The API checks a bearer token against the keys of your issuer. The `iss` must equal `issuer` exactly, as a string. The chart accepts a trailing slash when you deploy; if the tokens' `iss` has none, every token is then refused with `401`. Copy `issuer` from the `issuer` field of the issuer's `/.well-known/openid-configuration`. `aud` must hold one of `audiences`. The values of the `rolesClaim` are the person's permissions. The algorithms accepted are RS256, RS384, ES256 and EdDSA ([§60a, slice D6](../../architecture/10-control-plane-and-crds.md#60a-admin-dashboard-v0)). Run `GET /v1/me` to see what a token grants: it lists the claim's values that start with `platform:`.
 
 One thing to know before you rely on it: the API accepts a token that carries a `cnf` claim as a plain bearer. It does not check proof of possession (no DPoP). The record keeps this as a question for the owner ([CLAUDE.md](../../../CLAUDE.md), slice D6).
 
@@ -149,7 +151,8 @@ A route that is not in the table is never served. The permission of each route i
 `/readyz` answers `503` until the API has fetched the issuer's keys, and it also makes one call that needs the API's own rights on the cluster. So with a placeholder issuer, or when `issuer.to` or the NetworkPolicy blocks the issuer, the pod runs but never becomes ready, and `helm upgrade --wait` times out. Check:
 
 ```sh
-kubectl -n aap-system logs deploy/<release-fullname>-api     # here: aap-operator-api
+kubectl -n aap-system logs deploy/aap-operator-api     # the chart sets fullnameOverride: aap-operator, so the Deployment is aap-operator-api
+kubectl -n <release-namespace> get serviceaccount   # if you changed the name, find yours
 ```
 
 then `api.networkPolicy.issuer.to` and `.ports`, `api.networkPolicy.dns`, and the issuer's URL. With `maxUnavailable: 0`, old pods keep serving during a failed rollout. The chart's `/readyz` behaviour is described in [The pod](../../../deploy/operator/README.md#the-pod).
@@ -167,7 +170,7 @@ sh deploy/operator/tests/api-config.sh config.yaml -f values.yaml
 ./api --config config.yaml --check
 ```
 
-The extracted binary is dynamically linked: it needs a host glibc as new as Debian 13's (the image's base is `distroless/cc-debian13`). `api-config.sh` renders the chart with `api.enabled=true` and writes the `config.yaml` of the API's ConfigMap to a file. The binary refuses an unknown key at every level. Then install:
+The extracted binary is dynamically linked: at `sha-1d17e42` it needs glibc 2.39 or newer (the highest symbol version, read with `objdump -T`); the image's base is `distroless/cc-debian13`. Check again for the tag you use. `api-config.sh` renders the chart with `api.enabled=true` and writes the `config.yaml` of the API's ConfigMap to a file. The binary refuses an unknown key at every level. Then install:
 
 ```sh
 helm upgrade --install aap-operator deploy/operator --namespace aap-system -f values.yaml --wait

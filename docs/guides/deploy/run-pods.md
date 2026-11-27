@@ -52,7 +52,7 @@ Apply it with the operator's values (and the API's, if it is on):
 helm upgrade --install aap-operator deploy/operator --namespace aap-system -f values.yaml -f run-pods.values.yaml --wait
 ```
 
-The upgrade changes the operator's configuration file, so it **rolls the operator pods**. It also rolls every coder that has run pods once, because their pod template changes.
+The upgrade changes the operator's configuration file, so it **rolls the operator pods**.
 
 The values not shown (the run image, the idle and ready timeouts, node placement, `nodeType`) keep their defaults. They are in the chart's [Run pods](../../../deploy/operator/README.md#run-pods) section and in [`values.yaml`](../../../deploy/operator/values.yaml). The run image is pinned by tag and digest, and `latest` is refused.
 
@@ -116,7 +116,7 @@ sequenceDiagram
   O->>K: delete the parameters and the template ConfigMaps, the accounts last
 ```
 
-Deleting the service takes the same path, except that the template goes with the service's other objects.
+Deleting the service takes a shorter path. The operator revokes the binding and the run pods, then clears the quota, proxy, policy and parameters (the template goes with the service's other objects), and the accounts go. Only then are the StatefulSets and Deployments deleted. There is no step that re-applies the workers without the account, so for a moment the accounts are gone while the workloads still name them.
 
 The order matters. The operator makes the parameters before the right to make pods, and removes the right first. The accounts go last, so that an interrupted pass still finds one and comes back. The proxy goes before the run pods' policy, so a pod made just before the binding went is cut off before it is ever unpoliced ([`provider.rs`](../../../crates/runtime-kubernetes/src/provider.rs)). The operator itself holds `bind` on that one `Role` and no right to make a pod, `exec` or read a Secret. It can bind the `Role` to any account in the namespace ([What a person must know](../../../deploy/operator/README.md#what-a-person-must-know), items 1 to 4, say what follows from that).
 
@@ -130,8 +130,9 @@ stateDiagram-v2
   MayMakePods --> Unguarded: a person deletes the parameters
   Unguarded --> MayMakePods: the next reconcile makes them again
   MayMakePods --> Revoking: sizeClass removed, or the service deleted
-  Revoking --> Detaching: binding and run pods deleted
-  Detaching --> Clearing: workers applied without the account
+  Revoking --> Detaching: sizeClass removed only, binding and run pods deleted
+  Detaching --> Clearing: sizeClass removed only, workers applied without the account
+  Revoking --> Clearing: service deleted, binding and run pods deleted
   Clearing --> NoRunPods: quota, proxy, policy, parameters, template and accounts gone
 ```
 
@@ -215,7 +216,7 @@ Once named, the class is **required**: the admission policy refuses a run pod of
 
 `agent.runtimeClassName` is the same setting for the agents' own pods. **Leave it empty.** The owner's order is run pods first, and the agents' pods only after a run pod has started under `runsc` on a real node ([AD-052](../../architecture/11-decisions.md#ad-052--gvisor-a-sandboxed-runtime-class-for-run-pods-and-for-the-agents-own-pods), amended 2026-11-24). Whether the k3d run below counts as a real node is open for the owner.
 
-### What gVisor measured (ANR-404)
+### What gVisor measured
 
 The record is [§59c, row K14](../../architecture/10-control-plane-and-crds.md#59c-operator-increments-kagent-grade-minimum) and the paragraph after the K14a table, *Measured 2026-11-26 in a local k3d cluster*, with [AD-052](../../architecture/11-decisions.md#ad-052--gvisor-a-sandboxed-runtime-class-for-run-pods-and-for-the-agents-own-pods). Its words, which this page does not improve on:
 
@@ -248,7 +249,8 @@ After an agent with run pods is `Ready`:
 sh deploy/operator/tests/run-pods-admission.sh <agent-namespace> <service>
 
 # the operator's account lives in the release namespace and is named for the release (here aap-system and aap-operator)
-op=system:serviceaccount:<release-namespace>:<release-fullname>
+op=system:serviceaccount:<release-namespace>:aap-operator   # the chart sets fullnameOverride: aap-operator; if you changed it, use yours
+# find it with: kubectl -n <release-namespace> get serviceaccount
 kubectl auth can-i create statefulsets --as $op -n <agent-namespace>   # yes: the control, so the next answer can mean something
 kubectl auth can-i create pods         --as $op -n <agent-namespace>   # no
 kubectl auth can-i create pods         --as system:serviceaccount:<agent-namespace>:<service> -n <agent-namespace>   # yes

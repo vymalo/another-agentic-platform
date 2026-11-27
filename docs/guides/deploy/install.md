@@ -58,7 +58,7 @@ networkPolicy:
             kubernetes.io/metadata.name: orchestrator
 ```
 
-Then create the namespaces and the token, and install. If a watched namespace is missing, Helm fails loudly and leaves the release `failed`; make the namespace and run the same command again, and the release recovers.
+Then create the namespaces and the token, and install. The operator itself treats a missing namespace as empty, but Helm fails when the chart cannot make a `Role` there, and leaves the release `failed`. Making the namespace and running the same command again should recover it; that recovery was not tried.
 
 ```sh
 kubectl create namespace aap-system
@@ -152,6 +152,7 @@ On 2026-11-27, on a throwaway kind cluster (Kubernetes v1.35.8), the commands of
 ### What is unverified
 
 - **Argo CD.** An Argo CD that tracks this repository's chart paths and installs both charts on a real cluster (slice S10) is unverified ([CLAUDE.md](../../../CLAUDE.md)). That Argo CD syncs the CRDs before the operator is unverified too ([What is not proven](../../../deploy/operator/README.md#what-is-not-proven)).
+- **Recovering a failed release** after a missing namespace: the fix is expected, not tried.
 - **Kubernetes other than v1.35.8 and v1.35.5.** The chart's floor is 1.29. CI's kind jobs run v1.35.8 and `gvisor-k3d` runs k3s v1.35.5.
 - **Leader election.** `leader-e2e` does not prove that two writers never overlap, and it does not prove the budget under a real drain.
 - **The registry token from External Secrets** (`externalSecrets.enabled`). The chart renders it, but no job is written down that installs External Secrets and reads the registry through it.
