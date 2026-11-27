@@ -109,13 +109,15 @@ pub type OwnerFn = Arc<
 >;
 
 /// The group, version and plural of the kinds a chain walks, and of no other: a `ReplicaSet` and the `Deployment`
-/// above it, a `StatefulSet`, and a `Job` (a split worker).
+/// above it, a `StatefulSet`, a `Job` (a split worker), and the `AgentService` the chain must end at — which is read
+/// too, so that a pod cannot name one directly: its `uid` is checked like every other hop's.
 fn owner_resource(kind: &str) -> Option<(&'static str, &'static str, &'static str)> {
     match kind {
         "ReplicaSet" => Some(("apps", "v1", "replicasets")),
         "Deployment" => Some(("apps", "v1", "deployments")),
         "StatefulSet" => Some(("apps", "v1", "statefulsets")),
         "Job" => Some(("batch", "v1", "jobs")),
+        "AgentService" => Some(("agents.vymalo.com", "v1alpha1", "agentservices")),
         _ => None,
     }
 }
@@ -1440,7 +1442,15 @@ impl Meter {
             let mut next = Vec::new();
             for r in frontier {
                 if let Some(service) = metering::agent_service(&r) {
-                    return Chain::Service(service.to_owned());
+                    // The `AgentService` is read like every other hop: a pod that names one directly, with a uid
+                    // that is not the object's, ends the chain. Without the read, one free-form `ownerReferences`
+                    // entry would bill any agent (the terminal hop is the cheapest forgery).
+                    match self.owner_object(&pod.namespace, &r, &owners).await {
+                        OwnerObject::Found(_) => return Chain::Service(service.to_owned()),
+                        OwnerObject::Missing => {}
+                        OwnerObject::Unavailable => return Chain::Unavailable,
+                    }
+                    continue;
                 }
                 if owner_resource(&r.kind).is_none() || !walked.insert(r.uid.clone()) {
                     continue;
@@ -2105,8 +2115,11 @@ mod tests {
             },
             metrics.clone(),
         )
-        // The fixtures' agent pods name their AgentService as their own owner, so this is never asked.
-        .with_owners(Arc::new(|_, _| Box::pin(async { OwnerObject::Missing })));
+        // The fixtures' agent pods name their AgentService as their own owner; the lookup confirms it exists with
+        // that uid (the `owners` function stands for `kube_owners`, which checks the uid before answering `Found`).
+        .with_owners(Arc::new(|_, _| {
+            Box::pin(async { OwnerObject::Found(Vec::new()) })
+        }));
         (meter, sink, metrics)
     }
 
@@ -2127,9 +2140,9 @@ mod tests {
         let (meter, sink, metrics) = agent_meter(erase_accounts(Late(asked.clone())));
         let pod = agent_pod_facts("ns-a", 600); // first minute 10
         // Minutes 10..16 are over: no account, so they are given up (6 of them).
-        assert_eq!(meter.pass(&[pod.clone()], 1_000).await, 0);
+        assert_eq!(meter.pass(std::slice::from_ref(&pod), 1_000).await, 0);
         // Minute 16 is given up too (the source says none again), and the cursor does not stay behind.
-        assert_eq!(meter.pass(&[pod.clone()], 1_060).await, 0);
+        assert_eq!(meter.pass(std::slice::from_ref(&pod), 1_060).await, 0);
         // The service now has an account: only the minutes after the ones given up are for it.
         meter.pass(&[pod], 1_200).await;
         let minutes: Vec<u64> = sink.taken().iter().map(|e| e.minute).collect();
