@@ -1440,6 +1440,90 @@ fn a_key_a_rule_does_not_have_is_refused_at_every_level() {
 }
 
 #[test]
+fn a_key_a_toleration_or_a_node_affinity_does_not_have_is_refused() {
+    // ANR-1357: `k8s-openapi`'s types drop a key they do not know, and for placement that is a widening nobody sees —
+    // a misspelled `requiredDuringScheduling…` leaves no required affinity at all. Each case is accepted by the code
+    // before the change, and the assertion names the path.
+    for (what, over) in [
+        (
+            "tolerations[0].efect",
+            json!({"tolerations": [{"key": "a", "operator": "Exists", "efect": "NoSchedule"}]}),
+        ),
+        (
+            "tolerations[1].tolerationSecond",
+            json!({"tolerations": [{"key": "a"}, {"key": "b", "tolerationSecond": 60}]}),
+        ),
+        (
+            "nodeAffinity.requiredDuringScheduling",
+            json!({"nodeAffinity": {"requiredDuringScheduling": {}}}),
+        ),
+        (
+            "nodeAffinity.requiredDuringSchedulingIgnoredDuringExecution.nodeSelectorTerm",
+            json!({"nodeAffinity": {"requiredDuringSchedulingIgnoredDuringExecution": {"nodeSelectorTerm": []}}}),
+        ),
+        (
+            "nodeAffinity.requiredDuringSchedulingIgnoredDuringExecution.nodeSelectorTerms[0].matchExpression",
+            json!({"nodeAffinity": {"requiredDuringSchedulingIgnoredDuringExecution": {"nodeSelectorTerms": [{"matchExpression": []}]}}}),
+        ),
+        (
+            "nodeAffinity.requiredDuringSchedulingIgnoredDuringExecution.nodeSelectorTerms[0].matchFields[0].value",
+            json!({"nodeAffinity": {"requiredDuringSchedulingIgnoredDuringExecution": {"nodeSelectorTerms": [{"matchFields": [{"key": "a", "operator": "In", "value": ["b"]}]}]}}}),
+        ),
+        (
+            "nodeAffinity.requiredDuringSchedulingIgnoredDuringExecution.nodeSelectorTerms[1].matchExpressions[1].value",
+            json!({"nodeAffinity": {"requiredDuringSchedulingIgnoredDuringExecution": {"nodeSelectorTerms": [
+                {"matchExpressions": []},
+                {"matchExpressions": [
+                    {"key": "a", "operator": "Exists"},
+                    {"key": "b", "operator": "In", "value": ["c"]}
+                ]}
+            ]}}}),
+        ),
+        (
+            "nodeAffinity.preferredDuringSchedulingIgnoredDuringExecution[0].weigth",
+            json!({"nodeAffinity": {"preferredDuringSchedulingIgnoredDuringExecution": [{"weight": 1, "weigth": 2, "preference": {}}]}}),
+        ),
+        (
+            "nodeAffinity.preferredDuringSchedulingIgnoredDuringExecution[1].preference.matchField",
+            json!({"nodeAffinity": {"preferredDuringSchedulingIgnoredDuringExecution": [
+                {"weight": 1, "preference": {"matchExpressions": []}},
+                {"weight": 2, "preference": {"matchField": []}}
+            ]}}),
+        ),
+    ] {
+        let problems = refused(over);
+        let expected = format!("{what} is not a field of it");
+        assert!(
+            problems.iter().any(|p| p.contains(&expected)),
+            "{what}: {problems:#?}"
+        );
+    }
+}
+
+#[test]
+fn every_field_of_a_toleration_and_a_node_affinity_is_still_accepted() {
+    // The control for ANR-1357: the allow-lists are exactly the fields the types have, at every level.
+    settings_with(json!({
+        "tolerations": [
+            {"key": "a", "operator": "Equal", "value": "b", "effect": "NoSchedule", "tolerationSeconds": 60}
+        ],
+        "nodeAffinity": {
+            "requiredDuringSchedulingIgnoredDuringExecution": {
+                "nodeSelectorTerms": [{
+                    "matchExpressions": [{"key": "a", "operator": "In", "values": ["b"]}],
+                    "matchFields": [{"key": "metadata.name", "operator": "In", "values": ["c"]}]
+                }]
+            },
+            "preferredDuringSchedulingIgnoredDuringExecution": [
+                {"weight": 1, "preference": {"matchExpressions": [{"key": "d", "operator": "Exists"}]}}
+            ]
+        }
+    }))
+    .validate()
+    .expect("every field of a toleration and a nodeAffinity");
+}
+
+#[test]
 fn every_field_of_an_egress_rule_is_still_accepted() {
     // The control for ANR-1356: the allow-list is exactly the fields the rule has, at every level.
     settings_with(json!({"networkPolicy": {"extraEgress": [{
