@@ -142,7 +142,7 @@ The API reads the standard variables, as a strict subset. The operator reads the
 :::
 ::: in-depth What the chart refuses
 
-Each row was run with `helm template`. Every refusal prints `templates/servicemonitor.yaml:1:4` as its location. Ignore it: the checks are in `_validate.tpl`.
+Each row was run with `helm template`. The checks are in `_validate.tpl`; every refusal prints the location of the template that includes it, not the check's — the exact line it prints is in [the agent page](../../../.agents/docs/guides/operate/traces.md).
 
 | Change | Exit | The chart says |
 |---|---|---|

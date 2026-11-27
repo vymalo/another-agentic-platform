@@ -55,10 +55,23 @@ function unclosedInDepth(src) {
 }
 let diagrams = 0, links = 0;
 const failures = [];
+// Every markdown file (relative path) to its relative link targets as absolute paths (for the pair rule).
+const linksOut = new Map();
+
+// The docs for people and the docs for agents live apart (AD-074): the dated records keep
+// their evidence as written, and the pages of stillMixed are mixed and named until split.
+const datedRecords = new Set(['docs/architecture/11-decisions.md', 'docs/architecture/README.md']);
+const stillMixed = new Set(['docs/architecture/10-control-plane-and-crds.md']);
+// Something like `crates/x/src/y.rs:190` or `docs/z.md:12`; fenced code blocks and inline
+// code spans are blanked before matching, so an example in code never counts.
+const pathLine = /[A-Za-z0-9_./-]+\.(?:rs|md|ya?ml|toml|json|tsx?|jsx?|mjs|cjs|sh|go|py|hcl|tpl|txt|lock|css|html?|sql|proto)(?::[0-9]+)+\b/g;
 
 for (const file of markdownFiles(root)) {
   const rel = path.relative(root, file);
+  const relPosix = rel.split(path.sep).join('/');
   const src = fs.readFileSync(file, 'utf8');
+  const outs = [];
+  linksOut.set(relPosix, outs);
 
   for (const line of unclosedInDepth(src)) failures.push(`${rel}:${line} unclosed ::: in-depth`);
 
@@ -78,9 +91,34 @@ for (const file of markdownFiles(root)) {
     const target = m[1].split('#')[0];
     if (!target || /^[a-z][a-z0-9+.-]*:/i.test(target)) continue; // anchors, http(s):, mailto:
     links++;
-    if (!fs.existsSync(path.resolve(path.dirname(file), decodeURI(target)))) {
+    const abs = path.resolve(path.dirname(file), decodeURI(target));
+    outs.push(abs);
+    if (!fs.existsSync(abs)) {
       failures.push(`${rel}:${lineOf(src, m.index)} broken link: ${m[1]}`);
     }
+  }
+
+  // No `path:line` in a page for people (AD-074); the dated records and the still-mixed pages are exempt.
+  if (relPosix.startsWith('docs/') && !datedRecords.has(relPosix) && !stillMixed.has(relPosix)) {
+    for (const m of prose.matchAll(pathLine)) {
+      failures.push(`${rel}:${lineOf(src, m.index)} path:line in a page for people: ${m[0]}`);
+    }
+  }
+}
+
+// A pair shares its relative path and links both ways (AD-074): the agent page of
+// `docs/x/y.md` is `.agents/docs/x/y.md`. An agent page with no counterpart is exempt.
+for (const [agentRel, outs] of linksOut) {
+  if (!agentRel.startsWith('.agents/docs/')) continue;
+  const peopleRel = agentRel.slice('.agents/'.length);
+  if (!linksOut.has(peopleRel)) continue;
+  const peopleAbs = path.resolve(root, peopleRel);
+  const agentAbs = path.resolve(root, agentRel);
+  if (!linksOut.get(peopleRel).includes(agentAbs)) {
+    failures.push(`${peopleRel}:1 pair: no link to its agent page (${agentRel})`);
+  }
+  if (!outs.includes(peopleAbs)) {
+    failures.push(`${agentRel}:1 pair: no link to the page for people (${peopleRel})`);
   }
 }
 

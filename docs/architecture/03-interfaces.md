@@ -106,7 +106,7 @@ This projects §10 (release channels) onto A2A without a platform-specific API: 
 
 ## 12b. Agent Registry
 
-A client that wants to offer "the platform's agents" needs a list to start from. A2A names curated registries as a discovery strategy but prescribes no registry API (*verified 2026-10-01*, <https://a2a-protocol.org/latest/topics/agent-discovery/>), so the platform defines one: a **linkset of agent cards**, one `item` per `AgentService` that has A2A enabled and that the caller may invoke (§52).
+A client that wants to offer "the platform's agents" needs a list to start from. A2A names curated registries as a discovery strategy but prescribes no registry API (<https://a2a-protocol.org/latest/topics/agent-discovery/>), so the platform defines one: a **linkset of agent cards**, one `item` per `AgentService` that has A2A enabled and that the caller may invoke (§52).
 
 - URI: `https://agents.vymalo.com/registry/v1` (a profile identifier carried in the document).
 - A JSON document, `application/linkset+json`, shaped like an RFC 9727 API catalog; each item is the absolute URL of the service's agent card, with the service id, an optional display title, optional tags and, since D3, an optional `audience` (who may use the agent, for a client that offers agents to people: [§60a](10-control-plane-and-crds.md#who-may-use-an-agent-ad-028), AD-028).
@@ -118,6 +118,8 @@ A client that wants to offer "the platform's agents" needs a list to start from.
 > **Decision (2026-10-04, AD-023):** until a control plane exists, the operator binary serves the registry from the cache of its own reflector, with **one static bearer** and **no per-caller filtering**, and it refuses rather than truncates a list past the limits. The deviations from this section and from the contract are listed in [§59a](10-control-plane-and-crds.md#registry-in-v0).
 
 The first consumer is another-agentic-system, which reads the registry live beside its own static agent list.
+
+*The verification marks of this section are in [the agent page](../../.agents/docs/architecture/03-interfaces.md#12b-agent-registry).*
 
 ---
 
