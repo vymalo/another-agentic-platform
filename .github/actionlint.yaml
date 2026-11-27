@@ -1,0 +1,12 @@
+# actionlint reads this file on its own (docs/config.md, "Configuration file").
+#
+# `queue: max` on the `concurrency` of release.yml's `homebrew-tap` job is real GitHub Actions syntax
+# (`jobs.<job_id>.concurrency.queue`, verified 2026-11-27 at
+# https://docs.github.com/en/actions/reference/workflows-and-actions/workflow-syntax), but actionlint 1.7.12 does not parse
+# the key yet. The documented mechanism for this is the `paths.<glob>.ignore` list of regular expressions, which filters
+# errors by message, so exactly one message is ignored and nothing else: the expression is anchored at both ends and scoped
+# to that one file. Remove it when actionlint learns the key.
+paths:
+  .github/workflows/release.yml:
+    ignore:
+      - '^unexpected key "queue" for "concurrency" section\. expected one of "cancel-in-progress", "group"$'

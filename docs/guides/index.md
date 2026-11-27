@@ -4,6 +4,7 @@ One task per page.
 
 ## Deploy
 
+- [Install `aapctl`](install-aapctl.md): the command line of the platform's release, with Homebrew or a tarball, and the two commands that verify what you downloaded.
 - [Install the CRDs and the operator](deploy/install.md): the two charts, in order, with `watchNamespaces`, the store, the registry token and `replicas`.
 - [Turn on the Platform API](deploy/platform-api.md): `api.enabled`, the issuer, the network peers and the edge.
 - [Turn on run pods](deploy/run-pods.md): the egress proxy, the git sandbox and the sandboxed runtime.

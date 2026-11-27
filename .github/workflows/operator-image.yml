@@ -121,6 +121,9 @@ on:
       - "release-please-config.json"
       - ".release-please-manifest.json"
       - "tools/check-release-version.sh"
+      # The aapctl release's tap tooling (AD-071): its `scripts` job checks it, and nothing of it is in an image, so a push to
+      # main does not need to rebuild them for it.
+      - "tools/release/**"
   push:
     branches: [main]
     paths:
@@ -287,7 +290,14 @@ jobs:
     steps:
       - uses: actions/checkout@v7
       - name: shellcheck
-        run: shellcheck deploy/operator/bump-tag.sh deploy/operator/release-pin.sh tools/check-release-version.sh deploy/operator/tests/*.sh deploy/operator/tests/e2e/*.sh
+        run: shellcheck deploy/operator/bump-tag.sh deploy/operator/release-pin.sh tools/check-release-version.sh tools/release/homebrew-smoke.sh deploy/operator/tests/*.sh deploy/operator/tests/e2e/*.sh
+      # The release's tap tooling (AD-071): two Node programs and a shell script that CI never runs against a release, so its
+      # syntax and its own tests are what is checked here; `render-check.sh` and the release workflow do the rest.
+      - name: the tap tooling parses, and its tests pass
+        run: |
+          node --check tools/release/write-aapctl-formula.mjs
+          node --check tools/release/update-homebrew-tap.mjs
+          node --test tools/release/release.test.mjs
       # The scripted model of the run pods end-to-end (a Node script the coder's image runs in the cluster): its turns, its probe (valid shell, run for real), and its two
       # shapes of answer, with no cluster and no coder. Node 18 or later (the runner's) for fetch and node:test.
       - name: the scripted model of the run pods end-to-end
