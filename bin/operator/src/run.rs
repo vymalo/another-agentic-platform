@@ -932,8 +932,10 @@ mod tests {
         )
     }
 
-    /// ANR-1193: the meter the binary builds is the one the operator is composed with, and its run pods' accounts are
-    /// asked of the broker. Delete the `with_meter` call of `compose_meter` and this fails.
+    /// ANR-1193: the meter the binary builds is the one the operator is composed with, and the broker half of that
+    /// section is a source that asks the stub for a run pod's account. Delete the `with_meter` call of `compose_meter`
+    /// and this fails; it does not prove which account source `compose_meter` hands the operator (that is
+    /// `metering.rs`'s own routing test, and `has_activity`'s precedent is presence only).
     #[tokio::test(flavor = "multi_thread")]
     async fn the_operator_is_composed_with_the_meter_it_was_built() {
         use aap_usage::AccountSource;
