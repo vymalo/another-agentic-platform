@@ -67,18 +67,6 @@ pub struct ApiConfig {
     pub workload_listener: Option<WorkloadListener>,
 }
 
-/// Whether the TLS layer insists on a client certificate.
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub enum ClientAuth {
-    /// A connection with no client certificate does not complete its handshake. The default: the refusal is the TLS layer's.
-    #[default]
-    Required,
-    /// A connection with none is accepted, and the first request is answered `401` by the API (a problem detail a client can
-    /// read). A certificate that is presented is verified either way.
-    Optional,
-}
-
 /// The `workloadListener` block: where the mutual-TLS listener is and the files it reads. **Paths, not contents**: the key is
 /// a mounted file, never a value of this file.
 #[derive(Debug, Clone, Deserialize)]
@@ -92,9 +80,6 @@ pub struct WorkloadListener {
     pub key_file: PathBuf,
     /// The CA bundle (PEM) that client certificates must chain to: the one trust of this listener.
     pub client_ca_file: PathBuf,
-    /// Whether a client certificate is required at the handshake.
-    #[serde(default)]
-    pub client_auth: ClientAuth,
     /// How long a peer has to finish its TLS handshake, in seconds (1 to 60).
     #[serde(default = "default_handshake_timeout_secs")]
     pub handshake_timeout_secs: u64,
@@ -789,11 +774,6 @@ workloadClients:
             .unwrap();
         let w = on.workload.unwrap();
         assert_eq!(w.listener.listen.port(), 8443);
-        assert_eq!(
-            w.listener.client_auth,
-            ClientAuth::Required,
-            "required unless it says optional"
-        );
         assert_eq!(w.clients.table().unwrap().len(), 1);
     }
 
@@ -881,9 +861,9 @@ workloadClients:
                 "typo",
             ),
             (
-                "a client auth it does not have",
+                "a clientAuth, which was removed (a client certificate is always required)",
                 |v| {
-                    v["workloadListener"]["clientAuth"] = "sometimes".into();
+                    v["workloadListener"]["clientAuth"] = "required".into();
                 },
                 "clientAuth",
             ),
@@ -897,16 +877,16 @@ workloadClients:
     }
 
     #[test]
-    fn optional_client_auth_is_read() {
-        let mut v = with_workload();
-        v["workloadListener"]["clientAuth"] = "optional".into();
-        let settings = ApiConfig::parse(&serde_yaml::to_string(&v).unwrap())
-            .unwrap()
-            .validate()
-            .unwrap();
-        assert_eq!(
-            settings.workload.unwrap().listener.client_auth,
-            ClientAuth::Optional
-        );
+    fn a_file_that_still_says_client_auth_is_refused_as_an_unknown_key_whatever_its_value() {
+        // `clientAuth` was removed (the owner's decision of 2026-11-27: a client certificate is always required): no shim.
+        for value in ["required", "optional"] {
+            let mut v = with_workload();
+            v["workloadListener"]["clientAuth"] = value.into();
+            let message = refused(&v);
+            assert!(
+                message.contains("clientAuth") && message.contains("unknown field"),
+                "{value}: {message}"
+            );
+        }
     }
 }

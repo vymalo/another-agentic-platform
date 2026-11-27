@@ -935,8 +935,8 @@ SPIFFE id that is not one, a permission that is not platform:agents.own, a clash
 {{- if include "aap.api.workloadEnabled" . -}}
 {{- $w := $api.workload -}}
 {{- range $k, $v := $w -}}
-{{- if not (has $k (list "enabled" "port" "clientAuth" "handshakeTimeoutSecs" "maxHandshakesPerIp" "maxConnections" "clients" "tls" "clientCa" "from")) -}}
-{{- fail (printf "api.workload.%s is not a setting: enabled, port, clientAuth, handshakeTimeoutSecs, maxHandshakesPerIp, maxConnections, clients, tls, clientCa or from" $k) -}}
+{{- if not (has $k (list "enabled" "port" "handshakeTimeoutSecs" "maxHandshakesPerIp" "maxConnections" "clients" "tls" "clientCa" "from")) -}}
+{{- fail (printf "api.workload.%s is not a setting: enabled, port, handshakeTimeoutSecs, maxHandshakesPerIp, maxConnections, clients, tls, clientCa or from" $k) -}}
 {{- end -}}
 {{- end -}}
 {{- if not (include "aap.isPort" $w.port) -}}
@@ -950,9 +950,6 @@ SPIFFE id that is not one, a permission that is not platform:agents.own, a clash
 {{- if not (and (include "aap.isWholeNumber" $v) (ge (int $v) 1) (le (int $v) (int (index $b 1)))) -}}
 {{- fail (printf "api.workload.%s must be a whole number from 1 to %d, got %v" (index $b 0) (int (index $b 1)) $v) -}}
 {{- end -}}
-{{- end -}}
-{{- if not (has (toString $w.clientAuth) (list "required" "optional")) -}}
-{{- fail (printf "api.workload.clientAuth must be required or optional, got %q" (toString $w.clientAuth)) -}}
 {{- end -}}
 {{- if not (and (kindIs "slice" $w.clients) $w.clients) -}}
 {{- fail "api.workload.clients is required while api.workload.enabled: at least one workload ({spiffeId, permissions}); a listener that accepts no one is a mistake" -}}

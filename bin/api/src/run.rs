@@ -10,7 +10,6 @@ use std::time::Duration;
 
 use aap_api::ModelEndpoint;
 use aap_auth_oidc::OidcAuthenticator;
-use aap_auth_workload::WorkloadAuth;
 use aap_forms::Defaults;
 use aap_objects_kubernetes::KubernetesObjects;
 use aap_platform_api::{ApiMetrics, ApiState, CorsOrigins, NoBearer, router, workload_router};
@@ -133,15 +132,10 @@ where
     O: AgentObjects + 'static,
 {
     let l = &settings.listener;
-    let ca = std::fs::read_to_string(&l.client_ca_file).with_context(|| {
-        format!(
-            "reading the client CA bundle {}",
-            l.client_ca_file.display()
-        )
-    })?;
-    let auth = WorkloadAuth::new(&ca, &settings.clients).context("the workload authenticator")?;
-    let tls = mtls::server_config(&l.cert_file, &l.key_file, &ca, l.client_auth)?;
-    let router = build_workload_router(objects, auth, defaults, metrics, tracer)?;
+    // The client CA bundle is read here, at start (a missing one stops the API before anything binds), and again when its file changes.
+    let trust = mtls::Trust::load(&l.client_ca_file, &settings.clients, mtls::RECHECK)?;
+    let tls = mtls::server_config(&l.cert_file, &l.key_file, &trust)?;
+    let router = build_workload_router(objects, mtls::TrustAuth(trust), defaults, metrics, tracer)?;
     let tcp = tokio::net::TcpListener::bind(l.listen)
         .await
         .with_context(|| format!("binding {}", l.listen))?;

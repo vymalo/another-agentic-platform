@@ -4,17 +4,19 @@
 //! * **One trust.** Client certificates are verified at the handshake against the CA bundle of `workloadListener.clientCaFile`,
 //!   the same bundle (read the same way, `aap_auth_workload::parse_bundle`) the authenticator is built from, so the TLS layer
 //!   and the API cannot trust different CAs. A chain that does not lead to it never gets a request.
-//! * **Required or optional** (`clientAuth`): `required` ends the handshake of a peer with no certificate; `optional` lets the
-//!   connection through and the API answers its first request `401`. A certificate that is presented is verified either way.
+//! * **A client certificate is always required** at the handshake: a peer with none does not complete it. (There was a
+//!   `clientAuth: optional`; the owner removed it on 2026-11-27, and a file that still says `clientAuth` is refused as an unknown key.)
 //! * **The API decides.** The TLS layer is *a* check, not *the* check: the extended key usage (required, not required-if-present),
 //!   the window and the exact SPIFFE id are the authenticator's, whatever the handshake let through.
 //! * **Handshakes never block the listener.** Each runs in its own task under a deadline and a cap, so a peer that opens a
 //!   connection and says nothing costs one slot for ten seconds and nobody else anything.
 //! * **No client sees another's certificate**, and nothing here prints one: a certificate is `aap_ports::Certificate`, whose
 //!   `Debug` is a length.
-//! * **The server certificate is re-read** when its file changes (checked at most every 30 s, at a handshake), so that a renewed
-//!   certificate does not need a restart. A file that cannot be read keeps the one in use and says so once. Rotating the *CA
-//!   bundle* needs a restart: it is the trust, and it is read at start.
+//! * **The server certificate and the client CA bundle are re-read** when their files change (told by inode, length and
+//!   modification time; checked at most every 30 s, at a handshake and before a request is authenticated), so that a renewal or a
+//!   CA rotation needs no restart. The next handshake's verifier and the authenticator take the new bundle **together**; a
+//!   connection already established is not cut, and its next request is judged by the new bundle. A file that cannot be read, or a
+//!   bundle that holds no usable CA, keeps the one in use and warns once.
 //!
 //! Not built: the CRL of ADR-0042 decision 2 (fetched at most 2 h ago, fail closed when it cannot be read). It needs a source to
 //! fetch from, which the deployment has not named, so a revoked certificate is refused only when it expires (ANR-1011, AD-068).
@@ -29,20 +31,23 @@ use std::sync::{Arc, Mutex, PoisonError, RwLock};
 use std::task::{Context as TaskContext, Poll};
 use std::time::{Duration, Instant};
 
+use aap_auth_workload::{WorkloadAuth, WorkloadClients};
 use aap_platform_api::PeerCertificate;
-use aap_ports::Certificate;
+use aap_ports::{Certificate, ClientAuthError, ClientAuthenticator, Principal};
 use anyhow::{Context, Result, bail};
 use axum::{Extension, Router};
 use hyper::server::conn::http1;
 use hyper_util::rt::{TokioIo, TokioTimer};
 use hyper_util::service::TowerToHyperService;
 use rustls::RootCertStore;
-use rustls::server::danger::ClientCertVerifier;
+use rustls::client::danger::HandshakeSignatureValid;
+use rustls::server::danger::{ClientCertVerified, ClientCertVerifier};
 use rustls::server::{ClientHello, ResolvesServerCert, WebPkiClientVerifier};
 use rustls::sign::CertifiedKey;
+use rustls::{DigitallySignedStruct, DistinguishedName, SignatureScheme};
 use rustls::{ServerConfig, crypto::CryptoProvider};
 use rustls_pki_types::pem::PemObject;
-use rustls_pki_types::{CertificateDer, PrivateKeyDer};
+use rustls_pki_types::{CertificateDer, PrivateKeyDer, UnixTime};
 use tokio::io::{AsyncRead, AsyncWrite, ReadBuf};
 use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::{Semaphore, mpsc, watch};
@@ -50,10 +55,8 @@ use tokio::time::timeout;
 use tokio_rustls::TlsAcceptor;
 use tokio_rustls::server::TlsStream;
 
-use crate::config::ClientAuth;
-
 /// How long a server certificate is kept before its file is looked at again.
-const RECHECK: Duration = Duration::from_secs(30);
+pub const RECHECK: Duration = Duration::from_secs(30);
 
 /// The server certificate and its key, from two files, re-read when either changes.
 struct Reloading {
@@ -85,16 +88,17 @@ impl fmt::Debug for Reloading {
     }
 }
 
+fn file_id(p: &Path) -> Option<FileId> {
+    let m = std::fs::metadata(p).ok()?;
+    #[cfg(unix)]
+    let inode = std::os::unix::fs::MetadataExt::ino(&m);
+    #[cfg(not(unix))]
+    let inode = 0;
+    Some((inode, m.len(), m.modified().ok()))
+}
+
 fn stamp(cert: &Path, key: &Path) -> Stamp {
-    let id = |p: &Path| {
-        let m = std::fs::metadata(p).ok()?;
-        #[cfg(unix)]
-        let inode = std::os::unix::fs::MetadataExt::ino(&m);
-        #[cfg(not(unix))]
-        let inode = 0;
-        Some((inode, m.len(), m.modified().ok()))
-    };
-    (id(cert), id(key))
+    (file_id(cert), file_id(key))
 }
 
 fn load_certified(cert: &Path, key: &Path, provider: &CryptoProvider) -> Result<CertifiedKey> {
@@ -179,10 +183,9 @@ impl ResolvesServerCert for Reloading {
     }
 }
 
-/// The verifier of client certificates: the one CA bundle, `required` or `optional`.
+/// The verifier of client certificates for one CA bundle: a client certificate is **required**.
 fn client_verifier(
     ca_pem: &str,
-    mode: ClientAuth,
     provider: &Arc<CryptoProvider>,
 ) -> Result<Arc<dyn ClientCertVerifier>> {
     let mut roots = RootCertStore::empty();
@@ -195,46 +198,209 @@ fn client_verifier(
             .add(cert)
             .context("a certificate of the client CA bundle is not a usable trust anchor")?;
     }
-    let builder = WebPkiClientVerifier::builder_with_provider(Arc::new(roots), provider.clone());
-    let builder = match mode {
-        ClientAuth::Required => builder,
-        ClientAuth::Optional => builder.allow_unauthenticated(),
-    };
-    builder
+    WebPkiClientVerifier::builder_with_provider(Arc::new(roots), provider.clone())
         .build()
         .map_err(|e| anyhow::anyhow!("the client verifier: {e}"))
 }
 
-/// The TLS configuration of the listener: ring, the default protocol versions (1.3 and 1.2), HTTP/1.1, the client verifier and
-/// the reloading server certificate.
+/// The one trust of the workload listener: the client CA bundle, **read again when its file changes**, and what is built from it, the
+/// TLS layer's verifier and the API's authenticator, which are swapped **together** under one lock so that a handshake and a request
+/// never see two bundles. A bundle that cannot be read, or holds no usable CA, or whose table is refused, keeps the one in use and warns
+/// once. A connection already established is not cut: its next request is judged by the bundle that is current then.
+pub struct Trust {
+    ca_file: PathBuf,
+    clients: WorkloadClients,
+    provider: Arc<CryptoProvider>,
+    recheck: Duration,
+    current: RwLock<Current>,
+}
+
+struct Current {
+    auth: Arc<WorkloadAuth>,
+    verifier: Arc<dyn ClientCertVerifier>,
+    stamp: Option<FileId>,
+    checked: Instant,
+    complained: bool,
+}
+
+impl Trust {
+    /// Read `ca_file` and build the trust, looking at the file again every `recheck`.
+    ///
+    /// # Errors
+    ///
+    /// The file cannot be read, holds no usable CA, or the table of `clients` is refused.
+    pub fn load(ca_file: &Path, clients: &WorkloadClients, recheck: Duration) -> Result<Arc<Self>> {
+        let provider = Arc::new(rustls::crypto::ring::default_provider());
+        let stamp = file_id(ca_file);
+        let (auth, verifier) = Self::build(ca_file, clients, &provider)?;
+        Ok(Arc::new(Self {
+            ca_file: ca_file.to_owned(),
+            clients: clients.clone(),
+            provider,
+            recheck,
+            current: RwLock::new(Current {
+                auth,
+                verifier,
+                stamp,
+                checked: Instant::now(),
+                complained: false,
+            }),
+        }))
+    }
+
+    fn build(
+        ca_file: &Path,
+        clients: &WorkloadClients,
+        provider: &Arc<CryptoProvider>,
+    ) -> Result<(Arc<WorkloadAuth>, Arc<dyn ClientCertVerifier>)> {
+        let pem = std::fs::read_to_string(ca_file)
+            .with_context(|| format!("reading the client CA bundle {}", ca_file.display()))?;
+        let auth = WorkloadAuth::new(&pem, clients).context("the workload authenticator")?;
+        let verifier = client_verifier(&pem, provider)?;
+        Ok((Arc::new(auth), verifier))
+    }
+
+    /// Look at the file if it has not been looked at for `recheck`, and swap in the new bundle if it changed and is usable.
+    fn refresh(&self) {
+        let now = Instant::now();
+        {
+            let cur = self.current.read().unwrap_or_else(PoisonError::into_inner);
+            if now.duration_since(cur.checked) < self.recheck {
+                return;
+            }
+        }
+        let mut cur = self.current.write().unwrap_or_else(PoisonError::into_inner);
+        if now.duration_since(cur.checked) < self.recheck {
+            return;
+        }
+        cur.checked = now;
+        let seen = file_id(&self.ca_file);
+        if seen == cur.stamp {
+            return;
+        }
+        match Self::build(&self.ca_file, &self.clients, &self.provider) {
+            Ok((auth, verifier)) => {
+                cur.auth = auth;
+                cur.verifier = verifier;
+                cur.stamp = seen;
+                cur.complained = false;
+                tracing::info!("the workload listener's client CA bundle was reloaded");
+            }
+            Err(error) => {
+                // Not remembered as seen: it is tried again when the file changes again, and warned about once until then.
+                cur.stamp = seen;
+                if !cur.complained {
+                    cur.complained = true;
+                    tracing::warn!(error = %format!("{error:#}"), "the workload listener's client CA bundle changed and cannot be used: the one in use stays");
+                }
+            }
+        }
+    }
+
+    fn snapshot(&self) -> (Arc<WorkloadAuth>, Arc<dyn ClientCertVerifier>) {
+        self.refresh();
+        let cur = self.current.read().unwrap_or_else(PoisonError::into_inner);
+        (cur.auth.clone(), cur.verifier.clone())
+    }
+}
+
+/// The API's authenticator over the live trust.
+pub struct TrustAuth(pub Arc<Trust>);
+
+impl ClientAuthenticator for TrustAuth {
+    async fn authenticate(
+        &self,
+        certificate: Option<&Certificate>,
+    ) -> Result<Principal, ClientAuthError> {
+        let (auth, _) = self.0.snapshot();
+        auth.authenticate(certificate).await
+    }
+}
+
+/// The TLS layer's verifier over the live trust.
+struct TrustVerifier(Arc<Trust>);
+
+impl fmt::Debug for TrustVerifier {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("TrustVerifier").finish_non_exhaustive()
+    }
+}
+
+impl ClientCertVerifier for TrustVerifier {
+    fn root_hint_subjects(&self) -> &[DistinguishedName] {
+        // The names of the CAs a client may choose its certificate by: not offered, since the bundle can change under a handshake. A
+        // client holds the certificate it was given.
+        &[]
+    }
+
+    fn verify_client_cert(
+        &self,
+        end_entity: &CertificateDer<'_>,
+        intermediates: &[CertificateDer<'_>],
+        now: UnixTime,
+    ) -> Result<ClientCertVerified, rustls::Error> {
+        self.0
+            .snapshot()
+            .1
+            .verify_client_cert(end_entity, intermediates, now)
+    }
+
+    fn verify_tls12_signature(
+        &self,
+        message: &[u8],
+        cert: &CertificateDer<'_>,
+        dss: &DigitallySignedStruct,
+    ) -> Result<HandshakeSignatureValid, rustls::Error> {
+        self.0
+            .snapshot()
+            .1
+            .verify_tls12_signature(message, cert, dss)
+    }
+
+    fn verify_tls13_signature(
+        &self,
+        message: &[u8],
+        cert: &CertificateDer<'_>,
+        dss: &DigitallySignedStruct,
+    ) -> Result<HandshakeSignatureValid, rustls::Error> {
+        self.0
+            .snapshot()
+            .1
+            .verify_tls13_signature(message, cert, dss)
+    }
+
+    fn supported_verify_schemes(&self) -> Vec<SignatureScheme> {
+        self.0.snapshot().1.supported_verify_schemes()
+    }
+}
+
+/// The TLS configuration of the listener: ring, the default protocol versions (1.3 and 1.2), HTTP/1.1, the live client verifier (a
+/// client certificate is required) and the reloading server certificate.
 ///
 /// # Errors
 ///
-/// A file that cannot be read or parsed, a bundle with no usable CA, or a key that is not the certificate's.
+/// A file that cannot be read or parsed, or a key that is not the certificate's.
 pub fn server_config(
     cert_file: &Path,
     key_file: &Path,
-    ca_pem: &str,
-    mode: ClientAuth,
+    trust: &Arc<Trust>,
 ) -> Result<Arc<ServerConfig>> {
-    server_config_rechecking(cert_file, key_file, ca_pem, mode, RECHECK)
+    server_config_rechecking(cert_file, key_file, trust, RECHECK)
 }
 
 /// [`server_config`], looking at the server certificate's files every `recheck` (a test says 0).
 fn server_config_rechecking(
     cert_file: &Path,
     key_file: &Path,
-    ca_pem: &str,
-    mode: ClientAuth,
+    trust: &Arc<Trust>,
     recheck: Duration,
 ) -> Result<Arc<ServerConfig>> {
     let provider = Arc::new(rustls::crypto::ring::default_provider());
-    let verifier = client_verifier(ca_pem, mode, &provider)?;
     let resolver = Reloading::new(cert_file, key_file, provider.clone(), recheck)?;
     let mut config = ServerConfig::builder_with_provider(provider)
         .with_safe_default_protocol_versions()
         .map_err(|e| anyhow::anyhow!("TLS protocol versions: {e}"))?
-        .with_client_cert_verifier(verifier)
+        .with_client_cert_verifier(Arc::new(TrustVerifier(trust.clone())))
         .with_cert_resolver(Arc::new(resolver));
     config.alpn_protocols = vec![b"http/1.1".to_vec()];
     Ok(Arc::new(config))
@@ -568,7 +734,7 @@ mod tests {
 
     use aap_api::permission;
     use aap_auth_workload::testkit::{Leaf, LeafSpec, TestPki, Usage};
-    use aap_auth_workload::{WorkloadAuth, WorkloadClient, WorkloadClients};
+    use aap_auth_workload::{WorkloadClient, WorkloadClients};
     use aap_platform_api::{ApiMetrics, metric};
     use aap_ports::memory::{MemoryAuthenticator, MemoryObjects};
     use aap_trace::Tracer;
@@ -627,25 +793,26 @@ mod tests {
         workload_pki: TestPki,
         metrics: Arc<ApiMetrics>,
         stop: watch::Sender<bool>,
-        _dir: Dir,
+        dir: Dir,
+        ca_file: PathBuf,
     }
 
     fn limits() -> Limits {
         Limits::new(Duration::from_secs(5), 8, 256)
     }
 
-    async fn rig(mode: ClientAuth) -> Rig {
-        rig_with(mode, limits()).await
+    async fn rig() -> Rig {
+        rig_with(limits()).await
     }
 
-    async fn rig_with(mode: ClientAuth, limits: Limits) -> Rig {
+    async fn rig_with(limits: Limits) -> Rig {
         let dir = Dir::new();
         let server_pki = TestPki::new("server CA");
         let workload_pki = TestPki::new("workload CA");
         let server = server_pki.leaf(&LeafSpec::server(&["localhost", "127.0.0.1"]));
         let cert = dir.write("tls.crt", &server.cert_pem);
         let key = dir.write("tls.key", &server.key_pem);
-        let ca_pem = workload_pki.ca_pem();
+        let ca_file = dir.write("ca.crt", &workload_pki.ca_pem());
         let clients = WorkloadClients {
             clients: vec![
                 WorkloadClient {
@@ -658,13 +825,19 @@ mod tests {
                 },
             ],
         };
-        let auth = WorkloadAuth::new(&ca_pem, &clients).unwrap();
-        let tls = server_config(&cert, &key, &ca_pem, mode).unwrap();
+        // Every file is looked at on each handshake and request (a recheck of zero): the reloads are tested, not waited for.
+        let trust = Trust::load(&ca_file, &clients, Duration::ZERO).unwrap();
+        let tls = server_config_rechecking(&cert, &key, &trust, Duration::ZERO).unwrap();
         let metrics = Arc::new(ApiMetrics::new());
         let objects = MemoryObjects::in_namespace(&defaults().namespace);
-        let router =
-            build_workload_router(objects, auth, defaults(), metrics.clone(), Tracer::off())
-                .unwrap();
+        let router = build_workload_router(
+            objects,
+            TrustAuth(trust),
+            defaults(),
+            metrics.clone(),
+            Tracer::off(),
+        )
+        .unwrap();
         let tcp = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let addr = tcp.local_addr().unwrap();
         let listener = MtlsListener::new(tcp, tls, &limits).unwrap();
@@ -679,7 +852,8 @@ mod tests {
             workload_pki,
             metrics,
             stop,
-            _dir: dir,
+            dir,
+            ca_file,
         }
     }
 
@@ -765,7 +939,7 @@ mod tests {
 
     #[tokio::test]
     async fn the_right_spiffe_id_reaches_the_owner_routes_and_nothing_else() {
-        let rig = rig(ClientAuth::Required).await;
+        let rig = rig().await;
         let orchestrator = rig.leaf(&LeafSpec::client(ORCHESTRATOR));
 
         let (status, body) = rig.call(Some(&orchestrator), OWNER_LIST, "").await.unwrap();
@@ -807,7 +981,7 @@ mod tests {
 
     #[tokio::test]
     async fn an_identity_the_configuration_does_not_name_is_refused_with_its_reason() {
-        let rig = rig(ClientAuth::Required).await;
+        let rig = rig().await;
         let stranger = rig.leaf(&LeafSpec::client(STRANGER));
         let (status, body) = rig.call(Some(&stranger), OWNER_LIST, "").await.unwrap();
         assert_eq!(status, 401, "{body}");
@@ -830,7 +1004,7 @@ mod tests {
 
     #[tokio::test]
     async fn a_named_identity_with_no_permission_is_403_naming_the_permission() {
-        let rig = rig(ClientAuth::Required).await;
+        let rig = rig().await;
         let nobody = rig.leaf(&LeafSpec::client(NOBODY));
         let (status, body) = rig.call(Some(&nobody), OWNER_LIST, "").await.unwrap();
         assert_eq!(status, 403, "{body}");
@@ -839,7 +1013,7 @@ mod tests {
 
     #[tokio::test]
     async fn a_certificate_of_another_ca_does_not_get_a_connection() {
-        let rig = rig(ClientAuth::Required).await;
+        let rig = rig().await;
         let elsewhere = TestPki::new("another CA").leaf(&LeafSpec::client(ORCHESTRATOR));
         let refused = rig.call(Some(&elsewhere), OWNER_LIST, "").await;
         assert!(
@@ -850,7 +1024,7 @@ mod tests {
 
     #[tokio::test]
     async fn a_certificate_for_another_use_does_not_get_a_connection() {
-        let rig = rig(ClientAuth::Required).await;
+        let rig = rig().await;
         // The same CA and the same URI SAN, for server authentication: the prompt-signing leaf of the same PKI must not call the API.
         let mut spec = LeafSpec::client(ORCHESTRATOR);
         spec.usages = vec![Usage::Server];
@@ -863,7 +1037,7 @@ mod tests {
     async fn a_certificate_with_no_extended_key_usage_gets_a_connection_and_a_401() {
         // `webpki`'s client verifier takes a leaf that has no EKU extension at all (the check is required-if-present), so the TLS
         // layer lets it through; the authenticator requires the extension, by hand (ANR-1010). This is that test over a socket.
-        let rig = rig(ClientAuth::Required).await;
+        let rig = rig().await;
         let mut spec = LeafSpec::client(ORCHESTRATOR);
         spec.usages = Vec::new();
         let no_eku = rig.leaf(&spec);
@@ -879,7 +1053,7 @@ mod tests {
 
     #[tokio::test]
     async fn an_expired_certificate_does_not_get_a_connection() {
-        let rig = rig(ClientAuth::Required).await;
+        let rig = rig().await;
         let mut spec = LeafSpec::client(ORCHESTRATOR);
         spec.not_after = (2020, 1, 2);
         let expired = rig.leaf(&spec);
@@ -889,7 +1063,7 @@ mod tests {
 
     #[tokio::test]
     async fn a_leaf_with_no_uri_san_or_two_is_a_401() {
-        let rig = rig(ClientAuth::Required).await;
+        let rig = rig().await;
         let mut none = LeafSpec::client(ORCHESTRATOR);
         none.uris = Vec::new();
         none.hosts = vec!["orchestrator.test".to_owned()];
@@ -916,27 +1090,23 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn no_certificate_is_no_connection_when_required_and_a_401_when_optional() {
-        let required = rig(ClientAuth::Required).await;
-        assert!(required.call(None, OWNER_LIST, "").await.is_err());
-
-        let optional = rig(ClientAuth::Optional).await;
-        let (status, body) = optional.call(None, OWNER_LIST, "").await.unwrap();
-        assert_eq!(status, 401, "{body}");
-        assert!(body.contains("missing-certificate"), "{body}");
+    async fn a_client_certificate_is_always_required_at_the_handshake() {
+        // There is no `clientAuth: optional` (removed by the owner's decision of 2026-11-27): no certificate, no connection, with or
+        // without a bearer token beside it.
+        let rig = rig().await;
+        assert!(rig.call(None, OWNER_LIST, "").await.is_err());
+        let with_token = rig
+            .call(None, OWNER_LIST, "Authorization: Bearer person-token\r\n")
+            .await;
+        assert!(with_token.is_err(), "{with_token:?}");
     }
 
     #[tokio::test]
     async fn a_bearer_token_is_not_read_here_and_a_certificate_is_not_read_on_the_persons_listener()
     {
-        // The person's token, a good one, beside no certificate: refused (neither listener falls back to the other) ...
-        let optional = rig(ClientAuth::Optional).await;
-        let (status, _) = optional
-            .call(None, OWNER_LIST, "Authorization: Bearer person-token\r\n")
-            .await
-            .unwrap();
-        assert_eq!(status, 401);
-        // ... and a bearer beside a good certificate changes nothing: the certificate decides.
+        // A bearer beside a good certificate changes nothing: the certificate decides (and a bearer with no certificate never gets
+        // a connection: a_client_certificate_is_always_required_at_the_handshake).
+        let optional = rig().await;
         let leaf = optional.leaf(&LeafSpec::client(ORCHESTRATOR));
         let (status, _) = optional
             .call(
@@ -1032,14 +1202,9 @@ mod tests {
         let cert = dir.write("tls.crt", &first.cert_pem);
         let key = dir.write("tls.key", &first.key_pem);
         let mtime = std::fs::metadata(&cert).unwrap().modified().unwrap();
-        let tls = server_config_rechecking(
-            &cert,
-            &key,
-            &workload_pki.ca_pem(),
-            ClientAuth::Required,
-            Duration::ZERO,
-        )
-        .unwrap();
+        let ca = dir.write("ca.crt", &workload_pki.ca_pem());
+        let trust = Trust::load(&ca, &WorkloadClients::default(), Duration::ZERO).unwrap();
+        let tls = server_config_rechecking(&cert, &key, &trust, Duration::ZERO).unwrap();
         let tcp = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let addr = tcp.local_addr().unwrap();
         let (stop, stopped) = watch::channel(false);
@@ -1099,17 +1264,14 @@ mod tests {
         let cert = dir.write("tls.crt", &a.cert_pem);
         let key = dir.write("tls.key", &b.key_pem);
         let ca = dir.write("ca.pem", &pki.ca_pem());
-        let error = server_config(
-            &cert,
-            &key,
-            &std::fs::read_to_string(ca).unwrap(),
-            ClientAuth::Required,
-        )
-        .unwrap_err();
+        let trust = Trust::load(&ca, &WorkloadClients::default(), Duration::ZERO).unwrap();
+        let error = server_config(&cert, &key, &trust).unwrap_err();
         assert!(format!("{error:#}").contains("not the key"), "{error:#}");
-        // And a bundle with no CA in it.
-        let key = dir.write("tls.key", &a.key_pem);
-        let error = server_config(&cert, &key, "", ClientAuth::Required).unwrap_err();
+        // And a bundle with no CA in it stops the trust at start.
+        let empty = dir.write("empty.pem", "");
+        let error = Trust::load(&empty, &WorkloadClients::default(), Duration::ZERO)
+            .err()
+            .unwrap();
         assert!(format!("{error:#}").contains("no certificate"), "{error:#}");
     }
 
@@ -1118,7 +1280,7 @@ mod tests {
     #[tokio::test]
     async fn a_leaf_through_an_intermediate_reaches_the_owner_routes_with_only_the_root_in_the_bundle()
      {
-        let rig = rig(ClientAuth::Required).await;
+        let rig = rig().await;
         // root -> intermediate -> intermediate -> leaf; the bundle holds the root alone, and the client sends the leaf and the two.
         let issuing = rig
             .workload_pki
@@ -1138,7 +1300,7 @@ mod tests {
     #[tokio::test]
     async fn a_leaf_that_does_not_bring_its_intermediate_or_brings_another_cas_gets_no_connection()
     {
-        let rig = rig(ClientAuth::Required).await;
+        let rig = rig().await;
         let issuing = rig.workload_pki.intermediate("issuing");
         let mut alone = issuing.leaf(&LeafSpec::client(ORCHESTRATOR));
         alone.intermediates.clear();
@@ -1179,7 +1341,7 @@ mod tests {
         let mut l = limits();
         l.max_handshakes_per_ip = 2;
         l.handshake_timeout = Duration::from_secs(2);
-        let rig = rig_with(ClientAuth::Required, l).await;
+        let rig = rig_with(l).await;
         let (mut a, mut b) = (stalled(rig.addr).await, stalled(rig.addr).await);
         // The third connection of that address is closed at once, before any TLS work.
         let mut third = stalled(rig.addr).await;
@@ -1201,7 +1363,7 @@ mod tests {
     async fn a_handshake_that_says_nothing_is_dropped_at_its_deadline() {
         let mut l = limits();
         l.handshake_timeout = Duration::from_millis(400);
-        let rig = rig_with(ClientAuth::Required, l).await;
+        let rig = rig_with(l).await;
         let mut quiet = stalled(rig.addr).await;
         let started = Instant::now();
         assert!(closed_within(&mut quiet, Duration::from_secs(3)).await);
@@ -1220,7 +1382,7 @@ mod tests {
         l.max_handshakes = 1;
         l.handshake_timeout = Duration::from_millis(300);
         l.slot_wait = Duration::from_secs(2);
-        let rig = rig_with(ClientAuth::Required, l).await;
+        let rig = rig_with(l).await;
         let _held = stalled(rig.addr).await;
         tokio::time::sleep(Duration::from_millis(50)).await;
         let (status, body) = rig
@@ -1234,7 +1396,7 @@ mod tests {
         l.max_handshakes = 1;
         l.handshake_timeout = Duration::from_secs(3);
         l.slot_wait = Duration::from_millis(100);
-        let rig = rig_with(ClientAuth::Required, l).await;
+        let rig = rig_with(l).await;
         let _held = stalled(rig.addr).await;
         tokio::time::sleep(Duration::from_millis(50)).await;
         let started = Instant::now();
@@ -1284,7 +1446,7 @@ mod tests {
     async fn a_peer_that_sends_no_request_head_is_cut_off_and_so_is_one_that_sends_half_of_it() {
         let mut l = limits();
         l.header_read_timeout = Duration::from_millis(500);
-        let rig = rig_with(ClientAuth::Required, l).await;
+        let rig = rig_with(l).await;
         let leaf = rig.leaf(&LeafSpec::client(ORCHESTRATOR));
         // Nothing at all after the handshake.
         let mut silent = connected(&rig, &leaf).await;
@@ -1307,7 +1469,7 @@ mod tests {
     async fn a_connection_that_stops_in_the_middle_of_a_body_is_cut_off_by_the_idle_timeout() {
         let mut l = limits();
         l.idle_timeout = Duration::from_millis(500);
-        let rig = rig_with(ClientAuth::Required, l).await;
+        let rig = rig_with(l).await;
         let leaf = rig.leaf(&LeafSpec::client(ORCHESTRATOR));
         let mut stuck = connected(&rig, &leaf).await;
         stuck
@@ -1326,7 +1488,7 @@ mod tests {
     async fn open_connections_are_capped_and_a_closed_one_makes_room() {
         let mut l = limits();
         l.max_connections = 1;
-        let rig = rig_with(ClientAuth::Required, l).await;
+        let rig = rig_with(l).await;
         let leaf = rig.leaf(&LeafSpec::client(ORCHESTRATOR));
         // One connection open and idle; a second completes its handshake and is closed unserved.
         let first = connected(&rig, &leaf).await;
@@ -1353,5 +1515,137 @@ mod tests {
         );
         drop(a);
         assert!(per_ip.take(ip, 1).is_some());
+    }
+
+    // ---- The client CA bundle is reloaded live ---------------------------------------------------------------------------------
+
+    /// One HTTP/1.1 response from a kept-alive connection: the head and as many body bytes as its `Content-Length` says.
+    async fn read_response(tls: &mut tokio_rustls::client::TlsStream<TcpStream>) -> String {
+        let mut got = Vec::new();
+        let mut buf = [0u8; 1024];
+        loop {
+            let n = timeout(Duration::from_secs(5), tls.read(&mut buf))
+                .await
+                .expect("an answer within 5 s")
+                .expect("a read");
+            assert!(
+                n > 0,
+                "the connection was closed: {}",
+                String::from_utf8_lossy(&got)
+            );
+            got.extend_from_slice(&buf[..n]);
+            let text = String::from_utf8_lossy(&got).into_owned();
+            if let Some((head, body)) = text.split_once("\r\n\r\n") {
+                let length = head
+                    .lines()
+                    .find_map(|l| {
+                        l.to_ascii_lowercase()
+                            .strip_prefix("content-length:")
+                            .map(|v| v.trim().parse::<usize>().unwrap())
+                    })
+                    .unwrap_or(0);
+                if body.len() >= length {
+                    return text;
+                }
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn a_new_ca_bundle_is_honoured_without_a_restart_and_an_established_connection_is_not_cut()
+     {
+        let rig = rig().await;
+        let old_leaf = rig.leaf(&LeafSpec::client(ORCHESTRATOR));
+        let new_pki = TestPki::new("rotated workload CA");
+        let new_leaf = new_pki.leaf(&LeafSpec::client(ORCHESTRATOR));
+        let mtime = std::fs::metadata(&rig.ca_file).unwrap().modified().unwrap();
+
+        // Before the swap: the old CA's leaf is served, the new CA's gets no connection.
+        assert_eq!(
+            rig.call(Some(&old_leaf), OWNER_LIST, "").await.unwrap().0,
+            200
+        );
+        assert!(rig.call(Some(&new_leaf), OWNER_LIST, "").await.is_err());
+        // A connection of the old CA's leaf, open across the swap, and shown to be served before it (a TLS 1.3 client is "connected"
+        // before the server has checked its certificate).
+        let mut open = connected(&rig, &old_leaf).await;
+        let head = format!("GET {OWNER_LIST} HTTP/1.1\r\nHost: l\r\n\r\n");
+        open.write_all(head.as_bytes()).await.unwrap();
+        let first = read_response(&mut open).await;
+        assert!(first.starts_with("HTTP/1.1 200"), "{first}");
+
+        // The swap: the CA file is replaced, with the old modification time (told by its inode).
+        replace_keeping_time(&rig.dir, "ca.crt", &new_pki.ca_pem(), mtime);
+
+        // The connection that was open is not cut: its next request is answered, and it is judged by the new bundle (401, bad chain).
+        // This is the first thing to look at the file after the swap, so it is the authenticator, not a handshake, that takes it up.
+        open.write_all(head.as_bytes()).await.unwrap();
+        let answer = read_response(&mut open).await;
+        assert!(answer.starts_with("HTTP/1.1 401"), "{answer}");
+        assert!(answer.contains("bad chain"), "{answer}");
+        // After it: the new CA's leaf is served, the old one's gets no connection (the verifier and the authenticator agree).
+        let (status, body) = rig.call(Some(&new_leaf), OWNER_LIST, "").await.unwrap();
+        assert_eq!(status, 200, "{body}");
+        assert!(rig.call(Some(&old_leaf), OWNER_LIST, "").await.is_err());
+    }
+
+    #[tokio::test]
+    async fn a_broken_or_missing_ca_bundle_keeps_the_one_in_use() {
+        let rig = rig().await;
+        let leaf = rig.leaf(&LeafSpec::client(ORCHESTRATOR));
+        let mtime = std::fs::metadata(&rig.ca_file).unwrap().modified().unwrap();
+        for broken in [
+            "not a certificate",
+            "",
+            "-----BEGIN CERTIFICATE-----\nAAAA\n-----END CERTIFICATE-----\n",
+        ] {
+            replace_keeping_time(&rig.dir, "ca.crt", broken, mtime);
+            let (status, body) = rig.call(Some(&leaf), OWNER_LIST, "").await.unwrap();
+            assert_eq!(
+                status, 200,
+                "a bundle of {broken:?} replaced the trust: {body}"
+            );
+        }
+        // A leaf (which is no CA) in place of the bundle is refused as a trust, too.
+        let not_a_ca = rig.leaf(&LeafSpec::client(STRANGER)).cert_pem;
+        replace_keeping_time(&rig.dir, "ca.crt", &not_a_ca, mtime);
+        assert_eq!(rig.call(Some(&leaf), OWNER_LIST, "").await.unwrap().0, 200);
+        // The file gone.
+        std::fs::remove_file(&rig.ca_file).unwrap();
+        assert_eq!(rig.call(Some(&leaf), OWNER_LIST, "").await.unwrap().0, 200);
+        // And a good bundle written afterwards is taken up: the failures were not final.
+        let new_pki = TestPki::new("rotated workload CA");
+        std::fs::write(&rig.ca_file, new_pki.ca_pem()).unwrap();
+        let new_leaf = new_pki.leaf(&LeafSpec::client(ORCHESTRATOR));
+        assert_eq!(
+            rig.call(Some(&new_leaf), OWNER_LIST, "").await.unwrap().0,
+            200
+        );
+    }
+
+    #[test]
+    fn an_unchanged_file_is_not_rebuilt() {
+        let dir = Dir::new();
+        let ca = dir.write("ca.crt", &TestPki::new("CA").ca_pem());
+        let trust = Trust::load(&ca, &WorkloadClients::default(), Duration::ZERO).unwrap();
+        let (a, _) = trust.snapshot();
+        let (b, _) = trust.snapshot();
+        assert!(Arc::ptr_eq(&a, &b), "the same file was built twice");
+    }
+
+    #[test]
+    fn the_trust_is_looked_at_again_only_after_its_interval() {
+        let dir = Dir::new();
+        let pki = TestPki::new("CA");
+        let ca = dir.write("ca.crt", &pki.ca_pem());
+        let mtime = std::fs::metadata(&ca).unwrap().modified().unwrap();
+        let trust =
+            Trust::load(&ca, &WorkloadClients::default(), Duration::from_secs(3600)).unwrap();
+        let before = trust.snapshot().0;
+        replace_keeping_time(&dir, "ca.crt", &TestPki::new("other").ca_pem(), mtime);
+        assert!(
+            Arc::ptr_eq(&before, &trust.snapshot().0),
+            "the file was read again within its interval"
+        );
     }
 }

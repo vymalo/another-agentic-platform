@@ -22,7 +22,6 @@ api:
   workload:
     enabled: true
     port: 9443
-    clientAuth: optional
     handshakeTimeoutSecs: 3
     maxHandshakesPerIp: 4
     maxConnections: 100

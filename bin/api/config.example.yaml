@@ -33,14 +33,14 @@ cors:
 # bearer token and never a certificate, this one reads a certificate and never a token, and neither falls back to the other. It serves
 # ONLY the owner routes (/v1/owners/{owner}/agents...); every other path is a 404. The three files are mounted by the deployment: the
 # server certificate and key the API presents (re-read when the file changes), and the CA bundle client certificates must chain to
-# (the one trust: read at start). Each workload is its certificate's exact URI SAN, and only `platform:agents.own` is grantable.
-# `clientAuth: required` (the default) ends the handshake of a peer with no certificate; `optional` lets it through and answers 401.
+# (the one trust: re-read when it changes). Each workload is its certificate's exact URI SAN, and only `platform:agents.own` is grantable.
+# A client certificate is always required: a peer with none does not complete the handshake. Both files that hold the trust are re-read
+# when they change (the server certificate and key, and the CA bundle): a renewal or a rotation needs no restart.
 # workloadListener:
 #   listen: 0.0.0.0:8443
 #   certFile: /etc/aap-api-workload/tls/tls.crt
 #   keyFile: /etc/aap-api-workload/tls/tls.key
 #   clientCaFile: /etc/aap-api-workload/ca/ca.crt
-#   clientAuth: required
 # workloadClients:
 #   - spiffeId: spiffe://another/ns/another-agents/sa/orchestrator
 #     permissions: [platform:agents.own]

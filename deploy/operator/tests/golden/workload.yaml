@@ -183,7 +183,6 @@ data:
       spiffeId: spiffe://another/ns/another-agents/sa/watcher
     workloadListener:
       certFile: /etc/aap-api-workload/tls/tls.crt
-      clientAuth: optional
       clientCaFile: /etc/aap-api-workload/ca/ca.crt
       handshakeTimeoutSecs: 3
       keyFile: /etc/aap-api-workload/tls/tls.key
@@ -470,7 +469,7 @@ spec:
         app.kubernetes.io/component: api
       annotations:
         # A change of the configuration rolls the pods (the file is read once, at start).
-        checksum/config: 58fac6436803bf652d9b02318d4b4077514d20477ba4669c5e753a3fc7ac6b38
+        checksum/config: 30e402574933e43902af2e93a60629fcac32204c0b656403c58f3344b8632e3b
     spec:
       serviceAccountName: aap-operator-api
       # The API token is the API's way to the cluster.

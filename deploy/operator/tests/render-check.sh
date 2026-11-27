@@ -2253,7 +2253,7 @@ check "api.workload on: the volumes are the deployment's Secret (mode 0440) and 
 check "api.workload on: the pod's fsGroup lets the non-root user read the 0440 key" dhas Deployment $wl 'fsGroup: 65532'
 check "api.workload on: the configuration says where it listens, which files it reads and whether a certificate is required" \
   all_of "$(wl_config)" 'workloadListener:' 'handshakeTimeoutSecs: 3' 'maxHandshakesPerIp: 4' 'maxConnections: 100' 'listen: 0.0.0.0:9443' 'certFile: /etc/aap-api-workload/tls/tls.crt' 'keyFile: /etc/aap-api-workload/tls/tls.key' \
-  'clientCaFile: /etc/aap-api-workload/ca/ca.crt' 'clientAuth: optional'
+  'clientCaFile: /etc/aap-api-workload/ca/ca.crt'
 wl_clients() {
   all_of "$(wl_config)" 'workloadClients:' 'spiffeId: spiffe://another/ns/another-agents/sa/orchestrator' 'spiffeId: spiffe://another/ns/another-agents/sa/watcher' 'platform:agents\.own' \
     && none_of "$(wl_config)" 'platform:agents\.(read|write)|secrets\.pick|\*'
@@ -2289,7 +2289,8 @@ for t in 'api.workload.clients=[]|api.workload.clients is required' \
          'api.workload.tls.secretName=|api.workload.tls.secretName is required' \
          'api.workload.clientCa.configMap=|api.workload.clientCa.configMap is required' \
          'api.workload.clientCa.key=|api.workload.clientCa.key must name' \
-         'api.workload.clientAuth=never|clientAuth must be required or optional' \
+         'api.workload.clientAuth=required|api.workload.clientAuth is not a setting' \
+         'api.workload.clientAuth=optional|api.workload.clientAuth is not a setting' \
          'api.workload.port=8080|must differ from api.port' \
          'api.workload.port=8081|must differ from api.port' \
          'api.workload.port=9090|must differ from api.port' \

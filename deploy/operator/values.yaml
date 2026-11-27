@@ -642,8 +642,8 @@ api:
     enabled: false
     # The TLS port of the pod and of the Service `<fullname>-api-workload`. A port of its own: not `port`, `healthPort` or `metrics.port`.
     port: 8443
-    # `required`: a peer with no client certificate does not complete the handshake. `optional`: it does, and the API answers its first request 401.
-    clientAuth: required
+    # A client certificate is always required: a peer with none does not complete the handshake (there is no setting for it; `clientAuth` was
+    # removed, and a values file that still says it is refused).
     # What the listener bounds (bin/api/src/mtls.rs). `handshakeTimeoutSecs` (1 to 60): how long a peer has to finish its TLS handshake.
     # `maxHandshakesPerIp` (1 to 1024): the handshakes one source address may have in flight (the next connection of that address is closed
     # at once; behind a NAT or a proxy that hides addresses, raise it). `maxConnections` (1 to 65536): the open connections, all sources
@@ -661,7 +661,7 @@ api:
       secretName: ""
     clientCa:
       # REQUIRED: a ConfigMap whose `key` holds the PEM bundle client certificates must chain to (the PKI's CA, never a leaf). Mounted at
-      # /etc/aap-api-workload/ca and read at start: a rotation of the bundle needs a restart of the pods.
+      # /etc/aap-api-workload/ca and re-read when it changes (within about a minute): a rotation needs no restart, and a bundle that cannot be used keeps the old one and the API warns.
       configMap: ""
       key: ca.crt
     # Who may reach the TLS port (NetworkPolicyPeers): the orchestrator's pods. REQUIRED while `networkPolicy.enabled`: an empty list would make the listener unreachable.
