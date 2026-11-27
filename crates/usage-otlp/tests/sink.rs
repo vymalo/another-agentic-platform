@@ -503,3 +503,25 @@ async fn a_permanent_refusal_reports_the_batch_refused() {
     .await;
     assert_eq!(got, vec![(e.event_id, aap_usage::Fate::Refused)]);
 }
+
+#[tokio::test]
+async fn a_413_split_reports_each_half_delivered_exactly_once() {
+    let c = TestCollector::start();
+    c.set_behaviour(Behaviour::MaxRecords(2));
+    let mut cfg = settings(&c);
+    cfg.batch = 16;
+    cfg.interval = Duration::from_secs(3600);
+    let sink = OtlpUsageSink::start(cfg).unwrap();
+    let sent: Vec<_> = (0..11).map(|m| event("m1", "pod-1", m)).collect();
+    for e in &sent {
+        sink.send(e.clone()).await.unwrap();
+    }
+    assert!(sink.flush(Duration::from_secs(10)).await);
+    let got = fates(&sink);
+    assert_eq!(got.len(), 11, "one fate per event, none twice");
+    assert!(got.iter().all(|(_, f)| *f == aap_usage::Fate::Delivered));
+    assert_eq!(
+        got.into_iter().map(|(id, _)| id).collect::<BTreeSet<_>>(),
+        ids(&sent)
+    );
+}

@@ -1040,7 +1040,7 @@ fn ids(from: u64, to: u64) -> Vec<String> {
 }
 
 #[tokio::test]
-async fn a_collector_that_is_down_holds_the_cursor() {
+async fn a_silent_collector_leaves_the_acknowledged_cursor_where_it_was() {
     let sink = Arc::new(MemoryUsageSink::new());
     sink.hold_outcomes(aap_usage::Fate::Delivered); // taken, not acknowledged
     let metrics = Arc::new(Metrics::new());
@@ -1091,7 +1091,8 @@ async fn a_refusal_for_good_is_counted_and_never_sent_again() {
 }
 
 #[tokio::test]
-async fn a_restart_in_the_middle_of_a_batch_loses_no_minute_and_repeats_only_by_id() {
+async fn a_restart_in_the_middle_of_a_batch_leaves_no_gap_for_a_listed_pod_and_repeats_only_by_id()
+{
     // The collector keeps what it was given across the operator's restart; the operator does not.
     let sink = Arc::new(MemoryUsageSink::new());
     sink.hold_outcomes(aap_usage::Fate::Delivered);
@@ -1118,28 +1119,72 @@ async fn a_restart_in_the_middle_of_a_batch_loses_no_minute_and_repeats_only_by_
 }
 
 #[tokio::test]
-async fn a_vanished_pod_is_kept_until_its_minutes_are_acknowledged() {
+async fn a_minute_never_acknowledged_expires_at_the_backfill_bound_and_is_counted() {
     let sink = Arc::new(MemoryUsageSink::new());
     sink.hold_outcomes(aap_usage::Fate::Delivered);
-    let meter = acked(&sink, &Arc::new(Metrics::new()));
-    meter.pass(&[facts("uid-1", 600)], 1_100).await; // last seen in minute 18
-    let gone = Default::default();
-    assert_eq!(meter.close_vanished(&gone, 1_300).await, 1);
-    // Everything is handed over, nothing is acknowledged: the pod is still remembered.
-    assert_eq!(meter.acknowledged_through("uid-1"), Some(10));
-    meter.close_vanished(&gone, 1_310).await;
-    assert!(meter.unacknowledged("uid-1") > 0);
-    assert!(
-        meter.remembers("uid-1"),
-        "its facts are held while it is unacknowledged"
-    );
-    sink.settle(None);
-    meter.close_vanished(&gone, 1_320).await;
-    assert!(!meter.remembers("uid-1"), "and let go once it is");
+    let metrics = Arc::new(Metrics::new());
+    let meter = acked(&sink, &metrics);
+    meter.pass(&[facts("uid-1", 600)], 1_000).await;
+    meter.settle(1_000 + 24 * 3600 - 1);
+    assert_eq!(meter.unacknowledged("uid-1"), 6, "still within the bound");
+    meter.settle(1_000 + 24 * 3600 + 1);
     assert_eq!(meter.unacknowledged("uid-1"), 0);
     assert_eq!(
-        meter.acknowledged_through("uid-1"),
-        None,
-        "forgotten once acknowledged"
+        metrics.get(aap_controller::metric::METER_UNACKNOWLEDGED, &[]),
+        6
     );
+}
+
+/// A sink written as before the outcomes existed: it keeps the default `outcomes()`.
+struct Plain(Arc<MemoryUsageSink>);
+impl UsageSink for Plain {
+    async fn send(&self, e: PodMinuteEvent) -> Result<(), UsageError> {
+        self.0.send(e).await
+    }
+}
+
+#[tokio::test]
+async fn a_sink_that_reports_no_outcomes_is_not_tracked_and_leaks_nothing() {
+    // Through the function `Operator::with_meter` calls.
+    let inner = Arc::new(MemoryUsageSink::new());
+    let metrics = Arc::new(Metrics::new());
+    let (send, outcomes) = aap_controller::erase_sink_with_outcomes(Plain(inner.clone()));
+    let accounts = Arc::new(MemoryAccounts::new());
+    accounts.set_run("coder", "run-1", "acct-1");
+    let mut cfg = config();
+    cfg.skew_secs = 0;
+    let meter = Meter::new(send, erase_accounts(Shared(accounts)), cfg, metrics.clone())
+        .with_outcomes(outcomes);
+    meter.pass(&[facts("uid-1", 600)], 1_000).await;
+    assert_eq!(inner.taken().len(), 6);
+    assert_eq!(
+        meter.unacknowledged("uid-1"),
+        0,
+        "nothing is pending: the sink says nothing"
+    );
+    meter.settle(1_000 + 25 * 3600);
+    assert_eq!(
+        metrics.get(aap_controller::metric::METER_UNACKNOWLEDGED, &[]),
+        0
+    );
+    // A pod that vanishes is closed and forgotten as it always was.
+    assert_eq!(meter.close_vanished(&Default::default(), 1_300).await, 1);
+    assert_eq!(meter.acknowledged_through("uid-1"), None);
+}
+
+#[tokio::test]
+async fn acknowledgements_that_arrive_while_no_pass_runs_are_drained_by_settle_alone() {
+    // A replica that follows lists and sends nothing, but still settles (`run` does): what the collector
+    // acknowledged meanwhile clears, and a pass after the change of leader sends nothing again.
+    let sink = Arc::new(MemoryUsageSink::new());
+    sink.hold_outcomes(aap_usage::Fate::Delivered);
+    let metrics = Arc::new(Metrics::new());
+    let meter = acked(&sink, &metrics);
+    meter.pass(&[facts("uid-1", 600)], 1_000).await;
+    sink.settle(None); // acknowledged while this replica did not lead
+    meter.settle(1_030);
+    assert_eq!(meter.unacknowledged("uid-1"), 0);
+    assert_eq!(metrics.get(aap_controller::metric::METER_DELIVERED, &[]), 6);
+    meter.pass(&[facts("uid-1", 600)], 1_010).await;
+    assert_eq!(sink.taken().len(), 6);
 }

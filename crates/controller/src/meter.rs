@@ -2,8 +2,8 @@
 //! own, works out with [`crate::metering`] the whole minutes each ran that have not been sent, and hands one
 //! [`PodMinuteEvent`] per minute to a [`UsageSink`], for the account an [`AccountSource`] names.
 //!
-//! **Not wired into `operator run` yet** (a later slice, AD-069): [`Operator::with_meter`](crate::Operator::with_meter) turns it
-//! on, and nothing calls it from the binary.
+//! [`Operator::with_meter`](crate::Operator::with_meter) turns it on, and `operator run` calls it only when the file's
+//! `metering.enabled` is true (ANR-1103; off by default).
 //!
 //! The cursor of each pod (the first minute not sent) and the last facts seen of each pod are **in memory**. A
 //! restart, a new leader and a second replica therefore re-derive the same minutes from the pod's facts, with the
@@ -168,6 +168,9 @@ struct Inner {
     /// Minutes handed to the sink and not yet acknowledged, by event id (ANR-1151). Empty when the sink reports no
     /// outcomes.
     pending: HashMap<String, Pending>,
+    /// Set the first time the sink answers `None` to [`UsageSink::outcomes`]: it reports nothing, so nothing is
+    /// tracked from then on (taking an event is the delivery) and `pending` is empty.
+    untracked: bool,
 }
 
 /// A minute the sink took and the collector has not acknowledged.
@@ -204,8 +207,10 @@ pub struct Meter {
 }
 
 impl Meter {
-    /// Track the sink's acknowledgements (ANR-1151): a pod's minutes are **delivered** when the collector says so,
-    /// not when they are queued, and a pod that vanished is not forgotten while a minute of it is unacknowledged.
+    /// Track the sink's acknowledgements (ANR-1151): which minutes handed over the collector has acknowledged or
+    /// refused. **This observes; it does not hold anything back:** the cursor that decides what is sent still moves
+    /// when the sink takes the event. It is the groundwork of the durable part (ANR-1198), which needs to know what
+    /// is safe to drop. A sink that answers `None` to its outcomes is detected at the first settle and tracking stops.
     #[must_use]
     pub fn with_outcomes(mut self, f: OutcomesFn) -> Self {
         self.outcomes = Some(f);
@@ -217,14 +222,9 @@ impl Meter {
         self.with(|i| i.pending.values().filter(|p| p.uid == uid).count())
     }
 
-    /// Whether the meter still holds the last facts it saw of `uid` (a vanished pod's are held until its minutes
-    /// are acknowledged).
-    pub fn remembers(&self, uid: &str) -> bool {
-        self.with(|i| i.seen.contains_key(uid))
-    }
-
     /// The first minute of `uid` that is **not known delivered**: the oldest unacknowledged minute, or, when none
-    /// is pending, the cursor of what was handed over. It moves only on the collector's acknowledgement.
+    /// is pending, the cursor of what was handed over. It moves only on the collector's acknowledgement (it is
+    /// **not** the cursor that decides what is sent).
     pub fn acknowledged_through(&self, uid: &str) -> Option<u64> {
         self.with(|i| {
             i.pending
@@ -238,12 +238,19 @@ impl Meter {
 
     /// Read what the sink says became of its events at `now`: an acknowledged or refused minute stops being
     /// pending, and a minute unacknowledged past the backfill bound is forgotten (counted), so a lost
-    /// acknowledgement cannot keep a vanished pod for ever.
+    /// acknowledgement cannot keep a minute pending for ever.
     pub fn settle(&self, now: i64) {
         let Some(read) = self.outcomes.clone() else {
             return;
         };
-        let outcomes = read().unwrap_or_default();
+        let Some(outcomes) = read() else {
+            // The sink reports nothing, and never will: stop tracking, free what was kept.
+            self.with(|i| {
+                i.untracked = true;
+                i.pending.clear();
+            });
+            return;
+        };
         let (mut delivered, mut refused) = (0u64, 0u64);
         let mut expired = 0u64;
         self.with(|i| {
@@ -450,10 +457,8 @@ impl Meter {
             facts.deleted_at = None;
             facts.has_container_status = true;
             match self.process(&facts, now, share, &mut sent).await {
-                // Everything is handed over, but a vanished pod's facts are kept until the collector has acknowledged
-                // its minutes: a refusal or a lost batch is then still a minute the meter can account for.
-                Progress::Done if self.unacknowledged(&uid) == 0 => self.forget(&uid),
-                Progress::Done | Progress::Held => {}
+                Progress::Done => self.forget(&uid),
+                Progress::Held => {}
                 Progress::SinkDown => break,
             }
         }
@@ -605,7 +610,7 @@ impl Meter {
                 Ok(()) => {
                     self.metrics.inc(name::METER_EVENTS, &[]);
                     self.update(&pod.uid, |s| s.cursor = Some(minute + 1));
-                    if self.outcomes.is_some() {
+                    if self.outcomes.is_some() && !self.with(|i| i.untracked) {
                         let id = event_id(&pod.uid, minute);
                         self.with(|i| {
                             i.pending.insert(
@@ -776,6 +781,8 @@ where
 /// sends nothing.
 pub(crate) async fn run(l: MeterLoop, period: Duration, mut stop: watch::Receiver<bool>) {
     loop {
+        // Acknowledgements keep arriving whoever leads: a follower drains them (nothing is listed or sent).
+        l.meter.settle(unix_now());
         if l.leader.is_leader() {
             observe(&l.meter, &unix_now, async {
                 let mut all = Vec::new();
