@@ -134,7 +134,8 @@ impl crate::config::Settings {
                 enabled: self.tool_probe.enabled,
                 timeout: self.tool_probe.timeout,
             },
-            // The binary builds the activity source (P2c) but does not hand it to the operator yet, so the idle loop does not run.
+            // What the agents' specs carry for the activity listener (ANR-1030b); `None` while `activity.enabled` is off.
+            activity: self.activity.externals.clone(),
             sleep_poll: aap_controller::DEFAULT_POLL,
         }
     }
@@ -178,6 +179,12 @@ pub fn activity_source(
     };
     let token = aap_activity_http::Token::new(&text)
         .map_err(|_| refused("the bearer is empty".to_owned()))?;
+    // An agent splits `ACTIVITY_BEARER_TOKENS` on commas: a bearer with one would never match any of its pieces.
+    if text.trim().contains(',') {
+        return Err(refused(
+            "the bearer contains a comma: an agent splits its list of bearers on commas".to_owned(),
+        ));
+    }
     let source =
         aap_activity_http::HttpActivity::in_cluster(activity.port, activity.timeout, Some(token))?;
     Ok(Some(source))
@@ -328,14 +335,20 @@ fn compose<R, S>(
     options: aap_controller::Options,
     tracer: &aap_trace::Tracer,
     leader: std::sync::Arc<dyn aap_ports::LeaderElection>,
+    activity: Option<aap_activity_http::HttpActivity>,
 ) -> aap_controller::Operator<R, S>
 where
     R: aap_ports::RuntimeProvider + Clone + 'static,
     S: aap_ports::StoreProvisioner + Clone + 'static,
 {
-    aap_controller::Operator::new(client, runtime, store, owner, options)
+    let operator = aap_controller::Operator::new(client, runtime, store, owner, options)
         .with_tracer(tracer.clone())
-        .with_leader(leader)
+        .with_leader(leader);
+    // The idle loop runs only with a source (AD-058): `activity.enabled` is what makes one.
+    match activity {
+        Some(source) => operator.with_activity(source),
+        None => operator,
+    }
 }
 
 #[cfg(feature = "runtime-kubernetes")]
@@ -442,6 +455,7 @@ async fn run_with(settings: crate::config::Settings, tracer: aap_trace::Tracer) 
         options,
         &tracer,
         election.clone(),
+        activity,
     );
     // The meter sends only while this replica leads (`Operator::run` gates it); the sink is kept to flush on the way out.
     let (operator, meter_sink) = match meter {
@@ -666,11 +680,60 @@ mod tests {
                 aap_controller::Options::default(),
                 tracer,
                 std::sync::Arc::new(aap_ports::AlwaysLeader::default()),
+                None,
             )
         };
         let (on, _) = aap_trace::Tracer::in_memory(aap_trace::Sampler::AlwaysOn);
         assert!(compose_with(&on).tracer().enabled());
         assert!(!compose_with(&aap_trace::Tracer::off()).tracer().enabled());
+    }
+
+    /// ANR-1030b: the activity source the binary builds is the one the operator is composed with. An operator given none has
+    /// no idle loop; given one, it has. Delete the `with_activity` arm of `compose` and this fails.
+    #[tokio::test]
+    async fn the_operator_is_composed_with_the_activity_source_it_was_built() {
+        let compose_with = |activity| {
+            compose(
+                client(),
+                aap_ports::memory::MemoryRuntime::new(),
+                aap_ports::memory::MemoryStore::new(),
+                std::sync::Arc::new(|_| aap_ports::OwnerHandle::none()),
+                aap_controller::Options::default(),
+                &aap_trace::Tracer::off(),
+                std::sync::Arc::new(aap_ports::AlwaysLeader::default()),
+                activity,
+            )
+        };
+        assert!(!compose_with(None).has_activity(), "off: no idle loop");
+
+        let dir = std::env::temp_dir().join(format!("aap-compose-activity-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).expect("a directory");
+        let file = dir.join("token");
+        std::fs::write(&file, "a-bearer\n").expect("write");
+        let on = settings(&format!(
+            "version: 1\nactivity:\n  enabled: true\n  token: {{ file: {} }}\n  agentTokensSecret: {{ name: aap-activity, key: token }}\n  operatorPod: {{ namespace: aap, labels: {{ app: op }} }}\n",
+            file.display()
+        ));
+        let source = activity_source(&on.activity)
+            .expect("a source")
+            .expect("on builds one");
+        assert!(
+            compose_with(Some(source)).has_activity(),
+            "on: the idle loop is handed the source"
+        );
+        // And the spec side: the options carry what the agents' specs need.
+        let options = on.options(
+            false,
+            std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
+        );
+        assert_eq!(
+            options
+                .activity
+                .as_ref()
+                .map(aap_domain::ActivityExternals::port),
+            Some(8081)
+        );
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     /// K7a: the election the composition root builds reaches the operator, and an operator with none is a leader.
@@ -685,6 +748,7 @@ mod tests {
                 aap_controller::Options::default(),
                 &aap_trace::Tracer::off(),
                 leader,
+                None,
             )
         };
         let always = compose_with(std::sync::Arc::new(aap_ports::AlwaysLeader::new(
@@ -923,7 +987,7 @@ mod tests {
         let file = dir.join("token");
         let on = |token: &str| {
             settings(&format!(
-                "version: 1\nactivity:\n  enabled: true\n  token: {token}\n"
+                "version: 1\nactivity:\n  enabled: true\n  token: {token}\n  agentTokensSecret: {{ name: aap-activity, key: token }}\n  operatorPod: {{ namespace: aap, labels: {{ app: op }} }}\n"
             ))
         };
 
@@ -939,6 +1003,18 @@ mod tests {
         assert!(
             activity_source(&on(&format!("{{ file: {} }}", file.display())).activity).is_err(),
             "a blank token is refused"
+        );
+
+        std::fs::write(&file, "one,two\n").expect("write");
+        let text = format!(
+            "{:#}",
+            activity_source(&on(&format!("{{ file: {} }}", file.display())).activity)
+                .expect_err("a comma")
+        );
+        assert!(text.contains("comma"), "{text}");
+        assert!(
+            !text.contains("one,two"),
+            "the bearer is never in the message"
         );
 
         std::fs::write(&file, "s3cret-bearer\n").expect("write");

@@ -103,6 +103,15 @@ plain otherwise. A DNS label may be any of those, and `namespace: on` is the boo
 {{- if and (kindIs "map" $a) $a.to -}}true{{- end -}}
 {{- end -}}
 
+{{/* The Secret the agents' pods read the activity bearer from (ANR-1030b): `activity.agentTokensSecret`, else the operator's own `tokenSecret`. */}}
+{{- define "aap.activityAgentSecretName" -}}
+{{- default .Values.activity.tokenSecret.name .Values.activity.agentTokensSecret.name -}}
+{{- end -}}
+
+{{- define "aap.activityAgentSecretKey" -}}
+{{- default .Values.activity.tokenSecret.key .Values.activity.agentTokensSecret.key -}}
+{{- end -}}
+
 {{/* The pod-minute meter (ANR-1103): "true" or nothing. Off by default, and then nothing of it is rendered. */}}
 {{- define "aap.metering" -}}
 {{- $m := .Values.metering -}}

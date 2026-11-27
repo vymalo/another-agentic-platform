@@ -134,6 +134,7 @@ dependencies = [
 name = "aap-controller"
 version = "0.2.0"
 dependencies = [
+ "aap-activity-http",
  "aap-api",
  "aap-domain",
  "aap-ports",

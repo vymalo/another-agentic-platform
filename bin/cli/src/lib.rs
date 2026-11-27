@@ -97,6 +97,11 @@ struct Deployment {
     /// invalid.
     #[arg(long, value_name = "FILE")]
     run_pods_file: Option<PathBuf>,
+    /// The activity listener of agents that may sleep (aapctl's own flag: a YAML file holding the operator's `activity` block, of which
+    /// `enabled`, `port`, `agentTokensSecret` and `operatorPod` are read and `token` and `timeoutSecs` ignored). None: no agent gets a
+    /// listener, as an operator whose `activity.enabled` is off.
+    #[arg(long, value_name = "FILE")]
+    activity_file: Option<PathBuf>,
     /// The highest access tier an agent may ask for (as the operator's `defaults.maxAccessTier`): plan, edits, auto or bypass.
     #[arg(long, value_name = "TIER", default_value = "auto", value_parser = parse_tier)]
     max_access_tier: AccessTierCap,
@@ -204,9 +209,19 @@ fn settings(d: &Deployment, owner_uid: &str) -> Result<Settings, String> {
             Some(parsed)
         }
     };
+    let activity = match d
+        .activity_file
+        .as_deref()
+        .map(|p| PathBuf::from(p.to_string_lossy().trim()))
+        .filter(|p| !p.as_os_str().is_empty())
+    {
+        None => None,
+        Some(path) => activity_from_file(&path)?,
+    };
     Ok(Settings {
         default_image: default_image.map(str::to_owned),
         run_pods,
+        activity,
         cache_claims: d
             .cache_allowed_claims
             .iter()
@@ -216,6 +231,85 @@ fn settings(d: &Deployment, owner_uid: &str) -> Result<Settings, String> {
         max_access_tier: d.max_access_tier,
         owner_uid: owner_uid.to_owned(),
     })
+}
+
+/// The operator's `activity` block, as `--activity-file` reads it: what an agent's spec needs of it. `token` and `timeoutSecs` are the
+/// operator's own business (how it asks), so they are accepted and ignored: the same block can be given to both.
+#[derive(Debug, serde::Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct ActivityFile {
+    #[serde(default)]
+    enabled: bool,
+    #[serde(default = "default_activity_port")]
+    port: u16,
+    #[serde(default)]
+    agent_tokens_secret: Option<ActivitySecretFile>,
+    #[serde(default)]
+    operator_pod: Option<OperatorPodFile>,
+    #[serde(default)]
+    #[allow(dead_code)]
+    token: Option<serde_yaml::Value>,
+    #[serde(default)]
+    #[allow(dead_code)]
+    timeout_secs: Option<u64>,
+}
+
+#[derive(Debug, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ActivitySecretFile {
+    name: String,
+    key: String,
+}
+
+#[derive(Debug, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+struct OperatorPodFile {
+    namespace: String,
+    labels: std::collections::BTreeMap<String, String>,
+}
+
+fn default_activity_port() -> u16 {
+    8081
+}
+
+/// `--activity-file`: read and judged by the same constructor the operator uses at load, so the answer is the operator's.
+fn activity_from_file(
+    path: &std::path::Path,
+) -> Result<Option<aap_domain::ActivityExternals>, String> {
+    let text = std::fs::read_to_string(path)
+        .map_err(|e| format!("--activity-file {}: cannot be read: {e}", path.display()))?;
+    let file: ActivityFile = serde_yaml::from_str(&text).map_err(|e| {
+        format!(
+            "--activity-file {}: not an `activity` block: {e}",
+            path.display()
+        )
+    })?;
+    if !file.enabled {
+        return Ok(None);
+    }
+    let missing = |key: &str| {
+        format!(
+            "--activity-file {}: {key} is required while enabled is true",
+            path.display()
+        )
+    };
+    let secret = file
+        .agent_tokens_secret
+        .ok_or_else(|| missing("agentTokensSecret"))?;
+    let pod = file.operator_pod.ok_or_else(|| missing("operatorPod"))?;
+    aap_domain::ActivityExternals::new(
+        file.port,
+        aap_domain::ActivitySecret {
+            name: secret.name.trim().to_owned(),
+            key: secret.key.trim().to_owned(),
+        },
+        aap_domain::OperatorPeer {
+            namespace: pod.namespace.trim().to_owned(),
+            pod_labels: pod.labels,
+        },
+    )
+    .map(Some)
+    .map_err(|e| format!("--activity-file {}: {e}", path.display()))
 }
 
 /// Run the program: `args` (with the program name first), the streams, and the exit code to give.

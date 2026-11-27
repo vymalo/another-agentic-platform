@@ -9,7 +9,7 @@ use aap_ports::testkit::{
 use aap_ports::{
     AgentDirectory, Capabilities, Classify, CnpgSpec, DeleteOutcome, DeletionPolicy,
     DirectoryEntry, DirectoryError, Endpoint, EnvValue, ErrorClass, IssueReason, OwnerHandle,
-    Phase, RuntimeError, RuntimeId, RuntimeProvider, RuntimeSpec, RuntimeStatus, SecretRef,
+    Phase, Role, RuntimeError, RuntimeId, RuntimeProvider, RuntimeSpec, RuntimeStatus, SecretRef,
     StoreError, StoreId, StoreKind, StoreProvisioner, StoreSpec, Surface, VolumeSource,
 };
 use aap_ports::{Mount, NetworkActivity, Peer, ScratchVolume, Selector};
@@ -143,8 +143,27 @@ fn check_names_the_broken_invariant_of_the_activity_listener() {
             }),
         ),
         (
-            "not the network's",
+            "does not listen on the activity port",
             Box::new(|s| s.workloads[0].container.activity_port = Some(9999)),
+        ),
+        (
+            "sidecar",
+            Box::new(|s| {
+                // Even on the right port: only the agent container listens.
+                let mut side = s.workloads[0].container.clone();
+                side.name = "helper".into();
+                s.workloads[0].sidecars.push(side);
+            }),
+        ),
+        (
+            "does not select it",
+            Box::new(|s| {
+                // A workload the Service does not select, of any role (not only a worker), with the right port.
+                let mut other = s.workloads[0].clone();
+                other.name = "other".into();
+                other.role = Role::All;
+                s.workloads.push(other);
+            }),
         ),
         (
             "no activity listener",

@@ -253,8 +253,9 @@ impl RuntimeSpec {
         self.check_run_pods()
     }
 
-    /// The invariants of the activity listener (ANR-1030a): the Service's port and the selected workload's container
-    /// port are the same number, no other container has one, and the one peer that may reach it names something (a
+    /// The invariants of the activity listener (ANR-1030a, ANR-1030b): the Service's port and the selected workload's container
+    /// port are the same number, no other container has one (no sidecar, and no container of a workload the Service does not
+    /// select, whatever its role), and the one peer that may reach it names something (a
     /// peer with no selector renders `from: [{}]`, which the API refuses, and an empty selector admits every pod).
     fn check_activity(&self) -> Result<(), RuntimeError> {
         let bad = |what: String| Err(RuntimeError::InvalidSpec(what));
@@ -278,24 +279,26 @@ impl RuntimeSpec {
             return bad("the activity port is the network port".into());
         }
         for w in &self.workloads {
-            for c in std::iter::once(&w.container).chain(&w.sidecars) {
-                if c.activity_port.is_some_and(|p| p != a.port) {
-                    return bad(format!(
-                        "workload {}: container {} has an activity port that is not the network's",
-                        w.name, c.name
-                    ));
-                }
-            }
             let selected = w.name == self.network.selects;
-            if selected && w.container.activity_port != Some(a.port) {
+            // Only the selected workload's agent container listens: not a sidecar, whatever its port, and not a container of
+            // any other workload, whatever its role (a workload the Service does not select would serve a listener that
+            // nothing in the policy was written for).
+            if let Some(c) = w.sidecars.iter().find(|c| c.activity_port.is_some()) {
                 return bad(format!(
-                    "workload {}: the selected workload's agent container does not listen on the activity port",
-                    w.name
+                    "workload {}: sidecar {} has an activity port; only the agent container listens",
+                    w.name, c.name
                 ));
             }
-            if !selected && (w.container.activity_port.is_some()) && w.role == Role::Worker {
+            if selected {
+                if w.container.activity_port != Some(a.port) {
+                    return bad(format!(
+                        "workload {}: the selected workload's agent container does not listen on the activity port",
+                        w.name
+                    ));
+                }
+            } else if w.container.activity_port.is_some() {
                 return bad(format!(
-                    "workload {}: a worker has an activity port, and the Service does not select it",
+                    "workload {}: has an activity port, and the Service does not select it",
                     w.name
                 ));
             }

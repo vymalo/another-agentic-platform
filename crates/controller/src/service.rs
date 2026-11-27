@@ -170,6 +170,7 @@ async fn read_externals<R, S>(
         run_pods: ctx.options.run_pods.clone(),
         cache_claims: ctx.options.cache_claims.clone(),
         max_access_tier: ctx.options.max_access_tier,
+        activity: ctx.options.activity.clone(),
         ..Externals::default()
     };
     if let Some(name) = &wanted.model_endpoint {
@@ -360,6 +361,26 @@ where
     // leaves the agent asleep on the record. A person's `suspend` and a removed `scaling.idleTimeout` end the sleep.
     let mut agent = agent;
     let policy = crate::sleep::SleepPolicy::from_scaling(&svc.spec.scaling);
+    // An agent that asks to sleep, under an operator that polls, and whose pod serves no listener (the a2a harness: nothing
+    // of it says how busy it is) never sleeps: the idle loop skips it and the person is told once.
+    let listenerless = policy.is_some()
+        && ctx.options.activity.is_some()
+        && agent.runtime.network.activity.is_none();
+    if ctx.sleepers.set_listenerless(&id, listenerless) {
+        let event = KubeEvent {
+            type_: EventType::Normal,
+            reason: "NeverSleeps".to_owned(),
+            note: Some(
+                "the a2a harness has no activity listener; this agent never sleeps (scaling.idleTimeout is not used)"
+                    .to_owned(),
+            ),
+            action: "Reconcile".to_owned(),
+            secondary: None,
+        };
+        if let Err(e) = ctx.recorder.publish(&event, &svc.object_ref(&())).await {
+            tracing::warn!(service = %id.name(), "could not publish an Event: {e}");
+        }
+    }
     let now = (ctx.clock)().0.as_second();
     let held = ctx.sleepers.mark(&id);
     let mark = held.as_ref().map(|(m, _)| m);
@@ -689,6 +710,7 @@ where
     }
 
     ctx.sleepers.forget(&id);
+    ctx.sleepers.set_listenerless(&id, false);
     let deleted = step(Step::RuntimeDelete, ctx.runtime.delete(&id), class_of).await?;
     let released = step(Step::StoreRelease, ctx.store.release(&store_id), class_of).await?;
     ctx.metrics.inc(name::SERVICES_DELETED, &[]);
