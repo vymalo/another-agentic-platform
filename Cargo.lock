@@ -243,6 +243,9 @@ dependencies = [
  "aap-store-secret",
  "aap-trace",
  "aap-trace-otlp",
+ "aap-usage",
+ "aap-usage-broker",
+ "aap-usage-otlp",
  "anyhow",
  "axum",
  "clap",
@@ -257,6 +260,7 @@ dependencies = [
  "tower",
  "tracing",
  "tracing-subscriber",
+ "url",
 ]
 
 [[package]]
@@ -431,6 +435,19 @@ dependencies = [
  "sha2",
  "thiserror 2.0.21",
  "tokio",
+]
+
+[[package]]
+name = "aap-usage-broker"
+version = "0.2.0"
+dependencies = [
+ "aap-usage",
+ "axum",
+ "reqwest",
+ "serde_json",
+ "thiserror 2.0.21",
+ "tokio",
+ "url",
 ]
 
 [[package]]

@@ -355,6 +355,53 @@ activity:
             k8s-app: kube-dns
     ports: [53]
 
+# ANR-1103 (AD-069): the pod-minute meter. OFF by default, and then not a trace of it in any render (no key of the file, no volume, no rule).
+# On, the leading replica sends one usage line per pod and whole minute to the OpenTelemetry Collector (`collector`), for the account the
+# orchestrator's broker names for the run (`broker`). It needs run pods with `runPods.nodeType` admitting exactly ONE value (the node type
+# of a run pod is read from its node affinity: the meter reads no Node, so it needs no ClusterRole). Every address is a NetworkPolicy peer
+# the chart requires (`to`), never open egress; `port` is the PODS' port (a NetworkPolicy sees it after the Service). The broker's bearer is
+# a Secret key, mounted as a file and read once at start. DO NOT TURN IT ON before ANR-1151 (durable delivery) lands or the owner accepts,
+# in writing, that the minutes queued in memory are lost with the process.
+metering:
+  enabled: false
+  # The `source` of every line: a constant of the deployment, the same on every replica ([A-Za-z0-9._:/-], at most 128).
+  source: aap-operator
+  # How often the pods are looked at, in seconds (5 to 300).
+  periodSecs: 30
+  broker:
+    # The broker's base URL (`http://orchestrator.agents.svc:8080`): `GET <url>/internal/runs/<run>/account`. http or https.
+    url: ""
+    # Who the operator may reach for it: the broker's pods (a namespaceSelector and a podSelector) or its addresses (an ipBlock).
+    to: []
+    # The broker's port on its pods.
+    port: 8080
+    # One question's time limit, in seconds (1 to 60).
+    timeoutSecs: 5
+    tokenSecret:
+      name: ""
+      key: token
+  collector:
+    # The collector's base URL (`http://usage-collector.observability.svc:4318`): lines go to `<endpoint>/v1/logs`. http or https.
+    endpoint: ""
+    to: []
+    # The collector's OTLP/HTTP port on its pods.
+    port: 4318
+    # The queue (lines), the batch (lines per POST), and the waits, as the sink takes them.
+    queue: 4096
+    batch: 512
+    intervalSecs: 5
+    timeoutSecs: 10
+  # How the operator resolves the two addresses above: the cluster's DNS. A rule with ports and no `to` would be port 53 to anywhere.
+  dns:
+    to:
+      - namespaceSelector:
+          matchLabels:
+            kubernetes.io/metadata.name: kube-system
+        podSelector:
+          matchLabels:
+            k8s-app: kube-dns
+    ports: [53]
+
 toolProbe:
   # Who the operator may reach. Empty: no probe, and not a trace of it in any render. The peers of an in-cluster MCP server (a
   # namespaceSelector or a podSelector) or its addresses (an ipBlock).

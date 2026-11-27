@@ -377,12 +377,16 @@ where
             running.push(Box::pin(crate::meter::run(
                 crate::meter::MeterLoop {
                     client: self.client.clone(),
-                    meter: Arc::new(crate::Meter::new(
-                        sink,
-                        accounts,
-                        self.meter_config.clone(),
-                        metrics.clone(),
-                    )),
+                    meter: Arc::new({
+                        let leader = self.leader.clone();
+                        crate::Meter::new(
+                            sink,
+                            accounts,
+                            self.meter_config.clone(),
+                            metrics.clone(),
+                        )
+                        .with_continue(move || leader.is_leader())
+                    }),
                     scopes: scopes_for_sleep.clone(),
                     leader: self.leader.clone(),
                 },

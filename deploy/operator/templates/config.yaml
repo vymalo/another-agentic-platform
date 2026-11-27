@@ -103,6 +103,25 @@ data:
       token:
         file: /var/run/secrets/aap/activity/token
     {{- end }}
+    {{- if include "aap.metering" . }}
+    {{- $m := .Values.metering }}
+    # ANR-1103 (AD-069): the pod-minute meter. The broker's bearer is the mounted Secret's file, read once at start.
+    metering:
+      enabled: true
+      source: {{ $m.source | quote }}
+      periodSecs: {{ $m.periodSecs | int }}
+      broker:
+        url: {{ $m.broker.url | quote }}
+        timeoutSecs: {{ $m.broker.timeoutSecs | int }}
+        token:
+          file: /var/run/secrets/aap/metering/broker-token
+      collector:
+        endpoint: {{ $m.collector.endpoint | quote }}
+        queue: {{ $m.collector.queue | int }}
+        batch: {{ $m.collector.batch | int }}
+        intervalSecs: {{ $m.collector.intervalSecs | int }}
+        timeoutSecs: {{ $m.collector.timeoutSecs | int }}
+    {{- end }}
     {{- if hasKey (default dict .Values.retention) "afterDeleteDays" }}
     retention:
       # ANR-770: days a deleted agent's retained database and volumes are kept (0: for ever).

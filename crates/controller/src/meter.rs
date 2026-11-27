@@ -43,6 +43,9 @@ use crate::metrics::{Metrics, name};
 /// short run pod is seen.
 pub const DEFAULT_PERIOD: Duration = Duration::from_secs(30);
 
+/// The default of [`MeterConfig::pass_deadline`].
+pub const DEFAULT_PASS_DEADLINE: Duration = Duration::from_secs(25);
+
 /// The most events one pass sends by default (the rest waits for the next one), so a long backfill after a
 /// failover cannot hold the loop. [`MeterConfig::max_events_per_pass`] sets it.
 pub const MAX_EVENTS_PER_PASS: usize = 5_000;
@@ -101,6 +104,9 @@ pub struct MeterConfig {
     pub skew_secs: i64,
     /// The most events one pass sends, shared fairly between the pods that have minutes due.
     pub max_events_per_pass: usize,
+    /// How long one pass may take: past it the pass stops at the next pod (and a question to the account source is cut
+    /// at it), so a hung broker cannot stretch a pass. The pods left wait for the next one.
+    pub pass_deadline: Duration,
 }
 
 impl Default for MeterConfig {
@@ -111,6 +117,7 @@ impl Default for MeterConfig {
             period: DEFAULT_PERIOD,
             skew_secs: DEFAULT_SKEW_SECS,
             max_events_per_pass: MAX_EVENTS_PER_PASS,
+            pass_deadline: DEFAULT_PASS_DEADLINE,
         }
     }
 }
@@ -140,6 +147,10 @@ struct Inner {
     rotor: usize,
     /// What is left of the period's cap of events, shared by [`Meter::pass`] and [`Meter::close_vanished`].
     budget: usize,
+    /// When the running pass must stop.
+    deadline: Option<tokio::time::Instant>,
+    /// The account of a run that is bound (it never changes), by service and run: the broker is asked once per run.
+    accounts: HashMap<(String, String), String>,
 }
 
 /// How far one pod got in a pass.
@@ -160,9 +171,25 @@ pub struct Meter {
     config: MeterConfig,
     metrics: Arc<Metrics>,
     inner: Mutex<Inner>,
+    /// Asked between pods: false stops the pass (this replica lost the lease).
+    keep_going: Option<Arc<dyn Fn() -> bool + Send + Sync>>,
 }
 
 impl Meter {
+    /// Stop a pass between two pods when `f` says false (for example, when this replica no longer leads).
+    #[must_use]
+    pub fn with_continue(mut self, f: impl Fn() -> bool + Send + Sync + 'static) -> Self {
+        self.keep_going = Some(Arc::new(f));
+        self
+    }
+
+    fn must_stop(&self) -> bool {
+        self.keep_going.as_ref().is_some_and(|f| !f())
+            || self
+                .with(|i| i.deadline)
+                .is_some_and(|d| tokio::time::Instant::now() >= d)
+    }
+
     fn budget(&self) -> usize {
         self.with(|i| i.budget)
     }
@@ -184,6 +211,7 @@ impl Meter {
                 budget: config_cap,
                 ..Inner::default()
             }),
+            keep_going: None,
         }
     }
 
@@ -250,6 +278,7 @@ impl Meter {
         let cap = self.config.max_events_per_pass;
         let start = self.with(|i| {
             i.budget = cap;
+            i.deadline = Some(tokio::time::Instant::now() + self.config.pass_deadline);
             i.rotor = i.rotor.wrapping_add(1);
             i.rotor
         });
@@ -270,6 +299,9 @@ impl Meter {
                 .collect();
             let mut candidates = live.iter().filter(|i| wants(&pods[**i])).count();
             for i in live {
+                if self.must_stop() {
+                    return sent;
+                }
                 let pod = &pods[i];
                 let share = (self.budget() / candidates.max(1)).max(1);
                 if wants(pod) {
@@ -413,8 +445,33 @@ impl Meter {
                 service: service.clone(),
             },
         };
-        let subject = match (self.accounts)(pod_ref).await {
-            Ok(Some(account)) => account,
+        let cache_key = run.as_ref().map(|run| (service.clone(), run.clone()));
+        let cached = cache_key
+            .as_ref()
+            .and_then(|k| self.with(|i| i.accounts.get(k).cloned()));
+        let asked = match cached {
+            Some(account) => Ok(Some(account)),
+            None => {
+                let left = self
+                    .with(|i| i.deadline)
+                    .map_or(self.config.pass_deadline, |d| {
+                        d.saturating_duration_since(tokio::time::Instant::now())
+                    });
+                match tokio::time::timeout(left, (self.accounts)(pod_ref)).await {
+                    Ok(answer) => answer,
+                    // The pass ran out of time in the question: held like any failure to answer.
+                    Err(_) => Err(AccountUnavailable),
+                }
+            }
+        };
+        let subject = match asked {
+            Ok(Some(account)) => {
+                // A bound run's account never changes: remembered for the life of the process.
+                if let Some(k) = cache_key {
+                    self.with(|i| i.accounts.insert(k, account.clone()));
+                }
+                account
+            }
             Ok(None) => {
                 // Not known *yet*: the cursor stays, so that an account that appears later gets its earlier
                 // minutes. They are retried every pass until they pass the backfill bound, and counted once.
@@ -840,5 +897,75 @@ mod tests {
             "billed through the minute that holds the time before the list, not the time after it: {minutes:?}"
         );
         assert!(!minutes.contains(&18));
+    }
+
+    /// A meter over a counting account source and a memory sink, for the next tests.
+    fn counting(
+        config: MeterConfig,
+        delay: Duration,
+    ) -> (
+        Meter,
+        Arc<std::sync::atomic::AtomicUsize>,
+        Arc<MemoryUsageSink>,
+    ) {
+        struct S(Arc<MemoryUsageSink>);
+        impl UsageSink for S {
+            async fn send(&self, e: PodMinuteEvent) -> Result<(), UsageError> {
+                self.0.send(e).await
+            }
+        }
+        struct A(Arc<std::sync::atomic::AtomicUsize>, Duration);
+        impl AccountSource for A {
+            async fn account(&self, _: &PodRef) -> Result<Option<String>, AccountUnavailable> {
+                self.0.fetch_add(1, Ordering::SeqCst);
+                tokio::time::sleep(self.1).await;
+                Ok(Some("acct".into()))
+            }
+        }
+        let sink = Arc::new(MemoryUsageSink::new());
+        let asked = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let meter = Meter::new(
+            erase_sink(S(sink.clone())),
+            erase_accounts(A(asked.clone(), delay)),
+            MeterConfig {
+                node_type_label_key: Some("node-type".into()),
+                skew_secs: 0,
+                ..config
+            },
+            Arc::new(Metrics::new()),
+        );
+        (meter, asked, sink)
+    }
+
+    #[tokio::test]
+    async fn a_bound_runs_account_is_asked_once_for_the_life_of_the_meter() {
+        let (meter, asked, sink) = counting(MeterConfig::default(), Duration::ZERO);
+        meter.pass(&[run_pod_facts(600)], 1_000).await;
+        meter.pass(&[run_pod_facts(600)], 1_200).await;
+        meter.pass(&[run_pod_facts(600)], 1_500).await;
+        assert_eq!(asked.load(Ordering::SeqCst), 1);
+        assert!(sink.taken().len() > 1);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_hung_account_source_is_cut_at_the_pass_deadline_and_the_minutes_are_held() {
+        let (meter, _asked, sink) = counting(
+            MeterConfig {
+                pass_deadline: Duration::from_secs(2),
+                ..MeterConfig::default()
+            },
+            Duration::from_secs(3_600),
+        );
+        // Returns at the deadline (the paused clock advances), with nothing sent and the minutes still due.
+        assert_eq!(meter.pass(&[run_pod_facts(600)], 1_000).await, 0);
+        assert!(sink.taken().is_empty());
+    }
+
+    #[tokio::test]
+    async fn a_pass_stops_between_pods_once_leadership_is_lost() {
+        let (meter, asked, _sink) = counting(MeterConfig::default(), Duration::ZERO);
+        let meter = meter.with_continue(|| false);
+        assert_eq!(meter.pass(&[run_pod_facts(600)], 1_000).await, 0);
+        assert_eq!(asked.load(Ordering::SeqCst), 0);
     }
 }

@@ -89,6 +89,29 @@ spec:
       to:
         {{- toYaml $t.to | nindent 8 }}
     {{- end }}
+    {{- if include "aap.metering" . }}
+    {{- /* The pod-minute meter (ANR-1103): DNS to resolve the broker and the collector, then exactly the peers the deployment listed, each on its own port. */}}
+    {{- $mt := .Values.metering }}
+    - ports:
+        {{- range $mt.dns.ports }}
+        - protocol: UDP
+          port: {{ . }}
+        - protocol: TCP
+          port: {{ . }}
+        {{- end }}
+      to:
+        {{- toYaml $mt.dns.to | nindent 8 }}
+    - ports:
+        - protocol: TCP
+          port: {{ $mt.broker.port | int }}
+      to:
+        {{- toYaml $mt.broker.to | nindent 8 }}
+    - ports:
+        - protocol: TCP
+          port: {{ $mt.collector.port | int }}
+      to:
+        {{- toYaml $mt.collector.to | nindent 8 }}
+    {{- end }}
     {{- if include "aap.activity" . }}
     {{- /* The activity source (AD-058 P2c): DNS to resolve an agent's service name, and exactly the peers the deployment listed, on the agents' port. */}}
     {{- $a := .Values.activity }}

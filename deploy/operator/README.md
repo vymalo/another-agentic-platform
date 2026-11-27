@@ -638,6 +638,10 @@ and run its conformance suite under: `render-check.sh` reads that file and compa
 **No right on Secrets** (a `list` on Secrets would return their values), no `watch`, no workload, pod or ConfigMap, no `ClusterRole`. `/readyz`'s one call
 (a `list` of one `ModelEndpoint`) is inside it. The operator's `Role` gains nothing, and has no right on ExternalSecrets or on Events. The goldens that render the API's `Role` (`api.yaml`, `runpods.yaml`) moved by the rule `events: list` (K8) and the others did not.
 
+## The pod-minute meter (ANR-1103, AD-069)
+
+`metering` is **off by default**, and then not a trace of it is in any render (every golden but `tests/golden/metering.yaml` is unmoved). On, the chart renders the file's `metering` section, mounts the broker's bearer (`metering.broker.tokenSecret`) as the file `/var/run/secrets/aap/metering/broker-token`, and adds to the operator's NetworkPolicy DNS and exactly the peers of `metering.broker.to` and `metering.collector.to`, each on its own port. It refuses at render time what the binary would refuse at start: no run pods, a `runPods.nodeType` that does not admit exactly one value, a peer list that is empty or is every address, a URL with credentials or a query, a missing Secret, bounds out of range. Operator, collector and broker are described in [Turn on the pod-minute meter](../../docs/guides/deploy/metering.md). **Do not turn it on in a deployment before ANR-1151 (durable delivery).** `tests/metering.values.yaml` is its golden render, and `render-check.sh` holds each guarantee (each broken once on purpose). Not proven: a kind cluster with a real broker and collector.
+
 ## The usage ingest is removed (AD-069)
 
 The chart had a `usageIngest` component (AD-060). It is gone, with `bin/usage-ingest`, its image and its CI jobs: the platform provides OpenTelemetry only, and the OpenTelemetry Collector routes, enriches and dedupes. **The chart refuses a values file that still sets `usageIngest`** ("usageIngest was removed (AD-069) ... delete the key"), so an old file fails at render and does not silently deploy nothing. The image already pushed to ghcr stays where it is, and `bump-tag.sh` no longer knows the component (`usage-ingest` is refused, exit 2).
@@ -732,7 +736,7 @@ in [`bin/operator/README.md`](../../bin/operator/README.md#run-the-configuration
 [`config.example.yaml`](../../bin/operator/config.example.yaml)). The chart renders it into the ConfigMap `<fullname>`
 (`templates/config.yaml`) from the values of this file — `watchNamespaces`, `tuning`, `registry`, `defaultAgentImage`,
 `agent.runtimeClassName`, `cacheAllowedClaims`, `maxAccessTier`, `runPods`/`runPodClasses`, `toolProbe`, `retention`,
-`replicas`/`leaderElection`, `logLevel` and `otel` — mounts it at `/etc/aap-operator/config.yaml`, runs
+`replicas`/`leaderElection`, `metering`, `logLevel` and `otel` — mounts it at `/etc/aap-operator/config.yaml`, runs
 `args: [run, --config, /etc/aap-operator/config.yaml]`, and rolls with one `checksum/config`. The pod keeps `POD_NAME` (and
 `POD_NAMESPACE` with traces on) from the downward API and nothing else.
 

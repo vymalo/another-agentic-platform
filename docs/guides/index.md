@@ -7,6 +7,7 @@ One task per page.
 - [Install the CRDs and the operator](deploy/install.md): the two charts, in order, with `watchNamespaces`, the store, the registry token and `replicas`.
 - [Turn on the Platform API](deploy/platform-api.md): `api.enabled`, the issuer, the network peers and the edge.
 - [Turn on run pods](deploy/run-pods.md): the egress proxy, the git sandbox and the sandboxed runtime.
+- [Turn on the pod-minute meter](deploy/metering.md): usage lines to a collector, the broker that names the account, and the network peers it needs. Off by default.
 
 ## Operate
 
