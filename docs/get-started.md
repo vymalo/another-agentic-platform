@@ -69,16 +69,19 @@ decides `Ready`. This walk goes only `[*] --> Ready` (observed 2026-11-27 on one
 
 ## Prerequisites
 
-| Tool | Used here | Why |
-|---|---|---|
-| `docker` | 29.10.0 | kind runs the node as a container; you build one tiny image |
-| `kind` | 0.33.0 | the cluster |
-| `kubectl` | 1.35.10 | talks to it |
-| `helm` | 3.16.1 | installs the two charts |
-| `git`, `curl`, `jq`, `openssl` | any | clone, query, read JSON, make a token |
+| Tool | Required | Used in the walk of 2026-11-27 | Why |
+|---|---|---|---|
+| `docker` | any recent | 29.10.0 | kind runs the node as a container; you build one tiny image |
+| `kind` | 0.33.0 | 0.33.0 | the cluster |
+| `kubectl` | 1.37.x | 1.35.10 | talks to it |
+| `helm` | 4.3.2 or a later 4.x (Helm 3 is not supported) | 3.16.1 | installs the two charts |
+| `git`, `curl`, `jq`, `openssl` | any | any | clone, query, read JSON, make a token |
 
-CI pins the kind node image to `kindest/node:v1.35.8` (with its digest). The steps below use the same one. The operator needs
-Kubernetes 1.30 or later only for run pods, which this page does not use.
+The "Used in the walk" column is a record: that walk ran on `kindest/node:v1.35.8` with Helm 3.16.1, before AD-067 moved the floor. The commands were
+since run on `kindest/node:v1.37.0` with Helm 4.3.2 (and a kubectl 1.35.10 client, which is outside the supported skew of 1.37), to the same `Ready` agent; that is not a re-walk of the page.
+
+The platform supports Kubernetes 1.37 and later, and Helm 4 only. Both charts say so (`kubeVersion: ">=1.37.0-0"`), and Helm refuses an
+install on an older cluster. CI pins the kind node image to `kindest/node:v1.37.0` (with its digest). The steps below use the same one.
 
 ## 1. Get the repository and make a cluster
 
@@ -87,7 +90,7 @@ git clone https://github.com/vymalo/another-agentic-platform.git
 cd another-agentic-platform
 
 kind create cluster --name aap-start \
-  --image kindest/node:v1.35.8@sha256:07b2536e30b803ed61d1677a79df6115f798ce64c80f9e22f6ed45afd09323c0
+  --image kindest/node:v1.37.0@sha256:a1ed56cfb0e7b93589bdf97c8cd566405a265939e3620fc4f5de89adff580ae5
 kubectl config current-context
 ```
 

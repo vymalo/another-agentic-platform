@@ -55,8 +55,8 @@ die() { printf 'FAIL %s\n' "$*" >&2; exit 1; }
 note() { printf 'note %s\n' "$*"; }
 
 # ---- the pins. Every image the script names is by tag AND digest (k3d's own tools image: see below, the log says which one ran) (the digest of the index of the tag, read from the registry on 2026-11-26 with `docker buildx imagetools
-# inspect`), the gVisor archive by its SHA-512 (the file `gvisor.tar.bz2.sha512` next to it at the same address, and the same value computed locally). ----
-k3s_image=rancher/k3s:v1.35.5-k3s1@sha256:2074403abe1bded11ef3dde09d457e13be8e0b64c218b1c4f8269b4565cfbc65
+# inspect`; the k3s digest re-read 2026-11-27, AD-067), the gVisor archive by its SHA-512 (the file `gvisor.tar.bz2.sha512` next to it at the same address, and the same value computed locally). ----
+k3s_image=rancher/k3s:v1.37.2-k3s1@sha256:21ea6e0fac4e3930c2ce8aa40ddd41a8b18cb3e9a0222c030dc005e7e88c4332
 gvisor_release=20261116
 gvisor_url=https://storage.googleapis.com/gvisor/releases/release/$gvisor_release/x86_64/gvisor.tar.bz2
 gvisor_sha512=c87d792d5842efb70c38ee822124cfe0821a547715e7abcf3f2b14997cd02784edaa0b91e238ec5c27a25a1b9e00bf98113398eb62a0778d8d20d4e222f8b0e0

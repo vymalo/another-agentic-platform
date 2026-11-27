@@ -263,7 +263,7 @@ stateDiagram-v2
   composite-expanded roles, a nested claim) work is D14, when the realm is tried.
 * **The edge**: TLS, a check of the JWT, rate limits and the Ingress. The script reaches the API with `kubectl port-forward` and, once, through the Service from a pod.
 * **NetworkPolicy enforcement is kind's, not proven by this script alone.** kind's default network plugin, kindnet, **enforced** a NetworkPolicy in the coder end-to-end (*verified 2026-10-16*, `operator-coder-e2e` of run 38892472909 on `main` (kind v0.33.0, node v1.35.8): `ok   a pod the registry's NetworkPolicy does not name cannot read it (status 000)`; its ClusterRole may list and watch NetworkPolicies, pods and namespaces: `pkg/build/nodeimage/const_cni.go` of kind v0.33.0), so this job runs under enforcement, and the API's pod being Ready then shows that its ingress rule (the health port is not in it: the kubelet's probes come from the node) and its three egress rules were enough. **The script requires the refusal** (it accepted either outcome before the review of 2026-10-16, which let the check pass without proving anything); what only a run of the job can show is that kindnet does refuse this pod on this policy. `apiServer.cidrs` is empty in these values (any address on 443 and 6443), so the rule that is narrow is the issuer's, a /32.
-* **`preStop.sleep` and a rolling update.** The pod has the hook (the script checks the pod spec) and Kubernetes 1.35 has the feature on; that a request in flight survives a
+* **`preStop.sleep` and a rolling update.** The pod has the hook (the script checks the pod spec) and Kubernetes 1.35 and later have the feature on (the chart's floor is 1.37); that a request in flight survives a
   rollout, and what the sleep does for a client, is not measured.
 * **A real agent image, CloudNativePG, a coder, a suspend.** The agent is a folder agent on the stand-in (it answers `/healthz` and a card), its ledger is a
   Secret nobody opens. A coder form (which needs a GitHub App key) is the crate's tests'.
@@ -423,7 +423,7 @@ The operator, installed from its chart **with `runPods.enabled`**, runs **the re
 and does not put a broken default into the release; an owner decision, §60a D15b, one line to flip). The script [`run-pods-e2e.sh`](run-pods-e2e.sh) is all of it and runs against any kind cluster that has the operator image:
 
 ```sh
-kind create cluster --name aap-runpods --image kindest/node:v1.35.8   # any cluster whose network plugin enforces NetworkPolicy (kind's does), Kubernetes 1.30 or later
+kind create cluster --name aap-runpods --image kindest/node:v1.37.0@sha256:a1ed56cfb0e7b93589bdf97c8cd566405a265939e3620fc4f5de89adff580ae5   # any cluster whose network plugin enforces NetworkPolicy (kind's does), Kubernetes 1.37 or later (the chart's floor, AD-067)
 docker build -t operator:smoke -f docker/operator/Dockerfile . && kind load docker-image operator:smoke --name aap-runpods
 sh deploy/operator/tests/e2e/run-pods-e2e.sh    # kubectl on that cluster; needs helm, jq and openssl; pulls the coder, 3 GB
 ```
@@ -517,7 +517,7 @@ stateDiagram-v2
 ### What it does not prove
 
 * **A real model, GitHub, a pull request.** The model is a script that makes the same three calls for every task; the App's id is made up and its key is generated (the coder parses it at start and never uses it); no task edits files. The coder's work with a real model is `operator-coder-e2e`'s up to its startup checks, and the shipped system's.
-* **Another Kubernetes, another network plugin, Pod Security admission, a second node.** kind's node image (v1.35.8), kindnet, no Pod Security labels on the namespace, one node (a run pod on another node than the coder's, and a work volume shared by several workers, are not exercised).
+* **Another Kubernetes, another network plugin, Pod Security admission, a second node.** kind's node image (v1.37.0, v1.35.8 before AD-067), kindnet, no Pod Security labels on the namespace, one node (a run pod on another node than the coder's, and a work volume shared by several workers, are not exercised).
 * **OpenCode, Podman, devcontainers** in the run pod, and a coder whose image is not the pin. **git, cargo, pip and go reading the proxy variables** (curl and npm are tried; the others are documented to), **IPv6 egress** (kind is IPv4 only; the proof is the absence of a rule), domain fronting and what an allowed host accepts (adam-rs ADR 0042, "What is not covered"), and **an agent whose image has no `adam-egress`** (the default agent image, `sha-9a1fd4e`, is one: the operator cannot tell, §60a D15c decision 2)
 * **The Platform API and the dashboard**: `agent.runPodSizeClass` is proven by the API's tests; this script makes the objects by `kubectl`.
 * **A deployment**: netcup, Argo CD, External Secrets.
@@ -669,7 +669,7 @@ stateDiagram-v2
 * **The server's writes.** The example runs it `read_only` with the `view` account, and the catalogue's test holds the switch; this script shows
   the read path, not a refused write.
 * **A NetworkPolicy on a plugin that does not enforce it.** The probe would still answer, and the policy would prove nothing.
-* **A Kubernetes older than the cluster's** (kind's node image, 1.35.8), and **the other namespaces' catalogues** (one namespace, one server).
+* **A Kubernetes older than the cluster's** (kind's node image, 1.37.0, 1.35.8 before AD-067), and **the other namespaces' catalogues** (one namespace, one server).
 
 ### What ran, and what is unverified
 

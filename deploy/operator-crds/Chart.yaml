@@ -4,5 +4,7 @@ description: "The CustomResourceDefinitions of the operator (AgentService and Ag
 type: application
 version: 0.1.0
 appVersion: "0.1.0"
+# The same floor as the operator chart (AD-067): Kubernetes 1.37, `-0` for vendor suffixes.
+kubeVersion: ">=1.37.0-0"
 sources:
   - https://github.com/vymalo/another-agentic-platform

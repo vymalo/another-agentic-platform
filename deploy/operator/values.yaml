@@ -89,7 +89,7 @@ agent:
 # agent's account may make (the parameters are a ConfigMap per agent, which the operator makes) and its binding to the watched
 # namespace, and the Role that lets an account make, find, watch and delete pods and exec in them, which the operator binds each
 # agent's account to (it holds the right to bind that one Role and no right of its own to make a pod or exec). Needs Kubernetes 1.30
-# or later (ValidatingAdmissionPolicy is GA there). The values below are the coder chart's (adam-rs `deploy/coder`, `runPods`) at the
+# or later (ValidatingAdmissionPolicy is GA there); the chart's floor is 1.37 (AD-067). The values below are the coder chart's (adam-rs `deploy/coder`, `runPods`) at the
 # revision of the parity goldens, and a test holds them equal; `templates/_validate.tpl` refuses what the chart's does.
 runPods:
   enabled: false
@@ -536,8 +536,8 @@ api:
   # (bin/api/src/run.rs, DRAIN). The sleep counts against `terminationGracePeriodSeconds` (verified 2026-10-16, kubernetes.io container
   # lifecycle hooks), so the grace period must hold the sleep, the drain, the 2 s the binary then gives its health port, and 5 s of margin: the chart refuses less
   # than the sleep + 32 (the default, 40 with a sleep of 5, leaves 8 s).
-  # `lifecycle.preStop.sleep` is a feature gate that is alpha and OFF in Kubernetes 1.29, beta and on from 1.30 and GA in 1.34 (verified
-  # 2026-10-16, kubernetes.io feature gates): on 1.29 enable PodLifecycleSleepAction or set 0, which renders no hook.
+  # `lifecycle.preStop.sleep` is a feature gate that was alpha and off in Kubernetes 1.29, beta and on from 1.30 and GA in 1.34 (verified
+  # 2026-10-16, kubernetes.io feature gates): it is on at the chart's floor of 1.37 (AD-067); set 0 to render no hook.
   terminationGracePeriodSeconds: 40
   preStopSleepSeconds: 5
 

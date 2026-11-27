@@ -356,7 +356,7 @@ kubectl wait --for=condition=Ready node --all --timeout=180s >/dev/null || die "
 ok "the node is Ready"
 minor=$(kubectl version -o json | jq -r '.serverVersion.minor' | tr -d '+')
 case $minor in '' | *[!0-9]*) die "cannot read the cluster's Kubernetes version" ;; esac
-[ "$minor" -ge 30 ] || die "the cluster is Kubernetes 1.$minor: this script is written for 1.30 or later (the other end-to-end scripts' node image is 1.35)"
+[ "$minor" -ge 37 ] || die "the cluster is Kubernetes 1.$minor: the platform's floor is 1.37 (AD-067)"
 ok "the cluster is Kubernetes 1.$minor"
 
 step "1. the CRDs, the Secrets, a Postgres, the scripted model, the catalogue's server and the chart with the probe on"
