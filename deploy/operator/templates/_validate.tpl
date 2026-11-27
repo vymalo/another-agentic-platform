@@ -369,11 +369,11 @@ chart refuses it first), the peers are a NetworkPolicy's and never every address
 {{- $probe := int (default 5 .Values.toolProbe.timeoutSecs) -}}
 {{- $pass := int (default 4 $tuning.reconcileTimeoutSecs) -}}
 {{- $needPass := add $probe 5 -}}
-{{- $cut := max (sub $pass 5) 1 -}}
+{{- $cut := min $probe (max (sub $pass 5) 1) -}}
 {{- $renew := int .Values.leaderElection.renewSecs -}}
 {{- $needLease := add (add $renew $needPass) 1 -}}
 {{- if lt $pass $needPass -}}
-{{- fail (printf "toolProbe.timeoutSecs (%d) does not fit the pass: the pass keeps 5 s for its other steps, so the probe needs tuning.reconcileTimeoutSecs of at least %d, but the pass is %d s and the controller would cut the probe to %d s. With the election on the pass must stay below leaderElection.leaseSecs - leaderElection.renewSecs, so that needs leaderElection.leaseSecs of at least %d (renewSecs is %d): for example leaseSecs: %d, renewSecs: %d, tuning.reconcileTimeoutSecs: %d. Or lower toolProbe.timeoutSecs." $probe $needPass $pass $cut $needLease $renew $needLease $renew $needPass) -}}
+{{- fail (printf "toolProbe.timeoutSecs (%d) does not fit the pass: the pass keeps 5 s for its other steps, so the probe needs tuning.reconcileTimeoutSecs of at least %d, but the pass is %d s and the controller would give the probe %d s. With the election on the pass must stay below leaderElection.leaseSecs - leaderElection.renewSecs, so that needs leaderElection.leaseSecs of at least %d (renewSecs is %d): for example leaseSecs: %d, renewSecs: %d, tuning.reconcileTimeoutSecs: %d. Or lower toolProbe.timeoutSecs." $probe $needPass $pass $cut $needLease $renew $needLease $renew $needPass) -}}
 {{- end -}}
 {{- end -}}
 {{- /* Run pods (slice D15a): off by default, and then nothing of them is checked or rendered. */ -}}

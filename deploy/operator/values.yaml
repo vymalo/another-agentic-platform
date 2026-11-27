@@ -420,9 +420,9 @@ toolProbe:
   ports: [80, 443]
   # How long one probe may take, in seconds (1 to 60). A server that does not answer by then is `Reachable: False`, reason
   # `Timeout`. The probe runs inside a reconcile pass that keeps 5 s for its other steps, so a probe needs
-  # `tuning.reconcileTimeoutSecs` of at least `timeoutSecs + 5`, or the controller cuts it to `max(pass - 5, 1)` seconds. With `replicas` above 1 the pass must
+  # `tuning.reconcileTimeoutSecs` of at least `timeoutSecs + 5`, or the controller gives it `min(probe, max(pass - 5, 1))` seconds. With `replicas` above 1 the pass must
   # also stay below `leaderElection.leaseSecs - renewSecs`, and the chart refuses a pair that does not fit and names the values that
-  # do. The defaults (a pass of 4 s, a lease of 15 s) cannot hold any probe; with the default `renewSecs: 10` the smallest block for the default 5 s probe is
+  # do. The defaults cannot hold any probe (a pass of 4 s; the lease rule holds at 15 s, 4 < 15 - 10); with the default `renewSecs: 10` the smallest block for the default 5 s probe is
   # `leaseSecs: 21, renewSecs: 10, tuning.reconcileTimeoutSecs: 10, toolProbe.timeoutSecs: 5`.
   timeoutSecs: 5
   # How the operator resolves the server's name. REQUIRED while `to` is set and networkPolicy is enabled: without it the operator's

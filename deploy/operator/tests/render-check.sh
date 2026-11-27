@@ -797,10 +797,16 @@ check "with the election on, the renew-15 block renders: probe 60 s, pass 65 s, 
 check "with the election on, a probe timeout set to null is the default 5 s, as the file writes it" refused 'toolProbe.timeoutSecs (5) does not fit the pass: the pass keeps 5 s for its other steps, so the probe needs tuning.reconcileTimeoutSecs of at least 10' --set replicas=2 \
   --set-json 'toolProbe.to=[{"namespaceSelector":{"matchLabels":{"a":"b"}}}]' \
   --set-json 'toolProbe.dns.to=[{"namespaceSelector":{"matchLabels":{"a":"b"}}}]' --set toolProbe.timeoutSecs=null
-check "with the election on, the refusal says the clamp the controller applies (pass - 5, not always 1 s)" refused 'cut the probe to 5 s' --set replicas=2 \
+check "with the election on, the refusal says the time the controller gives (min(probe, pass - 5), not always 1 s)" refused 'give the probe 5 s' --set replicas=2 \
   --set leaderElection.leaseSecs=21 --set tuning.reconcileTimeoutSecs=10 \
   --set-json 'toolProbe.to=[{"namespaceSelector":{"matchLabels":{"a":"b"}}}]' \
   --set-json 'toolProbe.dns.to=[{"namespaceSelector":{"matchLabels":{"a":"b"}}}]' --set toolProbe.timeoutSecs=30
+check "with the election on, a probe of 1 s is still refused at a pass of 4 s, and nothing is cut (the controller gives it 1 s)" refused 'give the probe 1 s' --set replicas=2 \
+  --set-json 'toolProbe.to=[{"namespaceSelector":{"matchLabels":{"a":"b"}}}]' \
+  --set-json 'toolProbe.dns.to=[{"namespaceSelector":{"matchLabels":{"a":"b"}}}]' --set toolProbe.timeoutSecs=1
+check "with the election on, that refusal names the pass of 6 s a 1 s probe needs" refused 'tuning.reconcileTimeoutSecs of at least 6' --set replicas=2 \
+  --set-json 'toolProbe.to=[{"namespaceSelector":{"matchLabels":{"a":"b"}}}]' \
+  --set-json 'toolProbe.dns.to=[{"namespaceSelector":{"matchLabels":{"a":"b"}}}]' --set toolProbe.timeoutSecs=1
 render --set replicas=2 --set tuning=null
 check "tuning: null is the defaults, not a nil dereference" dhas ConfigMap aap-operator '^      timeoutSecs: 4$'
 render
