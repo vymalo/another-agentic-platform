@@ -1,9 +1,9 @@
 #!/usr/bin/env sh
-# ANR-1326: prove tools/check-release-branch-author.sh accepts release-please's own commits and refuses anything else.
+# ANR-1326: prove tools/check-release-branch-author.sh accepts release-please's own commit and refuses anything else.
 #
-# The identities are the real ones read from `release-please--branches--main` on 2026-11-27: the action's commit is authored by the
-# App (`vaam-apps[bot]` with GitHub's numeric-prefixed noreply address, committed by GitHub) and the lock commit by
-# `release-please[bot]`. A writer's commit, and a right name with a wrong address, must be refused.
+# The identity is the real one read from `release-please--branches--main` on 2026-11-27: the action's commit is authored by the App
+# (`vaam-apps[bot]` with GitHub's numeric-prefixed noreply address, committed by GitHub). A writer's commit, a right name with a wrong
+# address, a lookalike App address and a lookalike author must be refused.
 set -eu
 unset GIT_DIR GIT_WORK_TREE GIT_INDEX_FILE
 
@@ -37,15 +37,12 @@ app=$(commit "" 'vaam-apps[bot]' '330611300+vaam-apps[bot]@users.noreply.github.
 git update-ref refs/heads/main "$app"
 sh "$guard" >/dev/null || { echo 'FAIL: the App'"'"'s commit was refused'; exit 1; }
 
-lock=$(commit "$app" 'release-please[bot]' 'release-please[bot]@users.noreply.github.com' 'chore: sync Cargo.lock')
-git update-ref refs/heads/main "$lock"
-sh "$guard" >/dev/null || { echo 'FAIL: the lock commit'"'"'s identity was refused'; exit 1; }
+# The directory argument: run from outside the repository, so a guard that ignores it fails here.
+( cd / && sh "$guard" "$tmp" >/dev/null ) || { echo 'FAIL: the directory argument was refused'; exit 1; }
 
-# The directory argument: run from outside the repository.
-sh "$guard" "$tmp" >/dev/null || { echo 'FAIL: the directory argument was refused'; exit 1; }
+refuse "$(commit "$app" 'A Writer' 'writer@example.com' 'feat: mine')" 'a person'"'"'s commit'
+refuse "$(commit "$app" 'vaam-apps[bot]' 'evil@example.com' 'feat: right name, wrong address')" 'a right name with a wrong address'
+refuse "$(commit "$app" 'vaam-apps[bot]' 'evil+vaam-apps[bot]@users.noreply.github.com' 'feat: lookalike address')" 'a lookalike App address'
+refuse "$(commit "$app" 'x+release-please[bot]' 'x+release-please[bot]@users.noreply.github.com' 'feat: lookalike author')" 'a lookalike author'
 
-refuse "$(commit "$lock" 'A Writer' 'writer@example.com' 'feat: mine')" 'a person'"'"'s commit'
-refuse "$(commit "$lock" 'vaam-apps[bot]' 'evil@example.com' 'feat: right name, wrong address')" 'a right name with a wrong address'
-refuse "$(commit "$lock" 'x+release-please[bot]' 'x+release-please[bot]@users.noreply.github.com' 'feat: lookalike')" 'a lookalike author'
-
-echo "ok: release-please's commits pass, a person's commit, a wrong address and a lookalike are refused"
+echo "ok: the App's commit passes; a person's, a wrong address, a lookalike address and a lookalike author are refused"

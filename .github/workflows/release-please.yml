@@ -68,6 +68,9 @@ jobs:
   release-please:
     name: propose the next release
     runs-on: ubuntu-latest
+    # ANR-1326: the guard below trusts this workflow's own tree, so a manual run must not come from a branch a writer controls. A push
+    # event is always main here; this only closes `workflow_dispatch` on another ref.
+    if: github.ref == 'refs/heads/main'
     steps:
       - name: Mint a GitHub App token
         id: app-token

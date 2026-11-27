@@ -25,16 +25,14 @@ fail() {
   exit 1
 }
 
-# The action's commit is authored by the App: `<id>+<slug>[bot]@users.noreply.github.com`, the id being the App's numeric user id.
-# The lock commit this workflow makes is authored by release-please[bot] with a plain noreply address. Nothing else is accepted; the
-# workflow's API check then requires GitHub's signature on the top commit, which is what a forged author cannot produce.
+# The action's commit is authored by the App: `<id>+<slug>[bot]@users.noreply.github.com`, the id being the App's numeric user id. The
+# workflow runs this before its own lock commit, and release-please force-pushes the branch on every update, so the top commit is the
+# App's. Nothing else is accepted; the workflow's API check then requires GitHub's signature on that commit.
 if [ "$name" = "$bot" ]; then
   case "$email" in
-    *"+${bot}@users.noreply.github.com") ;;
+    [0-9][0-9]*"+${bot}@users.noreply.github.com") ;;
     *) fail ;;
   esac
-elif [ "$name" = 'release-please[bot]' ]; then
-  [ "$email" = 'release-please[bot]@users.noreply.github.com' ] || fail
 else
   fail
 fi
