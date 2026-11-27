@@ -39,6 +39,8 @@ http = "1"
 http-body = "1"
 http-body-util = "0.1"
 serde_yaml.workspace = true
+# Only to make a run pod's hash label in the fixtures, as the coder does (`metering.rs`'s tests).
+sha2.workspace = true
 # `test-util` is for `start_paused`: the tests of a backoff run in virtual time (tests/operator.rs).
 tokio = { workspace = true, features = ["macros", "rt", "rt-multi-thread", "sync", "time", "test-util"] }
 tower = { version = "0.5", default-features = false, features = ["util"] }

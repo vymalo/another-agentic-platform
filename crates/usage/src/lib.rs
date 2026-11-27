@@ -199,7 +199,9 @@ pub enum PodRef {
     Run {
         /// The agent service.
         service: String,
-        /// The run id (the label the coder puts on the pod).
+        /// The run's full id: the annotation `adam.vymalo.com/run-id` the coder puts on the pod, never its label
+        /// `adam.vymalo.com/run`, which is a hash of the id (ANR-1160). A source that asks the broker sends it as one
+        /// percent-encoded path segment.
         run: String,
     },
     /// A pod of the agent's own workload.

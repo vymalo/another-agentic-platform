@@ -33,8 +33,16 @@ pub const INSTANCE_LABEL: &str = "app.kubernetes.io/instance";
 pub const NAME_LABEL: &str = "app.kubernetes.io/name";
 /// The component of a run pod.
 pub const RUN_COMPONENT: &str = "run";
-/// The label the coder puts on a run pod: the run id (`aap_domain::contract::run_pods::RUN_LABEL`).
+/// The label the coder puts on a run pod (`aap_domain::contract::run_pods::RUN_LABEL`): the run's **short hash**,
+/// the first 12 hex digits of SHA-256 of the run id (adam-rs `adam-env-kubernetes` `names::run_hash`), so that a
+/// run id of up to 128 characters fits a label value. It marks the pod as a run's and is **never the run id**:
+/// the meter never sends it anywhere (ANR-1160).
 pub const RUN_LABEL: &str = "adam.vymalo.com/run";
+/// The annotation the coder puts on a run pod: the run's **full id** (adam-rs `names::RUN_ID_ANNOTATION`), which
+/// the coder writes and refuses a template that sets. It is what the broker binds, so it is the run of a
+/// [`aap_usage::PodRef::Run`] and of a line; a run pod without it is [`Unattributed::NoIdentity`], never guessed
+/// from the label.
+pub const RUN_ID_ANNOTATION: &str = "adam.vymalo.com/run-id";
 /// The annotation of the size weight (`aap_domain::contract::run_pods::SIZE_WEIGHT_ANNOTATION`).
 pub const SIZE_WEIGHT_ANNOTATION: &str = "agents.vymalo.com/size-weight";
 /// The components of an agent's own workload (`aap_runtime_kubernetes::names::component`). The egress proxy's
@@ -58,7 +66,8 @@ pub enum Unattributed {
     UnknownNodeType,
     /// The account source does not know the pod.
     UnknownAccount,
-    /// A run pod without its run label, or a pod without its agent service.
+    /// A run pod without its run-id annotation ([`RUN_ID_ANNOTATION`]; the hash label alone is not an identity),
+    /// or a pod without its agent service.
     NoIdentity,
 }
 
@@ -112,7 +121,7 @@ pub enum Kind {
     Run {
         /// The agent service, if known.
         service: Option<String>,
-        /// The run id, if the pod carries it.
+        /// The run id, from the annotation [`RUN_ID_ANNOTATION`], if the pod carries it.
         run: Option<String>,
     },
     /// An agent's own pod: its agent service, if known.
@@ -138,7 +147,11 @@ pub fn classify(p: &PodFacts) -> Kind {
                         .map(str::to_owned)
                 })
                 .filter(|s| !s.is_empty()),
-            run: label(RUN_LABEL)
+            // The full id is the annotation; the label is its hash and is never read as the id.
+            run: p
+                .annotations
+                .get(RUN_ID_ANNOTATION)
+                .map(String::as_str)
                 .filter(|r| !r.is_empty())
                 .map(str::to_owned),
         },
@@ -313,8 +326,9 @@ mod tests {
                 (MANAGED_BY_LABEL, "adam-coder"),
                 (COMPONENT_LABEL, "run"),
                 (NAME_LABEL, "coder-run"),
-                (RUN_LABEL, "r1"),
+                (RUN_LABEL, &run_hash("r1")),
             ]),
+            annotations: labels(&[(RUN_ID_ANNOTATION, "r1")]),
             ..PodFacts::default()
         };
         assert_eq!(
@@ -353,6 +367,66 @@ mod tests {
             ..PodFacts::default()
         };
         assert_eq!(classify(&other), Kind::Skip);
+    }
+
+    /// adam-rs's `adam-env-kubernetes` `names::run_hash` (at `e8809b4d`), copied for the fixtures only: the label
+    /// a coder puts on a run pod. The meter never computes it.
+    fn run_hash(run: &str) -> String {
+        use sha2::{Digest, Sha256};
+        Sha256::digest(run.as_bytes())
+            .iter()
+            .take(6)
+            .map(|b| format!("{b:02x}"))
+            .collect()
+    }
+
+    #[test]
+    fn the_run_is_the_annotation_and_never_the_hash_label() {
+        // A2A task ids are long; the label is their 12-digit hash and the annotation the id itself.
+        let id = "0f3c2a9e-1b7d-8e4a-9c21-6d5b7a8e9f10";
+        let run_pod = |labels_: &[(&str, &str)], annotations: &[(&str, &str)]| PodFacts {
+            labels: labels(
+                &[
+                    &[
+                        (MANAGED_BY_LABEL, "adam-coder"),
+                        (COMPONENT_LABEL, "run"),
+                        (NAME_LABEL, "coder-run"),
+                    ],
+                    labels_,
+                ]
+                .concat(),
+            ),
+            annotations: labels(annotations),
+            ..PodFacts::default()
+        };
+        let hash = run_hash(id);
+        assert_eq!(hash.len(), 12);
+        assert_ne!(hash, id);
+        let both = run_pod(&[(RUN_LABEL, &hash)], &[(RUN_ID_ANNOTATION, id)]);
+        assert_eq!(
+            classify(&both),
+            Kind::Run {
+                service: Some("coder".into()),
+                run: Some(id.into())
+            }
+        );
+        // The label alone is no identity: the pod is a run pod with no run, never one named by its hash.
+        for (only_label, annotations) in [
+            (run_pod(&[(RUN_LABEL, &hash)], &[]), "none"),
+            (
+                run_pod(&[(RUN_LABEL, &hash)], &[(RUN_ID_ANNOTATION, "")]),
+                "empty",
+            ),
+        ] {
+            assert_eq!(
+                classify(&only_label),
+                Kind::Run {
+                    service: Some("coder".into()),
+                    run: None
+                },
+                "annotation {annotations}"
+            );
+        }
     }
 
     #[test]
