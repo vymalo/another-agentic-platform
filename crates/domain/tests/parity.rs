@@ -1062,6 +1062,7 @@ fn every_variable_of_the_contract_is_covered_by_a_golden_or_a_test() {
     assert_eq!(
         unseen,
         // The two ACTIVITY_* names are adam-rs's ADR 0083, newer than the revision the goldens are at: tests/activity.rs sets them.
+        // Remove them from this list when the parity goldens move to adam-rs 707d597 or later (ANR-1200).
         vec![
             &"ADAM_AGENT_DIR",
             &"GITHUB_APP_INSTALLATION_ID",

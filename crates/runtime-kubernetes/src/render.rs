@@ -114,6 +114,9 @@ pub struct Rendered {
     pub disruption_budgets: Vec<PodDisruptionBudget>,
     /// Only when someone is allowed from.
     pub network_policy: Option<net::NetworkPolicy>,
+    /// The policy guards an activity listener (ANR-1030a): it must be applied before the workloads, so that no pod
+    /// serves the listener before the policy that keeps it to the operator exists.
+    pub policy_first: bool,
     /// Only with run pods: what the account that makes them, and what they, may do.
     pub run_pods: Option<RunPodObjects>,
 }
@@ -309,6 +312,7 @@ pub fn render(id: &RuntimeId, spec: &RuntimeSpec) -> Result<Rendered, Error> {
         workloads,
         disruption_budgets,
         network_policy: cx.network_policy(),
+        policy_first: spec.network.activity.is_some(),
         run_pods: spec.run_pods.as_ref().map(|r| cx.run_pods(r)).transpose()?,
     })
 }

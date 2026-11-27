@@ -14,20 +14,21 @@ use common::{assert_issue, issues_with, must_resolve, must_resolve_with, set};
 use serde_json::{Value, json};
 
 fn activity(port: u16) -> ActivityExternals {
-    ActivityExternals {
+    ActivityExternals::new(
         port,
-        tokens_secret: ActivitySecret {
+        ActivitySecret {
             name: "aap-activity".to_owned(),
             key: "tokens".to_owned(),
         },
-        operator_peer: OperatorPeer {
+        OperatorPeer {
             namespace: "aap-system".to_owned(),
             pod_labels: BTreeMap::from([(
                 "app.kubernetes.io/name".to_owned(),
                 "aap-operator".to_owned(),
             )]),
         },
-    }
+    )
+    .unwrap()
 }
 
 fn externals() -> Externals {
@@ -154,12 +155,11 @@ fn a_sidecar_never_gets_it() {
 #[test]
 fn the_digest_moves_with_the_port_and_not_with_the_operators_place() {
     let base = must_resolve_with("coder", &externals(), sleeps);
-    let mut moved = activity(8081);
-    moved.operator_peer.namespace = "elsewhere".to_owned();
-    moved
-        .operator_peer
-        .pod_labels
-        .insert("x".to_owned(), "y".to_owned());
+    let first = activity(8081);
+    let mut peer = first.operator_peer().clone();
+    peer.namespace = "elsewhere".to_owned();
+    peer.pod_labels.insert("x".to_owned(), "y".to_owned());
+    let moved = ActivityExternals::new(8081, first.tokens_secret().clone(), peer).unwrap();
     let other_peer = must_resolve_with("coder", &Externals::default().with_activity(moved), sleeps);
     assert_ne!(
         other_peer.runtime.network, base.runtime.network,
@@ -178,16 +178,45 @@ fn the_digest_moves_with_the_port_and_not_with_the_operators_place() {
 }
 
 #[test]
-fn a_port_the_pod_already_serves_is_refused_naming_the_field() {
-    for port in [0, 8080] {
-        let ext = Externals::default().with_activity(activity(port));
-        let issues = issues_with("coder", &ext, sleeps);
-        assert_issue(
-            &issues,
-            "spec.scaling.idleTimeout",
-            "activity listener port",
+fn the_deployments_settings_are_checked_when_built() {
+    let secret = || ActivitySecret {
+        name: "aap-activity".to_owned(),
+        key: "tokens".to_owned(),
+    };
+    let peer = || OperatorPeer {
+        namespace: "aap-system".to_owned(),
+        pod_labels: BTreeMap::from([("app".to_owned(), "op".to_owned())]),
+    };
+    ActivityExternals::new(8081, secret(), peer()).unwrap();
+    ActivityExternals::new(1024, secret(), peer()).unwrap();
+    let refused = |r: Result<ActivityExternals, aap_domain::ActivityConfigError>, says: &str| {
+        let e = r.expect_err(says).to_string();
+        assert!(e.contains(says), "{says}: {e}");
+    };
+    for port in [0, 80, 1023] {
+        refused(ActivityExternals::new(port, secret(), peer()), "below 1024");
+    }
+    refused(ActivityExternals::new(8080, secret(), peer()), "A2A port");
+    let mut p = peer();
+    p.pod_labels.clear();
+    refused(ActivityExternals::new(8081, secret(), p), "pod labels");
+    let mut p = peer();
+    p.namespace = " ".to_owned();
+    refused(ActivityExternals::new(8081, secret(), p), "namespace");
+    for (name, key) in [("", "tokens"), ("aap-activity", "")] {
+        let s = ActivitySecret {
+            name: name.to_owned(),
+            key: key.to_owned(),
+        };
+        refused(
+            ActivityExternals::new(8081, s, peer()),
+            "Secret name and key",
         );
     }
+}
+
+#[test]
+fn a_sidecar_on_the_listeners_port_is_refused_in_one_pod_and_fine_when_split() {
     let ext = Externals::default().with_activity(activity(8082));
     let issues = issues_with("coder", &ext, |s, c| {
         sleeps(s, c);
@@ -198,16 +227,46 @@ fn a_port_the_pod_already_serves_is_refused_naming_the_field() {
         );
     });
     assert_issue(&issues, "spec.tools.githubMcp.port", "activity listener");
-    // The same port with no sidecar, and the same settings for an agent that never sleeps, are fine.
+    // No sidecar: fine. Split: the sidecar is on the workers, the listener on the front.
     must_resolve_with("coder", &ext, |s, c| {
         sleeps(s, c);
         set(c, "/spec/tools/githubMcp/sidecar", json!(false));
     });
-    must_resolve_with(
-        "coder",
-        &Externals::default().with_activity(activity(8080)),
-        |_, _| {},
+    must_resolve_with("coder", &ext, |s, c| {
+        split(s, c);
+        set(
+            c,
+            "/spec/tools/githubMcp",
+            json!({"sidecar": true, "port": 8082}),
+        );
+    });
+}
+
+#[test]
+fn the_a2a_tokens_may_not_be_the_activity_secret_key() {
+    let issues = issues_with("coder", &externals(), |s, c| {
+        sleeps(s, c);
+        set(
+            s,
+            "/spec/interfaces/a2a/bearerTokensSecretRef",
+            json!({"name": "aap-activity", "key": "tokens"}),
+        );
+        let _ = c;
+    });
+    assert_issue(
+        &issues,
+        "spec.interfaces.a2a.bearerTokensSecretRef",
+        "cannot be checked",
     );
+    // Another key of the same Secret is not the same list.
+    must_resolve_with("coder", &externals(), |s, c| {
+        sleeps(s, c);
+        set(
+            s,
+            "/spec/interfaces/a2a/bearerTokensSecretRef",
+            json!({"name": "aap-activity", "key": "a2a"}),
+        );
+    });
 }
 
 #[test]
@@ -233,6 +292,9 @@ fn the_networks_own_port_is_in_the_digest_and_its_peer_is_not() {
     port.network.activity.as_mut().unwrap().port = 9999;
     assert_ne!(aap_domain::spec_digest(&port), digest);
     let mut peer = base;
-    peer.network.activity.as_mut().unwrap().from = aap_ports::Peer::default();
+    peer.network.activity.as_mut().unwrap().from.pods = Some(aap_ports::Selector {
+        match_labels: [("other".to_owned(), "labels".to_owned())].into(),
+        match_expressions: Vec::new(),
+    });
     assert_eq!(aap_domain::spec_digest(&peer), digest);
 }

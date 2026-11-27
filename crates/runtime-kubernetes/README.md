@@ -44,11 +44,13 @@ else: the provider has no right on Secrets, never reads one, and copies no kubel
 | `ConfigMap` | `<svc>-run-pods-policy` | run pods: the parameters of the deployment's admission policy, labelled `agents.vymalo.com/run-pods-policy: "true"`. **With node types (ANR-660, AD-066) two more keys, `nodeTypeKey` and `nodeTypeAdmitted` (one value per line), only when `RunPods::node_type` is set; the chart's policy falls back to its own values when they are absent.**
 | (the StatefulSet's `volumeClaimTemplates`) | `<volume>`, claims `<volume>-<workload>-<n>` | a `PerReplica` volume: ReadWriteOnce, one per replica |
 
+**Apply order of the agent's policy (ANR-1030a).** The policy comes after the workloads, as it always did, **except when the spec has an activity listener (`Rendered::policy_first`): then it is applied before the Service and the workloads**, so no pod serves the listener before the policy that keeps it to the operator exists (a policy that only admits peers is fail-closed before its pods are there; `tests/run_pods_api.rs` asserts both orders). Removal is unchanged: a policy an earlier spec made is deleted after the workloads are re-applied without the listener, so it is never gone while a pod still serves one.
+
 **The pod template** is the adam-rs chart's `statefulset.yaml`: no service-account token, `runAsNonRoot` with the ids of
 `Security`, `seccompProfile: RuntimeDefault`, every container drops all capabilities and refuses privilege escalation,
 the probes of the spec on the named port, `WORKER_ID` from the downward API, and the sidecars as **native sidecars**
 (init containers with `restartPolicy: Always`). `tests/render.rs` states each of these, and the goldens in
-[`tests/golden`](tests/golden) hold the whole of `examples/coder.yaml` (combined and split) and `examples/chat.yaml`.
+[`tests/golden`](tests/golden) hold the whole of `examples/coder.yaml` (combined and split) and `examples/chat.yaml`, and `coder-activity.yaml` the coder with the activity listener (ANR-1030a).
 
 ### Labels, annotations, ownership
 
@@ -250,7 +252,7 @@ AAP_TEST_KUBECONFIG=$HOME/.kube/config cargo test -p aap-runtime-kubernetes --te
 | File | What |
 |---|---|
 | `src/*` unit tests | the key encoding, the error classes, the status mapping from crafted Pods (every row of the issue table, the phases, the rollout checks), the plain-text audit |
-| `tests/render.rs` | golden YAML of `examples/coder.yaml` (combined and split) and `examples/chat.yaml`, and each rule stated: labels, digest, owner (compute has one, data has none), the chart's pod template, the policy, the budget, shared claims, suspend, no Secret name in plain text, what is refused |
+| `tests/render.rs` | golden YAML of `examples/coder.yaml` (combined and split), `examples/chat.yaml` and `coder-activity.yaml`, and each rule stated: labels, digest, owner (compute has one, data has none), the chart's pod template, the policy, the budget, shared claims, suspend, no Secret name in plain text, what is refused |
 | `tests/run_pods.rs`, `tests/run_pods_api.rs`, `tests/run_pods_parity.rs` | run pods (D15a, D15c, D15d): the objects and their golden; the git sandbox and the account's credentials as the coder chart renders them; the requests, their order and the removals against the fake API server (the egress proxy applied before the policy that names it, cleared before the run pods' policy, never taken for stale, a foreign object of its names blocking); parity with the coder chart's quota, network policy, binding, account, Role, `PriorityClass`, admission policy and egress proxy |
 | `tests/api.rs` | the provider against a **fake API server** (`tests/support`): the real requests of a real `kube::Client` against an in-memory store. The order of calls (reads before writes), `fieldManager` and `force`, the guard (no write at all), stale objects, `suspend`, both deletion policies and their order, status from seeded pods, endpoints, failures by class. It is not an API server: no controllers, no validation, no garbage collection |
 | `tests/watch.rs` (K6b) | `watch()` against the same fake, on its list requests: one namespaced watch of each kind per namespace given and **no list of the whole cluster** (the `Api::all` a namespaced `Role` cannot allow), and no namespace named is one list per kind with no namespace in its path |

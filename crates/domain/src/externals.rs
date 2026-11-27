@@ -51,16 +51,16 @@ pub struct Externals {
 ///
 /// One token for the whole deployment: the operator never reads a Secret (AD-024), so the agent's pod takes the
 /// listener's tokens from a key of a Secret that has this name in every namespace the operator watches, and the
-/// operator sends the same value as its bearer. Pending the owner's confirmation (ANR-Q142).
+/// operator sends the same value as its bearer. Decided by the owner on 2026-11-27 (ANR-Q142, option A).
+///
+/// The fields are private and [`ActivityExternals::new`] is the only way in, so no composition root can build one
+/// that renders a policy that admits more than the operator: an empty pod-label map would render `podSelector: {}`,
+/// which admits every pod of the operator's namespace.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ActivityExternals {
-    /// The port the listener binds, on every interface of the pod. It is neither the A2A port, nor the GitHub
-    /// sidecar's, nor 0; `validate` refuses an agent it would collide with, naming the field.
-    pub port: u16,
-    /// The Secret key holding the bearer tokens of the listener (`ACTIVITY_BEARER_TOKENS`), by reference only.
-    pub tokens_secret: ActivitySecret,
-    /// The only peer that may reach the listener: the operator's pods.
-    pub operator_peer: OperatorPeer,
+    port: u16,
+    tokens_secret: ActivitySecret,
+    operator_peer: OperatorPeer,
 }
 
 /// A key of a Secret, by name.
@@ -77,8 +77,77 @@ pub struct ActivitySecret {
 pub struct OperatorPeer {
     /// The operator's namespace (matched by `kubernetes.io/metadata.name`).
     pub namespace: String,
-    /// Labels of the operator's pods; every one must match.
+    /// Labels of the operator's pods; every one must match. Never empty.
     pub pod_labels: BTreeMap<String, String>,
+}
+
+/// Why an [`ActivityExternals`] was refused: the deployment's setting, not an agent's.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ActivityConfigError(String);
+
+impl std::fmt::Display for ActivityConfigError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.0)
+    }
+}
+
+impl std::error::Error for ActivityConfigError {}
+
+impl ActivityExternals {
+    /// Check and keep the deployment's settings.
+    ///
+    /// # Errors
+    ///
+    /// An empty pod-label map (it would admit every pod of the operator's namespace), an empty namespace, an empty
+    /// Secret name or key, or a port that is below 1024 (the container runs as a non-root user, so it could not bind
+    /// it; this also refuses 0) or 8080 (the A2A port).
+    pub fn new(
+        port: u16,
+        tokens_secret: ActivitySecret,
+        operator_peer: OperatorPeer,
+    ) -> Result<Self, ActivityConfigError> {
+        let refuse = |m: &str| Err(ActivityConfigError(m.to_owned()));
+        if port < 1024 {
+            return refuse("the activity port is below 1024: a non-root container cannot bind it");
+        }
+        if port == crate::contract::PORT {
+            return refuse("the activity port is the A2A port, 8080");
+        }
+        if tokens_secret.name.trim().is_empty() || tokens_secret.key.trim().is_empty() {
+            return refuse("the activity tokens' Secret name and key are required");
+        }
+        if operator_peer.namespace.trim().is_empty() {
+            return refuse("the operator's namespace is required");
+        }
+        if operator_peer.pod_labels.is_empty() {
+            return refuse(
+                "the operator's pod labels are required: an empty selector admits every pod of its namespace",
+            );
+        }
+        Ok(Self {
+            port,
+            tokens_secret,
+            operator_peer,
+        })
+    }
+
+    /// The port the listener binds.
+    #[must_use]
+    pub fn port(&self) -> u16 {
+        self.port
+    }
+
+    /// The Secret key of the listener's tokens.
+    #[must_use]
+    pub fn tokens_secret(&self) -> &ActivitySecret {
+        &self.tokens_secret
+    }
+
+    /// The only peer that may reach the listener.
+    #[must_use]
+    pub fn operator_peer(&self) -> &OperatorPeer {
+        &self.operator_peer
+    }
 }
 
 impl Externals {

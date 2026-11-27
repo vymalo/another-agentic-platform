@@ -90,20 +90,23 @@ pub fn resolved_activity(
     port: u16,
     change: impl FnOnce(&mut Value, &mut Value),
 ) -> ResolvedAgent {
-    let externals = fixture_externals().with_activity(aap_domain::ActivityExternals {
-        port,
-        tokens_secret: aap_domain::ActivitySecret {
-            name: "aap-activity".to_owned(),
-            key: "tokens".to_owned(),
-        },
-        operator_peer: aap_domain::OperatorPeer {
-            namespace: "aap-system".to_owned(),
-            pod_labels: std::collections::BTreeMap::from([(
-                "app.kubernetes.io/name".to_owned(),
-                "aap-operator".to_owned(),
-            )]),
-        },
-    });
+    let externals = fixture_externals().with_activity(
+        aap_domain::ActivityExternals::new(
+            port,
+            aap_domain::ActivitySecret {
+                name: "aap-activity".to_owned(),
+                key: "tokens".to_owned(),
+            },
+            aap_domain::OperatorPeer {
+                namespace: "aap-system".to_owned(),
+                pod_labels: std::collections::BTreeMap::from([(
+                    "app.kubernetes.io/name".to_owned(),
+                    "aap-operator".to_owned(),
+                )]),
+            },
+        )
+        .expect("a valid activity setting"),
+    );
     let (mut service, mut config) = example(name);
     change(&mut service, &mut config);
     let service: AgentService = serde_json::from_value(service).unwrap();

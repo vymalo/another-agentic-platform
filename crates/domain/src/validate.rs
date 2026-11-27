@@ -194,8 +194,9 @@ fn check_deployment_limits(
     }
 }
 
-/// The activity listener's port must not be a port the pod already serves (AD-058, ANR-1030a): adam exits 78 when it shares
-/// `LISTEN_ADDR`'s, and the GitHub sidecar binds its own on the same network namespace. Only for an agent that gets a listener.
+/// What an agent that gets the activity listener (AD-058, ANR-1030a) must not collide with. The deployment's own port is
+/// checked when it is built (`ActivityExternals::new`), so this judges only the agent: the GitHub sidecar's port (adam
+/// exits 78 on a shared one, and the sidecar shares the pod's network), and the A2A token list.
 fn check_activity(
     v: &mut Issues,
     service: &AgentService,
@@ -205,19 +206,10 @@ fn check_activity(
     let Some(activity) = plan::activity(service, cfg, externals) else {
         return;
     };
-    let at = "AgentService spec.scaling.idleTimeout";
-    if activity.port == 0 || activity.port == crate::contract::PORT {
-        v.add(
-            at,
-            format!(
-                "this operator's activity listener port is {}, which is not usable: it is neither 0 nor the A2A port {} (the file's activity settings)",
-                activity.port,
-                crate::contract::PORT
-            ),
-        );
-    }
-    if let Some(g) = cfg.spec.tools.github_mcp.as_ref().filter(|g| g.sidecar)
-        && i64::from(g.port) == i64::from(activity.port)
+    // With `split` the sidecar runs on the workers and the listener on the front: they never share a pod.
+    if service.spec.scaling.topology != Topology::Split
+        && let Some(g) = cfg.spec.tools.github_mcp.as_ref().filter(|g| g.sidecar)
+        && i64::from(g.port) == i64::from(activity.port())
     {
         v.add(
             "AgentConfig spec.tools.githubMcp.port",
@@ -225,6 +217,16 @@ fn check_activity(
                 "{} is the port of this operator's activity listener, which an agent with scaling.idleTimeout binds in the same pod: choose another port",
                 g.port
             ),
+        );
+    }
+    // adam exits 78 when a token is in both lists. Only the same Secret key can be seen here: the operator reads no Secret.
+    if let Some(r) = &service.spec.interfaces.a2a.bearer_tokens_secret_ref
+        && r.name == activity.tokens_secret().name
+        && r.key == activity.tokens_secret().key
+    {
+        v.add(
+            "AgentService spec.interfaces.a2a.bearerTokensSecretRef",
+            "this is the Secret key of the operator's activity tokens: adam refuses a token that is in both lists and exits 78. Use another key (different keys that hold the same value cannot be checked, because the operator reads no Secret)",
         );
     }
 }

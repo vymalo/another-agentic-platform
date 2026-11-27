@@ -439,6 +439,14 @@ impl KubernetesRuntime {
             self.apply(ns, &run.network_policy).await?;
             self.apply(ns, &run.role_binding).await?;
         }
+        // A policy that only admits peers is fail-closed before its pods exist. With an activity listener it comes before
+        // the workloads, or a listener would be open to every pod until the policy lands (ANR-1030a); without one the
+        // policy keeps its place after them, as it always had.
+        if r.policy_first
+            && let Some(o) = &r.network_policy
+        {
+            self.apply(ns, o).await?;
+        }
         self.apply(ns, &r.service).await?;
         for (_, w) in &r.workloads {
             match w {
@@ -455,7 +463,9 @@ impl KubernetesRuntime {
         for o in &r.disruption_budgets {
             self.apply(ns, o).await?;
         }
-        if let Some(o) = &r.network_policy {
+        if !r.policy_first
+            && let Some(o) = &r.network_policy
+        {
             self.apply(ns, o).await?;
         }
         Ok(())

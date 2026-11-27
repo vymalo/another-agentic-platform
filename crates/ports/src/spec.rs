@@ -233,6 +233,7 @@ impl RuntimeSpec {
         if self.network.port == 0 {
             return bad("the network port is 0".into());
         }
+        self.check_activity()?;
         if self
             .network
             .card_path
@@ -250,6 +251,67 @@ impl RuntimeSpec {
             }
         }
         self.check_run_pods()
+    }
+
+    /// The invariants of the activity listener (ANR-1030a): the Service's port and the selected workload's container
+    /// port are the same number, no other container has one, and the one peer that may reach it names something (a
+    /// peer with no selector renders `from: [{}]`, which the API refuses, and an empty selector admits every pod).
+    fn check_activity(&self) -> Result<(), RuntimeError> {
+        let bad = |what: String| Err(RuntimeError::InvalidSpec(what));
+        let Some(a) = &self.network.activity else {
+            for w in &self.workloads {
+                for c in std::iter::once(&w.container).chain(&w.sidecars) {
+                    if c.activity_port.is_some() {
+                        return bad(format!(
+                            "workload {}: container {} has an activity port, and the network has no activity listener",
+                            w.name, c.name
+                        ));
+                    }
+                }
+            }
+            return Ok(());
+        };
+        if a.port == 0 {
+            return bad("the activity port is 0".into());
+        }
+        if a.port == self.network.port {
+            return bad("the activity port is the network port".into());
+        }
+        for w in &self.workloads {
+            for c in std::iter::once(&w.container).chain(&w.sidecars) {
+                if c.activity_port.is_some_and(|p| p != a.port) {
+                    return bad(format!(
+                        "workload {}: container {} has an activity port that is not the network's",
+                        w.name, c.name
+                    ));
+                }
+            }
+            let selected = w.name == self.network.selects;
+            if selected && w.container.activity_port != Some(a.port) {
+                return bad(format!(
+                    "workload {}: the selected workload's agent container does not listen on the activity port",
+                    w.name
+                ));
+            }
+            if !selected && (w.container.activity_port.is_some()) && w.role == Role::Worker {
+                return bad(format!(
+                    "workload {}: a worker has an activity port, and the Service does not select it",
+                    w.name
+                ));
+            }
+        }
+        let empty = |s: &Option<Selector>| {
+            s.as_ref()
+                .is_some_and(|s| s.match_labels.is_empty() && s.match_expressions.is_empty())
+        };
+        let f = &a.from;
+        if f.namespaces.is_none() && f.pods.is_none() && f.cidr.is_none() {
+            return bad("the activity peer names nothing".into());
+        }
+        if empty(&f.pods) || empty(&f.namespaces) {
+            return bad("the activity peer has an empty selector, which admits every pod".into());
+        }
+        Ok(())
     }
 
     /// The invariants of [`run_pods`](Self::run_pods): a workload runs as the account only if the spec has

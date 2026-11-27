@@ -21,7 +21,8 @@ mod validate;
 
 pub use digest::{canonical_json, digest_json, spec_digest};
 pub use externals::{
-    ActivityExternals, ActivitySecret, Externals, OperatorPeer, References, references,
+    ActivityConfigError, ActivityExternals, ActivitySecret, Externals, OperatorPeer, References,
+    references,
 };
 pub use resolve::{ResolvedAgent, resolve};
 pub use run_pods::{

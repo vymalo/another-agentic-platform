@@ -135,7 +135,7 @@ pub fn resolve(
             // (the provider's default), so no existing digest moves.
             card_path: plan::a2a(config).map(|a| a.card_path.clone()),
             activity: cx.activity.map(|a| NetworkActivity {
-                port: a.port,
+                port: a.port(),
                 from: operator_peer(a),
             }),
         },
@@ -165,12 +165,12 @@ fn operator_peer(a: &ActivityExternals) -> Peer {
         namespaces: Some(Selector {
             match_labels: BTreeMap::from([(
                 "kubernetes.io/metadata.name".to_owned(),
-                a.operator_peer.namespace.clone(),
+                a.operator_peer().namespace.clone(),
             )]),
             match_expressions: Vec::new(),
         }),
         pods: Some(Selector {
-            match_labels: a.operator_peer.pod_labels.clone(),
+            match_labels: a.operator_peer().pod_labels.clone(),
             match_expressions: Vec::new(),
         }),
         cidr: None,
@@ -784,7 +784,7 @@ impl<'a> Cx<'a> {
             activity_port: self
                 .activity
                 .filter(|_| role != Role::Worker)
-                .map(|a| a.port),
+                .map(ActivityExternals::port),
         };
 
         // The sidecars of every process that runs workers: the git sandbox first (run pods), then the GitHub MCP server
@@ -1117,11 +1117,11 @@ impl<'a> Cx<'a> {
         if serves_a2a && let Some(a) = self.activity {
             e.push(lit(
                 env::ACTIVITY_LISTEN_ADDR,
-                format!("0.0.0.0:{}", a.port),
+                format!("0.0.0.0:{}", a.port()),
             ));
             e.push(EnvVar::secret(
                 env::ACTIVITY_BEARER_TOKENS,
-                SecretRef::new(&a.tokens_secret.name, &a.tokens_secret.key),
+                SecretRef::new(&a.tokens_secret().name, &a.tokens_secret().key),
             ));
         }
         Ok(e)
