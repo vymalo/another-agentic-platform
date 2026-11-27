@@ -32,7 +32,7 @@ jobs:
           cache-dependency-path: docs/package-lock.json
       - name: Install the pinned site dependencies
         run: npm --prefix docs ci --no-fund --no-audit
-      - name: The `::: in-depth` block's rule
+      - name: "The `::: in-depth` block's rule"
         run: npm --prefix docs run test:in-depth
       - name: The CRD pages are what the CRDs say
         run: npm --prefix docs run check-crds
