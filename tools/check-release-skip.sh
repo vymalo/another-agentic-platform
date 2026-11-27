@@ -16,7 +16,8 @@ canon="\${{ !(startsWith(github.head_ref, 'release-please--') && github.event.pu
 status=0
 found=0
 
-for file in "$dir"/.github/workflows/*.yml; do
+# Both extensions: GitHub Actions accepts `.yml` and `.yaml`, and a guard in a `.yaml` workflow is a guard too.
+for file in "$dir"/.github/workflows/*.yml "$dir"/.github/workflows/*.yaml; do
   [ -f "$file" ] || continue
   count=$(awk -v file="$file" -v canon="$canon" '
     function bad(msg) { printf "%s:%d: %s\n", file, FNR, msg > "/dev/stderr"; status = 1 }
