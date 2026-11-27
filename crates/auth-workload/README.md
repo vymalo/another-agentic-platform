@@ -56,6 +56,14 @@ expired one. Each refusal has a single cause, and the suite checks that no error
 its identity. Two crate tests go beyond the suite: an identity mapped to no permissions holds nothing, and
 the **configured** bundle decides (the accepted leaf is refused when the authenticator trusts the other CA).
 
+## A chain through an intermediate
+
+The peer's intermediates travel with the leaf (`aap_ports::Certificate::with_intermediates`, at most `MAX_INTERMEDIATES`; the trait is unchanged) and
+are given to `webpki` **as untrusted help to build the path**: trust is the configured bundle's alone. A bundle that holds the root accepts
+root -> intermediate -> leaf; a leaf without its intermediate, and an intermediate of another CA, are `BadChain`. The suite's two opt-in cases
+(`through_an_intermediate`, `through_a_foreign_intermediate`) run here against a root minted by the testkit (`TestPki::intermediate`) beside the
+checked-in CA.
+
 ## The listener, and what is still not built
 
 - **The mutual-TLS listener and the composition root** are ANR-1011 (AD-067): `bin/api/src/mtls.rs` hands each request the

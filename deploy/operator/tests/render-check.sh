@@ -2229,7 +2229,7 @@ check "api.workload on: the volumes are the deployment's Secret (mode 0440) and 
   dhas Deployment $wl 'secretName: "aap-api-workload-tls"' 'defaultMode: 288 # 0440' 'name: "aap-api-workload-ca"' 'key: "ca-bundle.pem"' 'path: ca.crt'
 check "api.workload on: the pod's fsGroup lets the non-root user read the 0440 key" dhas Deployment $wl 'fsGroup: 65532'
 check "api.workload on: the configuration says where it listens, which files it reads and whether a certificate is required" \
-  all_of "$(wl_config)" 'workloadListener:' 'listen: 0.0.0.0:9443' 'certFile: /etc/aap-api-workload/tls/tls.crt' 'keyFile: /etc/aap-api-workload/tls/tls.key' \
+  all_of "$(wl_config)" 'workloadListener:' 'handshakeTimeoutSecs: 3' 'maxHandshakesPerIp: 4' 'maxConnections: 100' 'listen: 0.0.0.0:9443' 'certFile: /etc/aap-api-workload/tls/tls.crt' 'keyFile: /etc/aap-api-workload/tls/tls.key' \
   'clientCaFile: /etc/aap-api-workload/ca/ca.crt' 'clientAuth: optional'
 wl_clients() {
   all_of "$(wl_config)" 'workloadClients:' 'spiffeId: spiffe://another/ns/another-agents/sa/orchestrator' 'spiffeId: spiffe://another/ns/another-agents/sa/watcher' 'platform:agents\.own' \
@@ -2274,6 +2274,10 @@ for t in 'api.workload.clients=[]|api.workload.clients is required' \
          'api.workload.from=[]|api.workload.from is required while api.networkPolicy.enabled' \
          'api.workload.from=[{"cidr":"10.0.0.0/8"}]|a peer needs a namespaceSelector' \
          'api.workload.tokenSecret=x|is not a setting' \
+         'api.workload.handshakeTimeoutSecs=0|api.workload.handshakeTimeoutSecs must be a whole number from 1 to 60' \
+         'api.workload.maxHandshakesPerIp=0|api.workload.maxHandshakesPerIp must be a whole number from 1 to 1024' \
+         'api.workload.maxConnections=70000|api.workload.maxConnections must be a whole number from 1 to 65536' \
+         'api.workload.from=[{"ipBlock":{"cidr":"0.0.0.0/0"}}]|api.workload.from: an ipBlock of 0.0.0.0/0 is every address' \
          'api.workload.clients[0].password=x|is not a setting: spiffeId or permissions' \
          'api.extraVolumes=[{"name":"workload-tls","emptyDir":{}}]|is the chart'"'"'s volume of api.workload' ; do
   set_=${t%%|*}; frag=${t#*|}

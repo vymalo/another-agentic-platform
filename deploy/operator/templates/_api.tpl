@@ -74,7 +74,7 @@ api.port and api.healthPort, which the probes and the Service use) and `defaults
 {{- /* The workload listener (ANR-1011): off, the file is what it was. The three files are the mounts of api-deployment.yaml. */ -}}
 {{- if include "aap.api.workloadEnabled" . -}}
 {{- $w := .Values.api.workload -}}
-{{- $_ := set $cfg "workloadListener" (dict "listen" (printf "0.0.0.0:%d" (int $w.port)) "certFile" "/etc/aap-api-workload/tls/tls.crt" "keyFile" "/etc/aap-api-workload/tls/tls.key" "clientCaFile" "/etc/aap-api-workload/ca/ca.crt" "clientAuth" $w.clientAuth) -}}
+{{- $_ := set $cfg "workloadListener" (dict "listen" (printf "0.0.0.0:%d" (int $w.port)) "certFile" "/etc/aap-api-workload/tls/tls.crt" "keyFile" "/etc/aap-api-workload/tls/tls.key" "clientCaFile" "/etc/aap-api-workload/ca/ca.crt" "clientAuth" $w.clientAuth "handshakeTimeoutSecs" (int $w.handshakeTimeoutSecs) "maxHandshakesPerIp" (int $w.maxHandshakesPerIp) "maxConnections" (int $w.maxConnections)) -}}
 {{- $clients := list -}}
 {{- range $c := $w.clients -}}
 {{- $clients = append $clients (dict "spiffeId" $c.spiffeId "permissions" (default (list) $c.permissions)) -}}

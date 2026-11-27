@@ -181,8 +181,11 @@ data:
       certFile: /etc/aap-api-workload/tls/tls.crt
       clientAuth: optional
       clientCaFile: /etc/aap-api-workload/ca/ca.crt
+      handshakeTimeoutSecs: 3
       keyFile: /etc/aap-api-workload/tls/tls.key
       listen: 0.0.0.0:9443
+      maxConnections: 100
+      maxHandshakesPerIp: 4
 ---
 # Source: aap-operator/templates/config.yaml
 apiVersion: v1
@@ -454,7 +457,7 @@ spec:
         app.kubernetes.io/component: api
       annotations:
         # A change of the configuration rolls the pods (the file is read once, at start).
-        checksum/config: c1ea5af8e1d2ba08af41960080238205b679f6a55c86a26e83a877ee348b8a5d
+        checksum/config: 58fac6436803bf652d9b02318d4b4077514d20477ba4669c5e753a3fc7ac6b38
     spec:
       serviceAccountName: aap-operator-api
       # The API token is the API's way to the cluster.

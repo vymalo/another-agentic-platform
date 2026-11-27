@@ -644,6 +644,13 @@ api:
     port: 8443
     # `required`: a peer with no client certificate does not complete the handshake. `optional`: it does, and the API answers its first request 401.
     clientAuth: required
+    # What the listener bounds (bin/api/src/mtls.rs). `handshakeTimeoutSecs` (1 to 60): how long a peer has to finish its TLS handshake.
+    # `maxHandshakesPerIp` (1 to 1024): the handshakes one source address may have in flight (the next connection of that address is closed
+    # at once; behind a NAT or a proxy that hides addresses, raise it). `maxConnections` (1 to 65536): the open connections, all sources
+    # together. Fixed, not values: 256 handshakes in flight, a 500 ms wait for a slot, 15 s for a request head, 60 s of idle.
+    handshakeTimeoutSecs: 5
+    maxHandshakesPerIp: 8
+    maxConnections: 256
     # The workloads: REQUIRED, at least one. Each `spiffeId` is the exact URI SAN (spiffe://...), once; `permissions` is `[platform:agents.own]` or empty.
     clients: []
     #  - spiffeId: spiffe://another/ns/another-agents/sa/orchestrator

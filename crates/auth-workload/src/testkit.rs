@@ -13,6 +13,9 @@ use rcgen::{
 /// A CA that signs leaves.
 pub struct TestPki {
     issuer: CertifiedIssuer<'static, KeyPair>,
+    /// The intermediates a leaf of this CA brings, DER, its own issuer first: empty for a root, this CA's certificate and then its
+    /// parent's for an intermediate.
+    chain: Vec<Vec<u8>>,
 }
 
 /// What a leaf is made of. Every field is one thing a refusal depends on.
@@ -69,6 +72,9 @@ pub struct Leaf {
     pub key_der: Vec<u8>,
     /// The private key, PEM (what a file holds).
     pub key_pem: String,
+    /// The intermediate CAs between this leaf and the root, DER, the leaf's issuer first. Empty when the root issued it. A peer sends
+    /// them after the leaf.
+    pub intermediates: Vec<Vec<u8>>,
 }
 
 impl TestPki {
@@ -87,7 +93,30 @@ impl TestPki {
         let key = KeyPair::generate().expect("a key");
         Self {
             issuer: CertifiedIssuer::self_signed(params, key).expect("a self-signed CA"),
+            chain: Vec::new(),
         }
+    }
+
+    /// An intermediate CA named `name`, signed by this one: a leaf it issues brings it (and this CA's own intermediates), and **the
+    /// bundle that trusts the root alone** accepts the leaf. This is the shape of a PKI that issues from an intermediate.
+    ///
+    /// # Panics
+    ///
+    /// When the generator fails: this is test tooling.
+    #[allow(clippy::expect_used)]
+    pub fn intermediate(&self, name: &str) -> Self {
+        let mut params = CertificateParams::new(Vec::<String>::new()).expect("empty SANs");
+        params.is_ca = IsCa::Ca(BasicConstraints::Unconstrained);
+        params.key_usages = vec![KeyUsagePurpose::KeyCertSign, KeyUsagePurpose::CrlSign];
+        params.distinguished_name.push(DnType::CommonName, name);
+        params.not_after = date_time_ymd(2099, 1, 1);
+        let key = KeyPair::generate().expect("a key");
+        let parent: &Issuer<'_, KeyPair> = &self.issuer;
+        let issuer =
+            CertifiedIssuer::signed_by(params, key, parent).expect("a signed intermediate CA");
+        let mut chain = vec![issuer.der().to_vec()];
+        chain.extend(self.chain.iter().cloned());
+        Self { issuer, chain }
     }
 
     /// The CA certificate, PEM: the bundle a listener is configured with.
@@ -129,6 +158,7 @@ impl TestPki {
             cert_pem: cert.pem(),
             key_der: key.serialize_der(),
             key_pem: key.serialize_pem(),
+            intermediates: self.chain.clone(),
         }
     }
 }

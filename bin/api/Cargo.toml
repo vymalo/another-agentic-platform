@@ -28,6 +28,8 @@ anyhow.workspace = true
 axum.workspace = true
 clap.workspace = true
 futures.workspace = true
+hyper.workspace = true
+hyper-util.workspace = true
 rustls.workspace = true
 rustls-pki-types.workspace = true
 kube = { workspace = true, features = ["client", "rustls-tls", "ring"] }

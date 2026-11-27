@@ -54,6 +54,8 @@ dependencies = [
  "axum",
  "clap",
  "futures",
+ "hyper",
+ "hyper-util",
  "kube",
  "rustls",
  "rustls-pki-types",

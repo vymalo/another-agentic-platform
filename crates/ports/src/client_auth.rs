@@ -21,33 +21,70 @@ use crate::{BoxError, Classify, ErrorClass, Principal};
 /// It has no `Display`, and its `Debug` says how many bytes there are, not which: a certificate is a
 /// credential, and an error or a log line that repeated it would carry the identity and the signature.
 #[derive(Clone, PartialEq, Eq)]
-pub struct Certificate(Vec<u8>);
+pub struct Certificate {
+    leaf: Vec<u8>,
+    intermediates: Vec<Vec<u8>>,
+}
+
+/// How many intermediates one certificate may bring: a chain from a workload PKI is a leaf and one or two intermediates, and a peer that
+/// brings more is not asking to be checked.
+pub const MAX_INTERMEDIATES: usize = 8;
 
 impl Certificate {
     /// The certificate the peer presented.
     pub fn new(der: impl Into<Vec<u8>>) -> Self {
-        Self(der.into())
+        Self {
+            leaf: der.into(),
+            intermediates: Vec::new(),
+        }
     }
 
-    /// Its DER bytes.
+    /// The same leaf with the intermediate CA certificates the peer sent after it (DER, in the order sent: the leaf's issuer first). They
+    /// are **untrusted input** that only help the chain to be built: trust is the configured bundle's alone. A PKI with an intermediate
+    /// (the owner's decision of 2026-11-27: OpenBao issues workload leaves) hands the leaf and its intermediate in the handshake.
+    #[must_use]
+    pub fn with_intermediates<I, D>(mut self, intermediates: I) -> Self
+    where
+        I: IntoIterator<Item = D>,
+        D: Into<Vec<u8>>,
+    {
+        self.intermediates = intermediates.into_iter().map(Into::into).collect();
+        self
+    }
+
+    /// Its DER bytes (the leaf's).
     pub fn as_der(&self) -> &[u8] {
-        &self.0
+        &self.leaf
     }
 
-    /// How many bytes it is.
+    /// The intermediates the peer sent after the leaf, DER each.
+    pub fn intermediates(&self) -> &[Vec<u8>] {
+        &self.intermediates
+    }
+
+    /// How many bytes the leaf is.
     pub fn len(&self) -> usize {
-        self.0.len()
+        self.leaf.len()
     }
 
     /// Whether it is empty (never a certificate a TLS layer accepted).
     pub fn is_empty(&self) -> bool {
-        self.0.is_empty()
+        self.leaf.is_empty()
     }
 }
 
 impl fmt::Debug for Certificate {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "Certificate({} bytes)", self.0.len())
+        if self.intermediates.is_empty() {
+            write!(f, "Certificate({} bytes)", self.leaf.len())
+        } else {
+            write!(
+                f,
+                "Certificate({} bytes, {} intermediates)",
+                self.leaf.len(),
+                self.intermediates.len()
+            )
+        }
     }
 }
 

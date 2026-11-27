@@ -1,6 +1,7 @@
 //! Cases of the `ClientAuthenticator` suite (ANR-1010). The workload implementation
-//! (`aap-auth-workload`) is held to these. **Not covered yet:** a chain through an intermediate and a
-//! revoked leaf — the implementation passes no intermediates and fetches no CRL.
+//! (`aap-auth-workload`) is held to these. A chain through an intermediate is covered by two cases an
+//! implementation opts into (`through_an_intermediate`, `through_a_foreign_intermediate`). **Not
+//! covered:** a revoked leaf — there is no CRL.
 //!
 //! The certificates are **fixtures**, not minted at test time: a checked-in test CA and its leaves are
 //! what the card asks for, and a suite that generated its own CA would not prove that a real CA bundle
@@ -51,6 +52,18 @@ pub trait ClientAuthenticatorUnderTest: crate::ClientAuthenticator + 'static {
 
     /// A certificate of the trusted CA, for client authentication, with **two** URI SANs.
     fn two_identities(&self) -> impl Future<Output = Certificate> + Send;
+
+    /// A leaf of the trusted CA **through an intermediate CA**, carrying that intermediate
+    /// ([`Certificate::with_intermediates`]): the same [`Accepted`] contract. `None` (the default) skips the case, so an
+    /// implementation that predates the case still compiles.
+    fn through_an_intermediate(&self) -> impl Future<Output = Option<Accepted>> + Send {
+        async { None }
+    }
+
+    /// A leaf whose intermediate chains to **another** CA than the trusted one, carrying it. `None` skips the case.
+    fn through_a_foreign_intermediate(&self) -> impl Future<Output = Option<Certificate>> + Send {
+        async { None }
+    }
 }
 
 /// What an error shows: its message, its debug form and those of its whole chain of sources.
@@ -145,6 +158,51 @@ pub mod cases {
                 ClientAuthError::Invalid(InvalidCertificate::UnknownIdentity)
             ),
             "{identity}: {err:?}"
+        );
+    }
+
+    pub async fn a_chain_through_an_intermediate_is_its_identity<
+        A: ClientAuthenticatorUnderTest,
+    >(
+        a: A,
+    ) {
+        let Some(Accepted {
+            certificate,
+            identity,
+            permissions,
+        }) = a.through_an_intermediate().await
+        else {
+            super::super::skipped("a_chain_through_an_intermediate: not offered");
+            return;
+        };
+        assert!(
+            !certificate.intermediates().is_empty(),
+            "the fixture must carry its intermediate"
+        );
+        let principal = a.authenticate(Some(&certificate)).await.unwrap();
+        assert_eq!(principal.subject(), identity);
+        assert_eq!(principal.permissions().collect::<Vec<_>>(), permissions);
+        // Without its intermediate the same leaf does not chain to the bundle: the intermediate is what links it.
+        let alone = Certificate::new(certificate.as_der().to_vec());
+        let err = a.authenticate(Some(&alone)).await.unwrap_err();
+        assert!(
+            matches!(err, ClientAuthError::Invalid(InvalidCertificate::BadChain)),
+            "{err:?}"
+        );
+    }
+
+    pub async fn an_intermediate_of_another_ca_is_a_bad_chain<A: ClientAuthenticatorUnderTest>(
+        a: A,
+    ) {
+        let Some(certificate) = a.through_a_foreign_intermediate().await else {
+            super::super::skipped("an_intermediate_of_another_ca: not offered");
+            return;
+        };
+        assert!(!certificate.intermediates().is_empty());
+        let err = a.authenticate(Some(&certificate)).await.unwrap_err();
+        assert!(
+            matches!(err, ClientAuthError::Invalid(InvalidCertificate::BadChain)),
+            "{err:?}"
         );
     }
 
@@ -252,6 +310,8 @@ macro_rules! client_authenticator_conformance {
             a_certificate_is_its_identity_and_permissions,
             no_certificate_is_missing,
             a_certificate_from_another_ca_is_invalid,
+            a_chain_through_an_intermediate_is_its_identity,
+            an_intermediate_of_another_ca_is_a_bad_chain,
             a_certificate_for_another_use_is_invalid,
             an_expired_certificate_is_invalid,
             an_unknown_identity_is_invalid,

@@ -95,6 +95,27 @@ pub struct WorkloadListener {
     /// Whether a client certificate is required at the handshake.
     #[serde(default)]
     pub client_auth: ClientAuth,
+    /// How long a peer has to finish its TLS handshake, in seconds (1 to 60).
+    #[serde(default = "default_handshake_timeout_secs")]
+    pub handshake_timeout_secs: u64,
+    /// How many handshakes one source address may have in flight (1 to 1024): the next connection of that address is closed at once.
+    #[serde(default = "default_max_handshakes_per_ip")]
+    pub max_handshakes_per_ip: usize,
+    /// How many connections may be open at once, all sources together (1 to 65536).
+    #[serde(default = "default_max_connections")]
+    pub max_connections: usize,
+}
+
+fn default_handshake_timeout_secs() -> u64 {
+    5
+}
+
+fn default_max_handshakes_per_ip() -> usize {
+    8
+}
+
+fn default_max_connections() -> usize {
+    256
 }
 
 /// The `cors` block.
@@ -238,6 +259,19 @@ fn workload(
                 "workloadListener.{key}: {} is not an absolute path (the chart mounts these files; a relative path would depend on where the process started)",
                 path.display()
             );
+        }
+    }
+    for (key, value, max) in [
+        ("handshakeTimeoutSecs", listener.handshake_timeout_secs, 60),
+        (
+            "maxHandshakesPerIp",
+            listener.max_handshakes_per_ip as u64,
+            1024,
+        ),
+        ("maxConnections", listener.max_connections as u64, 65536),
+    ] {
+        if !(1..=max).contains(&value) {
+            bail!("workloadListener.{key}: {value} is not between 1 and {max}");
         }
     }
     Ok(Some(WorkloadSettings { listener, clients }))
@@ -766,7 +800,28 @@ workloadClients:
     #[test]
     fn a_workload_setting_that_is_wrong_stops_the_api_naming_it() {
         type Case = (&'static str, fn(&mut serde_yaml::Value), &'static str);
-        let cases: [Case; 9] = [
+        let cases: [Case; 12] = [
+            (
+                "a handshake deadline of zero",
+                |v| {
+                    v["workloadListener"]["handshakeTimeoutSecs"] = 0.into();
+                },
+                "handshakeTimeoutSecs",
+            ),
+            (
+                "no handshakes per address",
+                |v| {
+                    v["workloadListener"]["maxHandshakesPerIp"] = 0.into();
+                },
+                "maxHandshakesPerIp",
+            ),
+            (
+                "a connection cap that is absurd",
+                |v| {
+                    v["workloadListener"]["maxConnections"] = 1_000_000.into();
+                },
+                "maxConnections",
+            ),
             (
                 "a permission a workload may not carry",
                 |v| {

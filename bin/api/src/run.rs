@@ -128,7 +128,7 @@ async fn workload_listener<O>(
     defaults: Defaults,
     metrics: Arc<ApiMetrics>,
     tracer: Tracer,
-) -> Result<(MtlsListener, Router)>
+) -> Result<(MtlsListener, Router, mtls::Limits)>
 where
     O: AgentObjects + 'static,
 {
@@ -145,9 +145,15 @@ where
     let tcp = tokio::net::TcpListener::bind(l.listen)
         .await
         .with_context(|| format!("binding {}", l.listen))?;
+    let limits = mtls::Limits::new(
+        Duration::from_secs(l.handshake_timeout_secs),
+        l.max_handshakes_per_ip,
+        l.max_connections,
+    );
     Ok((
-        MtlsListener::new(tcp, tls).context("the workload listener")?,
+        MtlsListener::new(tcp, tls, &limits).context("the workload listener")?,
         router,
+        limits,
     ))
 }
 
@@ -227,7 +233,7 @@ async fn serve_both(
     check: Check,
     metrics: (tokio::net::TcpListener, Arc<ApiMetrics>),
     tracer: Tracer,
-    workload: Option<(MtlsListener, Router)>,
+    workload: Option<(MtlsListener, Router, mtls::Limits)>,
     stop: impl Future<Output = ()>,
 ) -> Result<()> {
     let draining = Arc::new(AtomicBool::new(false));
@@ -236,8 +242,13 @@ async fn serve_both(
     let (stop_metrics, metrics_stopped) = watch::channel(false);
     let (stop_workload, workload_stopped) = watch::channel(false);
     let api = tokio::spawn(serve::serve(api, router, signalled(api_stopped)));
-    let workload = workload.map(|(listener, router)| {
-        tokio::spawn(mtls::serve(listener, router, signalled(workload_stopped)))
+    let workload = workload.map(|(listener, router, limits)| {
+        tokio::spawn(mtls::serve(
+            listener,
+            router,
+            limits,
+            signalled(workload_stopped),
+        ))
     });
     let health = tokio::spawn(serve::serve(
         health,

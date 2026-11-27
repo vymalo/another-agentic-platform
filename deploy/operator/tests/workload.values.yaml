@@ -23,6 +23,9 @@ api:
     enabled: true
     port: 9443
     clientAuth: optional
+    handshakeTimeoutSecs: 3
+    maxHandshakesPerIp: 4
+    maxConnections: 100
     clients:
       - spiffeId: spiffe://another/ns/another-agents/sa/orchestrator
         permissions: [platform:agents.own]

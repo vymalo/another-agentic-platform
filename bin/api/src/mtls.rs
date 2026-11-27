@@ -19,19 +19,23 @@
 //! Not built: the CRL of ADR-0042 decision 2 (fetched at most 2 h ago, fail closed when it cannot be read). It needs a source to
 //! fetch from, which the deployment has not named, so a revoked certificate is refused only when it expires (ANR-1011, AD-067).
 
+use std::collections::HashMap;
 use std::fmt;
 use std::io;
-use std::net::SocketAddr;
+use std::net::{IpAddr, SocketAddr};
 use std::path::{Path, PathBuf};
-use std::sync::{Arc, PoisonError, RwLock};
-use std::time::{Duration, Instant, SystemTime};
+use std::pin::Pin;
+use std::sync::{Arc, Mutex, PoisonError, RwLock};
+use std::task::{Context as TaskContext, Poll};
+use std::time::{Duration, Instant};
 
+use aap_platform_api::PeerCertificate;
 use aap_ports::Certificate;
 use anyhow::{Context, Result, bail};
-use axum::Router;
-use axum::extract::connect_info::{ConnectInfo, Connected};
-use axum::middleware::{Next, from_fn};
-use axum::serve::{IncomingStream, Listener};
+use axum::{Extension, Router};
+use hyper::server::conn::http1;
+use hyper_util::rt::{TokioIo, TokioTimer};
+use hyper_util::service::TowerToHyperService;
 use rustls::RootCertStore;
 use rustls::server::danger::ClientCertVerifier;
 use rustls::server::{ClientHello, ResolvesServerCert, WebPkiClientVerifier};
@@ -39,18 +43,15 @@ use rustls::sign::CertifiedKey;
 use rustls::{ServerConfig, crypto::CryptoProvider};
 use rustls_pki_types::pem::PemObject;
 use rustls_pki_types::{CertificateDer, PrivateKeyDer};
+use tokio::io::{AsyncRead, AsyncWrite, ReadBuf};
 use tokio::net::{TcpListener, TcpStream};
-use tokio::sync::{Semaphore, mpsc};
+use tokio::sync::{Semaphore, mpsc, watch};
 use tokio::time::timeout;
 use tokio_rustls::TlsAcceptor;
 use tokio_rustls::server::TlsStream;
 
 use crate::config::ClientAuth;
 
-/// How long a peer has to finish its handshake.
-const HANDSHAKE: Duration = Duration::from_secs(10);
-/// How many handshakes may be in flight at once.
-const IN_FLIGHT: usize = 256;
 /// How long a server certificate is kept before its file is looked at again.
 const RECHECK: Duration = Duration::from_secs(30);
 
@@ -71,7 +72,11 @@ struct Loaded {
     complained: bool,
 }
 
-type Stamp = (Option<SystemTime>, Option<SystemTime>);
+/// What identifies the content of a file without reading it: its inode, its length and its modification time. **Not the time alone**: a
+/// renewal that keeps the old time (a copy that preserves it, a clock that went back) still replaces the file, and a replaced file has
+/// another inode (a mounted Secret is swapped by a symlink, so the target is another file).
+type Stamp = (Option<FileId>, Option<FileId>);
+type FileId = (u64, u64, Option<std::time::SystemTime>);
 
 impl fmt::Debug for Reloading {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
@@ -81,8 +86,15 @@ impl fmt::Debug for Reloading {
 }
 
 fn stamp(cert: &Path, key: &Path) -> Stamp {
-    let modified = |p: &Path| std::fs::metadata(p).and_then(|m| m.modified()).ok();
-    (modified(cert), modified(key))
+    let id = |p: &Path| {
+        let m = std::fs::metadata(p).ok()?;
+        #[cfg(unix)]
+        let inode = std::os::unix::fs::MetadataExt::ino(&m);
+        #[cfg(not(unix))]
+        let inode = 0;
+        Some((inode, m.len(), m.modified().ok()))
+    };
+    (id(cert), id(key))
 }
 
 fn load_certified(cert: &Path, key: &Path, provider: &CryptoProvider) -> Result<CertifiedKey> {
@@ -228,7 +240,84 @@ fn server_config_rechecking(
     Ok(Arc::new(config))
 }
 
-/// A TCP listener that completes TLS handshakes in tasks of their own and hands axum the connections that finished.
+/// What the listener bounds. **Every number is a bound on what one peer, or all of them, can hold**: a handshake that does not finish, a
+/// connection that says nothing, and a flood of either.
+#[derive(Clone, Debug)]
+pub struct Limits {
+    /// How long a peer has to finish its TLS handshake.
+    pub handshake_timeout: Duration,
+    /// How many handshakes may be in flight at once, all sources together.
+    pub max_handshakes: usize,
+    /// How many handshakes one source address may have in flight (or waiting for a slot): one peer cannot take every slot.
+    pub max_handshakes_per_ip: usize,
+    /// How long a connection that found every slot taken waits for one before it is dropped.
+    pub slot_wait: Duration,
+    /// How many connections may be open after their handshake, all sources together.
+    pub max_connections: usize,
+    /// How long a request's head may take to arrive (hyper's `header_read_timeout`, which also bounds the wait for the next request
+    /// of a kept-alive connection).
+    pub header_read_timeout: Duration,
+    /// How long a connection may go without a byte moving either way (a body that never arrives, a peer that stops reading).
+    pub idle_timeout: Duration,
+}
+
+impl Limits {
+    /// The defaults, with the three settings a deployment may change.
+    pub fn new(
+        handshake_timeout: Duration,
+        max_handshakes_per_ip: usize,
+        max_connections: usize,
+    ) -> Self {
+        Self {
+            handshake_timeout,
+            max_handshakes: 256,
+            max_handshakes_per_ip,
+            slot_wait: Duration::from_millis(500),
+            max_connections,
+            header_read_timeout: Duration::from_secs(15),
+            idle_timeout: Duration::from_secs(60),
+        }
+    }
+}
+
+/// The handshakes each source address has in flight. Released when the guard is dropped.
+#[derive(Clone, Default)]
+struct PerIp(Arc<Mutex<HashMap<IpAddr, usize>>>);
+
+struct IpSlot {
+    map: PerIp,
+    ip: IpAddr,
+}
+
+impl PerIp {
+    /// A slot for `ip`, or `None` when it already has `max`.
+    fn take(&self, ip: IpAddr, max: usize) -> Option<IpSlot> {
+        let mut map = self.0.lock().unwrap_or_else(PoisonError::into_inner);
+        let held = map.entry(ip).or_insert(0);
+        if *held >= max {
+            return None;
+        }
+        *held += 1;
+        Some(IpSlot {
+            map: self.clone(),
+            ip,
+        })
+    }
+}
+
+impl Drop for IpSlot {
+    fn drop(&mut self) {
+        let mut map = self.map.0.lock().unwrap_or_else(PoisonError::into_inner);
+        if let Some(held) = map.get_mut(&self.ip) {
+            *held -= 1;
+            if *held == 0 {
+                map.remove(&self.ip);
+            }
+        }
+    }
+}
+
+/// A TCP listener that completes TLS handshakes in tasks of their own and hands over the connections that finished.
 pub struct MtlsListener {
     accepted: mpsc::Receiver<(TlsStream<TcpStream>, SocketAddr)>,
     local: SocketAddr,
@@ -242,16 +331,21 @@ impl Drop for MtlsListener {
 }
 
 impl MtlsListener {
-    /// Take over `tcp` and accept on it with `config`.
+    /// Take over `tcp` and accept on it with `config`, under `limits`.
+    ///
+    /// A source address that already has `max_handshakes_per_ip` handshakes in flight has the next connection closed **at once**, before
+    /// any TLS work; one that is within its share but finds every global slot taken waits `slot_wait` for one and is then dropped.
     ///
     /// # Errors
     ///
     /// The listener has no local address.
-    pub fn new(tcp: TcpListener, config: Arc<ServerConfig>) -> io::Result<Self> {
+    pub fn new(tcp: TcpListener, config: Arc<ServerConfig>, limits: &Limits) -> io::Result<Self> {
         let local = tcp.local_addr()?;
         let (tx, accepted) = mpsc::channel(64);
         let acceptor = TlsAcceptor::from(config);
-        let slots = Arc::new(Semaphore::new(IN_FLIGHT));
+        let slots = Arc::new(Semaphore::new(limits.max_handshakes));
+        let per_ip = PerIp::default();
+        let limits = limits.clone();
         let task = tokio::spawn(async move {
             loop {
                 let (stream, peer) = match tcp.accept().await {
@@ -263,15 +357,25 @@ impl MtlsListener {
                         continue;
                     }
                 };
-                let Ok(permit) = slots.clone().try_acquire_owned() else {
-                    // More handshakes in flight than the cap: this one is dropped, not queued behind the rest.
+                let Some(ip_slot) = per_ip.take(peer.ip(), limits.max_handshakes_per_ip) else {
+                    tracing::debug!(
+                        "a workload source has its share of handshakes in flight: connection closed"
+                    );
                     continue;
                 };
-                let acceptor = acceptor.clone();
-                let tx = tx.clone();
+                let (acceptor, tx, slots, limits) =
+                    (acceptor.clone(), tx.clone(), slots.clone(), limits.clone());
                 tokio::spawn(async move {
-                    let outcome = timeout(HANDSHAKE, acceptor.accept(stream)).await;
-                    drop(permit);
+                    // The wait for a slot is bounded, and counted against the source's share while it lasts.
+                    let permit = match timeout(limits.slot_wait, slots.acquire_owned()).await {
+                        Ok(Ok(permit)) => permit,
+                        _ => {
+                            tracing::debug!("every handshake slot was taken: connection closed");
+                            return;
+                        }
+                    };
+                    let outcome = timeout(limits.handshake_timeout, acceptor.accept(stream)).await;
+                    drop((permit, ip_slot));
                     match outcome {
                         Ok(Ok(tls)) => {
                             let _ = tx.send((tls, peer)).await;
@@ -290,71 +394,170 @@ impl MtlsListener {
             task,
         })
     }
-}
 
-impl Listener for MtlsListener {
-    type Io = TlsStream<TcpStream>;
-    type Addr = SocketAddr;
-
-    async fn accept(&mut self) -> (Self::Io, Self::Addr) {
-        loop {
-            if let Some(pair) = self.accepted.recv().await {
-                return pair;
-            }
-            // The accept task only ends when the listener is dropped, so this is never reached while it is served.
-            std::future::pending::<()>().await;
-        }
+    /// The next connection that finished its handshake.
+    async fn accept(&mut self) -> Option<TlsStream<TcpStream>> {
+        self.accepted.recv().await.map(|(tls, _)| tls)
     }
 
-    fn local_addr(&self) -> io::Result<Self::Addr> {
+    /// Where it listens.
+    pub fn local_addr(&self) -> io::Result<SocketAddr> {
         Ok(self.local)
     }
 }
 
-/// The certificate the peer of a connection presented, read once per connection by axum and put on each of its requests.
-#[derive(Clone)]
-struct Peer(Option<Certificate>);
+/// An IO that fails with `TimedOut` when nothing has moved for `idle` while a read or a write is waiting: a peer that goes quiet
+/// mid-request, or never reads its answer, does not keep a connection for ever.
+struct Idle<T> {
+    inner: T,
+    sleep: Pin<Box<tokio::time::Sleep>>,
+    idle: Duration,
+}
 
-impl Connected<IncomingStream<'_, MtlsListener>> for Peer {
-    fn connect_info(stream: IncomingStream<'_, MtlsListener>) -> Self {
-        let (_, connection) = stream.io().get_ref();
-        Self(
-            connection
-                .peer_certificates()
-                .and_then(|chain| chain.first())
-                .map(|leaf| Certificate::new(leaf.as_ref())),
-        )
+impl<T> Idle<T> {
+    fn new(inner: T, idle: Duration) -> Self {
+        Self {
+            inner,
+            sleep: Box::pin(tokio::time::sleep(idle)),
+            idle,
+        }
+    }
+
+    fn moved(&mut self) {
+        self.sleep
+            .as_mut()
+            .reset(tokio::time::Instant::now() + self.idle);
+    }
+
+    fn quiet(&mut self, cx: &mut TaskContext<'_>) -> bool {
+        self.sleep.as_mut().poll(cx).is_ready()
     }
 }
 
-/// `router`, with the peer's certificate on every request as the [`PeerCertificate`](aap_platform_api::PeerCertificate) the
-/// workload guard reads. A request cannot carry one any other way: it is not a header.
-fn with_peer(router: Router) -> Router {
-    router.layer(from_fn(
-        |ConnectInfo(peer): ConnectInfo<Peer>, mut request: axum::extract::Request, next: Next| async move {
-            request
-                .extensions_mut()
-                .insert(aap_platform_api::PeerCertificate(peer.0));
-            next.run(request).await
-        },
-    ))
+fn timed_out() -> io::Error {
+    io::Error::new(io::ErrorKind::TimedOut, "the connection was idle")
+}
+
+impl<T: AsyncRead + Unpin> AsyncRead for Idle<T> {
+    fn poll_read(
+        mut self: Pin<&mut Self>,
+        cx: &mut TaskContext<'_>,
+        buf: &mut ReadBuf<'_>,
+    ) -> Poll<io::Result<()>> {
+        match Pin::new(&mut self.inner).poll_read(cx, buf) {
+            Poll::Ready(result) => {
+                self.moved();
+                Poll::Ready(result)
+            }
+            Poll::Pending if self.quiet(cx) => Poll::Ready(Err(timed_out())),
+            Poll::Pending => Poll::Pending,
+        }
+    }
+}
+
+impl<T: AsyncWrite + Unpin> AsyncWrite for Idle<T> {
+    fn poll_write(
+        mut self: Pin<&mut Self>,
+        cx: &mut TaskContext<'_>,
+        buf: &[u8],
+    ) -> Poll<io::Result<usize>> {
+        match Pin::new(&mut self.inner).poll_write(cx, buf) {
+            Poll::Ready(result) => {
+                self.moved();
+                Poll::Ready(result)
+            }
+            Poll::Pending if self.quiet(cx) => Poll::Ready(Err(timed_out())),
+            Poll::Pending => Poll::Pending,
+        }
+    }
+
+    fn poll_flush(mut self: Pin<&mut Self>, cx: &mut TaskContext<'_>) -> Poll<io::Result<()>> {
+        Pin::new(&mut self.inner).poll_flush(cx)
+    }
+
+    fn poll_shutdown(mut self: Pin<&mut Self>, cx: &mut TaskContext<'_>) -> Poll<io::Result<()>> {
+        Pin::new(&mut self.inner).poll_shutdown(cx)
+    }
+}
+
+/// The certificates the peer of a connection presented: the leaf, and the intermediates it sent after it.
+fn peer_certificate(tls: &TlsStream<TcpStream>) -> PeerCertificate {
+    let (_, connection) = tls.get_ref();
+    PeerCertificate(connection.peer_certificates().and_then(|chain| {
+        let (leaf, rest) = chain.split_first()?;
+        Some(
+            Certificate::new(leaf.as_ref())
+                .with_intermediates(rest.iter().map(|der| der.as_ref().to_vec())),
+        )
+    }))
+}
+
+/// Serve one connection: HTTP/1.1 only (the ALPN says so), with the head's timeout and the idle timeout, until it ends or `stop`.
+async fn serve_connection(
+    tls: TlsStream<TcpStream>,
+    router: Router,
+    limits: Limits,
+    mut stop: watch::Receiver<bool>,
+) {
+    // The peer's certificates are a property of the connection, put on every request of it: not a header, so no request can say its own.
+    let peer = peer_certificate(&tls);
+    let service = TowerToHyperService::new(router.layer(Extension(peer)));
+    let io = TokioIo::new(Idle::new(tls, limits.idle_timeout));
+    let connection = http1::Builder::new()
+        .timer(TokioTimer::new())
+        .header_read_timeout(limits.header_read_timeout)
+        .serve_connection(io, service);
+    let mut connection = std::pin::pin!(connection);
+    tokio::select! {
+        result = connection.as_mut() => {
+            if let Err(error) = result {
+                tracing::debug!(%error, "a workload connection ended");
+            }
+        }
+        () = async { let _ = stop.wait_for(|stopped| *stopped).await; } => {
+            // Finish the request in flight, answer no other.
+            connection.as_mut().graceful_shutdown();
+            let _ = connection.await;
+        }
+    }
 }
 
 /// Serve `router` on `listener` until `shutdown` resolves, then let the requests in flight finish.
+///
+/// The connection cap is `limits.max_connections`: a connection that finds none free is closed, and the others are not made to wait.
 pub async fn serve(
-    listener: MtlsListener,
+    mut listener: MtlsListener,
     router: Router,
+    limits: Limits,
     shutdown: impl std::future::Future<Output = ()> + Send + 'static,
 ) -> Result<()> {
     let addr = listener.local_addr().context("the listening address")?;
     tracing::info!(%addr, "listening (mutual TLS)");
-    axum::serve(
-        listener,
-        with_peer(router).into_make_service_with_connect_info::<Peer>(),
-    )
-    .with_graceful_shutdown(shutdown)
-    .await
-    .with_context(|| format!("serving {addr}"))
+    let slots = Arc::new(Semaphore::new(limits.max_connections));
+    let (stop, stopped) = watch::channel(false);
+    let mut tasks = tokio::task::JoinSet::new();
+    let mut shutdown = std::pin::pin!(shutdown);
+    loop {
+        tokio::select! {
+            () = &mut shutdown => break,
+            accepted = listener.accept() => {
+                let Some(tls) = accepted else { break };
+                let Ok(permit) = slots.clone().try_acquire_owned() else {
+                    tracing::debug!("the workload listener has its connections: one closed");
+                    continue;
+                };
+                let (router, limits, stopped) = (router.clone(), limits.clone(), stopped.clone());
+                tasks.spawn(async move {
+                    serve_connection(tls, router, limits, stopped).await;
+                    drop(permit);
+                });
+            }
+            Some(_) = tasks.join_next(), if !tasks.is_empty() => {}
+        }
+    }
+    let _ = stop.send(true);
+    while tasks.join_next().await.is_some() {}
+    Ok(())
 }
 
 #[cfg(test)]
@@ -427,7 +630,15 @@ mod tests {
         _dir: Dir,
     }
 
+    fn limits() -> Limits {
+        Limits::new(Duration::from_secs(5), 8, 256)
+    }
+
     async fn rig(mode: ClientAuth) -> Rig {
+        rig_with(mode, limits()).await
+    }
+
+    async fn rig_with(mode: ClientAuth, limits: Limits) -> Rig {
         let dir = Dir::new();
         let server_pki = TestPki::new("server CA");
         let workload_pki = TestPki::new("workload CA");
@@ -456,9 +667,9 @@ mod tests {
                 .unwrap();
         let tcp = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let addr = tcp.local_addr().unwrap();
-        let listener = MtlsListener::new(tcp, tls).unwrap();
+        let listener = MtlsListener::new(tcp, tls, &limits).unwrap();
         let (stop, stopped) = watch::channel(false);
-        tokio::spawn(serve(listener, router, async move {
+        tokio::spawn(serve(listener, router, limits, async move {
             let mut rx = stopped;
             let _ = rx.wait_for(|s| *s).await;
         }));
@@ -497,7 +708,7 @@ mod tests {
             let config = match client {
                 Some(leaf) => builder
                     .with_client_auth_cert(
-                        vec![CertificateDer::from(leaf.cert_der.clone())],
+                        chain_of(leaf),
                         PrivateKeyDer::from_pem_slice(leaf.key_pem.as_bytes()).unwrap(),
                     )
                     .unwrap(),
@@ -540,6 +751,14 @@ mod tests {
         fn drop(&mut self) {
             let _ = self.stop.send(true);
         }
+    }
+
+    /// What a client sends: its leaf, then the intermediates it was issued through.
+    fn chain_of(leaf: &Leaf) -> Vec<CertificateDer<'static>> {
+        std::iter::once(&leaf.cert_der)
+            .chain(&leaf.intermediates)
+            .map(|der| CertificateDer::from(der.clone()))
+            .collect()
     }
 
     const OWNER_LIST: &str = "/v1/owners/alice/agents";
@@ -743,14 +962,22 @@ mod tests {
             Tracer::off(),
         )
         .unwrap();
-        let res = tower::ServiceExt::oneshot(
-            router,
-            axum::http::Request::get(OWNER_LIST)
-                .body(axum::body::Body::empty())
-                .unwrap(),
-        )
-        .await
-        .unwrap();
+        // The request carries what the workload listener would have put on it: the peer's valid certificate, and the connection's
+        // address. The person's router reads neither: it is judged by its token, and it has none.
+        let mut request = axum::http::Request::get(OWNER_LIST)
+            .body(axum::body::Body::empty())
+            .unwrap();
+        let valid = optional.leaf(&LeafSpec::client(ORCHESTRATOR));
+        request
+            .extensions_mut()
+            .insert(PeerCertificate(Some(Certificate::new(valid.cert_der))));
+        request
+            .extensions_mut()
+            .insert(axum::extract::ConnectInfo(SocketAddr::from((
+                [127, 0, 0, 1],
+                50000,
+            ))));
+        let res = tower::ServiceExt::oneshot(router, request).await.unwrap();
         assert_eq!(
             res.status(),
             401,
@@ -770,7 +997,7 @@ mod tests {
             .unwrap()
             .with_root_certificates(roots)
             .with_client_auth_cert(
-                vec![CertificateDer::from(client.cert_der.clone())],
+                chain_of(client),
                 PrivateKeyDer::from_pem_slice(client.key_pem.as_bytes()).unwrap(),
             )
             .unwrap();
@@ -783,6 +1010,18 @@ mod tests {
         connection.peer_certificates().unwrap()[0].as_ref().to_vec()
     }
 
+    /// Replace `name` by a new file (another inode) that keeps the modification time `mtime`: a renewal that a time alone would not see.
+    fn replace_keeping_time(dir: &Dir, name: &str, text: &str, mtime: std::time::SystemTime) {
+        let tmp = dir.write(&format!("{name}.new"), text);
+        std::fs::File::options()
+            .write(true)
+            .open(&tmp)
+            .unwrap()
+            .set_modified(mtime)
+            .unwrap();
+        std::fs::rename(&tmp, dir.0.join(name)).unwrap();
+    }
+
     #[tokio::test]
     async fn a_renewed_server_certificate_is_served_without_a_restart_and_a_broken_file_keeps_the_one_in_use()
      {
@@ -792,6 +1031,7 @@ mod tests {
         let first = server_pki.leaf(&LeafSpec::server(&["localhost", "127.0.0.1"]));
         let cert = dir.write("tls.crt", &first.cert_pem);
         let key = dir.write("tls.key", &first.key_pem);
+        let mtime = std::fs::metadata(&cert).unwrap().modified().unwrap();
         let tls = server_config_rechecking(
             &cert,
             &key,
@@ -803,9 +1043,11 @@ mod tests {
         let tcp = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let addr = tcp.local_addr().unwrap();
         let (stop, stopped) = watch::channel(false);
+        let l = limits();
         tokio::spawn(serve(
-            MtlsListener::new(tcp, tls).unwrap(),
+            MtlsListener::new(tcp, tls, &l).unwrap(),
             Router::new(),
+            l,
             async move {
                 let mut rx = stopped;
                 let _ = rx.wait_for(|s| *s).await;
@@ -814,17 +1056,38 @@ mod tests {
         let client = workload_pki.leaf(&LeafSpec::client(ORCHESTRATOR));
 
         assert_eq!(presented(addr, &server_pki, &client).await, first.cert_der);
-        // Renewed: new files (a later modification time is the signal, so wait past the clock's granularity).
-        tokio::time::sleep(Duration::from_millis(1100)).await;
+        // Renewed, with **the same modification time** (a copy that preserves it): another inode, so it is seen.
         let second = server_pki.leaf(&LeafSpec::server(&["localhost", "127.0.0.1"]));
-        dir.write("tls.crt", &second.cert_pem);
-        dir.write("tls.key", &second.key_pem);
+        replace_keeping_time(&dir, "tls.crt", &second.cert_pem, mtime);
+        replace_keeping_time(&dir, "tls.key", &second.key_pem, mtime);
         assert_eq!(presented(addr, &server_pki, &client).await, second.cert_der);
         // A file that cannot be read keeps the certificate in use: the listener does not go down with a bad renewal.
-        tokio::time::sleep(Duration::from_millis(1100)).await;
-        dir.write("tls.crt", "not a certificate");
+        replace_keeping_time(&dir, "tls.crt", "not a certificate", mtime);
         assert_eq!(presented(addr, &server_pki, &client).await, second.cert_der);
         let _ = stop.send(true);
+    }
+
+    #[test]
+    fn a_file_is_told_by_its_inode_its_length_and_its_time_and_not_by_its_time_alone() {
+        let dir = Dir::new();
+        let a = dir.write("a", "same length");
+        let key = dir.write("k", "k");
+        let mtime = std::fs::metadata(&a).unwrap().modified().unwrap();
+        let before = stamp(&a, &key);
+        assert_eq!(before, stamp(&a, &key), "the same file is the same stamp");
+        // Same length, same time, another file.
+        replace_keeping_time(&dir, "a", "other bytes", mtime);
+        assert_ne!(before, stamp(&a, &key), "another inode is another stamp");
+        // The same file, another length.
+        let before = stamp(&a, &key);
+        std::fs::write(&a, "a longer content than before").unwrap();
+        std::fs::File::options()
+            .write(true)
+            .open(&a)
+            .unwrap()
+            .set_modified(mtime)
+            .unwrap();
+        assert_ne!(before, stamp(&a, &key), "another length is another stamp");
     }
 
     #[test]
@@ -848,5 +1111,247 @@ mod tests {
         let key = dir.write("tls.key", &a.key_pem);
         let error = server_config(&cert, &key, "", ClientAuth::Required).unwrap_err();
         assert!(format!("{error:#}").contains("no certificate"), "{error:#}");
+    }
+
+    // ---- A PKI that issues from an intermediate (the owner's decision of 2026-11-27: OpenBao issues the workload leaves) -----------
+
+    #[tokio::test]
+    async fn a_leaf_through_an_intermediate_reaches_the_owner_routes_with_only_the_root_in_the_bundle()
+     {
+        let rig = rig(ClientAuth::Required).await;
+        // root -> intermediate -> intermediate -> leaf; the bundle holds the root alone, and the client sends the leaf and the two.
+        let issuing = rig
+            .workload_pki
+            .intermediate("issuing")
+            .intermediate("deeper");
+        let leaf = issuing.leaf(&LeafSpec::client(ORCHESTRATOR));
+        assert_eq!(leaf.intermediates.len(), 2);
+        let (status, body) = rig.call(Some(&leaf), OWNER_LIST, "").await.unwrap();
+        assert_eq!(status, 200, "{body}");
+        // The same chain with a leaf of an identity the file does not name is the authenticator's refusal, not a chain error.
+        let stranger = issuing.leaf(&LeafSpec::client(STRANGER));
+        let (status, body) = rig.call(Some(&stranger), OWNER_LIST, "").await.unwrap();
+        assert_eq!(status, 401, "{body}");
+        assert!(body.contains("unknown identity"), "{body}");
+    }
+
+    #[tokio::test]
+    async fn a_leaf_that_does_not_bring_its_intermediate_or_brings_another_cas_gets_no_connection()
+    {
+        let rig = rig(ClientAuth::Required).await;
+        let issuing = rig.workload_pki.intermediate("issuing");
+        let mut alone = issuing.leaf(&LeafSpec::client(ORCHESTRATOR));
+        alone.intermediates.clear();
+        let refused = rig.call(Some(&alone), OWNER_LIST, "").await;
+        assert!(refused.is_err(), "no intermediate, no chain: {refused:?}");
+
+        // An intermediate that chains to another root, however well formed.
+        let foreign = TestPki::new("foreign root").intermediate("issuing");
+        let leaf = foreign.leaf(&LeafSpec::client(ORCHESTRATOR));
+        let refused = rig.call(Some(&leaf), OWNER_LIST, "").await;
+        assert!(refused.is_err(), "{refused:?}");
+
+        // The right leaf with the wrong intermediate sent beside it.
+        let mut mixed = issuing.leaf(&LeafSpec::client(ORCHESTRATOR));
+        mixed.intermediates = foreign.leaf(&LeafSpec::client(ORCHESTRATOR)).intermediates;
+        let refused = rig.call(Some(&mixed), OWNER_LIST, "").await;
+        assert!(refused.is_err(), "{refused:?}");
+    }
+
+    // ---- Handshakes and connections are bounded ----------------------------------------------------------------------------------
+
+    /// A TCP connection that never starts a handshake.
+    async fn stalled(addr: SocketAddr) -> TcpStream {
+        TcpStream::connect(addr).await.unwrap()
+    }
+
+    /// Whether the server closes `stream` within `within` (a read that ends, or fails).
+    async fn closed_within(stream: &mut TcpStream, within: Duration) -> bool {
+        let mut buf = [0u8; 16];
+        matches!(
+            timeout(within, stream.read(&mut buf)).await,
+            Ok(Ok(0) | Err(_))
+        )
+    }
+
+    #[tokio::test]
+    async fn one_source_cannot_take_more_than_its_share_of_handshakes() {
+        let mut l = limits();
+        l.max_handshakes_per_ip = 2;
+        l.handshake_timeout = Duration::from_secs(2);
+        let rig = rig_with(ClientAuth::Required, l).await;
+        let (mut a, mut b) = (stalled(rig.addr).await, stalled(rig.addr).await);
+        // The third connection of that address is closed at once, before any TLS work.
+        let mut third = stalled(rig.addr).await;
+        assert!(
+            closed_within(&mut third, Duration::from_millis(800)).await,
+            "the source's third handshake was not refused"
+        );
+        // And so a good client of the same address finds no room while the two stall ...
+        let leaf = rig.leaf(&LeafSpec::client(ORCHESTRATOR));
+        assert!(rig.call(Some(&leaf), OWNER_LIST, "").await.is_err());
+        // ... and finds it again once they time out.
+        assert!(closed_within(&mut a, Duration::from_secs(4)).await);
+        assert!(closed_within(&mut b, Duration::from_secs(4)).await);
+        let (status, body) = rig.call(Some(&leaf), OWNER_LIST, "").await.unwrap();
+        assert_eq!(status, 200, "{body}");
+    }
+
+    #[tokio::test]
+    async fn a_handshake_that_says_nothing_is_dropped_at_its_deadline() {
+        let mut l = limits();
+        l.handshake_timeout = Duration::from_millis(400);
+        let rig = rig_with(ClientAuth::Required, l).await;
+        let mut quiet = stalled(rig.addr).await;
+        let started = Instant::now();
+        assert!(closed_within(&mut quiet, Duration::from_secs(3)).await);
+        assert!(
+            started.elapsed() < Duration::from_secs(2),
+            "closed after {:?}",
+            started.elapsed()
+        );
+    }
+
+    #[tokio::test]
+    async fn a_connection_that_finds_every_slot_taken_waits_briefly_for_one_before_it_is_dropped() {
+        let leaf_for = |rig: &Rig| rig.leaf(&LeafSpec::client(ORCHESTRATOR));
+        // One slot for everybody, held for 300 ms by a stalled peer; a good client waits up to 2 s for it, and is served.
+        let mut l = limits();
+        l.max_handshakes = 1;
+        l.handshake_timeout = Duration::from_millis(300);
+        l.slot_wait = Duration::from_secs(2);
+        let rig = rig_with(ClientAuth::Required, l).await;
+        let _held = stalled(rig.addr).await;
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        let (status, body) = rig
+            .call(Some(&leaf_for(&rig)), OWNER_LIST, "")
+            .await
+            .unwrap();
+        assert_eq!(status, 200, "waited for the slot: {body}");
+
+        // The same, with a wait shorter than the stall: dropped, not queued for ever.
+        let mut l = limits();
+        l.max_handshakes = 1;
+        l.handshake_timeout = Duration::from_secs(3);
+        l.slot_wait = Duration::from_millis(100);
+        let rig = rig_with(ClientAuth::Required, l).await;
+        let _held = stalled(rig.addr).await;
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        let started = Instant::now();
+        assert!(
+            rig.call(Some(&leaf_for(&rig)), OWNER_LIST, "")
+                .await
+                .is_err()
+        );
+        assert!(started.elapsed() < Duration::from_secs(2));
+    }
+
+    /// A TLS connection of `leaf`, after its handshake, with nothing sent.
+    async fn connected(rig: &Rig, leaf: &Leaf) -> tokio_rustls::client::TlsStream<TcpStream> {
+        let mut roots = RootCertStore::empty();
+        for der in aap_auth_workload::parse_bundle(&rig.server_pki.ca_pem()).unwrap() {
+            roots.add(der).unwrap();
+        }
+        let config =
+            ClientConfig::builder_with_provider(Arc::new(rustls::crypto::ring::default_provider()))
+                .with_safe_default_protocol_versions()
+                .unwrap()
+                .with_root_certificates(roots)
+                .with_client_auth_cert(
+                    chain_of(leaf),
+                    PrivateKeyDer::from_pem_slice(leaf.key_pem.as_bytes()).unwrap(),
+                )
+                .unwrap();
+        TlsConnector::from(Arc::new(config))
+            .connect(
+                ServerName::try_from("localhost").unwrap(),
+                TcpStream::connect(rig.addr).await.unwrap(),
+            )
+            .await
+            .unwrap()
+    }
+
+    /// Whether the server ends the connection (an answer and a close, or a close) within `within`.
+    async fn ends_within(
+        tls: &mut tokio_rustls::client::TlsStream<TcpStream>,
+        within: Duration,
+    ) -> bool {
+        let mut sink = Vec::new();
+        timeout(within, tls.read_to_end(&mut sink)).await.is_ok()
+    }
+
+    #[tokio::test]
+    async fn a_peer_that_sends_no_request_head_is_cut_off_and_so_is_one_that_sends_half_of_it() {
+        let mut l = limits();
+        l.header_read_timeout = Duration::from_millis(500);
+        let rig = rig_with(ClientAuth::Required, l).await;
+        let leaf = rig.leaf(&LeafSpec::client(ORCHESTRATOR));
+        // Nothing at all after the handshake.
+        let mut silent = connected(&rig, &leaf).await;
+        assert!(
+            ends_within(&mut silent, Duration::from_secs(4)).await,
+            "a silent connection was kept"
+        );
+        // Half a head, slowly.
+        let mut slow = connected(&rig, &leaf).await;
+        slow.write_all(b"GET /v1/owners/alice/agents HTTP/1.1\r\nHost: l")
+            .await
+            .unwrap();
+        assert!(
+            ends_within(&mut slow, Duration::from_secs(4)).await,
+            "a half-sent head was kept"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_connection_that_stops_in_the_middle_of_a_body_is_cut_off_by_the_idle_timeout() {
+        let mut l = limits();
+        l.idle_timeout = Duration::from_millis(500);
+        let rig = rig_with(ClientAuth::Required, l).await;
+        let leaf = rig.leaf(&LeafSpec::client(ORCHESTRATOR));
+        let mut stuck = connected(&rig, &leaf).await;
+        stuck
+            .write_all(
+                b"PUT /v1/owners/alice/agents/x HTTP/1.1\r\nHost: l\r\nContent-Type: application/json\r\nIf-None-Match: *\r\nContent-Length: 1000\r\n\r\n{",
+            )
+            .await
+            .unwrap();
+        assert!(
+            ends_within(&mut stuck, Duration::from_secs(4)).await,
+            "a stalled body kept its connection"
+        );
+    }
+
+    #[tokio::test]
+    async fn open_connections_are_capped_and_a_closed_one_makes_room() {
+        let mut l = limits();
+        l.max_connections = 1;
+        let rig = rig_with(ClientAuth::Required, l).await;
+        let leaf = rig.leaf(&LeafSpec::client(ORCHESTRATOR));
+        // One connection open and idle; a second completes its handshake and is closed unserved.
+        let first = connected(&rig, &leaf).await;
+        let second = rig.call(Some(&leaf), OWNER_LIST, "").await;
+        assert!(
+            second.is_err(),
+            "a second connection was served over the cap: {second:?}"
+        );
+        drop(first);
+        tokio::time::sleep(Duration::from_millis(200)).await;
+        let (status, body) = rig.call(Some(&leaf), OWNER_LIST, "").await.unwrap();
+        assert_eq!(status, 200, "{body}");
+    }
+
+    #[test]
+    fn a_source_slot_is_given_back() {
+        let per_ip = PerIp::default();
+        let ip: IpAddr = [10, 0, 0, 1].into();
+        let a = per_ip.take(ip, 1).unwrap();
+        assert!(per_ip.take(ip, 1).is_none());
+        assert!(
+            per_ip.take([10, 0, 0, 2].into(), 1).is_some(),
+            "another source is not affected"
+        );
+        drop(a);
+        assert!(per_ip.take(ip, 1).is_some());
     }
 }

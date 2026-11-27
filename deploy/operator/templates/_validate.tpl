@@ -935,8 +935,8 @@ SPIFFE id that is not one, a permission that is not platform:agents.own, a clash
 {{- if include "aap.api.workloadEnabled" . -}}
 {{- $w := $api.workload -}}
 {{- range $k, $v := $w -}}
-{{- if not (has $k (list "enabled" "port" "clientAuth" "clients" "tls" "clientCa" "from")) -}}
-{{- fail (printf "api.workload.%s is not a setting: enabled, port, clientAuth, clients, tls, clientCa or from" $k) -}}
+{{- if not (has $k (list "enabled" "port" "clientAuth" "handshakeTimeoutSecs" "maxHandshakesPerIp" "maxConnections" "clients" "tls" "clientCa" "from")) -}}
+{{- fail (printf "api.workload.%s is not a setting: enabled, port, clientAuth, handshakeTimeoutSecs, maxHandshakesPerIp, maxConnections, clients, tls, clientCa or from" $k) -}}
 {{- end -}}
 {{- end -}}
 {{- if not (include "aap.isPort" $w.port) -}}
@@ -944,6 +944,12 @@ SPIFFE id that is not one, a permission that is not platform:agents.own, a clash
 {{- end -}}
 {{- if or (eq (int $w.port) (int $api.port)) (eq (int $w.port) (int $api.healthPort)) (eq (int $w.port) (int $api.metrics.port)) -}}
 {{- fail "api.workload.port must differ from api.port, api.healthPort and api.metrics.port: the workload listener is a port of its own" -}}
+{{- end -}}
+{{- range $b := list (list "handshakeTimeoutSecs" 60) (list "maxHandshakesPerIp" 1024) (list "maxConnections" 65536) -}}
+{{- $v := get $w (index $b 0) -}}
+{{- if not (and (include "aap.isWholeNumber" $v) (ge (int $v) 1) (le (int $v) (int (index $b 1)))) -}}
+{{- fail (printf "api.workload.%s must be a whole number from 1 to %d, got %v" (index $b 0) (int (index $b 1)) $v) -}}
+{{- end -}}
 {{- end -}}
 {{- if not (has (toString $w.clientAuth) (list "required" "optional")) -}}
 {{- fail (printf "api.workload.clientAuth must be required or optional, got %q" (toString $w.clientAuth)) -}}
@@ -992,6 +998,8 @@ SPIFFE id that is not one, a permission that is not platform:agents.own, a clash
 {{- fail "api.workload.from must be a list of peers" -}}
 {{- end -}}
 {{- include "aap.checkPeers" (dict "what" "api.workload.from" "peers" (default (list) $w.from)) -}}
+{{- /* An ipBlock that is every address would open the listener to the world: refused, as the tool probe's and the traces' peers are. (api.networkPolicy.from, the person's, is not checked here.) */ -}}
+{{- include "aap.checkIpBlocks" (dict "what" "api.workload.from" "peers" (default (list) $w.from)) -}}
 {{- if and $api.networkPolicy.enabled (not $w.from) -}}
 {{- fail "api.workload.from is required while api.networkPolicy.enabled: with none, nothing could reach the workload listener (list the orchestrator's pods, or set api.networkPolicy.enabled=false)" -}}
 {{- end -}}

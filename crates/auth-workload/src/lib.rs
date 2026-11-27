@@ -29,7 +29,10 @@ pub mod testkit;
 
 use std::collections::{BTreeMap, BTreeSet};
 
-use aap_ports::{Certificate, ClientAuthError, ClientAuthenticator, InvalidCertificate, Principal};
+use aap_ports::{
+    Certificate, ClientAuthError, ClientAuthenticator, InvalidCertificate, MAX_INTERMEDIATES,
+    Principal,
+};
 use rustls_pki_types::{CertificateDer, TrustAnchor, UnixTime};
 use serde::Deserialize;
 use x509_parser::prelude::{FromDer, GeneralName, X509Certificate};
@@ -231,6 +234,16 @@ impl ClientAuthenticator for WorkloadAuth {
         let leaf = CertificateDer::from(der);
         let end_entity = webpki::EndEntityCert::try_from(&leaf)
             .map_err(|_| invalid(InvalidCertificate::Malformed))?;
+        // The intermediates the peer sent are untrusted help to build the chain; trust is the configured bundle's alone. A peer that
+        // sends more than a PKI has levels is not asking to be checked.
+        if certificate.intermediates().len() > MAX_INTERMEDIATES {
+            return Err(invalid(InvalidCertificate::Malformed));
+        }
+        let intermediates: Vec<CertificateDer<'_>> = certificate
+            .intermediates()
+            .iter()
+            .map(|der| CertificateDer::from(der.as_slice()))
+            .collect();
 
         // 2-4. It chains to the configured bundle, is for client authentication, and is in its window.
         //
@@ -241,7 +254,7 @@ impl ClientAuthenticator for WorkloadAuth {
             .verify_for_usage(
                 webpki::ALL_VERIFICATION_ALGS,
                 &self.anchors,
-                &[],
+                &intermediates,
                 UnixTime::now(),
                 webpki::KeyUsage::client_auth(),
                 None,
