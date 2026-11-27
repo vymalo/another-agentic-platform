@@ -8,6 +8,9 @@
 //! `SpendLine` and `Inserted` with it). A sink takes events; it answers nothing about them.
 //!
 //! * [`UsageSink::send`] takes one event and **never waits on a network**: the queue is the adapter's.
+//! * [`UsageSink::outcomes`] says what became of the events a sink took (ANR-1151): an **acknowledgement**, so the
+//!   meter does not call a minute delivered because it was queued. A sink that cannot say answers `None`, and
+//!   taking the event is then all the meter knows.
 //! * [`AccountSource`] says which account a pod's minutes are for. The account is an **opaque id from the
 //!   broker**, never an e-mail: [`PodMinuteEvent::validate`] keeps a closed alphabet that has no `@`.
 //!
@@ -196,6 +199,34 @@ pub trait UsageSink: Send + Sync {
     /// two calls that both succeed: the sink does not dedupe, the collector does on `event_id`. It **never
     /// waits on a network**: an adapter queues, and answers [`UsageError::Unavailable`] when it cannot.
     fn send(&self, event: PodMinuteEvent) -> impl Future<Output = Result<(), UsageError>> + Send;
+
+    /// What became of the events taken since the last call, each **once** (ANR-1151, additive): `Some(outcomes)`
+    /// from a sink that reports them, `None` from one that cannot, for which taking the event is the delivery.
+    /// A sink that answers `Some` must, sooner or later, say one [`Fate`] for each event it accepted, unless
+    /// it is stopped with events still held (then the caller's process is ending and the same minutes are
+    /// re-derived by the next one, with the same `event_id`s). It never waits on a network.
+    fn outcomes(&self) -> Option<Vec<Outcome>> {
+        None
+    }
+}
+
+/// What became of one event a sink took.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Fate {
+    /// The collector acknowledged it (a 2xx). The meter may forget it.
+    Delivered,
+    /// The collector refused it for good (400, 415, 422, or a single event too large). Sending it again cannot
+    /// help: the meter forgets it and counts it.
+    Refused,
+}
+
+/// The [`Fate`] of the event named by `event_id`.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Outcome {
+    /// [`PodMinuteEvent::event_id`].
+    pub event_id: String,
+    /// What became of it.
+    pub fate: Fate,
 }
 
 /// The pod an account is asked for. A run pod is known by its run id, an agent pod by its agent service.

@@ -441,6 +441,10 @@ impl UsageSink for ObservedOtlp {
             Err(UsageError::Unavailable)
         }
     }
+
+    fn outcomes(&self) -> Option<Vec<aap_usage::Outcome>> {
+        self.sink.outcomes()
+    }
 }
 
 impl Observed for ObservedOtlp {

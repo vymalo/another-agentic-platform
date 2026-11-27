@@ -29,6 +29,10 @@ impl UsageSink for SharedSink {
     async fn send(&self, event: PodMinuteEvent) -> Result<(), UsageError> {
         self.0.send(event).await
     }
+
+    fn outcomes(&self) -> Option<Vec<aap_usage::Outcome>> {
+        self.0.outcomes()
+    }
 }
 
 /// What the operator hands to `Operator::with_meter` and `with_meter_config`.

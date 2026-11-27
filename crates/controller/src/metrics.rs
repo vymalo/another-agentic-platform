@@ -43,6 +43,12 @@ pub mod name {
     pub const METER_INVALID: &str = "aap_meter_invalid_total";
     /// Times the account source could not answer; the pod's minutes are held for the next pass.
     pub const METER_ACCOUNT_FAILURES: &str = "aap_meter_account_failures_total";
+    /// Events the sink said the collector acknowledged (ANR-1151).
+    pub const METER_DELIVERED: &str = "aap_meter_delivered_total";
+    /// Events the sink said the collector refused for good (ANR-1151): never sent again.
+    pub const METER_REFUSED: &str = "aap_meter_refused_total";
+    /// Events handed to the sink whose acknowledgement never came within the backfill bound (ANR-1151): forgotten.
+    pub const METER_UNACKNOWLEDGED: &str = "aap_meter_unacknowledged_total";
 }
 
 fn help(series: &str) -> &'static str {
@@ -64,6 +70,11 @@ fn help(series: &str) -> &'static str {
         name::METER_SEND_FAILURES => "Pod-minute events the usage sink refused.",
         name::METER_INVALID => "Pod-minute events the sink called invalid, dropped.",
         name::METER_ACCOUNT_FAILURES => "Account lookups that failed, the minutes held.",
+        name::METER_DELIVERED => "Pod-minute events the collector acknowledged.",
+        name::METER_REFUSED => "Pod-minute events the collector refused for good.",
+        name::METER_UNACKNOWLEDGED => {
+            "Pod-minute events with no acknowledgement within the backfill bound, forgotten."
+        }
         _ => "",
     }
 }

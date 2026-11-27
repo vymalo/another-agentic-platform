@@ -118,10 +118,55 @@ pub async fn check_order<S: Observed>(s: &S) -> Result<(), String> {
     Ok(())
 }
 
+/// How long rule 5 waits, in [`run`], for an adapter that reports from a task of its own.
+pub const OUTCOMES_WITHIN: std::time::Duration = std::time::Duration::from_secs(5);
+
+/// Rule 5, both halves of the contract of [`UsageSink::outcomes`]. A sink that answers `None` has nothing to check.
+/// Otherwise, for events it accepted (a repeated one **twice**, as rule 3 says it is taken twice):
+/// **it names no event that was not sent**, **no more outcomes than acceptances of an id**, and **every acceptance
+/// gets a fate within `within`** (the adapter's own queue and batch may take that long).
+pub async fn check_outcomes(s: &impl Observed, within: std::time::Duration) -> Result<(), String> {
+    let mut sent: Vec<PodMinuteEvent> = (1u64..=3).map(|m| event("m1", "pod-1", m)).collect();
+    sent.push(event("m1", "pod-1", 1)); // a repeat: two acceptances, two outcomes
+    for e in &sent {
+        s.send(e.clone()).await.map_err(|x| err("outcomes", x))?;
+    }
+    let mut want: std::collections::BTreeMap<String, usize> = Default::default();
+    for e in &sent {
+        *want.entry(e.event_id.clone()).or_default() += 1;
+    }
+    let mut got: std::collections::BTreeMap<String, usize> = Default::default();
+    let deadline = std::time::Instant::now() + within;
+    loop {
+        let Some(batch) = s.outcomes() else {
+            return Ok(());
+        };
+        for o in batch {
+            let n = got.entry(o.event_id.clone()).or_default();
+            *n += 1;
+            match want.get(&o.event_id) {
+                None => return Err("outcomes: an outcome names an event that was not sent".into()),
+                Some(max) if *n > *max => {
+                    return Err("outcomes: an event has more outcomes than acceptances".into());
+                }
+                Some(_) => {}
+            }
+        }
+        if got == want {
+            return Ok(());
+        }
+        if std::time::Instant::now() >= deadline {
+            return Err("outcomes: an accepted event got no fate within the bound".into());
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+    }
+}
+
 /// Runs every rule, each on a sink `make` returns fresh. The first broken rule is the error.
 pub async fn run<S: Observed, F: Fn() -> S>(make: F) -> Result<(), String> {
     check_accepts_valid(&make()).await?;
     check_refuses_invalid(&make()).await?;
     check_same_event_twice(&make()).await?;
-    check_order(&make()).await
+    check_order(&make()).await?;
+    check_outcomes(&make(), OUTCOMES_WITHIN).await
 }

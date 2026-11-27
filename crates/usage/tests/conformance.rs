@@ -162,3 +162,88 @@ async fn the_account_fake_answers_by_run_and_by_service() {
     a.set_broken(true);
     assert!(a.account(&run).await.is_err());
 }
+
+// ---- rule 5: the sink's outcomes
+
+#[derive(Clone, Copy)]
+enum OutcomeFault {
+    NamesAnEventNeverSent,
+    ReportsTooMany,
+    NeverReports,
+}
+
+/// A sink that is right about everything but its outcomes.
+struct WrongOutcomes {
+    inner: MemoryUsageSink,
+    fault: OutcomeFault,
+}
+
+impl UsageSink for WrongOutcomes {
+    async fn send(&self, e: PodMinuteEvent) -> Result<(), UsageError> {
+        self.inner.send(e).await
+    }
+    fn outcomes(&self) -> Option<Vec<aap_usage::Outcome>> {
+        let mut real = self.inner.outcomes()?;
+        match self.fault {
+            OutcomeFault::NamesAnEventNeverSent => real.push(aap_usage::Outcome {
+                event_id: "f".repeat(64),
+                fate: aap_usage::Fate::Delivered,
+            }),
+            OutcomeFault::ReportsTooMany => {
+                let again = real.clone();
+                real.extend(again);
+            }
+            OutcomeFault::NeverReports => real.clear(),
+        }
+        Some(real)
+    }
+}
+
+impl Observed for WrongOutcomes {
+    fn taken(&self) -> Vec<PodMinuteEvent> {
+        self.inner.taken()
+    }
+}
+
+async fn wrong(fault: OutcomeFault) -> String {
+    let s = WrongOutcomes {
+        inner: MemoryUsageSink::new(),
+        fault,
+    };
+    testkit::check_outcomes(&s, std::time::Duration::from_millis(60))
+        .await
+        .expect_err("rule 5 must fail this sink")
+}
+
+#[tokio::test]
+async fn rule_five_fails_a_sink_that_names_an_event_it_was_not_sent() {
+    assert!(
+        wrong(OutcomeFault::NamesAnEventNeverSent)
+            .await
+            .contains("not sent")
+    );
+}
+
+#[tokio::test]
+async fn rule_five_fails_a_sink_that_reports_more_than_it_accepted() {
+    assert!(
+        wrong(OutcomeFault::ReportsTooMany)
+            .await
+            .contains("more outcomes")
+    );
+}
+
+#[tokio::test]
+async fn rule_five_fails_a_sink_whose_accepted_events_never_get_a_fate() {
+    assert!(wrong(OutcomeFault::NeverReports).await.contains("no fate"));
+}
+
+#[tokio::test]
+async fn a_repeated_event_gets_two_outcomes_from_the_fake() {
+    testkit::check_outcomes(
+        &MemoryUsageSink::new(),
+        std::time::Duration::from_millis(60),
+    )
+    .await
+    .unwrap();
+}
