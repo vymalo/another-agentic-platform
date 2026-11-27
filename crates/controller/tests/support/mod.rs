@@ -251,6 +251,7 @@ impl Fake {
             "Deployment" => "deployments",
             "StatefulSet" => "statefulsets",
             "Job" => "jobs",
+            "AgentService" => "agentservices",
             _ => return,
         };
         let ns = object["metadata"]["namespace"]
@@ -502,22 +503,25 @@ impl Fake {
             );
         }
 
-        // `/apis/{apps,batch}/v1/namespaces/<ns>/<plural>/<name>`: a `get` of an owner the meter's chain walks
-        // (ANR-1327). Nothing else of those groups is served, and no list or write.
+        // `/apis/{apps,batch,agents.vymalo.com}/…/namespaces/<ns>/<plural>/<name>`: a `get` of an owner the meter's
+        // chain walks (ANR-1327). An `AgentService` the owners map does not hold falls through to the controller's own
+        // handler below, which serves the objects the reconcile tests put there.
         if call.method == "GET"
             && let Some(rest) = call.path.strip_prefix("/apis/")
         {
             let segments: Vec<&str> = rest.split('/').collect();
             if segments.len() == 6
-                && matches!(segments[0], "apps" | "batch")
+                && matches!(segments[0], "apps" | "batch" | "agents.vymalo.com")
                 && segments[2] == "namespaces"
             {
                 let (group, ns, plural, name) =
                     (segments[0], segments[3], segments[4], segments[5]);
-                return match s.owners.get(&format!("{group}/{plural}/{ns}/{name}")) {
-                    Some(o) => respond(200, o),
-                    None => failure(404, &format!("{plural} \"{name}\" not found")),
-                };
+                if let Some(o) = s.owners.get(&format!("{group}/{plural}/{ns}/{name}")) {
+                    return respond(200, o);
+                }
+                if group != "agents.vymalo.com" {
+                    return failure(404, &format!("{plural} \"{name}\" not found"));
+                }
             }
         }
 

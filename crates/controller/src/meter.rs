@@ -109,13 +109,15 @@ pub type OwnerFn = Arc<
 >;
 
 /// The group, version and plural of the kinds a chain walks, and of no other: a `ReplicaSet` and the `Deployment`
-/// above it, a `StatefulSet`, and a `Job` (a split worker).
+/// above it, a `StatefulSet`, a `Job` (a split worker), and the `AgentService` the chain must end at — which is read
+/// too, so that a pod cannot name one directly: its `uid` is checked like every other hop's.
 fn owner_resource(kind: &str) -> Option<(&'static str, &'static str, &'static str)> {
     match kind {
         "ReplicaSet" => Some(("apps", "v1", "replicasets")),
         "Deployment" => Some(("apps", "v1", "deployments")),
         "StatefulSet" => Some(("apps", "v1", "statefulsets")),
         "Job" => Some(("batch", "v1", "jobs")),
+        "AgentService" => Some(("agents.vymalo.com", "v1alpha1", "agentservices")),
         _ => None,
     }
 }
@@ -1405,7 +1407,15 @@ impl Meter {
             let mut next = Vec::new();
             for r in frontier {
                 if let Some(service) = metering::agent_service(&r) {
-                    return Chain::Service(service.to_owned());
+                    // The `AgentService` is read like every other hop: a pod that names one directly, with a uid
+                    // that is not the object's, ends the chain. Without the read, one free-form `ownerReferences`
+                    // entry would bill any agent (the terminal hop is the cheapest forgery).
+                    match self.owner_object(&pod.namespace, &r, &owners).await {
+                        OwnerObject::Found(_) => return Chain::Service(service.to_owned()),
+                        OwnerObject::Missing => {}
+                        OwnerObject::Unavailable => return Chain::Unavailable,
+                    }
+                    continue;
                 }
                 if owner_resource(&r.kind).is_none() || !walked.insert(r.uid.clone()) {
                     continue;

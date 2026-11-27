@@ -129,8 +129,18 @@ fn agent_service_ref(service: &str) -> Value {
     })
 }
 
+/// The `AgentService` object itself (ANR-1327): the chain's terminal hop is read like every other, so its `uid` must
+/// exist in the fake or the chain ends nowhere.
+fn put_agent_service(fake: &Fake, service: &str) {
+    fake.put_owner(json!({
+        "apiVersion": "agents.vymalo.com/v1alpha1", "kind": "AgentService",
+        "metadata": { "namespace": NS, "name": service, "uid": format!("uid-svc-{service}") },
+    }));
+}
+
 /// A `Deployment` owned by the `AgentService` `service` (ANR-1327): the object a pod's `ReplicaSet` names.
 fn put_deployment(fake: &Fake, deployment: &str, service: &str) {
+    put_agent_service(fake, service);
     fake.put_owner(json!({
         "apiVersion": "apps/v1", "kind": "Deployment",
         "metadata": {
@@ -178,7 +188,11 @@ fn agent_pod(
         None => json!({}),
     };
     if let Some((kind, owner_name, owner_uid)) = owner {
-        let api_version = if kind == "Job" { "batch/v1" } else { "apps/v1" };
+        let api_version = match kind {
+            "Job" => "batch/v1",
+            "AgentService" => "agents.vymalo.com/v1alpha1",
+            _ => "apps/v1",
+        };
         pod["metadata"]["ownerReferences"] = json!([{
             "apiVersion": api_version, "kind": kind,
             "name": owner_name, "uid": owner_uid, "controller": true,
@@ -705,7 +719,9 @@ async fn a_job_owned_pod_and_a_statefulset_owned_pod_are_attributed() {
     let start = m0 * 60;
     let end = (m0 + 1) * 60;
     // A split worker is a Job's pod, and its Job is the AgentService's; a StatefulSet's pod is the set's, and the set
-    // is the AgentService's: one hop each, and one `get` each.
+    // is the AgentService's: one hop each, and one `get` each. The AgentService itself is read too (ANR-1327).
+    put_agent_service(&fake, "split");
+    put_agent_service(&fake, "coder");
     fake.put_owner(json!({
         "apiVersion": "batch/v1", "kind": "Job",
         "metadata": {
@@ -988,6 +1004,59 @@ async fn backfill_is_bounded_to_a_day_and_counted() {
         skipped >= 3 + 2,
         "the old pod's 3 and the edge pod's 2 older minutes: {skipped}"
     );
+}
+
+#[tokio::test]
+async fn a_pod_that_names_an_agent_service_directly_is_read_before_it_is_billed() {
+    let fake = Fake::new();
+    let m0 = now() / 60 - 10;
+    let start = m0 * 60;
+    let end = (m0 + 1) * 60;
+    // A pod whose only owner reference is the AgentService itself, with the object's uid: billed.
+    put_agent_service(&fake, "coder");
+    fake.put_pod(agent_pod(
+        "direct",
+        "uid-direct",
+        start,
+        end,
+        Some("1"),
+        Some(("AgentService", "coder", "uid-svc-coder")),
+    ));
+    // The same reference with a uid that is not the object's: the terminal hop is read like every other, so the
+    // chain ends and the pod is `no-identity`, never billed.
+    fake.put_pod(agent_pod(
+        "forged-direct",
+        "uid-forged-direct",
+        start,
+        end,
+        Some("1"),
+        Some(("AgentService", "coder", "uid-not-the-object")),
+    ));
+    let rig = start_rig(&fake).await;
+    eventually("the direct pod's line", || !rig.sink.taken().is_empty()).await;
+    passes(4).await;
+    let got = rig.sink.taken();
+    assert_eq!(
+        got.len(),
+        1,
+        "one line, for the pod whose uid matched: {got:?}"
+    );
+    assert_eq!(got[0].agent_service, "coder");
+    assert_eq!(got[0].subject, "acct-agent");
+    assert_eq!(
+        rig.metrics.get(
+            aap_controller::metric::METER_UNATTRIBUTED,
+            &[("reason", "no-identity")]
+        ),
+        1,
+        "the forged direct reference is counted, not billed"
+    );
+    assert!(
+        owner_gets(&rig, "agentservices").len() >= 2,
+        "the AgentService is read: {:?}",
+        rig.fake.calls()
+    );
+    rig.stop().await;
 }
 
 #[tokio::test]
