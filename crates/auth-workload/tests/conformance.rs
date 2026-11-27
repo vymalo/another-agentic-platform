@@ -2,6 +2,7 @@
 //! checked-in test CA (ANR-1010).
 #![allow(clippy::unwrap_used, clippy::expect_used)]
 
+use aap_auth_workload::testkit::{LeafSpec, TestPki};
 use aap_auth_workload::{WorkloadAuth, WorkloadClient, WorkloadClients};
 use aap_ports::testkit::client_auth::{Accepted, ClientAuthenticatorUnderTest};
 use aap_ports::{Certificate, ClientAuthError, ClientAuthenticator, Principal};
@@ -28,28 +29,56 @@ fn der(pem: &str) -> Certificate {
     Certificate::new(block.contents)
 }
 
-fn authenticator() -> WorkloadAuth {
+/// The checked-in CA and a root minted at run time (the checked-in one has no key, so it cannot sign an intermediate).
+fn authenticator(runtime_root: &TestPki) -> WorkloadAuth {
     let clients = WorkloadClients {
         clients: vec![WorkloadClient {
             spiffe_id: ORCHESTRATOR.to_owned(),
             permissions: vec!["platform:agents.own".to_owned()],
         }],
     };
-    WorkloadAuth::new(CA, &clients).expect("the test CA bundle and table")
+    let bundle = format!("{CA}\n{}", runtime_root.ca_pem());
+    WorkloadAuth::new(&bundle, &clients).expect("the test CA bundle and table")
 }
 
-struct Fixture(WorkloadAuth);
+struct Fixture {
+    auth: WorkloadAuth,
+    root: TestPki,
+    foreign: TestPki,
+}
 
 impl ClientAuthenticator for Fixture {
     async fn authenticate(
         &self,
         certificate: Option<&Certificate>,
     ) -> Result<Principal, ClientAuthError> {
-        self.0.authenticate(certificate).await
+        self.auth.authenticate(certificate).await
     }
 }
 
 impl ClientAuthenticatorUnderTest for Fixture {
+    async fn through_an_intermediate(&self) -> Option<Accepted> {
+        // root -> intermediate -> intermediate -> leaf, with only the root in the bundle.
+        let leaf = self
+            .root
+            .intermediate("issuing")
+            .intermediate("deeper")
+            .leaf(&LeafSpec::client(ORCHESTRATOR));
+        Some(Accepted {
+            certificate: Certificate::new(leaf.cert_der).with_intermediates(leaf.intermediates),
+            identity: ORCHESTRATOR.to_owned(),
+            permissions: vec!["platform:agents.own".to_owned()],
+        })
+    }
+
+    async fn through_a_foreign_intermediate(&self) -> Option<Certificate> {
+        let leaf = self
+            .foreign
+            .intermediate("issuing")
+            .leaf(&LeafSpec::client(ORCHESTRATOR));
+        Some(Certificate::new(leaf.cert_der).with_intermediates(leaf.intermediates))
+    }
+
     async fn accepted(&self) -> Accepted {
         Accepted {
             certificate: der(ACCEPTED),
@@ -90,7 +119,12 @@ impl ClientAuthenticatorUnderTest for Fixture {
 }
 
 async fn make() -> Option<Fixture> {
-    Some(Fixture(authenticator()))
+    let root = TestPki::new("runtime root");
+    Some(Fixture {
+        auth: authenticator(&root),
+        root,
+        foreign: TestPki::new("foreign root"),
+    })
 }
 
 aap_ports::client_authenticator_conformance!(make);

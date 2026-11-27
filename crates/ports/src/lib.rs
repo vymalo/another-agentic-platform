@@ -35,7 +35,9 @@ pub use activator::{
 };
 pub use activity::{Activity, ActivityError, ActivitySource};
 pub use auth::{AuthError, Authenticator, InvalidToken, Principal};
-pub use client_auth::{Certificate, ClientAuthError, ClientAuthenticator, InvalidCertificate};
+pub use client_auth::{
+    Certificate, ClientAuthError, ClientAuthenticator, InvalidCertificate, MAX_INTERMEDIATES,
+};
 pub use directory::{AgentDirectory, DirectoryEntry};
 pub use error::{BoxError, Classify, DirectoryError, ErrorClass, RuntimeError, StoreError};
 pub use events::{

@@ -632,6 +632,41 @@ api:
     to: []
     ports: [4318]
 
+  # The workload listener (ANR-1011, ADR-0042): a second listener of the API, **mutual TLS**, for a service that calls it with a client
+  # certificate and not a token (the orchestrator). OFF by default, and then not a trace of it in any render. The person's listener
+  # (`port`) reads a bearer token and never a certificate; this one reads a certificate and never a token; neither falls back to the
+  # other. It serves ONLY the owner routes (`/v1/owners/{owner}/agents...`, `platform:agents.own`): every other path is a 404.
+  # The workload's identity is its certificate's exact URI SAN (a SPIFFE id) and only `platform:agents.own` is grantable.
+  # Not built: the CRL of ADR-0042 decision 2 (no source to fetch it from has been named): a revoked certificate is refused only when it expires.
+  workload:
+    enabled: false
+    # The TLS port of the pod and of the Service `<fullname>-api-workload`. A port of its own: not `port`, `healthPort` or `metrics.port`.
+    port: 8443
+    # A client certificate is always required: a peer with none does not complete the handshake (there is no setting for it; `clientAuth` was
+    # removed, and a values file that still says it is refused).
+    # What the listener bounds (bin/api/src/mtls.rs). `handshakeTimeoutSecs` (1 to 60): how long a peer has to finish its TLS handshake.
+    # `maxHandshakesPerIp` (1 to 1024): the handshakes one source address may have in flight (the next connection of that address is closed
+    # at once; behind a NAT or a proxy that hides addresses, raise it). `maxConnections` (1 to 65536): the open connections, all sources
+    # together. Fixed, not values: 256 handshakes in flight, a 500 ms wait for a slot, 15 s for a request head, 60 s of idle.
+    handshakeTimeoutSecs: 5
+    maxHandshakesPerIp: 8
+    maxConnections: 256
+    # The workloads: REQUIRED, at least one. Each `spiffeId` is the exact URI SAN (spiffe://...), once; `permissions` is `[platform:agents.own]` or empty.
+    clients: []
+    #  - spiffeId: spiffe://another/ns/another-agents/sa/orchestrator
+    #    permissions: [platform:agents.own]
+    tls:
+      # REQUIRED: a Secret of type kubernetes.io/tls (tls.crt, tls.key) the deployment makes: the server certificate the API presents, which
+      # the workload checks against its own trust. Mounted at /etc/aap-api-workload/tls and re-read by the API when the file changes (30 s).
+      secretName: ""
+    clientCa:
+      # REQUIRED: a ConfigMap whose `key` holds the PEM bundle client certificates must chain to (the PKI's CA, never a leaf). Mounted at
+      # /etc/aap-api-workload/ca and re-read when it changes (within about a minute): a rotation needs no restart, and a bundle that cannot be used keeps the old one and the API warns.
+      configMap: ""
+      key: ca.crt
+    # Who may reach the TLS port (NetworkPolicyPeers): the orchestrator's pods. REQUIRED while `networkPolicy.enabled`: an empty list would make the listener unreachable.
+    from: []
+
   # Environment, volumes and mounts of the API's container beyond the chart's own, for an issuer behind a private CA or a proxy: `extraEnv`
   # is a list of EnvVar (`HTTPS_PROXY`, `NO_PROXY`, `SSL_CERT_FILE`), `extraVolumes` a list of Volume (a ConfigMap that holds a CA bundle) and
   # `extraVolumeMounts` a list of VolumeMount of them. The chart owns API_CONFIG_FILE, RUST_LOG (api.logLevel), API_LISTEN_ADDR and HEALTH_ADDR
