@@ -555,15 +555,17 @@ the CIDRs, a toleration or an egress rule, which the operator checks at start an
 {{- if not (kindIs "slice" $n.extraEgress) -}}
 {{- fail "runPods.networkPolicy.extraEgress must be a list of NetworkPolicy egress rules" -}}
 {{- end -}}
-{{- /* Every rule is a map, and its peers are judged as every other peer list's (ANR-1339). The rule's ports are not judged here:
+{{- /* Every rule is a map, names its peers (a rule with no peer is every destination: _otel.tpl and the metering section refuse the
+   same shape), and they are judged as every other peer list's (ANR-1339). The rule's ports are not judged here:
    the operator's binary refuses a port it does not accept at start (RunPodSettings::validate). */ -}}
 {{- range $i, $rule := $n.extraEgress -}}
 {{- if not (kindIs "map" $rule) -}}
 {{- fail (printf "runPods.networkPolicy.extraEgress[%d] must be a NetworkPolicy egress rule (a map with to and ports), got %s" $i (toJson $rule)) -}}
 {{- end -}}
-{{- if hasKey $rule "to" -}}
-{{- include "aap.checkPeerList" (dict "what" (printf "runPods.networkPolicy.extraEgress[%d].to" $i) "peers" (get $rule "to")) -}}
+{{- if not (get $rule "to") -}}
+{{- fail (printf "runPods.networkPolicy.extraEgress[%d].to is required: a NetworkPolicy egress rule with no peer reaches every address, and a run pod reaches the internet only through the egress proxy (name the peers, and the host in runPods.egressProxy.extraNoProxy)" $i) -}}
 {{- end -}}
+{{- include "aap.checkPeerList" (dict "what" (printf "runPods.networkPolicy.extraEgress[%d].to" $i) "peers" (get $rule "to")) -}}
 {{- end -}}
 {{- /* The egress proxy (adam-rs ADR 0042, slice D15c): the checks of the coder chart's _validate.tpl, which RunPodSettings::validate repeats. */ -}}
 {{- $ep := $r.egressProxy -}}
