@@ -1371,42 +1371,69 @@ fn each_setting_is_checked() {
 #[test]
 fn a_key_a_rule_does_not_have_is_refused_at_every_level() {
     // ANR-1356: `k8s-openapi`'s networking types are generated without `deny_unknown_fields`, so a misspelled key is
-    // dropped and the widening it causes is invisible. Each case below would otherwise be accepted: `too` leaves the
-    // rule with no `to` (every destination), `ipblock` leaves the peer with no field, `cidrs` leaves the block with an
-    // empty CIDR, `matchLabel` makes the selector `{}` (every namespace), `value` drops the requirement's values, and
-    // `end_port` loses the range. Every level is walked.
+    // dropped and the widening it causes is invisible. Some of these would otherwise be **accepted** (`port` for
+    // `ports` opens every port, `matchLabel` for `matchLabels` selects every namespace, `endport` loses the range, and
+    // the later-element cases); the others would be refused for a misleading reason, so the assertion names the key.
+    // Every level is walked, and every element of a list.
     for (what, rule) in [
         (
-            "the rule",
+            "the rule.too",
             json!({"too": [{"ipBlock": {"cidr": "10.0.0.0/8"}}]}),
         ),
         (
-            "the peer",
+            "the rule.port",
+            json!({"to": [{"ipBlock": {"cidr": "10.0.0.0/8"}}], "port": [{"port": 443}]}),
+        ),
+        (
+            "to[0].ipblock",
             json!({"to": [{"ipblock": {"cidr": "10.0.0.0/8"}}]}),
         ),
         (
-            "the ipBlock",
+            "to[0].ipBlock.cidrs",
             json!({"to": [{"ipBlock": {"cidrs": "10.0.0.0/8"}}]}),
         ),
         (
-            "the selector",
+            "to[0].namespaceSelector.matchLabel",
             json!({"to": [{"namespaceSelector": {"matchLabel": {"a": "b"}}}]}),
         ),
         (
-            "the requirement",
+            "to[0].podSelector.matchLabel",
+            json!({"to": [{"namespaceSelector": {"matchLabels": {"a": "b"}},
+                            "podSelector": {"matchLabel": {"c": "d"}}}]}),
+        ),
+        (
+            "to[0].podSelector.matchExpressions[0].value",
             json!({"to": [{"podSelector": {"matchExpressions": [
                 {"key": "a", "operator": "In", "value": ["b"]}
             ]}}]}),
         ),
         (
-            "the port",
+            "to[0].podSelector.matchExpressions[1].value",
+            json!({"to": [{"podSelector": {"matchExpressions": [
+                {"key": "a", "operator": "Exists"},
+                {"key": "b", "operator": "Exists", "value": ["c"]}
+            ]}}]}),
+        ),
+        (
+            "to[1].namespaceSelectr",
+            json!({"to": [{"ipBlock": {"cidr": "10.0.0.0/8"}},
+                            {"podSelector": {}, "namespaceSelectr": {}}]}),
+        ),
+        (
+            "ports[0].end_port",
             json!({"to": [{"ipBlock": {"cidr": "10.0.0.0/8"}}],
                   "ports": [{"protocol": "TCP", "port": 443, "end_port": 8443}]}),
         ),
+        (
+            "ports[1].endport",
+            json!({"to": [{"ipBlock": {"cidr": "10.0.0.0/8"}}],
+                  "ports": [{"port": 443}, {"port": 80, "endport": 90}]}),
+        ),
     ] {
         let problems = refused(json!({"networkPolicy": {"extraEgress": [rule]}}));
+        let expected = format!("{what} is not a field of it");
         assert!(
-            problems.iter().any(|p| p.contains("is not a field of it")),
+            problems.iter().any(|p| p.contains(&expected)),
             "{what}: {problems:#?}"
         );
     }
