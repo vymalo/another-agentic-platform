@@ -368,12 +368,14 @@ struct OperatorProc {
     registry: u16,
 }
 
-/// Three ports no listener holds. All three are bound **before** any is released: two  calls in a row can be
-/// handed the same port, and the operator child then fails to bind its second listener and exits — a failure that has
-/// nothing to do with the operator (ANR-1358; the same mechanism as ANR-1065's `trace_env`).
+/// Three ports no listener holds. All three are bound **before** any is released: two `bind(0)` calls in a row can be
+/// handed the same port, and the operator child then cannot bind one of its listeners and exits — a failure that has
+/// nothing to do with the operator (ANR-1358; the same mechanism as ANR-1065's `trace_env`). The registry binds
+/// `0.0.0.0`, so its port is reserved there too: one free on loopback can be taken on another interface.
 fn free_ports() -> (u16, u16, u16) {
-    let held: Vec<std::net::TcpListener> = (0..3)
-        .map(|_| std::net::TcpListener::bind("127.0.0.1:0").unwrap())
+    let held: Vec<std::net::TcpListener> = ["127.0.0.1:0", "127.0.0.1:0", "0.0.0.0:0"]
+        .into_iter()
+        .map(|a| std::net::TcpListener::bind(a).unwrap())
         .collect();
     let at = |i: usize| held[i].local_addr().unwrap().port();
     (at(0), at(1), at(2))
@@ -385,22 +387,30 @@ fn unique() -> u64 {
     NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
 }
 
-/// The invariant the operator child depends on: it binds all three of its listeners before it serves any, so the three
-/// ports a case is given must all be bindable **at once**. The guarantee is `free_ports`' construction — three listeners
-/// held before any is released; this is the smoke test over it, and it runs without a cluster (ANR-1358).
+/// The invariant the operator child depends on: it holds its listeners (three, with a registry token) at the same time,
+/// and if one cannot bind it exits. The guarantee is `free_ports`' construction — three listeners held before any is
+/// released — and this is the test over it, which runs without a cluster. On this kernel a sequential bind-and-drop
+/// returns a duplicate about once in 500 triples, so 256 iterations would see a regression about 1 run in 20 and 50 000
+/// see it practically always (ANR-1358, the review).
 #[test]
 fn the_three_ports_a_case_is_given_can_all_be_bound_at_once() {
-    for _ in 0..256 {
+    for _ in 0..50_000 {
         let (health, metrics, registry) = free_ports();
         assert!(
             health != metrics && metrics != registry && health != registry,
             "{health} {metrics} {registry}"
         );
-        // The child binds all three before it serves any: holding them at once is exactly what it does.
-        let _held: Vec<std::net::TcpListener> = [health, metrics, registry]
-            .into_iter()
-            .map(|p| std::net::TcpListener::bind(("127.0.0.1", p)).expect("a distinct port"))
-            .collect();
+        // Each port on the address its server binds: the registry on `0.0.0.0`, the other two on loopback.
+        let _held: Vec<std::net::TcpListener> = [
+            ("127.0.0.1", health),
+            ("127.0.0.1", metrics),
+            ("0.0.0.0", registry),
+        ]
+        .into_iter()
+        .map(|(a, p)| {
+            std::net::TcpListener::bind((a, p)).unwrap_or_else(|e| panic!("binding {a}:{p}: {e}"))
+        })
+        .collect();
     }
 }
 
