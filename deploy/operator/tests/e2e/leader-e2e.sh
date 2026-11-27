@@ -289,6 +289,19 @@ req() {
   pod=$1; shift
   kubectl -n "$ns" exec "$pod" -- curl -s -o /tmp/b -w '%{http_code}' -m 10 "$@" 2>/dev/null || true
 }
+# registry_answers [limit]: waits, bounded (60 s, one try a second), until the registry answers a tokenless request with anything but 000
+# (curl got no answer at all: the Service has no endpoints yet, or the policy has not settled). `helm --wait` returns when the pods are
+# Ready, not when kube-proxy and the CNI have programmed the Service and the policy (ANR-1095). It asserts nothing about the code: the
+# 401 check stays with the caller. On a timeout the run fails and says it never answered, and the last code.
+registry_answers() {
+  ra_deadline=$(( $(date +%s) + ${1:-60} ))
+  while :; do
+    ra_code=$(req "$reader" "$reg")
+    [ "$ra_code" != 000 ] && return 0
+    [ "$(date +%s)" -lt "$ra_deadline" ] || die "the registry at $reg never answered a request from $reader in ${1:-60}s (the last code: $ra_code)"
+    sleep 1
+  done
+}
 pod_body() { kubectl -n "$ns" exec "$1" -- cat /tmp/b; } # the body of the last req of that pod
 # registry_document: GET the registry with the token, the document in $work/registry.json, and every answer appended to $work/seen. Fails,
 # saying what came back, when the answer is not 200 or not JSON.
@@ -593,7 +606,9 @@ ok "create a Lease and get/update the named one; not get or list them unnamed, n
 
 # ---- 7. one agent, and the registry served by BOTH replicas --------------------------------------------------------------------------
 step "7. solo is Ready, and the registry lists it from the Service and from EACH pod's IP"
-[ "$(req "$reader" "$reg")" = 401 ] || die "the registry answers a request with no token with something else than 401"
+registry_answers
+code=$(req "$reader" "$reg")
+[ "$code" = 401 ] || die "the registry answered a request with no token $code, not 401"
 apply_agent solo Solo
 start=$(date +%s)
 await_ready solo
