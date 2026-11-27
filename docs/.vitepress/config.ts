@@ -2,7 +2,9 @@ import { readFileSync } from "node:fs";
 import { dirname, join, posix } from "node:path";
 import { fileURLToPath } from "node:url";
 import { defineMd3Config } from "@vaam-apps/vitepress-md3/config";
+import { useSidebar } from "vitepress-openapi";
 import { groupIconMdPlugin, groupIconVitePlugin } from "vitepress-plugin-group-icons";
+import { loadSpec } from "./openapi/spec";
 import { inDepth } from "./theme/in-depth";
 
 const root = join(dirname(fileURLToPath(import.meta.url)), "..");
@@ -52,7 +54,16 @@ const sidebar = [
         text: "API",
         items: [
           { text: "The Platform API's contract", link: "/api/" },
-          { text: "OpenAPI document", link: "/reference/openapi" },
+          { text: "OpenAPI reference", link: "/reference/openapi" },
+          {
+            text: "Operations",
+            collapsed: true,
+            items: useSidebar({
+              spec: loadSpec(),
+              linkPrefix: "/reference/openapi/operations/",
+              tagLinkPrefix: "/reference/openapi/tags/",
+            }).generateSidebarGroups(),
+          },
           ...pages("api", ["usage-ingest-v1.md"]),
         ],
       },
@@ -86,6 +97,10 @@ const sidebar = [
 
 // Prose writes <agent> or <ThreadShare> meaning a placeholder; Vue would read it as a component and fail the build.
 // Only real HTML elements pass through, everything else is shown as the text it is.
+// The API pages (reference/openapi.md and the tags/ and operations/ routes) also use `script` and the components of
+// vitepress-openapi: those are allowed there and nowhere else.
+const API_ONLY = ["script", "oaspec", "oaoperation", "permissionstable"];
+const isApiPage = (relativePath = "") => /^reference\/openapi(\.md|\/)/.test(relativePath);
 const HTML = new Set(
   "a abbr blockquote br code details dd div dl dt em figcaption figure h1 h2 h3 h4 h5 h6 hr i img kbd li ol p picture pre small source span strong sub summary sup table tbody td tfoot th thead tr u ul video".split(" "),
 );
@@ -96,10 +111,11 @@ export function escapeUnknownTags(md: any) {
   for (const rule of ["html_inline", "html_block"]) {
     const original = md.renderer.rules[rule];
     md.renderer.rules[rule] = (tokens: any, i: number, ...rest: any[]) => {
+      const env = rest[1] as { relativePath?: string } | undefined;
       const content: string = tokens[i].content;
       const tags = [...content.matchAll(/<\/?([A-Za-z][\w-]*)/g)].map((m) => m[1].toLowerCase());
       const wellFormed = /^\s*(<\/?[A-Za-z][\w-]*(\s+[\w:-]+(="[^"]*")?)*\s*\/?>\s*)+$/.test(content) || tokens[i].type === "html_block";
-      if (wellFormed && tags.every((t) => HTML.has(t))) return original(tokens, i, ...rest);
+      if (wellFormed && tags.every((t) => HTML.has(t) || (API_ONLY.includes(t) && isApiPage(env?.relativePath)))) return original(tokens, i, ...rest);
       return md.utils.escapeHtml(content).replace(/\{\{/g, "&#123;&#123;");
     };
   }
