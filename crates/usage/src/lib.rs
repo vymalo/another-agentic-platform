@@ -55,7 +55,10 @@ impl PodKind {
 }
 
 /// One pod, one minute of it. The names of the fields in the messages are the attributes' (AD-069).
-#[derive(Clone, Debug, PartialEq, Eq)]
+///
+/// `Debug` prints the `subject` (an account) as `<redacted>`, so no log line or panic message that formats an event
+/// can carry it.
+#[derive(Clone, PartialEq, Eq)]
 pub struct PodMinuteEvent {
     /// The meter instance that reports it: a deployment constant (`source`).
     pub source: String,
@@ -76,6 +79,22 @@ pub struct PodMinuteEvent {
     pub agent_service: String,
     /// The run it served (`run`): present for a run pod and for no other.
     pub run: Option<String>,
+}
+
+impl std::fmt::Debug for PodMinuteEvent {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("PodMinuteEvent")
+            .field("source", &self.source)
+            .field("event_id", &self.event_id)
+            .field("minute", &self.minute)
+            .field("subject", &"<redacted>")
+            .field("weight_quarters", &self.weight_quarters)
+            .field("node_type", &self.node_type)
+            .field("pod_kind", &self.pod_kind)
+            .field("agent_service", &self.agent_service)
+            .field("run", &self.run)
+            .finish()
+    }
 }
 
 impl PodMinuteEvent {
@@ -204,4 +223,28 @@ pub trait AccountSource: Send + Sync {
         &self,
         pod: &PodRef,
     ) -> impl Future<Output = Result<Option<String>, AccountUnavailable>> + Send;
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn debug_never_prints_the_subject() {
+        let e = PodMinuteEvent {
+            source: "m1".into(),
+            event_id: event_id("pod", 1),
+            minute: 1,
+            subject: "acct-SECRET-42".into(),
+            weight_quarters: 4,
+            node_type: "std".into(),
+            pod_kind: PodKind::Agent,
+            agent_service: "coder".into(),
+            run: None,
+        };
+        let text = format!("{e:?}");
+        assert!(!text.contains("acct-SECRET-42"), "{text}");
+        assert!(text.contains("<redacted>"), "{text}");
+        assert!(!format!("{:#?}", Some(e)).contains("acct-SECRET-42"));
+    }
 }
