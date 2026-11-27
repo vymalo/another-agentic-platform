@@ -22,7 +22,9 @@ mod auth;
 mod leader;
 mod objects;
 
-pub use activator::{Forwarded, MemoryCards, MemoryUpstream, MemoryWaker, Sequence, WakeScript};
+pub use activator::{
+    Forwarded, MemoryCards, MemoryUpstream, MemoryWaker, Scripted, Sequence, Step, WakeScript,
+};
 pub use activity::MemoryActivity;
 pub use auth::MemoryAuthenticator;
 pub use leader::{MemoryElection, MemoryTimings};

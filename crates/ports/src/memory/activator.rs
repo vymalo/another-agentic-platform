@@ -160,15 +160,62 @@ pub struct Forwarded {
     pub seq: u64,
 }
 
+/// One step of a scripted answer body.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum Step {
+    /// Produce this chunk.
+    Chunk(Vec<u8>),
+    /// Produce nothing for this long.
+    Wait(Duration),
+    /// Produce an `Unavailable` error item, and nothing after it.
+    Fail,
+    /// Produce nothing, ever.
+    Never,
+}
+
+/// What a [`MemoryUpstream`] answers: a head and the steps of its body.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Scripted {
+    /// The status code.
+    pub status: u16,
+    /// The headers.
+    pub headers: Vec<(String, String)>,
+    /// The body, step by step.
+    pub steps: Vec<Step>,
+}
+
+impl Scripted {
+    /// A `200` with these chunks and no delay.
+    pub fn chunks(chunks: &[&[u8]]) -> Self {
+        Self {
+            status: 200,
+            headers: Vec::new(),
+            steps: chunks.iter().map(|c| Step::Chunk(c.to_vec())).collect(),
+        }
+    }
+
+    /// A head and one whole body.
+    pub fn whole(status: u16, headers: Vec<(String, String)>, body: &[u8]) -> Self {
+        Self {
+            status,
+            headers,
+            steps: vec![Step::Chunk(body.to_vec())],
+        }
+    }
+}
+
 #[derive(Default)]
 struct UpstreamState {
     seen: Vec<Forwarded>,
-    answer: Option<UpstreamResponse>,
+    answer: Option<Scripted>,
     broken: bool,
     hung: bool,
+    produced: Vec<u64>,
 }
 
-/// A scripted [`Upstream`]: it records each request and answers `200` with the body `ok` unless told otherwise.
+/// A scripted [`Upstream`]: it records each request and answers `200 ok` unless told otherwise. A body is produced **lazily**,
+/// one step per poll, and each chunk takes a number from the [`Sequence`] at the moment it is produced
+/// ([`produced`](Self::produced)), so a test can show a chunk reached the caller before the next one existed.
 #[derive(Clone, Default)]
 pub struct MemoryUpstream {
     state: Arc<Mutex<UpstreamState>>,
@@ -181,7 +228,7 @@ impl MemoryUpstream {
         Self::default()
     }
 
-    /// An upstream whose calls are numbered by `sequence`.
+    /// An upstream whose calls and chunks are numbered by `sequence`.
     pub fn with_sequence(sequence: Sequence) -> Self {
         Self {
             state: Arc::default(),
@@ -190,7 +237,7 @@ impl MemoryUpstream {
     }
 
     /// Answer `response` from now on.
-    pub fn answer(&self, response: UpstreamResponse) {
+    pub fn answer(&self, response: Scripted) {
         lock(&self.state).answer = Some(response);
     }
 
@@ -199,7 +246,7 @@ impl MemoryUpstream {
         lock(&self.state).broken = true;
     }
 
-    /// Record every call, then never answer it.
+    /// Record every call, then never answer it (not even a head).
     pub fn hang(&self) {
         lock(&self.state).hung = true;
     }
@@ -212,6 +259,11 @@ impl MemoryUpstream {
     /// How many requests were forwarded.
     pub fn calls(&self) -> usize {
         lock(&self.state).seen.len()
+    }
+
+    /// The sequence number of each chunk, in the order they were produced.
+    pub fn produced(&self) -> Vec<u64> {
+        lock(&self.state).produced.clone()
     }
 }
 
@@ -236,10 +288,12 @@ impl Upstream for MemoryUpstream {
                     "scripted: agent unreachable".into(),
                 ))
             } else {
-                Ok(s.answer.clone().unwrap_or_else(|| UpstreamResponse {
-                    status: 200,
-                    headers: vec![("content-type".into(), "text/plain".into())],
-                    body: b"ok".to_vec(),
+                Ok(s.answer.clone().unwrap_or_else(|| {
+                    Scripted::whole(
+                        200,
+                        vec![("content-type".into(), "text/plain".into())],
+                        b"ok",
+                    )
                 }))
             };
             (s.hung, answer)
@@ -247,7 +301,33 @@ impl Upstream for MemoryUpstream {
         if hung {
             return std::future::pending().await;
         }
-        answer
+        let answer = answer?;
+        let state = Arc::clone(&self.state);
+        let sequence = self.sequence.clone();
+        let body = futures::stream::unfold(
+            (answer.steps.into_iter(), state, sequence),
+            |(mut steps, state, sequence)| async move {
+                loop {
+                    match steps.next()? {
+                        Step::Chunk(c) => {
+                            lock(&state).produced.push(sequence.next());
+                            return Some((Ok(c), (steps, state, sequence)));
+                        }
+                        Step::Wait(d) => tokio::time::sleep(d).await,
+                        Step::Fail => {
+                            let e = UpstreamError::Unavailable("scripted: stream failed".into());
+                            return Some((Err(e), (Vec::new().into_iter(), state, sequence)));
+                        }
+                        Step::Never => return std::future::pending().await,
+                    }
+                }
+            },
+        );
+        Ok(UpstreamResponse {
+            status: answer.status,
+            headers: answer.headers,
+            body: Box::pin(body),
+        })
     }
 }
 
@@ -317,8 +397,33 @@ impl CardsUnderTest for MemoryCards {
 }
 
 impl crate::testkit::UpstreamUnderTest for MemoryUpstream {
-    async fn answer(&self, response: UpstreamResponse) {
-        Self::answer(self, response);
+    async fn answer(&self, status: u16, headers: Vec<(String, String)>, chunks: Vec<Vec<u8>>) {
+        Self::answer(
+            self,
+            Scripted {
+                status,
+                headers,
+                steps: chunks.into_iter().map(Step::Chunk).collect(),
+            },
+        );
+    }
+
+    async fn answer_then_fail(
+        &self,
+        status: u16,
+        headers: Vec<(String, String)>,
+        chunks: Vec<Vec<u8>>,
+    ) {
+        let mut steps: Vec<Step> = chunks.into_iter().map(Step::Chunk).collect();
+        steps.push(Step::Fail);
+        Self::answer(
+            self,
+            Scripted {
+                status,
+                headers,
+                steps,
+            },
+        );
     }
 
     async fn break_upstream(&self) {

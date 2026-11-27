@@ -15,7 +15,7 @@ types that cross them; and the two seams of the admin dashboard's Platform API
 | `Authenticator` | a bearer token to a `Principal`: the subject and the values of the roles claim (D4) | [`auth-oidc`](../auth-oidc/README.md) (D6); `MemoryAuthenticator` here |
 | `ActivitySource` | what an agent says about its own work: runs held and the next schedule; an error is **never** idleness (AD-058, P2a) | none yet (the HTTP source is P2c); `MemoryActivity` here, suite `activity_source_conformance!` |
 | `Waker` | asks the operator to wake an agent and says when it is `Ready` or gave up (AD-058, P3b); the activator's one call to the operator | none yet (ANR-1067, ANR-1068); `MemoryWaker` here, suite `waker_conformance!` |
-| `Upstream` | forwards one buffered request to an `Ready` agent, once, by a `Route` (today only `Default`; AD-059 channels will add variants) | none yet (ANR-1068); `MemoryUpstream` here, suite `upstream_conformance!` |
+| `Upstream` | forwards one buffered request to a `Ready` agent, once, by a `Route`, and returns the answer's head and its body as a `BodyStream` of byte chunks (ANR-1069), so a streamed answer is never held whole (today only `Default`; AD-059 channels will add variants) | none yet (ANR-1068); `MemoryUpstream` here, suite `upstream_conformance!` |
 | `CardSource` | the agent card as the agent published it, readable while the agent sleeps (the registry holds no card body) | none yet (ANR-1068); `MemoryCards` here, suite `card_source_conformance!` |
 | `LeaderElection` | who holds the election several replicas of the operator are candidates of (K7a): the identity, `is_leader`, the campaign and its changes | [`leader-kubernetes`](../leader-kubernetes/README.md) (a `Lease`); `MemoryElection` here; `AlwaysLeader` here |
 

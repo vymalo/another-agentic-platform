@@ -9,6 +9,9 @@
 //! The agent is a [`RuntimeId`], the identity every other seam of this crate uses.
 
 use std::future::Future;
+use std::pin::Pin;
+
+use futures::{Stream, StreamExt};
 
 use crate::{BoxError, Classify, ErrorClass, RuntimeId};
 
@@ -108,21 +111,65 @@ pub struct UpstreamRequest {
     pub body: Vec<u8>,
 }
 
-/// An agent's answer, buffered.
-#[derive(Clone, Debug, PartialEq, Eq)]
+/// The body of an agent's answer: byte chunks, in order, as they arrive. An `Err` item ends the answer (the head has been
+/// sent by then, so the activator can only end the connection). No HTTP library type appears here (AD-020).
+pub type BodyStream = Pin<Box<dyn Stream<Item = Result<Vec<u8>, UpstreamError>> + Send>>;
+
+/// An agent's answer: its head, and its body **as a stream**, so that a streamed answer (SSE, A2A `message:stream`) reaches the
+/// caller as it is produced and the activator never holds it whole.
 pub struct UpstreamResponse {
     /// The status code.
     pub status: u16,
     /// Header names and values, in order.
     pub headers: Vec<(String, String)>,
-    /// The whole body.
-    pub body: Vec<u8>,
+    /// The body, chunk by chunk.
+    pub body: BodyStream,
+}
+
+impl UpstreamResponse {
+    /// An answer whose body is already whole: one chunk, or none when `body` is empty.
+    pub fn buffered(status: u16, headers: Vec<(String, String)>, body: Vec<u8>) -> Self {
+        let chunks: Vec<Result<Vec<u8>, UpstreamError>> = if body.is_empty() {
+            Vec::new()
+        } else {
+            vec![Ok(body)]
+        };
+        Self {
+            status,
+            headers,
+            body: Box::pin(futures::stream::iter(chunks)),
+        }
+    }
+
+    /// Read the whole body, for a caller that has no use for a stream (tests, mostly).
+    ///
+    /// # Errors
+    ///
+    /// The first error item of the stream.
+    pub async fn collect_body(self) -> Result<Vec<u8>, UpstreamError> {
+        let mut body = self.body;
+        let mut out = Vec::new();
+        while let Some(chunk) = body.next().await {
+            out.extend(chunk?);
+        }
+        Ok(out)
+    }
+}
+
+impl std::fmt::Debug for UpstreamResponse {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("UpstreamResponse")
+            .field("status", &self.status)
+            .field("headers", &self.headers)
+            .finish_non_exhaustive()
+    }
 }
 
 /// Why a request could not be forwarded.
 #[derive(Debug, thiserror::Error)]
 pub enum UpstreamError {
-    /// The agent could not be reached or did not answer. The activator answers `502`.
+    /// The agent could not be reached or did not answer (the activator answers `502`), **or** its body failed after the head: then
+    /// this is the error item of the [`BodyStream`], and the answer ends there (the activator can only end the connection).
     #[error("the agent could not be reached")]
     Unavailable(#[source] BoxError),
 }
@@ -133,14 +180,15 @@ impl Classify for UpstreamError {
     }
 }
 
-/// Forwards one buffered request to an agent that is `Ready`. **Once per request**: an implementation never retries a
+/// Forwards one buffered request to an agent that is `Ready` and returns its answer's head and a body stream. **Once per request**: an implementation never retries a
 /// request that may have reached the agent, because A2A methods are not idempotent.
 pub trait Upstream: Send + Sync {
     /// Send `request` to `agent` by `route` and return its answer.
     ///
     /// # Errors
     ///
-    /// [`UpstreamError`] when the agent cannot be reached. An answer with a 4xx or 5xx status is an `Ok`.
+    /// [`UpstreamError`] when the agent cannot be reached before it answers. An answer with a 4xx or 5xx status is an `Ok`; a
+    /// failure after the head is an `Err` item of the body.
     fn forward(
         &self,
         agent: &RuntimeId,

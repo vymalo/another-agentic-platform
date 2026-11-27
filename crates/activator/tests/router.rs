@@ -6,9 +6,11 @@
 
 use std::time::Duration;
 
-use aap_activator::{Activator, Outcome, Settings};
-use aap_ports::memory::{MemoryCards, MemoryUpstream, MemoryWaker, Sequence, WakeScript};
-use aap_ports::{Card, RefusedReason, RuntimeId, UpstreamResponse};
+use aap_activator::{Activator, Outcome, Settings, StreamEnd};
+use aap_ports::memory::{
+    MemoryCards, MemoryUpstream, MemoryWaker, Scripted, Sequence, Step, WakeScript,
+};
+use aap_ports::{Card, RefusedReason, RuntimeId};
 use axum::Router;
 use axum::body::{Body, to_bytes};
 use axum::http::{Request, StatusCode};
@@ -216,14 +218,14 @@ async fn body_and_headers_reach_the_upstream_unchanged_and_hop_by_hop_headers_do
 #[tokio::test(start_paused = true)]
 async fn the_agents_answer_comes_back_with_its_status_and_headers() {
     let r = rig(settings());
-    r.upstream.answer(UpstreamResponse {
-        status: 202,
-        headers: vec![
+    r.upstream.answer(Scripted::whole(
+        202,
+        vec![
             ("x-task".into(), "t1".into()),
             ("connection".into(), "close".into()),
         ],
-        body: b"accepted".to_vec(),
-    });
+        b"accepted",
+    ));
     let res = r.app.clone().oneshot(post("/x", "{}")).await.unwrap();
     assert_eq!(res.status(), StatusCode::ACCEPTED);
     assert_eq!(res.headers()["x-task"], "t1");
@@ -599,11 +601,7 @@ async fn a_card_source_error_has_its_own_outcome_and_an_invalid_upstream_status_
     assert_eq!(r.activator.metrics().requests(Outcome::CardUnavailable), 1);
     assert_eq!(r.activator.metrics().requests(Outcome::CardMissing), 1);
 
-    r.upstream.answer(UpstreamResponse {
-        status: 42,
-        headers: vec![],
-        body: vec![],
-    });
+    r.upstream.answer(Scripted::whole(42, vec![], &[]));
     let res = r.app.clone().oneshot(post("/x", "{}")).await.unwrap();
     assert_eq!(res.status(), StatusCode::BAD_GATEWAY);
 }
@@ -614,9 +612,9 @@ async fn a_card_source_error_has_its_own_outcome_and_an_invalid_upstream_status_
 async fn hop_by_hop_headers_are_dropped_from_the_answer_whatever_their_case() {
     let r = rig(settings());
     let h = |k: &str, v: &str| (k.to_owned(), v.to_owned());
-    r.upstream.answer(UpstreamResponse {
-        status: 200,
-        headers: vec![
+    r.upstream.answer(Scripted::whole(
+        200,
+        vec![
             h("Connection", " X-Secret , keep-alive"),
             h("X-Secret", "s"),
             h("Transfer-Encoding", "chunked"),
@@ -624,8 +622,8 @@ async fn hop_by_hop_headers_are_dropped_from_the_answer_whatever_their_case() {
             h("Upgrade", "h2c"),
             h("X-Kept", "y"),
         ],
-        body: b"ok".to_vec(),
-    });
+        b"ok",
+    ));
     let res = r.app.clone().oneshot(post("/x", "{}")).await.unwrap();
     for gone in [
         "connection",
@@ -822,18 +820,296 @@ async fn a_chunked_body_exactly_at_the_cap_passes() {
 }
 
 #[tokio::test(start_paused = true)]
-async fn an_upstream_content_length_is_dropped_whatever_its_case_and_the_servers_own_is_the_only_one()
- {
+async fn an_upstream_content_length_is_dropped_whatever_its_case() {
     let r = rig(settings());
     for spelling in ["Content-Length", "CONTENT-LENGTH", "content-length"] {
-        r.upstream.answer(UpstreamResponse {
-            status: 200,
-            headers: vec![(spelling.to_owned(), "999".to_owned())],
-            body: b"ok".to_vec(),
-        });
+        r.upstream.answer(Scripted::whole(
+            200,
+            vec![(spelling.to_owned(), "999".to_owned())],
+            b"ok",
+        ));
         let res = r.app.clone().oneshot(post("/x", "{}")).await.unwrap();
         let lengths: Vec<_> = res.headers().get_all("content-length").iter().collect();
-        assert_eq!(lengths.len(), 1, "{spelling}: {lengths:?}");
-        assert_eq!(lengths[0], "2", "{spelling}");
+        // The body is streamed, so no length is promised, and the agent's own (here a wrong one) is not passed on.
+        assert!(lengths.is_empty(), "{spelling}: {lengths:?}");
+        assert_eq!(to_bytes(res.into_body(), 16).await.unwrap(), "ok");
     }
+}
+
+// ---- the answer is streamed
+
+fn chunk(s: &str) -> Step {
+    Step::Chunk(s.as_bytes().to_vec())
+}
+
+/// The decisive streaming test: the client has the first chunk while the second does not exist yet.
+#[tokio::test(start_paused = true)]
+async fn the_first_chunk_reaches_the_client_before_the_second_is_produced() {
+    use futures::StreamExt;
+    let r = rig(settings());
+    r.upstream.answer(Scripted {
+        status: 200,
+        headers: vec![("content-type".into(), "text/event-stream".into())],
+        steps: vec![
+            chunk("one"),
+            Step::Wait(Duration::from_secs(10)),
+            chunk("two"),
+        ],
+    });
+    let res = r.app.clone().oneshot(post("/x", "{}")).await.unwrap();
+    assert_eq!(res.status(), StatusCode::OK);
+    assert_eq!(res.headers()["content-type"], "text/event-stream");
+    assert!(
+        res.headers().get("content-length").is_none(),
+        "a streamed answer promises no length"
+    );
+    assert!(
+        r.upstream.produced().is_empty(),
+        "nothing is read ahead of the client"
+    );
+    let mut body = res.into_body().into_data_stream();
+    let first = body.next().await.unwrap().unwrap();
+    assert_eq!(first, "one");
+    assert_eq!(
+        r.upstream.produced().len(),
+        1,
+        "the second chunk does not exist when the client holds the first"
+    );
+    let second = body.next().await.unwrap().unwrap();
+    assert_eq!(second, "two");
+    let produced = r.upstream.produced();
+    assert!(produced[0] < produced[1]);
+    assert!(
+        body.next().await.is_none(),
+        "the stream ends when the agent's does"
+    );
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_stalled_stream_ends_at_the_idle_timeout_and_is_counted() {
+    use futures::StreamExt;
+    let r = rig(Settings {
+        stream_idle_timeout: Duration::from_millis(50),
+        ..settings()
+    });
+    r.upstream.answer(Scripted {
+        status: 200,
+        headers: vec![],
+        steps: vec![chunk("a"), Step::Never],
+    });
+    let res = r.app.clone().oneshot(post("/x", "{}")).await.unwrap();
+    let mut body = res.into_body().into_data_stream();
+    assert_eq!(body.next().await.unwrap().unwrap(), "a");
+    assert!(body.next().await.unwrap().is_err(), "the connection ends");
+    assert!(body.next().await.is_none());
+    assert_eq!(r.activator.metrics().stream_ends(StreamEnd::Idle), 1);
+    assert_eq!(
+        r.activator.metrics().requests(Outcome::Forwarded),
+        1,
+        "the head was a forward"
+    );
+}
+
+#[tokio::test(start_paused = true)]
+async fn an_error_in_the_stream_ends_it_and_is_counted() {
+    use futures::StreamExt;
+    let r = rig(settings());
+    r.upstream.answer(Scripted {
+        status: 200,
+        headers: vec![],
+        steps: vec![chunk("a"), Step::Fail, chunk("never")],
+    });
+    let res = r.app.clone().oneshot(post("/x", "{}")).await.unwrap();
+    let mut body = res.into_body().into_data_stream();
+    assert_eq!(body.next().await.unwrap().unwrap(), "a");
+    assert!(body.next().await.unwrap().is_err());
+    assert!(body.next().await.is_none(), "nothing after the error");
+    assert_eq!(r.activator.metrics().stream_ends(StreamEnd::Failed), 1);
+}
+
+#[tokio::test(start_paused = true)]
+async fn the_permit_is_held_while_streaming_and_released_when_the_client_drops_the_answer() {
+    use futures::StreamExt;
+    let r = rig(Settings {
+        max_in_flight: 1,
+        ..settings()
+    });
+    r.upstream.answer(Scripted {
+        status: 200,
+        headers: vec![],
+        steps: vec![chunk("a"), Step::Never],
+    });
+    let res = r.app.clone().oneshot(post("/x", "{}")).await.unwrap();
+    let mut body = res.into_body().into_data_stream();
+    assert_eq!(body.next().await.unwrap().unwrap(), "a");
+    let shed = r.app.clone().oneshot(post("/x", "{}")).await.unwrap();
+    assert_eq!(
+        shed.status(),
+        StatusCode::SERVICE_UNAVAILABLE,
+        "the stream still holds the permit"
+    );
+    assert_eq!(shed.headers()["retry-after"], "7");
+    drop(body);
+    let later = r.app.clone().oneshot(post("/x", "{}")).await.unwrap();
+    assert_eq!(
+        later.status(),
+        StatusCode::OK,
+        "the permit came back when the client went away"
+    );
+}
+
+#[tokio::test(start_paused = true)]
+async fn the_permit_is_released_when_the_stream_ends() {
+    let r = rig(Settings {
+        max_in_flight: 1,
+        ..settings()
+    });
+    r.upstream.answer(Scripted::chunks(&[b"a", b"b"]));
+    let res = r.app.clone().oneshot(post("/x", "{}")).await.unwrap();
+    assert_eq!(to_bytes(res.into_body(), 16).await.unwrap(), "ab");
+    assert_eq!(
+        r.app
+            .clone()
+            .oneshot(post("/x", "{}"))
+            .await
+            .unwrap()
+            .status(),
+        StatusCode::OK
+    );
+}
+
+/// The first test above cannot tell a lazy body from a pump that reads ahead into a channel, because its `Wait(10s)` stalls the
+/// pump too. Back-to-back chunks can: a pump would have produced all three before the client asked for the second.
+#[tokio::test(start_paused = true)]
+async fn nothing_is_read_ahead_of_the_client_even_when_the_chunks_are_ready() {
+    use futures::StreamExt;
+    let r = rig(settings());
+    r.upstream.answer(Scripted::chunks(&[b"a", b"b", b"c"]));
+    let res = r.app.clone().oneshot(post("/x", "{}")).await.unwrap();
+    let mut body = res.into_body().into_data_stream();
+    assert_eq!(body.next().await.unwrap().unwrap(), "a");
+    for _ in 0..8 {
+        tokio::task::yield_now().await;
+    }
+    assert_eq!(
+        r.upstream.produced().len(),
+        1,
+        "a reader ahead of the client would have produced b and c"
+    );
+    assert_eq!(body.next().await.unwrap().unwrap(), "b");
+    for _ in 0..8 {
+        tokio::task::yield_now().await;
+    }
+    assert_eq!(r.upstream.produced().len(), 2);
+}
+
+#[tokio::test(start_paused = true)]
+async fn each_stream_is_counted_once_by_how_it_ended_and_a_client_that_leaves_is_abandoned() {
+    use futures::StreamExt;
+    let r = rig(settings());
+    let m = r.activator.metrics();
+    // complete
+    r.upstream.answer(Scripted::chunks(&[b"a"]));
+    let res = r.app.clone().oneshot(post("/x", "{}")).await.unwrap();
+    assert_eq!(to_bytes(res.into_body(), 16).await.unwrap(), "a");
+    assert_eq!(m.stream_ends(StreamEnd::Complete), 1);
+    // abandoned after chunk 1
+    r.upstream.answer(Scripted {
+        status: 200,
+        headers: vec![],
+        steps: vec![chunk("a"), Step::Never],
+    });
+    let res = r.app.clone().oneshot(post("/x", "{}")).await.unwrap();
+    let mut body = res.into_body().into_data_stream();
+    assert_eq!(body.next().await.unwrap().unwrap(), "a");
+    assert_eq!(m.stream_ends(StreamEnd::Abandoned), 0, "still being read");
+    drop(body);
+    assert_eq!(m.stream_ends(StreamEnd::Abandoned), 1);
+    // a request is `forwarded` once each, whatever its stream did
+    assert_eq!(m.requests(Outcome::Forwarded), 2);
+    let text = m.render();
+    assert!(
+        text.contains("aap_activator_stream_ends_total{end=\"complete\"} 1"),
+        "{text}"
+    );
+    assert!(
+        text.contains("aap_activator_stream_ends_total{end=\"abandoned\"} 1"),
+        "{text}"
+    );
+    assert!(
+        !text.contains("stream_idle"),
+        "no stream outcome in the request series: {text}"
+    );
+}
+
+fn ticking(n: usize) -> Scripted {
+    // A chunk now and then one every 4 s: never idle for `stream_idle_timeout`, never complete in the time the tests allow.
+    let mut steps = vec![chunk("t")];
+    for _ in 0..n {
+        steps.push(Step::Wait(Duration::from_secs(4)));
+        steps.push(chunk("t"));
+    }
+    Scripted {
+        status: 200,
+        headers: vec![],
+        steps,
+    }
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_stream_that_never_goes_idle_ends_at_max_stream_duration_and_frees_its_permit() {
+    use futures::StreamExt;
+    let r = rig(Settings {
+        max_in_flight: 1,
+        max_stream_duration: Some(Duration::from_secs(10)),
+        ..settings()
+    });
+    r.upstream.answer(ticking(100));
+    let started = tokio::time::Instant::now();
+    let res = r.app.clone().oneshot(post("/x", "{}")).await.unwrap();
+    let mut body = res.into_body().into_data_stream();
+    let mut chunks = 0;
+    while let Some(item) = body.next().await {
+        if item.is_err() {
+            break;
+        }
+        chunks += 1;
+    }
+    let took = started.elapsed();
+    assert_eq!(
+        chunks, 3,
+        "chunks at 0, 4 and 8 s; the next would be at 12 s"
+    );
+    assert!(
+        took >= Duration::from_secs(10) && took < Duration::from_secs(12),
+        "{took:?}"
+    );
+    assert_eq!(r.activator.metrics().stream_ends(StreamEnd::MaxDuration), 1);
+    assert_eq!(r.activator.metrics().stream_ends(StreamEnd::Idle), 0);
+    // The permit is free: with `max_in_flight` 1 a second request is served, not shed.
+    assert_eq!(
+        r.app
+            .clone()
+            .oneshot(post("/x", "{}"))
+            .await
+            .unwrap()
+            .status(),
+        StatusCode::OK
+    );
+}
+
+#[tokio::test(start_paused = true)]
+async fn without_max_stream_duration_the_same_stream_runs_past_ten_seconds() {
+    use futures::StreamExt;
+    let r = rig(settings());
+    assert_eq!(Settings::default().max_stream_duration, None);
+    r.upstream.answer(ticking(6));
+    let started = tokio::time::Instant::now();
+    let res = r.app.clone().oneshot(post("/x", "{}")).await.unwrap();
+    let all: Vec<_> = res.into_body().into_data_stream().collect().await;
+    assert_eq!(all.len(), 7);
+    assert!(all.iter().all(Result::is_ok));
+    assert!(started.elapsed() >= Duration::from_secs(24));
+    assert_eq!(r.activator.metrics().stream_ends(StreamEnd::Complete), 1);
+    assert_eq!(r.activator.metrics().stream_ends(StreamEnd::MaxDuration), 0);
 }

@@ -12,6 +12,7 @@ publish.workspace = true
 
 [dependencies]
 aap-ports.workspace = true
+futures.workspace = true
 # No `json`, `query` or `form`: the body is read here, with a cap, and every refusal is a fixed word.
 axum.workspace = true
 tokio = { workspace = true, features = ["rt", "sync", "time"] }
