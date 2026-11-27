@@ -2778,6 +2778,10 @@ fn two_commands_with_an_expiring_token_refresh_once_between_them() {
     let rig = Rig::start("two-refreshes");
     rig.save_session(&rig.expired_token(), rig.soon(), Some("r-seed"));
     let mut a = rig.ctl_live(&["whoami"]);
+    // The second command starts only once the first has written the rotated token: it must find it and use it, not race
+    // it for the lock. Waiting for that event, not for the clock, is what keeps the test independent of the machine's
+    // speed — the 2 s lock wait it used to hit on a loaded runner was the flake (ANR-1064).
+    wait_for(|| rig.saved()["refreshToken"].as_str() != Some("r-seed"));
     let mut b = rig.ctl_live(&["whoami"]);
     let (a, b) = (a.finish(), b.finish());
     assert_eq!(a.code, 0, "{}", a.stderr);
