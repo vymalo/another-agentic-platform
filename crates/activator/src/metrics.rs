@@ -15,12 +15,20 @@ pub const WAKES: &str = "aap_activator_wakes_total";
 pub enum Outcome {
     /// The card was answered (no wake).
     Card,
-    /// The card is not known or could not be read.
+    /// The agent has no card.
     CardMissing,
+    /// The card source could not be read.
+    CardUnavailable,
     /// Forwarded and answered.
     Forwarded,
-    /// The agent could not be reached once awake.
+    /// The agent could not be reached once awake, or answered an invalid status.
     UpstreamFailed,
+    /// The agent did not answer within `forward_timeout`.
+    UpstreamTimeout,
+    /// The body was not read within `body_read_timeout`.
+    BodyTimeout,
+    /// Over `max_in_flight`: refused with no wake.
+    Shed,
     /// The wake ended `TimedOut` or hit the activator's deadline.
     WakeTimeout,
     /// The wake failed or was refused.
@@ -37,8 +45,12 @@ impl Outcome {
         match self {
             Self::Card => "card",
             Self::CardMissing => "card_missing",
+            Self::CardUnavailable => "card_unavailable",
             Self::Forwarded => "forwarded",
             Self::UpstreamFailed => "upstream_failed",
+            Self::UpstreamTimeout => "upstream_timeout",
+            Self::BodyTimeout => "body_timeout",
+            Self::Shed => "shed",
             Self::WakeTimeout => "wake_timeout",
             Self::WakeFailed => "wake_failed",
             Self::TooLarge => "too_large",

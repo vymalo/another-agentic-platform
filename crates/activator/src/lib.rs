@@ -7,14 +7,26 @@
 //!   the [`Upstream`] when the agent is `Ready`.
 //! * At the deadline ([`Settings::wake_timeout`], or the `Waker` saying `TimedOut`) the answer is `503` with `Retry-After`.
 //!
-//! It makes no other decision. There is **no authentication here**: AD-058 gives the activator none, the agent checks
-//! the caller's token itself and the request is forwarded with its headers untouched. Which agent a request is for comes
-//! from the `Host` header (`<name>.<namespace>[.…]`, what a Kubernetes Service name gives); the agent's own Service is
-//! what selects the activator while it sleeps.
+//! It makes no other decision. **There is no authentication here**: AD-058 gives the activator none, the agent checks
+//! the caller's token itself and the request is forwarded with its headers untouched. **The activator is therefore safe
+//! only behind a NetworkPolicy that admits only the callers that may reach the agents**; that is a requirement on the chart
+//! of ANR-1068, not something this crate can enforce. A forged `Host` header can name any agent in the namespace and wake
+//! it, which is bounded here by [`Settings::max_in_flight`] and by the policy, not prevented.
 //!
-//! The deadline is owned by this crate (see [`Waker`]); an adapter that knows the agent's own `wakeTimeout` answers
-//! `TimedOut` at it. A wake that is in flight is not cancelled when its waiters go away, because asking the operator to
-//! wake is idempotent and the next request would only ask again.
+//! **Provisional (ANR-Q135):** which agent a request is for comes from the `Host` header (`<name>.<namespace>`, what a
+//! Kubernetes Service name gives, optionally ending in [`Settings::host_suffix`]); the agent's own Service is what selects
+//! the activator while it sleeps. Both labels are DNS-1123 labels. The way an agent is identified is not decided, and every
+//! default of [`Settings`] is provisional and set by the deployment.
+//!
+//! **The deadline is an upper bound.** [`Settings::wake_timeout`] caps every wake; an adapter that knows the agent's own
+//! `scaling.wakeTimeout` (5 s to 5 m) answers `TimedOut` at it, sooner. The default is the CRD's maximum, so the router
+//! never cuts an agent short below its own value. When the deadline fires the wake future is **dropped**, so a
+//! [`Waker::wake`] must be cancel-safe. A wake is not cancelled when its *waiters* go away (asking the operator is
+//! idempotent, and the next request would only ask again). A request that joins a wake already running shares the first
+//! request's deadline, so it may wait less than `wake_timeout`.
+//!
+//! **Known limit: no streaming.** Request and response bodies are buffered, so a streamed answer (SSE, A2A `message:stream`)
+//! arrives whole, after the agent finishes, and a stream longer than `forward_timeout` is cut. A follow-up card will cover it.
 //!
 //! Routing by channel (AD-059, R5) will be a step between the request and [`Upstream::forward`]: [`Activator::route`] is
 //! that step and always answers [`Route::Default`] today.
@@ -28,15 +40,16 @@ use std::sync::{Arc, Mutex, PoisonError};
 use std::time::Duration;
 
 use aap_ports::{
-    CardSource, Route, RuntimeId, Upstream, UpstreamRequest, WakeError, WakeOutcome, Waker,
+    CardSource, RefusedReason, Route, RuntimeId, Upstream, UpstreamRequest, WakeError, WakeOutcome,
+    Waker,
 };
 use axum::Router;
 use axum::body::{Body, to_bytes};
 use axum::extract::{Request, State};
-use axum::http::header::{CONTENT_TYPE, HOST, RETRY_AFTER};
+use axum::http::header::{CONTENT_LENGTH, CONTENT_TYPE, HOST, RETRY_AFTER};
 use axum::http::{HeaderName, HeaderValue, Method, StatusCode};
 use axum::response::Response;
-use tokio::sync::watch;
+use tokio::sync::{Semaphore, watch};
 
 pub use metrics::{ActivatorMetrics, Outcome, WakeKind};
 
@@ -50,8 +63,19 @@ pub struct Settings {
     /// The largest request body buffered; a larger one is `413`. A body is held in memory for as long as the wake takes, so
     /// the cap is also the activator's memory bound per waiting request.
     pub max_body_bytes: usize,
-    /// How long a wake may take before the caller is told to retry. §21a's default for an agent's `wakeTimeout` is 60 s.
+    /// The upper bound of a wake, after which the caller is told to retry. The default is 5 m, the largest value the CRD allows
+    /// for `scaling.wakeTimeout`, so that the agent's own (sooner) answer is what decides. Provisional.
     pub wake_timeout: Duration,
+    /// The longest `Upstream::forward` may take; past it the answer is `504`. Provisional.
+    pub forward_timeout: Duration,
+    /// The longest reading a request body may take; past it the answer is `408`. Provisional.
+    pub body_read_timeout: Duration,
+    /// How many non-card requests may be held or forwarded at once; past it the answer is `503` with `Retry-After` and no wake
+    /// is started. Memory is bounded by this times `max_body_bytes`. Provisional.
+    pub max_in_flight: usize,
+    /// When set (`.svc.cluster.local`), the `Host` must be `<name>.<namespace>` followed by exactly this, so another suffix is
+    /// `400`. When unset, only `<name>.<namespace>` is accepted. A leading `.` is added if missing. Provisional (ANR-Q135).
+    pub host_suffix: Option<String>,
     /// The seconds the `Retry-After` header says.
     pub retry_after_secs: u32,
     /// The paths answered from the [`CardSource`], for `GET` and `HEAD`.
@@ -62,7 +86,11 @@ impl Default for Settings {
     fn default() -> Self {
         Self {
             max_body_bytes: 1024 * 1024,
-            wake_timeout: Duration::from_secs(60),
+            wake_timeout: Duration::from_secs(300),
+            forward_timeout: Duration::from_secs(120),
+            body_read_timeout: Duration::from_secs(30),
+            max_in_flight: 256,
+            host_suffix: None,
             retry_after_secs: 10,
             card_paths: DEFAULT_CARD_PATHS.iter().map(|p| (*p).to_owned()).collect(),
         }
@@ -74,7 +102,7 @@ enum Flight {
     Ready,
     TimedOut,
     Unavailable,
-    Refused,
+    Refused(RefusedReason),
 }
 
 type Flights = Mutex<HashMap<RuntimeId, watch::Receiver<Option<Flight>>>>;
@@ -100,6 +128,7 @@ struct Inner<W, U, C> {
     upstream: U,
     cards: C,
     settings: Settings,
+    permits: Semaphore,
     flights: Arc<Flights>,
     metrics: Arc<ActivatorMetrics>,
 }
@@ -124,13 +153,20 @@ where
     C: CardSource + 'static,
 {
     /// An activator that wakes through `waker`, forwards through `upstream` and answers cards from `cards`.
-    pub fn new(waker: W, upstream: U, cards: C, settings: Settings) -> Self {
+    pub fn new(waker: W, upstream: U, cards: C, mut settings: Settings) -> Self {
+        if let Some(sfx) = settings.host_suffix.as_mut()
+            && !sfx.starts_with('.')
+        {
+            sfx.insert(0, '.');
+        }
+        let permits = Semaphore::new(settings.max_in_flight);
         Self {
             inner: Arc::new(Inner {
                 waker: Arc::new(waker),
                 upstream,
                 cards,
                 settings,
+                permits,
                 flights: Arc::default(),
                 metrics: Arc::default(),
             }),
@@ -183,7 +219,7 @@ where
                         Ok(Ok(WakeOutcome::Ready)) => Flight::Ready,
                         Ok(Ok(WakeOutcome::TimedOut)) | Err(_) => Flight::TimedOut,
                         Ok(Err(WakeError::Unavailable(_))) => Flight::Unavailable,
-                        Ok(Err(WakeError::Refused(_))) => Flight::Refused,
+                        Ok(Err(WakeError::Refused(why))) => Flight::Refused(why),
                     };
                     // The entry goes first, so a request that arrives after the answer makes a wake of its own; a
                     // request that joined before it reads the value from its receiver.
@@ -212,24 +248,32 @@ fn reply(status: StatusCode, reason: &'static str, retry_after: Option<u32>) -> 
     r
 }
 
-/// `<name>.<namespace>[.…]`, with an optional port, as a `Host` header of a Kubernetes Service. Anything else names no agent.
-fn agent_from_host(host: &str) -> Option<RuntimeId> {
+/// A DNS-1123 label: lowercase alphanumerics and `-`, not starting or ending with `-`, at most 63 characters.
+fn dns_label(l: &str) -> bool {
+    !l.is_empty()
+        && l.len() <= 63
+        && !l.starts_with('-')
+        && !l.ends_with('-')
+        && l.bytes()
+            .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'-')
+}
+
+/// `<name>.<namespace>` followed by exactly `suffix` (or by nothing when there is none), with an optional port. Anything else
+/// names no agent: a further label, another suffix, an upper-case or malformed label.
+fn agent_from_host(host: &str, suffix: Option<&str>) -> Option<RuntimeId> {
     let host = host.rsplit_once(':').map_or(host, |(h, p)| {
-        if p.bytes().all(|b| b.is_ascii_digit()) {
+        if !p.is_empty() && p.bytes().all(|b| b.is_ascii_digit()) {
             h
         } else {
             host
         }
     });
-    let mut labels = host.split('.');
-    let (name, scope) = (labels.next()?, labels.next()?);
-    let ok = |l: &str| {
-        !l.is_empty()
-            && l.len() <= 63
-            && l.bytes()
-                .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'-')
+    let rest = match suffix {
+        Some(sfx) => host.strip_suffix(sfx)?,
+        None => host,
     };
-    (ok(name) && ok(scope)).then(|| RuntimeId::new(scope, name))
+    let (name, scope) = rest.split_once('.')?;
+    (dns_label(name) && dns_label(scope)).then(|| RuntimeId::new(scope, name))
 }
 
 /// The headers that describe one connection, not the message (RFC 9110 §7.6.1): dropped in both directions, with every
@@ -280,7 +324,7 @@ where
         .headers()
         .get(HOST)
         .and_then(|h| h.to_str().ok())
-        .and_then(agent_from_host)
+        .and_then(|h| agent_from_host(h, s.host_suffix.as_deref()))
     else {
         return (
             reply(StatusCode::BAD_REQUEST, "no_agent", None),
@@ -313,10 +357,42 @@ where
                     "card_unavailable",
                     Some(s.retry_after_secs),
                 ),
-                Outcome::CardMissing,
+                Outcome::CardUnavailable,
             ),
         };
     }
+
+    // A request that declares a body over the cap is refused before anything is held or woken.
+    let declared = match request.headers().get(CONTENT_LENGTH) {
+        None => None,
+        Some(v) => match v.to_str().ok().and_then(|v| v.trim().parse::<u64>().ok()) {
+            Some(n) => Some(n),
+            None => {
+                return (
+                    reply(StatusCode::BAD_REQUEST, "bad_content_length", None),
+                    Outcome::BadRequest,
+                );
+            }
+        },
+    };
+    if declared.is_some_and(|n| n > s.max_body_bytes as u64) {
+        return (
+            reply(StatusCode::PAYLOAD_TOO_LARGE, "body_too_large", None),
+            Outcome::TooLarge,
+        );
+    }
+
+    // Past the limit nothing is buffered and no wake is started, so a flood of forged hosts cannot start wakes or hold memory.
+    let Ok(_permit) = a.inner.permits.try_acquire() else {
+        return (
+            reply(
+                StatusCode::SERVICE_UNAVAILABLE,
+                "busy",
+                Some(s.retry_after_secs),
+            ),
+            Outcome::Shed,
+        );
+    };
 
     let route = a.route(&agent, &request);
     let (parts, body) = request.into_parts();
@@ -330,24 +406,25 @@ where
         };
         headers.push((k.as_str().to_owned(), v.to_owned()));
     }
-    let body = match to_bytes(body, s.max_body_bytes).await {
+    let body = match read_body(body, s.max_body_bytes, s.body_read_timeout).await {
         Ok(b) => b,
-        Err(e) => {
-            // `to_bytes` reports a length-limit error as a boxed `LengthLimitError`; the one other failure is the
-            // peer going away mid-body.
-            let too_large = std::error::Error::source(&e)
-                .is_some_and(|s| s.to_string().contains("length limit"));
-            return if too_large {
-                (
-                    reply(StatusCode::PAYLOAD_TOO_LARGE, "body_too_large", None),
-                    Outcome::TooLarge,
-                )
-            } else {
-                (
-                    reply(StatusCode::BAD_REQUEST, "body_unreadable", None),
-                    Outcome::BadRequest,
-                )
-            };
+        Err(BodyFail::TooLarge) => {
+            return (
+                reply(StatusCode::PAYLOAD_TOO_LARGE, "body_too_large", None),
+                Outcome::TooLarge,
+            );
+        }
+        Err(BodyFail::Timeout) => {
+            return (
+                reply(StatusCode::REQUEST_TIMEOUT, "body_timeout", None),
+                Outcome::BodyTimeout,
+            );
+        }
+        Err(BodyFail::Unreadable) => {
+            return (
+                reply(StatusCode::BAD_REQUEST, "body_unreadable", None),
+                Outcome::BadRequest,
+            );
         }
     };
 
@@ -373,9 +450,16 @@ where
                 Outcome::WakeFailed,
             );
         }
-        Flight::Refused => {
+        // Neither is worth a retry: an unknown agent is not there, a suspended one is a person's choice (AD-058).
+        Flight::Refused(RefusedReason::Suspended) => {
             return (
-                reply(StatusCode::BAD_GATEWAY, "wake_refused", None),
+                reply(StatusCode::CONFLICT, "agent_suspended", None),
+                Outcome::WakeFailed,
+            );
+        }
+        Flight::Refused(_) => {
+            return (
+                reply(StatusCode::NOT_FOUND, "agent_unknown", None),
                 Outcome::WakeFailed,
             );
         }
@@ -390,9 +474,24 @@ where
         headers: strip_hop_by_hop(&headers),
         body: body.to_vec(),
     };
-    match a.inner.upstream.forward(&agent, &route, forwarded).await {
-        Ok(answer) => {
-            let status = StatusCode::from_u16(answer.status).unwrap_or(StatusCode::BAD_GATEWAY);
+    match tokio::time::timeout(
+        s.forward_timeout,
+        a.inner.upstream.forward(&agent, &route, forwarded),
+    )
+    .await
+    {
+        Err(_) => (
+            reply(StatusCode::GATEWAY_TIMEOUT, "upstream_timeout", None),
+            Outcome::UpstreamTimeout,
+        ),
+        Ok(Ok(answer)) => {
+            // A status that is not a valid HTTP status is the agent's fault and the caller's `502`.
+            let Ok(status) = StatusCode::from_u16(answer.status) else {
+                return (
+                    reply(StatusCode::BAD_GATEWAY, "upstream_invalid_status", None),
+                    Outcome::UpstreamFailed,
+                );
+            };
             let mut r = Response::new(Body::from(answer.body));
             *r.status_mut() = status;
             for (k, v) in strip_hop_by_hop(&answer.headers) {
@@ -406,10 +505,41 @@ where
             }
             (r, Outcome::Forwarded)
         }
-        Err(_) => (
+        Ok(Err(_)) => (
             reply(StatusCode::BAD_GATEWAY, "upstream_unavailable", None),
             Outcome::UpstreamFailed,
         ),
+    }
+}
+
+enum BodyFail {
+    TooLarge,
+    Timeout,
+    Unreadable,
+}
+
+/// Read a whole body of at most `cap` bytes within `timeout`. This is the fallback for a body with no `Content-Length`
+/// (chunked): the declared case is refused earlier.
+async fn read_body(
+    body: Body,
+    cap: usize,
+    timeout: Duration,
+) -> Result<axum::body::Bytes, BodyFail> {
+    match tokio::time::timeout(timeout, to_bytes(body, cap)).await {
+        Err(_) => Err(BodyFail::Timeout),
+        Ok(Ok(b)) => Ok(b),
+        Ok(Err(e)) => {
+            // `to_bytes` reports a length-limit error as a boxed `LengthLimitError` whose Display is "length limit exceeded"; the
+            // only other failure is the peer going away mid-body. There is no direct dependency to downcast with, so the text is
+            // matched, and `a_body_over_the_cap_with_no_content_length_is_413` pins it: if axum changes the text that test fails.
+            let too_large = std::error::Error::source(&e)
+                .is_some_and(|s| s.to_string().contains("length limit"));
+            Err(if too_large {
+                BodyFail::TooLarge
+            } else {
+                BodyFail::Unreadable
+            })
+        }
     }
 }
 
@@ -419,18 +549,52 @@ mod tests {
 
     #[test]
     fn host_names_the_agent() {
+        let id = |ns: &str, n: &str| Some(RuntimeId::new(ns, n));
+        assert_eq!(agent_from_host("coder.team-a", None), id("team-a", "coder"));
         assert_eq!(
-            agent_from_host("coder.team-a.svc.cluster.local:8080"),
-            Some(RuntimeId::new("team-a", "coder"))
+            agent_from_host("coder.team-a:8080", None),
+            id("team-a", "coder")
         );
         assert_eq!(
-            agent_from_host("coder.team-a"),
-            Some(RuntimeId::new("team-a", "coder"))
+            agent_from_host("coder.team-a.svc", None),
+            None,
+            "no further label without a suffix"
         );
-        assert_eq!(agent_from_host("localhost"), None);
-        assert_eq!(agent_from_host("Coder.team-a"), None);
-        assert_eq!(agent_from_host(".team-a"), None);
-        assert_eq!(agent_from_host("a b.c"), None);
+        assert_eq!(agent_from_host("localhost", None), None);
+        assert_eq!(agent_from_host("Coder.team-a", None), None);
+        assert_eq!(agent_from_host(".team-a", None), None);
+        assert_eq!(agent_from_host("a b.c", None), None);
+        assert_eq!(agent_from_host("-a.b", None), None);
+        assert_eq!(agent_from_host("a-.b", None), None);
+        assert_eq!(
+            agent_from_host(&format!("{}.b", "a".repeat(64)), None),
+            None
+        );
+        assert_eq!(
+            agent_from_host(&format!("{}.b", "a".repeat(63)), None).map(|_| ()),
+            Some(())
+        );
+    }
+
+    #[test]
+    fn a_suffix_is_matched_exactly() {
+        let sfx = Some(".svc.cluster.local");
+        let id = Some(RuntimeId::new("team-a", "coder"));
+        assert_eq!(agent_from_host("coder.team-a.svc.cluster.local", sfx), id);
+        assert_eq!(
+            agent_from_host("coder.team-a.svc.cluster.local:8080", sfx),
+            id
+        );
+        assert_eq!(agent_from_host("coder.team-a.evil.example", sfx), None);
+        assert_eq!(agent_from_host("coder.team-a", sfx), None);
+        assert_eq!(
+            agent_from_host("x.coder.team-a.svc.cluster.local", sfx),
+            None
+        );
+        assert_eq!(
+            agent_from_host("coder.team-a.svc.cluster.local.evil.example", sfx),
+            None
+        );
     }
 
     #[test]

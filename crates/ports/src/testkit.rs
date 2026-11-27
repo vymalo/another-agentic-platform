@@ -1227,6 +1227,12 @@ pub trait WakerUnderTest: crate::Waker + 'static {
     fn script_timed_out(&self, agent: &RuntimeId) -> impl Future<Output = ()> + Send;
     /// From now on waking `agent` fails because the operator cannot be reached.
     fn script_failure(&self, agent: &RuntimeId) -> impl Future<Output = ()> + Send;
+    /// From now on waking `agent` is refused, for `why`.
+    fn script_refuse(
+        &self,
+        agent: &RuntimeId,
+        why: crate::RefusedReason,
+    ) -> impl Future<Output = ()> + Send;
 }
 
 /// An [`Upstream`](crate::Upstream) the suite can script and read back.
@@ -1287,6 +1293,24 @@ pub mod activator {
         let err = w.wake(&a).await.unwrap_err();
         assert!(matches!(err, WakeError::Unavailable(_)), "{err:?}");
         assert!(err.class().is_retryable());
+    }
+
+    pub async fn a_refusal_carries_its_reason_and_is_not_retryable<W: WakerUnderTest>(w: W) {
+        use crate::RefusedReason;
+        let (one, two) = (id(), id());
+        w.script_refuse(&one, RefusedReason::Unknown).await;
+        w.script_refuse(&two, RefusedReason::Suspended).await;
+        let e1 = w.wake(&one).await.unwrap_err();
+        let e2 = w.wake(&two).await.unwrap_err();
+        assert!(
+            matches!(e1, WakeError::Refused(RefusedReason::Unknown)),
+            "{e1:?}"
+        );
+        assert!(
+            matches!(e2, WakeError::Refused(RefusedReason::Suspended)),
+            "{e2:?}"
+        );
+        assert!(!e1.class().is_retryable() && !e2.class().is_retryable());
     }
 
     pub async fn agents_do_not_mix<W: WakerUnderTest>(w: W) {
@@ -1384,18 +1408,14 @@ pub mod activator {
 #[macro_export]
 macro_rules! waker_conformance {
     ($make:path) => {
-        $crate::waker_conformance!(@cases $make, waker, "waker";
-            a_scripted_wake_ends_ready, waking_an_agent_that_is_awake_is_ready_and_repeatable,
-            a_wake_that_gives_up_is_timed_out_not_an_error, an_unreachable_operator_is_a_transient_error,
-            agents_do_not_mix,
-        );
+        $crate::waker_conformance!(@cases $make; a_scripted_wake_ends_ready, waking_an_agent_that_is_awake_is_ready_and_repeatable, a_wake_that_gives_up_is_timed_out_not_an_error, an_unreachable_operator_is_a_transient_error, a_refusal_carries_its_reason_and_is_not_retryable, agents_do_not_mix);
     };
-    (@cases $make:path, $kind:ident, $what:literal; $($case:ident),* $(,)?) => {
+    (@cases $make:path; $($case:ident),* $(,)?) => {
         $(
             #[tokio::test]
             async fn $case() {
                 let Some(under_test) = $make().await else {
-                    $crate::testkit::skipped(&format!("{}: {} not configured", stringify!($case), $what));
+                    $crate::testkit::skipped(&format!("{}: waker not configured", stringify!($case)));
                     return;
                 };
                 $crate::testkit::activator::$case(under_test).await;
@@ -1409,11 +1429,19 @@ macro_rules! waker_conformance {
 #[macro_export]
 macro_rules! upstream_conformance {
     ($make:path) => {
-        $crate::waker_conformance!(@cases $make, upstream, "upstream";
-            the_request_reaches_the_agent_unchanged,
-            the_answer_comes_back_unchanged_whatever_its_status, each_call_is_one_forward,
-            an_unreachable_agent_is_a_transient_error,
-        );
+        $crate::upstream_conformance!(@cases $make; the_request_reaches_the_agent_unchanged, the_answer_comes_back_unchanged_whatever_its_status, each_call_is_one_forward, an_unreachable_agent_is_a_transient_error);
+    };
+    (@cases $make:path; $($case:ident),* $(,)?) => {
+        $(
+            #[tokio::test]
+            async fn $case() {
+                let Some(under_test) = $make().await else {
+                    $crate::testkit::skipped(&format!("{}: upstream not configured", stringify!($case)));
+                    return;
+                };
+                $crate::testkit::activator::$case(under_test).await;
+            }
+        )*
     };
 }
 
@@ -1422,10 +1450,19 @@ macro_rules! upstream_conformance {
 #[macro_export]
 macro_rules! card_source_conformance {
     ($make:path) => {
-        $crate::waker_conformance!(@cases $make, cards, "card source";
-            a_card_is_served_as_published, an_agent_with_no_card_is_none_not_an_error,
-            cards_do_not_mix, an_unreadable_source_is_an_error_then_recovers,
-        );
+        $crate::card_source_conformance!(@cases $make; a_card_is_served_as_published, an_agent_with_no_card_is_none_not_an_error, cards_do_not_mix, an_unreadable_source_is_an_error_then_recovers);
+    };
+    (@cases $make:path; $($case:ident),* $(,)?) => {
+        $(
+            #[tokio::test]
+            async fn $case() {
+                let Some(under_test) = $make().await else {
+                    $crate::testkit::skipped(&format!("{}: card source not configured", stringify!($case)));
+                    return;
+                };
+                $crate::testkit::activator::$case(under_test).await;
+            }
+        )*
     };
 }
 

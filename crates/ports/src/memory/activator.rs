@@ -8,8 +8,8 @@ use std::time::Duration;
 use super::lock;
 use crate::testkit::{CardsUnderTest, WakerUnderTest};
 use crate::{
-    Card, CardError, CardSource, Route, RuntimeId, Upstream, UpstreamError, UpstreamRequest,
-    UpstreamResponse, WakeError, WakeOutcome, Waker,
+    Card, CardError, CardSource, RefusedReason, Route, RuntimeId, Upstream, UpstreamError,
+    UpstreamRequest, UpstreamResponse, WakeError, WakeOutcome, Waker,
 };
 
 /// A counter shared by fakes, so a test can say which of two events came first without a clock.
@@ -39,8 +39,8 @@ pub enum WakeScript {
     Never,
     /// Fail with `Unavailable`.
     Fail,
-    /// Fail with `Refused`.
-    Refuse,
+    /// Fail with `Refused`, for this reason.
+    Refuse(RefusedReason),
 }
 
 #[derive(Default)]
@@ -116,7 +116,7 @@ impl Waker for MemoryWaker {
             }
             WakeScript::TimedOut => WakeOutcome::TimedOut,
             WakeScript::Never => std::future::pending().await,
-            WakeScript::Refuse => return Err(WakeError::Refused("scripted: refused".into())),
+            WakeScript::Refuse(why) => return Err(WakeError::Refused(why)),
             WakeScript::Fail => {
                 return Err(WakeError::Unavailable(
                     "scripted: operator unreachable".into(),
@@ -141,6 +141,10 @@ impl WakerUnderTest for MemoryWaker {
     async fn script_failure(&self, agent: &RuntimeId) {
         self.script(agent, WakeScript::Fail);
     }
+
+    async fn script_refuse(&self, agent: &RuntimeId, why: RefusedReason) {
+        self.script(agent, WakeScript::Refuse(why));
+    }
 }
 
 /// One request a [`MemoryUpstream`] saw.
@@ -161,6 +165,7 @@ struct UpstreamState {
     seen: Vec<Forwarded>,
     answer: Option<UpstreamResponse>,
     broken: bool,
+    hung: bool,
 }
 
 /// A scripted [`Upstream`]: it records each request and answers `200` with the body `ok` unless told otherwise.
@@ -194,6 +199,11 @@ impl MemoryUpstream {
         lock(&self.state).broken = true;
     }
 
+    /// Record every call, then never answer it.
+    pub fn hang(&self) {
+        lock(&self.state).hung = true;
+    }
+
     /// The requests seen, in order.
     pub fn seen(&self) -> Vec<Forwarded> {
         lock(&self.state).seen.clone()
@@ -213,23 +223,31 @@ impl Upstream for MemoryUpstream {
         request: UpstreamRequest,
     ) -> Result<UpstreamResponse, UpstreamError> {
         let seq = self.sequence.next();
-        let mut s = lock(&self.state);
-        s.seen.push(Forwarded {
-            agent: agent.clone(),
-            route: route.clone(),
-            request,
-            seq,
-        });
-        if s.broken {
-            return Err(UpstreamError::Unavailable(
-                "scripted: agent unreachable".into(),
-            ));
+        let (hung, answer) = {
+            let mut s = lock(&self.state);
+            s.seen.push(Forwarded {
+                agent: agent.clone(),
+                route: route.clone(),
+                request,
+                seq,
+            });
+            let answer = if s.broken {
+                Err(UpstreamError::Unavailable(
+                    "scripted: agent unreachable".into(),
+                ))
+            } else {
+                Ok(s.answer.clone().unwrap_or_else(|| UpstreamResponse {
+                    status: 200,
+                    headers: vec![("content-type".into(), "text/plain".into())],
+                    body: b"ok".to_vec(),
+                }))
+            };
+            (s.hung, answer)
+        };
+        if hung {
+            return std::future::pending().await;
         }
-        Ok(s.answer.clone().unwrap_or_else(|| UpstreamResponse {
-            status: 200,
-            headers: vec![("content-type".into(), "text/plain".into())],
-            body: b"ok".to_vec(),
-        }))
+        answer
     }
 }
 

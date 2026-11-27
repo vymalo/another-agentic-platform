@@ -27,9 +27,29 @@ pub enum WakeError {
     /// The operator could not be reached or did not answer. A later attempt may succeed.
     #[error("the wake could not be requested or followed")]
     Unavailable(#[source] BoxError),
-    /// The operator refused: the agent is unknown, or is suspended by a person (`spec.suspend` is never woken, AD-058).
+    /// The operator refused, for a reason that no retry changes.
     #[error("the wake was refused: {0}")]
-    Refused(String),
+    Refused(RefusedReason),
+}
+
+/// Why a wake was refused. The activator answers `404` for [`Unknown`](Self::Unknown) and `409` for
+/// [`Suspended`](Self::Suspended), neither with `Retry-After`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum RefusedReason {
+    /// The operator knows no such agent.
+    Unknown,
+    /// The agent is suspended by a person (`spec.suspend`), which is never woken (AD-058).
+    Suspended,
+}
+
+impl std::fmt::Display for RefusedReason {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(match self {
+            Self::Unknown => "unknown agent",
+            Self::Suspended => "agent suspended",
+        })
+    }
 }
 
 impl Classify for WakeError {
@@ -45,13 +65,15 @@ impl Classify for WakeError {
 /// of §21a.
 ///
 /// **Who owns the deadline.** An adapter that knows the agent's `wakeTimeout` answers [`WakeOutcome::TimedOut`] at it.
-/// The activator additionally bounds every wake by its own setting, so a `Waker` that never answers still ends in a
-/// `503`; the two are the same answer to the caller.
+/// The activator additionally bounds every wake by its own setting (default 5 m, the CRD's maximum, so it never cuts an agent
+/// short below its own value), so a `Waker` that never answers still ends in a `503`; the two are the same answer to the
+/// caller. **Cancel-safety:** at the activator's deadline the future returned by `wake` is dropped, so an implementation must
+/// leave nothing half-done when it is dropped at any `.await`.
 ///
 /// A wake of an agent that is already awake is [`WakeOutcome::Ready`] at once: the activator does not know whether the
 /// agent sleeps, and asking is cheap.
 pub trait Waker: Send + Sync {
-    /// Wake `agent` and wait until it is `Ready`, or give up.
+    /// Wake `agent` and wait until it is `Ready`, or give up. The future may be dropped at the activator's deadline.
     ///
     /// # Errors
     ///
