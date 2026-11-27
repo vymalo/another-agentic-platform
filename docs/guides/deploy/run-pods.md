@@ -8,10 +8,10 @@ Install the operator first: [Install the CRDs and the operator](install.md).
 
 ## What you need first
 
-- **Kubernetes 1.30 or later.** The guard is a `ValidatingAdmissionPolicy`, which is GA there. It uses `params` in a match condition, which was *verified 2026-10-26* on v1.35.8 and **not on an older version** ([What a person must know](../../../deploy/operator/README.md#what-a-person-must-know)).
+- **Kubernetes 1.30 or later.** That minimum is this documentation's claim: the chart's own `kubeVersion` is `>=1.29.0-0` and does not enforce it. The guard is a `ValidatingAdmissionPolicy`, which is GA from 1.30. It uses `params` in a match condition, which was *verified 2026-10-26* on v1.35.8 and **not on an older version** ([What a person must know](../../../deploy/operator/README.md#what-a-person-must-know)).
 - **A CNI that enforces `NetworkPolicy`.** The run pods' network is deny by default, and a policy is only as real as the plugin behind it. On a cluster whose CNI does not enforce it, you get the proxy and no deny.
 - **A coder image that carries `adam-egress` and `adam-git-sandbox`.** See the next two sections. The chart's `defaultAgentImage` has neither. CLAUDE.md and the chart say so.
-- **With the Platform API on:** `api.config.defaults.coder.workVolume`, because run pods mount the coder's work volume. The chart refuses the render without it.
+- **With the Platform API on:** `api.config.defaults.coder.workVolume`, because run pods mount the coder's work volume. The chart refuses the render without it. The snippet is in the next section.
 
 ## The values
 
@@ -20,7 +20,7 @@ runPods:
   enabled: true
   runtimeClassName: gvisor        # optional: the sandbox, see below
   quota:
-    pods: 4                       # run pods per agent, at once
+    pods: 4                       # run pods at once, counted against the priority class
     limitsMemory: 8Gi
   egressProxy:
     replicas: 2
@@ -35,11 +35,28 @@ runPodClasses:                    # the size classes an agent picks by name
   standard:
     requests: { cpu: 250m, memory: 512Mi, ephemeral-storage: 1Gi }
     limits:   { cpu: "2",  memory: 2Gi,   ephemeral-storage: 4Gi }
+api:                              # only with the Platform API on: required then
+  config:
+    defaults:
+      coder:
+        workVolume: { name: work, scope: agent, mountPath: /work, source: { persistent: { size: 20Gi, perReplica: true } } }
 ```
+
+If the Platform API is off, drop the `api:` block. If it is on and the block is missing, the chart refuses the render (`api.config.defaults.coder.workVolume is required while runPods.enabled`).
+
+**The quota is shared.** The quota is a `ResourceQuota` scoped to a priority class, not to an agent or a size class. Every agent in a namespace has the same priority class, so two agents in one namespace share the tighter of their quotas, and the `403 exceeded quota` a coder sees is counted against that class, not against the size class it picked. One namespace per coder keeps them apart.
+
+Apply it with the operator's values (and the API's, if it is on):
+
+```sh
+helm upgrade --install aap-operator deploy/operator --namespace aap-system -f values.yaml -f run-pods.values.yaml --wait
+```
+
+The upgrade changes the operator's configuration file, so it **rolls the operator pods**. It also rolls every coder that has run pods once, because their pod template changes.
 
 The values not shown (the run image, the idle and ready timeouts, node placement, `nodeType`) keep their defaults. They are in the chart's [Run pods](../../../deploy/operator/README.md#run-pods) section and in [`values.yaml`](../../../deploy/operator/values.yaml). The run image is pinned by tag and digest, and `latest` is refused.
 
-An agent then asks for them by naming a class. The agent also needs a work volume, and an image from the right adam-rs revision (below):
+An agent then asks for them by naming a class. This is a **fragment** of an `AgentConfig`, not a whole one: a coder also needs `binary: adam-coder`, `agent.embedded`, its model, its GitHub settings and the rest. The agent also needs a work volume, and an image from the right adam-rs revision (below). The repository proves `sha-581aeed` in [`run-pods.yaml`](../../../deploy/operator/tests/e2e/run-pods.yaml); read the digest from that file, not from this page.
 
 ```yaml
 kind: AgentConfig
@@ -47,21 +64,35 @@ spec:
   harness:
     type: adam-rs
     adam:
+      binary: adam-coder
+      agent:
+        embedded: {}
       coder:
         runPods:
           sizeClass: standard
   environment:
     image:
-      ref: ghcr.io/vymalo/another-adam-rs/coder:<tag>@sha256:<digest>
+      ref: ghcr.io/vymalo/another-adam-rs/coder:sha-581aeed@sha256:<digest, from run-pods.yaml>
     volumes:
       - { name: work, scope: agent, mountPath: /work, source: { persistent: { size: 20Gi, perReplica: true } } }
 ```
 
 An existing coder that gets `runPods` is rolled once: its pod template changes. A coder without run pods does not move by one byte.
 
+## Putting it together
+
+With the operator, the Platform API and run pods on, the three value blocks are three files, or one merged file. Keep one `watchNamespaces`: a list in a later file replaces an earlier one.
+
+```sh
+helm upgrade --install aap-operator deploy/operator --namespace aap-system \
+  -f values.yaml -f api.values.yaml -f run-pods.values.yaml --wait
+```
+
+`values.yaml` is [the install page's](install.md#the-values), `api.values.yaml` is [the Platform API page's](platform-api.md#the-values), and `run-pods.values.yaml` is the block above, `workVolume` included. The API pod is not ready until it can fetch the issuer's keys, so `--wait` fails if the issuer is not reachable ([the Platform API page](platform-api.md#the-api-pod-is-not-ready-until-it-can-reach-the-issuer)). This combination was rendered with `helm template`, checked with kubeconform, and its API file was read by `api --check`: see the proof below, and [What was walked](#what-was-walked).
+
 ## What the operator makes for an agent
 
-The chart makes four things once: the `PriorityClass` (unless you name one), the admission policy and its binding over every watched namespace, and the `Role` run pods use (one in each watched namespace). For each agent that sets `sizeClass`, the operator makes the rest.
+The chart makes these once: the settings `ConfigMap` the operator reads (in the release's namespace), the `PriorityClass` (unless you name one), the admission policy and its binding over every watched namespace, and the `Role` run pods use (one in each watched namespace). For each agent that sets `sizeClass`, the operator makes the rest. The egress proxy's `PodDisruptionBudget` exists only when `egressProxy.replicas` is above 1.
 
 ```mermaid
 sequenceDiagram
@@ -78,12 +109,35 @@ sequenceDiagram
   W->>K: create a pod from the template, as the account
   K->>G: check the rules against the account's parameters
   G-->>K: admitted, or refused with the message of the rule broken
-  P->>K: remove sizeClass, or delete the service
-  O->>K: delete the RoleBinding first, then the run pods
-  O->>K: delete the proxy and policies, then the quota, parameters, template and accounts last
+  P->>K: remove sizeClass
+  O->>K: delete the RoleBinding, then the run pods
+  O->>K: apply the workers without the account, and null both names it has for it
+  O->>K: delete the quota, then the egress proxy, then the run pods' NetworkPolicy
+  O->>K: delete the parameters and the template ConfigMaps, the accounts last
 ```
 
-The order matters. The operator makes the parameters before the right to make pods, and removes the right first. The operator itself holds `bind` on that one `Role` and no right to make a pod, `exec` or read a Secret. It can bind the `Role` to any account in the namespace ([What a person must know](../../../deploy/operator/README.md#what-a-person-must-know), items 1 to 4, say what follows from that).
+Deleting the service takes the same path, except that the template goes with the service's other objects.
+
+The order matters. The operator makes the parameters before the right to make pods, and removes the right first. The accounts go last, so that an interrupted pass still finds one and comes back. The proxy goes before the run pods' policy, so a pod made just before the binding went is cut off before it is ever unpoliced ([`provider.rs`](../../../crates/runtime-kubernetes/src/provider.rs)). The operator itself holds `bind` on that one `Role` and no right to make a pod, `exec` or read a Secret. It can bind the `Role` to any account in the namespace ([What a person must know](../../../deploy/operator/README.md#what-a-person-must-know), items 1 to 4, say what follows from that).
+
+### The lifecycle of a coder with run pods
+
+```mermaid
+stateDiagram-v2
+  [*] --> NoRunPods
+  NoRunPods --> Guarded: sizeClass set, parameters, account, quota, proxy and policy applied
+  Guarded --> MayMakePods: the RoleBinding is applied
+  MayMakePods --> Unguarded: a person deletes the parameters
+  Unguarded --> MayMakePods: the next reconcile makes them again
+  MayMakePods --> Revoking: sizeClass removed, or the service deleted
+  Revoking --> Detaching: binding and run pods deleted
+  Detaching --> Clearing: workers applied without the account
+  Clearing --> NoRunPods: quota, proxy, policy, parameters, template and accounts gone
+```
+
+While `Unguarded`, the account can make any pod: the policy's binding allows a pod whose parameters are missing, because denying would refuse every pod in a namespace that has no agent with run pods. A person who can delete ConfigMaps in the namespace can do that, until the next reconcile ([What a person must know](../../../deploy/operator/README.md#what-a-person-must-know), items 2 and 3).
+
+**Turning `runPods.enabled` off clears nothing.** Without the settings the operator does not look for the objects, so a coder keeps its run-pod objects and its right to make pods until `coder.runPods` is removed from its `AgentConfig`, or the agent is deleted. Remove `coder.runPods` from the configs first, wait for the objects to go, then turn the value off.
 
 ## A run pod, from request to deletion
 
@@ -95,7 +149,7 @@ sequenceDiagram
   participant R as Run pod
   participant X as Egress proxy
   W->>K: create the pod
-  K-->>W: 403 exceeded quota, if the class is full
+  K-->>W: 403 exceeded quota, if the priority class is full
   W->>W: wait for a slot, up to waitSecs
   K->>L: admitted and counted, schedule it
   L->>R: start it, ready within readyTimeoutSecs
@@ -109,7 +163,7 @@ sequenceDiagram
 stateDiagram-v2
   [*] --> Requested
   Requested --> Refused: a rule of the policy is broken
-  Requested --> Waiting: the quota is full, 403
+  Requested --> Waiting: the priority class's quota is full, 403
   Waiting --> Requested: a slot is free
   Requested --> Starting: admitted and counted
   Starting --> Running: ready, a command is exec'd
@@ -191,13 +245,17 @@ Five refusals on the values above, each run with `helm template`:
 After an agent with run pods is `Ready`:
 
 ```sh
-sh deploy/operator/tests/run-pods-admission.sh <namespace> <service>
-kubectl auth can-i create pods --as system:serviceaccount:<namespace>:aap-operator -n <namespace>     # no
-kubectl auth can-i create pods --as system:serviceaccount:<namespace>:<service> -n <namespace>        # yes
-kubectl auth can-i get secrets --as system:serviceaccount:<namespace>:<service> -n <namespace>        # no
+sh deploy/operator/tests/run-pods-admission.sh <agent-namespace> <service>
+
+# the operator's account lives in the release namespace and is named for the release (here aap-system and aap-operator)
+op=system:serviceaccount:<release-namespace>:<release-fullname>
+kubectl auth can-i create statefulsets --as $op -n <agent-namespace>   # yes: the control, so the next answer can mean something
+kubectl auth can-i create pods         --as $op -n <agent-namespace>   # no
+kubectl auth can-i create pods         --as system:serviceaccount:<agent-namespace>:<service> -n <agent-namespace>   # yes
+kubectl auth can-i get secrets         --as system:serviceaccount:<agent-namespace>:<service> -n <agent-namespace>   # no
 ```
 
-The script asks the real policy with `--dry-run=server`, as the agent's account. It checks that the pod the coder would build is admitted and that each mutation is refused with its rule's message. It creates nothing.
+The script asks the real policy with `--dry-run=server`, as the agent's account. It checks that the pod the coder would build is admitted and that each mutation is refused with its rule's message. It creates nothing that stays: if the cluster has no `RuntimeClass runc`, it makes one (cluster-scoped), because the API server's own admission would otherwise answer before the policy does, and it removes it on exit. It needs `kubectl` and `jq`, and a user who may impersonate service accounts.
 
 ## What proves it
 
@@ -208,15 +266,15 @@ The script asks the real policy with `--dry-run=server`, as the agent's account.
 
 Where the chart is concerned, `render-check.sh` holds the objects, the operator's `Role` rule by rule, and every refusal above, each broken on purpose.
 
-*Verified 2026-11-27* with `gh run view`: `run-pods-e2e` ended in success in run 45922615533 of `operator-image.yml`, on `main` at `1d17e42`. Written down by the project: the run of 2026-10-27 in which a kubelet started the git sandbox and the coder, the sidecar held no token, key or Secret, and `curl` and `npm` went through the proxy (run 40520862547, job 122249371008). `gvisor-k3d` is cited as it is in the workflow's header: *verified 2026-11-26* on a hosted runner in run 45889453084 (PR #112). It was not re-run for this page.
+*Verified 2026-11-27* with `gh run view`: `run-pods-e2e` ended in success in run 45922615533 of `operator-image.yml`, on `main` at `1d17e42`, the commit whose tag is `sha-1d17e42`, checked on 2026-11-27. Written down by the project: the run of 2026-10-27 in which a kubelet started the git sandbox and the coder, the sidecar held no token, key or Secret, and `curl` and `npm` went through the proxy (run 40520862547, job 122249371008). `gvisor-k3d` is cited as it is in the workflow's header: *verified 2026-11-26* on a hosted runner in run 45889453084 (PR #112). It was not re-run for this page.
 
 ### What was walked
 
-On 2026-11-27, on a throwaway kind cluster (Kubernetes v1.35.8), the operator chart was upgraded with the values above. The real API server accepted the `ValidatingAdmissionPolicy`, its binding and the `PriorityClass`, the new operator pods became ready, and a `Role` for run pods appeared in the watched namespace. No `RuntimeClass` object was rendered. No coder ran, so no run pod was made. The cluster was deleted afterwards. With the Platform API on and a `workVolume`, the API's `--check` accepted the rendered file, which then lists the size class.
+On 2026-11-27, on a throwaway kind cluster (Kubernetes v1.35.8), the operator chart was upgraded with the values above. The real API server accepted the `ValidatingAdmissionPolicy`, its binding and the `PriorityClass`, the new operator pods became ready, and a `Role` for run pods appeared in the watched namespace. No `RuntimeClass` object was rendered. A second walk, on a fresh kind cluster, ran the combined `helm upgrade` of the install, Platform API and run pods values: the operator pods and the run pods objects came up, and the release ended `failed` only because the API's placeholder issuer left the API pod unready (see the Platform API page). The corrected `can-i` pair gave `create statefulsets` yes and `create pods` no for the operator's account in an agent namespace. The older form of the check, with the account named in the agent namespace, answered `no` for both, so it could not fail. No coder ran, so no run pod was made. The cluster was deleted afterwards. With the Platform API on and a `workVolume`, the API's `--check` accepted the rendered file, which then lists the size class.
 
 ### What is unverified
 
-- **The sandbox on a real node.** The sandbox start is proven on a container node only, with `ignore-cgroups` and unenforced limits. A real node, the Talos nodes with gVisor's extension, and the cost of a real build under runsc are unproven.
+- **The sandbox on a real node.** The sandbox start is proven on a container node only, with `ignore-cgroups` and unenforced limits. A real node, nodes with gVisor installed (for example by a node distribution's extension), and the cost of a real build under runsc are unproven.
 - **The agent's pods under the class.** The coder's own pod with its git sandbox, projected token, egress proxy and store's connections under `runsc` is unverified (slice K14d). That is why `agent.runtimeClassName` stays empty.
 - **`hostUsers: false` beside the class.** Untested on a real node.
 - **Kubernetes older than 1.35.** The match-condition `params` are unverified there.

@@ -10,4 +10,4 @@ One task per page.
 
 ## Operate
 
-The Operate guides are planned (ANR-937). There are none yet.
+The Operate guides are planned. There are none yet.

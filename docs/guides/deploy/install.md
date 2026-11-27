@@ -6,7 +6,7 @@ To try the operator on a laptop first, use [Get started](../../get-started.md). 
 
 ## Before you start
 
-- A Kubernetes cluster. The operator chart asks for `>=1.29.0-0`. CI runs Kubernetes v1.35.8 in kind, and no other version is tested in CI. Run pods need 1.30 or later (see [Turn on run pods](run-pods.md)).
+- A Kubernetes cluster. The operator chart asks for `>=1.29.0-0`. Every kind job in CI runs Kubernetes v1.35.8, and the `gvisor-k3d` workflow runs k3s v1.35.5. No older version is tested. Run pods need 1.30 or later (see [Turn on run pods](run-pods.md)).
 - `kubectl` and Helm 3, with the repository checked out. Nothing publishes either chart: you install them from their paths. The chart's own note says so ([Known limitations](../../../deploy/operator/README.md#known-limitations)).
 - Namespaces for the agents. The operator is namespaced and has no `ClusterRole`. The chart makes a `Role` in each namespace you list, so each one must exist before you install.
 
@@ -58,7 +58,7 @@ networkPolicy:
             kubernetes.io/metadata.name: orchestrator
 ```
 
-Then create the namespaces and the token, and install:
+Then create the namespaces and the token, and install. If a watched namespace is missing, Helm fails loudly and leaves the release `failed`; make the namespace and run the same command again, and the release recovers.
 
 ```sh
 kubectl create namespace aap-system
@@ -122,12 +122,13 @@ A follower's passes write nothing. A leader that has not written for `renewSecs`
 
 ## What the chart refuses
 
-`_validate.tpl` stops a render that would deploy something other than what the values say. Three refusals on the values above, each run with `helm template`:
+`_validate.tpl` stops a render that would deploy something other than what the values say. Four refusals on the values above, each run with `helm template`. Each prints `templates/usage-ingest.yaml:1:4` as its location. Ignore it: the checks live in `_validate.tpl`, which that template includes.
 
 | Change | The chart says |
 |---|---|
 | a registry token and no `networkPolicy.registry.allowFrom` | `networkPolicy.registry.allowFrom is required while the registry has a token and networkPolicy is enabled` |
 | `watchNamespace` set beside `watchNamespaces` | `watchNamespace and watchNamespaces are both set: use one` |
+| `replicaCount` instead of `replicas` | the operator's replica count is `replicas`, not `replicaCount` |
 | `defaultAgentImage` with a tag and no digest | `defaultAgentImage must be repository:tag@sha256:<64 hex> (a tag and a digest)` |
 
 ## What proves it
@@ -142,16 +143,16 @@ A follower's passes write nothing. A leader that has not written for `renewSecs`
 
 Where the chart is concerned, [`render-check.sh`](../../../deploy/operator/tests/render-check.sh) holds the `Role` rule by rule, the absence of a `ClusterRole`, and every refusal above, each broken on purpose. It runs in the `chart` job of `operator-image.yml`.
 
-*Verified 2026-11-27* with `gh run view`: on `main` at `1d17e42`, run 45922615534 of `operator.yml` (including `operator-e2e` and `store-cnpg`) and run 45922615533 of `operator-image.yml` (including `operator-coder-e2e`, `namespaces-e2e`, `leader-e2e` and `push`) ended in success.
+*Verified 2026-11-27* with `gh run view`: on `main` at commit `1d17e42` (tag `sha-1d17e42`), checked on 2026-11-27, run 45922615534 of `operator.yml` (including `operator-e2e` and `store-cnpg`) and run 45922615533 of `operator-image.yml` (including `operator-coder-e2e`, `namespaces-e2e`, `leader-e2e` and `push`) ended in success.
 
 ### What was walked
 
-On 2026-11-27, on a throwaway kind cluster (Kubernetes v1.35.8), the commands of this page were run: the CRDs, the three namespaces, the token, and the install with the values above. The published operator image at the chart's tag (`sha-1d17e42`) started. Two pods were ready, one `Lease` named `aap-operator` was held by one of them in `agents`, and the budget existed. There was one `Role` and one `RoleBinding` in each of `agents` and `agents-two`, none in `aap-system`, and no `ClusterRole` or `ClusterRoleBinding` of the operator. As the operator's account, `create statefulsets` was `yes` in the two watched namespaces and `no` in `aap-system`, and `get secrets` and `create pods` were `no` in all three. No agent was created, so no agent was reconciled in this walk. The cluster was deleted afterwards.
+On 2026-11-27, on a throwaway kind cluster (Kubernetes v1.35.8), the commands of this page were run: the CRDs, the three namespaces, the token, and the install with the values above. The published operator image at the chart's tag at that time (`sha-1d17e42`) started. Two pods were ready, one `Lease` named `aap-operator` was held by one of them in `agents`, and the budget existed. There was one `Role` and one `RoleBinding` in each of `agents` and `agents-two`, none in `aap-system`, and no `ClusterRole` or `ClusterRoleBinding` of the operator. As the operator's account, `create statefulsets` was `yes` in the two watched namespaces and `no` in `aap-system`, and `get secrets` and `create pods` were `no` in all three. No agent was created, so no agent was reconciled in this walk. The cluster was deleted afterwards.
 
 ### What is unverified
 
-- **Argo CD.** Installing the charts from the registry on a real cluster with Argo CD (slice S10) is unverified ([CLAUDE.md](../../../CLAUDE.md)). That Argo CD syncs the CRDs before the operator is unverified too ([What is not proven](../../../deploy/operator/README.md#what-is-not-proven)).
-- **Kubernetes other than v1.35.8.** The chart's floor is 1.29, and CI tests one version.
+- **Argo CD.** An Argo CD that tracks this repository's chart paths and installs both charts on a real cluster (slice S10) is unverified ([CLAUDE.md](../../../CLAUDE.md)). That Argo CD syncs the CRDs before the operator is unverified too ([What is not proven](../../../deploy/operator/README.md#what-is-not-proven)).
+- **Kubernetes other than v1.35.8 and v1.35.5.** The chart's floor is 1.29. CI's kind jobs run v1.35.8 and `gvisor-k3d` runs k3s v1.35.5.
 - **Leader election.** `leader-e2e` does not prove that two writers never overlap, and it does not prove the budget under a real drain.
 - **The registry token from External Secrets** (`externalSecrets.enabled`). The chart renders it, but no job is written down that installs External Secrets and reads the registry through it.
 - **CloudNativePG.** The job installs one version, 1.30.1. A production install of it is not covered.
