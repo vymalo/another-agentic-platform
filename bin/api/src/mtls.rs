@@ -817,7 +817,10 @@ mod tests {
             clients: vec![
                 WorkloadClient {
                     spiffe_id: ORCHESTRATOR.to_owned(),
-                    permissions: vec![permission::AGENTS_OWN.to_owned()],
+                    permissions: vec![
+                        permission::AGENTS_OWN.to_owned(),
+                        permission::AGENTS_READ_OWNER.to_owned(),
+                    ],
                 },
                 WorkloadClient {
                     spiffe_id: NOBODY.to_owned(),
@@ -1008,7 +1011,7 @@ mod tests {
         let nobody = rig.leaf(&LeafSpec::client(NOBODY));
         let (status, body) = rig.call(Some(&nobody), OWNER_LIST, "").await.unwrap();
         assert_eq!(status, 403, "{body}");
-        assert!(body.contains(permission::AGENTS_OWN), "{body}");
+        assert!(body.contains(permission::AGENTS_READ_OWNER), "{body}");
     }
 
     #[tokio::test]

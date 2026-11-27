@@ -27,7 +27,10 @@ api:
     maxConnections: 100
     clients:
       - spiffeId: spiffe://another/ns/another-agents/sa/orchestrator
-        permissions: [platform:agents.own]
+        permissions: [platform:agents.own, platform:agents.read.owner]
+      # AD-072: the staff service reads one owner's agents and nothing else.
+      - spiffeId: spiffe://another/ns/another-agents/sa/staff
+        permissions: [platform:agents.read.owner]
       - spiffeId: spiffe://another/ns/another-agents/sa/watcher
     tls:
       secretName: aap-api-workload-tls

@@ -18,8 +18,9 @@ carry what this grants.
 | it carries a URI SAN | `NoIdentity` |
 | the configuration names that exact URI — and there is exactly one (`two or more` is ambiguous) | `UnknownIdentity` |
 
-**Only `platform:agents.own` is grantable this way.** A permission outside that set is refused when the
-configuration is loaded, not when a request arrives.
+**Only `platform:agents.own` and `platform:agents.read.owner` are grantable this way** (AD-072: the
+orchestrator holds both, the staff service only the read-only one). A permission outside that set is
+refused when the configuration is loaded, not when a request arrives.
 
 ## The configuration block
 
@@ -28,12 +29,16 @@ workloadClients:
   - spiffeId: spiffe://another/ns/another-agents/sa/orchestrator
     permissions:
       - platform:agents.own
+      - platform:agents.read.owner
+  - spiffeId: spiffe://another/ns/another-agents/sa/staff
+    permissions:
+      - platform:agents.read.owner
 ```
 
 In the API's file `workloadClients` is the **list** (with `workloadListener`, ANR-1011); the crate's `WorkloadClients { clients }` is the same list as a type.
 
 `WorkloadClients` denies unknown fields. An empty identity, an identity named twice and a permission that
-is not `platform:agents.own` are refused by `WorkloadAuth::new`, which also refuses a bundle that is not
+is outside those two is refused by `WorkloadAuth::new`, which also refuses a bundle that is not
 PEM or holds no CA.
 
 ## Using it
