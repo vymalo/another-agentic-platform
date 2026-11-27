@@ -9,7 +9,7 @@ Install the operator first: [Install the CRDs and the operator](../deploy/instal
 ## What you need first
 
 - **A collector that takes OTLP/HTTP JSON.** The exporter does not speak gRPC or protobuf. A backend that wants those sits behind a collector, which converts.
-- **The collector's pods, as network peers.** The chart refuses `to` when empty.
+- **The collector's pods, as network peers.** The chart refuses an empty `to` only while the `NetworkPolicy` is enabled (it is by default). With the policy off, `to` may be empty.
 - **For headers or a private CA:** an existing Secret and an existing ConfigMap in the release namespace. The chart renders neither.
 
 ## The smallest setting
@@ -40,7 +40,12 @@ api:
             app.kubernetes.io/name: opentelemetry-collector
 ```
 
-`otel` is the operator's block. `api.otel` is the API's, and it does nothing unless `api.enabled` is true. Add them to the file you used to install.
+`otel` is the operator's block. `api.otel` is the API's, and it does nothing unless `api.enabled` is true. Add them to the file you used to install, or keep them in a second file and pass both. **Do not paste a second top-level `api:` block into one file.** YAML keeps the last one and drops the first without a warning: with the Platform API's values above it, the pasted `api:` replaces them, `helm template` still exits 0, and the render has no `aap-operator-api`. Merge the keys under your existing `api:`, or use the second-file form:
+
+```sh
+helm upgrade --install aap-operator deploy/operator --namespace aap-system \
+  -f values.yaml -f traces.values.yaml --wait
+```
 
 `endpoint` is the full URL, used as written. It must be `http` or `https`, with a host, and with no user name, password, query or fragment.
 
@@ -103,7 +108,7 @@ api:
             app.kubernetes.io/name: opentelemetry-collector
 ```
 
-Make the Secrets before you install. The values above name them and the chart does not make them:
+Make the Secrets and the ConfigMap **before the `helm upgrade` that turns tracing on**. The values above name them and the chart does not make them. Until they exist, the pod shows `ContainerCreating`, because the kubelet cannot mount a volume from an object that is not there. `$TOKEN` and `ca.pem` are values you supply: the token your collector expects, and the PEM file of your CA.
 
 ```sh
 kubectl -n aap-system create secret generic otel-operator-headers --from-literal=authorization="Bearer $TOKEN"
@@ -113,7 +118,7 @@ kubectl -n aap-system create configmap otel-ca --from-file=ca.pem
 
 The certificate is the exporter's **only** trust, not an addition to the system's. A proxy is not used (`HTTPS_PROXY` is not read) and a redirect is not followed.
 
-`sampler` is `always_on`, `always_off` or `traceidratio`, with `samplerRatio` from 0 to 1. `resourceAttributes` accepts only `deployment.environment.name`, `k8s.cluster.name` and `service.namespace`, with values of letters, digits, `.`, `_` and `-`.
+`sampler` is `always_on`, `always_off` or `traceidratio` in the chart, with `samplerRatio` from 0 to 1. The binaries also take the `parentbased_*` forms of those three (no parent is ever read, so each behaves as its base). `resourceAttributes` accepts only `deployment.environment.name`, `k8s.cluster.name` and `service.namespace`, with values of letters, digits, `.`, `_` and `-`.
 
 **Upgrading an old install.** Before the operator's settings moved into one configuration file, the operator's key held `name=value,...`. It now holds the value alone. A key that still has the old shape turns the operator's tracing off, with one warning, and the operator keeps running. Rewrite the Secret's key before you upgrade ([the chart's README](../../../deploy/operator/README.md#traces-k5)).
 
@@ -187,7 +192,7 @@ A span can say only what the closed list in [`crates/trace/README.md`](../../../
 
 **The operator's spans** hold: the controller, the object kind, its namespace and name, the step (`config.read`, `store.ensure`, `store.release`, `runtime.ensure`, `runtime.status`, `runtime.endpoints`, `runtime.delete` or `status.patch`), the agent's state, the result (`ok`, `error` or `timeout`), and, on a failure, the **class** of the error.
 
-**The API's spans** hold: the method, the **route template** (`/v1/agents/{name}`, never the path), the status code, and the closed words of an authentication or permission failure. No agent name is in an API span.
+**The API's spans** hold: the method, the **route template** (`/v1/agents/{name}`, never the path), the status code, the closed words of an authentication or permission failure, the slug of a problem answer (`aap.problem.type`) and the class of an error (`error.type`). No agent name is in an API span.
 
 **Never in a span:** a token or a header value, a body or a form value, a secret or a Secret's name, a URL, an agent's instructions, a tool's name or argument, the raw path, the user's subject (not even hashed). The operator and the API do not read an inbound `traceparent`, and none goes to the API server. The class of an error is recorded, never its text.
 

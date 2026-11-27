@@ -28,7 +28,7 @@ With more than one replica, the chart changes five things:
 | `PodDisruptionBudget` `aap-operator` | `maxUnavailable: 1`. At one replica there is none, because a budget of 1 of 1 would block every drain |
 | The operator's file | `leaderElection.enabled: true`, with the `Lease`'s name and namespace and the three timers |
 | The `Role` in the primary namespace | `get` and `update` on the `Lease` named `aap-operator`, and `create` on `leases`. No `delete`, and no `list` |
-| The pass timeout | 4 s, unless `tuning.reconcileTimeoutSecs` says otherwise |
+| The pass timeout | 4 s, unless `tuning.reconcileTimeoutSecs` says otherwise. With `toolProbe.to` set, `toolProbe.timeoutSecs` must be at most the pass timeout minus 5, and the chart refuses it otherwise (`with the election on, toolProbe.timeoutSecs (...) needs to be at most tuning.reconcileTimeoutSecs - 5 (...)`). With the default 4 s pass timeout it is always refused, because 4 minus 5 is negative. A render that passes (run): `leaseSecs: 30`, `tuning.reconcileTimeoutSecs: 10`, `toolProbe.timeoutSecs: 5` |
 
 The `Lease` is named `aap-operator` and lives in the **primary** namespace: the first of `watchNamespaces`. Every pod campaigns for the same one.
 
@@ -46,10 +46,11 @@ The registry stays up through a failover because each replica builds it from its
 
 ## How the election works
 
-Every `retrySecs` a follower, and every `renewSecs` the leader, reads the `Lease` and acts on it. The rules are in [`aap-leader-kubernetes`](../../../crates/leader-kubernetes/README.md#the-loop):
+Every `retrySecs`, a follower and the leader alike read the `Lease` and act on it. The leader renews at that pace, so one failed renewal is retried. `renewSecs` is not a period: it is the deadline after which a leader that could not write demotes itself. The rules are in [`aap-leader-kubernetes`](../../../crates/leader-kubernetes/README.md#the-loop):
 
 - No `Lease`: create it, naming yourself in `holderIdentity`. Another pod may win the create (a `409`): you are a follower.
 - It is yours: renew it. A `409` means someone took it: you are a follower at once.
+- It has **no holder** (`holderIdentity` is empty, because the last leader stopped cleanly): take it at once. Nobody waits for the old `renewTime` to pass.
 - It is someone else's and **expired**, that is `renewTime` plus `leaseSecs` is past, by your own clock: take it over, and add one to `leaseTransitions`.
 - Anything else: you are a follower.
 
@@ -64,7 +65,7 @@ sequenceDiagram
   A->>L: create, holder A
   B->>L: read: A's, not expired
   Note over B: follower: caches, /readyz and the registry, no writes
-  loop every renewSecs
+  loop every retrySecs
     A->>L: renew
   end
   alt A crashes, no SIGTERM
@@ -72,7 +73,7 @@ sequenceDiagram
     Note over B: writes nothing
     B->>L: read: A's, expired after leaseSecs
     B->>L: update: holder B, leaseTransitions + 1
-    Note over B: leader: reconciles the parked agent
+    Note over B: leader. The parked agent is reconciled on B's next recheck, up to 30 s later (FOLLOWER_RECHECK)
   else A is stopped with SIGTERM
     A->>L: clear holderIdentity
     B->>L: read: nobody's. Take it
@@ -84,7 +85,7 @@ If A's pod is gone, the `Deployment` makes a new one. It joins as a follower, an
 ```mermaid
 stateDiagram-v2
   [*] --> Follower
-  Follower --> Leader: no Lease, or it expired, and the write wins
+  Follower --> Leader: no Lease, no holder, or it expired, and the write wins
   Leader --> Follower: a 409 on renew, or no write for renewSecs
   Leader --> Released: SIGTERM, holderIdentity cleared
   Released --> [*]
@@ -100,7 +101,7 @@ kubectl -n aap-system get pod
 kubectl -n agents get lease aap-operator -o jsonpath='{.spec.holderIdentity} {.spec.leaseDurationSeconds} {.spec.leaseTransitions}{"\n"}'
 ```
 
-The second line names the leader's pod, 15, and how many times the `Lease` changed hands. Replace `agents` with your primary namespace.
+The second line names the leader's pod, 15, and how many times the `Lease` changed hands. Replace `agents` with your primary namespace. A healthy first line shows **both pods `1/1`**: a follower is ready too, so ready does not say which one writes.
 
 ## How long a failover takes
 
@@ -108,6 +109,7 @@ There are two ways a leader goes, and they differ by about 15 seconds.
 
 - **A crash or a lost node.** The pod leaves no word. The `Lease` keeps its name until it expires, `leaseSecs` after the last renewal, so nothing writes for about that long. Agents keep running, because each is a `Deployment` of its own. Only reconciling pauses. This is for a pod that is gone. A container that the kubelet restarts inside the same pod finds the `Lease` under its own name and renews it, so there is no failover (a comment in `leader-e2e.sh` says so; it was not run here).
 - **A clean stop** (SIGTERM, a drain, a rolling update). The leader clears `holderIdentity` and the next pod takes it on its next try.
+- **Then the agents catch up.** A replica that is not the leader asks again every 30 s whether it has become one (`FOLLOWER_RECHECK`, in `crates/controller/src/operator.rs`). So an agent that was applied while nobody wrote, a parked one, is reconciled by the new leader up to 30 s after the takeover. That is why the parked agent in the table below was `Ready` 21 s after the takeover and not at once.
 
 What was measured, as dated records:
 
@@ -118,6 +120,8 @@ What was measured, as dated records:
 | This page's walk, 2026-11-27, kind v1.35.8, the operator at `sha-2c16326` | 15 s after the dead holder's last renewal (04:11:58 to 04:12:13) | its `Deployment` was there within 16 s of the takeover | `holderIdentity` was clear 0.1 s after `kubectl delete pod` returned, `leaseTransitions` unchanged |
 
 The CI script reads the clock in whole seconds, so each figure is good to about a second. In the 2026-11-27 CI log and on the walk, the new leader was the `Deployment`'s replacement pod and not the surviving one. That is a race between two followers: CLAUDE.md records a run where the survivor won.
+
+**Why `leaseTransitions` differs in the SIGTERM column.** CI read it after another pod had taken the released `Lease` (1 to 2). The walk read it 0.1 s after the release, before anyone had taken it, so it had not moved. Clearing `holderIdentity` does not add one. The next takeover does.
 
 On the walk, in each of the 12 samples taken in the 13 s after the kill (about one a second), the new agent had **no** `Deployment`. The follower saw the event and wrote nothing, as it should.
 

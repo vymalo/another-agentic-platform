@@ -6,7 +6,7 @@ Install first: [Install the CRDs and the operator](../deploy/install.md). With t
 
 ## Which revision
 
-The operator's images are built and pushed by CI. After every green build of `main`, a last CI job writes the new image tags into `deploy/operator/values.yaml` and pushes **one commit** with the subject `chore(deploy): bump operator, api and usage-ingest to sha-<7 hex>`. That commit is the revision to use. At it, `image.tag`, `api.image.tag` and `usageIngest.image.tag` name the images CI built and tested for the commit the subject names.
+The operator's images are built and pushed by CI. After a green build of a commit that changes what is built, unless a newer one has landed, a last CI job writes the new image tags into `deploy/operator/values.yaml` and pushes **one commit** with the subject `chore(deploy): bump operator, api and usage-ingest to sha-<7 hex>`. That commit is the revision to use. At it, `image.tag`, `api.image.tag` and `usageIngest.image.tag` name the images CI built and tested for the commit the subject names.
 
 ```sh
 git fetch origin
@@ -18,7 +18,7 @@ A commit between a source change and its bump has a newer chart than its image. 
 
 ### What `bump-tag.sh` is
 
-`deploy/operator/bump-tag.sh` is **CI's tool, not yours**. The `bump` job of [`operator-image.yml`](../../../.github/workflows/operator-image.yml) runs it on `main`, and a dry run shows its edit on pull requests. It rewrites one `tag:` key in `values.yaml` and refuses a tag that is not `sha-` and seven hex digits. Its own header says the tag is written by it and by nothing else. The chart says "written by CI only, never by hand". Do not run it, and do not edit `image.tag` in a checkout.
+`deploy/operator/bump-tag.sh` is **CI's tool, not yours**. The `bump` job of [`operator-image.yml`](../../../.github/workflows/operator-image.yml) runs it on `main`, and a dry run shows its edit on pull requests. It rewrites one `tag:` key in `values.yaml` and refuses a tag that is not `sha-` and seven hex digits. The chart's `values.yaml` calls the tag "a plain key, written by that script only", and the chart's README says "written by CI only, never by hand". Do not run it, and do not edit `image.tag` in a checkout.
 
 What you do instead is pick a revision, as above. If you must run an image that no revision of the chart names, set the tag in **your own** values file, never in the repository's:
 
@@ -44,6 +44,7 @@ sequenceDiagram
   participant O as Operator pods
   You->>R: git checkout a bump commit
   You->>R: read what changed in the charts
+  You->>K: helm get values: compare with your file
   You->>K: helm template deploy/operator-crds, kubectl apply --server-side
   K-->>You: four CRDs Established
   You->>K: helm upgrade deploy/operator
@@ -53,6 +54,19 @@ sequenceDiagram
   You->>K: kubectl get agentservice: Ready, as before
 ```
 
+The release itself goes through these states. `pending-upgrade`, `deployed` and `failed` are the statuses `helm status` shows. The CRDs are applied with `kubectl`, outside the release:
+
+```mermaid
+stateDiagram-v2
+  [*] --> OldDeployed
+  OldDeployed --> CRDsApplied: kubectl apply --server-side
+  CRDsApplied --> Upgrading: helm upgrade, status pending-upgrade
+  Upgrading --> NewDeployed: pods ready, status deployed
+  Upgrading --> Failed: --wait times out, status failed
+  Failed --> Upgrading: fix the cause, helm upgrade again
+  NewDeployed --> [*]
+```
+
 1. **Read what changed.** The charts are the diff of one path. Your own values may name a value that moved or went:
 
    ```sh
@@ -60,9 +74,11 @@ sequenceDiagram
    git diff <old>..<new> -- deploy/operator/values.yaml
    ```
 
-2. **Render before you apply.** `helm template` with your values must succeed, and its output should pass `kubeconform`. With the API on, run the new image's own `--check` on the file you render ([Turn on the Platform API](../deploy/platform-api.md#check-the-file-before-you-deploy-it)).
+2. **Compare your values with the release.** `helm get values aap-operator --namespace aap-system` prints what the running release was installed with. Compare it with your file: a value given with `--set` at install time is lost on an upgrade that passes only `-f`. And a tag you pinned yourself (`image.tag` or `api.image.tag`, above) **keeps winning** after you check out a newer bump commit: remove it, or move it.
 
-3. **The CRDs, server-side.**
+3. **Render before you apply.** `helm template aap-operator deploy/operator --namespace aap-system -f values.yaml` must succeed, and its output should pass `kubeconform`. With the API on, run the new image's own `--check` on the file you render ([Turn on the Platform API](../deploy/platform-api.md#check-the-file-before-you-deploy-it)).
+
+4. **The CRDs, server-side.**
 
    ```sh
    helm template aap-operator-crds deploy/operator-crds | kubectl apply --server-side -f -
@@ -71,20 +87,40 @@ sequenceDiagram
      crd/modelendpoints.agents.vymalo.com crd/toolproviders.agents.vymalo.com
    ```
 
-4. **The operator.**
+5. **The operator.**
 
    ```sh
    helm upgrade aap-operator deploy/operator --namespace aap-system -f values.yaml --wait
    ```
 
-5. **Check.** `kubectl -n aap-system get pod`, and `kubectl get agentservice -A`. Every agent that was `Ready` should be. If one is not, read [Find why an agent is not Ready](not-ready.md).
+6. **Check.** `kubectl -n aap-system get pod`, and `kubectl get agentservice -A`. Every agent that was `Ready` should be. If one is not, read [Find why an agent is not Ready](not-ready.md).
+
+## If it goes wrong
+
+A `--wait` that times out leaves the release `failed`, and the old pods may still be serving. Read, in this order:
+
+```sh
+helm status aap-operator --namespace aap-system
+kubectl -n aap-system get pod
+kubectl -n aap-system describe pod -l app.kubernetes.io/instance=aap-operator
+kubectl -n aap-system logs deploy/aap-operator
+```
+
+Fix the cause and run `helm upgrade` again.
+
+**There is no supported rollback.** None was run. `helm rollback` reverts the operator's release, and it does **not** undo the CRDs: `kubectl apply` owns them, outside any release. So a rollback of the operator can leave it over newer CRDs.
+
+- **The safe case,** in the CRDs README's words: the CRDs over an older operator are safe as long as nobody has stored a reference (`endpointRef`, `providerRef`). An operator from before D1 reads every object written before it.
+- **The unsafe case:** never run an operator older than D1 against CRDs that store a reference. It types `baseUrl` as required and cannot decode such an `AgentConfig`.
+
+([The CRDs chart's README](../../../deploy/operator-crds/README.md#upgrading) has both.)
 
 ## Why the CRDs go first
 
 An operator from slice D2 on expects all four kinds. Reasons the chart's README gives:
 
 - **A missing kind.** Without `modelendpoints` and `toolproviders`, the operator still runs, but an agent whose config names a shared object stays `ConfigInvalid`, saying the kind is not installed, until they exist.
-- **A missing status subresource.** Since K2 the operator writes the `status` of `modelendpoints` and `toolproviders`. Only a CRDs chart from K2 on gives them that subresource. With an older one, the API server answers `404` to every such write. The operator logs a warning that says to install the CRDs chart, retries with the back-off of an internal error (30 s, doubling, 10 minutes at most), and reconciles every agent as before. Nothing is lost but the status, until the chart is there.
+- **A missing status subresource.** Since K2 the operator writes the `status` of `modelendpoints` and `toolproviders`. Only a CRDs chart from K2 on gives them that subresource. With an older one, the API server answers `404` to every such write. The operator logs a warning that says to install the CRDs chart, retries with the back-off of an internal error (30 s, doubling, 10 minutes at most: `backoff` in `crates/controller/src/context.rs`), and reconciles every agent as before. Nothing is lost but the status, until the chart is there.
 - **The other order was withdrawn.** The CRDs README says an older operator is safe over newer CRDs only while nothing stored a reference, and it warns never to run an operator older than D1 against CRDs that store one (`endpointRef`, `providerRef`): it cannot read such an `AgentConfig`. So if you roll the operator back, check that first.
 
 The CRDs chart is **additive for what is stored**. The `kind` job of [`operator.yml`](../../../.github/workflows/operator.yml) installs the CRDs of the previous commit, stores the two examples under them, applies the new CRDs over the old ones server-side, and updates those objects. They are still accepted.

@@ -105,9 +105,29 @@ api:
         release: kube-prometheus-stack
 ```
 
-Add both to the file you used to install. `networkPolicy` is already there: put `metrics` beside `registry`. Or pass a second `-f`, which Helm merges. Replace the `monitoring` namespace and the `labels` with yours.
+**Do not paste a second top-level `api:` or `networkPolicy:` block into the file.** YAML keeps the last one, so the first is dropped without a warning. With the Platform API's values above it, the pasted `api:` replaces the whole API block: `helm template` still exits 0, and the render has no `aap-operator-api` at all (checked: 0 objects, against 29 with the form below). Merge the keys under the `api:` and `networkPolicy:` you already have, or put them in a second file and pass both. Helm merges the maps. It replaces a list whole, so a list in the second file (`allowFrom`) replaces the first file's:
+
+```sh
+helm upgrade --install aap-operator deploy/operator --namespace aap-system \
+  -f values.yaml -f metrics.values.yaml --wait
+```
+
+Replace the `monitoring` namespace and the `labels` with yours.
 
 A peer that has only a `podSelector` means the pods of the release's own namespace. A Prometheus in another namespace needs a `namespaceSelector`.
+
+### Confirm it works
+
+1. **Read the endpoint itself.** Forward the port and ask. The port-forward does not go through the `NetworkPolicy`, so this proves the operator, not the policy:
+
+   ```sh
+   kubectl -n aap-system port-forward deploy/aap-operator 9090:9090 &
+   curl -s http://127.0.0.1:9090/metrics
+   kill %1
+   ```
+
+2. **Check what your Prometheus selects.** The `ServiceMonitor` is in the release namespace (`aap-system` here) and selects the Service there (`namespaceSelector.matchNames` in the render). Your Prometheus must be set to read `ServiceMonitor`s in that namespace. The `labels` you gave must match its `serviceMonitorSelector`. If the target never appears, look there first.
+3. **Then alert on a few series,** for example a rising `aap_reconcile_errors_total`, or a rising `aap_trace_spans_dropped_total` when tracing is on. The thresholds are yours: nothing here proves one.
 
 ### What the chart makes
 

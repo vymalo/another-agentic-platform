@@ -1,6 +1,6 @@
 # Find why an agent is not Ready
 
-An agent is an `AgentService` and an `AgentConfig`. The operator writes what it saw into the service's `status`. This page reads that status, then the Events, to find out why an agent is not `Ready`.
+An agent is an `AgentService` and an `AgentConfig`. The operator writes what it saw into the service's `status`. This page reads that status, then the Events, to find out why an agent is not `Ready`. Read in this order: the conditions, then the Events, then the operator's log. The names `badimage` and `hello` below are examples: use your own agent's name.
 
 The states and the moves between them are drawn in [Get started](../../get-started.md), and the run pods' own states in [Turn on run pods](../deploy/run-pods.md). They are not repeated here.
 
@@ -47,6 +47,7 @@ Every reason below is in `crates/controller/src/derive.rs` or in the provider's 
 
 | You see | Condition and reason | What to check | Seen |
 |---|---|---|---|
+| An empty `STATE`, or no `.status` at all | The operator has not written anything for this agent | The operator is not running; or it is not the leader yet (with `replicas` above 1, only the leader writes); or the agent's namespace is not in `watchNamespaces` (a typo is silent: the namespace is read as empty); or the operator's `Role` is missing there. Check `kubectl -n aap-system get pod`, then `kubectl -n <primary namespace> get lease aap-operator` (the `Lease` is in the **primary** namespace, the first of `watchNamespaces`), then the operator's log: `kubectl -n aap-system logs deploy/aap-operator`. [Install](../deploy/install.md#watchnamespaces) has `watchNamespaces`; a missing `Role` makes `/readyz` fail, and the operator names the namespaces still waiting every 30 s | no |
 | `Blocked`, `the AgentConfig "x" does not exist in this namespace` | `ConfigResolved=False` `ConfigNotFound` | `spec.configRef.name` of the service, and that the config is in the **same namespace** | yes |
 | `Blocked`, a field named in the message | `ConfigResolved=False` `ConfigInvalid` | The message names the field (`AgentService spec.interfaces.a2a.enabled: false: ...`). The same reason covers a `ModelEndpoint` or `ToolProvider` the config names that is missing, and a spec the provider refused. Run `aapctl validate -f` on the files to see every issue offline | yes (A2A off) |
 | `Blocked`, `CloudNativePG is not installed in this cluster` | `StoreReady=False` `CNPGNotInstalled` | The agent asked for `store.postgres.cnpg`. Install CloudNativePG, or use `store.postgres.secretRef`. An operator built without the store feature gives the same reason | yes |
@@ -57,15 +58,22 @@ Every reason below is in `crates/controller/src/derive.rs` or in the provider's 
 | `Degraded`, `container X keeps exiting` | `RuntimeReady=False` `CrashLoop` | `kubectl -n <ns> logs <pod> --previous` | cluster test |
 | `Degraded`, `container X exited with code 78: the agent refused its configuration` | `RuntimeReady=False` `ConfigRejected` | The agent's own log says which setting. The same reason covers a container the kubelet could not build from its configuration | cluster test |
 | `Degraded`, `container X exited with code 69: a dependency of the agent is unreachable` | `RuntimeReady=False` `DependencyUnavailable` | The agent's log says which dependency | cluster test |
-| `Degraded`, `a rollout is in progress` | `RuntimeReady=False` `Provisioning` | Wait, then look at the pod. The same reason is used when the runtime cannot get ready and the provider gave no reason | seen in the Events |
+| `Degraded`, `a rollout is in progress` | `RuntimeReady=False` `Provisioning` | Wait, then look at the pod ([find the pod](#find-the-pod)). Look for a pod that stays `Pending`, a `FailedScheduling` event, a volume claim that does not bind, or a quota that refuses the pod. The same reason is used when the runtime cannot get ready and the provider gave no reason | seen in the Events |
 | `Suspended`, `scaled to zero on purpose (spec.suspend)` | `RuntimeReady=False` `Suspended` | `spec.suspend` is `true`. `Ready` is `False` for it, and the state is healthy | yes |
 | `Suspended`, `scaled to zero because the agent reported no work` | `RuntimeReady=False` `Sleeping` | The idle timeout (`scaling.idleTimeout`) scaled it to zero | no |
 | Ready, but `Listed=False` `RegistryDisabled` | `Listed=False` | The operator serves no registry: no registry token is set. See [Install](../deploy/install.md#the-registry-token) | cluster test |
-| Ready, but `Listed=False` `A2ADisabled` | `Listed=False` | `spec.interfaces.a2a.enabled` is not true. The registry lists A2A agents only | yes |
+| `Blocked`, `spec.interfaces.a2a.enabled: false` | `ConfigResolved=False` `ConfigInvalid`, and at the same time `Listed=False` `A2ADisabled` | `a2a.enabled: false` is a validation error: v0 serves A2A and nothing else. Set it to `true`. `Ready` says `ConfigInvalid`; `Listed` says `A2ADisabled` | yes |
 | `Listed=False` `ServiceBlocked` | `Listed=False` | The service is `Blocked`: fix that first | yes |
 | `Listed=False` `RegistryFull` | `Listed=False` | The registry would pass 500 items or 1 MiB and lists nothing rather than truncate | no |
 
-One thing in that table is not what it looks like. An agent with the A2A interface off gets two reasons at once, as the walk showed: `ConfigResolved=False` `ConfigInvalid` and `Listed=False` `A2ADisabled`. The `Ready` reason is `ConfigInvalid`.
+### Find the pod
+
+An agent's pods carry the label `app.kubernetes.io/instance=<agent>` (the provider's golden output has it on the pod template):
+
+```sh
+kubectl -n agents get pod -l app.kubernetes.io/instance=hello
+kubectl -n agents describe pod -l app.kubernetes.io/instance=hello
+```
 
 ## Read the Events
 
@@ -88,6 +96,16 @@ Events:
 
 The second command also shows what the kubelet and the controllers said about the pod, which the conditions only summarise. For `badimage` it held `Failed to pull image "registry.invalid/none:1": ... no such host`, and for the missing Secret `Error: secret "absent-secret" not found`.
 
+### The operator's log
+
+When the conditions and the Events say nothing, or say nothing at all, read the operator's log:
+
+```sh
+kubectl -n aap-system logs deploy/aap-operator
+```
+
+With more than one replica this reads one pod, and only the leader reconciles: if that pod is a follower, read the leader's (`kubectl -n <primary namespace> get lease aap-operator` names it).
+
 ### Through the Platform API
 
 With the API on, `GET /v1/agents/{name}/events` gives the same Events to someone who has no `kubectl` and holds `platform:agents.read`:
@@ -109,17 +127,18 @@ The answer is `{ "events": [...], "incomplete": false }`. Each event is `{ type,
 ### Through `aapctl`
 
 ```sh
+aapctl login --server https://api.example --issuer https://issuer.example/realms/platform   # once, in a browser
 aapctl get agents                    # NAME KIND STATE MANAGED-BY SUSPENDED TITLE
 aapctl get agents badimage -o json   # the whole answer: state, conditions, status
 ```
 
-The state is lower case here: `saving`, `blocked`, `degraded`, `ready`, `suspended` or `deleting`. The `conditions` in the JSON are the ones above. `aapctl` has no command for Events at this commit: use the route, or `kubectl`. `aapctl` ships in no image: build it from the repository (`cargo run -q -p aap-cli -- get agents`).
+The state is lower case here: `saving`, `blocked`, `degraded`, `ready`, `suspended` or `deleting`. The `conditions` in the JSON are the ones above. Where a token comes from is on [Turn on the Platform API](../deploy/platform-api.md) (`$TOKEN` in the `curl` above is one the issuer gave you, and `aapctl login` also takes `--token-stdin`). `aapctl` has no command for Events at this commit: use the route, or `kubectl`. `aapctl` ships in no image: build it from the repository (`cargo run -q -p aap-cli -- get agents`).
 
 ## What proves it
 
 | Check | Where | What it holds |
 |---|---|---|
-| `cargo test --workspace` | [`operator.yml`](../../../.github/workflows/operator.yml), job `test` | `derive.rs` on fixed observations: each condition, each reason, the state, the `Ready` rule |
+| `cargo test --workspace` | [`operator.yml`](../../../.github/workflows/operator.yml), job `test` | `crates/controller/tests/pure.rs` on fixed observations: each condition, each reason, the state, the `Ready` rule |
 | `operator-e2e` | `operator.yml` | The operator binary against a kind cluster with real pods: a folder agent reaches `Ready`; a missing Secret is a condition until the Secret exists; a missing or invalid config blocks and a fixed one unblocks; `suspend` scales to zero; an object that is not ours with the agent's name is a conflict that changes nothing; a store of `cnpg` without CloudNativePG is `CNPGNotInstalled` |
 | `runtime-kubernetes` | `operator.yml` | The provider against kind: a container that exits 78, 69 or 1 is `ConfigRejected`, `DependencyUnavailable` or `CrashLoop` |
 | `api-e2e` | [`operator-image.yml`](../../../.github/workflows/operator-image.yml) | The deployed API: the Events of the agent's objects are an array, newest first, each about this agent. A `403` names `platform:agents.read`, and another name is a `404` |
@@ -132,7 +151,7 @@ On 2026-11-27, on a kind cluster (Kubernetes v1.35.8), the operator at `sha-2c16
 
 ### What is unverified
 
-- **The rows marked *no*.** They are read from the code, and the unit tests of `derive.rs` hold them. No cluster showed `ClusterNotReady`, `Sleeping` or `RegistryFull`. I found no test that names `NoEndpoint`.
+- **The rows marked *no*.** They are read from the code, and the unit tests of `derive.rs` (`crates/controller/tests/pure.rs`) hold them. No cluster showed `ClusterNotReady`, `Sleeping` or `RegistryFull`. I found no test that names `NoEndpoint`.
 - **The rows marked *cluster test*** were not reproduced on the walk.
 - **The Events route on the walk.** It was not called: no issuer ran there. `api-e2e` calls it with the testkit's issuer.
 - **The Events route's names against a real CloudNativePG.** The names of its `Cluster`, pods and jobs are from its documentation and not from a run ([§60a](../../architecture/10-control-plane-and-crds.md#60a-admin-dashboard-v0), *Events and the OpenAPI document*).

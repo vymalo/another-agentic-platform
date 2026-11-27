@@ -42,7 +42,7 @@ With run pods on, a third value is required: `api.config.defaults.coder.workVolu
 
 ## The values
 
-Add these to the file you used for the operator. All names are placeholders.
+Add these to the file you used for the operator, or keep them in a second file and pass both with `-f`. **Do not paste a second top-level `api:` or `networkPolicy:` block** into one file: YAML keeps the last, and the first is dropped without a warning. All names are placeholders.
 
 ```yaml
 api:
