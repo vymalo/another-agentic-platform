@@ -631,8 +631,8 @@ in a deployment that probes https servers; the chart cannot know the addresses.
 
 The status is the K2 `SharedStatus` with `probe.tools` (at most 64 names, sorted, each once, `toolsMore` for the rest, and `incomplete` when the server still named a cursor after five pages) and the
 `Reachable` condition (`Probed`, `NeedsHeader`, `Invalid`, `Unreachable`, `NotMcp` or `Timeout`; its message holds no URL and no header
-name or value). `render-check.sh` holds that the default render has one egress rule, no port 80 and no probe variable, that the probe render
-has DNS and exactly the listed peers and ports, the two variables, the `Role` unmoved, that traces and the probe stack (five rules), and
+name or value). `render-check.sh` holds that the default render has one egress rule, no port 80 and no probe key, that the probe render
+has DNS and exactly the listed peers and ports, the two keys of the operator's file (`toolProbe.enabled` and `toolProbe.timeoutSecs`), the `Role` unmoved, that traces and the probe stack (five rules), and
 every refusal by name; `api-e2e.sh` step 6a makes a provider through the deployed API, probes a stub MCP server on the runner through this
 egress, and reads `Reachable: True` and the tools back; a second provider that names a header is `Unknown`, `NeedsHeader`. `k10-e2e.sh`
 probes the catalogue's Kubernetes server through it (the example's pods as the peers, `tests/e2e/k10.values.yaml`) and then has a folder agent
