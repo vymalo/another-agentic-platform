@@ -433,6 +433,21 @@ dependencies = [
 ]
 
 [[package]]
+name = "aap-usage-otlp"
+version = "0.1.0"
+dependencies = [
+ "aap-usage",
+ "aap-usage-otlp",
+ "reqwest",
+ "serde_json",
+ "thiserror 2.0.21",
+ "tokio",
+ "tracing",
+ "tracing-subscriber",
+ "url",
+]
+
+[[package]]
 name = "ahash"
 version = "0.8.12"
 source = "registry+https://github.com/rust-lang/crates.io-index"
