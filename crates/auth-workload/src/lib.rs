@@ -24,6 +24,9 @@
 
 #![warn(missing_docs)]
 
+#[cfg(feature = "testkit")]
+pub mod testkit;
+
 use std::collections::{BTreeMap, BTreeSet};
 
 use aap_ports::{Certificate, ClientAuthError, ClientAuthenticator, InvalidCertificate, Principal};
@@ -300,6 +303,16 @@ fn reason(error: webpki::Error) -> InvalidCertificate {
 
 fn invalid(reason: InvalidCertificate) -> ClientAuthError {
     ClientAuthError::Invalid(reason)
+}
+
+/// The certificates of a PEM bundle, in DER: what [`WorkloadAuth::with_roots`] takes, and what the TLS listener builds its
+/// client-certificate verifier from, so that the two read **one** bundle in **one** way (ANR-1011).
+///
+/// # Errors
+///
+/// [`ConfigError::Bundle`] when a block cannot be read. A bundle with no block is `Ok` and empty: the callers refuse it.
+pub fn parse_bundle(bundle: &str) -> Result<Vec<CertificateDer<'static>>, ConfigError> {
+    roots_from_pem(bundle)
 }
 
 /// The certificates of a PEM bundle. Text between blocks (a comment, a header) is skipped to the next

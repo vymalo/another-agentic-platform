@@ -8,7 +8,7 @@
 use std::collections::BTreeMap;
 use std::sync::{Mutex, PoisonError};
 
-use aap_ports::{AuthError, InvalidToken};
+use aap_ports::{AuthError, ClientAuthError, InvalidCertificate, InvalidToken};
 use axum::http::Method;
 
 use crate::routes;
@@ -89,6 +89,23 @@ pub(crate) fn reason_label(error: &AuthError) -> &'static str {
     }
 }
 
+/// The closed word of a certificate that was refused: its own words, `cert_` first, so that a series of the workload listener is
+/// never mistaken for a token's.
+pub(crate) fn certificate_reason_label(error: &ClientAuthError) -> &'static str {
+    match error {
+        ClientAuthError::Missing => "cert_missing",
+        ClientAuthError::Unavailable(_) => "cert_unavailable",
+        ClientAuthError::Invalid(why) => match why {
+            InvalidCertificate::Malformed => "cert_malformed",
+            InvalidCertificate::BadChain => "cert_bad_chain",
+            InvalidCertificate::WrongUse => "cert_wrong_use",
+            InvalidCertificate::Expired => "cert_expired",
+            InvalidCertificate::UnknownIdentity => "cert_unknown_identity",
+            InvalidCertificate::NoIdentity => "cert_no_identity",
+        },
+    }
+}
+
 impl ApiMetrics {
     /// An empty set.
     #[must_use]
@@ -118,6 +135,14 @@ impl ApiMetrics {
     /// Count one authentication failure.
     pub(crate) fn auth_failure(&self, error: &AuthError) {
         self.add(metric::AUTH_FAILURES, &[("reason", reason_label(error))]);
+    }
+
+    /// Count one certificate that was refused (the workload listener).
+    pub(crate) fn certificate_failure(&self, error: &ClientAuthError) {
+        self.add(
+            metric::AUTH_FAILURES,
+            &[("reason", certificate_reason_label(error))],
+        );
     }
 
     /// The value of a series, 0 when it was never touched.

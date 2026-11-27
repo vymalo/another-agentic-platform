@@ -6,6 +6,7 @@
 //! the OpenAPI document of the API (K8) and needs no file.
 
 mod config;
+mod mtls;
 mod run;
 mod serve;
 

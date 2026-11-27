@@ -680,6 +680,7 @@ for each tested shape (tests/api-shapes.sh) to find such a value before it is de
 {{- fail "api.metrics.serviceMonitor.labels must be a map of label names to values" -}}
 {{- end -}}
 {{- end -}}
+{{- include "aap.api.workload.validate" . -}}
 {{- if not (and (or (kindIs "float64" $api.preStopSleepSeconds) (kindIs "int" $api.preStopSleepSeconds) (kindIs "int64" $api.preStopSleepSeconds)) (ge (int $api.preStopSleepSeconds) 0)) -}}
 {{- fail (printf "api.preStopSleepSeconds must be a whole number, 0 or more (0: no preStop hook), got %v" $api.preStopSleepSeconds) -}}
 {{- end -}}
@@ -923,6 +924,81 @@ compares it with the `iss` of a token; the JWKS URL (.query true) may have them.
 {{- end -}}
 
 {{/*
+api.workload (ANR-1011): what the chart can refuse of the mutual-TLS listener, and what the binary refuses at start all the same (a
+SPIFFE id that is not one, a permission that is not platform:agents.own, a clash of ports). Off, nothing is checked and nothing is rendered.
+*/}}
+{{- define "aap.api.workload.validate" -}}
+{{- $api := .Values.api -}}
+{{- if and (hasKey $api "workload") (not (kindIs "map" $api.workload)) -}}
+{{- fail "api.workload must be a map (the defaults of values.yaml are its keys; a null removes them)" -}}
+{{- end -}}
+{{- if include "aap.api.workloadEnabled" . -}}
+{{- $w := $api.workload -}}
+{{- range $k, $v := $w -}}
+{{- if not (has $k (list "enabled" "port" "clientAuth" "clients" "tls" "clientCa" "from")) -}}
+{{- fail (printf "api.workload.%s is not a setting: enabled, port, clientAuth, clients, tls, clientCa or from" $k) -}}
+{{- end -}}
+{{- end -}}
+{{- if not (include "aap.isPort" $w.port) -}}
+{{- fail (printf "api.workload.port: %v is not a port number" $w.port) -}}
+{{- end -}}
+{{- if or (eq (int $w.port) (int $api.port)) (eq (int $w.port) (int $api.healthPort)) (eq (int $w.port) (int $api.metrics.port)) -}}
+{{- fail "api.workload.port must differ from api.port, api.healthPort and api.metrics.port: the workload listener is a port of its own" -}}
+{{- end -}}
+{{- if not (has (toString $w.clientAuth) (list "required" "optional")) -}}
+{{- fail (printf "api.workload.clientAuth must be required or optional, got %q" (toString $w.clientAuth)) -}}
+{{- end -}}
+{{- if not (and (kindIs "slice" $w.clients) $w.clients) -}}
+{{- fail "api.workload.clients is required while api.workload.enabled: at least one workload ({spiffeId, permissions}); a listener that accepts no one is a mistake" -}}
+{{- end -}}
+{{- $seen := dict -}}
+{{- range $i, $c := $w.clients -}}
+{{- if not (kindIs "map" $c) -}}
+{{- fail (printf "api.workload.clients[%d] must be a map with spiffeId and permissions" $i) -}}
+{{- end -}}
+{{- range $k, $v := $c -}}
+{{- if not (has $k (list "spiffeId" "permissions")) -}}
+{{- fail (printf "api.workload.clients[%d].%s is not a setting: spiffeId or permissions" $i $k) -}}
+{{- end -}}
+{{- end -}}
+{{- if not (and (kindIs "string" $c.spiffeId) (regexMatch `^spiffe://[^[:space:]/]+(/[^[:space:]]*)?$` $c.spiffeId)) -}}
+{{- fail (printf "api.workload.clients[%d].spiffeId must be the certificate's exact URI SAN, spiffe://<trust domain>/<path> with no spaces, got %q" $i (toString $c.spiffeId)) -}}
+{{- end -}}
+{{- if hasKey $seen $c.spiffeId -}}
+{{- fail (printf "api.workload.clients[%d].spiffeId %s is named twice: one identity has one set of permissions" $i $c.spiffeId) -}}
+{{- end -}}
+{{- $_ := set $seen $c.spiffeId true -}}
+{{- if not (or (kindIs "slice" $c.permissions) (kindIs "invalid" $c.permissions)) -}}
+{{- fail (printf "api.workload.clients[%d].permissions must be a list" $i) -}}
+{{- end -}}
+{{- range $p := (default (list) $c.permissions) -}}
+{{- if ne (toString $p) "platform:agents.own" -}}
+{{- fail (printf "api.workload.clients[%d].permissions names %q, which a workload certificate may not carry: only platform:agents.own is grantable this way" $i (toString $p)) -}}
+{{- end -}}
+{{- end -}}
+{{- end -}}
+{{- $tls := default (dict) $w.tls -}}
+{{- if not (and (kindIs "string" $tls.secretName) $tls.secretName) -}}
+{{- fail "api.workload.tls.secretName is required while api.workload.enabled: the kubernetes.io/tls Secret (tls.crt, tls.key) the listener presents; the chart makes none and holds no key" -}}
+{{- end -}}
+{{- $ca := default (dict) $w.clientCa -}}
+{{- if not (and (kindIs "string" $ca.configMap) $ca.configMap) -}}
+{{- fail "api.workload.clientCa.configMap is required while api.workload.enabled: the ConfigMap that holds the CA bundle client certificates must chain to" -}}
+{{- end -}}
+{{- if not (and (kindIs "string" $ca.key) $ca.key) -}}
+{{- fail "api.workload.clientCa.key must name the key of that ConfigMap that holds the PEM bundle" -}}
+{{- end -}}
+{{- if not (kindIs "slice" (default (list) $w.from)) -}}
+{{- fail "api.workload.from must be a list of peers" -}}
+{{- end -}}
+{{- include "aap.checkPeers" (dict "what" "api.workload.from" "peers" (default (list) $w.from)) -}}
+{{- if and $api.networkPolicy.enabled (not $w.from) -}}
+{{- fail "api.workload.from is required while api.networkPolicy.enabled: with none, nothing could reach the workload listener (list the orchestrator's pods, or set api.networkPolicy.enabled=false)" -}}
+{{- end -}}
+{{- end -}}
+{{- end -}}
+
+{{/*
 api.extraEnv, api.extraVolumes and api.extraVolumeMounts: each a list of maps; the chart's own names are refused (the variables the
 binary reads from the environment before its file, the volume `config`, everything under /etc/aap-api), a mount must name a volume of
 extraVolumes, and a name is used once.
@@ -961,6 +1037,9 @@ extraVolumes, and a name is used once.
 {{- if and $api.otel.enabled (has $v.name (list "otel-headers" "otel-ca")) -}}
 {{- fail (printf "api.extraVolumes: %s is the chart's volume of api.otel: name yours otherwise" $v.name) -}}
 {{- end -}}
+{{- if and (include "aap.api.workloadEnabled" $) (has $v.name (list "workload-tls" "workload-ca")) -}}
+{{- fail (printf "api.extraVolumes: %s is the chart's volume of api.workload: name yours otherwise" $v.name) -}}
+{{- end -}}
 {{- if eq $v.name "config" -}}
 {{- fail "api.extraVolumes: `config` is the chart's volume (the configuration file): name yours otherwise" -}}
 {{- end -}}
@@ -980,6 +1059,9 @@ extraVolumes, and a name is used once.
 {{- $path := trimSuffix "/" $m.mountPath -}}
 {{- if and $api.otel.enabled (or (eq $path "/etc/aap/otel") (hasPrefix "/etc/aap/otel/" $path) (eq $path "/var/run/secrets/aap/otel") (hasPrefix "/var/run/secrets/aap/otel/" $path)) -}}
 {{- fail (printf "api.extraVolumeMounts: %s is mounted at %s, which is where api.otel mounts its headers and CA bundle (/var/run/secrets/aap/otel, /etc/aap/otel): mount it elsewhere" $m.name $m.mountPath) -}}
+{{- end -}}
+{{- if and (include "aap.api.workloadEnabled" $) (or (eq $path "/etc/aap-api-workload") (hasPrefix "/etc/aap-api-workload/" $path)) -}}
+{{- fail (printf "api.extraVolumeMounts: %s is mounted at %s, which is where api.workload mounts its server certificate and CA bundle (/etc/aap-api-workload): mount it elsewhere" $m.name $m.mountPath) -}}
 {{- end -}}
 {{- if or (eq $path "/etc/aap-api") (hasPrefix "/etc/aap-api/" $path) -}}
 {{- fail (printf "api.extraVolumeMounts: %s is mounted at %s, which is the configuration file's directory (/etc/aap-api): mount it elsewhere, for example /etc/aap-api-ca" $m.name $m.mountPath) -}}

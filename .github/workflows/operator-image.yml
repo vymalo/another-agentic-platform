@@ -19,7 +19,7 @@ name: Operator and API images
 # api-image:   (D7b1) builds docker/api/Dockerfile and smoke-tests the image like the operator's (the user, the version, the usage, the
 #              example configuration accepted, a misspelt key refused, no cluster to reach said so, no shell), and runs `api --check`
 #              in the image on the configuration the chart renders for each shape of values it is tested in (deploy/operator/tests/
-#              api-shapes.sh: the golden one, a Secret per agent, the least a deployment must say, one that sets every value, one with run pods, one with the metrics on and one with traces on, whose tracing environment the same job also hands to `api --check`). That
+#              api-shapes.sh: the golden one, a Secret per agent, the least a deployment must say, one that sets every value, one with run pods, one with the metrics on, one with the workload listener on and one with traces on, whose tracing environment the same job also hands to `api --check`). That
 #              finds a shape the chart renders and the binary refuses; it does not prove there is none: the chart refuses what it can check
 #              at render time, and anything else the binary refuses at start, failing closed. It is kept as an artifact for the push, as
 #              the operator's is.
@@ -164,6 +164,7 @@ jobs:
           helm lint deploy/operator -f deploy/operator/examples/netcup.values.yaml
           helm lint deploy/operator -f deploy/operator/tests/secret.values.yaml
           helm lint deploy/operator -f deploy/operator/tests/api.values.yaml
+          helm lint deploy/operator -f deploy/operator/tests/workload.values.yaml
           # tests/api-secretref.values.yaml is NOT linted: it says `cnpg: null` (to switch the store to a Secret per agent), and `helm lint`
           # coalesces the values twice, so the second pass puts the chart's default `cnpg` back and logs ten "[INFO] Fail: ... exactly
           # one of cnpg and secretRef" that fail nothing (reproduced with a four-line chart, helm v3.19.0: a key set to null in the values
@@ -210,7 +211,7 @@ jobs:
           # on (tests/runpods.values.yaml: a PriorityClass, a ValidatingAdmissionPolicy and its binding, a Role), run pods on with
           # several namespaces (K6a: one Role and RoleBinding per namespace, the run pods' Role in each, the binding over both),
           # the two ServiceMonitors on
-          # (tests/metrics.values.yaml, against the vendored schema in tests/schemas/monitoring.coreos.com), traces of both on (tests/otel.values.yaml), and the CRDs chart.
+          # (tests/metrics.values.yaml, against the vendored schema in tests/schemas/monitoring.coreos.com), traces of both on (tests/otel.values.yaml), the API's workload listener on (tests/workload.values.yaml, ANR-1011), and the CRDs chart.
           helm template aap-operator deploy/operator --namespace another-agentic-system > "$RUNNER_TEMP/rendered-default.yaml"
           helm template aap-operator deploy/operator --namespace another-agentic-system \
             -f deploy/operator/examples/netcup.values.yaml > "$RUNNER_TEMP/rendered-netcup.yaml"
@@ -231,6 +232,8 @@ jobs:
             -f deploy/operator/tests/metrics.values.yaml > "$RUNNER_TEMP/rendered-metrics.yaml"
           helm template aap-operator deploy/operator --namespace another-agentic-system \
             -f deploy/operator/tests/otel.values.yaml > "$RUNNER_TEMP/rendered-otel.yaml"
+          helm template aap-operator deploy/operator --namespace another-agentic-system \
+            -f deploy/operator/tests/workload.values.yaml > "$RUNNER_TEMP/rendered-workload.yaml"
           helm template aap-operator-crds deploy/operator-crds > "$RUNNER_TEMP/rendered-crds.yaml"
           for attempt in 1 2 3; do
             status=0
@@ -239,7 +242,7 @@ jobs:
                 -schema-location 'deploy/operator/tests/schemas/{{.Group}}/{{.ResourceKind}}_{{.ResourceAPIVersion}}.json' \
                 "$RUNNER_TEMP/rendered-default.yaml" "$RUNNER_TEMP/rendered-netcup.yaml" "$RUNNER_TEMP/rendered-secret.yaml" \
                 "$RUNNER_TEMP/rendered-api.yaml" "$RUNNER_TEMP/rendered-api-secretref.yaml" "$RUNNER_TEMP/rendered-api-full.yaml" \
-                "$RUNNER_TEMP/rendered-runpods.yaml" "$RUNNER_TEMP/rendered-runpods-two.yaml" "$RUNNER_TEMP/rendered-metrics.yaml" "$RUNNER_TEMP/rendered-otel.yaml" "$RUNNER_TEMP/rendered-crds.yaml" \
+                "$RUNNER_TEMP/rendered-runpods.yaml" "$RUNNER_TEMP/rendered-runpods-two.yaml" "$RUNNER_TEMP/rendered-metrics.yaml" "$RUNNER_TEMP/rendered-otel.yaml" "$RUNNER_TEMP/rendered-workload.yaml" "$RUNNER_TEMP/rendered-crds.yaml" \
                 > "$RUNNER_TEMP/kubeconform.out" 2>&1 || status=$?
             cat "$RUNNER_TEMP/kubeconform.out"
             if [ "$status" -eq 0 ]; then exit 0; fi

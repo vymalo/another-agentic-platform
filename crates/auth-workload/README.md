@@ -25,11 +25,12 @@ configuration is loaded, not when a request arrives.
 
 ```yaml
 workloadClients:
-  clients:
-    - spiffeId: spiffe://another/ns/another-agents/sa/orchestrator
-      permissions:
-        - platform:agents.own
+  - spiffeId: spiffe://another/ns/another-agents/sa/orchestrator
+    permissions:
+      - platform:agents.own
 ```
+
+In the API's file `workloadClients` is the **list** (with `workloadListener`, ANR-1011); the crate's `WorkloadClients { clients }` is the same list as a type.
 
 `WorkloadClients` denies unknown fields. An empty identity, an identity named twice and a permission that
 is not `platform:agents.own` are refused by `WorkloadAuth::new`, which also refuses a bundle that is not
@@ -55,10 +56,18 @@ expired one. Each refusal has a single cause, and the suite checks that no error
 its identity. Two crate tests go beyond the suite: an identity mapped to no permissions holds nothing, and
 the **configured** bundle decides (the accepted leaf is refused when the authenticator trusts the other CA).
 
-## Not in this slice
+## The listener, and what is still not built
 
-- **The mutual-TLS listener and the composition root** (ANR-1011): this crate is pure and has no
-  listener.
-- **The CRL check** ADR-0042 decision 2 asks for (fetched at most 2 h ago, fail closed when it cannot be
-  read): this card's checklist names the chain, the extended key usage and `notAfter` only. It is the
-  next slice's to add, and it needs a source to fetch from.
+- **The mutual-TLS listener and the composition root** are ANR-1011 (AD-067): `bin/api/src/mtls.rs` hands each request the
+  peer's certificate and `aap_platform_api::workload_router` serves the owner routes behind this authenticator. This crate
+  stays pure: no listener, no file read, no key.
+- **The CRL check** ADR-0042 decision 2 asks for (fetched at most 2 h ago, fail closed when it cannot be read) is **still not
+  built**: it needs a source to fetch from, which the deployment has not named. Until it is, a revoked certificate is refused
+  only when it expires, so keep the leaf's lifetime short.
+
+## The `testkit` feature
+
+`aap_auth_workload::testkit` (feature `testkit`, in no image) mints a CA and leaves **with** private keys at run time
+(`TestPki`, `LeafSpec`, `Leaf`, on `rcgen` with `ring`). The checked-in fixtures have no key, so they cannot complete a TLS
+handshake; the socket tests of `bin/api` use this instead. `parse_bundle` reads a PEM bundle into DER in the one way the
+authenticator and the TLS verifier both use.

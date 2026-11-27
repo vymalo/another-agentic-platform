@@ -48,7 +48,7 @@ spec:
         runAsNonRoot: true
         runAsUser: 65532
         runAsGroup: 65532
-        {{- if and $api.otel.enabled $api.otel.headersSecret.name }}
+        {{- if or (include "aap.api.workloadEnabled" .) (and $api.otel.enabled $api.otel.headersSecret.name) }}
         # So the mounted headers file (mode 0440) is readable by the non-root user.
         fsGroup: 65532
         {{- end }}
@@ -77,6 +77,11 @@ spec:
             - name: health
               containerPort: {{ $api.healthPort }}
               protocol: TCP
+            {{- if include "aap.api.workloadEnabled" . }}
+            - name: workload
+              containerPort: {{ $api.workload.port }}
+              protocol: TCP
+            {{- end }}
             {{- if include "aap.api.metricsExposed" . }}
             - name: metrics
               containerPort: {{ $api.metrics.port }}
@@ -123,6 +128,15 @@ spec:
             - name: config
               mountPath: /etc/aap-api
               readOnly: true
+            {{- if include "aap.api.workloadEnabled" . }}
+            # The server certificate and the CA bundle of the workload listener (ANR-1011): files, never a value of the configuration.
+            - name: workload-tls
+              mountPath: /etc/aap-api-workload/tls
+              readOnly: true
+            - name: workload-ca
+              mountPath: /etc/aap-api-workload/ca
+              readOnly: true
+            {{- end }}
             {{- if $api.otel.enabled }}
             {{- include "aap.otel.mounts" (dict "block" $api.otel) | nindent 12 }}
             {{- end }}
@@ -133,6 +147,18 @@ spec:
         - name: config
           configMap:
             name: {{ include "aap.api.fullname" . }}
+        {{- if include "aap.api.workloadEnabled" . }}
+        - name: workload-tls
+          secret:
+            secretName: {{ $api.workload.tls.secretName | quote }}
+            defaultMode: 288 # 0440
+        - name: workload-ca
+          configMap:
+            name: {{ $api.workload.clientCa.configMap | quote }}
+            items:
+              - key: {{ $api.workload.clientCa.key | quote }}
+                path: ca.crt
+        {{- end }}
         {{- if $api.otel.enabled }}
         {{- include "aap.otel.volumes" (dict "block" $api.otel) | nindent 8 }}
         {{- end }}

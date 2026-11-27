@@ -18,7 +18,7 @@
 use std::error::Error as StdError;
 
 use aap_forms::{FormError, FormTarget, Unrepresentable, from_object_errors};
-use aap_ports::{AuthError, InvalidToken, Kind, ObjectsError};
+use aap_ports::{AuthError, ClientAuthError, InvalidToken, Kind, ObjectsError};
 use axum::http::header::{ALLOW, CONTENT_TYPE, RETRY_AFTER, WWW_AUTHENTICATE};
 use axum::http::{HeaderName, HeaderValue, StatusCode};
 use axum::response::{IntoResponse, Response};
@@ -182,6 +182,33 @@ impl Problem {
                 "keys-unavailable",
                 "The token cannot be checked now",
                 "the issuer's keys cannot be fetched, so the token could not be checked: it is not known to be bad, try again",
+            )
+            .header(RETRY_AFTER, RETRY_AFTER_SECONDS),
+        }
+    }
+
+    /// `401` or `503` for a client certificate that did not become a workload (ANR-1011). No `WWW-Authenticate`: there is no
+    /// HTTP challenge for a certificate, and naming `Bearer` here would invite a client to send a token to a listener that
+    /// never reads one. The detail is a closed word, never a name taken from the certificate.
+    pub fn from_client_auth(error: &ClientAuthError) -> Self {
+        match error {
+            ClientAuthError::Missing => Self::new(
+                StatusCode::UNAUTHORIZED,
+                "missing-certificate",
+                "Unauthorized",
+                "this listener takes a client certificate and nothing else",
+            ),
+            ClientAuthError::Invalid(why) => Self::new(
+                StatusCode::UNAUTHORIZED,
+                "invalid-certificate",
+                "Unauthorized",
+                format!("the client certificate is not valid: {why}"),
+            ),
+            ClientAuthError::Unavailable(_) => Self::new(
+                StatusCode::SERVICE_UNAVAILABLE,
+                "trust-unavailable",
+                "The certificate cannot be checked now",
+                "the workload trust could not be read, so the certificate was not checked: it is not known to be bad, try again",
             )
             .header(RETRY_AFTER, RETRY_AFTER_SECONDS),
         }

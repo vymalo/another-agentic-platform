@@ -47,6 +47,15 @@ The table is [`routes.rs`](src/routes.rs) (`ROUTES`), which is §60a's table wri
 `HEAD` is `GET`. A method a path does not serve is `405` with `Allow`; a path that is no route is `404`. Neither asks for a token. Bodies
 are objects, never bare lists, in camelCase.
 
+### The workload router (ANR-1011, AD-067)
+
+`workload_router(state, authenticator)` is the router of the mutual-TLS listener: **the routes of the table whose permission is `platform:agents.own` (the four owner routes) and no other**, behind
+`workload.rs`'s guard in place of `authz::guard`. The state is an `ApiState<O, NoBearer>`: `NoBearer` fills the bearer seam's slot and refuses every token, so nothing on this listener can check one,
+and the guard reads a `ClientAuthenticator` and the `PeerCertificate` the listener put on the request, never `Authorization`. A route the workload may not use is a `404` (not mounted) and a route of
+the table that `agents.own` does not open, mounted by a mistake, is `500` (logged); no certificate is `401 missing-certificate` (no `WWW-Authenticate`), a certificate that does not verify is
+`401 invalid-certificate` with a closed word, an unreadable trust is `503`, and a known identity without the permission is `403`. Failures count into `aap_api_auth_failures_total{reason}` with
+`cert_` reasons. `tests/workload.rs` (6) and the router's own test hold it; the socket tests are `bin/api`'s.
+
 ### Events and the OpenAPI document (K8)
 
 [`openapi.rs`](src/openapi.rs) builds the OpenAPI 3.1 document (`document()`; `pretty()` is the text of the checked-in

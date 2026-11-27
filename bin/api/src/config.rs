@@ -6,9 +6,10 @@
 //! are this file's own, and, for the types of the CRDs below `defaults`, whatever the types do not write back.
 
 use std::net::SocketAddr;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use aap_auth_oidc::OidcConfig;
+use aap_auth_workload::{WorkloadClient, WorkloadClients};
 use aap_forms::Defaults;
 use aap_platform_api::CorsOrigins;
 use anyhow::{Context, Result, bail};
@@ -56,6 +57,44 @@ pub struct ApiConfig {
     pub cors: CorsSection,
     /// What a new agent gets besides what its form sets; its `namespace` is the API's.
     pub defaults: Defaults,
+    /// The workloads the mutual-TLS listener accepts (ANR-1011): each a SPIFFE id and what it may do, of which only
+    /// `platform:agents.own` is grantable. Absent or empty with no `workloadListener`: there is no such listener.
+    #[serde(default)]
+    pub workload_clients: Vec<WorkloadClient>,
+    /// The mutual-TLS listener of the workloads (ANR-1011). Absent: no workload can call the API, and the person's listener is
+    /// all there is.
+    #[serde(default)]
+    pub workload_listener: Option<WorkloadListener>,
+}
+
+/// Whether the TLS layer insists on a client certificate.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum ClientAuth {
+    /// A connection with no client certificate does not complete its handshake. The default: the refusal is the TLS layer's.
+    #[default]
+    Required,
+    /// A connection with none is accepted, and the first request is answered `401` by the API (a problem detail a client can
+    /// read). A certificate that is presented is verified either way.
+    Optional,
+}
+
+/// The `workloadListener` block: where the mutual-TLS listener is and the files it reads. **Paths, not contents**: the key is
+/// a mounted file, never a value of this file.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct WorkloadListener {
+    /// Where it listens.
+    pub listen: SocketAddr,
+    /// The server certificate chain (PEM) the API presents, which the workload checks against its own trust.
+    pub cert_file: PathBuf,
+    /// The key of that certificate (PEM, PKCS#8, PKCS#1 or SEC1). Re-read when the file changes.
+    pub key_file: PathBuf,
+    /// The CA bundle (PEM) that client certificates must chain to: the one trust of this listener.
+    pub client_ca_file: PathBuf,
+    /// Whether a client certificate is required at the handshake.
+    #[serde(default)]
+    pub client_auth: ClientAuth,
 }
 
 /// The `cors` block.
@@ -82,6 +121,17 @@ pub struct Settings {
     pub cors: CorsOrigins,
     /// The deployment's defaults (checked).
     pub defaults: Defaults,
+    /// The workload listener, when there is one (validated).
+    pub workload: Option<WorkloadSettings>,
+}
+
+/// The workload listener and who may use it.
+#[derive(Debug)]
+pub struct WorkloadSettings {
+    /// Where it listens, and the files it reads.
+    pub listener: WorkloadListener,
+    /// The identities it accepts, validated (`platform:agents.own` only).
+    pub clients: WorkloadClients,
 }
 
 impl ApiConfig {
@@ -132,12 +182,18 @@ impl ApiConfig {
             );
         }
         check_image_registries(self.defaults.allowed_image_registries.as_deref())?;
-        check_ports(&[
+        let workload = workload(self.workload_clients, self.workload_listener)?;
+        let mut listeners = vec![
             ("listen", self.listen),
             ("healthListen", self.health_listen),
             ("metricsListen", self.metrics_listen),
-        ])?;
+        ];
+        if let Some(w) = &workload {
+            listeners.push(("workloadListener.listen", w.listener.listen));
+        }
+        check_ports(&listeners)?;
         Ok(Settings {
+            workload,
             listen: self.listen,
             health_listen: self.health_listen,
             metrics_listen: self.metrics_listen,
@@ -148,13 +204,52 @@ impl ApiConfig {
     }
 }
 
+/// The workload listener and its clients, or none. **Both or neither**: a listener that names no workload would accept every
+/// handshake and answer `403` to each, and clients with no listener would be a setting that does nothing, which the file refuses
+/// to say silently.
+fn workload(
+    clients: Vec<WorkloadClient>,
+    listener: Option<WorkloadListener>,
+) -> Result<Option<WorkloadSettings>> {
+    let clients = WorkloadClients { clients };
+    let Some(listener) = listener else {
+        if clients.clients.is_empty() {
+            return Ok(None);
+        }
+        bail!(
+            "workloadClients names workloads and there is no workloadListener for them to call: add the listener, or remove the clients"
+        );
+    };
+    if clients.clients.is_empty() {
+        bail!(
+            "workloadListener is set and workloadClients is empty: a listener that accepts no workload is a mistake (name the workloads, or remove the listener)"
+        );
+    }
+    // The identities and permissions: a permission that is not `platform:agents.own`, a duplicate or an empty id is refused here,
+    // at load, with the entry it is in.
+    clients.table().context("workloadClients")?;
+    for (key, path) in [
+        ("certFile", &listener.cert_file),
+        ("keyFile", &listener.key_file),
+        ("clientCaFile", &listener.client_ca_file),
+    ] {
+        if !path.is_absolute() {
+            bail!(
+                "workloadListener.{key}: {} is not an absolute path (the chart mounts these files; a relative path would depend on where the process started)",
+                path.display()
+            );
+        }
+    }
+    Ok(Some(WorkloadSettings { listener, clients }))
+}
+
 /// No two listeners on one port: the second `bind` would fail at start ("Address already in use"), so `--check` says it first.
 fn check_ports(listeners: &[(&str, SocketAddr)]) -> Result<()> {
     for (i, (a, addr_a)) in listeners.iter().enumerate() {
         for (b, addr_b) in &listeners[i + 1..] {
             if addr_a.port() == addr_b.port() {
                 bail!(
-                    "{a} and {b} are both on port {}: the API, the health endpoints and /metrics are three listeners and each needs a port of its own",
+                    "{a} and {b} are both on port {}: the API, the health endpoints, /metrics and the workload listener are separate listeners and each needs a port of its own",
                     addr_a.port()
                 );
             }
@@ -627,5 +722,136 @@ defaults:
             load(Path::new("/nonexistent/api.yaml")).unwrap_err()
         );
         assert!(error.contains("/nonexistent/api.yaml"), "{error}");
+    }
+
+    /// The example with the workload listener on.
+    fn with_workload() -> serde_yaml::Value {
+        let mut v = example();
+        let text = r#"
+workloadListener:
+  listen: 0.0.0.0:8443
+  certFile: /etc/aap-api-workload/tls/tls.crt
+  keyFile: /etc/aap-api-workload/tls/tls.key
+  clientCaFile: /etc/aap-api-workload/ca/ca.crt
+workloadClients:
+  - spiffeId: spiffe://another/ns/another-agents/sa/orchestrator
+    permissions: [platform:agents.own]
+"#;
+        let extra: serde_yaml::Value = serde_yaml::from_str(text).unwrap();
+        for (k, val) in extra.as_mapping().unwrap() {
+            v.as_mapping_mut().unwrap().insert(k.clone(), val.clone());
+        }
+        v
+    }
+
+    #[test]
+    fn the_workload_listener_is_off_unless_the_file_says_so_and_then_it_is_read() {
+        let off = ApiConfig::parse(EXAMPLE).unwrap().validate().unwrap();
+        assert!(off.workload.is_none(), "no block, no listener");
+
+        let on = ApiConfig::parse(&serde_yaml::to_string(&with_workload()).unwrap())
+            .unwrap()
+            .validate()
+            .unwrap();
+        let w = on.workload.unwrap();
+        assert_eq!(w.listener.listen.port(), 8443);
+        assert_eq!(
+            w.listener.client_auth,
+            ClientAuth::Required,
+            "required unless it says optional"
+        );
+        assert_eq!(w.clients.table().unwrap().len(), 1);
+    }
+
+    #[test]
+    fn a_workload_setting_that_is_wrong_stops_the_api_naming_it() {
+        type Case = (&'static str, fn(&mut serde_yaml::Value), &'static str);
+        let cases: [Case; 9] = [
+            (
+                "a permission a workload may not carry",
+                |v| {
+                    v["workloadClients"][0]["permissions"] =
+                        serde_yaml::from_str("[platform:agents.read]").unwrap();
+                },
+                "platform:agents.own",
+            ),
+            (
+                "the same identity twice",
+                |v| {
+                    let first = v["workloadClients"][0].clone();
+                    v["workloadClients"].as_sequence_mut().unwrap().push(first);
+                },
+                "named twice",
+            ),
+            (
+                "an identity that is not a SPIFFE id",
+                |v| {
+                    v["workloadClients"][0]["spiffeId"] = "orchestrator".into();
+                },
+                "not a SPIFFE id",
+            ),
+            (
+                "clients and no listener",
+                |v| {
+                    v.as_mapping_mut().unwrap().remove("workloadListener");
+                },
+                "no workloadListener",
+            ),
+            (
+                "a listener and no clients",
+                |v| {
+                    v["workloadClients"] = serde_yaml::from_str("[]").unwrap();
+                },
+                "accepts no workload",
+            ),
+            (
+                "a relative path",
+                |v| {
+                    v["workloadListener"]["keyFile"] = "tls.key".into();
+                },
+                "workloadListener.keyFile",
+            ),
+            (
+                "the listener on the API's port",
+                |v| {
+                    v["workloadListener"]["listen"] = "0.0.0.0:8080".into();
+                },
+                "workloadListener.listen",
+            ),
+            (
+                "a key it does not have",
+                |v| {
+                    v["workloadListener"]["typo"] = "x".into();
+                },
+                "typo",
+            ),
+            (
+                "a client auth it does not have",
+                |v| {
+                    v["workloadListener"]["clientAuth"] = "sometimes".into();
+                },
+                "clientAuth",
+            ),
+        ];
+        for (what, change, expected) in cases {
+            let mut v = with_workload();
+            change(&mut v);
+            let message = refused(&v);
+            assert!(message.contains(expected), "{what}: {message}");
+        }
+    }
+
+    #[test]
+    fn optional_client_auth_is_read() {
+        let mut v = with_workload();
+        v["workloadListener"]["clientAuth"] = "optional".into();
+        let settings = ApiConfig::parse(&serde_yaml::to_string(&v).unwrap())
+            .unwrap()
+            .validate()
+            .unwrap();
+        assert_eq!(
+            settings.workload.unwrap().listener.client_auth,
+            ClientAuth::Optional
+        );
     }
 }

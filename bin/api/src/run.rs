@@ -10,10 +10,11 @@ use std::time::Duration;
 
 use aap_api::ModelEndpoint;
 use aap_auth_oidc::OidcAuthenticator;
+use aap_auth_workload::WorkloadAuth;
 use aap_forms::Defaults;
 use aap_objects_kubernetes::KubernetesObjects;
-use aap_platform_api::{ApiMetrics, ApiState, CorsOrigins, router};
-use aap_ports::{AgentObjects, AuthError, Authenticator};
+use aap_platform_api::{ApiMetrics, ApiState, CorsOrigins, NoBearer, router, workload_router};
+use aap_ports::{AgentObjects, AuthError, Authenticator, ClientAuthenticator};
 use aap_trace::Tracer;
 use anyhow::{Context, Result};
 use axum::Router;
@@ -22,7 +23,8 @@ use futures::future::BoxFuture;
 use kube::api::ListParams;
 use tokio::sync::watch;
 
-use crate::config::{self, Settings};
+use crate::config::{self, Settings, WorkloadSettings};
+use crate::mtls::{self, MtlsListener};
 use crate::serve::{self, Check, Health};
 
 /// The settings of `api`. Every one is also an environment variable, which is how the chart sets them.
@@ -87,6 +89,66 @@ where
         .with_tracer(tracer)
         .with_version(env!("CARGO_PKG_VERSION"));
     Ok(router(state))
+}
+
+/// The router of the workload listener over any two ports (ANR-1011): the same objects and defaults as the person's, **no bearer
+/// authenticator** ([`NoBearer`]) and the certificate authenticator in its place. It shares the counters and the tracer, so the
+/// two listeners are one API in the metrics, told apart by the `cert_` reasons of the failures.
+///
+/// # Errors
+///
+/// The defaults are not usable.
+pub fn build_workload_router<O, W>(
+    objects: O,
+    auth: W,
+    defaults: Defaults,
+    metrics: Arc<ApiMetrics>,
+    tracer: Tracer,
+) -> Result<Router>
+where
+    O: AgentObjects + 'static,
+    W: ClientAuthenticator + 'static,
+{
+    let state = ApiState::new(objects, NoBearer, defaults)
+        .context("the deployment's defaults")?
+        .with_metrics(metrics)
+        .with_tracer(tracer)
+        .with_version(env!("CARGO_PKG_VERSION"));
+    Ok(workload_router(state, auth))
+}
+
+/// The workload listener, read from its files and bound: the router and the listener `serve_both` runs.
+///
+/// # Errors
+///
+/// A file that cannot be read, a bundle with no CA, a key that is not the certificate's, or a port in use.
+async fn workload_listener<O>(
+    settings: &WorkloadSettings,
+    objects: O,
+    defaults: Defaults,
+    metrics: Arc<ApiMetrics>,
+    tracer: Tracer,
+) -> Result<(MtlsListener, Router)>
+where
+    O: AgentObjects + 'static,
+{
+    let l = &settings.listener;
+    let ca = std::fs::read_to_string(&l.client_ca_file).with_context(|| {
+        format!(
+            "reading the client CA bundle {}",
+            l.client_ca_file.display()
+        )
+    })?;
+    let auth = WorkloadAuth::new(&ca, &settings.clients).context("the workload authenticator")?;
+    let tls = mtls::server_config(&l.cert_file, &l.key_file, &ca, l.client_auth)?;
+    let router = build_workload_router(objects, auth, defaults, metrics, tracer)?;
+    let tcp = tokio::net::TcpListener::bind(l.listen)
+        .await
+        .with_context(|| format!("binding {}", l.listen))?;
+    Ok((
+        MtlsListener::new(tcp, tls).context("the workload listener")?,
+        router,
+    ))
 }
 
 /// What `/readyz` asks: the issuer's keys can be had (at once, while a copy can still verify), and the cluster's API server
@@ -160,19 +222,23 @@ async fn signalled(mut rx: watch::Receiver<bool>) {
 /// Serve until told to stop, then drain. The API stops first and the health endpoints last, so that a pod that is going is
 /// `not ready` for as long as it takes.
 async fn serve_both(
-    api: tokio::net::TcpListener,
-    router: Router,
+    (api, router): (tokio::net::TcpListener, Router),
     health: tokio::net::TcpListener,
     check: Check,
     metrics: (tokio::net::TcpListener, Arc<ApiMetrics>),
     tracer: Tracer,
+    workload: Option<(MtlsListener, Router)>,
     stop: impl Future<Output = ()>,
 ) -> Result<()> {
     let draining = Arc::new(AtomicBool::new(false));
     let (stop_api, api_stopped) = watch::channel(false);
     let (stop_health, health_stopped) = watch::channel(false);
     let (stop_metrics, metrics_stopped) = watch::channel(false);
+    let (stop_workload, workload_stopped) = watch::channel(false);
     let api = tokio::spawn(serve::serve(api, router, signalled(api_stopped)));
+    let workload = workload.map(|(listener, router)| {
+        tokio::spawn(mtls::serve(listener, router, signalled(workload_stopped)))
+    });
     let health = tokio::spawn(serve::serve(
         health,
         serve::health(Health {
@@ -193,8 +259,10 @@ async fn serve_both(
         Running {
             draining,
             api,
+            workload,
             health,
             metrics: metrics_server,
+            stop_workload,
             stop_api,
             stop_health,
             stop_metrics,
@@ -207,12 +275,15 @@ async fn serve_both(
 
 type Server = tokio::task::JoinHandle<Result<()>>;
 
-/// The three servers as they run, and what stops each.
+/// The servers as they run, and what stops each.
 struct Running {
     draining: Arc<AtomicBool>,
     api: Server,
+    /// The workload listener, when the file has one. Its end is the API's: a pod that cannot serve its workloads is not well.
+    workload: Option<Server>,
     health: Server,
     metrics: Server,
+    stop_workload: watch::Sender<bool>,
     stop_api: watch::Sender<bool>,
     stop_health: watch::Sender<bool>,
     stop_metrics: watch::Sender<bool>,
@@ -229,14 +300,24 @@ async fn supervise(mut s: Running, stop: impl Future<Output = ()>) -> Result<()>
             Ok(())
         }
         r = &mut s.api => Err(ended("the API server", r)),
+        r = ended_workload(&mut s.workload) => Err(ended("the workload server", r)),
         r = &mut s.health => Err(ended("the health server", r)),
         r = &mut s.metrics => Err(ended("the metrics server", r)),
     };
     s.draining.store(true, Ordering::Release);
     let _ = s.stop_api.send(true);
-    if !s.api.is_finished() && tokio::time::timeout(DRAIN, &mut s.api).await.is_err() {
-        tracing::warn!("requests were still in flight after {DRAIN:?}; stopping anyway");
-        s.api.abort();
+    let _ = s.stop_workload.send(true);
+    // One deadline for both listeners that take requests: the grace period holds `DRAIN`, not twice it.
+    let deadline = tokio::time::Instant::now() + DRAIN;
+    for server in std::iter::once(&mut s.api).chain(s.workload.as_mut()) {
+        if !server.is_finished()
+            && tokio::time::timeout_at(deadline, &mut *server)
+                .await
+                .is_err()
+        {
+            tracing::warn!("requests were still in flight after {DRAIN:?}; stopping anyway");
+            server.abort();
+        }
     }
     let _ = s.stop_health.send(true);
     let _ = s.stop_metrics.send(true);
@@ -261,6 +342,14 @@ async fn supervise(mut s: Running, stop: impl Future<Output = ()>) -> Result<()>
     outcome
 }
 
+/// Resolves when the workload server ends, and never when there is none (or when it was ended already and taken).
+async fn ended_workload(server: &mut Option<Server>) -> Result<Result<()>, tokio::task::JoinError> {
+    match server {
+        Some(handle) => handle.await,
+        None => std::future::pending().await,
+    }
+}
+
 fn ended(what: &str, result: Result<Result<()>, tokio::task::JoinError>) -> anyhow::Error {
     match result {
         Ok(Ok(())) => anyhow::anyhow!("{what} stopped without being asked to"),
@@ -278,6 +367,7 @@ pub async fn run(args: Args) -> Result<()> {
         oidc,
         cors,
         defaults,
+        workload,
     } = config::load(&args.config)?;
     // Before the cluster and the issuer. A tracing setting that is refused never stops the API (tracing is not a security
     // control, and platforms inject OTEL_* variables of their own): one warning, by variable, and tracing is off.
@@ -309,6 +399,21 @@ pub async fn run(args: Args) -> Result<()> {
         })
     };
     let counters = Arc::new(ApiMetrics::new());
+    // The workload listener's files are read before anything binds: a missing CA bundle or a key that is not the certificate's
+    // stops the API at start, never at the first workload's request. The person's listener has no part in it.
+    let workload = match &workload {
+        Some(w) => Some(
+            workload_listener(
+                w,
+                objects.clone(),
+                defaults.clone(),
+                counters.clone(),
+                tracer.clone(),
+            )
+            .await?,
+        ),
+        None => None,
+    };
     let router = build_router(
         objects,
         auth,
@@ -329,12 +434,12 @@ pub async fn run(args: Args) -> Result<()> {
         .await
         .with_context(|| format!("binding {metrics_listen}"))?;
     serve_both(
-        api,
-        router,
+        (api, router),
         health,
         check,
         (metrics, counters),
         tracer,
+        workload,
         termination(),
     )
     .await
@@ -408,12 +513,12 @@ mod tests {
         let (metrics, metrics_addr) = bound().await;
         let (stop, stopped) = watch::channel(false);
         let running = tokio::spawn(serve_both(
-            api,
-            router,
+            (api, router),
             health,
             check,
             (metrics, counters),
             Tracer::off(),
+            None,
             signalled(stopped),
         ));
 
@@ -485,12 +590,12 @@ mod tests {
         let (stop, stopped) = watch::channel(false);
         let check: Check = Arc::new(|| Box::pin(async { Ok(()) }));
         let running = tokio::spawn(serve_both(
-            api,
-            router,
+            (api, router),
             health,
             check,
             (metrics, counters),
             Tracer::off(),
+            None,
             signalled(stopped),
         ));
         assert_eq!(http(api_addr, "/v1/me", Some(&token)).await.0, 200);
@@ -517,8 +622,10 @@ mod tests {
         Running {
             draining: Arc::new(AtomicBool::new(false)),
             api,
+            workload: None,
             health,
             metrics,
+            stop_workload: watch::channel(false).0,
             stop_api: watch::channel(false).0,
             stop_health: watch::channel(false).0,
             stop_metrics: watch::channel(false).0,
@@ -659,12 +766,12 @@ mod tests {
         let (stop, stopped) = watch::channel(false);
         let check: Check = Arc::new(|| Box::pin(async { Ok(()) }));
         let running = tokio::spawn(serve_both(
-            api,
-            router,
+            (api, router),
             health,
             check,
             (metrics, counters),
             tracer,
+            None,
             signalled(stopped),
         ));
         assert_eq!(http(api_addr, "/v1/me", Some("t")).await.0, 200);

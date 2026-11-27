@@ -1,0 +1,41 @@
+# The Platform API with the workload listener on (ANR-1011): mutual TLS for a service that calls the owner routes with a client
+# certificate. Every value of `api.workload` is set, none left to its default, so that a value the chart writes into the file is read
+# by the binary (`api --check`, api-shapes.sh) and the render is the golden tests/golden/workload.yaml. The names are examples.
+watchNamespace: agents
+api:
+  enabled: true
+  config:
+    oidc:
+      issuer: https://keycloak.example.com/realms/another-agentic
+      audiences: [another-agentic]
+      rolesClaim: agentic_roles
+    defaults:
+      allowedImageRegistries: [ghcr.io]
+  networkPolicy:
+    from:
+      - namespaceSelector:
+          matchLabels:
+            kubernetes.io/metadata.name: kube-system
+        podSelector:
+          matchLabels:
+            app.kubernetes.io/name: traefik
+  workload:
+    enabled: true
+    port: 9443
+    clientAuth: optional
+    clients:
+      - spiffeId: spiffe://another/ns/another-agents/sa/orchestrator
+        permissions: [platform:agents.own]
+      - spiffeId: spiffe://another/ns/another-agents/sa/watcher
+    tls:
+      secretName: aap-api-workload-tls
+    clientCa:
+      configMap: aap-api-workload-ca
+      key: ca-bundle.pem
+    from:
+      - namespaceSelector:
+          matchLabels:
+            kubernetes.io/metadata.name: another-agents
+        podSelector:
+          matchLabels:
+            app.kubernetes.io/name: orchestrator
