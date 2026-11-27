@@ -80,6 +80,8 @@ struct State {
     /// The core `ConfigMap`s (ANR-1198), by `<namespace>/<name>`: get, list, create and a merge patch, with the
     /// `resourceVersion` check and the 1 MiB limit of a real API server.
     configmaps: BTreeMap<String, Value>,
+    /// The objects the meter's owner chain walks (ANR-1327), by `<group>/<plural>/<namespace>/<name>`: `get` only.
+    owners: BTreeMap<String, Value>,
 }
 
 /// A path that fails, as a `Role` that does not allow a namespace, or a kind the API server refuses there.
@@ -140,6 +142,7 @@ impl Fake {
                 failures: Vec::new(),
                 pods: BTreeMap::new(),
                 configmaps: BTreeMap::new(),
+                owners: BTreeMap::new(),
             })),
             changes: broadcast::channel(1024).0,
         }
@@ -235,6 +238,35 @@ impl Fake {
     /// Remove a core `Pod`, as its deletion completing does.
     pub fn remove_pod(&self, ns: &str, name: &str) {
         lock(&self.state).pods.remove(&format!("{ns}/{name}"));
+    }
+
+    /// Put an object the meter's owner chain reads (ANR-1327): an `apps/v1` `ReplicaSet`, `Deployment` or
+    /// `StatefulSet`, or a `batch/v1` `Job`, with the `uid` and `ownerReferences` it carries. Only a `get` of it is
+    /// served, and only under its own namespace and name.
+    pub fn put_owner(&self, object: Value) {
+        let api_version = object["apiVersion"].as_str().unwrap_or_default();
+        let group = api_version.split('/').next().unwrap_or_default();
+        let plural = match object["kind"].as_str().unwrap_or_default() {
+            "ReplicaSet" => "replicasets",
+            "Deployment" => "deployments",
+            "StatefulSet" => "statefulsets",
+            "Job" => "jobs",
+            _ => return,
+        };
+        let ns = object["metadata"]["namespace"]
+            .as_str()
+            .unwrap_or("default");
+        let name = object["metadata"]["name"].as_str().unwrap_or_default();
+        lock(&self.state)
+            .owners
+            .insert(format!("{group}/{plural}/{ns}/{name}"), object);
+    }
+
+    /// Remove an owner object, as its garbage collection completing does (ANR-1327).
+    pub fn remove_owner(&self, group: &str, plural: &str, ns: &str, name: &str) {
+        lock(&self.state)
+            .owners
+            .remove(&format!("{group}/{plural}/{ns}/{name}"));
     }
 
     /// A core `ConfigMap` as the fake holds it.
@@ -468,6 +500,25 @@ impl Fake {
                 &json!({"apiVersion": "v1", "kind": "PodList",
                         "metadata": {"resourceVersion": s.version.to_string()}, "items": items}),
             );
+        }
+
+        // `/apis/{apps,batch}/v1/namespaces/<ns>/<plural>/<name>`: a `get` of an owner the meter's chain walks
+        // (ANR-1327). Nothing else of those groups is served, and no list or write.
+        if call.method == "GET"
+            && let Some(rest) = call.path.strip_prefix("/apis/")
+        {
+            let segments: Vec<&str> = rest.split('/').collect();
+            if segments.len() == 6
+                && matches!(segments[0], "apps" | "batch")
+                && segments[2] == "namespaces"
+            {
+                let (group, ns, plural, name) =
+                    (segments[0], segments[3], segments[4], segments[5]);
+                return match s.owners.get(&format!("{group}/{plural}/{ns}/{name}")) {
+                    Some(o) => respond(200, o),
+                    None => failure(404, &format!("{plural} \"{name}\" not found")),
+                };
+            }
         }
 
         // `/apis/agents.vymalo.com/v1alpha1/[namespaces/<ns>/]<plural>[/<name>[/status]]`

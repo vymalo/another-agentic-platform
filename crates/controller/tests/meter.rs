@@ -121,6 +121,80 @@ fn running_container(start: i64) -> Value {
     }])
 }
 
+/// An `AgentService` owner reference, as the operator writes it on a workload.
+fn agent_service_ref(service: &str) -> Value {
+    json!({
+        "apiVersion": "agents.vymalo.com/v1alpha1", "kind": "AgentService",
+        "name": service, "uid": format!("uid-svc-{service}"), "controller": true,
+    })
+}
+
+/// A `Deployment` owned by the `AgentService` `service` (ANR-1327): the object a pod's `ReplicaSet` names.
+fn put_deployment(fake: &Fake, deployment: &str, service: &str) {
+    fake.put_owner(json!({
+        "apiVersion": "apps/v1", "kind": "Deployment",
+        "metadata": {
+            "namespace": NS, "name": deployment, "uid": format!("uid-deploy-{deployment}"),
+            "ownerReferences": [agent_service_ref(service)],
+        },
+    }));
+}
+
+/// A `ReplicaSet` of the `Deployment` `deployment`, and the `uid` a pod of it carries.
+fn put_replicaset(fake: &Fake, rs: &str, deployment: &str) -> String {
+    let uid = format!("uid-rs-{rs}");
+    fake.put_owner(json!({
+        "apiVersion": "apps/v1", "kind": "ReplicaSet",
+        "metadata": {
+            "namespace": NS, "name": rs, "uid": uid,
+            "ownerReferences": [{
+                "apiVersion": "apps/v1", "kind": "Deployment",
+                "name": deployment, "uid": format!("uid-deploy-{deployment}"), "controller": true,
+            }],
+        },
+    }));
+    uid
+}
+
+/// A pod labelled as an agent's (the labels are what the pod *claims*: `instance` is not the identity, ANR-1327),
+/// finished, that ran `start..end`, with the size weight `weight` and the one owner reference `owner` if given.
+fn agent_pod(
+    name: &str,
+    uid: &str,
+    start: i64,
+    end: i64,
+    weight: Option<&str>,
+    owner: Option<(&str, &str, &str)>,
+) -> Value {
+    let mut pod = finished_run(name, uid, "run-1", start, end);
+    pod["metadata"]["labels"] = json!({
+        "app.kubernetes.io/managed-by": "aap-operator",
+        "app.kubernetes.io/component": "agent",
+        "app.kubernetes.io/instance": "coder",
+        "app.kubernetes.io/name": "coder",
+    });
+    pod["metadata"]["annotations"] = match weight {
+        Some(w) => json!({ "agents.vymalo.com/size-weight": w }),
+        None => json!({}),
+    };
+    if let Some((kind, owner_name, owner_uid)) = owner {
+        let api_version = if kind == "Job" { "batch/v1" } else { "apps/v1" };
+        pod["metadata"]["ownerReferences"] = json!([{
+            "apiVersion": api_version, "kind": kind,
+            "name": owner_name, "uid": owner_uid, "controller": true,
+        }]);
+    }
+    pod
+}
+
+/// The account source every case starts with: the run `coder/run-1` and the agent `coder`.
+fn accounts() -> Arc<MemoryAccounts> {
+    let accounts = Arc::new(MemoryAccounts::new());
+    accounts.set_run("coder", "run-1", "acct-1");
+    accounts.set_agent("coder", "acct-agent");
+    accounts
+}
+
 struct Rig {
     fake: Fake,
     sink: Arc<MemoryUsageSink>,
@@ -149,10 +223,15 @@ fn config() -> MeterConfig {
 }
 
 async fn start(fake: &Fake, leader: Option<Arc<dyn LeaderElection>>) -> Rig {
+    start_with(fake, leader, accounts()).await
+}
+
+async fn start_with(
+    fake: &Fake,
+    leader: Option<Arc<dyn LeaderElection>>,
+    accounts: Arc<MemoryAccounts>,
+) -> Rig {
     let sink = Arc::new(MemoryUsageSink::new());
-    let accounts = Arc::new(MemoryAccounts::new());
-    accounts.set_run("coder", "run-1", "acct-1");
-    accounts.set_agent("coder", "acct-agent");
     let owner: OwnerOf = Arc::new(|_| OwnerHandle::none());
     let mut operator = Operator::new(
         fake.client(),
@@ -441,14 +520,18 @@ async fn a_node_type_line_carries_it_and_several_admitted_values_give_none() {
 async fn an_agent_pod_has_no_weight_yet_and_gives_no_line() {
     let fake = Fake::new();
     let m0 = now() / 60 - 10;
-    let mut agent = finished_run("agent-0", "uid-agent", "run-1", m0 * 60, (m0 + 2) * 60);
-    agent["metadata"]["labels"] = json!({
-        "app.kubernetes.io/managed-by": "aap-operator",
-        "app.kubernetes.io/component": "agent",
-        "app.kubernetes.io/instance": "coder",
-        "app.kubernetes.io/name": "coder",
-    });
-    agent["metadata"]["annotations"] = json!({});
+    // The chain its labels are not: the pod is the ReplicaSet's, the ReplicaSet the Deployment's, and the Deployment
+    // the AgentService's (ANR-1327). Without it the pod would be `no-identity`, before its weight is read.
+    put_deployment(&fake, "coder", "coder");
+    let rs = put_replicaset(&fake, "coder-abc", "coder");
+    let agent = agent_pod(
+        "agent-0",
+        "uid-agent",
+        m0 * 60,
+        (m0 + 2) * 60,
+        None,
+        Some(("ReplicaSet", "coder-abc", rs.as_str())),
+    );
     fake.put_pod(agent.clone());
     let rig = start_rig(&fake).await;
     passes(5).await;
@@ -464,10 +547,11 @@ async fn an_agent_pod_has_no_weight_yet_and_gives_no_line() {
         2
     );
     // When the annotation is there (a later slice), the same pod is metered, as an agent pod with no run.
-    agent["metadata"]["annotations"] = json!({ "agents.vymalo.com/size-weight": "1" });
-    agent["metadata"]["name"] = json!("agent-1");
-    agent["metadata"]["uid"] = json!("uid-agent-2");
-    fake.put_pod(agent);
+    let mut weighted = agent;
+    weighted["metadata"]["annotations"] = json!({ "agents.vymalo.com/size-weight": "1" });
+    weighted["metadata"]["name"] = json!("agent-1");
+    weighted["metadata"]["uid"] = json!("uid-agent-2");
+    fake.put_pod(weighted);
     eventually("the weighted agent pod's lines", || {
         rig.sink.taken().len() >= 2
     })
@@ -478,6 +562,307 @@ async fn an_agent_pod_has_no_weight_yet_and_gives_no_line() {
             .all(|e| e.pod_kind == PodKind::Agent && e.run.is_none() && e.subject == "acct-agent")
     );
     assert!(got.iter().all(|e| e.weight_quarters == 4));
+    rig.stop().await;
+}
+
+/// The calls of the fake that are a `get` of one kind of owner object (ANR-1327).
+fn owner_gets(rig: &Rig, plural: &str) -> Vec<String> {
+    rig.fake
+        .calls()
+        .iter()
+        .filter(|c| c.method == "GET" && c.path.contains(&format!("/{plural}/")))
+        .map(|c| c.path.clone())
+        .collect()
+}
+
+#[tokio::test]
+async fn an_agent_pod_is_billed_to_the_agent_service_its_owner_chain_ends_at() {
+    let fake = Fake::new();
+    let m0 = now() / 60 - 10;
+    // The labels say `coder` (see `agent_pod`); the chain says `other`. The chain is the identity.
+    put_deployment(&fake, "other", "other");
+    let rs = put_replicaset(&fake, "other-abc", "other");
+    let start = m0 * 60;
+    let end = (m0 + 2) * 60;
+    // Two pods of one ReplicaSet: the Deployment and the ReplicaSet are each read once, not once per pod.
+    for (name, uid) in [("a1", "uid-a1"), ("a2", "uid-a2")] {
+        fake.put_pod(agent_pod(
+            name,
+            uid,
+            start,
+            end,
+            Some("1"),
+            Some(("ReplicaSet", "other-abc", rs.as_str())),
+        ));
+    }
+    let accounts = accounts();
+    accounts.set_agent("other", "acct-other");
+    let rig = start_with(&fake, None, accounts).await;
+    eventually("four lines, two per pod", || rig.sink.taken().len() >= 4).await;
+    passes(3).await;
+    let got = rig.sink.taken();
+    assert_eq!(got.len(), 4, "{got:?}");
+    assert!(
+        got.iter().all(|e| e.pod_kind == PodKind::Agent
+            && e.agent_service == "other"
+            && e.run.is_none()
+            && e.subject == "acct-other"),
+        "the chain's AgentService, not the label's instance: {got:?}"
+    );
+    assert!(
+        rig.accounts.asked().contains(&PodRef::Agent {
+            service: "other".into()
+        }),
+        "{:?}",
+        rig.accounts.asked()
+    );
+    assert!(
+        !rig.accounts.asked().contains(&PodRef::Agent {
+            service: "coder".into()
+        }),
+        "the label's instance is never asked for"
+    );
+    // One `get` per distinct owner, not one per pod: the ReplicaSet, then the Deployment above it.
+    assert_eq!(
+        owner_gets(&rig, "replicasets").len(),
+        1,
+        "{:?}",
+        rig.fake.calls()
+    );
+    assert_eq!(
+        owner_gets(&rig, "deployments").len(),
+        1,
+        "{:?}",
+        rig.fake.calls()
+    );
+    rig.stop().await;
+}
+
+#[tokio::test]
+async fn a_pod_labelled_as_an_agent_whose_chain_ends_nowhere_makes_no_line() {
+    let fake = Fake::new();
+    let m0 = now() / 60 - 10;
+    let start = m0 * 60;
+    let end = (m0 + 3) * 60;
+    // Three pods with the agent labels and a weight, and no identity: no owner reference at all; a chain that ends at
+    // a Deployment with no AgentService above it; and a reference to a ReplicaSet that is not there.
+    fake.put_pod(agent_pod("none", "uid-none", start, end, Some("1"), None));
+    // The Deployment's own chain ends nowhere: its owner reference is stripped.
+    fake.put_owner(json!({
+        "apiVersion": "apps/v1", "kind": "Deployment",
+        "metadata": { "namespace": NS, "name": "orphan", "uid": "uid-deploy-orphan" },
+    }));
+    let orphan_rs = put_replicaset(&fake, "orphan-abc", "orphan");
+    fake.put_pod(agent_pod(
+        "orphan",
+        "uid-orphan",
+        start,
+        end,
+        Some("1"),
+        Some(("ReplicaSet", "orphan-abc", orphan_rs.as_str())),
+    ));
+    fake.put_pod(agent_pod(
+        "gone",
+        "uid-gone",
+        start,
+        end,
+        Some("1"),
+        Some(("ReplicaSet", "gone-abc", "uid-rs-gone-abc")),
+    ));
+    // A real run pod beside them, so that "no line" is not "the meter did not run".
+    fake.put_pod(finished_run("r1", "uid-run", "run-1", start, (m0 + 1) * 60));
+    let rig = start_rig(&fake).await;
+    eventually("the run pod's lines", || rig.sink.taken().len() >= 1).await;
+    passes(4).await;
+    let got = rig.sink.taken();
+    assert!(
+        got.iter().all(|e| e.pod_kind == PodKind::Run),
+        "not one line of a pod with no identity: {got:?}"
+    );
+    // Each agent pod's three minutes, counted once under `no-identity`, and no account asked for them.
+    assert_eq!(
+        rig.metrics.get(
+            aap_controller::metric::METER_UNATTRIBUTED,
+            &[("reason", "no-identity")]
+        ),
+        9
+    );
+    assert!(
+        rig.accounts.asked().iter().all(|p| p
+            != &PodRef::Agent {
+                service: "coder".into()
+            }),
+        "{:?}",
+        rig.accounts.asked()
+    );
+    rig.stop().await;
+}
+
+#[tokio::test]
+async fn a_job_owned_pod_and_a_statefulset_owned_pod_are_attributed() {
+    let fake = Fake::new();
+    let m0 = now() / 60 - 10;
+    let start = m0 * 60;
+    let end = (m0 + 1) * 60;
+    // A split worker is a Job's pod, and its Job is the AgentService's; a StatefulSet's pod is the set's, and the set
+    // is the AgentService's: one hop each, and one `get` each.
+    fake.put_owner(json!({
+        "apiVersion": "batch/v1", "kind": "Job",
+        "metadata": {
+            "namespace": NS, "name": "split-worker-1", "uid": "uid-job-1",
+            "ownerReferences": [agent_service_ref("split")],
+        },
+    }));
+    fake.put_owner(json!({
+        "apiVersion": "apps/v1", "kind": "StatefulSet",
+        "metadata": {
+            "namespace": NS, "name": "coder", "uid": "uid-sts-coder",
+            "ownerReferences": [agent_service_ref("coder")],
+        },
+    }));
+    fake.put_pod(agent_pod(
+        "split-worker-1-x",
+        "uid-job-pod",
+        start,
+        end,
+        Some("1"),
+        Some(("Job", "split-worker-1", "uid-job-1")),
+    ));
+    fake.put_pod(agent_pod(
+        "coder-0",
+        "uid-sts-pod",
+        start,
+        end,
+        Some("1"),
+        Some(("StatefulSet", "coder", "uid-sts-coder")),
+    ));
+    let accounts = accounts();
+    accounts.set_agent("split", "acct-split");
+    let rig = start_with(&fake, None, accounts).await;
+    eventually("one line per pod", || rig.sink.taken().len() >= 2).await;
+    passes(3).await;
+    let mut services: Vec<(String, String)> = rig
+        .sink
+        .taken()
+        .iter()
+        .map(|e| (e.agent_service.clone(), e.subject.clone()))
+        .collect();
+    services.sort();
+    assert_eq!(
+        services,
+        vec![
+            ("coder".to_owned(), "acct-agent".to_owned()),
+            ("split".to_owned(), "acct-split".to_owned()),
+        ]
+    );
+    assert_eq!(owner_gets(&rig, "jobs").len(), 1, "{:?}", rig.fake.calls());
+    assert_eq!(
+        owner_gets(&rig, "statefulsets").len(),
+        1,
+        "{:?}",
+        rig.fake.calls()
+    );
+    rig.stop().await;
+}
+
+#[tokio::test]
+async fn a_forged_pod_that_copies_the_labels_is_refused() {
+    let fake = Fake::new();
+    let m0 = now() / 60 - 10;
+    let start = m0 * 60;
+    let end = (m0 + 2) * 60;
+    // The labels are copied, and the owner reference names a real ReplicaSet of the agent but with **another uid**: a
+    // name made again is another object, and the chain ends (ANR-1327, by uid).
+    put_deployment(&fake, "coder", "coder");
+    let rs = put_replicaset(&fake, "coder-abc", "coder");
+    fake.put_pod(agent_pod(
+        "forged",
+        "uid-forged",
+        start,
+        end,
+        Some("1"),
+        Some(("ReplicaSet", "coder-abc", "uid-rs-another")),
+    ));
+    // And one whose owner is a kind the chain does not walk.
+    fake.put_pod(agent_pod(
+        "daemon",
+        "uid-daemon",
+        start,
+        end,
+        Some("1"),
+        Some(("DaemonSet", "coder", "uid-ds-coder")),
+    ));
+    // The genuine pod of the agent, so that the case can tell a refusal from a meter that did not run.
+    fake.put_pod(agent_pod(
+        "genuine",
+        "uid-genuine",
+        start,
+        end,
+        Some("1"),
+        Some(("ReplicaSet", "coder-abc", rs.as_str())),
+    ));
+    let rig = start_rig(&fake).await;
+    eventually("the genuine pod's lines", || !rig.sink.taken().is_empty()).await;
+    passes(4).await;
+    let got = rig.sink.taken();
+    assert!(
+        got.iter()
+            .all(|e| e.event_id != event_id("uid-forged", e.minute)
+                && e.event_id != event_id("uid-daemon", e.minute)),
+        "{got:?}"
+    );
+    assert!(
+        got.iter()
+            .any(|e| e.event_id == event_id("uid-genuine", e.minute)),
+        "{got:?}"
+    );
+    assert_eq!(
+        rig.metrics.get(
+            aap_controller::metric::METER_UNATTRIBUTED,
+            &[("reason", "no-identity")]
+        ),
+        4,
+        "the forged pod's two minutes and the daemon's two"
+    );
+    rig.stop().await;
+}
+
+#[tokio::test]
+async fn an_owner_lookup_that_fails_holds_the_minutes_and_counts_it() {
+    let fake = Fake::new();
+    let m0 = now() / 60 - 10;
+    put_deployment(&fake, "coder", "coder");
+    let rs = put_replicaset(&fake, "coder-abc", "coder");
+    fake.put_pod(agent_pod(
+        "a1",
+        "uid-a1",
+        m0 * 60,
+        (m0 + 2) * 60,
+        Some("1"),
+        Some(("ReplicaSet", "coder-abc", rs.as_str())),
+    ));
+    // The API server refuses the ReplicaSet: a transient failure, not a refusal.
+    fake.fail_path(Some("GET"), "/replicasets/", 500);
+    let rig = start_rig(&fake).await;
+    passes(6).await;
+    assert!(rig.sink.taken().is_empty());
+    assert!(
+        rig.metrics
+            .get(aap_controller::metric::METER_OWNER_FAILURES, &[])
+            >= 2
+    );
+    assert_eq!(
+        rig.metrics.get(
+            aap_controller::metric::METER_UNATTRIBUTED,
+            &[("reason", "no-identity")]
+        ),
+        0,
+        "a failure to read is not a refusal"
+    );
+    assert!(
+        rig.accounts.asked().is_empty(),
+        "no account is asked before the identity is known"
+    );
     rig.stop().await;
 }
 

@@ -410,6 +410,7 @@ where
                             self.meter_config.clone(),
                             metrics.clone(),
                         )
+                        .with_owners(crate::meter::kube_owners(self.client.clone()))
                         .with_outcomes(outcomes)
                         .with_continue(move || leader.is_leader());
                         match self.meter_tombstones.clone() {
