@@ -1,216 +1,11 @@
 //! `operator run`: the composition root. The controllers are generic over a runtime provider and a
 //! store provisioner (AD-020); this is the one place that names the types.
-
-use std::net::SocketAddr;
-use std::path::PathBuf;
+//!
+//! Every setting comes from one configuration file (ANR-962, AD-064), read and validated by [`crate::config`] before this
+//! module runs. `POD_NAME`, `POD_NAMESPACE` and `HOSTNAME` are still the environment's: they are the downward API's
+//! identity of this replica, not settings of a deployment.
 
 use anyhow::Result;
-use clap::Args;
-
-/// Settings of `run`. Every one is also an environment variable, which is how the chart sets them.
-#[derive(Clone, Debug, Args)]
-pub struct RunArgs {
-    /// Watch one namespace (the namespaced operator of §93), and the primary one when `WATCH_NAMESPACES` lists
-    /// several. Empty or unset: every namespace, unless `WATCH_NAMESPACES` lists some.
-    #[arg(long, env = "WATCH_NAMESPACE")]
-    pub watch_namespace: Option<String>,
-
-    /// Watch this list of namespaces, comma separated (K6b): one set of controllers and caches each, and one
-    /// namespaced Role in each. **The primary** (`WATCH_NAMESPACE`) must be one of them; `WATCH_NAMESPACE` alone is
-    /// the same as a list of one. Unset: `WATCH_NAMESPACE`, else every namespace.
-    #[arg(long, env = "WATCH_NAMESPACES")]
-    pub watch_namespaces: Option<String>,
-
-    /// Where `/healthz` and `/readyz` are served.
-    #[arg(long, env = "HEALTH_ADDR", default_value = "0.0.0.0:8081")]
-    pub health_addr: SocketAddr,
-
-    /// Where `/metrics` is served.
-    #[arg(long, env = "METRICS_ADDR", default_value = "0.0.0.0:9090")]
-    pub metrics_addr: SocketAddr,
-
-    /// The name of this pod, for the `reportingInstance` of the Events.
-    #[arg(long, env = "POD_NAME")]
-    pub instance: Option<String>,
-
-    /// Services reconciled at the same time.
-    #[arg(long, env = "AAP_CONCURRENCY", default_value_t = 4)]
-    pub concurrency: u16,
-
-    /// Seconds one pass over one object may take. A pass that is not done by then is dropped and tried
-    /// again after the error policy's wait: a request that is never answered would otherwise keep the
-    /// object out of the controller for as long as it lives.
-    #[arg(long, env = "AAP_RECONCILE_TIMEOUT_SECS", default_value_t = 60)]
-    pub reconcile_timeout_secs: u64,
-
-    /// Where the agent registry (`GET /registry/v1/agents`) is served. Only with the `registry` feature
-    /// and a token.
-    #[arg(long, env = "REGISTRY_ADDR", default_value = "0.0.0.0:8080")]
-    pub registry_addr: SocketAddr,
-
-    /// The file that holds the registry's bearer token (a mounted Secret). **No token, no registry**: with
-    /// this unset, or the file missing or empty, nothing is served on the registry's port and every service
-    /// is `Listed: False`, reason `RegistryDisabled` (fail closed). Read once at start.
-    #[arg(long, env = "REGISTRY_TOKEN_FILE")]
-    pub registry_token_file: Option<PathBuf>,
-
-    /// The URL of the registry document itself, sent as its `anchor` (the contract asks a server to; a
-    /// client ignores it). Unset: no `anchor`.
-    #[arg(long, env = "REGISTRY_PUBLIC_URL")]
-    pub registry_public_url: Option<String>,
-
-    /// Seconds between looks at a service that is Ready or Suspended (the timer that makes a lost
-    /// signal harmless).
-    #[arg(long, env = "AAP_RESYNC_SECS", default_value_t = 300)]
-    pub resync_secs: u64,
-
-    /// Seconds between looks at a service that is rolling out, unwell, or held by a foreign object.
-    #[arg(long, env = "AAP_RESYNC_PENDING_SECS", default_value_t = 15)]
-    pub resync_pending_secs: u64,
-
-    /// The image of an agent whose AgentConfig names none (AD-029, §60a): the coder image, a reference
-    /// such as `repository:tag@sha256:…`. Unset or empty: the operator has no default, and an
-    /// AgentConfig that names no image is `ConfigInvalid`. Changing it rolls every agent that names none
-    /// (and no other), through the config digest.
-    #[arg(long, env = "DEFAULT_AGENT_IMAGE")]
-    pub default_agent_image: Option<String>,
-
-    /// The `RuntimeClass` of every agent's own pod (K14a, AD-052): the name of an object the cluster
-    /// ADMINISTRATOR made (the chart makes none). Unset or empty: no class, and every workload is what it
-    /// was. Named, it goes into the pod template of every harness, and into the config digest, so naming
-    /// it rolls the agents once. A name that is not a DNS subdomain stops the operator at start, not one
-    /// agent at a time.
-    #[arg(long, env = "AGENT_RUNTIME_CLASS")]
-    pub agent_runtime_class: Option<String>,
-
-    /// The file that holds the deployment's settings for run pods (slice D15a): the size classes, the run image,
-    /// the quota, the network policy and the names of the cluster-scoped objects the chart made (a YAML file, a
-    /// mounted ConfigMap; `aap_domain::RunPodSettings`, an unknown key refused). **Unset or empty: this operator has
-    /// no run pods**, and an `AgentConfig` that asks for them is `ConfigInvalid`, saying so. Set and not a file
-    /// that parses and passes the checks: the operator does not start. Read once, at start: a change is a new pod.
-    #[arg(long, env = "RUN_PODS_FILE")]
-    pub run_pods_file: Option<String>,
-
-    /// The claims the deployment allows as an agent's package cache (`environment.cache.existingClaim`, K1), comma
-    /// separated. **Empty (the default): no agent may have a cache**: the claim is any claim of the namespace to the
-    /// pod that mounts it, so a deployment lists the ones made for the purpose.
-    #[arg(long, env = "CACHE_ALLOWED_CLAIMS", value_delimiter = ',')]
-    pub cache_allowed_claims: Vec<String>,
-
-    /// The highest access tier an `AgentConfig` may ask for (`coder.maxAccessTier`, K1): `plan`, `edits`, `auto` or
-    /// `bypass`. `auto`, the coder's own default, when unset. A config above it is `ConfigInvalid`; one that names none
-    /// gets the ceiling when it is lower than `auto`.
-    #[arg(long, env = "AGENT_MAX_ACCESS_TIER", default_value = "auto", value_parser = parse_tier)]
-    pub max_access_tier: aap_api::AccessTierCap,
-
-    /// Probe the MCP servers of `ToolProvider`s (K3b, AD-053): `initialize` and `tools/list`, and the reachability and
-    /// tool names in the provider's status. **Off by default**: no request is made and the status has no `Reachable`
-    /// condition. The chart sets it when `toolProbe.to` lists the peers the operator may reach.
-    #[arg(long, env = "TOOL_PROBE_ENABLED")]
-    pub tool_probe_enabled: bool,
-
-    /// How long one probe may take, in seconds (1 to 60). A server that does not answer by then is `Reachable: False`,
-    /// reason `Timeout`.
-    #[arg(
-        long,
-        env = "TOOL_PROBE_TIMEOUT_SECS",
-        default_value_t = 5,
-        value_parser = clap::value_parser!(u64).range(1..=60)
-    )]
-    pub tool_probe_timeout_secs: u64,
-
-    /// Ask each agent service what work it holds (AD-058 P2c): `GET http://<name>.<namespace>.svc:<ACTIVITY_PORT>/internal/activity`,
-    /// the source the idle controller (P2b) polls. **Off by default**: no request is made. It needs `ACTIVITY_TOKEN_FILE`, because the
-    /// agents refuse a request without their bearer.
-    #[arg(long, env = "ACTIVITY_ENABLED")]
-    pub activity_enabled: bool,
-
-    /// The port agents serve `/internal/activity` on (their `LISTEN_ADDR`).
-    #[arg(long, env = "ACTIVITY_PORT", default_value_t = 8080, value_parser = clap::value_parser!(u16).range(1..))]
-    pub activity_port: u16,
-
-    /// How long one question may take, in seconds (1 to 30). An agent that does not answer by then counts as busy.
-    #[arg(
-        long,
-        env = "ACTIVITY_TIMEOUT_SECS",
-        default_value_t = 3,
-        value_parser = clap::value_parser!(u64).range(1..=30)
-    )]
-    pub activity_timeout_secs: u64,
-
-    /// A file holding the bearer the agents accept (a mounted Secret key). Read once at start; never an argument, never logged.
-    #[arg(long, env = "ACTIVITY_TOKEN_FILE")]
-    pub activity_token_file: Option<PathBuf>,
-
-    /// Days the operator keeps the database and volumes a deleted agent left behind (`deletionPolicy: Retain`) before it
-    /// deletes them (ANR-770). 90 by default; `0` keeps them for ever and turns the sweep off.
-    #[arg(long, env = "RETENTION_AFTER_DELETE_DAYS", default_value_t = 90)]
-    pub retention_after_delete_days: u64,
-
-    /// Elect one replica to write (K7a), with a `coordination.k8s.io/v1` Lease: every replica keeps its caches,
-    /// serves `/healthz`, `/readyz`, `/metrics` and the registry, and **only the lease holder's passes write**.
-    /// Off (the default): this replica is the only one, and every pass writes.
-    #[arg(long, env = "LEADER_ELECTION_ENABLED")]
-    pub leader_election_enabled: bool,
-
-    /// The name of the Lease: the election is `<namespace>/<name>`.
-    #[arg(long, env = "LEADER_ELECTION_NAME", default_value = "aap-operator")]
-    pub leader_election_name: String,
-
-    /// The namespace of the Lease. Unset: the primary namespace, the first of `WATCH_NAMESPACES` (or
-    /// `WATCH_NAMESPACE`), which is where the operator's `Role` is. **With the election on and no namespace at
-    /// all, the operator refuses to start**: a Lease lives in one.
-    #[arg(long, env = "LEADER_ELECTION_NAMESPACE")]
-    pub leader_election_namespace: Option<String>,
-
-    /// How long the lease lives, in seconds: a holder that has not renewed for this long may be replaced.
-    #[arg(long, env = "LEADER_ELECTION_LEASE_SECS", default_value_t = 15)]
-    pub leader_election_lease_secs: u64,
-
-    /// How often the holder renews the lease, in seconds.
-    #[arg(long, env = "LEADER_ELECTION_RENEW_SECS", default_value_t = 10)]
-    pub leader_election_renew_secs: u64,
-
-    /// How often a replica that is not the holder tries, in seconds.
-    #[arg(long, env = "LEADER_ELECTION_RETRY_SECS", default_value_t = 2)]
-    pub leader_election_retry_secs: u64,
-}
-
-fn parse_tier(s: &str) -> Result<aap_api::AccessTierCap, String> {
-    match s.trim() {
-        "plan" => Ok(aap_api::AccessTierCap::Plan),
-        "edits" => Ok(aap_api::AccessTierCap::Edits),
-        "" | "auto" => Ok(aap_api::AccessTierCap::Auto),
-        "bypass" => Ok(aap_api::AccessTierCap::Bypass),
-        other => Err(format!(
-            "{other:?} is not an access tier: plan, edits, auto or bypass"
-        )),
-    }
-}
-
-/// Whether `name` is a namespace name: a DNS label, `^[a-z0-9]([-a-z0-9]{0,61}[a-z0-9])?$`, which is the rule the
-/// chart's `_validate.tpl` holds its values to.
-#[cfg(feature = "runtime-kubernetes")]
-fn is_dns_label(name: &str) -> bool {
-    !name.is_empty()
-        && name.len() <= 63
-        && !name.starts_with('-')
-        && !name.ends_with('-')
-        && name
-            .bytes()
-            .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'-')
-}
-
-/// Refuse a name that is no namespace, naming the variable that gave it.
-#[cfg(feature = "runtime-kubernetes")]
-fn check_label(variable: &str, name: &str) -> Result<()> {
-    if is_dns_label(name) {
-        return Ok(());
-    }
-    anyhow::bail!(
-        "{variable} {name:?} is not a namespace: a namespace is a DNS label (lowercase letters, digits and '-', starting and ending with a letter or a digit, at most 63 characters)"
-    );
-}
 
 /// The election this replica runs in (K7a), as `run` composed it.
 #[cfg(feature = "runtime-kubernetes")]
@@ -226,8 +21,18 @@ pub struct LeaderSettings {
     pub timings: aap_leader_kubernetes::Timings,
 }
 
-/// The identity this replica writes as the lease's holder (K7a): `POD_NAME`, else `HOSTNAME`, else a refusal. Two
-/// replicas with the same identity would renew each other's lease, which is no election at all.
+/// The name of this pod, for the `reportingInstance` of the Events and the lease's `holderIdentity`: `POD_NAME`, which the
+/// chart sets from the downward API. Not a setting of the configuration file: two replicas with the same identity would
+/// renew each other's lease, which is no election at all.
+#[cfg(feature = "runtime-kubernetes")]
+fn instance() -> Option<String> {
+    std::env::var("POD_NAME")
+        .ok()
+        .map(|name| name.trim().to_owned())
+        .filter(|name| !name.is_empty())
+}
+
+/// The identity this replica writes as the lease's holder (K7a): `POD_NAME`, else `HOSTNAME`, else a refusal.
 #[cfg(feature = "runtime-kubernetes")]
 fn candidate_id(instance: Option<&str>, hostname: Option<&str>) -> Result<aap_ports::CandidateId> {
     let name = instance
@@ -237,7 +42,7 @@ fn candidate_id(instance: Option<&str>, hostname: Option<&str>) -> Result<aap_po
     match name {
         Some(name) => Ok(aap_ports::CandidateId::new(name)),
         None => anyhow::bail!(
-            "LEADER_ELECTION_ENABLED is set, and neither POD_NAME nor HOSTNAME names this replica: the Lease's holderIdentity would be empty, and two replicas would look like one"
+            "leaderElection.enabled is set, and neither POD_NAME nor HOSTNAME names this replica: the Lease's holderIdentity would be empty, and two replicas would look like one"
         ),
     }
 }
@@ -250,219 +55,53 @@ fn hostname() -> Option<String> {
 
 // What `run` composes needs a runtime provider; without one the settings are parsed and unused.
 #[cfg(feature = "runtime-kubernetes")]
-impl RunArgs {
-    /// The default image, if there is one: an empty value (a chart value left blank) is none, and a
-    /// reference with white space in it is a deployment mistake that stops the operator at start, not a
-    /// `ConfigInvalid` on every agent that would have used it.
+impl crate::config::Settings {
+    /// The election this replica is a candidate of (K7a), from the file's `leaderElection` block: off is `None` and the
+    /// operator is an [`AlwaysLeader`](aap_ports::AlwaysLeader); on, the namespace is the block's, else the **primary**
+    /// (the first of `watch.namespaces`, where the operator's `Role` is), and the holder identity is `POD_NAME`, else
+    /// `HOSTNAME`.
     ///
     /// # Errors
     ///
-    /// The value has white space in it.
-    pub fn default_image(&self) -> Result<Option<String>> {
-        let Some(image) = self
-            .default_agent_image
-            .as_deref()
-            .map(str::trim)
-            .filter(|i| !i.is_empty())
-        else {
-            return Ok(None);
-        };
-        if image.contains(char::is_whitespace) {
-            anyhow::bail!(
-                "DEFAULT_AGENT_IMAGE (--default-agent-image) {image:?} has white space in it: an image reference such as repository:tag@sha256:… is expected"
-            );
-        }
-        Ok(Some(image.to_owned()))
-    }
-
-    /// The `RuntimeClass` of the agents' pods, if there is one: an unset or empty value is none (a chart value left
-    /// blank), and a name that is not a DNS subdomain is a deployment mistake that stops the operator at start, not
-    /// one agent at a time.
-    ///
-    /// # Errors
-    ///
-    /// The name is not a DNS subdomain.
-    pub fn agent_runtime_class(&self) -> Result<Option<String>> {
-        let Some(class) = self
-            .agent_runtime_class
-            .as_deref()
-            .map(str::trim)
-            .filter(|c| !c.is_empty())
-        else {
-            return Ok(None);
-        };
-        if !aap_domain::is_dns_subdomain(class) {
-            anyhow::bail!(
-                "AGENT_RUNTIME_CLASS (--agent-runtime-class) {class:?} is not the name of a RuntimeClass (a DNS subdomain): the RuntimeClass object is the administrator's"
-            );
-        }
-        Ok(Some(class.to_owned()))
-    }
-
-    /// The settings for run pods, if there are any: an unset or empty `RUN_PODS_FILE` is none, and a file that cannot be
-    /// read, is not YAML of the settings or fails their checks stops the operator at start, naming every mistake: a
-    /// pod that ran with half the settings would make run pods the guard does not match.
-    ///
-    /// # Errors
-    ///
-    /// The file cannot be read or parsed, or a setting is refused.
-    pub fn run_pod_settings(&self) -> Result<Option<aap_domain::RunPodSettings>> {
-        use anyhow::Context;
-        let Some(path) = self
-            .run_pods_file
-            .as_deref()
-            .map(str::trim)
-            .filter(|p| !p.is_empty())
-            .map(PathBuf::from)
-        else {
-            return Ok(None);
-        };
-        let path = path.as_path();
-        let text = std::fs::read_to_string(path).with_context(|| {
-            format!(
-                "RUN_PODS_FILE (--run-pods-file) {}: cannot be read",
-                path.display()
-            )
-        })?;
-        let settings: aap_domain::RunPodSettings =
-            serde_yaml::from_str(&text).with_context(|| {
-                format!(
-                    "RUN_PODS_FILE (--run-pods-file) {}: not the settings of run pods",
-                    path.display()
-                )
-            })?;
-        if let Err(problems) = settings.validate() {
-            anyhow::bail!(
-                "RUN_PODS_FILE (--run-pods-file) {}:\n  {}",
-                path.display(),
-                problems.join("\n  ")
-            );
-        }
-        Ok(Some(settings))
-    }
-
-    /// The namespaces to watch (K6b), from `WATCH_NAMESPACES` (a comma-separated list) and `WATCH_NAMESPACE` (the
-    /// one-namespace shorthand and the primary):
-    ///
-    /// * neither, or both empty: every namespace (`None`);
-    /// * `WATCH_NAMESPACE` alone: that one;
-    /// * `WATCH_NAMESPACES` alone: exactly those, in the order given;
-    /// * both: the list, and `WATCH_NAMESPACE` must be one of it — it is the primary, which names the cluster-scoped
-    ///   objects of run pods and the API's `defaults.namespace`, so a primary nobody watches is a deployment mistake.
-    ///
-    /// A name is a DNS label (the same rule as the chart's `_validate.tpl`), and a list holds each name once: an
-    /// operator that could not watch one of them would be as good as not running, so this refuses rather than
-    /// starting with part of the fleet.
-    ///
-    /// # Errors
-    ///
-    /// A name that is not a DNS label, a name given twice, a list that is set and holds no name, or a primary that
-    /// the list does not hold.
-    pub fn namespaces(&self) -> Result<Option<Vec<String>>> {
-        let primary = self
-            .watch_namespace
-            .as_deref()
-            .map(str::trim)
-            .filter(|n| !n.is_empty());
-        let Some(text) = self.watch_namespaces.as_deref() else {
-            return match primary {
-                None => Ok(None),
-                Some(name) => {
-                    check_label("WATCH_NAMESPACE (--watch-namespace)", name)?;
-                    Ok(Some(vec![name.to_owned()]))
-                }
-            };
-        };
-        let mut names: Vec<String> = Vec::new();
-        for name in text.split(',').map(str::trim) {
-            check_label("WATCH_NAMESPACES (--watch-namespaces)", name)?;
-            if names.iter().any(|n| n == name) {
-                anyhow::bail!(
-                    "WATCH_NAMESPACES (--watch-namespaces) {text:?} gives {name:?} twice: a namespace is watched once, by one set of controllers"
-                );
-            }
-            names.push(name.to_owned());
-        }
-        if let Some(name) = primary
-            && !names.iter().any(|n| n == name)
-        {
-            anyhow::bail!(
-                "WATCH_NAMESPACE (--watch-namespace) {name:?} is not one of WATCH_NAMESPACES (--watch-namespaces) {text:?}: it is the primary, so it must be watched too"
-            );
-        }
-        Ok(Some(names))
-    }
-
-    /// The election this replica is a candidate of (K7a), from the six `LEADER_ELECTION_*` settings:
-    ///
-    /// * off (the default): `None`, and the operator is an [`AlwaysLeader`](aap_ports::AlwaysLeader);
-    /// * on: the namespace of the Lease is `LEADER_ELECTION_NAMESPACE`, else the **primary** namespace (the first
-    ///   of `WATCH_NAMESPACES`, or `WATCH_NAMESPACE`) — the one the operator's `Role` is in — and a deployment
-    ///   that names neither is refused, because a Lease lives in one;
-    /// * the holder identity is `POD_NAME`, else `HOSTNAME` (see [`candidate_id`]);
-    /// * the timings are the three `_SECS` values, refused when they do not satisfy `retry < renew < lease`, each
-    ///   at least a second.
-    ///
-    /// # Errors
-    ///
-    /// One of those settings is missing or refused, naming the variable that gave it.
-    pub fn leader_election(&self, namespaces: Option<&[String]>) -> Result<Option<LeaderSettings>> {
-        if !self.leader_election_enabled {
+    /// The file was validated already; this refuses only a replica that cannot name itself.
+    fn leader_election(&self) -> Result<Option<LeaderSettings>> {
+        if !self.leader.enabled {
             return Ok(None);
         }
         let namespace = self
-            .leader_election_namespace
-            .as_deref()
-            .map(str::trim)
-            .filter(|name| !name.is_empty())
-            .map(str::to_owned)
-            .or_else(|| namespaces.and_then(|list| list.first().cloned()))
+            .leader
+            .namespace
+            .clone()
             .ok_or_else(|| {
                 anyhow::anyhow!(
-                    "LEADER_ELECTION_ENABLED is set and LEADER_ELECTION_NAMESPACE (--leader-election-namespace) names no namespace, and WATCH_NAMESPACE/WATCH_NAMESPACES names none either: the Lease needs the namespace the operator's Role is in"
+                    "leaderElection.enabled is set and leaderElection.namespace names no namespace, and watch.namespaces names none either: the Lease needs the namespace the operator's Role is in"
                 )
             })?;
-        check_label(
-            "LEADER_ELECTION_NAMESPACE (--leader-election-namespace)",
-            &namespace,
-        )?;
-        let name = self.leader_election_name.trim();
-        if name.is_empty() {
-            anyhow::bail!(
-                "LEADER_ELECTION_NAME (--leader-election-name) is empty: a Lease has a name"
-            );
-        }
-        check_label("LEADER_ELECTION_NAME (--leader-election-name)", name)?;
         let timings = aap_leader_kubernetes::Timings {
-            lease: std::time::Duration::from_secs(self.leader_election_lease_secs),
-            renew: std::time::Duration::from_secs(self.leader_election_renew_secs),
-            retry: std::time::Duration::from_secs(self.leader_election_retry_secs),
+            lease: std::time::Duration::from_secs(self.leader.lease_secs),
+            renew: std::time::Duration::from_secs(self.leader.renew_secs),
+            retry: std::time::Duration::from_secs(self.leader.retry_secs),
         };
-        timings.check().map_err(|why| {
-            anyhow::anyhow!(
-                "LEADER_ELECTION_LEASE_SECS, LEADER_ELECTION_RENEW_SECS and LEADER_ELECTION_RETRY_SECS (--leader-election-lease-secs, --leader-election-renew-secs, --leader-election-retry-secs): {why}"
-            )
-        })?;
-        let candidate = candidate_id(self.instance.as_deref(), hostname().as_deref())?;
+        timings
+            .check()
+            .map_err(|why| anyhow::anyhow!("leaderElection: {why}"))?;
+        let candidate = candidate_id(instance().as_deref(), hostname().as_deref())?;
         Ok(Some(LeaderSettings {
             namespace,
-            name: name.to_owned(),
+            name: self.leader.name.clone(),
             candidate,
             timings,
         }))
     }
 
+    /// What the controllers are told, from the file.
     fn options(
         &self,
-        watch_namespaces: Option<Vec<String>>,
         registry: bool,
         registry_full: std::sync::Arc<std::sync::atomic::AtomicBool>,
-        default_agent_image: Option<String>,
-        agent_runtime_class: Option<String>,
-        run_pods: Option<aap_domain::RunPodSettings>,
     ) -> aap_controller::Options {
         aap_controller::Options {
-            watch_namespaces,
+            watch_namespaces: self.namespaces.clone(),
             registry: if registry {
                 aap_controller::RegistryMode::Enabled
             } else {
@@ -470,23 +109,18 @@ impl RunArgs {
             },
             registry_full,
             resync: aap_controller::Resync {
-                settled: std::time::Duration::from_secs(self.resync_secs),
-                pending: std::time::Duration::from_secs(self.resync_pending_secs),
+                settled: self.reconcile.resync,
+                pending: self.reconcile.resync_pending,
                 ..aap_controller::Resync::default()
             },
-            concurrency: self.concurrency.max(1),
-            pass_timeout: std::time::Duration::from_secs(self.reconcile_timeout_secs.max(1)),
-            instance: self.instance.clone().filter(|i| !i.is_empty()),
-            default_agent_image,
-            agent_runtime_class,
-            run_pods,
-            cache_claims: self
-                .cache_allowed_claims
-                .iter()
-                .map(|c| c.trim().to_owned())
-                .filter(|c| !c.is_empty())
-                .collect(),
-            max_access_tier: self.max_access_tier,
+            concurrency: self.reconcile.concurrency,
+            pass_timeout: self.reconcile.timeout,
+            instance: instance(),
+            default_agent_image: self.defaults.agent_image.clone(),
+            agent_runtime_class: self.defaults.agent_runtime_class.clone(),
+            run_pods: self.run_pods.clone(),
+            cache_claims: self.defaults.cache_allowed_claims.iter().cloned().collect(),
+            max_access_tier: self.defaults.max_access_tier,
             retention: aap_controller::Retention {
                 after_delete: (self.retention_after_delete_days > 0).then(|| {
                     std::time::Duration::from_secs(
@@ -497,8 +131,8 @@ impl RunArgs {
                 ..aap_controller::Retention::default()
             },
             probe: aap_controller::Probe {
-                enabled: self.tool_probe_enabled,
-                timeout: std::time::Duration::from_secs(self.tool_probe_timeout_secs),
+                enabled: self.tool_probe.enabled,
+                timeout: self.tool_probe.timeout,
             },
             // The binary builds the activity source (P2c) but does not hand it to the operator yet, so the idle loop does not run.
             sleep_poll: aap_controller::DEFAULT_POLL,
@@ -506,34 +140,47 @@ impl RunArgs {
     }
 }
 
-impl RunArgs {
-    /// The HTTP activity source (AD-058 P2c), or `None` while `ACTIVITY_ENABLED` is off. **Fail closed**: enabled with no
-    /// readable, non-empty `ACTIVITY_TOKEN_FILE` is an error at start, never a source that asks with no bearer.
-    pub fn activity_source(&self) -> anyhow::Result<Option<aap_activity_http::HttpActivity>> {
-        use anyhow::Context;
-        if !self.activity_enabled {
-            if self.activity_token_file.is_some() {
-                tracing::warn!(
-                    "ACTIVITY_TOKEN_FILE is set but ACTIVITY_ENABLED is not: no agent is asked about its work"
-                );
-            }
-            return Ok(None);
+/// The HTTP activity source (AD-058 P2c), or `None` while `activity.enabled` is off. **Fail closed**: enabled, the bearer is
+/// read now and a reference that gives nothing (a missing or unreadable file, an empty or unset variable, a blank text) is an
+/// error at start, never a source that asks with no bearer. `--check` does not come here: it holds only the reference's shape.
+///
+/// # Errors
+///
+/// The bearer cannot be read or is blank, or the HTTP client cannot be built.
+pub fn activity_source(
+    activity: &crate::config::Activity,
+) -> anyhow::Result<Option<aap_activity_http::HttpActivity>> {
+    use aap_trace_otlp::SecretRef;
+    use anyhow::Context;
+    if !activity.enabled {
+        if activity.token.is_some() {
+            tracing::warn!(
+                "activity.token is set but activity.enabled is not: no agent is asked about its work"
+            );
         }
-        let path = self
-            .activity_token_file
-            .as_ref()
-            .context("ACTIVITY_ENABLED needs ACTIVITY_TOKEN_FILE: the agents refuse a request with no bearer")?;
-        let text = std::fs::read_to_string(path)
-            .with_context(|| format!("reading ACTIVITY_TOKEN_FILE {}", path.display()))?;
-        let token = aap_activity_http::Token::new(&text)
-            .with_context(|| format!("ACTIVITY_TOKEN_FILE {}", path.display()))?;
-        let source = aap_activity_http::HttpActivity::in_cluster(
-            self.activity_port,
-            std::time::Duration::from_secs(self.activity_timeout_secs),
-            Some(token),
-        )?;
-        Ok(Some(source))
+        return Ok(None);
     }
+    let reference = activity
+        .token
+        .as_ref()
+        .context("activity.token: required while activity.enabled is true: the agents refuse a request with no bearer")?;
+    let refused = |why: String| {
+        anyhow::Error::new(crate::config::ReferenceRefused(format!(
+            "activity.token {reference:?}: {why}"
+        )))
+    };
+    let text = match reference {
+        SecretRef::File(path) => std::fs::read_to_string(path)
+            .map_err(|e| refused(format!("the file cannot be read ({})", e.kind())))?,
+        SecretRef::Env(name) => {
+            std::env::var(name).map_err(|_| refused("the variable is not set".to_owned()))?
+        }
+    };
+    let token = aap_activity_http::Token::new(&text)
+        .map_err(|_| refused("the bearer is empty".to_owned()))?;
+    let source =
+        aap_activity_http::HttpActivity::in_cluster(activity.port, activity.timeout, Some(token))?;
+    Ok(Some(source))
 }
 
 /// The store provisioner of this build: with `store-cnpg`, the one that makes a CloudNativePG cluster and
@@ -549,36 +196,47 @@ fn store(_client: &kube::Client) -> aap_store_secret::SecretStore {
     aap_store_secret::SecretStore::new()
 }
 
-/// The registry's token, or why there is none. **No token, no registry** (fail closed): the operator
-/// keeps reconciling, says so loudly, and every service is `Listed: False`, reason `RegistryDisabled`.
+/// The registry's token. **No token configured, no registry** (fail closed): the operator keeps reconciling, says so loudly,
+/// and every service is `Listed: False`, reason `RegistryDisabled`. **A token configured and unusable is a refusal of the
+/// file** (exit 78, as `activity.token`'s is): a missing or empty file, an unset or empty variable. It used to be the same as
+/// none, and a deployment whose Secret was misnamed then ran for hours with no registry and a single log line (AD-064).
+///
+/// # Errors
+///
+/// [`ReferenceRefused`](crate::config::ReferenceRefused): the reference gives no token. The message names the reference, never
+/// a value.
 #[cfg(all(feature = "runtime-kubernetes", feature = "registry"))]
-fn registry_token(args: &RunArgs) -> Option<aap_registry::Token> {
-    let Some(path) = &args.registry_token_file else {
+fn registry_token(registry: &crate::config::Registry) -> Result<Option<aap_registry::Token>> {
+    use aap_trace_otlp::SecretRef;
+    let Some(reference) = &registry.token else {
         tracing::warn!(
-            "no REGISTRY_TOKEN_FILE: the agent registry is not served (it has no token to demand)"
+            "no registry.token: the agent registry is not served (it has no token to demand)"
         );
-        return None;
+        return Ok(None);
     };
-    match aap_registry::Token::from_file(path) {
-        Ok(token) => Some(token),
-        Err(e) => {
-            tracing::error!(
-                "{}: {e}: the agent registry is not served (it has no token to demand)",
-                path.display()
-            );
-            None
-        }
-    }
+    let token = match reference {
+        SecretRef::File(path) => aap_registry::Token::from_file(path).map_err(|e| e.to_string()),
+        SecretRef::Env(name) => std::env::var(name)
+            .ok()
+            .and_then(|text| aap_registry::Token::new(&text))
+            .ok_or_else(|| "the variable is not set or is empty".to_owned()),
+    };
+    token.map(Some).map_err(|why| {
+        // The reference, never the value: a file's path and a variable's name are not the token.
+        anyhow::Error::new(crate::config::ReferenceRefused(format!(
+            "registry.token {reference:?}: {why}"
+        )))
+    })
 }
 
 #[cfg(all(feature = "runtime-kubernetes", not(feature = "registry")))]
-fn registry_token(args: &RunArgs) -> Option<()> {
-    if args.registry_token_file.is_some() {
+fn registry_token(registry: &crate::config::Registry) -> Result<Option<()>> {
+    if registry.token.is_some() {
         tracing::warn!(
-            "REGISTRY_TOKEN_FILE is set, but this build has no `registry` feature: nothing is served on the registry's port"
+            "registry.token is set, but this build has no `registry` feature: nothing is served on the registry's port"
         );
     }
-    None
+    Ok(None)
 }
 
 /// How often the registry's document is built when nobody asks, so that `RegistryFull` is true to the
@@ -631,16 +289,20 @@ fn kubernetes_runtime(
 #[cfg(feature = "runtime-kubernetes")]
 const FLUSH: std::time::Duration = std::time::Duration::from_secs(3);
 
-/// `operator run`. The tracing variables are read first, before the cluster is asked anything. A setting that is refused never
-/// stops the operator (tracing is not a security control, and platforms inject OTEL_* variables of their own): one warning, by
-/// variable, and tracing is off. The spans still queued are flushed on every way out that returns, an error included (not when
-/// the main future panics).
+/// `operator run`. The traces are started first, from the file's `telemetry.otlp` section, before the cluster is asked
+/// anything. A reference that cannot be read (a headers file, a certificate) never stops the operator: one warning, by
+/// setting, and tracing is off. The spans still queued are flushed on every way out that returns, an error included (not
+/// when the main future panics).
 #[cfg(feature = "runtime-kubernetes")]
-pub async fn run(args: RunArgs) -> Result<()> {
-    let started = aap_trace_otlp::start("aap-operator", env!("CARGO_PKG_VERSION"));
+pub async fn run(settings: crate::config::Settings) -> Result<()> {
+    let started = aap_trace_otlp::start_section(
+        "aap-operator",
+        env!("CARGO_PKG_VERSION"),
+        settings.telemetry.as_ref(),
+    );
     started.warn();
     let tracer = started.tracer;
-    flushed(&tracer, run_with(args, tracer.clone())).await
+    flushed(&tracer, run_with(settings, tracer.clone())).await
 }
 
 /// Run `body`, then flush the spans still queued: on `Ok` and on `Err` alike.
@@ -677,7 +339,7 @@ where
 }
 
 #[cfg(feature = "runtime-kubernetes")]
-async fn run_with(args: RunArgs, tracer: aap_trace::Tracer) -> Result<()> {
+async fn run_with(settings: crate::config::Settings, tracer: aap_trace::Tracer) -> Result<()> {
     use std::sync::Arc;
 
     use aap_api::AgentService;
@@ -687,26 +349,15 @@ async fn run_with(args: RunArgs, tracer: aap_trace::Tracer) -> Result<()> {
     use kube::{Resource, ResourceExt};
     use tokio::sync::watch;
 
-    let default_image = args.default_image()?;
-    let agent_runtime_class = args.agent_runtime_class()?;
-    let run_pods = args.run_pod_settings()?;
-    let watch_namespaces = args.namespaces()?;
-    let leader = args.leader_election(watch_namespaces.as_deref())?;
+    let leader = settings.leader_election()?;
     let registry_full = Arc::new(std::sync::atomic::AtomicBool::new(false));
     // Built and checked now so a bad setting stops the start; the idle controller (P2b) is what polls it.
-    let activity = args.activity_source()?;
-    let token = registry_token(&args);
-    let options = args.options(
-        watch_namespaces,
-        token.is_some(),
-        registry_full.clone(),
-        default_image,
-        agent_runtime_class,
-        run_pods,
-    );
+    let activity = activity_source(&settings.activity)?;
+    let token = registry_token(&settings.registry)?;
+    let options = settings.options(token.is_some(), registry_full.clone());
     if options.watch_namespaces.is_none() {
         tracing::warn!(
-            "WATCH_NAMESPACE and WATCH_NAMESPACES name no namespace: the operator watches every namespace, which needs a ClusterRole this chart does not make"
+            "watch.namespaces names no namespace: the operator watches every namespace, which needs a ClusterRole this chart does not make"
         );
     }
     tracing::info!(
@@ -746,21 +397,21 @@ async fn run_with(args: RunArgs, tracer: aap_trace::Tracer) -> Result<()> {
     // POD_NAME, else HOSTNAME; without either, the election refuses to start (a holderIdentity of "" would make two
     // replicas look like one), while a lone operator with no election needs no name at all.
     let election: std::sync::Arc<dyn aap_ports::LeaderElection> = match &leader {
-        Some(settings) => {
+        Some(leader) => {
             let lease = aap_leader_kubernetes::LeaseElection::new(
                 client.clone(),
-                &settings.namespace,
-                &settings.name,
-                settings.candidate.clone(),
+                &leader.namespace,
+                &leader.name,
+                leader.candidate.clone(),
             )
-            .with_timings(settings.timings)
+            .with_timings(leader.timings)
             .map_err(|why| anyhow::anyhow!("the leader election's timings: {why}"))?;
             tracing::info!(
-                lease = %format!("{}/{}", settings.namespace, settings.name),
-                candidate = settings.candidate.as_str(),
-                lease_secs = settings.timings.lease.as_secs(),
-                renew_secs = settings.timings.renew.as_secs(),
-                retry_secs = settings.timings.retry.as_secs(),
+                lease = %format!("{}/{}", leader.namespace, leader.name),
+                candidate = leader.candidate.as_str(),
+                lease_secs = leader.timings.lease.as_secs(),
+                renew_secs = leader.timings.renew.as_secs(),
+                retry_secs = leader.timings.retry.as_secs(),
                 "leader election on: every replica serves, and only the lease holder's passes write"
             );
             Arc::new(lease)
@@ -769,7 +420,7 @@ async fn run_with(args: RunArgs, tracer: aap_trace::Tracer) -> Result<()> {
             tracing::info!(
                 "no leader election: this replica is the only one, and every pass writes"
             );
-            let candidate = candidate_id(args.instance.as_deref(), hostname().as_deref())
+            let candidate = candidate_id(instance().as_deref(), hostname().as_deref())
                 .unwrap_or_else(|_| aap_ports::CandidateId::new("operator"));
             Arc::new(aap_ports::AlwaysLeader::new(candidate))
         }
@@ -788,7 +439,7 @@ async fn run_with(args: RunArgs, tracer: aap_trace::Tracer) -> Result<()> {
     let registry_server = token.map(|token| {
         let mut registry = aap_registry::Registry::new(operator.directory(), token)
             .with_full_flag(registry_full.clone());
-        if let Some(anchor) = args.registry_public_url.clone().filter(|u| !u.is_empty()) {
+        if let Some(anchor) = settings.registry.public_url.clone() {
             registry = registry.with_anchor(anchor);
         }
         Arc::new(registry)
@@ -800,12 +451,12 @@ async fn run_with(args: RunArgs, tracer: aap_trace::Tracer) -> Result<()> {
         let _ = rx.wait_for(|stop| *stop).await;
     };
     let health = tokio::spawn(crate::serve::serve(
-        args.health_addr,
+        settings.listen.health,
         crate::serve::health(operator.readiness()),
         signalled(stopped.clone()),
     ));
     let metrics = tokio::spawn(crate::serve::serve(
-        args.metrics_addr,
+        settings.listen.metrics,
         crate::serve::metrics_for(operator.metrics(), &tracer),
         signalled(stopped.clone()),
     ));
@@ -815,7 +466,7 @@ async fn run_with(args: RunArgs, tracer: aap_trace::Tracer) -> Result<()> {
     #[cfg(feature = "registry")]
     let registry = tokio::spawn({
         let registry = registry_server.clone();
-        let addr = args.registry_addr;
+        let addr = settings.listen.registry;
         let stopped = stopped.clone();
         async move {
             let Some(registry) = registry else {
@@ -934,8 +585,8 @@ const LEASE_RELEASE_WAIT: std::time::Duration = std::time::Duration::from_secs(5
 const CONTROLLER_DRAIN_WAIT: std::time::Duration = std::time::Duration::from_secs(10);
 
 #[cfg(not(feature = "runtime-kubernetes"))]
-pub async fn run(args: RunArgs) -> Result<()> {
-    let _ = args;
+pub async fn run(settings: crate::config::Settings) -> Result<()> {
+    let _ = settings;
     anyhow::bail!(
         "this build has no runtime provider: rebuild with `--features runtime-kubernetes` (the default)"
     )
@@ -950,6 +601,14 @@ mod tests {
     fn client() -> kube::Client {
         let config = kube::Config::new("http://127.0.0.1:9".parse().expect("a URL"));
         kube::Client::try_from(config).expect("a client")
+    }
+
+    /// The settings a file gives, as `operator run` reads them.
+    fn settings(yaml: &str) -> crate::config::Settings {
+        crate::config::Config::parse(yaml)
+            .expect("a configuration")
+            .validate()
+            .expect("a configuration the operator can work with")
     }
 
     /// What a pass needs of the operator is the tracer it was composed with: an operator composed with none makes no span.
@@ -1034,35 +693,6 @@ mod tests {
         );
     }
 
-    /// K7a: the six election settings as the binary parses them with nothing set: **off** (a chart that renders no
-    /// `LEADER_ELECTION_ENABLED`, which is every replica count of one, is a lone operator that writes), and the
-    /// client-go timers.
-    #[test]
-    fn the_run_settings_default_to_no_election_and_the_client_go_timers() {
-        use clap::Parser as _;
-
-        let cli = crate::Cli::try_parse_from(["operator", "run"]).expect("the defaults parse");
-        let crate::Command::Run(args) = cli.command else {
-            panic!("`run` parses to the controllers");
-        };
-        assert!(
-            !args.leader_election_enabled,
-            "the election must be off unless the chart sets LEADER_ELECTION_ENABLED: a lone replica would campaign for a \
-             Lease its Role does not grant, never hold it, and write nothing"
-        );
-        assert_eq!(args.leader_election_name, "aap-operator");
-        assert_eq!(args.leader_election_namespace, None);
-        assert_eq!(
-            (
-                args.leader_election_lease_secs,
-                args.leader_election_renew_secs,
-                args.leader_election_retry_secs
-            ),
-            (15, 10, 2),
-            "the client-go defaults, and the ones the chart's values.yaml holds"
-        );
-    }
-
     /// The operator flushes the spans still queued when it ends, whether it ended well or not.
     #[tokio::test]
     async fn the_operator_flushes_its_spans_on_the_way_out() {
@@ -1106,8 +736,7 @@ mod tests {
         );
     }
 
-    /// The namespaces the runtime provider watches are the ones the operator was given (K6b), and an empty list
-    /// (no `WATCH_NAMESPACES` and no `WATCH_NAMESPACE`) is every namespace.
+    /// The namespaces the runtime provider watches are the ones the file gives (K6b), and none is every namespace.
     #[tokio::test]
     async fn the_runtime_provider_watches_the_namespaces_the_operator_was_given() {
         let mut options = aap_controller::Options::default();
@@ -1123,210 +752,49 @@ mod tests {
         );
     }
 
-    /// The settings of `run` as the environment would give them: the two namespace variables, and nothing else set.
-    fn args(one: Option<&str>, list: Option<&str>) -> RunArgs {
-        RunArgs {
-            watch_namespace: one.map(str::to_owned),
-            watch_namespaces: list.map(str::to_owned),
-            health_addr: "127.0.0.1:0".parse().expect("an address"),
-            metrics_addr: "127.0.0.1:0".parse().expect("an address"),
-            instance: None,
-            concurrency: 4,
-            reconcile_timeout_secs: 60,
-            registry_addr: "127.0.0.1:0".parse().expect("an address"),
-            registry_token_file: None,
-            registry_public_url: None,
-            resync_secs: 300,
-            resync_pending_secs: 15,
-            default_agent_image: None,
-            agent_runtime_class: None,
-            run_pods_file: None,
-            cache_allowed_claims: Vec::new(),
-            max_access_tier: aap_api::AccessTierCap::Auto,
-            tool_probe_enabled: false,
-            tool_probe_timeout_secs: 5,
-            activity_enabled: false,
-            activity_port: 8080,
-            activity_timeout_secs: 3,
-            activity_token_file: None,
-            retention_after_delete_days: 90,
-            leader_election_enabled: false,
-            leader_election_name: "aap-operator".to_owned(),
-            leader_election_namespace: None,
-            leader_election_lease_secs: 15,
-            leader_election_renew_secs: 10,
-            leader_election_retry_secs: 2,
-        }
-    }
-
-    /// `WATCH_NAMESPACES` and `WATCH_NAMESPACE`, as the chart sets them: the list, the one-namespace shorthand, and the
-    /// primary that must be one of the list.
-    #[test]
-    fn the_namespaces_are_the_list_and_the_alias_is_the_primary() {
-        // Neither, or a blank one (a chart value left empty): every namespace.
-        assert_eq!(args(None, None).namespaces().expect("none"), None);
-        assert_eq!(args(Some(""), None).namespaces().expect("blank"), None);
-        assert_eq!(args(Some("  "), None).namespaces().expect("blank"), None);
-        // The shorthand alone: that one, and it is checked like a name of the list.
-        assert_eq!(
-            args(Some("agents"), None).namespaces().expect("one"),
-            Some(vec!["agents".to_owned()])
-        );
-        // The list alone: exactly those, in the order given (which is the order of the shards).
-        assert_eq!(
-            args(None, Some("b,a")).namespaces().expect("a list"),
-            Some(vec!["b".to_owned(), "a".to_owned()])
-        );
-        // Both: the list, and the alias must be one of it.
-        assert_eq!(
-            args(Some("a"), Some("a, b")).namespaces().expect("both"),
-            Some(vec!["a".to_owned(), "b".to_owned()])
-        );
-        let err = args(Some("c"), Some("a,b"))
-            .namespaces()
-            .expect_err("a primary nobody watches");
-        assert!(
-            format!("{err:#}").contains("\"c\"") && format!("{err:#}").contains("primary"),
-            "{err:#}"
-        );
-    }
-
-    /// A list the operator cannot watch is refused at start, naming what is wrong: an operator that started with part
-    /// of the fleet would leave the rest of its namespaces unwatched without saying so.
-    #[test]
-    fn a_namespace_that_is_not_a_dns_label_a_duplicate_or_an_empty_list_is_refused() {
-        // A list that is set and holds no name: a blank one, and a comma or a trailing one.
-        for list in ["", " ", ","] {
-            let err = args(None, Some(list)).namespaces().expect_err(list);
-            assert!(
-                format!("{err:#}").contains("not a namespace"),
-                "{list}: {err:#}"
-            );
-        }
-        // A name that is not a DNS label, in the list and as the shorthand.
-        for name in [
-            "Agents",
-            "agents_1",
-            "-agents",
-            "agents-",
-            "a.b",
-            &"a".repeat(64),
-        ] {
-            let err = args(None, Some(name)).namespaces().expect_err(name);
-            assert!(format!("{err:#}").contains("DNS label"), "{name}: {err:#}");
-            assert!(args(Some(name), None).namespaces().is_err(), "{name}");
-        }
-        // A name given twice.
-        let err = args(None, Some("a,b,a"))
-            .namespaces()
-            .expect_err("a duplicate");
-        assert!(format!("{err:#}").contains("twice"), "{err:#}");
-        // And the rule itself, at its edges.
-        assert!(is_dns_label("a"));
-        assert!(is_dns_label("a-b-c"));
-        assert!(is_dns_label("a1"));
-        assert!(is_dns_label(&"a".repeat(63)));
-        assert!(!is_dns_label(""));
-        assert!(!is_dns_label(&"a".repeat(64)));
-        assert!(!is_dns_label("-a") && !is_dns_label("a-"));
-    }
-
-    /// K7a: the election is off by default; on, it takes the primary namespace when none is named, refuses
-    /// timings the loop cannot honour, and refuses a replica that cannot name itself.
+    /// K7a: the election is off by default; on, its namespace is the primary when the file names none, and its timings are
+    /// the file's. (The candidate is this pod's, which the test of [`candidate_id`] holds; a process has one `POD_NAME`.)
     #[test]
     fn the_leader_election_is_off_by_default_and_takes_the_primary_namespace() {
-        // Off: nothing is asked of the cluster, and the operator is the only replica.
-        let off = args(Some("agents"), None);
+        let off = settings("version: 1\nwatch: { namespaces: [agents] }\n");
+        assert!(!off.leader.enabled, "off: the operator is the only replica");
         assert!(
-            off.leader_election(Some(&["agents".to_owned()]))
+            off.leader_election()
                 .expect("off is not an error")
                 .is_none()
         );
 
-        // On, with a pod name: the primary namespace, the default lease name and the default timings.
-        let mut on = args(Some("agents"), None);
-        on.leader_election_enabled = true;
-        on.instance = Some("pod-7".to_owned());
-        let settings = on
-            .leader_election(Some(&["agents".to_owned()]))
-            .expect("on")
-            .expect("an election");
-        assert_eq!(settings.namespace, "agents", "the primary namespace");
-        assert_eq!(settings.name, "aap-operator");
-        assert_eq!(settings.candidate.as_str(), "pod-7");
-        assert_eq!(settings.timings, aap_leader_kubernetes::Timings::default());
-
-        // An explicit namespace wins over the primary.
-        let mut named = on.clone();
-        named.leader_election_namespace = Some("ops".to_owned());
+        let on = settings(
+            "version: 1\nwatch: { namespaces: [agents] }\nleaderElection: { enabled: true }\n",
+        );
+        assert_eq!(on.leader.name, "aap-operator");
         assert_eq!(
-            named
-                .leader_election(Some(&["agents".to_owned()]))
-                .expect("on")
-                .expect("an election")
-                .namespace,
-            "ops"
+            on.leader.namespace.as_deref(),
+            Some("agents"),
+            "the primary"
         );
-
-        // A list of several namespaces: the first is the primary.
         assert_eq!(
-            on.leader_election(Some(&["one".to_owned(), "two".to_owned()]))
-                .expect("on")
-                .expect("an election")
-                .namespace,
-            "one"
+            (
+                on.leader.lease_secs,
+                on.leader.renew_secs,
+                on.leader.retry_secs
+            ),
+            (15, 10, 2),
+            "the client-go defaults, and the ones the chart's values.yaml holds"
         );
 
-        // On, and no namespace anywhere: refused, naming the variable.
-        let mut nameless = args(None, None);
-        nameless.leader_election_enabled = true;
-        nameless.instance = Some("pod-7".to_owned());
-        let error = nameless
-            .leader_election(None)
-            .expect_err("a lease needs a namespace");
-        assert!(
-            format!("{error:#}").contains("LEADER_ELECTION_NAMESPACE"),
-            "{error:#}"
+        let named = settings(
+            "version: 1\nwatch: { namespaces: [agents] }\nleaderElection: { enabled: true, namespace: ops, leaseSecs: 30, renewSecs: 20, retrySecs: 3 }\n",
         );
-        assert!(
-            nameless.leader_election(Some(&[])).is_err(),
-            "an empty list has no primary"
+        assert_eq!(named.leader.namespace.as_deref(), Some("ops"));
+        assert_eq!(
+            (
+                named.leader.lease_secs,
+                named.leader.renew_secs,
+                named.leader.retry_secs
+            ),
+            (30, 20, 3)
         );
-
-        // A namespace that is not one, and a name that is not one.
-        let mut wrong = on.clone();
-        wrong.leader_election_namespace = Some("Agents".to_owned());
-        assert!(wrong.leader_election(Some(&["agents".to_owned()])).is_err());
-        let mut unnamed = on.clone();
-        unnamed.leader_election_name = "  ".to_owned();
-        assert!(
-            unnamed
-                .leader_election(Some(&["agents".to_owned()]))
-                .is_err()
-        );
-    }
-
-    /// K7a: timings the loop cannot honour are refused, naming the variables that gave them.
-    #[test]
-    fn inconsistent_leader_election_timings_are_refused() {
-        let mut on = args(Some("agents"), None);
-        on.leader_election_enabled = true;
-        on.instance = Some("pod-7".to_owned());
-        for (lease, renew, retry) in [(2, 2, 1), (15, 15, 2), (15, 10, 10), (0, 0, 0)] {
-            let mut bad = on.clone();
-            bad.leader_election_lease_secs = lease;
-            bad.leader_election_renew_secs = renew;
-            bad.leader_election_retry_secs = retry;
-            let error = bad
-                .leader_election(Some(&["agents".to_owned()]))
-                .expect_err("inconsistent timings");
-            let text = format!("{error:#}");
-            assert!(text.contains("LEADER_ELECTION_LEASE_SECS"), "{text}");
-            assert!(
-                text.contains("retry < renew < lease") || text.contains("at least 1 s"),
-                "{text}"
-            );
-        }
     }
 
     /// K7a: the candidate's identity is `POD_NAME`, else `HOSTNAME`, else a refusal.
@@ -1360,27 +828,80 @@ mod tests {
         );
     }
 
+    /// Ruling 5 of ANR-962, and AD-064 (changed on upgrade): `--check` holds a reference's shape, and the start reads it and
+    /// fails closed. No `registry.token` is no registry; a token that is configured and cannot be used (a missing or empty file,
+    /// an unset or empty variable) refuses the file, which is exit 78, never a registry that demands nothing.
+    #[cfg(all(feature = "runtime-kubernetes", feature = "registry"))]
+    #[test]
+    fn a_registry_token_that_is_configured_and_unusable_refuses_the_file() {
+        use aap_trace_otlp::SecretRef;
+        let registry = |token: Option<SecretRef>| crate::config::Registry {
+            public_url: None,
+            token,
+        };
+        assert!(
+            registry_token(&registry(None))
+                .expect("none is no registry")
+                .is_none(),
+            "no reference is no registry, and not a refusal"
+        );
+        let refused = |token: SecretRef| {
+            let error = registry_token(&registry(Some(token))).expect_err("a refusal");
+            assert!(crate::config::is_reference_refused(&error), "{error:#}");
+            assert!(format!("{error:#}").contains("registry.token"), "{error:#}");
+        };
+        let dir = std::env::temp_dir().join(format!("aap-registry-token-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).expect("a directory");
+        let file = dir.join("token");
+        refused(SecretRef::File(file.clone())); // missing
+        std::fs::write(&file, " \n").expect("write");
+        refused(SecretRef::File(file.clone())); // empty
+        refused(SecretRef::Env("AAP_TEST_NO_SUCH_REGISTRY_TOKEN".to_owned())); // unset
+        std::fs::write(&file, "registry-bearer\n").expect("write");
+        assert!(
+            registry_token(&registry(Some(SecretRef::File(file))))
+                .expect("a readable file")
+                .is_some()
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
     #[test]
     fn the_activity_source_is_off_by_default_and_fails_closed_without_a_token() {
-        let mut a = args(Some("agents"), None);
-        assert!(a.activity_source().expect("off is fine").is_none());
-
-        a.activity_enabled = true;
-        let text = format!("{:#}", a.activity_source().expect_err("no token file"));
-        assert!(text.contains("ACTIVITY_TOKEN_FILE"), "{text}");
+        let off = settings("version: 1\n");
+        assert!(
+            activity_source(&off.activity)
+                .expect("off is fine")
+                .is_none()
+        );
 
         let dir = std::env::temp_dir().join(format!("aap-activity-{}", std::process::id()));
         std::fs::create_dir_all(&dir).expect("a directory");
         let file = dir.join("token");
-        a.activity_token_file = Some(file.clone());
-        let text = format!("{:#}", a.activity_source().expect_err("missing file"));
-        assert!(text.contains("reading ACTIVITY_TOKEN_FILE"), "{text}");
+        let on = |token: &str| {
+            settings(&format!(
+                "version: 1\nactivity:\n  enabled: true\n  token: {token}\n"
+            ))
+        };
+
+        let text = format!(
+            "{:#}",
+            activity_source(&on(&format!("{{ file: {} }}", file.display())).activity)
+                .expect_err("missing file")
+        );
+        assert!(text.contains("activity.token"), "{text}");
+        assert!(text.contains("cannot be read"), "{text}");
 
         std::fs::write(&file, " \n").expect("write");
-        assert!(a.activity_source().is_err(), "a blank token is refused");
+        assert!(
+            activity_source(&on(&format!("{{ file: {} }}", file.display())).activity).is_err(),
+            "a blank token is refused"
+        );
 
         std::fs::write(&file, "s3cret-bearer\n").expect("write");
-        let source = a.activity_source().expect("a token").expect("a source");
+        let source = activity_source(&on(&format!("{{ file: {} }}", file.display())).activity)
+            .expect("a token")
+            .expect("a source");
         assert!(
             !format!("{source:?}").contains("s3cret"),
             "the token never prints"

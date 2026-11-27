@@ -1,0 +1,95 @@
+name: gVisor in k3d
+
+# ANR-404 (K14c, AD-052): a run pod of the operator's template under gVisor's runsc, in a k3d cluster, and what the card asks to measure beside it
+# (deploy/operator/tests/e2e/gvisor-k3d.sh: its header says how the shim is configured and what it does not prove). K14b recorded that kind refuses
+# runsc's device cgroup; the way past is the shim's own configuration file.
+#
+# A workflow of its own, NOT a required check and NOT a need of `push` in operator-image.yml: it pulls other registries' images by digest, and a hosted
+# runner may refuse what a local machine allowed, which is what it is here to say. It runs on a pull request only when the script, its fixture, this file
+# or the chart templates and the admission script it measures change, and on demand. *Verified 2026-11-26* on a hosted runner: run 45889453084 (PR #112, kernel
+# 7.0.0-1020-azure) started a run pod under runsc and passed the admission cases; limits are not enforced under ignore-cgroups, as locally.
+
+on:
+  pull_request:
+    paths:
+      - "deploy/operator/tests/e2e/gvisor-k3d*"
+      - ".github/workflows/gvisor-k3d.yml"
+      - "deploy/operator/templates/run-pods-*.yaml"
+      - "deploy/operator/templates/**"
+      - "deploy/operator-crds/**"
+      - "deploy/operator/templates/_validate.tpl"
+      - "deploy/operator/values.yaml"
+      - "deploy/operator/tests/run-pods-admission.sh"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: gvisor-k3d-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+env:
+  HELM_VERSION: v3.19.0
+  # k3d is pinned by version and by the SHA-256 of its release binary (checksums.txt of the release, *verified 2026-11-26* with a local copy of the same file).
+  K3D_VERSION: v5.9.0
+  K3D_SHA256: 06d8f25bc3a971c4eb29e0ff08429b180402db0f4dec838c9eac427e296800a0
+  # kubectl is pinned the same way, to the version the script was run with locally (v1.35.5); the checksum is the one dl.k8s.io publishes beside the binary
+  # (kubectl.sha256) and is the one of the binary the local run used, *verified 2026-11-26*.
+  KUBECTL_VERSION: v1.35.5
+  KUBECTL_SHA256: 90f75ea6ecc9ea5633262e1c0b83a40560003b30fc94a04cb099404fcef0c224
+
+jobs:
+  gvisor-k3d:
+    name: gvisor-k3d
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v7
+      - uses: azure/setup-helm@v5
+        with:
+          version: ${{ env.HELM_VERSION }}
+      # ANR-962: the operator reads one configuration file (`run --config`), so the chart of the pull request cannot run the image the chart pins (built from main
+      # before the change: "unexpected argument '--config'"). This job builds the operator image from the pull request, as operator-image.yml's `image` job does, and
+      # the script imports it into the k3d cluster (AAP_OPERATOR_IMAGE). A local run, with no override, still runs the chart's pin.
+      - uses: docker/setup-buildx-action@v4
+      - name: Build the operator image from this tree
+        uses: docker/build-push-action@v7
+        with:
+          context: .
+          file: docker/operator/Dockerfile
+          platforms: linux/amd64
+          push: false
+          load: true
+          provenance: false
+          tags: operator:pr
+          cache-from: type=gha,scope=operator
+      - name: Install k3d and kubectl
+        run: |
+          curl -sSfL -o "$RUNNER_TEMP/k3d" "https://github.com/k3d-io/k3d/releases/download/${K3D_VERSION}/k3d-linux-amd64"
+          echo "${K3D_SHA256}  $RUNNER_TEMP/k3d" | sha256sum -c -
+          sudo install -m 0755 "$RUNNER_TEMP/k3d" /usr/local/bin/k3d
+          curl -sSfL -o "$RUNNER_TEMP/kubectl" "https://dl.k8s.io/release/${KUBECTL_VERSION}/bin/linux/amd64/kubectl"
+          echo "${KUBECTL_SHA256}  $RUNNER_TEMP/kubectl" | sha256sum -c -
+          sudo install -m 0755 "$RUNNER_TEMP/kubectl" /usr/local/bin/kubectl
+          kubectl version --client
+          k3d version
+          docker version --format 'docker server {{.Server.Version}}'
+          stat -fc 'cgroup filesystem of /sys/fs/cgroup: %T' /sys/fs/cgroup
+      # `shell: bash` runs `bash --noprofile --norc -eo pipefail {0}`: the default of a step with no `shell` is `bash -e {0}`, with no pipefail, and
+      # then `tee`'s status would hide the script's.
+      - name: A run pod under runsc, and what the card asks to measure
+        shell: bash
+        env:
+          AAP_OPERATOR_IMAGE: operator:pr
+        run: sh deploy/operator/tests/e2e/gvisor-k3d.sh 2>&1 | tee "$RUNNER_TEMP/gvisor-k3d.log"
+      - name: The summary of the measures
+        if: always()
+        run: |
+          { echo '### gvisor-k3d'; echo '```'; sed -n '/==== SUMMARY/,$p' "$RUNNER_TEMP/gvisor-k3d.log"; echo '```'; } >> "$GITHUB_STEP_SUMMARY" || true
+      - uses: actions/upload-artifact@v7
+        if: always()
+        with:
+          name: gvisor-k3d-log
+          path: ${{ runner.temp }}/gvisor-k3d.log
+          if-no-files-found: ignore

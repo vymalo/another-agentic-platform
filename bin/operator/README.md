@@ -5,7 +5,8 @@ Kubernetes runtime provider, the store provisioner and the controllers. Nothing 
 
 ```sh
 cargo run -q -p aap-operator -- crdgen > deploy/crds/agents.vymalo.com.yaml   # regenerate the CRDs
-cargo run -q -p aap-operator -- run                                            # the controllers, against KUBECONFIG or the cluster
+cargo run -q -p aap-operator -- run --check --config config.example.yaml       # is the file one the operator can work with?
+cargo run -q -p aap-operator -- run --config config.example.yaml               # the controllers, against KUBECONFIG or the cluster
 ```
 
 | Subcommand | What |
@@ -14,48 +15,55 @@ cargo run -q -p aap-operator -- run                                            #
 | `run` | Composes `KubernetesRuntime` ([`aap-runtime-kubernetes`](../../crates/runtime-kubernetes/README.md)), `CnpgStore` ([`aap-store-cnpg`](../../crates/store-cnpg/README.md), which also serves a referenced Secret; `SecretStore` ([`aap-store-secret`](../../crates/store-secret/README.md)) without the `store-cnpg` feature) and the [`Operator`](../../crates/controller/README.md), serves health and metrics, and runs until SIGTERM or SIGINT, then lets the passes in flight finish |
 
 Libraries use `thiserror`; this binary uses `anyhow` (and has no error type of its own). **Leader election is off by
-default** — §59a's one replica, and every pass writes. With it on (K7a, `LEADER_ELECTION_ENABLED`) several replicas
+default** — §59a's one replica, and every pass writes. With it on (K7a, `leaderElection.enabled`) several replicas
 may run: each keeps its caches, serves health, metrics and the registry, and only the holder of a
 `coordination.k8s.io/v1` `Lease` writes (see *Leader election*).
 
-## `run`: settings
+## `run`: the configuration file
 
-Each is a flag and an environment variable, which is how the chart sets them (S8).
+`operator run --config <path>` reads **one YAML file** (default `/etc/aap-operator/config.yaml`, which the chart mounts from its
+ConfigMap) and every setting is in it (ANR-962, AD-064); [`config.example.yaml`](config.example.yaml) documents every key. An
+unknown key is refused at every level and `version` is required and must be `1`, so a misspelt key stops the operator instead
+of leaving a setting on its default. **`run --check`** reads the file, says whether the operator can work with it, and exits
+**0**, or **78** (`EX_CONFIG`) when the file is refused; `run` itself exits 78 for the same reason and 1 for anything else.
+`--check` reads none of the files the configuration names (a Secret is mounted in the pod, not on the machine that checks a
+chart).
 
-| Variable | Flag | Default | Meaning |
-|---|---|---|---|
-| `WATCH_NAMESPACE` | `--watch-namespace` | none: every namespace | Watch one namespace (the namespaced operator of §93), and **the primary** when `WATCH_NAMESPACES` lists several (it names the cluster-scoped objects of run pods and the API's `defaults.namespace`). Empty is the same as unset |
-| `WATCH_NAMESPACES` | `--watch-namespaces` | none: `WATCH_NAMESPACE`, else every namespace | **K6b:** the namespaces to watch, comma separated. One set of controllers and caches per namespace, and one namespaced `Role` in each (never a `ClusterRole`). The primary must be one of them. A name that is not a DNS label, a name given twice, and a list that is set and holds no name (`""`, `","`) stop the operator at start, naming the variable and the value: an operator that started with part of the fleet would leave the rest unwatched without saying so |
-| `HEALTH_ADDR` | `--health-addr` | `0.0.0.0:8081` | `/healthz`, `/readyz` |
-| `METRICS_ADDR` | `--metrics-addr` | `0.0.0.0:9090` | `/metrics` |
-| `POD_NAME` | `--instance` | none | The `reportingInstance` of Events |
-| `AAP_CONCURRENCY` | `--concurrency` | 4 | Services reconciled at once (never the same one twice) |
-| `AAP_RESYNC_SECS` | `--resync-secs` | 300 | Timer for a service that is Ready or Suspended |
-| `AAP_RESYNC_PENDING_SECS` | `--resync-pending-secs` | 15 | Timer for one that is rolling out, unwell or held by a foreign object |
-| `AAP_RECONCILE_TIMEOUT_SECS` | `--reconcile-timeout-secs` | 60 | The longest one pass over one object may take. A pass that is not done by then is dropped, fails as `Transient` (`reconcile failed: the pass did not finish within …`, counter `aap_reconcile_timeouts_total`) and is tried again after the error policy's wait. Without it a request that is never answered keeps the object out of the controller for as long as it lives |
-| `REGISTRY_ADDR` | `--registry-addr` | `0.0.0.0:8080` | Where the agent registry is served (feature `registry`, and only with a token) |
-| `REGISTRY_TOKEN_FILE` | `--registry-token-file` | none | The file that holds the registry's bearer token (a mounted Secret), read once at start. **No token, no registry**: unset, missing, unreadable or empty, nothing is served on the port, the operator logs why and keeps reconciling, and every service is `Listed: False`, reason `RegistryDisabled` |
-| `REGISTRY_PUBLIC_URL` | `--registry-public-url` | none | The URL of the registry document itself, sent as its `anchor` (optional in the contract) |
-| `CACHE_ALLOWED_CLAIMS` | `--cache-allowed-claims` | none | **K1:** the claims, comma separated, an `AgentConfig` may name as its package cache (`environment.cache.existingClaim`). Unset: no agent may have a cache (AD-049) |
-| `AGENT_MAX_ACCESS_TIER` | `--max-access-tier` | `auto` | **K1:** the highest access tier an `AgentConfig` may ask for (`plan`, `edits`, `auto`, `bypass`); a config above it is `ConfigInvalid`, and an agent that names none gets it when it is below `auto` (AD-050). Not a tier: the operator does not start |
-| `DEFAULT_AGENT_IMAGE` | `--default-agent-image` | none | The image of an agent whose `AgentConfig` names none (slice D2, AD-029): the coder image, a reference such as `repository:tag@sha256:…`. Unset or empty (a chart value left blank): **no default**, and such a config is `ConfigInvalid`, naming this flag. White space in it stops the operator at start (a deployment mistake, not an error on every agent that would have used it). A new value rolls every agent that names no image, through the config digest, and no other |
-| `AGENT_RUNTIME_CLASS` | `--agent-runtime-class` | none | The `RuntimeClass` of every agent's own pod (slice K14a, AD-052): the name of an object the cluster **administrator** made (the chart makes none). Unset or empty (a chart value left blank): no class, and every workload is what it was. Named, it goes into the pod template of every workload (both harnesses) and into the config digest, so naming it rolls the agents once. A name that is not a DNS subdomain stops the operator at start, naming this flag |
-| `RUN_PODS_FILE` | `--run-pods-file` | none | The deployment's settings for run pods (slice D15a): a YAML file, `aap_domain::RunPodSettings`, that the chart renders from `runPods` and `runPodClasses` and mounts. Read **once**, at start. Unset or empty: **the operator has no run pods**, and an `AgentConfig` that sets `coder.runPods` is `ConfigInvalid` saying so. A file that does not exist, does not parse (an unknown key is refused; a file from before D15c, with no `egressProxy` or with `networkPolicy.enabled`, is one, and so is a file from before D15d, with no `gitSandbox`, or with a switch for it), or fails `RunPodSettings::validate()` (the egress proxy's allow-list included: an empty one, an entry that is not a host name or is a bare suffix, no port; and the git sandbox's: no memory limit, a `/tmp` that is not a quantity above zero, no command at once or more than 4096) stops the operator at start, naming every mistake: a pod that cannot start is the better way to hear it than agents that run without the guard |
-| `TOOL_PROBE_ENABLED` | `--tool-probe-enabled` | off | **K3b, AD-053:** probe a `ToolProvider`'s MCP server (`initialize` and `tools/list`, [`aap-tool-probe`](../../crates/tool-probe/README.md)) and write `Reachable` and its tool names into the provider's status. The chart sets it when `toolProbe.to` lists the peers; a server that needs a header is `Reachable: Unknown`, reason `NeedsHeader`, and the operator reads no Secret (AD-024) |
-| `TOOL_PROBE_TIMEOUT_SECS` | `--tool-probe-timeout-secs` | 5 | How long one probe may take, 1 to 60 s; a server that does not answer by then is `Reachable: False`, reason `Timeout` |
-| `ACTIVITY_ENABLED` | `--activity-enabled` | off | **AD-058 P2c:** build the HTTP activity source ([`aap-activity-http`](../../crates/activity-http/README.md)), which asks each agent `GET /internal/activity`. Enabled without `ACTIVITY_TOKEN_FILE` stops the start. Nothing polls it until the idle controller (P2b). The chart sets it when `activity.to` lists the peers |
-| `ACTIVITY_PORT` | `--activity-port` | 8080 | The port agents serve `/internal/activity` on |
-| `ACTIVITY_TIMEOUT_SECS` | `--activity-timeout-secs` | 3 | How long one question may take, 1 to 30 s; no answer by then counts as busy |
-| `ACTIVITY_TOKEN_FILE` | `--activity-token-file` | none | A file holding the bearer the agents accept (a mounted Secret key); read once, never logged |
-| `LEADER_ELECTION_ENABLED` | `--leader-election-enabled` | off | **K7a:** elect one replica to write, with a `coordination.k8s.io/v1` `Lease`. Off: this replica is the only one, and every pass writes (`AlwaysLeader`) |
-| `LEADER_ELECTION_NAME` | `--leader-election-name` | `aap-operator` | The name of the `Lease`; the election is `<namespace>/<name>`. A DNS label |
-| `LEADER_ELECTION_NAMESPACE` | `--leader-election-namespace` | the primary | The namespace of the `Lease`: the primary one (`WATCH_NAMESPACE`, or the first of `WATCH_NAMESPACES`), where the chart's `Role` is. **With the election on and no namespace anywhere, `run` refuses to start**, naming the variable: a `Lease` lives in one |
-| `LEADER_ELECTION_LEASE_SECS` | `--leader-election-lease-secs` | 15 | How long the lease lives: a holder that has not renewed for this long may be replaced |
-| `LEADER_ELECTION_RENEW_SECS` | `--leader-election-renew-secs` | 10 | How often the holder renews |
-| `LEADER_ELECTION_RETRY_SECS` | `--leader-election-retry-secs` | 2 | How often a replica that is not the holder tries |
-| `RUST_LOG` | | `info` | `tracing` filter; logs go to standard error |
-| `KUBECONFIG` | | | Used when there is no in-cluster environment (`kube::Client::try_default`) |
+**There is no secret in the file.** The registry's token and the traces' headers are references: `{ file: /path }` (a mounted
+Secret) or `{ env: NAME }`. `POD_NAME`, `POD_NAMESPACE` and `HOSTNAME` are not settings: they are the downward API's identity
+of this replica (the `reportingInstance` of Events, the lease's `holderIdentity`, the traces' resource).
 
+| Key | Default | Meaning |
+|---|---|---|
+| `listen.health` | `0.0.0.0:8081` | `/healthz`, `/readyz`. The three listeners each need a port of their own (refused otherwise) |
+| `listen.metrics` | `0.0.0.0:9090` | `/metrics` |
+| `listen.registry` | `0.0.0.0:8080` | The agent registry (feature `registry`, and only with a token) |
+| `watch.namespaces` | none: every namespace | **K6b:** the namespaces to watch, in order. One set of controllers and caches per namespace, and one namespaced `Role` in each (never a `ClusterRole`). **The first is the primary**, which names the cluster-scoped objects of run pods and the API's `defaults.namespace`. A name that is not a DNS label and a name given twice stop the operator at start: an operator that started with part of the fleet would leave the rest unwatched without saying so |
+| `reconcile.concurrency` | 4 | Services reconciled at once, per controller and per namespace (at least 1) |
+| `reconcile.timeoutSecs` | 60 | The longest one pass over one object may take. A pass that is not done by then is dropped, fails as `Transient` (`reconcile failed: the pass did not finish within …`, counter `aap_reconcile_timeouts_total`) and is tried again after the error policy's wait. Without it a request that is never answered keeps the object out of the controller for as long as it lives |
+| `reconcile.resyncSecs` | 300 | Timer for a service that is Ready or Suspended |
+| `reconcile.resyncPendingSecs` | 15 | Timer for one that is rolling out, unwell or held by a foreign object |
+| `registry.token` | none | The bearer token, by reference (a mounted Secret), read once at start. **No token, no registry**: unset, missing, unreadable or empty, nothing is served on the port, the operator logs why and keeps reconciling, and every service is `Listed: False`, reason `RegistryDisabled` |
+| `registry.publicUrl` | none | The URL of the registry document itself, sent as its `anchor` (optional in the contract) |
+| `defaults.agentImage` | none | The image of an agent whose `AgentConfig` names none (slice D2, AD-029): the coder image, `repository:tag@sha256:…`. Absent or empty: **no default**, and such a config is `ConfigInvalid`. White space in it stops the operator at start. A new value rolls every agent that names no image, through the config digest, and no other |
+| `defaults.agentRuntimeClass` | none | The `RuntimeClass` of every agent's own pod (slice K14a, AD-052): the name of an object the cluster **administrator** made (the chart makes none). Absent or empty: no class. Named, it goes into the pod template of every workload (both harnesses) and into the config digest, so naming it rolls the agents once. A name that is not a DNS subdomain stops the operator at start |
+| `defaults.cacheAllowedClaims` | none | **K1:** the claims an `AgentConfig` may name as its package cache (`environment.cache.existingClaim`). Empty: no agent may have a cache (AD-049) |
+| `defaults.maxAccessTier` | `auto` | **K1:** the highest access tier an `AgentConfig` may ask for (`plan`, `edits`, `auto`, `bypass`); a config above it is `ConfigInvalid`, and an agent that names none gets it when it is below `auto` (AD-050) |
+| `runPods` | none | The deployment's settings for run pods (slice D15a): the size classes, the run image, the quota, the network policy, the egress proxy and the git sandbox, `aap_domain::RunPodSettings` as the chart's `runPods` and `runPodClasses` render it. Absent: **the operator has no run pods**, and an `AgentConfig` that sets `coder.runPods` is `ConfigInvalid` saying so. An unknown key, a block from before D15c (no `egressProxy`, or `networkPolicy.enabled`) or D15d (no `gitSandbox`, or a switch for it), and anything `RunPodSettings::validate()` refuses (the egress proxy's allow-list included, and the git sandbox's memory limit, `/tmp` and commands) stop the operator at start, naming every mistake |
+| `toolProbe.enabled` | `false` | **K3b, AD-053:** probe a `ToolProvider`'s MCP server (`initialize` and `tools/list`, [`aap-tool-probe`](../../crates/tool-probe/README.md)) and write `Reachable` and its tool names into the provider's status. A server that needs a header is `Reachable: Unknown`, reason `NeedsHeader`, and the operator reads no Secret (AD-024) |
+| `toolProbe.timeoutSecs` | 5 | How long one probe may take, 1 to 60 s; a server that does not answer by then is `Reachable: False`, reason `Timeout` |
+| `activity.enabled` | `false` | **AD-058 P2c:** build the HTTP activity source ([`aap-activity-http`](../../crates/activity-http/README.md)), which asks each agent `GET /internal/activity`. Enabled without `activity.token` is refused (78); a token that cannot be read or is blank stops the start (never a source with no bearer). Nothing polls it until the idle controller (P2b). The chart sets it when `activity.to` lists the peers |
+| `activity.port` | 8080 | The port agents serve `/internal/activity` on |
+| `activity.timeoutSecs` | 3 | How long one question may take, 1 to 30 s; no answer by then counts as busy |
+| `activity.token` | none | The bearer the agents accept, by reference (a mounted Secret key); read once, never logged |
+| `retention.afterDeleteDays` | 90 | **ANR-770:** days the database and volumes of a deleted agent (`deletionPolicy: Retain`) are kept before they are deleted. `0` keeps them for ever and turns the sweep off |
+| `leaderElection.enabled` | `false` | **K7a:** elect one replica to write, with a `coordination.k8s.io/v1` `Lease`. Off: this replica is the only one, and every pass writes (`AlwaysLeader`) |
+| `leaderElection.name` | `aap-operator` | The name of the `Lease`; the election is `<namespace>/<name>`. A DNS label |
+| `leaderElection.namespace` | the primary | The namespace of the `Lease`: the primary one (the first of `watch.namespaces`), where the chart's `Role` is. **With the election on and no namespace anywhere, `run` refuses to start**: a `Lease` lives in one |
+| `leaderElection.leaseSecs` / `renewSecs` / `retrySecs` | 15 / 10 / 2 | How long the lease lives, how often the holder renews, and how often a replica that is not the holder tries. `retry < renew < lease`, each at least a second, or `run` refuses to start |
+| `log.filter` | `info` | A `tracing` filter (`info,kube=warn,aap_controller=debug`); logs go to standard error. One `tracing` does not parse stops the operator |
+| `telemetry.otlp` | none | The traces (K5): `endpoint`, `headers` (a map of header name to reference), `certificate` (a path), `timeout` (ms), `sampler` (`always_on`, `always_off`, `traceidratio`) with `samplerRatio`, `serviceName` and `resourceAttributes`. Absent: no span. A header needs an `https` endpoint |
+| `KUBECONFIG` | | Not a setting of the file: used when there is no in-cluster environment (`kube::Client::try_default`) |
 
 * `GET /healthz` on 8081: 200 while the process is up (liveness).
 * `GET /readyz` on 8081: 200 once both controllers' caches have listed the cluster, 503 before.
@@ -75,24 +83,27 @@ the feature, and the controller is generic over `StoreProvisioner` (AD-020).
 
 ## Traces (K5)
 
-Traces are **off** unless an endpoint is set (`OTEL_EXPORTER_OTLP_TRACES_ENDPOINT`, or `OTEL_EXPORTER_OTLP_ENDPOINT` with
-`/v1/traces` appended), and then no task, queue or series exists. The variables are a strict subset of the standard ones,
-read by `aap-trace-otlp` ([README](../../crates/trace-otlp/README.md)): `grpc`, `http/protobuf` and
-`OTEL_EXPORTER_OTLP_HEADERS` are refused, headers come from the file `AAP_OTEL_HEADERS_FILE` names, and
-`OTEL_EXPORTER_OTLP_CERTIFICATE` is the exporter's only trust. **A tracing setting never stops the operator:** a bad one
-makes `run` log one `warn` line (`tracing is off`, the variable's name and a fixed reason, never the value) and run with
-tracing off (platforms inject `OTEL_*` variables of their own; BuildKit does, into every `RUN` step). `run` reads them at its top, **before** it asks the
-cluster anything, and flushes the spans still queued (at most 3 s) on every way out that returns, an error included (not when the main future panics), inside the 30 s of
-`terminationGracePeriodSeconds`. `POD_NAME` and `POD_NAMESPACE` (the chart sets them from the downward API when tracing is
-on) name the resource. When on, `/metrics` also has `aap_trace_spans_exported_total` and
-`aap_trace_spans_dropped_total{reason}` after the controllers' series, with `aap_trace_enabled 1`; with a tracing variable set and tracing off it has `aap_trace_enabled 0` alone; with none the text is what it was. The spans are
-the controllers' ([README](../../crates/controller/README.md)); §48a has the rest. `tests/trace_env.rs` runs the built binary with BuildKit's variables and with others it refuses: it warns once, never prints
-the value, and goes on to the cluster.
+Traces are **off** unless the file's `telemetry.otlp.endpoint` is set, and then no task, queue or series exists. The section
+is the same settings as the standard `OTEL_*` variables, read by `aap-trace-otlp`
+([README](../../crates/trace-otlp/README.md)): the endpoint is used as written, `sampler` is `always_on`, `always_off` or
+`traceidratio` (with `samplerRatio`), `headers` is a map of header name to a reference (a mounted file, or a variable) and
+`certificate` is the exporter's only trust. A header needs an `https` endpoint (a token in clear is a token given away). A
+section the exporter cannot use is **refused with the file** (exit 78, naming `telemetry.otlp.<key>`), which is what `--check`
+catches. A **file** the section names that cannot be read never stops the operator: one `warn` line (`tracing is off`, the
+setting and a fixed reason, never the value) and it runs with tracing off. `run` starts tracing at its top, **before** it asks
+the cluster anything, and flushes the spans still queued (at most 3 s) on every way out that returns, an error included (not when
+the main future panics), inside the 30 s of `terminationGracePeriodSeconds`. `POD_NAME` and `POD_NAMESPACE` (the chart sets them
+from the downward API when tracing is on) name the resource. When on, `/metrics` also has `aap_trace_spans_exported_total` and
+`aap_trace_spans_dropped_total{reason}` after the controllers' series, with `aap_trace_enabled 1`; with a trace section set and
+tracing off it has `aap_trace_enabled 0` alone; with none the text is what it was. The spans are the controllers'
+([README](../../crates/controller/README.md)); §48a has the rest. `tests/trace_env.rs` runs the built binary with a section it
+refuses and with references it cannot read: the first exits 78, the second warns once, never prints the value, and goes on to the
+cluster; the `OTEL_*` variables of the environment (BuildKit's) change nothing.
 
 ## Leader election (K7a)
 
-Off by default. On, the binary is one candidate of an election whose lease is `LEADER_ELECTION_NAMESPACE` /
-`LEADER_ELECTION_NAME`, through [`aap-leader-kubernetes`](../../crates/leader-kubernetes/README.md)
+Off by default. On, the binary is one candidate of an election whose lease is `leaderElection.namespace` /
+`leaderElection.name`, through [`aap-leader-kubernetes`](../../crates/leader-kubernetes/README.md)
 (`LeaseElection`); off, it is an `AlwaysLeader`, which asks nothing of the cluster.
 
 What the replica does, whatever the election says: it connects, lists and watches every namespace it was told to
@@ -113,8 +124,8 @@ The candidate's identity is `POD_NAME` (the chart sets it from the downward API)
 a `holderIdentity` of `""` would make two replicas look like one, and they would renew each other's lease.
 
 The timings must satisfy `retry < renew < lease`, each at least a second, or `run` refuses to start naming the
-three variables. **The pass limit and the lease margin**: with the election on, the chart caps
-`AAP_RECONCILE_TIMEOUT_SECS` at 4 s, below `lease - renew` (5 s with the defaults), so a pass that started before
+three keys. **The pass limit and the lease margin**: with the election on, the chart caps
+`reconcile.timeoutSecs` at 4 s, below `lease - renew` (5 s with the defaults), so a pass that started before
 the loss is bounded; a longer pass needs a longer lease (K7a). A deployment that turns the election on without the
 chart's cap makes that choice itself: the binary's own default is 60 s, longer than the 15 s lease.
 
@@ -123,7 +134,7 @@ chart's cap makes that choice itself: the binary's own default is 60 s, longer t
 Everything `run` does to the API, for the chart of S8 (a namespaced `Role`, §59a): the
 [controller's](../../crates/controller/README.md#cluster-rights) plus the
 [provider's](../../crates/runtime-kubernetes/README.md#cluster-rights), and with `store-cnpg` the
-[store's](../../crates/store-cnpg/README.md#cluster-rights). **No right on Secrets**, and the shared kinds of the dashboard (`modelendpoints`, `toolproviders`) are read and watched, never written. With `RUN_PODS_FILE` the chart adds the run pods rows of the provider's table (`serviceaccounts`, `resourcequotas`, `rolebindings`, `bind` on one named Role, `delete` on pods): it makes the Role and the admission policy itself, and the operator has no `ClusterRole`. The provider looks for run pod objects to clear (`KubernetesRuntime::clearing_run_pods`) only with the settings: without them the operator has no right on those kinds, and looking would fail every reconcile.
+[store's](../../crates/store-cnpg/README.md#cluster-rights). **No right on Secrets**, and the shared kinds of the dashboard (`modelendpoints`, `toolproviders`) are read and watched, never written. With `runPods` the chart adds the run pods rows of the provider's table (`serviceaccounts`, `resourcequotas`, `rolebindings`, `bind` on one named Role, `delete` on pods): it makes the Role and the admission policy itself, and the operator has no `ClusterRole`. The provider looks for run pod objects to clear (`KubernetesRuntime::clearing_run_pods`) only with the settings: without them the operator has no right on those kinds, and looking would fail every reconcile.
 
 ## The CRDs are a checked-in file
 
@@ -142,19 +153,18 @@ AAP_TEST_KUBECONFIG=$HOME/.kube/config AAP_TEST_STUB_IMAGE=aap-stub:ci cargo tes
 | File | What |
 |---|---|
 | `src/run.rs` unit test | the provider is told to look for run pod objects to clear only with settings for run pods (without them the operator has no right to read an account, a quota or a binding, and looking would fail every reconcile) |
-| `src/run.rs` unit tests (K6b) | `WATCH_NAMESPACES` and `WATCH_NAMESPACE`: neither is every namespace, the shorthand is one, the list is exactly those in the order given, the primary must be in the list, and a name that is not a DNS label, a duplicate or a list with no name is refused; the runtime provider is given the list, and an empty one is every namespace |
+| `src/config.rs` unit tests (ANR-962) | the file: `version` required and 1, an unknown key at the top, in a block and in `runPods`/`telemetry.otlp`, a reference that is a value (never quoted), the default image's white space, the runtime class's name, the namespaces (DNS labels, each once), two listeners on a port, the timers at least 1, the election's namespace and timings, the probe's timeout, the log filter, the trace section (endpoint, sampler, ratio, timeout, service name, resource attributes, a header over http), the chart's `runPods` block and its checks, and the example: it parses, it holds no secret, and every key of it is one |
 | `src/run.rs` unit tests (K5) | the operator is composed with the tracer it was given (`compose`), and the spans still queued are flushed on the way out, on `Ok` and on `Err` (`flushed`) |
-| `src/run.rs` unit tests (K7a) | the election is off by default; on, it takes the primary namespace (or `LEADER_ELECTION_NAMESPACE`), refuses timings that are not `retry < renew < lease` with each at least a second (naming the variables), refuses a replica with no `POD_NAME` and no `HOSTNAME`, and `compose` hands the election to the operator (an `AlwaysLeader` is a leader, a candidate whose campaign has not run is not) |
+| `src/run.rs` unit tests (K7a) | the election is off by default; on, it takes the primary namespace (or `leaderElection.namespace`); `compose` hands the election to the operator (an `AlwaysLeader` is a leader, a candidate whose campaign has not run is not), and the candidate is `POD_NAME`, else `HOSTNAME`, else a refusal |
 | `src/serve.rs` unit tests | `/healthz` is up at once, `/readyz` answers 503 until the readiness handle is marked, `/metrics` is Prometheus text |
-| `tests/cli.rs` | runs the built binary (`RUN_PODS_FILE`: an absent file, junk, an unknown key, a file from before the egress proxy, the switch of the network policy that is gone, and settings that fail their checks each stop it before it looks for a cluster, naming the variable and the mistake): `crdgen` equals the checked-in file and prints one document per kind; `run` without a cluster fails and says it was connecting; `run --help` lists every variable above; a default image with white space stops `run` before it looks for a cluster, and an empty one or a reference does not |
+| `tests/cli.rs` | runs the built binary: `crdgen` equals the checked-in file and prints one document per kind; `run --help` lists `--config` and `--check` and no environment variable; a file that is not there, an unknown key (top level and in `runPods`), a value where a reference belongs, a `version` that is not 1 and each setting the file refuses stop `run` and `--check` with **78**, naming the setting and never the token; the chart's `runPods` block is a file it takes, and one with a bad quota names `runPods.quota.pods`; the example passes `--check` and `run` goes on to look for a cluster; a valid file goes on too, with the old `WATCH_NAMESPACE`/`DEFAULT_AGENT_IMAGE`/`RUN_PODS_FILE`/… variables set to values it would refuse (they are not read); `run` without a cluster fails and says it was connecting |
 | `tests/e2e_fixture.rs` | the fixtures of the chart's kind end-to-end resolve; **the chart's `defaultAgentImage` is the image `tests/e2e/coder.yaml` runs**, and the fixture with its image removed, on an operator given that default, is the same agent, digest included |
 | `tests/cluster.rs` | **the end-to-end**: the binary against a real cluster (below) |
 
 ### The end-to-end, `tests/cluster.rs`
 
 Every case starts `operator run` (the binary Cargo built, `CARGO_BIN_EXE_operator`) against the cluster of
-`AAP_TEST_KUBECONFIG`, with `WATCH_NAMESPACE` set to a namespace of its own (or `WATCH_NAMESPACES` to two, for the case
-that watches two), free ports, and its log in
+`AAP_TEST_KUBECONFIG`, with a configuration file of its own (`watch.namespaces`, the ports, the image, the token), and its log in
 `$TMPDIR/aap-e2e-*.log` (printed when a case fails). The CRDs are installed first by server-side apply (what `crdgen`
 prints, and the `operator-e2e` job also applies the checked-in file with `kubectl`). **Everything a case creates has a name
 of its own** (the namespace, the Secrets, the objects): the cases run in parallel in one cluster, the lesson of S4's
@@ -176,7 +186,7 @@ skill) since D13: the system's orchestrator, which the whole-chain end-to-end ru
 | `an_object_that_is_not_ours_with_the_name_is_a_conflict_that_changes_nothing` | a Deployment named like the service, labelled `Helm`: `NameConflict`, `Blocked`, the foreign object not written; its removal lets the operator make its own |
 | `a_deletion_that_happens_while_the_operator_is_down_completes_when_it_returns` | the operator is killed (SIGKILL), the service deleted: the finalizer holds the object and the Deployment; a new operator completes it |
 | `the_registry_lists_a_ready_agent_to_whoever_holds_the_token_and_nobody_else` | S7: with a token file the operator serves the registry: `401` with no body for no token, a wrong one and the wrong scheme; `200` with the contract's headers, the `Ready` agent as an item with its card URL, title, tags and (D3) the audience of its `AgentService` as a set, in byte order, and the `Blocked` one not listed (`Listed: False` / `ServiceBlocked`); `304` on a match; `HEAD`; and, when `AAP_TEST_HOST_ADDR` is set, the registry and the card it lists read **from a pod** (and refused there without the token); a deleted service leaves the list |
-| `without_a_token_no_registry_is_served_and_nothing_is_listed` | S7: no `REGISTRY_TOKEN_FILE`: nothing listens on the registry's port and the service is `Listed: False` / `RegistryDisabled` |
+| `without_a_token_no_registry_is_served_and_nothing_is_listed` | S7: no `registry.token`: nothing listens on the registry's port and the service is `Listed: False` / `RegistryDisabled` |
 | `a_service_that_asks_for_a_cluster_is_cnpg_not_installed_without_cloudnativepg` | S6: `store.postgres.cnpg` on a cluster without CloudNativePG is `StoreReady: False`, `CNPGNotInstalled`, `Blocked`, no workload, and the deletion of that service completes (a skip when CloudNativePG is installed; a failure under `AAP_TEST_REQUIRE_CLUSTER=1`) |
 | `health_readiness_and_metrics_are_served` | `/healthz`, `/readyz` 200 and the counters on `/metrics` |
 | `a_config_that_references_the_shared_objects_runs_what_they_say_and_follows_their_edits` | D2: a config naming a `ModelEndpoint`, a `ToolProvider` and no image is `ConfigInvalid` while they are missing (nothing made, both named); created, the service becomes `Ready` by itself (the operator watches both kinds) and the Deployment carries the endpoint's address and Secret key, the provider's header Secret as `SEARCH_MCP_TOKEN`, the MCP file the provider gives and the operator's default image; an edit of the endpoint moves the digest (status and pod template) and the variable; deleting the provider blocks the service naming it and leaves the Deployment's generation alone; creating it again is the same digest |
@@ -187,7 +197,7 @@ skill) since D13: the system's orchestrator, which the whole-chain end-to-end ru
 |---|---|
 | `AAP_TEST_KUBECONFIG` | the kubeconfig file of the cluster to test. **Unset: the cluster cases skip.** Never the default context |
 | `AAP_TEST_REQUIRE_CLUSTER` | `1` or `true`: unset `AAP_TEST_KUBECONFIG` is a failure (CI) |
-| `AAP_TEST_STUB_IMAGE` | the stub image, already on the cluster's nodes. Default `aap-stub:ci`. Every operator the cases start is also given it as `DEFAULT_AGENT_IMAGE`, which only the case of the shared objects relies on |
+| `AAP_TEST_STUB_IMAGE` | the stub image, already on the cluster's nodes. Default `aap-stub:ci`. Every operator the cases start is also given it as `defaults.agentImage`, which only the case of the shared objects relies on |
 | `AAP_TEST_HOST_ADDR` | the address of this machine as the cluster's pods reach it (kind: the gateway of the docker network `kind`; the workflow computes it). Set, the registry case also reads the registry and the card from a pod. Unset, that part is skipped |
 | `AAP_TEST_DROP_SHARED_CRDS` | `1`: lets the case above delete the two shared CRDs. Never set it for a run of the whole file: the other cases use those kinds. CI sets it in a step of its own, after the whole-file run |
 | `AAP_TEST_NO_WORKLOADS` | `1` or `true`: the cluster is only an API server and etcd (no controller manager, no kubelet). The test then patches the status of every Deployment and StatefulSet to "rolled out" itself and skips the cases that need a kubelet. See below |

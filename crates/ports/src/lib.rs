@@ -10,6 +10,7 @@
 
 #![warn(missing_docs)]
 
+mod activator;
 mod activity;
 mod auth;
 mod client_auth;
@@ -28,6 +29,10 @@ pub mod memory;
 #[cfg(feature = "testkit")]
 pub mod testkit;
 
+pub use activator::{
+    BodyStream, Card, CardError, CardSource, RefusedReason, Route, Upstream, UpstreamError,
+    UpstreamRequest, UpstreamResponse, WakeError, WakeOutcome, Waker,
+};
 pub use activity::{Activity, ActivityError, ActivitySource};
 pub use auth::{AuthError, Authenticator, InvalidToken, Principal};
 pub use client_auth::{Certificate, ClientAuthError, ClientAuthenticator, InvalidCertificate};

@@ -86,21 +86,21 @@ enum Command {
     Logout(remote::LogoutArgs),
 }
 
-/// The settings the operator takes from its flags and environment (`bin/operator`'s `run` arguments), with its defaults. The
-/// environment is not read: the same files give the same answer on every machine.
+/// The settings the operator takes from its configuration file (`defaults.*` and `runPods`), as aapctl's own flags, with the
+/// operator's defaults. aapctl does not read the operator's file, and the environment is not read: the same files give the same answer on every machine.
 #[derive(Debug, Args)]
 struct Deployment {
-    /// The coder image of an agent that names none (the operator's `--default-agent-image`). None: such an agent is invalid.
+    /// The coder image of an agent that names none (aapctl's own flag, as the operator's file key `defaults.agentImage`). None: such an agent is invalid.
     #[arg(long, value_name = "IMAGE")]
     default_agent_image: Option<String>,
-    /// The settings of run pods (the operator's `--run-pods-file`, a YAML file). None: an agent that asks for run pods is
+    /// The settings of run pods (aapctl's own flag: a YAML file holding a `runPods` block, as the operator's file has it). None: an agent that asks for run pods is
     /// invalid.
     #[arg(long, value_name = "FILE")]
     run_pods_file: Option<PathBuf>,
-    /// The highest access tier an agent may ask for (the operator's `--max-access-tier`): plan, edits, auto or bypass.
+    /// The highest access tier an agent may ask for (as the operator's `defaults.maxAccessTier`): plan, edits, auto or bypass.
     #[arg(long, value_name = "TIER", default_value = "auto", value_parser = parse_tier)]
     max_access_tier: AccessTierCap,
-    /// The claims an agent may use as its package cache (the operator's `--cache-allowed-claims`), comma separated. None: no
+    /// The claims an agent may use as its package cache (as the operator's `defaults.cacheAllowedClaims`), comma separated. None: no
     /// agent may have a cache.
     #[arg(long, value_name = "CLAIMS", value_delimiter = ',')]
     cache_allowed_claims: Vec<String>,
@@ -177,7 +177,7 @@ fn settings(d: &Deployment, owner_uid: &str) -> Result<Settings, String> {
                 .to_owned(),
         );
     }
-    // A blank path is none, as the operator reads an empty `RUN_PODS_FILE`.
+    // A blank path is none, as the operator reads an empty path (was `RUN_PODS_FILE`).
     let run_pods_file = d
         .run_pods_file
         .as_deref()

@@ -1,13 +1,18 @@
-//! The settings, from the standard `OTEL_*` variables (a strict subset) and one of ours.
+//! The settings, from the standard `OTEL_*` variables (a strict subset) or from a configuration file's `telemetry.otlp`
+//! section (ANR-962, AD-064).
 //!
 //! One pure function reads them, so both binaries share the rules and `--check` can run them. An error names the
-//! variable and a fixed reason, never a value: a value may be a URL with a password.
+//! variable (or the setting) and a fixed reason, never a value: a value may be a URL with a password.
 
+use std::collections::BTreeMap;
 use std::path::PathBuf;
 use std::time::Duration;
 
 use aap_trace::{ResourceKey, Sampler};
+use serde::Deserialize;
 use url::Url;
+
+use crate::headers::Headers;
 
 /// Why a variable was refused: its name and a fixed text. Never the value.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, thiserror::Error)]
@@ -69,8 +74,269 @@ pub struct TraceSettings {
     pub sampler: Sampler,
     /// `AAP_OTEL_HEADERS_FILE`: a file of `k=v,...`. It is read by [`OtlpJson::new`](crate::OtlpJson::new), not here.
     pub headers_file: Option<PathBuf>,
+    /// The headers a configuration file's section named, each read from the reference that holds it (ANR-962): set by
+    /// [`OtlpSection::settings`], never by [`from_env`](Self::from_env).
+    pub headers: Option<Headers>,
     /// `OTEL_EXPORTER_OTLP_CERTIFICATE`: a PEM bundle that is the exporter's only trust.
     pub certificate: Option<PathBuf>,
+}
+
+/// Where a value the configuration file does not hold is read from (ANR-962, AD-064): a mounted file, or a variable.
+///
+/// The file says `{ file: /var/run/secrets/aap/registry/token }` or `{ env: NAME }` and nothing else: one key, one text.
+/// A value is never written in the file, and an error names the reference, never what it holds.
+#[derive(Clone, Debug, PartialEq, Eq, schemars::JsonSchema)]
+pub enum SecretRef {
+    /// A file, read once at start (a mounted Secret).
+    File(PathBuf),
+    /// A variable of the process.
+    Env(String),
+}
+
+impl<'de> Deserialize<'de> for SecretRef {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        use serde::de::Error as _;
+        // The message never holds what the value was: a string here may be the token itself.
+        let map = BTreeMap::<String, String>::deserialize(deserializer).map_err(|_| {
+            D::Error::invalid_type(
+                serde::de::Unexpected::Other("a value"),
+                &"a reference: { file: /path } or { env: NAME }",
+            )
+        })?;
+        let mut file = None;
+        let mut env = None;
+        for (key, value) in map {
+            match key.as_str() {
+                "file" => file = Some(PathBuf::from(value)),
+                "env" => env = Some(value),
+                other => {
+                    return Err(D::Error::custom(format!(
+                        "{other:?} is not a reference: file or env"
+                    )));
+                }
+            }
+        }
+        match (file, env) {
+            (Some(path), None) if !path.as_os_str().is_empty() => Ok(Self::File(path)),
+            (None, Some(name)) if !name.trim().is_empty() => Ok(Self::Env(name)),
+            (Some(_), Some(_)) => Err(D::Error::custom(
+                "a reference is a file or a variable, not both",
+            )),
+            _ => Err(D::Error::custom("a reference names a file or a variable")),
+        }
+    }
+}
+
+impl SecretRef {
+    /// The value, read now: a file's text without its trailing newline (a mounted Secret ends one as often as not), or
+    /// the variable.
+    ///
+    /// # Errors
+    ///
+    /// The file cannot be read, or the variable is not set. The reason never holds the path, the name or the value.
+    pub fn resolve(&self, lookup: impl Fn(&str) -> Option<String>) -> Result<String, &'static str> {
+        match self {
+            Self::File(path) => std::fs::read_to_string(path)
+                .map(|text| text.trim_end_matches(['\n', '\r']).to_owned())
+                .map_err(|_| "the file cannot be read"),
+            Self::Env(name) => lookup(name).ok_or("the variable is not set"),
+        }
+    }
+}
+
+/// The `telemetry.otlp` section of a configuration file (ANR-962, AD-064): the settings the `OTEL_*` variables carry,
+/// written as YAML. Absent: tracing is off, exactly as with no variable.
+///
+/// The file names the headers by reference (a mounted file per header, or a variable) and the certificate by path; none
+/// of them is read by [`validate`](Self::validate), which is what `--check` runs.
+#[derive(Clone, Debug, Default, PartialEq, Deserialize, schemars::JsonSchema)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct OtlpSection {
+    /// The full URL of the collector's traces endpoint (`https://collector:4318/v1/traces`). Absent or empty: off.
+    #[serde(default)]
+    pub endpoint: Option<String>,
+    /// The headers the collector wants, by name: a token, usually. Each is read from its reference when the exporter is
+    /// built, and a header needs an `https` endpoint (a token in clear is a token given away).
+    #[serde(default)]
+    pub headers: BTreeMap<String, SecretRef>,
+    /// A PEM bundle that is the exporter's only trust, as a path.
+    #[serde(default)]
+    pub certificate: Option<PathBuf>,
+    /// How long an export may take, in milliseconds (the unit of `OTEL_EXPORTER_OTLP_TIMEOUT`). 10 000 by default.
+    #[serde(default)]
+    pub timeout: Option<u64>,
+    /// `always_on` (the default), `always_off` or `traceidratio` (with `samplerRatio`).
+    #[serde(default)]
+    pub sampler: Option<String>,
+    /// The ratio of `traceidratio`, 0 to 1. Ignored by the other samplers.
+    #[serde(default)]
+    pub sampler_ratio: Option<f64>,
+    /// `service.name`. `aap-operator` or `aap-api` when absent.
+    #[serde(default)]
+    pub service_name: Option<String>,
+    /// The closed keys a deployment may add to the resource.
+    #[serde(default)]
+    pub resource_attributes: BTreeMap<String, String>,
+}
+
+impl OtlpSection {
+    /// Whether the section says anything at all.
+    #[must_use]
+    pub fn is_set(&self) -> bool {
+        self != &Self::default()
+    }
+
+    /// Whether the section is one the exporter can work with, without reading any file it names: the endpoint, the
+    /// timeout, the sampler, the service name, the resource attributes, and the rule that a header needs `https`.
+    ///
+    /// # Errors
+    ///
+    /// The first setting that is wrong, named: never a value.
+    pub fn validate(&self) -> Result<(), SettingsError> {
+        // The service name's default is the binary's; this only asks whether what the section says is usable.
+        self.parse("aap")?;
+        Ok(())
+    }
+
+    /// What the section asks for, and the headers read from their references. `Ok(None)` is off: no endpoint.
+    ///
+    /// `default_service` is the `service.name` when the section names none. `lookup` reads the variables a reference may
+    /// name (never the process's own here: a caller says).
+    ///
+    /// # Errors
+    ///
+    /// As [`validate`](Self::validate), and a reference that cannot be read.
+    pub fn settings(
+        &self,
+        default_service: &str,
+        lookup: impl Fn(&str) -> Option<String>,
+    ) -> Result<Option<TraceSettings>, SettingsError> {
+        let Some(mut settings) = self.parse(default_service)? else {
+            return Ok(None);
+        };
+        if !self.headers.is_empty() {
+            let mut headers = Headers::default();
+            for (name, reference) in &self.headers {
+                let value = reference
+                    .resolve(&lookup)
+                    .map_err(|reason| bad("telemetry.otlp.headers", reason))?;
+                if let Some(reason) = Self::old_format(name, &value) {
+                    return Err(bad("telemetry.otlp.headers", reason));
+                }
+                headers
+                    .insert(name, &value)
+                    .map_err(|reason| bad("telemetry.otlp.headers", reason))?;
+            }
+            settings.headers = Some(headers);
+        }
+        Ok(Some(settings))
+    }
+
+    /// What the operator's headers Secret held before ANR-962 (`name=value,...`), seen in a value that is now one header's value:
+    /// `Some(which)` when the value (a) starts with the configured header's own name and `=` (case-insensitive), or (b) holds
+    /// `,` followed by `<token>=` (the old list form). Nothing else: `ApiKey=abc`, `key-with-dash=val` and padded base64
+    /// (`YWJjZA==`) are values a collector may be given, so a shape test alone would refuse them. The text never holds the value.
+    fn old_format(header: &str, value: &str) -> Option<&'static str> {
+        let value = value.trim_start();
+        if value.len() > header.len()
+            && value.as_bytes()[header.len()] == b'='
+            && value.is_char_boundary(header.len())
+            && value[..header.len()].eq_ignore_ascii_case(header)
+        {
+            return Some(
+                "a header's value looks like the old name=value format: it starts with the header's own name and `=` (the Secret now holds the value alone, e.g. `Bearer <token>`)",
+            );
+        }
+        // The old list's own shape: it STARTS with `<token>=` and holds `,<token>=` later. A lone `,name=` inside an ordinary
+        // value (`Signature keyId="k",algorithm="hs2019"`, `Bearer x,y==`) is not the list.
+        let starts_with_pair = |text: &str| {
+            let name = text
+                .bytes()
+                .take_while(|b| b.is_ascii_alphanumeric() || *b == b'-')
+                .count();
+            name > 0 && text.as_bytes().get(name) == Some(&b'=')
+        };
+        let list_form = starts_with_pair(value)
+            && value
+                .match_indices(',')
+                .any(|(i, _)| starts_with_pair(&value[i + 1..]));
+        list_form.then_some(
+            "a header's value looks like the old name=value format: it starts with `name=` and holds `,` followed by `name=` (the Secret now holds the value alone, not a list)",
+        )
+    }
+
+    /// The settings the section describes, with no header read: what [`validate`](Self::validate) asks of.
+    fn parse(&self, default_service: &str) -> Result<Option<TraceSettings>, SettingsError> {
+        let endpoint = match self
+            .endpoint
+            .as_deref()
+            .map(str::trim)
+            .filter(|e| !e.is_empty())
+        {
+            None => return Ok(None),
+            Some(text) => parse_url(text, "telemetry.otlp.endpoint")?,
+        };
+        let timeout = match self.timeout {
+            None => DEFAULT_TIMEOUT,
+            Some(ms) => {
+                let t = Duration::from_millis(ms);
+                if t.is_zero() || t > MAX_TIMEOUT {
+                    return Err(bad(
+                        "telemetry.otlp.timeout",
+                        "must be between 1 and 60000 milliseconds",
+                    ));
+                }
+                t
+            }
+        };
+        let service_name = match self.service_name.as_deref() {
+            None => default_service.to_owned(),
+            Some(v) => {
+                if v.is_empty()
+                    || v.len() > 63
+                    || !v
+                        .chars()
+                        .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-')
+                {
+                    return Err(bad(
+                        "telemetry.otlp.serviceName",
+                        "must match [a-z0-9-]{1,63}",
+                    ));
+                }
+                v.to_owned()
+            }
+        };
+        let resource = resource_from_pairs(
+            self.resource_attributes
+                .iter()
+                .map(|(k, v)| (k.as_str(), v.as_str())),
+            "telemetry.otlp.resourceAttributes",
+        )?;
+        let ratio = self.sampler_ratio.map(|r| r.to_string());
+        let sampler = parse_sampler(
+            self.sampler.as_deref(),
+            ratio.as_deref(),
+            "telemetry.otlp.sampler",
+            "telemetry.otlp.samplerRatio",
+        )?;
+        // A token that goes out in clear is a token given away: headers need a TLS endpoint.
+        if !self.headers.is_empty() && endpoint.scheme() != "https" {
+            return Err(bad(
+                "telemetry.otlp.headers",
+                "the headers would be sent in clear: the endpoint must be https",
+            ));
+        }
+        Ok(Some(TraceSettings {
+            endpoint,
+            timeout,
+            service_name,
+            resource,
+            sampler,
+            headers_file: None,
+            headers: None,
+            certificate: self.certificate.clone(),
+        }))
+    }
 }
 
 impl TraceSettings {
@@ -160,6 +426,8 @@ impl TraceSettings {
         let sampler = parse_sampler(
             get("OTEL_TRACES_SAMPLER").as_deref(),
             get("OTEL_TRACES_SAMPLER_ARG").as_deref(),
+            "OTEL_TRACES_SAMPLER",
+            "OTEL_TRACES_SAMPLER_ARG",
         )?;
 
         // Both are checked, whichever wins.
@@ -196,6 +464,7 @@ impl TraceSettings {
             resource,
             sampler,
             headers_file,
+            headers: None,
             certificate,
         }))
     }
@@ -217,9 +486,22 @@ fn parse_url(text: &str, variable: &'static str) -> Result<Url, SettingsError> {
 
 fn parse_resource(text: &str) -> Result<Vec<(ResourceKey, String)>, SettingsError> {
     let var = "OTEL_RESOURCE_ATTRIBUTES";
+    let pairs: Vec<(&str, &str)> = text
+        .split(',')
+        .filter(|p| !p.trim().is_empty())
+        .map(|pair| pair.split_once('=').ok_or(bad(var, "a pair has no `=`")))
+        .collect::<Result<_, _>>()?;
+    resource_from_pairs(pairs.into_iter(), var)
+}
+
+/// Resource attributes from name/value pairs, the rule of `OTEL_RESOURCE_ATTRIBUTES` and of the file's
+/// `telemetry.otlp.resourceAttributes`: a closed list of keys, a value of `[A-Za-z0-9._-]{1,128}`, each key once.
+fn resource_from_pairs<'a>(
+    pairs: impl Iterator<Item = (&'a str, &'a str)>,
+    var: &'static str,
+) -> Result<Vec<(ResourceKey, String)>, SettingsError> {
     let mut out: Vec<(ResourceKey, String)> = Vec::new();
-    for pair in text.split(',').filter(|p| !p.trim().is_empty()) {
-        let (k, v) = pair.split_once('=').ok_or(bad(var, "a pair has no `=`"))?;
+    for (k, v) in pairs {
         let key = ResourceKey::from_name(k.trim()).ok_or(bad(
             var,
             "only deployment.environment.name, k8s.cluster.name and service.namespace are allowed",
@@ -241,8 +523,12 @@ fn parse_resource(text: &str) -> Result<Vec<(ResourceKey, String)>, SettingsErro
     Ok(out)
 }
 
-fn parse_sampler(name: Option<&str>, arg: Option<&str>) -> Result<Sampler, SettingsError> {
-    let var = "OTEL_TRACES_SAMPLER";
+fn parse_sampler(
+    name: Option<&str>,
+    arg: Option<&str>,
+    var: &'static str,
+    var_arg: &'static str,
+) -> Result<Sampler, SettingsError> {
     let Some(name) = name else {
         return Ok(Sampler::AlwaysOn);
     };
@@ -257,10 +543,10 @@ fn parse_sampler(name: Option<&str>, arg: Option<&str>) -> Result<Sampler, Setti
                 None => 1.0,
                 Some(a) => a
                     .parse::<f64>()
-                    .map_err(|_| bad("OTEL_TRACES_SAMPLER_ARG", "must be a number"))?,
+                    .map_err(|_| bad(var_arg, "must be a number"))?,
             };
             if !(0.0..=1.0).contains(&ratio) {
-                return Err(bad("OTEL_TRACES_SAMPLER_ARG", "must be between 0 and 1"));
+                return Err(bad(var_arg, "must be between 0 and 1"));
             }
             Ok(Sampler::TraceIdRatio(ratio))
         }
@@ -282,6 +568,77 @@ mod tests {
                 .find(|(n, _)| *n == k)
                 .map(|(_, v)| (*v).to_owned())
         }
+    }
+
+    /// ANR-962 upgrade: the operator's headers Secret held `name=value,...`; it now holds the one header's value. A value of the
+    /// old shape turns tracing off with one warning that names the setting and which tell it saw, and never quotes the value.
+    #[test]
+    fn a_header_value_in_the_old_name_value_format_is_refused_without_quoting_it() {
+        let section = |value_var: &'static str| OtlpSection {
+            endpoint: Some("https://collector.example:4318/v1/traces".to_owned()),
+            headers: BTreeMap::from([(
+                "authorization".to_owned(),
+                SecretRef::Env(value_var.to_owned()),
+            )]),
+            ..OtlpSection::default()
+        };
+        for (old, tell) in [
+            (
+                "authorization=Bearer s3cr3t",
+                "starts with the header's own name",
+            ),
+            ("AUTHORIZATION=s3cr3t", "starts with the header's own name"),
+            ("a=b,c=d", "followed by `name=`"),
+        ] {
+            let lookup = |_: &str| Some(old.to_owned());
+            let error = section("H").settings("aap", lookup).unwrap_err();
+            assert_eq!(error.variable, "telemetry.otlp.headers");
+            assert!(
+                error
+                    .reason
+                    .contains("looks like the old name=value format"),
+                "{}",
+                error.reason
+            );
+            assert!(error.reason.contains(tell), "{old}: {}", error.reason);
+            assert!(!format!("{error:?}{}", error.reason).contains("s3cr3t"));
+        }
+        // A made-up JWT ({"alg":"HS256"}.{"sub":"1"}."sig"), joined at run time so no token-shaped literal is in the source.
+        let jwt = ["eyJhbGciOiJIUzI1NiJ9", "eyJzdWIiOiIxIn0", "c2ln"].join(".");
+        for fine in [
+            "YWJjZA==",
+            "ApiKey=abc",
+            "key-with-dash=val",
+            "Basic dXNlcjpwYXNz",
+            "Bearer abc==",
+            jwt.as_str(),
+            "Signature keyId=\"k\",algorithm=\"hs2019\"",
+            "Bearer x,y==",
+        ] {
+            let lookup = |_: &str| Some(fine.to_owned());
+            assert!(
+                section("H").settings("aap", lookup).unwrap().is_some(),
+                "{fine}"
+            );
+        }
+        // Never stops the process: the start turns tracing off and carries the refusal, for one warning. The value is read from
+        // a file, as the chart mounts it.
+        let dir = std::env::temp_dir().join(format!("aap-old-headers-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let file = dir.join("headers");
+        std::fs::write(&file, "authorization=Bearer s3cr3t\n").unwrap();
+        let mut from_file = section("UNUSED");
+        from_file.headers = BTreeMap::from([("authorization".to_owned(), SecretRef::File(file))]);
+        let started = crate::process::start_section("aap", "0", Some(&from_file));
+        let _ = std::fs::remove_dir_all(&dir);
+        assert!(!started.tracer.enabled());
+        let refused = started.refused.expect("one refusal");
+        assert_eq!(refused.variable, "telemetry.otlp.headers");
+        assert!(
+            refused
+                .reason
+                .contains("looks like the old name=value format")
+        );
     }
 
     fn read(pairs: &[(&str, &str)]) -> Result<Option<TraceSettings>, SettingsError> {

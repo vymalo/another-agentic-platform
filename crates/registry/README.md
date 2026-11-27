@@ -133,7 +133,7 @@ first 128 bits of the SHA-256 of the body, quoted. A change of the `anchor` is a
   token is held as its SHA-256 and the digests are compared with `subtle`, so neither the token's length nor how much of a
   guess is right shows in the time. Two `Authorization` headers are no credential. A `401` has **no body**, and an
   unauthenticated caller learns nothing, not even a `304`. The token is never in a body, a header, a log line or `Debug`.
-* **No token, no registry.** The binary reads `REGISTRY_TOKEN_FILE` once at start (a mounted Secret; the trailing newline is
+* **No token, no registry.** The binary reads the token file the operator's configuration names (`registry.token`, was `REGISTRY_TOKEN_FILE`) once at start (a mounted Secret; the trailing newline is
   not part of it). Unset, missing, unreadable or empty, it serves nothing on the port and logs why. Rotating the Secret is
   a restart (the operator is one replica with `Recreate`, §59a).
 * **`HEAD`** has the headers and no body. The `Accept` header is not read: there is one media type.
@@ -150,7 +150,7 @@ first 128 bits of the SHA-256 of the body, quoted. A change of the `anchor` is a
 | releases on the card (§12a) | none | the contract's items have none, and v0 has no release-channels extension |
 | the agent token rule: the registry's consumer sends one token to every agent, which must be one of each service's `A2A_BEARER_TOKENS` | **not checked here** | the operator has no right on Secrets, so no code can check it; it is a deployment rule (§59a). The consumer test below reads the document and says nothing of tokens |
 | `Last-Modified` (the contract allows it) | not sent | the `ETag` is enough |
-| `anchor` (the contract: a server SHOULD) | sent when `REGISTRY_PUBLIC_URL` is set | the operator does not know the URL it is reached at |
+| `anchor` (the contract: a server SHOULD) | sent when the operator's file key `registry.publicUrl` (was `REGISTRY_PUBLIC_URL`) is set | the operator does not know the URL it is reached at |
 | a service name used in two namespaces (§59a does not say; K6b) | **listed for neither**: every entry of a shared id is in `Built::skipped`, and the reason says so | the contract forbids a duplicate `service`, and "the first" would be the directory's order (which namespace came first), not a decision the platform made. A reader that met two would keep the first, silently. The `Listed` condition of both services still says `True`: the controller does not build the document, so it cannot know (a note in the K6b report) |
 | §60a: the item's `audience` is the service's list of values | the values as a **sorted set**, an empty list as no attribute, and a list that breaks the contract's shape not at all | the `ETag` must not move when only an order moves; absent, empty and malformed are the same to a consumer; the contract defines what is malformed |
 

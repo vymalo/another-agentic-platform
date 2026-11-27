@@ -47,9 +47,11 @@ impl OtlpJson {
     /// A file that cannot be read, is longer than 4 KiB (the headers) or does not parse; a certificate file that holds
     /// no certificate. The error names the variable and never the content.
     pub fn new(settings: &TraceSettings) -> Result<Self, SettingsError> {
-        let headers = match &settings.headers_file {
-            None => Headers::default(),
-            Some(path) => {
+        let headers = match (&settings.headers, &settings.headers_file) {
+            // A configuration file's section read its headers already (ANR-962).
+            (Some(headers), _) => headers.clone(),
+            (None, None) => Headers::default(),
+            (None, Some(path)) => {
                 let var = "AAP_OTEL_HEADERS_FILE";
                 let bytes = std::fs::read(path).map_err(|_| bad(var, "the file cannot be read"))?;
                 if bytes.len() > MAX_HEADERS_FILE {

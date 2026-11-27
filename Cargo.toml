@@ -20,6 +20,7 @@ members = [
     "crates/trace-otlp",
     "crates/tool-probe",
     "crates/activity-http",
+    "crates/activator",
     "crates/usage",
     "crates/usage-postgres",
     "bin/operator",
@@ -58,6 +59,7 @@ aap-usage = { path = "crates/usage" }
 aap-trace-otlp = { path = "crates/trace-otlp" }
 aap-tool-probe = { path = "crates/tool-probe" }
 aap-activity-http = { path = "crates/activity-http" }
+aap-activator = { path = "crates/activator" }
 anyhow = "1"
 aws-lc-rs = "1.15"
 axum = { version = "0.8", default-features = false, features = ["http1", "tokio"] }

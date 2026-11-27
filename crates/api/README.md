@@ -61,7 +61,7 @@ deployment's (the operator chart's `runPods`), so that a person who may edit an 
 | Field | Shape |
 |---|---|
 | `AgentConfig.spec.harness.a2a` | `{ image, port?, cardPath?, healthPath?, env? }`, only with `type: a2a` |
-| `…a2a.image` | An `Image` (`ref`): the harness's own. `environment.image` is refused with it (`aap-domain`), and the operator's `--default-agent-image` never applies |
+| `…a2a.image` | An `Image` (`ref`): the harness's own. `environment.image` is refused with it (`aap-domain`), and the operator's `defaults.agentImage` never applies |
 | `…a2a.port` | 1 to 65535, `8080` by default: the container's port, the Service's and the `NetworkPolicy`'s |
 | `…a2a.cardPath` | A path, `/.well-known/agent-card.json` by default: where the image serves its card, and what the registry's `href` names |
 | `…a2a.healthPath` | A path, `/healthz` by default: the startup and readiness probes' path |

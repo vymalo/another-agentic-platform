@@ -1,0 +1,26 @@
+[package]
+name = "aap-activator"
+description = "The activator (AD-058 P3b): the stable front of a sleeping agent. An axum router generic over Waker, Upstream and CardSource that answers the card, holds a request while one shared wake runs, forwards it once, and answers 503 with Retry-After at the deadline"
+readme = "README.md"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+publish.workspace = true
+
+[dependencies]
+aap-ports.workspace = true
+futures.workspace = true
+# No `json`, `query` or `form`: the body is read here, with a cap, and every refusal is a fixed word.
+axum.workspace = true
+tokio = { workspace = true, features = ["rt", "sync", "time"] }
+
+[dev-dependencies]
+aap-ports = { workspace = true, features = ["testkit"] }
+tokio = { workspace = true, features = ["macros", "rt", "rt-multi-thread", "time", "net", "io-util", "test-util"] }
+tower = { workspace = true, features = ["util"] }
+
+[lints]
+workspace = true

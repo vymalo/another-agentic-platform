@@ -502,6 +502,12 @@ impl Cx<'_> {
         if let Some(class) = &r.runtime_class_name {
             data.insert("runtimeClassName".to_owned(), class.clone());
         }
+        // ANR-660 (AD-066): the node types the policy pins a run pod to, only when the deployment admits some, so the policy's rule
+        // is silent (and every parameter object is what it was) otherwise. One admitted value per line, as the other lists.
+        if let Some(node_type) = &r.node_type {
+            data.insert("nodeTypeKey".to_owned(), node_type.label_key.clone());
+            data.insert("nodeTypeAdmitted".to_owned(), node_type.admitted.join("\n"));
+        }
         let mut labels = service_labels(self.id);
         labels.insert(RUN_PODS_POLICY_LABEL.to_owned(), "true".to_owned());
         let policy_params = core::ConfigMap {

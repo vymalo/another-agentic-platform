@@ -166,6 +166,16 @@ trap 'exit 143' TERM HUP
 
 # jp <resource> <jsonpath>: a field of an object of the namespace, empty when it is not there.
 jp() { kubectl -n "$ns" get "$1" -o "jsonpath=$2" 2>/dev/null || true; }
+# operator_file <configmap>: the operator's configuration file (the ConfigMap's `config.yaml`), as kubectl prints it: the block scalar
+# without its indent, so the file's keys are at column 0. `{.data["config.yaml"]}` is NOT a jsonpath kubectl takes ("invalid array index"),
+# and `jp` hides a failure, so this reads it with the escaped dot and **fails when the read fails or is empty**: an empty read can never
+# pass a check that something is absent. Call it as `x=$(operator_file NAME) || die "..."`.
+operator_file() {
+  out=$(kubectl -n "$ns" get "configmap/$1" -o 'jsonpath={.data.config\.yaml}' 2>"$work/operator-file.err") \
+    || { printf 'cannot read configmap/%s: %s\n' "$1" "$(head -c 300 "$work/operator-file.err")" >&2; return 1; }
+  [ -n "$out" ] || { printf 'configmap/%s holds no config.yaml\n' "$1" >&2; return 1; }
+  printf '%s\n' "$out"
+}
 # not_foreign <kind/name>: the object is not there, or it carries this script's label. Anything else is somebody's, and is not overwritten.
 not_foreign() {
   if out=$(kubectl -n "$ns" get "$1" -o json 2>"$work/err"); then
@@ -385,9 +395,12 @@ ok "the catalogue's server is ready and answers /healthz from inside $ns (its ow
 installed=1
 helm_install
 [ "$(jp "deployment/$op" '{.status.readyReplicas}')" = 1 ] || die "the operator has no ready replica"
-[ "$(jp "deployment/$op" '{.spec.template.spec.containers[0].env[?(@.name=="TOOL_PROBE_ENABLED")].value}')" = true ] \
-  || die "the operator is not told to probe (TOOL_PROBE_ENABLED is not true): toolProbe.to was not rendered"
-ok "the operator is installed with toolProbe.to naming the catalogue's pods on 8080 (TOOL_PROBE_ENABLED is true in its Deployment)"
+# the probe block of the file (kubectl prints it unindented): from `toolProbe:` to the next key at column 0.
+op_file=$(operator_file "$op") || die "the operator's file cannot be read"
+printf '%s\n' "$op_file" | grep -Fxq 'version: 1' || die "the operator's file is not the file (no 'version: 1')"
+printf '%s\n' "$op_file" | awk '/^toolProbe:$/ { f = 1; next } /^[^ ]/ { f = 0 } f' | grep -Fxq '  enabled: true' \
+  || die "the operator's file does not turn the probe on (toolProbe.enabled): toolProbe.to was not rendered"
+ok "the operator is installed with toolProbe.to naming the catalogue's pods on 8080 (the file's toolProbe.enabled is true)"
 
 step "2. the tool probe: the provider is accepted, in use, reachable, and its tools are the server's"
 until_ok 120 "the provider to be Accepted" accepted

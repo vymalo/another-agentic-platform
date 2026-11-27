@@ -27,7 +27,15 @@ bad() { printf 'FAIL %s\n' "$*"; fail=1; }
 die() { printf 'FAIL %s\n' "$*" >&2; exit 1; }
 
 work=$(mktemp -d)
-trap 'rm -rf "$work"' EXIT
+# The RuntimeClass `runc` the runtime-class cases name (ensure_runc below): made only if absent, removed on any exit only if this script made it.
+made_runtime_class=0
+cleanup() {
+  rm -rf "$work"
+  if [ "$made_runtime_class" = 1 ]; then kubectl delete runtimeclass runc --ignore-not-found >/dev/null 2>&1 || true; fi
+}
+trap cleanup EXIT
+trap 'exit 130' INT
+trap 'exit 143' TERM HUP
 
 params() { kubectl -n "$ns" get configmap "$svc-run-pods-policy" -o "jsonpath={.data.$1}"; }
 template=$(kubectl -n "$ns" get configmap "$svc-run-pod" -o 'jsonpath={.data.pod\.yaml}') \
@@ -41,6 +49,8 @@ secret=$(params secretName)
 key=$(params secretKey)
 class=$(params priorityClass)
 runtime_class=$(params runtimeClassName)
+node_key=$(params nodeTypeKey)
+node_admitted=$(params nodeTypeAdmitted)
 if [ -z "$account" ] || [ -z "$managed_by" ] || [ -z "$run_label" ] || [ -z "$claim" ] || [ -z "$claims" ] || [ -z "$secret" ] || [ -z "$key" ] || [ -z "$class" ]; then
   die "the parameters of the guard are incomplete: $(kubectl -n "$ns" get configmap "$svc-run-pods-policy" -o 'jsonpath={.data}')"
 fi
@@ -79,20 +89,24 @@ try "no priority class" denied "a run pod has the priority class $class" 'del(.s
 
 # K14a (AD-052): once the deployment names a RuntimeClass, a run pod of the agent's account has that one and no other, or none; with no
 # class named, the policy does not judge the field at all (the control below: a pod with one is admitted).
+# Both branches name a class that must exist: the API server's own RuntimeClass admission answers `RuntimeClass "runc" not found` before the
+# policy is asked when the cluster has no such object (k3s and kind make none), so the cases would fail on that and not on the rule. A
+# `RuntimeClass` with a handler nothing runs is admitted, and a dry-run never starts it. It is cluster-scoped: it is made only when absent
+# and removed on any exit only when this script made it (an existing `runc` is never touched).
+ensure_runc() {
+  if ! kubectl get runtimeclass runc >/dev/null 2>&1; then
+    printf 'apiVersion: node.k8s.io/v1\nkind: RuntimeClass\nmetadata:\n  name: runc\nhandler: runc\n' | kubectl create -f - >/dev/null \
+      || die "the RuntimeClass runc could not be made"
+    made_runtime_class=1
+  fi
+}
+ensure_runc
 if [ -n "$runtime_class" ]; then
   try "another runtime class" denied "a run pod runs under the RuntimeClass $runtime_class" '.spec.runtimeClassName = "runc"'
   try "no runtime class" denied "a run pod runs under the RuntimeClass $runtime_class" 'del(.spec.runtimeClassName)'
 else
-  # The control: with no class named the policy does not judge the field. The API server still refuses a class that does not
-  # exist (its RuntimeClass admission), so the control makes one: a `RuntimeClass` object with a handler nothing runs is
-  # admitted, and a dry-run never starts it. It is cluster-scoped and this script leaves the cluster as it found it.
-  made_runtime_class=0
-  if ! kubectl get runtimeclass runc >/dev/null 2>&1; then
-    printf 'apiVersion: node.k8s.io/v1\nkind: RuntimeClass\nmetadata:\n  name: runc\nhandler: runc\n' | kubectl create -f - >/dev/null
-    made_runtime_class=1
-  fi
+  # The control: with no class named the policy does not judge the field.
   try "a runtime class when the deployment names none" allowed "" '.spec.runtimeClassName = "runc"'
-  if [ "$made_runtime_class" = 1 ]; then kubectl delete runtimeclass runc --ignore-not-found >/dev/null 2>&1 || true; fi
 fi
 
 # What it runs: only the images the deployment allows, in every container.
@@ -142,6 +156,40 @@ done
 try "no limits at all in the run container" denied "$limits_words" 'del(.spec.containers[0].resources.limits)'
 try "no resources at all in the init container" denied "$limits_words" 'del(.spec.initContainers[0].resources)'
 try "an extra container of an allowed image with no limits" denied "$limits_words" '.spec.containers += [.spec.containers[0] | .name = "extra" | del(.resources.limits)]'
+
+# ANR-660 (AD-066): with node types named, a run pod is PINNED to the admitted values by nodeSelector or by required node affinity in every term,
+# and sets no nodeName. The pod of the template (the control, above) is the proof that the operator's own affinity is admitted. The policy has the
+# rule exactly when the chart names node types, and then a parameter object WITHOUT nodeTypeKey (an operator older than the rule) is judged by the
+# chart's own key and values, not waved through: the same unrestricted pod is refused. With no rule in the policy, nothing here is judged.
+node_rule=$(kubectl get validatingadmissionpolicy -o json | jq '[.items[] | select(any(.spec.validations[]?; (.messageExpression // "") | contains("a run pod is pinned to the node types")))] | length')
+node_words="a run pod is pinned to the node types"
+if [ -n "$node_key" ] && [ "$node_rule" = 0 ]; then
+  bad "the parameters name the node type $node_key and the policy has no node-type rule: the chart does not name node types, or the policy is an old one"
+elif [ -n "$node_key" ]; then
+  first=$(printf '%s\n' "$node_admitted" | head -n 1)
+  try "node types: restricted by nodeSelector to an admitted value, with no affinity" allowed "" ".spec.nodeSelector = {(\"$node_key\"): \"$first\"} | del(.spec.affinity.nodeAffinity)"
+  try "node types: no restriction at all" denied "$node_words" 'del(.spec.affinity.nodeAffinity) | del(.spec.nodeSelector)'
+  try "node types: a value outside the admitted ones in the affinity" denied "$node_words" ".spec.affinity.nodeAffinity.requiredDuringSchedulingIgnoredDuringExecution.nodeSelectorTerms[].matchExpressions |= map(select(.key == \"$node_key\").values += [\"not-admitted\"])"
+  try "node types: a value outside the admitted ones in the selector" denied "$node_words" ".spec.nodeSelector = {(\"$node_key\"): \"not-admitted\"} | del(.spec.affinity.nodeAffinity)"
+  try "node types: a second term with no restriction (the terms are alternatives)" denied "$node_words" '.spec.affinity.nodeAffinity.requiredDuringSchedulingIgnoredDuringExecution.nodeSelectorTerms += [{matchExpressions: [{key: "kubernetes.io/arch", operator: "In", values: ["amd64"]}]}]'
+  try "node types: Exists on the key instead of In" denied "$node_words" ".spec.affinity.nodeAffinity.requiredDuringSchedulingIgnoredDuringExecution.nodeSelectorTerms |= map(.matchExpressions = [{key: \"$node_key\", operator: \"Exists\"}])"
+  # NotIn with ADMITTED values is the dangerous one: the pod may go anywhere but the admitted types.
+  try "node types: NotIn on the key with the admitted values, instead of In" denied "$node_words" ".spec.affinity.nodeAffinity.requiredDuringSchedulingIgnoredDuringExecution.nodeSelectorTerms |= map(.matchExpressions = [{key: \"$node_key\", operator: \"NotIn\", values: [\"$first\"]}])"
+  try "node types: an In on ANOTHER key with the admitted values" denied "$node_words" ".spec.affinity.nodeAffinity.requiredDuringSchedulingIgnoredDuringExecution.nodeSelectorTerms |= map(.matchExpressions = [{key: \"kubernetes.io/arch\", operator: \"In\", values: [\"$first\"]}])"
+  try "node types: a term with matchFields only" denied "$node_words" '.spec.affinity.nodeAffinity.requiredDuringSchedulingIgnoredDuringExecution.nodeSelectorTerms |= map(del(.matchExpressions) | .matchFields = [{key: "metadata.name", operator: "In", values: ["n1"]}])'
+  try "node types: only a preferred affinity" denied "$node_words" 'del(.spec.nodeSelector) | .spec.affinity.nodeAffinity = {preferredDuringSchedulingIgnoredDuringExecution: [{weight: 1, preference: {matchExpressions: [{key: "x", operator: "Exists"}]}}]}'
+  try "node types: a nodeSelector on another key" denied "$node_words" '.spec.nodeSelector = {"kubernetes.io/arch": "amd64"} | del(.spec.affinity.nodeAffinity)'
+  try "node types: spec.nodeName set, though the affinity is right" denied "$node_words" '.spec.nodeName = "some-node"'
+  # S7: an EMPTY nodeName is no nodeName (the API server drops an empty string before any rule reads it), so a pod that is pinned and says so is
+  # judged as pinned. Recorded against a real API server (k3s v1.35.5, 2026-11-26): admitted.
+  try "node types: spec.nodeName is the empty string, with a valid pin" allowed "" '.spec.nodeName = ""'
+elif [ "$node_rule" != 0 ]; then
+  # The parameters have no nodeTypeKey and the policy has the rule: the chart's own key and values judge them.
+  try "node types, parameters without nodeTypeKey: no restriction at all is refused all the same" denied "$node_words" 'del(.spec.affinity.nodeAffinity) | del(.spec.nodeSelector)'
+  try "node types, parameters without nodeTypeKey: a value outside the admitted ones is refused" denied "$node_words" '.spec.nodeSelector = {"example.com/not-the-key": "x"} | del(.spec.affinity.nodeAffinity)'
+else
+  try "no node types named anywhere: a run pod with no node restriction is admitted (the policy has no rule)" allowed "" 'del(.spec.nodeSelector)'
+fi
 
 # The guard is for the agent's account, and for it alone: another account is judged by what the cluster judges everybody by.
 if out=$(kubectl --dry-run=server create -f - 2>&1 <<EOF

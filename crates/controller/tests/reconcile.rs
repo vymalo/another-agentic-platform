@@ -853,14 +853,14 @@ async fn deleting_a_referent_blocks_the_service_and_leaves_what_runs_untouched()
 
 #[tokio::test]
 async fn a_config_with_no_image_is_blocked_without_a_default_and_runs_the_default_with_one() {
-    // No default: the message says which flag.
+    // No default: the message says which setting of the operator's configuration file (ANR-962).
     let w = World::with_options("coder-me", Options::default());
     w.put_shared();
     w.settle().await;
     assert_eq!(w.status()["state"], "Blocked");
     let message = w.message();
     assert!(
-        message.contains("spec.environment.image") && message.contains("--default-agent-image"),
+        message.contains("spec.environment.image") && message.contains("defaults.agentImage"),
         "{message}"
     );
     assert!(w.runtime.ids().is_empty());

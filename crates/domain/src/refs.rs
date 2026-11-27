@@ -177,7 +177,7 @@ pub(crate) fn materialize(config: &AgentConfig, externals: &Externals) -> Materi
             .filter(|d| !d.is_empty());
         match default {
             Some(d) if d.contains(char::is_whitespace) => issues.push(ConfigIssue {
-                field: "operator --default-agent-image".to_owned(),
+                field: "operator defaults.agentImage".to_owned(),
                 message: format!(
                     "{d:?} has white space in it: the operator's default image is a reference such as repository:tag@sha256:…, and this config names no image of its own"
                 ),
@@ -189,7 +189,7 @@ pub(crate) fn materialize(config: &AgentConfig, externals: &Externals) -> Materi
             }
             None => issues.push(ConfigIssue {
                 field: format!("{me} spec.environment.image"),
-                message: "no image, and this operator has no default agent image (--default-agent-image, DEFAULT_AGENT_IMAGE): name an image in the config, or give the operator a default".to_owned(),
+                message: "no image, and this operator has no default agent image (the operator configuration file's defaults.agentImage): name an image in the config, or give the operator a default".to_owned(),
             }),
         }
     }

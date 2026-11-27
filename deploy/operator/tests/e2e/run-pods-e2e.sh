@@ -128,6 +128,11 @@ run_role=$op-run-pods                # the Role of run pods (the chart's)
 sa_op="system:serviceaccount:$ns:$op"
 sa_coder="system:serviceaccount:$ns:$coder"
 steps_ext=https://agents.vymalo.com/a2a/extensions/steps/v1
+# ANR-660 (AD-066): the node type run pods are pinned to (run-pods.values.yaml `runPods.nodeType`, held equal by render-check.sh). The nodes of the
+# throwaway cluster are labelled with it before the upgrade, because the policy only proves a pod is PINNED to the admitted types, and the scheduler
+# then needs a node that has the label.
+node_type_key=aap-e2e/node-type
+node_type_value=e2e
 # The label on the namespace and on everything the script makes in it: what it may overwrite and delete.
 made_by_key=aap-e2e/made-by
 made_by=run-pods-e2e
@@ -142,6 +147,8 @@ openssl genrsa -out "$work/app-key.pem" 2048 2>/dev/null || die "openssl cannot 
 # What the cleanup undoes, recorded when it happens.
 ns_made=0       # the namespace (or a leftover of ours that is used again) is ours
 installed=0     # `helm upgrade --install` was started
+params_patched=0 # the agent's guard parameters have had their node-type keys removed for the no-key run (ANR-660); the cleanup puts them back
+nodes_labelled=0 # the node-type label was put on the nodes (ANR-660); the cleanup takes it off
 agents_made=0   # an AgentConfig or an AgentService may exist
 c_pid=''        # the stream of run C
 : > "$work/seen"
@@ -196,6 +203,11 @@ diagnostics() {
   echo "last answer:"; redact 2>/dev/null < "$work/a2a.json" | head -c 2000 || true; echo
   echo "::endgroup::"
 }
+# restore_node_type_params: the two keys saved in $work/policy-params.json back into the ConfigMap, as a merge patch built from the saved object.
+restore_node_type_params() {
+  patch=$(jq -c '{data: (.data | {nodeTypeKey, nodeTypeAdmitted} | with_entries(select(.value != null)))}' "$work/policy-params.json") || return 1
+  kubectl -n "$ns" patch configmap "$coder-run-pods-policy" --type=merge -p "$patch"
+}
 cleanup() {
   status=$?
   trap - EXIT
@@ -206,6 +218,8 @@ cleanup() {
   # What this run made and only that, in the order that lets the operator, which is still there, run the finalizers of the agents (and clear the run
   # pods): the agents, then the release (which takes the PriorityClass, the policy and its binding and the Role with it), then the namespace.
   # The CRDs stay: they are the cluster's, as Argo CD would leave them.
+  # The node-type keys removed from the guard's parameters for the fallback run: put back (best effort; the operator rewrites the object on its own too).
+  if [ "$params_patched" = 1 ]; then restore_node_type_params >/dev/null 2>&1 || true; fi
   if [ "$agents_made" = 1 ]; then
     kubectl -n "$ns" delete agentservice,agentconfig -l "$made_by_key=$made_by" --ignore-not-found --wait=true --timeout=180s >/dev/null 2>&1 || true
     for r in $(kubectl -n "$ns" get agentservice,agentconfig -l "$made_by_key=$made_by" -o name 2>/dev/null || true); do
@@ -213,6 +227,8 @@ cleanup() {
       kubectl -n "$ns" patch "$r" --type=merge -p '{"metadata":{"finalizers":null}}' >/dev/null 2>&1 || true
     done
   fi
+  # The label this run put on the nodes (it refused to start if one had the key already), and nothing else of the nodes.
+  if [ "$nodes_labelled" = 1 ]; then kubectl label node --all "$node_type_key-" >/dev/null 2>&1 || true; fi
   if [ "$installed" = 1 ]; then helm uninstall aap-operator --namespace "$ns" --timeout 120s >/dev/null 2>&1 || true; fi
   if [ "$ns_made" = 1 ]; then kubectl delete namespace "$ns" --ignore-not-found --wait=false >/dev/null 2>&1 || true; fi
   rm -rf "$work"
@@ -226,6 +242,16 @@ trap 'exit 143' TERM HUP
 
 # jp <resource> <jsonpath>: a field of an object of the namespace, empty when it is not there.
 jp() { kubectl -n "$ns" get "$1" -o "jsonpath=$2" 2>/dev/null || true; }
+# operator_file <configmap>: the operator's configuration file (the ConfigMap's `config.yaml`), as kubectl prints it: the block scalar
+# without its indent, so the file's keys are at column 0. `{.data["config.yaml"]}` is NOT a jsonpath kubectl takes ("invalid array index"),
+# and `jp` hides a failure, so this reads it with the escaped dot and **fails when the read fails or is empty**: an empty read can never
+# pass a check that something is absent. Call it as `x=$(operator_file NAME) || die "..."`.
+operator_file() {
+  out=$(kubectl -n "$ns" get "configmap/$1" -o 'jsonpath={.data.config\.yaml}' 2>"$work/operator-file.err") \
+    || { printf 'cannot read configmap/%s: %s\n' "$1" "$(head -c 300 "$work/operator-file.err")" >&2; return 1; }
+  [ -n "$out" ] || { printf 'configmap/%s holds no config.yaml\n' "$1" >&2; return 1; }
+  printf '%s\n' "$out"
+}
 # not_foreign <kind/name>: the object is not there, or it carries this script's label. Anything else is somebody's, and is not overwritten.
 not_foreign() {
   if out=$(kubectl -n "$ns" get "$1" -o json 2>"$work/err"); then
@@ -502,7 +528,7 @@ must_be_refused() {
 # check_pod <pod> <task id> <name>: the pod the kubelet runs is the one the operator's template describes, narrowed to the run. Saves it in $work/pod-<name>.json.
 check_pod() {
   kubectl -n "$ns" get pod "$1" -o json > "$work/pod-$3.json"
-  jqok "$work/pod-$3.json" "$1: not the pod of the template" --slurpfile tpl "$work/template.json" --arg id "$2" --arg svc "$coder" --arg class "$class" '
+  jqok "$work/pod-$3.json" "$1: not the pod of the template" --slurpfile tpl "$work/template.json" --arg id "$2" --arg svc "$coder" --arg class "$class" --arg nk "$node_type_key" --arg nv "$node_type_value" '
     .status.phase == "Running"
     and (.status.containerStatuses | map(select(.name == "run")) | .[0].ready == true)
     and .spec.priorityClassName == $class
@@ -512,6 +538,9 @@ check_pod() {
     and (.metadata.labels["adam.vymalo.com/run"] | length > 0)
     and .metadata.annotations["adam.vymalo.com/run-id"] == $id
     and .spec.automountServiceAccountToken == false
+    and ((.spec.affinity.nodeAffinity.requiredDuringSchedulingIgnoredDuringExecution.nodeSelectorTerms | length) > 0
+      and (.spec.affinity.nodeAffinity.requiredDuringSchedulingIgnoredDuringExecution.nodeSelectorTerms
+        | all(.matchExpressions | any(.key == $nk and .operator == "In" and .values == [$nv]))))
     and (.spec.containers | map(.name)) == ["run"]
     and (.spec.initContainers | map(.name)) == ["tools"]
     and .spec.containers[0].image == $tpl[0].spec.containers[0].image
@@ -573,13 +602,15 @@ absent get priorityclass "$class" || die "the PriorityClass of run pods exists w
 absent get validatingadmissionpolicy "$policy" || die "the admission policy of run pods exists with run pods off"
 absent get validatingadmissionpolicybinding "$policy" || die "the binding of the admission policy exists with run pods off"
 absent -n "$ns" get role "$run_role" || die "the Role of run pods exists with run pods off"
-absent -n "$ns" get configmap "$op-run-pods-settings" || die "the settings of run pods exist with run pods off"
-[ -z "$(jp "deployment/$op" '{.spec.template.spec.containers[0].env[?(@.name=="RUN_PODS_FILE")].value}')" ] || die "the operator is given RUN_PODS_FILE with run pods off"
+# kubectl prints the block scalar without its indent: the file's keys are at column 0. Positive first, so an empty read is not "off".
+off_file=$(operator_file "$op") || die "the operator's file cannot be read after the install with run pods off"
+printf '%s\n' "$off_file" | grep -Fxq 'version: 1' || die "the operator's file is not the file (no 'version: 1')"
+! printf '%s\n' "$off_file" | grep -Fxq 'runPods:' || die "the file names run pods with run pods off"
 for v in "create serviceaccounts" "create resourcequotas" "create rolebindings" "delete pods" "create pods" "get secrets"; do
   # shellcheck disable=SC2086
   [ "$(can "$sa_op" $v)" = no ] || die "the operator may $v with run pods off"
 done
-ok "with run pods off: no PriorityClass, no policy, no Role, no settings, no RUN_PODS_FILE, and the operator may not make a service account, a quota or a binding, delete or make a pod, or read a Secret"
+ok "with run pods off: no PriorityClass, no policy, no Role, no runPods block in the operator's file, and the operator may not make a service account, a quota or a binding, delete or make a pod, or read a Secret"
 
 step "2. the scripted model, and $plain: a coder with no run pods, on the real image"
 kubectl -n "$ns" create configmap e2e-model-script "--from-file=run-pods-model.js=$here/run-pods-model.js" --dry-run=client -o json \
@@ -624,10 +655,19 @@ ok "$plain has no git sandbox, no socket, no scratch directory, no projected vol
 ok "$plain has no run-pod object; its objects, its pod ($plain_pod_uid, restarts $plain_pod_restarts) and its config digest ($plain_digest) are recorded"
 
 step "3. the upgrade: the same chart with run pods on"
+# The nodes are labelled first (a run pod pinned to a type no node has would never be scheduled). A node that already has the key is somebody's: not touched.
+if kubectl get nodes -o json | jq -e --arg k "$node_type_key" '[.items[].metadata.labels | has($k)] | any' >/dev/null; then
+  die "a node already has the label $node_type_key: it is not overwritten (this script puts it on every node of the throwaway cluster and takes it off at the end)"
+fi
+nodes_labelled=1
+kubectl label node --all "$node_type_key=$node_type_value" >/dev/null
+ok "every node carries $node_type_key=$node_type_value, which the script took off again at the end"
 helm_install
 ok "the operator is upgraded with runPods.enabled (the same values file, one flag apart)"
 [ "$(jp "deployment/$op" '{.status.readyReplicas}')" = 1 ] || die "the operator has no ready replica after the upgrade"
-[ -n "$(jp "deployment/$op" '{.spec.template.spec.containers[0].env[?(@.name=="RUN_PODS_FILE")].value}')" ] || die "the operator is not given RUN_PODS_FILE with run pods on"
+on_file=$(operator_file "$op") || die "the operator's file cannot be read after the upgrade"
+printf '%s\n' "$on_file" | grep -Fxq 'version: 1' || die "the operator's file after the upgrade is not the file (no 'version: 1')"
+printf '%s\n' "$on_file" | grep -Fxq 'runPods:' || die "the file does not name run pods with run pods on"
 kubectl get priorityclass "$class" -o json > "$work/priorityclass.json"
 jqok "$work/priorityclass.json" "the PriorityClass of run pods is not value 0 and never-preempting" '.value == 0 and .preemptionPolicy == "Never"'
 kubectl get validatingadmissionpolicybinding "$policy" -o json > "$work/vapb.json"
@@ -704,6 +744,11 @@ jqok "$work/statefulset.json" "the coder's pod is not given the account, the tem
   and ([.spec.template.spec.volumes[] | select(.name == "run-pod") | .configMap.name] == [$svc + "-run-pod"])'
 jq -r '.data["pod.yaml"]' "$work/template-cm.json" > "$work/template.json"
 jqok "$work/template.json" "the template is not a Pod with a container run and an init container tools" '.kind == "Pod" and (.spec.containers | map(.name)) == ["run"] and (.spec.initContainers | map(.name)) == ["tools"]'
+# ANR-660 (AD-066): the template says the class's size weight (`standard` is 0.25) and is pinned to the node type of the values, in its one required term.
+jqok "$work/template.json" "the template has no size weight of 0.25, or is not pinned to $node_type_key In [$node_type_value] in its one required term" --arg nk "$node_type_key" --arg nv "$node_type_value" '
+  .metadata.annotations["agents.vymalo.com/size-weight"] == "0.25"
+  and (.spec.affinity.nodeAffinity.requiredDuringSchedulingIgnoredDuringExecution.nodeSelectorTerms
+    | length == 1 and (.[0].matchExpressions | any(.key == $nk and .operator == "In" and .values == [$nv])))'
 ok "the operator made, for $coder alone: the account, the quota (2 pods, scoped to $class), the network policy, the binding to $run_role, the template and the guard's parameters, each owned by the service; the coder's pod runs as the account with the template mounted"
 # The egress proxy (D15c): the one way out of a run pod, made beside the rest, from the coder's own image. The operator does not wait for it (it is no
 # workload of the service), so this script does.
@@ -770,9 +815,28 @@ ok "the account of $coder may make, get, list, watch and delete pods and exec in
 # that breaks a rule is refused with that rule's message. 25 of them.
 sh "$here/../run-pods-admission.sh" "$ns" "$coder" > "$work/admission.out" 2>&1 \
   || die "run-pods-admission.sh failed in this cluster: $(redact < "$work/admission.out" | tail -n 30 | head -c 3000)"
-[ "$(grep -c '^ok ' "$work/admission.out")" -ge 27 ] || die "run-pods-admission.sh ran fewer than 27 cases: $(redact < "$work/admission.out" | tail -n 8)"
+[ "$(grep -c '^ok ' "$work/admission.out")" -ge 40 ] || die "run-pods-admission.sh ran fewer than 40 cases (27, and the 13 of the node types, ANR-660): $(redact < "$work/admission.out" | tail -n 8)"
 if grep -q '^FAIL' "$work/admission.out"; then die "run-pods-admission.sh printed a failure: $(grep '^FAIL' "$work/admission.out" | head -n 3)"; fi
 ok "run-pods-admission.sh, run here against the policy the chart installed and the parameters the operator made: $(tail -n 1 "$work/admission.out")"
+# ANR-660 (AD-066), the fallback: the operator always writes nodeTypeKey, so the branch of the policy for parameters that LACK it (an operator older than the
+# rule) is never reached above. Remove the two keys from this agent's parameters, run the admission test again (it then expects the unrestricted pod refused by
+# the chart's own key and values) and put them back. The operator may rewrite the object on its next reconcile: the keys are checked absent just before the run
+# and just after it, and if they came back the branch was not proven and the script says so and fails instead of passing.
+policy_cm="$coder-run-pods-policy"
+kubectl -n "$ns" get configmap "$policy_cm" -o json > "$work/policy-params.json"
+[ -n "$(jq -r '.data.nodeTypeKey // empty' "$work/policy-params.json")" ] || die "$policy_cm has no nodeTypeKey: the operator did not write the node types it was given"
+params_patched=1
+kubectl -n "$ns" patch configmap "$policy_cm" --type=json -p '[{"op":"remove","path":"/data/nodeTypeKey"},{"op":"remove","path":"/data/nodeTypeAdmitted"}]' >/dev/null
+[ -z "$(jp "configmap/$policy_cm" '{.data.nodeTypeKey}')" ] || die "the operator wrote nodeTypeKey back before the run: the fallback is not proven (re-run)"
+sh "$here/../run-pods-admission.sh" "$ns" "$coder" > "$work/admission-nokey.out" 2>&1 \
+  || die "run-pods-admission.sh failed with the node-type keys removed from the parameters: $(redact < "$work/admission-nokey.out" | tail -n 30 | head -c 3000)"
+[ -z "$(jp "configmap/$policy_cm" '{.data.nodeTypeKey}')" ] || die "the operator wrote nodeTypeKey back during the run: the fallback is not proven (re-run)"
+restore_node_type_params >/dev/null || die "the node-type keys could not be put back into $policy_cm"
+params_patched=0
+[ "$(grep -c '^ok ' "$work/admission-nokey.out")" -ge 40 ] || die "run-pods-admission.sh ran fewer than 40 cases without the node-type keys: $(redact < "$work/admission-nokey.out" | tail -n 8)"
+[ "$(grep -c '^ok .*parameters without nodeTypeKey' "$work/admission-nokey.out")" -eq 2 ] || die "the two cases of parameters without nodeTypeKey did not run: $(redact < "$work/admission-nokey.out" | tail -n 8)"
+if grep -q '^FAIL' "$work/admission-nokey.out"; then die "run-pods-admission.sh printed a failure without the node-type keys: $(grep '^FAIL' "$work/admission-nokey.out" | head -n 3)"; fi
+ok "run-pods-admission.sh with the node-type keys removed from the parameters: an unrestricted pod is still refused by the chart's own values ($(tail -n 1 "$work/admission-nokey.out")); the keys are put back"
 
 step "4b. the git sandbox of $coder: the coder's own git runs where no secret is readable (D15d)"
 in_coder() { kubectl -n "$ns" exec "$coder-0" -c agent -- "$@"; }

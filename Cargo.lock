@@ -3,6 +3,17 @@
 version = 4
 
 [[package]]
+name = "aap-activator"
+version = "0.1.0"
+dependencies = [
+ "aap-ports",
+ "axum",
+ "futures",
+ "tokio",
+ "tower",
+]
+
+[[package]]
 name = "aap-activity-http"
 version = "0.1.0"
 dependencies = [
@@ -145,6 +156,7 @@ dependencies = [
  "aap-ports",
  "k8s-openapi",
  "proptest",
+ "schemars",
  "serde",
  "serde_json",
  "serde_yaml_ng",
@@ -227,6 +239,7 @@ dependencies = [
  "http",
  "k8s-openapi",
  "kube",
+ "schemars",
  "serde",
  "serde_json",
  "serde_yaml_ng",
@@ -390,6 +403,8 @@ dependencies = [
  "aap-trace-otlp",
  "axum",
  "reqwest",
+ "schemars",
+ "serde",
  "serde_json",
  "thiserror 2.0.21",
  "tokio",

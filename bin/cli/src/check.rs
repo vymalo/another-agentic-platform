@@ -11,16 +11,16 @@ use serde_json::Value;
 
 use crate::load::Object;
 
-/// What the operator's flags and environment say (`bin/operator`'s `RunArgs`), with the operator's own defaults.
+/// What the operator's configuration file says in `defaults.*` and `runPods` (aapctl's own flags carry them), with the operator's own defaults.
 #[derive(Clone, Debug, Default)]
 pub struct Settings {
-    /// `--default-agent-image`.
+    /// `--default-agent-image` (the file's `defaults.agentImage`).
     pub default_image: Option<String>,
-    /// `--run-pods-file`, read and checked.
+    /// `--run-pods-file` (the file's `runPods` block), read and checked.
     pub run_pods: Option<RunPodSettings>,
-    /// `--cache-allowed-claims`.
+    /// `--cache-allowed-claims` (`defaults.cacheAllowedClaims`).
     pub cache_claims: Vec<String>,
-    /// `--max-access-tier`.
+    /// `--max-access-tier` (`defaults.maxAccessTier`).
     pub max_access_tier: AccessTierCap,
     /// The uid the owner reference of a rendered object names (the objects are not applied, so there is none).
     pub owner_uid: String,
@@ -140,8 +140,14 @@ fn lost_fields(input: &Value, kept: &Value, path: &str, out: &mut Vec<String>) {
     }
 }
 
-/// The environment variables the operator's messages name, and the flag that is their place here.
-const ENV_FLAGS: [(&str, &str); 4] = [
+/// The settings the operator's messages name — its configuration file's keys since ANR-962, and the environment variables
+/// the messages of an older operator named — and the flag that is their place here.
+const SETTING_FLAGS: [(&str, &str); 8] = [
+    ("defaults.agentImage", "--default-agent-image"),
+    ("defaults.cacheAllowedClaims", "--cache-allowed-claims"),
+    ("defaults.maxAccessTier", "--max-access-tier"),
+    // The file-key form with its dot (`runPods.classes…`): the bare word is in unrelated messages (the `extraEnv` one).
+    ("runPods.", "--run-pods-file"),
     ("DEFAULT_AGENT_IMAGE", "--default-agent-image"),
     ("RUN_PODS_FILE", "--run-pods-file"),
     ("CACHE_ALLOWED_CLAIMS", "--cache-allowed-claims"),
@@ -163,8 +169,8 @@ fn text_of(issue: &ConfigIssue) -> String {
         }
     }
     let mut message = issue.message.clone();
-    for (env, flag) in ENV_FLAGS {
-        if message.contains(env) {
+    for (setting, flag) in SETTING_FLAGS {
+        if message.contains(setting) {
             message.push_str(&format!(" (aapctl: {flag})"));
         }
     }
@@ -393,5 +399,33 @@ fn whose<'a>(
             .get(&key(namespace, name))
             .map_or(service, |p| &p.object),
         _ => service,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn issue(message: &str) -> ConfigIssue {
+        ConfigIssue {
+            field: "AgentConfig spec.x".to_owned(),
+            message: message.to_owned(),
+        }
+    }
+
+    #[test]
+    fn the_run_pods_flag_is_named_for_the_file_key_and_not_for_the_word() {
+        // The `extraEnv` message of aap-domain says "(runPods)" and has nothing to do with the flag.
+        let text = text_of(&issue(
+            "the operator sets this variable itself when run pods are on (runPods)",
+        ));
+        assert!(!text.contains("--run-pods-file"), "{text}");
+        for message in [
+            "runPods.classes.standard.requests weigh nothing on the grid",
+            "the file's RUN_PODS_FILE names no class",
+        ] {
+            let text = text_of(&issue(message));
+            assert!(text.ends_with("(aapctl: --run-pods-file)"), "{text}");
+        }
     }
 }
