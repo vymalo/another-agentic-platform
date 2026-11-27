@@ -407,3 +407,45 @@ async fn retrying_since_says_how_long_a_batch_has_been_stuck_and_goes_back_to_ze
     .await;
     assert_eq!(sink.stats().snapshot().sent, 1);
 }
+
+#[tokio::test]
+async fn a_certificate_that_passes_the_pem_check_but_not_the_tls_stack_is_blamed_on_the_ca() {
+    // Valid PEM framing and base64, but the bytes are not a certificate: the PEM check passes, `build()` refuses.
+    let file = std::env::temp_dir().join(format!("aap-usage-otlp-badder-{}", std::process::id()));
+    std::fs::write(
+        &file,
+        "-----BEGIN CERTIFICATE-----\nAAAAAAAA\n-----END CERTIFICATE-----\n",
+    )
+    .unwrap();
+    let mut s = UsageOtlpSettings::new(url::Url::parse("https://collector:4318").unwrap());
+    s.ca = Some(file.clone());
+    let e = OtlpUsageSink::start(s).unwrap_err();
+    let _ = std::fs::remove_file(file);
+    assert_eq!(e.setting, "ca");
+    assert_eq!(
+        e.reason, "the HTTP client cannot be built with it",
+        "the build step, not the PEM step"
+    );
+}
+
+#[tokio::test]
+async fn shutdown_counts_every_event_it_gives_up_including_those_still_in_the_channel() {
+    let c = TestCollector::start();
+    c.set_behaviour(Behaviour::Status(503));
+    let mut cfg = settings(&c);
+    cfg.batch = 2;
+    cfg.queue = 64;
+    cfg.interval = Duration::from_secs(3600);
+    let sink = OtlpUsageSink::start(cfg).unwrap();
+    for m in 0..10 {
+        sink.send(event("m1", "pod-1", m)).await.unwrap();
+    }
+    until("the first batch is stuck", || c.raw_requests().len() >= 2).await;
+    let report = sink.shutdown(Duration::from_millis(300)).await;
+    let s = sink.stats().snapshot();
+    assert_eq!(report.unsent, 10, "{s:?}");
+    assert_eq!(s.queue_depth, 0, "a phantom depth is left: {s:?}");
+    assert_eq!(s.queued, 10);
+    assert_eq!(s.sent + s.refused + s.unsent_at_shutdown, 10);
+    assert!(c.events().is_empty());
+}

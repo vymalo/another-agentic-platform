@@ -241,9 +241,12 @@ impl Worker {
         let unsent = self.deliver(chunk, fallback).await;
         if unsent > 0 {
             // The deadline ran out: what is unsent and everything still held is given up, counted.
-            let rest = buf.len() as u64;
+            // Events still in the channel are given up with the rest, and counted with it: none is dropped uncounted.
+            let mut rest = buf.len() as u64;
             buf.clear();
-            while self.rx.try_recv().is_ok() {}
+            while self.rx.try_recv().is_ok() {
+                rest += 1;
+            }
             Stats::add(&self.stats.unsent_at_shutdown, unsent + rest);
             self.stats.resolve(unsent + rest);
         }

@@ -17,12 +17,16 @@ pub(crate) fn build(settings: &UsageOtlpSettings) -> Result<Client, SettingsErro
         .no_proxy()
         .timeout(settings.timeout)
         .user_agent("aap-usage-otlp");
-    if let Some(path) = &settings.ca {
+    // A build failure is the CA's when a bundle is given (a certificate the TLS stack refuses), the endpoint's otherwise.
+    let setting = if let Some(path) = &settings.ca {
         builder = trust_only(builder, path)?;
-    }
+        "ca"
+    } else {
+        "endpoint"
+    };
     builder
         .build()
-        .map_err(|_| bad("endpoint", "the HTTP client cannot be built"))
+        .map_err(|_| bad(setting, "the HTTP client cannot be built with it"))
 }
 
 fn trust_only(
