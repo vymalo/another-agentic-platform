@@ -1,7 +1,8 @@
 // The drift check of the generated CRD pages: `npm run check-crds`. It fails when a CRD changed and its page did not
-// (`npm run crds` rewrites them), and when a page exists that no CRD makes.
+// (`npm run crds` rewrites them), and when a page exists that no CRD makes. It then runs the generator's unit cases, the
+// shapes no checked-in CRD has.
 import { existsSync, readdirSync, readFileSync } from "node:fs";
-import { renderAll } from "./generate.mjs";
+import { renderAll, unitCases } from "./generate.mjs";
 
 const pages = renderAll();
 const expected = new Set(pages.map((page) => page.file));
@@ -31,3 +32,16 @@ if (drift) {
   process.exit(1);
 }
 console.log(`the ${pages.length} CRD pages are what the CRDs say`);
+
+let failed = 0;
+for (const unit of unitCases()) {
+  console.log(`${unit.ok ? "ok  " : "FAIL"} ${unit.name}`);
+  if (!unit.ok) {
+    console.error(`     ${unit.detail}`);
+    failed += 1;
+  }
+}
+if (failed) {
+  console.error(`${failed} unit case(s) of the CRD page generator failed (docs/.vitepress/crds/generate.mjs)`);
+  process.exit(1);
+}

@@ -31,4 +31,6 @@ is never asked and answers no account. No redirect is followed and no proxy is u
 ## Tests
 
 `cargo test -p aap-usage-broker`: unit tests of the segment and the settings, and `tests/broker.rs` against a stub broker on a
-local port (the raw path and the bearer the stub saw, each answer above, an e-mail refused, a slow and an absent broker).
+local port (the raw path and the bearer the stub saw, each answer above, an e-mail refused, a slow and an absent broker), plus
+the `AccountSource` conformance suite (`aap_usage::testkit::accounts`) against the same stub: an account, no account, and a
+broker that cannot answer.

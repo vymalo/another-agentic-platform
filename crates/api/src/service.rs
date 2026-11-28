@@ -89,6 +89,39 @@ pub struct AgentServiceSpec {
     /// What happens to data (work volumes, an operator-owned database) when the service is deleted.
     #[serde(default)]
     pub deletion_policy: DeletionPolicy,
+
+    /// The release channels of the service (AD-059, §10a). Absent: one revision, replaced in place, and the
+    /// workload keeps the name `<service>`. Present: a channel is a pointer to an `AgentConfig`, and the
+    /// operator names a workload per live revision (`<service>-r<n>`). The dashboard's forms cannot say it:
+    /// an object that carries it is YAML only.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub release: Option<Release>,
+}
+
+/// The release channels of a service (AD-059, §10a): `defaultChannel` and the channels, each a pointer to an
+/// `AgentConfig`. A channel is a name that points at a revision; moving it is editing one line, and a rollback
+/// is moving it back. The platform is the only owner of channel state (§12a).
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize, KubeSchema)]
+#[serde(rename_all = "camelCase")]
+#[x_kube(validation = Rule::new("self.channels.all(k, k.size() <= 32 && k.matches('^[a-z0-9]([a-z0-9-]*[a-z0-9])?$'))").message("release.channels: a channel name is at most 32 characters of lower-case letters, digits and -, starting and ending with a letter or a digit"))]
+#[x_kube(validation = Rule::new("self.defaultChannel in self.channels").message("release.defaultChannel names one of release.channels"))]
+pub struct Release {
+    /// The channel a request that names none gets. One of `channels`.
+    #[schemars(length(min = 1, max = 32))]
+    pub default_channel: String,
+
+    /// Channel name to what it points at: at most 8 channels.
+    #[schemars(extend("maxProperties" = 8))]
+    pub channels: std::collections::BTreeMap<String, ChannelTarget>,
+}
+
+/// What a channel points at: the `AgentConfig` whose revision serves it. The same shape as `configRef`, so a
+/// channel's image, model and tools are what that config says.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct ChannelTarget {
+    /// The `AgentConfig`, in the service's namespace, the channel points at.
+    pub config_ref: NameRef,
 }
 
 /// An agent's owner (`AgentService.spec.owner`): 1 to 63 characters of lower-case letters, digits, `-` and `_`, starting

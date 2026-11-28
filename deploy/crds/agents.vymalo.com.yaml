@@ -1102,6 +1102,50 @@ spec:
                     nullable: true
                     type: string
                 type: object
+              release:
+                description: |-
+                  The release channels of the service (AD-059, §10a). Absent: one revision, replaced in place, and the
+                  workload keeps the name `<service>`. Present: a channel is a pointer to an `AgentConfig`, and the
+                  operator names a workload per live revision (`<service>-r<n>`). The dashboard's forms cannot say it:
+                  an object that carries it is YAML only.
+                nullable: true
+                properties:
+                  channels:
+                    additionalProperties:
+                      description: |-
+                        What a channel points at: the `AgentConfig` whose revision serves it. The same shape as `configRef`, so a
+                        channel's image, model and tools are what that config says.
+                      properties:
+                        configRef:
+                          description: The `AgentConfig`, in the service's namespace, the channel points at.
+                          properties:
+                            name:
+                              description: Name of the referenced object.
+                              minLength: 1
+                              type: string
+                          required:
+                          - name
+                          type: object
+                      required:
+                      - configRef
+                      type: object
+                    description: 'Channel name to what it points at: at most 8 channels.'
+                    maxProperties: 8
+                    type: object
+                  defaultChannel:
+                    description: The channel a request that names none gets. One of `channels`.
+                    maxLength: 32
+                    minLength: 1
+                    type: string
+                required:
+                - channels
+                - defaultChannel
+                type: object
+                x-kubernetes-validations:
+                - message: 'release.channels: a channel name is at most 32 characters of lower-case letters, digits and -, starting and ending with a letter or a digit'
+                  rule: self.channels.all(k, k.size() <= 32 && k.matches('^[a-z0-9]([a-z0-9-]*[a-z0-9])?$'))
+                - message: release.defaultChannel names one of release.channels
+                  rule: self.defaultChannel in self.channels
               scaling:
                 default:
                   topology: combined
@@ -1368,6 +1412,65 @@ spec:
                 format: int64
                 nullable: true
                 type: integer
+              revisions:
+                description: |-
+                  The service's revisions, when `spec.release` is set (AD-059, §10a): one per resolved digest the service has
+                  run, newest first, with the epochs its image serves and the runs still open in each. Absent: no
+                  `spec.release`, so there is one revision and it is the workload the service names.
+                items:
+                  description: |-
+                    One revision of a service (AD-059, §10a): what its pods run, which epochs they can replay, and what they still
+                    have open. A revision is immutable; only its replica count moves.
+                  properties:
+                    digest:
+                      description: '`sha256:<hex>` of the resolved runtime, as `status.config.digest` gives it.'
+                      type: string
+                    epochs:
+                      description: The epochs its image serves.
+                      properties:
+                        max:
+                          description: The newest epoch this revision's image serves.
+                          format: int64
+                          type: integer
+                        min:
+                          description: The oldest epoch a worker of this revision can replay.
+                          format: int64
+                          type: integer
+                      required:
+                      - max
+                      - min
+                      type: object
+                    name:
+                      description: '`<service>-r<n>`, `n` counting the service''s digests in order.'
+                      type: string
+                    openRuns:
+                      additionalProperties:
+                        format: int64
+                        type: integer
+                      description: |-
+                        Open runs per epoch, keyed by the epoch's decimal text, as the agent's activity answer reports them.
+                        **Absent is not zero**: the agent did not answer, and a revision is never retired on a missing answer
+                        (fail closed).
+                      type: object
+                    phase:
+                      description: Where it is in the drain lifecycle.
+                      enum:
+                      - Current
+                      - Draining
+                      - Retired
+                      type: string
+                    readyReplicas:
+                      default: 0
+                      description: Pods of its workload that are ready.
+                      format: int32
+                      type: integer
+                  required:
+                  - digest
+                  - epochs
+                  - name
+                  - phase
+                  type: object
+                type: array
               runtime:
                 description: The runtime, as the provider reports it.
                 nullable: true

@@ -189,3 +189,34 @@ async fn a_slow_or_absent_broker_is_unavailable() {
     .unwrap();
     assert_eq!(gone.account(&run("r")).await, Err(AccountUnavailable));
 }
+
+/// The `AccountSource` conformance suite (ANR-1190): the broker passes every rule, with the stub in the state each rule
+/// needs — an account, no account, and a broker that cannot answer.
+#[tokio::test]
+async fn the_account_source_conformance_suite_passes() {
+    use aap_usage::testkit::accounts::{Case, check_accounts, check_no_account, check_unavailable};
+
+    let (source, stub) = start(Duration::from_secs(5)).await;
+    check_accounts(&source, &[Case::account(run("r1"), "acct-1")])
+        .await
+        .unwrap();
+    // A run the broker does not know, and an agent pod, which the broker never asks about.
+    set(&stub, 404, r#"{"code":"run_not_bound"}"#);
+    check_no_account(
+        &source,
+        &[
+            Case::none(run("r2")),
+            Case::none(PodRef::Agent {
+                namespace: "ns".into(),
+                service: "coder".into(),
+            }),
+        ],
+    )
+    .await
+    .unwrap();
+    // The broker is down: an error, never `None` (the meter holds the minute).
+    set(&stub, 500, "");
+    check_unavailable(&source, &[Case::unavailable(run("r1"))])
+        .await
+        .unwrap();
+}

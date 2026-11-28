@@ -176,6 +176,8 @@ What it does, in one paragraph: a controller reads an `AgentService` and the `Ag
 
 The adam-rs side is cited at revision `0391809`, the source of the coder image the netcup deployment pins: the files read there, and their links, are in [the agent page](../../.agents/docs/architecture/10-control-plane-and-crds.md#59a-operator-v0-adam-rs-agents).
 
+**Workingness (not built).** `AgentService.spec.scaling` will get an `activityProbe` that says how to ask an agent whether it holds work, by the contract [`activity/v1`](../extensions/activity-v1.md); an answer the operator cannot read counts as busy. The CRDs have no such field today. The design is [AD-075](11-decisions.md#ad-075--workingness-an-agent-is-asked-whether-it-holds-work-over-activityv1-and-unknown-is-busy) and the slice plan is ANR-1177's.
+
 ### Workspace layout
 
 One Cargo workspace in this repository. Crates are prefixed `aap-` (owner question in §93).
@@ -247,7 +249,18 @@ spec:
       - namespaceSelector: { matchLabels: { kubernetes.io/metadata.name: another-agentic-system } }
   registry: { title: Coder, tags: [coding, git] }
   deletionPolicy: Retain   # Retain | Delete
+  # release:               # AD-059, §10a: absent, one revision in place and the workload is `<name>`
+  #   defaultChannel: production
+  #   channels:            # at most 8; a name is at most 32 of [a-z0-9-], starting and ending with a letter or a digit
+  #     production: { configRef: { name: coder-r47 } }
+  #     staging: { configRef: { name: coder-r51 } }
 ```
+
+`spec.release` (slice R1, AD-059) is a pointer per channel and nothing reads it yet: the operator names a
+workload per live revision in R3 and drains the old one in R4. A service without it is unchanged — its
+workload, pod template and env are what they were, and the parity goldens do not move. `status.revisions[]`
+(`name`, `digest`, `epochs`, `phase`, `readyReplicas`, `openRuns`) is the operator's to write; the controller
+carries it over as it was until the drain controller computes it.
 
 #### `AgentConfig`: the netcup coder
 

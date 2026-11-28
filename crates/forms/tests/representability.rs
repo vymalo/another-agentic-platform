@@ -327,6 +327,16 @@ fn coder_changes() -> Vec<Change> {
             "spec.scaling.front",
         ),
         change(s, "/deletionPolicy", json!("Delete"), "spec.deletionPolicy"),
+        // AD-059, §10a: the release channels are a pointer per channel, and no form says them.
+        change(
+            s,
+            "/release",
+            json!({
+                "defaultChannel": "production",
+                "channels": { "production": { "configRef": { "name": "coder" } } }
+            }),
+            "spec.release",
+        ),
         change(
             c,
             "/harness/adam/coder/maxCheckCycles",

@@ -3,6 +3,10 @@
 
 use std::sync::Mutex;
 
+use aap_usage::AccountUnavailable;
+use aap_usage::testkit::accounts::{
+    Case, check_accounts, check_no_account, check_unavailable, run,
+};
 use aap_usage::testkit::{self, Observed, event};
 use aap_usage::{AccountSource, PodRef};
 use aap_usage::{MemoryAccounts, MemoryUsageSink, PodMinuteEvent, UsageError, UsageSink};
@@ -357,5 +361,95 @@ mod broken_tombstones {
     #[tokio::test]
     async fn a_store_that_never_conflicts_fails_the_conflict_rule() {
         fails(Fault::NeverConflicts, "conflict").await;
+    }
+}
+
+// ---- the AccountSource suite (ANR-1190)
+
+use aap_usage::AccountUnavailable;
+use aap_usage::testkit::accounts::{
+    Case, check_accounts, check_no_account, check_unavailable, run,
+};
+
+fn run_pod(run: &str) -> PodRef {
+    PodRef::Run {
+        service: "coder".into(),
+        run: run.into(),
+    }
+}
+
+fn agent_pod(namespace: &str) -> PodRef {
+    PodRef::Agent {
+        namespace: namespace.into(),
+        service: "coder".into(),
+    }
+}
+
+#[tokio::test]
+async fn the_account_fake_passes_the_suite() {
+    let source = MemoryAccounts::new();
+    source.set_run("coder", "r1", "acct-run");
+    source.set_agent("ns", "coder", "acct-agent");
+    run(
+        &source,
+        &[
+            Case::account(run_pod("r1"), "acct-run"),
+            Case::account(agent_pod("ns"), "acct-agent"),
+            Case::none(run_pod("r2")),
+            Case::none(agent_pod("other")),
+        ],
+    )
+    .await
+    .unwrap();
+    // The fake made unavailable: the same pod, now an error, never `None`.
+    source.set_broken(true);
+    check_unavailable(&source, &[Case::unavailable(run_pod("r1"))])
+        .await
+        .unwrap();
+}
+
+/// A source broken in one way, to prove each rule fails.
+struct Faulty(&'static str);
+
+impl AccountSource for Faulty {
+    async fn account(&self, _pod: &PodRef) -> Result<Option<String>, AccountUnavailable> {
+        match self.0 {
+            "wrong" => Ok(Some("another".into())),
+            "empty" => Ok(Some(String::new())),
+            "space" => Ok(Some("a b".into())),
+            "none" => Ok(None),
+            "error" => Err(AccountUnavailable),
+            other => unreachable!("unknown fault {other}"),
+        }
+    }
+}
+
+#[tokio::test]
+async fn each_account_rule_fails_on_a_source_broken_on_purpose() {
+    let pod = run_pod("r1");
+    for fault in ["wrong", "none", "error"] {
+        let e = check_accounts(&Faulty(fault), &[Case::account(pod.clone(), "acct")])
+            .await
+            .unwrap_err();
+        assert!(e.starts_with("accounts:"), "{fault}: {e}");
+    }
+    // The line-text rule: the answer is the account asked for, but it is not a usage line.
+    for (fault, want) in [("empty", ""), ("space", "a b")] {
+        let e = check_accounts(&Faulty(fault), &[Case::account(pod.clone(), want)])
+            .await
+            .unwrap_err();
+        assert!(e.contains("not line text"), "{fault}: {e}");
+    }
+    for fault in ["wrong", "error"] {
+        let e = check_no_account(&Faulty(fault), &[Case::none(pod.clone())])
+            .await
+            .unwrap_err();
+        assert!(e.starts_with("no-account:"), "{fault}: {e}");
+    }
+    for fault in ["none", "wrong"] {
+        let e = check_unavailable(&Faulty(fault), &[Case::unavailable(pod.clone())])
+            .await
+            .unwrap_err();
+        assert!(e.starts_with("unavailable:"), "{fault}: {e}");
     }
 }
