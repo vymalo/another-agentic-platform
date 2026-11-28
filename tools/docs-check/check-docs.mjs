@@ -42,10 +42,10 @@ function unclosedInDepth(src) {
     const raw = lines[i];
     // An indented code block (four or more columns) is code: a `:::` or a fence inside it is content, not a container,
     // which is what the renderer does (`in-depth.ts` returns null at `state.sCount[line] - state.blkIndent >= 4`). A
-    // tab counts four columns, as CommonMark has it. Every marker of this repository sits at column 0, so the absolute
-    // column is the block's own here.
+    // tab advances to the next multiple of four, as CommonMark and `state.sCount` have it. Every marker of this repository
+    // sits at column 0, so the absolute column is the block's own here.
     const lead = /^[ \t]*/.exec(raw)[0];
-    const indent = [...lead].reduce((n, ch) => n + (ch === '\t' ? 4 : 1), 0);
+    const indent = [...lead].reduce((n, ch) => n + (ch === '\t' ? 4 - (n % 4) : 1), 0);
     const code = indent >= 4;
     const line = raw.trimStart();
     const f = code ? null : /^(`{3,}|~{3,})(.*)$/.exec(line);
