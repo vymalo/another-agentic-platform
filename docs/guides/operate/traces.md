@@ -208,7 +208,7 @@ A span can say only what the closed list in [`crates/trace/README.md`](../../../
 | `api --check` and `operator run --check` | `api-image` and `chart` | The rendered environment of the API, and the rendered file of the operator, are accepted by the images |
 | `cargo test` | `operator.yml` | The pipeline against a test collector and a hanging one, and `testkit::assert_clean` on what a span holds |
 
-*Verified 2026-11-27* with `gh run view`: on `main` at commit `2c16326`, run 45932723504 of `operator-image.yml`, job `chain-e2e` 140289016188, ended in success, and its log says `the collector received spans of the operator (reconcile agentservice, k8s.namespace.name aap-e2e-chain) and of the Platform API (GET /v1/agents by its template /v1/agents), through the egress rule of each policy`.
+*The run this page was checked against, with its ids, is recorded in [the agent page](../../../.agents/docs/guides/operate/traces.md).*
 
 Run for this page, on 2026-11-27: the two blocks above rendered with `helm template` alone and with the install, Platform API and metrics pages' values added. kubeconform, strict, found every object valid (7, 22 and 22 objects). The refusals in the two tables above were run, each with its control.
 

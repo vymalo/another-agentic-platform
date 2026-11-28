@@ -224,8 +224,7 @@ so it is not removed with the namespace; deleting the cluster would remove it an
 **Not run end to end.** The machine this page was written on had Docker but no `kind`, `kubectl` or `helm`, and under 2 GB of free
 disk, so no cluster was made and no image was pulled. The commands are copied from
 [`k10-e2e.sh`](../../deploy/operator/tests/e2e/k10-e2e.sh) at `275a01c`, and its files are used unchanged. The script's job (`k10-e2e`
-of `operator-image.yml`) passed on `main`: run 45973874969 at `36ca2e0`, job 140423711463, *verified 2026-11-27* in the job's log, and
-the whole script ran on a throwaway kind cluster (v1.35.8), *verified 2026-11-21*. What this page changes (the namespace `aap`, the
+of `operator-image.yml`) has passed on `main`; the run, the job and the commit are in [the agent page](../../.agents/docs/get-started/tool-server.md). What this page changes (the namespace `aap`, the
 unlabelled objects, the `kubectl` reads in place of the script's polling and checks, the loop that waits for the task) was not run.
 
 ## Next

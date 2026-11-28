@@ -256,8 +256,8 @@ The agent goes first so that the operator, which is still running, completes its
 
 **Not run end to end.** The machine this page was written on had Docker but no `kind`, `kubectl` or `helm`, and under 2 GB of free
 disk, so no cluster was made and no image was pulled. The commands are copied from
-[`k10-e2e.sh`](../../deploy/operator/tests/e2e/k10-e2e.sh) at `275a01c`. That script's job (`k10-e2e` of `operator-image.yml`) passed
-on `main`: run 45973874969 at `36ca2e0`, *verified 2026-11-27* in the job's log. The script exercises the same objects, the same
+[`k10-e2e.sh`](../../deploy/operator/tests/e2e/k10-e2e.sh) at `275a01c`. That script's job (`k10-e2e` of `operator-image.yml`) has passed on `main`; the run and the commit are in
+[the agent page](../../.agents/docs/get-started/folder-agent.md). The script exercises the same objects, the same
 Secret keys and the same two A2A calls, with a tool in the way. What this page adds to the script (the `ModelEndpoint` in a
 namespace of its own, the unlabelled objects, the polling loop and the plain-path message) was not run.
 

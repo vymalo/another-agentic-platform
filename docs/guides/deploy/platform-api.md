@@ -204,7 +204,7 @@ A misspelt key under `api.config` in your **values** is refused first by the cha
 | `api-image` | `operator-image.yml` | Builds and smoke-tests the API image, and runs `api --check` on the files the chart renders for the shapes it is tested in |
 | `chain-e2e` | `operator-image.yml` | The API makes a coder with an audience, and a pinned orchestrator lists it. `push` does not need it |
 
-*Verified 2026-11-27* with `gh run view`: on `main` at commit `1d17e42` (tag `sha-1d17e42`), checked on 2026-11-27, run 45922615533 of `operator-image.yml`, with `api-e2e`, `api-image` and `chain-e2e` among its jobs, ended in success.
+*The run this page was checked against, with its ids, is recorded in [the agent page](../../../.agents/docs/guides/deploy/platform-api.md).*
 
 Also run for this page: `helm template` with only the values block above (and the chart's defaults) rendered 15 objects, and with the install page's values and the run pods page's values added it rendered 24. Every object was valid under `kubeconform` in both. The published API image at `api.image.tag` (`sha-1d17e42` when this was written) was pulled, and its `--check` accepted the rendered file (exit 0).
 

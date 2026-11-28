@@ -311,9 +311,8 @@ rm -f issuer.log aapctl.yaml aapctl.yaml.lock api-start.values.yaml model.yaml a
 
 **Not run end to end.** The machine this page was written on had Docker but no `kind`, `kubectl`, `helm` or built binaries, and under
 2 GB of free disk, so nothing was built or applied. The commands are copied from [`api-e2e.sh`](../../deploy/operator/tests/e2e/api-e2e.sh)
-at `275a01c`, steps 1 to 4 and 6b. That script's job (`api-e2e` of `operator-image.yml`) passed on `main`: run 45973874969 at
-`36ca2e0`, job 140423890484, *verified 2026-11-27* in the job's log; step 6b first passed in run 43706119020 at `970afa0`, *verified
-2026-11-15*. What this page changes from the script was not run: the values file written by hand, the fixed local port `18081`, the
+at `275a01c`, steps 1 to 4 and 6b. That script's job (`api-e2e` of `operator-image.yml`) has passed on `main`, step 6b included; the runs, the jobs
+and the commits are in [the agent page](../../.agents/docs/get-started/platform-api.md). What this page changes from the script was not run: the values file written by hand, the fixed local port `18081`, the
 single long-lived token, the JSON form written as a file and the loop that waits for `ready`.
 
 ## Next

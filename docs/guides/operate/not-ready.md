@@ -149,7 +149,7 @@ The state is lower case here: `saving`, `blocked`, `degraded`, `ready`, `suspend
 | `runtime-kubernetes` | `operator.yml` | The provider against kind: a container that exits 78, 69 or 1 is `ConfigRejected`, `DependencyUnavailable` or `CrashLoop` |
 | `api-e2e` | [`operator-image.yml`](../../../.github/workflows/operator-image.yml) | The deployed API: the Events of the agent's objects are an array, newest first, each about this agent. A `403` names `platform:agents.read`, and another name is a `404` |
 
-*Verified 2026-11-27* with `gh run view`: on `main` at commit `2c16326`, run 45932723504 of `operator-image.yml`, job `api-e2e` 140289016199, ended in success, and its log says `the Events of the agent's objects (an array, newest first, each about this agent, 403 naming platform:agents.read without it, 404 for another name) and the OpenAPI document are served`. On `main` at `1575f99`, run 45937638784 of `operator.yml`, with `operator-e2e`, `runtime-kubernetes` and `test` among its jobs, ended in success.
+*The run this page was checked against, with its ids, is recorded in [the agent page](../../../.agents/docs/guides/operate/not-ready.md).*
 
 ### What was walked
 

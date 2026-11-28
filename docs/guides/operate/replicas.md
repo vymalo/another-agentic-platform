@@ -167,7 +167,7 @@ Every refusal prints the location of the template that includes `_validate.tpl`,
 | `operator-e2e` | [`operator.yml`](../../../.github/workflows/operator.yml) | The election's own cases against a real API server: a `409` on a stale `resourceVersion`, a killed holder replaced |
 | `render-check.sh` | the `chart` job | The rolling update, the budget, the election keys and the refusals, each broken on purpose |
 
-*Verified 2026-11-27* with `gh run view`: on `main` at commit `2c16326`, run 45932723504 of `operator-image.yml`, with `leader-e2e` among its jobs, ended in success. Its log, the figures in the table above, says the `Lease` moved 14 s after the kill and was released 1 s after the SIGTERM.
+*The run this page was checked against, with its ids, is recorded in [the agent page](../../../.agents/docs/guides/operate/replicas.md).*
 
 Run for this page, on 2026-11-27: the values block rendered with `helm template`, alone and with the install page's, and kubeconform, strict, found 8 and 11 objects valid. The walk above ran on a kind cluster, Kubernetes v1.35.8, named for it and deleted afterwards.
 

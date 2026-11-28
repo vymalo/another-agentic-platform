@@ -73,6 +73,15 @@ const stillMixed = new Set(['docs/architecture/10-control-plane-and-crds.md']);
 // Something like `crates/x/src/y.rs:190` or `docs/z.md:12`; fenced code blocks and inline
 // code spans are blanked before matching, so an example in code never counts.
 const pathLine = /[A-Za-z0-9_./-]+\.(?:rs|md|ya?ml|toml|json|tsx?|jsx?|mjs|cjs|sh|go|py|hcl|tpl|txt|lock|css|html?|sql|proto)(?::[0-9]+)+\b/g;
+// A verification mark with a date — `*Verified 2026-11-27*`, `(*verified 2026-10-04*)` — is a
+// build record, not a statement for a reader (AD-074, ANR-1361). The dated records keep theirs,
+// and so do the contracts under `docs/extensions/`: an RFC section cited beside a rule is that
+// rule's justification, not a record of when someone checked it.
+const verifiedMark = /(?<![A-Za-z])[Vv]erified\s+\d{4}-\d{2}-\d{2}/g;
+const contracts = 'docs/extensions/';
+// The site's own structure and style guide is copied verbatim from the system (CLAUDE.md); it is not
+// a page a reader of the platform opens.
+const siteDocs = 'docs/.vitepress/';
 
 for (const file of markdownFiles(root)) {
   const rel = path.relative(root, file);
@@ -130,6 +139,14 @@ for (const file of markdownFiles(root)) {
   if (relPosix.startsWith('docs/') && !datedRecords.has(relPosix) && !stillMixed.has(relPosix)) {
     for (const m of prose.matchAll(pathLine)) {
       failures.push(`${rel}:${lineOf(src, m.index)} path:line in a page for people: ${m[0]}`);
+    }
+  }
+
+  // No dated verification mark either (ANR-1361): same exemptions, plus the contracts, which cite
+  // the RFC section a rule comes from rather than when the rule was checked.
+  if (relPosix.startsWith('docs/') && !relPosix.startsWith(contracts) && !relPosix.startsWith(siteDocs) && !datedRecords.has(relPosix) && !stillMixed.has(relPosix)) {
+    for (const m of prose.matchAll(verifiedMark)) {
+      failures.push(`${rel}:${lineOf(src, m.index)} verification mark in a page for people: ${m[0]}`);
     }
   }
 }
