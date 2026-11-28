@@ -1306,7 +1306,10 @@ fn each_setting_is_checked() {
         "dnsPodLabels",
     );
     says(
-        &refused(json!({"networkPolicy": {"extraEgress": [{"ports": [{"port": "https"}]}]}})),
+        // With a `to`: without one the rule is refused for that first, and the named port is never reached.
+        &refused(json!({
+            "networkPolicy": {"extraEgress": [{"to": [{"namespaceSelector": {"matchLabels": {"a": "b"}}}], "ports": [{"port": "https"}]}]}
+        })),
         "named port",
     );
     says(
@@ -1314,9 +1317,10 @@ fn each_setting_is_checked() {
         "needs a namespaceSelector",
     );
     says(
-        &refused(
-            json!({"networkPolicy": {"extraEgress": [{"ports": [{"protocol": "ICMP", "port": 1}]}]}}),
-        ),
+        // With a `to`: ANR-1353 refuses a rule without one before its ports are read.
+        &refused(json!({
+            "networkPolicy": {"extraEgress": [{"to": [{"namespaceSelector": {"matchLabels": {"a": "b"}}}], "ports": [{"protocol": "ICMP", "port": 1}]}]}
+        })),
         "not TCP, UDP or SCTP",
     );
     // ANR-1353: a rule with no `to` allows every destination, which is the internet the deny-by-default policy exists
