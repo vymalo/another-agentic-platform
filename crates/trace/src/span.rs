@@ -2,7 +2,7 @@
 
 use std::borrow::Cow;
 use std::future::Future;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::Ordering;
 use std::sync::{Arc, Mutex, PoisonError};
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -487,7 +487,7 @@ impl Tracer {
             sink: Sink::Memory(memory.clone()),
             sampler,
             stats: Arc::new(Stats::default()),
-            stopping: AtomicBool::new(false),
+            stopping: std::sync::atomic::AtomicBool::new(false),
             control: Mutex::new(None),
         };
         (Self(Some(Arc::new(shared)), true), memory)
