@@ -39,14 +39,22 @@ function unclosedInDepth(src) {
   let fence = null;
   const lines = src.split('\n');
   for (let i = 0; i < lines.length; i++) {
-    const line = lines[i].trimStart();
-    const f = /^(`{3,}|~{3,})(.*)$/.exec(line);
+    const raw = lines[i];
+    // An indented code block (four or more columns) is code: a `:::` or a fence inside it is content, not a container,
+    // which is what the renderer does (`in-depth.ts` returns null at `state.sCount[line] - state.blkIndent >= 4`). A
+    // tab counts four columns, as CommonMark has it. Every marker of this repository sits at column 0, so the absolute
+    // column is the block's own here.
+    const lead = /^[ \t]*/.exec(raw)[0];
+    const indent = [...lead].reduce((n, ch) => n + (ch === '\t' ? 4 : 1), 0);
+    const code = indent >= 4;
+    const line = raw.trimStart();
+    const f = code ? null : /^(`{3,}|~{3,})(.*)$/.exec(line);
     if (fence) {
       if (f && f[1][0] === fence.ch && f[1].length >= fence.len && f[2].trim() === '') fence = null;
       continue;
     }
     if (f && !(f[1][0] === '`' && f[2].includes('`'))) { fence = { ch: f[1][0], len: f[1].length }; continue; }
-    const m = /^:{3,}\s*(.*?)\s*$/.exec(line);
+    const m = code ? null : /^:{3,}\s*(.*?)\s*$/.exec(line);
     if (!m) continue;
     if (m[1] === '') open.pop();
     else open.push({ name: m[1].split(/\s/)[0], line: i + 1 });
