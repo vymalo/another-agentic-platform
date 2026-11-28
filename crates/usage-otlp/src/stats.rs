@@ -120,7 +120,7 @@ impl StatsSnapshot {
             ),
             (
                 "aap_meter_sink_refused_total",
-                "Pod-minute events the collector refused for good (a 4xx, a partialSuccess rejection); never sent again.",
+                "Pod-minute events the collector refused for good (a 4xx other than 408 and 429, a partialSuccess rejection); never sent again.",
                 self.refused,
             ),
             (
