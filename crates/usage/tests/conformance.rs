@@ -365,11 +365,9 @@ mod broken_tombstones {
 }
 
 // ---- the AccountSource suite (ANR-1190)
-
-use aap_usage::AccountUnavailable;
-use aap_usage::testkit::accounts::{
-    Case, check_accounts, check_no_account, check_unavailable, run,
-};
+//
+// The names are imported at the top of the file: the squash of #214 carried the same `use` block twice, which is a
+// duplicate definition (`E0252`) and made `cargo test` fail on main.
 
 fn run_pod(run: &str) -> PodRef {
     PodRef::Run {
