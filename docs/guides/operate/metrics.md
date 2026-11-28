@@ -50,6 +50,21 @@ Only the leading replica counts them. A pod of an agent makes no line: only run 
 | `aap_meter_sink_queue_depth` | gauge | Events still held by the sink: the queue and the batch in flight |
 | `aap_meter_sink_retrying_secs` | gauge | Seconds the current retrying episode has been in flight (0 when none; alert on any rise) |
 
+When the meter's tombstone store is on (ANR-1198), ten more counters appear, in the same place:
+
+| Series | Labels | Counts |
+|---|---|---|
+| `aap_meter_tombstones_written_total` | none | Tombstones written for pods found gone with minutes not known delivered |
+| `aap_meter_tombstones_released_total` | none | Tombstones deleted because their minutes were acknowledged |
+| `aap_meter_tombstones_restored_total` | none | Tombstones read when this replica began to lead (a crash or a failover left them to send) |
+| `aap_meter_tombstones_expired_total` | none | Tombstones deleted because the 24 h backfill bound passed over them |
+| `aap_meter_tombstones_unbacked_total` | none | Vanished pods that got **no** tombstone because the namespace's set is full (still metered from memory only) |
+| `aap_meter_tombstones_unreadable_total` | none | Records in the tombstone store this version could not read (a newer replica's): kept as they are |
+| `aap_meter_tombstones_refused_total` | none | Tombstone `ConfigMap`s refused as not the operator's (wrong labels, name, or an owner reference) |
+| `aap_meter_tombstones_invalid_total` | none | Records that parsed but are not valid (a text a line cannot carry, a weight off the grid): dropped |
+| `aap_meter_vanished_held_expired_total` | none | Vanished pods held in memory for want of a readable store whose minutes passed the 24 h bound |
+| `aap_meter_tombstone_errors_total` | `op` | Reads (`op="load"`) and writes (`op="save"`) of the tombstone store that failed |
+
 Alert on `aap_meter_sink_retrying_secs > 0` (the collector cannot be reached), on `aap_meter_sink_queue_depth` near `metering.collector.queue` (the queue is filling), and on a rising `aap_meter_sink_refused_total` (a batch the collector said no to). The names come from `crates/usage-otlp/src/stats.rs`; the values are the sink's `StatsSnapshot`, rendered on every `/metrics` request.
 
 The names come from `crates/controller/src/metrics.rs`. The label values are fixed in the code: none of them is a name from your cluster.
@@ -77,7 +92,7 @@ Two series, from `crates/platform-api/src/metrics.rs`:
 | Series | Labels | Counts |
 |---|---|---|
 | `aap_api_requests_total` | `route`, `method`, `status` | Requests. `route` is a template of the API's route table (`/v1/agents/{name}`), or `unmatched`. `method` is `GET`, `PUT`, `DELETE`, `POST`, `HEAD`, `OPTIONS` or `other`. `status` is the number |
-| `aap_api_auth_failures_total` | `reason` | Requests refused at authentication. `reason` is `missing`, `unavailable`, `malformed`, `bad_signature`, `unknown_key`, `expired`, `wrong_issuer`, `wrong_audience` or `missing_claim` |
+| `aap_api_auth_failures_total` | `reason` | Requests refused at authentication. The person's listener (a bearer JWT) reports `missing`, `unavailable`, `malformed`, `bad_signature`, `unknown_key`, `expired`, `wrong_issuer`, `wrong_audience` or `missing_claim`. The workload listener (a client certificate, AD-068) reports `cert_missing`, `cert_malformed`, `cert_bad_chain`, `cert_wrong_use`, `cert_expired`, `cert_unknown_identity`, `cert_no_identity` or `cert_unavailable`. Seventeen words, every one from a closed set |
 
 Every label value is chosen by the API from a closed set. A path, a token, a name or a user id cannot reach a series. The endpoint has **no authentication**: a scraper learns route templates, status counts and the reasons of failures, and nothing else.
 
@@ -93,6 +108,10 @@ aap_api_auth_failures_total{reason="missing"} 1
 aap_api_requests_total{route="/v1/me",method="GET",status="401"} 2
 aap_api_requests_total{route="unmatched",method="GET",status="404"} 1
 ```
+
+## Scrape into a collector
+
+A collector (the OpenTelemetry Collector's `prometheus` receiver, or a Prometheus) reads the operator's `/metrics` (port 9090) and the API's `/metrics` (`api.metrics.port`, 9090 by default). The chart's two `ServiceMonitor`s — one for the operator, one for the API — are the way a Prometheus Operator scrapes them; a collector's `prometheus` receiver (or a target allocator) reads the same targets, or the pod endpoints directly when there is no Prometheus Operator. The two Grafana dashboards of [Dashboards](dashboards.md) query the same series, so a Prometheus that holds them and a collector that holds them read one another. K5's trace exporter is untouched: this is metrics, not traces; the pod-minute logs leave over the OTLP wire the meter adapter itself sends (AD-069), not over a scrape.
 
 ## The values
 
