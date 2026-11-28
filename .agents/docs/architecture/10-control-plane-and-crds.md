@@ -586,3 +586,9 @@ What left the page for people: the proofs, quoted verbatim, in the order they st
 #### The kernel the uid check was read on
 
 *Verified 2026-11-15* on the kernel of this session (Linux 6.18, a container): `/proc/net/tcp` lists the client's row with the owner's uid (the new tests make a connection as uid 65534 and the listener refuses it); other kernels, containers with user namespaces (the table is per network namespace and shows the uid in the reader's namespace), macOS and Windows are *unverified*.
+
+### Facts checked
+
+- *Verified 2026-11-15*: RFC 9207 §2.4, "Validating the Issuer Identifier" — the comparison is a simple string comparison (<https://www.rfc-editor.org/rfc/rfc9207.txt>).
+- *Verified 2026-11-15*: RFC 7009 §2.1 — a server may invalidate every token of the same grant, which is why `logout` revokes once and a second sign-in does not revoke the first's refresh token.
+- *Verified 2026-11-15*: RFC 8252 §7.3 — an authorization server must allow any port on a loopback redirect.
