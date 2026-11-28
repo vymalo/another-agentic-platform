@@ -47,7 +47,12 @@ function typeOf(schema) {
   }
   const type = schema.type ?? (schema.properties ? "object" : schema.items ? "array" : undefined);
   if (type === "array") return `array of ${typeOf(schema.items)}`;
-  if (type === "object" && schema.additionalProperties && typeof schema.additionalProperties === "object") {
+  if (
+    type === "object" &&
+    schema.additionalProperties &&
+    typeof schema.additionalProperties === "object" &&
+    !schema.properties
+  ) {
     return `map of ${typeOf(schema.additionalProperties)}`;
   }
   return type ?? "—";
@@ -209,16 +214,32 @@ export function unitCases() {
     ),
   ];
 
-  const mapRows = specTable({
+  const both = {
     type: "object",
     properties: { known: { type: "string" } },
     additionalProperties: { type: "object", properties: { free: { type: "string" } } },
-  });
+  };
+  const mapRows = specTable(both);
   const paths = mapRows.map((row) => splitRow(row)[0]);
   const map = {
     name: "a map beside fixed fields keeps the rows of its value",
-    ok: ["spec.known", "spec{}", "spec{}.free"].every((path) => paths.includes(`<code>${path}</code>`)),
+    ok: paths.join(",") === ["spec.known", "spec{}", "spec{}.free"].map((path) => `<code>${path}</code>`).join(","),
     detail: `paths: ${paths.join(", ")}`,
+  };
+
+  const parent = splitRow(specTable({ type: "object", properties: { field: both } })[0] ?? "");
+  const parentType = {
+    name: "an object with fixed fields and a map is typed object",
+    ok: parent[0] === "<code>spec.field</code>" && parent[1] === "object",
+    detail: `cells: ${parent.slice(0, 2).join(", ")}`,
+  };
+
+  const namedRows = specTable({ type: "object", properties: { "a|b": { type: "string" } } });
+  const named = splitRow(namedRows[0] ?? "");
+  const name = {
+    name: "a property name with a pipe stays in its cell",
+    ok: namedRows.length === 1 && named.length === 6 && named[0] === "<code>spec.a\\|b</code>",
+    detail: namedRows.join(" / "),
   };
 
   const plainRows = specTable({ type: "object", properties: { field: { type: "string" } } });
@@ -233,7 +254,7 @@ export function unitCases() {
     spacesCase("a string default keeps its two spaces", { type: "string", default: "a  b" }, 3, '"a  b"'),
   ];
 
-  return [pattern, choice, fallback, description, rule, map, plain, ...spaced];
+  return [pattern, choice, fallback, description, rule, name, map, parentType, plain, ...spaced];
 }
 
 /** The pages, in the CRD file's order: `{ file, content }` per kind. */
