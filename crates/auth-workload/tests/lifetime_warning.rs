@@ -15,7 +15,7 @@ use tracing_subscriber::layer::SubscriberExt;
 const CA: &str = include_str!("fixtures/ca.pem");
 const ACCEPTED: &str = include_str!("fixtures/accepted.pem");
 const UNKNOWN: &str = include_str!("fixtures/unknown.pem");
-const ORCHESTRATOR: &str = "spiffe://another/ns/another-agents/sa/orchestrator";
+const ORCHESTRATOR: &str = "spiffe://another/ns/test/sa/orchestrator";
 
 /// The first certificate of a PEM, as the port's type.
 fn der(pem: &str) -> Certificate {
