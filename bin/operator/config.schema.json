@@ -967,7 +967,7 @@
       "description": "Where a value the configuration file does not hold is read from (ANR-962, AD-064): a mounted file, or a variable.\n\nThe file says `{ file: /var/run/secrets/aap/registry/token }` or `{ env: NAME }` and nothing else: one key, one text.\nA value is never written in the file, and an error names the reference, never what it holds.",
       "oneOf": [
         {
-          "description": "A file, read once at start (a mounted Secret).",
+          "description": "A file, read at start and re-read when it changes (a mounted Secret; ANR-1192).",
           "type": "object",
           "properties": {
             "File": {

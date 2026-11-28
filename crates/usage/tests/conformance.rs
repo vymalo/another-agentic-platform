@@ -365,6 +365,9 @@ mod broken_tombstones {
 }
 
 // ---- the AccountSource suite (ANR-1190)
+//
+// The names are imported at the top of the file: the squash of #214 carried the same `use` block twice, which is a
+// duplicate definition (`E0252`) and made `cargo test` fail on main.
 
 fn run_pod(run: &str) -> PodRef {
     PodRef::Run {

@@ -151,6 +151,29 @@ async fn the_bearer_is_sent_and_no_token_means_no_header() {
     assert_eq!(h2.stub.lock().unwrap().bearers, vec![None]);
 }
 
+/// ANR-1192: the bearer is asked at each poll, so a rotated token is sent without a restart.
+#[tokio::test]
+async fn a_token_source_is_asked_at_each_poll() {
+    let h = start(Some("first"), Duration::from_secs(5)).await;
+    let now = Arc::new(Mutex::new("first".to_owned()));
+    let asked = Arc::clone(&now);
+    let source = h
+        .source
+        .clone()
+        .with_token_source(move || Some(Token::new(&asked.lock().unwrap()).unwrap()));
+    h.answer(&id(), 200, r#"{"busy":1}"#);
+    source.poll(&id()).await.unwrap();
+    *now.lock().unwrap() = "second".to_owned();
+    source.poll(&id()).await.unwrap();
+    assert_eq!(
+        h.stub.lock().unwrap().bearers,
+        vec![
+            Some("Bearer first".to_owned()),
+            Some("Bearer second".to_owned())
+        ]
+    );
+}
+
 /// Neither the message of an error nor of anything under it holds a URL or the token.
 fn assert_says_no_url_and_no_token(err: &ActivityError, token: &str) {
     let mut next: Option<&dyn std::error::Error> = Some(err);

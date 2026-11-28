@@ -84,7 +84,7 @@ data:
         - "another-agentic-system"
     registry:
       publicUrl: "http://aap-operator-registry.another-agentic-system.svc:8080/registry/v1/agents"
-      # No token, no registry: this reference is what turns it on. A mounted Secret, read once at start.
+      # No token, no registry: this reference is what turns it on. A mounted Secret, re-read when it changes (ANR-1192).
       token:
         file: /var/run/secrets/aap/registry/token
     defaults:
@@ -259,7 +259,7 @@ spec:
         app.kubernetes.io/instance: aap-operator
       annotations:
         # The configuration file is read once, at start: a changed file is a new pod (ANR-962).
-        checksum/config: 8e7569a011d1f2a36a0d435905c3a67b154f0dae78f0a39a3ba7a0c1acd5dd59
+        checksum/config: f8ba5a762aee36a2828555e0fb4987e5c309d36fd7655ea166d127caafe2b031
     spec:
       serviceAccountName: aap-operator
       # The API token is the operator's way in.

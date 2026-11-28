@@ -108,7 +108,7 @@ data:
       # with one replica the binary's own 60 s applies.
       timeoutSecs: 4
     registry:
-      # No token, no registry: this reference is what turns it on. A mounted Secret, read once at start.
+      # No token, no registry: this reference is what turns it on. A mounted Secret, re-read when it changes (ANR-1192).
       token:
         file: /var/run/secrets/aap/registry/token
     defaults:
@@ -304,7 +304,7 @@ spec:
         app.kubernetes.io/instance: aap-operator
       annotations:
         # The configuration file is read once, at start: a changed file is a new pod (ANR-962).
-        checksum/config: 10fa0f602e3257917559dbc3ee2ac0c219a17209d49e13b00a1c96df8700d7a9
+        checksum/config: 86372799acdc1aae39b3da70007d2ee959bc3c60a7975dc15b3eac34d17755c7
     spec:
       serviceAccountName: aap-operator
       # The API token is the operator's way in.
