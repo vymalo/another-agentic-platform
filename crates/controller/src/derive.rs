@@ -222,9 +222,16 @@ fn config_condition(config: &ConfigOutcome) -> Draft {
             reason::CONFIG_NOT_FOUND,
             format!("the AgentConfig {name:?} does not exist in this namespace"),
         ),
-        ConfigOutcome::Invalid { message } | ConfigOutcome::ReferentMissing { message } => {
+        ConfigOutcome::Invalid { message } => {
             Draft::new(Truth::False, reason::CONFIG_INVALID, message.clone())
         }
+        // A referent that is not there yet unblocks by itself, so it says so instead of `ConfigInvalid` (ANR-1159): a
+        // client that reads the conditions can tell "wait" from "refused".
+        ConfigOutcome::ReferentMissing { message } => Draft::new(
+            Truth::False,
+            reason::CONFIG_REFERENT_MISSING,
+            message.clone(),
+        ),
     }
 }
 

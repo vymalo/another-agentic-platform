@@ -5,7 +5,7 @@
 #
 # The referents come first and the AgentConfig before the AgentService, the order the Platform API
 # applies them in. An API server checks none of the references; the operator resolves them (slice D2):
-# a referent that is not there makes the agent `ConfigInvalid`, naming it, and so does the missing image
+# a referent that is not there makes the agent `ConfigReferentMissing`, naming it, and so does the missing image
 # on an operator whose file has no `defaults.agentImage`.
 apiVersion: agents.vymalo.com/v1alpha1
 kind: ModelEndpoint

@@ -562,8 +562,9 @@ async fn a_reference_to_an_object_that_is_not_there_blocks_the_service_and_names
 
     let status = w.status();
     assert_eq!(status["state"], "Blocked");
-    is(&status, "ConfigResolved", "False", "ConfigInvalid");
-    is(&status, "Ready", "False", "ConfigInvalid");
+    // ANR-1159: a referent that is not there yet says so, and is not `ConfigInvalid` (waiting fixes this one).
+    is(&status, "ConfigResolved", "False", "ConfigReferentMissing");
+    is(&status, "Ready", "False", "ConfigReferentMissing");
     let message = w.message();
     assert!(
         message.contains("ModelEndpoint \"gateway\"") && message.contains(NS),
@@ -584,7 +585,7 @@ async fn a_reference_to_an_object_that_is_not_there_blocks_the_service_and_names
     let last = w.fake.events().pop().unwrap();
     assert_eq!(
         (last["type"].as_str(), last["reason"].as_str()),
-        (Some("Warning"), Some("ConfigInvalid"))
+        (Some("Warning"), Some("ConfigReferentMissing"))
     );
     assert!(last["note"].as_str().unwrap().contains("gateway"));
 }
@@ -600,7 +601,8 @@ async fn a_reference_to_a_kind_whose_crd_is_not_installed_blocks_the_service_and
 
     let status = w.status();
     assert_eq!(status["state"], "Blocked");
-    is(&status, "ConfigResolved", "False", "ConfigInvalid");
+    // ANR-1159: the referent is not there (the kind is not served yet), so the reason says wait, not refused.
+    is(&status, "ConfigResolved", "False", "ConfigReferentMissing");
     let message = w.message();
     for who in ["ModelEndpoint \"gateway\"", "ToolProvider \"websearch\""] {
         assert!(
@@ -821,7 +823,8 @@ async fn deleting_a_referent_blocks_the_service_and_leaves_what_runs_untouched()
 
     let status = w.status();
     assert_eq!(status["state"], "Blocked");
-    is(&status, "ConfigResolved", "False", "ConfigInvalid");
+    // ANR-1159: the referent is gone, not the config wrong; putting it back unblocks the service by itself.
+    is(&status, "ConfigResolved", "False", "ConfigReferentMissing");
     let message = w.message();
     assert!(message.contains("ModelEndpoint \"gateway\""), "{message}");
     assert!(
@@ -832,7 +835,7 @@ async fn deleting_a_referent_blocks_the_service_and_leaves_what_runs_untouched()
     assert_eq!(w.runtime.spec(&w.id()).unwrap(), running);
     assert_eq!(status["config"]["digest"], json!(running.digest));
     let last = w.fake.events().pop().unwrap();
-    assert_eq!(last["reason"], "ConfigInvalid");
+    assert_eq!(last["reason"], "ConfigReferentMissing");
 
     // The same for a provider.
     let (endpoint, _) = shared("coder-me");

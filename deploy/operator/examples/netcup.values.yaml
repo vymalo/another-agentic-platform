@@ -7,7 +7,7 @@
 #
 # Order, on every install and every upgrade: the CRDs first, then the operator. An operator from slice D2 onward expects all four
 # CRDs (agentservices, agentconfigs, modelendpoints, toolproviders): without the last two it no longer stalls (it watches those
-# kinds apart), but an agent whose config references a shared object stays ConfigInvalid until they are there. Never run an
+# kinds apart), but an agent whose config references a shared object stays ConfigReferentMissing until they are there. Never run an
 # operator older than D1 against CRDs that store a reference (endpointRef, providerRef). README "Upgrading".
 
 # Empty: the release's namespace, `another-agentic-system`.
