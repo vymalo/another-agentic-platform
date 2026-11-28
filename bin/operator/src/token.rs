@@ -45,6 +45,21 @@ impl TokenFile {
         }
     }
 
+    /// Seed the cache with a text that was just read and validated (the start-time read): the source answers it even if the
+    /// file vanishes before the first request, and a change of the file is still picked up.
+    pub fn seed(&self, text: &str) {
+        let stamp = match &self.reference {
+            SecretRef::File(path) => stamp(path).unwrap_or(Stamp(SystemTime::UNIX_EPOCH, 0)),
+            SecretRef::Env(_) => Stamp(SystemTime::UNIX_EPOCH, 0),
+        };
+        if let Ok(mut cached) = self.cached.lock() {
+            *cached = Some(Cached {
+                stamp,
+                text: text.to_owned(),
+            });
+        }
+    }
+
     /// The token as the reference gives it now: the file's text when it changed, the last text it gave when the file
     /// cannot be read, and `None` when it was never readable or the variable is not set.
     ///

@@ -106,6 +106,7 @@ pub fn parts(metering: Option<&Metering>) -> Result<Option<Parts>> {
         .map_err(|_| refused("metering.broker.token", reference, "the bearer is empty"))?;
     // The bearer is re-read when its file changes (ANR-1192): a rotated Secret needs no restart.
     let live = Arc::new(crate::token::TokenFile::new(reference.clone()));
+    live.seed(&text);
     let asked = Arc::clone(&live);
     let accounts = BrokerAccounts::new(&m.broker_url, token, m.broker_timeout)?
         .with_token_source(move || asked.get().and_then(|text| Token::new(&text).ok()));
