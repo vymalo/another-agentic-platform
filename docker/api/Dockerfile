@@ -27,6 +27,8 @@ ARG TARGET=x86_64-unknown-linux-musl
 
 FROM lukemathwalker/cargo-chef:0.1.77-rust-1.94.1-trixie@sha256:d5a1cca12f21de999e5b221b5c6ff5635080f4b8d5e58053241ff169e0fc60f6 AS chef
 ARG TARGET
+# The build stage's base image is pinned by digest; pinning its Debian packages here would break on the image's next digest.
+# hadolint ignore=DL3008
 RUN apt-get update \
  && apt-get install -y --no-install-recommends musl-tools perl file \
  && rm -rf /var/lib/apt/lists/* \
@@ -60,6 +62,8 @@ RUN cargo build --release --locked --package aap-api-server --bin api --target "
 # repository's pull request 52, run 43729018865, under docker/build-push-action: OTEL_EXPORTER_OTLP_TRACES_PROTOCOL=grpc and an
 # endpoint on a unix socket, for BuildKit's own tracing), and `api --check` reads them as the API's tracing settings and refuses
 # a protocol it does not speak. A smoke test must not depend on what a builder puts in the environment.
+# The smoke test's pipes must fail the step when their first command fails (hadolint DL4006): bash, with pipefail.
+SHELL ["/bin/bash", "-o", "pipefail", "-c"]
 RUN set -eu; \
     api=/src/target/$TARGET/release/api; \
     file "$api" | grep -q 'static'; \

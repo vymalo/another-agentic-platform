@@ -1,0 +1,65 @@
+# The run pod of the pod-minute meter's kind end-to-end (ANR-1447): a pod the adam-rs coder would make, described by the
+# facts the meter reads and nothing else (`crates/controller/src/metering.rs`):
+#
+#   * `app.kubernetes.io/managed-by=adam-coder` and `app.kubernetes.io/component=run`: what makes it a run pod;
+#   * `app.kubernetes.io/instance` (the agent service) and `app.kubernetes.io/name` (`<service>-run`);
+#   * `adam.vymalo.com/run` (the run's 12-hex label) and the `adam.vymalo.com/run-id` annotation, which is the run the
+#     broker is asked about — the label alone is not an identity;
+#   * `agents.vymalo.com/size-weight: "1"`, the decimal grid value: the meter reads it as 4 quarter-units;
+#   * the required node affinity `aap-e2e/node-type In [standard]` the operator's template carries when the deployment
+#     names one node type: the meter reads the node type from it and never from a Node (no ClusterRole).
+#
+# `sleep 90` makes it run a whole minute and then end, so the meter counts the minutes that are over and sends them once
+# the pod is Succeeded. The image is the stand-in the job loads into kind (`bin/operator/tests/stub`, busybox with
+# `adam-coder` as its entrypoint): `command` replaces the entrypoint, and `sleep` is busybox's.
+#
+# The script applies this as the cluster's administrator, so the chart's admission policy (which judges a pod made by an
+# agent's account, and only with that agent's parameters) does not select it. It carries the script's label, and one that
+# exists without it is never overwritten.
+apiVersion: v1
+kind: Pod
+metadata:
+  name: e2e-meter-run
+  labels:
+    aap-e2e/made-by: meter-e2e
+    app.kubernetes.io/managed-by: adam-coder
+    app.kubernetes.io/component: run
+    app.kubernetes.io/name: e2e-meter-run
+    app.kubernetes.io/instance: e2e-meter
+    adam.vymalo.com/run: "0123456789ab"
+  annotations:
+    adam.vymalo.com/run-id: e2e-meter-run-1
+    agents.vymalo.com/size-weight: "1"
+spec:
+  restartPolicy: Never
+  automountServiceAccountToken: false
+  securityContext:
+    runAsNonRoot: true
+    runAsUser: 10001
+  affinity:
+    nodeAffinity:
+      requiredDuringSchedulingIgnoredDuringExecution:
+        nodeSelectorTerms:
+          - matchExpressions:
+              - key: aap-e2e/node-type
+                operator: In
+                values: [standard]
+  containers:
+    - name: run
+      image: aap-stub:ci
+      imagePullPolicy: IfNotPresent
+      command: ["sleep", "90"]
+      resources:
+        requests:
+          cpu: 10m
+          memory: 16Mi
+        limits:
+          cpu: 100m
+          memory: 64Mi
+          ephemeral-storage: 64Mi
+      securityContext:
+        allowPrivilegeEscalation: false
+        privileged: false
+        readOnlyRootFilesystem: true
+        runAsNonRoot: true
+        runAsUser: 10001

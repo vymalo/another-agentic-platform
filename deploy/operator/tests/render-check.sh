@@ -194,6 +194,7 @@ check_config "tests/api-full.values.yaml" -f "$here/api-full.values.yaml"
 check_config "tests/metrics.values.yaml" -f "$here/metrics.values.yaml"
 check_config "tests/metering.values.yaml" -f "$here/metering.values.yaml"
 check_config "tests/e2e/run-pods.values.yaml" -f "$here/e2e/run-pods.values.yaml"
+check_config "tests/e2e/meter.values.yaml" -f "$here/e2e/meter.values.yaml"
 # ANR-1030b: with the activity source on, the file holds agentTokensSecret and operatorPod, which the binary requires while enabled.
 check_config "the activity source on (ANR-1030b)" --set activity.tokenSecret.name=agent-bearer \
   --set-json 'activity.to=[{"namespaceSelector":{"matchLabels":{"kubernetes.io/metadata.name":"agents"}},"podSelector":{"matchLabels":{"app":"agent"}}}]'
@@ -1838,6 +1839,78 @@ rp_sandbox_step() {
     && grep -qF 'for f in operator.log plain.log model.log coder-start.log sandbox.log' "$script"
 }
 check "run pods e2e: the script has the sandbox step (4b): the pod's shape, the controls, the sandbox's emptiness, a commit through the socket, the vector with its control, the coder's own worktree in the sandbox's log, and the plain coder without any of it" rp_sandbox_step
+
+# ---- The values of the kind end-to-end of the pod-minute meter (ANR-1447) ------------------------------------------------------
+# tests/e2e/meter.values.yaml with what meter-e2e.sh adds when it runs (the image of the job, loaded into kind and never pulled; the
+# stubs' address and ports on the runner), in the namespace of its own, aap-e2e-meter; and the script and the run pod, read as text.
+# That the chart renders them, and renders them as the script depends on, is checked here, so that a change that breaks them fails in
+# the chart job and not in a kind cluster.
+meter_ns=aap-e2e-meter
+meter_render() {
+  helm template aap-operator "$chart" --namespace "$meter_ns" -f "$here/e2e/meter.values.yaml" \
+    --set image.repository=operator --set image.tag=smoke --set image.pullPolicy=Never > "$out"
+}
+if ! meter_render 2> "$err"; then echo "FAIL meter e2e: the values of the pod-minute meter end-to-end do not render: $(head -c 400 "$err")"; fail=1; fi
+meter_settings() {
+  dhas ConfigMap aap-operator '^    metering:$' '^      enabled: true$' '^      source: "aap-operator"$' '^      periodSecs: 5$' \
+    '^      broker:$' '^        url: "http://172.18.0.1:18080"$' '^        token:$' \
+    '^          file: /var/run/secrets/aap/metering/broker-token$' \
+    '^      collector:$' '^        endpoint: "http://172.18.0.1:14318"$' \
+    '^    runPods:$' '^      nodeType:$' '^        admitted:$' '^        - standard$' '^        labelKey: aap-e2e/node-type$'
+}
+check "meter e2e: the values turn the meter on (period 5, the broker's file, the collector's endpoint) and run pods on with the one admitted node type" meter_settings
+meter_one_admitted() {
+  [ "$(doc ConfigMap aap-operator | awk '/^      nodeType:$/ { f = 1; next } f && /^        - / { n++ } f && /^      [a-z]/ { exit } END { print n + 0 }')" -eq 1 ]
+}
+check "meter e2e: runPods.nodeType admits exactly one value (the meter reads a run pod's node type from its node affinity, and with none or several it knows no line)" meter_one_admitted
+meter_mounts() {
+  dhas Deployment aap-operator 'name: metering-token' 'mountPath: /var/run/secrets/aap/metering' \
+    'secretName: meter-broker-token' '- key: token' 'path: broker-token'
+}
+check "meter e2e: the operator mounts the broker's bearer from meter-broker-token/token at /var/run/secrets/aap/metering" meter_mounts
+meter_peers() {
+  all_of "$(op_egress_rule 2)" 'port: 53$' 'k8s-app: kube-dns' \
+    && all_of "$(op_egress_rule 3)" 'cidr: 172.18.0.1/32' 'port: 18080$' \
+    && all_of "$(op_egress_rule 4)" 'cidr: 172.18.0.1/32' 'port: 14318$' \
+    && [ "$(op_egress_rules)" -eq 4 ]
+}
+check "meter e2e: the operator's policy is DNS and exactly the runner's address on the broker's and the collector's ports (four egress rules)" meter_peers
+meter_script() {
+  script="$here/e2e/meter-e2e.sh"
+  # shellcheck disable=SC2016 # the patterns are the script's own text, `${...}` and `$broker_url` and all
+  grep -q 'ns=${AAP_E2E_NAMESPACE:-aap-e2e-meter}$' "$script" && grep -q '^made_by=meter-e2e$' "$script" \
+    && grep -q 'kind-\*) ;;' "$script" && grep -q 'export HELM_KUBECONTEXT=' "$script" \
+    && grep -q '^node_type_key=aap-e2e/node-type ' "$script" && grep -q '^node_type_value=standard ' "$script" \
+    && grep -q '^pod=e2e-meter-run ' "$script" && grep -q '^run_id=e2e-meter-run-1 ' "$script" \
+    && grep -q 'meter-stubs.mjs' "$script" && grep -q 'meter-stubs: ready' "$script" \
+    && grep -q 'metering.broker.url=$broker_url' "$script" && grep -q 'metering.broker.port=$broker_port' "$script" \
+    && grep -q 'metering.collector.endpoint=$collector_url' "$script" && grep -q 'metering.collector.port=$collector_port' "$script" \
+    && grep -qF 'metering.broker.to=[{\"ipBlock\"' "$script" && grep -qF 'metering.collector.to=[{\"ipBlock\"' "$script"
+}
+check "meter e2e: the script's namespace, label, node type, run pod and run id are the values' and the fixtures', and it overrides the placeholders with the stubs' address and ports" meter_script
+meter_stub() {
+  stub="$here/e2e/meter-stubs.mjs"
+  script="$here/e2e/meter-e2e.sh"
+  # The script waits for the stubs' readiness line and parses the two ports they print: the stub prints the same words,
+  # with the `meter-stubs: ` prefix its `log` adds.
+  grep -q 'log("ready")' "$stub" && grep -q 'meter-stubs: ready' "$script" \
+    && grep -q 'broker listening on 0.0.0.0:' "$stub" && grep -q 'meter-stubs: broker listening on 0' "$script" \
+    && grep -q 'collector listening on 0.0.0.0:' "$stub" && grep -q 'meter-stubs: collector listening on 0' "$script" \
+    && grep -q 'internal/runs' "$stub" && grep -q 'v1/logs' "$stub" \
+    && grep -q 'internal/runs' "$script" && grep -q 'v1/logs' "$script"
+}
+check "meter e2e: the stubs' readiness and port lines are the ones the script waits for and parses, and both name the broker's route and the collector's" meter_stub
+meter_run_pod() {
+  pod="$here/e2e/meter-run.yaml"
+  grep -q '^    aap-e2e/made-by: meter-e2e$' "$pod" \
+    && grep -q '^    app.kubernetes.io/managed-by: adam-coder$' "$pod" && grep -q '^    app.kubernetes.io/component: run$' "$pod" \
+    && grep -q '^    app.kubernetes.io/instance: e2e-meter$' "$pod" && grep -q '^    app.kubernetes.io/name: e2e-meter-run$' "$pod" \
+    && grep -q '^    adam.vymalo.com/run: "0123456789ab"$' "$pod" && grep -q '^    adam.vymalo.com/run-id: e2e-meter-run-1$' "$pod" \
+    && grep -q '^    agents.vymalo.com/size-weight: "1"$' "$pod" && grep -q '^              - key: aap-e2e/node-type$' "$pod" \
+    && grep -q '^      command: \["sleep", "90"\]$' "$pod" && grep -q '^      image: aap-stub:ci$' "$pod"
+}
+check "meter e2e: the run pod carries the facts the meter reads (the coder's labels, the 12-hex label and the run-id annotation, the size weight 1, the admitted node type) and runs sleep 90 on the stand-in" meter_run_pod
+check "meter e2e: the script is a shell script sh can read" sh -n "$here/e2e/meter-e2e.sh"
 
 # ---- ServiceMonitors and the API's metrics (K4): off by default and then not a trace; on, exactly these objects --------------------
 prom='[{"namespaceSelector":{"matchLabels":{"kubernetes.io/metadata.name":"monitoring"}},"podSelector":{"matchLabels":{"app.kubernetes.io/name":"prometheus"}}}]'
