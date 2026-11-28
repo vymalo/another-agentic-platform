@@ -4,6 +4,8 @@ The operator and the Platform API each serve `/metrics` in the Prometheus text f
 
 Both `ServiceMonitor`s are **off by default**. With them off, the chart renders none, and a cluster without the Prometheus Operator CRDs installs as before.
 
+Two Grafana dashboards read these series: [Dashboards](dashboards.md).
+
 Install the operator first: [Install the CRDs and the operator](../deploy/install.md). The API part needs [Turn on the Platform API](../deploy/platform-api.md).
 
 ## What the operator exports
