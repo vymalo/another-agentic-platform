@@ -104,7 +104,11 @@ pub fn parts(metering: Option<&Metering>) -> Result<Option<Parts>> {
     };
     let token = Token::new(&text)
         .map_err(|_| refused("metering.broker.token", reference, "the bearer is empty"))?;
-    let accounts = BrokerAccounts::new(&m.broker_url, token, m.broker_timeout)?;
+    // The bearer is re-read when its file changes (ANR-1192): a rotated Secret needs no restart.
+    let live = Arc::new(crate::token::TokenFile::new(reference.clone()));
+    let asked = Arc::clone(&live);
+    let accounts = BrokerAccounts::new(&m.broker_url, token, m.broker_timeout)?
+        .with_token_source(move || asked.get().and_then(|text| Token::new(&text).ok()));
     let sink = OtlpUsageSink::start(m.collector.clone()).map_err(|_| {
         // `SettingsError` names a setting and never a value; the CA file is the one a file read can fail on.
         anyhow::Error::new(ReferenceRefused(

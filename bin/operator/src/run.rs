@@ -185,8 +185,16 @@ pub fn activity_source(
             "the bearer contains a comma: an agent splits its list of bearers on commas".to_owned(),
         ));
     }
+    // The bearer is re-read when its file changes (ANR-1192): a rotated Secret needs no restart.
+    let live = std::sync::Arc::new(crate::token::TokenFile::new(reference.clone()));
+    let asked = std::sync::Arc::clone(&live);
     let source =
-        aap_activity_http::HttpActivity::in_cluster(activity.port, activity.timeout, Some(token))?;
+        aap_activity_http::HttpActivity::in_cluster(activity.port, activity.timeout, None)?
+            .with_token_source(move || {
+                asked
+                    .get()
+                    .and_then(|text| aap_activity_http::Token::new(&text).ok())
+            });
     Ok(Some(source))
 }
 
@@ -524,6 +532,14 @@ async fn run_with(settings: crate::config::Settings, tracer: aap_trace::Tracer) 
     let registry_server = token.map(|token| {
         let mut registry = aap_registry::Registry::new(operator.directory(), token)
             .with_full_flag(registry_full.clone());
+        // The demanded bearer is re-read when its file changes (ANR-1192): a rotated Secret needs no restart.
+        if let Some(reference) = settings.registry.token.clone() {
+            let live = std::sync::Arc::new(crate::token::TokenFile::new(reference));
+            let asked = std::sync::Arc::clone(&live);
+            registry = registry.with_token_source(move || {
+                asked.get().and_then(|text| aap_registry::Token::new(&text))
+            });
+        }
         if let Some(anchor) = settings.registry.public_url.clone() {
             registry = registry.with_anchor(anchor);
         }

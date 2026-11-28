@@ -10,6 +10,7 @@ mod metering;
 mod run;
 #[cfg(feature = "runtime-kubernetes")]
 mod serve;
+mod token;
 
 use std::io::{self, Write};
 use std::path::PathBuf;
