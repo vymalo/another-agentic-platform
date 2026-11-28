@@ -8,13 +8,16 @@
 
 mod common;
 
+use std::collections::BTreeMap;
 use std::path::PathBuf;
 
-use aap_ports::{DeletionPolicy, OwnerHandle, RuntimeId, RuntimeSpec, Sharing, VolumeSource};
+use aap_ports::{
+    DeletionPolicy, OwnerHandle, RuntimeId, RuntimeSpec, Selector, Sharing, VolumeSource,
+};
 use aap_runtime_kubernetes::names::{
     DELETION_POLICY_ANNOTATION, DIGEST_ANNOTATION, MANAGED_BY_LABEL, MANAGED_BY_VALUE,
 };
-use aap_runtime_kubernetes::{Rendered, WorkloadObject, render};
+use aap_runtime_kubernetes::{Rendered, WorkloadObject, names, render};
 use common::{example, resolved, resolved_activity, set};
 use serde_json::{Value, json};
 
@@ -465,6 +468,162 @@ fn no_allow_from_is_no_policy() {
         !kinds(&r.documents())
             .iter()
             .any(|k| k.contains("NetworkPolicy"))
+    );
+}
+
+// ---------------------------------------------------------------- the activator switch (AD-058 P3a-2)
+
+fn activator_selector() -> Selector {
+    Selector {
+        match_labels: BTreeMap::from([(
+            "app.kubernetes.io/name".to_owned(),
+            "aap-activator".to_owned(),
+        )]),
+        match_expressions: Vec::new(),
+    }
+}
+
+#[test]
+fn the_service_selects_the_activator_and_direct_selects_the_workload() {
+    let (id, mut spec) = chat();
+    spec.network.route_to = Some(activator_selector());
+    spec.network.direct = true;
+    let docs = render(&id, &spec).unwrap().documents();
+
+    let service = find(&docs, "Service", "chat");
+    assert_eq!(
+        service["spec"]["selector"],
+        json!({"app.kubernetes.io/name": "aap-activator"}),
+        "while it is set, `<svc>` sends to the activator's pods"
+    );
+    assert_ne!(
+        service["spec"]["selector"],
+        json!(names::selector_labels("chat", &id)),
+        "and not to the workload"
+    );
+
+    let direct = find(&docs, "Service", "chat-direct");
+    assert_eq!(
+        direct["spec"]["selector"],
+        json!(names::selector_labels("chat", &id)),
+        "the name the activator forwards to reaches the workload"
+    );
+    assert_eq!(direct["spec"]["ports"][0]["name"], "http");
+    assert_eq!(direct["spec"]["ports"][0]["targetPort"], "http");
+    assert_eq!(direct["spec"]["ports"][0]["port"], 8080);
+}
+
+#[test]
+fn the_network_policy_admits_the_activator() {
+    // The agent's own ingress is restricted (`allowFrom`), so a policy is made and the activator's pods must be in it.
+    let r = resolved("chat", |s, _| {
+        set(
+            s,
+            "/spec/access/allowFrom",
+            json!([{"namespaceSelector": {"matchLabels": {"kubernetes.io/metadata.name": "another-agentic-system"}}}]),
+        );
+    });
+    let (id, mut spec) = (r.id, r.runtime);
+    assert!(!spec.network.allow_from.is_empty());
+    // Awake, after the switch-back: `<svc>` is on the workload again, and a forward through `<svc>-direct` must pass.
+    spec.network.direct = true;
+    spec.network.activator = Some(activator_selector());
+    spec.network.route_to = None;
+    let docs = render(&id, &spec).unwrap().documents();
+
+    let rule = &find(&docs, "NetworkPolicy", "chat")["spec"]["ingress"][0];
+    assert_eq!(
+        rule["ports"],
+        json!([{"protocol": "TCP", "port": 8080}]),
+        "the rule is the agent's port"
+    );
+    let peers = rule["from"].as_array().unwrap();
+    let activator = peers
+        .iter()
+        .find(|p| p["podSelector"]["matchLabels"]["app.kubernetes.io/name"] == "aap-activator")
+        .unwrap_or_else(|| panic!("the activator's pods are not admitted: {peers:?}"));
+    assert!(
+        activator.get("namespaceSelector").is_none(),
+        "the activator is in the same namespace: {activator}"
+    );
+
+    // The condition is `activator` (one is configured), not `route_to` or `direct`: without it the peer is not written.
+    spec.network.activator = None;
+    let docs = render(&id, &spec).unwrap().documents();
+    let peers = find(&docs, "NetworkPolicy", "chat")["spec"]["ingress"][0]["from"]
+        .as_array()
+        .unwrap()
+        .clone();
+    assert!(
+        !peers
+            .iter()
+            .any(|p| p["podSelector"]["matchLabels"]["app.kubernetes.io/name"] == "aap-activator"),
+        "no activator is configured: {peers:?}"
+    );
+}
+
+#[test]
+fn the_activator_does_not_close_an_open_port() {
+    // No `allowFrom`, but an activity listener, so there is a policy and its A2A rule has no `from`.
+    let r = resolved_activity("chat", 8081, |s, _| {
+        set(s, "/spec/scaling/idleTimeout", json!("15m"));
+        set(s, "/spec/access/allowFrom", json!([]));
+    });
+    let (id, mut spec) = (r.id, r.runtime);
+    assert!(spec.network.allow_from.is_empty());
+    assert!(spec.network.activity.is_some());
+    spec.network.direct = true;
+    spec.network.activator = Some(activator_selector());
+    let docs = render(&id, &spec).unwrap().documents();
+    let rule = &find(&docs, "NetworkPolicy", "chat")["spec"]["ingress"][0];
+    assert!(
+        rule.get("from").is_none(),
+        "naming the activator alone would shut everyone else out: {rule}"
+    );
+}
+
+#[test]
+fn with_an_activator_the_policy_is_applied_first() {
+    let (id, mut spec) = chat();
+    assert!(spec.network.activity.is_none());
+    spec.network.activator = Some(activator_selector());
+    assert!(
+        render(&id, &spec).unwrap().policy_first,
+        "or a forward through `<svc>-direct` is dropped until the policy lands"
+    );
+    spec.network.activator = None;
+    assert!(!render(&id, &spec).unwrap().policy_first);
+}
+
+#[test]
+fn a_route_to_with_match_expressions_is_refused() {
+    let (id, mut spec) = chat();
+    spec.network.route_to = Some(Selector {
+        match_labels: BTreeMap::new(),
+        match_expressions: vec![aap_ports::Requirement {
+            key: "app.kubernetes.io/name".to_owned(),
+            operator: aap_ports::SelectorOperator::In,
+            values: vec!["aap-activator".to_owned()],
+        }],
+    });
+    let err = render(&id, &spec).unwrap_err();
+    assert!(
+        matches!(err, aap_runtime_kubernetes::Error::InvalidSpec(ref what) if what.contains("route_to")),
+        "{err:?}"
+    );
+}
+
+#[test]
+fn the_digest_does_not_move_when_the_switch_flips() {
+    let (_, mut spec) = chat();
+    let before = aap_domain::spec_digest(&spec);
+    spec.network.route_to = Some(activator_selector());
+    spec.network.direct = true;
+    spec.network.activator = Some(activator_selector());
+    assert_eq!(
+        aap_domain::spec_digest(&spec),
+        before,
+        "where the Service routes is applied, it does not roll the pods"
     );
 }
 

@@ -50,7 +50,22 @@ The object is `agents.vymalo.com/v1alpha1`, namespaced, kind `AgentService`, plu
 | <code>spec.registry</code> | object | no | <code>{"tags":[]}</code> | — | How the agent is listed in the agent registry. |
 | <code>spec.registry.tags</code> | array of string | no | <code>[]</code> | — | Free-form tags. |
 | <code>spec.registry.title</code> | string | no | — | — | Display title. |
-| <code>spec.scaling</code> | object | no | <code>{"topology":"combined","workers":1}</code> | rule: scaling.front is only allowed with topology: split; rule: scaling.wakeAhead and scaling.wakeTimeout need scaling.idleTimeout | How many processes run, and in which topology. |
+| <code>spec.release</code> | object | no | — | rule: release.channels: a channel name is at most 32 characters of lower-case letters, digits and -, starting and ending with a letter or a digit; rule: release.defaultChannel names one of release.channels | The release channels of the service (AD-059, §10a). Absent: one revision, replaced in place, and the workload keeps the name `<service>`. Present: a channel is a pointer to an `AgentConfig`, and the operator names a workload per live revision (`<service>-r<n>… |
+| <code>spec.release.channels</code> | map of object | yes | — | maxProperties <code>8</code> | Channel name to what it points at: at most 8 channels. |
+| <code>spec.release.channels{}</code> | object | no | — | — | What a channel points at: the `AgentConfig` whose revision serves it. The same shape as `configRef`, so a channel's image, model and tools are what that config says. |
+| <code>spec.release.channels{}.configRef</code> | object | yes | — | — | The `AgentConfig`, in the service's namespace, the channel points at. |
+| <code>spec.release.channels{}.configRef.name</code> | string | yes | — | minLength <code>1</code> | Name of the referenced object. |
+| <code>spec.release.defaultChannel</code> | string | yes | — | minLength <code>1</code>; maxLength <code>32</code> | The channel a request that names none gets. One of `channels`. |
+| <code>spec.scaling</code> | object | no | <code>{"topology":"combined","workers":1}</code> | rule: scaling.front is only allowed with topology: split; rule: scaling.wakeAhead and scaling.wakeTimeout need scaling.idleTimeout; rule: scaling.activityProbe needs scaling.idleTimeout | How many processes run, and in which topology. |
+| <code>spec.scaling.activityProbe</code> | object | no | — | — | How the operator asks the agent whether it holds work (AD-075, the contract `activity/v1`), for an agent whose probe is not derived: an adam-rs agent's probe is the activity listener the operator renders. Off unless set, and it changes nothing without `idleTi… |
+| <code>spec.scaling.activityProbe.httpGet</code> | object | yes | — | — | Where the agent serves the contract: its port and path. |
+| <code>spec.scaling.activityProbe.httpGet.path</code> | string | yes | — | rule: scaling.activityProbe.httpGet.path is an absolute path: it starts with `/` | The path: absolute, it starts with `/`. |
+| <code>spec.scaling.activityProbe.httpGet.port</code> | integer | yes | — | format <code>int32</code>; minimum <code>1</code>; maximum <code>65535</code> | The port the agent serves the contract on: 1 to 65535. |
+| <code>spec.scaling.activityProbe.periodSeconds</code> | integer | no | <code>30</code> | format <code>int32</code>; minimum <code>1</code>; maximum <code>3600</code> | How often the agent is asked, in seconds: 1 to 3600. Default 30. |
+| <code>spec.scaling.activityProbe.timeoutSeconds</code> | integer | no | <code>2</code> | format <code>int32</code>; minimum <code>1</code>; maximum <code>60</code> | How long one question may take, in seconds: 1 to 60. Default 2. |
+| <code>spec.scaling.activityProbe.tokenSecretRef</code> | object | no | — | — | The Secret and key the **agent's pod** reads its copy of the bearer from, by reference only. The operator sends the bearer it holds in its own configuration and never reads this Secret (AD-024). |
+| <code>spec.scaling.activityProbe.tokenSecretRef.key</code> | string | yes | — | minLength <code>1</code> | Key inside the Secret. |
+| <code>spec.scaling.activityProbe.tokenSecretRef.name</code> | string | yes | — | minLength <code>1</code> | Name of the Secret. |
 | <code>spec.scaling.front</code> | object | no | — | — | The front of a `split` topology. |
 | <code>spec.scaling.front.replicas</code> | integer | no | <code>1</code> | format <code>int32</code>; minimum <code>1</code> | Replicas of `<name>-front`. A PodDisruptionBudget is made when there is more than one. |
 | <code>spec.scaling.idleTimeout</code> | string | no | — | rule: scaling.idleTimeout is a duration from 1m to 24h, such as 15m | How long the agent must report no work before it sleeps (scaled to zero). A duration such as `15m`, from `1m` to `24h`. Absent: the agent never sleeps (AD-058). |
@@ -102,6 +117,15 @@ Only the operator writes `status`; an object a person applies carries none. It i
 | <code>status.endpoints.a2a</code> | string | no | — | — | The A2A endpoint. |
 | <code>status.endpoints.agentCard</code> | string | no | — | — | The agent card. |
 | <code>status.observedGeneration</code> | integer | no | — | format <code>int64</code> | The `metadata.generation` the controller last reconciled. |
+| <code>status.revisions</code> | array of object | no | — | — | The service's revisions, when `spec.release` is set (AD-059, §10a): one per resolved digest the service has run, newest first, with the epochs its image serves and the runs still open in each. Absent: no `spec.release`, so there is one revision and it is the … |
+| <code>status.revisions[].digest</code> | string | yes | — | — | `sha256:<hex>` of the resolved runtime, as `status.config.digest` gives it. |
+| <code>status.revisions[].epochs</code> | object | yes | — | — | The epochs its image serves. |
+| <code>status.revisions[].epochs.max</code> | integer | yes | — | format <code>int64</code> | The newest epoch this revision's image serves. |
+| <code>status.revisions[].epochs.min</code> | integer | yes | — | format <code>int64</code> | The oldest epoch a worker of this revision can replay. |
+| <code>status.revisions[].name</code> | string | yes | — | — | `<service>-r<n>`, `n` counting the service's digests in order. |
+| <code>status.revisions[].openRuns</code> | map of integer | no | — | — | Open runs per epoch, keyed by the epoch's decimal text, as the agent's activity answer reports them. **Absent is not zero**: the agent did not answer, and a revision is never retired on a missing answer (fail closed). |
+| <code>status.revisions[].phase</code> | string | yes | — | one of <code>"Current"</code>, <code>"Draining"</code>, <code>"Retired"</code> | Where it is in the drain lifecycle. |
+| <code>status.revisions[].readyReplicas</code> | integer | no | <code>0</code> | format <code>int32</code> | Pods of its workload that are ready. |
 | <code>status.runtime</code> | object | no | — | — | The runtime, as the provider reports it. |
 | <code>status.runtime.phase</code> | string | yes | — | one of <code>"Absent"</code>, <code>"Provisioning"</code>, <code>"Ready"</code>, <code>"Suspended"</code>, <code>"Sleeping"</code>, <code>"Waking"</code>, <code>"Failed"</code> | The phase of §18. |
 | <code>status.runtime.provider</code> | string | yes | — | — | The provider that made it: `kubernetes`. |

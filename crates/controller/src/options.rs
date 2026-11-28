@@ -61,6 +61,13 @@ impl Default for Probe {
     }
 }
 
+/// The activator that fronts agents while they sleep (AD-058 P3a-2): where its pods are.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Activator {
+    /// The labels of the activator's pods, as the deployment gives them (one activator per namespace, ANR-Q135).
+    pub selector: aap_ports::Selector,
+}
+
 /// The settings of [`Operator`](crate::Operator).
 #[derive(Clone, Debug)]
 pub struct Options {
@@ -117,6 +124,10 @@ pub struct Options {
     /// How often the idle loop asks agents what work they hold (AD-058). It runs only when the operator is given
     /// an activity source ([`Operator::with_activity`](crate::Operator::with_activity)).
     pub sleep_poll: Duration,
+    /// The activator that fronts agents while they sleep (AD-058 P3a-2). `None` means no activator is configured: a
+    /// sleeping agent's Service is then left on its workload, because nothing forwards to it. Its file key and chart
+    /// are ANR-1068's.
+    pub activator: Option<Activator>,
 }
 
 impl Default for Options {
@@ -138,6 +149,7 @@ impl Default for Options {
             retention: crate::Retention::default(),
             activity: None,
             sleep_poll: crate::sleeper::DEFAULT_POLL,
+            activator: None,
         }
     }
 }

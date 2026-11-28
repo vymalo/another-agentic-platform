@@ -357,6 +357,20 @@ fn a_spec_without_run_pods_is_the_json_it_was_before_they_existed() {
 }
 
 #[test]
+fn an_activator_that_names_no_pod_is_refused() {
+    let mut spec = sample_spec(&id());
+    spec.network.activator = Some(aap_ports::Selector {
+        match_labels: Default::default(),
+        match_expressions: Vec::new(),
+    });
+    let err = spec.check().unwrap_err();
+    assert!(
+        matches!(err, RuntimeError::InvalidSpec(ref what) if what.contains("activator")),
+        "{err:?}"
+    );
+}
+
+#[test]
 fn worker_replicas_counts_the_roles_that_step_runs() {
     use aap_ports::Role;
     let mut spec = sample_spec(&id());

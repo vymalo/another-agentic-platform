@@ -137,6 +137,9 @@ impl crate::config::Settings {
             // What the agents' specs carry for the activity listener (ANR-1030b); `None` while `activity.enabled` is off.
             activity: self.activity.externals.clone(),
             sleep_poll: aap_controller::DEFAULT_POLL,
+            // The activator that fronts sleeping agents (AD-058 P3a-2): its file key and chart are ANR-1068's, so this
+            // operator has none yet.
+            activator: None,
         }
     }
 }
@@ -542,7 +545,11 @@ async fn run_with(settings: crate::config::Settings, tracer: aap_trace::Tracer) 
     ));
     let metrics = tokio::spawn(crate::serve::serve(
         settings.listen.metrics,
-        crate::serve::metrics_for(operator.metrics(), &tracer),
+        crate::serve::metrics_with_meter(
+            operator.metrics(),
+            aap_trace::TraceMetrics::of(&tracer),
+            meter_sink.as_ref().map(|s| s.0.stats()),
+        ),
         signalled(stopped.clone()),
     ));
 

@@ -138,6 +138,10 @@ pub fn resolve(
                 port: a.port(),
                 from: operator_peer(a),
             }),
+            // The switch is the controller's (AD-058 P3a-2): a resolved spec routes to the workload.
+            route_to: None,
+            direct: false,
+            activator: None,
         },
         run_pods: cx.run_pods_spec().map_err(|issue| vec![issue])?,
     };
