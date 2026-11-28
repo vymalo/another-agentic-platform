@@ -12,6 +12,7 @@ use aap_auth_oidc::OidcConfig;
 use aap_auth_workload::{WorkloadClient, WorkloadClients};
 use aap_forms::Defaults;
 use aap_platform_api::CorsOrigins;
+use aap_trace_otlp::OtlpSection;
 use anyhow::{Context, Result, bail};
 use serde::Deserialize;
 
@@ -29,6 +30,14 @@ fn health() -> SocketAddr {
     DEFAULT_HEALTH
         .parse()
         .unwrap_or_else(|_| SocketAddr::from(([0, 0, 0, 0], 8081)))
+}
+
+fn version_one() -> u32 {
+    1
+}
+
+fn default_filter() -> String {
+    "info".to_owned()
 }
 
 fn metrics() -> SocketAddr {
@@ -50,6 +59,15 @@ pub struct ApiConfig {
     /// Where `/metrics` is served (Prometheus text, no authentication: a port of its own, never the API's).
     #[serde(default = "metrics")]
     pub metrics_listen: SocketAddr,
+    /// The shape of this file. `1` is the only one there is; absent, it is `1` (a file from before the key).
+    #[serde(default = "version_one")]
+    pub version: u32,
+    /// The log: its filter is the only setting, as `RUST_LOG` used to be.
+    #[serde(default)]
+    pub log: LogSection,
+    /// Traces (K5): the `telemetry.otlp` section, as the `OTEL_*` variables used to say it. Absent: no span is made.
+    #[serde(default)]
+    pub telemetry: TelemetrySection,
     /// Whose tokens are accepted.
     pub oidc: OidcConfig,
     /// Which browser origins may call the API.
@@ -66,6 +84,32 @@ pub struct ApiConfig {
     /// all there is.
     #[serde(default)]
     pub workload_listener: Option<WorkloadListener>,
+}
+
+/// The `log` block.
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct LogSection {
+    /// A `tracing` filter, such as `info,kube=warn,aap_controller=debug`. `info` when absent.
+    #[serde(default = "default_filter")]
+    pub filter: String,
+}
+
+impl Default for LogSection {
+    fn default() -> Self {
+        Self {
+            filter: default_filter(),
+        }
+    }
+}
+
+/// The `telemetry` block: the traces, of which the OTLP section is the only one there is.
+#[derive(Debug, Default, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct TelemetrySection {
+    /// Where the spans go. Absent or empty: off, and the API makes none.
+    #[serde(default)]
+    pub otlp: Option<OtlpSection>,
 }
 
 /// The `workloadListener` block: where the mutual-TLS listener is and the files it reads. **Paths, not contents**: the key is
@@ -130,6 +174,10 @@ pub struct Settings {
     pub defaults: Defaults,
     /// The workload listener, when there is one (validated).
     pub workload: Option<WorkloadSettings>,
+    /// The `tracing` filter of the log (validated).
+    pub log_filter: String,
+    /// The traces, when the file asks for them (validated).
+    pub telemetry: Option<OtlpSection>,
 }
 
 /// The workload listener and who may use it.
@@ -179,6 +227,22 @@ impl ApiConfig {
     /// The first setting that is wrong, named: an issuer that is not an `http(s)` URL, no audience, an origin that is a
     /// wildcard, a deployment default that would make the operator refuse every agent.
     pub fn validate(self) -> Result<Settings> {
+        if self.version != 1 {
+            bail!(
+                "version: {} is not a version of this file (1 is)",
+                self.version
+            );
+        }
+        if self.log.filter.trim().is_empty() {
+            bail!("log.filter is empty: a `tracing` filter such as info is expected");
+        }
+        tracing_subscriber::EnvFilter::try_new(&self.log.filter)
+            .map_err(|why| anyhow::anyhow!("log.filter is not a `tracing` filter ({why})"))?;
+        if let Some(otlp) = &self.telemetry.otlp
+            && let Err(why) = otlp.validate()
+        {
+            bail!("telemetry.otlp: {why}");
+        }
         self.oidc.validate().context("oidc")?;
         let cors = CorsOrigins::new(&self.cors.allowed_origins).context("cors")?;
         let problems = self.defaults.check();
@@ -201,6 +265,8 @@ impl ApiConfig {
         check_ports(&listeners)?;
         Ok(Settings {
             workload,
+            log_filter: self.log.filter,
+            telemetry: self.telemetry.otlp,
             listen: self.listen,
             health_listen: self.health_listen,
             metrics_listen: self.metrics_listen,
@@ -444,6 +510,55 @@ mod tests {
                 "{required}"
             );
         }
+    }
+
+    #[test]
+    fn the_log_and_the_traces_are_the_files() {
+        // ANR-970: no RUST_LOG, no OTEL_* variables. The filter is `log.filter`, the traces are `telemetry.otlp`, and the
+        // file says `version: 1` (absent, it is 1).
+        let settings = ApiConfig::parse(EXAMPLE).unwrap().validate().unwrap();
+        assert_eq!(settings.log_filter, "info", "the example's default");
+        assert!(settings.telemetry.is_none(), "no traces in the example");
+
+        let mut v = example();
+        v["log"] =
+            serde_yaml::from_str("{ filter: 'info,kube=warn,aap_controller=debug' }").unwrap();
+        v["telemetry"] = serde_yaml::from_str(
+            "{ otlp: { endpoint: 'https://collector.invalid:4318/v1/traces', sampler: traceidratio, samplerRatio: 0.25 } }",
+        )
+        .unwrap();
+        let settings = ApiConfig::parse(&serde_yaml::to_string(&v).unwrap())
+            .unwrap()
+            .validate()
+            .unwrap();
+        assert!(settings.log_filter.contains("aap_controller=debug"));
+        assert!(settings.telemetry.is_some(), "the section is read");
+
+        // A filter that is not one, and a version this file is not, are named.
+        let mut v = example();
+        v["log"] = serde_yaml::from_str("{ filter: 'not a [filter' }").unwrap();
+        assert!(refused(&v).contains("log.filter"), "{}", refused(&v));
+        let mut v = example();
+        v["version"] = 2.into();
+        assert!(refused(&v).contains("version"), "{}", refused(&v));
+
+        // An unknown key inside the section is refused, at the top and nested (ANR-970's acceptance).
+        let mut v = example();
+        v["telemetry"] = serde_yaml::from_str("{ otlp: { typo: x } }").unwrap();
+        assert!(refused(&v).contains("typo"), "{}", refused(&v));
+        let mut v = example();
+        v["telemetry"] = serde_yaml::from_str("{ otpl: {} }").unwrap();
+        assert!(refused(&v).contains("otpl"), "{}", refused(&v));
+
+        // A header is a reference, never a value: a plain string is refused and the text never repeats it.
+        let mut v = example();
+        v["telemetry"] = serde_yaml::from_str(
+            "{ otlp: { endpoint: 'https://collector.invalid:4318/v1/traces', headers: { authorization: HUNTER2-TOKEN } } }",
+        )
+        .unwrap();
+        let message = refused(&v);
+        assert!(message.contains("a reference"), "{message}");
+        assert!(!message.contains("HUNTER2"), "{message}");
     }
 
     #[test]

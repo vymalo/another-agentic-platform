@@ -682,7 +682,7 @@ api:
   # Traces of the API (slice K5, §48a): one SERVER span per request named by its route template (never the path), the two ports as children.
   # The same shape and rules as the operator's `otel` above, without `dns` (the API's policy has its own DNS rule); OFF by default, and then
   # nothing of it is rendered. No subject, no agent name, no body, header, query or token is in any span, and no inbound `traceparent` is read.
-  # `api.extraEnv` may not set OTEL_* or AAP_OTEL_* names (they are these values).
+  # The chart renders these into the API's configuration file (ANR-970): a variable of an OTEL_* or AAP_OTEL_* name is read by nothing and is refused.
   otel:
     enabled: false
     endpoint: ""
@@ -692,6 +692,13 @@ api:
     headersSecret:
       name: ""
       key: ""
+      # The header the Secret's key holds the value of (`authorization` when empty), as the operator's `otel` names it.
+      # UPGRADE NOTE (ANR-970): the API used to be given a `name=value,...` list through a variable; the file now names the
+      # header, so the key must hold **the value alone** (`Bearer abc`). A value that starts with the configured header's name
+      # and `=` (the default `authorization`) turns the API's tracing off with one warning and the API keeps running; a pair for
+      # any other header is accepted as a value and sent as one, so set `header` to the old pair's name and keep only the value.
+      # Rewrite the Secret's key before upgrading, and upgrade the API image with the chart (an older image refuses the new file).
+      header: ""
     certificate:
       configMap: ""
       key: ""
@@ -742,8 +749,9 @@ api:
 
   # Environment, volumes and mounts of the API's container beyond the chart's own, for an issuer behind a private CA or a proxy: `extraEnv`
   # is a list of EnvVar (`HTTPS_PROXY`, `NO_PROXY`, `SSL_CERT_FILE`), `extraVolumes` a list of Volume (a ConfigMap that holds a CA bundle) and
-  # `extraVolumeMounts` a list of VolumeMount of them. The chart owns API_CONFIG_FILE, RUST_LOG (api.logLevel), API_LISTEN_ADDR and HEALTH_ADDR
-  # (api.port, api.healthPort), the volume `config` and everything under /etc/aap-api: it refuses a variable of those names and a mount there.
+  # `extraVolumeMounts` a list of VolumeMount of them. The binary reads **no** API_CONFIG_FILE, RUST_LOG, API_LISTEN_ADDR, HEALTH_ADDR or
+  # METRICS_ADDR any more (ANR-970: the ports are the file's, the filter is `api.logLevel` in it), so the chart refuses a variable of those
+  # names, as it refuses the volume `config` and every mount at or under /etc/aap-api.
   # The recipe, and what the binary reads (verified 2026-10-16, in the source): README "An issuer behind a private CA or a proxy".
   extraEnv: []
   #  - name: SSL_CERT_FILE

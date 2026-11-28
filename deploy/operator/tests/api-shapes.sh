@@ -10,8 +10,9 @@
 # to its default, so a value the chart writes into the file is read by the binary) and `runpods` (tests/runpods.values.yaml: run pods on, so
 # the file lists the size classes and a work volume, and the binary checks that a coder asking for the first class is a valid one) and
 # `metrics` (tests/metrics.values.yaml: the file carries `metricsListen`, on a port that is not the binary's default) and `otel`
-# (tests/otel.values.yaml: tracing on; the file is the golden's, because tracing is not in the file, and what CI checks with it is the
-# environment the chart renders for the API, read from the render by the workflow).
+# (tests/otel.values.yaml: tracing on; since ANR-970 the traces are the **file's** `telemetry.otlp`, with the header a `file` reference
+# and the CA a path) and `otel-ratio` (`traceidratio`, whose ratio the chart renders as a **number**: the review of ANR-970 found that a
+# quoted `"1"` makes `OtlpSection` refuse the file and the pod crash-loop).
 # and `workload` (tests/workload.values.yaml: the workload listener on, ANR-1011: the file carries `workloadListener` and `workloadClients`, and
 # the binary checks that a SPIFFE id, a permission and a port are ones it accepts; it reads none of the files the listener names).
 # Needs `helm` and `awk` (api-config.sh).
@@ -36,6 +37,8 @@ sh "$here/api-config.sh" "$dir/full.yaml" -f "$here/api-full.values.yaml"
 sh "$here/api-config.sh" "$dir/runpods.yaml" -f "$here/runpods.values.yaml"
 sh "$here/api-config.sh" "$dir/metrics.yaml" -f "$here/metrics.values.yaml"
 sh "$here/api-config.sh" "$dir/otel.yaml" -f "$here/otel.values.yaml"
+sh "$here/api-config.sh" "$dir/otel-ratio.yaml" -f "$here/otel.values.yaml" \
+  --set api.otel.sampler=traceidratio --set api.otel.samplerRatio=0.05
 sh "$here/api-config.sh" "$dir/workload.yaml" -f "$here/workload.values.yaml"
 
 # Shapes the chart renders and the binary must REFUSE (`api --check` exits 1), in refused/: `clash` puts the API on 9090 with the metrics

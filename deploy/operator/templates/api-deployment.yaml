@@ -58,18 +58,26 @@ spec:
         - name: api
           image: {{ include "aap.api.image" . | quote }}
           imagePullPolicy: {{ $api.image.pullPolicy }}
+          # Everything is the file's (ANR-970): the three ports, the log's filter and the traces. The binary reads no
+          # environment variable of its own any more.
+          args: ["--config", "/etc/aap-api/config.yaml"]
+          {{- if or $api.otel.enabled $api.extraEnv }}
           env:
-            - name: API_CONFIG_FILE
-              value: /etc/aap-api/config.yaml
-            - name: RUST_LOG
-              value: {{ $api.logLevel | quote }}
             {{- if $api.otel.enabled }}
-            # Traces (slice K5): the variables `api` reads. Absent, no span is made.
-            {{- include "aap.otel.env" (dict "block" $api.otel "pod" false) | nindent 12 }}
+            # Traces (slice K5): the resource's identity, the downward API's; the rest of the section is the file's.
+            - name: POD_NAME
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.name
+            - name: POD_NAMESPACE
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.namespace
             {{- end }}
             {{- with $api.extraEnv }}
             {{- toYaml . | nindent 12 }}
             {{- end }}
+          {{- end }}
           ports:
             - name: http
               containerPort: {{ $api.port }}

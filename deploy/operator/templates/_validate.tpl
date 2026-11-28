@@ -768,7 +768,7 @@ for each tested shape (tests/api-shapes.sh) to find such a value before it is de
 {{- fail "api.port and api.healthPort must differ: the API and its health endpoints are two listeners" -}}
 {{- end -}}
 {{- /* The API's traces (slice K5). */ -}}
-{{- include "aap.otel.validate" (dict "what" "api.otel" "block" $api.otel "policy" $api.networkPolicy.enabled "dns" false) -}}
+{{- include "aap.otel.validate" (dict "what" "api.otel" "block" $api.otel "policy" $api.networkPolicy.enabled "dns" false "headersInConfig" true) -}}
 {{- /* The metrics port: a port of its own, and a ServiceMonitor only where the NetworkPolicy lets the scrape in. */ -}}
 {{- $m := $api.metrics -}}
 {{- if not (kindIs "map" $m.serviceMonitor) -}}
@@ -1151,7 +1151,7 @@ extraVolumes, and a name is used once.
 {{- fail (printf "api.extraEnv: %q is not an environment variable name" $e.name) -}}
 {{- end -}}
 {{- if has $e.name (list "API_CONFIG_FILE" "RUST_LOG" "API_LISTEN_ADDR" "HEALTH_ADDR" "METRICS_ADDR") -}}
-{{- fail (printf "api.extraEnv: %s is the chart's: API_CONFIG_FILE is the mounted file, RUST_LOG is api.logLevel, and API_LISTEN_ADDR, HEALTH_ADDR and METRICS_ADDR would win over api.port, api.healthPort and api.metrics.port in the file, which the probes and the Service follow" $e.name) -}}
+{{- fail (printf "api.extraEnv: %s is read by nothing since ANR-970: the binary takes everything from its file (--config, the mounted one), so API_CONFIG_FILE, RUST_LOG, API_LISTEN_ADDR, HEALTH_ADDR and METRICS_ADDR would be a setting that does nothing. api.logLevel is the file's log.filter, and the ports are api.port, api.healthPort and api.metrics.port" $e.name) -}}
 {{- end -}}
 {{- if or (hasPrefix "OTEL_" $e.name) (hasPrefix "AAP_OTEL_" $e.name) (and $api.otel.enabled (has $e.name (list "POD_NAME" "POD_NAMESPACE"))) -}}
 {{- fail (printf "api.extraEnv: %s is the chart's: the tracing variables are api.otel (OTEL_*, AAP_OTEL_*, and POD_NAME and POD_NAMESPACE while api.otel.enabled)" $e.name) -}}

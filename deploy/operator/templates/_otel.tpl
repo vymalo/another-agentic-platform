@@ -1,7 +1,8 @@
 {{/*
 Traces (slice K5, §48a). Two blocks of the same shape, `otel` for the operator and `api.otel` for the Platform API, OFF by default and then
-nothing of them is rendered: no variable, no volume, no port, no rule. When on, the chart writes the standard OTEL_* variables the binaries read
-(crates/trace-otlp/README.md), a headers file from an existing Secret (never an environment variable) and a CA bundle from an existing ConfigMap,
+nothing of them is rendered: no variable, no volume, no port, no rule. When on, the chart writes the traces into each binary's configuration file
+(the operator's `telemetry.otlp` since ANR-962, the API's since ANR-970; crates/trace-otlp/README.md), a headers file from an existing Secret
+(never an environment variable) and a CA bundle from an existing ConfigMap,
 and opens egress to the collector's peers and to nothing else.
 
 Included helpers take a dict: .block (the values of the block), .api (true for the API's).
@@ -19,53 +20,6 @@ Included helpers take a dict: .block (the values of the block), .api (true for t
 {{/* "true" when the block has a volume of its own to mount (a headers Secret or a CA ConfigMap). */}}
 {{- define "aap.otel.hasVolumes" -}}
 {{- if or .block.headersSecret.name .block.certificate.configMap -}}true{{- end -}}
-{{- end -}}
-
-{{/* The environment of a container: the variables the binaries read. `.block` is api.otel; `.pod` says whether POD_NAME is the chart's already.
-The operator's traces are a section of its configuration file (ANR-962, `aap.otel.config`), not variables. */}}
-{{- define "aap.otel.env" -}}
-{{- $o := .block -}}
-- name: OTEL_EXPORTER_OTLP_TRACES_ENDPOINT
-  value: {{ $o.endpoint | quote }}
-- name: OTEL_EXPORTER_OTLP_PROTOCOL
-  value: http/json
-- name: OTEL_TRACES_SAMPLER
-  value: {{ $o.sampler | quote }}
-{{- if eq (toString $o.sampler) "traceidratio" }}
-- name: OTEL_TRACES_SAMPLER_ARG
-  value: {{ toString $o.samplerRatio | quote }}
-{{- end }}
-{{- if $o.resourceAttributes }}
-- name: OTEL_RESOURCE_ATTRIBUTES
-  value: {{ include "aap.otel.resourceAttributes" $o.resourceAttributes | quote }}
-{{- end }}
-{{- if $o.headersSecret.name }}
-- name: AAP_OTEL_HEADERS_FILE
-  value: /var/run/secrets/aap/otel/headers
-{{- end }}
-{{- if $o.certificate.configMap }}
-- name: OTEL_EXPORTER_OTLP_CERTIFICATE
-  value: /etc/aap/otel/ca/ca.pem
-{{- end }}
-{{- if not .pod }}
-- name: POD_NAME
-  valueFrom:
-    fieldRef:
-      fieldPath: metadata.name
-{{- end }}
-- name: POD_NAMESPACE
-  valueFrom:
-    fieldRef:
-      fieldPath: metadata.namespace
-{{- end -}}
-
-{{/* `k=v,k=v`, in key order. */}}
-{{- define "aap.otel.resourceAttributes" -}}
-{{- $parts := list -}}
-{{- range $k := keys . | sortAlpha -}}
-{{- $parts = append $parts (printf "%s=%s" $k (toString (get $ $k))) -}}
-{{- end -}}
-{{- join "," $parts -}}
 {{- end -}}
 
 {{/* The volumeMounts the block needs, indented by the caller. */}}
@@ -163,8 +117,7 @@ the component is on, `.dns` whether the block has a DNS rule of its own (the ope
 {{- if and $o.headersSecret (kindIs "map" $o.headersSecret) $o.headersSecret.name (not (hasPrefix "https://" $o.endpoint)) -}}
 {{- fail (printf "%s.headersSecret needs an https endpoint: the headers (a token) would be sent in clear to %s.endpoint" $what $what) -}}
 {{- end -}}
-{{- /* ANR-962: the operator's configuration file names the header whose value the Secret's key holds; the API's file is a
-`name=value,...` list, so it has no `header`. */}}
+{{- /* ANR-962 and ANR-970: both configuration files name the header whose value the Secret's key holds, so both have `header`. */}}
 {{- if kindIs "map" $o.headersSecret -}}
 {{- if .headersInConfig -}}
 {{- $header := get $o.headersSecret "header" -}}
@@ -175,10 +128,6 @@ the component is on, `.dns` whether the block has a DNS rule of its own (the ope
 {{- if not (has $k (list "name" "key" "header")) -}}
 {{- fail (printf "%s.headersSecret.%s is not a setting: name, key or header" $what $k) -}}
 {{- end -}}
-{{- end -}}
-{{- else -}}
-{{- if get $o.headersSecret "header" -}}
-{{- fail (printf "%s.headersSecret.header is the operator's: its configuration file names the header, and this component's file is a name=value list (remove the key)" $what) -}}
 {{- end -}}
 {{- end -}}
 {{- end -}}
