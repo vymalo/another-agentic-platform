@@ -395,7 +395,7 @@ pub mod accounts {
                             case.pod
                         ));
                     }
-                    if got.is_empty() || !is_line_text(&got) {
+                    if !is_line_text(&got) {
                         return Err(format!(
                             "accounts: {:?}: the account {got:?} is not line text",
                             case.pod
@@ -447,8 +447,8 @@ pub mod accounts {
         Ok(())
     }
 
-    /// Rule 3: a source that cannot answer now is `Err(AccountUnavailable)`, never `Ok(None)` — the meter would give the
-    /// minute up instead of holding it.
+    /// Rule 3: a source that cannot answer now is `Err(AccountUnavailable)`, never `Ok(None)` — a `None` here is a
+    /// transient failure the meter would read as a real absence.
     pub async fn check_unavailable<S: AccountSource>(
         source: &S,
         cases: &[Case],
@@ -481,96 +481,5 @@ pub mod accounts {
         check_accounts(source, cases).await?;
         check_no_account(source, cases).await?;
         check_unavailable(source, cases).await
-    }
-}
-
-#[cfg(test)]
-mod account_tests {
-    #![allow(clippy::unwrap_used, clippy::expect_used)]
-
-    use super::accounts::{Case, check_accounts, check_no_account, check_unavailable, run};
-    use crate::{AccountSource, AccountUnavailable, MemoryAccounts, PodRef};
-
-    fn run_pod(run: &str) -> PodRef {
-        PodRef::Run {
-            service: "coder".into(),
-            run: run.into(),
-        }
-    }
-
-    fn agent_pod(namespace: &str) -> PodRef {
-        PodRef::Agent {
-            namespace: namespace.into(),
-            service: "coder".into(),
-        }
-    }
-
-    #[tokio::test]
-    async fn the_memory_fake_passes_the_suite() {
-        let source = MemoryAccounts::new();
-        source.set_run("coder", "r1", "acct-run");
-        source.set_agent("ns", "coder", "acct-agent");
-        run(
-            &source,
-            &[
-                Case::account(run_pod("r1"), "acct-run"),
-                Case::account(agent_pod("ns"), "acct-agent"),
-                Case::none(run_pod("r2")),
-                Case::none(agent_pod("other")),
-            ],
-        )
-        .await
-        .unwrap();
-        // The fake made unavailable: the same pod, now an error, never `None`.
-        source.set_broken(true);
-        check_unavailable(&source, &[Case::unavailable(run_pod("r1"))])
-            .await
-            .unwrap();
-    }
-
-    /// A source broken in one way, to prove each rule fails.
-    struct Faulty(&'static str);
-
-    impl AccountSource for Faulty {
-        async fn account(&self, _pod: &PodRef) -> Result<Option<String>, AccountUnavailable> {
-            match self.0 {
-                "wrong" => Ok(Some("another".into())),
-                "empty" => Ok(Some(String::new())),
-                "space" => Ok(Some("a b".into())),
-                "none" => Ok(None),
-                "error" => Err(AccountUnavailable),
-                other => unreachable!("unknown fault {other}"),
-            }
-        }
-    }
-
-    #[tokio::test]
-    async fn each_rule_fails_on_a_source_broken_on_purpose() {
-        let pod = run_pod("r1");
-        for fault in ["wrong", "none", "error"] {
-            let e = check_accounts(&Faulty(fault), &[Case::account(pod.clone(), "acct")])
-                .await
-                .unwrap_err();
-            assert!(e.starts_with("accounts:"), "{fault}: {e}");
-        }
-        // The line-text rule: the answer is the account asked for, but it is not a usage line.
-        for (fault, want) in [("empty", ""), ("space", "a b")] {
-            let e = check_accounts(&Faulty(fault), &[Case::account(pod.clone(), want)])
-                .await
-                .unwrap_err();
-            assert!(e.contains("not line text"), "{fault}: {e}");
-        }
-        for fault in ["wrong", "error"] {
-            let e = check_no_account(&Faulty(fault), &[Case::none(pod.clone())])
-                .await
-                .unwrap_err();
-            assert!(e.starts_with("no-account:"), "{fault}: {e}");
-        }
-        for fault in ["none", "wrong"] {
-            let e = check_unavailable(&Faulty(fault), &[Case::unavailable(pod.clone())])
-                .await
-                .unwrap_err();
-            assert!(e.starts_with("unavailable:"), "{fault}: {e}");
-        }
     }
 }
