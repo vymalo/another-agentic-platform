@@ -34,6 +34,8 @@ const DESCRIPTION_MAX = 260;
 const MAX_DEPTH = 12;
 
 const cell = (text) => String(text ?? "").replace(/\|/g, "\\|").replace(/\s+/g, " ").trim();
+// For a cell that holds code: its spaces are part of the value. Only a line break goes, because it would end the row.
+const escapeCell = (text) => String(text ?? "").replace(/\|/g, "\\|").replace(/[\r\n]+/g, " ");
 const code = (text) =>
   `<code>${String(text).replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;")}</code>`;
 
@@ -64,7 +66,7 @@ function boundsOf(schema) {
     }
   }
   for (const rule of schema["x-kubernetes-validations"] ?? []) {
-    if (rule.message) parts.push(`rule: ${rule.message}`);
+    if (rule.message) parts.push(`rule: ${String(rule.message).replace(/\s+/g, " ").trim()}`);
   }
   return parts.join("; ");
 }
@@ -81,7 +83,7 @@ function row(path, schema, required) {
     shown,
   ];
   // Each cell is built raw and escaped here, once: a pipe from the schema never ends a cell.
-  return `| ${cells.map(cell).join(" | ")} |`;
+  return `| ${cells.map(escapeCell).join(" | ")} |`;
 }
 
 /** Every field under `schema`, as one flat table: the path, its type, whether its parent requires it, its default, its
@@ -185,6 +187,14 @@ function pipeCase(name, field, index) {
   return { name, ok, detail: `${cells.length} cells in ${rows[0]}` };
 }
 
+/** One row of six cells, and the source's two spaces still two in cell `index`. */
+function spacesCase(name, field, index, source) {
+  const rows = specTable({ type: "object", properties: { field } });
+  const cells = splitRow(rows[0] ?? "");
+  const ok = rows.length === 1 && cells.length === 6 && (cells[index] ?? "").includes(source);
+  return { name, ok, detail: rows.join(" / ") };
+}
+
 /** What the generator does with shapes the checked-in CRDs do not have, as `{ name, ok, detail }`. */
 export function unitCases() {
   const [pattern, choice, fallback, description, rule] = [
@@ -218,7 +228,12 @@ export function unitCases() {
     detail: plainRows.join(" / "),
   };
 
-  return [pattern, choice, fallback, description, rule, map, plain];
+  const spaced = [
+    spacesCase("a pattern keeps its two spaces", { type: "string", pattern: "^a  b$" }, 4, "^a  b$"),
+    spacesCase("a string default keeps its two spaces", { type: "string", default: "a  b" }, 3, '"a  b"'),
+  ];
+
+  return [pattern, choice, fallback, description, rule, map, plain, ...spaced];
 }
 
 /** The pages, in the CRD file's order: `{ file, content }` per kind. */
