@@ -531,18 +531,34 @@ fn a_taken_health_port_is_what_bind_line_matches() {
         "apiVersion: v1\nkind: Config\nclusters:\n- name: c\n  cluster:\n    server: https://127.0.0.1:1\nusers:\n- name: u\n  user:\n    token: t\ncontexts:\n- name: x\n  context:\n    cluster: c\n    user: u\ncurrent-context: x\n",
     )
     .unwrap();
-    let out = Command::new(env!("CARGO_BIN_EXE_operator"))
+    let log = std::env::temp_dir().join(format!("{stem}.log"));
+    let mut child = Command::new(env!("CARGO_BIN_EXE_operator"))
         .arg("run")
         .arg("--config")
         .arg(&config_file)
         .env("KUBECONFIG", &kubeconfig)
         .env("POD_NAME", "operator-under-test")
-        .output()
-        .expect("runs the operator");
+        .stdout(Stdio::null())
+        .stderr(std::fs::File::create(&log).unwrap())
+        .spawn()
+        .expect("starts the operator");
+    // A child that never exits would hold `START` for the whole job: bound it, as the cases bound a start.
+    let until = Instant::now() + Duration::from_secs(30);
+    let status = loop {
+        if let Some(status) = child.try_wait().expect("the operator's status") {
+            break status;
+        }
+        if Instant::now() >= until {
+            let _ = child.kill();
+            let _ = child.wait();
+            panic!("the operator did not exit within 30 s on a taken health port");
+        }
+        std::thread::sleep(Duration::from_millis(50));
+    };
     drop(held);
-    let stderr = String::from_utf8_lossy(&out.stderr);
-    assert!(!out.status.success(), "{}: {stderr}", out.status);
-    assert!(bind_line(&stderr).is_some(), "{}: {stderr}", out.status);
+    let stderr = std::fs::read_to_string(&log).unwrap_or_default();
+    assert!(!status.success(), "{status}: {stderr}");
+    assert!(bind_line(&stderr).is_some(), "{status}: {stderr}");
 }
 
 impl OperatorProc {
