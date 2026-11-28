@@ -194,6 +194,9 @@ check_config "tests/api-full.values.yaml" -f "$here/api-full.values.yaml"
 check_config "tests/metrics.values.yaml" -f "$here/metrics.values.yaml"
 check_config "tests/metering.values.yaml" -f "$here/metering.values.yaml"
 check_config "tests/e2e/run-pods.values.yaml" -f "$here/e2e/run-pods.values.yaml"
+# ANR-763 P4a: the sleep/wake end-to-end, with the activity source on. The chart's render of the operator's file is what `operator run`
+# reads at start; `operator run --check` says whether the configuration is one the binary accepts.
+check_config "tests/e2e/sleep.values.yaml" -f "$here/e2e/sleep.values.yaml"
 check_config "tests/e2e/meter.values.yaml" -f "$here/e2e/meter.values.yaml"
 # ANR-1030b: with the activity source on, the file holds agentTokensSecret and operatorPod, which the binary requires while enabled.
 check_config "the activity source on (ANR-1030b)" --set activity.tokenSecret.name=agent-bearer \
@@ -1769,18 +1772,18 @@ rp_pin() {
   grep -Eq '^ +ref: ghcr\.io/vymalo/another-adam-rs/coder:sha-[0-9a-f]{7}@sha256:[0-9a-f]{64}$' "$fixtures" || return 1
   pin_digest=$(sed -n 's/^ *ref: ghcr\.io\/vymalo\/another-adam-rs\/coder:[^@]*@\(sha256:[0-9a-f]*\)$/\1/p' "$fixtures" | sort -u)
   [ -n "$pin_digest" ] && [ "$(grep -cF "$pin_digest" "$fixtures")" -eq 2 ] || return 1
-  # The digest is in this file of deploy/ and .github/ (the script reads the pin from it, the model's manifest gets it from the script) and in three
+  # The digest is in this file of deploy/ and .github/ (the script reads the pin from it, the model's manifest gets it from the script) and in four
   # others, and no more: the chart's `defaultAgentImage`, which is the same image since ANR-1200 (the default coder is the one this end-to-end
-  # proves), the coder of S9's end-to-end (a test holds it equal to that default) and the README that documents both. The chart's golden renders
-  # carry it because they render that default, so they are left out of the count.
+  # proves), the coder of S9's end-to-end (a test holds it equal to that default), the README that documents both, and the sleep/wake end-to-end's
+  # coder (ANR-763, which must run the same image). The chart's golden renders carry it because they render that default, so they are left out of the count.
   found=$(grep -rlF "$pin_digest" "$chart/.." "$chart/../../.github" | grep -v '/tests/golden/')
-  [ "$(printf '%s\n' "$found" | wc -l)" -eq 4 ] || return 1
-  for f in '/values\.yaml$' '/tests/e2e/run-pods\.yaml$' '/tests/e2e/coder\.yaml$' '/README\.md$'; do
+  [ "$(printf '%s\n' "$found" | wc -l)" -eq 5 ] || return 1
+  for f in '/values\.yaml$' '/tests/e2e/run-pods\.yaml$' '/tests/e2e/sleep\.yaml$' '/tests/e2e/coder\.yaml$' '/README\.md$'; do
     printf '%s\n' "$found" | grep -Eq "$f" || return 1
   done
   grep -Eq "^defaultAgentImage: ghcr\.io/vymalo/another-adam-rs/coder:sha-[0-9a-f]{7}@$pin_digest\$" "$chart/values.yaml"
 }
-check "run pods e2e: the coder is pinned by tag and digest, on two lines of run-pods.yaml that are one pin, and its digest is in no file of deploy/ or .github/ but run-pods.yaml, the chart's defaultAgentImage, S9's coder and the README" rp_pin
+check "run pods e2e: the coder is pinned by tag and digest, on two lines of run-pods.yaml that are one pin, and its digest is in no file of deploy/ or .github/ but run-pods.yaml, the chart's defaultAgentImage, S9's coder, the sleep end-to-end's coder and the README" rp_pin
 rp_support() {
   support="$here/e2e/run-pods-support.yaml"
   [ "$(grep -c '^          image: __CODER_IMAGE__$' "$support")" -eq 1 ] || return 1

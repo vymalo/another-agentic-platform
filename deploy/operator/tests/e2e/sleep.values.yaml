@@ -1,0 +1,40 @@
+# The values the kind end-to-end of the sleep and wake path (ANR-763, P4a) installs the operator chart with. The script adds the image
+# (the one built in the job and loaded into kind, never pulled) and installs the chart with these: the activity source on (the operator asks
+# each agent about its work, so an adam agent that sets `scaling.idleTimeout` can sleep), the agents' NetworkPolicy admits the operator's pods
+# to the listener, and the bearer Secret `e2e-activity-bearer/token` exists in the watched namespace (the agent's pod reads it; the operator's
+# pod mounts the same name). NO run pods (the chart's default; `runPods.enabled` is false and the script asserts the absence of every cluster-
+# scoped object of run pods and the runPods block of the operator's file).
+#
+# The activity `to` peer is the coder's pod: the namespace of this script (`aap-e2e-sleep`, with `kubernetes.io/metadata.name` set by the
+# API server) and the labels the chart puts on every workload it makes (`app.kubernetes.io/instance=<service>`, `app.kubernetes.io/managed-by=
+# aap-operator`). The peer selector is narrowed to `app.kubernetes.io/instance=e2e-sleep` so a second agent of the same script (none here)
+# does not leak.
+#
+# The activity `dns` peer is the chart's default: kube-dns in kube-system, ports 53 (UDP and TCP).
+#
+# Nothing here is a secret. The cluster is a throwaway one; no value below is advice for a deployment (deploy/operator/README.md, "Activity",
+# is). The bearer Secret's value is made by the script and never read by a person.
+tuning:
+  # A pending service is looked at again every 5 s instead of 15: the job waits for pods, not for a timer.
+  resyncPendingSecs: 5
+networkPolicy:
+  enabled: true
+  # The agent's NetworkPolicy, set by the operator, admits the listener to the operator's pods alone. The chart renders the egress rules below
+  # (DNS, the API server on the chart's ports, and the agents on the activity port) with `networkPolicy.enabled` true.
+activity:
+  to:
+    - namespaceSelector:
+        matchLabels:
+          kubernetes.io/metadata.name: aap-e2e-sleep
+      podSelector:
+        matchLabels:
+          app.kubernetes.io/instance: e2e-sleep
+  # The agents' listener: 8081 by default (1024 to 65535, never 8080, the A2A port). The script asserts the agent container holds
+  # ACTIVITY_LISTEN_ADDR=0.0.0.0:8081 and the workload's containerPorts has port `activity` 8081.
+  port: 8081
+  timeoutSecs: 3
+  tokenSecret:
+    # The bearer is one deployment-wide (ANR-Q142): the operator mounts `e2e-activity-bearer/token` as a file in its pod, and the agent's pod
+    # reads the same Secret name and key from the watched namespace (the chart's `agentTokensSecret` defaults to `tokenSecret`).
+    name: e2e-activity-bearer
+    key: token
