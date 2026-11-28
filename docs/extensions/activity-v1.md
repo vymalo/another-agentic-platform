@@ -39,7 +39,7 @@ Authorization: Bearer <token>
 | Method | `GET`, with no body. Asking changes nothing in the agent |
 | Path | The agent's choice. adam's is `/internal/activity`; the contract does not fix it |
 | Port and listener | The agent's choice. An agent SHOULD serve the route apart from the interface its users call, so that the caller needs no access to that interface |
-| Authorization | `Authorization: Bearer <token>`, one bearer per deployment: one value that the caller sends to every agent it asks. It SHOULD NOT be a token that lets its holder do anything else with the agent |
+| Authorization | `Authorization: Bearer <token>`: the bearer the agent was configured to accept; the caller sends the value it was given. It SHOULD NOT be a token that lets its holder do anything else with the agent |
 | URL | No credential in it: no user information and no token in the path or the query |
 | Transport | HTTPS outside a trusted cluster network. Inside one, plain HTTP is allowed, with network rules that let only the caller reach the route |
 
@@ -174,6 +174,9 @@ and the loop asks a second time right before it proposes a sleep. When the opera
 in [§21a](../architecture/05-runtime.md#21a-sleep-when-idle-the-plan). An agent with no activity
 listener, such as a bring-your-own A2A image today, is not asked and does not sleep.
 
+The platform's deployment uses one bearer for every agent it asks (ANR-Q142); a per-agent token is not part of this
+contract.
+
 The client today differs from this contract in these ways:
 
 | Point | The client today |
@@ -181,7 +184,9 @@ The client today differs from this contract in these ways:
 | Status | It reads the body of **any `2xx`**, not only `200`. The contract says another status is unknown. adam answers only `200` on success, so the two do not differ with adam |
 | Path | Fixed at `/internal/activity` on the service's cluster address and one deployment-wide port |
 | Content type | Not checked |
-| Timestamp | A lower-case `t` or `z`, or a space instead of `T`, is unknown |
+| Timestamp | A lower-case `t` or `z`, or a space instead of `T`, is unknown. This is the safe direction: the agent stays up |
+| Impossible timestamp | **Accepted, which is not the safe direction.** The day is only checked to be 1 to 31, so `2026-02-31` is read as a later real date, and a second of `60` is taken in any minute, not only where a leap second can be. The contract calls a string that is not a timestamp unknown; the client instead acts on the date it computed, so with `busy` 0 and that date not due soon, the agent can be counted idle |
+| `busy` as a float | `1.0` is refused, because the client reads an unsigned whole number: unknown, the safe direction |
 
 A probe that a custom resource names (path, port, token reference and timing) is **not built**; see
 [AD-075](../architecture/11-decisions.md#ad-075--workingness-an-agent-is-asked-whether-it-holds-work-over-activityv1-and-unknown-is-busy).
