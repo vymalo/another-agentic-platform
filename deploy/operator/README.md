@@ -421,7 +421,7 @@ sources at the versions in `Cargo.lock`, **not by running it**):
 | **Proxy** | `Tuning::default()` has `use_system_proxy: true`, so `reqwest` reads `ALL_PROXY`, `HTTP_PROXY`, `HTTPS_PROXY` and `NO_PROXY`, and their lower-case names (`hyper-util` 0.1.21, `client/proxy/matcher.rs`) |
 | **What they do not reach** | The cluster client of the API (`kube` 4.0.0, `Client::try_default`) trusts the service account's CA, and its in-cluster configuration has no proxy (`proxy_url: None`; `HTTPS_PROXY` is read only when a kubeconfig file is loaded, which the pod has none of). So `SSL_CERT_FILE` and a proxy affect the issuer's keys and nothing else |
 
-Whether the image's base (`gcr.io/distroless/cc-debian13`) has a platform bundle for `openssl-probe` to find, which an issuer with a public certificate needs when
+Whether the image's base (`gcr.io/distroless/static-debian13`, which ships `/etc/ssl/certs/ca-certificates.crt`) has a bundle for `openssl-probe` to find, which an issuer with a public certificate needs when
 `SSL_CERT_FILE` is not set, is *unverified* (no image could be pulled where this was written). The recipe for a private CA (not tried on a cluster,
 *unverified*; `render-check.sh` holds only that these values render):
 

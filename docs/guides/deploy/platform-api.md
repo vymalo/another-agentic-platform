@@ -195,7 +195,7 @@ sh deploy/operator/tests/api-config.sh config.yaml -f values.yaml
 ./api --config config.yaml --check
 ```
 
-The extracted binary is dynamically linked: at `sha-1d17e42` it needs glibc 2.39 or newer (the highest symbol version, read with `objdump -T`); the image's base is `distroless/cc-debian13`. Check again for the tag you use. `api-config.sh` renders the chart with `api.enabled=true` and writes the `config.yaml` of the API's ConfigMap to a file. The binary refuses an unknown key at every level. Then install:
+The extracted binary is **static** (`ldd` says "not a dynamic executable"), so it needs no libc; the image's base is `distroless/static-debian13` (ANR-1174). `api-config.sh` renders the chart with `api.enabled=true` and writes the `config.yaml` of the API's ConfigMap to a file. The binary refuses an unknown key at every level. Then install:
 
 ```sh
 helm upgrade --install aap-operator deploy/operator --namespace aap-system -f values.yaml --wait
