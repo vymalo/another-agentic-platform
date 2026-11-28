@@ -244,6 +244,8 @@ What left the `Dn built` notes of the page for people: the proofs, quoted verbat
 >
 > *Walked, not run on a cluster*, under `dash`, with the scratch walk of this review (a fake `kubectl` and `helm`, the real router over the `Memory` ports, the real `OidcAuthenticator` and `test-issuer`): the whole script passes (the operator's log with colour codes, as the binary writes it); with a `kubectl logs` of the operator that fails, that is empty or that is another pod's log the run fails at step 7 (the script before the change passed with the failing one); with the sentinel planted in the logs and in a `describe`, the diagnostics of a red run print none of it (the script before the change printed it four times); `redact` on its own passes everything through with no pattern files or empty ones and drops the lines that hold the sentinel, a token, its payload or its signature. What the walk cannot show: that the operator of the `api-e2e` job logs `the caches are synced` (it does in `chain-e2e`'s, same image and chart, *verified 2026-10-17* in run 38996503582; the check is new here) and everything of the cluster half.
 
+Settled since, for the port of the D13 review's hardening: [the status log](../status.md) records `api-e2e` of `operator-image.yml` passing on `main` in run 45973874969 at `36ca2e0` (*verified 2026-11-27* there, in the jobs' logs), a run made after the port.
+
 #### D13
 
 > **D13 built (2026-10-17; the job `chain-e2e` passed on its first run, run 38994193619 at `4929e3c`, *verified 2026-10-17* in its log; the changes of the review of the same day passed in CI too, run 38996503582 at the PR head `8d45dab`, job `chain-e2e` 117290340019, success, *verified 2026-10-17* with `gh api` and in the job's log):** the kind end-to-end of **the whole chain**, [`deploy/operator/tests/e2e/chain-e2e.sh`](../../../deploy/operator/tests/e2e/README.md#the-kind-end-to-end-of-the-whole-chain-d13) and the job `chain-e2e` of `operator-image.yml` (it needs `image` and `api-image`; **`push` does not need it**).
@@ -418,8 +420,8 @@ The API validates it exactly as the orchestrator does (another-agentic-system AD
 **How the web gets the token today** (*verified 2026-10-05*, another-agentic-system `deploy/chart/files/Caddyfile` and `dev/Caddyfile`): every request to the web passes the edge's `forward_auth` to oauth2-proxy, which answers 202 with `Authorization: Bearer <ID token>` (`--set-authorization-header=true`, `deploy/chart/templates/oauth2-proxy.yaml`), and `copy_headers Authorization` puts it on the request that goes to the web, replacing what the browser sent.
 
 A **hash** and a **suffix** use the alphabet of Kubernetes' generated names, `bcdfghjklmnpqrstvwxz2456789`, the hash 5 to 10 characters (the 1 to 10 decimal digits of a 32-bit hash, so below 5 has a probability of about 2e-6) and the suffix exactly 5: *verified 2026-11-14* in the Kubernetes sources at `master` (`k8s.io/apimachinery/pkg/util/rand/rand.go` for the alphabet and `SafeEncodeString`, `k8s.io/apiserver/pkg/storage/names/generate.go` for `randomLength = 5`, `ComputeHash` in `k8s.io/kubernetes/pkg/controller/controller_utils.go` for the hash).
->
-> A client treats a message as untrusted text (renders it as text, never as markup), and **an empty list is not a healthy agent**: Kubernetes keeps events for a limited time (the API server's `--event-ttl`, one hour by default: *verified 2026-11-14*, `EventTTL: 1 * time.Hour` in `k8s.io/kubernetes/pkg/controlplane/apiserver/options/options.go` at `master`).
+
+A client treats a message as untrusted text (renders it as text, never as markup), and **an empty list is not a healthy agent**: Kubernetes keeps events for a limited time (the API server's `--event-ttl`, one hour by default: *verified 2026-11-14*, `EventTTL: 1 * time.Hour` in `k8s.io/kubernetes/pkg/controlplane/apiserver/options/options.go` at `master`).
 
 **No right on Secrets**, like the operator (AD-024): `list` on Secrets would return their values (*verified 2026-10-05*, <https://kubernetes.io/docs/concepts/security/rbac-good-practices/>, "Listing secrets").
 
@@ -453,8 +455,8 @@ The row and the sentences of the *Amended* notes as they were.
 It needs D7 (the API, the registry on) and D8 (the orchestrator that enforces the audience: the pin is its main at `8df44c6`).
 
 **D15a** (built, the *D15a built* note above) is everything that needs no cluster: the field, the neutral spec, the settings, the objects and their order, the chart (the Role, the `PriorityClass`, the admission policy and its parameters), the form and `GET /v1/info`, parity with the coder chart at adam-rs `3f714d0` and the admission test against a real API server.
->
-> The row's dependency on adam-rs's ADR 0019 is met by adam-rs `main` (#131, `3f714d0`); the *Risks* row below is amended.
+
+The row's dependency on adam-rs's ADR 0019 is met by adam-rs `main` (#131, `3f714d0`); the *Risks* row below is amended.
 
 *Amended 2026-10-27 (D15c):* **D15c is built** (the *D15c built* note above): adam-rs closed the network of a run pod (its ADR 0042, `ff10395` and `7598255`: deny by default, an egress proxy of its own, the template's proxy variables) and the operator makes the same per agent; the parity goldens move to `7598255`; `run-pods-e2e.sh` asks the cluster what adam-rs's script asks of its own. D15b's job has run green (run 40435825771). D15 stays open until the job has run green with D15c's checks.
 
@@ -472,10 +474,6 @@ The rows as they were.
 | adam-rs's run-pod settings change before they merge | D15 is last and starts from adam-rs `main` (met: D15a read `3f714d0`, and a later change of the coder chart is a diff of the parity goldens, `tools/adam-parity/regen.sh --check`; it happened once, D15c: adam-rs closed the network of a run pod at `ff10395` and `7598255` and the goldens moved) |
 | An agent's image has no `adam-git-sandbox` (older than adam-rs `05cda7f`; `defaultAgentImage` is one) | the git-sandbox sidecar cannot start and the coder container, which waits for its startup probe, never does: the pod is `Init:0/2` and the service is never `Ready`; loud, and the operator cannot tell beforehand (§60a, D15d, decision 2); the chart's README says so where `defaultAgentImage` is, and the end-to-end's fixture names an image that has it |
 | An agent's image has no `adam-egress` (older than adam-rs `ff10395`; `defaultAgentImage` is one) | the proxy of its run pods cannot start and its run pods reach nothing; the operator cannot tell and the service stays `Ready` (§60a, D15c, decisions 2 and 3); the chart's README says so where `defaultAgentImage` is, and the end-to-end's fixture names an image that has it |
-
-The end of the row *A person who deletes the policy's parameter ConfigMap*:
-
-Not closed: a person with `delete` on ConfigMaps in the namespace can still open it (*D15a built*, 2) |
 
 ### Facts checked
 
