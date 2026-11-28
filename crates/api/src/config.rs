@@ -422,7 +422,7 @@ pub struct Model {
     /// A `ModelEndpoint` of the same namespace that holds the address and the key (AD-029).
     /// Exclusive with `baseUrl` and `apiKeySecretRef`. The operator reads the endpoint into the same
     /// variables the inline form gives (§60a), so an edit of the endpoint rolls every agent that uses
-    /// it. An endpoint that is not there makes the agent `ConfigInvalid`, naming it.
+    /// it. An endpoint that is not there makes the agent `ConfigReferentMissing` (ANR-1159), naming it, until it is applied.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub endpoint_ref: Option<NameRef>,
 

@@ -2010,7 +2010,8 @@ async fn a_config_that_references_the_shared_objects_runs_what_they_say_and_foll
     case.apply::<AgentService>(&svc).await;
     let blocked = case
         .until("refs", "a missing referent to block the service", 60, |s| {
-            is(s, "ConfigResolved", "False", "ConfigInvalid")
+            // ANR-1159: a referent that is not there yet says so, and is not `ConfigInvalid`.
+            is(s, "ConfigResolved", "False", "ConfigReferentMissing")
         })
         .await;
     let why = blocked["status"]["conditions"][0]["message"]
@@ -2109,7 +2110,7 @@ async fn a_config_that_references_the_shared_objects_runs_what_they_say_and_foll
         .unwrap();
     let blocked = case
         .until("refs", "the deletion to block the service", 60, |s| {
-            is(s, "ConfigResolved", "False", "ConfigInvalid")
+            is(s, "ConfigResolved", "False", "ConfigReferentMissing")
         })
         .await;
     assert_eq!(state(&blocked["status"]), "Blocked");
@@ -2204,7 +2205,7 @@ async fn an_operator_without_the_shared_crds_still_runs_plain_services_and_says_
     case.apply::<AgentService>(&svc).await;
     let blocked = case
         .until("refs", "the service to say the CRDs are missing", 60, |s| {
-            is(s, "ConfigResolved", "False", "ConfigInvalid")
+            is(s, "ConfigResolved", "False", "ConfigReferentMissing")
         })
         .await;
     let why = blocked["status"]["conditions"][0]["message"]
