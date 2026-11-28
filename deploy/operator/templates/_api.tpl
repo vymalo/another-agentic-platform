@@ -78,7 +78,8 @@ file and the CA bundle are the mounts of api-deployment.yaml, and each header is
 {{- $otlp := dict "endpoint" $o.endpoint -}}
 {{- if eq (toString $o.sampler) "traceidratio" -}}
 {{- $_ := set $otlp "sampler" "traceidratio" -}}
-{{- $_ := set $otlp "samplerRatio" $o.samplerRatio -}}
+{{- /* A number, not the string values.yaml holds: `OtlpSection.samplerRatio` is an `f64`, and YAML keeps `"1"` quoted. */ -}}
+{{- $_ := set $otlp "samplerRatio" (float64 $o.samplerRatio) -}}
 {{- else -}}
 {{- $_ := set $otlp "sampler" $o.sampler -}}
 {{- end -}}

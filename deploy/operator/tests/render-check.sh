@@ -1059,7 +1059,8 @@ check "the secretref shape renders (a Secret per agent, no policy, no Ingress)" 
 api_shapes_are_written() {
   d=$(mktemp -d) || return 1
   sh "$here/api-shapes.sh" "$d" > /dev/null 2>&1 \
-    && [ "$(find "$d" -type f | wc -l)" -eq 9 ] && [ -s "$d/golden.yaml" ] && [ -s "$d/secretref.yaml" ] && [ -s "$d/minimal.yaml" ] && [ -s "$d/runpods.yaml" ] && [ -s "$d/metrics.yaml" ] && [ -s "$d/otel.yaml" ] && [ -s "$d/workload.yaml" ] \
+    && [ "$(find "$d" -type f | wc -l)" -eq 10 ] && [ -s "$d/golden.yaml" ] && [ -s "$d/secretref.yaml" ] && [ -s "$d/minimal.yaml" ] && [ -s "$d/runpods.yaml" ] && [ -s "$d/metrics.yaml" ] && [ -s "$d/otel.yaml" ] && [ -s "$d/otel-ratio.yaml" ] && [ -s "$d/workload.yaml" ] \
+    && grep -q '^    samplerRatio: 0.05$' "$d/otel-ratio.yaml" \
     && grep -q '^workloadListener:$' "$d/workload.yaml" && ! grep -q 'workload' "$d/golden.yaml" \
     && grep -q '^  - standard$' "$d/runpods.yaml" && ! grep -q 'runPodSizeClasses' "$d/golden.yaml" \
     && grep -q '^listen: 0.0.0.0:8443$' "$d/full.yaml" && grep -q '^healthListen: 0.0.0.0:9091$' "$d/full.yaml" \
@@ -1070,7 +1071,7 @@ api_shapes_are_written() {
   rm -rf "$d"
   return "$r"
 }
-check "api: api-shapes.sh writes the file of eight shapes and one that must be refused (golden, secretref, minimal, full, runpods, metrics, otel, workload; refused/clash), the full one with the ports it sets, run pods alone with size classes, metrics alone with metricsListen, the workload listener alone with workloadListener" api_shapes_are_written
+check "api: api-shapes.sh writes the file of nine shapes and one that must be refused (golden, secretref, minimal, full, runpods, metrics, otel, otel-ratio, workload; refused/clash), the full one with the ports it sets, run pods alone with size classes, metrics alone with metricsListen, the traces with a number for the ratio, the workload listener alone with workloadListener" api_shapes_are_written
 check "api: the shape that sets every value (tests/api-full.values.yaml) renders" renders_ok -f "$here/api-full.values.yaml"
 
 # ---- The values of the kind end-to-end of the Platform API (D7b2) ------------------------------------------------------------
@@ -2058,6 +2059,15 @@ otel_api_policy() {
   all_of "$(api_egress_rule 4)" 'port: 4319' '^      to:' 'otel-gateway' || return 1
   none_of "$(api_egress_rule 4)" 'port: 4318|opentelemetry-collector|port: 443|port: 53'
 }
+otel_ratio_is_a_number() {
+  # values.yaml holds `samplerRatio: "1"`, a string, and `OtlpSection.samplerRatio` is an `f64`: a quoted ratio makes the API refuse
+  # the file and crash-loop (the review of ANR-970 found it). The chart writes a number.
+  render -f "$here/api.values.yaml" --set api.otel.enabled=true --set api.otel.endpoint=https://c:4318/v1/traces \
+    --set api.otel.sampler=traceidratio --set api.otel.samplerRatio=0.05 \
+    --set-json 'api.otel.to=[{"podSelector":{"matchLabels":{"a":"b"}}}]' || return 1
+  dhas ConfigMap aap-operator-api '^        sampler: traceidratio$' '^        samplerRatio: 0.05$'
+}
+check "api.otel: a traceidratio ratio is a number in the file, not the string values.yaml holds (ANR-970 review)" otel_ratio_is_a_number
 check "otel: the API's NetworkPolicy has three egress rules off and four on, the fourth to api.otel.to on api.otel.ports (and not the operator's)" otel_api_policy
 otel_no_open_rule() {
   # In every rendered policy, a rule that names a port of the collector or of DNS has a `to`: none is open egress.

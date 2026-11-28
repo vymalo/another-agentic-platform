@@ -136,7 +136,7 @@ fn free_addrs() -> (SocketAddr, SocketAddr, SocketAddr) {
 /// Start the API on a file and wait for `/metrics`. A child that **exits** before it serves is retried on three fresh
 /// addresses, but **only** when it says the port was taken: any other exit is the test's answer. Every failure says what the
 /// child wrote to stderr (ANR-1065).
-fn serve_metrics(tag: &str, extra: &str) -> (Killed, String) {
+fn serve_metrics(tag: &str, extra: &str, env: &[(&str, &str)]) -> (Killed, String) {
     // The running tests start in parallel and each releases its ports before its child binds them: one at a time.
     static START: std::sync::Mutex<()> = std::sync::Mutex::new(());
     let _starting = START
@@ -154,6 +154,7 @@ fn serve_metrics(tag: &str, extra: &str) -> (Killed, String) {
             api()
                 .args(["--config"])
                 .arg(&config)
+                .envs(env.iter().copied())
                 .env("KUBECONFIG", &kube)
                 .env_remove("KUBERNETES_SERVICE_HOST")
                 .stdout(Stdio::null())
@@ -239,7 +240,7 @@ impl Drop for Killed {
 /// With no `telemetry` in the file the metrics text has no trace line: it is what K4 prints.
 #[test]
 fn a_running_api_with_no_telemetry_makes_no_span() {
-    let (_child, text) = serve_metrics("plain", "");
+    let (_child, text) = serve_metrics("plain", "", &[]);
     assert!(!text.contains("aap_trace_"), "{text}");
 }
 
@@ -249,6 +250,42 @@ fn a_running_api_with_an_unreachable_collector_still_serves() {
     let (_child, text) = serve_metrics(
         "unreachable",
         "telemetry:\n  otlp:\n    endpoint: http://127.0.0.1:1/v1/traces\n",
+        &[],
     );
     assert!(text.contains("aap_trace_enabled 1\n"), "{text}");
+}
+
+/// ANR-970 kept the rule for the file that the variables had: a reference the pod does not have never stops the API. `--check` reads
+/// no file, so it accepts the section; a running API warns once, serves, and says tracing is off.
+#[test]
+fn a_reference_the_pod_does_not_have_turns_tracing_off_and_stops_nothing() {
+    let unreadable = "telemetry:\n  otlp:\n    endpoint: https://otel.invalid:4318/v1/traces\n    headers:\n      authorization:\n        file: /nonexistent/headers\n";
+    let (code, stdout, stderr) = check(&write("unreadable", &document(unreadable, None)));
+    assert_eq!(code, Some(0), "{stdout} {stderr}");
+    let (mut child, text) = serve_metrics("unreadable", unreadable, &[]);
+    let log = stderr_of(&mut child);
+    assert!(text.contains("aap_trace_enabled 0\n"), "{text}");
+    assert!(log.contains("tracing is off"), "{log}");
+}
+
+/// The variables the cutover removed are read by nothing: a shell that still sets them changes no setting, and the API serves.
+#[test]
+fn the_removed_variables_are_ignored() {
+    let (_child, text) = serve_metrics(
+        "ignored",
+        "",
+        &[
+            ("API_LISTEN_ADDR", "garbage"),
+            ("HEALTH_ADDR", "garbage"),
+            ("METRICS_ADDR", "garbage"),
+            ("API_CONFIG_FILE", "/nonexistent/config.yaml"),
+            ("RUST_LOG", "="),
+            ("OTEL_EXPORTER_OTLP_PROTOCOL", "grpc"),
+            (
+                "OTEL_EXPORTER_OTLP_TRACES_ENDPOINT",
+                "unix:///dev/otel-grpc.sock",
+            ),
+        ],
+    );
+    assert!(!text.contains("aap_trace_"), "{text}");
 }

@@ -2,7 +2,6 @@
 //! this builds it from the Kubernetes objects and the OIDC authenticator, and serves it.
 
 use std::future::Future;
-use std::net::SocketAddr;
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -22,11 +21,11 @@ use futures::future::BoxFuture;
 use kube::api::ListParams;
 use tokio::sync::watch;
 
-use crate::config::{self, Settings, WorkloadSettings};
+use crate::config::{Settings, WorkloadSettings};
 use crate::mtls::{self, MtlsListener};
 use crate::serve::{self, Check, Health};
 
-/// The settings of `api`. Every one is also an environment variable, which is how the chart sets them.
+/// The command line of `api`: the file, and whether to check it. Every setting is the file's (ANR-970).
 #[derive(Debug, Parser)]
 #[command(
     name = "api",
@@ -442,6 +441,8 @@ pub async fn run(settings: Settings) -> Result<()> {
 #[cfg(test)]
 mod tests {
     #![allow(clippy::unwrap_used, clippy::expect_used)]
+
+    use std::net::SocketAddr;
     use std::sync::Mutex;
     use std::sync::atomic::AtomicUsize;
 
@@ -891,26 +892,22 @@ mod tests {
     }
 
     #[test]
-    fn the_settings_of_the_command_line_win_over_the_file() {
-        let args = Args::try_parse_from([
-            "api",
-            "--config",
-            "/etc/api/config.yaml",
-            "--listen",
-            "127.0.0.1:9000",
-            "--health-addr",
-            "127.0.0.1:9001",
-            "--metrics-addr",
-            "127.0.0.1:9002",
-        ])
-        .unwrap();
-        assert_eq!(args.listen, Some("127.0.0.1:9000".parse().unwrap()));
-        assert_eq!(args.health_addr, Some("127.0.0.1:9001".parse().unwrap()));
-        assert_eq!(args.metrics_addr, Some("127.0.0.1:9002".parse().unwrap()));
+    fn the_command_line_names_the_file_and_nothing_else() {
+        // ANR-970: the file's default path, and no flag for a setting the file holds.
+        let args = Args::try_parse_from(["api"]).unwrap();
+        assert_eq!(args.config, PathBuf::from("/etc/aap-api/config.yaml"));
         assert!(!args.check);
-        assert!(
-            Args::try_parse_from(["api"]).is_err(),
-            "the configuration file is required"
+        assert_eq!(
+            Args::try_parse_from(["api", "--config", "/etc/api/config.yaml"])
+                .unwrap()
+                .config,
+            PathBuf::from("/etc/api/config.yaml")
         );
+        for flag in ["--listen", "--health-addr", "--metrics-addr"] {
+            assert!(
+                Args::try_parse_from(["api", flag, "127.0.0.1:9000"]).is_err(),
+                "{flag} is the file's"
+            );
+        }
     }
 }
