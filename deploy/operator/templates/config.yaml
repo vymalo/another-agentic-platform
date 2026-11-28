@@ -45,7 +45,7 @@ data:
       {{- with .Values.registry.publicUrl }}
       publicUrl: {{ . | quote }}
       {{- end }}
-      # No token, no registry: this reference is what turns it on. A mounted Secret, read once at start.
+      # No token, no registry: this reference is what turns it on. A mounted Secret, re-read when it changes (ANR-1192).
       token:
         file: /var/run/secrets/aap/registry/token
     {{- end }}
@@ -95,7 +95,7 @@ data:
       timeoutSecs: {{ .Values.toolProbe.timeoutSecs | default 5 }}
     {{- end }}
     {{- if include "aap.activity" . }}
-    # AD-058 P2c: ask each agent what work it holds. The bearer is the mounted Secret's file, read once at start.
+    # AD-058 P2c: ask each agent what work it holds. The bearer is the mounted Secret's file, re-read when it changes (ANR-1192).
     activity:
       enabled: true
       port: {{ .Values.activity.port | int }}
@@ -114,7 +114,7 @@ data:
     {{- end }}
     {{- if include "aap.metering" . }}
     {{- $m := .Values.metering }}
-    # ANR-1103 (AD-069): the pod-minute meter. The broker's bearer is the mounted Secret's file, read once at start.
+    # ANR-1103 (AD-069): the pod-minute meter. The broker's bearer is the mounted Secret's file, re-read when it changes (ANR-1192).
     metering:
       enabled: true
       source: {{ $m.source | quote }}

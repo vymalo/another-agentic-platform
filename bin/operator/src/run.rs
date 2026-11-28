@@ -188,8 +188,18 @@ pub fn activity_source(
             "the bearer contains a comma: an agent splits its list of bearers on commas".to_owned(),
         ));
     }
+    // The bearer is re-read when its file changes (ANR-1192): a rotated Secret needs no restart. Seeded with the text
+    // validated here, so a file that vanishes before the first poll still answers.
+    let live = std::sync::Arc::new(crate::token::TokenFile::new(reference.clone()));
+    live.seed(&text);
+    let asked = std::sync::Arc::clone(&live);
     let source =
-        aap_activity_http::HttpActivity::in_cluster(activity.port, activity.timeout, Some(token))?;
+        aap_activity_http::HttpActivity::in_cluster(activity.port, activity.timeout, None)?
+            .with_token_source(move || {
+                asked
+                    .get()
+                    .and_then(|text| aap_activity_http::Token::new(&text).ok())
+            });
     Ok(Some(source))
 }
 
@@ -216,7 +226,9 @@ fn store(_client: &kube::Client) -> aap_store_secret::SecretStore {
 /// [`ReferenceRefused`](crate::config::ReferenceRefused): the reference gives no token. The message names the reference, never
 /// a value.
 #[cfg(all(feature = "runtime-kubernetes", feature = "registry"))]
-fn registry_token(registry: &crate::config::Registry) -> Result<Option<aap_registry::Token>> {
+fn registry_token(
+    registry: &crate::config::Registry,
+) -> Result<Option<(aap_registry::Token, String)>> {
     use aap_trace_otlp::SecretRef;
     let Some(reference) = &registry.token else {
         tracing::warn!(
@@ -224,19 +236,23 @@ fn registry_token(registry: &crate::config::Registry) -> Result<Option<aap_regis
         );
         return Ok(None);
     };
-    let token = match reference {
-        SecretRef::File(path) => aap_registry::Token::from_file(path).map_err(|e| e.to_string()),
-        SecretRef::Env(name) => std::env::var(name)
-            .ok()
-            .and_then(|text| aap_registry::Token::new(&text))
-            .ok_or_else(|| "the variable is not set or is empty".to_owned()),
-    };
-    token.map(Some).map_err(|why| {
-        // The reference, never the value: a file's path and a variable's name are not the token.
+    // The reference, never the value: a file's path and a variable's name are not the token.
+    let refused = |why: String| {
         anyhow::Error::new(crate::config::ReferenceRefused(format!(
             "registry.token {reference:?}: {why}"
         )))
-    })
+    };
+    // The text is kept so that the live source can be seeded with what was validated here (ANR-1192).
+    let text = match reference {
+        SecretRef::File(path) => std::fs::read_to_string(path)
+            .map_err(|e| refused(format!("the file cannot be read ({})", e.kind())))?,
+        SecretRef::Env(name) => {
+            std::env::var(name).map_err(|_| refused("the variable is not set".to_owned()))?
+        }
+    };
+    let token =
+        aap_registry::Token::new(&text).ok_or_else(|| refused("the token is empty".to_owned()))?;
+    Ok(Some((token, text)))
 }
 
 #[cfg(all(feature = "runtime-kubernetes", not(feature = "registry")))]
@@ -524,9 +540,19 @@ async fn run_with(settings: crate::config::Settings, tracer: aap_trace::Tracer) 
     let (operator, meter_sink) = compose_meter(operator, meter, meter_client, meter_home);
 
     #[cfg(feature = "registry")]
-    let registry_server = token.map(|token| {
+    let registry_server = token.map(|(token, text)| {
         let mut registry = aap_registry::Registry::new(operator.directory(), token)
             .with_full_flag(registry_full.clone());
+        // The demanded bearer is re-read when its file changes (ANR-1192): a rotated Secret needs no restart. Seeded with
+        // the text validated here, so a file that vanishes before the first request still answers.
+        if let Some(reference) = settings.registry.token.clone() {
+            let live = std::sync::Arc::new(crate::token::TokenFile::new(reference));
+            live.seed(&text);
+            let asked = std::sync::Arc::clone(&live);
+            registry = registry.with_token_source(move || {
+                asked.get().and_then(|text| aap_registry::Token::new(&text))
+            });
+        }
         if let Some(anchor) = settings.registry.public_url.clone() {
             registry = registry.with_anchor(anchor);
         }

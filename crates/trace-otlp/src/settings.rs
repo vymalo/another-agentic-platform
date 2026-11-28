@@ -87,7 +87,7 @@ pub struct TraceSettings {
 /// A value is never written in the file, and an error names the reference, never what it holds.
 #[derive(Clone, Debug, PartialEq, Eq, schemars::JsonSchema)]
 pub enum SecretRef {
-    /// A file, read once at start (a mounted Secret).
+    /// A file, read at start and re-read when it changes (a mounted Secret; ANR-1192).
     File(PathBuf),
     /// A variable of the process.
     Env(String),

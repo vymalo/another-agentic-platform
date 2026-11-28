@@ -84,6 +84,33 @@ async fn it_asks_one_encoded_segment_with_the_bearer() {
     );
 }
 
+/// ANR-1192: the bearer is asked at each request, so a rotated Secret needs no restart.
+#[tokio::test]
+async fn a_token_source_is_asked_at_each_request() {
+    let (source, stub) = start(Duration::from_secs(5)).await;
+    let now = Arc::new(Mutex::new("first-token".to_owned()));
+    let asked = Arc::clone(&now);
+    let source = source.with_token_source(move || Token::new(&asked.lock().unwrap()).ok());
+    assert_eq!(
+        source.account(&run("r1")).await,
+        Ok(Some("acct-1".to_owned()))
+    );
+    *now.lock().unwrap() = "second-token".to_owned();
+    assert_eq!(
+        source.account(&run("r2")).await,
+        Ok(Some("acct-1".to_owned()))
+    );
+    let s = stub.lock().unwrap();
+    let bearers: Vec<Option<String>> = s.seen.iter().map(|(_, b)| b.clone()).collect();
+    assert_eq!(
+        bearers,
+        vec![
+            Some("Bearer first-token".to_owned()),
+            Some("Bearer second-token".to_owned())
+        ]
+    );
+}
+
 #[tokio::test]
 async fn a_run_id_that_cannot_be_a_segment_is_not_asked() {
     let (source, stub) = start(Duration::from_secs(5)).await;

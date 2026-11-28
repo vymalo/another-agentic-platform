@@ -20,6 +20,7 @@
 //!   about run pods only.
 
 use std::fmt;
+use std::sync::Arc;
 use std::time::Duration;
 
 use aap_usage::{AccountSource, AccountUnavailable, PodRef, is_line_text};
@@ -92,8 +93,11 @@ pub fn check_base(base: &Url) -> Result<(), SettingsError> {
 pub struct BrokerAccounts {
     client: reqwest::Client,
     base: String,
-    token: Token,
+    token: Arc<TokenSource>,
 }
+
+/// Where the meter's bearer comes from, asked at each request (ANR-1192).
+pub type TokenSource = dyn Fn() -> Option<Token> + Send + Sync;
 
 impl fmt::Debug for BrokerAccounts {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
@@ -120,11 +124,23 @@ impl BrokerAccounts {
             .no_proxy()
             .build()
             .map_err(SettingsError::Client)?;
+        let token = Arc::new(move || Some(token.clone()));
         Ok(Self {
             client,
             base: base.as_str().trim_end_matches('/').to_owned(),
             token,
         })
+    }
+
+    /// The bearer from `source`, asked at each request (ANR-1192): a rotated Secret needs no restart. It replaces the
+    /// token `new` was given; a source that answers `None` holds the minute rather than asking with no bearer.
+    #[must_use]
+    pub fn with_token_source(
+        mut self,
+        source: impl Fn() -> Option<Token> + Send + Sync + 'static,
+    ) -> Self {
+        self.token = Arc::new(source);
+        self
     }
 
     /// The URL asked for `run`, or `None` for a run id that is never asked.
@@ -160,10 +176,12 @@ impl AccountSource for BrokerAccounts {
         let Some(url) = self.url(run) else {
             return Ok(None);
         };
+        // The bearer is asked of its source at each request: a rotated Secret needs no restart (ANR-1192).
+        let token = self.token.as_ref()().ok_or(AccountUnavailable)?;
         let mut response = self
             .client
             .get(url)
-            .bearer_auth(&self.token.0)
+            .bearer_auth(&token.0)
             .send()
             .await
             .map_err(|_| AccountUnavailable)?;
