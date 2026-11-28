@@ -3,6 +3,9 @@
 The HTTP [`ActivitySource`](../ports/src/activity.rs) (AD-058, slice P2c): it asks an agent service's `GET /internal/activity` what
 work it holds, so the idle controller (P2b) can tell when the service may sleep.
 
+The wire is [`activity/v1`](../../docs/extensions/activity-v1.md) (AD-075). The client reads the body of any `2xx`, where the
+contract allows only `200`; that gap is to be closed in slice 3 (ANR-1177). The contract lists the client's other differences.
+
 ## What it does
 
 `HttpActivity::in_cluster(port, timeout, token)` asks `http://<name>.<namespace>.svc:<port>/internal/activity` of the
