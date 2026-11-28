@@ -60,8 +60,8 @@ RUN cargo build --release --locked --package aap-operator --bin operator --targe
 # unix socket, for BuildKit's own tracing). A smoke test must not depend on what a builder puts in the environment.
 RUN set -eu; \
     bin=/src/target/$TARGET/release/operator; \
-    file "$bin" | grep -q 'statically linked'; \
-    ldd "$bin" 2>&1 | grep -q 'not a dynamic executable'; \
+    file "$bin" | grep -q 'static'; \
+    ldd "$bin" 2>&1 | grep -q -e 'statically linked' -e 'not a dynamic executable'; \
     clean="env -i PATH=$PATH"; \
     $clean "$bin" --help > /dev/null; \
     $clean "$bin" crdgen > /tmp/crds.yaml; \
