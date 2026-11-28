@@ -54,7 +54,7 @@ pub struct WorkloadClients {
     /// The longest lifetime a presented leaf may have before the listener warns, in seconds (`workloadListener.maxLeafLifetimeSecs`).
     /// Absent: no warning. It is never a refusal: the lifetime is the issuer's, and refusing would break a working deployment whose
     /// PKI is not this one's (ANR-1374).
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(default)]
     pub max_leaf_lifetime_secs: Option<i64>,
 }
 
