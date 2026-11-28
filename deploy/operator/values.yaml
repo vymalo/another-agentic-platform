@@ -729,6 +729,13 @@ api:
     handshakeTimeoutSecs: 5
     maxHandshakesPerIp: 8
     maxConnections: 256
+    # The longest lifetime a **presented**, **accepted** workload certificate may have before the API warns, in seconds (1 to
+    # 31536000); absent, no warning. It is never a refusal (ANR-1374): the lifetime is the issuer's, and refusing would break a
+    # deployment whose PKI is not this one's. A workload certificate should live about 24 h, so a revocation is forgotten within a day;
+    # how the orchestrator gets and renews one is in docs/guides/deploy/platform-api.md. **Leave room for the issuer's backdating**:
+    # OpenBao sets `notBefore` 30 s before the issue (its `not_before_duration` default), so a `ttl: 24h` role yields a lifetime of
+    # 86 430 s, and a maximum of 86 400 would warn about every correctly issued leaf. 90 000 (25 h) is the value the guide suggests.
+    # maxLeafLifetimeSecs: 90000
     # The workloads: REQUIRED, at least one. Each `spiffeId` is the exact URI SAN (spiffe://...), once; `permissions` is any of
     # `platform:agents.own`, `platform:agents.read.owner`, both, or empty (AD-072: the orchestrator holds both, the staff service the
     # read-only one; anything else is refused at render and at load).

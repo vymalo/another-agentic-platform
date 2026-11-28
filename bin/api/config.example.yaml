@@ -45,6 +45,10 @@ cors:
 #   certFile: /etc/aap-api-workload/tls/tls.crt
 #   keyFile: /etc/aap-api-workload/tls/tls.key
 #   clientCaFile: /etc/aap-api-workload/ca/ca.crt
+#   # A warning, never a refusal (ANR-1374): the API logs one line, with the lifetime and never the identity, the first time an accepted
+#   # leaf lives longer than this. A workload certificate should live about 24 h; leave room for the issuer's backdating (OpenBao sets
+#   # `notBefore` 30 s early, so a `ttl: 24h` role gives 86 430 s: 90 000, 25 h, is the value the guide suggests).
+#   maxLeafLifetimeSecs: 90000
 # workloadClients:
 #   - spiffeId: spiffe://another/ns/another-agents/sa/orchestrator
 #     permissions: [platform:agents.own, platform:agents.read.owner]

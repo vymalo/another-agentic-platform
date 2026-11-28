@@ -2471,7 +2471,18 @@ check "a values file that still sets usageIngest is refused, by name" refused "u
 render -f "$here/api.values.yaml"
 check "api.workload off (the default): not a trace of it in the API's render (no port, mount, volume, Service or rule)" \
   lacks 'workload|8443|aap-api-workload'
+check "api.workload: the lifetime warning is off by default (no maxLeafLifetimeSecs in the file)" dlacks ConfigMap aap-operator-api 'maxLeafLifetimeSecs'
 render -f "$here/workload.values.yaml"
+# ANR-1374: the lifetime warning is off by default, the shape sets 90000 (25 h: a `ttl: 24h` OpenBao role is backdated 30 s, so 86 400
+# would warn about every correct leaf), and a maximum of 0 or past a year is a mistake and not "off".
+wl_lifetime() {
+  dhas ConfigMap aap-operator-api '^      maxLeafLifetimeSecs: 90000$' || return 1
+  for v in 0 -1 31536001; do
+    refused 'api.workload.maxLeafLifetimeSecs must be a whole number from 1 to 31536000' -f "$here/workload.values.yaml" --set api.workload.maxLeafLifetimeSecs=$v || return 1
+  done
+  refused 'api.workload.maxLeafLifetimeSecs must be a whole number from 1 to 31536000' -f "$here/workload.values.yaml" --set-string api.workload.maxLeafLifetimeSecs=abc
+}
+check "api.workload: the lifetime warning is the workload shape's 90000, and 0, a negative or past a year is refused (ANR-1374)" wl_lifetime
 wl=aap-operator-api
 wl_config() { doc ConfigMap $wl | awk '/^  config.yaml: \|$/ { f = 1; next } f { print }'; }
 # (`check` runs one command: a `&&` after it would not be part of the check, so each check that needs two conditions is a function.)

@@ -134,6 +134,10 @@ pub struct WorkloadListener {
     /// How many connections may be open at once, all sources together (1 to 65536).
     #[serde(default = "default_max_connections")]
     pub max_connections: usize,
+    /// The longest lifetime a presented workload certificate may have before the listener warns, in seconds (1 to 31536000). Absent: no
+    /// warning. **Never a refusal** (ANR-1374): the lifetime is the issuer's, and a deployment whose PKI is not this one's would break.
+    #[serde(default)]
+    pub max_leaf_lifetime_secs: Option<u64>,
 }
 
 fn default_handshake_timeout_secs() -> u64 {
@@ -284,14 +288,19 @@ fn workload(
     clients: Vec<WorkloadClient>,
     listener: Option<WorkloadListener>,
 ) -> Result<Option<WorkloadSettings>> {
-    let clients = WorkloadClients { clients };
     let Some(listener) = listener else {
-        if clients.clients.is_empty() {
+        if clients.is_empty() {
             return Ok(None);
         }
         bail!(
             "workloadClients names workloads and there is no workloadListener for them to call: add the listener, or remove the clients"
         );
+    };
+    // ANR-1374: the longest lifetime a presented leaf may have before the listener warns. It is the listener's, not the clients', so it
+    // is carried into the block the authenticator reads.
+    let clients = WorkloadClients {
+        clients,
+        max_leaf_lifetime_secs: listener.max_leaf_lifetime_secs.map(|s| s as i64),
     };
     if clients.clients.is_empty() {
         bail!(
@@ -325,6 +334,13 @@ fn workload(
         if !(1..=max).contains(&value) {
             bail!("workloadListener.{key}: {value} is not between 1 and {max}");
         }
+    }
+    if let Some(secs) = listener.max_leaf_lifetime_secs
+        && !(1..=31_536_000).contains(&secs)
+    {
+        bail!(
+            "workloadListener.maxLeafLifetimeSecs: {secs} is not between 1 and 31536000 (a year): a lifetime beyond that is no lifetime, and the setting is a warning"
+        );
     }
     Ok(Some(WorkloadSettings { listener, clients }))
 }
@@ -891,6 +907,52 @@ workloadClients:
         let w = on.workload.unwrap();
         assert_eq!(w.listener.listen.port(), 8443);
         assert_eq!(w.clients.table().unwrap().len(), 1);
+    }
+
+    /// ANR-1374: the lifetime warning is a setting of the listener, off when absent, carried into what the authenticator reads, and
+    /// refused outside 1..=31536000 (a maximum of 0 would warn about every certificate, so it is a mistake, not "off").
+    #[test]
+    fn the_lifetime_warning_is_the_listeners_and_off_unless_named() {
+        let off = ApiConfig::parse(&serde_yaml::to_string(&with_workload()).unwrap())
+            .unwrap()
+            .validate()
+            .unwrap()
+            .workload
+            .unwrap();
+        assert!(off.clients.max_leaf_lifetime_secs.is_none(), "absent: off");
+
+        for (secs, ok) in [
+            (1_i64, true),
+            (86_400, true),
+            (31_536_000, true),
+            (0, false),
+            (-1, false),
+            (31_536_001, false),
+        ] {
+            let mut v = with_workload();
+            v["workloadListener"]["maxLeafLifetimeSecs"] = secs.into();
+            let parsed =
+                ApiConfig::parse(&serde_yaml::to_string(&v).unwrap()).and_then(ApiConfig::validate);
+            assert_eq!(parsed.is_ok(), ok, "{secs}");
+            if ok {
+                let w = parsed.unwrap().workload.unwrap();
+                assert_eq!(w.clients.max_leaf_lifetime_secs, Some(secs));
+            } else {
+                let error = format!("{:#}", parsed.unwrap_err());
+                assert!(error.contains("maxLeafLifetimeSecs"), "{error}");
+            }
+        }
+
+        // A null is absent, as it is everywhere in this file.
+        let mut v = with_workload();
+        v["workloadListener"]["maxLeafLifetimeSecs"] = serde_yaml::Value::Null;
+        let w = ApiConfig::parse(&serde_yaml::to_string(&v).unwrap())
+            .unwrap()
+            .validate()
+            .unwrap()
+            .workload
+            .unwrap();
+        assert!(w.clients.max_leaf_lifetime_secs.is_none(), "null: off");
     }
 
     #[test]

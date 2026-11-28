@@ -827,6 +827,7 @@ mod tests {
                     permissions: Vec::new(),
                 },
             ],
+            max_leaf_lifetime_secs: None,
         };
         // Every file is looked at on each handshake and request (a recheck of zero): the reloads are tested, not waited for.
         let trust = Trust::load(&ca_file, &clients, Duration::ZERO).unwrap();
