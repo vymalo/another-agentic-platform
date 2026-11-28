@@ -789,7 +789,15 @@ Why: the runtime image no longer carries libc, libgcc or a platform bundle — o
 The chart is unchanged: user 65532, no shell, the same ports.
 
 
-#### AD-077 — Metrics are scraped, not exported over OTLP
+#### AD-077 — Workload identity is OpenBao's, with SPIFFE and SPIRE each optional
+
+*(2026-11-28, ANR-1082; the owner's rows 149 to 152 and 165 of 2026-11-27. Built here: the plan, §40. The `WorkloadIdentity` port, the `ClientAuthenticator`'s mode-1 mapping and the chart's mode values are the rest of the card.)*
+
+Decisions: **(1) OpenBao is the vault and the issuer.** Workload certificates come from its PKI engine, and a workload signs in with its Kubernetes service-account token (`auth/kubernetes/login`), a role bounded by `bound_service_account_names` and `bound_service_account_namespaces` (*verified 2026-11-28* at openbao.org, 2.7.x). The credential broker keeps the vault; the PKI is the same deployment. **(2) Three modes, each optional, and nothing requires the next.** Mode 1: OpenBao certificates only. Mode 2: OpenBao issues a `spiffe://` URI SAN. Mode 3: SPIRE issues the SVID and OpenBao signs its intermediate. A deployment that runs none of SPIFFE and SPIRE is a supported deployment. **(3) In mode 1 a workload is named by a DNS SAN**, `<serviceaccount>.<namespace>.svc`, and **never by the CN** — the owner's answer to the card's question, because a CN is free text while the DNS SAN is a name Kubernetes already owns. **(4) The trust domain is a deployment value**, not a constant: `agents.vymalo.com` in §40 is an example. **(5) Identity is read through a port.** `WorkloadIdentity`, with a conformance testkit (AD-020); the DNS SAN, the URI SAN and an attested SVID are adapters behind it, and no SPIRE API appears in a trait signature, so a deployment without SPIRE carries no SPIRE dependency. **(6) `ClientAuthenticator` is unchanged by the choice.** It verifies a chain against one CA bundle and maps one URI SAN to a permission (AD-065, AD-068), so mode 2 works with no code change and mode 1 needs only the DNS-SAN mapping this AD records. **(7) SPIRE, where it is used, takes OpenBao as its upstream CA** — SPIRE's `UpstreamAuthority "vault"` plugin states that it is compatible with the OpenBao API (*verified 2026-11-28*) — so a deployment that adds SPIRE does not add a second root.
+
+*Unverified, and left open:* `csi-driver-spiffe` against OpenBao (see §40). *Alternative rejected:* treating a Kubernetes `ServiceAccount` as the conceptual identity — it is one way to obtain an identity, not the identity.
+
+#### AD-078 — Metrics are scraped, not exported over OTLP
 
 *(2026-11-28, ANR-1479 (a slice of ANR-1171); the implementer's, **for the owner to confirm**.)* ANR-1171 offered two transports for the platform's metrics: "metrics over OTLP as well, or a collector scraping the existing Prometheus endpoints". The choice: **scrape the existing Prometheus endpoints; no second metrics exporter over OTLP.**
 
