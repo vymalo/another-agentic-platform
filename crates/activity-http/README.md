@@ -14,10 +14,16 @@ work it holds, so the idle controller (P2b) can tell when the service may sleep.
 
 | Case | Error |
 |---|---|
-| connection refused, DNS failure, timeout, a body that fails mid-read | `Unavailable` |
-| status other than 2xx (including a redirect, which is not followed), or a 5xx | `Unavailable` |
-| `401` or `403` (the agent refused the question) | `Invalid` |
+| connection refused or DNS failure | `Unavailable`, cause `Connect` |
+| timeout (including packets a NetworkPolicy drops, which end as a timeout: the client limits the whole request) | `Unavailable`, cause `Timeout` |
+| a 5xx | `Unavailable`, cause `ServerError` |
+| any other non-2xx (including a redirect, which is not followed) | `Unavailable`, cause `Other` |
+| a body that fails mid-read | `Unavailable`, cause `Other` (`Timeout` if the request's time ran out) |
+| `401` or `403` (the agent refused the question) | `Refused { status }` |
 | a body longer than 4096 bytes, not JSON, no whole-number `busy`, a `nextDueAt` that is not an RFC 3339 string | `Invalid` |
+
+The cause is the closed `UnavailableCause`; the operator's `warn` for a failed poll logs it as `timeout`, `connect`,
+`status 5xx` or `other`.
 
 No proxy is used and no redirect is followed. The `Token` has no `Display` and prints nothing of itself in `Debug`; no error
 message holds the URL, the token or the body.

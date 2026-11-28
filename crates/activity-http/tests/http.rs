@@ -8,7 +8,7 @@ use std::time::Duration;
 
 use aap_activity_http::{HttpActivity, MAX_BODY, Token};
 use aap_ports::testkit::ActivityUnderTest;
-use aap_ports::{Activity, ActivityError, ActivitySource, RuntimeId};
+use aap_ports::{Activity, ActivityError, ActivitySource, RuntimeId, UnavailableCause};
 use axum::Router;
 use axum::extract::{Path, State};
 use axum::http::{HeaderMap, StatusCode};
@@ -151,24 +151,48 @@ async fn the_bearer_is_sent_and_no_token_means_no_header() {
     assert_eq!(h2.stub.lock().unwrap().bearers, vec![None]);
 }
 
+/// Neither the message of an error nor of anything under it holds a URL or the token.
+fn assert_says_no_url_and_no_token(err: &ActivityError, token: &str) {
+    let mut next: Option<&dyn std::error::Error> = Some(err);
+    while let Some(e) = next {
+        let message = e.to_string();
+        for secret in ["http://", "https://", token] {
+            assert!(!message.contains(secret), "{message}");
+        }
+        next = e.source();
+    }
+}
+
 #[tokio::test]
-async fn a_refusal_is_invalid_and_a_server_error_is_unavailable_and_neither_is_idle() {
-    let h = start(None, Duration::from_secs(5)).await;
-    for (code, unavailable) in [
-        (401, false),
-        (403, false),
-        (500, true),
-        (503, true),
-        (404, true),
-        (302, true),
+async fn a_401_and_a_403_are_refused_with_their_status() {
+    let h = start(Some("secret-value"), Duration::from_secs(5)).await;
+    for code in [401, 403] {
+        h.answer(&id(), code, r#"{"busy":0}"#);
+        let err = h.source.poll(&id()).await.unwrap_err();
+        assert!(
+            matches!(err, ActivityError::Refused { status } if status == code),
+            "{code}: {err:?}"
+        );
+        assert_says_no_url_and_no_token(&err, "secret-value");
+    }
+}
+
+#[tokio::test]
+async fn another_status_is_unavailable_by_cause_and_never_idle() {
+    let h = start(Some("secret-value"), Duration::from_secs(5)).await;
+    for (code, wanted) in [
+        (500, UnavailableCause::ServerError),
+        (503, UnavailableCause::ServerError),
+        (404, UnavailableCause::Other),
+        (302, UnavailableCause::Other),
     ] {
         h.answer(&id(), code, r#"{"busy":0}"#);
         let err = h.source.poll(&id()).await.unwrap_err();
-        assert_eq!(
-            matches!(err, ActivityError::Unavailable(_)),
-            unavailable,
-            "{code}"
+        assert!(
+            matches!(err, ActivityError::Unavailable { cause, .. } if cause == wanted),
+            "{code}: {err:?}"
         );
+        assert_says_no_url_and_no_token(&err, "secret-value");
     }
 }
 
@@ -235,17 +259,25 @@ async fn an_answer_that_is_too_long_is_refused() {
 }
 
 #[tokio::test]
-async fn nothing_listening_and_a_slow_agent_are_unavailable() {
+async fn nothing_listening_is_connect_and_a_slow_agent_is_timeout() {
     let closed = HttpActivity::with_resolver(
         |_| "http://127.0.0.1:9/internal/activity".into(),
         Duration::from_secs(1),
-        None,
+        Some(Token::new("secret-value").unwrap()),
     )
     .unwrap();
-    assert!(matches!(
-        closed.poll(&id()).await,
-        Err(ActivityError::Unavailable(_))
-    ));
+    let err = closed.poll(&id()).await.unwrap_err();
+    assert!(
+        matches!(
+            err,
+            ActivityError::Unavailable {
+                cause: UnavailableCause::Connect,
+                ..
+            }
+        ),
+        "{err:?}"
+    );
+    assert_says_no_url_and_no_token(&err, "secret-value");
 
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = listener.local_addr().unwrap();
@@ -259,13 +291,21 @@ async fn nothing_listening_and_a_slow_agent_are_unavailable() {
     let slow = HttpActivity::with_resolver(
         move |_| format!("http://{addr}/internal/activity"),
         Duration::from_millis(300),
-        None,
+        Some(Token::new("secret-value").unwrap()),
     )
     .unwrap();
-    assert!(matches!(
-        slow.poll(&id()).await,
-        Err(ActivityError::Unavailable(_))
-    ));
+    let err = slow.poll(&id()).await.unwrap_err();
+    assert!(
+        matches!(
+            err,
+            ActivityError::Unavailable {
+                cause: UnavailableCause::Timeout,
+                ..
+            }
+        ),
+        "{err:?}"
+    );
+    assert_says_no_url_and_no_token(&err, "secret-value");
 }
 
 #[test]
