@@ -55,10 +55,23 @@ function unclosedInDepth(src) {
 }
 let diagrams = 0, links = 0;
 const failures = [];
+// Every markdown file (relative path) to its relative link targets as absolute paths (for the pair rule).
+const linksOut = new Map();
+
+// The docs for people and the docs for agents live apart (AD-074): the dated records keep
+// their evidence as written, and the pages of stillMixed are mixed and named until split.
+const datedRecords = new Set(['docs/architecture/11-decisions.md', 'docs/architecture/README.md']);
+const stillMixed = new Set(['docs/architecture/10-control-plane-and-crds.md']);
+// Something like `crates/x/src/y.rs:190` or `docs/z.md:12`; fenced code blocks and inline
+// code spans are blanked before matching, so an example in code never counts.
+const pathLine = /[A-Za-z0-9_./-]+\.(?:rs|md|ya?ml|toml|json|tsx?|jsx?|mjs|cjs|sh|go|py|hcl|tpl|txt|lock|css|html?|sql|proto)(?::[0-9]+)+\b/g;
 
 for (const file of markdownFiles(root)) {
   const rel = path.relative(root, file);
+  const relPosix = rel.split(path.sep).join('/');
   const src = fs.readFileSync(file, 'utf8');
+  const outs = [];
+  linksOut.set(relPosix, outs);
 
   for (const line of unclosedInDepth(src)) failures.push(`${rel}:${line} unclosed ::: in-depth`);
 
@@ -68,19 +81,64 @@ for (const file of markdownFiles(root)) {
     catch (e) { failures.push(`${rel}:${lineOf(src, m.index)} mermaid: ${String(e.message).split('\n')[0]}`); }
   }
 
-  // Blank out fenced blocks and inline code spans (keeping line numbers) so
-  // example links inside code are not checked.
+  // Blank out fenced blocks, inline code spans and URLs (keeping line numbers) so an example
+  // inside code, or a path that is the tail of a URL, is not read as a `path:line`. A fence is
+  // three or more backticks or tildes, closed by at least as many of the same character and
+  // nothing after it.
   const blank = (code) => code.replace(/[^\n]/g, ' ');
-  const prose = src
-    .replace(/```[\s\S]*?```/g, blank)
-    .replace(/`[^`\n]+`/g, blank);
+  function blankCode(text) {
+    const lines = text.split('\n');
+    let fence = null;
+    for (let i = 0; i < lines.length; i++) {
+      const line = lines[i];
+      const m = /^\s*(`{3,}|~{3,})(.*)$/.exec(line);
+      if (fence) {
+        lines[i] = blank(line);
+        if (m && m[1][0] === fence.ch && m[1].length >= fence.len && m[2].trim() === '') fence = null;
+        continue;
+      }
+      if (m && !(m[1][0] === '`' && m[2].includes('`'))) {
+        fence = { ch: m[1][0], len: m[1].length };
+        lines[i] = blank(line);
+      }
+    }
+    return lines.join('\n');
+  }
+  const prose = blankCode(src)
+    .replace(/`[^`\n]+`/g, blank)
+    .replace(/\bhttps?:\/\/[^\s)>]+/g, blank);
   for (const m of prose.matchAll(/\]\(([^)\s]+)\)/g)) {
     const target = m[1].split('#')[0];
     if (!target || /^[a-z][a-z0-9+.-]*:/i.test(target)) continue; // anchors, http(s):, mailto:
     links++;
-    if (!fs.existsSync(path.resolve(path.dirname(file), decodeURI(target)))) {
+    const abs = path.resolve(path.dirname(file), decodeURI(target));
+    outs.push(abs);
+    if (!fs.existsSync(abs)) {
       failures.push(`${rel}:${lineOf(src, m.index)} broken link: ${m[1]}`);
     }
+  }
+
+  // No `path:line` in a page for people (AD-074); the dated records and the still-mixed pages are exempt.
+  if (relPosix.startsWith('docs/') && !datedRecords.has(relPosix) && !stillMixed.has(relPosix)) {
+    for (const m of prose.matchAll(pathLine)) {
+      failures.push(`${rel}:${lineOf(src, m.index)} path:line in a page for people: ${m[0]}`);
+    }
+  }
+}
+
+// A pair shares its relative path and links both ways (AD-074): the agent page of
+// `docs/x/y.md` is `.agents/docs/x/y.md`. An agent page with no counterpart is exempt.
+for (const [agentRel, outs] of linksOut) {
+  if (!agentRel.startsWith('.agents/docs/')) continue;
+  const peopleRel = agentRel.slice('.agents/'.length);
+  if (!linksOut.has(peopleRel)) continue;
+  const peopleAbs = path.resolve(root, peopleRel);
+  const agentAbs = path.resolve(root, agentRel);
+  if (!linksOut.get(peopleRel).includes(agentAbs)) {
+    failures.push(`${peopleRel}:1 pair: no link to its agent page (${agentRel})`);
+  }
+  if (!outs.includes(peopleAbs)) {
+    failures.push(`${agentRel}:1 pair: no link to the page for people (${peopleRel})`);
   }
 }
 

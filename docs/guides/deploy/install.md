@@ -118,7 +118,7 @@ The election, what a follower does, and how long a failover takes are on [Run tw
 
 ## What the chart refuses
 
-`_validate.tpl` stops a render that would deploy something other than what the values say. Four refusals on the values above, each run with `helm template`. Each prints `templates/servicemonitor.yaml:1:4` as its location. Ignore it: the checks live in `_validate.tpl`, which that template includes.
+`_validate.tpl` stops a render that would deploy something other than what the values say. Four refusals on the values above, each run with `helm template`. The checks live in `_validate.tpl`, which `templates/servicemonitor.yaml` includes, and each refusal prints that template's location, not the check's — the exact line it prints is in [the agent page](../../../.agents/docs/guides/deploy/install.md).
 
 | Change | The chart says |
 |---|---|

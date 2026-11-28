@@ -368,12 +368,50 @@ struct OperatorProc {
     registry: u16,
 }
 
-fn free_port() -> u16 {
-    std::net::TcpListener::bind("127.0.0.1:0")
-        .unwrap()
-        .local_addr()
-        .unwrap()
-        .port()
+/// Three ports no listener holds. All three are bound **before** any is released: two `bind(0)` calls in a row can be
+/// handed the same port, and the operator child then cannot bind one of its listeners and exits — a failure that has
+/// nothing to do with the operator (ANR-1358; the same mechanism as ANR-1065's `trace_env`). The registry binds
+/// `0.0.0.0`, so its port is reserved there too: one free on loopback can be taken on another interface.
+fn free_ports() -> (u16, u16, u16) {
+    let held: Vec<std::net::TcpListener> = ["127.0.0.1:0", "127.0.0.1:0", "0.0.0.0:0"]
+        .into_iter()
+        .map(|a| std::net::TcpListener::bind(a).unwrap())
+        .collect();
+    let at = |i: usize| held[i].local_addr().unwrap().port();
+    (at(0), at(1), at(2))
+}
+
+/// A suffix for a file name of this process, distinct per call: a port is no name, and two calls can be handed the same.
+fn unique() -> u64 {
+    static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+}
+
+/// The invariant the operator child depends on: it holds its listeners (three, with a registry token) at the same time,
+/// and if one cannot bind it exits. The guarantee is `free_ports`' construction — three listeners held before any is
+/// released — and this is the test over it, which runs without a cluster. On this kernel a sequential bind-and-drop
+/// returns a duplicate about once in 500 triples, so 256 iterations would see a regression about 1 run in 20 and 50 000
+/// see it practically always (ANR-1358, the review).
+#[test]
+fn the_three_ports_a_case_is_given_can_all_be_bound_at_once() {
+    for _ in 0..50_000 {
+        let (health, metrics, registry) = free_ports();
+        assert!(
+            health != metrics && metrics != registry && health != registry,
+            "{health} {metrics} {registry}"
+        );
+        // Each port on the address its server binds: the registry on `0.0.0.0`, the other two on loopback.
+        let _held: Vec<std::net::TcpListener> = [
+            ("127.0.0.1", health),
+            ("127.0.0.1", metrics),
+            ("0.0.0.0", registry),
+        ]
+        .into_iter()
+        .map(|(a, p)| {
+            std::net::TcpListener::bind((a, p)).unwrap_or_else(|e| panic!("binding {a}:{p}: {e}"))
+        })
+        .collect();
+    }
 }
 
 impl OperatorProc {
@@ -383,8 +421,8 @@ impl OperatorProc {
     /// `namespaces`: the ones it watches (`watch.namespaces`, K6b); the first is the primary.
     fn spawn(cluster: &Cluster, namespaces: &[&str], registry_token: Option<&str>) -> Self {
         let namespace = namespaces.first().copied().unwrap_or_default();
-        let log = std::env::temp_dir().join(format!("aap-e2e-{namespace}-{}.log", free_port()));
-        let (health, metrics, registry) = (free_port(), free_port(), free_port());
+        let log = std::env::temp_dir().join(format!("aap-e2e-{namespace}-{}.log", unique()));
+        let (health, metrics, registry) = free_ports();
         // The file `operator run` reads (ANR-962): the chart's, written here for this case.
         let mut config = format!(
             "version: 1\n\
@@ -406,7 +444,7 @@ impl OperatorProc {
             ));
         }
         let config_file =
-            std::env::temp_dir().join(format!("aap-e2e-{namespace}-{}.yaml", free_port()));
+            std::env::temp_dir().join(format!("aap-e2e-{namespace}-{}.yaml", unique()));
         std::fs::write(&config_file, config).unwrap();
         let child = Command::new(env!("CARGO_BIN_EXE_operator"))
             .arg("run")
