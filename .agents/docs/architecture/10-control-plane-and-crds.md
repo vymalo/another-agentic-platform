@@ -60,6 +60,14 @@ The adam-rs side is cited at revision `0391809`, the source of the coder image t
 - *Verified 2026-10-04*, kube-rs documentation: `kube` 4.0.0, `k8s-openapi` 0.28.0, `schemars` 1.
 - *Unverified*: CEL rules through `x_kube(validation = …)`; server-side-apply co-ownership of a CloudNativePG Cluster's `managed.roles`; Argo CD pruning of `volumeClaimTemplates` claims; netcup's Kubernetes version.
 
+- *Verified 2026-10-16*, CI run 38857024797 of `operator.yml`, job `runtime-kubernetes`, kindest/node v1.35.8: a pod running `sh -c "exit 1"` was `Terminated`, `Error`, exit code 1, restart count 5 after 240 s.
+- *Verified 2026-10-04*, revision `0391809`: the variable names and meanings are those of `bin/adam-coder/README.md` and `bin/adam-agent/README.md`.
+- *Verified 2026-11-14*: at adam-rs `4bc6742` (the revision of the parity goldens and of the vendored CRD, the same file as at `bec3e32`), K1 closes the listed differences with adam-rs's serde names, bounds and environment variables.
+- *Verified 2026-10-04*, `bin/adam-agent/README.md`, "Several agents, one database": adam keys a run by the agent's name, and several processes with the same name are replicas of one agent.
+- *Verified 2026-10-04*: another-agentic-system names the agent token `AGENT_REGISTRY_AGENT_TOKEN` (`orchestrator/crates/registry-platform/README.md`).
+- *Verified 2026-11-27*: the renders of both charts at `755872d` and with the markers are byte for byte the same, and the goldens pass with every version moved to 0.2.0.
+- *Verified 2026-11-27*: `--prefer-index=false` works with buildx v0.38.1 against a local registry only.
+
 ## §59b. The run pool: pods where work runs
 
 The design, with every decision and qualifier, is on [the page for people](../../../docs/architecture/10-control-plane-and-crds.md#59b-the-run-pool-pods-where-work-runs). The cluster facts that left it are below.
