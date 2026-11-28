@@ -1072,9 +1072,11 @@ SPIFFE id that is not one, a permission that is neither platform:agents.own nor 
 {{- if or (eq (int $w.port) (int $api.port)) (eq (int $w.port) (int $api.healthPort)) (eq (int $w.port) (int $api.metrics.port)) -}}
 {{- fail "api.workload.port must differ from api.port, api.healthPort and api.metrics.port: the workload listener is a port of its own" -}}
 {{- end -}}
-{{- with $w.maxLeafLifetimeSecs -}}
-{{- if not (and (include "aap.isWholeNumber" .) (ge (int .) 1) (le (int .) 31536000)) -}}
-{{- fail (printf "api.workload.maxLeafLifetimeSecs must be a whole number from 1 to 31536000, got %v" .) -}}
+{{- /* `with` would skip 0, "" and false, which are mistakes and not "off": only an absent key and a null are off. */ -}}
+{{- if and (hasKey $w "maxLeafLifetimeSecs") (not (kindIs "invalid" $w.maxLeafLifetimeSecs)) -}}
+{{- $v := $w.maxLeafLifetimeSecs -}}
+{{- if not (and (include "aap.isWholeNumber" $v) (ge (int $v) 1) (le (int $v) 31536000)) -}}
+{{- fail (printf "api.workload.maxLeafLifetimeSecs must be a whole number from 1 to 31536000, got %v" $v) -}}
 {{- end -}}
 {{- end -}}
 {{- range $b := list (list "handshakeTimeoutSecs" 60) (list "maxHandshakesPerIp" 1024) (list "maxConnections" 65536) -}}

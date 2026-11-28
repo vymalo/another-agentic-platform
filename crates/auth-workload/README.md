@@ -35,7 +35,9 @@ workloadClients:
       - platform:agents.read.owner
 ```
 
-In the API's file `workloadClients` is the **list** (with `workloadListener`, ANR-1011); the crate's `WorkloadClients { clients }` is the same list as a type.
+In the API's file `workloadClients` is the **list** (with `workloadListener`, ANR-1011); the crate's `WorkloadClients { clients, max_leaf_lifetime_secs }` is the same list as a type.
+
+**The lifetime is a warning, never a refusal** (ANR-1374). `max_leaf_lifetime_secs` (the API's `workloadListener.maxLeafLifetimeSecs`, absent: off) makes `authenticate` log **one** line per process — the lifetime and the maximum, never the identity — the first time an **accepted** leaf lives longer (`notAfter - notBefore`). A workload certificate should live about 24 h: until the CRL lands (ANR-1373), its lifetime is the whole revocation story. It is checked after every refusal, so a leaf the listener turns away cannot spend the one warning.
 
 `WorkloadClients` denies unknown fields. An empty identity, an identity named twice and a permission that
 is outside those two is refused by `WorkloadAuth::new`, which also refuses a bundle that is not

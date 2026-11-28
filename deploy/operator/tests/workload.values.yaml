@@ -25,7 +25,7 @@ api:
     handshakeTimeoutSecs: 3
     maxHandshakesPerIp: 4
     maxConnections: 100
-    maxLeafLifetimeSecs: 86400
+    maxLeafLifetimeSecs: 90000
     clients:
       - spiffeId: spiffe://another/ns/another-agents/sa/orchestrator
         permissions: [platform:agents.own, platform:agents.read.owner]

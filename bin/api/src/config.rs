@@ -909,6 +909,52 @@ workloadClients:
         assert_eq!(w.clients.table().unwrap().len(), 1);
     }
 
+    /// ANR-1374: the lifetime warning is a setting of the listener, off when absent, carried into what the authenticator reads, and
+    /// refused outside 1..=31536000 (a maximum of 0 would warn about every certificate, so it is a mistake, not "off").
+    #[test]
+    fn the_lifetime_warning_is_the_listeners_and_off_unless_named() {
+        let off = ApiConfig::parse(&serde_yaml::to_string(&with_workload()).unwrap())
+            .unwrap()
+            .validate()
+            .unwrap()
+            .workload
+            .unwrap();
+        assert!(off.clients.max_leaf_lifetime_secs.is_none(), "absent: off");
+
+        for (secs, ok) in [
+            (1_i64, true),
+            (86_400, true),
+            (31_536_000, true),
+            (0, false),
+            (-1, false),
+            (31_536_001, false),
+        ] {
+            let mut v = with_workload();
+            v["workloadListener"]["maxLeafLifetimeSecs"] = secs.into();
+            let parsed =
+                ApiConfig::parse(&serde_yaml::to_string(&v).unwrap()).and_then(ApiConfig::validate);
+            assert_eq!(parsed.is_ok(), ok, "{secs}");
+            if ok {
+                let w = parsed.unwrap().workload.unwrap();
+                assert_eq!(w.clients.max_leaf_lifetime_secs, Some(secs));
+            } else {
+                let error = format!("{:#}", parsed.unwrap_err());
+                assert!(error.contains("maxLeafLifetimeSecs"), "{error}");
+            }
+        }
+
+        // A null is absent, as it is everywhere in this file.
+        let mut v = with_workload();
+        v["workloadListener"]["maxLeafLifetimeSecs"] = serde_yaml::Value::Null;
+        let w = ApiConfig::parse(&serde_yaml::to_string(&v).unwrap())
+            .unwrap()
+            .validate()
+            .unwrap()
+            .workload
+            .unwrap();
+        assert!(w.clients.max_leaf_lifetime_secs.is_none(), "null: off");
+    }
+
     #[test]
     fn a_workload_setting_that_is_wrong_stops_the_api_naming_it() {
         type Case = (&'static str, fn(&mut serde_yaml::Value), &'static str);

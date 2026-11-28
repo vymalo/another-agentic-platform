@@ -243,14 +243,6 @@ impl ClientAuthenticator for WorkloadAuth {
         // 1. It parses.
         let (_, parsed) =
             X509Certificate::from_der(der).map_err(|_| invalid(InvalidCertificate::Malformed))?;
-        // A workload certificate should be short-lived: its lifetime is the revocation story (ANR-1374, AD-068's amendment). A longer
-        // one is warned about **once**, with its length and never the identity, and is still accepted: the lifetime is the issuer's, and
-        // refusing would break a working deployment whose PKI is not this one's.
-        if let Some(max) = self.max_leaf_lifetime_secs
-            && too_long(leaf_lifetime_secs(&parsed), max)
-        {
-            warn_once(leaf_lifetime_secs(&parsed), max);
-        }
         let leaf = CertificateDer::from(der);
         let end_entity = webpki::EndEntityCert::try_from(&leaf)
             .map_err(|_| invalid(InvalidCertificate::Malformed))?;
@@ -315,6 +307,16 @@ impl ClientAuthenticator for WorkloadAuth {
             .identities
             .get(identity)
             .ok_or_else(|| invalid(InvalidCertificate::UnknownIdentity))?;
+        // A workload certificate should be short-lived: its lifetime is the revocation story (ANR-1374, AD-068's amendment). A longer
+        // one is warned about **once**, with its length and never the identity, and is still accepted: the lifetime is the issuer's, and
+        // refusing would break a working deployment whose PKI is not this one's. It is checked here, after every refusal, so a leaf the
+        // listener turns away cannot spend the one warning on a certificate nobody is using.
+        if let Some(max) = self.max_leaf_lifetime_secs {
+            let lifetime = leaf_lifetime_secs(&parsed);
+            if too_long(lifetime, max) {
+                warn_once(lifetime, max);
+            }
+        }
         Ok(Principal::new(identity, permissions.iter().cloned()))
     }
 }
