@@ -290,7 +290,7 @@ fn schemas() -> Value {
             "properties": {
                 "type": { "type": "string", "description": "AgentService: ConfigResolved, StoreReady, RuntimeReady, Listed, Ready. Model and tool server: Accepted, InUse, AgentsReady." },
                 "status": { "type": "string", "enum": ["True", "False", "Unknown"] },
-                "reason": { "type": "string" },
+                "reason": { "type": "string", "description": "For `ConfigResolved`: `Resolved` (true), `ConfigNotFound` (false: the named AgentConfig does not exist), `ConfigInvalid` (false: the config failed validation — waiting will not fix it), `ReferentMissing` (false: a `ModelEndpoint` or `ToolProvider` the config names is not there yet, or its kind is not installed — the operator retries on the pending timer and the condition clears by itself). The first false condition is the one to show." },
                 "message": { "type": "string" },
                 "lastTransitionTime": { "type": "string", "format": "date-time" },
                 "observedGeneration": { "type": "integer" }

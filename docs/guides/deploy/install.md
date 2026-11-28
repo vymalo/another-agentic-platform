@@ -26,7 +26,7 @@ sequenceDiagram
   Op-->>API: caches synced, /readyz answers
 ```
 
-Install the CRDs first. An operator expects all four kinds (`agentservices`, `agentconfigs`, `modelendpoints`, `toolproviders`). Without the last two it still runs, but an agent whose config names a shared object stays `ConfigInvalid` until they exist ([Upgrading](../../../deploy/operator/README.md#upgrading)).
+Install the CRDs first. An operator expects all four kinds (`agentservices`, `agentconfigs`, `modelendpoints`, `toolproviders`). Without the last two it still runs, but an agent whose config names a shared object stays `ReferentMissing` (the kind is not installed, the operator retries on the pending timer) until they exist ([Upgrading](../../../deploy/operator/README.md#upgrading)).
 
 ```sh
 helm template aap-operator-crds deploy/operator-crds | kubectl apply --server-side -f -

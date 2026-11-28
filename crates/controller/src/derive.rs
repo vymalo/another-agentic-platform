@@ -26,11 +26,13 @@ pub enum ConfigOutcome {
         message: String,
     },
     /// The config references an object that was not there when the pass read it (a `ModelEndpoint` or a
-    /// `ToolProvider`, or the whole kind: its CRD is not installed). The condition is `Invalid`'s, word for
-    /// word; the difference is the timer. The objects the config names are applied by a person or a tool,
-    /// each by its own request, so the service can be read between two of them, and the watch that would
-    /// bring the second is the one thing a lost signal or a kind that was not served yet leaves out:
-    /// such a service is looked at again soon, not at the settled period.
+    /// `ToolProvider`, or the whole kind: its CRD is not installed). The condition has its **own** reason,
+    /// `ReferentMissing`, distinct from `ConfigInvalid`, so a client can tell "wait — the object will appear"
+    /// from "refused — the config is wrong"; the message is the same words as `Invalid`'s. The objects the
+    /// config names are applied by a person or a tool, each by its own request, so the service can be read
+    /// between two of them, and the watch that would bring the second is the one thing a lost signal or a
+    /// kind that was not served yet leaves out: such a service is looked at again soon, not at the settled
+    /// period.
     ReferentMissing {
         /// What is missing, for a person (the same words as `Invalid`'s).
         message: String,
@@ -217,8 +219,11 @@ fn config_condition(config: &ConfigOutcome) -> Draft {
             reason::CONFIG_NOT_FOUND,
             format!("the AgentConfig {name:?} does not exist in this namespace"),
         ),
-        ConfigOutcome::Invalid { message } | ConfigOutcome::ReferentMissing { message } => {
+        ConfigOutcome::Invalid { message } => {
             Draft::new(Truth::False, reason::CONFIG_INVALID, message.clone())
+        }
+        ConfigOutcome::ReferentMissing { message } => {
+            Draft::new(Truth::False, reason::REFERENT_MISSING, message.clone())
         }
     }
 }

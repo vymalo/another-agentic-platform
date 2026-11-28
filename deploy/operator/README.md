@@ -62,7 +62,7 @@ walks a cluster from nothing, and [Install the CRDs and the operator](../../docs
 
 **Install or upgrade the CRDs first, then the operator.** An operator from slice D2 onward expects all four CRDs (`agentservices`,
 `agentconfigs`, `modelendpoints`, `toolproviders`): without the last two it no longer stalls (it watches those kinds apart, so a
-list that fails holds no other agent back), but an agent whose config references a shared object stays `ConfigInvalid`, saying the
+list that fails holds no other agent back), but an agent whose config references a shared object stays `ReferentMissing`, saying the
 kind is not installed, until they are there. Never run an operator older than D1 against CRDs that store a reference
 (`endpointRef`, `providerRef`): it types `baseUrl` as required and cannot decode such an `AgentConfig`. The same rule is in
 [`deploy/operator-crds`](../operator-crds/README.md#upgrading), with the reasons. The two Argo CD Applications sync apart:

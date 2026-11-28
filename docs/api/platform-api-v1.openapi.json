@@ -1356,6 +1356,7 @@
             "type": "integer"
           },
           "reason": {
+            "description": "For `ConfigResolved`: `Resolved` (true), `ConfigNotFound` (false: the named AgentConfig does not exist), `ConfigInvalid` (false: the config failed validation — waiting will not fix it), `ReferentMissing` (false: a `ModelEndpoint` or `ToolProvider` the config names is not there yet, or its kind is not installed — the operator retries on the pending timer and the condition clears by itself). The first false condition is the one to show.",
             "type": "string"
           },
           "status": {

@@ -836,22 +836,35 @@ fn a_referent_maps_to_the_services_whose_config_references_it_and_to_no_other() 
 }
 
 #[test]
-fn a_missing_referent_is_the_condition_of_an_invalid_config_with_its_words() {
-    // The difference between the two outcomes is the timer; for a person the condition is the same.
-    let status = |config| {
-        let mut o = observed();
-        o.config = config;
-        derive(&o, &[], &at("2026-10-05T10:00:00Z"))
+fn an_invalid_config_is_configresolved_false_reason_configinvalid_with_its_message() {
+    // A wrong config is final: waiting will not fix it.
+    let mut o = observed();
+    o.config = ConfigOutcome::Invalid {
+        message: "ModelEndpoint \"gateway\" was not found".into(),
     };
-    let invalid = status(ConfigOutcome::Invalid {
-        message: "ModelEndpoint \"gateway\" was not found".into(),
-    });
-    let missing = status(ConfigOutcome::ReferentMissing {
-        message: "ModelEndpoint \"gateway\" was not found".into(),
-    });
-    assert_eq!(missing, invalid);
-    assert_eq!(missing.conditions[0].reason, "ConfigInvalid");
-    assert_eq!(missing.conditions[0].status, "False");
+    let status = derive(&o, &[], &at("2026-10-05T10:00:00Z"));
+    let c = &status.conditions[0];
+    assert_eq!(c.type_, "ConfigResolved");
+    assert_eq!(c.status, "False");
+    assert_eq!(c.reason, "ConfigInvalid");
+    assert_eq!(c.message, "ModelEndpoint \"gateway\" was not found");
+}
+
+#[test]
+fn a_missing_referent_is_configresolved_false_reason_referentmissing_with_the_same_words() {
+    // The message is the same as `Invalid`'s — the difference is the reason (and the timer):
+    // a client can tell "wait — the object will appear" from "refused — the config is wrong".
+    let message = "ModelEndpoint \"gateway\" was not found".to_owned();
+    let mut o = observed();
+    o.config = ConfigOutcome::ReferentMissing {
+        message: message.clone(),
+    };
+    let status = derive(&o, &[], &at("2026-10-05T10:00:00Z"));
+    let c = &status.conditions[0];
+    assert_eq!(c.type_, "ConfigResolved");
+    assert_eq!(c.status, "False");
+    assert_eq!(c.reason, "ReferentMissing");
+    assert_eq!(c.message, message, "the words are unchanged");
 }
 
 #[test]

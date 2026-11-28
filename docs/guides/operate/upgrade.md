@@ -124,7 +124,7 @@ Fix the cause and run `helm upgrade` again.
 
 An operator from slice D2 on expects all four kinds. Reasons the chart's README gives:
 
-- **A missing kind.** Without `modelendpoints` and `toolproviders`, the operator still runs, but an agent whose config names a shared object stays `ConfigInvalid`, saying the kind is not installed, until they exist.
+- **A missing kind.** Without `modelendpoints` and `toolproviders`, the operator still runs, but an agent whose config names a shared object stays `ReferentMissing`, saying the kind is not installed, until they exist. The operator retries on the pending timer (15 s); no human action is needed for the condition to clear.
 - **A missing status subresource.** Since K2 the operator writes the `status` of `modelendpoints` and `toolproviders`. Only a CRDs chart from K2 on gives them that subresource. With an older one, the API server answers `404` to every such write. The operator logs a warning that says to install the CRDs chart, retries with the back-off of an internal error (30 s, doubling, 10 minutes at most: `backoff` in `crates/controller/src/context.rs`), and reconciles every agent as before. Nothing is lost but the status, until the chart is there.
 - **The other order was withdrawn.** The CRDs README says an older operator is safe over newer CRDs only while nothing stored a reference, and it warns never to run an operator older than D1 against CRDs that store one (`endpointRef`, `providerRef`): it cannot read such an `AgentConfig`. So if you roll the operator back, check that first.
 

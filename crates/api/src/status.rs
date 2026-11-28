@@ -270,6 +270,9 @@ pub mod reason {
     pub const CONFIG_NOT_FOUND: &str = "ConfigNotFound";
     /// `ConfigResolved` false: the config failed validation.
     pub const CONFIG_INVALID: &str = "ConfigInvalid";
+    /// `ConfigResolved` false: an object the config names (`ModelEndpoint` or `ToolProvider`) is not there yet, or its kind is not installed.
+    /// The operator retries on the pending timer and the condition clears by itself; `ConfigInvalid` is the reason a config that is really invalid (waiting will not fix it) keeps.
+    pub const REFERENT_MISSING: &str = "ReferentMissing";
     /// `StoreReady` true: a Secret is referenced.
     pub const SECRET_REFERENCED: &str = "SecretReferenced";
     /// `StoreReady` true: the CloudNativePG cluster is ready.

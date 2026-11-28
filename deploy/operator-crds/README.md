@@ -38,7 +38,7 @@ cp deploy/crds/agents.vymalo.com.yaml deploy/operator-crds/files/agents.vymalo.c
 
 **Install or upgrade the CRDs first, then the operator.** An operator from slice D2 onward expects all four CRDs (`agentservices`,
 `agentconfigs`, `modelendpoints`, `toolproviders`): without the last two it no longer stalls (it watches those kinds apart, so a
-list that fails holds no other agent back), but an agent whose config references a shared object stays `ConfigInvalid`, saying the
+list that fails holds no other agent back), but an agent whose config references a shared object stays `ReferentMissing`, saying the
 kind is not installed, until they are there. Never run an operator older than D1 against CRDs that store a reference
 (`endpointRef`, `providerRef`): it types `baseUrl` as required and cannot decode such an `AgentConfig`. The other order was the
 guidance of D1, when an operator read nothing new and the CRDs were the risk; for a D2 operator it is the one that leaves agents
