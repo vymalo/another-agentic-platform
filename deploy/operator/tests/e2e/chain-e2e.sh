@@ -589,13 +589,14 @@ ok "the operator and the API are Ready (the API's /readyz: the issuer's keys fet
 [ "$(jp deployment/aap-operator '{.spec.template.spec.volumes[*].secret.secretName}')" = "$registry_secret" ] \
   || die "the operator does not mount the registry's token from $registry_secret: $(jp deployment/aap-operator '{.spec.template.spec.volumes[*].secret.secretName}')"
 ok "the operator serves its registry (Service aap-operator-registry on 8080) with the token of $registry_secret"
-# ANR-962: the operator's traces are the file's telemetry.otlp.endpoint (the ConfigMap), not a variable; the API's are still variables.
+# ANR-962 and ANR-970: both traces are the file's telemetry.otlp.endpoint (each ConfigMap), not a variable.
 op_file=$(operator_file aap-operator) || die "the operator's file cannot be read"
 [ "$(printf '%s\n' "$op_file" | grep -Fxc "    endpoint: \"http://$collector.$ns.svc:4318/v1/traces\"")" = 1 ] \
   || die "the operator's file does not send its traces to the collector"
-[ "$(jp "deployment/$api_name" '{.spec.template.spec.containers[0].env[?(@.name=="OTEL_EXPORTER_OTLP_TRACES_ENDPOINT")].value}')" = "http://$collector.$ns.svc:4318/v1/traces" ] \
-  || die "the API does not send its traces to the collector"
-ok "the operator and the API are told to send their traces to the collector (otel.* and api.otel.*)"
+api_file=$(operator_file "$api_name") || die "the API's file cannot be read"
+[ "$(printf '%s\n' "$api_file" | grep -Fxc "        endpoint: http://$collector.$ns.svc:4318/v1/traces")" = 1 ] \
+  || die "the API's file does not send its traces to the collector"
+ok "the operator and the API are told to send their traces to the collector (otel.* and api.otel.*, both in their files)"
 
 # The orchestrator's configuration, rendered here because the issuer's address is known only now. It names the operator's registry as its
 # one source of agents (`agents.file` is not needed when a registry is), reads both tokens as files, and has two roles that may read and use

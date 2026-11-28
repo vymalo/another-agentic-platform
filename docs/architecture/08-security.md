@@ -177,7 +177,7 @@ sharedWith: []                     # later: organisations
 | `bearer` | The token | The token | `Authorization: Bearer <token>` |
 | `none` | Nothing | No secret (the record only) | No credential |
 
-**OAuth 2 follows the MCP authorization specification's current revision, *verified 2026-10-06*** (<https://modelcontextprotocol.io/specification/latest/basic/authorization>, which resolved to the revision `2026-07-28`; its security page at the same revision). What the broker must do as the OAuth client:
+**OAuth 2 follows the MCP authorization specification's current revision** (<https://modelcontextprotocol.io/specification/latest/basic/authorization>, which resolved to the revision `2026-07-28`; its security page at the same revision). What the broker must do as the OAuth client:
 
 - find the authorization server from the MCP server's **Protected Resource Metadata** (RFC 9728), then its metadata by **RFC 8414 or OpenID Connect Discovery** (a client must support both);
 - get a client id by, in the spec's order of preference, **Client ID Metadata Documents**, pre-registration, or **Dynamic Client Registration** (the spec marks DCR deprecated, kept for servers without the first). The broker therefore serves a metadata document at a stable HTTPS URL;
@@ -194,7 +194,7 @@ sharedWith: []                     # later: organisations
 - a user server's tools are namespaced, so they can **never shadow** an agent's own tool; a limit on servers per person and on tools per server;
 - a user server can reference **nothing of the deployment**: no environment variable, no profile field, no token of the person.
 
-**How this mimics LibreChat** (*verified 2026-10-06*, <https://www.librechat.ai/docs/features/mcp>, read by a fetch that summarises the page, and the search listing of <https://www.librechat.ai/docs/configuration/librechat_yaml/object_structure/mcp_servers>):
+**How this mimics LibreChat** (<https://www.librechat.ai/docs/features/mcp> and <https://www.librechat.ai/docs/configuration/librechat_yaml/object_structure/mcp_servers>):
 
 | LibreChat | Here |
 |---|---|
@@ -204,23 +204,23 @@ sharedWith: []                     # later: organisations
 | **UI-created servers can only resolve `customUserVars` placeholders**; environment variables, profile fields and OIDC tokens are blocked | Adopted whole (the last rule above) |
 | Tokens and keys stored encrypted per user (the page says so; the cipher is not stated) | Encrypted per user and per connection, in the vault |
 
-Where it differs: LibreChat connects from its own server. Here the call goes through the orchestrator's relay, which is an open question (§93), because the system already has a mechanism for tools a person attaches to a chat: [`thread-tools/v1`](https://github.com/vymalo/another-agentic-system/blob/main/docs/api/thread-tools-v1.md) (*verified 2026-10-06*, read on `origin/main`): the orchestrator holds each attached server's credentials, the agent gets one MCP endpoint per thread and **no tool server's credential ever travels in an A2A message** or reaches the event log. A user's server is such a server whose credential comes from the broker per call, so **the agent never holds it**.
+Where it differs: LibreChat connects from its own server. Here the call goes through the orchestrator's relay, which is an open question (§93), because the system already has a mechanism for tools a person attaches to a chat: [`thread-tools/v1`](https://github.com/vymalo/another-agentic-system/blob/main/docs/api/thread-tools-v1.md): the orchestrator holds each attached server's credentials, the agent gets one MCP endpoint per thread and **no tool server's credential ever travels in an A2A message** or reaches the event log. A user's server is such a server whose credential comes from the broker per call, so **the agent never holds it**.
 
 ### Code-host connections (AD-041)
 
-They feed adam-rs's `CodeHost` (`crates/adam-workspace/src/code_host.rs`; open and find a pull request, comment, create a repository; *verified 2026-10-06* that GitHub is the only implementation and that the trait says "GitHub today; the trait leaves room for others") and its `GitCredentials`.
+They feed adam-rs's `CodeHost` (`crates/adam-workspace/src/code_host.rs`; open and find a pull request, comment, create a repository) and its `GitCredentials`; GitHub is the only implementation today ("GitHub today; the trait leaves room for others").
 
 | | GitHub | GitLab | Bitbucket |
 |---|---|---|---|
-| Connection | **An App the user installs** (the platform's own GitHub App; the user picks the account or organisation and repositories). The broker records the installation id | OAuth 2, authorization code with PKCE (`S256`) (*verified 2026-10-06*, <https://docs.gitlab.com/api/oauth2/>) | OAuth 2, authorization code (*verified 2026-10-06*, <https://support.atlassian.com/bitbucket-cloud/docs/use-oauth-on-bitbucket-cloud/>); PKCE is **not mentioned** on that page (*unverified*) |
+| Connection | **An App the user installs** (the platform's own GitHub App; the user picks the account or organisation and repositories). The broker records the installation id | OAuth 2, authorization code with PKCE (`S256`) (<https://docs.gitlab.com/api/oauth2/>) | OAuth 2, authorization code (<https://support.atlassian.com/bitbucket-cloud/docs/use-oauth-on-bitbucket-cloud/>); PKCE is **not mentioned** on that page |
 | What the broker holds | The App's private key **(a platform secret, only here)** and the installation id | A refresh token | A refresh token and the OAuth consumer's secret |
-| Token handed out | An **installation access token**, which can be restricted to named `repositories` and `permissions` in the request that creates it, and **expires after one hour** (*verified 2026-10-06*, <https://docs.github.com/en/rest/apps/apps#create-an-installation-access-token-for-an-app>) | The user's access token: **2 hours**; a refresh **invalidates the old access and refresh tokens** (*verified 2026-10-06*, same page) | The user's access token: **2 hours**; the refresh grant exists (*verified 2026-10-06*, same page) |
-| Scope | **Per repository and per permission, by the token** | OAuth scopes, **not per repository** (*unverified*: `read_repository`, `write_repository`, `api`) | OAuth scopes, **not per repository** (*unverified*) |
-| Early revoke of one grant | *Unverified*: `DELETE /installation/token` | *Unverified*: the revocation endpoint | *Unverified* |
+| Token handed out | An **installation access token**, which can be restricted to named `repositories` and `permissions` in the request that creates it, and **expires after one hour** (<https://docs.github.com/en/rest/apps/apps#create-an-installation-access-token-for-an-app>) | The user's access token: **2 hours**; a refresh **invalidates the old access and refresh tokens** (same page) | The user's access token: **2 hours**; the refresh grant exists (same page) |
+| Scope | **Per repository and per permission, by the token** | OAuth scopes, **not per repository** (not proven: `read_repository`, `write_repository`, `api`) | OAuth scopes, **not per repository** |
+| Early revoke of one grant | not proven: `DELETE /installation/token` | not proven: the revocation endpoint | not proven |
 
 **Consequence, stated and not hidden:** a token cut to one repository is a GitHub property only. For GitLab and Bitbucket the broker enforces "this lease's repositories" **by policy** (it refuses a grant for a repository the lease does not name), but the token it hands over can reach everything the user authorised. So **who holds it matters**: only the coder, never a run pod, and a push is the coder's (P-015).
 
-The GitHub setup (the installation's Setup URL redirects to the broker with the installation id, and a user-to-server sign-in proves the installer can see that installation) is *unverified*: the GitHub page read on 2026-10-06 did not cover it, and it is proved on a throwaway App before it is built.
+The GitHub setup (the installation's Setup URL redirects to the broker with the installation id, and a user-to-server sign-in proves the installer can see that installation) is not proven: the GitHub page read on 2026-10-06 did not cover it, and it is proved on a throwaway App before it is built.
 
 **What adam-rs gains:** implementations of `CodeHost` for GitLab (merge requests) and Bitbucket (pull requests) and a `GitCredentials` backed by the broker, each in its own crate and chosen by configuration (AD-020); how a merge request is named in `PullRequest` is adam's to decide.
 
@@ -300,7 +300,7 @@ sequenceDiagram
     W-->>U: connected
 ```
 
-GitHub differs in the first half only: the person is sent to the App's installation page and returns with an installation id (*unverified*, above); nothing is exchanged for a refresh token, and the broker keeps the installation id (metadata) and, as a platform secret, the App key. `api_key` and `bearer` have no redirect: the person's value goes to `begin` over the web's session and straight to the vault.
+GitHub differs in the first half only: the person is sent to the App's installation page and returns with an installation id (not proven, above); nothing is exchanged for a refresh token, and the broker keeps the installation id (metadata) and, as a platform secret, the App key. `api_key` and `bearer` have no redirect: the person's value goes to `begin` over the web's session and straight to the vault.
 
 ```mermaid
 stateDiagram-v2
@@ -356,7 +356,7 @@ A grant is asked **per request** and held in memory for its use. The broker does
 
 1. the connection becomes `Revoked`: **no further grant**, effective at once (the broker checks before it mints);
 2. the refresh token, key or installation id is **deleted from the vault**; for an App installation the person also removes the App on the host, and the broker says so;
-3. where the provider has a revocation endpoint the broker calls it, best effort (*unverified*, table above);
+3. where the provider has a revocation endpoint the broker calls it, best effort (not proven, table above);
 4. the grants it issued and have not expired are marked revoked in its ledger, and the orchestrator and the coder are told, so an attached tool server is detached and a lease loses the repository.
 
 What it cannot do: **a provider token already handed out lives to its own expiry**, one hour for GitHub's and two for GitLab's and Bitbucket's (above), unless the provider revokes it. That bounds the damage, and is why a grant is asked per request and not held.
@@ -386,18 +386,17 @@ What it cannot do: **a provider token already handed out lives to its own expiry
 | New dependency | A server to run and unseal | A KMS (cloud or self-hosted) | None |
 | Audit | Built in | Ours | CloudTrail |
 
-*Unverified* throughout (limits, prices, and the exact check-and-set of each): the choice is the owner's, §93.
+Not proven throughout (limits, prices, and the exact check-and-set of each): the choice is the owner's, §93.
 
 ### Tenancy
 
 - **Ownership is the principal's.** A connection belongs to one `Principal`. `sharedWith: [org]` is reserved; sharing means a grant check on the caller's membership, and which membership source (Keycloak groups, §52) is open.
-- A grant request carries the **run token**, so the broker answers only for the run's owner. The system's thread token carries `{thread, job, agent, caller}` today and has no `owner`; adding it is an additive change on its side (*unverified* how its audience extends).
+- A grant request carries the **run token**, so the broker answers only for the run's owner. The system's thread token carries `{thread, job, agent, caller}` today and has no `owner`; adding it is an additive change on its side (not proven how its audience extends).
 - **Pods are never shared across owners** (§59b), and the lease carries the same `owner`, so the identity that picks a pod is the one that picks a connection.
 
 ### Facts checked
 
-- *Verified 2026-10-06:* the MCP authorization specification (`latest`, revision `2026-07-28`) and its security considerations; LibreChat's MCP page; GitHub's installation-token page; GitLab's OAuth page; Atlassian's Bitbucket OAuth page; the user-namespaces page (for §59b); `thread-tools/v1` and `CodeHost` on the `origin/main` of their repositories.
-- *Unverified:* PKCE on Bitbucket; the OAuth scope names and the lack of per-repository scope on GitLab and Bitbucket; every early-revocation endpoint; GitHub's Setup URL flow; each vault backend's limits.
+The verification state of every claim of §39a — the date and source each was checked against, and each open one — is in [the agent page](../../.agents/docs/architecture/08-security.md#39a-connections-user-mcp-servers-and-the-credential-broker).
 
 ---
 
@@ -536,7 +535,7 @@ resource.project = payments
 
 > **Decision (2026-10-05, AD-032):** for the admin dashboard (§60a), permissions are **Keycloak client roles** of the client `another-agentic`, and human-facing roles are **composite roles** that bundle them; the Platform API checks individual permissions, never a role name. v0 names, proposed and not final: `platform:agents.read`, `platform:agents.write`, `platform:models.write`, `platform:toolproviders.write`, `platform:secrets.pick` and `agent.use:<agent-name>`. `agent.configure` above stays an example of the target model; v0 replaces it with the finer set.
 
-> **Decision (2026-10-06, AD-044):** **every client is a public OAuth client with PKCE**, per RFC 8252 (OAuth 2.0 for Native Apps), with **one Keycloak public client per platform**. Web: redirect. Desktop (Tauri): the system browser and a loopback redirect `http://127.0.0.1:<port>` (for example tauri-plugin-oauth, <https://www.lib.rs/crates/tauri-plugin-oauth>, maintenance *unverified*). Mobile: an in-app browser tab (ASWebAuthenticationSession or Custom Tabs, never an embedded webview) with an app-claimed https link or a custom scheme. Tokens live in the OS keychain or keystore. The clients call the orchestrator and the Platform API directly with the bearer JWT (§60a, *Clients without a web server*). The details are another-agentic-system's ADR 0047, *to be added*, in <https://github.com/vymalo/another-agentic-system/blob/main/docs/decisions/>.
+> **Decision (2026-10-06, AD-044):** **every client is a public OAuth client with PKCE**, per RFC 8252 (OAuth 2.0 for Native Apps), with **one Keycloak public client per platform**. Web: redirect. Desktop (Tauri): the system browser and a loopback redirect `http://127.0.0.1:<port>` (for example tauri-plugin-oauth, <https://www.lib.rs/crates/tauri-plugin-oauth>, maintenance not proven). Mobile: an in-app browser tab (ASWebAuthenticationSession or Custom Tabs, never an embedded webview) with an app-claimed https link or a custom scheme. Tokens live in the OS keychain or keystore. The clients call the orchestrator and the Platform API directly with the bearer JWT (§60a, *Clients without a web server*). The details are another-agentic-system's ADR 0047, *to be added*, in <https://github.com/vymalo/another-agentic-system/blob/main/docs/decisions/>.
 
 Human authorization belongs to the application control plane.
 
@@ -704,7 +703,7 @@ SLSA provenance
 
 A revision should record the exact runtime image digest.
 
-*Amended 2026-11-27 ([AD-070](11-decisions.md#ad-070--releases-release-please-cuts-vxyz-the-tested-sha-7-images-are-copied-by-digest-and-the-charts-are-published-with-the-releases-pins)):* the platform's own artifacts. A release `vX.Y.Z` publishes the operator and Platform API images as the tested `sha-<7>` digests copied to `X.Y.Z` and `X.Y` (never `latest`), each with a cosign keyless signature, an SPDX SBOM and a SLSA provenance attestation, and both charts as signed OCI artifacts whose packaged values pin the images by tag and digest. The provenance of an image is the release run's, not its build's: BuildKit's attestations exist only for a build, and the release copies the image that passed the end-to-ends instead of building another ([§59a *Releases*](10-control-plane-and-crds.md#releases-ad-070)). *Unverified* until the first tag runs it.
+*Amended 2026-11-27 ([AD-070](11-decisions.md#ad-070--releases-release-please-cuts-vxyz-the-tested-sha-7-images-are-copied-by-digest-and-the-charts-are-published-with-the-releases-pins)):* the platform's own artifacts. A release `vX.Y.Z` publishes the operator and Platform API images as the tested `sha-<7>` digests copied to `X.Y.Z` and `X.Y` (never `latest`), each with a cosign keyless signature, an SPDX SBOM and a SLSA provenance attestation, and both charts as signed OCI artifacts whose packaged values pin the images by tag and digest. The provenance of an image is the release run's, not its build's: BuildKit's attestations exist only for a build, and the release copies the image that passed the end-to-ends instead of building another ([§59a *Releases*](10-control-plane-and-crds.md#releases-ad-070)). Not proven until the first tag runs it.
 
 ---
 

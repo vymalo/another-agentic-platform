@@ -637,14 +637,20 @@ impl RunPodSettings {
             let _ = value;
         }
         for (i, t) in self.tolerations.iter().enumerate() {
+            if let Err(why) = only_known_toleration(t, &format!("tolerations[{i}]")) {
+                bad(why);
+            }
             if serde_json::from_value::<Toleration>(t.clone()).is_err() {
                 bad(format!("tolerations[{i}]: not a Kubernetes toleration"));
             }
         }
-        if let Some(a) = self.node_affinity_value()
-            && serde_json::from_value::<NodeAffinity>(a.clone()).is_err()
-        {
-            bad("nodeAffinity: not a Kubernetes nodeAffinity".into());
+        if let Some(a) = self.node_affinity_value() {
+            if let Err(why) = only_known_node_affinity(a, "nodeAffinity") {
+                bad(why);
+            }
+            if serde_json::from_value::<NodeAffinity>(a.clone()).is_err() {
+                bad("nodeAffinity: not a Kubernetes nodeAffinity".into());
+            }
         }
         for (i, image) in self.extra_allowed_images.iter().enumerate() {
             if image.trim().is_empty() || image.contains(char::is_whitespace) {
@@ -976,6 +982,80 @@ fn only_fields(value: &Value, allowed: &[&str], path: &str) -> Result<(), String
             "{path}.{key} is not a field of it: the fields are {}",
             allowed.join(", ")
         ));
+    }
+    Ok(())
+}
+
+/// The fields of a toleration, of a `nodeAffinity` and of every level below it. `k8s-openapi`'s types are generated
+/// without `deny_unknown_fields`, so a misspelled key is dropped and the widening is invisible: a
+/// `requiredDuringScheduling` for `requiredDuringSchedulingIgnoredDuringExecution` leaves no required affinity, a
+/// misspelled `matchExpressions` beside `matchFields` drops that constraint, and a toleration with a misspelled `effect`
+/// tolerates every effect (ANR-1357).
+const TOLERATION_FIELDS: [&str; 5] = ["key", "operator", "value", "effect", "tolerationSeconds"];
+const NODE_AFFINITY_FIELDS: [&str; 2] = [
+    "requiredDuringSchedulingIgnoredDuringExecution",
+    "preferredDuringSchedulingIgnoredDuringExecution",
+];
+const NODE_SELECTOR_FIELDS: [&str; 1] = ["nodeSelectorTerms"];
+const NODE_TERM_FIELDS: [&str; 2] = ["matchExpressions", "matchFields"];
+const NODE_REQUIREMENT_FIELDS: [&str; 3] = ["key", "operator", "values"];
+const PREFERRED_TERM_FIELDS: [&str; 2] = ["weight", "preference"];
+
+/// A toleration, against its fields.
+fn only_known_toleration(value: &Value, path: &str) -> Result<(), String> {
+    only_fields(value, &TOLERATION_FIELDS, path)
+}
+
+/// A `nodeAffinity` at every level: the two scheduling blocks, the terms, their expressions and fields, and each
+/// preferred term's preference.
+fn only_known_node_affinity(value: &Value, path: &str) -> Result<(), String> {
+    only_fields(value, &NODE_AFFINITY_FIELDS, path)?;
+    if let Some(required) = value.get("requiredDuringSchedulingIgnoredDuringExecution") {
+        let at = format!("{path}.requiredDuringSchedulingIgnoredDuringExecution");
+        only_fields(required, &NODE_SELECTOR_FIELDS, &at)?;
+        for (i, term) in required
+            .get("nodeSelectorTerms")
+            .and_then(Value::as_array)
+            .into_iter()
+            .flatten()
+            .enumerate()
+        {
+            only_known_node_term(term, &format!("{at}.nodeSelectorTerms[{i}]"))?;
+        }
+    }
+    for (i, preferred) in value
+        .get("preferredDuringSchedulingIgnoredDuringExecution")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .enumerate()
+    {
+        let at = format!("{path}.preferredDuringSchedulingIgnoredDuringExecution[{i}]");
+        only_fields(preferred, &PREFERRED_TERM_FIELDS, &at)?;
+        if let Some(term) = preferred.get("preference") {
+            only_known_node_term(term, &format!("{at}.preference"))?;
+        }
+    }
+    Ok(())
+}
+
+/// One node selector term, and every requirement of its two lists.
+fn only_known_node_term(term: &Value, path: &str) -> Result<(), String> {
+    only_fields(term, &NODE_TERM_FIELDS, path)?;
+    for key in ["matchExpressions", "matchFields"] {
+        for (i, requirement) in term
+            .get(key)
+            .and_then(Value::as_array)
+            .into_iter()
+            .flatten()
+            .enumerate()
+        {
+            only_fields(
+                requirement,
+                &NODE_REQUIREMENT_FIELDS,
+                &format!("{path}.{key}[{i}]"),
+            )?;
+        }
     }
     Ok(())
 }

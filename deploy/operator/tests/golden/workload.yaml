@@ -170,11 +170,14 @@ data:
             size: 5Gi
     healthListen: 0.0.0.0:8081
     listen: 0.0.0.0:8080
+    log:
+      filter: info
     oidc:
       audiences:
       - another-agentic
       issuer: https://keycloak.example.com/realms/another-agentic
       rolesClaim: agentic_roles
+    version: 1
     workloadClients:
     - permissions:
       - platform:agents.own
@@ -482,7 +485,7 @@ spec:
         app.kubernetes.io/component: api
       annotations:
         # A change of the configuration rolls the pods (the file is read once, at start).
-        checksum/config: c0d991a897203ccd43d87ba9708bf5f471a14fad8ed372d5fc27714640db3d4a
+        checksum/config: bcc7aec73397b16815460ac25e1a5a5062650ec5c6fc7fcd20056eea52e1cde2
     spec:
       serviceAccountName: aap-operator-api
       # The API token is the API's way to the cluster.
@@ -500,11 +503,9 @@ spec:
         - name: api
           image: "ghcr.io/vymalo/another-agentic-platform/api:sha-0000000"
           imagePullPolicy: IfNotPresent
-          env:
-            - name: API_CONFIG_FILE
-              value: /etc/aap-api/config.yaml
-            - name: RUST_LOG
-              value: "info"
+          # Everything is the file's (ANR-970): the three ports, the log's filter and the traces. The binary reads no
+          # environment variable of its own any more.
+          args: ["--config", "/etc/aap-api/config.yaml"]
           ports:
             - name: http
               containerPort: 8080

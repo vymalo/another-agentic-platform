@@ -49,4 +49,4 @@ the revision history for anything substantive.
 
 The code rules — build, test, commit, open a pull request — are in [`CONTRIBUTING.md`](../CONTRIBUTING.md). Coding agents work from
 [`CLAUDE.md`](../CLAUDE.md), whose architecture rules this page repeats for people; the agent-facing copy of the docs rules is
-`.agents/docs/writing-docs.md` when ANR-1002 lands it.
+[`.agents/docs/writing-docs.md`](../.agents/docs/writing-docs.md).
