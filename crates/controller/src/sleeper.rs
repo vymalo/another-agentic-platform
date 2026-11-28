@@ -53,6 +53,19 @@ fn failure_kind(e: &ActivityError) -> &'static str {
     }
 }
 
+/// What [`Sleepers::claim`] found for the mark a pass planned from (ANR-1199). The race it closes: a lap of the idle
+/// loop may drop the mark as stale between the plan and the claim, and the pass must then write no record.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum Claim {
+    /// The pass's mark, claimed for the first time: the record is written, and the sleep counted once it succeeded.
+    New,
+    /// The same mark, claimed by an **earlier** pass whose write succeeded: this pass's cache is behind. The record is
+    /// written again (idempotent) and not counted; a pass for one object runs alone, so this is never a second pass now.
+    Already,
+    /// The mark is gone, or another one replaced it: there is no record to write.
+    Gone,
+}
+
 /// What the loop and the reconciler share about sleep. Cheap to share in an `Arc`.
 ///
 /// It holds the idle clock of each agent and the loop's **proposals** (a [`Mark`]). It does not hold who is asleep:
@@ -125,20 +138,29 @@ impl Sleepers {
 
     /// Claim the proposal **before** its record is written, so that aging cannot drop it while the write is in flight
     /// (a loop lap in that window would otherwise poll an agent whose record is not visible yet, and the sleep would
-    /// go uncounted). True the first time only: that pass counts the sleep once its write succeeded.
-    pub(crate) fn claim(&self, id: &RuntimeId) -> bool {
-        self.with(|i| {
-            i.marks
-                .get_mut(&key(id))
-                .is_some_and(|(_, claimed)| !std::mem::replace(claimed, true))
+    /// go uncounted). `made_at` is the mark the pass planned from: a mark that another lap has replaced, or dropped as
+    /// stale, is [`Claim::Gone`], and its record is not written (ANR-1199). Only [`Claim::New`] counts the sleep, once
+    /// its write succeeded.
+    pub(crate) fn claim(&self, id: &RuntimeId, made_at: i64) -> Claim {
+        self.with(|i| match i.marks.get_mut(&key(id)) {
+            None => Claim::Gone,
+            Some((mark, _)) if mark.made_at != made_at => Claim::Gone,
+            Some((_, claimed)) if *claimed => Claim::Already,
+            Some((_, claimed)) => {
+                *claimed = true;
+                Claim::New
+            }
         })
     }
 
-    /// Give a claim back because the write failed: the mark ages again, so a retry a long time later is no longer
-    /// acted on (the safe choice: a failing write must not keep an old poll alive for ever).
-    pub(crate) fn unclaim(&self, id: &RuntimeId) {
+    /// Give a claim back because the write failed or the pass was cut off: the mark ages again, so a retry a long time
+    /// later is no longer acted on (the safe choice: a failing write must not keep an old poll alive for ever). Only
+    /// the mark this pass claimed (`made_at`), as [`drop_mark`](Self::drop_mark) does: a newer one keeps its own claim.
+    pub(crate) fn unclaim(&self, id: &RuntimeId, made_at: i64) {
         self.with(|i| {
-            if let Some((_, claimed)) = i.marks.get_mut(&key(id)) {
+            if let Some((mark, claimed)) = i.marks.get_mut(&key(id))
+                && mark.made_at == made_at
+            {
                 *claimed = false;
             }
         });
@@ -716,15 +738,39 @@ mod tests {
         let svc = service(sleepy(), false);
         r.at(&svc, 0).await;
         r.at(&svc, 600).await;
-        assert!(r.sleepers.claim(&r.id), "the first claim is new");
-        assert!(!r.sleepers.claim(&r.id), "the second is not");
+        assert_eq!(
+            r.sleepers.claim(&r.id, 600),
+            Claim::New,
+            "the first claim is new"
+        );
+        assert_eq!(
+            r.sleepers.claim(&r.id, 600),
+            Claim::Already,
+            "the second is not"
+        );
         assert!(
             r.sleepers.is_marked(&r.id, 600 + 10_000, MAX_AGE),
             "a record is being written for it"
         );
         // A failed write gives the claim back: it ages again.
-        r.sleepers.unclaim(&r.id);
+        r.sleepers.unclaim(&r.id, 600);
         assert!(!r.sleepers.is_marked(&r.id, 600 + 10_000, MAX_AGE));
+    }
+
+    #[tokio::test]
+    async fn a_mark_dropped_between_the_plan_and_the_claim_is_gone_and_writes_no_record() {
+        let r = rig();
+        let svc = service(sleepy(), false);
+        r.at(&svc, 0).await;
+        r.at(&svc, 600).await;
+        // Another lap's clock is past the bound and drops the mark as stale before this pass claims it: the plan made
+        // a record for a mark that no longer exists (ANR-1199).
+        assert!(!r.sleepers.is_marked(&r.id, 600 + 10_000, MAX_AGE));
+        assert_eq!(
+            r.sleepers.claim(&r.id, 600),
+            Claim::Gone,
+            "the mark the pass planned from is gone: no record"
+        );
     }
 
     #[tokio::test]

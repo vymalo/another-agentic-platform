@@ -5,6 +5,10 @@ repository's own `docs/` with `@vaam-apps/vitepress-md3`, so a pull request upda
 the same seven sections, in this order, and the same groups inside Guides and Reference, so a reader can move from one
 site to another. The other repositories copy this file and never diverge.
 
+> **This repository, 2026-11-28 (ANR-1085 review).** Copied verbatim from the system's v3, with one exception: two things
+> described below are **not enabled on this site yet** — the `llms.txt`/`llms-full.txt` pages (no `vitepress-plugin-llms`
+> in `docs/package.json`) and the `sidebarTitle` length check in `config.ts`. Everything else applies as written.
+
 ## Sections
 
 | # | Section | Holds |
