@@ -12,15 +12,14 @@ api --config bin/api/config.example.yaml --check   # say whether the file is usa
 It runs beside the operator, **not inside it** (least privilege per process, §60a): it holds the right to write the specs people edit and to list the
 ExternalSecrets that offer keys, and it takes people's tokens; the operator holds neither. It is stateless and can run two replicas.
 
-| Flag | Variable | |
-|---|---|---|
-| `--config <file>` | `API_CONFIG_FILE` | The configuration file (required) |
-| `--listen <addr>` | `API_LISTEN_ADDR` | Where the API listens. **Wins over `listen` in the file** |
-| `--health-addr <addr>` | `HEALTH_ADDR` | Where `/healthz` and `/readyz` are served. **Wins over `healthListen` in the file** |
-| `--metrics-addr <addr>` | `METRICS_ADDR` | Where `/metrics` is served (K4). **Wins over `metricsListen` in the file** |
-| `--check` | | Read the file, say whether the API can work with it, exit `0` or `1` |
+| Flag | |
+|---|---|
+| `--config <file>` | The configuration file; `/etc/aap-api/config.yaml` when absent (ANR-970) |
+| `--check` | Read the file, say whether the API can work with it, exit `0` or `1` |
 
-`RUST_LOG` sets the log filter (default `info`). The cluster is `kube::Client::try_default`: the pod's ServiceAccount, or `KUBECONFIG`.
+**Everything is the file's** (ANR-970): the three ports, the log's filter (`log.filter`) and the traces (`telemetry.otlp`).
+The binary reads no `API_*` variable and no `RUST_LOG`; a variable of those names is ignored. The cluster is
+`kube::Client::try_default`: the pod's ServiceAccount, or `KUBECONFIG`.
 
 ## The configuration file
 
@@ -40,7 +39,7 @@ file that does not come back, with its path (`defaults.allowFrom[0].podSelectr`)
 | `cors.allowedOrigins` | `[]` | Exact origins as a browser writes them, `scheme://host[:port]`. **A wildcard, `null`, anything else and the default port of the scheme (`https://host:443`) are refused**: a browser leaves that port out, so the entry would match nothing. Empty is no CORS |
 | `defaults` | required | [`aap_forms::Defaults`](../../crates/forms/README.md#deployment-defaults-and-what-the-round-trip-does-with-them): the store, the A2A bearer reference, `allowFrom`, `security`, what a coder and a folder agent get, `offerLabel`, `allowedImageRegistries`. **`defaults.namespace` is the one namespace the API reads and writes** (there is no second `namespace` to disagree with it). Checked at load with `Defaults::check`: what would make the operator refuse every agent stops the API |
 | `defaults.runPodSizeClasses` | optional, default none | The names of the classes of the operator's run pods (D15a): what `GET /v1/info` offers and what a coder form may pick. **The operator chart writes it** from `runPodClasses` while `runPods.enabled` (and refuses a hand-written list); written by hand it must be the classes the operator has, or the operator marks the agent `ConfigInvalid` naming the class. With classes, `defaults.coder.workVolume` is required (run pods mount it) and the binary checks at start that a coder asking for the first class is a valid one. See `config.example.yaml` |
-| `workloadListener`, `workloadClients` | absent: no workload listener | **The mutual-TLS listener of the workloads (ANR-1011, [AD-068](../../docs/architecture/11-decisions.md))**, off unless **both** are present (`workloadClients` without a listener, and a listener without clients, are refused). `workloadListener`: `listen` (a fourth port, different from the other three), `certFile` and `keyFile` (the server certificate the API presents and its key: **paths**, absolute; the certificate is re-read when its file changes), `clientCaFile` (the one CA bundle client certificates chain to; read at start) `handshakeTimeoutSecs` (5, 1 to 60), `maxHandshakesPerIp` (8, 1 to 1024: the next connection of an address with that many in flight is closed at once) and `maxConnections` (256, 1 to 65536). `workloadClients`: a **list** of `{ spiffeId, permissions }`, the certificate's exact URI SAN and what it may do; **only `platform:agents.own` and `platform:agents.read.owner` are grantable** (AD-072: the orchestrator holds both, the staff service only the read-only one), and an identity that is not `spiffe://...`, one named twice and any other permission are refused at load. The listener serves **only** `/v1/owners/{owner}/agents...`; every other path is a `404`. See `config.example.yaml` |
+| `workloadListener`, `workloadClients` | absent: no workload listener | **The mutual-TLS listener of the workloads (ANR-1011, [AD-068](../../docs/architecture/11-decisions.md))**, off unless **both** are present (`workloadClients` without a listener, and a listener without clients, are refused). `workloadListener`: `listen` (a fourth port, different from the other three), `certFile` and `keyFile` (the server certificate the API presents and its key: **paths**, absolute; the certificate is re-read when its file changes), `clientCaFile` (the one CA bundle client certificates chain to; re-read when it changes), `handshakeTimeoutSecs` (5, 1 to 60), `maxHandshakesPerIp` (8, 1 to 1024: the next connection of an address with that many in flight is closed at once), `maxConnections` (256, 1 to 65536) and `maxLeafLifetimeSecs` (absent: off; 1 to 31536000: the listener logs **one** warning, with the lifetime and never the identity, the first time a presented leaf lives longer — it is never a refusal, ANR-1374). `workloadClients`: a **list** of `{ spiffeId, permissions }`, the certificate's exact URI SAN and what it may do; **only `platform:agents.own` and `platform:agents.read.owner` are grantable** (AD-072: the orchestrator holds both, the staff service only the read-only one), and an identity that is not `spiffe://...`, one named twice and any other permission are refused at load. The listener serves **only** `/v1/owners/{owner}/agents...`; every other path is a `404`. See `config.example.yaml` |
 | `defaults.allowedImageRegistries` | **required, at least one** | The registries a folder agent may pin its own image from. **The binary does not start without it** (`aap-forms` alone reads "absent" as "any registry"): a person who holds `agents.write` and not `secrets.pick` can still name an agent's image, and that pod is handed the model endpoint's API key and the A2A bearer. An entry is a registry host (and port) and **does not bound repositories**: `ghcr.io` admits every image on `ghcr.io`, so name only registries whose images you trust. A tag or a digest is always required |
 
 ## The workload listener (ANR-1011)
@@ -113,20 +112,20 @@ given to stop after it, and 5 s of margin, so the chart refuses less than the sl
 
 ## Traces (K5)
 
-Traces are **off** unless an endpoint is set (`OTEL_EXPORTER_OTLP_TRACES_ENDPOINT`, or `OTEL_EXPORTER_OTLP_ENDPOINT` with
-`/v1/traces` appended), and then no task, queue or series exists. The variables are a strict subset of the standard ones,
-read by `aap-trace-otlp` ([README](../../crates/trace-otlp/README.md)): `grpc`, `http/protobuf` and
-`OTEL_EXPORTER_OTLP_HEADERS` are refused, headers come from the file `AAP_OTEL_HEADERS_FILE` names, and
-`OTEL_EXPORTER_OTLP_CERTIFICATE` is the exporter's only trust. **A tracing setting never stops the API:** `run` logs one
-`warn` line (`tracing is off`, the variable's name and a fixed reason, never the value) and runs with tracing off (platforms
-inject `OTEL_*` variables of their own; BuildKit does, into every `RUN` step), and `/metrics` carries `aap_trace_enabled 0`
-while any tracing variable is set and tracing is off. `api --check` still refuses the setting and names the variable (it exits
-1), so a rendered configuration is validated in CI, and reads none of the files they name. The tracing variables are not in the YAML file. `run` reads them before the cluster and the issuer; the
-flush (at most 3 s) comes **after** the 25 s drain of the API and runs at the same time as the 2 s stop of the health and
-metrics servers, so the chart's grace floor is not moved. When on, `/metrics` also has `aap_trace_enabled 1` and the two `aap_trace_*` series. The
-spans are the router's ([README](../../crates/platform-api/README.md)). `tests/trace_env.rs` runs the built binary with BuildKit's variables (`run` starts, warns once without the value and serves
-`aap_trace_enabled 0`; `--check` exits 1 naming the variable) and with the others it refuses, with every `OTEL_*` of the
-developer's shell removed.
+Traces are **off** unless the file's `telemetry.otlp.endpoint` is set, and then no task, queue or series exists. The
+section is the operator's ([`OtlpSection`](../../crates/trace-otlp/src/settings.rs)), read by `aap-trace-otlp`
+([README](../../crates/trace-otlp/README.md)): `sampler` is `always_on`, `always_off` or `traceidratio` with
+`samplerRatio`, `certificate` is the exporter's only trust, and each entry of `headers` is a **reference** (`{ file: … }` or
+`{ env: … }`, never a value) that needs an `https` endpoint. **A tracing setting never stops the API:** a reference that
+cannot be read is one `warn` line (`tracing is off`, the setting's name and a fixed reason, never the value) and the API runs
+with tracing off, and `/metrics` carries `aap_trace_enabled 0` then. `api --check` refuses what the section cannot say (an
+unknown key, a header that is a value) and names the key, so a rendered configuration is validated in CI, and it reads none
+of the files the section names. `run` starts the tracer before the cluster and the issuer; the flush (at most 3 s) comes
+**after** the 25 s drain of the API and runs at the same time as the 2 s stop of the health and metrics servers, so the
+chart's grace floor is not moved. When on, `/metrics` also has `aap_trace_enabled 1` and the two `aap_trace_*` series. The
+spans are the router's ([README](../../crates/platform-api/README.md)). `tests/telemetry.rs` runs the built binary on the
+example file (no span, no `aap_trace_` line) and on a file with an unreachable collector (`aap_trace_enabled 1`: a tracing
+setting never stops it), and asks `--check` for the refusals above.
 
 ## Tests
 
@@ -139,7 +138,7 @@ developer's shell removed.
 | `mtls` (26 in all) | the first twelve, the review's ten, and four of the CA reload: a new bundle honoured without a restart (a leaf of a new CA refused before the swap and served after it, a connection open across the swap answered and judged by the new bundle), a broken, empty, non-CA or missing bundle keeping the old one and a good one taken up afterwards, the interval, and an unchanged file not rebuilt; and a client certificate is always required (no certificate, with or without a bearer, gets no connection). The first twelve: | **over a real TCP socket and a real TLS stack** (a CA and its leaves minted by `aap_auth_workload::testkit`): the right SPIFFE id reaches the owner routes and every other path is `404`; an unknown identity is `401` (counted `cert_unknown_identity`, the identity not echoed); a known identity with no permission is `403`; **another CA, a server-authentication leaf and an expired leaf get no HTTP answer**; a leaf with **no EKU** gets a connection and `401 wrong use`; no URI SAN and two are `401`; no certificate is refused when `required` and `401` when `optional`; a bearer is not read here and is not the person's certificate; **a renewed server certificate is served without a restart and a broken renewal keeps the old one**; a key that is not the certificate's, and a bundle with no CA, stop it at start |
 | `config` (+3) | the workload block is off unless set; nine refusals (a permission outside the two workload ones, a duplicate, a non-SPIFFE id, clients with no listener, a listener with no clients, a relative path, the API's port, an unknown key, three bounds out of range); **a file that still says `clientAuth` (any value) is refused as an unknown field** (hard cutover, no shim) |
 | `serve` (7) | `/metrics` is Prometheus text (`text/plain; version=0.0.4`), empty before the first request, and nothing else is served on that router; `/healthz` and `/readyz` follow the check; **a burst of 50 probes asks the check once, and the answer is kept 5 s**; a failure and a timeout are kept; a draining pod is not ready at once and is alive; a check that never answers is not ready |
-| `run` (8) | **a server that has ended is reported and never polled again, whichever of the three ends first**; **the router comes up on a real socket with the `Memory` ports and over a real issuer**, answers, and stops when told (the port is closed); a server that ends by itself ends the API with its reason; readiness needs the keys and the cluster; **the cluster probe asks for one `ModelEndpoint` of the namespace (a client that records the request) and fails when the server refuses**; the flags win over the file (`--metrics-addr` too); **the counters are on the metrics port and only there** (`aap_api_requests_total` with the template, `aap_api_auth_failures_total{reason="missing"}`, no token in the text, `/metrics` is `404` on the API's and the health port) |
+| `run` (8) | **a server that has ended is reported and never polled again, whichever of the three ends first**; **the router comes up on a real socket with the `Memory` ports and over a real issuer**, answers, and stops when told (the port is closed); a server that ends by itself ends the API with its reason; readiness needs the keys and the cluster; **the cluster probe asks for one `ModelEndpoint` of the namespace (a client that records the request) and fails when the server refuses**; the command line names the file and no setting (ANR-970: `--listen`, `--health-addr` and `--metrics-addr` are refused as unknown); **the counters are on the metrics port and only there** (`aap_api_requests_total` with the template, `aap_api_auth_failures_total{reason="missing"}`, no token in the text, `/metrics` is `404` on the API's and the health port) |
 
 Not a `cargo test`: the binary in a cluster is [`api-e2e.sh`](../../deploy/operator/tests/e2e/README.md#the-kind-end-to-end-of-the-platform-api-d7b2) (D7b2, CI job `api-e2e`): the
 chart's `api` component installed in kind with the image of the job, the issuer a program on the runner (`cargo build -p aap-auth-oidc --example test-issuer --features testkit`), and a
@@ -154,7 +153,7 @@ no shell and no `CMD`: the file is required). The build stage runs `--version`, 
 configuration the chart renders, and the job `api-e2e` runs the image in a kind cluster (the chart's `api` component, a real issuer, a folder agent made through the API, [D7b2](../../deploy/operator/tests/e2e/README.md#the-kind-end-to-end-of-the-platform-api-d7b2)). *Unverified* until CI has run it: no image was built where this was written (the binary was, in release mode).
 
 **The chart** is the component `api` of [`deploy/operator`](../../deploy/operator/README.md#the-platform-api), off by default: a Deployment with its configuration mounted from a
-ConfigMap at `/etc/aap-api/config.yaml` (`API_CONFIG_FILE`) and **nothing else mounted**, a Service on the API port (the health port is the pod's, for the kubelet), the `Role`
+ConfigMap at `/etc/aap-api/config.yaml`, given by `args: ["--config", …]`, and **nothing else mounted**, a Service on the API port (the health port is the pod's, for the kubelet), the `Role`
 above, a NetworkPolicy and an optional Ingress. The chart owns `listen`, `healthListen` and `defaults.namespace`; the rest is `api.config`. To read what it renders with this binary:
 
 ```sh
@@ -164,7 +163,7 @@ cargo run -q -p aap-api-server -- --config /tmp/config.yaml --check
 
 ## Not here
 
-* **The workload listener has not run in a cluster**: the kind end-to-end (a pod, a kubelet mounting the Secret, a client from the orchestrator's pod through the NetworkPolicy) and a leaf from a real PKI are *unverified*. The CRL is not built.
+* **The workload listener has not run in a cluster**: the kind end-to-end (a pod, a kubelet mounting the Secret, a client from the orchestrator's pod through the NetworkPolicy) and a leaf from a real PKI are *unverified*. The CRL is not built (ANR-1373).
 * The kind end-to-end (create a folder agent through the API, see it `Ready` and listed) is slice **D7b2**, built: [`deploy/operator/tests/e2e/api-e2e.sh`](../../deploy/operator/tests/e2e/README.md#the-kind-end-to-end-of-the-platform-api-d7b2),
   the job `api-e2e` of `operator-image.yml`, which `push` needs. **The binary has still not run against a real API server or a real issuer where this was written** (no container daemon, no kind):
   the job is the first time, and it is *unverified* until CI has run it. What was run: the script, end to end, against the real router over the `Memory` ports and a real issuer with a fake `kubectl`.

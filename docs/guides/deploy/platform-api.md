@@ -147,6 +147,27 @@ stateDiagram-v2
 A route that is not in the table is never served. The permission of each route is in the [OpenAPI document](../../reference/openapi.md) (`x-permission`).
 
 :::
+
+## The workload listener, and its certificates
+
+A service can call the API with a **certificate** instead of a token: the workload listener, on a port of its own, mutual TLS, serving **only** the owner routes. It is off unless `api.workload.enabled` is true and at least one workload is named.
+
+The API checks a certificate in this order, and each failure has its own word: it chains to `api.workload.clientCa`; it carries the **client-authentication** extended key usage (required, not "if present"); it is inside its validity window; and it names **exactly one** URI SAN that is one of `api.workload.clients` — that SAN is the whole identity, and what it may do is the entry's `permissions`.
+
+**A workload certificate should live about 24 h.** Its lifetime is the revocation story: nothing checks a revocation list yet, so a certificate is trusted until it expires. The chart issues no certificate, and the orchestrator's is the orchestrator's to obtain. The shape that fits OpenBao:
+
+| Piece | What it is |
+|---|---|
+| Kubernetes auth | The orchestrator's ServiceAccount token logs in to OpenBao (`auth/kubernetes/login`, a role bound to its namespace and name), and a policy gives it **`update` on `<mount>/issue/<role>`** — reading the role is not issuing |
+| A PKI role with `ttl: 24h` | `ttl` is the **default** lifetime; `max_ttl: 24h` is what limits it. `client_flag: true` and `server_flag: false` (OpenBao defaults to a server certificate), `allowed_uri_sans` = the workload's exact `spiffe://...`, `require_cn: false`; the request names `uri_sans` for the same value. **One role per workload**, so a login cannot ask for another's SAN |
+| A sidecar that renews | The orchestrator reads its certificate from files; a small sidecar in its pod (log in, issue, **swap a directory or a symlink** — a certificate and a key written one after the other are never a pair — and sleep until two thirds of the lifetime) keeps them fresh, and the orchestrator re-reads them when they change. **If it does not re-read them, a renewal only takes effect at the next restart**: that is the system's side of the contract |
+
+**When the renewal fails, the API fails closed.** At expiry a **new** connection fails the TLS handshake, and a request on a connection that was already open gets `401` with the word `expired`. After a renewal the caller must load the new files **and open a new connection**: a kept-alive one still carries the old certificate.
+
+*Unverified:* none of the OpenBao setup above was run against an OpenBao here, and neither was whether the orchestrator re-reads its files; the API's own check is what the tests and the kind end-to-end hold.
+
+**A warning, if you want one.** `api.workload.maxLeafLifetimeSecs` (absent: off) makes the API log **one** warning — the lifetime, never the identity — the first time an **accepted** leaf lives longer than that. It never refuses a certificate: the lifetime is your issuer's, and a deployment whose PKI is not this one's has to keep working. **Leave room for the issuer's backdating:** OpenBao sets `notBefore` 30 s before the issue (its `not_before_duration` default), so a `ttl: 24h` role gives a lifetime of 86 430 s and a maximum of 86 400 would warn about every correctly issued leaf. 90 000 (25 h) is the suggested value.
+
 ## The API pod is not ready until it can reach the issuer
 
 ::: in-depth The checks behind it
@@ -182,7 +203,7 @@ helm upgrade --install aap-operator deploy/operator --namespace aap-system -f va
 
 ## What the chart and the binary refuse
 
-Each row was run, with the values above and one change. Every chart refusal prints `templates/servicemonitor.yaml:1:4` as its location. Ignore it: the checks live in `_validate.tpl`, which that template includes, and the message after it is the one that matters.
+Each row was run, with the values above and one change. The checks live in `_validate.tpl`, which `templates/servicemonitor.yaml` includes, and every chart refusal prints that template's location — ignore it, the message after it is the one that matters; the exact line it prints is in [the agent page](../../../.agents/docs/guides/deploy/platform-api.md).
 
 | Change | Who refuses | Message |
 |---|---|---|
@@ -204,7 +225,7 @@ A misspelt key under `api.config` in your **values** is refused first by the cha
 | `api-image` | `operator-image.yml` | Builds and smoke-tests the API image, and runs `api --check` on the files the chart renders for the shapes it is tested in |
 | `chain-e2e` | `operator-image.yml` | The API makes a coder with an audience, and a pinned orchestrator lists it. `push` does not need it |
 
-*Verified 2026-11-27* with `gh run view`: on `main` at commit `1d17e42` (tag `sha-1d17e42`), checked on 2026-11-27, run 45922615533 of `operator-image.yml`, with `api-e2e`, `api-image` and `chain-e2e` among its jobs, ended in success.
+*The run this page was checked against, with its ids, is recorded in [the agent page](../../../.agents/docs/guides/deploy/platform-api.md).*
 
 Also run for this page: `helm template` with only the values block above (and the chart's defaults) rendered 15 objects, and with the install page's values and the run pods page's values added it rendered 24. Every object was valid under `kubeconform` in both. The published API image at `api.image.tag` (`sha-1d17e42` when this was written) was pulled, and its `--check` accepted the rendered file (exit 0).
 

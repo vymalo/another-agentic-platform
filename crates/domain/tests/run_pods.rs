@@ -1305,8 +1305,12 @@ fn each_setting_is_checked() {
         &refused(json!({"networkPolicy": {"dnsPodLabels": {"k8s-app": null}}})),
         "dnsPodLabels",
     );
+    // ANR-1353 made a `to` mandatory and judges it first, so a case about the ports names a peer: without one it is refused
+    // for the missing `to` and never reaches the check it is about (two stale assertions, found by ANR-1355).
     says(
-        &refused(json!({"networkPolicy": {"extraEgress": [{"ports": [{"port": "https"}]}]}})),
+        &refused(json!({"networkPolicy": {"extraEgress": [
+            {"to": [{"ipBlock": {"cidr": "10.9.0.5/32"}}], "ports": [{"port": "https"}]}
+        ]}})),
         "named port",
     );
     says(
@@ -1314,11 +1318,317 @@ fn each_setting_is_checked() {
         "needs a namespaceSelector",
     );
     says(
-        &refused(
-            json!({"networkPolicy": {"extraEgress": [{"ports": [{"protocol": "ICMP", "port": 1}]}]}}),
-        ),
+        &refused(json!({"networkPolicy": {"extraEgress": [
+            {"to": [{"ipBlock": {"cidr": "10.9.0.5/32"}}], "ports": [{"protocol": "ICMP", "port": 1}]}
+        ]}})),
         "not TCP, UDP or SCTP",
     );
+    // ANR-1353: a rule with no `to` allows every destination, which is the internet the deny-by-default policy exists
+    // to close; a range whose prefix is zero is the same widening. Each case fails on the code before the change
+    // (the rule was accepted), and the path of the rule is named.
+    says(
+        &refused(json!({"networkPolicy": {"extraEgress": [{"ports": [{"port": 443}]}]}})),
+        "networkPolicy.extraEgress[0]",
+    );
+    says(
+        &refused(json!({"networkPolicy": {"extraEgress": [{"ports": [{"port": 443}]}]}})),
+        "needs a `to`",
+    );
+    says(
+        &refused(json!({"networkPolicy": {"extraEgress": [{"to": []}]}})),
+        "needs a `to`",
+    );
+    says(
+        &refused(json!({"networkPolicy": {"extraEgress": [
+            {"to": [{"ipBlock": {"cidr": "0.0.0.0/0"}}]}
+        ]}})),
+        "covers every address",
+    );
+    says(
+        &refused(json!({"networkPolicy": {"extraEgress": [
+            {"to": [{"ipBlock": {"cidr": "::/0"}}]}
+        ]}})),
+        "covers every address",
+    );
+    // Every peer is checked, not only the first; a zero written `00` is a zero; and the shape of the old internet rule
+    // (`0.0.0.0/0` with an `except`) is refused too.
+    says(
+        &refused(json!({"networkPolicy": {"extraEgress": [
+            {"to": [{"ipBlock": {"cidr": "10.0.0.0/8"}}, {"ipBlock": {"cidr": "0.0.0.0/0"}}]}
+        ]}})),
+        "covers every address",
+    );
+    says(
+        &refused(json!({"networkPolicy": {"extraEgress": [
+            {"to": [{"ipBlock": {"cidr": "0.0.0.0/00"}}]}
+        ]}})),
+        "covers every address",
+    );
+    says(
+        &refused(json!({"networkPolicy": {"extraEgress": [
+            {"to": [{"ipBlock": {"cidr": "0.0.0.0/0", "except": ["10.0.0.0/8"]}}]}
+        ]}})),
+        "covers every address",
+    );
+}
+
+#[test]
+fn an_egress_selector_that_selects_everything_is_refused() {
+    // ANR-1355: a selector with no matchLabels and no matchExpressions selects everything it could. `namespaceSelector: {}`
+    // is every namespace of the cluster; a `podSelector: {}` beside no `namespaceSelector` is every pod of the run pod's own
+    // namespace, the agent's own pod and the egress proxy among them, so a run pod could reach the agent directly and the
+    // proxy would stop being the one way out. Every case is accepted by the code before the change.
+    for (rule, part) in [
+        (
+            json!({"to": [{"namespaceSelector": {}}], "ports": [{"port": 443}]}),
+            "selects every namespace",
+        ),
+        (
+            json!({"to": [{"namespaceSelector": {"matchLabels": null}}], "ports": [{"port": 443}]}),
+            "selects every namespace",
+        ),
+        (
+            json!({"to": [{"namespaceSelector": {"matchExpressions": []}}], "ports": [{"port": 443}]}),
+            "selects every namespace",
+        ),
+        (
+            json!({"to": [{"podSelector": {}}], "ports": [{"port": 443}]}),
+            "every pod of the run pod's own namespace",
+        ),
+        (
+            json!({"to": [{"podSelector": {"matchLabels": null}}], "ports": [{"port": 443}]}),
+            "every pod of the run pod's own namespace",
+        ),
+    ] {
+        says(
+            &refused(json!({"networkPolicy": {"extraEgress": [rule]}})),
+            part,
+        );
+    }
+    // A peer that names its namespaces may take every pod of them: the author named the target.
+    settings_with(json!({"networkPolicy": {"extraEgress": [{
+        "to": [{"namespaceSelector": {"matchLabels": {"kubernetes.io/metadata.name": "models"}}, "podSelector": {}}],
+        "ports": [{"port": 8080}]
+    }]}}))
+    .validate()
+    .expect("every pod of a namespace the peer names is a target the author chose");
+    // The agent's own `access.allowFrom` keeps its meaning: `peers` is not where this is refused, and "any namespace may
+    // reach this agent" stays a deployment's deliberate choice (ANR-1353 scoped the `/0` the same way). `allowFrom` is on
+    // the AgentService, the first document.
+    let r = must_resolve("coder", |service, _| {
+        service["spec"]["access"]["allowFrom"] = json!([{"namespaceSelector": {}}]);
+    });
+    let peer = &r.runtime.network.allow_from[0];
+    assert_eq!(
+        peer.namespaces
+            .as_ref()
+            .map(|s| (s.match_labels.len(), s.match_expressions.len())),
+        Some((0, 0))
+    );
+}
+
+#[test]
+fn a_port_entry_names_the_port_it_reaches() {
+    // ANR-1355: a port entry with no `port` matches every port of its protocol (Kubernetes), which is a typo's widening, and
+    // an `endPort` with no start is meaningless. A rule with no `ports` at all stays Kubernetes' "every port": it is visible
+    // in the file and `deploy/operator/README.md` documents it. Each case is accepted by the code before the change.
+    for rule in [
+        json!({"to": [{"ipBlock": {"cidr": "10.9.0.5/32"}}], "ports": [{"protocol": "TCP"}]}),
+        json!({"to": [{"ipBlock": {"cidr": "10.9.0.5/32"}}], "ports": [{"port": 443}, {"protocol": "UDP"}]}),
+        json!({"to": [{"ipBlock": {"cidr": "10.9.0.5/32"}}], "ports": [{"endPort": 5100}]}),
+    ] {
+        says(
+            &refused(json!({"networkPolicy": {"extraEgress": [rule]}})),
+            "names no `port`",
+        );
+    }
+}
+
+#[test]
+fn a_key_a_rule_does_not_have_is_refused_at_every_level() {
+    // ANR-1356: `k8s-openapi`'s networking types are generated without `deny_unknown_fields`, so a misspelled key is
+    // dropped and the widening it causes is invisible. Some of these would otherwise be **accepted** (`port` for
+    // `ports` opens every port, `matchLabel` for `matchLabels` selects every namespace, `endport` loses the range, and
+    // the later-element cases); the others would be refused for a misleading reason, so the assertion names the key.
+    // Every level is walked, and every element of a list.
+    for (what, rule) in [
+        (
+            "the rule.too",
+            json!({"too": [{"ipBlock": {"cidr": "10.0.0.0/8"}}]}),
+        ),
+        (
+            "the rule.port",
+            json!({"to": [{"ipBlock": {"cidr": "10.0.0.0/8"}}], "port": [{"port": 443}]}),
+        ),
+        (
+            "to[0].ipblock",
+            json!({"to": [{"ipblock": {"cidr": "10.0.0.0/8"}}]}),
+        ),
+        (
+            "to[0].ipBlock.cidrs",
+            json!({"to": [{"ipBlock": {"cidrs": "10.0.0.0/8"}}]}),
+        ),
+        (
+            "to[0].namespaceSelector.matchLabel",
+            json!({"to": [{"namespaceSelector": {"matchLabel": {"a": "b"}}}]}),
+        ),
+        (
+            "to[0].podSelector.matchLabel",
+            json!({"to": [{"namespaceSelector": {"matchLabels": {"a": "b"}},
+                            "podSelector": {"matchLabel": {"c": "d"}}}]}),
+        ),
+        (
+            "to[0].podSelector.matchExpressions[0].value",
+            json!({"to": [{"podSelector": {"matchExpressions": [
+                {"key": "a", "operator": "In", "value": ["b"]}
+            ]}}]}),
+        ),
+        (
+            "to[0].podSelector.matchExpressions[1].value",
+            json!({"to": [{"podSelector": {"matchExpressions": [
+                {"key": "a", "operator": "Exists"},
+                {"key": "b", "operator": "Exists", "value": ["c"]}
+            ]}}]}),
+        ),
+        (
+            "to[1].namespaceSelectr",
+            json!({"to": [{"ipBlock": {"cidr": "10.0.0.0/8"}},
+                            {"podSelector": {}, "namespaceSelectr": {}}]}),
+        ),
+        (
+            "ports[0].end_port",
+            json!({"to": [{"ipBlock": {"cidr": "10.0.0.0/8"}}],
+                  "ports": [{"protocol": "TCP", "port": 443, "end_port": 8443}]}),
+        ),
+        (
+            "ports[1].endport",
+            json!({"to": [{"ipBlock": {"cidr": "10.0.0.0/8"}}],
+                  "ports": [{"port": 443}, {"port": 80, "endport": 90}]}),
+        ),
+    ] {
+        let problems = refused(json!({"networkPolicy": {"extraEgress": [rule]}}));
+        let expected = format!("{what} is not a field of it");
+        assert!(
+            problems.iter().any(|p| p.contains(&expected)),
+            "{what}: {problems:#?}"
+        );
+    }
+}
+
+#[test]
+fn a_key_a_toleration_or_a_node_affinity_does_not_have_is_refused() {
+    // ANR-1357: `k8s-openapi`'s types drop a key they do not know, and for placement that is a widening nobody sees —
+    // a misspelled `requiredDuringScheduling…` leaves no required affinity at all. Each case is accepted by the code
+    // before the change, and the assertion names the path.
+    for (what, over) in [
+        (
+            "tolerations[0].efect",
+            json!({"tolerations": [{"key": "a", "operator": "Exists", "efect": "NoSchedule"}]}),
+        ),
+        (
+            "tolerations[1].tolerationSecond",
+            json!({"tolerations": [{"key": "a"}, {"key": "b", "tolerationSecond": 60}]}),
+        ),
+        (
+            "nodeAffinity.requiredDuringScheduling",
+            json!({"nodeAffinity": {"requiredDuringScheduling": {}}}),
+        ),
+        (
+            "nodeAffinity.requiredDuringSchedulingIgnoredDuringExecution.nodeSelectorTerm",
+            json!({"nodeAffinity": {"requiredDuringSchedulingIgnoredDuringExecution": {"nodeSelectorTerm": []}}}),
+        ),
+        (
+            "nodeAffinity.requiredDuringSchedulingIgnoredDuringExecution.nodeSelectorTerms[0].matchExpression",
+            json!({"nodeAffinity": {"requiredDuringSchedulingIgnoredDuringExecution": {"nodeSelectorTerms": [{"matchExpression": []}]}}}),
+        ),
+        (
+            "nodeAffinity.requiredDuringSchedulingIgnoredDuringExecution.nodeSelectorTerms[0].matchFields[0].value",
+            json!({"nodeAffinity": {"requiredDuringSchedulingIgnoredDuringExecution": {"nodeSelectorTerms": [{"matchFields": [{"key": "a", "operator": "In", "value": ["b"]}]}]}}}),
+        ),
+        (
+            "nodeAffinity.requiredDuringSchedulingIgnoredDuringExecution.nodeSelectorTerms[1].matchExpressions[1].value",
+            json!({"nodeAffinity": {"requiredDuringSchedulingIgnoredDuringExecution": {"nodeSelectorTerms": [
+                {"matchExpressions": []},
+                {"matchExpressions": [
+                    {"key": "a", "operator": "Exists"},
+                    {"key": "b", "operator": "In", "value": ["c"]}
+                ]}
+            ]}}}),
+        ),
+        (
+            "nodeAffinity.preferredDuringSchedulingIgnoredDuringExecution[0].weigth",
+            json!({"nodeAffinity": {"preferredDuringSchedulingIgnoredDuringExecution": [{"weight": 1, "weigth": 2, "preference": {}}]}}),
+        ),
+        (
+            "nodeAffinity.preferredDuringSchedulingIgnoredDuringExecution[1].preference.matchField",
+            json!({"nodeAffinity": {"preferredDuringSchedulingIgnoredDuringExecution": [
+                {"weight": 1, "preference": {"matchExpressions": []}},
+                {"weight": 2, "preference": {"matchField": []}}
+            ]}}),
+        ),
+    ] {
+        let problems = refused(over);
+        let expected = format!("{what} is not a field of it");
+        assert!(
+            problems.iter().any(|p| p.contains(&expected)),
+            "{what}: {problems:#?}"
+        );
+    }
+}
+
+#[test]
+fn every_field_of_a_toleration_and_a_node_affinity_is_still_accepted() {
+    // The control for ANR-1357: the allow-lists are exactly the fields the types have, at every level.
+    settings_with(json!({
+        "tolerations": [
+            {"key": "a", "operator": "Equal", "value": "b", "effect": "NoSchedule", "tolerationSeconds": 60}
+        ],
+        "nodeAffinity": {
+            "requiredDuringSchedulingIgnoredDuringExecution": {
+                "nodeSelectorTerms": [{
+                    "matchExpressions": [{"key": "a", "operator": "In", "values": ["b"]}],
+                    "matchFields": [{"key": "metadata.name", "operator": "In", "values": ["c"]}]
+                }]
+            },
+            "preferredDuringSchedulingIgnoredDuringExecution": [
+                {"weight": 1, "preference": {"matchExpressions": [{"key": "d", "operator": "Exists"}]}}
+            ]
+        }
+    }))
+    .validate()
+    .expect("every field of a toleration and a nodeAffinity");
+}
+
+#[test]
+fn every_field_of_an_egress_rule_is_still_accepted() {
+    // The control for ANR-1356: the allow-list is exactly the fields the rule has, at every level.
+    settings_with(json!({"networkPolicy": {"extraEgress": [{
+        "to": [
+            {"ipBlock": {"cidr": "10.0.0.0/8", "except": ["10.9.0.0/16"]}},
+            {
+                "namespaceSelector": {
+                    "matchLabels": {"a": "b"},
+                    "matchExpressions": [{"key": "c", "operator": "In", "values": ["d"]}]
+                },
+                "podSelector": {"matchLabels": {"e": "f"}}
+            }
+        ],
+        "ports": [{"protocol": "TCP", "port": 443, "endPort": 8443}]
+    }]}}))
+    .validate()
+    .expect("every field of a rule");
+}
+
+#[test]
+fn an_egress_rule_that_names_a_range_of_its_own_is_still_accepted() {
+    // The control for ANR-1353: only a prefix of zero is refused, and the agent's own `access.allowFrom` is untouched
+    // (it is a deployment's deliberate choice there, and a `/0` in it is still accepted).
+    settings_with(json!({"networkPolicy": {"extraEgress": [
+        {"to": [{"ipBlock": {"cidr": "10.0.0.0/8"}}], "ports": [{"port": 443}]},
+        {"to": [{"ipBlock": {"cidr": "10.9.0.5/32"}}]}
+    ]}}))
+    .validate()
+    .expect("a range of the deployment's own");
 }
 
 #[test]

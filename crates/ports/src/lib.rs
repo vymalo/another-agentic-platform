@@ -24,6 +24,10 @@ mod runtime;
 mod spec;
 mod store;
 
+pub mod annotations;
+// The `Memory` implementations and their conformance suites are the feature's own (its comment says so), and they use
+// `tokio`, which only `testkit` enables: ungated, a crate that depends on `aap-ports` without the feature cannot build
+// (`cargo build -p aap-forms`). Every test that uses them enables the feature in its dev-dependencies.
 #[cfg(feature = "testkit")]
 pub mod memory;
 #[cfg(feature = "testkit")]
@@ -33,7 +37,7 @@ pub use activator::{
     BodyStream, Card, CardError, CardSource, RefusedReason, Route, Upstream, UpstreamError,
     UpstreamRequest, UpstreamResponse, WakeError, WakeOutcome, Waker,
 };
-pub use activity::{Activity, ActivityError, ActivitySource};
+pub use activity::{Activity, ActivityError, ActivitySource, UnavailableCause};
 pub use auth::{AuthError, Authenticator, InvalidToken, Principal};
 pub use client_auth::{
     Certificate, ClientAuthError, ClientAuthenticator, InvalidCertificate, MAX_INTERMEDIATES,

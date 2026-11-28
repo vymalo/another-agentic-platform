@@ -499,10 +499,10 @@ check "api: the replicas are the value (2), the strategy a rolling update that s
 check "api: the image is a sha-<7 hex> tag of the api package (the placeholder until CI bumps it, then the bumped tag)" \
   dhas Deployment aap-operator-api 'image: "ghcr.io/vymalo/another-agentic-platform/api:sha-[0-9a-f]{7}"'
 api_reads_its_file() {
-  dhas Deployment aap-operator-api 'name: API_CONFIG_FILE' 'value: /etc/aap-api/config.yaml' 'mountPath: /etc/aap-api' 'readOnly: true' \
-    'configMap:' 'name: aap-operator-api' && dlacks Deployment aap-operator-api '^          args:'
+  dhas Deployment aap-operator-api 'args: \["--config", "/etc/aap-api/config.yaml"\]' 'mountPath: /etc/aap-api' 'readOnly: true' \
+    'configMap:' 'name: aap-operator-api' && dlacks Deployment aap-operator-api 'API_CONFIG_FILE|RUST_LOG'
 }
-check "api: the binary reads its file from API_CONFIG_FILE, mounted read-only from the ConfigMap of the API, and takes no argument" api_reads_its_file
+check "api: the binary is given its file by --config (ANR-970), mounted read-only from the ConfigMap of the API, and no API_* or RUST_LOG variable" api_reads_its_file
 check "api: the pods roll with the file (a checksum of the ConfigMap)" dhas Deployment aap-operator-api 'checksum/config: [0-9a-f]{64}'
 api_probes() {
   dcount Deployment aap-operator-api 'path: /healthz' 2 && dhas Deployment aap-operator-api 'path: /readyz' 'containerPort: 8081' \
@@ -605,10 +605,11 @@ secretref_objects() {
 }
 check "api (secretref shape): no Ingress, no policy for the API, no ServiceAccount made, and the existing one is the pod's and the binding's" secretref_objects
 secretref_pod() {
-  dhas Deployment aap-operator-api 'api:sha-[0-9a-f]{7}@sha256:0{64}"' 'value: "debug"' 'terminationGracePeriodSeconds: 32' \
+  dhas Deployment aap-operator-api 'api:sha-[0-9a-f]{7}@sha256:0{64}"' 'terminationGracePeriodSeconds: 32' \
+    && dhas ConfigMap aap-operator-api '^      filter: debug$' \
     && dlacks Deployment aap-operator-api '^          lifecycle:' 'sleep:'
 }
-check "api (secretref shape): the image is tag and digest, the log level and the grace period are the values, and there is no preStop hook" secretref_pod
+check "api (secretref shape): the image is tag and digest, the log level is the file's and the grace period is the value, and there is no preStop hook" secretref_pod
 
 # The shape that sets every value: what each one does to the render. (It renders from the defaults of values.yaml, so each of these differs from them.)
 render -f "$here/api-full.values.yaml"
@@ -641,8 +642,8 @@ api_probes_follow_the_health_port() {
   dcount Deployment aap-operator-api 'port: health' 3 && dhas Deployment aap-operator-api 'name: health' 'containerPort: 9091'
 }
 check "api (full shape): the three probes go to the named port health, which is 9091" api_probes_follow_the_health_port
-check "api (full shape): the container's environment is the chart's two variables, then api.extraEnv in order" \
-  test "$(api_env_names)" = "API_CONFIG_FILE RUST_LOG SSL_CERT_FILE HTTPS_PROXY NO_PROXY "
+check "api (full shape): the container's environment is api.extraEnv, and nothing the binary reads (ANR-970)" \
+  test "$(api_env_names)" = "SSL_CERT_FILE HTTPS_PROXY NO_PROXY "
 check "api (full shape): api.extraEnv values are rendered as they are" \
   dhas Deployment aap-operator-api 'value: /etc/aap-api-ca/ca-bundle.crt' 'value: http://proxy.example.com:3128' 'value: .svc,.cluster.local,10.0.0.0/8'
 api_extra_volumes() { test "$(api_volume_names)" = "config ca " && dhas Deployment aap-operator-api 'name: aap-api-ca$'; }
@@ -679,9 +680,9 @@ check "api (full shape): the pod annotation of the values is on the pod template
   dcount Deployment aap-operator-api 'example.com/scrape: "false"' 1
 render -f "$here/api.values.yaml"
 api_nothing_extra_by_default() {
-  test "$(api_env_names)" = "API_CONFIG_FILE RUST_LOG " && test "$(api_volume_names)" = "config " && test "$(api_mounts)" = "config /etc/aap-api "
+  test -z "$(api_env_names)" && test "$(api_volume_names)" = "config " && test "$(api_mounts)" = "config /etc/aap-api "
 }
-check "api: with no extraEnv, extraVolumes or extraVolumeMounts the container has the chart's two variables, its config volume and its one mount, nothing more" \
+check "api: with no extraEnv, extraVolumes or extraVolumeMounts the container has no environment, its config volume and its one mount, nothing more" \
   api_nothing_extra_by_default
 api_default_rules_are_open_on_their_ports() {
   all_of "$(api_egress_rule 1)" 'port: 443$' 'port: 6443$' && none_of "$(api_egress_rule 1)" 'ipBlock' '^      to:$' \
@@ -834,6 +835,13 @@ check "a token Secret and an ExternalSecret together are refused" \
 check "a registry with no one allowed to read it is refused" refused 'networkPolicy.registry.allowFrom is required' --set registry.tokenSecret.name=t
 check "a peer that names nothing is refused" refused 'a peer needs a namespaceSelector' \
   --set registry.tokenSecret.name=t --set 'networkPolicy.registry.allowFrom[0].foo=bar'
+# ANR-1339: the operator's two peer lists are checked as every other peer list's (a list, never a map; an ipBlock of every address refused).
+check "networkPolicy.registry.allowFrom as a map is refused (a peer list is a list)" refused 'networkPolicy.registry.allowFrom must be a list of NetworkPolicy peers' \
+  --set-json 'networkPolicy.registry.allowFrom={"namespaceSelector":{}}'
+check "an ipBlock of 0.0.0.0/0 among the registry's readers is refused" refused 'networkPolicy.registry.allowFrom: an ipBlock of 0.0.0.0/0 is every address' \
+  --set registry.tokenSecret.name=t --set-json 'networkPolicy.registry.allowFrom=[{"ipBlock":{"cidr":"0.0.0.0/0"}}]'
+check "an ipBlock of 0.0.0.0/0 among the metrics peers is refused" refused 'networkPolicy.metrics.allowFrom: an ipBlock of 0.0.0.0/0 is every address' \
+  --set-json 'networkPolicy.metrics.allowFrom=[{"ipBlock":{"cidr":"0.0.0.0/0"}}]'
 check "an ExternalSecret with no property is refused" \
   refused 'externalSecrets.properties.registryToken is required' --set externalSecrets.enabled=true --set externalSecrets.properties.registryToken= \
   --set networkPolicy.enabled=false
@@ -951,13 +959,27 @@ check "a peer that names nothing is refused" refused_api 'a peer needs a namespa
 check "a DNS peer that names nothing is refused" refused_api 'api.networkPolicy.dns.to: a peer needs' --set-json 'api.networkPolicy.dns.to=[{"foo":"bar"}]'
 check "no API server port is refused" refused_api 'api.networkPolicy.apiServer.ports must name at least one port' --set api.networkPolicy.apiServer.ports=null
 check "an issuer peer that names nothing is refused" refused_api 'api.networkPolicy.issuer.to: a peer needs' --set-json 'api.networkPolicy.issuer.to=[{"foo":"bar"}]'
+# ANR-1339: the API's five peer lists go through the same helper as every other peer list's (a list, never a map; a peer that says
+# who; an ipBlock of every address refused).
+check "an ipBlock of 0.0.0.0/0 among the API's ingress peers is refused" refused_api 'api.networkPolicy.from: an ipBlock of 0.0.0.0/0 is every address' --set-json 'api.networkPolicy.from=[{"ipBlock":{"cidr":"0.0.0.0/0"}}]'
+check "an ipBlock of 0.0.0.0/0 among the API's DNS peers is refused" refused_api 'api.networkPolicy.dns.to: an ipBlock of 0.0.0.0/0 is every address' --set-json 'api.networkPolicy.dns.to=[{"ipBlock":{"cidr":"0.0.0.0/0"}}]'
+check "an ipBlock of 0.0.0.0/0 among the issuer's peers is refused" refused_api 'api.networkPolicy.issuer.to: an ipBlock of 0.0.0.0/0 is every address' --set-json 'api.networkPolicy.issuer.to=[{"ipBlock":{"cidr":"0.0.0.0/0"}}]'
+check "an ipBlock of 0.0.0.0/0 among the API's metrics peers is refused" refused 'api.metrics.allowFrom: an ipBlock of 0.0.0.0/0 is every address' -f "$here/metrics.values.yaml" --set-json 'api.metrics.allowFrom=[{"ipBlock":{"cidr":"0.0.0.0/0"}}]'
+check "an ipBlock of 0.0.0.0/0 among the dashboard's default peers is refused" refused_api 'api.config.defaults.allowFrom: an ipBlock of 0.0.0.0/0 is every address' --set-json 'api.config.defaults.allowFrom=[{"ipBlock":{"cidr":"0.0.0.0/0"}}]'
+check "the API's ingress peers as a map are refused (a peer list is a list)" refused_api 'api.networkPolicy.from must be a list of NetworkPolicy peers' --set-json 'api.networkPolicy.from={"namespaceSelector":{}}'
+check "the API's five peer lists with a real ipBlock each render" renders_ok -f "$here/api.values.yaml" \
+  --set-json 'api.networkPolicy.from=[{"ipBlock":{"cidr":"10.0.0.0/8"}}]' \
+  --set-json 'api.networkPolicy.dns.to=[{"ipBlock":{"cidr":"10.0.0.0/8"}}]' \
+  --set-json 'api.networkPolicy.issuer.to=[{"ipBlock":{"cidr":"10.0.0.0/8"}}]' \
+  --set-json 'api.metrics.allowFrom=[{"ipBlock":{"cidr":"10.0.0.0/8"}}]' \
+  --set-json 'api.config.defaults.allowFrom=[{"ipBlock":{"cidr":"10.0.0.0/8"}}]'
 # api.extraEnv, api.extraVolumes and api.extraVolumeMounts: the chart's own names and paths are not for sale.
 ca_volume='api.extraVolumes=[{"name":"ca","configMap":{"name":"aap-api-ca"}}]'
-check "extraEnv: RUST_LOG is refused (it is api.logLevel)" refused_api 'api.extraEnv: RUST_LOG is the chart' --set-json 'api.extraEnv=[{"name":"RUST_LOG","value":"debug"}]'
-check "extraEnv: API_CONFIG_FILE is refused (it is the mounted file)" refused_api 'api.extraEnv: API_CONFIG_FILE is the chart' --set-json 'api.extraEnv=[{"name":"API_CONFIG_FILE","value":"/x"}]'
-check "extraEnv: API_LISTEN_ADDR is refused (it would win over api.port, which the probes and the Service follow)" \
-  refused_api 'api.extraEnv: API_LISTEN_ADDR is the chart' --set-json 'api.extraEnv=[{"name":"API_LISTEN_ADDR","value":"0.0.0.0:1"}]'
-check "extraEnv: HEALTH_ADDR is refused" refused_api 'api.extraEnv: HEALTH_ADDR is the chart' --set-json 'api.extraEnv=[{"name":"HEALTH_ADDR","value":"0.0.0.0:1"}]'
+check "extraEnv: RUST_LOG is refused (the binary reads no such variable since ANR-970)" refused_api 'api.extraEnv: RUST_LOG is read by nothing' --set-json 'api.extraEnv=[{"name":"RUST_LOG","value":"debug"}]'
+check "extraEnv: API_CONFIG_FILE is refused (--config is the mounted file)" refused_api 'api.extraEnv: API_CONFIG_FILE is read by nothing' --set-json 'api.extraEnv=[{"name":"API_CONFIG_FILE","value":"/x"}]'
+check "extraEnv: API_LISTEN_ADDR is refused (the file's listen is api.port, which the probes and the Service follow)" \
+  refused_api 'api.extraEnv: API_LISTEN_ADDR is read by nothing' --set-json 'api.extraEnv=[{"name":"API_LISTEN_ADDR","value":"0.0.0.0:1"}]'
+check "extraEnv: HEALTH_ADDR is refused" refused_api 'api.extraEnv: HEALTH_ADDR is read by nothing' --set-json 'api.extraEnv=[{"name":"HEALTH_ADDR","value":"0.0.0.0:1"}]'
 check "extraEnv: a name set twice is refused" refused_api 'api.extraEnv: A is set twice' --set-json 'api.extraEnv=[{"name":"A","value":"1"},{"name":"A","value":"2"}]'
 check "extraEnv: an entry with no name is refused" refused_api 'api.extraEnv: every entry is a map with a name' --set-json 'api.extraEnv=[{"value":"1"}]'
 check "extraEnv: an entry that is not a map is refused" refused_api 'api.extraEnv: every entry is a map with a name' --set-json 'api.extraEnv=["A=1"]'
@@ -1037,7 +1059,8 @@ check "the secretref shape renders (a Secret per agent, no policy, no Ingress)" 
 api_shapes_are_written() {
   d=$(mktemp -d) || return 1
   sh "$here/api-shapes.sh" "$d" > /dev/null 2>&1 \
-    && [ "$(find "$d" -type f | wc -l)" -eq 9 ] && [ -s "$d/golden.yaml" ] && [ -s "$d/secretref.yaml" ] && [ -s "$d/minimal.yaml" ] && [ -s "$d/runpods.yaml" ] && [ -s "$d/metrics.yaml" ] && [ -s "$d/otel.yaml" ] && [ -s "$d/workload.yaml" ] \
+    && [ "$(find "$d" -type f | wc -l)" -eq 10 ] && [ -s "$d/golden.yaml" ] && [ -s "$d/secretref.yaml" ] && [ -s "$d/minimal.yaml" ] && [ -s "$d/runpods.yaml" ] && [ -s "$d/metrics.yaml" ] && [ -s "$d/otel.yaml" ] && [ -s "$d/otel-ratio.yaml" ] && [ -s "$d/workload.yaml" ] \
+    && grep -q '^    samplerRatio: 0.05$' "$d/otel-ratio.yaml" \
     && grep -q '^workloadListener:$' "$d/workload.yaml" && ! grep -q 'workload' "$d/golden.yaml" \
     && grep -q '^  - standard$' "$d/runpods.yaml" && ! grep -q 'runPodSizeClasses' "$d/golden.yaml" \
     && grep -q '^listen: 0.0.0.0:8443$' "$d/full.yaml" && grep -q '^healthListen: 0.0.0.0:9091$' "$d/full.yaml" \
@@ -1048,7 +1071,7 @@ api_shapes_are_written() {
   rm -rf "$d"
   return "$r"
 }
-check "api: api-shapes.sh writes the file of eight shapes and one that must be refused (golden, secretref, minimal, full, runpods, metrics, otel, workload; refused/clash), the full one with the ports it sets, run pods alone with size classes, metrics alone with metricsListen, the workload listener alone with workloadListener" api_shapes_are_written
+check "api: api-shapes.sh writes the file of nine shapes and one that must be refused (golden, secretref, minimal, full, runpods, metrics, otel, otel-ratio, workload; refused/clash), the full one with the ports it sets, run pods alone with size classes, metrics alone with metricsListen, the traces with a number for the ratio, the workload listener alone with workloadListener" api_shapes_are_written
 check "api: the shape that sets every value (tests/api-full.values.yaml) renders" renders_ok -f "$here/api-full.values.yaml"
 
 # ---- The values of the kind end-to-end of the Platform API (D7b2) ------------------------------------------------------------
@@ -1234,7 +1257,7 @@ check "chain: the script's namespace, label, audience and Secrets are the ones t
 # collector's log is in the scan for the secrets and the tokens in step 7.
 chain_otel_values() {
   dhas ConfigMap aap-operator '^        endpoint: "http://e2e-otel-collector\.aap-e2e-chain\.svc:4318/v1/traces"$' 'deployment.environment.name: e2e' \
-    && dhas Deployment aap-operator-api 'value: "http://e2e-otel-collector\.aap-e2e-chain\.svc:4318/v1/traces"' 'deployment.environment.name=e2e' \
+    && dhas ConfigMap aap-operator-api '^      otlp:$' '^        endpoint: http://e2e-otel-collector\.aap-e2e-chain\.svc:4318/v1/traces$' 'deployment.environment.name: e2e' \
     && all_of "$(op_egress_rule 3)" 'port: 4318' 'app.kubernetes.io/name: e2e-otel-collector' \
     && all_of "$(api_egress_rule 4)" 'port: 4318' 'app.kubernetes.io/name: e2e-otel-collector'
 }
@@ -1630,6 +1653,21 @@ check "refused: a variable the operator sets itself (the build jobs)" refused "r
 check "refused: a variable that is a number and not a text" refused "runPods.extraEnv.JOBS must be a text" --set runPods.enabled=true --set runPods.extraEnv.JOBS=2
 check "refused: a CIDR that is none" refused "is not an IPv4 CIDR" --set runPods.enabled=true --set 'runPods.networkPolicy.clusterCIDRs[0]=10.0.0.0/33'
 check "refused: no label of the DNS pods" refused "runPods.networkPolicy.dnsPodLabels must name at least one label" --set runPods.enabled=true --set runPods.networkPolicy.dnsPodLabels=null
+# ANR-1339: an extraEgress rule is a map, and its `to` is checked as every other peer list's (a list, never a map; a peer that says
+# who; an ipBlock of every address refused), because run pods are deny by default and a peer of every address would be the policy's
+# whole point lost. The rule's `ports` are not validated here: the operator's binary judges them at start.
+check "refused: an extraEgress rule that is not a map" refused "runPods.networkPolicy.extraEgress[0] must be a NetworkPolicy egress rule" -f "$here/runpods.values.yaml" --set-json 'runPods.networkPolicy.extraEgress=["open"]'
+check "refused: an extraEgress rule's peers as a map (a peer list is a list)" refused "runPods.networkPolicy.extraEgress[0].to must be a list of NetworkPolicy peers" -f "$here/runpods.values.yaml" --set-json 'runPods.networkPolicy.extraEgress=[{"to":{"namespaceSelector":{}}}]'
+check "refused: an extraEgress peer ipBlock of every address" refused "runPods.networkPolicy.extraEgress[0].to: an ipBlock of 0.0.0.0/0 is every address" -f "$here/runpods.values.yaml" --set-json 'runPods.networkPolicy.extraEgress=[{"to":[{"ipBlock":{"cidr":"0.0.0.0/0"}}]}]'
+check "refused: an extraEgress rule with no peer (a rule with no to is every destination)" refused "runPods.networkPolicy.extraEgress[0].to is required" -f "$here/runpods.values.yaml" --set-json 'runPods.networkPolicy.extraEgress=[{"ports":[{"protocol":"TCP","port":443}]}]'
+check "refused: an extraEgress rule with an empty peers list (the same rule)" refused "runPods.networkPolicy.extraEgress[0].to is required" -f "$here/runpods.values.yaml" --set-json 'runPods.networkPolicy.extraEgress=[{"to":[],"ports":[{"protocol":"TCP","port":443}]}]'
+extra_egress_reaches_the_settings() {
+  render -f "$here/runpods.values.yaml" --set-json 'runPods.networkPolicy.extraEgress=[{"to":[{"ipBlock":{"cidr":"10.0.0.0/8","except":["10.1.0.0/16"]}}],"ports":[{"port":443,"protocol":"TCP"}]}]' || return 1
+  # The chart makes no NetworkPolicy of a run pod (the operator makes one per agent at runtime): the rule reaches the operator's
+  # settings, which is what the operator renders that policy from.
+  dhas ConfigMap aap-operator '^        extraEgress:$' 'ipBlock' 'cidr: 10.0.0.0/8' 'except' '10.1.0.0/16' '- port: 443' 'protocol: TCP' && dlacks ConfigMap aap-operator 'namespaceSelector'
+}
+check "a valid extraEgress with an ipBlock renders, and the rule reaches the operator's settings (the operator renders a run pod's NetworkPolicy from them)" extra_egress_reaches_the_settings
 # The egress proxy (D15c): the checks of the coder chart's _validate.tpl, which RunPodSettings::validate repeats.
 check "refused: an allow-list of no host" refused "hold no host" --set runPods.enabled=true --set-json 'runPods.egressProxy.allow=[]'
 check "refused: an allow-list entry that is a URL" refused "is not a host name" --set runPods.enabled=true --set 'runPods.egressProxy.extraAllow[0]=https://example.com'
@@ -1895,7 +1933,7 @@ check "the API's metrics port must be a port" refused_api 'api.metrics.port: 700
 check "a peer of api.metrics.allowFrom must say who" refused_api 'api.metrics.allowFrom: a peer needs' --set-json 'api.metrics.allowFrom=[{"x":1}]'
 check "an API interval that is not a duration is refused" refused_api 'api.metrics.serviceMonitor.interval must be a duration' \
   --set api.metrics.serviceMonitor.enabled=true --set api.networkPolicy.enabled=false --set api.metrics.serviceMonitor.interval=soon
-check "METRICS_ADDR is the chart's, as the other two addresses are" refused_api 'api.extraEnv: METRICS_ADDR is the chart' \
+check "METRICS_ADDR is read by nothing since ANR-970, as the other two addresses are" refused_api 'api.extraEnv: METRICS_ADDR is read by nothing' \
   --set-json 'api.extraEnv=[{"name":"METRICS_ADDR","value":"0.0.0.0:1"}]'
 check "api off: an API ServiceMonitor is neither rendered nor checked" sm_off --set api.metrics.serviceMonitor.enabled=true
 metrics_values() {
@@ -1932,11 +1970,14 @@ otel_blocks_are_not_crossed() {
   dhas ConfigMap aap-operator 'endpoint: "https://otel-collector\.observability\.svc:4318/v1/traces"' '^        sampler: traceidratio$' '^        samplerRatio: 0.25$' \
     'deployment.environment.name: prod' 'k8s.cluster.name: netcup' 'service.namespace: another-agentic' || return 1
   dlacks ConfigMap aap-operator 'otel-gateway|otel-api-|bundle\.pem' || return 1
-  dhas Deployment aap-operator-api 'otel-gateway\.observability\.svc:4319/v1/traces' 'value: "always_on"' 'otel-api-headers' 'otel-api-ca' || return 1
-  dlacks Deployment aap-operator-api 'otel-collector|otel-operator-|OTEL_TRACES_SAMPLER_ARG|k8s.cluster.name' || return 1
-  # One endpoint in the file, and not a trace of the old variables in the pod.
-  [ "$(op_file | grep -c '^        endpoint:')" -eq 1 ] && ! op_pod | grep -q 'OTEL_' || return 1
-  # The operator already had POD_NAME: it is not written twice; the API had none.
+  dhas ConfigMap aap-operator-api 'endpoint: https://otel-gateway\.observability\.svc:4319/v1/traces' 'sampler: always_on' || return 1
+  dhas Deployment aap-operator-api 'otel-api-headers' 'otel-api-ca' || return 1
+  dlacks Deployment aap-operator-api 'OTEL_|otel-collector|otel-operator-|k8s.cluster.name' || return 1
+  # One endpoint in each file, and not a trace of the old variables in either pod (ANR-970).
+  [ "$(op_file | grep -c '^        endpoint:')" -eq 1 ] || return 1
+  [ "$(doc ConfigMap aap-operator-api | grep -c '^        endpoint:')" -eq 1 ] || return 1
+  ! op_pod | grep -q 'OTEL_' || return 1
+  # Both pods take the resource's identity from the downward API, once each.
   [ "$(op_pod | grep -c 'name: POD_NAME$')" -eq 1 ] && [ "$(doc Deployment aap-operator-api | grep -c 'name: POD_NAME$')" -eq 1 ] \
     && dhas Deployment aap-operator 'name: POD_NAMESPACE' 'fieldPath: metadata.namespace' \
     && dhas Deployment aap-operator-api 'name: POD_NAMESPACE' 'fieldPath: metadata.namespace'
@@ -1968,7 +2009,8 @@ otel_certificate() {
   render -f "$here/otel.values.yaml" || return 1
   dhas ConfigMap aap-operator '^        certificate: /etc/aap/otel/ca/ca.pem$' || return 1
   dhas Deployment aap-operator 'name: otel-operator-ca' 'key: ca.pem' 'path: ca.pem' 'mountPath: /etc/aap/otel/ca' || return 1
-  dhas Deployment aap-operator-api 'name: OTEL_EXPORTER_OTLP_CERTIFICATE' 'value: /etc/aap/otel/ca/ca.pem' 'name: otel-api-ca' 'key: bundle.pem' 'mountPath: /etc/aap/otel/ca' || return 1
+  dhas ConfigMap aap-operator-api 'certificate: /etc/aap/otel/ca/ca.pem' || return 1
+  dhas Deployment aap-operator-api 'name: otel-api-ca' 'key: bundle.pem' 'mountPath: /etc/aap/otel/ca' || return 1
   [ "$(op_pod | awk '/name: otel-ca/ { s = 1 } s && /readOnly: true/ { n++; exit } END { print n + 0 }')" -eq 1 ]
 }
 check "otel: the CA bundle is a read-only ConfigMap mount and the file names its path" otel_certificate
@@ -1990,7 +2032,8 @@ otel_certificate_alone() {
   render -f "$here/api.values.yaml" --set api.otel.enabled=true --set api.otel.endpoint=https://c:4318/v1/traces \
     --set-json 'api.otel.to=[{"podSelector":{"matchLabels":{"a":"b"}}}]' \
     --set api.otel.certificate.configMap=only-api-ca --set api.otel.certificate.key=ca.pem || return 1
-  dhas Deployment aap-operator-api 'name: OTEL_EXPORTER_OTLP_CERTIFICATE' 'name: otel-ca' 'name: only-api-ca' 'mountPath: /etc/aap/otel/ca' || return 1
+  dhas ConfigMap aap-operator-api 'certificate: /etc/aap/otel/ca/ca.pem' || return 1
+  dhas Deployment aap-operator-api 'name: otel-ca' 'name: only-api-ca' 'mountPath: /etc/aap/otel/ca' || return 1
   dlacks Deployment aap-operator-api 'otel-headers|AAP_OTEL_HEADERS_FILE'
 }
 check "otel: a CA bundle with no headers Secret still gets its volume and mount (operator and API), and no headers volume" otel_certificate_alone
@@ -2016,6 +2059,15 @@ otel_api_policy() {
   all_of "$(api_egress_rule 4)" 'port: 4319' '^      to:' 'otel-gateway' || return 1
   none_of "$(api_egress_rule 4)" 'port: 4318|opentelemetry-collector|port: 443|port: 53'
 }
+otel_ratio_is_a_number() {
+  # values.yaml holds `samplerRatio: "1"`, a string, and `OtlpSection.samplerRatio` is an `f64`: a quoted ratio makes the API refuse
+  # the file and crash-loop (the review of ANR-970 found it). The chart writes a number.
+  render -f "$here/api.values.yaml" --set api.otel.enabled=true --set api.otel.endpoint=https://c:4318/v1/traces \
+    --set api.otel.sampler=traceidratio --set api.otel.samplerRatio=0.05 \
+    --set-json 'api.otel.to=[{"podSelector":{"matchLabels":{"a":"b"}}}]' || return 1
+  dhas ConfigMap aap-operator-api '^        sampler: traceidratio$' '^        samplerRatio: 0.05$'
+}
+check "api.otel: a traceidratio ratio is a number in the file, not the string values.yaml holds (ANR-970 review)" otel_ratio_is_a_number
 check "otel: the API's NetworkPolicy has three egress rules off and four on, the fourth to api.otel.to on api.otel.ports (and not the operator's)" otel_api_policy
 otel_no_open_rule() {
   # In every rendered policy, a rule that names a port of the collector or of DNS has a `to`: none is open egress.
@@ -2040,17 +2092,17 @@ otel_api_off_is_not_rendered() {
 }
 check "api off: api.otel is neither rendered nor checked (a bad endpoint renders)" otel_api_off_is_not_rendered
 check "api off: api.otel is not checked" renders_ok --set api.otel.enabled=true --set api.otel.endpoint=nonsense
-otel_config_file_is_untouched() {
+otel_config_file_names_the_traces() {
   a=$(mktemp) || return 1
   b=$(mktemp) || return 1
   sh "$here/api-config.sh" "$a" -f "$here/otel.values.yaml" || return 1
   sh "$here/api-config.sh" "$b" -f "$here/otel.values.yaml" --set api.otel.enabled=false --set otel.enabled=false || return 1
-  cmp -s "$a" "$b"
+  grep -q 'endpoint: https://otel-gateway' "$a" && ! grep -q 'telemetry' "$b"
   r=$?
   rm -f "$a" "$b"
   return "$r"
 }
-check "otel: the API's configuration file is the same with tracing on and off (tracing is not in the file)" otel_config_file_is_untouched
+check "otel: the API's configuration file names the traces with api.otel on, and has no telemetry section with it off (ANR-970)" otel_config_file_names_the_traces
 otel_no_secret() {
   render -f "$here/otel.values.yaml" || return 1
   lacks '^kind: Secret$' && lacks '(ghp_|github_pat_|gho_|sk-[A-Za-z0-9]{8}|-----BEGIN|AKIA[0-9A-Z]{16}|xox[bp]-|eyJ[A-Za-z0-9_-]{20})'
@@ -2245,6 +2297,51 @@ check "metering: a key that is not a setting is refused" refused 'metering.foo i
 check "metering must be a map" refused 'metering must be a map' --set metering=null
 check "an ipBlock of 0.0.0.0/0 as a collector peer is refused" met_refused 'is every address' --set-json 'metering.collector.to=[{"ipBlock":{"cidr":"0.0.0.0/0"}}]'
 
+# ---- An empty namespaceSelector is every namespace (ANR-1191) ------------------------------------------------------------------
+# `namespaceSelector: {}` selects every namespace in a NetworkPolicy, so every list of peers refuses a namespaceSelector that has no
+# matchLabels and no matchExpressions; one with either renders.
+every_ns='[{"namespaceSelector":{}}]'
+ns_msg='a namespaceSelector with no matchLabels and no matchExpressions selects every namespace'
+ns_dns='[{"namespaceSelector":{"matchLabels":{"a":"b"}}}]'
+check "an empty namespaceSelector as a toolProbe peer is refused" refused "toolProbe.to: $ns_msg" \
+  --set-json "toolProbe.to=$every_ns" --set-json "toolProbe.dns.to=$ns_dns"
+check "an empty namespaceSelector as an activity peer is refused" refused "activity.to: $ns_msg" \
+  --set-json "activity.to=$every_ns" --set activity.tokenSecret.name=agent-bearer --set-json "activity.dns.to=$ns_dns"
+check "an empty namespaceSelector as a traces collector peer is refused" refused "otel.to: $ns_msg" \
+  -f "$here/otel.values.yaml" --set-json "otel.to=$every_ns"
+check "an empty namespaceSelector as a metering broker peer is refused" refused "metering.broker.to: $ns_msg" \
+  -f "$here/metering.values.yaml" --set-json "metering.broker.to=$every_ns"
+check "an empty namespaceSelector as a registry reader is refused" refused "networkPolicy.registry.allowFrom: $ns_msg" \
+  -f "$here/leader.values.yaml" --set-json "networkPolicy.registry.allowFrom=$every_ns"
+check "an empty namespaceSelector as a metrics scraper is refused" refused "networkPolicy.metrics.allowFrom: $ns_msg" \
+  -f "$here/metrics.values.yaml" --set-json "networkPolicy.metrics.allowFrom=$every_ns"
+check "an empty namespaceSelector as an API metrics scraper is refused" refused "api.metrics.allowFrom: $ns_msg" \
+  -f "$here/metrics.values.yaml" --set-json "api.metrics.allowFrom=$every_ns"
+check "an empty namespaceSelector as an API ingress peer is refused" refused "api.networkPolicy.from: $ns_msg" \
+  -f "$here/metrics.values.yaml" --set-json "api.networkPolicy.from=$every_ns"
+# The other spellings of nothing: null, and each of the two keys empty.
+for nothing in 'null' '{"matchLabels":{}}' '{"matchExpressions":[]}'; do
+  check "a namespaceSelector of $nothing is refused" refused "toolProbe.to: $ns_msg" \
+    --set-json "toolProbe.to=[{\"namespaceSelector\":$nothing}]" --set-json "toolProbe.dns.to=$ns_dns"
+done
+check "an empty namespaceSelector is refused even beside a podSelector" refused "toolProbe.to: $ns_msg" \
+  --set-json 'toolProbe.to=[{"namespaceSelector":{},"podSelector":{"matchLabels":{"a":"b"}}}]' --set-json "toolProbe.dns.to=$ns_dns"
+check "an ipBlock of 0.0.0.0/0 as a registry reader is refused" refused 'networkPolicy.registry.allowFrom: an ipBlock of 0.0.0.0/0 is every address' \
+  -f "$here/leader.values.yaml" --set-json 'networkPolicy.registry.allowFrom=[{"ipBlock":{"cidr":"0.0.0.0/0"}}]'
+check "an ipBlock of 0.0.0.0/0 as a metrics scraper is refused" refused 'networkPolicy.metrics.allowFrom: an ipBlock of 0.0.0.0/0 is every address' \
+  -f "$here/metrics.values.yaml" --set-json 'networkPolicy.metrics.allowFrom=[{"ipBlock":{"cidr":"0.0.0.0/0"}}]'
+ns_labels_renders() {
+  render --set-json 'toolProbe.to=[{"namespaceSelector":{"matchLabels":{"probe":"mcp"}}}]' --set-json "toolProbe.dns.to=$ns_dns" || return 1
+  all_of "$(op_egress_rule 3)" '^      to:' 'namespaceSelector:' 'matchLabels:' 'probe: mcp'
+}
+check "a namespaceSelector with matchLabels alone renders, and the operator's egress rule carries the peer" ns_labels_renders
+ns_expressions_renders() {
+  render --set-json 'toolProbe.to=[{"namespaceSelector":{"matchExpressions":[{"key":"a","operator":"In","values":["b"]}]}}]' \
+    --set-json "toolProbe.dns.to=$ns_dns" || return 1
+  all_of "$(op_egress_rule 3)" '^      to:' 'namespaceSelector:' 'matchExpressions:' 'key: a' 'operator: In'
+}
+check "a namespaceSelector with matchExpressions alone renders, and the operator's egress rule carries the peer" ns_expressions_renders
+
 # ---- Tool probe (slice K3a, AD-053) ---------------------------------------------------------------------------------------
 # `toolProbe.to` is the deployment's list of the peers the operator may reach to probe a ToolProvider's MCP server (a NetworkPolicy
 # names peers, never host names: the policy is what bounds the probe). Empty (the default): off, and then not a rule of it is rendered.
@@ -2374,7 +2471,18 @@ check "a values file that still sets usageIngest is refused, by name" refused "u
 render -f "$here/api.values.yaml"
 check "api.workload off (the default): not a trace of it in the API's render (no port, mount, volume, Service or rule)" \
   lacks 'workload|8443|aap-api-workload'
+check "api.workload: the lifetime warning is off by default (no maxLeafLifetimeSecs in the file)" dlacks ConfigMap aap-operator-api 'maxLeafLifetimeSecs'
 render -f "$here/workload.values.yaml"
+# ANR-1374: the lifetime warning is off by default, the shape sets 90000 (25 h: a `ttl: 24h` OpenBao role is backdated 30 s, so 86 400
+# would warn about every correct leaf), and a maximum of 0 or past a year is a mistake and not "off".
+wl_lifetime() {
+  dhas ConfigMap aap-operator-api '^      maxLeafLifetimeSecs: 90000$' || return 1
+  for v in 0 -1 31536001; do
+    refused 'api.workload.maxLeafLifetimeSecs must be a whole number from 1 to 31536000' -f "$here/workload.values.yaml" --set api.workload.maxLeafLifetimeSecs=$v || return 1
+  done
+  refused 'api.workload.maxLeafLifetimeSecs must be a whole number from 1 to 31536000' -f "$here/workload.values.yaml" --set-string api.workload.maxLeafLifetimeSecs=abc
+}
+check "api.workload: the lifetime warning is the workload shape's 90000, and 0, a negative or past a year is refused (ANR-1374)" wl_lifetime
 wl=aap-operator-api
 wl_config() { doc ConfigMap $wl | awk '/^  config.yaml: \|$/ { f = 1; next } f { print }'; }
 # (`check` runs one command: a `&&` after it would not be part of the check, so each check that needs two conditions is a function.)

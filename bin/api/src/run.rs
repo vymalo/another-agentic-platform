@@ -2,7 +2,6 @@
 //! this builds it from the Kubernetes objects and the OIDC authenticator, and serves it.
 
 use std::future::Future;
-use std::net::SocketAddr;
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -22,11 +21,11 @@ use futures::future::BoxFuture;
 use kube::api::ListParams;
 use tokio::sync::watch;
 
-use crate::config::{self, Settings, WorkloadSettings};
+use crate::config::{Settings, WorkloadSettings};
 use crate::mtls::{self, MtlsListener};
 use crate::serve::{self, Check, Health};
 
-/// The settings of `api`. Every one is also an environment variable, which is how the chart sets them.
+/// The command line of `api`: the file, and whether to check it. Every setting is the file's (ANR-970).
 #[derive(Debug, Parser)]
 #[command(
     name = "api",
@@ -34,21 +33,10 @@ use crate::serve::{self, Check, Health};
     about = "The Platform API of the admin dashboard"
 )]
 pub struct Args {
-    /// The configuration file (`config.example.yaml` documents every key).
-    #[arg(long, env = "API_CONFIG_FILE")]
+    /// The configuration file (`config.example.yaml` documents every key). Nothing else names a setting: the three ports,
+    /// the log's filter and the traces are the file's (ANR-970).
+    #[arg(long, default_value = "/etc/aap-api/config.yaml")]
     pub config: PathBuf,
-
-    /// Where the API listens. Wins over `listen` in the file.
-    #[arg(long, env = "API_LISTEN_ADDR")]
-    pub listen: Option<SocketAddr>,
-
-    /// Where `/healthz` and `/readyz` are served. Wins over `healthListen` in the file.
-    #[arg(long, env = "HEALTH_ADDR")]
-    pub health_addr: Option<SocketAddr>,
-
-    /// Where `/metrics` is served. Wins over `metricsListen` in the file.
-    #[arg(long, env = "METRICS_ADDR")]
-    pub metrics_addr: Option<SocketAddr>,
 
     /// Read the configuration file, say whether the API can work with it, and exit. Needs no cluster and no issuer.
     #[arg(long)]
@@ -363,8 +351,8 @@ fn ended(what: &str, result: Result<Result<()>, tokio::task::JoinError>) -> anyh
     }
 }
 
-/// `api`: read the configuration, compose, serve.
-pub async fn run(args: Args) -> Result<()> {
+/// `api`: compose what the file says, and serve.
+pub async fn run(settings: Settings) -> Result<()> {
     let Settings {
         listen,
         health_listen,
@@ -373,15 +361,15 @@ pub async fn run(args: Args) -> Result<()> {
         cors,
         defaults,
         workload,
-    } = config::load(&args.config)?;
+        log_filter: _,
+        telemetry,
+    } = settings;
     // Before the cluster and the issuer. A tracing setting that is refused never stops the API (tracing is not a security
-    // control, and platforms inject OTEL_* variables of their own): one warning, by variable, and tracing is off.
-    let started = aap_trace_otlp::start("aap-api", env!("CARGO_PKG_VERSION"));
+    // control): one warning, by setting, and tracing is off.
+    let started =
+        aap_trace_otlp::start_section("aap-api", env!("CARGO_PKG_VERSION"), telemetry.as_ref());
     started.warn();
     let tracer = started.tracer;
-    let listen = args.listen.unwrap_or(listen);
-    let health_listen = args.health_addr.unwrap_or(health_listen);
-    let metrics_listen = args.metrics_addr.unwrap_or(metrics_listen);
     tracing::info!(
         namespace = %defaults.namespace,
         origins = cors.as_slice().len(),
@@ -453,6 +441,8 @@ pub async fn run(args: Args) -> Result<()> {
 #[cfg(test)]
 mod tests {
     #![allow(clippy::unwrap_used, clippy::expect_used)]
+
+    use std::net::SocketAddr;
     use std::sync::Mutex;
     use std::sync::atomic::AtomicUsize;
 
@@ -902,26 +892,22 @@ mod tests {
     }
 
     #[test]
-    fn the_settings_of_the_command_line_win_over_the_file() {
-        let args = Args::try_parse_from([
-            "api",
-            "--config",
-            "/etc/api/config.yaml",
-            "--listen",
-            "127.0.0.1:9000",
-            "--health-addr",
-            "127.0.0.1:9001",
-            "--metrics-addr",
-            "127.0.0.1:9002",
-        ])
-        .unwrap();
-        assert_eq!(args.listen, Some("127.0.0.1:9000".parse().unwrap()));
-        assert_eq!(args.health_addr, Some("127.0.0.1:9001".parse().unwrap()));
-        assert_eq!(args.metrics_addr, Some("127.0.0.1:9002".parse().unwrap()));
+    fn the_command_line_names_the_file_and_nothing_else() {
+        // ANR-970: the file's default path, and no flag for a setting the file holds.
+        let args = Args::try_parse_from(["api"]).unwrap();
+        assert_eq!(args.config, PathBuf::from("/etc/aap-api/config.yaml"));
         assert!(!args.check);
-        assert!(
-            Args::try_parse_from(["api"]).is_err(),
-            "the configuration file is required"
+        assert_eq!(
+            Args::try_parse_from(["api", "--config", "/etc/api/config.yaml"])
+                .unwrap()
+                .config,
+            PathBuf::from("/etc/api/config.yaml")
         );
+        for flag in ["--listen", "--health-addr", "--metrics-addr"] {
+            assert!(
+                Args::try_parse_from(["api", flag, "127.0.0.1:9000"]).is_err(),
+                "{flag} is the file's"
+            );
+        }
     }
 }

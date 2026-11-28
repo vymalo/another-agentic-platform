@@ -163,7 +163,7 @@ So read it this way. A change today is meant to be additive: a new optional fiel
 | `bump` | `operator-image.yml` | `bump-tag.sh` on `main`. Its dry run on pull requests is `bump-dry-run`, and `bump-tag-test.sh`, in the shell scripts job, holds that it edits only the key it is asked to |
 | `leader-e2e` | `operator-image.yml` | Two replicas and a handover, as above |
 
-*Verified 2026-11-27* with `gh run view`: on `main` at commit `1575f99`, run 45937638784 of `operator.yml`, with `kind`, `crds-drift` and `operator-e2e` among its jobs, ended in success. On `main` at `2c16326`, run 45932723504 of `operator-image.yml`, with `helm lint, render checks and kubeconform`, `leader-e2e` and `bump the tags in the chart` among its jobs, ended in success, and its bump commit is `651a60e`.
+*The run this page was checked against, with its ids, is recorded in [the agent page](../../../.agents/docs/guides/operate/upgrade.md).*
 
 ### What was walked
 

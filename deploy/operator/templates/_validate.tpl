@@ -132,11 +132,7 @@ Included from deployment.yaml, which every render has, so they always run.
 {{- fail "networkPolicy.registry.allowFrom is required while the registry has a token and networkPolicy is enabled: with none, nothing could read it (list the orchestrator's namespace or pods, or set networkPolicy.enabled=false)" -}}
 {{- end -}}
 {{- range $list := list "registry" "metrics" -}}
-{{- range $peer := (get $.Values.networkPolicy $list).allowFrom -}}
-{{- if not (or (hasKey $peer "namespaceSelector") (hasKey $peer "podSelector") (hasKey $peer "ipBlock")) -}}
-{{- fail (printf "networkPolicy.%s.allowFrom: a peer needs a namespaceSelector, a podSelector or an ipBlock, got %s" $list (toJson $peer)) -}}
-{{- end -}}
-{{- end -}}
+{{- include "aap.checkPeerList" (dict "what" (printf "networkPolicy.%s.allowFrom" $list) "peers" (get $.Values.networkPolicy $list).allowFrom) -}}
 {{- end -}}
 {{- if not .Values.networkPolicy.apiServer.ports -}}
 {{- fail "networkPolicy.apiServer.ports must name at least one port: the operator reaches nothing else" -}}
@@ -164,11 +160,7 @@ policy on, as the traces' is. */ -}}
 {{- fail (printf "toolProbe.timeoutSecs must be a whole number of seconds from 1 to 60, got %v" $tp.timeoutSecs) -}}
 {{- end -}}
 {{- end -}}
-{{- if not (kindIs "slice" (default (list) $tp.to)) -}}
-{{- fail "toolProbe.to must be a list of NetworkPolicy peers" -}}
-{{- end -}}
-{{- include "aap.checkPeers" (dict "what" "toolProbe.to" "peers" (default (list) $tp.to)) -}}
-{{- include "aap.checkIpBlocks" (dict "what" "toolProbe.to" "peers" (default (list) $tp.to)) -}}
+{{- include "aap.checkPeerList" (dict "what" "toolProbe.to" "peers" $tp.to) -}}
 {{- if not (kindIs "slice" (default (list) $tp.ports)) -}}
 {{- fail "toolProbe.ports must be a list of port numbers" -}}
 {{- end -}}
@@ -192,8 +184,7 @@ policy on, as the traces' is. */ -}}
 {{- fail (printf "toolProbe.dns.ports: %v is not a port number" $p) -}}
 {{- end -}}
 {{- end -}}
-{{- include "aap.checkPeers" (dict "what" "toolProbe.dns.to" "peers" (default (list) $tp.dns.to)) -}}
-{{- include "aap.checkIpBlocks" (dict "what" "toolProbe.dns.to" "peers" (default (list) $tp.dns.to)) -}}
+{{- include "aap.checkPeerList" (dict "what" "toolProbe.dns.to" "peers" $tp.dns.to) -}}
 {{- else if and $tp.to .Values.networkPolicy.enabled -}}
 {{- fail "toolProbe.dns is required while toolProbe.to is set and the NetworkPolicy is enabled: the probe's DNS rule needs its peers and ports" -}}
 {{- end -}}
@@ -222,11 +213,7 @@ the DNS rule is required with the policy on, as the tool probe's is. */ -}}
 {{- if not (kindIs "map" $ac.agentTokensSecret) -}}
 {{- fail "activity.agentTokensSecret must be a map with a name and a key (empty: the same as tokenSecret)" -}}
 {{- end -}}
-{{- if not (kindIs "slice" (default (list) $ac.to)) -}}
-{{- fail "activity.to must be a list of NetworkPolicy peers" -}}
-{{- end -}}
-{{- include "aap.checkPeers" (dict "what" "activity.to" "peers" (default (list) $ac.to)) -}}
-{{- include "aap.checkIpBlocks" (dict "what" "activity.to" "peers" (default (list) $ac.to)) -}}
+{{- include "aap.checkPeerList" (dict "what" "activity.to" "peers" $ac.to) -}}
 {{- if $ac.to -}}
 {{- if not (and (include "aap.isWholeNumber" $ac.timeoutSecs) (ge (int $ac.timeoutSecs) 1) (le (int $ac.timeoutSecs) 30)) -}}
 {{- fail (printf "activity.timeoutSecs must be a whole number of seconds from 1 to 30, got %v" $ac.timeoutSecs) -}}
@@ -248,8 +235,7 @@ Defaulting it to the operator's own would leave them in CreateContainerConfigErr
 {{- fail (printf "activity.dns.ports: %v is not a port number" $p) -}}
 {{- end -}}
 {{- end -}}
-{{- include "aap.checkPeers" (dict "what" "activity.dns.to" "peers" $ac.dns.to) -}}
-{{- include "aap.checkIpBlocks" (dict "what" "activity.dns.to" "peers" $ac.dns.to) -}}
+{{- include "aap.checkPeerList" (dict "what" "activity.dns.to" "peers" $ac.dns.to) -}}
 {{- end -}}
 {{- end -}}
 {{- /* The pod-minute meter (ANR-1103, AD-069): off by default. On, every part is required (the operator refuses an incomplete section at start, and the
@@ -300,14 +286,10 @@ chart refuses it first), the peers are a NetworkPolicy's and never every address
 {{- if not (kindIs "map" $b) -}}
 {{- fail (printf "metering.%s must be a map" $part) -}}
 {{- end -}}
-{{- if not (kindIs "slice" (default (list) $b.to)) -}}
-{{- fail (printf "metering.%s.to must be a list of NetworkPolicy peers" $part) -}}
-{{- end -}}
+{{- include "aap.checkPeerList" (dict "what" (printf "metering.%s.to" $part) "peers" $b.to) -}}
 {{- if not $b.to -}}
 {{- fail (printf "metering.%s.to is required while metering.enabled is true: the operator's egress goes to exactly the peers listed, never to anywhere" $part) -}}
 {{- end -}}
-{{- include "aap.checkPeers" (dict "what" (printf "metering.%s.to" $part) "peers" $b.to) -}}
-{{- include "aap.checkIpBlocks" (dict "what" (printf "metering.%s.to" $part) "peers" $b.to) -}}
 {{- if not (include "aap.isPort" $b.port) -}}
 {{- fail (printf "metering.%s.port: %v is not a port number" $part $b.port) -}}
 {{- end -}}
@@ -344,8 +326,7 @@ chart refuses it first), the peers are a NetworkPolicy's and never every address
 {{- fail (printf "metering.dns.ports: %v is not a port number" $p) -}}
 {{- end -}}
 {{- end -}}
-{{- include "aap.checkPeers" (dict "what" "metering.dns.to" "peers" $mt.dns.to) -}}
-{{- include "aap.checkIpBlocks" (dict "what" "metering.dns.to" "peers" $mt.dns.to) -}}
+{{- include "aap.checkPeerList" (dict "what" "metering.dns.to" "peers" $mt.dns.to) -}}
 {{- end -}}
 {{- end -}}
 {{- /* Settings that have a default: a number, above zero. */ -}}
@@ -574,6 +555,18 @@ the CIDRs, a toleration or an egress rule, which the operator checks at start an
 {{- if not (kindIs "slice" $n.extraEgress) -}}
 {{- fail "runPods.networkPolicy.extraEgress must be a list of NetworkPolicy egress rules" -}}
 {{- end -}}
+{{- /* Every rule is a map, names its peers (a rule with no peer is every destination: _otel.tpl and the metering section refuse the
+   same shape), and they are judged as every other peer list's (ANR-1339). The rule's ports are not judged here:
+   the operator's binary refuses a port it does not accept at start (RunPodSettings::validate). */ -}}
+{{- range $i, $rule := $n.extraEgress -}}
+{{- if not (kindIs "map" $rule) -}}
+{{- fail (printf "runPods.networkPolicy.extraEgress[%d] must be a NetworkPolicy egress rule (a map with to and ports), got %s" $i (toJson $rule)) -}}
+{{- end -}}
+{{- if not (get $rule "to") -}}
+{{- fail (printf "runPods.networkPolicy.extraEgress[%d].to is required: a NetworkPolicy egress rule with no peer reaches every address, and a run pod reaches the internet only through the egress proxy (name the peers, and the host in runPods.egressProxy.extraNoProxy)" $i) -}}
+{{- end -}}
+{{- include "aap.checkPeerList" (dict "what" (printf "runPods.networkPolicy.extraEgress[%d].to" $i) "peers" (get $rule "to")) -}}
+{{- end -}}
 {{- /* The egress proxy (adam-rs ADR 0042, slice D15c): the checks of the coder chart's _validate.tpl, which RunPodSettings::validate repeats. */ -}}
 {{- $ep := $r.egressProxy -}}
 {{- range $k, $v := $ep -}}
@@ -775,7 +768,7 @@ for each tested shape (tests/api-shapes.sh) to find such a value before it is de
 {{- fail "api.port and api.healthPort must differ: the API and its health endpoints are two listeners" -}}
 {{- end -}}
 {{- /* The API's traces (slice K5). */ -}}
-{{- include "aap.otel.validate" (dict "what" "api.otel" "block" $api.otel "policy" $api.networkPolicy.enabled "dns" false) -}}
+{{- include "aap.otel.validate" (dict "what" "api.otel" "block" $api.otel "policy" $api.networkPolicy.enabled "dns" false "headersInConfig" true) -}}
 {{- /* The metrics port: a port of its own, and a ServiceMonitor only where the NetworkPolicy lets the scrape in. */ -}}
 {{- $m := $api.metrics -}}
 {{- if not (kindIs "map" $m.serviceMonitor) -}}
@@ -787,7 +780,7 @@ for each tested shape (tests/api-shapes.sh) to find such a value before it is de
 {{- if or (eq (int $m.port) (int $api.port)) (eq (int $m.port) (int $api.healthPort)) -}}
 {{- fail "api.metrics.port must differ from api.port and api.healthPort: /metrics is a listener of its own, never the API's" -}}
 {{- end -}}
-{{- include "aap.checkPeers" (dict "what" "api.metrics.allowFrom" "peers" (default (list) $m.allowFrom)) -}}
+{{- include "aap.checkPeerList" (dict "what" "api.metrics.allowFrom" "peers" $m.allowFrom) -}}
 {{- if $m.serviceMonitor.enabled -}}
 {{- if and $api.networkPolicy.enabled (not $m.allowFrom) -}}
 {{- fail "api.metrics.serviceMonitor.enabled needs api.metrics.allowFrom: with none, the API's NetworkPolicy drops the scrape (list the Prometheus pods or namespace, or set api.networkPolicy.enabled=false)" -}}
@@ -899,9 +892,7 @@ for each tested shape (tests/api-shapes.sh) to find such a value before it is de
 {{- if and (hasKey $d "offerLabel") (not (and (kindIs "string" $d.offerLabel) (regexMatch `^[^[:space:]]+$` $d.offerLabel))) -}}
 {{- fail (printf "api.config.defaults.offerLabel must be a label key with no space, got %q" (toString $d.offerLabel)) -}}
 {{- end -}}
-{{- range $peer := (default (list) $d.allowFrom) -}}
-{{- include "aap.checkPeers" (dict "what" "api.config.defaults.allowFrom" "peers" (list $peer)) -}}
-{{- end -}}
+{{- include "aap.checkPeerList" (dict "what" "api.config.defaults.allowFrom" "peers" $d.allowFrom) -}}
 {{- $store := default (dict) $d.store -}}
 {{- if not (kindIs "map" $store) -}}
 {{- fail "api.config.defaults.store must be a map with exactly one of cnpg and secretRef" -}}
@@ -968,9 +959,9 @@ for each tested shape (tests/api-shapes.sh) to find such a value before it is de
 {{- if not $np.from -}}
 {{- fail "api.networkPolicy.from is required while api.networkPolicy.enabled: with none, nothing could reach the API (list the pods of the Ingress controller, or set api.networkPolicy.enabled=false)" -}}
 {{- end -}}
-{{- include "aap.checkPeers" (dict "what" "api.networkPolicy.from" "peers" $np.from) -}}
-{{- include "aap.checkPeers" (dict "what" "api.networkPolicy.dns.to" "peers" $np.dns.to) -}}
-{{- include "aap.checkPeers" (dict "what" "api.networkPolicy.issuer.to" "peers" $np.issuer.to) -}}
+{{- include "aap.checkPeerList" (dict "what" "api.networkPolicy.from" "peers" $np.from) -}}
+{{- include "aap.checkPeerList" (dict "what" "api.networkPolicy.dns.to" "peers" $np.dns.to) -}}
+{{- include "aap.checkPeerList" (dict "what" "api.networkPolicy.issuer.to" "peers" $np.issuer.to) -}}
 {{- range $list := list "apiServer" "dns" "issuer" -}}
 {{- $ports := (get $np $list).ports -}}
 {{- if not $ports -}}
@@ -999,7 +990,26 @@ for each tested shape (tests/api-shapes.sh) to find such a value before it is de
 {{- if not (and (kindIs "map" $peer) (or (hasKey $peer "namespaceSelector") (hasKey $peer "podSelector") (hasKey $peer "ipBlock"))) -}}
 {{- fail (printf "%s: a peer needs a namespaceSelector, a podSelector or an ipBlock, got %s" $what (toJson $peer)) -}}
 {{- end -}}
+{{- if hasKey $peer "namespaceSelector" -}}
+{{- $ns := $peer.namespaceSelector -}}
+{{- if or (not (kindIs "map" $ns)) (not (or $ns.matchLabels $ns.matchExpressions)) -}}
+{{- fail (printf "%s: a namespaceSelector with no matchLabels and no matchExpressions selects every namespace: name the namespaces" $what) -}}
 {{- end -}}
+{{- end -}}
+{{- end -}}
+{{- end -}}
+
+{{/*
+A list of peers: .what (the value's name) and .peers. A list, never a map or a text, and every peer is judged by aap.checkPeers and
+aap.checkIpBlocks. Absent and empty are no peer.
+*/}}
+{{- define "aap.checkPeerList" -}}
+{{- $peers := .peers -}}
+{{- if not (or (kindIs "slice" $peers) (kindIs "invalid" $peers)) -}}
+{{- fail (printf "%s must be a list of NetworkPolicy peers, got %s" .what (toJson $peers)) -}}
+{{- end -}}
+{{- include "aap.checkPeers" (dict "what" .what "peers" (default (list) $peers)) -}}
+{{- include "aap.checkIpBlocks" (dict "what" .what "peers" (default (list) $peers)) -}}
 {{- end -}}
 
 {{/*
@@ -1052,8 +1062,8 @@ SPIFFE id that is not one, a permission that is neither platform:agents.own nor 
 {{- if include "aap.api.workloadEnabled" . -}}
 {{- $w := $api.workload -}}
 {{- range $k, $v := $w -}}
-{{- if not (has $k (list "enabled" "port" "handshakeTimeoutSecs" "maxHandshakesPerIp" "maxConnections" "clients" "tls" "clientCa" "from")) -}}
-{{- fail (printf "api.workload.%s is not a setting: enabled, port, handshakeTimeoutSecs, maxHandshakesPerIp, maxConnections, clients, tls, clientCa or from" $k) -}}
+{{- if not (has $k (list "enabled" "port" "handshakeTimeoutSecs" "maxHandshakesPerIp" "maxConnections" "maxLeafLifetimeSecs" "clients" "tls" "clientCa" "from")) -}}
+{{- fail (printf "api.workload.%s is not a setting: enabled, port, handshakeTimeoutSecs, maxHandshakesPerIp, maxConnections, maxLeafLifetimeSecs, clients, tls, clientCa or from" $k) -}}
 {{- end -}}
 {{- end -}}
 {{- if not (include "aap.isPort" $w.port) -}}
@@ -1061,6 +1071,13 @@ SPIFFE id that is not one, a permission that is neither platform:agents.own nor 
 {{- end -}}
 {{- if or (eq (int $w.port) (int $api.port)) (eq (int $w.port) (int $api.healthPort)) (eq (int $w.port) (int $api.metrics.port)) -}}
 {{- fail "api.workload.port must differ from api.port, api.healthPort and api.metrics.port: the workload listener is a port of its own" -}}
+{{- end -}}
+{{- /* `with` would skip 0, "" and false, which are mistakes and not "off": only an absent key and a null are off. */ -}}
+{{- if and (hasKey $w "maxLeafLifetimeSecs") (not (kindIs "invalid" $w.maxLeafLifetimeSecs)) -}}
+{{- $v := $w.maxLeafLifetimeSecs -}}
+{{- if not (and (include "aap.isWholeNumber" $v) (ge (int $v) 1) (le (int $v) 31536000)) -}}
+{{- fail (printf "api.workload.maxLeafLifetimeSecs must be a whole number from 1 to 31536000, got %v" $v) -}}
+{{- end -}}
 {{- end -}}
 {{- range $b := list (list "handshakeTimeoutSecs" 60) (list "maxHandshakesPerIp" 1024) (list "maxConnections" 65536) -}}
 {{- $v := get $w (index $b 0) -}}
@@ -1108,12 +1125,9 @@ SPIFFE id that is not one, a permission that is neither platform:agents.own nor 
 {{- if not (and (kindIs "string" $ca.key) $ca.key) -}}
 {{- fail "api.workload.clientCa.key must name the key of that ConfigMap that holds the PEM bundle" -}}
 {{- end -}}
-{{- if not (kindIs "slice" (default (list) $w.from)) -}}
-{{- fail "api.workload.from must be a list of peers" -}}
-{{- end -}}
-{{- include "aap.checkPeers" (dict "what" "api.workload.from" "peers" (default (list) $w.from)) -}}
-{{- /* An ipBlock that is every address would open the listener to the world: refused, as the tool probe's and the traces' peers are. (api.networkPolicy.from, the person's, is not checked here.) */ -}}
-{{- include "aap.checkIpBlocks" (dict "what" "api.workload.from" "peers" (default (list) $w.from)) -}}
+{{- /* An ipBlock that is every address would open the listener to the world: refused, as it is of every peer list of this chart
+   (aap.checkPeerList). */ -}}
+{{- include "aap.checkPeerList" (dict "what" "api.workload.from" "peers" $w.from) -}}
 {{- if and $api.networkPolicy.enabled (not $w.from) -}}
 {{- fail "api.workload.from is required while api.networkPolicy.enabled: with none, nothing could reach the workload listener (list the orchestrator's pods, or set api.networkPolicy.enabled=false)" -}}
 {{- end -}}
@@ -1144,7 +1158,7 @@ extraVolumes, and a name is used once.
 {{- fail (printf "api.extraEnv: %q is not an environment variable name" $e.name) -}}
 {{- end -}}
 {{- if has $e.name (list "API_CONFIG_FILE" "RUST_LOG" "API_LISTEN_ADDR" "HEALTH_ADDR" "METRICS_ADDR") -}}
-{{- fail (printf "api.extraEnv: %s is the chart's: API_CONFIG_FILE is the mounted file, RUST_LOG is api.logLevel, and API_LISTEN_ADDR, HEALTH_ADDR and METRICS_ADDR would win over api.port, api.healthPort and api.metrics.port in the file, which the probes and the Service follow" $e.name) -}}
+{{- fail (printf "api.extraEnv: %s is read by nothing since ANR-970: the binary takes everything from its file (--config, the mounted one), so API_CONFIG_FILE, RUST_LOG, API_LISTEN_ADDR, HEALTH_ADDR and METRICS_ADDR would be a setting that does nothing. api.logLevel is the file's log.filter, and the ports are api.port, api.healthPort and api.metrics.port" $e.name) -}}
 {{- end -}}
 {{- if or (hasPrefix "OTEL_" $e.name) (hasPrefix "AAP_OTEL_" $e.name) (and $api.otel.enabled (has $e.name (list "POD_NAME" "POD_NAMESPACE"))) -}}
 {{- fail (printf "api.extraEnv: %s is the chart's: the tracing variables are api.otel (OTEL_*, AAP_OTEL_*, and POD_NAME and POD_NAMESPACE while api.otel.enabled)" $e.name) -}}

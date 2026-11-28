@@ -275,9 +275,9 @@ rm -f coder.yaml gateway.yaml
 **Not run end to end.** The machine this page was written on had Docker but no `kind`, `kubectl` or `helm`, and under 2 GB of free
 disk. The objects are the ones of [`coder-e2e.sh`](../../deploy/operator/tests/e2e/coder-e2e.sh) at `275a01c` (the real image) and of the
 stand-in `coder` fixture of `bin/operator/tests/cluster.rs` (the stand-in), joined by hand. The first passed in CI as the job
-`operator-coder-e2e` (run 37307542288, *verified 2026-10-15* with `gh run view`), which is older than Helm 4 and Kubernetes 1.37 (AD-067).
-The second is covered by the `kind` job of `operator.yml`, which passed on `main`: job 140420663650 of run 45973874487 at `36ca2e0`,
-*verified 2026-11-27* in the job's log. Whether this exact join, with a `ModelEndpoint` applied after the config, becomes `Ready`, and what the `Blocked`
+`operator-coder-e2e`, which is older than Helm 4 and Kubernetes 1.37 (AD-067).
+The second is covered by the `kind` job of `operator.yml`, which has passed on `main`; the runs, the jobs
+and the commit are in [the agent page](../../.agents/docs/get-started/coder.md). Whether this exact join, with a `ModelEndpoint` applied after the config, becomes `Ready`, and what the `Blocked`
 state says, was not run.
 
 ## Next
