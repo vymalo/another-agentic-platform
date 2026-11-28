@@ -11,7 +11,7 @@ use std::fmt;
 use std::sync::Arc;
 use std::time::Duration;
 
-use aap_ports::{Activity, ActivityError, ActivitySource, RuntimeId};
+use aap_ports::{Activity, ActivityError, ActivitySource, RuntimeId, UnavailableCause};
 
 /// The most bytes of an answer that are read: the real one is a few dozen.
 pub const MAX_BODY: usize = 4096;
@@ -134,27 +134,26 @@ impl ActivitySource for HttpActivity {
             request = request.bearer_auth(&token.0);
         }
         // `reqwest::Error` can hold the URL: it names a service, never a credential, but the message is not made from it.
-        let mut response = request
-            .send()
-            .await
-            .map_err(|e| ActivityError::Unavailable(Box::new(e.without_url())))?;
+        let mut response = request.send().await.map_err(transport)?;
         let status = response.status();
         if status == reqwest::StatusCode::UNAUTHORIZED || status == reqwest::StatusCode::FORBIDDEN {
-            return Err(ActivityError::Invalid(format!(
-                "the agent refused the question ({status})"
-            )));
+            return Err(ActivityError::Refused {
+                status: status.as_u16(),
+            });
         }
         if !status.is_success() {
-            return Err(ActivityError::Unavailable(
-                format!("the agent answered {status}").into(),
-            ));
+            let cause = if status.is_server_error() {
+                UnavailableCause::ServerError
+            } else {
+                UnavailableCause::Other
+            };
+            return Err(ActivityError::Unavailable {
+                cause,
+                source: format!("the agent answered {status}").into(),
+            });
         }
         let mut body = Vec::new();
-        while let Some(chunk) = response
-            .chunk()
-            .await
-            .map_err(|e| ActivityError::Unavailable(Box::new(e.without_url())))?
-        {
+        while let Some(chunk) = response.chunk().await.map_err(transport)? {
             if body.len() + chunk.len() > MAX_BODY {
                 return Err(ActivityError::Invalid(format!(
                     "the answer is longer than {MAX_BODY} bytes"
@@ -163,6 +162,21 @@ impl ActivitySource for HttpActivity {
             body.extend_from_slice(&chunk);
         }
         parse(&body)
+    }
+}
+
+/// A request that failed on the wire, before the answer or in the middle of its body. The URL is taken out of it.
+fn transport(e: reqwest::Error) -> ActivityError {
+    let cause = if e.is_timeout() {
+        UnavailableCause::Timeout
+    } else if e.is_connect() {
+        UnavailableCause::Connect
+    } else {
+        UnavailableCause::Other
+    };
+    ActivityError::Unavailable {
+        cause,
+        source: Box::new(e.without_url()),
     }
 }
 

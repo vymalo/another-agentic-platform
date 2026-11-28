@@ -147,6 +147,27 @@ stateDiagram-v2
 A route that is not in the table is never served. The permission of each route is in the [OpenAPI document](../../reference/openapi.md) (`x-permission`).
 
 :::
+
+## The workload listener, and its certificates
+
+A service can call the API with a **certificate** instead of a token: the workload listener, on a port of its own, mutual TLS, serving **only** the owner routes. It is off unless `api.workload.enabled` is true and at least one workload is named.
+
+The API checks a certificate in this order, and each failure has its own word: it chains to `api.workload.clientCa`; it carries the **client-authentication** extended key usage (required, not "if present"); it is inside its validity window; and it names **exactly one** URI SAN that is one of `api.workload.clients` — that SAN is the whole identity, and what it may do is the entry's `permissions`.
+
+**A workload certificate should live about 24 h.** Its lifetime is the revocation story: nothing checks a revocation list yet, so a certificate is trusted until it expires. The chart issues no certificate, and the orchestrator's is the orchestrator's to obtain. The shape that fits OpenBao:
+
+| Piece | What it is |
+|---|---|
+| Kubernetes auth | The orchestrator's ServiceAccount token logs in to OpenBao (`auth/kubernetes/login`, a role bound to its namespace and name), and a policy gives it **`update` on `<mount>/issue/<role>`** — reading the role is not issuing |
+| A PKI role with `ttl: 24h` | `ttl` is the **default** lifetime; `max_ttl: 24h` is what limits it. `client_flag: true` and `server_flag: false` (OpenBao defaults to a server certificate), `allowed_uri_sans` = the workload's exact `spiffe://...`, `require_cn: false`; the request names `uri_sans` for the same value. **One role per workload**, so a login cannot ask for another's SAN |
+| A sidecar that renews | The orchestrator reads its certificate from files; a small sidecar in its pod (log in, issue, **swap a directory or a symlink** — a certificate and a key written one after the other are never a pair — and sleep until two thirds of the lifetime) keeps them fresh, and the orchestrator re-reads them when they change. **If it does not re-read them, a renewal only takes effect at the next restart**: that is the system's side of the contract |
+
+**When the renewal fails, the API fails closed.** At expiry a **new** connection fails the TLS handshake, and a request on a connection that was already open gets `401` with the word `expired`. After a renewal the caller must load the new files **and open a new connection**: a kept-alive one still carries the old certificate.
+
+*Unverified:* none of the OpenBao setup above was run against an OpenBao here, and neither was whether the orchestrator re-reads its files; the API's own check is what the tests and the kind end-to-end hold.
+
+**A warning, if you want one.** `api.workload.maxLeafLifetimeSecs` (absent: off) makes the API log **one** warning — the lifetime, never the identity — the first time an **accepted** leaf lives longer than that. It never refuses a certificate: the lifetime is your issuer's, and a deployment whose PKI is not this one's has to keep working. **Leave room for the issuer's backdating:** OpenBao sets `notBefore` 30 s before the issue (its `not_before_duration` default), so a `ttl: 24h` role gives a lifetime of 86 430 s and a maximum of 86 400 would warn about every correctly issued leaf. 90 000 (25 h) is the suggested value.
+
 ## The API pod is not ready until it can reach the issuer
 
 ::: in-depth The checks behind it

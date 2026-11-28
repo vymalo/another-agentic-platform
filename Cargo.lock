@@ -104,6 +104,8 @@ dependencies = [
  "serde_yaml_ng",
  "thiserror 2.0.21",
  "tokio",
+ "tracing",
+ "tracing-subscriber",
  "x509-parser",
 ]
 
