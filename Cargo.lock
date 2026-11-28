@@ -4,7 +4,7 @@ version = 4
 
 [[package]]
 name = "aap-activator"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "aap-ports",
  "axum",
@@ -15,7 +15,7 @@ dependencies = [
 
 [[package]]
 name = "aap-activity-http"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "aap-ports",
  "axum",
@@ -27,7 +27,7 @@ dependencies = [
 
 [[package]]
 name = "aap-api"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "k8s-openapi",
  "kube",
@@ -39,7 +39,7 @@ dependencies = [
 
 [[package]]
 name = "aap-api-server"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "aap-api",
  "aap-auth-oidc",
@@ -71,7 +71,7 @@ dependencies = [
 
 [[package]]
 name = "aap-auth-oidc"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "aap-auth-oidc",
  "aap-ports",
@@ -93,7 +93,7 @@ dependencies = [
 
 [[package]]
 name = "aap-auth-workload"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "aap-auth-workload",
  "aap-ports",
@@ -111,7 +111,7 @@ dependencies = [
 
 [[package]]
 name = "aap-cli"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "aap-api",
  "aap-auth-oidc",
@@ -134,7 +134,7 @@ dependencies = [
 
 [[package]]
 name = "aap-controller"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "aap-activity-http",
  "aap-api",
@@ -163,7 +163,7 @@ dependencies = [
 
 [[package]]
 name = "aap-domain"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "aap-api",
  "aap-ports",
@@ -179,7 +179,7 @@ dependencies = [
 
 [[package]]
 name = "aap-forms"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "aap-api",
  "aap-domain",
@@ -195,7 +195,7 @@ dependencies = [
 
 [[package]]
 name = "aap-leader-kubernetes"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "aap-leader-kubernetes",
  "aap-ports",
@@ -211,7 +211,7 @@ dependencies = [
 
 [[package]]
 name = "aap-objects-kubernetes"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "aap-api",
  "aap-ports",
@@ -232,7 +232,7 @@ dependencies = [
 
 [[package]]
 name = "aap-operator"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "aap-activity-http",
  "aap-api",
@@ -269,7 +269,7 @@ dependencies = [
 
 [[package]]
 name = "aap-platform-api"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "aap-api",
  "aap-auth-oidc",
@@ -293,7 +293,7 @@ dependencies = [
 
 [[package]]
 name = "aap-platform-client"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "aap-api",
  "aap-forms",
@@ -315,7 +315,7 @@ dependencies = [
 
 [[package]]
 name = "aap-ports"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "aap-api",
  "aap-ports",
@@ -328,7 +328,7 @@ dependencies = [
 
 [[package]]
 name = "aap-registry"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "aap-ports",
  "axum",
@@ -345,7 +345,7 @@ dependencies = [
 
 [[package]]
 name = "aap-runtime-kubernetes"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "aap-api",
  "aap-domain",
@@ -365,7 +365,7 @@ dependencies = [
 
 [[package]]
 name = "aap-store-cnpg"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "aap-api",
  "aap-domain",
@@ -383,7 +383,7 @@ dependencies = [
 
 [[package]]
 name = "aap-store-secret"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "aap-ports",
  "aap-store-secret",
@@ -392,7 +392,7 @@ dependencies = [
 
 [[package]]
 name = "aap-tool-probe"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "aap-tool-probe",
  "axum",
@@ -406,7 +406,7 @@ dependencies = [
 
 [[package]]
 name = "aap-trace"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "aap-trace",
  "getrandom 0.2.17",
@@ -415,7 +415,7 @@ dependencies = [
 
 [[package]]
 name = "aap-trace-otlp"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "aap-trace",
  "aap-trace-otlp",
@@ -433,7 +433,7 @@ dependencies = [
 
 [[package]]
 name = "aap-usage"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "aap-usage",
  "sha2",
@@ -443,7 +443,7 @@ dependencies = [
 
 [[package]]
 name = "aap-usage-broker"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "aap-usage",
  "axum",
@@ -456,7 +456,7 @@ dependencies = [
 
 [[package]]
 name = "aap-usage-kubernetes"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "aap-api",
  "aap-usage",
@@ -469,7 +469,7 @@ dependencies = [
 
 [[package]]
 name = "aap-usage-otlp"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "aap-usage",
  "aap-usage-otlp",
