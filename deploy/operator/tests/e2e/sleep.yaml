@@ -1,0 +1,117 @@
+# The coder of the kind end-to-end of the sleep and wake path (ANR-763, P4a), on the REAL adam-rs coder image (the pin of run-pods.yaml, which carries
+# #474's activity listener), with `scaling.idleTimeout`, `scaling.wakeAhead` and `scaling.wakeTimeout` and no run pods (the operator's idle loop
+# asks it about its work, the workload scales to zero, the wake-at annotation wakes it). The script applies it in its own namespace
+# (aap-e2e-sleep), every object carries the label aap-e2e/made-by=sleep-e2e, the only objects the script applies over or deletes.
+#
+# The pin of the coder is HERE, in `ref:` (run-pods.yaml is its twin, ANR-1200). The script asserts the image of the operator's file
+# and of the StatefulSet's pod template are this one. `sha-b5d1c7e` is adam-rs's main of 2026-11-27, whose chart renders ADR 0038's
+# run pod and it carries #474's activity listener (`ACTIVITY_LISTEN_ADDR` and the bearer it accepts).
+#
+# No value here is a secret: every Secret is a reference to a key the script makes, with a random or dummy value. The model is
+# the script's own (sleep-support.yaml's `__CODER_IMAGE__`, the same image's Node), GitHub is never reached (the variant is the
+# token one with a dummy token), and the Postgres is a throwaway one.
+apiVersion: agents.vymalo.com/v1alpha1
+kind: AgentConfig
+metadata:
+  name: e2e-sleep
+  labels:
+    aap-e2e/made-by: sleep-e2e
+spec:
+  harness:
+    type: adam-rs
+    adam:
+      binary: adam-coder
+      agent:
+        embedded: {}
+      coder:
+        workers: 2
+        maxCheckCycles: 3
+        checkTimeoutSecs: 900
+        workspaceSweepSecs: 10
+        allowedRepoHosts: [github.com]
+        githubApiUrl: https://api.github.com
+        prDraft: true
+        gitAuthor:
+          name: "e2e[bot]"
+          email: "e2e@example.invalid"
+        opencodeModel: coding-model
+        github:
+          token: # the token variant with a dummy token: nothing here reaches GitHub
+            secretRef:
+              name: e2e-secrets
+              key: GITHUB_TOKEN
+  model:
+    model: coding-model
+    baseUrl:
+      value: http://e2e-model:8080/v1 # the script's own model, in this namespace
+    apiKeySecretRef:
+      name: e2e-secrets
+      key: MODEL_API_KEY
+  tools:
+    # The embedded agent reads GitHub through this server (a native sidecar, the same image): without it the coder exits 69.
+    githubMcp:
+      sidecar: true
+      port: 8082
+      host: ""
+    mcpServers: {}
+  environment:
+    image:
+      ref: ghcr.io/vymalo/another-adam-rs/coder:sha-b5d1c7e@sha256:5de41376a08d8452ae0c59314e0e34d35da0aae495cdbc72ad6144a9c4235d45
+    resources: # a runner, not netcup
+      requests:
+        cpu: 100m
+        memory: 256Mi
+      limits:
+        memory: 2Gi
+    volumes:
+      - name: work
+        scope: agent
+        mountPath: /work
+        source:
+          persistent:
+            size: 1Gi
+            perReplica: true
+    terminationGracePeriodSeconds: 30
+  security:
+    runAsUser: 10001
+    runAsGroup: 10001
+    fsGroup: 10001
+    fsGroupChangePolicy: OnRootMismatch
+  extraEnv: {}
+---
+apiVersion: agents.vymalo.com/v1alpha1
+kind: AgentService
+metadata:
+  name: e2e-sleep
+  labels:
+    aap-e2e/made-by: sleep-e2e
+spec:
+  description: A coder with scaling.idleTimeout, for the end-to-end of the sleep and wake path.
+  configRef:
+    name: e2e-sleep
+  interfaces:
+    a2a:
+      enabled: true
+      bearerTokensSecretRef:
+        name: e2e-secrets
+        key: A2A_BEARER_TOKENS
+      publicUrl: "" # empty: http://<name>.<ns>.svc:8080/
+  scaling:
+    topology: combined
+    workers: 1
+    # The agent goes to zero after one minute with no work, wakes ten seconds before a scheduled poll, and gives a wake one minute
+    # before it says the wake timed out.
+    idleTimeout: 1m
+    wakeAhead: 10s
+    wakeTimeout: 1m
+  store:
+    postgres:
+      secretRef:
+        name: e2e-db-uris
+        key: sleep-uri
+  access:
+    allowFrom:
+      - podSelector:
+          matchLabels:
+            aap-e2e/client: "true" # the script reaches the agent from inside its own pod: nobody else is named
+  deletionPolicy: Delete

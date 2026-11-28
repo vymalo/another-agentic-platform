@@ -194,6 +194,9 @@ check_config "tests/api-full.values.yaml" -f "$here/api-full.values.yaml"
 check_config "tests/metrics.values.yaml" -f "$here/metrics.values.yaml"
 check_config "tests/metering.values.yaml" -f "$here/metering.values.yaml"
 check_config "tests/e2e/run-pods.values.yaml" -f "$here/e2e/run-pods.values.yaml"
+# ANR-763 P4a: the sleep/wake end-to-end, with the activity source on. The chart's render of the operator's file is what `operator run`
+# reads at start; `operator run --check` says whether the configuration is one the binary accepts.
+check_config "tests/e2e/sleep.values.yaml" -f "$here/e2e/sleep.values.yaml"
 # ANR-1030b: with the activity source on, the file holds agentTokensSecret and operatorPod, which the binary requires while enabled.
 check_config "the activity source on (ANR-1030b)" --set activity.tokenSecret.name=agent-bearer \
   --set-json 'activity.to=[{"namespaceSelector":{"matchLabels":{"kubernetes.io/metadata.name":"agents"}},"podSelector":{"matchLabels":{"app":"agent"}}}]'
@@ -1773,8 +1776,8 @@ rp_pin() {
   # proves), the coder of S9's end-to-end (a test holds it equal to that default) and the README that documents both. The chart's golden renders
   # carry it because they render that default, so they are left out of the count.
   found=$(grep -rlF "$pin_digest" "$chart/.." "$chart/../../.github" | grep -v '/tests/golden/')
-  [ "$(printf '%s\n' "$found" | wc -l)" -eq 4 ] || return 1
-  for f in '/values\.yaml$' '/tests/e2e/run-pods\.yaml$' '/tests/e2e/coder\.yaml$' '/README\.md$'; do
+  [ "$(printf '%s\n' "$found" | wc -l)" -eq 5 ] || return 1
+  for f in '/values\.yaml$' '/tests/e2e/run-pods\.yaml$' '/tests/e2e/coder\.yaml$' '/tests/e2e/sleep\.yaml$' '/README\.md$'; do
     printf '%s\n' "$found" | grep -Eq "$f" || return 1
   done
   grep -Eq "^defaultAgentImage: ghcr\.io/vymalo/another-adam-rs/coder:sha-[0-9a-f]{7}@$pin_digest\$" "$chart/values.yaml"
@@ -2228,6 +2231,54 @@ check "activity.dns.to emptied is refused while the policy is on" refused 'activ
 check "activity: a key that is not a setting is refused" refused 'activity.foo is not a setting' --set activity.foo=1
 check "activity must be a map" refused 'activity must be a map' --set activity=null
 check "an ipBlock of 0.0.0.0/0 as an activity peer is refused" refused 'is every address' --set activity.tokenSecret.name=x --set-json 'activity.to=[{"ipBlock":{"cidr":"0.0.0.0/0"}}]'
+
+# ---- ANR-763 P4a: the kind end-to-end of the sleep/wake path ---------------------------------------------------------
+# `sleep.values.yaml` is what the chart is rendered with for the sleep/wake end-to-end (sleep-e2e.sh): activity on (the agents'
+# `e2e-sleep` pod is the peer), the bearer Secret `e2e-activity-bearer/token`, port 8081, networkPolicy on. Without run pods, with no
+# `runPods` block in the file, no PriorityClass, no admission policy, no run-pods Role. Each check below is broken on purpose (the
+# broken-on-purpose is the mutation the script's developer runs to prove the check can fail).
+sleep_refused() { frag=$1; shift; refused "$frag" -f "$here/e2e/sleep.values.yaml" "$@"; }
+# The chart's namespace is the script's namespace: the activity.to peer and the watched namespace are both `aap-e2e-sleep`.
+sleep_render() { helm template aap-operator "$chart" --namespace aap-e2e-sleep -f "$here/e2e/sleep.values.yaml" "$@" > "$out"; }
+sleep_file_has_activity() {
+  sleep_render || return 1
+  dhas ConfigMap aap-operator '^    activity:$' '^      enabled: true$' '^      port: 8081$' '^      timeoutSecs: 3$' \
+    '^        file: /var/run/secrets/aap/activity/token$' '^        name: "e2e-activity-bearer"$' '^        key: "token"$' \
+    '^        namespace: "aap-e2e-sleep"$' '^          app.kubernetes.io/name: aap-operator$' '^          app.kubernetes.io/instance: aap-operator$' || return 1
+  has 'secretName: e2e-activity-bearer' && has 'key: token' && has 'mountPath: /var/run/secrets/aap/activity' || return 1
+}
+check "sleep.values.yaml renders: the file's activity section is the values, the operator's bearer file is e2e-activity-bearer/token, and operatorPod is the watched namespace and the operator's selector labels" sleep_file_has_activity
+sleep_no_run_pods_in_render() {
+  sleep_render || return 1
+  # The file's `runPods` block, the run-pods fields, and the run-pods cluster-scoped objects: none of them.
+  dlacks ConfigMap aap-operator '^    runPods:' || return 1
+  dlacks ConfigMap aap-operator 'priorityClass' || return 1
+  lacks '^kind: (PriorityClass|ValidatingAdmissionPolicy|ValidatingAdmissionPolicyBinding)$'
+}
+check "sleep.values.yaml renders: the file names no runPods block, no run-pods fields, and no run-pod cluster-scoped objects" sleep_no_run_pods_in_render
+sleep_egress() {
+  sleep_render || return 1
+  # The operator's NetworkPolicy egress: API server (443/6443), DNS (53), and the agents on 8081 in the watched namespace.
+  [ "$(op_egress_rules)" -eq 3 ] || return 1
+  all_of "$(op_egress_rule 3)" 'port: 8081$' '^      to:' 'kubernetes.io/metadata.name: aap-e2e-sleep' 'app.kubernetes.io/instance: e2e-sleep' || return 1
+  none_of "$(op_egress_rule 3)" 'port: 53|ipBlock|0\.0\.0\.0/0'
+}
+check "sleep.values.yaml renders: the operator's NetworkPolicy egress opens to the agent's namespace on the activity port 8081, nothing wider" sleep_egress
+# Empty `tokenSecret` is refused: the agents refuse a question with no bearer.
+sleep_refused_missing_bearer() { sleep_refused 'activity.tokenSecret.name and activity.tokenSecret.key are required' --set activity.tokenSecret.name= --set activity.tokenSecret.key=; }
+check "sleep.values.yaml without activity.tokenSecret is refused (the agents refuse a question with no bearer)" sleep_refused_missing_bearer
+# An empty peer selector (would admit every pod of the namespace) is refused.
+sleep_refused_bad_peer() { sleep_refused 'a namespaceSelector with no matchLabels' --set-json 'activity.to=[{"namespaceSelector":{}}]'; }
+check "sleep.values.yaml with an empty peer selector is refused (would admit every pod of the namespace)" sleep_refused_bad_peer
+# When `activity.to` is emptied, activity is off (the helper's gate) and the chart renders no activity block, no mount, no rule.
+sleep_refused_off_no_block() {
+  sleep_render --set activity.to=null > "$out" || return 1
+  dlacks ConfigMap aap-operator '^    activity:$' || return 1
+  dlacks Deployment aap-operator 'activity-token' || return 1
+  # The operator's NetworkPolicy has only the API server rule (no DNS, no activity port).
+  [ "$(op_egress_rules)" -eq 1 ] || return 1
+}
+check "sleep.values.yaml with activity.to emptied renders nothing of activity: no file block, no mount, no egress rule" sleep_refused_off_no_block
 
 # ---- The pod-minute meter (ANR-1103, AD-069) -------------------------------------------------------------------------------
 # `metering.enabled` is off by default and then not a trace of it in any render: no key of the file, no volume, no mount, no egress rule
