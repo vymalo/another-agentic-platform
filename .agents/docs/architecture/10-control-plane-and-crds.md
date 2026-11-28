@@ -60,6 +60,40 @@ The adam-rs side is cited at revision `0391809`, the source of the coder image t
 - *Verified 2026-10-04*, kube-rs documentation: `kube` 4.0.0, `k8s-openapi` 0.28.0, `schemars` 1.
 - *Unverified*: CEL rules through `x_kube(validation = …)`; server-side-apply co-ownership of a CloudNativePG Cluster's `managed.roles`; Argo CD pruning of `volumeClaimTemplates` claims; netcup's Kubernetes version.
 
+## §59b. The run pool: pods where work runs
+
+### Cluster facts (verified 2026-10-06)
+
+*Verified 2026-10-06*, the owner's run of two probe scripts on the netcup cluster. The first five answer the question of §93 *Run pool*; the probes follow.
+
+| Fact | Value |
+|---|---|
+| Nodes | 5 Talos v1.13.6, Kubernetes v1.36.1, kernel 6.18.38-talos, containerd 2.2.5 |
+| User namespaces | `user.max_user_namespaces` is 15000: no Talos change is needed |
+| CNI | Cilium 1.19.6, which enforces NetworkPolicy |
+| Runtime classes | None: no gVisor, no Kata |
+| Addresses | Pod CIDR 10.244.0.0/16 (a /24 per node); the `kubernetes` service is 10.96.0.1 |
+| Allocatable | About 47.75 CPU and 107 GiB memory over the 5 nodes; the control-plane node has about 4 CPU and 7 GiB |
+| StorageClasses | Only `longhorn` (default, `numberOfReplicas: "2"`) and `longhorn-static`, both `driver.longhorn.io` |
+
+| Probe (a pod with `hostUsers: false`) | Result |
+|---|---|
+| 1. An `emptyDir` volume | **Works**: root in the pod maps to host uid 130154496, range 65536 |
+| 2. A Longhorn **RWX** claim (NFS share-manager) | **Fails to start**: `failed to set MOUNT_ATTR_IDMAP on …/volumes/kubernetes.io~csi/pvc-…/mount: invalid argument`. Consistent with mount_setattr(2), which does not list NFS among the idmap-capable filesystems (*verified 2026-10-06*, <https://man7.org/linux/man-pages/man2/mount_setattr.2.html>) |
+| 3. A Longhorn **RWO** claim (block device, ext4) | **Works**: mounted `ext4 (rw,seclabel,relatime,idmapped)` |
+| 4. Rootful BuildKit (`moby/buildkit`, `privileged: true` inside the user namespace, `--root` on an `emptyDir`) | **Works**: built a two-line Dockerfile and exported an OCI archive |
+| 5. Podman 5.8.7 (`quay.io/podman/stable`, `privileged: true` inside the user namespace, storage on an `emptyDir`, `--cgroup-manager=cgroupfs --events-backend=file`) | **Works**: ran busybox |
+
+Probes 4 and 5 ran in a namespace at Pod Security `privileged`; `baseline` was not tried (*Containers in a run*). Probes 2 and 3 are why AD-045 exists; probe 1 is what AD-048 rests on (a user namespace per pod, with a 65536-id range of its own); probes 4 and 5 are why AD-043's sidecars are offered.
+
+### Facts checked
+
+- **The claim is Longhorn RWX.** *Verified 2026-10-06, the owner's probe on netcup:* the class serves RWX through an NFS share-manager, and a pod with `hostUsers: false` cannot mount it (*Cluster facts*, below).
+- **Kaniko is not chosen:** its original repository was archived in June 2025 and only forks remain (*verified 2026-10-06*, <https://ideas.harness.io/feature-request/p/kaniko-project-is-archived-how-do-we-build-images-in-un-privileged-mode>).
+- **Storage and cache.** The daemon's own snapshot store is an `emptyDir` of the sidecar (*verified 2026-10-06 on netcup* for both daemons; overlay snapshots on an NFS-backed claim are *unverified* and probably unsupported, and no such claim is mountable here anyway).
+
+- *Verified 2026-10-06*: the design's sources — adam-rs ADR 0019 and the `Environment`/`EnvSession` traits (`crates/adam-workspace/src/environment.rs`), the Kubernetes ephemeral-volumes page, the user-namespaces page and the v1.36 post, the CERN rootless-build post, adam-rs ADR 0010 and the devcontainer records, the `longhorn` class's `numberOfReplicas: "2"`, and Kaniko's archived repository — were read on that date; the netcup probes are the *Cluster facts* above.
+
 ## §59c. Operator increments (kagent-grade minimum)
 
 The plan, with every state, decision and qualifier, is on [the page for people](../../../docs/architecture/10-control-plane-and-crds.md#59c-operator-increments-kagent-grade-minimum). Here are the proofs that left it, quoted verbatim.
