@@ -70,6 +70,15 @@ name: Operator and API images
 #              here, and its waits are for pods and a quota, so a flake or a bad pin would block the operator's release for a reason that is not the operator's;
 #              run pods are off by default, so a red run of it does not put a broken default into the image. That is a decision for the owner (§60a, D15b): to make
 #              it gate, add it to the `needs` of `push` below. deploy/operator/tests/e2e/README.md says what it proves and what it does not.
+# meter-e2e (ANR-1447): a kind cluster of its own. The operator's chart installed with THAT image, the pod-minute meter ON (`metering.enabled`) and run pods
+#              on with ONE admitted node type; a stub broker and a stub OTLP/HTTP collector on the runner (deploy/operator/tests/e2e/meter-stubs.mjs, one
+#              process on two ports); and a run pod the coder would have made (`sleep 90` on the stand-in) with the labels and annotations the meter reads.
+#              The script shows the broker asked for the run's account, one line per minute at the collector (the account, weightQuarters 4, the admitted node
+#              type, podKind run), the nine aap_meter_sink_* series on /metrics with aap_meter_events_total growing, and no bearer or account in any log or
+#              answer but the broker's own. It runs in parallel with the others and **does not gate the push**: it depends on kindnet enforcing the chart's
+#              egress policy to a process on the runner, the same environment run-pods-e2e needs, and the meter is off by default, so a red run does not put a
+#              broken default into the image. That is a decision for the owner (§60a, ANR-1447): to make it gate, add it to the `needs` of `push` below.
+#              deploy/operator/tests/e2e/README.md says what it proves and what it does not.
 # namespaces-e2e (K6b): a kind cluster of its own. The operator's chart installed with THAT image and `watchNamespaces` naming two namespaces
 #              it watches (a third is the Helm release's and is NOT watched), and the stand-in for the adam image (bin/operator/tests/stub) as
 #              the agents' image: ONE Role and ONE RoleBinding, named for the release, in each watched namespace and nothing cluster-scoped (by
@@ -89,7 +98,7 @@ name: Operator and API images
 #              with `leaseTransitions` one more, the parked agent Ready within 60 s, a SIGTERM passing the Lease to another pod within 10 s (the
 #              release, not the 15 s expiry), and no secret value in the logs read or the answers. deploy/operator/tests/e2e/README.md says
 #              what it proves and what it does not. It gates the push: it pins nothing outside this repository.
-# push:        main (or a dispatch on a `v*` tag, never `latest`), after every job above but chain-e2e and run-pods-e2e: `sha-<7>` and `latest` of both images (the same tag). One red job of either
+# push:        main (or a dispatch on a `v*` tag, never `latest`), after every job above but chain-e2e, run-pods-e2e and meter-e2e: `sha-<7>` and `latest` of both images (the same tag). One red job of either
 #              image (the API's included) means no image is pushed and no tag bumped: a decision for the owner (deploy/operator/README.md,
 #              "The image").
 # bump:        main only, after the push: `deploy/operator/bump-tag.sh` sets `image.tag` and, with `api`, `api.image.tag` in
@@ -324,6 +333,10 @@ jobs:
         run: |
           node --check deploy/operator/tests/e2e/run-pods-model.js
           node --test deploy/operator/tests/e2e/run-pods-model.test.js
+      # The stubs of the pod-minute meter end-to-end (ANR-1447): one Node process on two ports, which meter-e2e.sh runs on the
+      # runner as the orchestrator's broker and as an OTLP/HTTP collector. Nothing of it is in an image.
+      - name: the pod-minute meter end-to-end's stubs parse
+        run: node --check deploy/operator/tests/e2e/meter-stubs.mjs
       - name: bump-tag.sh is idempotent and edits only the tag it was asked for (image.tag, or api.image.tag)
         run: sh deploy/operator/tests/bump-tag-test.sh
       # AD-070: a release pins X.Y.Z and the digests in a copy of the chart only (release.yml), never in the file git tracks.
@@ -777,6 +790,46 @@ jobs:
           OPERATOR_IMAGE_TAG: smoke
           OPERATOR_PULL_POLICY: Never
         run: sh deploy/operator/tests/e2e/run-pods-e2e.sh
+
+  meter-e2e:
+    # ANR-1206: the release pull request only moves version strings and main's own push run already tested this code; skipped here to spare the shared runner queue (a skipped job satisfies a required check).
+    if: ${{ !(startsWith(github.head_ref, 'release-please--') && github.event.pull_request.head.repo.full_name == github.repository && github.event.pull_request.user.login == 'vaam-apps[bot]' && github.actor == 'vaam-apps[bot]') }}
+    name: meter-e2e
+    needs: image
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v7
+      - uses: azure/setup-helm@v5
+        with:
+          version: ${{ env.HELM_VERSION }}
+      - name: Create a kind cluster
+        uses: helm/kind-action@v1
+        with:
+          version: v0.33.0
+          # The same node image as the other jobs: Kubernetes v1.37.0, the digest of the index of the tag. Its network plugin, kindnet, enforces NetworkPolicies
+          # (the operator's egress to the stubs on the runner goes through its own policy, so a wrong rule would fail this job).
+          node_image: kindest/node:v1.37.0@sha256:a1ed56cfb0e7b93589bdf97c8cd566405a265939e3620fc4f5de89adff580ae5
+          kubectl_version: v1.37.2
+          cluster_name: aap-meter
+          wait: 120s
+      # The image that passed the smoke test, loaded into the cluster: the chart runs it with pullPolicy Never. The run pod's image is the stand-in of
+      # bin/operator/tests/stub, built here and loaded too; the stubs of the broker and of the collector are a Node process on the runner.
+      - uses: actions/download-artifact@v8
+        with:
+          name: operator-image
+          path: ${{ runner.temp }}
+      - name: Load the images into kind
+        run: |
+          docker load -i "$RUNNER_TEMP/operator.tar"
+          docker build -t aap-stub:ci bin/operator/tests/stub
+          kind load docker-image operator:smoke aap-stub:ci --name aap-meter
+      - name: The pod-minute meter, end to end
+        env:
+          OPERATOR_IMAGE_REPOSITORY: operator
+          OPERATOR_IMAGE_TAG: smoke
+          OPERATOR_PULL_POLICY: Never
+        run: sh deploy/operator/tests/e2e/meter-e2e.sh
 
   k10-e2e:
     # ANR-1206: the release pull request only moves version strings and main's own push run already tested this code; skipped here to spare the shared runner queue (a skipped job satisfies a required check).

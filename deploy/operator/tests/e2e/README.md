@@ -1,6 +1,6 @@
-# The kind end-to-ends of the operator: the coder (S9), the Platform API (D7b2), the whole chain (D13), run pods (D15b), the tool catalogue (K10), several watched namespaces (K6b) and leader election (K7b)
+# The kind end-to-ends of the operator: the coder (S9), the Platform API (D7b2), the whole chain (D13), run pods (D15b), the tool catalogue (K10), several watched namespaces (K6b), leader election (K7b) and the pod-minute meter (ANR-1447)
 
-Seven scripts, seven jobs of [`operator-image.yml`](../../../../.github/workflows/operator-image.yml), one kind cluster each: [`coder-e2e.sh`](coder-e2e.sh)
+Eight scripts, eight jobs of [`operator-image.yml`](../../../../.github/workflows/operator-image.yml), one kind cluster each: [`coder-e2e.sh`](coder-e2e.sh)
 (the operator runs the real coder, [below](#the-kind-end-to-end-of-the-coder-s9)), [`api-e2e.sh`](api-e2e.sh) (the Platform API creates an agent the
 operator makes Ready, [further down](#the-kind-end-to-end-of-the-platform-api-d7b2)) and [`chain-e2e.sh`](chain-e2e.sh) (the API makes a coder with an
 audience, the operator runs it and lists it, and a pinned image of the system's orchestrator lists it for the person who holds the role and for nobody
@@ -9,9 +9,10 @@ set them up, [further down](#the-kind-end-to-end-of-run-pods-d15b)), [`k10-e2e.s
 tool server through a `ToolProvider` and the tool's answer reaches its model, [further down](#the-kind-end-to-end-of-the-tool-catalogue-k10)),
 [`namespaces-e2e.sh`](namespaces-e2e.sh) (one operator watches two
 namespaces, with one Role and RoleBinding in each, and lists a service id the two share for neither of them,
-[further down](#the-kind-end-to-end-of-several-watched-namespaces-k6b)) and [`leader-e2e.sh`](leader-e2e.sh) (two replicas elect a leader, a killed
+[further down](#the-kind-end-to-end-of-several-watched-namespaces-k6b)), [`leader-e2e.sh`](leader-e2e.sh) (two replicas elect a leader, a killed
 one is replaced only after the Lease expires, a stopped one releases it at once, and the survivor serves the registry throughout,
-[at the end](#the-kind-end-to-end-of-leader-election-k7b)).
+[at the end](#the-kind-end-to-end-of-leader-election-k7b)), and [`meter-e2e.sh`](meter-e2e.sh) (the pod-minute meter end to end: a run pod's minutes
+reach a stub broker and a stub collector, [further down](#the-kind-end-to-end-of-the-pod-minute-meter-anr-1447)).
 
 ## The kind end-to-end of the coder (S9)
 
@@ -543,6 +544,31 @@ All eleven steps passed (44 `ok` lines, exit 0), with the real answers of the AP
 **D15d (2026-10-27), the git sandbox.** Step 4 loses the automounted token (the coder's pod mounts the account's credentials as a volume of the coder container alone) and the new **step 4b** is adam-rs's sandbox checks at `581aeed`, applied to the pod the operator made (above); steps 2, 8, 9 and 11 gain a few lines; `git-sandbox-vector.sh` is vendored; and the pin moves to `sha-581aeed` (*verified 2026-10-27* by anonymous requests to `ghcr.io`: a Docker v2 image manifest, not an index, digest `sha256:5e851765…`, 14 layers, 3.0 GB, `linux/amd64`, user `10001`, entrypoint `tini -- adam-coder`, label `org.opencontainers.image.revision` the full hash of `581aeed`, and a layer in its history that copies `adam-coder`, `adam-agent`, `adam-kube-exec`, `adam-egress`, `adam-git-sandbox` and `adam-git` into `/usr/local/bin`; the image's content was not unpacked here; adam-rs's `values.yaml` named `sha-05cda7f`, which has the same layer, when this was read). Adam-rs's script passed in its CI on its first run (run 40507897870, job 122201831517, *verified 2026-10-27* in the commit message of `581aeed`). **Run where it was written:** `shellcheck` 0.9.0, `dash -n`, `actionlint`; **the jq programs of step 4b against a pod and a StatefulSet made from the operator's golden render**, passing, and failing under seventeen of seventeen mutations of the pod (a shared process namespace, an automounted token, an injected token volume, a writable root, a variable from a Secret, an `envFrom`, the token, the App's key or the template mounted in the sandbox, the GitHub server holding the token, the coder container without it or with it writable, a socket that is not the sandbox's, a sandbox not ready, restarted, not a native sidecar or of another image), and under three of four of the StatefulSet's (the fourth, the automounted token, is step 4's own line); `render-check.sh` and the Rust tests that hold the fixtures and the vendored file's hash. **Run green in CI (run 40520862547, job `run-pods-e2e` 122249371008, at `b8290bf`, *verified 2026-10-27* in its log): all of step 4b** (that a kubelet starts the sidecar and then the coder container, the controls and the emptiness as above, `awk`, `find`, `stat` and `curl` in the coder's image where the script runs them, the vector's marker, the shape of the sandbox's log lines) **and that the coder's own git for a run goes through the sandbox** (the `worktree` line of step 8, and that runs A, B and C, whose git now runs in another container, still behave as before). No container daemon and no kind exist where it was written.
 
 **D15c (2026-10-27), the egress proxy.** Step 4 gains the proxy's objects and their rollout, step 7 is rewritten (above), step 9 and 10 gain the proxy's six objects and pods, step 11 the proxy's log; the pin moves to `sha-7598255` (*verified 2026-10-27* by an anonymous request to `ghcr.io`: a Docker v2 image manifest, not an index, 14 layers, 3.0 GB, user `10001`, entrypoint `tini -- adam-coder`, label `org.opencontainers.image.revision` the full hash of `7598255`, and a layer in its history that copies `adam-egress` next to `adam-coder`; the image's content was not unpacked here). The new checks are adam-rs's `deploy/coder/tests/kind-run-pods.sh` at that revision, ported to the operator's objects (that script passed in adam-rs's CI, run 40471872938, *verified 2026-10-27* in adam-rs's commit message of `7598255`). **Run where it was written:** `shellcheck` 0.9.0, `dash -n`, `actionlint`; the jq programs against objects shaped like the operator's golden render; `render-check.sh` and the Rust tests that hold the fixtures. **Unverified until the job has run: all of the new step 7** (the controls, the refusals and their 60 s retry on kindnet, `npm` and `curl` through the proxy from the `workspace` image (it has `curl`, which step 7 of D15b ran, and `npm`, which its smoke test asks for: `npm config get cache`), the proxy's log lines and the absence of what the requests carried), the proxy's rollout in a cluster whose kubelet pulls the pin, and the cleanup of the six objects by the owner reference. No container daemon and no kind exist where it was written.
+
+## The kind end-to-end of the pod-minute meter (ANR-1447)
+
+The operator, installed from its chart with `metering.enabled` and run pods on with **one** admitted node type, **meters a run pod's whole minutes** and sends
+one usage line per minute to an OTLP/HTTP collector, for the account the orchestrator's broker names for the run. Both peers are stubs on the runner
+([`meter-stubs.mjs`](meter-stubs.mjs), one Node process on two ports): the real broker is the system's, and the real collector is the deployment's. This is the
+job `meter-e2e` of [`operator-image.yml`](../../../../.github/workflows/operator-image.yml) (it needs the job `image`, and **`push` does not need it**: it
+depends on kindnet enforcing the chart's egress policy to a process on the runner, and the meter is off by default). The script [`meter-e2e.sh`](meter-e2e.sh) is
+all of it:
+
+```sh
+kind create cluster --name aap-meter --image kindest/node:v1.37.0@sha256:a1ed56cfb0e7b93589bdf97c8cd566405a265939e3620fc4f5de89adff580ae5   # Kubernetes 1.37 or later (the chart's floor, AD-067)
+docker build -t operator:smoke -f docker/operator/Dockerfile . && docker build -t aap-stub:ci bin/operator/tests/stub
+kind load docker-image operator:smoke aap-stub:ci --name aap-meter
+sh deploy/operator/tests/e2e/meter-e2e.sh    # kubectl on that cluster; needs helm, jq, curl, node and openssl
+```
+
+It labels every node `aap-e2e/node-type=standard` (the one value `runPods.nodeType.admitted` names, and it refuses if a node already has the key), applies
+[`meter-run.yaml`](meter-run.yaml) — a run pod the coder would have made: the labels, the run-id annotation, the size weight `1` and the required node affinity
+the meter reads, and `sleep 90` on the stand-in — and waits for it to be Succeeded. It shows the broker asked for the run's account, one line at the collector
+with that account, `weightQuarters` 4, the admitted node type and `podKind` `run`, the nine `aap_meter_sink_*` series on the operator's `/metrics` (queued and
+sent above zero, the queue empty, no retry and no refusal) with `aap_meter_events_total` growing, and no bearer or account value in any log or answer but the
+broker's own. **Unverified until the job has run**: no cluster existed where it was written; what ran here is `shellcheck`, `sh -n`, `node --check`,
+`helm template` with [`meter.values.yaml`](meter.values.yaml), `operator run --check` on the file it renders, and the chart's whole
+`render-check.sh` (which holds the fixtures above).
 
 ## The kind end-to-end of the tool catalogue (K10)
 
