@@ -180,8 +180,8 @@ pub fn activity_source(
             std::env::var(name).map_err(|_| refused("the variable is not set".to_owned()))?
         }
     };
-    let token = aap_activity_http::Token::new(&text)
-        .map_err(|_| refused("the bearer is empty".to_owned()))?;
+    // Validated here and re-read from the file or variable at each poll (ANR-1192): the value itself is never kept.
+    aap_activity_http::Token::new(&text).map_err(|_| refused("the bearer is empty".to_owned()))?;
     // An agent splits `ACTIVITY_BEARER_TOKENS` on commas: a bearer with one would never match any of its pieces.
     if text.trim().contains(',') {
         return Err(refused(

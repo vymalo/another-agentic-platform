@@ -594,7 +594,7 @@ op_file=$(operator_file aap-operator) || die "the operator's file cannot be read
 [ "$(printf '%s\n' "$op_file" | grep -Fxc "    endpoint: \"http://$collector.$ns.svc:4318/v1/traces\"")" = 1 ] \
   || die "the operator's file does not send its traces to the collector"
 api_file=$(operator_file "$api_name") || die "the API's file cannot be read"
-[ "$(printf '%s\n' "$api_file" | grep -Fxc "        endpoint: http://$collector.$ns.svc:4318/v1/traces")" = 1 ] \
+[ "$(printf '%s\n' "$api_file" | grep -Fxc "    endpoint: http://$collector.$ns.svc:4318/v1/traces")" = 1 ] \
   || die "the API's file does not send its traces to the collector"
 ok "the operator and the API are told to send their traces to the collector (otel.* and api.otel.*, both in their files)"
 

@@ -1,0 +1,28 @@
+# Refused: The period is over an hour.
+# expect: Invalid value: 3601: spec.scaling.activityProbe.periodSeconds in body should be less than or equal to 3600
+apiVersion: agents.vymalo.com/v1alpha1
+kind: AgentService
+metadata:
+  name: invalid-sleep
+  namespace: another-agentic-system
+spec:
+  configRef:
+    name: chat
+  interfaces:
+    a2a:
+      enabled: true
+      bearerTokensSecretRef:
+        name: tokens
+        key: A2A_BEARER_TOKENS
+  scaling:
+    idleTimeout: 10m
+    activityProbe:
+      httpGet:
+        port: 8081
+        path: /internal/activity
+      periodSeconds: 3601
+  store:
+    postgres:
+      secretRef:
+        name: db
+        key: uri

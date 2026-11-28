@@ -1152,6 +1152,67 @@ spec:
                   workers: 1
                 description: How many processes run, and in which topology.
                 properties:
+                  activityProbe:
+                    description: |-
+                      How the operator asks the agent whether it holds work (AD-075, the contract `activity/v1`), for an
+                      agent whose probe is not derived: an adam-rs agent's probe is the activity listener the operator
+                      renders. Off unless set, and it changes nothing without `idleTimeout`.
+                    nullable: true
+                    properties:
+                      httpGet:
+                        description: 'Where the agent serves the contract: its port and path.'
+                        properties:
+                          path:
+                            description: 'The path: absolute, it starts with `/`.'
+                            type: string
+                            x-kubernetes-validations:
+                            - message: 'scaling.activityProbe.httpGet.path is an absolute path: it starts with `/`'
+                              rule: self.startsWith('/')
+                          port:
+                            description: 'The port the agent serves the contract on: 1 to 65535.'
+                            format: int32
+                            maximum: 65535.0
+                            minimum: 1.0
+                            type: integer
+                        required:
+                        - path
+                        - port
+                        type: object
+                      periodSeconds:
+                        default: 30
+                        description: 'How often the agent is asked, in seconds: 1 to 3600. Default 30.'
+                        format: int32
+                        maximum: 3600.0
+                        minimum: 1.0
+                        type: integer
+                      timeoutSeconds:
+                        default: 2
+                        description: 'How long one question may take, in seconds: 1 to 60. Default 2.'
+                        format: int32
+                        maximum: 60.0
+                        minimum: 1.0
+                        type: integer
+                      tokenSecretRef:
+                        description: |-
+                          The Secret and key the **agent's pod** reads its copy of the bearer from, by reference only. The
+                          operator sends the bearer it holds in its own configuration and never reads this Secret (AD-024).
+                        nullable: true
+                        properties:
+                          key:
+                            description: Key inside the Secret.
+                            minLength: 1
+                            type: string
+                          name:
+                            description: Name of the Secret.
+                            minLength: 1
+                            type: string
+                        required:
+                        - key
+                        - name
+                        type: object
+                    required:
+                    - httpGet
+                    type: object
                   front:
                     description: The front of a `split` topology.
                     nullable: true
@@ -1209,6 +1270,8 @@ spec:
                   rule: '!has(self.front) || self.topology == ''split'''
                 - message: scaling.wakeAhead and scaling.wakeTimeout need scaling.idleTimeout
                   rule: has(self.idleTimeout) || (!has(self.wakeAhead) && !has(self.wakeTimeout))
+                - message: scaling.activityProbe needs scaling.idleTimeout
+                  rule: has(self.idleTimeout) || !has(self.activityProbe)
               store:
                 description: Where the agent's durable run ledger lives.
                 properties:

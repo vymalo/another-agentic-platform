@@ -1,0 +1,26 @@
+# Refused: A probe is set without idleTimeout, so nothing would ever sleep.
+# expect: scaling.activityProbe needs scaling.idleTimeout
+apiVersion: agents.vymalo.com/v1alpha1
+kind: AgentService
+metadata:
+  name: invalid-sleep
+  namespace: another-agentic-system
+spec:
+  configRef:
+    name: chat
+  interfaces:
+    a2a:
+      enabled: true
+      bearerTokensSecretRef:
+        name: tokens
+        key: A2A_BEARER_TOKENS
+  scaling:
+    activityProbe:
+      httpGet:
+        port: 8081
+        path: /internal/activity
+  store:
+    postgres:
+      secretRef:
+        name: db
+        key: uri
