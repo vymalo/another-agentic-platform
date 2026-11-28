@@ -249,12 +249,12 @@ chart refuses it first), the peers are a NetworkPolicy's and never every address
 {{- fail (printf "metering.%s is not a setting: enabled, source, periodSecs, broker, collector or dns" $k) -}}
 {{- end -}}
 {{- end -}}
-{{- range $sect, $allowed := dict "broker" (list "url" "to" "port" "timeoutSecs" "tokenSecret") "collector" (list "endpoint" "to" "port" "queue" "batch" "intervalSecs" "timeoutSecs") "dns" (list "to" "ports") -}}
+{{- range $sect, $allowed := dict "broker" (list "url" "to" "port" "timeoutSecs" "tokenSecret") "collector" (list "endpoint" "to" "port" "queue" "batch" "intervalSecs" "timeoutSecs" "caFile") "dns" (list "to" "ports") -}}
 {{- $blk := get $mt $sect -}}
 {{- if kindIs "map" $blk -}}
 {{- range $k, $_ := $blk -}}
 {{- if not (has $k $allowed) -}}
-{{- fail (printf "metering.%s.%s is not a setting: %s (collector.caFile is not a chart value yet)" $sect $k (join ", " $allowed)) -}}
+{{- fail (printf "metering.%s.%s is not a setting: %s" $sect $k (join ", " $allowed)) -}}
 {{- end -}}
 {{- end -}}
 {{- end -}}
@@ -265,6 +265,31 @@ chart refuses it first), the peers are a NetworkPolicy's and never every address
 {{- if not (has $k (list "name" "key")) -}}
 {{- fail (printf "metering.broker.tokenSecret.%s is not a setting: name or key" $k) -}}
 {{- end -}}
+{{- end -}}
+{{- end -}}
+{{- end -}}
+{{- /* ANR-1194: metering.collector.caFile is a ConfigMap reference; both or neither; https endpoint only. Empty strings are
+   treated as absent (the default in values.yaml is two empties). */ -}}
+{{- if kindIs "map" $mt.collector -}}
+{{- if hasKey $mt.collector "caFile" -}}
+{{- if not (kindIs "map" $mt.collector.caFile) -}}
+{{- fail "metering.collector.caFile must be a map with configMap and key" -}}
+{{- end -}}
+{{- range $k, $_ := $mt.collector.caFile -}}
+{{- if not (has $k (list "configMap" "key")) -}}
+{{- fail (printf "metering.collector.caFile.%s is not a setting: configMap or key" $k) -}}
+{{- end -}}
+{{- end -}}
+{{- $cm := trim (toString (default "" $mt.collector.caFile.configMap)) -}}
+{{- $ck := trim (toString (default "" $mt.collector.caFile.key)) -}}
+{{- if or (and $cm (not $ck)) (and $ck (not $cm)) -}}
+{{- fail "metering.collector.caFile needs both configMap and key, or neither" -}}
+{{- end -}}
+{{- if and $cm (not (and (regexMatch `^[A-Za-z0-9]([-A-Za-z0-9.]*[A-Za-z0-9])?$` $cm) (regexMatch `^[-._a-zA-Z0-9]+$` $ck))) -}}
+{{- fail (printf "metering.collector.caFile: %q and %q must be names" $cm $ck) -}}
+{{- end -}}
+{{- if and $cm (not (hasPrefix "https://" (toString $mt.collector.endpoint))) -}}
+{{- fail "metering.collector.caFile needs an https endpoint: a CA bundle for an http endpoint is a mistake (metering.collector.caFile.configMap and metering.collector.endpoint)" -}}
 {{- end -}}
 {{- end -}}
 {{- end -}}

@@ -39,15 +39,37 @@ pub fn metrics(metrics: Arc<Metrics>) -> Router {
 }
 
 /// [`metrics`], and when tracing is on (K5) the two counters of the trace pipeline after the controllers': with tracing off
-/// the text is exactly what it was.
+/// the text is exactly what it was. Used by the tests below; in the binary's production build the meter is wired in by
+/// `metrics_with_meter` directly.
+#[allow(dead_code)]
 pub fn metrics_with_traces(metrics: Arc<Metrics>, traces: aap_trace::TraceMetrics) -> Router {
+    metrics_with_meter(metrics, traces, None)
+}
+
+/// [`metrics_with_traces`], and when the pod-minute meter is wired into `operator run` (ANR-1194) the sink's nine series after
+/// the trace's: counters for what the sink took, sent, refused and retried, the gauges of the queue depth and the current retrying
+/// episode. With `None` the text is byte-identical to [`metrics_with_traces`]'s; with `Some` it gains the nine lines after the
+/// trace ones.
+pub fn metrics_with_meter(
+    metrics: Arc<Metrics>,
+    traces: aap_trace::TraceMetrics,
+    meter: Option<Arc<aap_usage_otlp::Stats>>,
+) -> Router {
+    let state = (metrics, traces, meter);
     Router::new()
         .route(
             "/metrics",
             get(
-                |State((m, t)): State<(Arc<Metrics>, aap_trace::TraceMetrics)>| async move {
+                |State((m, t, meter)): State<(
+                    Arc<Metrics>,
+                    aap_trace::TraceMetrics,
+                    Option<Arc<aap_usage_otlp::Stats>>,
+                )>| async move {
                     let mut text = m.render();
                     text.push_str(&t.render());
+                    if let Some(stats) = meter {
+                        text.push_str(&stats.snapshot().render());
+                    }
                     (
                         [(
                             header::CONTENT_TYPE,
@@ -58,11 +80,13 @@ pub fn metrics_with_traces(metrics: Arc<Metrics>, traces: aap_trace::TraceMetric
                 },
             ),
         )
-        .with_state((metrics, traces))
+        .with_state(state)
 }
 
-/// The `/metrics` router of a process whose tracer is `tracer`: the controllers' counters, then the pipeline's.
+/// The `/metrics` router of a process whose tracer is `tracer`: the controllers' counters, then the pipeline's. Used by the tests
+/// below; `run` composes its router with [`metrics_with_meter`] directly, so this is dead in a release build.
 #[cfg(feature = "runtime-kubernetes")]
+#[allow(dead_code)]
 pub fn metrics_for(metrics: Arc<Metrics>, tracer: &aap_trace::Tracer) -> Router {
     metrics_with_traces(metrics, aap_trace::TraceMetrics::of(tracer))
 }
@@ -191,5 +215,57 @@ mod tests {
         );
         assert!(body.contains("aap_trace_enabled 0\n"), "{body}");
         assert!(!body.contains("aap_trace_spans"), "{body}");
+    }
+
+    /// ANR-1194: with no meter wired into `operator run`, the text is what it was. With a meter, the sink's nine series follow
+    /// the controllers' and the trace's, in the order the contract lists them. Bump `Some` to `None` (or remove the append) and the
+    /// assertion fails; the value-rendering is the test of [`aap_usage_otlp::Stats::snapshot`]'s `render` in `aap_usage_otlp`.
+    #[tokio::test]
+    async fn the_meter_series_follow_the_trace_when_the_meter_is_wired_in() {
+        let m = Arc::new(Metrics::new());
+        m.inc("aap_runtime_signals_total", &[]);
+        let (tracer, _) = aap_trace::Tracer::in_memory(aap_trace::Sampler::AlwaysOn);
+        let traces = aap_trace::TraceMetrics::of(&tracer);
+
+        let (_, without, _) = get(
+            metrics_with_meter(m.clone(), traces.clone(), None),
+            "/metrics",
+        )
+        .await;
+        assert!(!without.contains("aap_meter_sink_"), "{without}");
+        assert!(without.contains("aap_runtime_signals_total 1"), "{without}");
+        assert!(
+            without.contains("aap_trace_spans_exported_total 0"),
+            "{without}"
+        );
+
+        let (_, with, _) = get(
+            metrics_with_meter(m, traces, Some(Arc::new(aap_usage_otlp::Stats::default()))),
+            "/metrics",
+        )
+        .await;
+        for series in [
+            "aap_meter_sink_queued_total",
+            "aap_meter_sink_sent_total",
+            "aap_meter_sink_dropped_queue_full_total",
+            "aap_meter_sink_refused_total",
+            "aap_meter_sink_retries_total",
+            "aap_meter_sink_unsent_at_shutdown_total",
+            "aap_meter_sink_outcomes_dropped_total",
+            "aap_meter_sink_queue_depth",
+            "aap_meter_sink_retrying_secs",
+        ] {
+            assert!(
+                with.contains(&format!("# HELP {series} ")),
+                "{series}: {with}"
+            );
+            assert!(with.contains(&format!("{series} 0\n")), "{series}: {with}");
+        }
+        // The controllers' and trace's text is still first and unchanged.
+        assert!(with.starts_with(&without), "{with}");
+        let controller = with.find("aap_runtime_signals_total 1").unwrap();
+        let trace = with.find("aap_trace_spans_exported_total 0").unwrap();
+        let meter = with.find("aap_meter_sink_queued_total").unwrap();
+        assert!(controller < trace && trace < meter, "{with}");
     }
 }

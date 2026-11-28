@@ -65,7 +65,7 @@ of this replica (the `reportingInstance` of Events, the lease's `holderIdentity`
 | `metering.broker.token` | none | The meter's bearer, by reference (`{ file }` or `{ env }`); read once at start (a missing or blank one is 78), never logged |
 | `metering.broker.timeoutSecs` | 5 | One question's time limit, 1 to 60 s |
 | `metering.collector.endpoint` | none | The collector's base URL: lines go to `<endpoint>/v1/logs` as OTLP/HTTP JSON ([`aap-usage-otlp`](../../crates/usage-otlp/README.md)) |
-| `metering.collector.caFile` | none | A PEM bundle that is the only trust for an `https` endpoint. The chart does not set it yet |
+| `metering.collector.caFile` | none | A PEM bundle that is the only trust for an `https` `endpoint`. The chart mounts the named `ConfigMap` key read-only at `/etc/aap/metering/ca/ca.pem` and sets the file's `metering.collector.caFile` to that path (ANR-1194). Empty: the platform roots apply |
 | `metering.collector.queue`, `batch`, `intervalSecs`, `timeoutSecs` | 4096, 512, 5, 10 | The sink's bounds: the queue (lines), lines per POST, the wait for a part batch (1 to 3600 s) and one POST's limit (1 to 300 s) |
 | `retention.afterDeleteDays` | 90 | **ANR-770:** days the database and volumes of a deleted agent (`deletionPolicy: Retain`) are kept before they are deleted. `0` keeps them for ever and turns the sweep off |
 | `leaderElection.enabled` | `false` | **K7a:** elect one replica to write, with a `coordination.k8s.io/v1` `Lease`. Off: this replica is the only one, and every pass writes (`AlwaysLeader`) |

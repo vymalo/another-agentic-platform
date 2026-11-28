@@ -43,6 +43,21 @@ metering:
 
 `metering.broker.to` and `metering.collector.to` are required: the operator's network policy then lets it reach exactly those peers on those ports, plus DNS, and nothing else. A `0.0.0.0/0` peer is refused. `port` is the port on the pods, which a NetworkPolicy sees after the Service. The chart mounts the Secret key as a file, and the operator reads it once at start. It never reads a Secret through the API, and the bearer is in no value, no log and no metric.
 
+### A private CA for the collector (ANR-1194)
+
+If the collector is reached over `https` with a private certificate, set `metering.collector.caFile`:
+
+```yaml
+metering:
+  collector:
+    endpoint: https://usage-collector.observability.svc:4318  # https only
+    caFile:
+      configMap: usage-collector-ca        # a ConfigMap in the operator's namespace
+      key: ca.pem                          # the PEM bundle's key
+```
+
+Both `configMap` and `key` are required (or neither). Both are names (the same syntax as `otel.certificate.configMap` and `otel.certificate.key`). The chart mounts the key read-only at `/etc/aap/metering/ca/ca.pem`, and the operator's `metering.collector.caFile` becomes that path. An `http://` endpoint with `caFile` set is refused at render time (a CA bundle for `http` is a mistake). Empty: the platform roots apply.
+
 Apply it, which rolls the operator pods:
 
 ```sh
