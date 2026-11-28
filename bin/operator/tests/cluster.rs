@@ -414,55 +414,169 @@ fn the_three_ports_a_case_is_given_can_all_be_bound_at_once() {
     }
 }
 
+/// How long a spawned operator has to bind its listeners and answer. The cases poll `/healthz` for 60 s already.
+const START_TIMEOUT: Duration = Duration::from_secs(60);
+
+/// Whether `GET 127.0.0.1:<port><path>` answers 200, blocking at most ~700 ms. Used while the start mutex is held.
+fn http_ok(port: u16, path: &str) -> bool {
+    use std::io::Write;
+    let addr = std::net::SocketAddr::from(([127, 0, 0, 1], port));
+    let Ok(mut stream) = std::net::TcpStream::connect_timeout(&addr, Duration::from_millis(200))
+    else {
+        return false;
+    };
+    let request = format!("GET {path} HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n");
+    if stream
+        .set_read_timeout(Some(Duration::from_millis(500)))
+        .is_err()
+        || stream.write_all(request.as_bytes()).is_err()
+    {
+        return false;
+    }
+    let mut out = String::new();
+    // A read cut short by the timeout still leaves the status line, which is all that is looked at.
+    let _ = stream.read_to_string(&mut out);
+    out.split_whitespace().nth(1) == Some("200")
+}
+
+/// Whether something is listening on 127.0.0.1:<port>.
+fn tcp_open(port: u16) -> bool {
+    let addr = std::net::SocketAddr::from(([127, 0, 0, 1], port));
+    std::net::TcpStream::connect_timeout(&addr, Duration::from_millis(200)).is_ok()
+}
+
+/// What a start attempt found.
+enum Start {
+    Listening,
+    Exited(std::process::ExitStatus),
+    TimedOut,
+}
+
+/// Wait until the health and metrics listeners answer and (when a registry token was given) the registry listener
+/// accepts a connection, or the child exits, or `START_TIMEOUT` passes.
+fn wait_until_listening(
+    child: &mut Child,
+    health: u16,
+    metrics: u16,
+    registry: u16,
+    with_registry: bool,
+) -> Start {
+    let until = Instant::now() + START_TIMEOUT;
+    loop {
+        if let Some(status) = child.try_wait().expect("the operator's status") {
+            return Start::Exited(status);
+        }
+        if http_ok(health, "/healthz")
+            && http_ok(metrics, "/metrics")
+            && (!with_registry || tcp_open(registry))
+        {
+            return Start::Listening;
+        }
+        if Instant::now() >= until {
+            return Start::TimedOut;
+        }
+        std::thread::sleep(Duration::from_millis(50));
+    }
+}
+
+/// The line of the operator's log that says a port was taken, when there is one.
+fn bind_line(log: &str) -> Option<&str> {
+    log.lines().find(|l| l.contains("Address already in use"))
+}
+
 impl OperatorProc {
     /// `registry_token`: the token the registry demands, written to a file the operator reads. `None`: no
     /// `registry.token`, so no registry (fail closed), which is what most cases run with.
     ///
     /// `namespaces`: the ones it watches (`watch.namespaces`, K6b); the first is the primary.
+    ///
+    /// Returns once the child listens. A child that **exits** first is retried on three fresh ports, but **only** when
+    /// its log says a port was taken (`Address already in use`): `free_ports()` cannot reserve a port, so another
+    /// process can take one before the child binds it. Any other exit fails the case with the child's log (ANR-1363).
     fn spawn(cluster: &Cluster, namespaces: &[&str], registry_token: Option<&str>) -> Self {
+        // The cases start in parallel, and each releases its ports before its child binds them: without this, one
+        // case's child could take, or be answered on, another's port. Held until the child listens. No `.await` here.
+        static START: std::sync::Mutex<()> = std::sync::Mutex::new(());
+        let _starting = START
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         let namespace = namespaces.first().copied().unwrap_or_default();
-        let log = std::env::temp_dir().join(format!("aap-e2e-{namespace}-{}.log", unique()));
-        let (health, metrics, registry) = free_ports();
-        // The file `operator run` reads (ANR-962): the chart's, written here for this case.
-        let mut config = format!(
-            "version: 1\n\
-             listen:\n  health: 127.0.0.1:{health}\n  metrics: 127.0.0.1:{metrics}\n  registry: 0.0.0.0:{registry}\n\
-             watch:\n  namespaces: [{}]\n\
-             reconcile:\n  resyncPendingSecs: 5\n  timeoutSecs: 30\n\
-             defaults:\n  agentImage: \"{}\"\n\
-             log:\n  filter: 'info,kube=warn,aap_controller=debug'\n",
-            namespaces.join(", "),
-            cluster.image
-        );
-        if let Some(token) = registry_token {
-            let file = std::env::temp_dir().join(format!("aap-e2e-{namespace}.token"));
-            // A mounted Secret ends its value with a newline as often as not.
-            std::fs::write(&file, format!("{token}\n")).unwrap();
-            config.push_str(&format!(
-                "registry:\n  token:\n    file: {}\n",
-                file.display()
-            ));
+        let mut why = String::new();
+        for attempt in 1..=3 {
+            let log = std::env::temp_dir().join(format!("aap-e2e-{namespace}-{}.log", unique()));
+            let (health, metrics, registry) = free_ports();
+            // The file `operator run` reads (ANR-962): the chart's, written here for this case.
+            let mut config = format!(
+                "version: 1\n\
+                 listen:\n  health: 127.0.0.1:{health}\n  metrics: 127.0.0.1:{metrics}\n  registry: 0.0.0.0:{registry}\n\
+                 watch:\n  namespaces: [{}]\n\
+                 reconcile:\n  resyncPendingSecs: 5\n  timeoutSecs: 30\n\
+                 defaults:\n  agentImage: \"{}\"\n\
+                 log:\n  filter: 'info,kube=warn,aap_controller=debug'\n",
+                namespaces.join(", "),
+                cluster.image
+            );
+            if let Some(token) = registry_token {
+                let file = std::env::temp_dir().join(format!("aap-e2e-{namespace}.token"));
+                // A mounted Secret ends its value with a newline as often as not.
+                std::fs::write(&file, format!("{token}\n")).unwrap();
+                config.push_str(&format!(
+                    "registry:\n  token:\n    file: {}\n",
+                    file.display()
+                ));
+            }
+            let config_file =
+                std::env::temp_dir().join(format!("aap-e2e-{namespace}-{}.yaml", unique()));
+            std::fs::write(&config_file, config).unwrap();
+            let mut child = Command::new(env!("CARGO_BIN_EXE_operator"))
+                .arg("run")
+                .arg("--config")
+                .arg(&config_file)
+                .env("KUBECONFIG", &cluster.kubeconfig)
+                .env("POD_NAME", "operator-under-test")
+                .stdout(Stdio::null())
+                .stderr(std::fs::File::create(&log).unwrap())
+                .spawn()
+                .expect("starts the operator");
+            match wait_until_listening(
+                &mut child,
+                health,
+                metrics,
+                registry,
+                registry_token.is_some(),
+            ) {
+                Start::Listening => {
+                    return Self {
+                        child,
+                        log,
+                        health,
+                        metrics,
+                        registry,
+                    };
+                }
+                Start::Exited(status) => {
+                    let text = std::fs::read_to_string(&log).unwrap_or_default();
+                    let said = format!(
+                        "attempt {attempt}: the operator exited ({status}) before it served on \
+                         {health}/{metrics}/{registry}; its log:\n{text}"
+                    );
+                    assert!(bind_line(&text).is_some(), "{said}");
+                    eprintln!("{said}\nretrying on fresh ports");
+                    why.push_str(&said);
+                    why.push('\n');
+                }
+                Start::TimedOut => {
+                    let _ = child.kill();
+                    let _ = child.wait();
+                    let text = std::fs::read_to_string(&log).unwrap_or_default();
+                    panic!(
+                        "the operator did not serve on {health}/{metrics}/{registry} within {}s; its log:\n{text}",
+                        START_TIMEOUT.as_secs()
+                    );
+                }
+            }
         }
-        let config_file =
-            std::env::temp_dir().join(format!("aap-e2e-{namespace}-{}.yaml", unique()));
-        std::fs::write(&config_file, config).unwrap();
-        let child = Command::new(env!("CARGO_BIN_EXE_operator"))
-            .arg("run")
-            .arg("--config")
-            .arg(&config_file)
-            .env("KUBECONFIG", &cluster.kubeconfig)
-            .env("POD_NAME", "operator-under-test")
-            .stdout(Stdio::null())
-            .stderr(std::fs::File::create(&log).unwrap())
-            .spawn()
-            .expect("starts the operator");
-        Self {
-            child,
-            log,
-            health,
-            metrics,
-            registry,
-        }
+        panic!("the operator never started after 3 attempts:\n{why}");
     }
 
     /// The process has ended (a crash is a failed test, not a hang).
