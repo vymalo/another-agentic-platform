@@ -19,7 +19,10 @@ pub struct TokenFile {
 }
 
 struct Cached {
-    stamp: Stamp,
+    /// `None` for a text seeded from the start-time read: the next `get` re-reads the file, so a rotation that landed
+    /// between that read and the seed is never cached under a stamp it does not belong to. `Some` for a text `get` read
+    /// itself, with the stamp taken **before** the read.
+    stamp: Option<Stamp>,
     text: String,
 }
 
@@ -46,15 +49,13 @@ impl TokenFile {
     }
 
     /// Seed the cache with a text that was just read and validated (the start-time read): the source answers it even if the
-    /// file vanishes before the first request, and a change of the file is still picked up.
+    /// file vanishes before the first request. The seeded text carries **no stamp**, so the next `get` re-reads the file
+    /// if it is readable (a rotation between the caller's read and this call is therefore picked up) and serves the seeded
+    /// text only if the file cannot be read.
     pub fn seed(&self, text: &str) {
-        let stamp = match &self.reference {
-            SecretRef::File(path) => stamp(path).unwrap_or(Stamp(SystemTime::UNIX_EPOCH, 0)),
-            SecretRef::Env(_) => Stamp(SystemTime::UNIX_EPOCH, 0),
-        };
         if let Ok(mut cached) = self.cached.lock() {
             *cached = Some(Cached {
-                stamp,
+                stamp: None,
                 text: text.to_owned(),
             });
         }
@@ -71,7 +72,8 @@ impl TokenFile {
             SecretRef::File(path) => {
                 let now = stamp(path);
                 if let Some(cached) = self.cached()
-                    && Some(cached.stamp) == now
+                    && cached.stamp.is_some()
+                    && cached.stamp == now
                 {
                     return Some(cached.text);
                 }
@@ -80,7 +82,7 @@ impl TokenFile {
                         let stamp = now.unwrap_or(Stamp(SystemTime::UNIX_EPOCH, 0));
                         if let Ok(mut cached) = self.cached.lock() {
                             *cached = Some(Cached {
-                                stamp,
+                                stamp: Some(stamp),
                                 text: text.clone(),
                             });
                         }
@@ -135,6 +137,29 @@ mod tests {
         write(&path, "second-token");
         assert_eq!(token.get().as_deref(), Some("second-token"));
         std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn a_seeded_text_never_wins_over_a_readable_file() {
+        // The seed carries no stamp: a rotation between the caller's read and the seed is picked up by the next `get`.
+        let dir = std::env::temp_dir().join(format!("aap-token-seed-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("token");
+        write(&path, "rotated");
+        let token = TokenFile::new(SecretRef::File(path.clone()));
+        token.seed("start-time");
+        assert_eq!(token.get().as_deref(), Some("rotated"));
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn a_seeded_text_is_kept_when_the_file_is_gone_before_the_first_get() {
+        // The start-time read validated a text; the file vanishes before the first request, and the source still answers it.
+        let token = TokenFile::new(SecretRef::File(std::path::PathBuf::from(
+            "/nonexistent/aap/seeded",
+        )));
+        token.seed("start-time");
+        assert_eq!(token.get().as_deref(), Some("start-time"));
     }
 
     #[test]
