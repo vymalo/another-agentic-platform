@@ -17,6 +17,6 @@ There is **no panel for leader changes**. The count is a field of the `Lease` ob
 
 ## Change one
 
-The JSON files are generated, so an edit made to them, or saved back from Grafana, is lost. Change the Python script of the dashboard in `tools/dashboards/` and regenerate the file, as the [README](../../../deploy/dashboards/README.md#generated-do-not-edit-the-json) shows. A check in CI refuses a file that differs from its script, and a panel that queries a metric no service emits.
+The JSON files are generated, so an edit made to them, or saved back from Grafana, is lost. Change the dashboard's script, `operator_dashboard.py` or `api_dashboard.py` in `tools/dashboards/`, and regenerate the file, as the [README](../../../deploy/dashboards/README.md#generated-do-not-edit-the-json) shows. A check in CI refuses a file that differs from its script, and a panel that queries a metric no service emits.
 
 The dashboards have no alerts, and no threshold is suggested: what is normal depends on your install.

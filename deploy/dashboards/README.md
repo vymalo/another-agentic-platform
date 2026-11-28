@@ -15,15 +15,15 @@ The queries do not filter by namespace or job, so two installs scraped by one Pr
 
 ## Generated: do not edit the JSON
 
-`tools/dashboards/<name>.py` writes `<name>.json`. Change the generator, then run:
+`tools/dashboards/<name>_dashboard.py` writes `<name>.json`. Change the generator, then run:
 
 ```sh
-python3 tools/dashboards/operator.py
-python3 tools/dashboards/api.py
+python3 tools/dashboards/operator_dashboard.py
+python3 tools/dashboards/api_dashboard.py
 python3 tools/dashboards/check.py
 ```
 
-The generators and the check use the Python 3 standard library only. CI runs `check.py`, which fails when:
+The generators and the check use the Python 3 standard library only. CI runs `check.py` (`.github/workflows/dashboards.yml`), which fails when:
 
 - a JSON file differs from what its generator says, is missing, or has no generator;
 - a panel query names a series that is not a constant of `crates/controller/src/metrics.rs` or `crates/platform-api/src/metrics.rs`, or names no series at all.

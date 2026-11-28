@@ -4,17 +4,16 @@ services emit. Standard library only. Run it from anywhere: `python3 tools/dashb
 
 import sys
 
-if __name__ == "__main__":
-    # A neighbour is named like a standard library module: see grafana.py.
-    del sys.path[0]
 sys.dont_write_bytecode = True
 
 import importlib.util
 import re
 from pathlib import Path
 
+import grafana
+
 HERE = Path(__file__).resolve().parent
-GENERATORS = ("operator", "api")
+GENERATORS = ("operator_dashboard", "api_dashboard")
 # Where the services declare the names of their series.
 SOURCES = ("crates/controller/src/metrics.rs", "crates/platform-api/src/metrics.rs")
 CONSTANT = re.compile(r'pub const [A-Z0-9_]+: &str =\s*"(aap_[a-z0-9_]+)";')
@@ -23,7 +22,7 @@ QUERIED = re.compile(r"\baap_\w*")
 
 
 def load(name):
-    spec = importlib.util.spec_from_file_location(f"dashboard_{name}", HERE / f"{name}.py")
+    spec = importlib.util.spec_from_file_location(name, HERE / f"{name}.py")
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)
     return module
@@ -39,20 +38,21 @@ def emitted(root):
     return names
 
 
-def drift(grafana, boards):
+def drift(generators):
+    """`generators` maps a dashboard's NAME to the script that writes it and what it builds."""
     failures = []
-    for name, board in boards.items():
+    for name, (script, board) in generators.items():
         path = grafana.OUTPUT_DIR / f"{name}.json"
         shown = path.relative_to(grafana.ROOT)
         if not path.is_file():
             failures.append(f"{shown}: missing")
         elif path.read_bytes() != grafana.render(board):
-            failures.append(f"{shown}: differs from what tools/dashboards/{name}.py generates")
+            failures.append(f"{shown}: differs from what tools/dashboards/{script}.py generates")
     for path in sorted(grafana.OUTPUT_DIR.glob("*.json")):
-        if path.stem not in boards:
+        if path.stem not in generators:
             failures.append(f"{path.relative_to(grafana.ROOT)}: no generator writes it")
     if failures:
-        failures.append("run `python3 tools/dashboards/operator.py` and `python3 tools/dashboards/api.py`")
+        failures.append("run `python3 tools/dashboards/operator_dashboard.py` and `python3 tools/dashboards/api_dashboard.py`")
     return failures
 
 
@@ -79,11 +79,12 @@ def unknown_metrics(boards, names):
 
 
 def main():
-    boards = {name: load(name).build() for name in GENERATORS}
-    grafana = load("grafana")
+    loaded = {script: load(script) for script in GENERATORS}
+    generators = {module.NAME: (script, module.build()) for script, module in loaded.items()}
+    boards = {name: board for name, (_, board) in generators.items()}
     names = emitted(grafana.ROOT)
     unknown, queried, expressions = unknown_metrics(boards, names)
-    failures = drift(grafana, boards) + unknown
+    failures = drift(generators) + unknown
     if failures:
         print("\n".join(failures), file=sys.stderr)
         return 1

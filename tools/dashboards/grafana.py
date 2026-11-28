@@ -1,9 +1,4 @@
-"""What the dashboard generators share. Standard library only.
-
-A generator beside this file is named for its dashboard, and one of them is `operator.py`, which is also the name of a
-module of the standard library. Python puts a script's own directory first on `sys.path`, so every script of this
-directory removes it (`del sys.path[0]`) before it imports anything else, and loads this file by its path.
-"""
+"""What the dashboard generators share. Standard library only."""
 
 import json
 from pathlib import Path
