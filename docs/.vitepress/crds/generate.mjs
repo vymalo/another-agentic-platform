@@ -64,17 +64,24 @@ function boundsOf(schema) {
     }
   }
   for (const rule of schema["x-kubernetes-validations"] ?? []) {
-    if (rule.message) parts.push(`rule: ${cell(rule.message)}`);
+    if (rule.message) parts.push(`rule: ${rule.message}`);
   }
   return parts.join("; ");
 }
 
 function row(path, schema, required) {
-  const description = cell(schema.description);
+  const description = String(schema.description ?? "").replace(/\s+/g, " ").trim();
   const shown = description.length > DESCRIPTION_MAX ? `${description.slice(0, DESCRIPTION_MAX - 1)}…` : description;
-  return `| ${code(path)} | ${typeOf(schema)} | ${required ? "yes" : "no"} | ${
-    schema.default === undefined ? "—" : code(JSON.stringify(schema.default))
-  } | ${boundsOf(schema) || "—"} | ${shown} |`;
+  const cells = [
+    code(path),
+    typeOf(schema),
+    required ? "yes" : "no",
+    schema.default === undefined ? "—" : code(JSON.stringify(schema.default)),
+    boundsOf(schema) || "—",
+    shown,
+  ];
+  // Each cell is built raw and escaped here, once: a pipe from the schema never ends a cell.
+  return `| ${cells.map(cell).join(" | ")} |`;
 }
 
 /** Every field under `schema`, as one flat table: the path, its type, whether its parent requires it, its default, its
@@ -91,7 +98,7 @@ function walk(schema, path, rows, depth) {
     walk(schema.items, `${path}[]`, rows, depth + 1);
   }
   const value = schema.additionalProperties;
-  if (value && typeof value === "object" && !schema.properties && value.properties) {
+  if (value && typeof value === "object" && value.properties) {
     const valuePath = `${path}{}`;
     rows.push(row(valuePath, value, false));
     walk(value, valuePath, rows, depth + 1);
@@ -104,7 +111,7 @@ function table(rows) {
   );
 }
 
-function page(kind, crd) {
+export function page(kind, crd) {
   const version = crd.spec.versions[0];
   const schema = version.schema.openAPIV3Schema;
   const specRows = [];
@@ -145,6 +152,73 @@ function page(kind, crd) {
     "The CRD itself, with every description whole, is [`deploy/crds/agents.vymalo.com.yaml`](https://github.com/vymalo/another-agentic-platform/blob/main/deploy/crds/agents.vymalo.com.yaml).",
     "",
   ].join("\n");
+}
+
+/** A made-up CRD whose `spec` is `spec`, so a case can ask for a shape no checked-in CRD has. */
+function probe(spec) {
+  const schema = { description: "probe", required: ["spec"], properties: { spec } };
+  return {
+    spec: {
+      group: "agents.vymalo.com",
+      names: { kind: "Probe", plural: "probes" },
+      scope: "Namespaced",
+      versions: [{ name: "v1alpha1", schema: { openAPIV3Schema: schema } }],
+    },
+  };
+}
+
+/** The rows of the `spec` table of a probe's page, without the header and its rule. */
+function specTable(spec) {
+  const section = page("Probe", probe(spec)).split("## `spec`\n\n")[1] ?? "";
+  return section.split("\n\n")[0].split("\n").slice(2);
+}
+
+/** A row as a Markdown table reads it: only a pipe with no backslash before it ends a cell. */
+const splitRow = (row) => row.split(/(?<!\\)\|/).slice(1, -1).map((text) => text.trim());
+
+/** One row, six cells, and in cell `index` the source `a|b` escaped exactly once. */
+function pipeCase(name, field, index) {
+  const rows = specTable({ type: "object", properties: { field } });
+  const cells = splitRow(rows[0] ?? "");
+  const text = cells[index] ?? "";
+  const ok = rows.length === 1 && cells.length === 6 && text.includes("a\\|b") && !text.includes("\\\\|");
+  return { name, ok, detail: `${cells.length} cells in ${rows[0]}` };
+}
+
+/** What the generator does with shapes the checked-in CRDs do not have, as `{ name, ok, detail }`. */
+export function unitCases() {
+  const [pattern, choice, fallback, description, rule] = [
+    pipeCase("a pattern with a pipe stays in its cell", { type: "string", pattern: "^(a|b)$" }, 4),
+    pipeCase("an enum value with a pipe stays in its cell", { type: "string", enum: ["a|b"] }, 4),
+    pipeCase("a string default with a pipe stays in its cell", { type: "string", default: "a|b" }, 3),
+    pipeCase("a description with a pipe in a code span stays in its cell", { type: "string", description: "the `a|b` value" }, 5),
+    pipeCase(
+      "a rule message with a pipe is escaped once",
+      { type: "string", "x-kubernetes-validations": [{ rule: "true", message: "a|b" }] },
+      4,
+    ),
+  ];
+
+  const mapRows = specTable({
+    type: "object",
+    properties: { known: { type: "string" } },
+    additionalProperties: { type: "object", properties: { free: { type: "string" } } },
+  });
+  const paths = mapRows.map((row) => splitRow(row)[0]);
+  const map = {
+    name: "a map beside fixed fields keeps the rows of its value",
+    ok: ["spec.known", "spec{}", "spec{}.free"].every((path) => paths.includes(`<code>${path}</code>`)),
+    detail: `paths: ${paths.join(", ")}`,
+  };
+
+  const plainRows = specTable({ type: "object", properties: { field: { type: "string" } } });
+  const plain = {
+    name: "control: a plain string is one row of six cells",
+    ok: plainRows.length === 1 && splitRow(plainRows[0]).length === 6,
+    detail: plainRows.join(" / "),
+  };
+
+  return [pattern, choice, fallback, description, rule, map, plain];
 }
 
 /** The pages, in the CRD file's order: `{ file, content }` per kind. */
