@@ -6,6 +6,9 @@
 use std::sync::Mutex;
 use std::time::SystemTime;
 
+#[cfg(unix)]
+use std::os::unix::fs::MetadataExt;
+
 use aap_trace_otlp::SecretRef;
 
 /// The reference the configuration names, and the last text it gave.
@@ -26,9 +29,11 @@ struct Cached {
     text: String,
 }
 
-/// What says a file changed: its modification time and its size (a Secret's payload is replaced, so both move).
+/// What says a file changed: its modification time, its size, and its inode. A Secret's payload is replaced by an
+/// atomic symlink swap, so all three move; the inode is what makes a same-second, same-size rewrite (a new token with
+/// the same byte length) a change too, as the mTLS listener's own reload does (ANR-1011).
 #[derive(Clone, Copy, PartialEq, Eq)]
-struct Stamp(SystemTime, u64);
+struct Stamp(SystemTime, u64, u64);
 
 impl std::fmt::Debug for TokenFile {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -79,7 +84,7 @@ impl TokenFile {
                 }
                 match std::fs::read_to_string(path) {
                     Ok(text) => {
-                        let stamp = now.unwrap_or(Stamp(SystemTime::UNIX_EPOCH, 0));
+                        let stamp = now.unwrap_or(Stamp(SystemTime::UNIX_EPOCH, 0, 0));
                         if let Ok(mut cached) = self.cached.lock() {
                             *cached = Some(Cached {
                                 stamp: Some(stamp),
@@ -108,7 +113,11 @@ impl TokenFile {
 /// The file's stamp, or `None` when it cannot be read (a missing file, or a platform without one).
 fn stamp(path: &std::path::Path) -> Option<Stamp> {
     let meta = std::fs::metadata(path).ok()?;
-    Some(Stamp(meta.modified().ok()?, meta.len()))
+    #[cfg(unix)]
+    let ino = meta.ino();
+    #[cfg(not(unix))]
+    let ino = 0;
+    Some(Stamp(meta.modified().ok()?, meta.len(), ino))
 }
 
 #[cfg(test)]
@@ -136,6 +145,33 @@ mod tests {
         assert_eq!(token.get().as_deref(), Some("first"));
         write(&path, "second-token");
         assert_eq!(token.get().as_deref(), Some("second-token"));
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn a_same_size_rewrite_with_the_same_mtime_is_a_change() {
+        // The inode is in the stamp. A Secret is replaced by an atomic symlink swap (a new file), so a token of the same
+        // length written in the same second is still picked up; the mtime and the size alone would not move.
+        use std::io::Write as _;
+        let dir = std::env::temp_dir().join(format!("aap-token-ino-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("token");
+        write(&path, "aaaa");
+        let original = std::fs::metadata(&path).unwrap().modified().unwrap();
+        let token = TokenFile::new(SecretRef::File(path.clone()));
+        assert_eq!(token.get().as_deref(), Some("aaaa"));
+        // A new file of the same size, with the first file's modification time, renamed over the path: only the inode differs.
+        let tmp = path.with_extension("new");
+        {
+            let mut file = std::fs::File::create(&tmp).unwrap();
+            file.write_all(b"bbbb").unwrap();
+            file.sync_all().unwrap();
+            let mut times = std::fs::FileTimes::new();
+            times.set_modified(original);
+            file.set_times(times).unwrap();
+        }
+        std::fs::rename(&tmp, &path).unwrap();
+        assert_eq!(token.get().as_deref(), Some("bbbb"));
         std::fs::remove_dir_all(&dir).ok();
     }
 
