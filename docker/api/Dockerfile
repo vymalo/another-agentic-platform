@@ -6,7 +6,7 @@
 #   docker buildx build -f docker/api/Dockerfile .
 #
 # This is docker/operator/Dockerfile with the package and the binary changed: the same builder and runtime images (the same tags
-# and digests), the same layers, the same user. ANR-1174: the binary is **static musl** (`ldd` says "not a dynamic executable"),
+# and digests), the same layers, the same user. ANR-1174: the binary is **static musl** (`file` says "static-pie linked", `ldd` "statically linked"),
 # so the runtime is the distroless `static` image: no libc, no libgcc, the CA certificates and nothing else (no shell, no package
 # manager). The builder is still Debian 13 (trixie): it has `musl-tools` (the `musl-gcc` linker) and `perl`, and both TLS stacks
 # build for `x86_64-unknown-linux-musl` there: rustls with ring (bin/api/Cargo.toml) and aws-lc-rs through `jsonwebtoken`
@@ -62,8 +62,8 @@ RUN cargo build --release --locked --package aap-api-server --bin api --target "
 # a protocol it does not speak. A smoke test must not depend on what a builder puts in the environment.
 RUN set -eu; \
     api=/src/target/$TARGET/release/api; \
-    file "$api" | grep -q 'statically linked'; \
-    ldd "$api" 2>&1 | grep -q 'not a dynamic executable'; \
+    file "$api" | grep -q 'static'; \
+    ldd "$api" 2>&1 | grep -q -e 'statically linked' -e 'not a dynamic executable'; \
     clean="env -i PATH=$PATH"; \
     $clean "$api" --version > /tmp/version; \
     grep -q '^api ' /tmp/version; \

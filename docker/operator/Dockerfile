@@ -5,7 +5,7 @@
 #
 #   docker buildx build -f docker/operator/Dockerfile .
 #
-# ANR-1174: the binary is **static musl** (`ldd` says "not a dynamic executable"), so the runtime is the
+# ANR-1174: the binary is **static musl** (`file` says "static-pie linked", `ldd` "statically linked"), so the runtime is the
 # distroless `static` image: no libc, no libgcc, the CA certificates and nothing else (no shell, no package
 # manager). The builder is still Debian 13 (trixie): it has `musl-tools` (the `musl-gcc` linker) and `perl`
 # (ring's assembly), and `ring` and `aws-lc-rs` build for `x86_64-unknown-linux-musl` there. TLS is rustls
