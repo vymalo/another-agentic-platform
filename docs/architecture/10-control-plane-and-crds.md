@@ -1206,7 +1206,7 @@ stateDiagram-v2
 
 ### Cluster facts
 
-The cluster facts the design rests on — the netcup probes of 2026-10-06, the five probe results and what each one decides — are on the agent page.
+The cluster facts the design rests on — the netcup probes of 2026-10-06, the five probe results and what each one decides — are on [the agent page](../../.agents/docs/architecture/10-control-plane-and-crds.md#59b-the-run-pool-pods-where-work-runs).
 
 ### Seams (AD-039, AD-020)
 

@@ -62,6 +62,8 @@ The adam-rs side is cited at revision `0391809`, the source of the coder image t
 
 ## §59b. The run pool: pods where work runs
 
+The design, with every decision and qualifier, is on [the page for people](../../../docs/architecture/10-control-plane-and-crds.md#59b-the-run-pool-pods-where-work-runs). The cluster facts that left it are below.
+
 ### Cluster facts (verified 2026-10-06)
 
 *Verified 2026-10-06*, the owner's run of two probe scripts on the netcup cluster. The first five answer the question of §93 *Run pool*; the probes follow.
