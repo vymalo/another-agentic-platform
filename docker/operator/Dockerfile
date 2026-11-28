@@ -29,7 +29,7 @@ ARG TARGET
 # The musl target and the tools the C dependencies need: `musl-gcc` as the linker, `perl` for ring's
 # assembly, and a C compiler for aws-lc-sys (the image has one; the line keeps the layer explicit).
 RUN apt-get update \
- && apt-get install -y --no-install-recommends musl-tools perl \
+ && apt-get install -y --no-install-recommends musl-tools perl file \
  && rm -rf /var/lib/apt/lists/* \
  && rustup target add "$TARGET"
 # The musl target needs a musl linker: Debian's `cc` is glibc's gcc and would link a dynamic binary. This is the
