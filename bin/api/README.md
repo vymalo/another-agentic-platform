@@ -147,7 +147,7 @@ folder agent created, read, replaced and deleted through the deployed API while 
 ## The image and the chart
 
 **The image** is [`docker/api/Dockerfile`](../../docker/api/Dockerfile): `ghcr.io/vymalo/another-agentic-platform/api`, built from the repository root, the operator's
-Dockerfile with the package and the binary changed (cargo-chef on Rust 1.94.1 onto `distroless/cc-debian13:nonroot`, both pinned by tag and digest, user 65532, `ENTRYPOINT ["/api"]`,
+Dockerfile with the package and the binary changed (cargo-chef on Rust 1.94.1, a **static musl** binary onto `distroless/static-debian13:nonroot`, both pinned by tag and digest, user 65532, `ENTRYPOINT ["/api"]`,
 no shell and no `CMD`: the file is required). The build stage runs `--version`, `--help`, `--check` on `config.example.yaml`, and a refusal of that file with a misspelt key. CI
 ([`operator-image.yml`](../../.github/workflows/operator-image.yml), job `api-image`) builds it, runs the same on the final image, and runs `api --check` in it on the
 configuration the chart renders, and the job `api-e2e` runs the image in a kind cluster (the chart's `api` component, a real issuer, a folder agent made through the API, [D7b2](../../deploy/operator/tests/e2e/README.md#the-kind-end-to-end-of-the-platform-api-d7b2)). *Unverified* until CI has run it: no image was built where this was written (the binary was, in release mode).
