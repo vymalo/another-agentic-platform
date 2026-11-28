@@ -157,7 +157,7 @@ Each row was run with `helm template`, with `replicas: 2` and one change:
 | `replicas: 0` | 1 | `replicas must be a whole number of at least 1, got 0` |
 | `toolProbe.to` and `toolProbe.dns.to` set, at the defaults | 1 | `toolProbe.timeoutSecs (5) does not fit the pass: the pass keeps 5 s for its other steps, so the probe needs tuning.reconcileTimeoutSecs of at least 10, but the pass is 4 s and the controller would give the probe 1 s. With the election on the pass must stay below leaderElection.leaseSecs - leaderElection.renewSecs, so that needs leaderElection.leaseSecs of at least 21 (renewSecs is 10): for example leaseSecs: 21, renewSecs: 10, tuning.reconcileTimeoutSecs: 10. Or lower toolProbe.timeoutSecs.` |
 
-Every refusal prints `templates/servicemonitor.yaml:1:4` as its location. Ignore it. The control is the values block above, which renders and passes kubeconform. With one replica, the `leaderElection` keys are not read: `retrySecs: 99` at one replica renders, exit 0. A fraction is refused at any replica count: with more than one it would be written as `15.5` into a `u64` of the operator's file, which `operator run --check` refuses at start, and the chart keeps one rule for the key whether it is written or not. A fraction given with `--set` is a *string* to Helm and is refused for that reason; the shape a values file gives is `--set-json`.
+Every refusal prints the location of the template that includes `_validate.tpl`, not the check's — the exact line it prints is in [the agent page](../../../.agents/docs/guides/operate/replicas.md). The control is the values block above, which renders and passes kubeconform. With one replica, the `leaderElection` keys are not read: `retrySecs: 99` at one replica renders, exit 0. A fraction is refused at any replica count: with more than one it would be written as `15.5` into a `u64` of the operator's file, which `operator run --check` refuses at start, and the chart keeps one rule for the key whether it is written or not. A fraction given with `--set` is a *string* to Helm and is refused for that reason; the shape a values file gives is `--set-json`.
 
 ## What proves it
 
@@ -167,7 +167,7 @@ Every refusal prints `templates/servicemonitor.yaml:1:4` as its location. Ignore
 | `operator-e2e` | [`operator.yml`](../../../.github/workflows/operator.yml) | The election's own cases against a real API server: a `409` on a stale `resourceVersion`, a killed holder replaced |
 | `render-check.sh` | the `chart` job | The rolling update, the budget, the election keys and the refusals, each broken on purpose |
 
-*Verified 2026-11-27* with `gh run view`: on `main` at commit `2c16326`, run 45932723504 of `operator-image.yml`, with `leader-e2e` among its jobs, ended in success. Its log, the figures in the table above, says the `Lease` moved 14 s after the kill and was released 1 s after the SIGTERM.
+*The run this page was checked against, with its ids, is recorded in [the agent page](../../../.agents/docs/guides/operate/replicas.md).*
 
 Run for this page, on 2026-11-27: the values block rendered with `helm template`, alone and with the install page's, and kubeconform, strict, found 8 and 11 objects valid. The walk above ran on a kind cluster, Kubernetes v1.35.8, named for it and deleted afterwards.
 

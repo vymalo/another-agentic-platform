@@ -177,8 +177,8 @@ where
     }
 
     /// Turn the pod-minute meter on (ANR-673, AD-069): while this replica leads, it sends one event per pod and
-    /// whole minute to `sink`, for the account `accounts` names. **Off without it**, and `operator run` does not
-    /// call it yet (a later slice, AD-069).
+    /// whole minute to `sink`, for the account `accounts` names. **Off without it**; `bin/operator` calls it only
+    /// when the file's `metering.enabled` is true (ANR-1103).
     #[must_use]
     pub fn with_meter<K, A>(mut self, sink: K, accounts: A) -> Self
     where
@@ -222,6 +222,13 @@ where
     #[must_use]
     pub fn has_activity(&self) -> bool {
         self.activity.is_some()
+    }
+
+    /// Whether the pod-minute meter is on ([`with_meter`](Self::with_meter)): what a composition root's test asks,
+    /// so that a meter built and never handed over is caught.
+    #[must_use]
+    pub fn has_meter(&self) -> bool {
+        self.meter.is_some()
     }
 
     /// Elect `leader`'s holder as the one whose passes write (K7a). The default is [`AlwaysLeader`]: one

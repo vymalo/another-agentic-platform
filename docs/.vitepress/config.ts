@@ -67,7 +67,14 @@ const sidebar = [
           ...pages("api", ["usage-ingest-v1.md"]),
         ],
       },
-      { text: "CRDs", items: [{ text: "Custom resources", link: "/reference/crds" }] },
+      {
+        text: "CRDs",
+        items: [
+          { text: "Custom resources", link: "/reference/crds" },
+          ...pages("reference/crds", ["AgentService.md", "AgentConfig.md", "ModelEndpoint.md", "ToolProvider.md"]),
+        ],
+      },
+      { text: "CLI", items: [{ text: "aapctl", link: "/reference/cli" }] },
       { text: "Extensions", items: [{ text: "Extensions", link: "/extensions/" }, ...pages("extensions", ["release-channels-v1.md", "agent-registry-v1.md"])] },
     ],
   },
@@ -93,7 +100,13 @@ const sidebar = [
     ],
   },
   { text: "Decisions", items: pages("architecture", ["11-decisions.md"]) },
-  { text: "Contributing", items: [{ text: "How to contribute", link: "/contributing" }] },
+  {
+    text: "Contributing",
+    items: [
+      { text: "How to contribute", link: "/contributing" },
+      { text: "Writing docs", link: "/writing-docs" },
+    ],
+  },
 ];
 
 // Prose writes <agent> or <ThreadShare> meaning a placeholder; Vue would read it as a component and fail the build.

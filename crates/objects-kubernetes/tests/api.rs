@@ -558,26 +558,30 @@ impl Logs {
 }
 
 #[tokio::test]
-async fn what_the_operator_writes_between_the_two_applies_does_not_stop_the_save() {
-    // The operator writes the `status` of a service when its config changes, and puts its finalizer on a service it has
-    // just seen: the `resourceVersion` moves, and what the save is about does not.
-    for what in ["a status", "a finalizer"] {
+async fn what_is_written_between_the_two_applies_does_not_stop_the_save() {
+    // The operator writes the `status` of a service when its config changes and puts its finalizer on a service it has
+    // just seen, and the activator writes `wake-at` when a request reaches a sleeping agent: the `resourceVersion`
+    // moves, and what the save is about does not.
+    for what in ["a status", "a finalizer", "a wake-at"] {
         let (fake, h) = setup();
         let (name, draft, agent) = made(&h).await;
         fake.clear_calls();
         let changed = reconfigured(&retitled(&draft, "Changed"), "another-model");
         let service = name.clone();
-        fake.before_the_next_real_apply("agentservices", &name, move |s| {
-            if what == "a status" {
-                s.apply_status_as(
-                    "aap-operator",
-                    "agentservices",
-                    &service,
-                    json!({ "observedGeneration": 2 }),
-                );
-            } else {
-                s.add_finalizer("agentservices", &service, "agents.vymalo.com/runtime");
-            }
+        fake.before_the_next_real_apply("agentservices", &name, move |s| match what {
+            "a status" => s.apply_status_as(
+                "aap-operator",
+                "agentservices",
+                &service,
+                json!({ "observedGeneration": 2 }),
+            ),
+            "a finalizer" => s.add_finalizer("agentservices", &service, "agents.vymalo.com/runtime"),
+            _ => s.merge_as(
+                "aap-activator",
+                "agentservices",
+                &service,
+                json!({ "metadata": { "annotations": { "agents.vymalo.com/wake-at": "2026-11-27T22:00:00Z" } } }),
+            ),
         });
         let before =
             fake.stored("agentservices", &name).unwrap()["metadata"]["resourceVersion"].clone();
@@ -595,6 +599,14 @@ async fn what_the_operator_writes_between_the_two_applies_does_not_stop_the_save
             json!("another-model"),
             "{what}"
         );
+
+        if what == "a wake-at" {
+            assert_eq!(
+                fake.stored("agentservices", &name).unwrap()["metadata"]["annotations"]["agents.vymalo.com/wake-at"],
+                json!("2026-11-27T22:00:00Z"),
+                "the activator's mark survives the repeated apply"
+            );
+        }
 
         // The service was applied twice: the version it was read at was refused, and the one it had then was not.
         let applies = written(&fake, "agentservices");

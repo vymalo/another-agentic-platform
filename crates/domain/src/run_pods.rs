@@ -636,14 +636,20 @@ impl RunPodSettings {
             let _ = value;
         }
         for (i, t) in self.tolerations.iter().enumerate() {
+            if let Err(why) = only_known_toleration(t, &format!("tolerations[{i}]")) {
+                bad(why);
+            }
             if serde_json::from_value::<Toleration>(t.clone()).is_err() {
                 bad(format!("tolerations[{i}]: not a Kubernetes toleration"));
             }
         }
-        if let Some(a) = self.node_affinity_value()
-            && serde_json::from_value::<NodeAffinity>(a.clone()).is_err()
-        {
-            bad("nodeAffinity: not a Kubernetes nodeAffinity".into());
+        if let Some(a) = self.node_affinity_value() {
+            if let Err(why) = only_known_node_affinity(a, "nodeAffinity") {
+                bad(why);
+            }
+            if serde_json::from_value::<NodeAffinity>(a.clone()).is_err() {
+                bad("nodeAffinity: not a Kubernetes nodeAffinity".into());
+            }
         }
         for (i, image) in self.extra_allowed_images.iter().enumerate() {
             if image.trim().is_empty() || image.contains(char::is_whitespace) {
@@ -947,13 +953,181 @@ fn is_ipv4_cidr(s: &str) -> bool {
         && bits.parse::<u8>().is_ok_and(|b| b <= 32)
 }
 
+/// The prefix length of a CIDR (`10.0.0.0/8` is 8, `::/0` is 0), when it has one this file can read. The address
+/// itself is the API server's to judge; this is only what the run pods' policy cannot allow.
+fn cidr_prefix(cidr: &str) -> Option<u8> {
+    cidr.rsplit_once('/')?.1.parse().ok()
+}
+
+/// The fields a `NetworkPolicy` egress rule may have, at each level. `k8s-openapi`'s networking types are generated
+/// **without** `deny_unknown_fields`, so a misspelled key is dropped and the widening it causes is invisible: `port:`
+/// for `ports:` opens every port, `matchLabel:` for `matchLabels:` makes the selector `{}`, which is every namespace
+/// (ANR-1356). Every level is therefore walked against its list before the rule is read.
+const EGRESS_RULE_FIELDS: [&str; 2] = ["to", "ports"];
+const PEER_FIELDS: [&str; 3] = ["ipBlock", "namespaceSelector", "podSelector"];
+const IP_BLOCK_FIELDS: [&str; 2] = ["cidr", "except"];
+const SELECTOR_FIELDS: [&str; 2] = ["matchLabels", "matchExpressions"];
+const REQUIREMENT_FIELDS: [&str; 3] = ["key", "operator", "values"];
+const PORT_FIELDS: [&str; 3] = ["protocol", "port", "endPort"];
+
+/// Refuse a key that is not one of `allowed` at `path`. A value that is not an object is left to the deserialiser,
+/// which names it already.
+fn only_fields(value: &Value, allowed: &[&str], path: &str) -> Result<(), String> {
+    let Some(object) = value.as_object() else {
+        return Ok(());
+    };
+    if let Some(key) = object.keys().find(|k| !allowed.contains(&k.as_str())) {
+        return Err(format!(
+            "{path}.{key} is not a field of it: the fields are {}",
+            allowed.join(", ")
+        ));
+    }
+    Ok(())
+}
+
+/// The fields of a toleration, of a `nodeAffinity` and of every level below it. `k8s-openapi`'s types are generated
+/// without `deny_unknown_fields`, so a misspelled key is dropped and the widening is invisible: a
+/// `requiredDuringScheduling` for `requiredDuringSchedulingIgnoredDuringExecution` leaves no required affinity, a
+/// misspelled `matchExpressions` beside `matchFields` drops that constraint, and a toleration with a misspelled `effect`
+/// tolerates every effect (ANR-1357).
+const TOLERATION_FIELDS: [&str; 5] = ["key", "operator", "value", "effect", "tolerationSeconds"];
+const NODE_AFFINITY_FIELDS: [&str; 2] = [
+    "requiredDuringSchedulingIgnoredDuringExecution",
+    "preferredDuringSchedulingIgnoredDuringExecution",
+];
+const NODE_SELECTOR_FIELDS: [&str; 1] = ["nodeSelectorTerms"];
+const NODE_TERM_FIELDS: [&str; 2] = ["matchExpressions", "matchFields"];
+const NODE_REQUIREMENT_FIELDS: [&str; 3] = ["key", "operator", "values"];
+const PREFERRED_TERM_FIELDS: [&str; 2] = ["weight", "preference"];
+
+/// A toleration, against its fields.
+fn only_known_toleration(value: &Value, path: &str) -> Result<(), String> {
+    only_fields(value, &TOLERATION_FIELDS, path)
+}
+
+/// A `nodeAffinity` at every level: the two scheduling blocks, the terms, their expressions and fields, and each
+/// preferred term's preference.
+fn only_known_node_affinity(value: &Value, path: &str) -> Result<(), String> {
+    only_fields(value, &NODE_AFFINITY_FIELDS, path)?;
+    if let Some(required) = value.get("requiredDuringSchedulingIgnoredDuringExecution") {
+        let at = format!("{path}.requiredDuringSchedulingIgnoredDuringExecution");
+        only_fields(required, &NODE_SELECTOR_FIELDS, &at)?;
+        for (i, term) in required
+            .get("nodeSelectorTerms")
+            .and_then(Value::as_array)
+            .into_iter()
+            .flatten()
+            .enumerate()
+        {
+            only_known_node_term(term, &format!("{at}.nodeSelectorTerms[{i}]"))?;
+        }
+    }
+    for (i, preferred) in value
+        .get("preferredDuringSchedulingIgnoredDuringExecution")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .enumerate()
+    {
+        let at = format!("{path}.preferredDuringSchedulingIgnoredDuringExecution[{i}]");
+        only_fields(preferred, &PREFERRED_TERM_FIELDS, &at)?;
+        if let Some(term) = preferred.get("preference") {
+            only_known_node_term(term, &format!("{at}.preference"))?;
+        }
+    }
+    Ok(())
+}
+
+/// One node selector term, and every requirement of its two lists.
+fn only_known_node_term(term: &Value, path: &str) -> Result<(), String> {
+    only_fields(term, &NODE_TERM_FIELDS, path)?;
+    for key in ["matchExpressions", "matchFields"] {
+        for (i, requirement) in term
+            .get(key)
+            .and_then(Value::as_array)
+            .into_iter()
+            .flatten()
+            .enumerate()
+        {
+            only_fields(
+                requirement,
+                &NODE_REQUIREMENT_FIELDS,
+                &format!("{path}.{key}[{i}]"),
+            )?;
+        }
+    }
+    Ok(())
+}
+
+/// Walk every level of a rule against its allow-list: the rule, each peer, its `ipBlock`, its two selectors and their
+/// requirements, and each port.
+fn only_known_fields(value: &Value) -> Result<(), String> {
+    only_fields(value, &EGRESS_RULE_FIELDS, "the rule")?;
+    if let Some(peers) = value.get("to").and_then(Value::as_array) {
+        for (i, peer) in peers.iter().enumerate() {
+            let path = format!("to[{i}]");
+            only_fields(peer, &PEER_FIELDS, &path)?;
+            if let Some(block) = peer.get("ipBlock") {
+                only_fields(block, &IP_BLOCK_FIELDS, &format!("{path}.ipBlock"))?;
+            }
+            for key in ["namespaceSelector", "podSelector"] {
+                let Some(selector) = peer.get(key) else {
+                    continue;
+                };
+                let path = format!("{path}.{key}");
+                only_fields(selector, &SELECTOR_FIELDS, &path)?;
+                for (j, e) in selector
+                    .get("matchExpressions")
+                    .and_then(Value::as_array)
+                    .into_iter()
+                    .flatten()
+                    .enumerate()
+                {
+                    only_fields(
+                        e,
+                        &REQUIREMENT_FIELDS,
+                        &format!("{path}.matchExpressions[{j}]"),
+                    )?;
+                }
+            }
+        }
+    }
+    for (i, port) in value
+        .get("ports")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .enumerate()
+    {
+        only_fields(port, &PORT_FIELDS, &format!("ports[{i}]"))?;
+    }
+    Ok(())
+}
+
 /// A `NetworkPolicy` egress entry of the settings as a neutral rule. Named ports are refused: the neutral
 /// port is a number.
 fn egress_rule(value: &Value) -> Result<EgressRule, String> {
+    only_known_fields(value)?;
     let rule: NetworkPolicyEgressRule = serde_json::from_value(value.clone())
         .map_err(|e| format!("not a NetworkPolicy egress rule ({e})"))?;
+    // Kubernetes reads a rule with no `to` as **every** destination: that is the whole internet, which is what this
+    // policy is deny-by-default about (ANR-1353). A rule must name at least one peer.
+    if rule.to.as_ref().is_none_or(|to| to.is_empty()) {
+        return Err("the rule needs a `to`: with none it allows every destination".to_owned());
+    }
     let mut to = Vec::new();
     for p in rule.to.iter().flatten() {
+        // A range whose prefix is zero covers every address of its family: `0.0.0.0/0` is the same widening as no
+        // `to` at all. Refused here rather than in `convert::peers`, which also reads the agent's own
+        // `access.allowFrom`, where a wide range is a deployment's deliberate choice (ANR-1353).
+        if let Some(block) = &p.ip_block
+            && cidr_prefix(&block.cidr) == Some(0)
+        {
+            return Err(format!(
+                "the ipBlock {:?} covers every address of its family: name the range it may reach",
+                block.cidr
+            ));
+        }
         let (mut peers, problems) = crate::convert::peers(std::slice::from_ref(p));
         if let Some((_, message)) = problems.into_iter().next() {
             return Err(message);
