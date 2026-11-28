@@ -174,6 +174,16 @@ v1.35.8, *verified 2026-10-15*). Every bound of the fields D1 added has an inval
 and the empty names and keys of the references): `tests/examples.rs` lists them (`BOUND_EXAMPLES`), fails when a bound has
 none, and proves each example states the message of its bound by taking the keyword out of the schema.
 
+**A `null` for an optional field is pruned before any rule runs** (*verified 2026-11-28* on kind, Kubernetes v1.37.0:
+`spec.release: null`, `access.audience: null` and `scaling.idleTimeout: null` are accepted, and the stored spec has none
+of the three, while a present invalid value — `idleTimeout: bogus`, `release.defaultChannel: nope` — is still refused with
+its rule's message). So **a rule needs no null guard, and must not get one**: `self == null || …` compiles on an object
+type but the API server refuses the CRD for a string or a list (`found no matching overload for '_==_' applied to
+'(string, null)'`). The `kube-cel` validator `tests/examples.rs` uses evaluates a *raw* document and does not model the
+pruning, so it answers `No such overload` for a null a real server never shows a rule: a raw-document test is not how to
+judge a rule's null safety. The `kind` job's *An explicit null for an optional field is pruned, not refused* step is the
+measurement, kept so the next reader does not "fix" a defect that does not exist.
+
 The release channels have the same pair of bounds: `release.channels` is `maxProperties: 8` (a map of pointers, walked
 by the rule above) and `release.defaultChannel` is `maxLength: 32`. Both are rows of `BOUND_EXAMPLES`, with their own
 `examples/invalid` files.
