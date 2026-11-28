@@ -51,6 +51,7 @@ fn observed() -> Observed {
             a2a: Some("http://a/".to_owned()),
             agent_card: Some("http://a/.well-known/agent-card.json".to_owned()),
         }),
+        revisions: Vec::new(),
     }
 }
 

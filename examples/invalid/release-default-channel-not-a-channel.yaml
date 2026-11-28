@@ -1,0 +1,28 @@
+# Refused: release.defaultChannel is `staging`, which is not one of release.channels.
+# expect: release.defaultChannel names one of release.channels
+apiVersion: agents.vymalo.com/v1alpha1
+kind: AgentService
+metadata:
+  name: invalid-release-default-channel
+  namespace: another-agentic-system
+spec:
+  configRef:
+    name: chat
+  release:
+    defaultChannel: staging
+    channels:
+      production: { configRef: { name: chat } }
+  interfaces:
+    a2a:
+      enabled: true
+      bearerTokensSecretRef:
+        name: tokens
+        key: A2A_BEARER_TOKENS
+  scaling:
+    topology: combined
+    workers: 1
+  store:
+    postgres:
+      secretRef:
+        name: db
+        key: uri

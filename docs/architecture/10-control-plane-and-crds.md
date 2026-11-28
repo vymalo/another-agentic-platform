@@ -247,7 +247,18 @@ spec:
       - namespaceSelector: { matchLabels: { kubernetes.io/metadata.name: another-agentic-system } }
   registry: { title: Coder, tags: [coding, git] }
   deletionPolicy: Retain   # Retain | Delete
+  # release:               # AD-059, §10a: absent, one revision in place and the workload is `<name>`
+  #   defaultChannel: production
+  #   channels:            # at most 8; a name is at most 32 of [a-z0-9-], starting and ending with a letter or a digit
+  #     production: { configRef: { name: coder-r47 } }
+  #     staging: { configRef: { name: coder-r51 } }
 ```
+
+`spec.release` (slice R1, AD-059) is a pointer per channel and nothing reads it yet: the operator names a
+workload per live revision in R3 and drains the old one in R4. A service without it is unchanged — its
+workload, pod template and env are what they were, and the parity goldens do not move. `status.revisions[]`
+(`name`, `digest`, `epochs`, `phase`, `readyReplicas`, `openRuns`) is the operator's to write; the controller
+carries it over as it was until the drain controller computes it.
 
 #### `AgentConfig`: the netcup coder
 

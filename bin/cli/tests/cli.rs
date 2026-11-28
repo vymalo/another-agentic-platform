@@ -283,7 +283,9 @@ fn validate_accepts_every_example() {
 /// rules when a config uses it (the operator judges every endpoint; the CLI judges only the endpoints no config reaches).
 /// The CLI does not read a schema and does not evaluate CEL, so it cannot refuse them: it accepts them, and says so in its
 /// README.
-const REFUSED_BY_THE_API_SERVER_ONLY: [&str; 23] = [
+const REFUSED_BY_THE_API_SERVER_ONLY: [&str; 28] = [
+    // ANR-1100's bound (`spec.account` is at most 128 bytes): a schema bound, like the audience's.
+    "account-too-long.yaml",
     "audience-star-with-others.yaml",
     "audience-too-many.yaml",
     "audience-value-empty.yaml",
@@ -296,6 +298,11 @@ const REFUSED_BY_THE_API_SERVER_ONLY: [&str; 23] = [
     "model-endpoint-models-too-many.yaml",
     "model-endpoint-title-empty.yaml",
     "model-endpoint-title-too-long.yaml",
+    // AD-059, §10a: the release channels' rules are CEL and its two bounds are the schema's.
+    "release-channel-name.yaml",
+    "release-channels-too-many.yaml",
+    "release-default-channel-not-a-channel.yaml",
+    "release-default-channel-too-long.yaml",
     "scaling-idle-timeout-malformed.yaml",
     "scaling-idle-timeout-too-long.yaml",
     "scaling-idle-timeout-too-short.yaml",

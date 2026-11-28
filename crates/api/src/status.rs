@@ -34,9 +34,66 @@ pub struct AgentServiceStatus {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub sleep: Option<SleepStatus>,
 
+    /// The service's revisions, when `spec.release` is set (AD-059, §10a): one per resolved digest the service has
+    /// run, newest first, with the epochs its image serves and the runs still open in each. Absent: no
+    /// `spec.release`, so there is one revision and it is the workload the service names.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub revisions: Vec<RevisionStatus>,
+
     /// `ConfigResolved`, `StoreReady`, `RuntimeReady`, `Listed` and `Ready`.
     #[serde(default)]
     pub conditions: Vec<Condition>,
+}
+
+/// One revision of a service (AD-059, §10a): what its pods run, which epochs they can replay, and what they still
+/// have open. A revision is immutable; only its replica count moves.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct RevisionStatus {
+    /// `<service>-r<n>`, `n` counting the service's digests in order.
+    pub name: String,
+
+    /// `sha256:<hex>` of the resolved runtime, as `status.config.digest` gives it.
+    pub digest: String,
+
+    /// The epochs its image serves.
+    pub epochs: Epochs,
+
+    /// Where it is in the drain lifecycle.
+    pub phase: RevisionPhase,
+
+    /// Pods of its workload that are ready.
+    #[serde(default)]
+    pub ready_replicas: i32,
+
+    /// Open runs per epoch, keyed by the epoch's decimal text, as the agent's activity answer reports them.
+    /// **Absent is not zero**: the agent did not answer, and a revision is never retired on a missing answer
+    /// (fail closed).
+    #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
+    pub open_runs: std::collections::BTreeMap<String, i64>,
+}
+
+/// The epochs a revision's image serves (adam's ADR 0076, through its activity answer): a worker steps a run whose
+/// epoch is in `min..=max` and refuses the rest.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct Epochs {
+    /// The oldest epoch a worker of this revision can replay.
+    pub min: i64,
+    /// The newest epoch this revision's image serves.
+    pub max: i64,
+}
+
+/// Where a revision is in the drain lifecycle (AD-059, §10a): the one new runs go to, the one that still serves
+/// runs started on it, and the one nothing serves any more.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub enum RevisionPhase {
+    /// New runs go to it.
+    Current,
+    /// A newer revision is `Current` and this one still serves open runs.
+    Draining,
+    /// No open run needs it. Its workload is scaled to zero, then deleted.
+    Retired,
 }
 
 /// The annotation that wakes a sleeping agent (AD-058, ANR-Q134). Its value is an RFC 3339 instant, written by

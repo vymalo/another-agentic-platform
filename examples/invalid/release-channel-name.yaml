@@ -1,0 +1,28 @@
+# Refused: a channel is named `Production`, with a capital; a channel name is lower-case letters, digits and `-`.
+# expect: release.channels: a channel name is at most 32 characters of lower-case letters, digits and -, starting and ending with a letter or a digit
+apiVersion: agents.vymalo.com/v1alpha1
+kind: AgentService
+metadata:
+  name: invalid-release-channel-name
+  namespace: another-agentic-system
+spec:
+  configRef:
+    name: chat
+  release:
+    defaultChannel: Production
+    channels:
+      Production: { configRef: { name: chat } }
+  interfaces:
+    a2a:
+      enabled: true
+      bearerTokensSecretRef:
+        name: tokens
+        key: A2A_BEARER_TOKENS
+  scaling:
+    topology: combined
+    workers: 1
+  store:
+    postgres:
+      secretRef:
+        name: db
+        key: uri
