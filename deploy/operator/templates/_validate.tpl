@@ -1062,8 +1062,8 @@ SPIFFE id that is not one, a permission that is neither platform:agents.own nor 
 {{- if include "aap.api.workloadEnabled" . -}}
 {{- $w := $api.workload -}}
 {{- range $k, $v := $w -}}
-{{- if not (has $k (list "enabled" "port" "handshakeTimeoutSecs" "maxHandshakesPerIp" "maxConnections" "clients" "tls" "clientCa" "from")) -}}
-{{- fail (printf "api.workload.%s is not a setting: enabled, port, handshakeTimeoutSecs, maxHandshakesPerIp, maxConnections, clients, tls, clientCa or from" $k) -}}
+{{- if not (has $k (list "enabled" "port" "handshakeTimeoutSecs" "maxHandshakesPerIp" "maxConnections" "maxLeafLifetimeSecs" "clients" "tls" "clientCa" "from")) -}}
+{{- fail (printf "api.workload.%s is not a setting: enabled, port, handshakeTimeoutSecs, maxHandshakesPerIp, maxConnections, maxLeafLifetimeSecs, clients, tls, clientCa or from" $k) -}}
 {{- end -}}
 {{- end -}}
 {{- if not (include "aap.isPort" $w.port) -}}
@@ -1071,6 +1071,11 @@ SPIFFE id that is not one, a permission that is neither platform:agents.own nor 
 {{- end -}}
 {{- if or (eq (int $w.port) (int $api.port)) (eq (int $w.port) (int $api.healthPort)) (eq (int $w.port) (int $api.metrics.port)) -}}
 {{- fail "api.workload.port must differ from api.port, api.healthPort and api.metrics.port: the workload listener is a port of its own" -}}
+{{- end -}}
+{{- with $w.maxLeafLifetimeSecs -}}
+{{- if not (and (include "aap.isWholeNumber" .) (ge (int .) 1) (le (int .) 31536000)) -}}
+{{- fail (printf "api.workload.maxLeafLifetimeSecs must be a whole number from 1 to 31536000, got %v" .) -}}
+{{- end -}}
 {{- end -}}
 {{- range $b := list (list "handshakeTimeoutSecs" 60) (list "maxHandshakesPerIp" 1024) (list "maxConnections" 65536) -}}
 {{- $v := get $w (index $b 0) -}}

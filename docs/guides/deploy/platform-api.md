@@ -147,6 +147,24 @@ stateDiagram-v2
 A route that is not in the table is never served. The permission of each route is in the [OpenAPI document](../../reference/openapi.md) (`x-permission`).
 
 :::
+## The workload listener, and its certificates
+
+A service can call the API with a **certificate** instead of a token: the workload listener, on a port of its own, mutual TLS, serving **only** the owner routes. It is off unless `api.workload.enabled` is true and at least one workload is named.
+
+The API checks a certificate in this order, and each failure has its own word: it chains to `api.workload.clientCa`; it carries the **client-authentication** extended key usage (required, not "if present"); it is inside its validity window; and it names **exactly one** URI SAN that is one of `api.workload.clients` — that SAN is the whole identity, and what it may do is the entry's `permissions`.
+
+**A workload certificate should live about 24 h.** Its lifetime is the revocation story: nothing checks a revocation list yet, so a certificate is trusted until it expires. The chart issues no certificate, and the orchestrator's is the orchestrator's to obtain. The shape that fits OpenBao:
+
+| Piece | What it is |
+|---|---|
+| Kubernetes auth | The orchestrator's ServiceAccount token logs in to OpenBao (`auth/kubernetes/login`, a role bound to its namespace and name), and a policy lets it read one PKI role |
+| A PKI role with `ttl: 24h` | It issues leaves with the URI SAN `spiffe://another/ns/<namespace>/sa/<serviceaccount>` and `extendedKeyUsage = clientAuth`, and `max_ttl` no longer than a day |
+| A sidecar that renews | The orchestrator reads its certificate from files; a small sidecar in its pod (log in, issue, write both files atomically, sleep until two thirds of the lifetime) keeps them fresh, and the orchestrator re-reads them when they change. **If it does not re-read them, a renewal only takes effect at the next restart**: that is the system's side of the contract |
+
+**When the renewal fails, the API fails closed.** An expired leaf is refused (`401`, with the word `expired`) and the orchestrator's calls stop; nothing is cached, so the first request after a successful renewal works again.
+
+**A warning, if you want one.** `api.workload.maxLeafLifetimeSecs` (absent: off) makes the API log **one** warning — the lifetime, never the identity — the first time a presented leaf lives longer than that. It never refuses a certificate: the lifetime is your issuer's, and a deployment whose PKI is not this one's has to keep working.
+
 ## The API pod is not ready until it can reach the issuer
 
 ::: in-depth The checks behind it

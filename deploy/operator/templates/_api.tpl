@@ -97,7 +97,12 @@ file and the CA bundle are the mounts of api-deployment.yaml, and each header is
 {{- /* The workload listener (ANR-1011): off, the file is what it was. The three files are the mounts of api-deployment.yaml. */ -}}
 {{- if include "aap.api.workloadEnabled" . -}}
 {{- $w := .Values.api.workload -}}
-{{- $_ := set $cfg "workloadListener" (dict "listen" (printf "0.0.0.0:%d" (int $w.port)) "certFile" "/etc/aap-api-workload/tls/tls.crt" "keyFile" "/etc/aap-api-workload/tls/tls.key" "clientCaFile" "/etc/aap-api-workload/ca/ca.crt" "handshakeTimeoutSecs" (int $w.handshakeTimeoutSecs) "maxHandshakesPerIp" (int $w.maxHandshakesPerIp) "maxConnections" (int $w.maxConnections)) -}}
+{{- $listener := dict "listen" (printf "0.0.0.0:%d" (int $w.port)) "certFile" "/etc/aap-api-workload/tls/tls.crt" "keyFile" "/etc/aap-api-workload/tls/tls.key" "clientCaFile" "/etc/aap-api-workload/ca/ca.crt" "handshakeTimeoutSecs" (int $w.handshakeTimeoutSecs) "maxHandshakesPerIp" (int $w.maxHandshakesPerIp) "maxConnections" (int $w.maxConnections) -}}
+{{- /* ANR-1374: the lifetime warning, only when the deployment names a maximum: absent, the key is not written and the file is what it was. */ -}}
+{{- with $w.maxLeafLifetimeSecs -}}
+{{- $_ := set $listener "maxLeafLifetimeSecs" (int .) -}}
+{{- end -}}
+{{- $_ := set $cfg "workloadListener" $listener -}}
 {{- $clients := list -}}
 {{- range $c := $w.clients -}}
 {{- $clients = append $clients (dict "spiffeId" $c.spiffeId "permissions" (default (list) $c.permissions)) -}}

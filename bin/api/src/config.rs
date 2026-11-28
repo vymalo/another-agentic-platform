@@ -134,6 +134,10 @@ pub struct WorkloadListener {
     /// How many connections may be open at once, all sources together (1 to 65536).
     #[serde(default = "default_max_connections")]
     pub max_connections: usize,
+    /// The longest lifetime a presented workload certificate may have before the listener warns, in seconds (1 to 31536000). Absent: no
+    /// warning. **Never a refusal** (ANR-1374): the lifetime is the issuer's, and a deployment whose PKI is not this one's would break.
+    #[serde(default)]
+    pub max_leaf_lifetime_secs: Option<u64>,
 }
 
 fn default_handshake_timeout_secs() -> u64 {
@@ -284,14 +288,19 @@ fn workload(
     clients: Vec<WorkloadClient>,
     listener: Option<WorkloadListener>,
 ) -> Result<Option<WorkloadSettings>> {
-    let clients = WorkloadClients { clients };
     let Some(listener) = listener else {
-        if clients.clients.is_empty() {
+        if clients.is_empty() {
             return Ok(None);
         }
         bail!(
             "workloadClients names workloads and there is no workloadListener for them to call: add the listener, or remove the clients"
         );
+    };
+    // ANR-1374: the longest lifetime a presented leaf may have before the listener warns. It is the listener's, not the clients', so it
+    // is carried into the block the authenticator reads.
+    let clients = WorkloadClients {
+        clients,
+        max_leaf_lifetime_secs: listener.max_leaf_lifetime_secs.map(|s| s as i64),
     };
     if clients.clients.is_empty() {
         bail!(
@@ -325,6 +334,13 @@ fn workload(
         if !(1..=max).contains(&value) {
             bail!("workloadListener.{key}: {value} is not between 1 and {max}");
         }
+    }
+    if let Some(secs) = listener.max_leaf_lifetime_secs
+        && !(1..=31_536_000).contains(&secs)
+    {
+        bail!(
+            "workloadListener.maxLeafLifetimeSecs: {secs} is not between 1 and 31536000 (a year): a lifetime beyond that is no lifetime, and the setting is a warning"
+        );
     }
     Ok(Some(WorkloadSettings { listener, clients }))
 }

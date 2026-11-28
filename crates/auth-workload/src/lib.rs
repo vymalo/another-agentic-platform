@@ -51,6 +51,11 @@ pub struct WorkloadClients {
     /// The identities the workload listener accepts, each with what it may do.
     #[serde(default)]
     pub clients: Vec<WorkloadClient>,
+    /// The longest lifetime a presented leaf may have before the listener warns, in seconds (`workloadListener.maxLeafLifetimeSecs`).
+    /// Absent: no warning. It is never a refusal: the lifetime is the issuer's, and refusing would break a working deployment whose
+    /// PKI is not this one's (ANR-1374).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_leaf_lifetime_secs: Option<i64>,
 }
 
 /// One workload the listener accepts.
@@ -154,6 +159,7 @@ impl WorkloadClients {
 pub struct WorkloadAuth {
     anchors: Vec<TrustAnchor<'static>>,
     identities: BTreeMap<String, BTreeSet<String>>,
+    max_leaf_lifetime_secs: Option<i64>,
 }
 
 impl std::fmt::Debug for WorkloadAuth {
@@ -162,6 +168,7 @@ impl std::fmt::Debug for WorkloadAuth {
         f.debug_struct("WorkloadAuth")
             .field("anchors", &self.anchors.len())
             .field("identities", &self.identities.len())
+            .field("max_leaf_lifetime_secs", &self.max_leaf_lifetime_secs)
             .finish()
     }
 }
@@ -214,6 +221,7 @@ impl WorkloadAuth {
         Ok(Self {
             anchors,
             identities: clients.table()?,
+            max_leaf_lifetime_secs: clients.max_leaf_lifetime_secs,
         })
     }
 
@@ -235,6 +243,14 @@ impl ClientAuthenticator for WorkloadAuth {
         // 1. It parses.
         let (_, parsed) =
             X509Certificate::from_der(der).map_err(|_| invalid(InvalidCertificate::Malformed))?;
+        // A workload certificate should be short-lived: its lifetime is the revocation story (ANR-1374, AD-068's amendment). A longer
+        // one is warned about **once**, with its length and never the identity, and is still accepted: the lifetime is the issuer's, and
+        // refusing would break a working deployment whose PKI is not this one's.
+        if let Some(max) = self.max_leaf_lifetime_secs
+            && too_long(leaf_lifetime_secs(&parsed), max)
+        {
+            warn_once(leaf_lifetime_secs(&parsed), max);
+        }
         let leaf = CertificateDer::from(der);
         let end_entity = webpki::EndEntityCert::try_from(&leaf)
             .map_err(|_| invalid(InvalidCertificate::Malformed))?;
@@ -301,6 +317,30 @@ impl ClientAuthenticator for WorkloadAuth {
             .ok_or_else(|| invalid(InvalidCertificate::UnknownIdentity))?;
         Ok(Principal::new(identity, permissions.iter().cloned()))
     }
+}
+
+/// A leaf's lifetime in seconds, `notAfter - notBefore`, as the certificate states it.
+fn leaf_lifetime_secs(cert: &X509Certificate<'_>) -> i64 {
+    cert.validity().not_after.timestamp() - cert.validity().not_before.timestamp()
+}
+
+/// Whether a lifetime exceeds the configured maximum. A maximum of 0 or less is not a maximum (the file refuses it, and this keeps a
+/// misconfiguration from warning about every certificate).
+fn too_long(lifetime: i64, max: i64) -> bool {
+    max > 0 && lifetime > max
+}
+
+/// One warning per process, whoever presents a long-lived leaf first: the point is to tell the operator their issuer's lifetime is
+/// longer than the deployment meant, and a warning per handshake would be a flood.
+fn warn_once(lifetime: i64, max: i64) {
+    static WARNED: std::sync::Once = std::sync::Once::new();
+    WARNED.call_once(|| {
+        tracing::warn!(
+            leaf_lifetime_secs = lifetime,
+            max_leaf_lifetime_secs = max,
+            "a workload certificate lives longer than workloadListener.maxLeafLifetimeSecs: a revoked one is trusted until it expires (ANR-1374)"
+        );
+    });
 }
 
 /// The closed word for a chain-verification failure.
@@ -370,4 +410,41 @@ fn find(needle: &[u8], haystack: &[u8]) -> Option<usize> {
     haystack
         .windows(needle.len())
         .position(|window| window == needle)
+}
+
+#[cfg(test)]
+mod tests {
+    #![allow(clippy::unwrap_used, clippy::expect_used)]
+
+    use super::*;
+
+    #[test]
+    fn a_lifetime_past_the_maximum_is_warned_about_and_never_refused() {
+        // ANR-1374: the decision is the whole of the warning, and a leaf is never refused for its length.
+        assert!(too_long(25 * 3600, 24 * 3600), "an hour past the maximum");
+        assert!(!too_long(24 * 3600, 24 * 3600), "exactly the maximum");
+        assert!(!too_long(10, 0), "a maximum of 0 is not one");
+        assert!(!too_long(10, -1), "nor a negative one");
+    }
+
+    #[test]
+    fn a_leaves_lifetime_is_the_difference_of_its_two_dates() {
+        // The fixture is valid for years (it must not expire under a test): the lifetime is read from the certificate, not from the
+        // clock, so a leaf with `notAfter == notBefore` would be 0 and never "long".
+        let pem = include_str!("../tests/fixtures/accepted.pem");
+        let roots = roots_from_pem(pem).expect("a certificate");
+        let der = roots.first().expect("one certificate");
+        let (_, parsed) = X509Certificate::from_der(der.as_ref()).expect("a certificate");
+        let lifetime = leaf_lifetime_secs(&parsed);
+        assert!(
+            lifetime > 86_400,
+            "the fixture lives longer than a day: {lifetime}"
+        );
+        assert_eq!(
+            lifetime,
+            parsed.validity().not_after.timestamp() - parsed.validity().not_before.timestamp()
+        );
+        // The same leaf against a maximum below its lifetime: warned about, not refused.
+        assert!(too_long(lifetime, 86_400));
+    }
 }
