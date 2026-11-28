@@ -2,8 +2,8 @@ apiVersion: v2
 name: aap-operator-crds
 description: "The CustomResourceDefinitions of the operator (AgentService and AgentConfig, and for the admin dashboard ModelEndpoint and ToolProvider; agents.vymalo.com/v1alpha1), and nothing else. Its own chart so the CRDs are installed, and upgraded, apart from the operator (§93)."
 type: application
-version: 0.2.0 # x-release-please-version
-appVersion: "0.2.0" # x-release-please-version
+version: 0.3.0 # x-release-please-version
+appVersion: "0.3.0" # x-release-please-version
 # The same floor as the operator chart (AD-067): Kubernetes 1.37, `-0` for vendor suffixes.
 kubeVersion: ">=1.37.0-0"
 sources:
