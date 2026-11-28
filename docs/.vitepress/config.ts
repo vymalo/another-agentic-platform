@@ -76,7 +76,7 @@ const sidebar = [
         ],
       },
       { text: "CLI", items: [{ text: "aapctl", link: "/reference/cli" }] },
-      { text: "Extensions", items: [{ text: "Extensions", link: "/extensions/" }, ...pages("extensions", ["release-channels-v1.md", "agent-registry-v1.md"])] },
+      { text: "Extensions", items: [{ text: "Extensions", link: "/extensions/" }, ...pages("extensions", ["release-channels-v1.md", "agent-registry-v1.md", "activity-v1.md"])] },
     ],
   },
   {
