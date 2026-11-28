@@ -67,7 +67,8 @@ const failures = [];
 const linksOut = new Map();
 
 // The docs for people and the docs for agents live apart (AD-074): the dated records keep
-// their evidence as written, and the pages of stillMixed are mixed and named until split.
+// their evidence as written, and a page named in stillMixed is mixed until its split. The set is
+// empty since 2026-11-28: every page is split, and the two rules below apply to all of them.
 const datedRecords = new Set(['docs/architecture/11-decisions.md', 'docs/architecture/README.md']);
 const stillMixed = new Set([]);
 // Something like `crates/x/src/y.rs:190` or `docs/z.md:12`; fenced code blocks and inline
