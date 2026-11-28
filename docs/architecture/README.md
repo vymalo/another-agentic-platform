@@ -139,6 +139,7 @@
 | 2026-11-28 | New AD-076 (ANR-1174): the operator and API images are **static musl** on `distroless/static-debian13` (builder Debian 13 with `musl-tools` and `perl`, the build stage checks `file`/`ldd`, `ring` and `aws-lc-rs` build for musl), so the runtime carries no libc and no glibc — the image is **larger** (the static binary carries its libc: 35.4 MB against 19.0 MB for the operator, measured 2026-11-28); musl's DNS and locale behaviour is the end-to-end jobs' check. No chart change. |
 | 2026-11-28 | ANR-1159: **a missing referent has its own reason**, `ConfigResolved=False` `ConfigReferentMissing`, so a client can tell "wait" from "refused" — `ConfigInvalid` stays for a config that is really wrong, and both keep the same message. The operator already looked again every 15 s for this outcome; the reason now says so. §59a's condition table, the state diagram's causes and the operate guides follow; the pure test proves the two reasons differ while the words do not, and the reconcile and kind tests cover the three shapes (a deleted referent, a kind whose CRD is not installed). No section is added or renumbered. |
 
+| 2026-11-28 | New AD-077 (ANR-1082, the owner's rows 149 to 152 and 165 of 2026-11-27): **workload identity is OpenBao's, with SPIFFE and SPIRE each optional** — three modes (plain OpenBao certificates; OpenBao-issued `spiffe://` URI SANs; SPIRE with OpenBao as its upstream CA), mode 1 naming a workload by **DNS SAN** `<serviceaccount>.<namespace>.svc` and never the CN, the trust domain a deployment value, and identity read through a `WorkloadIdentity` port with no SPIRE API in a trait signature. §40 rewritten as the plan. The port, the authenticator's mode-1 mapping and the chart's values are not built. |
 ## Contents
 
 | File | Sections |
@@ -207,7 +208,7 @@ Cross-references in the text use the original section numbers (`§N`).
 | 38 | [Secrets Model](08-security.md) | `08-security.md` |
 | 39 | [Credential Broker](08-security.md) | `08-security.md` |
 | 39a | [Connections, user MCP servers and the credential broker](08-security.md) | `08-security.md` |
-| 40 | [SPIFFE / SPIRE](08-security.md) | `08-security.md` |
+| 40 | [Workload identity: OpenBao, SPIFFE and SPIRE](08-security.md) | `08-security.md` |
 | 41 | [EAIG](08-security.md) | `08-security.md` |
 | 42 | [Scale-from-Zero Request](05-runtime.md) | `05-runtime.md` |
 | 43 | [Routing](03-interfaces.md) | `03-interfaces.md` |

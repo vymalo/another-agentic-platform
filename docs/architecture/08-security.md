@@ -400,13 +400,33 @@ The verification state of every claim of §39a — the date and source each was 
 
 ---
 
-## 40. SPIFFE / SPIRE
+## 40. Workload identity: OpenBao, SPIFFE and SPIRE
 
-SPIFFE answers:
+A workload that calls another service, or asks the credential broker for a secret, has to say **which workload it is**. Today it says so with a bearer token. The design is that it can say so with a certificate, and that **neither SPIFFE nor SPIRE is required** for that to work.
 
-> Which workload is making this request?
+**The three modes** (the owner's decision of 2026-11-27, rows 149 to 152; AD-077). A deployment chooses one. Mode 1 is the floor and every mode works without the next.
 
-Potential identities:
+| Mode | The certificate | The workload's name | What it needs |
+|---|---|---|---|
+| **1. OpenBao only** | OpenBao PKI issues it | a **DNS SAN**, `<serviceaccount>.<namespace>.svc` — never the CN (the owner, 2026-11-27, row 165) | nothing beyond OpenBao |
+| **2. SPIFFE IDs, no SPIRE** | OpenBao PKI issues it, with a `spiffe://<trust-domain>/<path>` **URI SAN** | the URI SAN, which the `ClientAuthenticator` already reads (AD-065, AD-068) | a PKI role whose `allowed_uri_sans` admits the trust domain |
+| **3. SPIRE as well** | SPIRE issues the SVID, and OpenBao signs SPIRE's intermediate | the SPIFFE ID, attested by SPIRE | SPIRE, for attestation and cross-cluster federation |
+
+In every mode the workload **signs in to OpenBao with its Kubernetes service-account token** (`auth/kubernetes/login`), and the role binds that token to a service account and a namespace. What differs is what the issued certificate *says*.
+
+**The trust domain is a deployment value.** `agents.vymalo.com` in the examples below is an illustration, not a constant: a deployment sets its own, and a certificate from another trust domain is another CA's problem.
+
+**Identity is read through a port.** `WorkloadIdentity` is a trait with a conformance testkit (AD-020): mode 1's DNS SAN, mode 2's URI SAN and mode 3's attested SVID are adapters behind it, and **no SPIRE API appears in a trait signature**. The `ClientAuthenticator` of AD-065 is unchanged by the choice — it verifies a chain against one CA bundle and maps a URI SAN to a permission — so mode 2 needs no code change, and mode 1 needs the mapping AD-077 records.
+
+```mermaid
+flowchart LR
+    Pod[Workload pod] -->|service-account token| BAO[OpenBao Kubernetes auth]
+    BAO -->|token| PKI[OpenBao PKI]
+    PKI -->|certificate| Pod
+    SPIRE[SPIRE: mode 3 only] -.->|upstream CA| PKI
+```
+
+What a mode 2 or mode 3 identity looks like, with the deployment's own trust domain:
 
 ```text
 spiffe://agents.vymalo.com/control-plane
@@ -418,31 +438,17 @@ spiffe://agents.vymalo.com/agent/coder
 spiffe://agents.vymalo.com/agent/reviewer
 ```
 
-```mermaid
-flowchart LR
-    Coder[Coder Agent]
-    Reviewer[Reviewer]
-    Broker[Credential Broker]
-    Artifact[Artifact Service]
+Such an identity can support workload mTLS, service authorization, secret issuance and agent-to-agent trust, which is why it is not a Kubernetes `ServiceAccount` in the API model: a `ServiceAccount` is one way to *obtain* an identity, not the identity itself.
 
-    Coder -->|mTLS| Reviewer
-    Coder -->|mTLS| Broker
-    Reviewer -->|mTLS| Artifact
-```
+**What is verified, and what is not** (*read 2026-11-28*):
 
-SPIFFE identity can later support:
-
-- workload mTLS;
-- service authorization;
-- secret issuance;
-- agent-to-agent trust;
-- workload identity independent of bearer tokens.
-
-The API model should therefore avoid treating Kubernetes `ServiceAccount` as the conceptual identity.
-
-A ServiceAccount may simply be one identity provider implementation.
+- *Verified*: OpenBao's PKI issues URI SANs. A role carries `allowed_uri_sans` — the documentation's own example is `["example.com", "spiffe://*"]` — and the issue and sign endpoints take `uri_sans` (openbao.org, *PKI secrets engine API*, release 2.7.x).
+- *Verified*: OpenBao's Kubernetes auth method logs a pod in with its service-account JWT, against a role bounded by `bound_service_account_names` and `bound_service_account_namespaces` (openbao.org, *Kubernetes auth method*, 2.7.x).
+- *Verified*: SPIRE can take OpenBao as its **upstream CA**. SPIRE's `UpstreamAuthority "vault"` plugin says it "is also compatible with the OpenBao API" (spiffe/spire, `doc/plugin_server_upstreamauthority_vault.md`).
+- *Unverified*: `csi-driver-spiffe` (cert-manager's CSI driver) delivers SPIFFE SVIDs to pods, but it is "designed to work alongside cert-manager", so reaching OpenBao through it needs a cert-manager issuer backed by OpenBao, which nobody has checked here. A deployment that wants SVIDs in a volume can use it; the platform does not require it.
 
 ---
+
 
 ## 41. EAIG
 
