@@ -56,6 +56,39 @@ fn bearer() -> Vec<(&'static str, String)> {
     vec![("authorization", format!("Bearer {TOKEN}"))]
 }
 
+/// ANR-1192: the token is asked of its source at each request, so a rotated Secret needs no restart.
+#[tokio::test]
+async fn a_token_source_is_asked_at_each_request() {
+    let directory = MemoryDirectory::new();
+    directory.put(titled("ns", "coder", "Coder", &["coding"]));
+    let now = Arc::new(std::sync::Mutex::new("first-token".to_owned()));
+    let asked = Arc::clone(&now);
+    let registry = Registry::new(directory, Token::new("first-token").unwrap())
+        .with_token_source(move || Token::new(&asked.lock().unwrap()));
+    let router = Arc::new(registry).router();
+    async fn call_with(router: &Router, token: &str) -> StatusCode {
+        let auth = format!("Bearer {token}");
+        call(
+            router,
+            Method::GET,
+            &[
+                ("authorization", &auth),
+                ("accept", "application/linkset+json"),
+            ],
+        )
+        .await
+        .status()
+    }
+    assert_eq!(call_with(&router, "first-token").await, StatusCode::OK);
+    *now.lock().unwrap() = "second-token".to_owned();
+    // The old token is refused once the source says otherwise, and the new one is what the registry demands.
+    assert_eq!(
+        call_with(&router, "first-token").await,
+        StatusCode::UNAUTHORIZED
+    );
+    assert_eq!(call_with(&router, "second-token").await, StatusCode::OK);
+}
+
 async fn get(router: &Router, extra: &[(&str, &str)]) -> Response<Body> {
     let auth = bearer();
     let mut headers: Vec<(&str, &str)> = auth.iter().map(|(k, v)| (*k, v.as_str())).collect();

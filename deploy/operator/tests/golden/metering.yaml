@@ -214,7 +214,7 @@ data:
       role: aap-operator-run-pods
       tolerations: []
       waitSecs: 1020
-    # ANR-1103 (AD-069): the pod-minute meter. The broker's bearer is the mounted Secret's file, read once at start.
+    # ANR-1103 (AD-069): the pod-minute meter. The broker's bearer is the mounted Secret's file, re-read when it changes (ANR-1192).
     metering:
       enabled: true
       source: "example-operator"
@@ -421,7 +421,7 @@ spec:
         app.kubernetes.io/instance: aap-operator
       annotations:
         # The configuration file is read once, at start: a changed file is a new pod (ANR-962).
-        checksum/config: 1ad66378342d8e32f6a756447fe2b6944426aabadd8c101a383b6f6e74fcb0f6
+        checksum/config: d5e6c0a0223473d31e662b5d2c746af75796e47a299e44f0dc7181a71aa8d0f1
     spec:
       serviceAccountName: aap-operator
       # The API token is the operator's way in.

@@ -57,18 +57,22 @@ pub enum SettingsError {
 
 type Resolver = dyn Fn(&RuntimeId) -> String + Send + Sync;
 
+/// Where the bearer comes from, asked at each poll: a deployment that rotates its Secret needs no restart (ANR-1192).
+/// `None` is no bearer, which an agent refuses.
+pub type TokenSource = dyn Fn() -> Option<Token> + Send + Sync;
+
 /// An [`ActivitySource`] over HTTP. Cheap to clone.
 #[derive(Clone)]
 pub struct HttpActivity {
     client: reqwest::Client,
     resolve: Arc<Resolver>,
-    token: Option<Token>,
+    token: Option<Arc<TokenSource>>,
 }
 
 impl fmt::Debug for HttpActivity {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("HttpActivity")
-            .field("token", &self.token)
+            .field("token", &self.token.is_some())
             .finish_non_exhaustive()
     }
 }
@@ -118,11 +122,26 @@ impl HttpActivity {
             .no_proxy()
             .build()
             .map_err(SettingsError::Client)?;
+        let token = token.map(|token| {
+            let token = Arc::new(token);
+            Arc::new(move || Some(Token(token.0.clone()))) as Arc<TokenSource>
+        });
         Ok(Self {
             client,
             resolve: Arc::new(resolve),
             token,
         })
+    }
+
+    /// The bearer from `source`, asked at each poll (ANR-1192): a rotated Secret needs no restart. It replaces whatever
+    /// token the constructor was given.
+    #[must_use]
+    pub fn with_token_source(
+        mut self,
+        source: impl Fn() -> Option<Token> + Send + Sync + 'static,
+    ) -> Self {
+        self.token = Some(Arc::new(source));
+        self
     }
 }
 
@@ -130,7 +149,7 @@ impl ActivitySource for HttpActivity {
     async fn poll(&self, id: &RuntimeId) -> Result<Activity, ActivityError> {
         let url = (self.resolve)(id);
         let mut request = self.client.get(url);
-        if let Some(token) = &self.token {
+        if let Some(token) = self.token.as_ref().and_then(|source| source()) {
             request = request.bearer_auth(&token.0);
         }
         // `reqwest::Error` can hold the URL: it names a service, never a credential, but the message is not made from it.

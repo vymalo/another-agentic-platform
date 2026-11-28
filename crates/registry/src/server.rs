@@ -17,6 +17,9 @@ use axum::routing::get;
 use crate::document::{self, MEDIA_TYPE, RFC9727_PROFILE};
 use crate::token::Token;
 
+/// Where the demanded bearer comes from, asked at each request (ANR-1192).
+pub type TokenSource = dyn Fn() -> Option<Token> + Send + Sync;
+
 /// The registry's path (the contract recommends it; a deployment may serve the document anywhere).
 pub const PATH: &str = "/registry/v1/agents";
 
@@ -26,7 +29,7 @@ pub const MAX_AGE_SECS: u32 = 30;
 /// What serves the registry: the directory it reads, the token it demands, and where it says it is.
 pub struct Registry<D> {
     directory: D,
-    token: Token,
+    token: Arc<TokenSource>,
     anchor: Option<String>,
     full: Arc<AtomicBool>,
 }
@@ -34,12 +37,24 @@ pub struct Registry<D> {
 impl<D: AgentDirectory + 'static> Registry<D> {
     /// A registry over `directory`. A caller that does not present `token` gets `401` and no body.
     pub fn new(directory: D, token: Token) -> Self {
+        let token = Arc::new(move || Some(token.clone()));
         Self {
             directory,
             token,
             anchor: None,
             full: Arc::new(AtomicBool::new(false)),
         }
+    }
+
+    /// The token from `source`, asked at each request (ANR-1192): a rotated Secret needs no restart. It replaces
+    /// whatever token `new` was given; a source that answers `None` refuses every caller.
+    #[must_use]
+    pub fn with_token_source(
+        mut self,
+        source: impl Fn() -> Option<Token> + Send + Sync + 'static,
+    ) -> Self {
+        self.token = Arc::new(source);
+        self
     }
 
     /// The URL of the document itself, sent as its `anchor` (the contract: a server SHOULD, a client
@@ -181,7 +196,9 @@ async fn serve<D: AgentDirectory + 'static>(
     State(registry): State<Arc<Registry<D>>>,
     headers: HeaderMap,
 ) -> Response<axum::body::Body> {
-    if !presented(&headers).is_some_and(|t| registry.token.matches(t)) {
+    // The token is asked of its source at each request: a rotated Secret needs no restart (ANR-1192).
+    let token = registry.token.as_ref()();
+    if !presented(&headers).is_some_and(|t| token.as_ref().is_some_and(|token| token.matches(t))) {
         return unauthorised();
     }
     let built = match registry.document().await {
