@@ -197,6 +197,7 @@ check_config "tests/e2e/run-pods.values.yaml" -f "$here/e2e/run-pods.values.yaml
 # ANR-763 P4a: the sleep/wake end-to-end, with the activity source on. The chart's render of the operator's file is what `operator run`
 # reads at start; `operator run --check` says whether the configuration is one the binary accepts.
 check_config "tests/e2e/sleep.values.yaml" -f "$here/e2e/sleep.values.yaml"
+check_config "tests/e2e/meter.values.yaml" -f "$here/e2e/meter.values.yaml"
 # ANR-1030b: with the activity source on, the file holds agentTokensSecret and operatorPod, which the binary requires while enabled.
 check_config "the activity source on (ANR-1030b)" --set activity.tokenSecret.name=agent-bearer \
   --set-json 'activity.to=[{"namespaceSelector":{"matchLabels":{"kubernetes.io/metadata.name":"agents"}},"podSelector":{"matchLabels":{"app":"agent"}}}]'
@@ -1771,18 +1772,18 @@ rp_pin() {
   grep -Eq '^ +ref: ghcr\.io/vymalo/another-adam-rs/coder:sha-[0-9a-f]{7}@sha256:[0-9a-f]{64}$' "$fixtures" || return 1
   pin_digest=$(sed -n 's/^ *ref: ghcr\.io\/vymalo\/another-adam-rs\/coder:[^@]*@\(sha256:[0-9a-f]*\)$/\1/p' "$fixtures" | sort -u)
   [ -n "$pin_digest" ] && [ "$(grep -cF "$pin_digest" "$fixtures")" -eq 2 ] || return 1
-  # The digest is in this file of deploy/ and .github/ (the script reads the pin from it, the model's manifest gets it from the script) and in three
+  # The digest is in this file of deploy/ and .github/ (the script reads the pin from it, the model's manifest gets it from the script) and in four
   # others, and no more: the chart's `defaultAgentImage`, which is the same image since ANR-1200 (the default coder is the one this end-to-end
-  # proves), the coder of S9's end-to-end (a test holds it equal to that default) and the README that documents both. The chart's golden renders
-  # carry it because they render that default, so they are left out of the count.
+  # proves), the coder of S9's end-to-end (a test holds it equal to that default), the README that documents both, and the sleep/wake end-to-end's
+  # coder (ANR-763, which must run the same image). The chart's golden renders carry it because they render that default, so they are left out of the count.
   found=$(grep -rlF "$pin_digest" "$chart/.." "$chart/../../.github" | grep -v '/tests/golden/')
   [ "$(printf '%s\n' "$found" | wc -l)" -eq 5 ] || return 1
-  for f in '/values\.yaml$' '/tests/e2e/run-pods\.yaml$' '/tests/e2e/coder\.yaml$' '/tests/e2e/sleep\.yaml$' '/README\.md$'; do
+  for f in '/values\.yaml$' '/tests/e2e/run-pods\.yaml$' '/tests/e2e/sleep\.yaml$' '/tests/e2e/coder\.yaml$' '/README\.md$'; do
     printf '%s\n' "$found" | grep -Eq "$f" || return 1
   done
   grep -Eq "^defaultAgentImage: ghcr\.io/vymalo/another-adam-rs/coder:sha-[0-9a-f]{7}@$pin_digest\$" "$chart/values.yaml"
 }
-check "run pods e2e: the coder is pinned by tag and digest, on two lines of run-pods.yaml that are one pin, and its digest is in no file of deploy/ or .github/ but run-pods.yaml, the chart's defaultAgentImage, S9's coder and the README" rp_pin
+check "run pods e2e: the coder is pinned by tag and digest, on two lines of run-pods.yaml that are one pin, and its digest is in no file of deploy/ or .github/ but run-pods.yaml, the chart's defaultAgentImage, S9's coder, the sleep end-to-end's coder and the README" rp_pin
 rp_support() {
   support="$here/e2e/run-pods-support.yaml"
   [ "$(grep -c '^          image: __CODER_IMAGE__$' "$support")" -eq 1 ] || return 1
@@ -1841,6 +1842,78 @@ rp_sandbox_step() {
     && grep -qF 'for f in operator.log plain.log model.log coder-start.log sandbox.log' "$script"
 }
 check "run pods e2e: the script has the sandbox step (4b): the pod's shape, the controls, the sandbox's emptiness, a commit through the socket, the vector with its control, the coder's own worktree in the sandbox's log, and the plain coder without any of it" rp_sandbox_step
+
+# ---- The values of the kind end-to-end of the pod-minute meter (ANR-1447) ------------------------------------------------------
+# tests/e2e/meter.values.yaml with what meter-e2e.sh adds when it runs (the image of the job, loaded into kind and never pulled; the
+# stubs' address and ports on the runner), in the namespace of its own, aap-e2e-meter; and the script and the run pod, read as text.
+# That the chart renders them, and renders them as the script depends on, is checked here, so that a change that breaks them fails in
+# the chart job and not in a kind cluster.
+meter_ns=aap-e2e-meter
+meter_render() {
+  helm template aap-operator "$chart" --namespace "$meter_ns" -f "$here/e2e/meter.values.yaml" \
+    --set image.repository=operator --set image.tag=smoke --set image.pullPolicy=Never > "$out"
+}
+if ! meter_render 2> "$err"; then echo "FAIL meter e2e: the values of the pod-minute meter end-to-end do not render: $(head -c 400 "$err")"; fail=1; fi
+meter_settings() {
+  dhas ConfigMap aap-operator '^    metering:$' '^      enabled: true$' '^      source: "aap-operator"$' '^      periodSecs: 5$' \
+    '^      broker:$' '^        url: "http://172.18.0.1:18080"$' '^        token:$' \
+    '^          file: /var/run/secrets/aap/metering/broker-token$' \
+    '^      collector:$' '^        endpoint: "http://172.18.0.1:14318"$' \
+    '^    runPods:$' '^      nodeType:$' '^        admitted:$' '^        - standard$' '^        labelKey: aap-e2e/node-type$'
+}
+check "meter e2e: the values turn the meter on (period 5, the broker's file, the collector's endpoint) and run pods on with the one admitted node type" meter_settings
+meter_one_admitted() {
+  [ "$(doc ConfigMap aap-operator | awk '/^      nodeType:$/ { f = 1; next } f && /^        - / { n++ } f && /^      [a-z]/ { exit } END { print n + 0 }')" -eq 1 ]
+}
+check "meter e2e: runPods.nodeType admits exactly one value (the meter reads a run pod's node type from its node affinity, and with none or several it knows no line)" meter_one_admitted
+meter_mounts() {
+  dhas Deployment aap-operator 'name: metering-token' 'mountPath: /var/run/secrets/aap/metering' \
+    'secretName: meter-broker-token' '- key: token' 'path: broker-token'
+}
+check "meter e2e: the operator mounts the broker's bearer from meter-broker-token/token at /var/run/secrets/aap/metering" meter_mounts
+meter_peers() {
+  all_of "$(op_egress_rule 2)" 'port: 53$' 'k8s-app: kube-dns' \
+    && all_of "$(op_egress_rule 3)" 'cidr: 172.18.0.1/32' 'port: 18080$' \
+    && all_of "$(op_egress_rule 4)" 'cidr: 172.18.0.1/32' 'port: 14318$' \
+    && [ "$(op_egress_rules)" -eq 4 ]
+}
+check "meter e2e: the operator's policy is DNS and exactly the runner's address on the broker's and the collector's ports (four egress rules)" meter_peers
+meter_script() {
+  script="$here/e2e/meter-e2e.sh"
+  # shellcheck disable=SC2016 # the patterns are the script's own text, `${...}` and `$broker_url` and all
+  grep -q 'ns=${AAP_E2E_NAMESPACE:-aap-e2e-meter}$' "$script" && grep -q '^made_by=meter-e2e$' "$script" \
+    && grep -q 'kind-\*) ;;' "$script" && grep -q 'export HELM_KUBECONTEXT=' "$script" \
+    && grep -q '^node_type_key=aap-e2e/node-type ' "$script" && grep -q '^node_type_value=standard ' "$script" \
+    && grep -q '^pod=e2e-meter-run ' "$script" && grep -q '^run_id=e2e-meter-run-1 ' "$script" \
+    && grep -q 'meter-stubs.mjs' "$script" && grep -q 'meter-stubs: ready' "$script" \
+    && grep -q 'metering.broker.url=$broker_url' "$script" && grep -q 'metering.broker.port=$broker_port' "$script" \
+    && grep -q 'metering.collector.endpoint=$collector_url' "$script" && grep -q 'metering.collector.port=$collector_port' "$script" \
+    && grep -qF 'metering.broker.to=[{\"ipBlock\"' "$script" && grep -qF 'metering.collector.to=[{\"ipBlock\"' "$script"
+}
+check "meter e2e: the script's namespace, label, node type, run pod and run id are the values' and the fixtures', and it overrides the placeholders with the stubs' address and ports" meter_script
+meter_stub() {
+  stub="$here/e2e/meter-stubs.mjs"
+  script="$here/e2e/meter-e2e.sh"
+  # The script waits for the stubs' readiness line and parses the two ports they print: the stub prints the same words,
+  # with the `meter-stubs: ` prefix its `log` adds.
+  grep -q 'log("ready")' "$stub" && grep -q 'meter-stubs: ready' "$script" \
+    && grep -q 'broker listening on 0.0.0.0:' "$stub" && grep -q 'meter-stubs: broker listening on 0' "$script" \
+    && grep -q 'collector listening on 0.0.0.0:' "$stub" && grep -q 'meter-stubs: collector listening on 0' "$script" \
+    && grep -q 'internal/runs' "$stub" && grep -q 'v1/logs' "$stub" \
+    && grep -q 'internal/runs' "$script" && grep -q 'v1/logs' "$script"
+}
+check "meter e2e: the stubs' readiness and port lines are the ones the script waits for and parses, and both name the broker's route and the collector's" meter_stub
+meter_run_pod() {
+  pod="$here/e2e/meter-run.yaml"
+  grep -q '^    aap-e2e/made-by: meter-e2e$' "$pod" \
+    && grep -q '^    app.kubernetes.io/managed-by: adam-coder$' "$pod" && grep -q '^    app.kubernetes.io/component: run$' "$pod" \
+    && grep -q '^    app.kubernetes.io/instance: e2e-meter$' "$pod" && grep -q '^    app.kubernetes.io/name: e2e-meter-run$' "$pod" \
+    && grep -q '^    adam.vymalo.com/run: "0123456789ab"$' "$pod" && grep -q '^    adam.vymalo.com/run-id: e2e-meter-run-1$' "$pod" \
+    && grep -q '^    agents.vymalo.com/size-weight: "1"$' "$pod" && grep -q '^              - key: aap-e2e/node-type$' "$pod" \
+    && grep -q '^      command: \["sleep", "90"\]$' "$pod" && grep -q '^      image: aap-stub:ci$' "$pod"
+}
+check "meter e2e: the run pod carries the facts the meter reads (the coder's labels, the 12-hex label and the run-id annotation, the size weight 1, the admitted node type) and runs sleep 90 on the stand-in" meter_run_pod
+check "meter e2e: the script is a shell script sh can read" sh -n "$here/e2e/meter-e2e.sh"
 
 # ---- ServiceMonitors and the API's metrics (K4): off by default and then not a trace; on, exactly these objects --------------------
 prom='[{"namespaceSelector":{"matchLabels":{"kubernetes.io/metadata.name":"monitoring"}},"podSelector":{"matchLabels":{"app.kubernetes.io/name":"prometheus"}}}]'
@@ -2231,54 +2304,6 @@ check "activity.dns.to emptied is refused while the policy is on" refused 'activ
 check "activity: a key that is not a setting is refused" refused 'activity.foo is not a setting' --set activity.foo=1
 check "activity must be a map" refused 'activity must be a map' --set activity=null
 check "an ipBlock of 0.0.0.0/0 as an activity peer is refused" refused 'is every address' --set activity.tokenSecret.name=x --set-json 'activity.to=[{"ipBlock":{"cidr":"0.0.0.0/0"}}]'
-
-# ---- ANR-763 P4a: the kind end-to-end of the sleep/wake path ---------------------------------------------------------
-# `sleep.values.yaml` is what the chart is rendered with for the sleep/wake end-to-end (sleep-e2e.sh): activity on (the agents'
-# `e2e-sleep` pod is the peer), the bearer Secret `e2e-activity-bearer/token`, port 8081, networkPolicy on. Without run pods, with no
-# `runPods` block in the file, no PriorityClass, no admission policy, no run-pods Role. Each check below is broken on purpose (the
-# broken-on-purpose is the mutation the script's developer runs to prove the check can fail).
-sleep_refused() { frag=$1; shift; refused "$frag" -f "$here/e2e/sleep.values.yaml" "$@"; }
-# The chart's namespace is the script's namespace: the activity.to peer and the watched namespace are both `aap-e2e-sleep`.
-sleep_render() { helm template aap-operator "$chart" --namespace aap-e2e-sleep -f "$here/e2e/sleep.values.yaml" "$@" > "$out"; }
-sleep_file_has_activity() {
-  sleep_render || return 1
-  dhas ConfigMap aap-operator '^    activity:$' '^      enabled: true$' '^      port: 8081$' '^      timeoutSecs: 3$' \
-    '^        file: /var/run/secrets/aap/activity/token$' '^        name: "e2e-activity-bearer"$' '^        key: "token"$' \
-    '^        namespace: "aap-e2e-sleep"$' '^          app.kubernetes.io/name: aap-operator$' '^          app.kubernetes.io/instance: aap-operator$' || return 1
-  has 'secretName: e2e-activity-bearer' && has 'key: token' && has 'mountPath: /var/run/secrets/aap/activity' || return 1
-}
-check "sleep.values.yaml renders: the file's activity section is the values, the operator's bearer file is e2e-activity-bearer/token, and operatorPod is the watched namespace and the operator's selector labels" sleep_file_has_activity
-sleep_no_run_pods_in_render() {
-  sleep_render || return 1
-  # The file's `runPods` block, the run-pods fields, and the run-pods cluster-scoped objects: none of them.
-  dlacks ConfigMap aap-operator '^    runPods:' || return 1
-  dlacks ConfigMap aap-operator 'priorityClass' || return 1
-  lacks '^kind: (PriorityClass|ValidatingAdmissionPolicy|ValidatingAdmissionPolicyBinding)$'
-}
-check "sleep.values.yaml renders: the file names no runPods block, no run-pods fields, and no run-pod cluster-scoped objects" sleep_no_run_pods_in_render
-sleep_egress() {
-  sleep_render || return 1
-  # The operator's NetworkPolicy egress: API server (443/6443), DNS (53), and the agents on 8081 in the watched namespace.
-  [ "$(op_egress_rules)" -eq 3 ] || return 1
-  all_of "$(op_egress_rule 3)" 'port: 8081$' '^      to:' 'kubernetes.io/metadata.name: aap-e2e-sleep' 'app.kubernetes.io/instance: e2e-sleep' || return 1
-  none_of "$(op_egress_rule 3)" 'port: 53|ipBlock|0\.0\.0\.0/0'
-}
-check "sleep.values.yaml renders: the operator's NetworkPolicy egress opens to the agent's namespace on the activity port 8081, nothing wider" sleep_egress
-# Empty `tokenSecret` is refused: the agents refuse a question with no bearer.
-sleep_refused_missing_bearer() { sleep_refused 'activity.tokenSecret.name and activity.tokenSecret.key are required' --set activity.tokenSecret.name= --set activity.tokenSecret.key=; }
-check "sleep.values.yaml without activity.tokenSecret is refused (the agents refuse a question with no bearer)" sleep_refused_missing_bearer
-# An empty peer selector (would admit every pod of the namespace) is refused.
-sleep_refused_bad_peer() { sleep_refused 'a namespaceSelector with no matchLabels' --set-json 'activity.to=[{"namespaceSelector":{}}]'; }
-check "sleep.values.yaml with an empty peer selector is refused (would admit every pod of the namespace)" sleep_refused_bad_peer
-# When `activity.to` is emptied, activity is off (the helper's gate) and the chart renders no activity block, no mount, no rule.
-sleep_refused_off_no_block() {
-  sleep_render --set activity.to=null > "$out" || return 1
-  dlacks ConfigMap aap-operator '^    activity:$' || return 1
-  dlacks Deployment aap-operator 'activity-token' || return 1
-  # The operator's NetworkPolicy has only the API server rule (no DNS, no activity port).
-  [ "$(op_egress_rules)" -eq 1 ] || return 1
-}
-check "sleep.values.yaml with activity.to emptied renders nothing of activity: no file block, no mount, no egress rule" sleep_refused_off_no_block
 
 # ---- The pod-minute meter (ANR-1103, AD-069) -------------------------------------------------------------------------------
 # `metering.enabled` is off by default and then not a trace of it in any render: no key of the file, no volume, no mount, no egress rule

@@ -563,7 +563,7 @@ check_pod() {
     and ([.spec.containers[].env[]? | select(.value == null and .valueFrom.secretKeyRef == null)] | length) == 0
     and ([.spec.containers[].env[]? | select(.valueFrom.secretKeyRef != null)] | length) == 0
     and ([.spec.containers[].envFrom[]?] | length) == 0
-    and (has(.spec.imagePullSecrets) | not)'
+    and (.spec | has("imagePullSecrets") | not)'
 }
 # work_mounts <pod json>: the mounts of the pod's work volume of the run container, as "<rw|ro> <path> <- <subPath>" lines, sorted.
 work_mounts() { jq -r '.spec.containers[0].volumeMounts[] | select(.name == "work") | "\(if .readOnly == true then "ro" else "rw" end) \(.mountPath) <- \(.subPath // "")"' "$1" | sort; }

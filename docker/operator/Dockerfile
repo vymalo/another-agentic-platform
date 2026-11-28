@@ -28,6 +28,8 @@ FROM lukemathwalker/cargo-chef:0.1.77-rust-1.94.1-trixie@sha256:d5a1cca12f21de99
 ARG TARGET
 # The musl target and the tools the C dependencies need: `musl-gcc` as the linker, `perl` for ring's
 # assembly, and a C compiler for aws-lc-sys (the image has one; the line keeps the layer explicit).
+# The build stage's base image is pinned by digest; pinning its Debian packages here would break on the image's next digest.
+# hadolint ignore=DL3008
 RUN apt-get update \
  && apt-get install -y --no-install-recommends musl-tools perl file \
  && rm -rf /var/lib/apt/lists/* \
@@ -58,6 +60,8 @@ RUN cargo build --release --locked --package aap-operator --bin operator --targe
 # Every command runs under `env -i`: BuildKit injects its own OTEL_* variables into RUN steps (seen 2026-11-15 in the log of this
 # repository's pull request 52, run 43729018865, under docker/build-push-action: a traces protocol of `grpc` and an endpoint on a
 # unix socket, for BuildKit's own tracing). A smoke test must not depend on what a builder puts in the environment.
+# The smoke test's pipes must fail the step when their first command fails (hadolint DL4006): bash, with pipefail.
+SHELL ["/bin/bash", "-o", "pipefail", "-c"]
 RUN set -eu; \
     bin=/src/target/$TARGET/release/operator; \
     file "$bin" | grep -q 'static'; \

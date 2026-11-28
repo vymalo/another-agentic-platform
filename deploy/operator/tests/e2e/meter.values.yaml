@@ -1,0 +1,54 @@
+# The values the kind end-to-end of the pod-minute meter (ANR-1447) installs the operator chart with: the meter ON, with
+# a broker and a collector on the runner, run pods on with exactly one admitted node type (the meter reads a run pod's
+# node type from its required node affinity, and with none or several it knows no line), and the shortest period.
+#
+# The broker's URL, the collector's endpoint, the runner's address in both `to` lists and the two ports below are
+# PLACEHOLDERS: the script replaces them with the address it finds on the docker network of kind and the ports the stubs
+# picked (`metering.broker.url`, `metering.broker.to`, `metering.broker.port`, `metering.collector.endpoint`,
+# `metering.collector.to`, `metering.collector.port`). They render as written, so `render-check.sh` holds this file and
+# the script's overrides together. The image is the one the job built and loaded into kind, never pulled.
+#
+# Nothing here is a secret: the broker's bearer is the Secret the script makes (`meter-broker-token`, key `token`), which
+# the chart mounts as a file and the operator re-reads when it changes. No value below is advice for a deployment
+# (deploy/operator/README.md, "The pod-minute meter", is).
+runPods:
+  enabled: true
+  # ANR-660 (AD-066): the key the script puts on the node itself (`aap-e2e/node-type=standard`, and it refuses if a node
+  # already has the key) and the one value it admits. The operator adds the requirement to every term of a run pod's
+  # required node affinity, and the meter reads the node type from it: a pod that admits none or several makes no line
+  # (`unknown-node-type`).
+  nodeType:
+    labelKey: aap-e2e/node-type
+    admitted: [standard]
+
+metering:
+  enabled: true
+  source: aap-operator
+  # The minimum (5): a run pod of 90 s is seen in time, and a minute is sent within a period of its end.
+  periodSecs: 5
+  broker:
+    # `GET <url>/internal/runs/<run>/account` (crates/usage-broker): the stub on the runner.
+    url: http://172.18.0.1:18080
+    # The peer the operator's policy admits for it: the runner's address, and only it.
+    to:
+      - ipBlock:
+          cidr: 172.18.0.1/32
+    port: 18080
+    timeoutSecs: 5
+    tokenSecret:
+      name: meter-broker-token
+      key: token
+  collector:
+    # Lines go to `<endpoint>/v1/logs` (crates/usage-otlp): the stub collector on the runner.
+    endpoint: http://172.18.0.1:14318
+    to:
+      - ipBlock:
+          cidr: 172.18.0.1/32
+    port: 14318
+    # One line per pod-minute: a batch of one is sent at the interval, well inside the script's wait.
+    queue: 64
+    batch: 16
+    intervalSecs: 5
+    timeoutSecs: 5
+  # The chart's default DNS rule is kept (values.yaml): the peers are addresses, but a policy rule with ports and no `to`
+  # would be port 53 to anywhere, and the chart refuses an empty `metering.dns.to`.

@@ -36,17 +36,17 @@ fn part(which: &str) -> (AgentService, AgentConfig) {
             other => panic!("{which} holds a {other:?}"),
         }
     }
-    let mut service: AgentService =
-        service.unwrap_or_else(|| panic!("no AgentService in {which}"));
-    let mut config: AgentConfig =
-        config.unwrap_or_else(|| panic!("no AgentConfig in {which}"));
+    let mut service: AgentService = service.unwrap_or_else(|| panic!("no AgentService in {which}"));
+    let mut config: AgentConfig = config.unwrap_or_else(|| panic!("no AgentConfig in {which}"));
     // The manifest carries no namespace (the script applies it with `-n`): the namespace of the script, here.
     service.metadata.namespace = Some("aap-e2e-sleep".to_owned());
     config.metadata.namespace = Some("aap-e2e-sleep".to_owned());
     (service, config)
 }
 
-fn resolve(externals: &Externals) -> Result<aap_domain::ResolvedAgent, Vec<aap_domain::ConfigIssue>> {
+fn resolve(
+    externals: &Externals,
+) -> Result<aap_domain::ResolvedAgent, Vec<aap_domain::ConfigIssue>> {
     let (service, config) = part("sleep.yaml");
     aap_domain::resolve(&service, &config, externals, aap_ports::OwnerHandle::none())
 }
@@ -100,7 +100,9 @@ fn the_coder_resolves_with_the_activity_settings_and_carries_the_listener() {
     // Activity on: the variables are on the agent container, the port is there, the policy has the operator as its peer.
     let on_env = env_of(&on.runtime.workloads[0]);
     assert!(
-        on_env.iter().any(|(n, v)| n == "ACTIVITY_LISTEN_ADDR" && v.contains("8081")),
+        on_env
+            .iter()
+            .any(|(n, v)| n == "ACTIVITY_LISTEN_ADDR" && v.contains("8081")),
         "{on_env:?}"
     );
     assert!(
@@ -109,12 +111,19 @@ fn the_coder_resolves_with_the_activity_settings_and_carries_the_listener() {
             .any(|(n, v)| n == "ACTIVITY_BEARER_TOKENS" && v.contains("e2e-activity-bearer")),
         "the bearer is not from e2e-activity-bearer: {on_env:?}"
     );
-    let activity = on.runtime.network.activity.as_ref().expect("the activity policy");
+    let activity = on
+        .runtime
+        .network
+        .activity
+        .as_ref()
+        .expect("the activity policy");
     assert_eq!(activity.port, 8081, "the policy port is the listener's");
     let peer = activity.from.clone();
     let namespaces = peer.namespaces.expect("the operator's namespace is set");
     assert!(
-        namespaces.match_labels.contains_key("kubernetes.io/metadata.name")
+        namespaces
+            .match_labels
+            .contains_key("kubernetes.io/metadata.name")
             && namespaces.match_labels["kubernetes.io/metadata.name"] == "aap-e2e-sleep",
         "the operator's namespace selector names the watched namespace"
     );
@@ -182,7 +191,10 @@ fn sleep_yaml_names_the_secrets_and_services_the_script_makes() {
     let support = read("sleep-support.yaml");
     let script = read("sleep-e2e.sh");
     for (secret, keys) in [
-        ("e2e-secrets", &["A2A_BEARER_TOKENS", "MODEL_API_KEY", "GITHUB_TOKEN"][..]),
+        (
+            "e2e-secrets",
+            &["A2A_BEARER_TOKENS", "MODEL_API_KEY", "GITHUB_TOKEN"][..],
+        ),
         ("e2e-db-uris", &["sleep-uri"][..]),
     ] {
         assert!(
@@ -235,8 +247,7 @@ fn sleep_yaml_names_the_secrets_and_services_the_script_makes() {
     for text in [&fixtures, &support] {
         for line in text.lines().filter(|l| {
             let l = l.trim_start();
-            (l.starts_with("image:") || l.starts_with("ref:"))
-                && !l.trim_end().ends_with(':')
+            (l.starts_with("image:") || l.starts_with("ref:")) && !l.trim_end().ends_with(':')
         }) {
             assert!(
                 line.contains("@sha256:") || line.contains("__CODER_IMAGE__"),
