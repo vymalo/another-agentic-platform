@@ -33,26 +33,23 @@ fn main() -> ExitCode {
 }
 
 fn real_main(args: run::Args) -> Result<()> {
-    // `--check` validates the tracing variables with the configuration, so that what a deployment renders is checked in CI: a bad
-    // one is an error and says which. It reads none of the files they name. A running API never stops for one: it warns once and
-    // runs with tracing off (`run::run`), because tracing is not a security control and platforms inject OTEL_* variables of their
-    // own (BuildKit does, into every RUN step).
+    // `--check` says whether the file is one the API can work with — the traces it asks for and the filter of its log included,
+    // and it reads none of the files they name. A running API never stops for a tracing setting: it warns once and runs with
+    // tracing off (`run::run`), because tracing is not a security control.
     if args.check {
-        aap_trace_otlp::check("aap-api").map_err(|e| anyhow::anyhow!("{e}"))?;
         config::load(&args.config)?;
         println!("{}: ok", args.config.display());
         return Ok(());
     }
+    // The file first: its `log.filter` is the subscriber's, so a running API has no `RUST_LOG` to read (ANR-970).
+    let settings = config::load(&args.config)?;
     tracing_subscriber::fmt()
-        .with_env_filter(
-            tracing_subscriber::EnvFilter::try_from_default_env()
-                .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("info")),
-        )
+        .with_env_filter(tracing_subscriber::EnvFilter::new(&settings.log_filter))
         .with_writer(io::stderr)
         .init();
     tokio::runtime::Builder::new_multi_thread()
         .enable_all()
         .build()
         .context("starting the async runtime")?
-        .block_on(run::run(args))
+        .block_on(run::run(settings))
 }

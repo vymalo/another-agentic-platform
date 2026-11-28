@@ -12,15 +12,14 @@ api --config bin/api/config.example.yaml --check   # say whether the file is usa
 It runs beside the operator, **not inside it** (least privilege per process, §60a): it holds the right to write the specs people edit and to list the
 ExternalSecrets that offer keys, and it takes people's tokens; the operator holds neither. It is stateless and can run two replicas.
 
-| Flag | Variable | |
-|---|---|---|
-| `--config <file>` | `API_CONFIG_FILE` | The configuration file (required) |
-| `--listen <addr>` | `API_LISTEN_ADDR` | Where the API listens. **Wins over `listen` in the file** |
-| `--health-addr <addr>` | `HEALTH_ADDR` | Where `/healthz` and `/readyz` are served. **Wins over `healthListen` in the file** |
-| `--metrics-addr <addr>` | `METRICS_ADDR` | Where `/metrics` is served (K4). **Wins over `metricsListen` in the file** |
-| `--check` | | Read the file, say whether the API can work with it, exit `0` or `1` |
+| Flag | |
+|---|---|
+| `--config <file>` | The configuration file; `/etc/aap-api/config.yaml` when absent (ANR-970) |
+| `--check` | Read the file, say whether the API can work with it, exit `0` or `1` |
 
-`RUST_LOG` sets the log filter (default `info`). The cluster is `kube::Client::try_default`: the pod's ServiceAccount, or `KUBECONFIG`.
+**Everything is the file's** (ANR-970): the three ports, the log's filter (`log.filter`) and the traces (`telemetry.otlp`).
+The binary reads no `API_*` variable and no `RUST_LOG`; a variable of those names is ignored. The cluster is
+`kube::Client::try_default`: the pod's ServiceAccount, or `KUBECONFIG`.
 
 ## The configuration file
 
@@ -113,20 +112,20 @@ given to stop after it, and 5 s of margin, so the chart refuses less than the sl
 
 ## Traces (K5)
 
-Traces are **off** unless an endpoint is set (`OTEL_EXPORTER_OTLP_TRACES_ENDPOINT`, or `OTEL_EXPORTER_OTLP_ENDPOINT` with
-`/v1/traces` appended), and then no task, queue or series exists. The variables are a strict subset of the standard ones,
-read by `aap-trace-otlp` ([README](../../crates/trace-otlp/README.md)): `grpc`, `http/protobuf` and
-`OTEL_EXPORTER_OTLP_HEADERS` are refused, headers come from the file `AAP_OTEL_HEADERS_FILE` names, and
-`OTEL_EXPORTER_OTLP_CERTIFICATE` is the exporter's only trust. **A tracing setting never stops the API:** `run` logs one
-`warn` line (`tracing is off`, the variable's name and a fixed reason, never the value) and runs with tracing off (platforms
-inject `OTEL_*` variables of their own; BuildKit does, into every `RUN` step), and `/metrics` carries `aap_trace_enabled 0`
-while any tracing variable is set and tracing is off. `api --check` still refuses the setting and names the variable (it exits
-1), so a rendered configuration is validated in CI, and reads none of the files they name. The tracing variables are not in the YAML file. `run` reads them before the cluster and the issuer; the
-flush (at most 3 s) comes **after** the 25 s drain of the API and runs at the same time as the 2 s stop of the health and
-metrics servers, so the chart's grace floor is not moved. When on, `/metrics` also has `aap_trace_enabled 1` and the two `aap_trace_*` series. The
-spans are the router's ([README](../../crates/platform-api/README.md)). `tests/trace_env.rs` runs the built binary with BuildKit's variables (`run` starts, warns once without the value and serves
-`aap_trace_enabled 0`; `--check` exits 1 naming the variable) and with the others it refuses, with every `OTEL_*` of the
-developer's shell removed.
+Traces are **off** unless the file's `telemetry.otlp.endpoint` is set, and then no task, queue or series exists. The
+section is the operator's ([`OtlpSection`](../../crates/trace-otlp/src/settings.rs)), read by `aap-trace-otlp`
+([README](../../crates/trace-otlp/README.md)): `sampler` is `always_on`, `always_off` or `traceidratio` with
+`samplerRatio`, `certificate` is the exporter's only trust, and each entry of `headers` is a **reference** (`{ file: … }` or
+`{ env: … }`, never a value) that needs an `https` endpoint. **A tracing setting never stops the API:** a reference that
+cannot be read is one `warn` line (`tracing is off`, the setting's name and a fixed reason, never the value) and the API runs
+with tracing off, and `/metrics` carries `aap_trace_enabled 0` then. `api --check` refuses what the section cannot say (an
+unknown key, a header that is a value) and names the key, so a rendered configuration is validated in CI, and it reads none
+of the files the section names. `run` starts the tracer before the cluster and the issuer; the flush (at most 3 s) comes
+**after** the 25 s drain of the API and runs at the same time as the 2 s stop of the health and metrics servers, so the
+chart's grace floor is not moved. When on, `/metrics` also has `aap_trace_enabled 1` and the two `aap_trace_*` series. The
+spans are the router's ([README](../../crates/platform-api/README.md)). `tests/telemetry.rs` runs the built binary on the
+example file (no span, no `aap_trace_` line) and on a file with an unreachable collector (`aap_trace_enabled 1`: a tracing
+setting never stops it), and asks `--check` for the refusals above.
 
 ## Tests
 
@@ -154,7 +153,7 @@ no shell and no `CMD`: the file is required). The build stage runs `--version`, 
 configuration the chart renders, and the job `api-e2e` runs the image in a kind cluster (the chart's `api` component, a real issuer, a folder agent made through the API, [D7b2](../../deploy/operator/tests/e2e/README.md#the-kind-end-to-end-of-the-platform-api-d7b2)). *Unverified* until CI has run it: no image was built where this was written (the binary was, in release mode).
 
 **The chart** is the component `api` of [`deploy/operator`](../../deploy/operator/README.md#the-platform-api), off by default: a Deployment with its configuration mounted from a
-ConfigMap at `/etc/aap-api/config.yaml` (`API_CONFIG_FILE`) and **nothing else mounted**, a Service on the API port (the health port is the pod's, for the kubelet), the `Role`
+ConfigMap at `/etc/aap-api/config.yaml`, given by `args: ["--config", …]`, and **nothing else mounted**, a Service on the API port (the health port is the pod's, for the kubelet), the `Role`
 above, a NetworkPolicy and an optional Ingress. The chart owns `listen`, `healthListen` and `defaults.namespace`; the rest is `api.config`. To read what it renders with this binary:
 
 ```sh

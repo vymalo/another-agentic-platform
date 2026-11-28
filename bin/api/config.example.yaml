@@ -1,14 +1,18 @@
-# The configuration of the Platform API (§60a, slice D7a): one file, read at start (`--config`, `API_CONFIG_FILE`).
+# The configuration of the Platform API (§60a, slice D7a): one file, read at start (`--config`, `/etc/aap-api/config.yaml`).
+# **Everything is here** (ANR-970): the three ports, the log's filter and the traces. The binary reads no `API_*` variable and no
+# `RUST_LOG`, and the chart gives it nothing but this file.
 # A typo is an error and stops the API (an unknown key is refused), and so is anything the API could not work with.
 #
 # THERE IS NO SECRET IN THIS FILE, and there is no place for one. The API checks a bearer token against the keys of the
 # issuer (public), and reaches the cluster with its ServiceAccount. A secret in an agent is a reference to a Secret key,
 # chosen among the keys the cluster offers (`defaults.offerLabel`).
 
+# The shape of this file. 1 is the only one there is; absent, it is 1.
+version: 1
+
 # Where the API listens, where /healthz and /readyz are served, and where /metrics is (Prometheus text, no authentication, never on
-# the API's port). The flags --listen, --health-addr and --metrics-addr (API_LISTEN_ADDR, HEALTH_ADDR, METRICS_ADDR) win over the
-# file. Three ports, all different (--check refuses a clash). /metrics is on the loopback by default, reachable from nothing else:
-# say 0.0.0.0:<port> to let a scraper in.
+# the API's port). Three ports, all different (--check refuses a clash). /metrics is on the loopback by default, reachable from
+# nothing else: say 0.0.0.0:<port> to let a scraper in. There is no flag and no variable for them (ANR-970).
 listen: 0.0.0.0:8080
 healthListen: 0.0.0.0:8081
 metricsListen: 127.0.0.1:9090
@@ -115,3 +119,24 @@ defaults:
   # a registry host (and port, when it has one) and does not bound repositories: ghcr.io admits every image on ghcr.io, so
   # name only registries whose images you trust. A tag or a digest is always required.
   allowedImageRegistries: [ghcr.io]
+
+# The log. `filter` is a `tracing` filter, `info` when absent; it is what `RUST_LOG` used to be, and the binary reads no
+# variable of that name (ANR-970).
+log:
+  filter: info
+
+# Traces (K5, §48a): the OTLP/HTTP JSON exporter's settings, as the `OTEL_*` variables used to say them. Absent or empty: no span
+# is made. The API makes one SERVER span per request, named by its route template, and no subject, agent name, body, header,
+# query or token is in any of them; no inbound `traceparent` is read. A header is a **reference** (`{ file: … }`), never a value,
+# and needs an `https` endpoint.
+# telemetry:
+#   otlp:
+#     endpoint: https://collector.example.com:4318/v1/traces
+#     sampler: traceidratio
+#     samplerRatio: 0.25
+#     headers:
+#       authorization:
+#         file: /var/run/secrets/aap/otel/headers
+#     certificate: /etc/aap/otel/ca/ca.pem
+#     resourceAttributes:
+#       deployment.environment.name: prod

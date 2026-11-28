@@ -188,11 +188,24 @@ data:
             size: 5Gi
     healthListen: 0.0.0.0:8081
     listen: 0.0.0.0:8080
+    log:
+      filter: info
     oidc:
       audiences:
       - another-agentic
       issuer: https://keycloak.example.com/realms/another-agentic
       rolesClaim: agentic_roles
+    telemetry:
+      otlp:
+        certificate: /etc/aap/otel/ca/ca.pem
+        endpoint: https://otel-gateway.observability.svc:4319/v1/traces
+        headers:
+          authorization:
+            file: /var/run/secrets/aap/otel/headers
+        resourceAttributes:
+          deployment.environment.name: prod
+        sampler: always_on
+    version: 1
 
 ---
 # Source: aap-operator/templates/config.yaml
@@ -469,7 +482,7 @@ spec:
         app.kubernetes.io/component: api
       annotations:
         # A change of the configuration rolls the pods (the file is read once, at start).
-        checksum/config: ce18ccb2fb2939d9e0ed64ed868dc89128aa2a62a7e945cec89cc98c4aba88e0
+        checksum/config: f986037ffe60e2d6e1369bce9f5b36a59a50ead02b75f19c06250bdfddccf0eb
     spec:
       serviceAccountName: aap-operator-api
       # The API token is the API's way to the cluster.
@@ -487,24 +500,11 @@ spec:
         - name: api
           image: "ghcr.io/vymalo/another-agentic-platform/api:sha-0000000"
           imagePullPolicy: IfNotPresent
+          # Everything is the file's (ANR-970): the three ports, the log's filter and the traces. The binary reads no
+          # environment variable of its own any more.
+          args: ["--config", "/etc/aap-api/config.yaml"]
           env:
-            - name: API_CONFIG_FILE
-              value: /etc/aap-api/config.yaml
-            - name: RUST_LOG
-              value: "info"
-            # Traces (slice K5): the variables `api` reads. Absent, no span is made.
-            - name: OTEL_EXPORTER_OTLP_TRACES_ENDPOINT
-              value: "https://otel-gateway.observability.svc:4319/v1/traces"
-            - name: OTEL_EXPORTER_OTLP_PROTOCOL
-              value: http/json
-            - name: OTEL_TRACES_SAMPLER
-              value: "always_on"
-            - name: OTEL_RESOURCE_ATTRIBUTES
-              value: "deployment.environment.name=prod"
-            - name: AAP_OTEL_HEADERS_FILE
-              value: /var/run/secrets/aap/otel/headers
-            - name: OTEL_EXPORTER_OTLP_CERTIFICATE
-              value: /etc/aap/otel/ca/ca.pem
+            # Traces (slice K5): the resource's identity, the downward API's; the rest of the section is the file's.
             - name: POD_NAME
               valueFrom:
                 fieldRef:

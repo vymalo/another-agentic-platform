@@ -499,10 +499,10 @@ check "api: the replicas are the value (2), the strategy a rolling update that s
 check "api: the image is a sha-<7 hex> tag of the api package (the placeholder until CI bumps it, then the bumped tag)" \
   dhas Deployment aap-operator-api 'image: "ghcr.io/vymalo/another-agentic-platform/api:sha-[0-9a-f]{7}"'
 api_reads_its_file() {
-  dhas Deployment aap-operator-api 'name: API_CONFIG_FILE' 'value: /etc/aap-api/config.yaml' 'mountPath: /etc/aap-api' 'readOnly: true' \
-    'configMap:' 'name: aap-operator-api' && dlacks Deployment aap-operator-api '^          args:'
+  dhas Deployment aap-operator-api 'args: \["--config", "/etc/aap-api/config.yaml"\]' 'mountPath: /etc/aap-api' 'readOnly: true' \
+    'configMap:' 'name: aap-operator-api' && dlacks Deployment aap-operator-api 'API_CONFIG_FILE|RUST_LOG'
 }
-check "api: the binary reads its file from API_CONFIG_FILE, mounted read-only from the ConfigMap of the API, and takes no argument" api_reads_its_file
+check "api: the binary is given its file by --config (ANR-970), mounted read-only from the ConfigMap of the API, and no API_* or RUST_LOG variable" api_reads_its_file
 check "api: the pods roll with the file (a checksum of the ConfigMap)" dhas Deployment aap-operator-api 'checksum/config: [0-9a-f]{64}'
 api_probes() {
   dcount Deployment aap-operator-api 'path: /healthz' 2 && dhas Deployment aap-operator-api 'path: /readyz' 'containerPort: 8081' \
@@ -605,10 +605,11 @@ secretref_objects() {
 }
 check "api (secretref shape): no Ingress, no policy for the API, no ServiceAccount made, and the existing one is the pod's and the binding's" secretref_objects
 secretref_pod() {
-  dhas Deployment aap-operator-api 'api:sha-[0-9a-f]{7}@sha256:0{64}"' 'value: "debug"' 'terminationGracePeriodSeconds: 32' \
+  dhas Deployment aap-operator-api 'api:sha-[0-9a-f]{7}@sha256:0{64}"' 'terminationGracePeriodSeconds: 32' \
+    && dhas ConfigMap aap-operator-api '^      filter: debug$' \
     && dlacks Deployment aap-operator-api '^          lifecycle:' 'sleep:'
 }
-check "api (secretref shape): the image is tag and digest, the log level and the grace period are the values, and there is no preStop hook" secretref_pod
+check "api (secretref shape): the image is tag and digest, the log level is the file's and the grace period is the value, and there is no preStop hook" secretref_pod
 
 # The shape that sets every value: what each one does to the render. (It renders from the defaults of values.yaml, so each of these differs from them.)
 render -f "$here/api-full.values.yaml"
@@ -641,8 +642,8 @@ api_probes_follow_the_health_port() {
   dcount Deployment aap-operator-api 'port: health' 3 && dhas Deployment aap-operator-api 'name: health' 'containerPort: 9091'
 }
 check "api (full shape): the three probes go to the named port health, which is 9091" api_probes_follow_the_health_port
-check "api (full shape): the container's environment is the chart's two variables, then api.extraEnv in order" \
-  test "$(api_env_names)" = "API_CONFIG_FILE RUST_LOG SSL_CERT_FILE HTTPS_PROXY NO_PROXY "
+check "api (full shape): the container's environment is api.extraEnv, and nothing the binary reads (ANR-970)" \
+  test "$(api_env_names)" = "SSL_CERT_FILE HTTPS_PROXY NO_PROXY "
 check "api (full shape): api.extraEnv values are rendered as they are" \
   dhas Deployment aap-operator-api 'value: /etc/aap-api-ca/ca-bundle.crt' 'value: http://proxy.example.com:3128' 'value: .svc,.cluster.local,10.0.0.0/8'
 api_extra_volumes() { test "$(api_volume_names)" = "config ca " && dhas Deployment aap-operator-api 'name: aap-api-ca$'; }
@@ -679,9 +680,9 @@ check "api (full shape): the pod annotation of the values is on the pod template
   dcount Deployment aap-operator-api 'example.com/scrape: "false"' 1
 render -f "$here/api.values.yaml"
 api_nothing_extra_by_default() {
-  test "$(api_env_names)" = "API_CONFIG_FILE RUST_LOG " && test "$(api_volume_names)" = "config " && test "$(api_mounts)" = "config /etc/aap-api "
+  test -z "$(api_env_names)" && test "$(api_volume_names)" = "config " && test "$(api_mounts)" = "config /etc/aap-api "
 }
-check "api: with no extraEnv, extraVolumes or extraVolumeMounts the container has the chart's two variables, its config volume and its one mount, nothing more" \
+check "api: with no extraEnv, extraVolumes or extraVolumeMounts the container has no environment, its config volume and its one mount, nothing more" \
   api_nothing_extra_by_default
 api_default_rules_are_open_on_their_ports() {
   all_of "$(api_egress_rule 1)" 'port: 443$' 'port: 6443$' && none_of "$(api_egress_rule 1)" 'ipBlock' '^      to:$' \
@@ -974,11 +975,11 @@ check "the API's five peer lists with a real ipBlock each render" renders_ok -f 
   --set-json 'api.config.defaults.allowFrom=[{"ipBlock":{"cidr":"10.0.0.0/8"}}]'
 # api.extraEnv, api.extraVolumes and api.extraVolumeMounts: the chart's own names and paths are not for sale.
 ca_volume='api.extraVolumes=[{"name":"ca","configMap":{"name":"aap-api-ca"}}]'
-check "extraEnv: RUST_LOG is refused (it is api.logLevel)" refused_api 'api.extraEnv: RUST_LOG is the chart' --set-json 'api.extraEnv=[{"name":"RUST_LOG","value":"debug"}]'
-check "extraEnv: API_CONFIG_FILE is refused (it is the mounted file)" refused_api 'api.extraEnv: API_CONFIG_FILE is the chart' --set-json 'api.extraEnv=[{"name":"API_CONFIG_FILE","value":"/x"}]'
-check "extraEnv: API_LISTEN_ADDR is refused (it would win over api.port, which the probes and the Service follow)" \
-  refused_api 'api.extraEnv: API_LISTEN_ADDR is the chart' --set-json 'api.extraEnv=[{"name":"API_LISTEN_ADDR","value":"0.0.0.0:1"}]'
-check "extraEnv: HEALTH_ADDR is refused" refused_api 'api.extraEnv: HEALTH_ADDR is the chart' --set-json 'api.extraEnv=[{"name":"HEALTH_ADDR","value":"0.0.0.0:1"}]'
+check "extraEnv: RUST_LOG is refused (the binary reads no such variable since ANR-970)" refused_api 'api.extraEnv: RUST_LOG is read by nothing' --set-json 'api.extraEnv=[{"name":"RUST_LOG","value":"debug"}]'
+check "extraEnv: API_CONFIG_FILE is refused (--config is the mounted file)" refused_api 'api.extraEnv: API_CONFIG_FILE is read by nothing' --set-json 'api.extraEnv=[{"name":"API_CONFIG_FILE","value":"/x"}]'
+check "extraEnv: API_LISTEN_ADDR is refused (the file's listen is api.port, which the probes and the Service follow)" \
+  refused_api 'api.extraEnv: API_LISTEN_ADDR is read by nothing' --set-json 'api.extraEnv=[{"name":"API_LISTEN_ADDR","value":"0.0.0.0:1"}]'
+check "extraEnv: HEALTH_ADDR is refused" refused_api 'api.extraEnv: HEALTH_ADDR is read by nothing' --set-json 'api.extraEnv=[{"name":"HEALTH_ADDR","value":"0.0.0.0:1"}]'
 check "extraEnv: a name set twice is refused" refused_api 'api.extraEnv: A is set twice' --set-json 'api.extraEnv=[{"name":"A","value":"1"},{"name":"A","value":"2"}]'
 check "extraEnv: an entry with no name is refused" refused_api 'api.extraEnv: every entry is a map with a name' --set-json 'api.extraEnv=[{"value":"1"}]'
 check "extraEnv: an entry that is not a map is refused" refused_api 'api.extraEnv: every entry is a map with a name' --set-json 'api.extraEnv=["A=1"]'
@@ -1255,7 +1256,7 @@ check "chain: the script's namespace, label, audience and Secrets are the ones t
 # collector's log is in the scan for the secrets and the tokens in step 7.
 chain_otel_values() {
   dhas ConfigMap aap-operator '^        endpoint: "http://e2e-otel-collector\.aap-e2e-chain\.svc:4318/v1/traces"$' 'deployment.environment.name: e2e' \
-    && dhas Deployment aap-operator-api 'value: "http://e2e-otel-collector\.aap-e2e-chain\.svc:4318/v1/traces"' 'deployment.environment.name=e2e' \
+    && dhas ConfigMap aap-operator-api '^      otlp:$' '^        endpoint: http://e2e-otel-collector\.aap-e2e-chain\.svc:4318/v1/traces$' 'deployment.environment.name: e2e' \
     && all_of "$(op_egress_rule 3)" 'port: 4318' 'app.kubernetes.io/name: e2e-otel-collector' \
     && all_of "$(api_egress_rule 4)" 'port: 4318' 'app.kubernetes.io/name: e2e-otel-collector'
 }
@@ -1931,7 +1932,7 @@ check "the API's metrics port must be a port" refused_api 'api.metrics.port: 700
 check "a peer of api.metrics.allowFrom must say who" refused_api 'api.metrics.allowFrom: a peer needs' --set-json 'api.metrics.allowFrom=[{"x":1}]'
 check "an API interval that is not a duration is refused" refused_api 'api.metrics.serviceMonitor.interval must be a duration' \
   --set api.metrics.serviceMonitor.enabled=true --set api.networkPolicy.enabled=false --set api.metrics.serviceMonitor.interval=soon
-check "METRICS_ADDR is the chart's, as the other two addresses are" refused_api 'api.extraEnv: METRICS_ADDR is the chart' \
+check "METRICS_ADDR is read by nothing since ANR-970, as the other two addresses are" refused_api 'api.extraEnv: METRICS_ADDR is read by nothing' \
   --set-json 'api.extraEnv=[{"name":"METRICS_ADDR","value":"0.0.0.0:1"}]'
 check "api off: an API ServiceMonitor is neither rendered nor checked" sm_off --set api.metrics.serviceMonitor.enabled=true
 metrics_values() {
@@ -1968,11 +1969,14 @@ otel_blocks_are_not_crossed() {
   dhas ConfigMap aap-operator 'endpoint: "https://otel-collector\.observability\.svc:4318/v1/traces"' '^        sampler: traceidratio$' '^        samplerRatio: 0.25$' \
     'deployment.environment.name: prod' 'k8s.cluster.name: netcup' 'service.namespace: another-agentic' || return 1
   dlacks ConfigMap aap-operator 'otel-gateway|otel-api-|bundle\.pem' || return 1
-  dhas Deployment aap-operator-api 'otel-gateway\.observability\.svc:4319/v1/traces' 'value: "always_on"' 'otel-api-headers' 'otel-api-ca' || return 1
-  dlacks Deployment aap-operator-api 'otel-collector|otel-operator-|OTEL_TRACES_SAMPLER_ARG|k8s.cluster.name' || return 1
-  # One endpoint in the file, and not a trace of the old variables in the pod.
-  [ "$(op_file | grep -c '^        endpoint:')" -eq 1 ] && ! op_pod | grep -q 'OTEL_' || return 1
-  # The operator already had POD_NAME: it is not written twice; the API had none.
+  dhas ConfigMap aap-operator-api 'endpoint: https://otel-gateway\.observability\.svc:4319/v1/traces' 'sampler: always_on' || return 1
+  dhas Deployment aap-operator-api 'otel-api-headers' 'otel-api-ca' || return 1
+  dlacks Deployment aap-operator-api 'OTEL_|otel-collector|otel-operator-|k8s.cluster.name' || return 1
+  # One endpoint in each file, and not a trace of the old variables in either pod (ANR-970).
+  [ "$(op_file | grep -c '^        endpoint:')" -eq 1 ] || return 1
+  [ "$(doc ConfigMap aap-operator-api | grep -c '^        endpoint:')" -eq 1 ] || return 1
+  ! op_pod | grep -q 'OTEL_' || return 1
+  # Both pods take the resource's identity from the downward API, once each.
   [ "$(op_pod | grep -c 'name: POD_NAME$')" -eq 1 ] && [ "$(doc Deployment aap-operator-api | grep -c 'name: POD_NAME$')" -eq 1 ] \
     && dhas Deployment aap-operator 'name: POD_NAMESPACE' 'fieldPath: metadata.namespace' \
     && dhas Deployment aap-operator-api 'name: POD_NAMESPACE' 'fieldPath: metadata.namespace'
@@ -2004,7 +2008,8 @@ otel_certificate() {
   render -f "$here/otel.values.yaml" || return 1
   dhas ConfigMap aap-operator '^        certificate: /etc/aap/otel/ca/ca.pem$' || return 1
   dhas Deployment aap-operator 'name: otel-operator-ca' 'key: ca.pem' 'path: ca.pem' 'mountPath: /etc/aap/otel/ca' || return 1
-  dhas Deployment aap-operator-api 'name: OTEL_EXPORTER_OTLP_CERTIFICATE' 'value: /etc/aap/otel/ca/ca.pem' 'name: otel-api-ca' 'key: bundle.pem' 'mountPath: /etc/aap/otel/ca' || return 1
+  dhas ConfigMap aap-operator-api 'certificate: /etc/aap/otel/ca/ca.pem' || return 1
+  dhas Deployment aap-operator-api 'name: otel-api-ca' 'key: bundle.pem' 'mountPath: /etc/aap/otel/ca' || return 1
   [ "$(op_pod | awk '/name: otel-ca/ { s = 1 } s && /readOnly: true/ { n++; exit } END { print n + 0 }')" -eq 1 ]
 }
 check "otel: the CA bundle is a read-only ConfigMap mount and the file names its path" otel_certificate
@@ -2026,7 +2031,8 @@ otel_certificate_alone() {
   render -f "$here/api.values.yaml" --set api.otel.enabled=true --set api.otel.endpoint=https://c:4318/v1/traces \
     --set-json 'api.otel.to=[{"podSelector":{"matchLabels":{"a":"b"}}}]' \
     --set api.otel.certificate.configMap=only-api-ca --set api.otel.certificate.key=ca.pem || return 1
-  dhas Deployment aap-operator-api 'name: OTEL_EXPORTER_OTLP_CERTIFICATE' 'name: otel-ca' 'name: only-api-ca' 'mountPath: /etc/aap/otel/ca' || return 1
+  dhas ConfigMap aap-operator-api 'certificate: /etc/aap/otel/ca/ca.pem' || return 1
+  dhas Deployment aap-operator-api 'name: otel-ca' 'name: only-api-ca' 'mountPath: /etc/aap/otel/ca' || return 1
   dlacks Deployment aap-operator-api 'otel-headers|AAP_OTEL_HEADERS_FILE'
 }
 check "otel: a CA bundle with no headers Secret still gets its volume and mount (operator and API), and no headers volume" otel_certificate_alone
@@ -2076,17 +2082,17 @@ otel_api_off_is_not_rendered() {
 }
 check "api off: api.otel is neither rendered nor checked (a bad endpoint renders)" otel_api_off_is_not_rendered
 check "api off: api.otel is not checked" renders_ok --set api.otel.enabled=true --set api.otel.endpoint=nonsense
-otel_config_file_is_untouched() {
+otel_config_file_names_the_traces() {
   a=$(mktemp) || return 1
   b=$(mktemp) || return 1
   sh "$here/api-config.sh" "$a" -f "$here/otel.values.yaml" || return 1
   sh "$here/api-config.sh" "$b" -f "$here/otel.values.yaml" --set api.otel.enabled=false --set otel.enabled=false || return 1
-  cmp -s "$a" "$b"
+  grep -q 'endpoint: https://otel-gateway' "$a" && ! grep -q 'telemetry' "$b"
   r=$?
   rm -f "$a" "$b"
   return "$r"
 }
-check "otel: the API's configuration file is the same with tracing on and off (tracing is not in the file)" otel_config_file_is_untouched
+check "otel: the API's configuration file names the traces with api.otel on, and has no telemetry section with it off (ANR-970)" otel_config_file_names_the_traces
 otel_no_secret() {
   render -f "$here/otel.values.yaml" || return 1
   lacks '^kind: Secret$' && lacks '(ghp_|github_pat_|gho_|sk-[A-Za-z0-9]{8}|-----BEGIN|AKIA[0-9A-Z]{16}|xox[bp]-|eyJ[A-Za-z0-9_-]{20})'

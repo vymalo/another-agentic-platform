@@ -153,16 +153,17 @@ Each row was run with `helm template`. Every refusal prints `templates/servicemo
 | `headersSecret.name` and no `key` | 1 | `otel.headersSecret needs both name and key, or neither` |
 | `samplerRatio: 2` | 1 | `otel.samplerRatio must be a number from 0 to 1, got "2"` |
 | `api.extraEnv` sets `OTEL_EXPORTER_OTLP_HEADERS` | 1 | `api.extraEnv: OTEL_EXPORTER_OTLP_HEADERS is the chart's: the tracing variables are api.otel (OTEL_*, AAP_OTEL_*, and POD_NAME and POD_NAMESPACE while api.otel.enabled)` |
+| `api.extraEnv` sets `RUST_LOG` | 1 | `api.extraEnv: RUST_LOG is read by nothing since ANR-970: …` (the API takes everything from its file) |
 
 Each has a control: the smallest setting above renders, exit 0. With `api.enabled` false, `api.otel` is neither rendered nor checked.
 
-The binaries refuse more than the chart can see. Both checks need no cluster and no collector, and neither reads the files a setting names.
+The binaries refuse more than the chart can see. Both checks need no cluster and no collector, and neither reads the files a setting names. **Since ANR-970 the API reads its traces from its file, not from `OTEL_*` variables** (the chart renders `telemetry.otlp` into it), so a variable of that name is ignored and the refusals are the section's.
 
 | Change | Binary | Exit | It says |
 |---|---|---|---|
-| `OTEL_EXPORTER_OTLP_PROTOCOL=grpc` on the environment the chart renders | `api --check` | 1 | `OTEL_EXPORTER_OTLP_PROTOCOL: only http/json is supported (a collector turns it into grpc or http/protobuf)` |
-| the same with `http/protobuf` | `api --check` | 1 | the same sentence |
-| `OTEL_EXPORTER_OTLP_HEADERS=a=b` | `api --check` | 1 | `OTEL_EXPORTER_OTLP_HEADERS: not supported: put the headers in the file AAP_OTEL_HEADERS_FILE names` |
+| `api.otel.endpoint` changed to `http://` beside a header | `api --check` | 1 | `telemetry.otlp.headers: the headers would be sent in clear: the endpoint must be https` |
+| `api.otel.sampler: sometimes` | `api --check` | 1 | `telemetry.otlp.sampler: must be always_on, always_off or traceidratio (or their parentbased_ forms)` |
+| an unknown key in the API's `telemetry` section | `api --check` | 1 | the key, named |
 | the operator's file with `endpoint` changed to `http://` beside a header | `operator run --check` | 78 | `telemetry.otlp.headers: the headers would be sent in clear: the endpoint must be https` |
 | the operator's file with `sampler: sometimes` | `operator run --check` | 78 | `telemetry.otlp.sampler: must be always_on, always_off or traceidratio (or their parentbased_ forms)` |
 

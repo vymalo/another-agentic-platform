@@ -163,8 +163,7 @@ the component is on, `.dns` whether the block has a DNS rule of its own (the ope
 {{- if and $o.headersSecret (kindIs "map" $o.headersSecret) $o.headersSecret.name (not (hasPrefix "https://" $o.endpoint)) -}}
 {{- fail (printf "%s.headersSecret needs an https endpoint: the headers (a token) would be sent in clear to %s.endpoint" $what $what) -}}
 {{- end -}}
-{{- /* ANR-962: the operator's configuration file names the header whose value the Secret's key holds; the API's file is a
-`name=value,...` list, so it has no `header`. */}}
+{{- /* ANR-962 and ANR-970: both configuration files name the header whose value the Secret's key holds, so both have `header`. */}}
 {{- if kindIs "map" $o.headersSecret -}}
 {{- if .headersInConfig -}}
 {{- $header := get $o.headersSecret "header" -}}
@@ -175,10 +174,6 @@ the component is on, `.dns` whether the block has a DNS rule of its own (the ope
 {{- if not (has $k (list "name" "key" "header")) -}}
 {{- fail (printf "%s.headersSecret.%s is not a setting: name, key or header" $what $k) -}}
 {{- end -}}
-{{- end -}}
-{{- else -}}
-{{- if get $o.headersSecret "header" -}}
-{{- fail (printf "%s.headersSecret.header is the operator's: its configuration file names the header, and this component's file is a name=value list (remove the key)" $what) -}}
 {{- end -}}
 {{- end -}}
 {{- end -}}

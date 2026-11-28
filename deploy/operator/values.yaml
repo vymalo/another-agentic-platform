@@ -692,6 +692,11 @@ api:
     headersSecret:
       name: ""
       key: ""
+      # The header the Secret's key holds the value of (`authorization` when empty), as the operator's `otel` names it.
+      # UPGRADE NOTE (ANR-970): the API's file used to be given a `name=value,...` list through a variable; the file now names
+      # the header, so the key must hold **the value alone** (`Bearer abc`). A key that still holds the old shape turns the
+      # API's tracing off with one warning and the API keeps running. Rewrite the Secret's key before upgrading.
+      header: ""
     certificate:
       configMap: ""
       key: ""

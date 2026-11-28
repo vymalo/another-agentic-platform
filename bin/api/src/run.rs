@@ -34,21 +34,10 @@ use crate::serve::{self, Check, Health};
     about = "The Platform API of the admin dashboard"
 )]
 pub struct Args {
-    /// The configuration file (`config.example.yaml` documents every key).
-    #[arg(long, env = "API_CONFIG_FILE")]
+    /// The configuration file (`config.example.yaml` documents every key). Nothing else names a setting: the three ports,
+    /// the log's filter and the traces are the file's (ANR-970).
+    #[arg(long, default_value = "/etc/aap-api/config.yaml")]
     pub config: PathBuf,
-
-    /// Where the API listens. Wins over `listen` in the file.
-    #[arg(long, env = "API_LISTEN_ADDR")]
-    pub listen: Option<SocketAddr>,
-
-    /// Where `/healthz` and `/readyz` are served. Wins over `healthListen` in the file.
-    #[arg(long, env = "HEALTH_ADDR")]
-    pub health_addr: Option<SocketAddr>,
-
-    /// Where `/metrics` is served. Wins over `metricsListen` in the file.
-    #[arg(long, env = "METRICS_ADDR")]
-    pub metrics_addr: Option<SocketAddr>,
 
     /// Read the configuration file, say whether the API can work with it, and exit. Needs no cluster and no issuer.
     #[arg(long)]
@@ -363,8 +352,8 @@ fn ended(what: &str, result: Result<Result<()>, tokio::task::JoinError>) -> anyh
     }
 }
 
-/// `api`: read the configuration, compose, serve.
-pub async fn run(args: Args) -> Result<()> {
+/// `api`: compose what the file says, and serve.
+pub async fn run(settings: Settings) -> Result<()> {
     let Settings {
         listen,
         health_listen,
@@ -373,15 +362,15 @@ pub async fn run(args: Args) -> Result<()> {
         cors,
         defaults,
         workload,
-    } = config::load(&args.config)?;
+        log_filter: _,
+        telemetry,
+    } = settings;
     // Before the cluster and the issuer. A tracing setting that is refused never stops the API (tracing is not a security
-    // control, and platforms inject OTEL_* variables of their own): one warning, by variable, and tracing is off.
-    let started = aap_trace_otlp::start("aap-api", env!("CARGO_PKG_VERSION"));
+    // control): one warning, by setting, and tracing is off.
+    let started =
+        aap_trace_otlp::start_section("aap-api", env!("CARGO_PKG_VERSION"), telemetry.as_ref());
     started.warn();
     let tracer = started.tracer;
-    let listen = args.listen.unwrap_or(listen);
-    let health_listen = args.health_addr.unwrap_or(health_listen);
-    let metrics_listen = args.metrics_addr.unwrap_or(metrics_listen);
     tracing::info!(
         namespace = %defaults.namespace,
         origins = cors.as_slice().len(),
