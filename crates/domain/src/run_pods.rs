@@ -16,6 +16,7 @@ use aap_ports::{
 };
 use k8s_openapi::api::core::v1::{NodeAffinity, Toleration};
 use k8s_openapi::api::networking::v1::NetworkPolicyEgressRule;
+use k8s_openapi::apimachinery::pkg::apis::meta::v1::LabelSelector;
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 
@@ -1104,6 +1105,19 @@ fn only_known_fields(value: &Value) -> Result<(), String> {
     Ok(())
 }
 
+/// Whether a label selector selects everything: it names no label and no expression. `matchLabels: {}` and a bare
+/// `matchLabels:` (null) are one selector to Kubernetes, and both select every namespace — or every pod.
+fn selects_everything(selector: &LabelSelector) -> bool {
+    selector
+        .match_labels
+        .as_ref()
+        .is_none_or(|labels| labels.is_empty())
+        && selector
+            .match_expressions
+            .as_ref()
+            .is_none_or(|expressions| expressions.is_empty())
+}
+
 /// A `NetworkPolicy` egress entry of the settings as a neutral rule. Named ports are refused: the neutral
 /// port is a number.
 fn egress_rule(value: &Value) -> Result<EgressRule, String> {
@@ -1128,6 +1142,29 @@ fn egress_rule(value: &Value) -> Result<EgressRule, String> {
                 block.cidr
             ));
         }
+        // A selector that names nothing selects everything (ANR-1355). `namespaceSelector: {}` is every namespace of the
+        // cluster; a `podSelector: {}` beside no `namespaceSelector` is every pod of the run pod's own namespace — the
+        // agent's own pod and the egress proxy among them — so a run pod could reach the agent directly and the proxy would
+        // stop being the one way out. Refused here, in the run pods' path, and not in `convert::peers`:
+        // `spec.access.allowFrom` is the agent's own list, where "any namespace may reach this agent" is a deployment's
+        // deliberate choice (ANR-1353 scoped the `/0` the same way). A `podSelector: {}` beside a namespace the peer names
+        // is "every pod of those namespaces", a target the author named, and stays.
+        if p.namespace_selector
+            .as_ref()
+            .is_some_and(selects_everything)
+        {
+            return Err(
+                "the namespaceSelector has no matchLabels and no matchExpressions: it selects every namespace, so name the namespaces"
+                    .to_owned(),
+            );
+        }
+        if p.namespace_selector.is_none() && p.pod_selector.as_ref().is_some_and(selects_everything)
+        {
+            return Err(
+                "the podSelector has no matchLabels and no matchExpressions and the peer names no namespace: it selects every pod of the run pod's own namespace, the agent's own included, so name the pods or the namespaces"
+                    .to_owned(),
+            );
+        }
         let (mut peers, problems) = crate::convert::peers(std::slice::from_ref(p));
         if let Some((_, message)) = problems.into_iter().next() {
             return Err(message);
@@ -1142,8 +1179,16 @@ fn egress_rule(value: &Value) -> Result<EgressRule, String> {
             "SCTP" => Protocol::Sctp,
             other => return Err(format!("protocol {other:?} is not TCP, UDP or SCTP")),
         };
+        // A port entry with no `port` matches every port of its protocol (Kubernetes): that is a typo's widening, and an
+        // `endPort` with no start is meaningless. A rule with no `ports` at all stays Kubernetes' "every port", which is
+        // visible in the file and documented in `deploy/operator/README.md` (ANR-1355).
         let port = match &p.port {
-            None => None,
+            None => {
+                return Err(
+                    "a port entry names no `port`: it matches every port of its protocol, so name the port"
+                        .to_owned(),
+                );
+            }
             Some(k8s_openapi::apimachinery::pkg::util::intstr::IntOrString::Int(n)) => {
                 Some(u16::try_from(*n).map_err(|_| format!("port {n} is not a port number"))?)
             }

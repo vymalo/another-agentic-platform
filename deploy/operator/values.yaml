@@ -167,8 +167,10 @@ runPods:
     # More egress rules for a run pod, as NetworkPolicy `egress` entries: an in-cluster target the proxy cannot serve (it connects to
     # public IPv4 addresses only), such as a model gateway in the cluster. Add its host to `egressProxy.extraNoProxy` too, or the tools
     # send the request to the proxy, which refuses it.
-    # Each rule needs a `to` (no `to` allows every destination) and no `ipBlock` may be a /0: the operator
-    # refuses both in the file it reads (ANR-1353). The chart does not check them yet.
+    # Each rule needs a `to` (no `to` allows every destination), no `ipBlock` may be a /0, no selector may be empty
+    # (`namespaceSelector: {}` is every namespace; `podSelector: {}` beside no namespace is every pod of the run pod's own
+    # namespace), and a port entry names its `port`: the operator refuses all of them in the file it reads (ANR-1353,
+    # ANR-1355). The chart refuses the `to`, the /0 and the empty `namespaceSelector` at render (ANR-1339).
     extraEgress: []
   # The only way out of a run pod to the internet (adam-rs ADR 0042): `adam-egress`, an HTTPS-only forward proxy, one Deployment per
   # agent that has run pods, from THE AGENT'S OWN CODER IMAGE (`tini -- adam-egress`; no other image to pin). It accepts `CONNECT host:443`
