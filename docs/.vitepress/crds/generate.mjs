@@ -33,9 +33,16 @@ const BOUNDS = [
 const DESCRIPTION_MAX = 260;
 const MAX_DEPTH = 12;
 
-const cell = (text) => String(text ?? "").replace(/\|/g, "\\|").replace(/\s+/g, " ").trim();
+// A code span (a run of backticks up to the next run of the same length) or one backslash.
+const SPAN_OR_BACKSLASH = /(?<!`)(`+)(?!`)[\s\S]*?(?<!`)\1(?!`)|\\/g;
+// Backslashes first, then pipes, so Markdown shows the source: outside a code span it reads `\\` as one backslash, and
+// would drop the one in `\.` or `\|`; inside a span a backslash is literal and stays single.
+const escapeText = (text) =>
+  String(text ?? "").replace(SPAN_OR_BACKSLASH, (found) => (found === "\\" ? "\\\\" : found)).replace(/\|/g, "\\|");
+// For prose: whitespace runs are one space.
+const cell = (text) => escapeText(text).replace(/\s+/g, " ").trim();
 // For a cell that holds code: its spaces are part of the value. Only a line break goes, because it would end the row.
-const escapeCell = (text) => String(text ?? "").replace(/\|/g, "\\|").replace(/[\r\n]+/g, " ");
+const escapeCell = (text) => escapeText(text).replace(/[\r\n]+/g, " ");
 const code = (text) =>
   `<code>${String(text).replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;")}</code>`;
 
@@ -183,12 +190,11 @@ function specTable(spec) {
 /** A row as a Markdown table reads it: only a pipe with no backslash before it ends a cell. */
 const splitRow = (row) => row.split(/(?<!\\)\|/).slice(1, -1).map((text) => text.trim());
 
-/** One row, six cells, and in cell `index` the source `a|b` escaped exactly once. */
-function pipeCase(name, field, index) {
+/** One row, six cells, and cell `index` exactly `expected`: the Markdown, with its escapes. */
+function pipeCase(name, field, index, expected) {
   const rows = specTable({ type: "object", properties: { field } });
   const cells = splitRow(rows[0] ?? "");
-  const text = cells[index] ?? "";
-  const ok = rows.length === 1 && cells.length === 6 && text.includes("a\\|b") && !text.includes("\\\\|");
+  const ok = rows.length === 1 && cells.length === 6 && cells[index] === expected;
   return { name, ok, detail: `${cells.length} cells in ${rows[0]}` };
 }
 
@@ -202,17 +208,38 @@ function spacesCase(name, field, index, source) {
 
 /** What the generator does with shapes the checked-in CRDs do not have, as `{ name, ok, detail }`. */
 export function unitCases() {
+  // `String.raw`: every backslash below is one character, as it is in the page.
   const [pattern, choice, fallback, description, rule] = [
-    pipeCase("a pattern with a pipe stays in its cell", { type: "string", pattern: "^(a|b)$" }, 4),
-    pipeCase("an enum value with a pipe stays in its cell", { type: "string", enum: ["a|b"] }, 4),
-    pipeCase("a string default with a pipe stays in its cell", { type: "string", default: "a|b" }, 3),
-    pipeCase("a description with a pipe in a code span stays in its cell", { type: "string", description: "the `a|b` value" }, 5),
+    pipeCase("a pattern with a pipe stays in its cell", { type: "string", pattern: "^(a|b)$" }, 4, String.raw`matches <code>^(a\|b)$</code>`),
+    pipeCase("an enum value with a pipe stays in its cell", { type: "string", enum: ["a|b"] }, 4, String.raw`one of <code>"a\|b"</code>`),
+    pipeCase("a string default with a pipe stays in its cell", { type: "string", default: "a|b" }, 3, String.raw`<code>"a\|b"</code>`),
+    pipeCase(
+      "a description with a pipe in a code span stays in its cell",
+      { type: "string", description: "the `a|b` value" },
+      5,
+      "the `a\\|b` value",
+    ),
     pipeCase(
       "a rule message with a pipe is escaped once",
       { type: "string", "x-kubernetes-validations": [{ rule: "true", message: "a|b" }] },
       4,
+      String.raw`rule: a\|b`,
     ),
   ];
+  // Outside a code span Markdown reads `\\` as one backslash, so a backslash of the source is written twice.
+  const backslash = pipeCase(
+    "a backslash before a pipe is kept",
+    { type: "string", pattern: String.raw`a\|b` },
+    4,
+    String.raw`matches <code>a\\\|b</code>`,
+  );
+  // Inside a code span it is literal, so it is written once; only the pipe gains its escape.
+  const spanBackslash = pipeCase(
+    "a backslash in a description's code span is not doubled",
+    { type: "string", description: "split on `\\n` or `a\\|b`, not \\. here" },
+    5,
+    "split on `\\n` or `a\\\\|b`, not \\\\. here",
+  );
 
   const both = {
     type: "object",
@@ -254,7 +281,7 @@ export function unitCases() {
     spacesCase("a string default keeps its two spaces", { type: "string", default: "a  b" }, 3, '"a  b"'),
   ];
 
-  return [pattern, choice, fallback, description, rule, name, map, parentType, plain, ...spaced];
+  return [pattern, choice, fallback, description, rule, backslash, spanBackslash, name, map, parentType, plain, ...spaced];
 }
 
 /** The pages, in the CRD file's order: `{ file, content }` per kind. */
