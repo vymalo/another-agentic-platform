@@ -31,6 +31,10 @@ RUN apt-get update \
  && apt-get install -y --no-install-recommends musl-tools perl \
  && rm -rf /var/lib/apt/lists/* \
  && rustup target add "$TARGET"
+# The musl target needs a musl linker: Debian's `cc` is glibc's gcc and would link a dynamic binary. This is the
+# x86_64 spelling (CI builds linux/amd64); another target sets its own `musl-gcc`/`<arch>-linux-musl-gcc`.
+ENV CARGO_TARGET_X86_64_UNKNOWN_LINUX_MUSL_LINKER=musl-gcc \
+    CC_x86_64_unknown_linux_musl=musl-gcc
 WORKDIR /src
 
 # The recipe is the dependency graph (the manifests and the lockfile), so it only changes with them.
