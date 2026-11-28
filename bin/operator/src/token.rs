@@ -166,7 +166,7 @@ mod tests {
             let mut file = std::fs::File::create(&tmp).unwrap();
             file.write_all(b"bbbb").unwrap();
             file.sync_all().unwrap();
-            let mut times = std::fs::FileTimes::new();
+            let times = std::fs::FileTimes::new();
             times.set_modified(original);
             file.set_times(times).unwrap();
         }
