@@ -6,7 +6,8 @@
 //! | `StatefulSet` `<workload>` | the workload has a stable identity (`Workload::stable_identity`) |
 //! | `Deployment` `<workload>` | it has not |
 //! | `PodDisruptionBudget` `<workload>` | `Workload::min_available` is set |
-//! | `Service` `<service>` | always, selecting `Network::selects` |
+//! | `Service` `<service>` | always, selecting `Network::selects` (or `Network::route_to` while it is set) |
+//! | `Service` `<service>-direct` | `Network::direct` (the activator forwards to it while the deployment fronts the agent) |
 //! | `NetworkPolicy` `<service>` | `Network::allow_from` is not empty |
 //! | `ConfigMap` `<file set>` | one per `FileSet` |
 //! | `PersistentVolumeClaim` `<service>-<volume>` | a `Shared` persistent volume |
@@ -108,14 +109,19 @@ pub struct Rendered {
     pub claims: Vec<core::PersistentVolumeClaim>,
     /// The Service.
     pub service: core::Service,
+    /// `<svc>-direct`: the workload's selector under a name of its own, while the deployment fronts the agent with an
+    /// activator (AD-058 P3a-2), so the activator has a stable name to forward to whether `<svc>` selects its own pods
+    /// or the workload's.
+    pub direct_service: Option<core::Service>,
     /// The workloads and the role each runs, in the order of the spec.
     pub workloads: Vec<(Role, WorkloadObject)>,
     /// One per workload with `min_available`.
     pub disruption_budgets: Vec<PodDisruptionBudget>,
     /// Only when someone is allowed from.
     pub network_policy: Option<net::NetworkPolicy>,
-    /// The policy guards an activity listener (ANR-1030a): it must be applied before the workloads, so that no pod
-    /// serves the listener before the policy that keeps it to the operator exists.
+    /// The policy must be applied before the Service and the workloads: it guards an activity listener (ANR-1030a), so
+    /// no pod serves the listener before the policy that keeps it to the operator exists; or an activator fronts the
+    /// agent (AD-058 P3a-2), so no forward through `<svc>-direct` meets a policy that does not admit it yet.
     pub policy_first: bool,
     /// Only with run pods: what the account that makes them, and what they, may do.
     pub run_pods: Option<RunPodObjects>,
@@ -197,6 +203,9 @@ impl Rendered {
         }
         out.extend(self.claims.iter().map(doc));
         out.push(doc(&self.service));
+        if let Some(direct) = &self.direct_service {
+            out.push(doc(direct));
+        }
         for (_, w) in &self.workloads {
             out.push(match w {
                 WorkloadObject::StatefulSet(s) => doc(s.as_ref()),
@@ -308,11 +317,12 @@ pub fn render(id: &RuntimeId, spec: &RuntimeSpec) -> Result<Rendered, Error> {
     Ok(Rendered {
         config_maps,
         claims: claims.into_values().collect(),
-        service: cx.service(),
+        service: cx.service()?,
+        direct_service: cx.direct_service(),
         workloads,
         disruption_budgets,
         network_policy: cx.network_policy(),
-        policy_first: spec.network.activity.is_some(),
+        policy_first: spec.network.activity.is_some() || spec.network.activator.is_some(),
         run_pods: spec.run_pods.as_ref().map(|r| cx.run_pods(r)).transpose()?,
     })
 }
@@ -406,12 +416,13 @@ impl Cx<'_> {
         })
     }
 
-    fn service(&self) -> core::Service {
+    fn service(&self) -> Result<core::Service, Error> {
         let Network {
             port,
             selects,
             card_path,
             activity,
+            route_to,
             ..
         } = &self.spec.network;
         let mut metadata = self.meta(self.id.name(), service_labels(self.id), true, false);
@@ -421,11 +432,25 @@ impl Cx<'_> {
                 .get_or_insert_with(BTreeMap::new)
                 .insert(names::CARD_PATH_ANNOTATION.to_owned(), path.clone());
         }
-        core::Service {
+        // While it is set, `<svc>` sends to the activator's pods, which hold a request and wake the agent (AD-058
+        // P3a-2). A Service selector is a flat map: an expression cannot be expressed, and the spec is refused rather
+        // than silently routed somewhere else.
+        let selector = match route_to {
+            Some(route) => {
+                if !route.match_expressions.is_empty() {
+                    return Err(invalid(
+                        "the network's route_to has match expressions, which a Service selector cannot express",
+                    ));
+                }
+                route.match_labels.clone()
+            }
+            None => names::selector_labels(selects, self.id),
+        };
+        Ok(core::Service {
             metadata,
             spec: Some(core::ServiceSpec {
                 type_: Some("ClusterIP".to_owned()),
-                selector: Some(names::selector_labels(selects, self.id)),
+                selector: Some(selector),
                 ports: Some(
                     std::iter::once(core::ServicePort {
                         name: Some(PORT_NAME.to_owned()),
@@ -447,7 +472,37 @@ impl Cx<'_> {
                 ..core::ServiceSpec::default()
             }),
             ..core::Service::default()
+        })
+    }
+
+    /// `<svc>-direct`: the workload's selector under a name of its own, which the activator forwards to while `<svc>`
+    /// selects its own pods (AD-058 P3a-2). `None` unless the spec asks for it.
+    fn direct_service(&self) -> Option<core::Service> {
+        if !self.spec.network.direct {
+            return None;
         }
+        let network = &self.spec.network;
+        Some(core::Service {
+            metadata: self.meta(
+                &names::direct_service(self.id),
+                service_labels(self.id),
+                true,
+                false,
+            ),
+            spec: Some(core::ServiceSpec {
+                type_: Some("ClusterIP".to_owned()),
+                selector: Some(names::selector_labels(&network.selects, self.id)),
+                ports: Some(vec![core::ServicePort {
+                    name: Some(PORT_NAME.to_owned()),
+                    port: i32::from(network.port),
+                    target_port: Some(IntOrString::String(PORT_NAME.to_owned())),
+                    protocol: Some("TCP".to_owned()),
+                    ..core::ServicePort::default()
+                }]),
+                ..core::ServiceSpec::default()
+            }),
+            ..core::Service::default()
+        })
     }
 
     /// Ingress on the container port from the peers, and no egress rule: the agent needs git hosts,
@@ -459,8 +514,22 @@ impl Cx<'_> {
         if network.allow_from.is_empty() && network.activity.is_none() {
             return None;
         }
-        let a2a_peers = (!network.allow_from.is_empty())
-            .then(|| network.allow_from.iter().map(peer).collect::<Vec<_>>());
+        // The activator's pods (`activator`, set whenever an activator is configured) are admitted awake and asleep: a
+        // forward through `<svc>-direct` may arrive after the switch-back (AD-058 P3a-2). `route_to` is only where
+        // `<svc>` sends while the agent sleeps. With an empty `allow_from` the rule has no `from` and admits them
+        // already: naming them there would shut everyone else out.
+        let mut a2a_peers: Vec<net::NetworkPolicyPeer> =
+            network.allow_from.iter().map(peer).collect();
+        if !a2a_peers.is_empty()
+            && let Some(activator) = &network.activator
+        {
+            a2a_peers.push(net::NetworkPolicyPeer {
+                pod_selector: Some(selector(activator)),
+                ..net::NetworkPolicyPeer::default()
+            });
+        }
+        // None when nobody is named: the A2A rule stays as open as it was without a policy (no `from`).
+        let a2a_peers = (!a2a_peers.is_empty()).then_some(a2a_peers);
         let mut ingress = vec![net::NetworkPolicyIngressRule {
             from: a2a_peers,
             ports: Some(vec![net::NetworkPolicyPort {

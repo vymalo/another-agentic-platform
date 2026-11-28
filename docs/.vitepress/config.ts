@@ -43,7 +43,7 @@ const sidebar = [
       { text: "Guides", link: "/guides/" },
       ...pages("guides", ["install-aapctl.md"]),
       { text: "Deploy", items: pages("guides/deploy", ["install.md", "platform-api.md", "run-pods.md", "metering.md"]) },
-      { text: "Operate", items: pages("guides/operate", ["not-ready.md", "upgrade.md", "replicas.md", "metrics.md", "traces.md"]) },
+      { text: "Operate", items: pages("guides/operate", ["not-ready.md", "upgrade.md", "replicas.md", "metrics.md", "dashboards.md", "traces.md"]) },
     ],
   },
   {
@@ -76,7 +76,7 @@ const sidebar = [
         ],
       },
       { text: "CLI", items: [{ text: "aapctl", link: "/reference/cli" }] },
-      { text: "Extensions", items: [{ text: "Extensions", link: "/extensions/" }, ...pages("extensions", ["release-channels-v1.md", "agent-registry-v1.md"])] },
+      { text: "Extensions", items: [{ text: "Extensions", link: "/extensions/" }, ...pages("extensions", ["release-channels-v1.md", "agent-registry-v1.md", "activity-v1.md"])] },
     ],
   },
   {

@@ -141,6 +141,12 @@ spec:
             - name: metering-token
               mountPath: /var/run/secrets/aap/metering
               readOnly: true
+            {{- if and (kindIs "map" .Values.metering.collector.caFile) .Values.metering.collector.caFile.configMap }}
+            # ANR-1194: a PEM bundle the sink reads once at start, mounted read-only from the named ConfigMap key.
+            - name: metering-ca
+              mountPath: /etc/aap/metering/ca
+              readOnly: true
+            {{- end }}
             {{- end }}
             {{- if include "aap.otel.on" . }}
             {{- include "aap.otel.mounts" (dict "block" .Values.otel) | nindent 12 }}
@@ -176,6 +182,15 @@ spec:
             items:
               - key: {{ .Values.metering.broker.tokenSecret.key }}
                 path: broker-token
+        {{- if and (kindIs "map" .Values.metering.collector.caFile) .Values.metering.collector.caFile.configMap }}
+        # ANR-1194: the ConfigMap whose key is the collector's CA bundle (https only; an empty CA for an http endpoint is refused).
+        - name: metering-ca
+          configMap:
+            name: {{ .Values.metering.collector.caFile.configMap }}
+            items:
+              - key: {{ .Values.metering.collector.caFile.key }}
+                path: ca.pem
+        {{- end }}
         {{- end }}
         {{- if include "aap.otel.on" . }}
         {{- include "aap.otel.volumes" (dict "block" .Values.otel) | nindent 8 }}

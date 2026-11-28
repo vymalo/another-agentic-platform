@@ -96,6 +96,12 @@ pub fn shared_claim(id: &RuntimeId, volume: &str) -> String {
     format!("{}-{volume}", id.name())
 }
 
+/// `<service>-direct`: the workload's selector under a name of its own (AD-058 P3a-2), which the activator forwards
+/// to while `<service>` selects the activator's pods.
+pub fn direct_service(id: &RuntimeId) -> String {
+    format!("{}-direct", id.name())
+}
+
 /// On the ConfigMap that holds the parameters of the admission policy of a service's run pods (`"true"`): what
 /// the policy's binding selects its parameters by (the operator chart renders the binding, slice D15a).
 pub const RUN_PODS_POLICY_LABEL: &str = "agents.vymalo.com/run-pods-policy";

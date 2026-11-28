@@ -176,6 +176,8 @@ What it does, in one paragraph: a controller reads an `AgentService` and the `Ag
 
 The adam-rs side is cited at revision `0391809`, the source of the coder image the netcup deployment pins: the files read there, and their links, are in [the agent page](../../.agents/docs/architecture/10-control-plane-and-crds.md#59a-operator-v0-adam-rs-agents).
 
+**Workingness (not built).** `AgentService.spec.scaling` will get an `activityProbe` that says how to ask an agent whether it holds work, by the contract [`activity/v1`](../extensions/activity-v1.md); an answer the operator cannot read counts as busy. The CRDs have no such field today. The design is [AD-075](11-decisions.md#ad-075--workingness-an-agent-is-asked-whether-it-holds-work-over-activityv1-and-unknown-is-busy) and the slice plan is ANR-1177's.
+
 ### Workspace layout
 
 One Cargo workspace in this repository. Crates are prefixed `aap-` (owner question in §93).
