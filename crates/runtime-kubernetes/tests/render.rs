@@ -525,8 +525,10 @@ fn the_network_policy_admits_the_activator() {
     });
     let (id, mut spec) = (r.id, r.runtime);
     assert!(!spec.network.allow_from.is_empty());
+    // Awake, after the switch-back: `<svc>` is on the workload again, and a forward through `<svc>-direct` must pass.
     spec.network.direct = true;
-    spec.network.route_to = Some(activator_selector());
+    spec.network.activator = Some(activator_selector());
+    spec.network.route_to = None;
     let docs = render(&id, &spec).unwrap().documents();
 
     let rule = &find(&docs, "NetworkPolicy", "chat")["spec"]["ingress"][0];
@@ -545,8 +547,8 @@ fn the_network_policy_admits_the_activator() {
         "the activator is in the same namespace: {activator}"
     );
 
-    // The condition is `direct` (the activator fronts the agent), not `route_to`: without it the peer is not written.
-    spec.network.direct = false;
+    // The condition is `activator` (one is configured), not `route_to` or `direct`: without it the peer is not written.
+    spec.network.activator = None;
     let docs = render(&id, &spec).unwrap().documents();
     let peers = find(&docs, "NetworkPolicy", "chat")["spec"]["ingress"][0]["from"]
         .as_array()
@@ -558,6 +560,39 @@ fn the_network_policy_admits_the_activator() {
             .any(|p| p["podSelector"]["matchLabels"]["app.kubernetes.io/name"] == "aap-activator"),
         "no activator is configured: {peers:?}"
     );
+}
+
+#[test]
+fn the_activator_does_not_close_an_open_port() {
+    // No `allowFrom`, but an activity listener, so there is a policy and its A2A rule has no `from`.
+    let r = resolved_activity("chat", 8081, |s, _| {
+        set(s, "/spec/scaling/idleTimeout", json!("15m"));
+        set(s, "/spec/access/allowFrom", json!([]));
+    });
+    let (id, mut spec) = (r.id, r.runtime);
+    assert!(spec.network.allow_from.is_empty());
+    assert!(spec.network.activity.is_some());
+    spec.network.direct = true;
+    spec.network.activator = Some(activator_selector());
+    let docs = render(&id, &spec).unwrap().documents();
+    let rule = &find(&docs, "NetworkPolicy", "chat")["spec"]["ingress"][0];
+    assert!(
+        rule.get("from").is_none(),
+        "naming the activator alone would shut everyone else out: {rule}"
+    );
+}
+
+#[test]
+fn with_an_activator_the_policy_is_applied_first() {
+    let (id, mut spec) = chat();
+    assert!(spec.network.activity.is_none());
+    spec.network.activator = Some(activator_selector());
+    assert!(
+        render(&id, &spec).unwrap().policy_first,
+        "or a forward through `<svc>-direct` is dropped until the policy lands"
+    );
+    spec.network.activator = None;
+    assert!(!render(&id, &spec).unwrap().policy_first);
 }
 
 #[test]
@@ -584,6 +619,7 @@ fn the_digest_does_not_move_when_the_switch_flips() {
     let before = aap_domain::spec_digest(&spec);
     spec.network.route_to = Some(activator_selector());
     spec.network.direct = true;
+    spec.network.activator = Some(activator_selector());
     assert_eq!(
         aap_domain::spec_digest(&spec),
         before,

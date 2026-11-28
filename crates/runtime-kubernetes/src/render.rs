@@ -119,8 +119,9 @@ pub struct Rendered {
     pub disruption_budgets: Vec<PodDisruptionBudget>,
     /// Only when someone is allowed from.
     pub network_policy: Option<net::NetworkPolicy>,
-    /// The policy guards an activity listener (ANR-1030a): it must be applied before the workloads, so that no pod
-    /// serves the listener before the policy that keeps it to the operator exists.
+    /// The policy must be applied before the Service and the workloads: it guards an activity listener (ANR-1030a), so
+    /// no pod serves the listener before the policy that keeps it to the operator exists; or an activator fronts the
+    /// agent (AD-058 P3a-2), so no forward through `<svc>-direct` meets a policy that does not admit it yet.
     pub policy_first: bool,
     /// Only with run pods: what the account that makes them, and what they, may do.
     pub run_pods: Option<RunPodObjects>,
@@ -321,7 +322,7 @@ pub fn render(id: &RuntimeId, spec: &RuntimeSpec) -> Result<Rendered, Error> {
         workloads,
         disruption_budgets,
         network_policy: cx.network_policy(),
-        policy_first: spec.network.activity.is_some(),
+        policy_first: spec.network.activity.is_some() || spec.network.activator.is_some(),
         run_pods: spec.run_pods.as_ref().map(|r| cx.run_pods(r)).transpose()?,
     })
 }
@@ -513,17 +514,17 @@ impl Cx<'_> {
         if network.allow_from.is_empty() && network.activity.is_none() {
             return None;
         }
-        // The activator's pods are admitted while the deployment fronts the agent (`direct`), whether `<svc>` selects
-        // them or the workload: a forward through `<svc>-direct` may arrive after the switch-back (AD-058 P3a-2). The
-        // pods are named by `route_to`, the only field that says which pods they are; when it is not set nothing here
-        // names them, and the rule is as open (or as closed) as `allow_from` alone makes it.
+        // The activator's pods (`activator`, set whenever an activator is configured) are admitted awake and asleep: a
+        // forward through `<svc>-direct` may arrive after the switch-back (AD-058 P3a-2). `route_to` is only where
+        // `<svc>` sends while the agent sleeps. With an empty `allow_from` the rule has no `from` and admits them
+        // already: naming them there would shut everyone else out.
         let mut a2a_peers: Vec<net::NetworkPolicyPeer> =
             network.allow_from.iter().map(peer).collect();
-        if network.direct
-            && let Some(route) = &network.route_to
+        if !a2a_peers.is_empty()
+            && let Some(activator) = &network.activator
         {
             a2a_peers.push(net::NetworkPolicyPeer {
-                pod_selector: Some(selector(route)),
+                pod_selector: Some(selector(activator)),
                 ..net::NetworkPolicyPeer::default()
             });
         }

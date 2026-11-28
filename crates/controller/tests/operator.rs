@@ -1719,6 +1719,11 @@ async fn the_service_routes_to_the_activator_until_ready_then_switches_back() {
     .await;
     let spec = r.runtime.inner.spec(&chat_id()).unwrap();
     assert_eq!(spec.network.route_to, None, "the switch is back");
+    assert_eq!(
+        spec.network.activator,
+        Some(activator().selector),
+        "the policy still admits the activator's forwards"
+    );
     assert!(
         spec.network.direct,
         "the activator's upstream stays while an activator fronts the agent"

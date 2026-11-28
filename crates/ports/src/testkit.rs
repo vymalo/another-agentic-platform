@@ -431,6 +431,7 @@ pub fn sample_spec(id: &RuntimeId) -> RuntimeSpec {
             activity: None,
             route_to: None,
             direct: false,
+            activator: None,
         },
         run_pods: None,
     }

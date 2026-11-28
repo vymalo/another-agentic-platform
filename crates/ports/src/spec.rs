@@ -248,6 +248,12 @@ impl RuntimeSpec {
         {
             return bad("the network's route_to names no pod".into());
         }
+        if let Some(activator) = &self.network.activator
+            && activator.match_labels.is_empty()
+            && activator.match_expressions.is_empty()
+        {
+            return bad("the network's activator names no pod".into());
+        }
         for w in &self.workloads {
             if w.runtime_class_name
                 .as_deref()
@@ -759,6 +765,12 @@ pub struct Network {
     /// becomes Ready is never cut by the name going. Off unless set, and then not in the serialised spec.
     #[serde(default, skip_serializing_if = "is_false")]
     pub direct: bool,
+    /// The activator's pods (AD-058 P3a-2), which the agent's NetworkPolicy admits on its port whenever an activator
+    /// fronts the agent, awake or asleep, so a forward through `<svc>-direct` is admitted after the switch-back.
+    /// `None`: no activator is configured, and no such peer is written. Off unless set, and then not in the serialised
+    /// spec, so the digest of a spec that never sets it is what it was.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub activator: Option<Selector>,
 }
 
 /// The activity listener's side of [`Network`]: its port, and who may reach it.

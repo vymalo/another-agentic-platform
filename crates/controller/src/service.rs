@@ -460,6 +460,9 @@ where
         // the workload while `<svc>-direct` stays, so a forward the activator makes as the agent becomes Ready is never
         // cut by the name disappearing.
         agent.runtime.network.direct = true;
+        // And the policy admits its pods, awake or asleep: a forward through `<svc>-direct` may come after the
+        // switch-back, when `route_to` is already cleared.
+        agent.runtime.network.activator = Some(activator.selector.clone());
         if obs.sleep.is_some() {
             agent.runtime.network.route_to = Some(activator.selector.clone());
         }

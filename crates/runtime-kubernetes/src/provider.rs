@@ -466,8 +466,9 @@ impl KubernetesRuntime {
             self.apply(ns, &run.role_binding).await?;
         }
         // A policy that only admits peers is fail-closed before its pods exist. With an activity listener it comes before
-        // the workloads, or a listener would be open to every pod until the policy lands (ANR-1030a); without one the
-        // policy keeps its place after them, as it always had.
+        // the workloads, or a listener would be open to every pod until the policy lands (ANR-1030a). With an activator it
+        // comes before them too, or its forwards through `<svc>-direct` would be dropped until the policy admits it
+        // (AD-058 P3a-2). With neither the policy keeps its place after them, as it always had.
         if r.policy_first
             && let Some(o) = &r.network_policy
         {
