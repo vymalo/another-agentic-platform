@@ -322,3 +322,255 @@ pub mod tombstones {
         check_conflict(&a, &b).await
     }
 }
+
+/// The conformance suite of [`AccountSource`](crate::AccountSource): one `check_*` per rule, and [`run`](accounts::run).
+///
+/// An adapter's test says what its source knows, one [`accounts::Case`] per pod: the account it must answer, no account
+/// (`Ok(None)`, not an error), or unavailable (`Err(AccountUnavailable)`, not `Ok(None)` — the meter holds the minute).
+/// A source whose answers change between calls (the broker against a stub, a fake made broken for one rule) calls the
+/// checks with the source in the state each rule needs; [`run`](accounts::run) is for a source whose answers are fixed.
+pub mod accounts {
+    use crate::{AccountSource, AccountUnavailable, PodRef, is_line_text};
+
+    /// What a source must answer for one pod.
+    #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+    pub enum Want {
+        /// The account, exactly; it is line text and not empty.
+        Account(&'static str),
+        /// No account: `Ok(None)`, not an error and not an empty account.
+        None,
+        /// The source cannot answer now: `Err(AccountUnavailable)`, not `Ok(None)`.
+        Unavailable,
+    }
+
+    /// One pod and what the source must answer for it.
+    #[derive(Clone, Debug)]
+    pub struct Case {
+        /// The pod the source is asked about.
+        pub pod: PodRef,
+        /// The answer it must give.
+        pub want: Want,
+    }
+
+    impl Case {
+        /// A pod whose account is `account`.
+        pub fn account(pod: PodRef, account: &'static str) -> Self {
+            Self {
+                pod,
+                want: Want::Account(account),
+            }
+        }
+
+        /// A pod with no account.
+        pub fn none(pod: PodRef) -> Self {
+            Self {
+                pod,
+                want: Want::None,
+            }
+        }
+
+        /// A pod the source cannot answer for now.
+        pub fn unavailable(pod: PodRef) -> Self {
+            Self {
+                pod,
+                want: Want::Unavailable,
+            }
+        }
+    }
+
+    /// Rule 1: a pod the source knows gets exactly its account, and the account is line text and not empty.
+    pub async fn check_accounts<S: AccountSource>(
+        source: &S,
+        cases: &[Case],
+    ) -> Result<(), String> {
+        for case in cases {
+            let Want::Account(want) = case.want else {
+                continue;
+            };
+            match source.account(&case.pod).await {
+                Ok(Some(got)) => {
+                    if got != want {
+                        return Err(format!(
+                            "accounts: {:?}: want {want:?}, got {got:?}",
+                            case.pod
+                        ));
+                    }
+                    if got.is_empty() || !is_line_text(&got) {
+                        return Err(format!(
+                            "accounts: {:?}: the account {got:?} is not line text",
+                            case.pod
+                        ));
+                    }
+                }
+                Ok(None) => {
+                    return Err(format!(
+                        "accounts: {:?}: no account, want {want:?}",
+                        case.pod
+                    ));
+                }
+                Err(AccountUnavailable) => {
+                    return Err(format!(
+                        "accounts: {:?}: unavailable, want {want:?}",
+                        case.pod
+                    ));
+                }
+            }
+        }
+        Ok(())
+    }
+
+    /// Rule 2: a pod with no account is `Ok(None)`, never an error and never an empty account.
+    pub async fn check_no_account<S: AccountSource>(
+        source: &S,
+        cases: &[Case],
+    ) -> Result<(), String> {
+        for case in cases {
+            if case.want != Want::None {
+                continue;
+            }
+            match source.account(&case.pod).await {
+                Ok(None) => {}
+                Ok(Some(got)) => {
+                    return Err(format!(
+                        "no-account: {:?}: got {got:?}, want none",
+                        case.pod
+                    ));
+                }
+                Err(AccountUnavailable) => {
+                    return Err(format!(
+                        "no-account: {:?}: unavailable, want none",
+                        case.pod
+                    ));
+                }
+            }
+        }
+        Ok(())
+    }
+
+    /// Rule 3: a source that cannot answer now is `Err(AccountUnavailable)`, never `Ok(None)` — the meter would give the
+    /// minute up instead of holding it.
+    pub async fn check_unavailable<S: AccountSource>(
+        source: &S,
+        cases: &[Case],
+    ) -> Result<(), String> {
+        for case in cases {
+            if case.want != Want::Unavailable {
+                continue;
+            }
+            match source.account(&case.pod).await {
+                Err(AccountUnavailable) => {}
+                Ok(None) => {
+                    return Err(format!(
+                        "unavailable: {:?}: none, want an error (the minute would be given up)",
+                        case.pod
+                    ));
+                }
+                Ok(Some(got)) => {
+                    return Err(format!(
+                        "unavailable: {:?}: got {got:?}, want an error",
+                        case.pod
+                    ));
+                }
+            }
+        }
+        Ok(())
+    }
+
+    /// Runs every rule on a source whose answers are fixed. The first broken rule is the error.
+    pub async fn run<S: AccountSource>(source: &S, cases: &[Case]) -> Result<(), String> {
+        check_accounts(source, cases).await?;
+        check_no_account(source, cases).await?;
+        check_unavailable(source, cases).await
+    }
+}
+
+#[cfg(test)]
+mod account_tests {
+    #![allow(clippy::unwrap_used, clippy::expect_used)]
+
+    use super::accounts::{Case, check_accounts, check_no_account, check_unavailable, run};
+    use crate::{AccountSource, AccountUnavailable, MemoryAccounts, PodRef};
+
+    fn run_pod(run: &str) -> PodRef {
+        PodRef::Run {
+            service: "coder".into(),
+            run: run.into(),
+        }
+    }
+
+    fn agent_pod(namespace: &str) -> PodRef {
+        PodRef::Agent {
+            namespace: namespace.into(),
+            service: "coder".into(),
+        }
+    }
+
+    #[tokio::test]
+    async fn the_memory_fake_passes_the_suite() {
+        let source = MemoryAccounts::new();
+        source.set_run("coder", "r1", "acct-run");
+        source.set_agent("ns", "coder", "acct-agent");
+        run(
+            &source,
+            &[
+                Case::account(run_pod("r1"), "acct-run"),
+                Case::account(agent_pod("ns"), "acct-agent"),
+                Case::none(run_pod("r2")),
+                Case::none(agent_pod("other")),
+            ],
+        )
+        .await
+        .unwrap();
+        // The fake made unavailable: the same pod, now an error, never `None`.
+        source.set_broken(true);
+        check_unavailable(&source, &[Case::unavailable(run_pod("r1"))])
+            .await
+            .unwrap();
+    }
+
+    /// A source broken in one way, to prove each rule fails.
+    struct Faulty(&'static str);
+
+    impl AccountSource for Faulty {
+        async fn account(&self, _pod: &PodRef) -> Result<Option<String>, AccountUnavailable> {
+            match self.0 {
+                "wrong" => Ok(Some("another".into())),
+                "empty" => Ok(Some(String::new())),
+                "space" => Ok(Some("a b".into())),
+                "none" => Ok(None),
+                "error" => Err(AccountUnavailable),
+                other => unreachable!("unknown fault {other}"),
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn each_rule_fails_on_a_source_broken_on_purpose() {
+        let pod = run_pod("r1");
+        for fault in ["wrong", "none", "error"] {
+            let e = check_accounts(&Faulty(fault), &[Case::account(pod.clone(), "acct")])
+                .await
+                .unwrap_err();
+            assert!(e.starts_with("accounts:"), "{fault}: {e}");
+        }
+        // The line-text rule: the answer is the account asked for, but it is not a usage line.
+        for (fault, want) in [("empty", ""), ("space", "a b")] {
+            let e = check_accounts(&Faulty(fault), &[Case::account(pod.clone(), want)])
+                .await
+                .unwrap_err();
+            assert!(e.contains("not line text"), "{fault}: {e}");
+        }
+        for fault in ["wrong", "error"] {
+            let e = check_no_account(&Faulty(fault), &[Case::none(pod.clone())])
+                .await
+                .unwrap_err();
+            assert!(e.starts_with("no-account:"), "{fault}: {e}");
+        }
+        for fault in ["none", "wrong"] {
+            let e = check_unavailable(&Faulty(fault), &[Case::unavailable(pod.clone())])
+                .await
+                .unwrap_err();
+            assert!(e.starts_with("unavailable:"), "{fault}: {e}");
+        }
+    }
+}
