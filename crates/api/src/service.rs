@@ -187,6 +187,7 @@ pub struct UnsupportedInterface {
 #[serde(rename_all = "camelCase")]
 #[x_kube(validation = Rule::new("!has(self.front) || self.topology == 'split'").message("scaling.front is only allowed with topology: split"))]
 #[x_kube(validation = Rule::new("has(self.idleTimeout) || (!has(self.wakeAhead) && !has(self.wakeTimeout))").message("scaling.wakeAhead and scaling.wakeTimeout need scaling.idleTimeout"))]
+#[x_kube(validation = Rule::new("has(self.idleTimeout) || !has(self.activityProbe)").message("scaling.activityProbe needs scaling.idleTimeout"))]
 pub struct Scaling {
     /// `combined`: one workload runs every role. `split`: a control plane (`<name>-front`) and workers.
     #[serde(default)]
@@ -218,10 +219,59 @@ pub struct Scaling {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[x_kube(validation = Rule::new("self.matches('^[1-9][0-9]*[smh]$') && duration(self) >= duration('5s') && duration(self) <= duration('5m')").message("scaling.wakeTimeout is a duration from 5s to 5m, such as 60s"))]
     pub wake_timeout: Option<String>,
+
+    /// How the operator asks the agent whether it holds work (AD-075, the contract `activity/v1`), for an
+    /// agent whose probe is not derived: an adam-rs agent's probe is the activity listener the operator
+    /// renders. Off unless set, and it changes nothing without `idleTimeout`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub activity_probe: Option<ActivityProbe>,
+}
+
+/// How the operator asks an agent whether it holds work (AD-075, the contract `activity/v1`): where the
+/// agent serves the answer, the Secret its pod reads its copy of the bearer from, and how often and how
+/// long to ask. It borrows the shape of a Kubernetes probe, not its effect: a bad answer restarts
+/// nothing and removes nothing from a Service; it only decides whether the agent may be scaled to zero.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct ActivityProbe {
+    /// Where the agent serves the contract: its port and path.
+    pub http_get: ActivityHttpGet,
+    /// The Secret and key the **agent's pod** reads its copy of the bearer from, by reference only. The
+    /// operator sends the bearer it holds in its own configuration and never reads this Secret (AD-024).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub token_secret_ref: Option<SecretKeyRef>,
+    /// How often the agent is asked, in seconds: 1 to 3600. Default 30.
+    #[serde(default = "thirty")]
+    #[schemars(range(min = 1, max = 3600))]
+    pub period_seconds: i32,
+    /// How long one question may take, in seconds: 1 to 60. Default 2.
+    #[serde(default = "two")]
+    #[schemars(range(min = 1, max = 60))]
+    pub timeout_seconds: i32,
+}
+
+/// The port and path of an [`ActivityProbe`] (AD-075). The host is the agent's own Service address.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, KubeSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct ActivityHttpGet {
+    /// The port the agent serves the contract on: 1 to 65535.
+    #[schemars(range(min = 1, max = 65535))]
+    pub port: i32,
+    /// The path: absolute, it starts with `/`.
+    #[x_kube(validation = Rule::new("self.startsWith('/')").message("scaling.activityProbe.httpGet.path is an absolute path: it starts with `/`"))]
+    pub path: String,
 }
 
 fn one() -> i32 {
     1
+}
+
+fn thirty() -> i32 {
+    30
+}
+
+fn two() -> i32 {
+    2
 }
 
 impl Default for Scaling {
@@ -233,6 +283,7 @@ impl Default for Scaling {
             idle_timeout: None,
             wake_ahead: None,
             wake_timeout: None,
+            activity_probe: None,
         }
     }
 }

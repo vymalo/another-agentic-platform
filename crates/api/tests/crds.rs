@@ -148,6 +148,16 @@ const SPEC_RULES: &[(&str, &str)] = &[
         "has(self.idleTimeout) || (!has(self.wakeAhead) && !has(self.wakeTimeout))",
         "scaling.wakeAhead and scaling.wakeTimeout need scaling.idleTimeout",
     ),
+    // AD-075: a probe is the way to ask whether the agent holds work, which only matters when it may sleep
+    (
+        "has(self.idleTimeout) || !has(self.activityProbe)",
+        "scaling.activityProbe needs scaling.idleTimeout",
+    ),
+    // AD-075: the probe's path is a path
+    (
+        "self.startsWith('/')",
+        "scaling.activityProbe.httpGet.path is an absolute path: it starts with `/`",
+    ),
     // beyond the list, same shape: a model endpoint is a value or a Secret key (an AgentConfig's
     // model.baseUrl and a ModelEndpoint's baseUrl)
     (
