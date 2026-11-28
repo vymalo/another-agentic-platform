@@ -3,10 +3,9 @@
 //! Each case runs `operator run` (the binary Cargo built for this test) against the cluster of
 //! `AAP_TEST_KUBECONFIG`, in a namespace of its own, with its own Secrets and objects named for the case:
 //! cases run in parallel and share nothing. Only their operators' starts take turns: a lock is held until the child
-//! listens, and a start is retried only on `Address already in use` (ANR-1363).
-//! They apply an `AgentConfig` and an `AgentService`, and check what
-//! the cluster ends up with: the workload, the Service, the ConfigMap, the status the operator writes, the
-//! Events, and that deleting the service completes its finalizer.
+//! listens, and a start is retried only on `Address already in use` (ANR-1363). They apply an `AgentConfig` and an
+//! `AgentService`, and check what the cluster ends up with: the workload, the Service, the ConfigMap, the status the
+//! operator writes, the Events, and that deleting the service completes its finalizer.
 //!
 //! The operator is given the stub image as its default agent image (`defaults.agentImage`, AD-029), which only the case of
 //! the shared objects (`ModelEndpoint`, `ToolProvider`) relies on: every other manifest names its image.
@@ -532,7 +531,14 @@ fn a_taken_health_port_is_what_bind_line_matches() {
     )
     .unwrap();
     let log = std::env::temp_dir().join(format!("{stem}.log"));
-    let mut child = Command::new(env!("CARGO_BIN_EXE_operator"))
+    let mut cmd = Command::new(env!("CARGO_BIN_EXE_operator"));
+    // A developer's or the runner's tracing variables are no business of this test: the child must reach the bind.
+    for (name, _) in std::env::vars() {
+        if name.starts_with("OTEL_") || name.starts_with("AAP_OTEL_") {
+            cmd.env_remove(name);
+        }
+    }
+    let mut child = cmd
         .arg("run")
         .arg("--config")
         .arg(&config_file)
@@ -558,7 +564,12 @@ fn a_taken_health_port_is_what_bind_line_matches() {
     drop(held);
     let stderr = std::fs::read_to_string(&log).unwrap_or_default();
     assert!(!status.success(), "{status}: {stderr}");
-    assert!(bind_line(&stderr).is_some(), "{status}: {stderr}");
+    // The line must be about the port this test held, not one another process took in the gap.
+    let bind = bind_line(&stderr);
+    assert!(
+        bind.is_some_and(|l| l.contains(&format!("127.0.0.1:{health}"))),
+        "{status}: {stderr}"
+    );
 }
 
 impl OperatorProc {
