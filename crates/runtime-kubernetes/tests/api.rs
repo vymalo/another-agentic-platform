@@ -9,10 +9,11 @@ mod support;
 use aap_ports::testkit::sample_spec;
 use aap_ports::{
     Classify, ErrorClass, IssueReason, Phase, Role, RuntimeId, RuntimeProvider, RuntimeSpec,
-    Surface,
+    Selector, Surface,
 };
 use aap_runtime_kubernetes::KubernetesRuntime;
 use serde_json::{Value, json};
+use std::collections::BTreeMap;
 use support::{Call, Fake, K};
 
 const NS: &str = "aap-test";
@@ -329,6 +330,52 @@ async fn what_the_spec_no_longer_asks_for_is_deleted_and_file_sets_wait_for_the_
     assert!(
         fake.get(K::ConfigMap, NS, "unrelated").is_some(),
         "another service's object"
+    );
+}
+
+#[tokio::test]
+async fn a_direct_service_goes_when_the_spec_no_longer_asks_for_it() {
+    let (fake, runtime) = setup();
+    // Fronted by an activator: `<svc>` sends to its pods and `<svc>-direct` reaches the workload.
+    let mut spec = sample_spec(&id());
+    spec.network.route_to = Some(Selector {
+        match_labels: BTreeMap::from([(
+            "app.kubernetes.io/name".to_owned(),
+            "aap-activator".to_owned(),
+        )]),
+        match_expressions: Vec::new(),
+    });
+    spec.network.direct = true;
+    runtime.ensure(&id(), &spec).await.unwrap();
+    assert!(
+        fake.get(K::Service, NS, "rt-direct").is_some(),
+        "the activator's upstream was applied"
+    );
+    assert!(fake.get(K::Service, NS, "rt").is_some());
+
+    // The deployment has no activator any more: the switch is off, and `<svc>-direct` goes. `<svc>` stays.
+    fake.clear_calls();
+    let spec = sample_spec(&id());
+    runtime.ensure(&id(), &spec).await.unwrap();
+    let deleted = kinds_written(&fake.calls(), "DELETE");
+    assert!(
+        deleted.contains(&(K::Service, "rt-direct".to_owned())),
+        "{deleted:?}"
+    );
+    assert!(
+        !deleted.contains(&(K::Service, "rt".to_owned())),
+        "the main Service stays: {deleted:?}"
+    );
+    assert!(fake.get(K::Service, NS, "rt-direct").is_none());
+    assert!(fake.get(K::Service, NS, "rt").is_some());
+
+    // A `<svc>-direct` someone else made is never deleted: only ours are listed.
+    let (fake, runtime) = setup();
+    fake.put(K::Service, NS, "rt-direct", helm("rt"));
+    runtime.ensure(&id(), &sample_spec(&id())).await.unwrap();
+    assert!(
+        fake.get(K::Service, NS, "rt-direct").is_some(),
+        "another manager's Service is theirs"
     );
 }
 

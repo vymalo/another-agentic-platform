@@ -61,7 +61,9 @@ pub fn digest_json(value: &Value) -> String {
 /// what a pod runs set aside.
 ///
 /// Set aside: the owner, the deletion policy, the digest itself, `suspend`, each workload's
-/// `replicas` and `min_available`, who may reach the port (and the activity listener: its port stays, who may reach it goes), and the run pods' own objects (`run_pods`: a
+/// `replicas` and `min_available`, who may reach the port (and the activity listener: its port stays, who may reach it goes), where
+/// the Service routes while it sleeps (`route_to`, `direct`), the activator's pods the policy admits
+/// (`activator`), and the run pods' own objects (`run_pods`: a
 /// quota, a policy and an account's rights are applied, and what a pod reads of them, the template, the
 /// variables and the account's name, is in the workloads and the file sets). A bigger `scaling.workers`, a
 /// suspend, a different `allowFrom` or a new owner must not roll the running pods; a changed image,
@@ -83,6 +85,11 @@ pub fn spec_digest(spec: &RuntimeSpec) -> String {
             from: Peer::default(),
             ..a
         }),
+        // Where the Service routes while it sleeps (`route_to`, `direct`): applied, and no pod runs differently for it.
+        route_to: None,
+        direct: false,
+        // The activator's pods the policy admits: who may reach the port, as `allow_from` is.
+        activator: None,
         ..pods.network
     };
     pods.run_pods = None;
@@ -134,6 +141,47 @@ mod tests {
         let one: Value = serde_json::from_str(r#"{"a":1,"b":{"c":2,"d":3}}"#).unwrap();
         let two: Value = serde_json::from_str(r#"{"b":{"d":3,"c":2},"a":1}"#).unwrap();
         assert_eq!(digest_json(&one), digest_json(&two));
+    }
+
+    #[test]
+    fn the_service_switch_is_not_part_of_the_digest() {
+        use aap_ports::{RuntimeId, Selector, testkit::sample_spec};
+        use std::collections::BTreeMap;
+
+        let id = RuntimeId::new("team", "rt");
+        let mut spec = sample_spec(&id);
+        let before = spec_digest(&spec);
+        let asleep: Value = serde_json::to_value(&spec).unwrap();
+        assert!(
+            asleep
+                .get("network")
+                .is_some_and(|n| n.get("route_to").is_none()
+                    && n.get("direct").is_none()
+                    && n.get("activator").is_none()),
+            "a spec that never sets the switch serialises without it: {asleep}"
+        );
+
+        spec.network.route_to = Some(Selector {
+            match_labels: BTreeMap::from([(
+                "app.kubernetes.io/name".to_owned(),
+                "aap-activator".to_owned(),
+            )]),
+            match_expressions: Vec::new(),
+        });
+        spec.network.direct = true;
+        spec.network.activator = spec.network.route_to.clone();
+        assert_eq!(
+            spec_digest(&spec),
+            before,
+            "where the Service routes is applied, it does not roll the pods"
+        );
+        let asleep: Value = serde_json::to_value(&spec).unwrap();
+        assert!(
+            asleep["network"].get("route_to").is_some()
+                && asleep["network"]["direct"].as_bool() == Some(true)
+                && asleep["network"].get("activator").is_some(),
+            "the switch is in the spec the provider renders: {asleep}"
+        );
     }
 
     #[test]
