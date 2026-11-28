@@ -171,7 +171,7 @@ async fn a_leaf_longer_lived_than_the_maximum_is_still_accepted() {
     };
     let auth = WorkloadAuth::new(CA, &clients).expect("the test CA bundle and table");
     let principal = auth
-        .authenticate(Some(&Certificate::new(der(ACCEPTED))))
+        .authenticate(Some(&der(ACCEPTED)))
         .await
         .expect("a long-lived leaf is accepted, and only warned about");
     assert_eq!(principal.subject(), ORCHESTRATOR);
