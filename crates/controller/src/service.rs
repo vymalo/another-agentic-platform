@@ -306,6 +306,8 @@ where
         // What runs was resolved from these, and stays while the service is blocked.
         config_status: previous.config.clone(),
         endpoints: previous.endpoints.clone(),
+        // AD-059, §10a: R4's drain controller computes the revisions; until then they are what they were.
+        revisions: previous.revisions.clone(),
     };
 
     // 2. The config.

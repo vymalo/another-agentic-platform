@@ -1,0 +1,114 @@
+# A service with release channels (AD-059, §10a): two revisions of one agent, `production` on the older one and
+# `staging` on the newer, and a request that names no channel gets `production`. A channel points at an
+# `AgentConfig`, so promoting one is editing this pointer, and a rollback is moving it back.
+apiVersion: agents.vymalo.com/v1alpha1
+kind: AgentService
+metadata:
+  name: chat
+  namespace: another-agentic-system
+spec:
+  description: A chat assistant, on two revisions.
+  configRef:
+    name: chat-r47
+  release:
+    defaultChannel: production
+    channels:
+      production:
+        configRef:
+          name: chat-r47
+      staging:
+        configRef:
+          name: chat-r51
+  interfaces:
+    a2a:
+      enabled: true
+      bearerTokensSecretRef:
+        name: chat-secrets
+        key: A2A_BEARER_TOKENS
+  scaling:
+    topology: combined
+    workers: 1
+  store:
+    postgres:
+      secretRef:
+        name: chat-db-app
+        key: uri
+  registry:
+    title: Chat
+    tags: [chat]
+---
+apiVersion: agents.vymalo.com/v1alpha1
+kind: AgentConfig
+metadata:
+  name: chat-r47
+  namespace: another-agentic-system
+spec:
+  harness:
+    type: adam-rs
+    adam:
+      binary: adam-agent
+      agent:
+        folder:
+          files:
+            instructions.md: |
+              ---
+              name: chat
+              description: A chat assistant.
+              ---
+              Your name is Chat.
+  model:
+    model: chat-model
+    baseUrl:
+      value: https://gateway.example.invalid/v1
+    apiKeySecretRef:
+      name: chat-secrets
+      key: MODEL_API_KEY
+  tools:
+    allowInsecureHttp: true
+  environment:
+    image:
+      ref: ghcr.io/vymalo/another-adam-rs/coder:sha-0391809@sha256:814d8ee329a5e4d8634e8a82532c035999c4be27aac086508b742a635449ea40
+    resources:
+      requests:
+        cpu: 100m
+        memory: 256Mi
+      limits:
+        memory: 512Mi
+---
+apiVersion: agents.vymalo.com/v1alpha1
+kind: AgentConfig
+metadata:
+  name: chat-r51
+  namespace: another-agentic-system
+spec:
+  harness:
+    type: adam-rs
+    adam:
+      binary: adam-agent
+      agent:
+        folder:
+          files:
+            instructions.md: |
+              ---
+              name: chat
+              description: A chat assistant.
+              ---
+              Your name is Chat. You answer with more detail.
+  model:
+    model: chat-model-next
+    baseUrl:
+      value: https://gateway.example.invalid/v1
+    apiKeySecretRef:
+      name: chat-secrets
+      key: MODEL_API_KEY
+  tools:
+    allowInsecureHttp: true
+  environment:
+    image:
+      ref: ghcr.io/vymalo/another-adam-rs/coder:sha-0391809@sha256:814d8ee329a5e4d8634e8a82532c035999c4be27aac086508b742a635449ea40
+    resources:
+      requests:
+        cpu: 100m
+        memory: 256Mi
+      limits:
+        memory: 512Mi

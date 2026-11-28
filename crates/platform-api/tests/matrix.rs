@@ -201,10 +201,12 @@ async fn every_permission_but_the_one_the_route_needs_is_403_naming_that_one() {
         assert!(r.is_problem("forbidden"), "{verb} {template}");
         let body = r.json();
         assert_eq!(body["permission"], needed, "{verb} {template}");
-        // It names that permission, and no other.
+        // It names that permission, and no other. A permission whose name is a prefix of the one the route needs
+        // (`platform:agents.read` of `platform:agents.read.owner`, AD-072) is in the text of any answer that names the
+        // longer one, so it cannot be told apart: the body's `permission` field, asserted above, is what proves which.
         let text = r.text();
         assert!(text.contains(needed), "{verb} {template}");
-        for other in &others {
+        for other in others.iter().filter(|o| !needed.contains(*o)) {
             assert!(
                 !text.contains(other),
                 "{verb} {template} names {other}: {text}"

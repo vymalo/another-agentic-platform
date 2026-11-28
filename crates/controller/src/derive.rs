@@ -2,8 +2,8 @@
 //! the state diagram of "Reconciliation"). Pure: no clock (the time is an argument), no I/O.
 
 use aap_api::{
-    AgentServiceStatus, ConfigStatus, Endpoints, RuntimePhase, ServiceState, SleepStatus,
-    condition_type as ty, reason,
+    AgentServiceStatus, ConfigStatus, Endpoints, RevisionStatus, RuntimePhase, ServiceState,
+    SleepStatus, condition_type as ty, reason,
 };
 use aap_ports::{Issue, IssueReason, Phase, RuntimeStatus, StoreState};
 use k8s_openapi::apimachinery::pkg::apis::meta::v1::{Condition, Time};
@@ -85,6 +85,10 @@ pub struct Observed {
     pub config_status: Option<ConfigStatus>,
     /// `status.endpoints`, kept the same way.
     pub endpoints: Option<Endpoints>,
+    /// `status.revisions` (AD-059, §10a): carried over as it was. R4's drain controller computes it; until then
+    /// nothing derives it, and a pass that replaced the status with an empty list would lose what the revisions
+    /// of a service with `spec.release` say.
+    pub revisions: Vec<RevisionStatus>,
 }
 
 /// The status of a pass. `previous` is the conditions the object had, so a condition whose status
@@ -120,6 +124,7 @@ pub fn derive(obs: &Observed, previous: &[Condition], now: &Time) -> AgentServic
         }),
         endpoints: obs.endpoints.clone(),
         sleep: obs.sleep.clone(),
+        revisions: obs.revisions.clone(),
         conditions,
     }
 }

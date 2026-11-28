@@ -740,7 +740,8 @@ fn a_folder_agent_with_many_workers_needs_no_placement() {
 }
 
 /// The invalid examples `validate` has nothing to say about, and why. The audience reaches no pod and
-/// the registry lists an item with a malformed one for administrators only (§60a, AD-028); and what is a
+/// the registry lists an item with a malformed one for administrators only (§60a, AD-028); the release channels
+/// (AD-059, §10a) are a shape the operator reads in R3 and R4 and nothing resolves yet; and what is a
 /// bound of the schema alone costs the operator nothing to resolve and it does not enforce: the number
 /// of extra MCP servers, the length of a title or of a provider's URL, and how many aliases, tools or
 /// headers a shared object lists, and the sleep durations of `scaling` (AD-058), whose bounds are CEL
@@ -748,6 +749,9 @@ fn a_folder_agent_with_many_workers_needs_no_placement() {
 /// `ToolProvider` (an address, the Secret references, the exclusive forms, the URL) is asked of it.
 fn outside_validate(file_name: &str) -> bool {
     file_name.starts_with("audience-")
+        // ANR-1100's bound (`spec.account` is at most 128 bytes): a schema bound, like the audience's.
+        || file_name == "account-too-long.yaml"
+        || file_name.starts_with("release-")
         || file_name == "extra-body-too-many.yaml"
         || file_name == "mcp-servers-too-many.yaml"
         || file_name.starts_with("scaling-")
@@ -859,6 +863,7 @@ fn the_shape_rules_of_the_crd_hold_without_an_api_server() {
     assert_eq!(
         skipped,
         [
+            "account-too-long.yaml",
             "audience-star-with-others.yaml",
             "audience-too-many.yaml",
             "audience-value-empty.yaml",
@@ -871,6 +876,10 @@ fn the_shape_rules_of_the_crd_hold_without_an_api_server() {
             "model-endpoint-models-too-many.yaml",
             "model-endpoint-title-empty.yaml",
             "model-endpoint-title-too-long.yaml",
+            "release-channel-name.yaml",
+            "release-channels-too-many.yaml",
+            "release-default-channel-not-a-channel.yaml",
+            "release-default-channel-too-long.yaml",
             "scaling-idle-timeout-malformed.yaml",
             "scaling-idle-timeout-too-long.yaml",
             "scaling-idle-timeout-too-short.yaml",

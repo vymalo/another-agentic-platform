@@ -1,0 +1,36 @@
+# Refused: release.channels has 9 channels; at most 8 (a bound of the schema, not a CEL rule).
+# expect: Too many: 9: must have at most 8 items
+apiVersion: agents.vymalo.com/v1alpha1
+kind: AgentService
+metadata:
+  name: invalid-release-channels-too-many
+  namespace: another-agentic-system
+spec:
+  configRef:
+    name: chat
+  release:
+    defaultChannel: c0
+    channels:
+      c0: { configRef: { name: chat } }
+      c1: { configRef: { name: chat } }
+      c2: { configRef: { name: chat } }
+      c3: { configRef: { name: chat } }
+      c4: { configRef: { name: chat } }
+      c5: { configRef: { name: chat } }
+      c6: { configRef: { name: chat } }
+      c7: { configRef: { name: chat } }
+      c8: { configRef: { name: chat } }
+  interfaces:
+    a2a:
+      enabled: true
+      bearerTokensSecretRef:
+        name: tokens
+        key: A2A_BEARER_TOKENS
+  scaling:
+    topology: combined
+    workers: 1
+  store:
+    postgres:
+      secretRef:
+        name: db
+        key: uri
