@@ -406,6 +406,13 @@ metering:
     batch: 512
     intervalSecs: 5
     timeoutSecs: 10
+    # ANR-1194: a PEM bundle that is the **only** trust for an `https` endpoint. The ConfigMap is an existing one in the operator's
+    # namespace; its key holds the PEM (the chart mounts it read-only at `/etc/aap/metering/ca/ca.pem`, and the sink reads it once
+    # at start). Both `configMap` and `key`, or neither. Empty: the platform roots (the OTel Collector's certificate is usually a
+    # public one). https endpoint only — a CA bundle for an http endpoint is a deployment mistake the chart refuses.
+    caFile:
+      configMap: ""
+      key: ""
   # How the operator resolves the two addresses above: the cluster's DNS. A rule with ports and no `to` would be port 53 to anywhere.
   dns:
     to:

@@ -130,6 +130,11 @@ data:
         batch: {{ $m.collector.batch | int }}
         intervalSecs: {{ $m.collector.intervalSecs | int }}
         timeoutSecs: {{ $m.collector.timeoutSecs | int }}
+        {{- if and (kindIs "map" $m.collector.caFile) $m.collector.caFile.configMap }}
+        # ANR-1194: the CA bundle the sink reads once at start, mounted from the named ConfigMap at a fixed file name (the volume
+        # names the item `ca.pem`, whatever the ConfigMap's key is).
+        caFile: /etc/aap/metering/ca/ca.pem
+        {{- end }}
     {{- end }}
     {{- if hasKey (default dict .Values.retention) "afterDeleteDays" }}
     retention:

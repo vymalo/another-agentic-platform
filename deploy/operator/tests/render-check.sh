@@ -2271,7 +2271,32 @@ metering_no_token_in_render() {
   refused 'metering.broker.tokenSecret.value is not a setting' -f "$here/metering.values.yaml" --set metering.broker.tokenSecret.value=hunter2
 }
 check "metering on: the Secret's key is the one named, no key or name is in the file, and a token value has no place" metering_no_token_in_render
-check "metering.collector.caFile is refused until the chart supports it" met_refused 'metering.collector.caFile is not a setting' --set metering.collector.caFile=/x.pem
+# ANR-1194: `metering.collector.caFile` is a ConfigMap reference (mirror of `otel.certificate`). Empty by default and then no trace of
+# it; both `configMap` and `key` together, both are names, an `http://` endpoint is refused (a CA bundle for `http` is a mistake).
+metering_cafile_defaults() {
+  met_on || return 1
+  dhas ConfigMap aap-operator '^      collector:$' || return 1
+  dlacks ConfigMap aap-operator 'caFile:' || return 1
+  dlacks Deployment aap-operator 'metering-ca' || return 1
+}
+check "metering on, no caFile: the file and the pod hold nothing of caFile" metering_cafile_defaults
+metering_cafile_renders() {
+  # The key is deliberately not `ca.pem`: the mount names the item `ca.pem`, so the file's path is fixed whatever the key is.
+  met_on --set metering.collector.endpoint=https://usage-collector.observability.svc:4318 \
+    --set metering.collector.caFile.configMap=ca-only \
+    --set metering.collector.caFile.key=bundle.pem || return 1
+  dhas ConfigMap aap-operator 'caFile: /etc/aap/metering/ca/ca.pem' || return 1
+  dhas Deployment aap-operator 'name: metering-ca' 'name: ca-only' 'key: bundle.pem' 'path: ca.pem' 'mountPath: /etc/aap/metering/ca' 'readOnly: true' || return 1
+}
+check "metering on with caFile: the file names the bundle's path, the pod mounts it read-only from the named ConfigMap" metering_cafile_renders
+check "metering.collector.caFile: a key that is not a setting is refused" met_refused 'metering.collector.caFile.value is not a setting' --set-json 'metering.collector.caFile={"value":"/x.pem"}'
+check "metering.collector.caFile that is not a map is refused" met_refused 'metering.collector.caFile must be a map' --set metering.collector.caFile=/x.pem
+check "metering.collector.caFile without key is refused" met_refused 'metering.collector.caFile needs both configMap and key, or neither' --set metering.collector.caFile.configMap=cm
+check "metering.collector.caFile without configMap is refused" met_refused 'metering.collector.caFile needs both configMap and key, or neither' --set metering.collector.caFile.key=ca.pem
+check "metering.collector.caFile with an http endpoint is refused" met_refused 'metering.collector.caFile needs an https endpoint' \
+  --set metering.collector.caFile.configMap=cm --set metering.collector.caFile.key=ca.pem
+check "metering.collector.caFile with a bad configMap name is refused" met_refused 'must be names' --set metering.collector.caFile.configMap='bad_name' --set metering.collector.caFile.key=ca.pem
+check "metering.collector.caFile: an unknown key is refused" met_refused 'is not a setting' --set-json 'metering.collector.caFile={"configMap":"cm","key":"k","extra":"x"}'
 check "metering.broker: a key that is not a setting is refused" met_refused 'metering.broker.foo is not a setting' --set metering.broker.foo=1
 check "metering.dns: a key that is not a setting is refused" met_refused 'metering.dns.foo is not a setting' --set metering.dns.foo=1
 metering_without_the_policy() { met_on --set networkPolicy.enabled=false --set-json 'metering.dns=null' || return 1; ! doc NetworkPolicy aap-operator | grep -q .; }

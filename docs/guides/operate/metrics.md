@@ -34,7 +34,21 @@ With the pod-minute meter on ([Turn on the pod-minute meter](../deploy/metering.
 | `aap_meter_account_failures_total` | none | Times the broker could not answer (a `401`, a `5xx`, a timeout): the pod's minutes are held for the next pass |
 | `aap_meter_owner_failures_total` | none | Times an agent pod's owner chain could not be read (a `5xx`, a timeout): the minutes are held for the next pass (ANR-1327) |
 
-Only the leading replica counts them. A pod of an agent makes no line: only run pods carry the size-weight annotation, so it stops at `no-weight` (its account is read from `AgentService.spec.account`, AD-073; its weight is ANR-1045), and before that its identity is the `AgentService` its owner chain ends at, not its labels (ANR-1327). The sink's own counters (queued, sent, refused, retrying) are not exported yet: until they are, an unreachable collector shows as a growing `aap_meter_send_failures_total` and nothing on the collector's side.
+Only the leading replica counts them. A pod of an agent makes no line: only run pods carry the size-weight annotation, so it stops at `no-weight` (its account is read from `AgentService.spec.account`, AD-073; its weight is ANR-1045), and before that its identity is the `AgentService` its owner chain ends at, not its labels (ANR-1327). The sink's own counters appear too while `metering.enabled` is true (ANR-1194), in the same place:
+
+| Series | Type | Counts |
+|---|---|---|
+| `aap_meter_sink_queued_total` | counter | Events the sink took into its queue |
+| `aap_meter_sink_sent_total` | counter | Events the collector acknowledged (2xx) |
+| `aap_meter_sink_dropped_queue_full_total` | counter | Events the sink refused because the queue was full (the meter holds the minute and sends it again) |
+| `aap_meter_sink_refused_total` | counter | Events the collector refused for good (a 4xx other than 408/429, or a partialSuccess rejection); never sent again |
+| `aap_meter_sink_retries_total` | counter | POST attempts that failed transiently and were repeated |
+| `aap_meter_sink_unsent_at_shutdown_total` | counter | Events still unsent when the shutdown's deadline ran out |
+| `aap_meter_sink_outcomes_dropped_total` | counter | Collector acknowledgements the sink dropped because the meter did not drain them (never while a meter runs) |
+| `aap_meter_sink_queue_depth` | gauge | Events still held by the sink: the queue and the batch in flight |
+| `aap_meter_sink_retrying_secs` | gauge | Seconds the current retrying episode has been in flight (0 when none; alert on any rise) |
+
+Alert on `aap_meter_sink_retrying_secs > 0` (the collector cannot be reached), on `aap_meter_sink_queue_depth` near `metering.collector.queue` (the queue is filling), and on a rising `aap_meter_sink_refused_total` (a batch the collector said no to). The names come from `crates/usage-otlp/src/stats.rs`; the values are the sink's `StatsSnapshot`, rendered on every `/metrics` request.
 
 The names come from `crates/controller/src/metrics.rs`. The label values are fixed in the code: none of them is a name from your cluster.
 

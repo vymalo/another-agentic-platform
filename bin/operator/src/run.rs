@@ -542,7 +542,11 @@ async fn run_with(settings: crate::config::Settings, tracer: aap_trace::Tracer) 
     ));
     let metrics = tokio::spawn(crate::serve::serve(
         settings.listen.metrics,
-        crate::serve::metrics_for(operator.metrics(), &tracer),
+        crate::serve::metrics_with_meter(
+            operator.metrics(),
+            aap_trace::TraceMetrics::of(&tracer),
+            meter_sink.as_ref().map(|s| s.0.stats()),
+        ),
         signalled(stopped.clone()),
     ));
 
