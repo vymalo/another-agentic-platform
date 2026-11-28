@@ -28,7 +28,8 @@ FROM lukemathwalker/cargo-chef:0.1.77-rust-1.94.1-trixie@sha256:d5a1cca12f21de99
 ARG TARGET
 # The musl target and the tools the C dependencies need: `musl-gcc` as the linker, `perl` for ring's
 # assembly, and a C compiler for aws-lc-sys (the image has one; the line keeps the layer explicit).
-# hadolint ignore=DL3008 -- the base image is pinned by digest; pinning its Debian packages would break on the image's next digest.
+# The build stage's base image is pinned by digest; pinning its Debian packages here would break on the image's next digest.
+# hadolint ignore=DL3008
 RUN apt-get update \
  && apt-get install -y --no-install-recommends musl-tools perl file \
  && rm -rf /var/lib/apt/lists/* \

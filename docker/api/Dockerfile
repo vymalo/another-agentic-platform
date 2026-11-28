@@ -27,7 +27,8 @@ ARG TARGET=x86_64-unknown-linux-musl
 
 FROM lukemathwalker/cargo-chef:0.1.77-rust-1.94.1-trixie@sha256:d5a1cca12f21de999e5b221b5c6ff5635080f4b8d5e58053241ff169e0fc60f6 AS chef
 ARG TARGET
-# hadolint ignore=DL3008 -- the base image is pinned by digest; pinning its Debian packages would break on the image's next digest.
+# The build stage's base image is pinned by digest; pinning its Debian packages here would break on the image's next digest.
+# hadolint ignore=DL3008
 RUN apt-get update \
  && apt-get install -y --no-install-recommends musl-tools perl file \
  && rm -rf /var/lib/apt/lists/* \
