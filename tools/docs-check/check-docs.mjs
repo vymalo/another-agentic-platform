@@ -81,12 +81,32 @@ for (const file of markdownFiles(root)) {
     catch (e) { failures.push(`${rel}:${lineOf(src, m.index)} mermaid: ${String(e.message).split('\n')[0]}`); }
   }
 
-  // Blank out fenced blocks and inline code spans (keeping line numbers) so
-  // example links inside code are not checked.
+  // Blank out fenced blocks, inline code spans and URLs (keeping line numbers) so an example
+  // inside code, or a path that is the tail of a URL, is not read as a `path:line`. A fence is
+  // three or more backticks or tildes, closed by at least as many of the same character and
+  // nothing after it.
   const blank = (code) => code.replace(/[^\n]/g, ' ');
-  const prose = src
-    .replace(/```[\s\S]*?```/g, blank)
-    .replace(/`[^`\n]+`/g, blank);
+  function blankCode(text) {
+    const lines = text.split('\n');
+    let fence = null;
+    for (let i = 0; i < lines.length; i++) {
+      const line = lines[i];
+      const m = /^\s*(`{3,}|~{3,})(.*)$/.exec(line);
+      if (fence) {
+        lines[i] = blank(line);
+        if (m && m[1][0] === fence.ch && m[1].length >= fence.len && m[2].trim() === '') fence = null;
+        continue;
+      }
+      if (m && !(m[1][0] === '`' && m[2].includes('`'))) {
+        fence = { ch: m[1][0], len: m[1].length };
+        lines[i] = blank(line);
+      }
+    }
+    return lines.join('\n');
+  }
+  const prose = blankCode(src)
+    .replace(/`[^`\n]+`/g, blank)
+    .replace(/\bhttps?:\/\/[^\s)>]+/g, blank);
   for (const m of prose.matchAll(/\]\(([^)\s]+)\)/g)) {
     const target = m[1].split('#')[0];
     if (!target || /^[a-z][a-z0-9+.-]*:/i.test(target)) continue; // anchors, http(s):, mailto:
