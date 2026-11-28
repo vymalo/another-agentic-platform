@@ -41,6 +41,8 @@ on:
       - "docs/extensions/agent-registry-v1.md"
       - ".github/workflows/operator.yml"
       - "tools/check-dependencies.sh"
+      - "tools/dashboards/**"
+      - "deploy/dashboards/**"
   push:
     branches: [main]
     paths:
@@ -53,6 +55,8 @@ on:
       - "docs/extensions/agent-registry-v1.md"
       - ".github/workflows/operator.yml"
       - "tools/check-dependencies.sh"
+      - "tools/dashboards/**"
+      - "deploy/dashboards/**"
 
 permissions:
   contents: read
@@ -115,6 +119,17 @@ jobs:
       - uses: Swatinem/rust-cache@v2
       - name: the dependency gates
         run: sh tools/check-dependencies.sh
+
+  dashboards:
+    # ANR-1206: the release pull request only moves version strings and main's own push run already tested this code; skipped here to spare the shared runner queue (a skipped job satisfies a required check).
+    if: ${{ !(startsWith(github.head_ref, 'release-please--') && github.event.pull_request.head.repo.full_name == github.repository && github.event.pull_request.user.login == 'vaam-apps[bot]' && github.actor == 'vaam-apps[bot]') }}
+    # ANR-1423: tools/dashboards/*.py write deploy/dashboards/*.json, and a panel may query only a series that the two
+    # metrics.rs declare (they are under crates/**, so a renamed series runs this). Standard library: the runner's Python 3.
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - name: the dashboards are what their generators say, and every panel's metric is emitted
+        run: python3 tools/dashboards/check.py
 
   crds-drift:
     # ANR-1206: the release pull request only moves version strings and main's own push run already tested this code; skipped here to spare the shared runner queue (a skipped job satisfies a required check).
