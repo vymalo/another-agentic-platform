@@ -837,8 +837,9 @@ fn a_referent_maps_to_the_services_whose_config_references_it_and_to_no_other() 
 }
 
 #[test]
-fn a_missing_referent_is_the_condition_of_an_invalid_config_with_its_words() {
-    // The difference between the two outcomes is the timer; for a person the condition is the same.
+fn a_missing_referent_says_so_and_an_invalid_config_says_invalid() {
+    // ANR-1159: the words are the same, the reason is not, so a client can tell "wait" (the operator looks again soon and
+    // the service unblocks by itself) from "refused" (waiting will not fix it).
     let status = |config| {
         let mut o = observed();
         o.config = config;
@@ -850,9 +851,15 @@ fn a_missing_referent_is_the_condition_of_an_invalid_config_with_its_words() {
     let missing = status(ConfigOutcome::ReferentMissing {
         message: "ModelEndpoint \"gateway\" was not found".into(),
     });
-    assert_eq!(missing, invalid);
-    assert_eq!(missing.conditions[0].reason, "ConfigInvalid");
+    assert_eq!(invalid.conditions[0].reason, "ConfigInvalid");
+    assert_eq!(missing.conditions[0].reason, "ConfigReferentMissing");
+    assert_eq!(invalid.conditions[0].status, "False");
     assert_eq!(missing.conditions[0].status, "False");
+    assert_eq!(
+        invalid.conditions[0].message, missing.conditions[0].message,
+        "a person reads the same words either way"
+    );
+    assert_ne!(missing, invalid);
 }
 
 #[test]

@@ -325,8 +325,12 @@ pub mod reason {
     pub const RESOLVED: &str = "Resolved";
     /// `ConfigResolved` false: the named AgentConfig does not exist.
     pub const CONFIG_NOT_FOUND: &str = "ConfigNotFound";
-    /// `ConfigResolved` false: the config failed validation.
+    /// `ConfigResolved` false: the config failed validation, and waiting will not fix it.
     pub const CONFIG_INVALID: &str = "ConfigInvalid";
+    /// `ConfigResolved` false: a `ModelEndpoint` or a `ToolProvider` the config names is not there yet (ANR-1159). The
+    /// operator looks again soon and the service unblocks by itself, so a client waits instead of treating the agent as
+    /// refused. `ConfigInvalid` stays for a config that is really wrong.
+    pub const CONFIG_REFERENT_MISSING: &str = "ConfigReferentMissing";
     /// `StoreReady` true: a Secret is referenced.
     pub const SECRET_REFERENCED: &str = "SecretReferenced";
     /// `StoreReady` true: the CloudNativePG cluster is ready.

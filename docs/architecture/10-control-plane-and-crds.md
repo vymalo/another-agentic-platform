@@ -516,12 +516,12 @@ stateDiagram-v2
     Blocked --> Ready: config and store resolved, the runtime already runs this digest
     Degraded --> Ready: runtime.phase is Ready
     Ready --> Degraded: rollout, crash loop, missing Secret, image pull
-    Ready --> Blocked: ConfigNotFound, ConfigInvalid, StoreNotReady or NameConflict
-    Degraded --> Blocked: ConfigNotFound, ConfigInvalid, StoreNotReady or NameConflict
+    Ready --> Blocked: ConfigNotFound, ConfigInvalid, ConfigReferentMissing, StoreNotReady or NameConflict
+    Degraded --> Blocked: ConfigNotFound, ConfigInvalid, ConfigReferentMissing, StoreNotReady or NameConflict
     Ready --> Suspended: spec.suspend is true and runtime.phase is Suspended
     Degraded --> Suspended: spec.suspend is true and runtime.phase is Suspended
     Suspended --> Degraded: spec.suspend is false, runtime.phase Provisioning
-    Suspended --> Blocked: ConfigNotFound, ConfigInvalid or StoreNotReady
+    Suspended --> Blocked: ConfigNotFound, ConfigInvalid, ConfigReferentMissing or StoreNotReady
     Blocked --> [*]: deleted, finalizer removed
     Degraded --> [*]: deleted, finalizer removed
     Ready --> [*]: deleted, finalizer removed
@@ -538,7 +538,7 @@ The rule, in order: a false `ConfigResolved` or `StoreReady`, or a `NameConflict
 Steps of one pass:
 
 1. **Finalizer** `agents.vymalo.com/runtime`, added before anything is created.
-2. **Fetch and validate the config.** `ConfigNotFound` or `ConfigInvalid`, with the cross-object rules above.
+2. **Fetch and validate the config.** `ConfigNotFound`, `ConfigInvalid`, or `ConfigReferentMissing` when an object the config names (or its kind) is not there yet, with the cross-object rules above.
 3. **Ensure the store.** A referenced Secret needs nothing; `cnpg` makes the Cluster `<svc>-db`, whose Secret `<svc>-db-app` (key `uri`) is the connection string. `CNPGNotInstalled` when the CloudNativePG API is absent.
 4. **Resolve, then `RuntimeProvider::ensure`.** `resolve` turns the two objects into a `ResolvedAgent`: the `RuntimeSpec` and its sha256 digest. The pods are annotated `agents.vymalo.com/config-digest`, so a changed folder, MCP file, image or variable is a rollout (adam reads its files at startup only).
 5. **Patch the status** by server-side apply, and emit Events on transitions.
@@ -637,7 +637,7 @@ status:
 
 | Condition | `True` reason | `False` reasons |
 |---|---|---|
-| `ConfigResolved` | `Resolved` | `ConfigNotFound`, `ConfigInvalid` |
+| `ConfigResolved` | `Resolved` | `ConfigNotFound`, `ConfigInvalid`, `ConfigReferentMissing` |
 | `StoreReady` | `SecretReferenced`, `ClusterReady` | `CNPGNotInstalled`, `ClusterNotReady` |
 | `RuntimeReady` | `Ready` | `Provisioning`, `Suspended`, `MissingSecret`, `ConfigRejected`, `DependencyUnavailable`, `ImagePull`, `CrashLoop`, `NameConflict` |
 | `Listed` | `Listed` | `A2ADisabled`, `ServiceBlocked`, `RegistryFull`, `RegistryDisabled` |
