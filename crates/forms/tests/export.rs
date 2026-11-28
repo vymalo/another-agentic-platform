@@ -401,7 +401,8 @@ proptest! {
             let meta: BTreeSet<&str> = doc["metadata"].as_object().unwrap().keys().map(String::as_str).collect();
             prop_assert!(meta.is_subset(&BTreeSet::from(["name", "namespace", "labels", "annotations"])));
             let annotations = doc["metadata"]["annotations"].as_object().map(|m| m.len()).unwrap_or(0);
-            prop_assert_eq!(annotations, extra.len() + 1, "the platform's annotations, and nobody else's");
+            // `noisy` keeps two of the platform's: `note` and `config-digest` (`wake-at` is transient, ANR-1352).
+            prop_assert_eq!(annotations, extra.len() + 2, "the platform's annotations, and nobody else's");
         }
     }
 
