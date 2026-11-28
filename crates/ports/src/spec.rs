@@ -242,6 +242,12 @@ impl RuntimeSpec {
         {
             return bad("the network's card path is not a path".into());
         }
+        if let Some(route) = &self.network.route_to
+            && route.match_labels.is_empty()
+            && route.match_expressions.is_empty()
+        {
+            return bad("the network's route_to names no pod".into());
+        }
         for w in &self.workloads {
             if w.runtime_class_name
                 .as_deref()
@@ -743,6 +749,16 @@ pub struct Network {
     /// digest and the objects of a spec that never sets it are what they were.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub activity: Option<NetworkActivity>,
+    /// Where `<svc>` sends while it is set: the activator's pods, so a sleeping agent's Service reaches the front that
+    /// holds the request and wakes it (AD-058 P3a-2). `None`: the workload. Off unless set, and then not in the
+    /// serialised spec, so the digest of a spec that never sets it is what it was.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub route_to: Option<Selector>,
+    /// Also render `<svc>-direct`, the workload's selector under a name of its own, which the activator forwards to
+    /// (AD-058 P3a-2): it stays while an activator fronts the agent, awake or asleep, so a forward made as the agent
+    /// becomes Ready is never cut by the name going. Off unless set, and then not in the serialised spec.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub direct: bool,
 }
 
 /// The activity listener's side of [`Network`]: its port, and who may reach it.

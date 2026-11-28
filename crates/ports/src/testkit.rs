@@ -429,6 +429,8 @@ pub fn sample_spec(id: &RuntimeId) -> RuntimeSpec {
             allow_from: Vec::new(),
             card_path: None,
             activity: None,
+            route_to: None,
+            direct: false,
         },
         run_pods: None,
     }

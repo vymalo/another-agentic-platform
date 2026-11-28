@@ -1525,9 +1525,21 @@ async fn running_sleepy(
     service: &Value,
     config: &Value,
 ) -> Running {
+    running_sleepy_with(sleepy_options(), fake, source, clock, service, config).await
+}
+
+/// As [`running_sleepy`], with the operator's options given by the test.
+async fn running_sleepy_with(
+    options: Options,
+    fake: Fake,
+    source: &aap_ports::memory::MemoryActivity,
+    clock: Option<aap_controller::Clock>,
+    service: &Value,
+    config: &Value,
+) -> Running {
     let r = start_with_clock(
         fake,
-        sleepy_options(),
+        options,
         |f| f.watchers_in(SERVICES, "team") >= 1 && f.watchers_in(CONFIGS, "team") >= 2,
         Some(source.clone()),
         clock,
@@ -1642,6 +1654,76 @@ async fn a_wake_at_annotation_wakes_a_sleeping_agent_through_waking_to_ready() {
     .await;
     assert!(sleep_of(&r).is_none(), "{:?}", sleep_of(&r));
     assert_eq!(r.state("team", "chat").as_deref(), Some("Ready"));
+    r.stop().await;
+}
+
+/// The activator a test configures: one set of pods, labelled as the deployment labels them.
+fn activator() -> aap_controller::Activator {
+    aap_controller::Activator {
+        selector: aap_ports::Selector {
+            match_labels: std::collections::BTreeMap::from([(
+                "app.kubernetes.io/name".to_owned(),
+                "aap-activator".to_owned(),
+            )]),
+            match_expressions: Vec::new(),
+        },
+    }
+}
+
+#[tokio::test]
+async fn the_service_routes_to_the_activator_until_ready_then_switches_back() {
+    let source = aap_ports::memory::MemoryActivity::new();
+    source.set(&chat_id(), busy());
+    let (service, config) = sleepy_chat(json!({}), Value::Null);
+    let r = running_sleepy_with(
+        Options {
+            activator: Some(activator()),
+            ..sleepy_options()
+        },
+        Fake::new(),
+        &source,
+        None,
+        &service,
+        &config,
+    )
+    .await;
+
+    // Asleep: `<svc>` routes to the activator's pods, and the workload is held at zero.
+    until_asleep(&r, &source, None).await;
+    let spec = r.runtime.inner.spec(&chat_id()).unwrap();
+    assert_eq!(spec.network.route_to, Some(activator().selector));
+    assert!(spec.network.direct, "the activator's upstream exists");
+    assert!(spec.suspend, "the workload is held at zero");
+
+    // Waking: still routed to the activator, which holds the request until the agent is Ready.
+    r.runtime.script(Some(provisioning()));
+    r.fake
+        .put(SERVICES, annotate(&service, "2026-11-27T10:00:00Z"));
+    within(Duration::from_secs(15), "the agent to be waking", || {
+        phase_of(&r, "team", "chat").as_deref() == Some("Waking")
+    })
+    .await;
+    let spec = r.runtime.inner.spec(&chat_id()).unwrap();
+    assert_eq!(spec.network.route_to, Some(activator().selector));
+    assert!(spec.network.direct);
+    assert!(!spec.suspend, "the scale to zero is lifted");
+
+    // Ready: `<svc>` is back on the workload, `<svc>-direct` stays for the activator's in-flight forwards, and only
+    // then does the record go.
+    source.set(&chat_id(), busy());
+    r.runtime.script(None);
+    r.runtime.signal(&chat_id());
+    within(Duration::from_secs(15), "the agent to be Ready", || {
+        phase_of(&r, "team", "chat").as_deref() == Some("Ready")
+    })
+    .await;
+    let spec = r.runtime.inner.spec(&chat_id()).unwrap();
+    assert_eq!(spec.network.route_to, None, "the switch is back");
+    assert!(
+        spec.network.direct,
+        "the activator's upstream stays while an activator fronts the agent"
+    );
+    assert!(sleep_of(&r).is_none(), "{:?}", sleep_of(&r));
     r.stop().await;
 }
 

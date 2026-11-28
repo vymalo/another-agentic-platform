@@ -137,6 +137,9 @@ impl crate::config::Settings {
             // What the agents' specs carry for the activity listener (ANR-1030b); `None` while `activity.enabled` is off.
             activity: self.activity.externals.clone(),
             sleep_poll: aap_controller::DEFAULT_POLL,
+            // The activator that fronts sleeping agents (AD-058 P3a-2): its file key and chart are ANR-1068's, so this
+            // operator has none yet.
+            activator: None,
         }
     }
 }

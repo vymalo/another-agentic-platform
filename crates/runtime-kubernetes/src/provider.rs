@@ -335,6 +335,13 @@ impl KubernetesRuntime {
             );
         }
         note(first_role, self.foreign::<Service>(id, id.name()).await?);
+        if r.direct_service.is_some() {
+            note(
+                first_role,
+                self.foreign::<Service>(id, &names::direct_service(id))
+                    .await?,
+            );
+        }
         for (role, w) in &r.workloads {
             let found = match w {
                 WorkloadObject::StatefulSet(_) => self.foreign::<StatefulSet>(id, w.name()).await?,
@@ -467,6 +474,9 @@ impl KubernetesRuntime {
             self.apply(ns, o).await?;
         }
         self.apply(ns, &r.service).await?;
+        if let Some(direct) = &r.direct_service {
+            self.apply(ns, direct).await?;
+        }
         for (_, w) in &r.workloads {
             match w {
                 WorkloadObject::StatefulSet(s) => {
@@ -521,6 +531,22 @@ impl KubernetesRuntime {
             let name = d.metadata.name.unwrap_or_default();
             if !want_deploy.contains(name.as_str()) {
                 self.delete_named::<Deployment>(ns, &name).await?;
+            }
+        }
+        // The services: `<svc>`, `<svc>-direct` (AD-058 P3a-2) and the egress proxy's. `<svc>-direct` is the one that goes
+        // when the spec stops asking for it (`direct` off, which the deployment's activator decides), and this is the only
+        // place that removes it. Only ours are listed, so a foreign one is never deleted.
+        let mut wanted_services: BTreeSet<&str> = BTreeSet::from([id.name()]);
+        if let Some(direct) = &r.direct_service {
+            wanted_services.extend(direct.metadata.name.as_deref());
+        }
+        if let Some(run) = &r.run_pods {
+            wanted_services.extend(run.egress_proxy.service.metadata.name.as_deref());
+        }
+        for s in self.list_ours::<Service>(id).await? {
+            let name = s.metadata.name.unwrap_or_default();
+            if !wanted_services.contains(name.as_str()) {
+                self.delete_named::<Service>(ns, &name).await?;
             }
         }
         let budgets: BTreeSet<&str> = r

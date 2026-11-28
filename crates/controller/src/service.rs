@@ -450,19 +450,41 @@ where
         }
     }
     obs.sleep = planned;
-    match step(
+    // The Service switch (AD-058 P3a-2). While the record holds the agent, asleep or waking, `<svc>` routes to the
+    // activator, which holds a request and forwards it once the agent is Ready. With no activator configured there is
+    // nothing to route to: the record alone holds the workload at zero.
+    if let Some(activator) = &ctx.options.activator {
+        // The activator's upstream exists whether the agent is awake or asleep: the switch-back moves `<svc>` back to
+        // the workload while `<svc>-direct` stays, so a forward the activator makes as the agent becomes Ready is never
+        // cut by the name disappearing.
+        agent.runtime.network.direct = true;
+        if obs.sleep.is_some() {
+            agent.runtime.network.route_to = Some(activator.selector.clone());
+        }
+    }
+    let mut ensured = step(
         Step::RuntimeEnsure,
         ctx.runtime.ensure(&id, &agent.runtime),
         class_of,
     )
-    .await
-    {
+    .await;
+    // The wake is over when the runtime says it is ready: switch `<svc>` back to the workload first, so nothing is
+    // routed to the activator that has nothing left to wake, and only then let the record go.
+    let woke = matches!(&ensured, Ok(status) if status.phase == Phase::Ready)
+        && obs.sleep.as_ref().is_some_and(|s| s.waking.is_some());
+    if woke && agent.runtime.network.route_to.is_some() {
+        agent.runtime.network.route_to = None;
+        ensured = step(
+            Step::RuntimeEnsure,
+            ctx.runtime.ensure(&id, &agent.runtime),
+            class_of,
+        )
+        .await;
+    }
+    match ensured {
         Ok(status) => {
             obs.config_status = Some(config);
-            // A wake is over when the runtime says it is ready: the record goes, and the idle clock starts afresh.
-            if status.phase == Phase::Ready
-                && obs.sleep.as_ref().is_some_and(|s| s.waking.is_some())
-            {
+            if woke {
                 obs.sleep = None;
                 ctx.sleepers.wake(&id);
             }

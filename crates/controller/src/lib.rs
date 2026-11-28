@@ -58,7 +58,7 @@ pub use meter::{
 };
 pub use metrics::{Metrics, name as metric};
 pub use operator::{FOLLOWER_RECHECK, Operator, Readiness};
-pub use options::{Options, Probe, RegistryMode, Resync};
+pub use options::{Activator, Options, Probe, RegistryMode, Resync};
 pub use retention::{DEFAULT_AFTER_DELETE, Retention, Swept, sweep};
 pub use service::{reconcile_service, service_error_policy};
 pub use shared::{
