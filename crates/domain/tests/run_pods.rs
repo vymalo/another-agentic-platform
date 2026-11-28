@@ -1305,8 +1305,12 @@ fn each_setting_is_checked() {
         &refused(json!({"networkPolicy": {"dnsPodLabels": {"k8s-app": null}}})),
         "dnsPodLabels",
     );
+    // ANR-1353 made a `to` mandatory and judges it first, so a case about the ports names a peer: without one it is refused
+    // for the missing `to` and never reaches the check it is about (two stale assertions, found by ANR-1355).
     says(
-        &refused(json!({"networkPolicy": {"extraEgress": [{"ports": [{"port": "https"}]}]}})),
+        &refused(json!({"networkPolicy": {"extraEgress": [
+            {"to": [{"ipBlock": {"cidr": "10.9.0.5/32"}}], "ports": [{"port": "https"}]}
+        ]}})),
         "named port",
     );
     says(
@@ -1314,9 +1318,9 @@ fn each_setting_is_checked() {
         "needs a namespaceSelector",
     );
     says(
-        &refused(
-            json!({"networkPolicy": {"extraEgress": [{"ports": [{"protocol": "ICMP", "port": 1}]}]}}),
-        ),
+        &refused(json!({"networkPolicy": {"extraEgress": [
+            {"to": [{"ipBlock": {"cidr": "10.9.0.5/32"}}], "ports": [{"protocol": "ICMP", "port": 1}]}
+        ]}})),
         "not TCP, UDP or SCTP",
     );
     // ANR-1353: a rule with no `to` allows every destination, which is the internet the deny-by-default policy exists
@@ -1366,6 +1370,78 @@ fn each_setting_is_checked() {
         ]}})),
         "covers every address",
     );
+}
+
+#[test]
+fn an_egress_selector_that_selects_everything_is_refused() {
+    // ANR-1355: a selector with no matchLabels and no matchExpressions selects everything it could. `namespaceSelector: {}`
+    // is every namespace of the cluster; a `podSelector: {}` beside no `namespaceSelector` is every pod of the run pod's own
+    // namespace, the agent's own pod and the egress proxy among them, so a run pod could reach the agent directly and the
+    // proxy would stop being the one way out. Every case is accepted by the code before the change.
+    for (rule, part) in [
+        (
+            json!({"to": [{"namespaceSelector": {}}], "ports": [{"port": 443}]}),
+            "selects every namespace",
+        ),
+        (
+            json!({"to": [{"namespaceSelector": {"matchLabels": null}}], "ports": [{"port": 443}]}),
+            "selects every namespace",
+        ),
+        (
+            json!({"to": [{"namespaceSelector": {"matchExpressions": []}}], "ports": [{"port": 443}]}),
+            "selects every namespace",
+        ),
+        (
+            json!({"to": [{"podSelector": {}}], "ports": [{"port": 443}]}),
+            "every pod of the run pod's own namespace",
+        ),
+        (
+            json!({"to": [{"podSelector": {"matchLabels": null}}], "ports": [{"port": 443}]}),
+            "every pod of the run pod's own namespace",
+        ),
+    ] {
+        says(
+            &refused(json!({"networkPolicy": {"extraEgress": [rule]}})),
+            part,
+        );
+    }
+    // A peer that names its namespaces may take every pod of them: the author named the target.
+    settings_with(json!({"networkPolicy": {"extraEgress": [{
+        "to": [{"namespaceSelector": {"matchLabels": {"kubernetes.io/metadata.name": "models"}}, "podSelector": {}}],
+        "ports": [{"port": 8080}]
+    }]}}))
+    .validate()
+    .expect("every pod of a namespace the peer names is a target the author chose");
+    // The agent's own `access.allowFrom` keeps its meaning: `peers` is not where this is refused, and "any namespace may
+    // reach this agent" stays a deployment's deliberate choice (ANR-1353 scoped the `/0` the same way). `allowFrom` is on
+    // the AgentService, the first document.
+    let r = must_resolve("coder", |service, _| {
+        service["spec"]["access"]["allowFrom"] = json!([{"namespaceSelector": {}}]);
+    });
+    let peer = &r.runtime.network.allow_from[0];
+    assert_eq!(
+        peer.namespaces
+            .as_ref()
+            .map(|s| (s.match_labels.len(), s.match_expressions.len())),
+        Some((0, 0))
+    );
+}
+
+#[test]
+fn a_port_entry_names_the_port_it_reaches() {
+    // ANR-1355: a port entry with no `port` matches every port of its protocol (Kubernetes), which is a typo's widening, and
+    // an `endPort` with no start is meaningless. A rule with no `ports` at all stays Kubernetes' "every port": it is visible
+    // in the file and `deploy/operator/README.md` documents it. Each case is accepted by the code before the change.
+    for rule in [
+        json!({"to": [{"ipBlock": {"cidr": "10.9.0.5/32"}}], "ports": [{"protocol": "TCP"}]}),
+        json!({"to": [{"ipBlock": {"cidr": "10.9.0.5/32"}}], "ports": [{"port": 443}, {"protocol": "UDP"}]}),
+        json!({"to": [{"ipBlock": {"cidr": "10.9.0.5/32"}}], "ports": [{"endPort": 5100}]}),
+    ] {
+        says(
+            &refused(json!({"networkPolicy": {"extraEgress": [rule]}})),
+            "names no `port`",
+        );
+    }
 }
 
 #[test]
