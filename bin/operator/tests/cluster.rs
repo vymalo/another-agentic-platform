@@ -2,7 +2,9 @@
 //!
 //! Each case runs `operator run` (the binary Cargo built for this test) against the cluster of
 //! `AAP_TEST_KUBECONFIG`, in a namespace of its own, with its own Secrets and objects named for the case:
-//! cases run in parallel and share nothing. They apply an `AgentConfig` and an `AgentService`, and check what
+//! cases run in parallel and share nothing. Only their operators' starts take turns: a lock is held until the child
+//! listens, and a start is retried only on `Address already in use` (ANR-1363).
+//! They apply an `AgentConfig` and an `AgentService`, and check what
 //! the cluster ends up with: the workload, the Service, the ConfigMap, the status the operator writes, the
 //! Events, and that deleting the service completes its finalizer.
 //!
@@ -387,6 +389,9 @@ fn unique() -> u64 {
     NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
 }
 
+/// Held by whoever is choosing ports in this binary: a start, until its child listens, and the tests over the ports.
+static START: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
 /// The invariant the operator child depends on: it holds its listeners (three, with a registry token) at the same time,
 /// and if one cannot bind it exits. The guarantee is `free_ports`' construction — three listeners held before any is
 /// released — and this is the test over it, which runs without a cluster. On this kernel a sequential bind-and-drop
@@ -395,6 +400,10 @@ fn unique() -> u64 {
 #[test]
 fn the_three_ports_a_case_is_given_can_all_be_bound_at_once() {
     for _ in 0..50_000 {
+        // The loop must not choose a port while a case is choosing one.
+        let _starting = START
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         let (health, metrics, registry) = free_ports();
         assert!(
             health != metrics && metrics != registry && health != registry,
@@ -470,7 +479,11 @@ fn wait_until_listening(
             && http_ok(metrics, "/metrics")
             && (!with_registry || tcp_open(registry))
         {
-            return Start::Listening;
+            // A foreign process could answer the port while our child failed to bind it.
+            return match child.try_wait().expect("the operator's status") {
+                Some(status) => Start::Exited(status),
+                None => Start::Listening,
+            };
         }
         if Instant::now() >= until {
             return Start::TimedOut;
@@ -482,6 +495,54 @@ fn wait_until_listening(
 /// The line of the operator's log that says a port was taken, when there is one.
 fn bind_line(log: &str) -> Option<&str> {
     log.lines().find(|l| l.contains("Address already in use"))
+}
+
+/// The predicate of the retry, tested against the real binary without a cluster: a health port that is held makes
+/// `operator run` exit with a line `bind_line` matches. The kubeconfig names a server nobody answers, which is enough
+/// to build the client: it connects lazily.
+#[test]
+fn a_taken_health_port_is_what_bind_line_matches() {
+    // The child is a start too.
+    let _starting = START
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let held = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let health = held.local_addr().unwrap().port();
+    let (_, metrics, registry) = free_ports();
+    assert!(
+        health != metrics && health != registry,
+        "{health} {metrics} {registry}"
+    );
+    let config = format!(
+        "version: 1\n\
+         listen:\n  health: 127.0.0.1:{health}\n  metrics: 127.0.0.1:{metrics}\n  registry: 0.0.0.0:{registry}\n\
+         watch:\n  namespaces: [default]\n\
+         reconcile:\n  resyncPendingSecs: 5\n  timeoutSecs: 30\n\
+         defaults:\n  agentImage: \"aap-stub:ci\"\n\
+         log:\n  filter: 'info,kube=warn,aap_controller=debug'\n"
+    );
+    // The process id too: `unique()` starts again at zero in every run.
+    let stem = format!("aap-e2e-taken-{}-{}", std::process::id(), unique());
+    let config_file = std::env::temp_dir().join(format!("{stem}.yaml"));
+    std::fs::write(&config_file, config).unwrap();
+    let kubeconfig = std::env::temp_dir().join(format!("{stem}.kubeconfig"));
+    std::fs::write(
+        &kubeconfig,
+        "apiVersion: v1\nkind: Config\nclusters:\n- name: c\n  cluster:\n    server: https://127.0.0.1:1\nusers:\n- name: u\n  user:\n    token: t\ncontexts:\n- name: x\n  context:\n    cluster: c\n    user: u\ncurrent-context: x\n",
+    )
+    .unwrap();
+    let out = Command::new(env!("CARGO_BIN_EXE_operator"))
+        .arg("run")
+        .arg("--config")
+        .arg(&config_file)
+        .env("KUBECONFIG", &kubeconfig)
+        .env("POD_NAME", "operator-under-test")
+        .output()
+        .expect("runs the operator");
+    drop(held);
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(!out.status.success(), "{}: {stderr}", out.status);
+    assert!(bind_line(&stderr).is_some(), "{}: {stderr}", out.status);
 }
 
 impl OperatorProc {
@@ -496,7 +557,6 @@ impl OperatorProc {
     fn spawn(cluster: &Cluster, namespaces: &[&str], registry_token: Option<&str>) -> Self {
         // The cases start in parallel, and each releases its ports before its child binds them: without this, one
         // case's child could take, or be answered on, another's port. Held until the child listens. No `.await` here.
-        static START: std::sync::Mutex<()> = std::sync::Mutex::new(());
         let _starting = START
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
