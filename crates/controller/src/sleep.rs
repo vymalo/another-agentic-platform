@@ -162,7 +162,10 @@ mod tests {
     }
 
     fn down() -> Result<Activity, ActivityError> {
-        Err(ActivityError::Unavailable("down".into()))
+        Err(ActivityError::Unavailable {
+            cause: aap_ports::UnavailableCause::Connect,
+            source: "down".into(),
+        })
     }
 
     /// Runs `polls` (time, answer) in order from a fresh state and returns every decision.

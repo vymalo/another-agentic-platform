@@ -5,7 +5,7 @@ use std::sync::{Arc, Mutex};
 
 use super::lock;
 use crate::testkit::ActivityUnderTest;
-use crate::{Activity, ActivityError, ActivitySource, RuntimeId};
+use crate::{Activity, ActivityError, ActivitySource, RuntimeId, UnavailableCause};
 
 #[derive(Default)]
 struct State {
@@ -50,7 +50,10 @@ impl ActivitySource for MemoryActivity {
         let mut s = lock(&self.state);
         s.asked.push(id.clone());
         if s.broken.contains_key(id) {
-            return Err(ActivityError::Unavailable("scripted: unreachable".into()));
+            return Err(ActivityError::Unavailable {
+                cause: UnavailableCause::Connect,
+                source: "scripted: unreachable".into(),
+            });
         }
         Ok(s.answers.get(id).copied().unwrap_or(Activity::IDLE))
     }

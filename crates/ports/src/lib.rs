@@ -37,7 +37,7 @@ pub use activator::{
     BodyStream, Card, CardError, CardSource, RefusedReason, Route, Upstream, UpstreamError,
     UpstreamRequest, UpstreamResponse, WakeError, WakeOutcome, Waker,
 };
-pub use activity::{Activity, ActivityError, ActivitySource};
+pub use activity::{Activity, ActivityError, ActivitySource, UnavailableCause};
 pub use auth::{AuthError, Authenticator, InvalidToken, Principal};
 pub use client_auth::{
     Certificate, ClientAuthError, ClientAuthenticator, InvalidCertificate, MAX_INTERMEDIATES,
