@@ -139,7 +139,7 @@ The election, what a follower does, and how long a failover takes are on [Run tw
 
 Where the chart is concerned, [`render-check.sh`](../../../deploy/operator/tests/render-check.sh) holds the `Role` rule by rule, the absence of a `ClusterRole`, and every refusal above, each broken on purpose. It runs in the `chart` job of `operator-image.yml`.
 
-*Verified 2026-11-27* with `gh run view`: on `main` at commit `1d17e42` (tag `sha-1d17e42`), checked on 2026-11-27, run 45922615534 of `operator.yml` (including `operator-e2e` and `store-cnpg`) and run 45922615533 of `operator-image.yml` (including `operator-coder-e2e`, `namespaces-e2e`, `leader-e2e` and `push`) ended in success.
+*The run this page was checked against, with its ids, is recorded in [the agent page](../../../.agents/docs/guides/deploy/install.md).*
 
 ### What was walked
 

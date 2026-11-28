@@ -211,6 +211,15 @@ const SPEC_RULES: &[(&str, &str)] = &[
         "self.all(a, a.matches('^[!-~]+$'))",
         "access.audience: a value is visible ASCII characters, with no space or control character",
     ),
+    // AD-059, §10a: the release channels (R1), whose count and length are bounds of the schema (below)
+    (
+        "self.channels.all(k, k.size() <= 32 && k.matches('^[a-z0-9]([a-z0-9-]*[a-z0-9])?$'))",
+        "release.channels: a channel name is at most 32 characters of lower-case letters, digits and -, starting and ending with a letter or a digit",
+    ),
+    (
+        "self.defaultChannel in self.channels",
+        "release.defaultChannel names one of release.channels",
+    ),
 ];
 
 #[test]

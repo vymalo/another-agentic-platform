@@ -26,7 +26,7 @@ let crds: Vec<CustomResourceDefinition> = aap_api::crds(); // AgentConfig, Agent
 
 | Item | What |
 |---|---|
-| `AgentService`, `AgentServiceSpec`, `AgentServiceStatus` | The service: `configRef`, `interfaces`, `scaling`, `suspend`, `store`, `access`, `registry`, `deletionPolicy`, and the status the controller writes |
+| `AgentService`, `AgentServiceSpec`, `AgentServiceStatus` | The service: `configRef`, `interfaces`, `scaling`, `suspend`, `store`, `access`, `registry`, `deletionPolicy`, `release` (R1), and the status the controller writes |
 | `AgentConfig`, `AgentConfigSpec`, `AgentConfigStatus` | The config: `harness` (`adam-rs`, or `a2a` since K11a), `model` (optional; required of `adam-rs`), `tools`, `environment`, `security`, `extraEnv` |
 | `ModelEndpoint`, `ModelEndpointSpec` | An OpenAI-compatible endpoint set once (`title`, `baseUrl`, `apiKeySecretRef`, `models`), named by `AgentConfig.spec.model.endpointRef`. Its status is a `SharedStatus` (K2) |
 | `ToolProvider`, `ToolProviderSpec`, `ProviderMcp` | One remote MCP server set once (`title`, `mcp: { url, headers, tools, optional }`), named by `AgentConfig.spec.tools.mcpServers.<n>.providerRef`. Its status is a `SharedStatus` (K2) |
@@ -71,6 +71,20 @@ deployment's (the operator chart's `runPods`), so that a person who may edit an 
 for an `a2a` harness by `aap-domain` (an image that serves A2A itself brings its own model, cache, volumes, tools and variables, and is one
 server). [`examples/a2a.yaml`](../../examples/a2a.yaml). The dashboard's forms are the adam-rs harness's: an `a2a` config is YAML only
 (`aap-forms` says why).
+
+## Release channels (R1, AD-059)
+
+| Field | Shape |
+|---|---|
+| `AgentService.spec.release` | Optional `{ defaultChannel, channels }` (`aap_api::Release`). **Absent: one revision, replaced in place**, the workload keeps the name `<service>`, and the object serialises as it did. `spec.release` is in no form: an object that carries it is YAML only, and says so with the field. |
+| `release.channels` | Channel name to `{ configRef: { name } }` (`ChannelTarget`), at most 8. A channel is a **pointer** to an `AgentConfig`, so promoting one is editing one line and a rollback is moving it back; it is not a copy of the config. |
+| `release.defaultChannel` | The channel a request that names none gets. One of `channels`, at most 32 characters. |
+| `status.revisions[]` | `name` (`<service>-r<n>`, `n` counting the service's digests), `digest` (`sha256:<hex>`, as `status.config.digest`), `epochs` (`min`, `max`: the range adam's ADR 0076 says the image replays), `phase` (`Current`, `Draining`, `Retired`), `readyReplicas`, and `openRuns` (epoch, as text, to a count — **absent is not zero**: no answer from the agent, and a revision is never retired on a missing answer) |
+
+**Nothing reads `spec.release` yet.** R3 names a workload per live revision (`<service>-r<n>`) and R4's drain controller
+computes `status.revisions`; until then the controller **carries `status.revisions` over as it was**, so a pass cannot
+lose it. A service without `spec.release` is byte for byte what it was, and the parity goldens do not move
+([`examples/release.yaml`](../../examples/release.yaml), §10a of the architecture).
 
 ## The dashboard's fields (D1)
 
@@ -150,6 +164,8 @@ object. Each has an invalid example in [`examples/invalid`](../../examples/inval
 | an enabled `interfaces.a2a` (`enabled` absent is false, as before K1: adam-rs reads it as true) names `bearerTokensSecretRef` | `A2aInterface` (K1: adam-rs's rule; the example `a2a-no-token`) |
 | `*` only alone in `access.audience` | `Access.audience` (D1) |
 | an `access.audience` value is visible ASCII (`^[!-~]+$`; **decided by the owner on 2026-10-15**) | `Access.audience` (D1) |
+| a `release.channels` name is at most 32 of `[a-z0-9-]`, starting and ending with a letter or a digit | `Release` (R1, AD-059) |
+| `release.defaultChannel` is one of `release.channels` | `Release` (R1, AD-059) |
 
 The audience's other bounds, 32 values and 1 to 64 characters each, are **schema bounds**, not CEL rules, and an API
 server needs them: it prices a rule that walks a list by `maxItems` and `maxLength`. For the same reason `tools.mcpServers`
@@ -157,6 +173,10 @@ has `maxProperties: 32`, a bound D1 added (an unbounded map of servers made the 
 v1.35.8, *verified 2026-10-15*). Every bound of the fields D1 added has an invalid example too, 21 in all (the table above,
 and the empty names and keys of the references): `tests/examples.rs` lists them (`BOUND_EXAMPLES`), fails when a bound has
 none, and proves each example states the message of its bound by taking the keyword out of the schema.
+
+The release channels have the same pair of bounds: `release.channels` is `maxProperties: 8` (a map of pointers, walked
+by the rule above) and `release.defaultChannel` is `maxLength: 32`. Both are rows of `BOUND_EXAMPLES`, with their own
+`examples/invalid` files.
 
 Nothing §59a lists as a CRD rule was left out, so this crate has no `validate()` function.
 What §59a assigns to the reconciler (`aap-domain::validate`, slice S2) is **not** here: the

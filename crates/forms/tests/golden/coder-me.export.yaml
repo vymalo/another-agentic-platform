@@ -2,6 +2,7 @@ apiVersion: agents.vymalo.com/v1alpha1
 kind: AgentConfig
 metadata:
   annotations:
+    agents.vymalo.com/config-digest: sha256:kept
     agents.vymalo.com/note: kept
   labels:
     agents.vymalo.com/team: kept
@@ -74,6 +75,7 @@ apiVersion: agents.vymalo.com/v1alpha1
 kind: AgentService
 metadata:
   annotations:
+    agents.vymalo.com/config-digest: sha256:kept
     agents.vymalo.com/note: kept
   labels:
     agents.vymalo.com/team: kept

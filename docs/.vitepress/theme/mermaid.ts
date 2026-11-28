@@ -77,11 +77,10 @@ function sizeBoxes() {
 // The renderer (a chunk of 700 KB with Mermaid) is fetched by the first page that has a diagram, and kept after that:
 // its own route listener only exists once it is loaded.
 let loaded = false;
-async function start() {
-  if (!loaded) {
-    if (!document.querySelector(".language-mermaid")) return;
-    loaded = true;
-  }
+
+// The renderer's own setup, once its chunk is here: create it and its toolbar. Split out of `start` so a failure can be
+// reported and the load left retryable (ANR-1085 review).
+async function load() {
   const { createMermaidRenderer } = await import("vitepress-mermaid-renderer");
   const renderer = createMermaidRenderer({
     theme: "base",
@@ -102,6 +101,24 @@ async function start() {
     mobile: { positions: { vertical: "top", horizontal: "right" } },
     fullscreen: { copyCode: "enabled", toggleFullscreen: "enabled", resetView: "enabled", zoomOut: "enabled", zoomIn: "enabled", zoomLevel: "enabled", download: "enabled" },
   });
+}
+
+// A page change or theme switch must not start a second renderer while the chunk is still being fetched.
+let starting = false;
+async function start() {
+  if (starting) return;
+  if (!loaded && !document.querySelector(".language-mermaid")) return;
+  starting = true;
+  try {
+    await load();
+    // Only now is the renderer in place: a chunk that failed to fetch, or a renderer that threw, leaves `loaded` false so
+    // the next page (or theme switch) tries again.
+    loaded = true;
+  } catch (e) {
+    console.warn("the diagram renderer could not be loaded; the next page tries again", e);
+  } finally {
+    starting = false;
+  }
 }
 
 // Layout of the theme: the md3 layout, with the renderer started in the browser where a page has a diagram.

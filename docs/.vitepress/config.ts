@@ -4,6 +4,7 @@ import { fileURLToPath } from "node:url";
 import { defineMd3Config } from "@vaam-apps/vitepress-md3/config";
 import { useSidebar } from "vitepress-openapi";
 import { groupIconMdPlugin, groupIconVitePlugin } from "vitepress-plugin-group-icons";
+import { DEFAULT_BASE } from "./openapi/shared";
 import { loadSpec } from "./openapi/spec";
 import { inDepth } from "./theme/in-depth";
 
@@ -42,7 +43,7 @@ const sidebar = [
       { text: "Guides", link: "/guides/" },
       ...pages("guides", ["install-aapctl.md"]),
       { text: "Deploy", items: pages("guides/deploy", ["install.md", "platform-api.md", "run-pods.md", "metering.md"]) },
-      { text: "Operate", items: pages("guides/operate", ["not-ready.md", "upgrade.md", "replicas.md", "metrics.md", "traces.md"]) },
+      { text: "Operate", items: pages("guides/operate", ["not-ready.md", "upgrade.md", "replicas.md", "metrics.md", "dashboards.md", "traces.md"]) },
     ],
   },
   {
@@ -75,7 +76,7 @@ const sidebar = [
         ],
       },
       { text: "CLI", items: [{ text: "aapctl", link: "/reference/cli" }] },
-      { text: "Extensions", items: [{ text: "Extensions", link: "/extensions/" }, ...pages("extensions", ["release-channels-v1.md", "agent-registry-v1.md"])] },
+      { text: "Extensions", items: [{ text: "Extensions", link: "/extensions/" }, ...pages("extensions", ["release-channels-v1.md", "agent-registry-v1.md", "activity-v1.md"])] },
     ],
   },
   {
@@ -143,7 +144,7 @@ export function githubSlug(s: string): string {
 export default defineMd3Config({
   title: "another-agentic-platform",
   description: "A Kubernetes-native platform for durable, versioned AI agent services on disposable compute.",
-  base: process.env.DOCS_BASE ?? "/another-agentic-platform/",
+  base: process.env.DOCS_BASE ?? DEFAULT_BASE,
   cleanUrls: true,
   // VitePress serves index.md; these READMEs are the folders' own index pages and stay where they are.
   rewrites: { "architecture/README.md": "architecture/index.md", "api/README.md": "api/index.md" },

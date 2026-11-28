@@ -18,6 +18,8 @@ and its *Not proven* ended:
 
 > the parity goldens stay at adam-rs `4bc6742` and cannot render it
 
+That is only the trailing half of one sentence, whose first half stays on the page for people (*Not proven: a kubelet or a CNI enforcing rule 2, and an agent binary with the listener*), so for this sentence AD-074's "lands verbatim" holds for the half quoted here and not for the sentence as a whole.
+
 ANR-1030b as built (the operator wired) carried, mid-paragraph:
 
 > *Unverified:* the generator's and `PushSecret`'s exact fields are External Secrets Operator's and were not checked here;

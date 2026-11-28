@@ -4,6 +4,8 @@ The operator and the Platform API each serve `/metrics` in the Prometheus text f
 
 Both `ServiceMonitor`s are **off by default**. With them off, the chart renders none, and a cluster without the Prometheus Operator CRDs installs as before.
 
+Two Grafana dashboards read these series: [Dashboards](dashboards.md).
+
 Install the operator first: [Install the CRDs and the operator](../deploy/install.md). The API part needs [Turn on the Platform API](../deploy/platform-api.md).
 
 ## What the operator exports
@@ -180,7 +182,7 @@ The binary has its own check. The file the chart renders for the API, with `metr
 
 Run for this page, on 2026-11-27: `helm template` rendered the operator block alone, the API block with the Platform API page's values, and both with the install page's values. kubeconform, strict, with the vendored schema, found every object valid: 8, 17 and 22 objects, exit 0. As a control, the operator's `ServiceMonitor` with `path` misspelt as `pathh` was refused (`additional properties 'pathh' not allowed`, exit 1). The operator's `/metrics` was read through a port-forward on a kind cluster. The API's was read from the API binary of the published image at the chart's pin, run on a workstation against the same cluster.
 
-*Verified 2026-11-27* with `gh run view`: on `main` at commit `2c16326` (tag `sha-2c16326`), run 45932723504 of `operator-image.yml`, with the jobs `helm lint, render checks and kubeconform` and `build and smoke-test the API image` among them, ended in success.
+*The run this page was checked against, with its ids, is recorded in [the agent page](../../../.agents/docs/guides/operate/metrics.md).*
 
 ### What is unverified
 

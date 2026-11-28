@@ -66,15 +66,43 @@ api.port and api.healthPort, which the probes and the Service use) and `defaults
 {{- if and .Values.maxAccessTier (ne (toString .Values.maxAccessTier) "auto") -}}
 {{- $_ := set $defaults "maxAccessTier" .Values.maxAccessTier -}}
 {{- end -}}
-{{- $cfg := dict "listen" (printf "0.0.0.0:%d" (int .Values.api.port)) "healthListen" (printf "0.0.0.0:%d" (int .Values.api.healthPort)) "oidc" $c.oidc "cors" (default (dict) $c.cors) "defaults" $defaults -}}
+{{- $cfg := dict "version" 1 "listen" (printf "0.0.0.0:%d" (int .Values.api.port)) "healthListen" (printf "0.0.0.0:%d" (int .Values.api.healthPort)) "log" (dict "filter" .Values.api.logLevel) "oidc" $c.oidc "cors" (default (dict) $c.cors) "defaults" $defaults -}}
 {{- /* Only when the metrics port is exposed: otherwise the file is what it was and the binary's default (9090) stands. */ -}}
 {{- if include "aap.api.metricsExposed" . -}}
 {{- $_ := set $cfg "metricsListen" (printf "0.0.0.0:%d" (int .Values.api.metrics.port)) -}}
 {{- end -}}
+{{- /* Traces (K5, ANR-970): the section of the file, as the operator's `telemetry.otlp`; off, the file is what it was. The headers
+file and the CA bundle are the mounts of api-deployment.yaml, and each header is the value alone (the file names it). */ -}}
+{{- if include "aap.api.otel.on" . -}}
+{{- $o := .Values.api.otel -}}
+{{- $otlp := dict "endpoint" $o.endpoint -}}
+{{- if eq (toString $o.sampler) "traceidratio" -}}
+{{- $_ := set $otlp "sampler" "traceidratio" -}}
+{{- /* A number, not the string values.yaml holds: `OtlpSection.samplerRatio` is an `f64`, and YAML keeps `"1"` quoted. */ -}}
+{{- $_ := set $otlp "samplerRatio" (float64 $o.samplerRatio) -}}
+{{- else -}}
+{{- $_ := set $otlp "sampler" $o.sampler -}}
+{{- end -}}
+{{- with $o.resourceAttributes -}}
+{{- $_ := set $otlp "resourceAttributes" . -}}
+{{- end -}}
+{{- if $o.headersSecret.name -}}
+{{- $_ := set $otlp "headers" (dict ($o.headersSecret.header | default "authorization") (dict "file" "/var/run/secrets/aap/otel/headers")) -}}
+{{- end -}}
+{{- if $o.certificate.configMap -}}
+{{- $_ := set $otlp "certificate" "/etc/aap/otel/ca/ca.pem" -}}
+{{- end -}}
+{{- $_ := set $cfg "telemetry" (dict "otlp" $otlp) -}}
+{{- end -}}
 {{- /* The workload listener (ANR-1011): off, the file is what it was. The three files are the mounts of api-deployment.yaml. */ -}}
 {{- if include "aap.api.workloadEnabled" . -}}
 {{- $w := .Values.api.workload -}}
-{{- $_ := set $cfg "workloadListener" (dict "listen" (printf "0.0.0.0:%d" (int $w.port)) "certFile" "/etc/aap-api-workload/tls/tls.crt" "keyFile" "/etc/aap-api-workload/tls/tls.key" "clientCaFile" "/etc/aap-api-workload/ca/ca.crt" "handshakeTimeoutSecs" (int $w.handshakeTimeoutSecs) "maxHandshakesPerIp" (int $w.maxHandshakesPerIp) "maxConnections" (int $w.maxConnections)) -}}
+{{- $listener := dict "listen" (printf "0.0.0.0:%d" (int $w.port)) "certFile" "/etc/aap-api-workload/tls/tls.crt" "keyFile" "/etc/aap-api-workload/tls/tls.key" "clientCaFile" "/etc/aap-api-workload/ca/ca.crt" "handshakeTimeoutSecs" (int $w.handshakeTimeoutSecs) "maxHandshakesPerIp" (int $w.maxHandshakesPerIp) "maxConnections" (int $w.maxConnections) -}}
+{{- /* ANR-1374: the lifetime warning, only when the deployment names a maximum: absent, the key is not written and the file is what it was. */ -}}
+{{- with $w.maxLeafLifetimeSecs -}}
+{{- $_ := set $listener "maxLeafLifetimeSecs" (int .) -}}
+{{- end -}}
+{{- $_ := set $cfg "workloadListener" $listener -}}
 {{- $clients := list -}}
 {{- range $c := $w.clients -}}
 {{- $clients = append $clients (dict "spiffeId" $c.spiffeId "permissions" (default (list) $c.permissions)) -}}

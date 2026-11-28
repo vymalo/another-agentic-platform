@@ -1187,7 +1187,7 @@ pub mod activity {
         a.set(&id, Activity::IDLE).await;
         a.break_source(&id).await;
         let err = a.poll(&id).await.unwrap_err();
-        assert!(matches!(err, ActivityError::Unavailable(_)), "{err:?}");
+        assert!(matches!(err, ActivityError::Unavailable { .. }), "{err:?}");
         assert_eq!(err.class(), ErrorClass::Transient);
         assert!(err.class().is_retryable());
         a.set(&id, Activity::IDLE).await;

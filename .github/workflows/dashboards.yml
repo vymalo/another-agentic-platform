@@ -1,0 +1,37 @@
+name: Dashboards
+
+# The Grafana dashboards of deploy/dashboards are what the scripts of tools/dashboards write, and a panel queries only a
+# series that the two metrics.rs declare (ANR-1423). Standard library only: the runner's Python 3. A workflow of its own,
+# so that a change of a dashboard does not start operator.yml's cluster jobs.
+
+on:
+  pull_request:
+    paths:
+      - "tools/dashboards/**"
+      - "deploy/dashboards/**"
+      - "crates/controller/src/metrics.rs"
+      - "crates/platform-api/src/metrics.rs"
+      - ".github/workflows/dashboards.yml"
+  push:
+    branches: [main]
+    paths:
+      - "tools/dashboards/**"
+      - "deploy/dashboards/**"
+      - "crates/controller/src/metrics.rs"
+      - "crates/platform-api/src/metrics.rs"
+      - ".github/workflows/dashboards.yml"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: dashboards-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - name: the dashboards are what their generators say, and every panel's metric is emitted
+        run: python3 tools/dashboards/check.py

@@ -1358,6 +1358,8 @@ const MAY_BE_ABSENT: &[&str] = &[
     "AgentForm/audience",
     // An A2A image has no model (K11b, AD-054), and its own settings have the CRD's defaults.
     "AgentForm/model",
+    // ANR-1100: the account is a person's, written only by a caller that holds `platform:agents.own`.
+    "AgentForm/account",
     "A2aSettings/port",
     "A2aSettings/cardPath",
     "A2aSettings/healthPath",

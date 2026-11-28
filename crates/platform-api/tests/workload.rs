@@ -211,7 +211,12 @@ async fn a_known_workload_without_the_permission_is_403_naming_it() {
         .send()
         .await;
     assert_eq!(r.code(), 403, "{}", r.text());
-    assert!(r.text().contains("platform:agents.own"));
+    // AD-072: reading an owner's agents is `platform:agents.read.owner`; `platform:agents.own` is the write side.
+    assert!(
+        r.text().contains(aap_api::permission::AGENTS_READ_OWNER),
+        "{}",
+        r.text()
+    );
 }
 
 #[tokio::test]

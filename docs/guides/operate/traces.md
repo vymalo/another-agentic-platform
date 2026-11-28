@@ -52,7 +52,7 @@ helm upgrade --install aap-operator deploy/operator --namespace aap-system \
 ### What the chart does with it
 
 - **The operator.** It writes a `telemetry.otlp` section into the operator's configuration file, the ConfigMap `aap-operator`. The operator reads that file. It does not read any `OTEL_*` variable.
-- **The API.** It sets `OTEL_*` variables on the API's container, and `POD_NAME` and `POD_NAMESPACE` from the downward API. The API reads those.
+- **The API.** It writes the same section into the API's configuration file, the ConfigMap `aap-operator-api`, and gives the container `POD_NAME` and `POD_NAMESPACE` from the downward API for the resource's identity. It sets no `OTEL_*` variable, and the API reads none (ANR-970).
 - **The network.** Each component's `NetworkPolicy` gets one egress rule to the peers in `to`, on `ports` (4318 by default). The rule always has a `to`. The chart never renders a rule that has ports and no peer, and it refuses `0.0.0.0/0`. The operator's policy also gets a DNS rule (`otel.dns`), because it had none.
 - **The rights.** The operator's `Role` gains nothing. The kubelet resolves the Secret and the ConfigMap.
 
@@ -60,10 +60,7 @@ The collector rule is narrow, but the policy as a whole is not: the operator's r
 
 ::: in-depth Headers and a private CA
 
-Headers need an `https` endpoint. A token is never sent in clear. They come from a **Secret mounted as a file** at `/var/run/secrets/aap/otel`, never from a variable. The two components read the key in different shapes:
-
-- **The operator.** The key holds the value of one header: `Bearer <token>`. The header's name is `otel.headersSecret.header`, `authorization` by default.
-- **The API.** The key holds a list: `name=value,name2=value2`, at most 4 KiB.
+Headers need an `https` endpoint. A token is never sent in clear. They come from a **Secret mounted as a file** at `/var/run/secrets/aap/otel`, never from a variable. **Both components read the key the same way** (ANR-970): it holds **the value of one header alone** — `Bearer <token>` — and the header's name is `headersSecret.header`, `authorization` by default. The chart names one header, so a list of several cannot be expressed; put the one the collector wants.
 
 ```yaml
 otel:
@@ -93,9 +90,10 @@ api:
     endpoint: https://otel-collector.observability.svc:4318/v1/traces
     sampler: traceidratio
     samplerRatio: "0.05"               # the API faces the internet: keep the ratio small
-    headersSecret:                     # the key holds a list: name=value,name2=value2
+    headersSecret:                     # the key holds one header's value alone: Bearer <token>
       name: otel-api-headers
       key: headers
+      header: authorization
     certificate:
       configMap: otel-ca
       key: ca.pem
@@ -112,7 +110,7 @@ Make the Secrets and the ConfigMap **before the `helm upgrade` that turns tracin
 
 ```sh
 kubectl -n aap-system create secret generic otel-operator-headers --from-literal=authorization="Bearer $TOKEN"
-kubectl -n aap-system create secret generic otel-api-headers --from-literal=headers="authorization=Bearer $TOKEN"
+kubectl -n aap-system create secret generic otel-api-headers --from-literal=headers="Bearer $TOKEN"
 kubectl -n aap-system create configmap otel-ca --from-file=ca.pem
 ```
 
@@ -120,12 +118,12 @@ The certificate is the exporter's **only** trust, not an addition to the system'
 
 `sampler` is `always_on`, `always_off` or `traceidratio` in the chart, with `samplerRatio` from 0 to 1. The binaries also take the `parentbased_*` forms of those three (no parent is ever read, so each behaves as its base). `resourceAttributes` accepts only `deployment.environment.name`, `k8s.cluster.name` and `service.namespace`, with values of letters, digits, `.`, `_` and `-`.
 
-**Upgrading an old install.** Before the operator's settings moved into one configuration file, the operator's key held `name=value,...`. It now holds the value alone. A key that still has the old shape turns the operator's tracing off, with one warning, and the operator keeps running. Rewrite the Secret's key before you upgrade ([the chart's README](../../../deploy/operator/README.md#traces-k5)).
+**Upgrading an old install.** Before the settings moved into the configuration files, both keys held `name=value,...` (the operator's before AD-064, the API's before ANR-970). Each now holds the value alone, and the chart names the header. A key whose value starts with the **configured** header's name and `=` (the default `authorization`) turns that component's tracing off with one warning, and the component keeps running. **A pair for any other header is accepted as a value and is sent as one**: set `headersSecret.header` to the old pair's name and keep only the value. Rewrite the Secret's key before you upgrade ([the chart's README](../../../deploy/operator/README.md#traces-k5)). **Upgrade the image with the chart**: an older image refuses a file with `version` or `log` in it (`deny_unknown_fields`), so a chart newer than the image leaves the old pods serving and the rollout stalled.
 
 :::
 ::: in-depth The settings the binaries accept
 
-The API reads the standard variables, as a strict subset. The operator reads the same settings from its file. These are refused:
+Both binaries read the same settings from their file, as a strict subset of the standard variables' meaning. These are refused:
 
 | Setting | Why |
 |---|---|
@@ -153,16 +151,17 @@ Each row was run with `helm template`. The checks are in `_validate.tpl`; every 
 | `headersSecret.name` and no `key` | 1 | `otel.headersSecret needs both name and key, or neither` |
 | `samplerRatio: 2` | 1 | `otel.samplerRatio must be a number from 0 to 1, got "2"` |
 | `api.extraEnv` sets `OTEL_EXPORTER_OTLP_HEADERS` | 1 | `api.extraEnv: OTEL_EXPORTER_OTLP_HEADERS is the chart's: the tracing variables are api.otel (OTEL_*, AAP_OTEL_*, and POD_NAME and POD_NAMESPACE while api.otel.enabled)` |
+| `api.extraEnv` sets `RUST_LOG` | 1 | `api.extraEnv: RUST_LOG is read by nothing since ANR-970: …` (the API takes everything from its file) |
 
 Each has a control: the smallest setting above renders, exit 0. With `api.enabled` false, `api.otel` is neither rendered nor checked.
 
-The binaries refuse more than the chart can see. Both checks need no cluster and no collector, and neither reads the files a setting names.
+The binaries refuse more than the chart can see. Both checks need no cluster and no collector, and neither reads the files a setting names. **Since ANR-970 the API reads its traces from its file, not from `OTEL_*` variables** (the chart renders `telemetry.otlp` into it), so a variable of that name is ignored and the refusals are the section's.
 
 | Change | Binary | Exit | It says |
 |---|---|---|---|
-| `OTEL_EXPORTER_OTLP_PROTOCOL=grpc` on the environment the chart renders | `api --check` | 1 | `OTEL_EXPORTER_OTLP_PROTOCOL: only http/json is supported (a collector turns it into grpc or http/protobuf)` |
-| the same with `http/protobuf` | `api --check` | 1 | the same sentence |
-| `OTEL_EXPORTER_OTLP_HEADERS=a=b` | `api --check` | 1 | `OTEL_EXPORTER_OTLP_HEADERS: not supported: put the headers in the file AAP_OTEL_HEADERS_FILE names` |
+| `api.otel.endpoint` changed to `http://` beside a header | `api --check` | 1 | `telemetry.otlp.headers: the headers would be sent in clear: the endpoint must be https` |
+| `api.otel.sampler: sometimes` | `api --check` | 1 | `telemetry.otlp.sampler: must be always_on, always_off or traceidratio (or their parentbased_ forms)` |
+| an unknown key in the API's `telemetry` section | `api --check` | 1 | the key, named |
 | the operator's file with `endpoint` changed to `http://` beside a header | `operator run --check` | 78 | `telemetry.otlp.headers: the headers would be sent in clear: the endpoint must be https` |
 | the operator's file with `sampler: sometimes` | `operator run --check` | 78 | `telemetry.otlp.sampler: must be always_on, always_off or traceidratio (or their parentbased_ forms)` |
 
@@ -205,10 +204,10 @@ A span can say only what the closed list in [`crates/trace/README.md`](../../../
 |---|---|---|
 | `chain-e2e`, step 6b | [`operator-image.yml`](../../../.github/workflows/operator-image.yml) | A pinned OpenTelemetry Collector (`0.165.0`, pinned by digest in `deploy/operator/tests/e2e/otel-collector.yaml`) runs in kind. The operator and the API are told to send to it. Its log holds spans of the operator (a `reconcile agentservice` pass) and of the API (`GET /v1/agents`, by its template), through the egress rule of each policy. No secret and no token is in any log. `push` does not need this job |
 | `render-check.sh` | the `chart` job | Off means not a trace in any render. On, the variables, the headers volume, the CA mount and the egress rule, each broken on purpose |
-| `api --check` and `operator run --check` | `api-image` and `chart` | The rendered environment of the API, and the rendered file of the operator, are accepted by the images |
+| `api --check` and `operator run --check` | `api-image` and `chart` | The rendered file of each (the API's, from the `otel` and `otel-ratio` shapes) is accepted by the images |
 | `cargo test` | `operator.yml` | The pipeline against a test collector and a hanging one, and `testkit::assert_clean` on what a span holds |
 
-*Verified 2026-11-27* with `gh run view`: on `main` at commit `2c16326`, run 45932723504 of `operator-image.yml`, job `chain-e2e` 140289016188, ended in success, and its log says `the collector received spans of the operator (reconcile agentservice, k8s.namespace.name aap-e2e-chain) and of the Platform API (GET /v1/agents by its template /v1/agents), through the egress rule of each policy`.
+*The run this page was checked against, with its ids, is recorded in [the agent page](../../../.agents/docs/guides/operate/traces.md).*
 
 Run for this page, on 2026-11-27: the two blocks above rendered with `helm template` alone and with the install, Platform API and metrics pages' values added. kubeconform, strict, found every object valid (7, 22 and 22 objects). The refusals in the two tables above were run, each with its control.
 

@@ -39,14 +39,22 @@ function unclosedInDepth(src) {
   let fence = null;
   const lines = src.split('\n');
   for (let i = 0; i < lines.length; i++) {
-    const line = lines[i].trimStart();
-    const f = /^(`{3,}|~{3,})(.*)$/.exec(line);
+    const raw = lines[i];
+    // An indented code block (four or more columns) is code: a `:::` or a fence inside it is content, not a container,
+    // which is what the renderer does (`in-depth.ts` returns null at `state.sCount[line] - state.blkIndent >= 4`). A
+    // tab advances to the next multiple of four, as CommonMark and `state.sCount` have it. Every marker of this repository
+    // sits at column 0, so the absolute column is the block's own here.
+    const lead = /^[ \t]*/.exec(raw)[0];
+    const indent = [...lead].reduce((n, ch) => n + (ch === '\t' ? 4 - (n % 4) : 1), 0);
+    const code = indent >= 4;
+    const line = raw.trimStart();
+    const f = code ? null : /^(`{3,}|~{3,})(.*)$/.exec(line);
     if (fence) {
       if (f && f[1][0] === fence.ch && f[1].length >= fence.len && f[2].trim() === '') fence = null;
       continue;
     }
     if (f && !(f[1][0] === '`' && f[2].includes('`'))) { fence = { ch: f[1][0], len: f[1].length }; continue; }
-    const m = /^:{3,}\s*(.*?)\s*$/.exec(line);
+    const m = code ? null : /^:{3,}\s*(.*?)\s*$/.exec(line);
     if (!m) continue;
     if (m[1] === '') open.pop();
     else open.push({ name: m[1].split(/\s/)[0], line: i + 1 });
@@ -59,12 +67,22 @@ const failures = [];
 const linksOut = new Map();
 
 // The docs for people and the docs for agents live apart (AD-074): the dated records keep
-// their evidence as written, and the pages of stillMixed are mixed and named until split.
+// their evidence as written, and a page named in stillMixed is mixed until its split. The set is
+// empty since 2026-11-28: every page is split, and the two rules below apply to all of them.
 const datedRecords = new Set(['docs/architecture/11-decisions.md', 'docs/architecture/README.md']);
-const stillMixed = new Set(['docs/architecture/10-control-plane-and-crds.md']);
+const stillMixed = new Set([]);
 // Something like `crates/x/src/y.rs:190` or `docs/z.md:12`; fenced code blocks and inline
 // code spans are blanked before matching, so an example in code never counts.
 const pathLine = /[A-Za-z0-9_./-]+\.(?:rs|md|ya?ml|toml|json|tsx?|jsx?|mjs|cjs|sh|go|py|hcl|tpl|txt|lock|css|html?|sql|proto)(?::[0-9]+)+\b/g;
+// A verification mark with a date — `*Verified 2026-11-27*`, `(*verified 2026-10-04*)` — is a
+// build record, not a statement for a reader (AD-074, ANR-1361). The dated records keep theirs,
+// and so do the contracts under `docs/extensions/`: an RFC section cited beside a rule is that
+// rule's justification, not a record of when someone checked it.
+const verifiedMark = /(?<![A-Za-z])[Vv]erified\s+\d{4}-\d{2}-\d{2}/g;
+const contracts = 'docs/extensions/';
+// The site's own structure and style guide is copied verbatim from the system (CLAUDE.md); it is not
+// a page a reader of the platform opens.
+const siteDocs = 'docs/.vitepress/';
 
 for (const file of markdownFiles(root)) {
   const rel = path.relative(root, file);
@@ -122,6 +140,14 @@ for (const file of markdownFiles(root)) {
   if (relPosix.startsWith('docs/') && !datedRecords.has(relPosix) && !stillMixed.has(relPosix)) {
     for (const m of prose.matchAll(pathLine)) {
       failures.push(`${rel}:${lineOf(src, m.index)} path:line in a page for people: ${m[0]}`);
+    }
+  }
+
+  // No dated verification mark either (ANR-1361): same exemptions, plus the contracts, which cite
+  // the RFC section a rule comes from rather than when the rule was checked.
+  if (relPosix.startsWith('docs/') && !relPosix.startsWith(contracts) && !relPosix.startsWith(siteDocs) && !datedRecords.has(relPosix) && !stillMixed.has(relPosix)) {
+    for (const m of prose.matchAll(verifiedMark)) {
+      failures.push(`${rel}:${lineOf(src, m.index)} verification mark in a page for people: ${m[0]}`);
     }
   }
 }

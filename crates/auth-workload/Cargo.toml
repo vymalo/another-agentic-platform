@@ -20,6 +20,7 @@ rustls-pki-types.workspace = true
 rustls-webpki.workspace = true
 serde.workspace = true
 thiserror.workspace = true
+tracing.workspace = true
 x509-parser.workspace = true
 rcgen = { workspace = true, optional = true }
 
@@ -28,6 +29,7 @@ aap-auth-workload = { path = ".", features = ["testkit"] }
 aap-ports = { workspace = true, features = ["testkit"] }
 serde_yaml.workspace = true
 tokio = { workspace = true, features = ["macros", "rt"] }
+tracing-subscriber.workspace = true
 
 [lints]
 workspace = true

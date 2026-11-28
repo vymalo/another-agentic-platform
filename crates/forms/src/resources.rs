@@ -111,6 +111,8 @@ pub fn to_resources(form: &AgentForm, deployment: &Deployment, namespace: &str) 
             tags: form.tags.clone(),
         },
         deletion_policy: DeletionPolicy::Retain,
+        // No form says the release channels (AD-059, §10a): an object that carries them is YAML only.
+        release: None,
     };
 
     let harness = match &form.agent {

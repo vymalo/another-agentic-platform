@@ -294,11 +294,12 @@ async fn the_owner_permission_does_not_open_the_broad_routes_and_the_broad_ones_
         .send()
         .await;
     assert_eq!(r.code(), 403);
-    // A person with every dashboard permission but the owner one gets 403 on the owner's routes.
+    // A person with every dashboard permission but the owner ones gets 403 on the owner's routes. There are two:
+    // `platform:agents.own` (AD-032) and `platform:agents.read.owner` (AD-072).
     let held: Vec<&str> = permission::ALL
         .iter()
         .copied()
-        .filter(|p| *p != permission::AGENTS_OWN)
+        .filter(|p| *p != permission::AGENTS_OWN && *p != permission::AGENTS_READ_OWNER)
         .collect();
     let person = api.token("person", &held);
     assert_eq!(

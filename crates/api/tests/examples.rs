@@ -479,6 +479,19 @@ const BOUND_EXAMPLES: &[(&str, &str, &str, &str)] = &[
         "minLength",
         "audience-value-empty",
     ),
+    // the release channels (AD-059, §10a): at most 8 channels, and a `defaultChannel` of at most 32
+    (
+        "AgentService",
+        "spec.release.channels",
+        "maxProperties",
+        "release-channels-too-many",
+    ),
+    (
+        "AgentService",
+        "spec.release.defaultChannel",
+        "maxLength",
+        "release-default-channel-too-long",
+    ),
     // the reasoning levels of a ModelEndpoint (ADR 0063)
     (
         "ModelEndpoint",

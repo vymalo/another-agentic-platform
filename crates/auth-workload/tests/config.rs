@@ -8,7 +8,10 @@ const CA: &str = include_str!("fixtures/ca.pem");
 const NOT_A_CA: &str = include_str!("fixtures/accepted.pem");
 
 fn clients(clients: Vec<WorkloadClient>) -> WorkloadClients {
-    WorkloadClients { clients }
+    WorkloadClients {
+        clients,
+        max_leaf_lifetime_secs: None,
+    }
 }
 
 fn one(identity: &str, permissions: &[&str]) -> WorkloadClients {

@@ -6,7 +6,7 @@
 use std::sync::{Arc, Mutex};
 
 use aap_ports::testkit::{self, ActivityUnderTest};
-use aap_ports::{Activity, ActivityError, ActivitySource, RuntimeId};
+use aap_ports::{Activity, ActivityError, ActivitySource, RuntimeId, UnavailableCause};
 
 #[derive(Clone, Copy, PartialEq)]
 enum Fault {
@@ -38,7 +38,10 @@ impl ActivitySource for Faulty {
             return if self.fault == Fault::UnreachableIsIdle {
                 Ok(Activity::IDLE)
             } else {
-                Err(ActivityError::Unavailable("down".into()))
+                Err(ActivityError::Unavailable {
+                    cause: UnavailableCause::Connect,
+                    source: "down".into(),
+                })
             };
         }
         if self.fault == Fault::OneAnswerForEveryone {

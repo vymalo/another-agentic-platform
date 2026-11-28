@@ -45,7 +45,8 @@ RUN cargo build --release --locked --package aap-api-server --bin api
 # Smoke test of what was built, in the build stage because the final image has no shell: the binary starts and says its version,
 # prints its usage, accepts the example configuration (`--check` needs no cluster and no issuer), and refuses a file that is not one.
 # (CI runs the same commands on the final image, and `--check` on the configuration the chart renders.)
-# Every command runs under `env -i`: BuildKit injects its own OTEL_* variables into RUN steps (seen 2026-11-15 in the log of this
+# Every command runs under `env -i`: a clean environment, so a variable of the builder's cannot reach a command. (The API reads no
+# `OTEL_*` variable any more: its traces are the file's `telemetry.otlp`, ANR-970. Seen 2026-11-15 in the log of this
 # repository's pull request 52, run 43729018865, under docker/build-push-action: OTEL_EXPORTER_OTLP_TRACES_PROTOCOL=grpc and an
 # endpoint on a unix socket, for BuildKit's own tracing), and `api --check` reads them as the API's tracing settings and refuses
 # a protocol it does not speak. A smoke test must not depend on what a builder puts in the environment.
@@ -71,6 +72,5 @@ COPY --from=build /src/target/release/api /api
 USER 65532:65532
 # 8080 the API, 8081 health (/healthz and /readyz): the defaults of `listen` and `healthListen`.
 EXPOSE 8080 8081
-ENV RUST_LOG=info
-# No CMD: the configuration file is required (`--config`, or API_CONFIG_FILE, which is how the chart sets it).
+# No CMD and no ENV: every setting is the file's (ANR-970), which `--config` names (default `/etc/aap-api/config.yaml`).
 ENTRYPOINT ["/api"]

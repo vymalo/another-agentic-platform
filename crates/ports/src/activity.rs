@@ -30,22 +30,61 @@ impl Activity {
     }
 }
 
+/// Why the agent could not answer, in the terms the operator logs: a closed set, so a warn never carries a URL,
+/// a token or a status text.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum UnavailableCause {
+    /// The request did not complete in time. With only a limit on the whole request, packets a NetworkPolicy drops
+    /// end here too.
+    Timeout,
+    /// The connection could not be made (a refused connection, a closed port, DNS).
+    Connect,
+    /// The agent answered a 5xx.
+    ServerError,
+    /// Anything else: another status, a body that could not be read.
+    Other,
+}
+
+impl UnavailableCause {
+    /// The short class the operator logs.
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Timeout => "timeout",
+            Self::Connect => "connect",
+            Self::ServerError => "status 5xx",
+            Self::Other => "other",
+        }
+    }
+}
+
 /// Why an [`ActivitySource`] could not answer.
 #[derive(Debug, thiserror::Error)]
 pub enum ActivityError {
     /// The agent could not be reached or did not answer in time. It may be starting, stopping or gone.
     #[error("the agent's activity is unavailable")]
-    Unavailable(#[source] BoxError),
-    /// The agent answered something this operator does not understand, or refused the question.
-    #[error("the agent's activity answer was refused or malformed: {0}")]
+    Unavailable {
+        /// The short class, for the operator's warn.
+        cause: UnavailableCause,
+        /// What failed underneath. Not part of the message.
+        #[source]
+        source: BoxError,
+    },
+    /// The agent answered 401 or 403: the token or the policy is wrong, and it will not change by retrying.
+    #[error("the agent's activity answer was refused ({status})")]
+    Refused {
+        /// The HTTP status the agent answered.
+        status: u16,
+    },
+    /// The agent answered something this operator does not understand.
+    #[error("the agent's activity answer was malformed: {0}")]
     Invalid(String),
 }
 
 impl Classify for ActivityError {
     fn class(&self) -> ErrorClass {
         match self {
-            Self::Unavailable(_) => ErrorClass::Transient,
-            Self::Invalid(_) => ErrorClass::Invalid,
+            Self::Unavailable { .. } => ErrorClass::Transient,
+            Self::Refused { .. } | Self::Invalid(_) => ErrorClass::Invalid,
         }
     }
 }

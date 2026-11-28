@@ -8,7 +8,7 @@ Install the operator first: [Install the CRDs and the operator](install.md).
 
 ## What you need first
 
-- **Kubernetes 1.37 or later**, which is the platform's floor (AD-067) and the chart's own `kubeVersion` (`>=1.37.0-0`). The guard is a `ValidatingAdmissionPolicy`, which is GA from 1.30. It uses `params` in a match condition, which was *verified 2026-10-26* on v1.35.8; that it works on 1.37 is **unverified until CI has run `run-pods-e2e` on v1.37.0** ([What a person must know](../../../deploy/operator/README.md#what-a-person-must-know)).
+- **Kubernetes 1.37 or later**, which is the platform's floor (AD-067) and the chart's own `kubeVersion` (`>=1.37.0-0`). The guard is a `ValidatingAdmissionPolicy`, which is GA from 1.30. It uses `params` in a match condition, which is proven on v1.35.8 (the record is in [the agent page](../../../.agents/docs/guides/deploy/run-pods.md)); that it works on 1.37 is **unverified until CI has run `run-pods-e2e` on v1.37.0** ([What a person must know](../../../deploy/operator/README.md#what-a-person-must-know)).
 - **A CNI that enforces `NetworkPolicy`.** The run pods' network is deny by default, and a policy is only as real as the plugin behind it. On a cluster whose CNI does not enforce it, you get the proxy and no deny.
 - **A coder image that carries `adam-egress` and `adam-git-sandbox`.** See the next two sections. The chart's `defaultAgentImage` has neither. CLAUDE.md and the chart say so.
 - **With the Platform API on:** `api.config.defaults.coder.workVolume`, because run pods mount the coder's work volume. The chart refuses the render without it. The snippet is in the next section.
@@ -271,7 +271,7 @@ The script asks the real policy with `--dry-run=server`, as the agent's account.
 
 Where the chart is concerned, `render-check.sh` holds the objects, the operator's `Role` rule by rule, and every refusal above, each broken on purpose.
 
-*Verified 2026-11-27* with `gh run view`: `run-pods-e2e` ended in success in run 45922615533 of `operator-image.yml`, on `main` at `1d17e42`, the commit whose tag is `sha-1d17e42`, checked on 2026-11-27. Written down by the project: the run of 2026-10-27 in which a kubelet started the git sandbox and the coder, the sidecar held no token, key or Secret, and `curl` and `npm` went through the proxy (run 40520862547, job 122249371008). `gvisor-k3d` is cited as it is in the workflow's header: *verified 2026-11-26* on a hosted runner in run 45889453084 (PR #112). It was not re-run for this page.
+*The run this page was checked against, with its ids, is recorded in [the agent page](../../../.agents/docs/guides/deploy/run-pods.md).*
 
 ### What was walked
 

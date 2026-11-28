@@ -167,8 +167,10 @@ runPods:
     # More egress rules for a run pod, as NetworkPolicy `egress` entries: an in-cluster target the proxy cannot serve (it connects to
     # public IPv4 addresses only), such as a model gateway in the cluster. Add its host to `egressProxy.extraNoProxy` too, or the tools
     # send the request to the proxy, which refuses it.
-    # Each rule needs a `to` (no `to` allows every destination) and no `ipBlock` may be a /0: the operator
-    # refuses both in the file it reads (ANR-1353). The chart does not check them yet.
+    # Each rule needs a `to` (no `to` allows every destination), no `ipBlock` may be a /0, no selector may be empty
+    # (`namespaceSelector: {}` is every namespace; `podSelector: {}` beside no namespace is every pod of the run pod's own
+    # namespace), and a port entry names its `port`: the operator refuses all of them in the file it reads (ANR-1353,
+    # ANR-1355). The chart refuses the `to`, the /0 and the empty `namespaceSelector` at render (ANR-1339).
     extraEgress: []
   # The only way out of a run pod to the internet (adam-rs ADR 0042): `adam-egress`, an HTTPS-only forward proxy, one Deployment per
   # agent that has run pods, from THE AGENT'S OWN CODER IMAGE (`tini -- adam-egress`; no other image to pin). It accepts `CONNECT host:443`
@@ -682,7 +684,7 @@ api:
   # Traces of the API (slice K5, §48a): one SERVER span per request named by its route template (never the path), the two ports as children.
   # The same shape and rules as the operator's `otel` above, without `dns` (the API's policy has its own DNS rule); OFF by default, and then
   # nothing of it is rendered. No subject, no agent name, no body, header, query or token is in any span, and no inbound `traceparent` is read.
-  # `api.extraEnv` may not set OTEL_* or AAP_OTEL_* names (they are these values).
+  # The chart renders these into the API's configuration file (ANR-970): a variable of an OTEL_* or AAP_OTEL_* name is read by nothing and is refused.
   otel:
     enabled: false
     endpoint: ""
@@ -692,6 +694,13 @@ api:
     headersSecret:
       name: ""
       key: ""
+      # The header the Secret's key holds the value of (`authorization` when empty), as the operator's `otel` names it.
+      # UPGRADE NOTE (ANR-970): the API used to be given a `name=value,...` list through a variable; the file now names the
+      # header, so the key must hold **the value alone** (`Bearer abc`). A value that starts with the configured header's name
+      # and `=` (the default `authorization`) turns the API's tracing off with one warning and the API keeps running; a pair for
+      # any other header is accepted as a value and sent as one, so set `header` to the old pair's name and keep only the value.
+      # Rewrite the Secret's key before upgrading, and upgrade the API image with the chart (an older image refuses the new file).
+      header: ""
     certificate:
       configMap: ""
       key: ""
@@ -720,6 +729,13 @@ api:
     handshakeTimeoutSecs: 5
     maxHandshakesPerIp: 8
     maxConnections: 256
+    # The longest lifetime a **presented**, **accepted** workload certificate may have before the API warns, in seconds (1 to
+    # 31536000); absent, no warning. It is never a refusal (ANR-1374): the lifetime is the issuer's, and refusing would break a
+    # deployment whose PKI is not this one's. A workload certificate should live about 24 h, so a revocation is forgotten within a day;
+    # how the orchestrator gets and renews one is in docs/guides/deploy/platform-api.md. **Leave room for the issuer's backdating**:
+    # OpenBao sets `notBefore` 30 s before the issue (its `not_before_duration` default), so a `ttl: 24h` role yields a lifetime of
+    # 86 430 s, and a maximum of 86 400 would warn about every correctly issued leaf. 90 000 (25 h) is the value the guide suggests.
+    # maxLeafLifetimeSecs: 90000
     # The workloads: REQUIRED, at least one. Each `spiffeId` is the exact URI SAN (spiffe://...), once; `permissions` is any of
     # `platform:agents.own`, `platform:agents.read.owner`, both, or empty (AD-072: the orchestrator holds both, the staff service the
     # read-only one; anything else is refused at render and at load).
@@ -742,8 +758,9 @@ api:
 
   # Environment, volumes and mounts of the API's container beyond the chart's own, for an issuer behind a private CA or a proxy: `extraEnv`
   # is a list of EnvVar (`HTTPS_PROXY`, `NO_PROXY`, `SSL_CERT_FILE`), `extraVolumes` a list of Volume (a ConfigMap that holds a CA bundle) and
-  # `extraVolumeMounts` a list of VolumeMount of them. The chart owns API_CONFIG_FILE, RUST_LOG (api.logLevel), API_LISTEN_ADDR and HEALTH_ADDR
-  # (api.port, api.healthPort), the volume `config` and everything under /etc/aap-api: it refuses a variable of those names and a mount there.
+  # `extraVolumeMounts` a list of VolumeMount of them. The binary reads **no** API_CONFIG_FILE, RUST_LOG, API_LISTEN_ADDR, HEALTH_ADDR or
+  # METRICS_ADDR any more (ANR-970: the ports are the file's, the filter is `api.logLevel` in it), so the chart refuses a variable of those
+  # names, as it refuses the volume `config` and every mount at or under /etc/aap-api.
   # The recipe, and what the binary reads (verified 2026-10-16, in the source): README "An issuer behind a private CA or a proxy".
   extraEnv: []
   #  - name: SSL_CERT_FILE

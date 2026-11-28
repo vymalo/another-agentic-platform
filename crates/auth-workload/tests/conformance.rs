@@ -36,6 +36,7 @@ fn authenticator(runtime_root: &TestPki) -> WorkloadAuth {
             spiffe_id: ORCHESTRATOR.to_owned(),
             permissions: vec!["platform:agents.own".to_owned()],
         }],
+        max_leaf_lifetime_secs: None,
     };
     let bundle = format!("{CA}\n{}", runtime_root.ca_pem());
     WorkloadAuth::new(&bundle, &clients).expect("the test CA bundle and table")
@@ -145,6 +146,7 @@ async fn an_identity_mapped_to_no_permissions_holds_nothing() {
                 permissions: Vec::new(),
             },
         ],
+        max_leaf_lifetime_secs: None,
     };
     let auth = WorkloadAuth::new(CA, &clients).expect("the test CA bundle and table");
     let principal = auth
@@ -156,6 +158,25 @@ async fn an_identity_mapped_to_no_permissions_holds_nothing() {
     assert!(!principal.holds("platform:agents.own"));
 }
 
+/// ANR-1374: the lifetime is a **warning**, never a refusal. The checked-in fixture lives for years, so a maximum of one second is
+/// exceeded by far — and the leaf is accepted all the same.
+#[tokio::test]
+async fn a_leaf_longer_lived_than_the_maximum_is_still_accepted() {
+    let clients = WorkloadClients {
+        clients: vec![WorkloadClient {
+            spiffe_id: ORCHESTRATOR.to_owned(),
+            permissions: vec!["platform:agents.own".to_owned()],
+        }],
+        max_leaf_lifetime_secs: Some(1),
+    };
+    let auth = WorkloadAuth::new(CA, &clients).expect("the test CA bundle and table");
+    let principal = auth
+        .authenticate(Some(&der(ACCEPTED)))
+        .await
+        .expect("a long-lived leaf is accepted, and only warned about");
+    assert_eq!(principal.subject(), ORCHESTRATOR);
+}
+
 /// The configured bundle decides: the accepted leaf is refused when the authenticator trusts the other
 /// CA, so the chain check reads the bundle and not the leaf's shape.
 #[tokio::test]
@@ -165,6 +186,7 @@ async fn the_configured_bundle_decides() {
             spiffe_id: ORCHESTRATOR.to_owned(),
             permissions: vec!["platform:agents.own".to_owned()],
         }],
+        max_leaf_lifetime_secs: None,
     };
     let other = WorkloadAuth::new(OTHER_CA, &clients).expect("the other CA bundle and table");
     let err = other
